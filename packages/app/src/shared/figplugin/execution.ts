@@ -10,6 +10,8 @@ import {
 export const FIGPLUGIN_EXECUTION_PROTOCOL = 1 as const
 export const FIGPLUGIN_EXECUTION_MAX_EVENTS = 32
 export const FIGPLUGIN_EXECUTION_TTL_MS = 120_000
+export const FIGPLUGIN_VISUAL_BASELINE_TTL_MS = 24 * 60 * 60 * 1000
+export const FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS = 3
 
 const protocol = z.literal(FIGPLUGIN_EXECUTION_PROTOCOL)
 const host = z.enum(FIGPLUGIN_HOSTS)
@@ -81,22 +83,73 @@ export const figPluginVisualEvidenceSchema = z
   })
 export type FigPluginVisualEvidence = z.output<typeof figPluginVisualEvidenceSchema>
 
-const visualEvidenceArraySchema = z
-  .array(figPluginVisualEvidenceSchema)
-  .min(1)
-  .max(20)
-  .superRefine((value, ctx) => {
-    const targets = new Set<string>()
-    for (const [index, item] of value.entries()) {
-      if (targets.has(item.targetId))
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'Duplicate visual evidence target',
-          path: [index, 'targetId']
-        })
-      targets.add(item.targetId)
-    }
+const uniqueTargetArray = <Schema extends z.ZodTypeAny>(schema: Schema, message: string) =>
+  z
+    .array(schema)
+    .min(1)
+    .max(20)
+    .superRefine((value, ctx) => {
+      const targets = new Set<string>()
+      for (const [index, item] of value.entries()) {
+        const targetId = (item as { targetId?: unknown }).targetId
+        if (typeof targetId !== 'string') continue
+        if (targets.has(targetId))
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message,
+            path: [index, 'targetId']
+          })
+        targets.add(targetId)
+      }
+    })
+
+const visualEvidenceArraySchema = uniqueTargetArray(
+  figPluginVisualEvidenceSchema,
+  'Duplicate visual evidence target'
+)
+
+export const figPluginVisualBaselineTargetSchema = z
+  .object({
+    targetId: identifier,
+    accepted: figPluginVisualEvidencePointSchema
   })
+  .strict()
+
+export const figPluginVisualBaselineSchema = z
+  .object({
+    protocol,
+    baselineId: hex32,
+    sourceExecutionId: hex32,
+    pluginId: FigPluginIdSchema,
+    host,
+    projectId: identifier,
+    documentId: identifier,
+    scopeId: identifier,
+    captureId: hex32,
+    planSha256: sha256,
+    contextSha256: sha256,
+    visualEvidenceSha256: sha256,
+    adapterVersion: z.string().min(1).max(64),
+    targets: uniqueTargetArray(
+      figPluginVisualBaselineTargetSchema,
+      'Duplicate visual baseline target'
+    ),
+    acceptedAt: safeInteger,
+    expiresAt: safeInteger,
+    correctionRoundsUsed: z.number().int().min(0).max(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS),
+    maxCorrectionRounds: z.literal(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS)
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.expiresAt <= value.acceptedAt)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid visual baseline expiry' })
+    if (value.correctionRoundsUsed > value.maxCorrectionRounds)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual correction round limit exceeded'
+      })
+  })
+export type FigPluginVisualBaseline = z.output<typeof figPluginVisualBaselineSchema>
 
 export const figPluginExecutionPreviewSchema = z
   .object({
@@ -179,7 +232,8 @@ const publicStatusFields = {
   total: z.number().int().min(1).max(20),
   effect,
   updatedAt: safeInteger,
-  visualEvidence: visualEvidenceArraySchema.optional()
+  visualEvidence: visualEvidenceArraySchema.optional(),
+  visualEvidenceSha256: sha256.optional()
 }
 export const figPluginExecutionStatusSchema = z
   .object({
@@ -203,6 +257,11 @@ export const figPluginExecutionStatusSchema = z
   .superRefine((value, ctx) => {
     if (value.completed > value.total)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid completed count' })
+    if ((value.visualEvidence === undefined) !== (value.visualEvidenceSha256 === undefined))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Incomplete visual evidence status'
+      })
     if (value.visualEvidence && (value.state !== 'completed' || value.effect !== 'applied'))
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -328,10 +387,18 @@ export type FigPluginDesktopExecutionApproval = z.output<
 export const figPluginDesktopExecutionSchema = z.object({ executionId: hex32 }).strict()
 export type FigPluginDesktopExecution = z.output<typeof figPluginDesktopExecutionSchema>
 
+export const figPluginDesktopVisualBaselineAcceptanceSchema = z
+  .object({ executionId: hex32, visualEvidenceSha256: sha256 })
+  .strict()
+export type FigPluginDesktopVisualBaselineAcceptance = z.output<
+  typeof figPluginDesktopVisualBaselineAcceptanceSchema
+>
+
 export const figPluginExecutionDesktopStateSchema = z
   .object({
     previews: z.array(figPluginExecutionPreviewSchema).max(16),
-    statuses: z.array(figPluginExecutionStatusSchema).max(16)
+    statuses: z.array(figPluginExecutionStatusSchema).max(16),
+    baselines: z.array(figPluginVisualBaselineSchema).max(16)
   })
   .strict()
 export type FigPluginExecutionDesktopState = z.output<typeof figPluginExecutionDesktopStateSchema>

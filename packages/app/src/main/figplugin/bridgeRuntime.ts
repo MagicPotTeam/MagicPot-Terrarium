@@ -18,6 +18,8 @@ import {
 import {
   FIGPLUGIN_EXECUTION_MAX_EVENTS,
   FIGPLUGIN_EXECUTION_PROTOCOL,
+  FIGPLUGIN_VISUAL_BASELINE_TTL_MS,
+  FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
   figPluginExecutionClaimResponseSchema,
   figPluginExecutionPreviewSchema,
   figPluginExecutionProgressRequestSchema,
@@ -27,6 +29,7 @@ import {
   figPluginExecutionStatusSchema,
   figPluginExecutionClaimRequestSchema,
   figPluginExecutionStatusRequestSchema,
+  figPluginVisualBaselineSchema,
   type FigPluginExecutionClaimResponse,
   type FigPluginExecutionPreview,
   type FigPluginExecutionProgressRequest,
@@ -34,6 +37,7 @@ import {
   type FigPluginExecutionResultResponse,
   type FigPluginExecutionState,
   type FigPluginExecutionStatus,
+  type FigPluginVisualBaseline,
   type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import {
@@ -127,6 +131,11 @@ type PlanProgress = {
   effect: 'none' | 'applied' | 'rolled-back' | 'partial' | 'unknown'
   at: number
 }
+type VisualBaselineRecord = {
+  value: FigPluginVisualBaseline
+  binding: FigPluginRuntimeBinding
+}
+
 type PlanExecution = {
   executionId: string
   actionId: string
@@ -177,6 +186,10 @@ const terminalExecution = new Set<FigPluginExecutionState>([
 ])
 const digest = (value: unknown): string =>
   createHash('sha256').update(canonicalFigPluginJson(value), 'utf8').digest('hex')
+const visualBaselineScopeKey = (
+  value: Pick<FigPluginVisualBaseline, 'pluginId' | 'host' | 'projectId' | 'documentId' | 'scopeId'>
+): string =>
+  JSON.stringify([value.pluginId, value.host, value.projectId, value.documentId, value.scopeId])
 
 /** Memory-only main-process authority. Never expose createPairing/approve/deny to the host.
  * The caller supplies trusted native consent and validates the entire current store binding.
@@ -185,6 +198,7 @@ export class FigPluginBridgeRuntime {
   private readonly tickets = new Map<string, Ticket>()
   private readonly sessions = new Map<string, Session>()
   private readonly calls = new Map<string, Call>()
+  private readonly visualBaselines = new Map<string, VisualBaselineRecord>()
   private readonly validateBinding: Options['validateBinding']
   private readonly invoke: Options['invoke']
   private readonly clock: () => number
@@ -209,6 +223,9 @@ export class FigPluginBridgeRuntime {
   }
 
   private executionStatus(execution: PlanExecution): FigPluginExecutionStatus {
+    const visualEvidenceSha256 = execution.visualEvidence
+      ? digest(execution.visualEvidence)
+      : undefined
     return figPluginExecutionStatusSchema.parse({
       protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
       executionId: execution.executionId,
@@ -218,7 +235,9 @@ export class FigPluginBridgeRuntime {
       total: execution.plan.steps.length,
       effect: execution.effect,
       updatedAt: execution.updatedAt,
-      ...(execution.visualEvidence ? { visualEvidence: execution.visualEvidence } : {}),
+      ...(execution.visualEvidence
+        ? { visualEvidence: execution.visualEvidence, visualEvidenceSha256 }
+        : {}),
       ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
     })
   }
@@ -309,7 +328,10 @@ export class FigPluginBridgeRuntime {
     return execution
   }
 
-  private recordExecutionAudit(execution: PlanExecution): void {
+  private recordExecutionAudit(
+    execution: PlanExecution,
+    visualBaseline?: FigPluginVisualBaseline
+  ): void {
     if (!this.audit) return
     try {
       this.audit({
@@ -336,6 +358,15 @@ export class FigPluginBridgeRuntime {
           ? {
               visualEvidenceCount: execution.visualEvidence.length,
               visualEvidenceSha256: digest(execution.visualEvidence)
+            }
+          : {}),
+        ...(visualBaseline
+          ? {
+              visualBaselineId: visualBaseline.baselineId,
+              visualBaselineEvidenceSha256: visualBaseline.visualEvidenceSha256,
+              visualBaselineAcceptedAt: visualBaseline.acceptedAt,
+              visualBaselineExpiresAt: visualBaseline.expiresAt,
+              maxCorrectionRounds: visualBaseline.maxCorrectionRounds
             }
           : {}),
         ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
@@ -620,6 +651,88 @@ export class FigPluginBridgeRuntime {
     return [...this.calls.values()]
       .flatMap((call) => (call.execution ? [call.execution] : []))
       .map((execution) => this.executionStatus(execution))
+  }
+
+  listVisualBaselines(): FigPluginVisualBaseline[] {
+    this.enter()
+    return [...this.visualBaselines.values()]
+      .map((record) => structuredClone(record.value))
+      .sort((left, right) => right.acceptedAt - left.acceptedAt)
+  }
+
+  async acceptVisualBaseline(
+    executionId: string,
+    visualEvidenceSha256: string
+  ): Promise<FigPluginVisualBaseline> {
+    this.enter()
+    const execution = this.findExecution(executionId)
+    const check = (): { evidence: FigPluginVisualEvidence[]; sha256: string } => {
+      const evidence = execution.visualEvidence
+      const sha256 = evidence ? digest(evidence) : undefined
+      if (
+        this.calls.get(execution.call.receipt.response.callId) !== execution.call ||
+        this.sessions.get(execution.call.session.id) !== execution.call.session ||
+        execution.state !== 'completed' ||
+        execution.effect !== 'applied' ||
+        execution.preview.visualAudit !== 'hash-only' ||
+        !evidence ||
+        !sha256 ||
+        !secretEquals(visualEvidenceSha256, sha256)
+      )
+        throw new FigPluginBridgeError('INVALID_REQUEST')
+      return { evidence, sha256 }
+    }
+    check()
+    await this.checkSession(execution.call.session)
+    const checked = check()
+    const previous = [...this.visualBaselines.values()].find(
+      (record) => record.value.sourceExecutionId === execution.executionId
+    )
+    if (previous) {
+      if (!secretEquals(visualEvidenceSha256, previous.value.visualEvidenceSha256))
+        throw new FigPluginBridgeError('INVALID_REQUEST')
+      return structuredClone(previous.value)
+    }
+    const acceptedAt = this.clock()
+    const baseline = figPluginVisualBaselineSchema.parse({
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      baselineId: randomBytes(16).toString('hex'),
+      sourceExecutionId: execution.executionId,
+      pluginId: execution.call.session.binding.pluginId,
+      host: execution.call.session.binding.host,
+      projectId: execution.call.session.binding.projectId,
+      documentId: execution.context.documentId,
+      scopeId: execution.context.scopeId,
+      captureId: execution.context.captureId,
+      planSha256: execution.planSha256,
+      contextSha256: execution.contextSha256,
+      visualEvidenceSha256: checked.sha256,
+      adapterVersion: execution.preview.adapterVersion,
+      targets: checked.evidence.map((item) => ({
+        targetId: item.targetId,
+        accepted: item.after
+      })),
+      acceptedAt,
+      expiresAt: acceptedAt + FIGPLUGIN_VISUAL_BASELINE_TTL_MS,
+      correctionRoundsUsed: 0,
+      maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS
+    })
+    const scopeKey = visualBaselineScopeKey(baseline)
+    for (const [id, record] of this.visualBaselines) {
+      if (visualBaselineScopeKey(record.value) === scopeKey) this.visualBaselines.delete(id)
+    }
+    while (this.visualBaselines.size >= 16) {
+      const oldest = this.visualBaselines.keys().next().value
+      if (!oldest) break
+      this.visualBaselines.delete(oldest)
+    }
+    this.visualBaselines.set(baseline.baselineId, {
+      value: baseline,
+      binding: Object.freeze({ ...execution.call.session.binding })
+    })
+    this.recordExecutionAudit(execution, baseline)
+    this.scheduleCleanup()
+    return structuredClone(baseline)
   }
 
   async approve(callId: string, payloadSha256: string): Promise<void> {
@@ -925,6 +1038,9 @@ export class FigPluginBridgeRuntime {
       if (session.binding.pluginId === pluginId)
         this.removeSession(session, 'CONFIGURATION_CHANGED')
     }
+    for (const [id, record] of this.visualBaselines) {
+      if (record.binding.pluginId === pluginId) this.visualBaselines.delete(id)
+    }
     this.scheduleCleanup()
   }
 
@@ -944,6 +1060,9 @@ export class FigPluginBridgeRuntime {
     for (const session of this.sessions.values()) {
       if (!valid(session.binding)) this.removeSession(session, 'CONFIGURATION_CHANGED')
     }
+    for (const [id, record] of this.visualBaselines) {
+      if (!valid(record.binding)) this.visualBaselines.delete(id)
+    }
     this.scheduleCleanup()
   }
 
@@ -954,6 +1073,7 @@ export class FigPluginBridgeRuntime {
     this.timer = undefined
     for (const [id, ticket] of this.tickets) this.removeTicket(id, ticket)
     for (const session of this.sessions.values()) this.removeSession(session, 'CANCELLED')
+    this.visualBaselines.clear()
     this.failures = []
   }
 
@@ -1203,6 +1323,9 @@ export class FigPluginBridgeRuntime {
         this.terminate(call, 'TIMEOUT')
       }
     }
+    for (const [id, record] of this.visualBaselines) {
+      if (record.value.expiresAt <= now) this.visualBaselines.delete(id)
+    }
     this.scheduleCleanup()
   }
 
@@ -1216,6 +1339,8 @@ export class FigPluginBridgeRuntime {
       next = Math.min(next, session.expiresAt, session.idleAt)
     for (const call of this.calls.values())
       next = Math.min(next, call.receipt.response.expiresAt, call.deadline ?? Infinity)
+    for (const record of this.visualBaselines.values())
+      next = Math.min(next, record.value.expiresAt)
     if (this.failures.length) next = Math.min(next, this.failures[0] + FAILURE_WINDOW)
     if (next === Infinity) return
     this.timer = setTimeout(

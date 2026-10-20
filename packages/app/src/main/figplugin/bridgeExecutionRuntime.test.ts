@@ -3,6 +3,10 @@ import type {
   FigPluginBridgePrepareRequest,
   FigPluginRuntimeBinding
 } from '@shared/figplugin/bridge'
+import {
+  FIGPLUGIN_VISUAL_BASELINE_TTL_MS,
+  FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS
+} from '../../shared/figplugin/execution'
 import { createHostPlanReadback, type HostContext, type HostPlan } from '@shared/figplugin/hostPlan'
 import { createHostPlanningPreview } from '@shared/figplugin/hostPlanPreview'
 import type { FigPluginExecutionAuditEvent } from './executionAudit'
@@ -138,6 +142,33 @@ async function prepared(value: ReturnType<typeof fixture>) {
   }
   expect(last?.status).toBe('completed')
   return { session, receipt }
+}
+
+async function completedVisualExecution(value: ReturnType<typeof fixture>) {
+  const { session, receipt } = await prepared(value)
+  const execution = value.runtime.listPlanExecutions()[0]
+  await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+  const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+    protocol: 1,
+    callId: receipt.callId
+  })
+  if (claimed.status !== 'ready') throw new Error('not claimed')
+  const after: HostContext = {
+    ...hashOnlyContext,
+    nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'New name' }))
+  }
+  const result = value.runtime.planResult(session.sessionId, session.sessionToken, {
+    protocol: 1,
+    executionId: execution.executionId,
+    actionId: claimed.intent.actionId,
+    status: 'completed',
+    effect: 'applied',
+    completed: 1,
+    total: 1,
+    readback: createHostPlanReadback(hashOnlyContext, after, plan),
+    visualEvidence
+  })
+  return { session, receipt, execution, result }
 }
 
 describe('approved native-plan execution runtime', () => {
@@ -288,31 +319,13 @@ describe('approved native-plan execution runtime', () => {
   it('stores and audits an exact bounded visual checkpoint set', async () => {
     const value = fixture(true, hashOnlyContext)
     try {
-      const { session, receipt } = await prepared(value)
-      const execution = value.runtime.listPlanExecutions()[0]
-      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
-      const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
-        protocol: 1,
-        callId: receipt.callId
-      })
-      if (claimed.status !== 'ready') throw new Error('not claimed')
-      const after: HostContext = {
-        ...hashOnlyContext,
-        nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'New name' }))
-      }
-      const result = value.runtime.planResult(session.sessionId, session.sessionToken, {
-        protocol: 1,
-        executionId: execution.executionId,
-        actionId: claimed.intent.actionId,
-        status: 'completed',
-        effect: 'applied',
-        completed: 1,
-        total: 1,
-        readback: createHostPlanReadback(hashOnlyContext, after, plan),
-        visualEvidence
-      })
+      const { result } = await completedVisualExecution(value)
       expect(result.status.visualEvidence).toEqual(visualEvidence)
-      expect(value.runtime.listPlanStatuses()[0].visualEvidence).toEqual(visualEvidence)
+      expect(result.status.visualEvidenceSha256).toMatch(/^[a-f0-9]{64}$/)
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+        visualEvidence,
+        visualEvidenceSha256: result.status.visualEvidenceSha256
+      })
       expect(value.audit.at(-1)).toMatchObject({
         state: 'completed',
         visualAudit: 'hash-only',
@@ -320,6 +333,71 @@ describe('approved native-plan execution runtime', () => {
         visualEvidenceSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
       })
       expect(JSON.stringify(value.audit)).not.toMatch(/Old name|New name/)
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('accepts one exact user visual baseline, audits only hashes and enforces its bounded lifetime', async () => {
+    const value = fixture(true, hashOnlyContext)
+    try {
+      const { execution, result } = await completedVisualExecution(value)
+      const visualEvidenceSha256 = result.status.visualEvidenceSha256!
+      await expect(
+        value.runtime.acceptVisualBaseline(execution.executionId, 'f'.repeat(64))
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+      expect(value.runtime.listVisualBaselines()).toEqual([])
+
+      const baseline = await value.runtime.acceptVisualBaseline(
+        execution.executionId,
+        visualEvidenceSha256
+      )
+      expect(baseline).toMatchObject({
+        sourceExecutionId: execution.executionId,
+        pluginId: binding.pluginId,
+        host: binding.host,
+        projectId: binding.projectId,
+        documentId: hashOnlyContext.documentId,
+        scopeId: hashOnlyContext.scopeId,
+        captureId: hashOnlyContext.captureId,
+        visualEvidenceSha256,
+        targets: [{ targetId: 'node_1', accepted: visualEvidence[0].after }],
+        correctionRoundsUsed: 0,
+        maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
+        expiresAt: baseline.acceptedAt + FIGPLUGIN_VISUAL_BASELINE_TTL_MS
+      })
+      expect(
+        await value.runtime.acceptVisualBaseline(execution.executionId, visualEvidenceSha256)
+      ).toEqual(baseline)
+      expect(value.runtime.listVisualBaselines()).toEqual([baseline])
+      expect(value.audit.at(-1)).toMatchObject({
+        state: 'completed',
+        effect: 'applied',
+        visualBaselineId: baseline.baselineId,
+        visualBaselineEvidenceSha256: visualEvidenceSha256,
+        visualBaselineAcceptedAt: baseline.acceptedAt,
+        visualBaselineExpiresAt: baseline.expiresAt,
+        maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS
+      })
+      expect(JSON.stringify(value.audit)).not.toMatch(/Old name|New name/)
+      value.advance(FIGPLUGIN_VISUAL_BASELINE_TTL_MS)
+      expect(value.runtime.listVisualBaselines()).toEqual([])
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('invalidates an accepted visual baseline when the package binding is revoked', async () => {
+    const value = fixture(true, hashOnlyContext)
+    try {
+      const { execution, result } = await completedVisualExecution(value)
+      await value.runtime.acceptVisualBaseline(
+        execution.executionId,
+        result.status.visualEvidenceSha256!
+      )
+      expect(value.runtime.listVisualBaselines()).toHaveLength(1)
+      value.runtime.revokePlugin(binding.pluginId)
+      expect(value.runtime.listVisualBaselines()).toEqual([])
     } finally {
       value.runtime.dispose()
     }

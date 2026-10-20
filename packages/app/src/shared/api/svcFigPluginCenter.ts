@@ -43,10 +43,14 @@ import {
 import {
   figPluginDesktopExecutionApprovalSchema,
   figPluginDesktopExecutionSchema,
+  figPluginDesktopVisualBaselineAcceptanceSchema,
   figPluginExecutionDesktopStateSchema,
+  figPluginVisualBaselineSchema,
   type FigPluginDesktopExecution,
   type FigPluginDesktopExecutionApproval,
-  type FigPluginExecutionDesktopState
+  type FigPluginDesktopVisualBaselineAcceptance,
+  type FigPluginExecutionDesktopState,
+  type FigPluginVisualBaseline
 } from '../figplugin/execution'
 
 /** One control plane: legacy metadata and verified materialization remain non-executing. */
@@ -67,6 +71,9 @@ export type FigPluginCenterSvc = {
   revokeBridge(req: { pluginId: string }): Promise<void>
   planState(req: Record<string, never>): Promise<FigPluginExecutionDesktopState>
   approvePlanExecution(req: FigPluginDesktopExecutionApproval): Promise<{ completed: boolean }>
+  acceptVisualBaseline(
+    req: FigPluginDesktopVisualBaselineAcceptance
+  ): Promise<FigPluginVisualBaseline | null>
   denyPlanExecution(req: FigPluginDesktopExecution): Promise<void>
   cancelPlanExecution(req: FigPluginDesktopExecution): Promise<void>
 }
@@ -111,6 +118,12 @@ export const figPluginCenterSvcDef: ServiceDefSheet<FigPluginCenterSvc> = {
     type: 'unary',
     request: (value) => parseFigPluginBridgeValue(figPluginDesktopExecutionApprovalSchema, value),
     response: figPluginManagedPathResultSchema
+  },
+  acceptVisualBaseline: {
+    type: 'unary',
+    request: (value) =>
+      parseFigPluginBridgeValue(figPluginDesktopVisualBaselineAcceptanceSchema, value),
+    response: figPluginVisualBaselineSchema.nullable()
   },
   denyPlanExecution: {
     type: 'unary',

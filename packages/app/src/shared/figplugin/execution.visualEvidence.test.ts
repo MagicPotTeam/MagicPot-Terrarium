@@ -1,7 +1,11 @@
 ﻿import { describe, expect, it } from 'vitest'
 import {
+  FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
+  figPluginDesktopVisualBaselineAcceptanceSchema,
+  figPluginExecutionDesktopStateSchema,
   figPluginExecutionResultRequestSchema,
   figPluginExecutionStatusSchema,
+  figPluginVisualBaselineSchema,
   figPluginVisualEvidenceSchema
 } from './execution'
 
@@ -53,7 +57,8 @@ describe('FIGPLUGIN visual evidence contract', () => {
         total: 1,
         effect: 'applied',
         updatedAt: 1,
-        visualEvidence: [evidence]
+        visualEvidence: [evidence],
+        visualEvidenceSha256: 'f'.repeat(64)
       }).visualEvidence
     ).toEqual([evidence])
   })
@@ -79,6 +84,89 @@ describe('FIGPLUGIN visual evidence contract', () => {
     ).toThrow()
   })
 
+  it('requires the evidence digest and evidence array together on public status', () => {
+    expect(() =>
+      figPluginExecutionStatusSchema.parse({
+        protocol: 1,
+        executionId: result.executionId,
+        callId: 'f'.repeat(32),
+        state: 'completed',
+        completed: 1,
+        total: 1,
+        effect: 'applied',
+        updatedAt: 1,
+        visualEvidence: [evidence]
+      })
+    ).toThrow(/incomplete visual evidence status/i)
+    expect(() =>
+      figPluginExecutionStatusSchema.parse({
+        protocol: 1,
+        executionId: result.executionId,
+        callId: 'f'.repeat(32),
+        state: 'completed',
+        completed: 1,
+        total: 1,
+        effect: 'applied',
+        updatedAt: 1,
+        visualEvidenceSha256: 'f'.repeat(64)
+      })
+    ).toThrow(/incomplete visual evidence status/i)
+  })
+
+  it('accepts a bounded user checkpoint descriptor with a fixed correction round cap', () => {
+    const baseline = figPluginVisualBaselineSchema.parse({
+      protocol: 1,
+      baselineId: '1'.repeat(32),
+      sourceExecutionId: result.executionId,
+      pluginId: 'demo.figma',
+      host: 'figma',
+      projectId: 'project_1',
+      documentId: readback.documentId,
+      scopeId: readback.scopeId,
+      captureId: readback.captureId,
+      planSha256: '2'.repeat(64),
+      contextSha256: '3'.repeat(64),
+      visualEvidenceSha256: '4'.repeat(64),
+      adapterVersion: 'figma-native-1',
+      targets: [{ targetId: evidence.targetId, accepted: evidence.after }],
+      acceptedAt: 10,
+      expiresAt: 20,
+      correctionRoundsUsed: 0,
+      maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS
+    })
+    expect(
+      figPluginExecutionDesktopStateSchema.parse({
+        previews: [],
+        statuses: [],
+        baselines: [baseline]
+      }).baselines
+    ).toEqual([baseline])
+    expect(
+      figPluginDesktopVisualBaselineAcceptanceSchema.parse({
+        executionId: baseline.sourceExecutionId,
+        visualEvidenceSha256: baseline.visualEvidenceSha256
+      })
+    ).toEqual({
+      executionId: baseline.sourceExecutionId,
+      visualEvidenceSha256: baseline.visualEvidenceSha256
+    })
+    expect(() =>
+      figPluginVisualBaselineSchema.parse({
+        ...baseline,
+        targets: [baseline.targets[0], baseline.targets[0]]
+      })
+    ).toThrow(/duplicate visual baseline target/i)
+    expect(() =>
+      figPluginVisualBaselineSchema.parse({ ...baseline, expiresAt: baseline.acceptedAt })
+    ).toThrow(/expiry/i)
+    expect(() =>
+      figPluginVisualBaselineSchema.parse({
+        ...baseline,
+        correctionRoundsUsed: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS + 1
+      })
+    ).toThrow()
+  })
+
   it('does not attach visual evidence to a failed or nonterminal execution', () => {
     expect(() =>
       figPluginExecutionResultRequestSchema.parse({
@@ -99,7 +187,8 @@ describe('FIGPLUGIN visual evidence contract', () => {
         total: 1,
         effect: 'applied',
         updatedAt: 1,
-        visualEvidence: [evidence]
+        visualEvidence: [evidence],
+        visualEvidenceSha256: 'f'.repeat(64)
       })
     ).toThrow(/visual evidence/i)
   })

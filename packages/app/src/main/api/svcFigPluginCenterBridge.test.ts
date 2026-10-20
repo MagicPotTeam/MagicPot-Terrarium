@@ -20,11 +20,13 @@ import {
   type FigPluginPairResponse
 } from '@shared/figplugin/bridge'
 import {
+  FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
   figPluginExecutionClaimResponseSchema,
   figPluginExecutionDesktopStateSchema,
   figPluginExecutionResultResponseSchema,
   figPluginExecutionStatusSchema,
-  type FigPluginDesktopExecutionApproval
+  type FigPluginDesktopExecutionApproval,
+  type FigPluginDesktopVisualBaselineAcceptance
 } from '@shared/figplugin/execution'
 import { createHostPlanReadback, type HostContext, type HostPlan } from '@shared/figplugin/hostPlan'
 import { FIGPLUGIN_MANAGEMENT_ERRORS } from '@shared/figplugin/management'
@@ -67,6 +69,7 @@ type BridgeMethod =
   | 'revokeBridge'
   | 'planState'
   | 'approvePlanExecution'
+  | 'acceptVisualBaseline'
   | 'denyPlanExecution'
   | 'cancelPlanExecution'
 type Store = ConstructorParameters<typeof FigPluginBridgeController>[0]
@@ -349,6 +352,10 @@ const executionContext: HostContext = {
     visualAudit: 'unavailable'
   }
 }
+const visualExecutionContext: HostContext = {
+  ...structuredClone(executionContext),
+  execution: { ...executionContext.execution!, visualAudit: 'hash-only' }
+}
 const executionPlan: HostPlan = {
   schemaVersion: 2,
   kind: 'host-plan',
@@ -375,13 +382,26 @@ const executionRequest = (sequence = 1): FigPluginBridgePrepareRequest => ({
   featureId: 'plan-preview',
   hostContext: structuredClone(executionContext)
 })
-const executedContext = (): HostContext => ({
-  ...structuredClone(executionContext),
-  nodes: executionContext.nodes.map((node) => ({
+const visualExecutionRequest = (sequence = 1): FigPluginBridgePrepareRequest => ({
+  ...executionRequest(sequence),
+  requestId: `synthetic_visual_execution_request_${sequence}`,
+  hostContext: structuredClone(visualExecutionContext)
+})
+const executedContext = (context: HostContext = executionContext): HostContext => ({
+  ...structuredClone(context),
+  nodes: context.nodes.map((node) => ({
     ...structuredClone(node),
     name: 'Synthetic approved label'
   }))
 })
+const visualEvidence = [
+  {
+    targetId: '1:2',
+    before: { sha256: '1'.repeat(64), width: 64, height: 32 },
+    after: { sha256: '2'.repeat(64), width: 64, height: 32 },
+    changed: true
+  }
+]
 const desktopState = (value: Fixture) => value.service.bridgeState({}, invocation('bridgeState'))
 const planDesktopState = (value: Fixture) => value.service.planState({}, invocation('planState'))
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve))
@@ -523,6 +543,14 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
         v.service.approvePlanExecution({ executionId: UNKNOWN_CALL, planSha256: UNKNOWN_HASH }, c)
     },
     {
+      name: 'acceptVisualBaseline',
+      call: (v, c) =>
+        v.service.acceptVisualBaseline(
+          { executionId: UNKNOWN_CALL, visualEvidenceSha256: UNKNOWN_HASH },
+          c
+        )
+    },
+    {
       name: 'denyPlanExecution',
       call: (v, c) => v.service.denyPlanExecution({ executionId: UNKNOWN_CALL }, c)
     },
@@ -616,6 +644,17 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
       'INVALID_REQUEST'
     )
     await rejectsSafely(
+      value.service.acceptVisualBaseline(
+        {
+          executionId: UNKNOWN_CALL,
+          visualEvidenceSha256: UNKNOWN_HASH,
+          checkboxChecked: true
+        } as FigPluginDesktopVisualBaselineAcceptance,
+        invocation('acceptVisualBaseline')
+      ),
+      'INVALID_REQUEST'
+    )
+    await rejectsSafely(
       value.service.denyPlanExecution(
         { executionId: UNKNOWN_CALL, approved: true } as { executionId: string },
         invocation('denyPlanExecution')
@@ -655,6 +694,7 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
   it('state and harmless absent-bridge cancellation never initialize a bridge or prompt', async () => {
     const value = fixture()
     expect(await desktopState(value)).toEqual({ sessions: [], previews: [] })
+    expect(await planDesktopState(value)).toEqual({ previews: [], statuses: [], baselines: [] })
     await value.service.denyBridge({ callId: UNKNOWN_CALL }, invocation('denyBridge'))
     await value.service.revokeBridge({ pluginId: pairRequest.pluginId }, invocation('revokeBridge'))
     await rejectsSafely(
@@ -1145,9 +1185,12 @@ async function waitForExecution(value: Fixture, callId: string, executionId?: st
   throw new Error('Synthetic native execution preview was not registered')
 }
 
-async function prepareExecutablePlan(value: Fixture) {
+async function prepareExecutablePlan(
+  value: Fixture,
+  input: FigPluginBridgePrepareRequest = executionRequest()
+) {
   const { origin, session } = await loopbackSession(value)
-  const preparedResponse = await post(origin, 'prepare', executionRequest(), session)
+  const preparedResponse = await post(origin, 'prepare', input, session)
   expect(preparedResponse.status).toBe(200)
   const prepared = figPluginBridgePrepareResponseSchema.parse(preparedResponse.body)
   const modelPreview = (await desktopState(value)).previews.find(
@@ -1168,6 +1211,51 @@ async function prepareExecutablePlan(value: Fixture) {
   expect(await waitForCall(origin, session, prepared.callId)).toMatchObject({ status: 'completed' })
   const { preview: execution } = await waitForExecution(value, prepared.callId)
   return { origin, session, prepared, execution }
+}
+
+async function completeVisualExecution(value: Fixture) {
+  const { origin, session, prepared, execution } = await prepareExecutablePlan(
+    value,
+    visualExecutionRequest()
+  )
+  expect(execution.visualAudit).toBe('hash-only')
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  expect(
+    await value.service.approvePlanExecution(
+      { executionId: execution.executionId, planSha256: execution.planSha256 },
+      invocation('approvePlanExecution')
+    )
+  ).toEqual({ completed: true })
+  const claim = figPluginExecutionClaimResponseSchema.parse(
+    (await post(origin, 'plan/claim', { protocol: 1, callId: prepared.callId }, session)).body
+  )
+  if (claim.status !== 'ready') throw new Error('Expected an approved execution intent')
+  const resultResponse = await post(
+    origin,
+    'plan/result',
+    {
+      protocol: 1,
+      executionId: execution.executionId,
+      actionId: claim.intent.actionId,
+      status: 'completed',
+      effect: 'applied',
+      completed: 1,
+      total: 1,
+      readback: createHostPlanReadback(
+        visualExecutionContext,
+        executedContext(visualExecutionContext),
+        executionPlan
+      ),
+      visualEvidence
+    },
+    session
+  )
+  expect(resultResponse.status).toBe(200)
+  const result = figPluginExecutionResultResponseSchema.parse(resultResponse.body)
+  const visualEvidenceSha256 = result.status.visualEvidenceSha256
+  if (!visualEvidenceSha256) throw new Error('Expected exact visual evidence digest')
+  expect(result.status.visualEvidence).toEqual(visualEvidence)
+  return { origin, session, prepared, execution, result, visualEvidenceSha256 }
 }
 
 it('real loopback: pair -> prepare -> native desktop approval -> one mock model result -> deny/cancel/revoke', async () => {
@@ -1517,6 +1605,99 @@ it('real loopback: model send and exact native write use separate approvals and 
   expect(figPluginExecutionStatusSchema.parse(statusResponse.body)).toEqual(parsedResult.status)
   expect(value.model.chat).toHaveBeenCalledTimes(1)
   expect(executionContext.nodes[0].name).toBe('Synthetic untrusted label')
+})
+
+it('real loopback: exact user consent records one bounded visual checkpoint and revoke removes it', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const { execution, visualEvidenceSha256 } = await completeVisualExecution(value)
+  expect((await planDesktopState(value)).baselines).toEqual([])
+
+  const modalCount = native.showMessageBox.mock.calls.length
+  await rejectsSafely(
+    value.service.acceptVisualBaseline(
+      { executionId: execution.executionId, visualEvidenceSha256: UNKNOWN_HASH },
+      invocation('acceptVisualBaseline')
+    ),
+    'EXPIRED'
+  )
+  expect(native.showMessageBox).toHaveBeenCalledTimes(modalCount)
+
+  const cancelledModal = holdModal()
+  const cancelledAcceptance = value.service.acceptVisualBaseline(
+    { executionId: execution.executionId, visualEvidenceSha256 },
+    invocation('acceptVisualBaseline')
+  )
+  const cancelledOptions = await cancelledModal.opened
+  expectDefaultCancel(cancelledOptions)
+  expect(cancelledOptions.title).toBe('Accept a bounded visual checkpoint')
+  expect(cancelledOptions.detail).toContain(`Visual evidence SHA-256: ${visualEvidenceSha256}`)
+  expect(cancelledOptions.detail).toContain('"targetId": "1:2"')
+  expect(cancelledOptions.detail).toContain(
+    `Maximum correction rounds recorded by this checkpoint: ${FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS}`
+  )
+  expect(cancelledOptions.detail).toContain('stores no pixels or design text')
+  expect(cancelledOptions.detail).not.toContain('Synthetic approved label')
+  expect(cancelledOptions.detail).not.toContain('Synthetic untrusted label')
+  cancelledModal.resolve(cancelled)
+  expect(await cancelledAcceptance).toBeNull()
+  expect((await planDesktopState(value)).baselines).toEqual([])
+
+  const approvedModal = holdModal()
+  const accepting = value.service.acceptVisualBaseline(
+    { executionId: execution.executionId, visualEvidenceSha256 },
+    invocation('acceptVisualBaseline')
+  )
+  expectDefaultCancel(await approvedModal.opened)
+  approvedModal.resolve(approved)
+  const baseline = await accepting
+  expect(baseline).toMatchObject({
+    sourceExecutionId: execution.executionId,
+    pluginId: pairRequest.pluginId,
+    host: 'figma',
+    projectId: pairRequest.projectId,
+    documentId: visualExecutionContext.documentId,
+    scopeId: visualExecutionContext.scopeId,
+    captureId: visualExecutionContext.captureId,
+    planSha256: execution.planSha256,
+    contextSha256: execution.contextSha256,
+    visualEvidenceSha256,
+    targets: [{ targetId: '1:2', accepted: visualEvidence[0].after }],
+    correctionRoundsUsed: 0,
+    maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS
+  })
+  if (!baseline) throw new Error('Expected accepted baseline')
+  expect((await planDesktopState(value)).baselines).toEqual([baseline])
+
+  const promptCount = native.showMessageBox.mock.calls.length
+  expect(
+    await value.service.acceptVisualBaseline(
+      { executionId: execution.executionId, visualEvidenceSha256 },
+      invocation('acceptVisualBaseline')
+    )
+  ).toEqual(baseline)
+  expect(native.showMessageBox).toHaveBeenCalledTimes(promptCount)
+
+  await value.service.revokeBridge({ pluginId: pairRequest.pluginId }, invocation('revokeBridge'))
+  expect((await planDesktopState(value)).baselines).toEqual([])
+})
+
+it('real loopback: visual checkpoint consent fails closed after the desktop document epoch changes', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const { execution, visualEvidenceSha256 } = await completeVisualExecution(value)
+  const modal = holdModal()
+  const rejected = rejectsSafely(
+    value.service.acceptVisualBaseline(
+      { executionId: execution.executionId, visualEvidenceSha256 },
+      invocation('acceptVisualBaseline')
+    ),
+    'CONFIGURATION_CHANGED'
+  )
+  expectDefaultCancel(await modal.opened)
+  value.window.webContents.emit('did-start-navigation', {}, TRUSTED_URL, false, true)
+  modal.resolve(approved)
+  await rejected
+  expect(await planDesktopState(value)).toEqual({ previews: [], statuses: [], baselines: [] })
+  expect(value.dispose).toHaveBeenCalledTimes(1)
 })
 
 it('real loopback: a false applied readback is quarantined and cannot be claimed again', async () => {

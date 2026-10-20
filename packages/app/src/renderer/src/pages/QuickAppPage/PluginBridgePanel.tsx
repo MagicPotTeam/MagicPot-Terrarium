@@ -32,10 +32,13 @@ import {
 import {
   figPluginDesktopExecutionApprovalSchema,
   figPluginDesktopExecutionSchema,
+  figPluginDesktopVisualBaselineAcceptanceSchema,
   figPluginExecutionDesktopStateSchema,
+  figPluginVisualBaselineSchema,
   type FigPluginDesktopExecution,
   type FigPluginExecutionDesktopState,
   type FigPluginExecutionPreview,
+  type FigPluginExecutionStatus,
   type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import { getProjectById, listProjects, PROJECTS_CHANGED_EVENT } from '../MainPage/projectStore'
@@ -53,11 +56,14 @@ type BridgeNoticeKey =
   | 'figplugin.bridge.planApprovalAccepted'
   | 'figplugin.bridge.planDenied'
   | 'figplugin.bridge.planCancelled'
+  | 'figplugin.bridge.visualBaselineAccepted'
+  | 'figplugin.bridge.visualBaselineDeclined'
 
 const emptyState = (): FigPluginBridgeDesktopState => ({ sessions: [], previews: [] })
 const emptyExecutionState = (): FigPluginExecutionDesktopState => ({
   previews: [],
-  statuses: []
+  statuses: [],
+  baselines: []
 })
 const eligible = (item: FigPluginManagedSummary) =>
   !!item.bridgeOrigin &&
@@ -137,6 +143,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   const [executions, setExecutions] = useState(emptyExecutionState)
   const [reviewed, setReviewed] = useState<Record<string, string>>({})
   const [reviewedExecutions, setReviewedExecutions] = useState<Record<string, string>>({})
+  const [reviewedBaselines, setReviewedBaselines] = useState<Record<string, string>>({})
   const [monitorUntil, setMonitorUntil] = useState(0)
   const [busy, setBusy] = useState(false)
   const [revoking, setRevoking] = useState(false)
@@ -180,6 +187,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
     setExecutions(emptyExecutionState())
     setReviewed({})
     setReviewedExecutions({})
+    setReviewedBaselines({})
     setModels({})
   }, [])
 
@@ -262,9 +270,14 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         : null
     )
     setState(next)
+    const activeExecutionPreviews = nextExecutions.previews.filter(
+      (preview) => preview.expiresAt > now
+    )
+    const activeBaselines = nextExecutions.baselines.filter((baseline) => baseline.expiresAt > now)
     setExecutions({
-      previews: nextExecutions.previews.filter((preview) => preview.expiresAt > now),
-      statuses: nextExecutions.statuses
+      previews: activeExecutionPreviews,
+      statuses: nextExecutions.statuses,
+      baselines: activeBaselines
     })
     setReviewed((previous) =>
       Object.fromEntries(
@@ -275,9 +288,21 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
     )
     setReviewedExecutions((previous) =>
       Object.fromEntries(
-        nextExecutions.previews
+        activeExecutionPreviews
           .filter((previewEx) => previous[previewEx.executionId] === executionReviewKey(previewEx))
           .map((previewEx) => [previewEx.executionId, executionReviewKey(previewEx)])
+      )
+    )
+    setReviewedBaselines((previous) =>
+      Object.fromEntries(
+        nextExecutions.statuses
+          .filter(
+            (status) =>
+              status.visualEvidenceSha256 !== undefined &&
+              previous[status.executionId] === status.visualEvidenceSha256 &&
+              !activeBaselines.some((baseline) => baseline.sourceExecutionId === status.executionId)
+          )
+          .map((status) => [status.executionId, status.visualEvidenceSha256!])
       )
     )
     setError('')
@@ -347,7 +372,8 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       ...(ticket ? [ticket.expiresAt] : []),
       ...state.previews.map((call) => call.expiresAt),
       ...state.sessions.map((session) => session.expiresAt),
-      ...executions.previews.map((previewEx) => previewEx.expiresAt)
+      ...executions.previews.map((previewEx) => previewEx.expiresAt),
+      ...executions.baselines.map((baseline) => baseline.expiresAt)
     ]
     if (!expiries.length) return
     const timer = setTimeout(
@@ -360,10 +386,12 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         }))
         setExecutions((value) => ({
           previews: value.previews.filter((previewEx) => previewEx.expiresAt > now),
-          statuses: value.statuses
+          statuses: value.statuses,
+          baselines: value.baselines.filter((baseline) => baseline.expiresAt > now)
         }))
         setReviewed({})
         setReviewedExecutions({})
+        setReviewedBaselines({})
       },
       Math.min(2_147_483_647, Math.max(0, Math.min(...expiries) - Date.now()))
     )
@@ -580,6 +608,67 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         figPluginDesktopExecutionSchema.parse({ executionId })
       )
       if (live()) setNotice('figplugin.bridge.planCancelled')
+      if (live()) await refresh(live)
+    })
+  }
+
+  const canAcceptVisualBaseline = (status: FigPluginExecutionStatus) => {
+    const preview = executions.previews.find((item) => item.executionId === status.executionId)
+    return (
+      status.state === 'completed' &&
+      status.effect === 'applied' &&
+      status.visualEvidence !== undefined &&
+      status.visualEvidenceSha256 !== undefined &&
+      preview?.visualAudit === 'hash-only' &&
+      preview.expiresAt > Date.now() &&
+      projects.some((value) => value.id === preview.projectId) &&
+      candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host) &&
+      !executions.baselines.some((baseline) => baseline.sourceExecutionId === status.executionId)
+    )
+  }
+
+  const acceptVisualBaseline = (status: FigPluginExecutionStatus) => {
+    const hash = status.visualEvidenceSha256
+    const preview = executions.previews.find((item) => item.executionId === status.executionId)
+    if (
+      pending.current ||
+      revokePending.current ||
+      !hash ||
+      !preview ||
+      reviewedBaselines[status.executionId] !== hash ||
+      !canAcceptVisualBaseline(status)
+    )
+      return
+    if (!getProjectById(preview.projectId)) {
+      stopMonitoring()
+      setError('figplugin.bridge.errors.CONFIGURATION_CHANGED')
+      return
+    }
+    setReviewedBaselines((previous) => {
+      const next = { ...previous }
+      delete next[status.executionId]
+      return next
+    })
+    void run(async (live) => {
+      const value = await api().svcFigPluginCenter.acceptVisualBaseline(
+        figPluginDesktopVisualBaselineAcceptanceSchema.parse({
+          executionId: status.executionId,
+          visualEvidenceSha256: hash
+        })
+      )
+      if (!live()) return
+      if (value === null) {
+        setNotice('figplugin.bridge.visualBaselineDeclined')
+      } else {
+        const baseline = parseFigPluginBridgeValue(figPluginVisualBaselineSchema, value)
+        if (
+          baseline.sourceExecutionId !== status.executionId ||
+          baseline.visualEvidenceSha256 !== hash ||
+          baseline.expiresAt <= Date.now()
+        )
+          throw new FigPluginBridgeError('INVALID_REQUEST')
+        setNotice('figplugin.bridge.visualBaselineAccepted')
+      }
       if (live()) await refresh(live)
     })
   }
@@ -925,46 +1014,137 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         {!executions.statuses.length && (
           <Typography>{t('figplugin.bridge.noExecutionStatuses')}</Typography>
         )}
-        {executions.statuses.map((executionStatus) => (
-          <Paper key={executionStatus.executionId} variant="outlined" sx={{ p: 2 }}>
+        {executions.statuses.map((executionStatus) => {
+          const acceptedBaseline = executions.baselines.find(
+            (baseline) => baseline.sourceExecutionId === executionStatus.executionId
+          )
+          const canAccept = canAcceptVisualBaseline(executionStatus)
+          const evidenceHash = executionStatus.visualEvidenceSha256
+          return (
+            <Paper key={executionStatus.executionId} variant="outlined" sx={{ p: 2 }}>
+              <Stack spacing={1}>
+                <Typography>
+                  {t('figplugin.bridge.executionStatus', {
+                    state: executionStatus.state,
+                    completed: executionStatus.completed,
+                    total: executionStatus.total,
+                    effect: executionStatus.effect
+                  })}
+                </Typography>
+                {executionStatus.visualEvidence && (
+                  <>
+                    <Typography>
+                      {t('figplugin.bridge.visualEvidenceSummary', {
+                        count: executionStatus.visualEvidence.length,
+                        changed: executionStatus.visualEvidence.filter((item) => item.changed)
+                          .length
+                      })}
+                    </Typography>
+                    {evidenceHash && (
+                      <Typography>
+                        {t('figplugin.bridge.visualEvidenceHash', { hash: evidenceHash })}
+                      </Typography>
+                    )}
+                    <Box
+                      component="pre"
+                      tabIndex={0}
+                      aria-label={t('figplugin.bridge.visualEvidenceDetails')}
+                      sx={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto', m: 0 }}
+                    >
+                      {renderVisualEvidence(executionStatus.visualEvidence)}
+                    </Box>
+                    <Alert severity="info">{t('figplugin.bridge.visualEvidenceBoundary')}</Alert>
+                    {canAccept && evidenceHash && (
+                      <>
+                        <FormControlLabel
+                          label={t('figplugin.bridge.reviewVisualBaseline')}
+                          control={
+                            <Checkbox
+                              disabled={locked}
+                              checked={
+                                reviewedBaselines[executionStatus.executionId] === evidenceHash
+                              }
+                              onChange={(event) => {
+                                if (!pending.current && !revokePending.current)
+                                  setReviewedBaselines((previous) => ({
+                                    ...previous,
+                                    [executionStatus.executionId]: event.target.checked
+                                      ? evidenceHash
+                                      : ''
+                                  }))
+                              }}
+                            />
+                          }
+                        />
+                        <Button
+                          variant="contained"
+                          disabled={
+                            locked ||
+                            reviewedBaselines[executionStatus.executionId] !== evidenceHash
+                          }
+                          onClick={() => acceptVisualBaseline(executionStatus)}
+                        >
+                          {t('figplugin.bridge.acceptVisualBaseline')}
+                        </Button>
+                      </>
+                    )}
+                    {acceptedBaseline && (
+                      <Alert severity="success">
+                        {t('figplugin.bridge.visualBaselineCurrent', {
+                          id: shortHash(acceptedBaseline.baselineId)
+                        })}
+                      </Alert>
+                    )}
+                  </>
+                )}
+                {!['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(
+                  executionStatus.state
+                ) && (
+                  <Button
+                    disabled={locked}
+                    onClick={() => cancelExecution(executionStatus.executionId)}
+                  >
+                    {t('figplugin.bridge.cancelWrite')}
+                  </Button>
+                )}
+              </Stack>
+            </Paper>
+          )
+        })}
+        <Typography component="h3" variant="subtitle1">
+          {t('figplugin.bridge.visualBaselines')}
+        </Typography>
+        {!executions.baselines.length && (
+          <Typography>{t('figplugin.bridge.noVisualBaselines')}</Typography>
+        )}
+        {executions.baselines.map((baseline) => (
+          <Paper key={baseline.baselineId} variant="outlined" sx={{ p: 2 }}>
             <Stack spacing={1}>
               <Typography>
-                {t('figplugin.bridge.executionStatus', {
-                  state: executionStatus.state,
-                  completed: executionStatus.completed,
-                  total: executionStatus.total,
-                  effect: executionStatus.effect
+                {t('figplugin.bridge.visualBaselineSummary', {
+                  plugin: baseline.pluginId,
+                  host: baseline.host,
+                  project: baseline.projectId,
+                  count: baseline.targets.length
                 })}
               </Typography>
-              {executionStatus.visualEvidence && (
-                <>
-                  <Typography>
-                    {t('figplugin.bridge.visualEvidenceSummary', {
-                      count: executionStatus.visualEvidence.length,
-                      changed: executionStatus.visualEvidence.filter((item) => item.changed).length
-                    })}
-                  </Typography>
-                  <Box
-                    component="pre"
-                    tabIndex={0}
-                    aria-label={t('figplugin.bridge.visualEvidenceDetails')}
-                    sx={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto', m: 0 }}
-                  >
-                    {renderVisualEvidence(executionStatus.visualEvidence)}
-                  </Box>
-                  <Alert severity="info">{t('figplugin.bridge.visualEvidenceBoundary')}</Alert>
-                </>
-              )}
-              {!['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(
-                executionStatus.state
-              ) && (
-                <Button
-                  disabled={locked}
-                  onClick={() => cancelExecution(executionStatus.executionId)}
-                >
-                  {t('figplugin.bridge.cancelWrite')}
-                </Button>
-              )}
+              <Typography>
+                {t('figplugin.bridge.visualBaselineHash', {
+                  hash: baseline.visualEvidenceSha256
+                })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.visualBaselineRounds', {
+                  used: baseline.correctionRoundsUsed,
+                  max: baseline.maxCorrectionRounds
+                })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.visualBaselineExpires', {
+                  expiry: new Date(baseline.expiresAt).toLocaleString()
+                })}
+              </Typography>
+              <Alert severity="info">{t('figplugin.bridge.visualBaselineBoundary')}</Alert>
             </Stack>
           </Paper>
         ))}

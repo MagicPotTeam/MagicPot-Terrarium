@@ -56,6 +56,19 @@ const eventSchema = z
       .length(64)
       .regex(/^[a-f0-9]{64}$/)
       .optional(),
+    visualBaselineId: z
+      .string()
+      .length(32)
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    visualBaselineEvidenceSha256: z
+      .string()
+      .length(64)
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    visualBaselineAcceptedAt: z.number().int().min(0).optional(),
+    visualBaselineExpiresAt: z.number().int().min(0).optional(),
+    maxCorrectionRounds: z.number().int().min(1).max(10).optional(),
     durationMs: z.number().int().min(0),
     errorCode: z.string().min(1).max(64).optional()
   })
@@ -68,6 +81,32 @@ const eventSchema = z
         code: z.ZodIssueCode.custom,
         message: 'Visual evidence audit is not completed'
       })
+    const baselineFields = [
+      value.visualBaselineId,
+      value.visualBaselineEvidenceSha256,
+      value.visualBaselineAcceptedAt,
+      value.visualBaselineExpiresAt,
+      value.maxCorrectionRounds
+    ]
+    const baselineCount = baselineFields.filter((field) => field !== undefined).length
+    if (baselineCount !== 0 && baselineCount !== baselineFields.length)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Incomplete visual baseline audit' })
+    if (
+      baselineCount !== 0 &&
+      (value.state !== 'completed' ||
+        value.effect !== 'applied' ||
+        value.visualEvidenceCount === undefined)
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual baseline is not accepted success'
+      })
+    if (
+      value.visualBaselineAcceptedAt !== undefined &&
+      value.visualBaselineExpiresAt !== undefined &&
+      value.visualBaselineExpiresAt <= value.visualBaselineAcceptedAt
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid visual baseline audit expiry' })
   })
 export type FigPluginExecutionAuditEvent = z.output<typeof eventSchema>
 

@@ -10,6 +10,11 @@ import {
   type FigPluginBridgePreview,
   type FigPluginDesktopPairTicket
 } from '@shared/figplugin/bridge'
+import type {
+  FigPluginExecutionPreview,
+  FigPluginExecutionStatus,
+  FigPluginVisualBaseline
+} from '@shared/figplugin/execution'
 import type { FigPluginManagedSummary } from '@shared/figplugin/management'
 import en from '@shared/locales/en-US/renderer.json'
 import zh from '@shared/locales/zh-CN/renderer.json'
@@ -26,6 +31,7 @@ const mocks = vi.hoisted(() => ({
     revokeBridge: vi.fn<FigPluginCenterSvc['revokeBridge']>(),
     planState: vi.fn<FigPluginCenterSvc['planState']>(),
     approvePlanExecution: vi.fn<FigPluginCenterSvc['approvePlanExecution']>(),
+    acceptVisualBaseline: vi.fn<FigPluginCenterSvc['acceptVisualBaseline']>(),
     denyPlanExecution: vi.fn<FigPluginCenterSvc['denyPlanExecution']>(),
     cancelPlanExecution: vi.fn<FigPluginCenterSvc['cancelPlanExecution']>()
   },
@@ -106,6 +112,75 @@ const state = (call = preview()): FigPluginBridgeDesktopState => ({
   sessions: [],
   previews: [call]
 })
+const nativeExecutionPreview = (): FigPluginExecutionPreview => ({
+  protocol: 1,
+  executionId: '4'.repeat(32),
+  callId: '5'.repeat(32),
+  pluginId: target.pluginId,
+  host: target.host,
+  projectId: project.id,
+  documentId: 'document-1',
+  scopeId: 'page-1',
+  captureId: '6'.repeat(32),
+  plan: {
+    schemaVersion: 2,
+    kind: 'host-plan',
+    captureId: '6'.repeat(32),
+    steps: [{ command: 'node.rename', targetId: 'node-1', name: 'New name' }]
+  },
+  planSha256: '7'.repeat(64),
+  contextSha256: '8'.repeat(64),
+  adapterVersion: 'synthetic-figma-1',
+  rollback: 'verified-in-place',
+  visualAudit: 'hash-only',
+  risk: 'low',
+  differences: [
+    { targetId: 'node-1', command: 'node.rename', before: 'Old name', after: 'New name' }
+  ],
+  state: 'completed',
+  requiresWriteApproval: true,
+  createdAt: Date.now() - 1000,
+  expiresAt: Date.now() + 60_000
+})
+const visualExecutionStatus = (): FigPluginExecutionStatus => ({
+  protocol: 1,
+  executionId: nativeExecutionPreview().executionId,
+  callId: nativeExecutionPreview().callId,
+  state: 'completed',
+  completed: 1,
+  total: 1,
+  effect: 'applied',
+  updatedAt: Date.now(),
+  visualEvidenceSha256: '9'.repeat(64),
+  visualEvidence: [
+    {
+      targetId: 'node-1',
+      before: { sha256: '1'.repeat(64), width: 64, height: 32 },
+      after: { sha256: '2'.repeat(64), width: 64, height: 32 },
+      changed: true
+    }
+  ]
+})
+const acceptedVisualBaseline = (): FigPluginVisualBaseline => ({
+  protocol: 1,
+  baselineId: 'a'.repeat(32),
+  sourceExecutionId: nativeExecutionPreview().executionId,
+  pluginId: target.pluginId,
+  host: target.host,
+  projectId: project.id,
+  documentId: nativeExecutionPreview().documentId,
+  scopeId: nativeExecutionPreview().scopeId,
+  captureId: nativeExecutionPreview().captureId,
+  planSha256: nativeExecutionPreview().planSha256,
+  contextSha256: nativeExecutionPreview().contextSha256,
+  visualEvidenceSha256: visualExecutionStatus().visualEvidenceSha256!,
+  adapterVersion: nativeExecutionPreview().adapterVersion,
+  targets: [{ targetId: 'node-1', accepted: visualExecutionStatus().visualEvidence![0].after }],
+  acceptedAt: Date.now(),
+  expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+  correctionRoundsUsed: 0,
+  maxCorrectionRounds: 3
+})
 const key = (name: string) => `figplugin.bridge.${name}`
 const button = (name: string) => screen.getByRole('button', { name: key(name) })
 const select = (name: string, value: string) =>
@@ -152,8 +227,9 @@ beforeEach(() => {
   mocks.project.mockImplementation((id) => mocks.projects().find((value) => value.id === id))
   mocks.center.createPairing.mockImplementation(async () => ticket())
   mocks.center.bridgeState.mockResolvedValue({ sessions: [], previews: [] })
-  mocks.center.planState.mockResolvedValue({ previews: [], statuses: [] })
+  mocks.center.planState.mockResolvedValue({ previews: [], statuses: [], baselines: [] })
   mocks.center.approveBridge.mockResolvedValue({ completed: true })
+  mocks.center.acceptVisualBaseline.mockResolvedValue(null)
   mocks.center.denyBridge.mockResolvedValue(undefined)
   mocks.center.revokeBridge.mockResolvedValue(undefined)
   mocks.profiles.mockResolvedValue({ profiles: [{ id: 'chat-id', model_name: 'Synthetic model' }] })
@@ -866,6 +942,45 @@ describe('PluginBridgePanel', () => {
     await click('revokeSelected')
     expect(screen.getByText(key('revoked'))).toBeInTheDocument()
   })
+  it('requires exact review before accepting a bounded visual checkpoint and renders its limits', async () => {
+    const execution = nativeExecutionPreview()
+    const status = visualExecutionStatus()
+    const baseline = acceptedVisualBaseline()
+    mocks.center.planState
+      .mockResolvedValueOnce({ previews: [execution], statuses: [status], baselines: [] })
+      .mockResolvedValueOnce({
+        previews: [execution],
+        statuses: [status],
+        baselines: [baseline]
+      })
+    mocks.center.acceptVisualBaseline.mockResolvedValueOnce(baseline)
+    mount()
+    await click('refresh')
+
+    expect(button('acceptVisualBaseline')).toBeDisabled()
+    expect(mocks.center.acceptVisualBaseline).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByLabelText(key('reviewVisualBaseline')))
+    expect(button('acceptVisualBaseline')).toBeEnabled()
+    await click('acceptVisualBaseline')
+
+    expect(mocks.center.acceptVisualBaseline).toHaveBeenCalledExactlyOnceWith({
+      executionId: execution.executionId,
+      visualEvidenceSha256: status.visualEvidenceSha256
+    })
+    expect(screen.getByText(key('visualBaselineAccepted'))).toBeInTheDocument()
+    expect(
+      screen.getByText(`${key('visualBaselineCurrent')} ${baseline.baselineId.slice(0, 12)}`)
+    ).toBeInTheDocument()
+    expect(screen.getByText(key('visualBaselineBoundary'))).toBeInTheDocument()
+    expect(
+      screen.getByText(`${key('visualBaselineHash')} ${baseline.visualEvidenceSha256}`)
+    ).toBeInTheDocument()
+    expect(screen.getByText(`${key('visualBaselineRounds')} 0 3`)).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: key('acceptVisualBaseline') })
+    ).not.toBeInTheDocument()
+  })
+
   it('renders bounded visual checkpoint summaries without claiming automatic correction', async () => {
     mocks.center.planState.mockResolvedValue({
       previews: [],
@@ -879,6 +994,7 @@ describe('PluginBridgePanel', () => {
           total: 1,
           effect: 'applied',
           updatedAt: Date.now(),
+          visualEvidenceSha256: '3'.repeat(64),
           visualEvidence: [
             {
               targetId: 'node-1',
@@ -888,7 +1004,8 @@ describe('PluginBridgePanel', () => {
             }
           ]
         }
-      ]
+      ],
+      baselines: []
     })
     mount()
     await click('refresh')

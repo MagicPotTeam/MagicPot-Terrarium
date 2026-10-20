@@ -1,6 +1,7 @@
 import {
   buildBridgeApprovalDetails,
-  buildPlanExecutionApprovalDetails
+  buildPlanExecutionApprovalDetails,
+  buildVisualBaselineApprovalDetails
 } from '../figplugin/bridgeApprovalDetails'
 import path from 'node:path'
 import fs from 'node:fs/promises'
@@ -39,9 +40,12 @@ import {
 import {
   figPluginDesktopExecutionApprovalSchema,
   figPluginDesktopExecutionSchema,
+  figPluginDesktopVisualBaselineAcceptanceSchema,
   type FigPluginDesktopExecution,
   type FigPluginDesktopExecutionApproval,
-  type FigPluginExecutionDesktopState
+  type FigPluginDesktopVisualBaselineAcceptance,
+  type FigPluginExecutionDesktopState,
+  type FigPluginVisualBaseline
 } from '@shared/figplugin/execution'
 import {
   readAndVerifyFigPluginPackageFile,
@@ -80,6 +84,7 @@ type BridgeControl = Pick<
   | 'revokePlugin'
   | 'planState'
   | 'approvePlanExecution'
+  | 'acceptVisualBaseline'
   | 'denyPlanExecution'
   | 'cancelPlanExecution'
   | 'dispose'
@@ -692,7 +697,7 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
   ): Promise<FigPluginExecutionDesktopState> => {
     parseFigPluginManagementValue(figPluginManagementEmptyRequestSchema, req)
     this.authorizeManagement('planState', invocation)
-    return this.bridge?.planState() ?? { previews: [], statuses: [] }
+    return this.bridge?.planState() ?? { previews: [], statuses: [], baselines: [] }
   }
 
   approveBridge = async (
@@ -788,6 +793,70 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       check()
       await controller.approvePlanExecution(request.executionId, request.planSha256)
       return { completed: true }
+    })
+  }
+
+  acceptVisualBaseline = async (
+    req: FigPluginDesktopVisualBaselineAcceptance,
+    invocation?: ServiceInvocationContext
+  ): Promise<FigPluginVisualBaseline | null> => {
+    const request = parseFigPluginBridgeValue(figPluginDesktopVisualBaselineAcceptanceSchema, req)
+    const parent = this.authorizeManagement('acceptVisualBaseline', invocation)
+    const epoch = this.documentGenerations.get(parent)
+    const documentUrl = parent.webContents.getURL()
+    const controller = this.bridge
+    if (!controller) throw new FigPluginBridgeError('EXPIRED')
+    const check = () => {
+      if (
+        this.authorizeManagement('acceptVisualBaseline', invocation) !== parent ||
+        parent.webContents.getURL() !== documentUrl ||
+        this.documentGenerations.get(parent) !== epoch ||
+        this.bridge !== controller
+      )
+        throw new FigPluginBridgeError('CONFIGURATION_CHANGED')
+    }
+    return this.exclusive(async () => {
+      check()
+      const state = controller.planState()
+      const preview = state.previews.find(
+        (item) =>
+          item.executionId === request.executionId &&
+          item.state === 'completed' &&
+          item.visualAudit === 'hash-only'
+      )
+      const status = state.statuses.find(
+        (item) =>
+          item.executionId === request.executionId &&
+          item.state === 'completed' &&
+          item.effect === 'applied' &&
+          item.visualEvidenceSha256 === request.visualEvidenceSha256 &&
+          item.visualEvidence !== undefined
+      )
+      if (!preview || !status) throw new FigPluginBridgeError('EXPIRED')
+      const existing = state.baselines.find(
+        (item) => item.sourceExecutionId === request.executionId
+      )
+      if (existing) {
+        if (existing.visualEvidenceSha256 !== request.visualEvidenceSha256)
+          throw new FigPluginBridgeError('EXPIRED')
+        return existing
+      }
+      const approval = await this.confirm(parent, {
+        type: 'warning',
+        title: 'Accept a bounded visual checkpoint',
+        message: `${preview.pluginId} (${preview.host})`,
+        detail: buildVisualBaselineApprovalDetails(preview, status),
+        buttons: ['Accept this exact checkpoint', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+        checkboxLabel:
+          'I reviewed this exact result and accept its bounded hashes as a temporary checkpoint',
+        checkboxChecked: false
+      })
+      if (approval.response !== 0 || !approval.checkboxChecked) return null
+      check()
+      return controller.acceptVisualBaseline(request.executionId, request.visualEvidenceSha256)
     })
   }
 

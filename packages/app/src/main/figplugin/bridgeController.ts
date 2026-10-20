@@ -331,12 +331,20 @@ export class FigPluginBridgeController {
   planState(): FigPluginExecutionDesktopState {
     return {
       previews: this.#runtime.listPlanExecutions(),
-      statuses: this.#runtime.listPlanStatuses()
+      statuses: this.#runtime.listPlanStatuses(),
+      baselines: this.#runtime.listVisualBaselines()
     }
   }
 
   approvePlanExecution(executionId: string, planSha256: string): Promise<void> {
     return this.#runtime.approvePlan(executionId, planSha256)
+  }
+
+  acceptVisualBaseline(
+    executionId: string,
+    visualEvidenceSha256: string
+  ): ReturnType<FigPluginBridgeRuntime['acceptVisualBaseline']> {
+    return this.#runtime.acceptVisualBaseline(executionId, visualEvidenceSha256)
   }
 
   denyPlanExecution(executionId: string): void {
