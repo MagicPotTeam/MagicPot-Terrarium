@@ -7,6 +7,7 @@ import { normalizeModelRetryStatus } from '@shared/llm/modelCapacityRetry'
 import { withCanvasFileTools } from './canvasFileTools'
 import { createCanvasPathReadHandler, type CanvasPathReadHandler } from './canvasPathReadApproval'
 import { createSkillToolStream } from './skillToolStream'
+import { parseSkillToolInvocation } from './skillToolProtocol'
 import { streamExternalAgent } from './externalAgentStream'
 import type { LLMExternalAgentStreamReq, LLMExternalAgentStreamResp } from '@shared/api/svcLLMProxy'
 import {
@@ -1068,20 +1069,6 @@ const normalizeRemoteToolStatus = (value: unknown): LLMToolStatus => {
   return { runId, toolCallId, toolName, status }
 }
 
-const normalizeRequestedToolArgs = (value: unknown): Record<string, unknown> => {
-  if (isPlainRecord(value)) {
-    return value
-  }
-
-  if (value === undefined || value === null) {
-    return {}
-  }
-
-  return {
-    input: value
-  }
-}
-
 const parseExplicitToolCommand = (text?: string | null): ExplicitToolCommand | null => {
   const normalized = String(text || '').trim()
   if (!normalized) {
@@ -1178,7 +1165,13 @@ const buildSkillRuntimeToolInstructions = (
     'Only request a tool when it is genuinely needed.',
     'If you want a tool to run, respond with JSON only using this exact shape:',
     '{"toolName":"<tool-name>","args":{...}}',
-    'Do not wrap the JSON in Markdown fences.',
+    'Do not wrap the JSON in Markdown fences or append a normal answer before the tool result.',
+    'Use valid JSON escaping for backslashes, or use forward slashes for Windows paths (D:/folder/file.docx).',
+    ...(tools.some((tool) => tool.name === 'files.read')
+      ? [
+          'files.read is an actual local file tool. For an absolute local path, the application requests permission for that exact file. It can extract passive text from DOCX. Do not claim you cannot read a local document before using the tool; summarize only the returned content.'
+        ]
+      : []),
     outputMode === 'structured'
       ? 'After tool results are provided, your final answer must still satisfy the required structured output schema.'
       : 'After tool results are provided, answer normally to the user unless another tool call is still required.',
@@ -1192,40 +1185,6 @@ const buildSkillRuntimeToolInstructions = (
       ].join('\n')
     )
   ].join('\n\n')
-}
-
-const parseRequestedToolInvocation = (
-  content: string,
-  allowedToolNames?: ReadonlySet<string>
-): RequestedToolInvocation | null => {
-  const trimmed = content.trim()
-  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
-    return null
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed) as unknown
-    if (!isPlainRecord(parsed) || typeof parsed.toolName !== 'string' || !parsed.toolName.trim()) {
-      return null
-    }
-
-    const keys = Object.keys(parsed)
-    if (keys.some((key) => key !== 'toolName' && key !== 'args')) {
-      return null
-    }
-
-    const toolName = parsed.toolName.trim()
-    if (allowedToolNames && !allowedToolNames.has(toolName)) {
-      return null
-    }
-
-    return {
-      toolName,
-      args: normalizeRequestedToolArgs(parsed.args)
-    }
-  } catch {
-    return null
-  }
 }
 
 const buildToolResultMessage = (
@@ -2424,6 +2383,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let lastStepUsage: ToolLoopUsage | undefined
     let continuationUrl = req.sessionUrl
     let modelStepCount = 0
+    let toolProtocolRepairs = 0
     const toolHistory: Array<Record<string, unknown>> = []
     const emitToolStatus = (toolStatus: LLMToolStatus): void => {
       if (options?.signal?.aborted) return
@@ -2431,7 +2391,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     }
 
     try {
-      for (let step = 0; step <= MAX_SKILL_RUNTIME_TOOL_CALLS; step += 1) {
+      for (let step = 0; step <= MAX_SKILL_RUNTIME_TOOL_CALLS;) {
         const stepStream =
           availableSkillTools.length > 0 ? createSkillToolStream(options?.onDelta) : undefined
         const nextChatResult = await cli.chat({
@@ -2464,10 +2424,28 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         if (chatResult.sessionUrl) continuationUrl = chatResult.sessionUrl
         throwIfAborted(options?.signal)
 
-        const requestedTool =
+        const parsedTool =
           availableSkillTools.length > 0
-            ? parseRequestedToolInvocation(content, availableSkillToolNames)
-            : null
+            ? parseSkillToolInvocation(content, availableSkillToolNames)
+            : { kind: 'text' as const }
+        if (parsedTool.kind === 'invalid') {
+          // Do not display invocation JSON or a premature refusal as a successful answer.
+          stepStream?.finish(true)
+          throwIfAborted(options?.signal)
+          if (parsedTool.reason === 'malformed' && toolProtocolRepairs++ === 0) {
+            conversationMessages.push({ role: 'assistant', content })
+            conversationMessages.push({
+              role: 'user',
+              content:
+                '[Tool Protocol Correction] No tool has run. Return one valid JSON tool invocation only: {"toolName":"<bound-tool>","args":{...}}. Preserve the user-requested file identity; use forward slashes for Windows paths. Do not append an apology or summary before receiving the actual tool result.'
+            })
+            continue
+          }
+          throw new Error(
+            'The model returned an invalid or ambiguous tool call. No tool was executed; please retry.'
+          )
+        }
+        const requestedTool = parsedTool.kind === 'tool' ? parsedTool.invocation : null
         stepStream?.finish(Boolean(requestedTool))
         throwIfAborted(options?.signal)
         if (!requestedTool) break
@@ -2520,8 +2498,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           throwIfAborted(options?.signal)
           // Preserve the legacy provider projection until native tool items are negotiated.
           // The parallel structured record never replaces model-visible call/result context.
-          conversationMessages.push({ role: 'assistant', content })
+          conversationMessages.push({ role: 'assistant', content: JSON.stringify(requestedTool) })
           conversationMessages.push(buildToolResultMessage(requestedTool, toolResult.content))
+          step += 1
         } catch (error) {
           if (record.status !== 'completed') {
             const status = options?.signal?.aborted ? 'cancelled' : 'failed'

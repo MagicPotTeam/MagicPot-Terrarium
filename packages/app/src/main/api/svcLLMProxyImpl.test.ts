@@ -958,6 +958,143 @@ describe('LLMProxySvcImpl', () => {
     }
   )
 
+  it.each(['bare-with-prose', 'fenced-with-prose'])(
+    'executes a leading DOCX read %s without leaking its pre-result refusal',
+    async (mode) => {
+      mockAgentProfile()
+      const ownedPath = String.raw`D:\owned\中文 文档.docx`
+      const invocation = { toolName: 'files.read', args: { path: ownedPath, maxBytes: 1048576 } }
+      const json = JSON.stringify(invocation)
+      const content =
+        (mode === 'fenced-with-prose' ? '```json\n' + json + '\n```' : json) +
+        ' 抱歉，我目前无法读取该本地路径中的 DOCX 文件。'
+      listToolsMock.mockReturnValue([
+        {
+          name: 'files.read',
+          description: 'Read approved local document text',
+          inputSchema: { type: 'object' }
+        }
+      ])
+      callToolMock.mockResolvedValue({ content: 'OWNED_DOCX_TEXT: 项目计划包括三个阶段。' })
+      const snapshots: Array<unknown> = []
+      const agentChat = vi.fn().mockImplementation(async (input) => {
+        snapshots.push(structuredClone(input.messages))
+        if (snapshots.length === 1) {
+          for (let offset = 0; offset < content.length; offset += 3)
+            input.onDelta?.({ type: 'text-delta', delta: content.slice(offset, offset + 3) })
+          return { content }
+        }
+        input.onDelta?.({ type: 'text-delta', delta: '文档包含三个阶段。' })
+        return { content: '文档包含三个阶段。' }
+      })
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+      const events: Array<{ type: string; delta?: string; content?: string }> = []
+      await new LLMProxySvcImpl().chatStream(
+        {
+          profileId: 'agent-profile',
+          conversationId: 'docx-framing-' + mode,
+          messages: [{ role: 'user', content: `读取 "${ownedPath}"，总结内容。` }],
+          skillRuntime: { bindings: [{ appId: 'magicpot.core', toolNames: ['files.read'] }] }
+        },
+        {
+          onData: (event) => {
+            events.push(event)
+          }
+        }
+      )
+      expect(callToolMock).toHaveBeenCalledOnce()
+      expect(callToolMock.mock.calls[0][1]).toBe('files.read')
+      expect(callToolMock.mock.calls[0][2]).toEqual(invocation.args)
+      expect(agentChat).toHaveBeenCalledTimes(2)
+      expect(JSON.stringify(snapshots[1])).toContain('OWNED_DOCX_TEXT')
+      expect(JSON.stringify(snapshots[1])).not.toContain('无法读取')
+      expect(
+        events
+          .filter((e) => e.type === 'text-delta')
+          .map((e) => e.delta)
+          .join('')
+      ).toBe('文档包含三个阶段。')
+      expect(events.filter((e) => e.type === 'done')).toHaveLength(1)
+      expect(events.at(-1)?.content).toBe('文档包含三个阶段。')
+    }
+  )
+
+  it('repairs malformed Windows-path tool JSON once before dispatch without guessing file authority', async () => {
+    mockAgentProfile()
+    const valid = JSON.stringify({
+      toolName: 'files.read',
+      args: { path: 'D:/owned/中文 文档.docx' }
+    })
+    const malformed = String.raw`{"toolName":"files.read","args":{"path":"D:\owned\中文 文档.docx"}} 抱歉不能读取。`
+    listToolsMock.mockReturnValue([
+      { name: 'files.read', description: 'Read', inputSchema: { type: 'object' } }
+    ])
+    callToolMock.mockResolvedValue({ content: 'OWNED_DOCX_REPAIRED' })
+    const responses = [malformed, valid, '实际内容总结']
+    const agentChat = vi.fn().mockImplementation(async (input) => {
+      const content = responses.shift()!
+      input.onDelta?.({ type: 'text-delta', delta: content })
+      return { content }
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    const events: Array<{ type: string; delta?: string }> = []
+    await new LLMProxySvcImpl().chatStream(
+      {
+        profileId: 'agent-profile',
+        conversationId: 'docx-malformed-tool',
+        messages: [{ role: 'user', content: '读取 D:/owned/中文 文档.docx' }],
+        skillRuntime: { bindings: [{ appId: 'magicpot.core', toolNames: ['files.read'] }] }
+      },
+      {
+        onData: (event) => {
+          events.push(event)
+        }
+      }
+    )
+    expect(callToolMock).toHaveBeenCalledOnce()
+    expect(callToolMock.mock.calls[0][2]).toEqual({ path: 'D:/owned/中文 文档.docx' })
+    expect(agentChat).toHaveBeenCalledTimes(3)
+    expect(
+      events
+        .filter((e) => e.type === 'text-delta')
+        .map((e) => e.delta)
+        .join('')
+    ).toBe('实际内容总结')
+  })
+
+  it('stops after one malformed-tool correction and never publishes or executes the broken frame', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue([
+      { name: 'files.read', description: 'Read', inputSchema: { type: 'object' } }
+    ])
+    const broken = '{"toolName":"files.read","args":'
+    const agentChat = vi.fn().mockImplementation(async (input) => {
+      input.onDelta?.({ type: 'text-delta', delta: broken })
+      return { content: broken }
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    const events: Array<{ type: string; delta?: string; error?: string }> = []
+    await new LLMProxySvcImpl().chatStream(
+      {
+        profileId: 'agent-profile',
+        conversationId: 'malformed-tool-budget',
+        messages: [{ role: 'user', content: 'Read owned document' }],
+        skillRuntime: { bindings: [{ appId: 'magicpot.core', toolNames: ['files.read'] }] }
+      },
+      {
+        onData: (event) => {
+          events.push(event)
+        }
+      }
+    )
+    expect(agentChat).toHaveBeenCalledTimes(2)
+    expect(callToolMock).not.toHaveBeenCalled()
+    expect(events.filter((e) => e.type === 'text-delta')).toHaveLength(0)
+    expect(
+      events.some((e) => e.type === 'error' && e.error?.includes('invalid or ambiguous tool call'))
+    ).toBe(true)
+  })
+
   it('passes the active tool-call signal and stable run/tool ids into runtime execution', async () => {
     const agentChat = vi
       .fn()

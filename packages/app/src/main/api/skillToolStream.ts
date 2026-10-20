@@ -1,4 +1,5 @@
 import type { LLMDeltaEvent } from '@shared/llm'
+import { classifySkillToolPrefix } from './skillToolProtocol'
 
 const MAX_PENDING_TOOL_BYTES = 512 * 1024
 
@@ -33,15 +34,7 @@ export const createSkillToolStream = (emit?: (event: LLMDeltaEvent) => void) => 
     }
     if (event.type !== 'text-delta' || !event.delta) return
     prefix += event.delta
-    const candidate = prefix.trimStart()
-    if (!candidate) return
-    if (candidate[0] !== '{') {
-      flush()
-      return
-    }
-    // Only the exact toolName/args object protocol can become a tool call.
-    const firstKey = /^\{\s*"([^"\\]*)"\s*:/.exec(candidate)?.[1]
-    if (firstKey !== undefined && firstKey !== 'toolName' && firstKey !== 'args') flush()
+    if (classifySkillToolPrefix(prefix) === 'text') flush()
   }
 
   const finish = (isToolCall: boolean): void => {

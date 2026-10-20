@@ -48,3 +48,26 @@ describe('skill tool stream framing', () => {
     expect(emit).not.toHaveBeenCalled()
   })
 })
+
+describe('tool-shaped Markdown streaming', () => {
+  it('holds a split fenced invocation and its premature apology until dispatch', () => {
+    const emit = vi.fn()
+    const stream = createSkillToolStream(emit)
+    const content =
+      '```json\n{"toolName":"files.read","args":{"path":"D:/owned/test.docx"}}\n``` 抱歉无法读取'
+    for (const delta of content) {
+      stream.onDelta({ type: 'text-delta', delta })
+      expect(emit).not.toHaveBeenCalled()
+    }
+    stream.finish(true)
+    expect(emit).not.toHaveBeenCalled()
+  })
+  it('continues streaming normal code fences rather than buffering all Markdown', () => {
+    const emit = vi.fn()
+    const stream = createSkillToolStream(emit)
+    stream.onDelta({ type: 'text-delta', delta: '```python\nprint(1)' })
+    expect(emit).toHaveBeenCalledOnce()
+    stream.finish(false)
+    expect(emit).toHaveBeenCalledOnce()
+  })
+})
