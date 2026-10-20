@@ -4457,3 +4457,178 @@ describe('LLMProxySvcImpl', () => {
     )
   })
 })
+
+describe('native Agent tool loop', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+    callToolMock.mockReset()
+    listToolsMock.mockReset()
+  })
+  const bound = [
+    {
+      name: 'files.read',
+      description: 'Read owned file',
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }
+    }
+  ]
+  const request = () => ({
+    conversationId: 'owned-native-loop',
+    profileId: 'agent-profile',
+    messages: [{ role: 'user' as const, content: 'Inspect six files and summarize' }],
+    skillRuntime: { bindings: [{ appId: 'magicpot.core', toolNames: ['files.read'] }] }
+  })
+  const call = (id: string, path = 'a.txt') => ({
+    id,
+    name: 'files.read',
+    wireName: 'mp_tool_0',
+    arguments: JSON.stringify({ path })
+  })
+  it('executes six native calls, returns paired outputs, and preserves structured history', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    callToolMock.mockImplementation(async (_route, _name, args) => ({
+      content: 'file:' + args.path
+    }))
+    const seen: unknown[] = []
+    const chat = vi.fn(async (params: any) => {
+      seen.push(
+        structuredClone({
+          tools: params.tools,
+          toolTurns: params.toolTurns,
+          messages: params.messages
+        })
+      )
+      const n = params.toolTurns?.length || 0
+      return n < 6
+        ? {
+            content: '',
+            toolCalls: [call('call_' + n, n + '.txt')],
+            finishReason: 'tool_call' as const
+          }
+        : { content: 'Six files read.' }
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    const result = await new LLMProxySvcImpl().chat(request())
+    expect(chat).toHaveBeenCalledTimes(7)
+    expect(callToolMock).toHaveBeenCalledTimes(6)
+    expect((seen[6] as any).toolTurns.map((x: any) => x.results[0])).toEqual(
+      Array.from({ length: 6 }, (_, i) => ({ callId: 'call_' + i, output: 'file:' + i + '.txt' }))
+    )
+    expect(result.metadata?.toolHistory).toHaveLength(6)
+    expect(result.content).toBe('Six files read.')
+    expect((seen[0] as any).tools).toEqual(bound)
+  })
+  it('executes a native batch serially and stops before the next tool on cancellation', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    const abort = new AbortController()
+    const chat = vi.fn().mockResolvedValue({
+      content: '',
+      toolCalls: [call('one'), call('two', 'b.txt')],
+      finishReason: 'tool_call'
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    callToolMock.mockImplementation(async () => {
+      abort.abort()
+      return { content: 'first result' }
+    })
+    await expect(
+      new LLMProxySvcImpl().chat(request(), { signal: abort.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(callToolMock).toHaveBeenCalledOnce()
+    expect(chat).toHaveBeenCalledOnce()
+  })
+  it('validates the full native batch before executing any member', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    const chat = vi.fn().mockResolvedValue({
+      content: '',
+      toolCalls: [call('one'), { ...call('two'), name: 'shell.unbound' }],
+      finishReason: 'tool_call'
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    await expect(new LLMProxySvcImpl().chat(request())).rejects.toThrow(/unbound/i)
+    expect(callToolMock).not.toHaveBeenCalled()
+  })
+  it('never executes a duplicate native call id twice', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    callToolMock.mockResolvedValue({ content: 'actual' })
+    const chat = vi
+      .fn()
+      .mockResolvedValue({ content: '', toolCalls: [call('same')], finishReason: 'tool_call' })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    await expect(new LLMProxySvcImpl().chat(request())).rejects.toThrow(/duplicate/i)
+    expect(callToolMock).toHaveBeenCalledOnce()
+  })
+  it('also permits more than four legacy JSON calls for providers without native tools', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    callToolMock.mockResolvedValue({ content: 'owned' })
+    let n = 0
+    const chat = vi.fn(async () =>
+      ++n <= 6
+        ? { content: JSON.stringify({ toolName: 'files.read', args: { path: n + '.txt' } }) }
+        : { content: 'legacy completed' }
+    )
+    vi.mocked(cliFromProfile).mockReturnValue({ chat } as never)
+    expect((await new LLMProxySvcImpl().chat(request())).content).toBe('legacy completed')
+    expect(callToolMock).toHaveBeenCalledTimes(6)
+  })
+  it('falls back once only for a pre-output native capability rejection', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    callToolMock.mockResolvedValue({ content: 'owned' })
+    const chat = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('tools is not supported'), { statusCode: 400 })
+      )
+      .mockResolvedValueOnce({ content: '{"toolName":"files.read","args":{"path":"a.txt"}}' })
+      .mockResolvedValueOnce({ content: 'fallback done' })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    expect((await new LLMProxySvcImpl().chat(request())).content).toBe('fallback done')
+    expect(chat.mock.calls[0][0].tools).toEqual(bound)
+    expect(chat.mock.calls[1][0].tools).toBeUndefined()
+    expect(callToolMock).toHaveBeenCalledOnce()
+  })
+  it('does not use native fallback to bypass authentication or retry executed tools', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    const chat = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('tools is not supported'), { statusCode: 401 }))
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    await expect(new LLMProxySvcImpl().chat(request())).rejects.toThrow('not supported')
+    expect(chat).toHaveBeenCalledOnce()
+    expect(callToolMock).not.toHaveBeenCalled()
+  })
+  it('retains successful tools when the following model request fails without replay', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    callToolMock.mockResolvedValue({ content: 'saved tool result' })
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce({ content: '', toolCalls: [call('one')] })
+      .mockRejectedValue(new Error('terminal model failure'))
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    const err = await new LLMProxySvcImpl().chat(request()).catch((e) => e)
+    expect(err.message).toBe('terminal model failure')
+    expect(err.metadata.toolHistory[0]).toMatchObject({
+      status: 'completed',
+      content: 'saved tool result'
+    })
+    expect(callToolMock).toHaveBeenCalledOnce()
+  })
+  it('enforces a finite 64-call budget rather than running forever', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    callToolMock.mockResolvedValue({ content: 'owned' })
+    let n = 0
+    const chat = vi.fn(async () => ({ content: '', toolCalls: [call('budget_' + n++)] }))
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    await expect(new LLMProxySvcImpl().chat(request())).rejects.toThrow(/budget exhausted/)
+    expect(callToolMock).toHaveBeenCalledTimes(64)
+    expect(chat).toHaveBeenCalledTimes(65)
+  })
+})

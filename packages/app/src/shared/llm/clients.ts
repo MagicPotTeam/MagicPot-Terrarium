@@ -11,6 +11,11 @@
 
 import { retryModelCapacity, parseModelRetryAfter, modelCapacityReason } from './modelCapacityRetry'
 import type { LLMModelUse } from '@shared/config/config'
+import {
+  buildNativeToolDefinitions,
+  extractNativeToolResult,
+  projectNativeToolTurns
+} from './nativeTools'
 import { selectMessagesForImageHistoryPolicy } from './imageHistory'
 import { validateImageRequestContract } from './imageRequestContract'
 import {
@@ -925,6 +930,12 @@ type OpenAICapacityRetryContext = {
 }
 
 export class OpenAIAPICli implements LLMCli {
+  get supportsNativeTools(): boolean {
+    return (
+      this.options?.modelUse !== 'image' &&
+      resolveOpenAIClientApiMode(this.baseUrl, this.modelName, this.options) !== 'images'
+    )
+  }
   constructor(
     protected readonly apiKey: string,
     protected readonly baseUrl: string,
@@ -1234,7 +1245,7 @@ export class OpenAIAPICli implements LLMCli {
       // Responses image generation uses a supported mainline model at the top level;
       // the GPT Image model is selected on the image_generation tool itself.
       model: responseMainlineModel,
-      input: responsesInput,
+      input: [...responsesInput, ...projectNativeToolTurns(params.toolTurns, 'responses')],
       instructions: params.systemPrompt?.trim() || 'You are a helpful assistant.',
       store: false,
       ...(params.onDelta ? { stream: true } : {})
@@ -1319,6 +1330,18 @@ export class OpenAIAPICli implements LLMCli {
         })
       }
 
+      if (params.tools?.length && !useImageGeneration) {
+        requestBody.tools = [
+          ...(Array.isArray(requestBody.tools) ? requestBody.tools : []),
+          ...buildNativeToolDefinitions(params.tools, 'responses')
+        ]
+        requestBody.parallel_tool_calls = false
+        requestBody.include = [
+          ...(Array.isArray(requestBody.include) ? requestBody.include : []),
+          'reasoning.encrypted_content'
+        ]
+      }
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...(this.options?.extraHeaders || {})
@@ -1367,8 +1390,13 @@ export class OpenAIAPICli implements LLMCli {
           resp,
           useImageGeneration ? OPENAI_IMAGE_JSON_MAX_BYTES : OPENAI_JSON_MAX_BYTES
         ))
+      const native = params.tools?.length
+        ? extractNativeToolResult(data, params.tools, 'responses')
+        : {}
+      if (native.toolCalls?.length && streamed?.finishReason === 'length')
+        throw new Error('Incomplete native tool calls are not executable.')
       const serialized = serializeOpenAIResponsesOutput(data)
-      if (!serialized && streamed?.finishReason !== 'length') {
+      if (!serialized && !native.toolCalls?.length && streamed?.finishReason !== 'length') {
         throw new Error(
           `OpenAI Responses API returned empty or invalid content. Response: ${JSON.stringify(data)}`
         )
@@ -1389,7 +1417,9 @@ export class OpenAIAPICli implements LLMCli {
       }
       return {
         ...result,
+        ...native,
         ...(streamed ? { finishReason: streamed.finishReason } : {}),
+        ...(native.toolCalls?.length ? { finishReason: 'tool_call' as const } : {}),
         ...(usage ? { usage } : {}),
         ...(upstreamStreamingMetadataRef.current
           ? {
@@ -1463,11 +1493,18 @@ export class OpenAIAPICli implements LLMCli {
         }
       : {
           model: this.modelName,
-          messages: apiMessages,
+          messages: [
+            ...apiMessages,
+            ...projectNativeToolTurns(params.toolTurns, 'chat-completions')
+          ],
           temperature: params.temperature ?? 0.7,
           stream: Boolean(params.onDelta),
           ...(params.onDelta ? { stream_options: { include_usage: true } } : {})
         }
+    if (params.tools?.length && !usesImagesGenerationEndpoint) {
+      requestBody.tools = buildNativeToolDefinitions(params.tools, 'chat-completions')
+      requestBody.parallel_tool_calls = false
+    }
     if (params.maxOutputTokens && !usesImagesGenerationEndpoint) {
       requestBody.max_tokens = params.maxOutputTokens
     }
@@ -1573,6 +1610,32 @@ export class OpenAIAPICli implements LLMCli {
           ? ((entry as { content: unknown[] }).content ?? [])
           : []
       )
+
+    const native = params.tools?.length
+      ? extractNativeToolResult(data, params.tools, 'chat-completions')
+      : {}
+    if (params.tools?.length && streamed?.finishReason === 'tool_call' && !native.toolCalls?.length)
+      throw new Error('Native tool response is missing its call frames.')
+    if (native.toolCalls?.length && streamed?.finishReason === 'length')
+      throw new Error('Incomplete native tool calls are not executable.')
+    if (native.toolCalls?.length) {
+      const text = typeof content === 'string' ? content : ''
+      if (!streamed && text) params.onDelta?.({ type: 'text-delta', delta: text })
+      return {
+        content: text,
+        ...native,
+        finishReason: 'tool_call',
+        usage: normalizeProviderTokenUsage(data),
+        ...(upstreamStreamingMetadataRef.current
+          ? {
+              metadata: withOpenAIUpstreamStreamingMetadata(
+                undefined,
+                upstreamStreamingMetadataRef.current
+              )
+            }
+          : {})
+      }
+    }
 
     const toolCalls = data?.choices?.[0]?.message?.tool_calls
     const toolMetadata =

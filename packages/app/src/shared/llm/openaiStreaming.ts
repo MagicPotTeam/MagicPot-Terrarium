@@ -137,6 +137,7 @@ export async function readOpenAIStream(
     finish: LLMChatFinishReason | undefined
   let usage: unknown
   let hostedWorkStarted = false
+  const completedNativeItems = new Map<number, Record<string, unknown>>()
   const imageParts: Record<string, unknown>[] = []
   const responseImageFallbacks: Array<{
     item: Record<string, unknown>
@@ -241,6 +242,12 @@ export async function readOpenAIStream(
           // materialize the returned base64 image.
           const item = record(event.item)
           if (item) cacheResponseImageItem(item, event.output_index)
+          if (
+            item &&
+            ['function_call', 'reasoning', 'message'].includes(String(item.type)) &&
+            Number.isSafeInteger(event.output_index)
+          )
+            completedNativeItems.set(Number(event.output_index), item)
         } else if (event.type === 'response.completed' || event.type === 'response.incomplete') {
           const payload = record(event.response)
           if (!payload) throw new Error('OpenAI stream completion has no response.')
@@ -251,8 +258,19 @@ export async function readOpenAIStream(
             )
           }
           // Refusals use a separate SDK field; retain them as visible text for the existing serializer.
-          const completedOutput = Array.isArray(payload.output)
-            ? payload.output.map((item) => {
+          const finalOutput = Array.isArray(payload.output) ? [...payload.output] : []
+          for (const [index, item] of [...completedNativeItems].sort((a, b) => a[0] - b[0])) {
+            if (
+              !finalOutput.some(
+                (entry) =>
+                  (item.id && record(entry)?.id === item.id) ||
+                  (item.call_id && record(entry)?.call_id === item.call_id)
+              )
+            )
+              finalOutput.splice(Math.min(index, finalOutput.length), 0, item)
+          }
+          const completedOutput = Array.isArray(finalOutput)
+            ? finalOutput.map((item) => {
                 const value = record(item)
                 if (!value || !Array.isArray(value.content)) return item
                 return {

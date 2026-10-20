@@ -1,4 +1,5 @@
 import type { LLMRetryStatus } from './modelCapacityRetry'
+import type { LLMFunctionCall, LLMFunctionTool, LLMToolTurn } from './nativeTools'
 import type { OCRResult } from '@shared/api/svcLLMProxy'
 import type { ImageRequestContract } from './imageRequestContract'
 export type { ImageRequestContract } from './imageRequestContract'
@@ -86,6 +87,8 @@ export type LLMChatTokenUsage = {
 export type LLMImageHistoryPolicy = 'latest-user-turn' | 'all'
 
 export interface LLMChatResult {
+  toolCalls?: LLMFunctionCall[]
+  toolResponseItems?: Record<string, unknown>[]
   content: string
   imageUrl?: string
   sessionUrl?: string
@@ -193,6 +196,9 @@ export interface VideoGenerationOptions {
 }
 
 export interface LLMChatParams {
+  /** Main-selected native tools; not renderer-supplied execution authority. */
+  tools?: LLMFunctionTool[]
+  toolTurns?: LLMToolTurn[]
   /** Main-owned interactive Agent policy, not a permission or remote retry directive. */
   retryCapacity?: boolean
   messages: ChatMessage[]
@@ -291,6 +297,10 @@ export const normalizeLLMChatResult = (value: string | LLMChatResult): LLMChatRe
   if (typeof value !== 'string') {
     return {
       content: typeof value.content === 'string' ? value.content : '',
+      ...(Array.isArray(value.toolCalls) ? { toolCalls: value.toolCalls } : {}),
+      ...(Array.isArray(value.toolResponseItems)
+        ? { toolResponseItems: value.toolResponseItems }
+        : {}),
       ...(typeof value.imageUrl === 'string' ? { imageUrl: value.imageUrl } : {}),
       ...(typeof value.sessionUrl === 'string' ? { sessionUrl: value.sessionUrl } : {}),
       ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
@@ -320,6 +330,7 @@ export const normalizeLLMChatResult = (value: string | LLMChatResult): LLMChatRe
 
 /** Common LLM client interface chat only (shared) */
 export interface LLMCli {
+  readonly supportsNativeTools?: boolean
   chat(params: LLMChatParams): Promise<LLMChatResult>
 }
 

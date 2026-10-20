@@ -8,6 +8,14 @@ import { withCanvasFileTools } from './canvasFileTools'
 import { createCanvasPathReadHandler, type CanvasPathReadHandler } from './canvasPathReadApproval'
 import { createSkillToolStream } from './skillToolStream'
 import { parseSkillToolInvocation } from './skillToolProtocol'
+import {
+  MAX_AGENT_TOOL_CALLS,
+  MAX_NATIVE_TRANSCRIPT_BYTES,
+  prepareNativeToolBatch,
+  isNativeToolsUnsupportedError,
+  type LLMFunctionCall,
+  type LLMToolTurn
+} from '@shared/llm/nativeTools'
 import { streamExternalAgent } from './externalAgentStream'
 import type { LLMExternalAgentStreamReq, LLMExternalAgentStreamResp } from '@shared/api/svcLLMProxy'
 import {
@@ -1038,7 +1046,7 @@ const addToolLoopUsage = (
   return result
 }
 
-const MAX_SKILL_RUNTIME_TOOL_CALLS = 4
+const MAX_SKILL_RUNTIME_TOOL_CALLS = MAX_AGENT_TOOL_CALLS
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -2367,13 +2375,18 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       ? (runtime.listTools(allowedToolNames) as ToolSummary[])
       : []
     const availableSkillToolNames = new Set(availableSkillTools.map((tool) => tool.name))
-    const toolInstructionBlock = buildSkillRuntimeToolInstructions(availableSkillTools, {
-      outputMode: req.skillRuntime?.execution?.outputMode
-    })
-    const systemPromptWithTools = [req.systemPrompt?.trim() || '', toolInstructionBlock]
-      .filter(Boolean)
-      .join('\n\n')
-    const toolAwareSystemPrompt = systemPromptWithTools || undefined
+    let nativeToolsEnabled = cli.supportsNativeTools === true && availableSkillTools.length > 0
+    const toolAwareSystemPrompt = (): string | undefined => {
+      const toolInstructionBlock = nativeToolsEnabled
+        ? 'Use the provided native functions when needed. Do not print tool invocation JSON as an answer. Wait for actual tool results before claiming a file was read or an operation succeeded. Local file permissions remain enforced by the application.'
+        : buildSkillRuntimeToolInstructions(availableSkillTools, {
+            outputMode: req.skillRuntime?.execution?.outputMode
+          })
+      return (
+        [req.systemPrompt?.trim() || '', toolInstructionBlock].filter(Boolean).join('\n\n') ||
+        undefined
+      )
+    }
     const conversationMessages = [...effectiveMessages]
     let content = ''
     let chatResult: LLMChatResult = { content: '' }
@@ -2385,37 +2398,67 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let modelStepCount = 0
     let toolProtocolRepairs = 0
     const toolHistory: Array<Record<string, unknown>> = []
+    const nativeTurns: LLMToolTurn[] = []
+    const executedNativeIds = new Set<string>()
+    let transcriptBytes = 0
     const emitToolStatus = (toolStatus: LLMToolStatus): void => {
       if (options?.signal?.aborted) return
       options?.onDelta?.({ type: 'tool-status', delta: '', toolStatus })
     }
 
     try {
-      for (let step = 0; step <= MAX_SKILL_RUNTIME_TOOL_CALLS;) {
+      for (let step = 0; ;) {
+        throwIfAborted(options?.signal)
+        if (modelStepCount >= MAX_SKILL_RUNTIME_TOOL_CALLS + 2)
+          throw new Error(
+            'Agent model-step budget exhausted. Completed tool results have been retained.'
+          )
         const stepStream =
           availableSkillTools.length > 0 ? createSkillToolStream(options?.onDelta) : undefined
-        const nextChatResult = await cli.chat({
-          ...(req.conversationId && options?.signal && !req.videoGenerationOptions
-            ? { retryCapacity: true }
-            : {}),
-          messages: conversationMessages,
-          systemPrompt: toolAwareSystemPrompt,
-          reasoningEffort: req.reasoningEffort,
-          maxOutputTokens: req.maxOutputTokens,
-          temperature: req.temperature,
-          imageGenerationOptions: req.imageGenerationOptions,
-          imageRequest: req.imageRequest,
-          imageHistoryPolicy: req.imageHistoryPolicy,
-          videoGenerationOptions: req.videoGenerationOptions,
-          signal: options?.signal,
-          sessionUrl: continuationUrl,
-          conversationId: req.conversationId,
-          onDelta:
-            stepStream?.onDelta ??
-            ((event) => {
-              if (event.type !== 'done') options?.onDelta?.(event)
-            })
-        })
+        let nativeOutputStarted = false
+        let nextChatResult: LLMChatResult
+        try {
+          nextChatResult = await cli.chat({
+            ...(req.conversationId && options?.signal && !req.videoGenerationOptions
+              ? { retryCapacity: true }
+              : {}),
+            ...(nativeToolsEnabled ? { tools: availableSkillTools, toolTurns: nativeTurns } : {}),
+            messages: conversationMessages,
+            systemPrompt: toolAwareSystemPrompt(),
+            reasoningEffort: req.reasoningEffort,
+            maxOutputTokens: req.maxOutputTokens,
+            temperature: req.temperature,
+            imageGenerationOptions: req.imageGenerationOptions,
+            imageRequest: req.imageRequest,
+            imageHistoryPolicy: req.imageHistoryPolicy,
+            videoGenerationOptions: req.videoGenerationOptions,
+            signal: options?.signal,
+            sessionUrl: continuationUrl,
+            conversationId: req.conversationId,
+            onDelta: (event) => {
+              if (
+                (event.type === 'text-delta' && event.delta) ||
+                event.type === 'attachment' ||
+                event.type === 'tool-status'
+              )
+                nativeOutputStarted = true
+              if (stepStream) stepStream.onDelta(event)
+              else if (event.type !== 'done') options?.onDelta?.(event)
+            }
+          })
+        } catch (error) {
+          throwIfAborted(options?.signal)
+          if (
+            nativeToolsEnabled &&
+            modelStepCount === 0 &&
+            !nativeOutputStarted &&
+            isNativeToolsUnsupportedError(error)
+          ) {
+            nativeToolsEnabled = false
+            continue
+          }
+          throw error
+        }
         chatResult = normalizeLLMChatResult(nextChatResult)
         modelStepCount += 1
         lastStepUsage = chatResult.usage
@@ -2424,15 +2467,29 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         if (chatResult.sessionUrl) continuationUrl = chatResult.sessionUrl
         throwIfAborted(options?.signal)
 
-        const parsedTool =
-          availableSkillTools.length > 0
+        if (
+          nativeToolsEnabled &&
+          chatResult.toolCalls?.length &&
+          ['length', 'cancelled', 'error'].includes(chatResult.finishReason || '')
+        )
+          throw new Error('Incomplete native tool calls are not executable.')
+        const nativeBatch =
+          nativeToolsEnabled && chatResult.toolCalls?.length
+            ? prepareNativeToolBatch(chatResult.toolCalls, availableSkillTools)
+            : []
+        const parsedTool = nativeBatch.length
+          ? { kind: 'text' as const }
+          : availableSkillTools.length > 0
             ? parseSkillToolInvocation(content, availableSkillToolNames)
             : { kind: 'text' as const }
         if (parsedTool.kind === 'invalid') {
-          // Do not display invocation JSON or a premature refusal as a successful answer.
           stepStream?.finish(true)
           throwIfAborted(options?.signal)
-          if (parsedTool.reason === 'malformed' && toolProtocolRepairs++ === 0) {
+          if (
+            parsedTool.reason === 'malformed' &&
+            toolProtocolRepairs++ === 0 &&
+            nativeTurns.length === 0
+          ) {
             conversationMessages.push({ role: 'assistant', content })
             conversationMessages.push({
               role: 'user',
@@ -2445,76 +2502,143 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             'The model returned an invalid or ambiguous tool call. No tool was executed; please retry.'
           )
         }
-        const requestedTool = parsedTool.kind === 'tool' ? parsedTool.invocation : null
-        stepStream?.finish(Boolean(requestedTool))
+        const legacy = parsedTool.kind === 'tool' ? parsedTool.invocation : null
+        const requested = nativeBatch.length
+          ? nativeBatch.map(({ call, args }) => ({
+              toolName: call.name,
+              args,
+              call: call as LLMFunctionCall | undefined
+            }))
+          : legacy
+            ? [
+                {
+                  ...legacy,
+                  call: nativeToolsEnabled
+                    ? {
+                        id: `${runId}:tool:${step}`,
+                        name: legacy.toolName,
+                        wireName: `mp_tool_${availableSkillTools.findIndex((tool) => tool.name === legacy.toolName)}`,
+                        arguments: JSON.stringify(legacy.args)
+                      }
+                    : undefined
+                }
+              ]
+            : []
+        stepStream?.finish(requested.length > 0)
         throwIfAborted(options?.signal)
-        if (!requestedTool) break
-        if (step === MAX_SKILL_RUNTIME_TOOL_CALLS) {
-          throw new Error('Skill runtime tool-call loop exceeded the maximum number of steps.')
+        if (!requested.length) break
+        if (step + requested.length > MAX_SKILL_RUNTIME_TOOL_CALLS)
+          throw new Error(
+            `Agent tool-call budget exhausted (${MAX_SKILL_RUNTIME_TOOL_CALLS} calls). Completed tool results have been retained.`
+          )
+        // Reject an ambiguous replay before any member of this batch can have effects.
+        for (const item of requested) {
+          if (item.call && executedNativeIds.has(item.call.id))
+            throw new Error('Duplicate native tool call id; the operation was not executed again.')
         }
-
-        const toolCallId = `${runId}:tool:${step}`
-        const toolOptions = {
-          allowedToolNames,
-          signal: options?.signal,
-          runId,
-          toolCallId,
-          readExternalFile: options?.readExternalFile
+        const turn: LLMToolTurn = {
+          content: nativeBatch.length ? content : '',
+          calls: requested.flatMap((item) => (item.call ? [item.call] : [])),
+          results: [],
+          ...(nativeBatch.length && chatResult.toolResponseItems
+            ? { responseItems: chatResult.toolResponseItems }
+            : {})
         }
-        const record: Record<string, unknown> = {
-          runId,
-          toolCallId,
-          toolName: requestedTool.toolName,
-          args: requestedTool.args,
-          status: 'running'
-        }
-        toolHistory.push(record)
-        try {
-          emitToolStatus({ runId, toolCallId, toolName: requestedTool.toolName, status: 'running' })
+        for (const requestedTool of requested) {
           throwIfAborted(options?.signal)
-          const toolResult = options?.executeTool
-            ? await options.executeTool({
-                toolName: requestedTool.toolName,
-                args: requestedTool.args,
-                runId,
-                toolCallId,
-                signal: options.signal
-              })
-            : await runtime.callTool(
-                buildSkillRuntimeRoute(req),
-                requestedTool.toolName,
-                requestedTool.args,
-                toolOptions
-              )
-          record.status = 'completed'
-          record.content = toolResult.content
-          if (toolResult.metadata) record.metadata = toolResult.metadata
-          emitToolStatus({
+          const toolCallId = `${runId}:tool:${step}`
+          const toolOptions = {
+            allowedToolNames,
+            signal: options?.signal,
+            runId,
+            toolCallId,
+            readExternalFile: options?.readExternalFile
+          }
+          const record: Record<string, unknown> = {
             runId,
             toolCallId,
             toolName: requestedTool.toolName,
-            status: 'completed'
-          })
-          throwIfAborted(options?.signal)
-          // Preserve the legacy provider projection until native tool items are negotiated.
-          // The parallel structured record never replaces model-visible call/result context.
-          conversationMessages.push({ role: 'assistant', content: JSON.stringify(requestedTool) })
-          conversationMessages.push(buildToolResultMessage(requestedTool, toolResult.content))
-          step += 1
-        } catch (error) {
-          if (record.status !== 'completed') {
-            const status = options?.signal?.aborted ? 'cancelled' : 'failed'
-            record.status = status
-            record.error = error instanceof Error ? error.message : String(error)
+            args: requestedTool.args,
+            status: 'running'
+          }
+          if (requestedTool.call) {
+            executedNativeIds.add(requestedTool.call.id)
+            record.metadata = {
+              nativeCallId: requestedTool.call.id,
+              nativeName: requestedTool.call.wireName
+            }
+          }
+          toolHistory.push(record)
+          try {
             emitToolStatus({
               runId,
               toolCallId,
               toolName: requestedTool.toolName,
-              status
+              status: 'running'
             })
+            throwIfAborted(options?.signal)
+            const toolResult = options?.executeTool
+              ? await options.executeTool({
+                  toolName: requestedTool.toolName,
+                  args: requestedTool.args,
+                  runId,
+                  toolCallId,
+                  signal: options.signal
+                })
+              : await runtime.callTool(
+                  buildSkillRuntimeRoute(req),
+                  requestedTool.toolName,
+                  requestedTool.args,
+                  toolOptions
+                )
+            record.status = 'completed'
+            record.content = toolResult.content
+            if (toolResult.metadata)
+              record.metadata = {
+                ...((record.metadata as Record<string, unknown>) || {}),
+                ...toolResult.metadata
+              }
+            emitToolStatus({
+              runId,
+              toolCallId,
+              toolName: requestedTool.toolName,
+              status: 'completed'
+            })
+            throwIfAborted(options?.signal)
+            if (requestedTool.call)
+              turn.results.push({ callId: requestedTool.call.id, output: toolResult.content })
+            else {
+              conversationMessages.push({
+                role: 'assistant',
+                content: JSON.stringify({
+                  toolName: requestedTool.toolName,
+                  args: requestedTool.args
+                })
+              })
+              conversationMessages.push(buildToolResultMessage(requestedTool, toolResult.content))
+            }
+            step += 1
+          } catch (error) {
+            if (record.status !== 'completed') {
+              const status = options?.signal?.aborted ? 'cancelled' : 'failed'
+              record.status = status
+              record.error = error instanceof Error ? error.message : String(error)
+              emitToolStatus({ runId, toolCallId, toolName: requestedTool.toolName, status })
+            }
+            throw error
           }
-          throw error
         }
+        // A bounded transcript is distinct from the number of calls. Never silently truncate results.
+        transcriptBytes +=
+          Buffer.byteLength(JSON.stringify(nativeToolsEnabled ? turn : requested), 'utf8') +
+          (nativeToolsEnabled
+            ? 0
+            : Buffer.byteLength(String(toolHistory.at(-1)?.content || ''), 'utf8'))
+        if (transcriptBytes > MAX_NATIVE_TRANSCRIPT_BYTES)
+          throw new Error(
+            'Agent tool transcript budget exhausted. Completed tool results have been retained.'
+          )
+        if (nativeToolsEnabled) nativeTurns.push(turn)
       }
     } catch (error) {
       if (error instanceof Error) {
