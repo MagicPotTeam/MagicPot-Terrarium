@@ -2,8 +2,15 @@
 ;(() => {
   const photoshop = require('photoshop')
   const { app } = photoshop
-  const imaging = photoshop.imaging
   const executeAsModal = photoshop.core && photoshop.core.executeAsModal
+  const getPhotoshopImaging = () => {
+    try {
+      const value = photoshop.imaging
+      return value && typeof value.getPixels === 'function' ? value : null
+    } catch {
+      return null
+    }
+  }
   const HOST = 'photoshop'
   const EXECUTION_ADAPTER_VERSION = 'photoshop-uxp-native-1'
   const keys = (value, required, optional = []) =>
@@ -540,12 +547,12 @@
       }
     }
     const visualHelper = globalThis.MagicPotVisualEvidenceV1
+    const visualImaging = getPhotoshopImaging()
     const canCaptureVisualEvidence =
       visualHelper &&
       typeof visualHelper.capturePhotoshopLayer === 'function' &&
       typeof visualHelper.combine === 'function' &&
-      imaging &&
-      typeof imaging.getPixels === 'function' &&
+      visualImaging &&
       selectedIds.every((id) => {
         const layer = objects.get(id)
         return layer && Number.isSafeInteger(layer.id) && layer.id > 0
@@ -785,15 +792,15 @@
     if (
       !helper ||
       typeof helper.capturePhotoshopLayer !== 'function' ||
-      typeof helper.combine !== 'function' ||
-      !imaging ||
-      typeof imaging.getPixels !== 'function'
+      typeof helper.combine !== 'function'
     )
       throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
     return helper
   }
   async function capturePlanVisualPoints(checked, documentId) {
     const helper = getVisualEvidenceHelper()
+    const imaging = getPhotoshopImaging()
+    if (!imaging) throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
     const numericDocumentId = Number(documentId)
     if (!Number.isSafeInteger(numericDocumentId) || numericDocumentId <= 0)
       throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')

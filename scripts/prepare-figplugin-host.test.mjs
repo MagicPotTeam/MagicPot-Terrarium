@@ -22,6 +22,10 @@ const SYNTHETIC_HELPER = Buffer.from(
   'Object.defineProperty(globalThis, "MagicPotSelectionSnapshotV1", { value: Object.freeze({}) });\n' +
     'throw new Error("HELPER_MUST_NOT_RUN");\n// no trailing newline'
 )
+const SYNTHETIC_VISUAL_HELPER = Buffer.from(
+  'Object.defineProperty(globalThis, "MagicPotVisualEvidenceV1", { value: Object.freeze({}) });\n' +
+    'throw new Error("VISUAL_HELPER_MUST_NOT_RUN");\n// no trailing newline'
+)
 const HELPER_SEPARATOR = Buffer.from('\n;\n')
 // These plausible-format IDs are synthetic fixtures, not claims of registry ownership.
 const HOSTS = {
@@ -167,6 +171,7 @@ async function isolated(t, host = 'figma', connected = false) {
       path.join(path.dirname(helper), 'plan-preview.js'),
       '/* opaque planning validator fixture */\n'
     )
+    fs.writeFileSync(path.join(path.dirname(helper), 'visual-evidence.js'), SYNTHETIC_VISUAL_HELPER)
     const bridgeDir = path.join(sourceDir, 'bridge')
     fs.mkdirSync(bridgeDir)
     // Opaque bytes, including placeholder-looking JS, must be copied without evaluation/substitution.
@@ -767,6 +772,8 @@ function checkConnected(input, sourceDir) {
       configPrefix(input),
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'selection-snapshot.js')),
       HELPER_SEPARATOR,
+      fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'visual-evidence.js')),
+      HELPER_SEPARATOR,
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')),
       HELPER_SEPARATOR,
       fs.readFileSync(path.join(sourceDir, 'bridge', spec.code))
@@ -822,14 +829,20 @@ for (const [host, spec] of Object.entries(HOSTS)) {
     const before = [spec.code, spec.ui].map((name) =>
       snapshot(path.join(sourceDir, 'bridge', name))
     )
-    const helperPath = path.join(SOURCES, 'shared', 'selection-snapshot.js')
-    const helperBefore = snapshot(helperPath)
+    const helperPaths = [
+      path.join(SOURCES, 'shared', 'selection-snapshot.js'),
+      path.join(SOURCES, 'shared', 'visual-evidence.js'),
+      path.join(SOURCES, 'shared', 'plan-preview.js')
+    ]
+    const helpersBefore = helperPaths.map(snapshot)
     t.mock.method(globalThis, 'fetch', () => assert.fail('preparation must remain offline'))
     assert.equal(Object.hasOwn(globalThis, 'MagicPotSelectionSnapshotV1'), false)
+    assert.equal(Object.hasOwn(globalThis, 'MagicPotVisualEvidenceV1'), false)
     prepareFigPluginHost(input)
     checkConnected(input, sourceDir)
     assert.equal(Object.hasOwn(globalThis, 'MagicPotSelectionSnapshotV1'), false)
-    assert.deepEqual(snapshot(helperPath), helperBefore)
+    assert.equal(Object.hasOwn(globalThis, 'MagicPotVisualEvidenceV1'), false)
+    assert.deepEqual(helperPaths.map(snapshot), helpersBefore)
     assert.deepEqual(
       [spec.code, spec.ui].map((name) => snapshot(path.join(sourceDir, 'bridge', name))),
       before
@@ -1042,7 +1055,8 @@ test('connected native byte bound includes the prepended config and helper', asy
     MAX_FILE -
       configPrefix(input).length -
       SYNTHETIC_HELPER.length -
-      HELPER_SEPARATOR.length * 2 -
+      SYNTHETIC_VISUAL_HELPER.length -
+      HELPER_SEPARATOR.length * 3 -
       fs.statSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')).size,
     32
   )
