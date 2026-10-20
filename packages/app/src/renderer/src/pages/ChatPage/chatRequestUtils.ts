@@ -145,7 +145,7 @@ export type RequestChatCompletionStreamEvent =
   | { type: 'text-delta'; delta: string }
   | { type: 'attachment'; attachment: ChatAttachment }
   | { type: 'session'; sessionUrl: string }
-  | { type: 'tool-status'; toolStatus: LLMToolStatus }
+  | { type: 'tool-status'; toolStatus: LLMToolStatus; toolHistory?: unknown }
   | { type: 'retry'; retry: LLMRetryStatus }
   | { type: 'done' }
   | { type: 'error'; error: string }
@@ -1928,7 +1928,10 @@ const requestLocalChatCompletionStream = async (
           }
           input.onEvent({
             type: 'tool-status',
-            toolStatus
+            toolStatus,
+            ...(Array.isArray(chunk.metadata?.toolHistory)
+              ? { toolHistory: chunk.metadata.toolHistory }
+              : {})
           })
         }
 

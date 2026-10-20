@@ -1860,6 +1860,84 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
+  it('persists completed tool evidence before the pending model answer or cancellation', async () => {
+    const checkpoint: NonNullable<ChatMessage['toolHistory']> = [
+      {
+        runId: 'owned-checkpoint-run',
+        toolCallId: 'owned-checkpoint-call',
+        toolName: 'files.write',
+        args: { path: 'owned.txt', content: 'owned output' },
+        status: 'completed',
+        content: '{"path":"owned.txt","created":true}'
+      }
+    ]
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let pendingInput: { onEvent: (event: unknown) => void; signal: AbortSignal } | undefined
+    let settle!: (value: unknown) => void
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pendingInput = input
+      return new Promise((resolve) => {
+        settle = resolve
+      })
+    })
+    const view = renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const sessionId = readCurrentSessionState()!.id
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'write a file' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(pendingInput).toBeDefined())
+    try {
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'owned-checkpoint-run',
+            toolCallId: 'owned-checkpoint-call',
+            toolName: 'files.write',
+            status: 'completed'
+          },
+          toolHistory: checkpoint
+        })
+      })
+      await waitFor(() => {
+        const saved = hoisted.storedSessions.value.find((session) => session.id === sessionId)
+        expect(saved?.messages.at(-1)?.toolHistory).toEqual(checkpoint)
+        expect(saved?.messages.at(-1)?.content).toBe('')
+      })
+      // A late or foreign run snapshot cannot replace this run's completed evidence.
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'owned-checkpoint-run',
+            toolCallId: 'foreign-call',
+            toolName: 'files.write',
+            status: 'completed'
+          },
+          toolHistory: [
+            {
+              ...checkpoint[0],
+              runId: 'foreign-run',
+              toolCallId: 'foreign-call',
+              content: 'FOREIGN_NOT_SAVED'
+            }
+          ]
+        })
+      })
+      expect(JSON.stringify(hoisted.storedSessions.value)).not.toContain('FOREIGN_NOT_SAVED')
+    } finally {
+      await act(async () => {
+        settle({
+          result: { content: 'finished', metadata: { toolHistory: checkpoint } },
+          response: 'finished'
+        })
+      })
+      view.unmount()
+    }
+  })
+
   it('falls back from an expired streaming continuation before any output is emitted', async () => {
     hoisted.availableProfiles.value = [
       {

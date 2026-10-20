@@ -299,7 +299,13 @@ export const removeTrailingEmptyAssistantMessage = (
 ): ChatSession[] =>
   updateSessionById(sessions, sessionId, (session) => {
     const lastMessage = session.messages[session.messages.length - 1]
-    if (lastMessage?.role !== 'assistant' || lastMessage.content) {
+    if (
+      lastMessage?.role !== 'assistant' ||
+      lastMessage.content ||
+      lastMessage.toolHistory?.length ||
+      lastMessage.attachments?.length ||
+      lastMessage.ocrResult
+    ) {
       return session
     }
 

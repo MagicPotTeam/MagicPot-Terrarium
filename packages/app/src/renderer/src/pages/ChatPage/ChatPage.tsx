@@ -1,3 +1,4 @@
+import { mergeToolCheckpoint } from './chatToolCheckpoint'
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
@@ -5756,6 +5757,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         externalAgentSkill: activeExternalAgentSkill
       })
       let streamedResponse = ''
+      let streamedToolHistory: ChatMessage['toolHistory']
       let streamedAttachments: ChatAttachment[] = []
       let streamedSessionUrl = currentSessionUrl
       let streamedOcrResult: ChatMessage['ocrResult']
@@ -5928,6 +5930,33 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
 
             if (event.type === 'tool-status') {
+              const checkpoint = mergeToolCheckpoint(
+                streamedToolHistory,
+                event.toolHistory,
+                event.toolStatus
+              )
+              if (checkpoint) {
+                streamedToolHistory = checkpoint
+                // Tool effects can finish long before the model answers. Save this
+                // evidence now so a renderer crash does not turn them into unknown work.
+                setSessions((previous) =>
+                  previous.map((session) => {
+                    if (session.id !== targetSessionId) return session
+                    const last = session.messages.at(-1)
+                    if (last?.role !== 'assistant') return session
+                    return {
+                      ...session,
+                      messages: [
+                        ...session.messages.slice(0, -1),
+                        { ...last, toolHistory: checkpoint }
+                      ]
+                    }
+                  })
+                )
+                void persistSessionsToStorage((previous) => previous, 'tool-checkpoint').catch(
+                  () => undefined
+                )
+              }
               const status = event.toolStatus.status
               lifecycleEvent(
                 status === 'running'
@@ -6010,7 +6039,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             !requestState.sessionUrl ||
             !isInvalidSessionContinuationError(error, true) ||
             streamedResponse ||
-            streamedAttachments.length > 0
+            streamedAttachments.length > 0 ||
+            Boolean(streamedToolHistory?.length)
           ) {
             throw error
           }
@@ -6391,7 +6421,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
               })
             : undefined
         const failedToolHistory = normalizeChatToolHistory(
-          failedResult?.metadata?.toolHistory ?? failedResult?.partialResult?.metadata?.toolHistory
+          failedResult?.metadata?.toolHistory ??
+            failedResult?.partialResult?.metadata?.toolHistory ??
+            streamedToolHistory
         )
         const wasCancelled = Boolean(
           targetSessionId && cancelledSessionsRef.current.has(targetSessionId)
