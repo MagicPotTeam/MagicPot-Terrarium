@@ -6,6 +6,11 @@ import { buildProjectStorageDirName } from '@shared/projectStorage'
 import type { ProjectTraceProjectRef } from '@shared/projectTrace'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
 
+// This suite invokes a real child process. Validation, cwd creation and spawn must
+// observe the same filesystem; memfs canonicalization can otherwise change Windows drives.
+vi.unmock('node:fs')
+vi.unmock('node:fs/promises')
+
 const { buildDataDirRef } = vi.hoisted(() => ({
   buildDataDirRef: { current: process.cwd() }
 }))

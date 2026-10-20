@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -33,11 +33,12 @@ afterEach(() => {
 
 function setup(effect: PolicyRule['effect'] = 'require-approval', constraints?: PolicyConstraints) {
   const workerId = process.env.VITEST_WORKER_ID ?? '0'
-  const root = path.join(
+  let root = path.join(
     tmpdir(),
     `magic-tool-host-${process.pid}-${workerId}-${Math.random().toString(36).slice(2)}`
   )
   mkdirSync(root)
+  root = realpathSync.native(root)
   roots.push(root)
   const store = new MagicAgentEventStore(':memory:')
   stores.push(store)
