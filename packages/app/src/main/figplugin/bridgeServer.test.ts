@@ -58,6 +58,11 @@ const makeRuntime = () => ({
   cancel: vi.fn<Runtime['cancel']>().mockResolvedValue(undefined),
   closeSession: vi.fn<Runtime['closeSession']>(),
   planStatus: vi.fn<Runtime['planStatus']>(),
+  prepareVisualCorrection: vi.fn<Runtime['prepareVisualCorrection']>().mockResolvedValue({
+    protocol: 1,
+    status: 'pending',
+    expiresAt: 1_900_000_000_000
+  }),
   claimPlan: vi.fn<Runtime['claimPlan']>(),
   planProgress: vi.fn<Runtime['planProgress']>(),
   planResult: vi.fn<Runtime['planResult']>()
@@ -233,7 +238,24 @@ describe('dedicated FigPlugin bridge HTTP contract', () => {
     expect(status.headers['cache-control']).toBe('no-store')
   })
 
-  it('binds IPv4 only, applies hard connection/header/time limits, and clamps timeout overrides', async () => {
+  it('forwards bounded visual correction preparation through the authenticated route', async () => {
+    const { origin, runtime } = await fixture()
+    const request = { protocol: 1 as const, sourceExecutionId: '1'.repeat(32) }
+    const response = await post(origin, '/figplugin/v1/plan/correction/prepare', request)
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.text)).toEqual({
+      protocol: 1,
+      status: 'pending',
+      expiresAt: 1_900_000_000_000
+    })
+    expect(runtime.prepareVisualCorrection).toHaveBeenCalledExactlyOnceWith(
+      session.sessionId,
+      session.sessionToken,
+      request
+    )
+  })
+
+  it('binds IPv4 only, applies hard connection/header time limits, and clamps timeout overrides', async () => {
     const emitted = vi.spyOn(Server.prototype, 'emit')
     const timers = vi.spyOn(globalThis, 'setTimeout')
     const { origin } = await fixture(120_000)

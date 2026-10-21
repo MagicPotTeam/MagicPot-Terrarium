@@ -68,3 +68,24 @@ describe('CustomWorkshopTabs', () => {
     expect(navigateMock).toHaveBeenCalledWith('/qappdesign')
   })
 })
+
+it('opens the registered plugin management route through the workshop tab', () => {
+  useLocationMock.mockReturnValue({ pathname: '/qappdesign' })
+  render(
+    <ThemeProvider theme={theme}>
+      <CustomWorkshopTabs />
+    </ThemeProvider>
+  )
+  fireEvent.click(screen.getByRole('tab', { name: 'Plugins' }))
+  expect(navigateMock).toHaveBeenCalledWith('/workshop/plugins')
+})
+
+it('selects the plugin tab when the plugin management route is active', () => {
+  useLocationMock.mockReturnValue({ pathname: '/workshop/plugins' })
+  render(
+    <ThemeProvider theme={theme}>
+      <CustomWorkshopTabs />
+    </ThemeProvider>
+  )
+  expect(screen.getByRole('tab', { name: 'Plugins' })).toHaveAttribute('aria-selected', 'true')
+})

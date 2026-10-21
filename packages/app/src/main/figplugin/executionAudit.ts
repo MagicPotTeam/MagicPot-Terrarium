@@ -95,11 +95,29 @@ const eventSchema = z
       .regex(/^[a-f0-9]{64}$/)
       .optional(),
     visualCorrectionExpiresAt: z.number().int().min(0).optional(),
+    correctionAttempt: z
+      .object({
+        authorizationId: z.string().regex(/^[a-f0-9]{32}$/),
+        baselineId: z.string().regex(/^[a-f0-9]{32}$/),
+        sourceExecutionId: z.string().regex(/^[a-f0-9]{32}$/),
+        round: z.number().int().min(1).max(3),
+        maxCorrectionRounds: z.literal(3),
+        targetCount: z.number().int().min(1).max(20),
+        consumed: z.boolean()
+      })
+      .strict()
+      .optional(),
     durationMs: z.number().int().min(0),
     errorCode: z.string().min(1).max(64).optional()
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (
+      value.correctionAttempt &&
+      ['claimed', 'executing', 'readback', 'completed'].includes(value.state) &&
+      !value.correctionAttempt.consumed
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Active correction was not consumed' })
     if ((value.visualEvidenceCount === undefined) !== (value.visualEvidenceSha256 === undefined))
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Incomplete visual evidence audit' })
     if (value.visualEvidenceCount !== undefined && value.state !== 'completed')

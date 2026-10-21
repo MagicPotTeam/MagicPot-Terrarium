@@ -30,3 +30,12 @@ describe('routes', () => {
     expect(getRouteByPath(LEGACY_PROJECT_WEBGL_ROUTE_PATH)?.id).toBe('project_webgl_legacy')
   })
 })
+
+it('registers the FIGPLUGIN management route as an actual workshop peer', () => {
+  const route = getRouteByPath('/workshop/plugins')
+  expect(route?.id).toBe('workshop_plugins')
+  expect(route?.showInSidebar).toBe(false)
+  expect(route?.Page).toBeDefined()
+  expect(getRouteById('workshop_plugins')?.path).toBe('/workshop/plugins')
+  expect(getPathById('workshop_plugins')).toBe('/workshop/plugins')
+})

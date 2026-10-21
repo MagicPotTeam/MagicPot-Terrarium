@@ -70,6 +70,7 @@
   let planningNodes = null
   let review = null
   let planReview = null
+  let activeExecution = null
   let sequence = 0
   let epoch = 0
   let disposed = false
@@ -90,6 +91,7 @@
     cancel: '/figplugin/v1/cancel',
     close: '/figplugin/v1/close',
     planStatus: '/figplugin/v1/plan/status',
+    planCorrectionPrepare: '/figplugin/v1/plan/correction/prepare',
     planClaim: '/figplugin/v1/plan/claim',
     planProgress: '/figplugin/v1/plan/progress',
     planResult: '/figplugin/v1/plan/result'
@@ -136,19 +138,21 @@
     el('status').textContent = label
     el('read-only-capture').disabled = !secure()
     el('pair').disabled = !config || !secure() || session !== null || pairing
-    el('capture').disabled = !config || !secure() || pairing
-    el('plan-capture').disabled = !config || !secure() || pairing
+    el('capture').disabled = !config || !secure() || pairing || activeExecution !== null
+    el('plan-capture').disabled = !config || !secure() || pairing || activeExecution !== null
     el('share').disabled =
       !config ||
       !secure() ||
       !session ||
       pairing ||
       review !== null ||
+      planReview !== null ||
+      activeExecution !== null ||
       !snapshot ||
       !el('consent').checked ||
       !el('prompt').value.trim() ||
       el('prompt').value.length > 16384
-    el('cancel').disabled = review === null
+    el('cancel').disabled = review === null && planReview === null && activeExecution === null
   }
   function clearView() {
     if (!initialized || disposed) return
@@ -373,6 +377,13 @@
     }
   }
   function cancelReview() {
+    if (activeExecution) {
+      const item = activeExecution
+      stop()
+      state('Execution cancellation requested. Waiting for the native operation to stop safely.')
+      void post('cancel', { protocol: 1, callId: item.callId }, item.auth).catch(() => {})
+      return
+    }
     if (!review && planReview) {
       const old = planReview
       clearTimeout(planPollTimer)
@@ -417,6 +428,7 @@
       })
   }
   function capture() {
+    if (activeExecution) return
     if (!config || disposed || pairing) return
     cancelReview()
     snapshot = null
@@ -466,11 +478,11 @@
     if (!Number.isFinite(value) || value < 0 || value > 100) return undefined
     return value / 100
   }
-  function capturePhotoshopHostContext(captureId) {
+  function capturePhotoshopHostContext(captureId, selectionOverride = null) {
     const document = app.activeDocument
     if (!document || !Number.isSafeInteger(document.id) || document.id <= 0)
       throw new Error('CONTEXT')
-    const layers = document.activeLayers
+    const layers = selectionOverride || document.activeLayers
     if (!layers || typeof layers.length !== 'number' || layers.length < 1 || layers.length > 100)
       throw new Error('CONTEXT')
     const documentId = String(document.id)
@@ -580,7 +592,120 @@
       nodes: objects
     }
   }
+  const exactIdArray = (value) =>
+    Array.isArray(value) &&
+    value.length >= 1 &&
+    value.length <= 20 &&
+    value.every((item) => exactText(item, 160) === item) &&
+    new Set(value).size === value.length &&
+    value.every((item, index) => item === [...value].sort()[index])
+  const sameIds = (left, right) =>
+    exactIdArray(left) &&
+    exactIdArray(right) &&
+    left.length === right.length &&
+    left.every((item, index) => item === right[index])
+  function findPhotoshopLayer(document, targetId) {
+    const stack = []
+    const add = (collection) => {
+      if (!collection || typeof collection.length !== 'number') return
+      for (let index = 0; index < collection.length; index += 1) stack.push(collection[index])
+    }
+    add(document.layers)
+    add(document.activeLayers)
+    const seen = new Set()
+    let visited = 0
+    while (stack.length) {
+      const layer = stack.shift()
+      if (!layer || ++visited > 1000) throw new Error('CONTEXT')
+      const id = String(layer.id)
+      if (seen.has(id)) continue
+      seen.add(id)
+      if (id === targetId) return layer
+      add(layer.layers)
+    }
+    throw new Error('CONTEXT')
+  }
+  function validateCorrectionAuthorization(value, item) {
+    if (
+      !keys(value, [
+        'protocol',
+        'authorizationId',
+        'baselineId',
+        'sourceExecutionId',
+        'pluginId',
+        'host',
+        'projectId',
+        'documentId',
+        'scopeId',
+        'captureId',
+        'adapterVersion',
+        'baselineEvidenceSha256',
+        'visualEvidenceSha256',
+        'comparisonSha256',
+        'visualTargetIds',
+        'authorizedTargetIds',
+        'round',
+        'maxCorrectionRounds',
+        'authorizedAt',
+        'expiresAt',
+        'state'
+      ]) ||
+      value.protocol !== 1 ||
+      !hex(value.authorizationId, 32) ||
+      !hex(value.baselineId, 32) ||
+      value.baselineId !== item.baselineId ||
+      value.baselineEvidenceSha256 !== item.baselineEvidenceSha256 ||
+      value.visualEvidenceSha256 !== item.visualEvidenceSha256 ||
+      value.sourceExecutionId !== item.sourceExecutionId ||
+      value.pluginId !== config.pluginId ||
+      value.host !== HOST ||
+      exactText(value.projectId, 160) !== value.projectId ||
+      value.documentId !== item.sourceHostContext.documentId ||
+      value.scopeId !== item.sourceHostContext.scopeId ||
+      value.captureId !== item.sourceHostContext.captureId ||
+      value.adapterVersion !== EXECUTION_ADAPTER_VERSION ||
+      !hex(value.baselineEvidenceSha256, 64) ||
+      !hex(value.visualEvidenceSha256, 64) ||
+      !hex(value.comparisonSha256, 64) ||
+      !exactIdArray(value.visualTargetIds) ||
+      !exactIdArray(value.authorizedTargetIds) ||
+      !sameIds(value.visualTargetIds, item.visualTargetIds) ||
+      !sameIds(value.authorizedTargetIds, item.authorizedTargetIds) ||
+      value.authorizedTargetIds.some((targetId) => !value.visualTargetIds.includes(targetId)) ||
+      !Number.isInteger(value.round) ||
+      value.round < 1 ||
+      value.round > 3 ||
+      value.maxCorrectionRounds !== 3 ||
+      !integer(value.authorizedAt) ||
+      !integer(value.expiresAt) ||
+      value.expiresAt <= Date.now() ||
+      value.expiresAt <= value.authorizedAt ||
+      value.state !== 'authorized'
+    )
+      throw new Error('REQUEST')
+    return value
+  }
+  function capturePhotoshopCorrectionContext(authorization) {
+    const document = app.activeDocument
+    if (!document || String(document.id) !== authorization.documentId) throw new Error('CONTEXT')
+    const selection = authorization.visualTargetIds.map((targetId) =>
+      findPhotoshopLayer(document, targetId)
+    )
+    const captured = capturePhotoshopHostContext(authorization.authorizationId, selection)
+    const selectedIds = [...captured.context.selectedIds].sort()
+    if (
+      captured.context.documentId !== authorization.documentId ||
+      captured.context.scopeId !== authorization.scopeId ||
+      captured.context.captureId !== authorization.authorizationId ||
+      captured.context.execution.adapterVersion !== authorization.adapterVersion ||
+      captured.context.execution.visualAudit !== 'hash-only' ||
+      !sameIds(selectedIds, authorization.visualTargetIds)
+    )
+      throw new Error('CONTEXT')
+    return captured
+  }
   function capturePlan() {
+    if (activeExecution) return
     if (pairing || disposed || !config || !initialized) return
     cancelReview()
     snapshot = null
@@ -720,7 +845,24 @@
         throw new Error('UNSUPPORTED_COMMAND')
     }
   }
-  function rollbackPlanStep(layer, contextNode, step) {
+  function rollbackPlanStep(layer, contextNode, step, documentId) {
+    // Roll back only a value still owned by this attempt. Never overwrite a later
+    // user edit, a moved/replaced object, or a newly locked target.
+    const requested =
+      step.command === 'node.rename'
+        ? step.name
+        : step.command === 'node.opacity'
+          ? step.opacity
+          : step.command === 'node.visibility'
+            ? step.visible
+            : step.command === 'text.content'
+              ? step.text
+              : step.layout
+    if (
+      verifyNativeLayer(contextNode, documentId) !== layer ||
+      !samePlanValue(readNodeValue(layer, step.command), requested)
+    )
+      throw new Error('STALE_CONTEXT')
     switch (step.command) {
       case 'node.rename':
         layer.name = contextNode.name
@@ -797,7 +939,7 @@
       throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
     return helper
   }
-  async function capturePlanVisualPoints(checked, documentId) {
+  async function capturePlanVisualPoints(entries, documentId) {
     const helper = getVisualEvidenceHelper()
     const imaging = getPhotoshopImaging()
     if (!imaging) throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
@@ -805,21 +947,21 @@
     if (!Number.isSafeInteger(numericDocumentId) || numericDocumentId <= 0)
       throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
     const captured = new Map()
-    for (const entry of checked) {
-      if (captured.has(entry.step.targetId)) continue
+    for (const entry of entries) {
+      if (captured.has(entry.targetId)) continue
       captured.set(
-        entry.step.targetId,
+        entry.targetId,
         await helper.capturePhotoshopLayer(imaging, numericDocumentId, entry.layer.id)
       )
     }
     return captured
   }
-  function combinePlanVisualEvidence(checked, before, after) {
+  function combinePlanVisualEvidence(entries, before, after) {
     const helper = getVisualEvidenceHelper()
     const evidence = []
     const seen = new Set()
-    for (const entry of checked) {
-      const targetId = entry.step.targetId
+    for (const entry of entries) {
+      const targetId = entry.targetId
       if (seen.has(targetId)) continue
       seen.add(targetId)
       const beforePoint = before.get(targetId)
@@ -829,7 +971,69 @@
     }
     return evidence
   }
+  function visualEntriesForIntent(checked, item, intent) {
+    if (!intent.visualCorrection && !intent.visualTargetIds)
+      return checked.map((entry) => ({ targetId: entry.step.targetId, layer: entry.layer }))
+    const authorization = item.authorization
+    const attempt = intent.visualCorrection
+    if (
+      !authorization ||
+      !attempt ||
+      !sameIds(intent.visualTargetIds, authorization.visualTargetIds) ||
+      attempt.authorizationId !== authorization.authorizationId ||
+      attempt.baselineId !== authorization.baselineId ||
+      attempt.sourceExecutionId !== authorization.sourceExecutionId ||
+      attempt.round !== authorization.round ||
+      attempt.maxCorrectionRounds !== authorization.maxCorrectionRounds ||
+      !sameIds(attempt.authorizedTargetIds, authorization.authorizedTargetIds) ||
+      item.hostContext.captureId !== authorization.authorizationId ||
+      !sameIds([...item.hostContext.selectedIds].sort(), authorization.visualTargetIds)
+    )
+      throw new Error('REQUEST')
+    const planTargetIds = [...new Set(checked.map((entry) => entry.step.targetId))].sort()
+    if (!sameIds(planTargetIds, authorization.authorizedTargetIds)) throw new Error('REQUEST')
+    const contextNodes = new Map(item.hostContext.nodes.map((node) => [node.id, node]))
+    return authorization.visualTargetIds.map((targetId) => {
+      const contextNode = contextNodes.get(targetId)
+      if (!contextNode) throw new Error('STALE_CONTEXT')
+      return {
+        targetId,
+        layer: verifyNativeLayer(contextNode, item.hostContext.documentId)
+      }
+    })
+  }
+  const executionCurrent = (item) =>
+    !disposed &&
+    activeExecution === item &&
+    item.executionEpoch === epoch &&
+    session === item.auth &&
+    Date.now() < Math.min(item.expiresAt, item.auth.expiresAt, item.auth.idleAt)
+  function assertExecutionCurrent(item) {
+    if (!executionCurrent(item)) throw new Error('CANCELLED')
+  }
+  async function checkExecutionAuthority(item) {
+    assertExecutionCurrent(item)
+    const status = await post(
+      'planStatus',
+      {
+        protocol: 1,
+        callId: item.callId,
+        executionId: item.executionId
+      },
+      item.auth
+    )
+    assertExecutionCurrent(item)
+    if (
+      !status ||
+      status.protocol !== 1 ||
+      status.executionId !== item.executionId ||
+      status.callId !== item.callId ||
+      !['claimed', 'executing'].includes(status.state)
+    )
+      throw new Error('CANCELLED')
+  }
   async function executeClaimedPlan(item, intent) {
+    assertExecutionCurrent(item)
     const planner = globalThis.MagicPotPlanPreviewV1
     let plan
     try {
@@ -846,26 +1050,58 @@
     let readback = createPlanReadback(item.hostContext, plan)
     let visualEvidence
     let failureCode
+    let sequence = 2
     try {
       await executeAsModal(
         async () => {
+          assertExecutionCurrent(item)
           let checked = precheckPlan(plan, item.hostContext)
+          let visualEntries = visualEntriesForIntent(checked, item, intent)
           let beforeVisual = null
           if (item.hostContext.execution.visualAudit === 'hash-only') {
-            beforeVisual = await capturePlanVisualPoints(checked, item.hostContext.documentId)
+            beforeVisual = await capturePlanVisualPoints(visualEntries, item.hostContext.documentId)
+            assertExecutionCurrent(item)
             // Pixel capture is asynchronous. Re-check native identities before the first mutation.
             checked = precheckPlan(plan, item.hostContext)
+            visualEntries = visualEntriesForIntent(checked, item, intent)
           }
+          await checkExecutionAuthority(item)
+          checked = precheckPlan(plan, item.hostContext)
           const applied = []
           try {
-            for (const entry of checked) {
+            for (let index = 0; index < checked.length; index += 1) {
+              const entry = checked[index]
+              assertExecutionCurrent(item)
+              precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext)
               applyPlanStep(entry.layer, entry.step)
               applied.push(entry)
+              await post(
+                'planProgress',
+                {
+                  protocol: 1,
+                  executionId: item.executionId,
+                  actionId: item.actionId,
+                  sequence: sequence++,
+                  phase: 'executing',
+                  index,
+                  completed: index + 1,
+                  total: checked.length,
+                  effect: index + 1 === checked.length ? 'applied' : 'partial',
+                  at: Date.now()
+                },
+                item.auth
+              )
+              assertExecutionCurrent(item)
             }
           } catch {
             for (const entry of applied.reverse()) {
               try {
-                rollbackPlanStep(entry.layer, entry.contextNode, entry.step)
+                rollbackPlanStep(
+                  entry.layer,
+                  entry.contextNode,
+                  entry.step,
+                  item.hostContext.documentId
+                )
               } catch {}
             }
             failureCode = 'ROLLED_BACK'
@@ -883,14 +1119,25 @@
           if (effect === 'applied' && item.hostContext.execution.visualAudit === 'hash-only') {
             try {
               const afterVisual = await capturePlanVisualPoints(
-                checked,
+                visualEntries,
                 item.hostContext.documentId
               )
-              visualEvidence = combinePlanVisualEvidence(checked, beforeVisual, afterVisual)
+              assertExecutionCurrent(item)
+              for (const entry of checked)
+                verifyNativeLayer(entry.contextNode, item.hostContext.documentId)
+              readback = createPlanReadback(item.hostContext, plan)
+              if (readback.steps.some((step) => step.observation !== 'requested'))
+                throw new Error('STALE_CONTEXT')
+              visualEvidence = combinePlanVisualEvidence(visualEntries, beforeVisual, afterVisual)
             } catch {
               for (const entry of [...applied].reverse()) {
                 try {
-                  rollbackPlanStep(entry.layer, entry.contextNode, entry.step)
+                  rollbackPlanStep(
+                    entry.layer,
+                    entry.contextNode,
+                    entry.step,
+                    item.hostContext.documentId
+                  )
                 } catch {}
               }
               visualEvidence = undefined
@@ -917,17 +1164,15 @@
     else if (observations.some((value) => value === 'requested')) effect = 'partial'
     else effect = 'unknown'
     if (effect !== 'applied') visualEvidence = undefined
-    const completed = readback.steps.filter((step) => step.observation === 'requested').length
-    const status = effect === 'applied' ? 'completed' : 'failed'
-    const errorCode =
-      failureCode ||
-      (effect === 'rolled-back'
-        ? 'ROLLED_BACK'
-        : effect === 'unknown'
-          ? 'QUARANTINED'
-          : effect === 'partial'
-            ? 'EXECUTION_FAILED'
-            : 'HOST_UNAVAILABLE')
+    if (!executionCurrent(item)) return
+    let completed = readback.steps.filter((step) => step.observation === 'requested').length
+    let status = effect === 'applied' ? 'completed' : 'failed'
+    let errorCode =
+      effect === 'unknown'
+        ? 'QUARANTINED'
+        : effect === 'partial'
+          ? 'EXECUTION_FAILED'
+          : failureCode || (effect === 'rolled-back' ? 'ROLLED_BACK' : 'HOST_UNAVAILABLE')
     try {
       await post(
         'planProgress',
@@ -935,7 +1180,7 @@
           protocol: 1,
           executionId: item.executionId,
           actionId: item.actionId,
-          sequence: 2,
+          sequence: sequence++,
           phase: 'readback',
           index: plan.steps.length - 1,
           completed,
@@ -945,6 +1190,26 @@
         },
         item.auth
       )
+      assertExecutionCurrent(item)
+      const latestReadback = createPlanReadback(item.hostContext, plan)
+      let unchanged = samePlanValue(latestReadback, readback)
+      if (status === 'completed') {
+        try {
+          for (const record of item.hostContext.nodes)
+            if (plan.steps.some((step) => step.targetId === record.id))
+              verifyNativeLayer(record, item.hostContext.documentId)
+        } catch {
+          unchanged = false
+        }
+      }
+      if (!unchanged) {
+        readback = latestReadback
+        completed = readback.steps.filter((step) => step.observation === 'requested').length
+        status = 'failed'
+        effect = 'unknown'
+        visualEvidence = undefined
+        errorCode = 'QUARANTINED'
+      }
       const result = await post(
         'planResult',
         {
@@ -961,13 +1226,23 @@
         },
         item.auth
       )
-      if (result && result.status && result.status.state === 'completed')
-        state(
-          visualEvidence
-            ? 'Approved plan applied with bounded before/after visual checkpoints.'
-            : 'Approved plan applied and verified by document readback.'
-        )
-      else if (effect === 'rolled-back')
+      if (!executionCurrent(item)) return
+      if (result && result.status && result.status.state === 'completed') {
+        if (
+          result.status.visualBaselineComparison &&
+          result.status.visualBaselineComparison.exactMatch === false
+        ) {
+          beginCorrectionReview(item, result.status)
+        } else {
+          state(
+            visualEvidence
+              ? result.status.visualBaselineComparison?.exactMatch === true
+                ? 'Approved correction matches the accepted visual checkpoint.'
+                : 'Approved plan applied with bounded before/after visual checkpoints.'
+              : 'Approved plan applied and verified by document readback.'
+          )
+        }
+      } else if (effect === 'rolled-back')
         state('Plan failed. Applied values were rolled back and verified.')
       else state('Plan failed. Check MagicPot desktop for the execution receipt.')
     } catch {
@@ -976,6 +1251,7 @@
   }
   function beginPlanReview(call, content) {
     planReview = {
+      kind: 'plan',
       auth: call.auth,
       callId: call.callId,
       hostContext: call.hostContext,
@@ -988,6 +1264,65 @@
     state('Plan ready. Awaiting separate write approval in MagicPot desktop.')
     schedulePlan(planReview)
   }
+  function beginCorrectionReview(source, status) {
+    const comparison = status && status.visualBaselineComparison
+    const targets = comparison && Array.isArray(comparison.targets) ? comparison.targets : []
+    const visualTargetIds = targets.map((target) => target && target.targetId).sort()
+    const authorizedTargetIds = targets
+      .filter((target) => target && target.changed === true)
+      .map((target) => target.targetId)
+      .sort()
+    const evidenceTargetIds = Array.isArray(status && status.visualEvidence)
+      ? status.visualEvidence.map((item) => item && item.targetId).sort()
+      : []
+    if (
+      !source ||
+      !source.auth ||
+      !source.hostContext ||
+      source.hostContext.execution?.visualAudit !== 'hash-only' ||
+      !status ||
+      status.state !== 'completed' ||
+      status.effect !== 'applied' ||
+      status.executionId !== source.executionId ||
+      !comparison ||
+      comparison.executionId !== status.executionId ||
+      comparison.exactMatch !== false ||
+      !Number.isInteger(comparison.changedCount) ||
+      comparison.changedCount < 1 ||
+      comparison.changedCount !== authorizedTargetIds.length ||
+      !sameIds(visualTargetIds, evidenceTargetIds) ||
+      !exactIdArray(authorizedTargetIds) ||
+      comparison.visualEvidenceSha256 !== status.visualEvidenceSha256 ||
+      Date.now() >= source.expiresAt
+    ) {
+      state(
+        'Visual comparison could not be bound to a correction request. No correction was started.'
+      )
+      return
+    }
+    planReview = {
+      kind: 'correction',
+      auth: source.auth,
+      callId: source.callId,
+      sourceExecutionId: status.executionId,
+      baselineId: comparison.baselineId,
+      baselineEvidenceSha256: comparison.baselineEvidenceSha256,
+      visualEvidenceSha256: status.visualEvidenceSha256,
+      sourceHostContext: JSON.parse(JSON.stringify(source.hostContext)),
+      visualTargetIds,
+      authorizedTargetIds,
+      expiresAt: source.expiresAt,
+      polls: 0,
+      started: false,
+      authorization: null,
+      hostContext: null,
+      executionId: null
+    }
+    state(
+      'Visual result differs from the accepted checkpoint. Awaiting an explicit correction authorization in MagicPot desktop.'
+    )
+    schedulePlan(planReview)
+  }
   const currentPlan = (item) =>
     !disposed && planReview === item && live() && Date.now() < item.expiresAt
   function schedulePlan(item) {
@@ -996,31 +1331,118 @@
       clearTimeout(planPollTimer)
       planPollTimer = null
       planReview = null
-      state('Plan approval expired or polling limit reached.')
+      state('Plan approval or correction authorization expired, or the polling limit was reached.')
       return
     }
     planPollTimer = setTimeout(() => void pollPlan(item), 1000)
+  }
+  async function prepareCorrection(item) {
+    if (item.kind !== 'correction' || item.executionId) return true
+    let response = await post(
+      'planCorrectionPrepare',
+      {
+        protocol: 1,
+        sourceExecutionId: item.sourceExecutionId,
+        ...(item.hostContext ? { hostContext: item.hostContext } : {})
+      },
+      item.auth
+    )
+    if (!currentPlan(item) || !response || response.protocol !== 1) return false
+    touch(item.auth)
+    if (response.status === 'pending') {
+      if (!keys(response, ['protocol', 'status', 'expiresAt']) || !integer(response.expiresAt))
+        throw new Error('REQUEST')
+      item.expiresAt = Math.min(item.expiresAt, response.expiresAt)
+      state('Awaiting an explicit correction authorization in MagicPot desktop.')
+      schedulePlan(item)
+      return false
+    }
+    if (response.status === 'authorized') {
+      if (!keys(response, ['protocol', 'status', 'authorization'])) throw new Error('REQUEST')
+      const authorization = validateCorrectionAuthorization(response.authorization, item)
+      const captured = capturePhotoshopCorrectionContext(authorization)
+      item.authorization = authorization
+      item.hostContext = captured.context
+      planningNodes = captured.nodes
+      item.expiresAt = Math.min(item.expiresAt, authorization.expiresAt)
+      response = await post(
+        'planCorrectionPrepare',
+        {
+          protocol: 1,
+          sourceExecutionId: item.sourceExecutionId,
+          hostContext: item.hostContext
+        },
+        item.auth
+      )
+      if (!currentPlan(item) || !response || response.protocol !== 1) return false
+      touch(item.auth)
+    }
+    if (response.status === 'terminal') {
+      if (
+        !keys(response, ['protocol', 'status', 'state'], ['errorCode']) ||
+        typeof response.state !== 'string'
+      )
+        throw new Error('REQUEST')
+      planReview = null
+      state('Visual correction authorization ended without a document write.')
+      return false
+    }
+    if (
+      response.status !== 'prepared' ||
+      !keys(response, ['protocol', 'status', 'executionId', 'callId', 'state', 'expiresAt']) ||
+      !hex(response.executionId, 32) ||
+      response.callId !== item.callId ||
+      typeof response.state !== 'string' ||
+      !integer(response.expiresAt) ||
+      response.expiresAt <= Date.now() ||
+      !item.authorization ||
+      !item.hostContext
+    )
+      throw new Error('REQUEST')
+    item.executionId = response.executionId
+    item.expiresAt = Math.min(item.expiresAt, response.expiresAt)
+    state(
+      'Correction plan prepared. Awaiting a separate native write approval in MagicPot desktop.'
+    )
+    return true
   }
   async function pollPlan(item) {
     if (!currentPlan(item)) return
     item.polls += 1
     try {
-      const status = await post('planStatus', { protocol: 1, callId: item.callId }, item.auth)
+      if (item.kind === 'correction' && !(await prepareCorrection(item))) return
+      if (!currentPlan(item)) return
+      const selector = {
+        protocol: 1,
+        callId: item.callId,
+        ...(item.executionId ? { executionId: item.executionId } : {})
+      }
+      const status = await post('planStatus', selector, item.auth)
       if (!currentPlan(item)) return
       if (
         !status ||
         status.protocol !== 1 ||
-        typeof status.executionId !== 'string' ||
-        typeof status.state !== 'string'
+        !hex(status.executionId, 32) ||
+        typeof status.state !== 'string' ||
+        (item.executionId && status.executionId !== item.executionId)
       )
         throw new Error('REQUEST')
+      item.executionId = status.executionId
       if (status.state === 'awaiting-approval') {
-        state('Plan ready. Awaiting separate write approval in MagicPot desktop.')
+        state(
+          item.kind === 'correction'
+            ? 'Correction plan ready. Awaiting a separate native write approval in MagicPot desktop.'
+            : 'Plan ready. Awaiting separate write approval in MagicPot desktop.'
+        )
         schedulePlan(item)
         return
       }
       if (status.state === 'approved') {
-        const claim = await post('planClaim', { protocol: 1, callId: item.callId }, item.auth)
+        const claim = await post(
+          'planClaim',
+          { protocol: 1, callId: item.callId, executionId: item.executionId },
+          item.auth
+        )
         if (!currentPlan(item)) return
         if (!claim || claim.protocol !== 1) throw new Error('REQUEST')
         if (claim.status === 'pending') {
@@ -1036,17 +1458,32 @@
         if (
           !item.started &&
           intent &&
-          intent.executionId === status.executionId &&
+          intent.executionId === item.executionId &&
           intent.callId === item.callId &&
+          intent.purpose === 'execute-host-plan' &&
           intent.host === HOST &&
+          intent.pluginId === config.pluginId &&
+          intent.documentId === item.hostContext.documentId &&
+          intent.scopeId === item.hostContext.scopeId &&
+          intent.adapterVersion === EXECUTION_ADAPTER_VERSION &&
+          hex(intent.actionId, 32) &&
           intent.captureId === item.hostContext.captureId &&
           intent.expiresAt > Date.now()
         ) {
           item.started = true
+          item.executionEpoch = epoch
+          activeExecution = item
           planReview = null
-          item.executionId = intent.executionId
           item.actionId = intent.actionId
-          await executeClaimedPlan(item, intent)
+          state('Executing the separately approved native plan...')
+          try {
+            await executeClaimedPlan(item, intent)
+          } finally {
+            if (activeExecution === item) {
+              activeExecution = null
+              if (!disposed && session === item.auth) state()
+            }
+          }
           return
         }
         throw new Error('REQUEST')
@@ -1068,7 +1505,7 @@
     } catch {
       if (currentPlan(item)) {
         planReview = null
-        state('Plan status request failed. Check MagicPot desktop; polling stopped.')
+        state('Plan or correction status request failed. Check MagicPot desktop; polling stopped.')
       }
     }
   }
@@ -1178,6 +1615,7 @@
     }
   }
   async function share() {
+    if (activeExecution) return
     if (!config || disposed || pairing || review || !live() || !snapshot || !el('consent').checked)
       return
     const prompt = el('prompt').value.trim()

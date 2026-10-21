@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS,
   FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
@@ -189,6 +189,7 @@ describe('FIGPLUGIN visual evidence contract', () => {
       baselineEvidenceSha256: '4'.repeat(64),
       visualEvidenceSha256: 'f'.repeat(64),
       comparisonSha256: '6'.repeat(64),
+      visualTargetIds: ['node_1', 'node_2'],
       authorizedTargetIds: ['node_1', 'node_2'],
       round: 1,
       maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
@@ -227,6 +228,12 @@ describe('FIGPLUGIN visual evidence contract', () => {
         authorizedTargetIds: ['node_1', 'node_1']
       })
     ).toThrow(/duplicate/i)
+    expect(() =>
+      figPluginVisualCorrectionAuthorizationSchema.parse({
+        ...authorization,
+        authorizedTargetIds: ['node_3']
+      })
+    ).toThrow(/outside the visual checkpoint/i)
     expect(() =>
       figPluginVisualCorrectionAuthorizationSchema.parse({
         ...authorization,
@@ -391,4 +398,33 @@ describe('FIGPLUGIN visual evidence contract', () => {
       })
     ).toThrow(/visual evidence/i)
   })
+})
+
+it('bounds retained execution states across ordinary calls and correction attempts', () => {
+  const statuses = Array.from({ length: 48 }, (_, index) => ({
+    protocol: 1,
+    executionId: (index + 1).toString(16).padStart(32, '0'),
+    callId: 'a'.repeat(32),
+    state: 'cancelled',
+    completed: 0,
+    total: 1,
+    effect: 'none',
+    updatedAt: 100
+  }))
+  expect(
+    figPluginExecutionDesktopStateSchema.parse({
+      previews: [],
+      statuses,
+      baselines: [],
+      correctionAuthorizations: []
+    }).statuses
+  ).toHaveLength(48)
+  expect(() =>
+    figPluginExecutionDesktopStateSchema.parse({
+      previews: [],
+      statuses: [...statuses, statuses[0]],
+      baselines: [],
+      correctionAuthorizations: []
+    })
+  ).toThrow()
 })

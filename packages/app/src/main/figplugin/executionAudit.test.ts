@@ -1,13 +1,17 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
-import { afterEach, describe, expect, it } from 'vitest'
+import os from 'node:os'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   FIGPLUGIN_AUDIT_MAX_RECORDS,
   FIGPLUGIN_AUDIT_TTL_MS,
   FigPluginExecutionAuditStore,
   type FigPluginExecutionAuditEvent
 } from './executionAudit'
+
+// Verify append, fsync and reopen against the OS, not the suite-wide memfs mock.
+vi.unmock('node:fs')
+vi.unmock('node:fs/promises')
 
 const roots: string[] = []
 const event = (index: number, at: number): FigPluginExecutionAuditEvent => ({
@@ -38,8 +42,7 @@ afterEach(async () => {
 
 describe('bounded persistent FIGPLUGIN execution audit', () => {
   it('retains only the newest bounded records and never stores document values', async () => {
-    const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
-    await fs.mkdir(root, { recursive: true })
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
     roots.push(root)
     const store = new FigPluginExecutionAuditStore(root, () => 1000)
     for (let index = 0; index < FIGPLUGIN_AUDIT_MAX_RECORDS + 8; index += 1)
@@ -48,14 +51,15 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
     const records = await store.list()
     expect(records).toHaveLength(FIGPLUGIN_AUDIT_MAX_RECORDS)
     expect(records[0].requestId).toBe('request_8')
+    const reopened = new FigPluginExecutionAuditStore(root, () => 1000)
+    expect(await reopened.list()).toEqual(records)
     expect(JSON.stringify(records)).not.toMatch(/Old name|New name|layer content/)
     const info = await fs.stat(path.join(root, 'execution-audit.jsonl'))
     if (process.platform !== 'win32') expect(info.mode & 0o077).toBe(0)
   })
 
   it('stores only paired terminal visual checkpoint summaries', async () => {
-    const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
-    await fs.mkdir(root, { recursive: true })
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
     roots.push(root)
     const store = new FigPluginExecutionAuditStore(root, () => 1000)
     store.record({
@@ -88,8 +92,7 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
   })
 
   it('stores an accepted visual baseline only as complete bounded hashes and timing metadata', async () => {
-    const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
-    await fs.mkdir(root, { recursive: true })
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
     roots.push(root)
     const store = new FigPluginExecutionAuditStore(root, () => 1000)
     store.record({
@@ -139,8 +142,7 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
   })
 
   it('stores only a complete bounded visual comparison summary', async () => {
-    const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
-    await fs.mkdir(root, { recursive: true })
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
     roots.push(root)
     const store = new FigPluginExecutionAuditStore(root, () => 1000)
     const valid = {
@@ -192,10 +194,9 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
   })
 
   it('drops expired and malformed lines without exposing parser failures', async () => {
-    const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
-    await fs.mkdir(root, { recursive: true })
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
     roots.push(root)
-    const now = 1_000_000
+    const now = FIGPLUGIN_AUDIT_TTL_MS + 1_000_000
     const store = new FigPluginExecutionAuditStore(root, () => now)
     store.record(event(1, now - FIGPLUGIN_AUDIT_TTL_MS - 1))
     store.record(event(2, now))
@@ -205,4 +206,32 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
     expect(records.map((item) => item.requestId)).toEqual(['request_2'])
     expect(JSON.stringify(records)).not.toContain('PRIVATE')
   })
+})
+
+it('persists bounded correction lineage and consumption without design text or targets', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
+  roots.push(root)
+  const store = new FigPluginExecutionAuditStore(root, () => 1000)
+  const correctionAttempt = {
+    authorizationId: 'a'.repeat(32),
+    baselineId: 'b'.repeat(32),
+    sourceExecutionId: 'c'.repeat(32),
+    round: 1,
+    maxCorrectionRounds: 3 as const,
+    targetCount: 1,
+    consumed: true
+  }
+  store.record({ ...event(1, 1000), correctionAttempt })
+  store.record({ ...event(2, 1000), correctionAttempt: { ...correctionAttempt, consumed: false } })
+  store.record({ ...event(3, 1000), correctionAttempt: { ...correctionAttempt, round: 4 } })
+  store.record({
+    ...event(4, 1000),
+    correctionAttempt: { ...correctionAttempt, plan: 'PRIVATE-DESIGN' }
+  } as FigPluginExecutionAuditEvent)
+  await store.flush()
+  expect(await store.list()).toEqual([
+    expect.objectContaining({ requestId: 'request_1', correctionAttempt })
+  ])
+  const text = await fs.readFile(path.join(root, 'execution-audit.jsonl'), 'utf8')
+  expect(text).not.toMatch(/PRIVATE-DESIGN|authorizedTargetIds|Drifted name|New name/)
 })

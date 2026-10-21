@@ -179,6 +179,86 @@ async function completedVisualExecution(
   return { session, receipt, execution, result }
 }
 
+// Use the production runtime throughout; only the model and native host observations are fixtures.
+async function correctionFixture() {
+  const value = fixture(true, hashOnlyContext)
+  const first = await completedVisualExecution(value)
+  const baseline = await value.runtime.acceptVisualBaseline(
+    first.execution.executionId,
+    first.result.status.visualEvidenceSha256!
+  )
+  const drift = [
+    { ...visualEvidence[0], after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) } }
+  ]
+  const changed = await completedVisualExecution(value, drift)
+  return { ...value, baseline, changed, drift }
+}
+async function prepareCorrectionFixture(
+  value: Awaited<ReturnType<typeof correctionFixture>>,
+  source = value.changed.result.status
+) {
+  const authorization = await value.runtime.authorizeVisualCorrection(
+    source.executionId,
+    value.baseline.baselineId,
+    source.visualEvidenceSha256!
+  )
+  const context: HostContext = {
+    ...structuredClone(hashOnlyContext),
+    captureId: authorization.authorizationId,
+    nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'Drifted name' }))
+  }
+  const input = { protocol: 1, sourceExecutionId: source.executionId, hostContext: context }
+  const { session } = value.changed
+  const prepare = () =>
+    value.runtime.prepareVisualCorrection(session.sessionId, session.sessionToken, input)
+  const result = await prepare()
+  if (result.status !== 'prepared') throw new Error('missing correction execution')
+  const preview = value.runtime
+    .listPlanExecutions()
+    .find((item) => item.executionId === result.executionId)!
+  const selector = {
+    protocol: 1,
+    callId: value.changed.receipt.callId,
+    executionId: result.executionId
+  }
+  const claim = () => value.runtime.claimPlan(session.sessionId, session.sessionToken, selector)
+  return { authorization, context, input, prepare, result, preview, selector, claim }
+}
+function finishCorrectionFixture(
+  value: Awaited<ReturnType<typeof correctionFixture>>,
+  correction: Awaited<ReturnType<typeof prepareCorrectionFixture>>,
+  intent: import('@shared/figplugin/execution').FigPluginExecutionIntent,
+  hash = '3'.repeat(64)
+) {
+  const after = {
+    ...structuredClone(correction.context),
+    nodes: correction.context.nodes.map((node) => ({ ...node, name: 'New name' }))
+  }
+  const evidence = [
+    {
+      targetId: 'node_1',
+      before: value.drift[0].after,
+      after: { ...visualEvidence[0].after, sha256: hash },
+      changed: hash !== value.drift[0].after.sha256
+    }
+  ]
+  return value.runtime.planResult(
+    value.changed.session.sessionId,
+    value.changed.session.sessionToken,
+    {
+      protocol: 1,
+      executionId: correction.preview.executionId,
+      actionId: intent.actionId,
+      status: 'completed',
+      effect: 'applied',
+      completed: 1,
+      total: 1,
+      readback: createHostPlanReadback(correction.context, after, intent.plan),
+      visualEvidence: evidence
+    }
+  ).status
+}
+
 describe('approved native-plan execution runtime', () => {
   it('binds write approval to the exact plan, claims once and verifies readback', async () => {
     const value = fixture()
@@ -510,10 +590,11 @@ describe('approved native-plan execution runtime', () => {
         adapterVersion: hashOnlyContext.execution!.adapterVersion,
         baselineEvidenceSha256: baseline.visualEvidenceSha256,
         visualEvidenceSha256: changedEvidenceSha256,
+        visualTargetIds: ['node_1'],
         authorizedTargetIds: ['node_1'],
         round: 1,
         maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
-        expiresAt: authorization.authorizedAt + FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS,
+        expiresAt: changed.execution.expiresAt,
         state: 'authorized'
       })
       expect(
@@ -570,6 +651,228 @@ describe('approved native-plan execution runtime', () => {
       expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([replacement])
       value.advance(FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS)
       expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('prepares, separately approves and consumes one correction round before verified execution', async () => {
+    const value = fixture(true, hashOnlyContext)
+    try {
+      const first = await completedVisualExecution(value)
+      const baseline = await value.runtime.acceptVisualBaseline(
+        first.execution.executionId,
+        first.result.status.visualEvidenceSha256!
+      )
+      const driftEvidence = [
+        {
+          ...visualEvidence[0],
+          after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) }
+        }
+      ]
+      const changed = await completedVisualExecution(value, driftEvidence)
+      expect(
+        await value.runtime.prepareVisualCorrection(
+          changed.session.sessionId,
+          changed.session.sessionToken,
+          { protocol: 1, sourceExecutionId: changed.execution.executionId }
+        )
+      ).toMatchObject({ status: 'pending' })
+
+      const authorization = await value.runtime.authorizeVisualCorrection(
+        changed.execution.executionId,
+        baseline.baselineId,
+        changed.result.status.visualEvidenceSha256!
+      )
+      expect(
+        await value.runtime.prepareVisualCorrection(
+          changed.session.sessionId,
+          changed.session.sessionToken,
+          { protocol: 1, sourceExecutionId: changed.execution.executionId }
+        )
+      ).toEqual({ protocol: 1, status: 'authorized', authorization })
+
+      const correctionContext: HostContext = {
+        ...structuredClone(hashOnlyContext),
+        captureId: authorization.authorizationId,
+        nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'Drifted name' }))
+      }
+      const preparedCorrection = await value.runtime.prepareVisualCorrection(
+        changed.session.sessionId,
+        changed.session.sessionToken,
+        {
+          protocol: 1,
+          sourceExecutionId: changed.execution.executionId,
+          hostContext: correctionContext
+        }
+      )
+      expect(preparedCorrection).toMatchObject({
+        protocol: 1,
+        status: 'prepared',
+        callId: changed.receipt.callId,
+        state: 'awaiting-approval'
+      })
+      if (preparedCorrection.status !== 'prepared') throw new Error('correction was not prepared')
+      const correction = value.runtime
+        .listPlanExecutions()
+        .find((item) => item.executionId === preparedCorrection.executionId)
+      expect(correction).toMatchObject({
+        captureId: authorization.authorizationId,
+        visualCorrection: {
+          authorizationId: authorization.authorizationId,
+          baselineId: baseline.baselineId,
+          sourceExecutionId: changed.execution.executionId,
+          round: 1,
+          maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
+          authorizedTargetIds: ['node_1']
+        },
+        plan: {
+          captureId: authorization.authorizationId,
+          steps: [{ command: 'node.rename', targetId: 'node_1', name: 'New name' }]
+        }
+      })
+      if (!correction) throw new Error('missing correction preview')
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([authorization])
+      expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(0)
+
+      await value.runtime.approvePlan(correction.executionId, correction.planSha256)
+      const claimed = await value.runtime.claimPlan(
+        changed.session.sessionId,
+        changed.session.sessionToken,
+        {
+          protocol: 1,
+          callId: changed.receipt.callId,
+          executionId: correction.executionId
+        }
+      )
+      expect(claimed.status).toBe('ready')
+      if (claimed.status !== 'ready') throw new Error('correction was not claimed')
+      expect(claimed.intent).toMatchObject({
+        executionId: correction.executionId,
+        callId: changed.receipt.callId,
+        captureId: authorization.authorizationId,
+        visualTargetIds: ['node_1'],
+        visualCorrection: correction.visualCorrection
+      })
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+      expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(1)
+      expect(
+        await value.runtime.claimPlan(changed.session.sessionId, changed.session.sessionToken, {
+          protocol: 1,
+          callId: changed.receipt.callId,
+          executionId: correction.executionId
+        })
+      ).toEqual(claimed)
+
+      const correctedContext: HostContext = {
+        ...structuredClone(correctionContext),
+        nodes: correctionContext.nodes.map((node) => ({ ...node, name: 'New name' }))
+      }
+      const correctionEvidence = [
+        {
+          targetId: 'node_1',
+          before: driftEvidence[0].after,
+          after: visualEvidence[0].after,
+          changed: true
+        }
+      ]
+      const result = value.runtime.planResult(
+        changed.session.sessionId,
+        changed.session.sessionToken,
+        {
+          protocol: 1,
+          executionId: correction.executionId,
+          actionId: claimed.intent.actionId,
+          status: 'completed',
+          effect: 'applied',
+          completed: 1,
+          total: 1,
+          readback: createHostPlanReadback(
+            correctionContext,
+            correctedContext,
+            claimed.intent.plan
+          ),
+          visualEvidence: correctionEvidence
+        }
+      )
+      expect(result.status).toMatchObject({
+        state: 'completed',
+        effect: 'applied',
+        visualBaselineComparison: {
+          baselineId: baseline.baselineId,
+          changedCount: 0,
+          exactMatch: true
+        }
+      })
+      expect(
+        await value.runtime.prepareVisualCorrection(
+          changed.session.sessionId,
+          changed.session.sessionToken,
+          { protocol: 1, sourceExecutionId: changed.execution.executionId }
+        )
+      ).toMatchObject({ status: 'terminal', state: 'completed' })
+      await expect(
+        value.runtime.acceptVisualBaseline(
+          correction.executionId,
+          result.status.visualEvidenceSha256!
+        )
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('does not spend a correction round when a prepared correction is denied', async () => {
+    const value = fixture(true, hashOnlyContext)
+    try {
+      const first = await completedVisualExecution(value)
+      const baseline = await value.runtime.acceptVisualBaseline(
+        first.execution.executionId,
+        first.result.status.visualEvidenceSha256!
+      )
+      const changed = await completedVisualExecution(value, [
+        {
+          ...visualEvidence[0],
+          after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) }
+        }
+      ])
+      const authorization = await value.runtime.authorizeVisualCorrection(
+        changed.execution.executionId,
+        baseline.baselineId,
+        changed.result.status.visualEvidenceSha256!
+      )
+      const correctionContext: HostContext = {
+        ...structuredClone(hashOnlyContext),
+        captureId: authorization.authorizationId,
+        nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'Drifted name' }))
+      }
+      const preparedCorrection = await value.runtime.prepareVisualCorrection(
+        changed.session.sessionId,
+        changed.session.sessionToken,
+        {
+          protocol: 1,
+          sourceExecutionId: changed.execution.executionId,
+          hostContext: correctionContext
+        }
+      )
+      if (preparedCorrection.status !== 'prepared') throw new Error('correction was not prepared')
+      value.runtime.denyPlan(preparedCorrection.executionId)
+      expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(0)
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+      expect(
+        await value.runtime.prepareVisualCorrection(
+          changed.session.sessionId,
+          changed.session.sessionToken,
+          { protocol: 1, sourceExecutionId: changed.execution.executionId }
+        )
+      ).toMatchObject({ status: 'pending' })
+      const replacement = await value.runtime.authorizeVisualCorrection(
+        changed.execution.executionId,
+        baseline.baselineId,
+        changed.result.status.visualEvidenceSha256!
+      )
+      expect(replacement.authorizationId).not.toBe(authorization.authorizationId)
+      expect(replacement.round).toBe(1)
     } finally {
       value.runtime.dispose()
     }
@@ -672,4 +975,202 @@ describe('approved native-plan execution runtime', () => {
       value.runtime.dispose()
     }
   })
+})
+
+it('cannot mint a new correction from the same consumed comparison, before or after completion', async () => {
+  const value = await correctionFixture()
+  try {
+    const c = await prepareCorrectionFixture(value)
+    await value.runtime.approvePlan(c.preview.executionId, c.preview.planSha256)
+    const claimed = await c.claim()
+    if (claimed.status !== 'ready') throw new Error('not ready')
+    const repeat = () =>
+      value.runtime.authorizeVisualCorrection(
+        value.changed.execution.executionId,
+        value.baseline.baselineId,
+        value.changed.result.status.visualEvidenceSha256!
+      )
+    await expect(repeat()).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    finishCorrectionFixture(value, c, claimed.intent)
+    await expect(repeat()).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(1)
+    expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+  } finally {
+    value.runtime.dispose()
+  }
+})
+
+it('spends exactly three rounds despite concurrent duplicate claims, and rejects round four', async () => {
+  const value = await correctionFixture()
+  try {
+    let source = value.changed.result.status
+    for (let round = 1; round <= 3; round++) {
+      const c = await prepareCorrectionFixture(value, source)
+      expect(c.authorization.round).toBe(round)
+      expect(await c.prepare()).toEqual(c.result)
+      expect((await c.claim()).status).toBe('pending')
+      expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(round - 1)
+      await value.runtime.approvePlan(c.preview.executionId, c.preview.planSha256)
+      const claims = await Promise.all([c.claim(), c.claim(), c.claim()])
+      expect(claims[0]).toEqual(claims[1])
+      expect(claims[1]).toEqual(claims[2])
+      const claim = claims[0]
+      if (claim.status !== 'ready') throw new Error('not ready')
+      expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(round)
+      source = finishCorrectionFixture(value, c, claim.intent)
+      expect(source.visualBaselineComparison?.exactMatch).toBe(false)
+      expect(source.visualCorrection).toEqual(c.preview.visualCorrection)
+      expect(
+        value.audit.filter(
+          (event) => event.executionId === c.preview.executionId && event.state === 'claimed'
+        )
+      ).toHaveLength(1)
+      expect(value.audit.at(-1)?.correctionAttempt).toMatchObject({
+        authorizationId: c.authorization.authorizationId,
+        baselineId: value.baseline.baselineId,
+        round,
+        maxCorrectionRounds: 3,
+        targetCount: 1,
+        consumed: true
+      })
+    }
+    await expect(
+      value.runtime.authorizeVisualCorrection(
+        source.executionId,
+        value.baseline.baselineId,
+        source.visualEvidenceSha256!
+      )
+    ).rejects.toMatchObject({ code: 'DENIED' })
+    expect(
+      await value.runtime.prepareVisualCorrection(
+        value.changed.session.sessionId,
+        value.changed.session.sessionToken,
+        { protocol: 1, sourceExecutionId: source.executionId }
+      )
+    ).toMatchObject({ status: 'terminal', state: 'denied', errorCode: 'DENIED' })
+    expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+    expect(JSON.stringify(value.audit)).not.toMatch(/Drifted name|New name|authorizedTargetIds/)
+  } finally {
+    value.runtime.dispose()
+  }
+})
+
+it.each(['document', 'scope', 'capture', 'adapter', 'targets', 'lock'] as const)(
+  'rejects a recaptured correction context with a changed %s boundary',
+  async (boundary) => {
+    const value = await correctionFixture()
+    try {
+      const a = await value.runtime.authorizeVisualCorrection(
+        value.changed.execution.executionId,
+        value.baseline.baselineId,
+        value.changed.result.status.visualEvidenceSha256!
+      )
+      const context = structuredClone(hashOnlyContext)
+      context.captureId = a.authorizationId
+      if (boundary === 'document') context.documentId = 'foreign-document'
+      if (boundary === 'scope') context.scopeId = 'foreign-scope'
+      if (boundary === 'capture') context.captureId = 'f'.repeat(32)
+      if (boundary === 'adapter') context.execution!.adapterVersion = 'other-adapter'
+      if (boundary === 'targets') context.selectedIds = ['foreign-node']
+      if (boundary === 'lock') context.nodes[0].locked = true
+      await expect(
+        value.runtime.prepareVisualCorrection(
+          value.changed.session.sessionId,
+          value.changed.session.sessionToken,
+          {
+            protocol: 1,
+            sourceExecutionId: value.changed.execution.executionId,
+            hostContext: context
+          }
+        )
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+      expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(0)
+    } finally {
+      value.runtime.dispose()
+    }
+  }
+)
+
+it.each(['cancel', 'deny', 'revoke', 'expire'] as const)(
+  '%s before claim does not consume a round or release a correction intent',
+  async (action) => {
+    const value = await correctionFixture()
+    try {
+      const c = await prepareCorrectionFixture(value)
+      await value.runtime.approvePlan(c.preview.executionId, c.preview.planSha256)
+      if (action === 'cancel')
+        value.runtime.cancelVisualCorrectionAuthorization(c.authorization.authorizationId)
+      if (action === 'deny') value.runtime.denyPlan(c.preview.executionId)
+      if (action === 'revoke') value.runtime.revokePlugin(binding.pluginId)
+      if (action === 'expire') value.advance(c.preview.expiresAt - c.preview.createdAt + 1)
+      const result = await c.claim().catch(() => null)
+      expect(result?.status).not.toBe('ready')
+      expect(
+        value.runtime.listVisualBaselines().every((item) => item.correctionRoundsUsed === 0)
+      ).toBe(true)
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+    } finally {
+      value.runtime.dispose()
+    }
+  }
+)
+
+it('rejects another session attempting to prepare or claim a correction', async () => {
+  const value = await correctionFixture()
+  try {
+    const c = await prepareCorrectionFixture(value)
+    const other = await prepared(value)
+    await expect(
+      value.runtime.prepareVisualCorrection(
+        other.session.sessionId,
+        other.session.sessionToken,
+        c.input
+      )
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+    await value.runtime.approvePlan(c.preview.executionId, c.preview.planSha256)
+    await expect(
+      value.runtime.claimPlan(other.session.sessionId, other.session.sessionToken, c.selector)
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+    expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(0)
+  } finally {
+    value.runtime.dispose()
+  }
+})
+
+it.each([false, true])(
+  'host cancellation stops correction descendants after claim=%s, preserving spent rounds',
+  async (claimFirst) => {
+    const value = await correctionFixture()
+    try {
+      const c = await prepareCorrectionFixture(value)
+      await value.runtime.approvePlan(c.preview.executionId, c.preview.planSha256)
+      if (claimFirst) expect((await c.claim()).status).toBe('ready')
+      await value.runtime.cancel(
+        value.changed.session.sessionId,
+        value.changed.session.sessionToken,
+        value.changed.receipt.callId
+      )
+      expect(await c.claim()).toMatchObject({ status: 'terminal', state: 'cancelled' })
+      expect(value.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(claimFirst ? 1 : 0)
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+    } finally {
+      value.runtime.dispose()
+    }
+  }
+)
+it('cannot change a prepared correction context via a replay', async () => {
+  const value = await correctionFixture()
+  try {
+    const c = await prepareCorrectionFixture(value)
+    await expect(
+      value.runtime.prepareVisualCorrection(
+        value.changed.session.sessionId,
+        value.changed.session.sessionToken,
+        { ...c.input, hostContext: { ...c.context, documentId: 'other-document' } }
+      )
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(await c.prepare()).toEqual(c.result)
+  } finally {
+    value.runtime.dispose()
+  }
 })

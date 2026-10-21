@@ -6,9 +6,8 @@ import { buildHostPlanPreview } from './build-figplugin-plan-preview.mjs'
 
 const root = new URL('../packages/figplugin-hosts/', import.meta.url)
 const read = (name) => readFileSync(new URL(name, root), 'utf8')
-const flush = async () => {
-  for (let i = 0; i < 80; i++) await Promise.resolve()
-}
+// Drain the current microtask chain without guessing its length; VM timers stay virtual.
+const flush = () => new Promise((resolve) => setImmediate(resolve))
 const plain = (value) => JSON.parse(JSON.stringify(value))
 const fakePng = (label) => {
   const data = new Uint8Array(32)
@@ -35,7 +34,13 @@ function fixture(
     locked = false,
     approvePlan = false,
     twoSteps = false,
-    failSecond = false
+    failSecond = false,
+    correctionFlow = false,
+    tamperCorrectionAuthorization = false,
+    visualGate = null,
+    modalGate = null,
+    tamperComparisonIdentity = false,
+    progressHook = null
   } = {}
 ) {
   let time = 1_800_000_000_000,
@@ -60,7 +65,7 @@ function fixture(
   }
   const rootNode = { id: '0:0', type: 'DOCUMENT' }
   const page = { id: '0:1', type: 'PAGE', name: 'Owned page', parent: rootNode, selection: [] }
-  const document = { id: 5, activeLayers: [] }
+  const document = { id: 5, activeLayers: [], layers: [] }
   const data =
     host === 'figma'
       ? {
@@ -111,11 +116,15 @@ function fixture(
           transparentPixelsLocked: false,
           isBackgroundLayer: false
         }
+  document.layers = [node, second]
   if (host === 'figma') {
     for (const item of [node, second]) {
       item.width = 64
       item.height = 32
-      item.exportAsync = async () => fakePng(item.name)
+      item.exportAsync = async () => {
+        if (visualGate) await visualGate({ node, second })
+        return fakePng(item.name)
+      }
     }
   }
   if (failSecond)
@@ -138,15 +147,28 @@ function fixture(
     showUI() {},
     on() {},
     closePlugin() {},
+    getNodeById(id) {
+      return [rootNode, page, node, second].find((item) => item.id === id) || null
+    },
     ui: { postMessage: (value) => posts.push(plain(value)) }
   }
   const origin = 'http://127.0.0.1:49152',
     pluginId = 'owned.' + host
   const sessionId = 'b'.repeat(32),
     sessionToken = 'c'.repeat(64),
-    callId = 'd'.repeat(32)
+    callId = 'd'.repeat(32),
+    sourceExecutionId = '8'.repeat(32),
+    correctionExecutionId = 'a'.repeat(32),
+    correctionAuthorizationId = '5'.repeat(32),
+    correctionBaselineId = '4'.repeat(32),
+    sourceVisualEvidenceSha256 = '6'.repeat(64),
+    baselineVisualEvidenceSha256 = '7'.repeat(64),
+    comparisonSha256 = 'a'.repeat(64)
   let approvedContext
+  let correctionContext
   let planResult = null
+  const planResults = []
+  const claimedExecutions = new Set()
   const plannedSteps = () => {
     const steps = [
       {
@@ -202,51 +224,123 @@ function fixture(
           expiresAt: time + 600_000,
           idleTimeoutMs: 120_000
         }
-      else if (url.endsWith('/prepare')) {
+      else if (url.endsWith('/plan/correction/prepare')) {
+        const selectedId = approvedContext.nodes[0].id
+        if (!body.hostContext) {
+          value = {
+            protocol: 1,
+            status: 'authorized',
+            authorization: {
+              protocol: 1,
+              authorizationId: correctionAuthorizationId,
+              baselineId: tamperComparisonIdentity ? 'f'.repeat(32) : correctionBaselineId,
+              sourceExecutionId,
+              pluginId,
+              host,
+              projectId: 'project_1',
+              documentId: approvedContext.documentId,
+              scopeId: approvedContext.scopeId,
+              captureId: approvedContext.captureId,
+              adapterVersion: host === 'figma' ? 'figma-native-1' : 'photoshop-uxp-native-1',
+              baselineEvidenceSha256: baselineVisualEvidenceSha256,
+              visualEvidenceSha256: sourceVisualEvidenceSha256,
+              comparisonSha256,
+              visualTargetIds: [selectedId],
+              authorizedTargetIds: [tamperCorrectionAuthorization ? String(second.id) : selectedId],
+              round: 1,
+              maxCorrectionRounds: 3,
+              authorizedAt: time,
+              expiresAt: time + 60_000,
+              state: 'authorized'
+            }
+          }
+        } else {
+          correctionContext = body.hostContext
+          value = {
+            protocol: 1,
+            status: 'prepared',
+            executionId: correctionExecutionId,
+            callId,
+            state: 'awaiting-approval',
+            expiresAt: time + 60_000
+          }
+        }
+      } else if (url.endsWith('/prepare')) {
         approvedContext = body.hostContext
         value = { protocol: 1, callId, status: 'awaiting-approval', expiresAt: time + 120_000 }
       } else if (url.endsWith('/plan/status')) {
+        const executionId = body.executionId || sourceExecutionId
         value = {
           protocol: 1,
-          executionId: '8'.repeat(32),
+          executionId,
           callId,
-          state: approvePlan ? 'approved' : 'awaiting-approval',
+          state: claimedExecutions.has(executionId)
+            ? 'claimed'
+            : approvePlan
+              ? 'approved'
+              : 'awaiting-approval',
           completed: 0,
-          total: twoSteps ? 2 : 1,
+          total: executionId === correctionExecutionId ? 1 : twoSteps ? 2 : 1,
           effect: 'none',
           updatedAt: time
         }
       } else if (url.endsWith('/plan/claim')) {
-        const selected = approvedContext.nodes[0]
+        claimedExecutions.add(body.executionId || sourceExecutionId)
+        const correction = body.executionId === correctionExecutionId
+        const context = correction ? correctionContext : approvedContext
+        const selected = context.nodes[0]
+        const authorizationTargets = [approvedContext.nodes[0].id]
         value = {
           protocol: 1,
           status: 'ready',
           intent: {
             protocol: 1,
             purpose: 'execute-host-plan',
-            executionId: '8'.repeat(32),
+            executionId: correction ? correctionExecutionId : sourceExecutionId,
             callId,
             pluginId,
             host,
-            documentId: approvedContext.documentId,
-            scopeId: approvedContext.scopeId,
-            captureId: approvedContext.captureId,
+            documentId: context.documentId,
+            scopeId: context.scopeId,
+            captureId: context.captureId,
             plan: {
               schemaVersion: 2,
               kind: 'host-plan',
-              captureId: approvedContext.captureId,
-              steps: plannedSteps()
+              captureId: context.captureId,
+              steps: correction
+                ? [
+                    {
+                      command: 'node.rename',
+                      targetId: selected.id,
+                      name: 'Original owned name'
+                    }
+                  ]
+                : plannedSteps()
             },
-            planSha256: '9'.repeat(64),
+            planSha256: correction ? 'f'.repeat(64) : '9'.repeat(64),
             expiresAt: time + 120000,
             adapterVersion: host === 'figma' ? 'figma-native-1' : 'photoshop-uxp-native-1',
-            actionId: '8'.repeat(32)
+            actionId: correction ? 'e'.repeat(32) : sourceExecutionId,
+            ...(correction
+              ? {
+                  visualTargetIds: authorizationTargets,
+                  visualCorrection: {
+                    authorizationId: correctionAuthorizationId,
+                    baselineId: correctionBaselineId,
+                    sourceExecutionId,
+                    round: 1,
+                    maxCorrectionRounds: 3,
+                    authorizedTargetIds: authorizationTargets
+                  }
+                }
+              : {})
           }
         }
       } else if (url.endsWith('/plan/progress')) {
+        if (progressHook) await progressHook(body, { node, second })
         value = {
           protocol: 1,
-          executionId: '8'.repeat(32),
+          executionId: body.executionId,
           callId,
           state: body.phase,
           completed: body.completed,
@@ -256,21 +350,49 @@ function fixture(
         }
       } else if (url.endsWith('/plan/result')) {
         planResult = body
-        value = {
+        planResults.push(plain(body))
+        const correction = body.executionId === correctionExecutionId
+        const statusValue = {
           protocol: 1,
-          executionId: '8'.repeat(32),
-          status: {
-            protocol: 1,
-            executionId: '8'.repeat(32),
-            callId,
-            state: body.status === 'completed' ? 'completed' : 'failed',
-            completed: body.completed,
-            total: body.total,
-            effect: body.effect,
-            updatedAt: time,
-            ...(body.visualEvidence ? { visualEvidence: body.visualEvidence } : {})
-          }
+          executionId: body.executionId,
+          callId,
+          state: body.status === 'completed' ? 'completed' : 'failed',
+          completed: body.completed,
+          total: body.total,
+          effect: body.effect,
+          updatedAt: time,
+          ...(body.visualEvidence ? { visualEvidence: body.visualEvidence } : {})
         }
+        if (correctionFlow && body.status === 'completed' && body.visualEvidence) {
+          const current = body.visualEvidence[0].after
+          const baseline = correction ? current : body.visualEvidence[0].before
+          Object.assign(statusValue, {
+            visualEvidenceSha256: correction
+              ? baselineVisualEvidenceSha256
+              : sourceVisualEvidenceSha256,
+            visualBaselineComparison: {
+              protocol: 1,
+              baselineId: correctionBaselineId,
+              executionId: body.executionId,
+              baselineEvidenceSha256: baselineVisualEvidenceSha256,
+              visualEvidenceSha256: correction
+                ? baselineVisualEvidenceSha256
+                : sourceVisualEvidenceSha256,
+              comparedAt: time,
+              targets: [
+                {
+                  targetId: body.visualEvidence[0].targetId,
+                  baseline,
+                  current,
+                  changed: !correction
+                }
+              ],
+              changedCount: correction ? 0 : 1,
+              exactMatch: correction
+            }
+          })
+        }
+        value = { protocol: 1, executionId: body.executionId, status: statusValue }
       } else if (url.endsWith('/status')) {
         const selected = approvedContext.nodes[0]
         const plan = {
@@ -333,11 +455,13 @@ function fixture(
         app,
         core: {
           async executeAsModal(callback) {
+            if (modalGate) await modalGate()
             return callback()
           }
         },
         imaging: {
           async getPixels(request) {
+            if (visualGate) await visualGate({ node, second })
             const layer = [node, second].find((item) => item.id === request.layerID)
             assert.ok(layer)
             return {
@@ -435,10 +559,13 @@ function fixture(
     output,
     requests,
     node,
+    second,
     vm,
     posts,
     element,
+    cancel: () => (host === 'figma' ? send({ type: 'cancel' }) : click('cancel')),
     planResult: () => planResult,
+    planResults: () => planResults.map(plain),
     close: () => {
       if (host === 'figma') send({ type: 'dispose' })
       else click('close')
@@ -524,6 +651,93 @@ for (const host of ['figma', 'photoshop']) {
       await flush()
     }
   })
+  test(`${host}: a changed checkpoint requires a separately authorized and approved correction`, async () => {
+    const f = fixture(host, { approvePlan: true, correctionFlow: true })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(1000)
+      assert.equal(f.node.name, 'Original owned name')
+      await f.tick(1000)
+      assert.equal(f.node.name, 'Approved new name')
+      assert.equal(f.planResults().length, 1)
+
+      await f.tick(1000)
+      assert.equal(f.node.name, 'Original owned name')
+      const results = f.planResults()
+      assert.equal(results.length, 2)
+      assert.equal(results[0].executionId, '8'.repeat(32))
+      assert.equal(results[1].executionId, 'a'.repeat(32))
+      assert.equal(results[1].status, 'completed')
+      assert.equal(results[1].effect, 'applied')
+      assert.equal(results[1].readback.captureId, '5'.repeat(32))
+      assert.equal(results[1].readback.steps[0].observation, 'requested')
+      assert.equal(results[1].visualEvidence.length, 1)
+      assert.equal(results[1].visualEvidence[0].targetId, results[1].readback.steps[0].targetId)
+      assert.equal(results[1].visualEvidence[0].changed, true)
+
+      const correctionPrepares = f.requests.filter((request) =>
+        request.url.endsWith('/plan/correction/prepare')
+      )
+      assert.equal(correctionPrepares.length, 2)
+      assert.deepEqual(correctionPrepares[0].body, {
+        protocol: 1,
+        sourceExecutionId: '8'.repeat(32)
+      })
+      assert.equal(correctionPrepares[1].body.hostContext.captureId, '5'.repeat(32))
+      assert.deepEqual(correctionPrepares[1].body.hostContext.selectedIds, [
+        results[1].readback.steps[0].targetId
+      ])
+      const correctionClaim = f.requests.find(
+        (request) =>
+          request.url.endsWith('/plan/claim') && request.body.executionId === 'a'.repeat(32)
+      )
+      assert.ok(correctionClaim)
+      assert.deepEqual(correctionClaim.body, {
+        protocol: 1,
+        callId: 'd'.repeat(32),
+        executionId: 'a'.repeat(32)
+      })
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: a correction authorization cannot expand beyond the compared changed targets`, async () => {
+    const f = fixture(host, {
+      approvePlan: true,
+      correctionFlow: true,
+      tamperCorrectionAuthorization: true
+    })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(1000)
+      await f.tick(1000)
+      assert.equal(f.node.name, 'Approved new name')
+      await f.tick(1000)
+      assert.equal(f.node.name, 'Approved new name')
+      assert.equal(f.planResults().length, 1)
+      assert.equal(
+        f.requests.filter((request) => request.url.endsWith('/plan/correction/prepare')).length,
+        1
+      )
+      assert.equal(
+        f.requests.filter(
+          (request) =>
+            request.url.endsWith('/plan/claim') && request.body.executionId === 'a'.repeat(32)
+        ).length,
+        0
+      )
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
   test(`${host}: a mid-plan native failure rolls back earlier writes and reports originals`, async () => {
     const f = fixture(host, { approvePlan: true, twoSteps: true, failSecond: true })
     try {
@@ -564,4 +778,235 @@ for (const host of ['figma', 'photoshop']) {
       await flush()
     }
   })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  for (const action of ['cancel', 'close']) {
+    test(`${host}: ${action} during visual capture cannot perform a late write`, async () => {
+      let release
+      let entered = false
+      const gate = new Promise((resolve) => {
+        release = resolve
+      })
+      const f = fixture(host, {
+        approvePlan: true,
+        visualGate: async () => {
+          entered = true
+          await gate
+        }
+      })
+      try {
+        await f.pair()
+        f.capture()
+        f.share()
+        await flush()
+        await f.tick(1000)
+        await f.tick(1000)
+        assert.equal(entered, true)
+        assert.equal(f.node.name, 'Original owned name')
+        f[action]()
+        await flush()
+        release()
+        await flush()
+        assert.equal(f.node.name, 'Original owned name')
+        assert.ok(!f.planResults().some((result) => result.status === 'completed'))
+      } finally {
+        release()
+        f.close()
+        await flush()
+      }
+    })
+  }
+}
+test('photoshop: cancellation while waiting for modal never starts a native write', async () => {
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const f = fixture('photoshop', { approvePlan: true, modalGate: () => gate })
+  try {
+    await f.pair()
+    f.capture()
+    f.share()
+    await flush()
+    await f.tick(1000)
+    await f.tick(1000)
+    f.cancel()
+    await flush()
+    release()
+    await flush()
+    assert.equal(f.node.name, 'Original owned name')
+    assert.ok(!f.planResults().some((result) => result.status === 'completed'))
+  } finally {
+    release()
+    f.close()
+    await flush()
+  }
+})
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: same targets with a substituted accepted checkpoint never start correction`, async () => {
+    const f = fixture(host, {
+      approvePlan: true,
+      correctionFlow: true,
+      tamperComparisonIdentity: true
+    })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(1000)
+      await f.tick(1000)
+      await f.tick(1000)
+      assert.equal(f.node.name, 'Approved new name')
+      assert.equal(f.planResults().length, 1)
+      assert.equal(f.requests.filter((request) => request.url.endsWith('/plan/claim')).length, 1)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+
+// Inject user/host changes across actual async boundaries in the production scripts.
+for (const host of ['figma', 'photoshop']) {
+  for (const mutation of ['rename', 'lock']) {
+    test(`${host}: rechecks the next target after awaiting progress (${mutation})`, async () => {
+      const f = fixture(host, {
+        approvePlan: true,
+        twoSteps: true,
+        progressHook: (progress, { second }) => {
+          if (progress.phase !== 'executing' || progress.completed !== 1) return
+          if (mutation === 'rename') second.name = 'Concurrent user change'
+          else second[host === 'figma' ? 'locked' : 'allLocked'] = true
+        }
+      })
+      try {
+        await f.pair()
+        f.capture()
+        f.share()
+        await flush()
+        await f.tick(2000)
+        assert.equal(f.node.name, 'Original owned name', 'our prior write must be rolled back')
+        assert.equal(
+          f.second.name,
+          mutation === 'rename' ? 'Concurrent user change' : 'Second original name'
+        )
+        assert.equal(f.planResult().status, 'failed')
+        assert.equal(Object.hasOwn(f.planResult(), 'visualEvidence'), false)
+      } finally {
+        f.close()
+        await flush()
+      }
+    })
+  }
+  test(`${host}: rollback never overwrites a newer user change`, async () => {
+    const f = fixture(host, {
+      approvePlan: true,
+      twoSteps: true,
+      failSecond: true,
+      progressHook: (progress, { node }) => {
+        if (progress.phase === 'executing' && progress.completed === 1)
+          node.name = 'Concurrent user change'
+      }
+    })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(2000)
+      assert.equal(f.node.name, 'Concurrent user change')
+      assert.equal(f.planResult().status, 'failed')
+      assert.equal(f.planResult().effect, 'unknown')
+      assert.equal(f.planResult().errorCode, 'QUARANTINED')
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: post-write visual capture cannot publish stale successful readback`, async () => {
+    let captures = 0
+    const f = fixture(host, {
+      approvePlan: true,
+      visualGate: ({ node }) => {
+        if (++captures === 2) node.name = 'Concurrent user change'
+      }
+    })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(2000)
+      assert.equal(f.node.name, 'Concurrent user change')
+      assert.equal(f.planResult().status, 'failed')
+      assert.equal(f.planResult().effect, 'unknown')
+      assert.equal(f.planResult().errorCode, 'QUARANTINED')
+      assert.equal(Object.hasOwn(f.planResult(), 'visualEvidence'), false)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: result rechecks readback after awaiting the final progress receipt`, async () => {
+    const f = fixture(host, {
+      approvePlan: true,
+      progressHook: (progress, { node }) => {
+        if (progress.phase === 'readback') node.name = 'Concurrent user change'
+      }
+    })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(2000)
+      assert.equal(f.node.name, 'Concurrent user change')
+      assert.equal(f.planResult().status, 'failed')
+      assert.equal(f.planResult().effect, 'unknown')
+      assert.equal(f.planResult().errorCode, 'QUARANTINED')
+      assert.equal(f.planResult().readback.steps[0].observation, 'other')
+      assert.equal(Object.hasOwn(f.planResult(), 'visualEvidence'), false)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  for (const action of ['cancel', 'close']) {
+    test(`${host}: ${action} after the first progress receipt prevents later writes`, async () => {
+      let f
+      let progressCount = 0
+      f = fixture(host, {
+        approvePlan: true,
+        twoSteps: true,
+        progressHook: (progress) => {
+          if (progress.phase === 'executing') {
+            progressCount++
+            if (progress.completed === 1) f[action]()
+          }
+        }
+      })
+      try {
+        await f.pair()
+        f.capture()
+        f.share()
+        await flush()
+        await f.tick(2000)
+        assert.equal(progressCount, 1)
+        assert.equal(f.second.name, 'Second original name')
+        assert.ok(!f.planResults().some((result) => result.status === 'completed'))
+      } finally {
+        f.close()
+        await flush()
+      }
+    })
+  }
 }

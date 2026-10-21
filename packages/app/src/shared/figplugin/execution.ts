@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { FigPluginIdSchema, FIGPLUGIN_HOSTS } from './manifest'
 import {
+  hostContextSchema,
   hostPlanReadbackSchema,
   hostPlanSchema,
   type HostPlan,
@@ -233,6 +234,7 @@ export const figPluginVisualCorrectionAuthorizationSchema = z
     baselineEvidenceSha256: sha256,
     visualEvidenceSha256: sha256,
     comparisonSha256: sha256,
+    visualTargetIds: sortedUniqueIdentifierArraySchema,
     authorizedTargetIds: sortedUniqueIdentifierArraySchema,
     round: z.number().int().min(1).max(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS),
     maxCorrectionRounds: z.literal(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS),
@@ -252,9 +254,29 @@ export const figPluginVisualCorrectionAuthorizationSchema = z
         code: z.ZodIssueCode.custom,
         message: 'Visual correction authorization round limit exceeded'
       })
+    const visualTargets = new Set(value.visualTargetIds)
+    if (value.authorizedTargetIds.some((targetId) => !visualTargets.has(targetId)))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual correction target is outside the visual checkpoint'
+      })
   })
 export type FigPluginVisualCorrectionAuthorization = z.output<
   typeof figPluginVisualCorrectionAuthorizationSchema
+>
+
+export const figPluginVisualCorrectionAttemptSchema = z
+  .object({
+    authorizationId: hex32,
+    baselineId: hex32,
+    sourceExecutionId: hex32,
+    round: z.number().int().min(1).max(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS),
+    maxCorrectionRounds: z.literal(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS),
+    authorizedTargetIds: sortedUniqueIdentifierArraySchema
+  })
+  .strict()
+export type FigPluginVisualCorrectionAttempt = z.output<
+  typeof figPluginVisualCorrectionAttemptSchema
 >
 
 export const figPluginExecutionPreviewSchema = z
@@ -276,6 +298,7 @@ export const figPluginExecutionPreviewSchema = z
     visualAudit: z.enum(['hash-only', 'unavailable']),
     risk: z.enum(['low', 'medium', 'high']),
     differences: z.array(differenceSchema).min(1).max(20),
+    visualCorrection: figPluginVisualCorrectionAttemptSchema.optional(),
     state: figPluginExecutionStateSchema,
     requiresWriteApproval: z.literal(true),
     createdAt: safeInteger,
@@ -311,12 +334,39 @@ export const figPluginExecutionIntentSchema = z
     planSha256: sha256,
     expiresAt: safeInteger,
     adapterVersion: z.string().min(1).max(64),
-    actionId: hex32
+    actionId: hex32,
+    visualTargetIds: sortedUniqueIdentifierArraySchema.optional(),
+    visualCorrection: figPluginVisualCorrectionAttemptSchema.optional()
   })
   .strict()
   .superRefine((value, ctx) => {
     if (value.plan.captureId !== value.captureId)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Intent capture mismatch' })
+    const planTargetIds = new Set(value.plan.steps.map((step) => step.targetId))
+    if (
+      value.visualTargetIds &&
+      [...planTargetIds].some((targetId) => !value.visualTargetIds!.includes(targetId))
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual target set does not cover the plan'
+      })
+    if ((value.visualCorrection === undefined) !== (value.visualTargetIds === undefined))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Incomplete visual correction intent'
+      })
+    if (value.visualCorrection) {
+      const authorized = new Set(value.visualCorrection.authorizedTargetIds)
+      if (
+        authorized.size !== planTargetIds.size ||
+        [...authorized].some((targetId) => !planTargetIds.has(targetId))
+      )
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Visual correction target does not exactly match the plan'
+        })
+    }
     try {
       if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 32 * 1024)
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Execution intent is too large' })
@@ -326,7 +376,9 @@ export const figPluginExecutionIntentSchema = z
   })
 export type FigPluginExecutionIntent = z.output<typeof figPluginExecutionIntentSchema>
 
-export const figPluginExecutionClaimRequestSchema = z.object({ protocol, callId: hex32 }).strict()
+export const figPluginExecutionClaimRequestSchema = z
+  .object({ protocol, callId: hex32, executionId: hex32.optional() })
+  .strict()
 export type FigPluginExecutionClaimRequest = z.output<typeof figPluginExecutionClaimRequestSchema>
 
 const publicStatusFields = {
@@ -340,7 +392,9 @@ const publicStatusFields = {
   updatedAt: safeInteger,
   visualEvidence: visualEvidenceArraySchema.optional(),
   visualEvidenceSha256: sha256.optional(),
-  visualBaselineComparison: figPluginVisualBaselineComparisonSchema.optional()
+  visualBaselineComparison: figPluginVisualBaselineComparisonSchema.optional(),
+  visualCorrection: figPluginVisualCorrectionAttemptSchema.optional(),
+  visualCorrectionConsumed: z.boolean().optional()
 }
 export const figPluginExecutionStatusSchema = z
   .object({
@@ -362,6 +416,11 @@ export const figPluginExecutionStatusSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if ((value.visualCorrection === undefined) !== (value.visualCorrectionConsumed === undefined))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Incomplete correction consumption status'
+      })
     if (value.completed > value.total)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid completed count' })
     if ((value.visualEvidence === undefined) !== (value.visualEvidenceSha256 === undefined))
@@ -513,7 +572,9 @@ export type FigPluginExecutionResultResponse = z.output<
   typeof figPluginExecutionResultResponseSchema
 >
 
-export const figPluginExecutionStatusRequestSchema = z.object({ protocol, callId: hex32 }).strict()
+export const figPluginExecutionStatusRequestSchema = z
+  .object({ protocol, callId: hex32, executionId: hex32.optional() })
+  .strict()
 export type FigPluginExecutionStatusRequest = z.output<typeof figPluginExecutionStatusRequestSchema>
 
 export const figPluginDesktopExecutionApprovalSchema = z
@@ -546,10 +607,54 @@ export type FigPluginDesktopVisualCorrectionAuthorization = z.output<
   typeof figPluginDesktopVisualCorrectionAuthorizationSchema
 >
 
+export const figPluginVisualCorrectionPrepareRequestSchema = z
+  .object({
+    protocol,
+    sourceExecutionId: hex32,
+    hostContext: hostContextSchema.optional()
+  })
+  .strict()
+export type FigPluginVisualCorrectionPrepareRequest = z.output<
+  typeof figPluginVisualCorrectionPrepareRequestSchema
+>
+
+export const figPluginVisualCorrectionPrepareResponseSchema = z.discriminatedUnion('status', [
+  z.object({ protocol, status: z.literal('pending'), expiresAt: safeInteger }).strict(),
+  z
+    .object({
+      protocol,
+      status: z.literal('authorized'),
+      authorization: figPluginVisualCorrectionAuthorizationSchema
+    })
+    .strict(),
+  z
+    .object({
+      protocol,
+      status: z.literal('prepared'),
+      executionId: hex32,
+      callId: hex32,
+      state: figPluginExecutionStateSchema,
+      expiresAt: safeInteger
+    })
+    .strict(),
+  z
+    .object({
+      protocol,
+      status: z.literal('terminal'),
+      state: terminalStatus,
+      errorCode: z.string().min(1).max(64).optional()
+    })
+    .strict()
+])
+export type FigPluginVisualCorrectionPrepareResponse = z.output<
+  typeof figPluginVisualCorrectionPrepareResponseSchema
+>
+
 export const figPluginExecutionDesktopStateSchema = z
   .object({
-    previews: z.array(figPluginExecutionPreviewSchema).max(16),
-    statuses: z.array(figPluginExecutionStatusSchema).max(16),
+    // Runtime retains at most 32 ordinary calls plus 16 correction attempts.
+    previews: z.array(figPluginExecutionPreviewSchema).max(48),
+    statuses: z.array(figPluginExecutionStatusSchema).max(48),
     baselines: z.array(figPluginVisualBaselineSchema).max(16),
     correctionAuthorizations: z.array(figPluginVisualCorrectionAuthorizationSchema).max(16)
   })

@@ -228,6 +228,7 @@ const visualCorrectionAuthorization = (): FigPluginVisualCorrectionAuthorization
   baselineEvidenceSha256: 'b'.repeat(64),
   visualEvidenceSha256: visualExecutionStatus().visualEvidenceSha256!,
   comparisonSha256: 'c'.repeat(64),
+  visualTargetIds: ['node-1'],
   authorizedTargetIds: ['node-1'],
   round: 1,
   maxCorrectionRounds: 3,
@@ -1148,6 +1149,52 @@ describe('PluginBridgePanel', () => {
       screen.queryByRole('button', { name: key('cancelVisualCorrectionAuthorization') })
     ).not.toBeInTheDocument()
   })
+
+  it.each(['running', 'consumed', 'limit', 'unclaimed-cancelled'] as const)(
+    'gates another correction authorization for %s attempts',
+    async (mode) => {
+      const source = comparedVisualExecutionStatus(true)
+      const baseline = {
+        ...acceptedVisualBaseline(),
+        visualEvidenceSha256: source.visualBaselineComparison!.baselineEvidenceSha256,
+        correctionRoundsUsed: mode === 'limit' ? 3 : mode === 'unclaimed-cancelled' ? 0 : 1
+      }
+      const authorization = visualCorrectionAuthorization()
+      const child: FigPluginExecutionStatus = {
+        protocol: 1,
+        executionId: 'e'.repeat(32),
+        callId: source.callId,
+        state: mode === 'running' ? 'executing' : 'cancelled',
+        completed: 0,
+        total: 1,
+        effect: 'none',
+        updatedAt: Date.now(),
+        visualCorrection: {
+          authorizationId: authorization.authorizationId,
+          baselineId: baseline.baselineId,
+          sourceExecutionId: source.executionId,
+          round: 1,
+          maxCorrectionRounds: 3,
+          authorizedTargetIds: ['node-1']
+        },
+        visualCorrectionConsumed: mode !== 'unclaimed-cancelled'
+      }
+      mocks.center.planState.mockResolvedValue({
+        previews: [nativeExecutionPreview()],
+        statuses: [source, child],
+        baselines: [baseline],
+        correctionAuthorizations: []
+      })
+      mount()
+      await click('refresh')
+      if (mode === 'unclaimed-cancelled') expect(button('authorizeVisualCorrection')).toBeDisabled()
+      else
+        expect(
+          screen.queryByRole('button', { name: key('authorizeVisualCorrection') })
+        ).not.toBeInTheDocument()
+      expect(mocks.center.authorizeVisualCorrection).not.toHaveBeenCalled()
+    }
+  )
 
   it('renders bounded visual checkpoint summaries without claiming automatic correction', async () => {
     mocks.center.planState.mockResolvedValue({

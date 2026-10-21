@@ -25,7 +25,9 @@ import {
   figPluginExecutionResultRequestSchema,
   figPluginExecutionResultResponseSchema,
   figPluginExecutionStatusRequestSchema,
-  figPluginExecutionStatusSchema
+  figPluginExecutionStatusSchema,
+  figPluginVisualCorrectionPrepareRequestSchema,
+  figPluginVisualCorrectionPrepareResponseSchema
 } from '@shared/figplugin/execution'
 import type { FigPluginBridgeRuntime } from './bridgeRuntime'
 
@@ -37,6 +39,7 @@ type Runtime = Pick<
   | 'cancel'
   | 'closeSession'
   | 'planStatus'
+  | 'prepareVisualCorrection'
   | 'claimPlan'
   | 'planProgress'
   | 'planResult'
@@ -49,6 +52,7 @@ const paths = new Set([
   '/figplugin/v1/cancel',
   '/figplugin/v1/close',
   '/figplugin/v1/plan/status',
+  '/figplugin/v1/plan/correction/prepare',
   '/figplugin/v1/plan/claim',
   '/figplugin/v1/plan/progress',
   '/figplugin/v1/plan/result'
@@ -204,6 +208,15 @@ const dispatch = async (
           session,
           token,
           parseFigPluginBridgeValue(figPluginExecutionStatusRequestSchema, body)
+        )
+      )
+    case '/figplugin/v1/plan/correction/prepare':
+      return serialize(
+        figPluginVisualCorrectionPrepareResponseSchema,
+        await runtime.prepareVisualCorrection(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginVisualCorrectionPrepareRequestSchema, body)
         )
       )
     case '/figplugin/v1/plan/claim':

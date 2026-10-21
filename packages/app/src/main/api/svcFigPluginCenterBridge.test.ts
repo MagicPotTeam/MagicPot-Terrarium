@@ -1683,7 +1683,7 @@ it('real loopback: exact user consent records one bounded visual checkpoint and 
   expect(cancelledOptions.detail).toContain(
     `Maximum correction rounds recorded by this checkpoint: ${FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS}`
   )
-  expect(cancelledOptions.detail).toContain('stores no pixels or design text')
+  expect(cancelledOptions.detail).toContain('plan values can include design text')
   expect(cancelledOptions.detail).not.toContain('Synthetic approved label')
   expect(cancelledOptions.detail).not.toContain('Synthetic untrusted label')
   cancelledModal.resolve(cancelled)
@@ -1842,7 +1842,7 @@ it('real loopback: changed visual comparison requires one separate correction au
     `Current evidence SHA-256: ${changed.visualEvidenceSha256}`
   )
   expect(declinedOptions.detail).toContain('"targetId": "1:2"')
-  expect(declinedOptions.detail).toContain('does not call a model')
+  expect(declinedOptions.detail).toContain('without calling a model')
   expect(declinedOptions.detail).not.toContain('Synthetic approved label')
   expect(declinedOptions.detail).not.toContain('Synthetic untrusted label')
   declinedModal.resolve(cancelled)
@@ -2063,3 +2063,135 @@ it.each(['deny', 'cancel'] as const)(
     expect(value.model.chat).toHaveBeenCalledTimes(1)
   }
 )
+
+it('real loopback: correction authorization, exact write approval, one claim and a fresh visual comparison', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const first = await completeVisualExecution(value)
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  const baseline = await value.service.acceptVisualBaseline(
+    { executionId: first.execution.executionId, visualEvidenceSha256: first.visualEvidenceSha256 },
+    invocation('acceptVisualBaseline')
+  )
+  if (!baseline) throw new Error('missing baseline')
+  const drift = [
+    { ...visualEvidence[0], after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) } }
+  ]
+  const changed = await completeVisualExecution(value, drift, 2)
+  const request = {
+    executionId: changed.execution.executionId,
+    baselineId: baseline.baselineId,
+    visualEvidenceSha256: changed.visualEvidenceSha256
+  }
+  const authModal = holdModal()
+  const authorizing = value.service.authorizeVisualCorrection(
+    request,
+    invocation('authorizeVisualCorrection')
+  )
+  const authOptions = await authModal.opened
+  expectDefaultCancel(authOptions)
+  expect(authOptions.detail).toContain('without calling a model')
+  expect(authOptions.detail).toContain('separate native write approval')
+  authModal.resolve(approved)
+  const authorization = await authorizing
+  if (!authorization) throw new Error('missing authorization')
+
+  const context: HostContext = {
+    ...structuredClone(visualExecutionContext),
+    captureId: authorization.authorizationId,
+    nodes: visualExecutionContext.nodes.map((node) => ({ ...node, name: 'Drifted synthetic name' }))
+  }
+  const prepareInput = {
+    protocol: 1,
+    sourceExecutionId: changed.execution.executionId,
+    hostContext: context
+  }
+  const prepared = await post(
+    changed.origin,
+    'plan/correction/prepare',
+    prepareInput,
+    changed.session
+  )
+  expect(prepared.status).toBe(200)
+  const preparedBody = prepared.body as { executionId: string; status: string }
+  expect(preparedBody.status).toBe('prepared')
+  const correction = (await planDesktopState(value)).previews.find(
+    (item) => item.executionId === preparedBody.executionId
+  )!
+  expect(correction.visualCorrection).toMatchObject({ round: 1, authorizedTargetIds: ['1:2'] })
+  const selector = {
+    protocol: 1,
+    callId: changed.prepared.callId,
+    executionId: correction.executionId
+  }
+  expect((await post(changed.origin, 'plan/claim', selector, changed.session)).body).toMatchObject({
+    status: 'pending'
+  })
+  expect((await planDesktopState(value)).baselines[0].correctionRoundsUsed).toBe(0)
+  // A renderer checkbox is not sufficient without native write acceptance.
+  native.showMessageBox.mockResolvedValueOnce({ response: 0, checkboxChecked: false })
+  expect(
+    await value.service.approvePlanExecution(
+      { executionId: correction.executionId, planSha256: correction.planSha256 },
+      invocation('approvePlanExecution')
+    )
+  ).toEqual({ completed: false })
+  expect((await post(changed.origin, 'plan/claim', selector, changed.session)).body).toMatchObject({
+    status: 'pending'
+  })
+
+  const writeModal = holdModal()
+  const approving = value.service.approvePlanExecution(
+    { executionId: correction.executionId, planSha256: correction.planSha256 },
+    invocation('approvePlanExecution')
+  )
+  const options = await writeModal.opened
+  expectDefaultCancel(options)
+  expect(options.title).toBe('Approve one visual correction write')
+  expect(options.detail).toContain(correction.planSha256)
+  expect(options.detail).toContain('Drifted synthetic name')
+  expect(options.detail).toContain('Synthetic approved label')
+  expect(options.detail).toContain('round 1 of 3')
+  writeModal.resolve(approved)
+  await approving
+  const replies = await Promise.all([
+    post(changed.origin, 'plan/claim', selector, changed.session),
+    post(changed.origin, 'plan/claim', selector, changed.session)
+  ])
+  expect(replies[0].body).toEqual(replies[1].body)
+  const claim = figPluginExecutionClaimResponseSchema.parse(replies[0].body)
+  if (claim.status !== 'ready') throw new Error('not claimed')
+  expect((await planDesktopState(value)).baselines[0].correctionRoundsUsed).toBe(1)
+  const after = {
+    ...structuredClone(context),
+    nodes: context.nodes.map((node) => ({ ...node, name: 'Synthetic approved label' }))
+  }
+  const resultBody = {
+    protocol: 1,
+    executionId: correction.executionId,
+    actionId: claim.intent.actionId,
+    status: 'completed',
+    effect: 'applied',
+    completed: 1,
+    total: 1,
+    readback: createHostPlanReadback(context, after, claim.intent.plan),
+    visualEvidence: [
+      { targetId: '1:2', before: drift[0].after, after: visualEvidence[0].after, changed: true }
+    ]
+  }
+  const resultResponse = await post(changed.origin, 'plan/result', resultBody, changed.session)
+  expect(resultResponse.status).toBe(200)
+  const result = figPluginExecutionResultResponseSchema.parse(resultResponse.body)
+  expect(result.status).toMatchObject({
+    state: 'completed',
+    visualCorrectionConsumed: true,
+    visualBaselineComparison: { baselineId: baseline.baselineId, exactMatch: true, changedCount: 0 }
+  })
+  expect((await post(changed.origin, 'plan/result', resultBody, changed.session)).body).toEqual(
+    resultResponse.body
+  )
+  expect(
+    (await post(changed.origin, 'plan/correction/prepare', prepareInput, changed.session)).body
+  ).toMatchObject({ status: 'terminal', state: 'completed' })
+  // Restoring accepted properties does not call the provider again.
+  expect(value.model.chat).toHaveBeenCalledTimes(2)
+})

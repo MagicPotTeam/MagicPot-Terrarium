@@ -674,6 +674,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       status.visualEvidence !== undefined &&
       status.visualEvidenceSha256 !== undefined &&
       preview?.visualAudit === 'hash-only' &&
+      preview.visualCorrection === undefined &&
       preview.expiresAt > Date.now() &&
       projects.some((value) => value.id === preview.projectId) &&
       candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host) &&
@@ -747,6 +748,13 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       preview.expiresAt > Date.now() &&
       projects.some((value) => value.id === preview.projectId) &&
       candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host) &&
+      !executions.statuses.some(
+        (child) =>
+          child.visualCorrection?.baselineId === baseline.baselineId &&
+          (!['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(child.state) ||
+            (child.visualCorrectionConsumed &&
+              child.visualCorrection.sourceExecutionId === status.executionId))
+      ) &&
       !executions.correctionAuthorizations.some(
         (authorization) => authorization.baselineId === baseline.baselineId
       )
@@ -1105,6 +1113,15 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                 })}
               </Typography>
               <Typography>{t('figplugin.bridge.risk', { risk: previewEx.risk })}</Typography>
+              {previewEx.visualCorrection && (
+                <Alert severity="warning">
+                  {t('figplugin.bridge.visualCorrectionWritePreview', {
+                    round: previewEx.visualCorrection.round,
+                    max: previewEx.visualCorrection.maxCorrectionRounds,
+                    count: previewEx.visualCorrection.authorizedTargetIds.length
+                  })}
+                </Alert>
+              )}
               <Typography>
                 {t('figplugin.bridge.planHash', { hash: previewEx.planSha256 })}
               </Typography>
