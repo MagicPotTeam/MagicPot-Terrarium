@@ -1364,6 +1364,46 @@
     "video_load_failed": "视频加载失败"
   },
   "figplugin": {
+    "history": {
+      "title": "执行历史",
+      "description": "查看已保存的执行与修正记录，重启 MagicPot 后也可读取，无需重新配对或请求模型。",
+      "boundary": "历史仅作核对依据，不代表任务仍在运行，也不会恢复写入授权。缺少后续终态的执行需要重新核对宿主。日志保留 7 天、最多 256 条事件、总量 1 MiB，在记录或查看时清理；不保存设计文本、像素、计划正文或凭据。",
+      "plugin": "历史插件",
+      "allPlugins": "全部插件（含已移除插件）",
+      "project": "精确项目 ID（可选）",
+      "limit": "事件条数",
+      "load": "读取历史",
+      "error": "无法安全读取执行历史，未启动任何任务。",
+      "count": "已保存事件：{{count}} 条",
+      "empty": "当前筛选下没有保留记录。",
+      "writeFailed": "本进程有事件未能保存，历史可能不完整；没有记录不代表写入没有发生。",
+      "truncated": "当前只显示最新的匹配事件，可增加条数或缩小筛选范围；较早的执行阶段可能未显示。",
+      "errorCode": "错误码：{{code}}",
+      "correction": "修正第 {{round}} / {{max}} 轮 — {{consumed}}",
+      "consumed": "已消耗轮次",
+      "unconsumed": "未消耗轮次",
+      "identifiers": "关联标识与证据哈希",
+      "comparison": "检查点比较：{{changed}} / {{count}} 个目标变化",
+      "states": {
+        "awaiting-approval": "记录时等待批准",
+        "approved": "记录时已批准",
+        "claimed": "记录时已领取",
+        "executing": "记录时执行中",
+        "readback": "记录时回读中",
+        "completed": "已完成",
+        "cancelled": "已取消",
+        "denied": "已拒绝",
+        "failed": "失败",
+        "expired": "已过期"
+      },
+      "effects": {
+        "none": "未报告修改",
+        "applied": "已应用",
+        "rolled-back": "已回滚",
+        "partial": "部分修改",
+        "unknown": "修改结果待核实"
+      }
+    },
     "bridge": {
       "title": "FigPlugin 桥接",
       "description": "将已验证的 FigPlugin 与项目配对，建立明确且可审查的桥接会话。",

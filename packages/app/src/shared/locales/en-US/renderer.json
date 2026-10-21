@@ -1364,6 +1364,46 @@
     "video_load_failed": "Video load failed"
   },
   "figplugin": {
+    "history": {
+      "title": "Execution history",
+      "description": "Read saved execution and correction events, including after restarting MagicPot. No pairing or model request is needed.",
+      "boundary": "History is evidence only, not a live task or permission to resume. An event without a later terminal state needs host verification. Logs retain up to 256 events for 7 days (1 MiB total); cleanup runs on recording or reading. Design text, pixels, plans and credentials are excluded.",
+      "plugin": "History plugin",
+      "allPlugins": "All plugins (including removed plugins)",
+      "project": "Exact project ID (optional)",
+      "limit": "Event limit",
+      "load": "Read history",
+      "error": "Execution history could not be read safely. No task was started.",
+      "count": "Saved events: {{count}}",
+      "empty": "No retained events match these filters.",
+      "writeFailed": "Some events could not be saved in this process. This history may be incomplete; an absent record does not prove that a write did not happen.",
+      "truncated": "Only the newest matching events are shown. Increase the limit or narrow the filters; older phases may be missing.",
+      "errorCode": "Error code: {{code}}",
+      "correction": "Correction {{round}} / {{max}} — {{consumed}}",
+      "consumed": "round consumed",
+      "unconsumed": "round not consumed",
+      "identifiers": "Identifiers and evidence hashes",
+      "comparison": "Checkpoint comparison: {{changed}} / {{count}} targets changed",
+      "states": {
+        "awaiting-approval": "Awaiting approval (recorded)",
+        "approved": "Approved (recorded)",
+        "claimed": "Claimed (recorded)",
+        "executing": "Executing (recorded)",
+        "readback": "Reading back (recorded)",
+        "completed": "Completed",
+        "cancelled": "Cancelled",
+        "denied": "Denied",
+        "failed": "Failed",
+        "expired": "Expired"
+      },
+      "effects": {
+        "none": "no effect reported",
+        "applied": "applied",
+        "rolled-back": "rolled back",
+        "partial": "partial effect",
+        "unknown": "effect unknown"
+      }
+    },
     "bridge": {
       "title": "FigPlugin bridge",
       "description": "Pair a verified FigPlugin with a project for an explicit, reviewable bridge session.",

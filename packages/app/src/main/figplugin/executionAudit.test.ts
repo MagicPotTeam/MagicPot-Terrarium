@@ -37,6 +37,7 @@ const event = (index: number, at: number): FigPluginExecutionAuditEvent => ({
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true })
 })
 
@@ -54,6 +55,8 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
     const reopened = new FigPluginExecutionAuditStore(root, () => 1000)
     expect(await reopened.list()).toEqual(records)
     expect(JSON.stringify(records)).not.toMatch(/Old name|New name|layer content/)
+    const disk = await fs.readFile(path.join(root, 'execution-audit.jsonl'), 'utf8')
+    expect(disk.trimEnd().split('\n')).toHaveLength(FIGPLUGIN_AUDIT_MAX_RECORDS)
     const info = await fs.stat(path.join(root, 'execution-audit.jsonl'))
     if (process.platform !== 'win32') expect(info.mode & 0o077).toBe(0)
   })
@@ -234,4 +237,110 @@ it('persists bounded correction lineage and consumption without design text or t
   ])
   const text = await fs.readFile(path.join(root, 'execution-audit.jsonl'), 'utf8')
   expect(text).not.toMatch(/PRIVATE-DESIGN|authorizedTargetIds|Drifted name|New name/)
+})
+
+async function ownedRoot(): Promise<string> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-history-test-'))
+  roots.push(root)
+  return root
+}
+
+it('physically removes expired/malformed/future events when reopened below the byte quota', async () => {
+  const root = await ownedRoot()
+  const file = path.join(root, 'execution-audit.jsonl')
+  let now = 1_000_000
+  const store = new FigPluginExecutionAuditStore(root, () => now)
+  store.record(event(1, now))
+  await store.flush()
+  now += FIGPLUGIN_AUDIT_TTL_MS
+  await fs.appendFile(
+    file,
+    [JSON.stringify(event(2, now)), JSON.stringify(event(3, now + 1)), '{PRIVATE broken}', ''].join(
+      '\n'
+    )
+  )
+  const reopened = new FigPluginExecutionAuditStore(root, () => now)
+  expect(await reopened.list()).toEqual([event(2, now)])
+  expect(await fs.readFile(file, 'utf8')).toBe(`${JSON.stringify(event(2, now))}\n`)
+})
+
+it('orders independent store instances for the same main-process root without lost records', async () => {
+  const root = await ownedRoot()
+  const left = new FigPluginExecutionAuditStore(root, () => 1000)
+  const right = new FigPluginExecutionAuditStore(root, () => 1000)
+  for (let index = 0; index < 30; index++) (index % 2 ? left : right).record(event(index, 1000))
+  await Promise.all([left.flush(), right.flush()])
+  expect((await right.list()).map((entry) => entry.requestId)).toEqual(
+    Array.from({ length: 30 }, (_, index) => `request_${index}`)
+  )
+  expect(await left.list()).toEqual(await right.list())
+})
+
+it('keeps the last valid log and removes its own temporary after a failed atomic replacement', async () => {
+  const root = await ownedRoot()
+  const store = new FigPluginExecutionAuditStore(root, () => 1000)
+  store.record(event(1, 1000))
+  await store.flush()
+  const rename = vi.spyOn(fs, 'rename').mockRejectedValue(new Error('PRIVATE disk path failure'))
+  store.record(event(2, 1000))
+  await store.flush()
+  expect(store.writeFailed).toBe(true)
+  expect(await store.list()).toEqual([event(1, 1000)])
+  expect(await fs.readdir(root)).toEqual(['execution-audit.jsonl'])
+  rename.mockRestore()
+  store.record(event(3, 1000))
+  await store.flush()
+  // New writes recover, but the missing second event remains missing.
+  expect(store.writeFailed).toBe(true)
+  expect((await store.list()).map((entry) => entry.requestId)).toEqual(['request_1', 'request_3'])
+})
+
+it('refuses oversized logs before allocating or opening file data, without truncating them', async () => {
+  const root = await ownedRoot()
+  const file = path.join(root, 'execution-audit.jsonl')
+  const size = 2 * 1024 * 1024 + 1
+  await fs.writeFile(file, Buffer.alloc(size, 32))
+  const store = new FigPluginExecutionAuditStore(root, () => 1000)
+  const open = vi.spyOn(fs, 'open')
+  await expect(store.list()).rejects.toThrow('FIGPLUGIN_AUDIT_UNAVAILABLE')
+  expect(open).not.toHaveBeenCalled()
+  store.record(event(1, 1000))
+  await store.flush()
+  expect(store.writeFailed).toBe(true)
+  expect((await fs.stat(file)).size).toBe(size)
+})
+
+it('refuses hardlinked audit files without altering the unrelated file', async () => {
+  const root = await ownedRoot()
+  const outside = path.join(root, 'owned-unrelated.txt')
+  await fs.writeFile(outside, 'DO_NOT_MODIFY')
+  await fs.link(outside, path.join(root, 'execution-audit.jsonl'))
+  const store = new FigPluginExecutionAuditStore(root, () => 1000)
+  await expect(store.list()).rejects.toThrow('FIGPLUGIN_AUDIT_UNAVAILABLE')
+  store.record(event(1, 1000))
+  await store.flush()
+  expect(store.writeFailed).toBe(true)
+  expect(await fs.readFile(outside, 'utf8')).toBe('DO_NOT_MODIFY')
+})
+
+it('refuses linked ancestor directories without creating an audit in their target', async () => {
+  const root = await ownedRoot()
+  const outside = path.join(root, 'target')
+  await fs.mkdir(outside)
+  const linked = path.join(root, 'linked')
+  await fs.symlink(outside, linked, process.platform === 'win32' ? 'junction' : 'dir')
+  const store = new FigPluginExecutionAuditStore(path.join(linked, 'audit'), () => 1000)
+  await expect(store.list()).rejects.toThrow('FIGPLUGIN_AUDIT_UNAVAILABLE')
+  store.record(event(1, 1000))
+  await store.flush()
+  expect(store.writeFailed).toBe(true)
+  expect(await fs.readdir(outside)).toEqual([])
+})
+
+it('does not create missing directories during an empty history read', async () => {
+  const root = await ownedRoot()
+  const missingRoot = path.join(root, 'not-created')
+  const store = new FigPluginExecutionAuditStore(missingRoot, () => 1000)
+  expect(await store.list()).toEqual([])
+  expect(await fs.readdir(root)).toEqual([])
 })

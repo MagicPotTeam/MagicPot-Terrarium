@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
     denyBridge: vi.fn<FigPluginCenterSvc['denyBridge']>(),
     revokeBridge: vi.fn<FigPluginCenterSvc['revokeBridge']>(),
     planState: vi.fn<FigPluginCenterSvc['planState']>(),
+    executionHistory: vi.fn<FigPluginCenterSvc['executionHistory']>(),
     approvePlanExecution: vi.fn<FigPluginCenterSvc['approvePlanExecution']>(),
     acceptVisualBaseline: vi.fn<FigPluginCenterSvc['acceptVisualBaseline']>(),
     authorizeVisualCorrection: vi.fn<FigPluginCenterSvc['authorizeVisualCorrection']>(),

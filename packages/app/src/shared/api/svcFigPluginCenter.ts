@@ -29,6 +29,12 @@ import {
 } from '../figplugin/management'
 import { z } from 'zod'
 import {
+  figPluginExecutionHistoryRequestSchema,
+  figPluginExecutionHistorySchema,
+  type FigPluginExecutionHistoryRequest,
+  type FigPluginExecutionHistory
+} from '../figplugin/executionAudit'
+import {
   figPluginDesktopPairRequestSchema,
   figPluginDesktopPairTicketSchema,
   figPluginDesktopApprovalSchema,
@@ -76,6 +82,7 @@ export type FigPluginCenterSvc = {
   denyBridge(req: { callId: string }): Promise<void>
   revokeBridge(req: { pluginId: string }): Promise<void>
   planState(req: Record<string, never>): Promise<FigPluginExecutionDesktopState>
+  executionHistory(req: FigPluginExecutionHistoryRequest): Promise<FigPluginExecutionHistory>
   approvePlanExecution(req: FigPluginDesktopExecutionApproval): Promise<{ completed: boolean }>
   acceptVisualBaseline(
     req: FigPluginDesktopVisualBaselineAcceptance
@@ -120,6 +127,11 @@ export const figPluginCenterSvcDef: ServiceDefSheet<FigPluginCenterSvc> = {
     type: 'unary',
     request: validated(figPluginManagedTargetSchema.pick({ pluginId: true })),
     response: z.void()
+  },
+  executionHistory: {
+    type: 'unary',
+    request: validated(figPluginExecutionHistoryRequestSchema),
+    response: figPluginExecutionHistorySchema
   },
   planState: {
     type: 'unary',

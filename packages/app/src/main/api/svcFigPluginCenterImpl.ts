@@ -26,7 +26,20 @@ import type { FigPluginCenterOperation, FigPluginCenterResponse } from '@shared/
 import { FigPluginCenterStore } from '../figplugin/centerStore'
 import { verifyNativePluginManifest } from '../figplugin/nativeManifest'
 import { FigPluginBridgeController } from '../figplugin/bridgeController'
-import { FigPluginExecutionAuditStore } from '../figplugin/executionAudit'
+import {
+  getFigPluginExecutionAuditStore,
+  flushFigPluginExecutionAuditStores,
+  type FigPluginExecutionAuditStore
+} from '../figplugin/executionAudit'
+import {
+  FIGPLUGIN_AUDIT_TTL_MS,
+  FIGPLUGIN_AUDIT_MAX_RECORDS,
+  FIGPLUGIN_AUDIT_MAX_BYTES,
+  figPluginExecutionHistoryRequestSchema,
+  figPluginExecutionHistorySchema,
+  type FigPluginExecutionHistoryRequest,
+  type FigPluginExecutionHistory
+} from '@shared/figplugin/executionAudit'
 import {
   FigPluginBridgeError,
   figPluginDesktopPairRequestSchema,
@@ -104,6 +117,7 @@ export async function disposeFigPluginBridges(): Promise<void> {
   const controllers = [...activeBridges]
   activeBridges.clear()
   await Promise.all(controllers.map((controller) => controller.dispose().catch(() => undefined)))
+  await flushFigPluginExecutionAuditStores()
 }
 
 type PackagePreview = {
@@ -309,13 +323,18 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       store
     ) => {
       const { LLMProxySvcImpl } = await import('./svcLLMProxyImpl')
-      const audit = new FigPluginExecutionAuditStore(
+      const audit = getFigPluginExecutionAuditStore(
         path.join(app.getPath('userData'), 'figplugin-center')
       )
       return new FigPluginBridgeController(store, new LLMProxySvcImpl(), {
         audit: (event) => audit.record(event)
       })
-    }
+    },
+    private readonly getAuditStore: () => Pick<
+      FigPluginExecutionAuditStore,
+      'list' | 'writeFailed'
+    > = () =>
+      getFigPluginExecutionAuditStore(path.join(app.getPath('userData'), 'figplugin-center'))
   ) {}
 
   private authorizeManagement(
@@ -382,6 +401,48 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       const result = await this.store.listManaged()
       this.authorizeManagement('listPackages', invocation)
       return result
+    } catch (error) {
+      throw sanitizedManagementError(error)
+    }
+  }
+
+  executionHistory = async (
+    req: FigPluginExecutionHistoryRequest,
+    invocation?: ServiceInvocationContext
+  ): Promise<FigPluginExecutionHistory> => {
+    const request = parseFigPluginManagementValue(figPluginExecutionHistoryRequestSchema, req)
+    const parent = this.authorizeManagement('executionHistory', invocation)
+    const url = parent.webContents.getURL()
+    const generation = this.documentGenerations.get(parent)
+    try {
+      // History must work without pairing, constructing a Bridge, or starting a Provider.
+      const audit = this.getAuditStore()
+      const records = await audit.list()
+      if (
+        this.authorizeManagement('executionHistory', invocation) !== parent ||
+        parent.webContents.getURL() !== url ||
+        this.documentGenerations.get(parent) !== generation
+      )
+        throw new FigPluginBridgeError('CONFIGURATION_CHANGED')
+      const matching = records
+        .filter(
+          (record) =>
+            (request.pluginId === undefined || record.pluginId === request.pluginId) &&
+            (request.projectId === undefined || record.projectId === request.projectId)
+        )
+        .slice()
+        .reverse()
+        .sort((left, right) => right.at - left.at)
+      const limit = request.limit ?? 50
+      return figPluginExecutionHistorySchema.parse({
+        records: matching.slice(0, limit),
+        truncated: matching.length > limit,
+        recordedAt: Date.now(),
+        retentionMs: FIGPLUGIN_AUDIT_TTL_MS,
+        maxRecords: FIGPLUGIN_AUDIT_MAX_RECORDS,
+        maxBytes: FIGPLUGIN_AUDIT_MAX_BYTES,
+        writeFailed: audit.writeFailed
+      })
     } catch (error) {
       throw sanitizedManagementError(error)
     }

@@ -32,6 +32,7 @@ import {
 import type { FigPluginCapability, FigPluginHost } from '@shared/figplugin/manifest'
 import CustomWorkshopTabs from './components/CustomWorkshopTabs'
 import PluginBridgePanel from './PluginBridgePanel'
+import PluginExecutionHistoryPanel from './PluginExecutionHistoryPanel'
 
 type Profile = Pick<LLMListProfilesResp['profiles'][number], 'id' | 'model_name' | 'model_use'>
 type DialogState =
@@ -628,6 +629,7 @@ const WorkshopPluginsPage = () => {
             </Paper>
           ))}
           <PluginBridgePanel items={list?.items ?? []} />
+          <PluginExecutionHistoryPanel items={list?.items ?? []} />
         </Stack>
       </Paper>
       <Dialog
