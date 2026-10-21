@@ -13,7 +13,8 @@ import {
 import type {
   FigPluginExecutionPreview,
   FigPluginExecutionStatus,
-  FigPluginVisualBaseline
+  FigPluginVisualBaseline,
+  FigPluginVisualCorrectionAuthorization
 } from '@shared/figplugin/execution'
 import type { FigPluginManagedSummary } from '@shared/figplugin/management'
 import en from '@shared/locales/en-US/renderer.json'
@@ -32,6 +33,9 @@ const mocks = vi.hoisted(() => ({
     planState: vi.fn<FigPluginCenterSvc['planState']>(),
     approvePlanExecution: vi.fn<FigPluginCenterSvc['approvePlanExecution']>(),
     acceptVisualBaseline: vi.fn<FigPluginCenterSvc['acceptVisualBaseline']>(),
+    authorizeVisualCorrection: vi.fn<FigPluginCenterSvc['authorizeVisualCorrection']>(),
+    cancelVisualCorrectionAuthorization:
+      vi.fn<FigPluginCenterSvc['cancelVisualCorrectionAuthorization']>(),
     denyPlanExecution: vi.fn<FigPluginCenterSvc['denyPlanExecution']>(),
     cancelPlanExecution: vi.fn<FigPluginCenterSvc['cancelPlanExecution']>()
   },
@@ -209,6 +213,28 @@ const acceptedVisualBaseline = (): FigPluginVisualBaseline => ({
   correctionRoundsUsed: 0,
   maxCorrectionRounds: 3
 })
+const visualCorrectionAuthorization = (): FigPluginVisualCorrectionAuthorization => ({
+  protocol: 1,
+  authorizationId: 'd'.repeat(32),
+  baselineId: 'a'.repeat(32),
+  sourceExecutionId: nativeExecutionPreview().executionId,
+  pluginId: target.pluginId,
+  host: target.host,
+  projectId: project.id,
+  documentId: nativeExecutionPreview().documentId,
+  scopeId: nativeExecutionPreview().scopeId,
+  captureId: nativeExecutionPreview().captureId,
+  adapterVersion: nativeExecutionPreview().adapterVersion,
+  baselineEvidenceSha256: 'b'.repeat(64),
+  visualEvidenceSha256: visualExecutionStatus().visualEvidenceSha256!,
+  comparisonSha256: 'c'.repeat(64),
+  authorizedTargetIds: ['node-1'],
+  round: 1,
+  maxCorrectionRounds: 3,
+  authorizedAt: Date.now(),
+  expiresAt: Date.now() + 10 * 60 * 1000,
+  state: 'authorized'
+})
 const key = (name: string) => `figplugin.bridge.${name}`
 const button = (name: string) => screen.getByRole('button', { name: key(name) })
 const select = (name: string, value: string) =>
@@ -255,9 +281,16 @@ beforeEach(() => {
   mocks.project.mockImplementation((id) => mocks.projects().find((value) => value.id === id))
   mocks.center.createPairing.mockImplementation(async () => ticket())
   mocks.center.bridgeState.mockResolvedValue({ sessions: [], previews: [] })
-  mocks.center.planState.mockResolvedValue({ previews: [], statuses: [], baselines: [] })
+  mocks.center.planState.mockResolvedValue({
+    previews: [],
+    statuses: [],
+    baselines: [],
+    correctionAuthorizations: []
+  })
   mocks.center.approveBridge.mockResolvedValue({ completed: true })
   mocks.center.acceptVisualBaseline.mockResolvedValue(null)
+  mocks.center.authorizeVisualCorrection.mockResolvedValue(null)
+  mocks.center.cancelVisualCorrectionAuthorization.mockResolvedValue(undefined)
   mocks.center.denyBridge.mockResolvedValue(undefined)
   mocks.center.revokeBridge.mockResolvedValue(undefined)
   mocks.profiles.mockResolvedValue({ profiles: [{ id: 'chat-id', model_name: 'Synthetic model' }] })
@@ -975,11 +1008,17 @@ describe('PluginBridgePanel', () => {
     const status = visualExecutionStatus()
     const baseline = acceptedVisualBaseline()
     mocks.center.planState
-      .mockResolvedValueOnce({ previews: [execution], statuses: [status], baselines: [] })
       .mockResolvedValueOnce({
         previews: [execution],
         statuses: [status],
-        baselines: [baseline]
+        baselines: [],
+        correctionAuthorizations: []
+      })
+      .mockResolvedValueOnce({
+        previews: [execution],
+        statuses: [status],
+        baselines: [baseline],
+        correctionAuthorizations: []
       })
     mocks.center.acceptVisualBaseline.mockResolvedValueOnce(baseline)
     mount()
@@ -1019,7 +1058,8 @@ describe('PluginBridgePanel', () => {
       mocks.center.planState.mockResolvedValue({
         previews: [],
         statuses: [status],
-        baselines: [acceptedVisualBaseline()]
+        baselines: [acceptedVisualBaseline()],
+        correctionAuthorizations: []
       })
       mount()
       await click('refresh')
@@ -1046,6 +1086,69 @@ describe('PluginBridgePanel', () => {
     }
   )
 
+  it('requires exact review for one correction authorization and can cancel it', async () => {
+    const execution = nativeExecutionPreview()
+    const status = comparedVisualExecutionStatus(true)
+    const baseline = {
+      ...acceptedVisualBaseline(),
+      visualEvidenceSha256: status.visualBaselineComparison!.baselineEvidenceSha256
+    }
+    const authorization = visualCorrectionAuthorization()
+    mocks.center.planState
+      .mockResolvedValueOnce({
+        previews: [execution],
+        statuses: [status],
+        baselines: [baseline],
+        correctionAuthorizations: []
+      })
+      .mockResolvedValueOnce({
+        previews: [execution],
+        statuses: [status],
+        baselines: [baseline],
+        correctionAuthorizations: [authorization]
+      })
+      .mockResolvedValueOnce({
+        previews: [execution],
+        statuses: [status],
+        baselines: [baseline],
+        correctionAuthorizations: []
+      })
+    mocks.center.authorizeVisualCorrection.mockResolvedValueOnce(authorization)
+    mount()
+    await click('refresh')
+
+    expect(button('authorizeVisualCorrection')).toBeDisabled()
+    expect(mocks.center.authorizeVisualCorrection).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByLabelText(key('reviewVisualCorrection')))
+    expect(button('authorizeVisualCorrection')).toBeEnabled()
+    await click('authorizeVisualCorrection')
+
+    expect(mocks.center.authorizeVisualCorrection).toHaveBeenCalledExactlyOnceWith({
+      executionId: status.executionId,
+      baselineId: baseline.baselineId,
+      visualEvidenceSha256: status.visualEvidenceSha256
+    })
+    expect(screen.getByText(key('visualCorrectionAuthorized'))).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        `${key('visualCorrectionCurrent')} ${authorization.authorizationId.slice(0, 12)} 1 3`
+      )
+    ).toBeInTheDocument()
+    expect(screen.getByText(`${key('visualCorrectionRound')} 1 3`)).toBeInTheDocument()
+    expect(screen.getByLabelText(key('visualCorrectionTargets'))).toHaveTextContent('node-1')
+    expect(screen.getByText(key('visualCorrectionBoundary'))).toBeInTheDocument()
+    expect(button('cancelVisualCorrectionAuthorization')).toBeEnabled()
+
+    await click('cancelVisualCorrectionAuthorization')
+    expect(mocks.center.cancelVisualCorrectionAuthorization).toHaveBeenCalledExactlyOnceWith({
+      authorizationId: authorization.authorizationId
+    })
+    expect(screen.getByText(key('visualCorrectionCancelled'))).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: key('cancelVisualCorrectionAuthorization') })
+    ).not.toBeInTheDocument()
+  })
+
   it('renders bounded visual checkpoint summaries without claiming automatic correction', async () => {
     mocks.center.planState.mockResolvedValue({
       previews: [],
@@ -1070,7 +1173,8 @@ describe('PluginBridgePanel', () => {
           ]
         }
       ],
-      baselines: []
+      baselines: [],
+      correctionAuthorizations: []
     })
     mount()
     await click('refresh')

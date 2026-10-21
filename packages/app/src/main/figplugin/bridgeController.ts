@@ -332,7 +332,8 @@ export class FigPluginBridgeController {
     return {
       previews: this.#runtime.listPlanExecutions(),
       statuses: this.#runtime.listPlanStatuses(),
-      baselines: this.#runtime.listVisualBaselines()
+      baselines: this.#runtime.listVisualBaselines(),
+      correctionAuthorizations: this.#runtime.listVisualCorrectionAuthorizations()
     }
   }
 
@@ -345,6 +346,18 @@ export class FigPluginBridgeController {
     visualEvidenceSha256: string
   ): ReturnType<FigPluginBridgeRuntime['acceptVisualBaseline']> {
     return this.#runtime.acceptVisualBaseline(executionId, visualEvidenceSha256)
+  }
+
+  authorizeVisualCorrection(
+    executionId: string,
+    baselineId: string,
+    visualEvidenceSha256: string
+  ): ReturnType<FigPluginBridgeRuntime['authorizeVisualCorrection']> {
+    return this.#runtime.authorizeVisualCorrection(executionId, baselineId, visualEvidenceSha256)
+  }
+
+  cancelVisualCorrectionAuthorization(authorizationId: string): void {
+    this.#runtime.cancelVisualCorrectionAuthorization(authorizationId)
   }
 
   denyPlanExecution(executionId: string): void {

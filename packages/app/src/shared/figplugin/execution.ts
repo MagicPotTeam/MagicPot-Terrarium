@@ -11,6 +11,7 @@ export const FIGPLUGIN_EXECUTION_PROTOCOL = 1 as const
 export const FIGPLUGIN_EXECUTION_MAX_EVENTS = 32
 export const FIGPLUGIN_EXECUTION_TTL_MS = 120_000
 export const FIGPLUGIN_VISUAL_BASELINE_TTL_MS = 24 * 60 * 60 * 1000
+export const FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS = 10 * 60 * 1000
 export const FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS = 3
 
 const protocol = z.literal(FIGPLUGIN_EXECUTION_PROTOCOL)
@@ -201,6 +202,59 @@ export const figPluginVisualBaselineComparisonSchema = z
   })
 export type FigPluginVisualBaselineComparison = z.output<
   typeof figPluginVisualBaselineComparisonSchema
+>
+
+const sortedUniqueIdentifierArraySchema = z
+  .array(identifier)
+  .min(1)
+  .max(20)
+  .superRefine((value, ctx) => {
+    const unique = new Set(value)
+    if (unique.size !== value.length)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate visual correction target' })
+    const sorted = [...value].sort()
+    if (value.some((item, index) => item !== sorted[index]))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Unsorted visual correction targets' })
+  })
+
+export const figPluginVisualCorrectionAuthorizationSchema = z
+  .object({
+    protocol,
+    authorizationId: hex32,
+    baselineId: hex32,
+    sourceExecutionId: hex32,
+    pluginId: FigPluginIdSchema,
+    host,
+    projectId: identifier,
+    documentId: identifier,
+    scopeId: identifier,
+    captureId: hex32,
+    adapterVersion: z.string().min(1).max(64),
+    baselineEvidenceSha256: sha256,
+    visualEvidenceSha256: sha256,
+    comparisonSha256: sha256,
+    authorizedTargetIds: sortedUniqueIdentifierArraySchema,
+    round: z.number().int().min(1).max(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS),
+    maxCorrectionRounds: z.literal(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS),
+    authorizedAt: safeInteger,
+    expiresAt: safeInteger,
+    state: z.literal('authorized')
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.expiresAt <= value.authorizedAt)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Invalid visual correction authorization expiry'
+      })
+    if (value.round > value.maxCorrectionRounds)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual correction authorization round limit exceeded'
+      })
+  })
+export type FigPluginVisualCorrectionAuthorization = z.output<
+  typeof figPluginVisualCorrectionAuthorizationSchema
 >
 
 export const figPluginExecutionPreviewSchema = z
@@ -478,11 +532,26 @@ export type FigPluginDesktopVisualBaselineAcceptance = z.output<
   typeof figPluginDesktopVisualBaselineAcceptanceSchema
 >
 
+export const figPluginDesktopVisualCorrectionAuthorizationRequestSchema = z
+  .object({ executionId: hex32, baselineId: hex32, visualEvidenceSha256: sha256 })
+  .strict()
+export type FigPluginDesktopVisualCorrectionAuthorizationRequest = z.output<
+  typeof figPluginDesktopVisualCorrectionAuthorizationRequestSchema
+>
+
+export const figPluginDesktopVisualCorrectionAuthorizationSchema = z
+  .object({ authorizationId: hex32 })
+  .strict()
+export type FigPluginDesktopVisualCorrectionAuthorization = z.output<
+  typeof figPluginDesktopVisualCorrectionAuthorizationSchema
+>
+
 export const figPluginExecutionDesktopStateSchema = z
   .object({
     previews: z.array(figPluginExecutionPreviewSchema).max(16),
     statuses: z.array(figPluginExecutionStatusSchema).max(16),
-    baselines: z.array(figPluginVisualBaselineSchema).max(16)
+    baselines: z.array(figPluginVisualBaselineSchema).max(16),
+    correctionAuthorizations: z.array(figPluginVisualCorrectionAuthorizationSchema).max(16)
   })
   .strict()
 export type FigPluginExecutionDesktopState = z.output<typeof figPluginExecutionDesktopStateSchema>

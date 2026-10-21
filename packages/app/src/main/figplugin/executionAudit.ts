@@ -81,6 +81,20 @@ const eventSchema = z
       .length(64)
       .regex(/^[a-f0-9]{64}$/)
       .optional(),
+    visualCorrectionAuthorizationId: z
+      .string()
+      .length(32)
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    visualCorrectionRound: z.number().int().min(1).max(10).optional(),
+    visualCorrectionMaxRounds: z.number().int().min(1).max(10).optional(),
+    visualCorrectionTargetCount: z.number().int().min(1).max(20).optional(),
+    visualCorrectionComparisonSha256: z
+      .string()
+      .length(64)
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    visualCorrectionExpiresAt: z.number().int().min(0).optional(),
     durationMs: z.number().int().min(0),
     errorCode: z.string().min(1).max(64).optional()
   })
@@ -155,6 +169,67 @@ const eventSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'Visual comparison changed count mismatch'
+      })
+    const correctionFields = [
+      value.visualCorrectionAuthorizationId,
+      value.visualCorrectionRound,
+      value.visualCorrectionMaxRounds,
+      value.visualCorrectionTargetCount,
+      value.visualCorrectionComparisonSha256,
+      value.visualCorrectionExpiresAt
+    ]
+    const correctionCount = correctionFields.filter((field) => field !== undefined).length
+    if (correctionCount !== 0 && correctionCount !== correctionFields.length)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Incomplete visual correction authorization audit'
+      })
+    if (
+      correctionCount !== 0 &&
+      (comparisonCount === 0 ||
+        value.state !== 'completed' ||
+        value.effect !== 'applied' ||
+        value.visualComparisonChangedCount === undefined ||
+        value.visualComparisonChangedCount < 1)
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual correction authorization has no changed comparison'
+      })
+    if (
+      value.visualCorrectionRound !== undefined &&
+      value.visualCorrectionMaxRounds !== undefined &&
+      value.visualCorrectionRound > value.visualCorrectionMaxRounds
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual correction authorization round mismatch'
+      })
+    if (
+      value.visualCorrectionTargetCount !== undefined &&
+      value.visualComparisonChangedCount !== undefined &&
+      value.visualCorrectionTargetCount !== value.visualComparisonChangedCount
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual correction authorization target count mismatch'
+      })
+    if (
+      value.visualCorrectionComparisonSha256 !== undefined &&
+      value.visualComparisonSha256 !== undefined &&
+      value.visualCorrectionComparisonSha256 !== value.visualComparisonSha256
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual correction authorization comparison mismatch'
+      })
+    if (
+      value.visualCorrectionExpiresAt !== undefined &&
+      value.visualCorrectionExpiresAt <= value.at
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Invalid visual correction authorization expiry'
       })
   })
 export type FigPluginExecutionAuditEvent = z.output<typeof eventSchema>

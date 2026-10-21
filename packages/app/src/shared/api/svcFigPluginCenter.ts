@@ -44,13 +44,19 @@ import {
   figPluginDesktopExecutionApprovalSchema,
   figPluginDesktopExecutionSchema,
   figPluginDesktopVisualBaselineAcceptanceSchema,
+  figPluginDesktopVisualCorrectionAuthorizationRequestSchema,
+  figPluginDesktopVisualCorrectionAuthorizationSchema,
   figPluginExecutionDesktopStateSchema,
   figPluginVisualBaselineSchema,
+  figPluginVisualCorrectionAuthorizationSchema,
   type FigPluginDesktopExecution,
   type FigPluginDesktopExecutionApproval,
   type FigPluginDesktopVisualBaselineAcceptance,
+  type FigPluginDesktopVisualCorrectionAuthorization,
+  type FigPluginDesktopVisualCorrectionAuthorizationRequest,
   type FigPluginExecutionDesktopState,
-  type FigPluginVisualBaseline
+  type FigPluginVisualBaseline,
+  type FigPluginVisualCorrectionAuthorization
 } from '../figplugin/execution'
 
 /** One control plane: legacy metadata and verified materialization remain non-executing. */
@@ -74,6 +80,12 @@ export type FigPluginCenterSvc = {
   acceptVisualBaseline(
     req: FigPluginDesktopVisualBaselineAcceptance
   ): Promise<FigPluginVisualBaseline | null>
+  authorizeVisualCorrection(
+    req: FigPluginDesktopVisualCorrectionAuthorizationRequest
+  ): Promise<FigPluginVisualCorrectionAuthorization | null>
+  cancelVisualCorrectionAuthorization(
+    req: FigPluginDesktopVisualCorrectionAuthorization
+  ): Promise<void>
   denyPlanExecution(req: FigPluginDesktopExecution): Promise<void>
   cancelPlanExecution(req: FigPluginDesktopExecution): Promise<void>
 }
@@ -124,6 +136,18 @@ export const figPluginCenterSvcDef: ServiceDefSheet<FigPluginCenterSvc> = {
     request: (value) =>
       parseFigPluginBridgeValue(figPluginDesktopVisualBaselineAcceptanceSchema, value),
     response: figPluginVisualBaselineSchema.nullable()
+  },
+  authorizeVisualCorrection: {
+    type: 'unary',
+    request: (value) =>
+      parseFigPluginBridgeValue(figPluginDesktopVisualCorrectionAuthorizationRequestSchema, value),
+    response: figPluginVisualCorrectionAuthorizationSchema.nullable()
+  },
+  cancelVisualCorrectionAuthorization: {
+    type: 'unary',
+    request: (value) =>
+      parseFigPluginBridgeValue(figPluginDesktopVisualCorrectionAuthorizationSchema, value),
+    response: z.void()
   },
   denyPlanExecution: {
     type: 'unary',

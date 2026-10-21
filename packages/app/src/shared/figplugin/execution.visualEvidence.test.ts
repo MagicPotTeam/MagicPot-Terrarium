@@ -1,12 +1,15 @@
 ﻿import { describe, expect, it } from 'vitest'
 import {
+  FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS,
   FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
   figPluginDesktopVisualBaselineAcceptanceSchema,
+  figPluginDesktopVisualCorrectionAuthorizationRequestSchema,
   figPluginExecutionDesktopStateSchema,
   figPluginExecutionResultRequestSchema,
   figPluginExecutionStatusSchema,
   figPluginVisualBaselineComparisonSchema,
   figPluginVisualBaselineSchema,
+  figPluginVisualCorrectionAuthorizationSchema,
   figPluginVisualEvidenceSchema
 } from './execution'
 
@@ -139,7 +142,8 @@ describe('FIGPLUGIN visual evidence contract', () => {
       figPluginExecutionDesktopStateSchema.parse({
         previews: [],
         statuses: [],
-        baselines: [baseline]
+        baselines: [baseline],
+        correctionAuthorizations: []
       }).baselines
     ).toEqual([baseline])
     expect(
@@ -166,6 +170,69 @@ describe('FIGPLUGIN visual evidence contract', () => {
         correctionRoundsUsed: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS + 1
       })
     ).toThrow()
+  })
+
+  it('accepts one bounded future correction authorization without claiming execution', () => {
+    const authorizedAt = 100
+    const authorization = figPluginVisualCorrectionAuthorizationSchema.parse({
+      protocol: 1,
+      authorizationId: '5'.repeat(32),
+      baselineId: '1'.repeat(32),
+      sourceExecutionId: result.executionId,
+      pluginId: 'demo.figma',
+      host: 'figma',
+      projectId: 'project_1',
+      documentId: readback.documentId,
+      scopeId: readback.scopeId,
+      captureId: readback.captureId,
+      adapterVersion: 'figma-native-1',
+      baselineEvidenceSha256: '4'.repeat(64),
+      visualEvidenceSha256: 'f'.repeat(64),
+      comparisonSha256: '6'.repeat(64),
+      authorizedTargetIds: ['node_1', 'node_2'],
+      round: 1,
+      maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
+      authorizedAt,
+      expiresAt: authorizedAt + FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS,
+      state: 'authorized'
+    })
+    expect(
+      figPluginExecutionDesktopStateSchema.parse({
+        previews: [],
+        statuses: [],
+        baselines: [],
+        correctionAuthorizations: [authorization]
+      }).correctionAuthorizations
+    ).toEqual([authorization])
+    expect(
+      figPluginDesktopVisualCorrectionAuthorizationRequestSchema.parse({
+        executionId: authorization.sourceExecutionId,
+        baselineId: authorization.baselineId,
+        visualEvidenceSha256: authorization.visualEvidenceSha256
+      })
+    ).toEqual({
+      executionId: authorization.sourceExecutionId,
+      baselineId: authorization.baselineId,
+      visualEvidenceSha256: authorization.visualEvidenceSha256
+    })
+    expect(() =>
+      figPluginVisualCorrectionAuthorizationSchema.parse({
+        ...authorization,
+        authorizedTargetIds: ['node_2', 'node_1']
+      })
+    ).toThrow(/unsorted/i)
+    expect(() =>
+      figPluginVisualCorrectionAuthorizationSchema.parse({
+        ...authorization,
+        authorizedTargetIds: ['node_1', 'node_1']
+      })
+    ).toThrow(/duplicate/i)
+    expect(() =>
+      figPluginVisualCorrectionAuthorizationSchema.parse({
+        ...authorization,
+        expiresAt: authorization.authorizedAt
+      })
+    ).toThrow(/expiry/i)
   })
 
   it('validates exact and changed comparisons against an accepted bounded checkpoint', () => {

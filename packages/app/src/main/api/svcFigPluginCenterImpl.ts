@@ -1,7 +1,8 @@
 import {
   buildBridgeApprovalDetails,
   buildPlanExecutionApprovalDetails,
-  buildVisualBaselineApprovalDetails
+  buildVisualBaselineApprovalDetails,
+  buildVisualCorrectionAuthorizationDetails
 } from '../figplugin/bridgeApprovalDetails'
 import path from 'node:path'
 import fs from 'node:fs/promises'
@@ -41,11 +42,16 @@ import {
   figPluginDesktopExecutionApprovalSchema,
   figPluginDesktopExecutionSchema,
   figPluginDesktopVisualBaselineAcceptanceSchema,
+  figPluginDesktopVisualCorrectionAuthorizationRequestSchema,
+  figPluginDesktopVisualCorrectionAuthorizationSchema,
   type FigPluginDesktopExecution,
   type FigPluginDesktopExecutionApproval,
   type FigPluginDesktopVisualBaselineAcceptance,
+  type FigPluginDesktopVisualCorrectionAuthorization,
+  type FigPluginDesktopVisualCorrectionAuthorizationRequest,
   type FigPluginExecutionDesktopState,
-  type FigPluginVisualBaseline
+  type FigPluginVisualBaseline,
+  type FigPluginVisualCorrectionAuthorization
 } from '@shared/figplugin/execution'
 import {
   readAndVerifyFigPluginPackageFile,
@@ -85,6 +91,8 @@ type BridgeControl = Pick<
   | 'planState'
   | 'approvePlanExecution'
   | 'acceptVisualBaseline'
+  | 'authorizeVisualCorrection'
+  | 'cancelVisualCorrectionAuthorization'
   | 'denyPlanExecution'
   | 'cancelPlanExecution'
   | 'dispose'
@@ -697,7 +705,14 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
   ): Promise<FigPluginExecutionDesktopState> => {
     parseFigPluginManagementValue(figPluginManagementEmptyRequestSchema, req)
     this.authorizeManagement('planState', invocation)
-    return this.bridge?.planState() ?? { previews: [], statuses: [], baselines: [] }
+    return (
+      this.bridge?.planState() ?? {
+        previews: [],
+        statuses: [],
+        baselines: [],
+        correctionAuthorizations: []
+      }
+    )
   }
 
   approveBridge = async (
@@ -858,6 +873,102 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       check()
       return controller.acceptVisualBaseline(request.executionId, request.visualEvidenceSha256)
     })
+  }
+
+  authorizeVisualCorrection = async (
+    req: FigPluginDesktopVisualCorrectionAuthorizationRequest,
+    invocation?: ServiceInvocationContext
+  ): Promise<FigPluginVisualCorrectionAuthorization | null> => {
+    const request = parseFigPluginBridgeValue(
+      figPluginDesktopVisualCorrectionAuthorizationRequestSchema,
+      req
+    )
+    const parent = this.authorizeManagement('authorizeVisualCorrection', invocation)
+    const epoch = this.documentGenerations.get(parent)
+    const documentUrl = parent.webContents.getURL()
+    const controller = this.bridge
+    if (!controller) throw new FigPluginBridgeError('EXPIRED')
+    const check = () => {
+      if (
+        this.authorizeManagement('authorizeVisualCorrection', invocation) !== parent ||
+        parent.webContents.getURL() !== documentUrl ||
+        this.documentGenerations.get(parent) !== epoch ||
+        this.bridge !== controller
+      )
+        throw new FigPluginBridgeError('CONFIGURATION_CHANGED')
+    }
+    return this.exclusive(async () => {
+      check()
+      const state = controller.planState()
+      const preview = state.previews.find(
+        (item) =>
+          item.executionId === request.executionId &&
+          item.state === 'completed' &&
+          item.visualAudit === 'hash-only'
+      )
+      const status = state.statuses.find(
+        (item) =>
+          item.executionId === request.executionId &&
+          item.state === 'completed' &&
+          item.effect === 'applied' &&
+          item.visualEvidenceSha256 === request.visualEvidenceSha256 &&
+          item.visualEvidence !== undefined &&
+          item.visualBaselineComparison?.baselineId === request.baselineId &&
+          item.visualBaselineComparison.visualEvidenceSha256 === request.visualEvidenceSha256 &&
+          item.visualBaselineComparison.exactMatch === false &&
+          item.visualBaselineComparison.changedCount > 0
+      )
+      const baseline = state.baselines.find(
+        (item) =>
+          item.baselineId === request.baselineId &&
+          item.expiresAt > Date.now() &&
+          item.visualEvidenceSha256 === status?.visualBaselineComparison?.baselineEvidenceSha256
+      )
+      if (!preview || !status || !baseline) throw new FigPluginBridgeError('EXPIRED')
+      const existing = state.correctionAuthorizations.find(
+        (item) => item.baselineId === request.baselineId && item.expiresAt > Date.now()
+      )
+      if (existing) {
+        if (
+          existing.sourceExecutionId !== request.executionId ||
+          existing.visualEvidenceSha256 !== request.visualEvidenceSha256
+        )
+          throw new FigPluginBridgeError('BUSY')
+        return existing
+      }
+      const approval = await this.confirm(parent, {
+        type: 'warning',
+        title: 'Authorize one correction round',
+        message: `${preview.pluginId} (${preview.host})`,
+        detail: buildVisualCorrectionAuthorizationDetails(preview, status, baseline),
+        buttons: ['Authorize exact targets', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+        checkboxLabel:
+          'I understand this only authorizes one future correction attempt and does not modify the document now',
+        checkboxChecked: false
+      })
+      if (approval.response !== 0 || !approval.checkboxChecked) return null
+      check()
+      return controller.authorizeVisualCorrection(
+        request.executionId,
+        request.baselineId,
+        request.visualEvidenceSha256
+      )
+    })
+  }
+
+  cancelVisualCorrectionAuthorization = async (
+    req: FigPluginDesktopVisualCorrectionAuthorization,
+    invocation?: ServiceInvocationContext
+  ): Promise<void> => {
+    const request = parseFigPluginBridgeValue(
+      figPluginDesktopVisualCorrectionAuthorizationSchema,
+      req
+    )
+    this.authorizeManagement('cancelVisualCorrectionAuthorization', invocation)
+    this.bridge?.cancelVisualCorrectionAuthorization(request.authorizationId)
   }
 
   denyPlanExecution = async (

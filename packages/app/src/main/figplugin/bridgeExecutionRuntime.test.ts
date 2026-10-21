@@ -5,6 +5,7 @@ import type {
 } from '@shared/figplugin/bridge'
 import {
   FIGPLUGIN_VISUAL_BASELINE_TTL_MS,
+  FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS,
   FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS
 } from '../../shared/figplugin/execution'
 import { createHostPlanReadback, type HostContext, type HostPlan } from '@shared/figplugin/hostPlan'
@@ -461,6 +462,114 @@ describe('approved native-plan execution runtime', () => {
         visualComparisonSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
       })
       expect(JSON.stringify(value.audit)).not.toMatch(/Old name|New name/)
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('authorizes one bounded future correction round for exact changed targets', async () => {
+    const value = fixture(true, hashOnlyContext)
+    try {
+      const first = await completedVisualExecution(value)
+      const baseline = await value.runtime.acceptVisualBaseline(
+        first.execution.executionId,
+        first.result.status.visualEvidenceSha256!
+      )
+      const changedEvidence = [
+        {
+          ...visualEvidence[0],
+          after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) }
+        }
+      ]
+      const changed = await completedVisualExecution(value, changedEvidence)
+      const changedEvidenceSha256 = changed.result.status.visualEvidenceSha256!
+
+      await expect(
+        value.runtime.authorizeVisualCorrection(
+          changed.execution.executionId,
+          baseline.baselineId,
+          'f'.repeat(64)
+        )
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+
+      const authorization = await value.runtime.authorizeVisualCorrection(
+        changed.execution.executionId,
+        baseline.baselineId,
+        changedEvidenceSha256
+      )
+      expect(authorization).toMatchObject({
+        baselineId: baseline.baselineId,
+        sourceExecutionId: changed.execution.executionId,
+        pluginId: binding.pluginId,
+        host: binding.host,
+        projectId: binding.projectId,
+        documentId: hashOnlyContext.documentId,
+        scopeId: hashOnlyContext.scopeId,
+        captureId: hashOnlyContext.captureId,
+        adapterVersion: hashOnlyContext.execution!.adapterVersion,
+        baselineEvidenceSha256: baseline.visualEvidenceSha256,
+        visualEvidenceSha256: changedEvidenceSha256,
+        authorizedTargetIds: ['node_1'],
+        round: 1,
+        maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
+        expiresAt: authorization.authorizedAt + FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS,
+        state: 'authorized'
+      })
+      expect(
+        await value.runtime.authorizeVisualCorrection(
+          changed.execution.executionId,
+          baseline.baselineId,
+          changedEvidenceSha256
+        )
+      ).toEqual(authorization)
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([authorization])
+      expect(value.audit.at(-1)).toMatchObject({
+        state: 'completed',
+        effect: 'applied',
+        visualCorrectionAuthorizationId: authorization.authorizationId,
+        visualCorrectionRound: 1,
+        visualCorrectionMaxRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
+        visualCorrectionTargetCount: 1,
+        visualCorrectionComparisonSha256: authorization.comparisonSha256,
+        visualCorrectionExpiresAt: authorization.expiresAt
+      })
+      expect(JSON.stringify(value.audit.at(-1))).not.toMatch(/Old name|New name/)
+
+      const competingEvidence = [
+        {
+          ...visualEvidence[0],
+          after: { ...visualEvidence[0].after, sha256: '4'.repeat(64) }
+        }
+      ]
+      const competing = await completedVisualExecution(value, competingEvidence)
+      await expect(
+        value.runtime.authorizeVisualCorrection(
+          competing.execution.executionId,
+          baseline.baselineId,
+          competing.result.status.visualEvidenceSha256!
+        )
+      ).rejects.toMatchObject({ code: 'BUSY' })
+
+      const exact = await completedVisualExecution(value)
+      await expect(
+        value.runtime.authorizeVisualCorrection(
+          exact.execution.executionId,
+          baseline.baselineId,
+          exact.result.status.visualEvidenceSha256!
+        )
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+
+      value.runtime.cancelVisualCorrectionAuthorization(authorization.authorizationId)
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+      const replacement = await value.runtime.authorizeVisualCorrection(
+        competing.execution.executionId,
+        baseline.baselineId,
+        competing.result.status.visualEvidenceSha256!
+      )
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([replacement])
+      value.advance(FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS)
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toEqual([])
     } finally {
       value.runtime.dispose()
     }

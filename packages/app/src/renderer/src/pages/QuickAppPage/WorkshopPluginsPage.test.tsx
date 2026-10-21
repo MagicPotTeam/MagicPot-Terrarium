@@ -31,6 +31,9 @@ const mocks = vi.hoisted(() => ({
     planState: vi.fn<FigPluginCenterSvc['planState']>(),
     approvePlanExecution: vi.fn<FigPluginCenterSvc['approvePlanExecution']>(),
     acceptVisualBaseline: vi.fn<FigPluginCenterSvc['acceptVisualBaseline']>(),
+    authorizeVisualCorrection: vi.fn<FigPluginCenterSvc['authorizeVisualCorrection']>(),
+    cancelVisualCorrectionAuthorization:
+      vi.fn<FigPluginCenterSvc['cancelVisualCorrectionAuthorization']>(),
     denyPlanExecution: vi.fn<FigPluginCenterSvc['denyPlanExecution']>(),
     cancelPlanExecution: vi.fn<FigPluginCenterSvc['cancelPlanExecution']>()
   } satisfies FigPluginCenterSvc,
@@ -153,7 +156,12 @@ beforeEach(() => {
   mocks.center.copyPackagePath.mockResolvedValue({ completed: true })
   mocks.center.revealPackage.mockResolvedValue({ completed: true })
   mocks.center.discardPreview.mockResolvedValue(undefined)
-  mocks.center.planState.mockResolvedValue({ previews: [], statuses: [], baselines: [] })
+  mocks.center.planState.mockResolvedValue({
+    previews: [],
+    statuses: [],
+    baselines: [],
+    correctionAuthorizations: []
+  })
   mocks.profiles.mockResolvedValue({
     profiles: [
       { id: 'chat-id', model_name: 'Chat candidate', model_use: 'chat' },

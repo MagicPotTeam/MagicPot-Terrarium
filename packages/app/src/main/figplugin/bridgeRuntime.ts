@@ -19,6 +19,7 @@ import {
   FIGPLUGIN_EXECUTION_MAX_EVENTS,
   FIGPLUGIN_EXECUTION_PROTOCOL,
   FIGPLUGIN_VISUAL_BASELINE_TTL_MS,
+  FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS,
   FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
   figPluginExecutionClaimResponseSchema,
   figPluginExecutionPreviewSchema,
@@ -31,6 +32,7 @@ import {
   figPluginExecutionStatusRequestSchema,
   figPluginVisualBaselineComparisonSchema,
   figPluginVisualBaselineSchema,
+  figPluginVisualCorrectionAuthorizationSchema,
   type FigPluginExecutionClaimResponse,
   type FigPluginExecutionPreview,
   type FigPluginExecutionProgressRequest,
@@ -40,6 +42,7 @@ import {
   type FigPluginExecutionStatus,
   type FigPluginVisualBaseline,
   type FigPluginVisualBaselineComparison,
+  type FigPluginVisualCorrectionAuthorization,
   type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import {
@@ -137,6 +140,10 @@ type VisualBaselineRecord = {
   value: FigPluginVisualBaseline
   binding: FigPluginRuntimeBinding
 }
+type VisualCorrectionAuthorizationRecord = {
+  value: FigPluginVisualCorrectionAuthorization
+  binding: FigPluginRuntimeBinding
+}
 
 type PlanExecution = {
   executionId: string
@@ -202,6 +209,10 @@ export class FigPluginBridgeRuntime {
   private readonly sessions = new Map<string, Session>()
   private readonly calls = new Map<string, Call>()
   private readonly visualBaselines = new Map<string, VisualBaselineRecord>()
+  private readonly visualCorrectionAuthorizations = new Map<
+    string,
+    VisualCorrectionAuthorizationRecord
+  >()
   private readonly validateBinding: Options['validateBinding']
   private readonly invoke: Options['invoke']
   private readonly clock: () => number
@@ -385,7 +396,8 @@ export class FigPluginBridgeRuntime {
 
   private recordExecutionAudit(
     execution: PlanExecution,
-    visualBaseline?: FigPluginVisualBaseline
+    visualBaseline?: FigPluginVisualBaseline,
+    visualCorrectionAuthorization?: FigPluginVisualCorrectionAuthorization
   ): void {
     if (!this.audit) return
     try {
@@ -430,6 +442,16 @@ export class FigPluginBridgeRuntime {
               visualComparisonTargetCount: execution.visualBaselineComparison.targets.length,
               visualComparisonChangedCount: execution.visualBaselineComparison.changedCount,
               visualComparisonSha256: digest(execution.visualBaselineComparison)
+            }
+          : {}),
+        ...(visualCorrectionAuthorization
+          ? {
+              visualCorrectionAuthorizationId: visualCorrectionAuthorization.authorizationId,
+              visualCorrectionRound: visualCorrectionAuthorization.round,
+              visualCorrectionMaxRounds: visualCorrectionAuthorization.maxCorrectionRounds,
+              visualCorrectionTargetCount: visualCorrectionAuthorization.authorizedTargetIds.length,
+              visualCorrectionComparisonSha256: visualCorrectionAuthorization.comparisonSha256,
+              visualCorrectionExpiresAt: visualCorrectionAuthorization.expiresAt
             }
           : {}),
         ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
@@ -723,6 +745,13 @@ export class FigPluginBridgeRuntime {
       .sort((left, right) => right.acceptedAt - left.acceptedAt)
   }
 
+  listVisualCorrectionAuthorizations(): FigPluginVisualCorrectionAuthorization[] {
+    this.enter()
+    return [...this.visualCorrectionAuthorizations.values()]
+      .map((record) => structuredClone(record.value))
+      .sort((left, right) => right.authorizedAt - left.authorizedAt)
+  }
+
   async acceptVisualBaseline(
     executionId: string,
     visualEvidenceSha256: string
@@ -782,12 +811,12 @@ export class FigPluginBridgeRuntime {
     })
     const scopeKey = visualBaselineScopeKey(baseline)
     for (const [id, record] of this.visualBaselines) {
-      if (visualBaselineScopeKey(record.value) === scopeKey) this.visualBaselines.delete(id)
+      if (visualBaselineScopeKey(record.value) === scopeKey) this.removeVisualBaseline(id)
     }
     while (this.visualBaselines.size >= 16) {
       const oldest = this.visualBaselines.keys().next().value
       if (!oldest) break
-      this.visualBaselines.delete(oldest)
+      this.removeVisualBaseline(oldest)
     }
     this.visualBaselines.set(baseline.baselineId, {
       value: baseline,
@@ -796,6 +825,119 @@ export class FigPluginBridgeRuntime {
     this.recordExecutionAudit(execution, baseline)
     this.scheduleCleanup()
     return structuredClone(baseline)
+  }
+
+  async authorizeVisualCorrection(
+    executionId: string,
+    baselineId: string,
+    visualEvidenceSha256: string
+  ): Promise<FigPluginVisualCorrectionAuthorization> {
+    this.enter()
+    const execution = this.findExecution(executionId)
+    const check = (): {
+      baseline: FigPluginVisualBaseline
+      comparison: FigPluginVisualBaselineComparison
+      comparisonSha256: string
+    } => {
+      const comparison = execution.visualBaselineComparison
+      const baselineRecord = isId(baselineId) ? this.visualBaselines.get(baselineId) : undefined
+      const baseline = baselineRecord?.value
+      const evidenceSha256 = execution.visualEvidence ? digest(execution.visualEvidence) : undefined
+      if (
+        this.calls.get(execution.call.receipt.response.callId) !== execution.call ||
+        this.sessions.get(execution.call.session.id) !== execution.call.session ||
+        execution.state !== 'completed' ||
+        execution.effect !== 'applied' ||
+        execution.preview.visualAudit !== 'hash-only' ||
+        !comparison ||
+        comparison.exactMatch ||
+        comparison.changedCount < 1 ||
+        comparison.baselineId !== baselineId ||
+        comparison.visualEvidenceSha256 !== evidenceSha256 ||
+        !secretEquals(visualEvidenceSha256, evidenceSha256) ||
+        !baseline ||
+        baseline.expiresAt <= this.clock() ||
+        baseline.visualEvidenceSha256 !== comparison.baselineEvidenceSha256 ||
+        baseline.adapterVersion !== execution.preview.adapterVersion ||
+        visualBaselineScopeKey(baseline) !==
+          visualBaselineScopeKey({
+            pluginId: execution.call.session.binding.pluginId,
+            host: execution.call.session.binding.host,
+            projectId: execution.call.session.binding.projectId,
+            documentId: execution.context.documentId,
+            scopeId: execution.context.scopeId
+          })
+      )
+        throw new FigPluginBridgeError('INVALID_REQUEST')
+      return { baseline, comparison, comparisonSha256: digest(comparison) }
+    }
+    let checked = check()
+    await this.checkSession(execution.call.session)
+    checked = check()
+    const existing = [...this.visualCorrectionAuthorizations.values()].find(
+      (record) => record.value.baselineId === checked.baseline.baselineId
+    )
+    if (existing) {
+      if (
+        existing.value.sourceExecutionId === execution.executionId &&
+        existing.value.visualEvidenceSha256 === visualEvidenceSha256 &&
+        existing.value.comparisonSha256 === checked.comparisonSha256
+      )
+        return structuredClone(existing.value)
+      throw new FigPluginBridgeError('BUSY')
+    }
+    const round = checked.baseline.correctionRoundsUsed + 1
+    if (round > checked.baseline.maxCorrectionRounds) throw new FigPluginBridgeError('DENIED')
+    const authorizedAt = this.clock()
+    const expiresAt = Math.min(
+      authorizedAt + FIGPLUGIN_VISUAL_CORRECTION_AUTHORIZATION_TTL_MS,
+      checked.baseline.expiresAt
+    )
+    if (expiresAt <= authorizedAt) throw new FigPluginBridgeError('EXPIRED')
+    const authorization = figPluginVisualCorrectionAuthorizationSchema.parse({
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      authorizationId: randomBytes(16).toString('hex'),
+      baselineId: checked.baseline.baselineId,
+      sourceExecutionId: execution.executionId,
+      pluginId: execution.call.session.binding.pluginId,
+      host: execution.call.session.binding.host,
+      projectId: execution.call.session.binding.projectId,
+      documentId: execution.context.documentId,
+      scopeId: execution.context.scopeId,
+      captureId: execution.context.captureId,
+      adapterVersion: execution.preview.adapterVersion,
+      baselineEvidenceSha256: checked.comparison.baselineEvidenceSha256,
+      visualEvidenceSha256,
+      comparisonSha256: checked.comparisonSha256,
+      authorizedTargetIds: checked.comparison.targets
+        .filter((target) => target.changed)
+        .map((target) => target.targetId)
+        .sort(),
+      round,
+      maxCorrectionRounds: checked.baseline.maxCorrectionRounds,
+      authorizedAt,
+      expiresAt,
+      state: 'authorized'
+    })
+    while (this.visualCorrectionAuthorizations.size >= 16) {
+      const oldest = this.visualCorrectionAuthorizations.keys().next().value
+      if (!oldest) break
+      this.visualCorrectionAuthorizations.delete(oldest)
+    }
+    this.visualCorrectionAuthorizations.set(authorization.authorizationId, {
+      value: authorization,
+      binding: Object.freeze({ ...execution.call.session.binding })
+    })
+    this.recordExecutionAudit(execution, undefined, authorization)
+    this.scheduleCleanup()
+    return structuredClone(authorization)
+  }
+
+  cancelVisualCorrectionAuthorization(authorizationId: string): void {
+    this.enter()
+    if (!isId(authorizationId)) throw new FigPluginBridgeError('INVALID_REQUEST')
+    this.visualCorrectionAuthorizations.delete(authorizationId)
+    this.scheduleCleanup()
   }
 
   async approve(callId: string, payloadSha256: string): Promise<void> {
@@ -1106,7 +1248,10 @@ export class FigPluginBridgeRuntime {
         this.removeSession(session, 'CONFIGURATION_CHANGED')
     }
     for (const [id, record] of this.visualBaselines) {
-      if (record.binding.pluginId === pluginId) this.visualBaselines.delete(id)
+      if (record.binding.pluginId === pluginId) this.removeVisualBaseline(id)
+    }
+    for (const [id, record] of this.visualCorrectionAuthorizations) {
+      if (record.binding.pluginId === pluginId) this.visualCorrectionAuthorizations.delete(id)
     }
     this.scheduleCleanup()
   }
@@ -1128,7 +1273,10 @@ export class FigPluginBridgeRuntime {
       if (!valid(session.binding)) this.removeSession(session, 'CONFIGURATION_CHANGED')
     }
     for (const [id, record] of this.visualBaselines) {
-      if (!valid(record.binding)) this.visualBaselines.delete(id)
+      if (!valid(record.binding)) this.removeVisualBaseline(id)
+    }
+    for (const [id, record] of this.visualCorrectionAuthorizations) {
+      if (!valid(record.binding)) this.visualCorrectionAuthorizations.delete(id)
     }
     this.scheduleCleanup()
   }
@@ -1141,6 +1289,7 @@ export class FigPluginBridgeRuntime {
     for (const [id, ticket] of this.tickets) this.removeTicket(id, ticket)
     for (const session of this.sessions.values()) this.removeSession(session, 'CANCELLED')
     this.visualBaselines.clear()
+    this.visualCorrectionAuthorizations.clear()
     this.failures = []
   }
 
@@ -1359,6 +1508,13 @@ export class FigPluginBridgeRuntime {
     ticket.secret = ''
   }
 
+  private removeVisualBaseline(baselineId: string): void {
+    this.visualBaselines.delete(baselineId)
+    for (const [id, record] of this.visualCorrectionAuthorizations) {
+      if (record.value.baselineId === baselineId) this.visualCorrectionAuthorizations.delete(id)
+    }
+  }
+
   private removeSession(session: Session, code: TerminalCode): void {
     this.sessions.delete(session.id)
     session.token = ''
@@ -1391,7 +1547,11 @@ export class FigPluginBridgeRuntime {
       }
     }
     for (const [id, record] of this.visualBaselines) {
-      if (record.value.expiresAt <= now) this.visualBaselines.delete(id)
+      if (record.value.expiresAt <= now) this.removeVisualBaseline(id)
+    }
+    for (const [id, record] of this.visualCorrectionAuthorizations) {
+      if (record.value.expiresAt <= now || !this.visualBaselines.has(record.value.baselineId))
+        this.visualCorrectionAuthorizations.delete(id)
     }
     this.scheduleCleanup()
   }
@@ -1407,6 +1567,8 @@ export class FigPluginBridgeRuntime {
     for (const call of this.calls.values())
       next = Math.min(next, call.receipt.response.expiresAt, call.deadline ?? Infinity)
     for (const record of this.visualBaselines.values())
+      next = Math.min(next, record.value.expiresAt)
+    for (const record of this.visualCorrectionAuthorizations.values())
       next = Math.min(next, record.value.expiresAt)
     if (this.failures.length) next = Math.min(next, this.failures[0] + FAILURE_WINDOW)
     if (next === Infinity) return

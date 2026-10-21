@@ -33,13 +33,17 @@ import {
   figPluginDesktopExecutionApprovalSchema,
   figPluginDesktopExecutionSchema,
   figPluginDesktopVisualBaselineAcceptanceSchema,
+  figPluginDesktopVisualCorrectionAuthorizationRequestSchema,
+  figPluginDesktopVisualCorrectionAuthorizationSchema,
   figPluginExecutionDesktopStateSchema,
   figPluginVisualBaselineSchema,
+  figPluginVisualCorrectionAuthorizationSchema,
   type FigPluginDesktopExecution,
   type FigPluginExecutionDesktopState,
   type FigPluginExecutionPreview,
   type FigPluginExecutionStatus,
   type FigPluginVisualBaselineComparison,
+  type FigPluginVisualCorrectionAuthorization,
   type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import { getProjectById, listProjects, PROJECTS_CHANGED_EVENT } from '../MainPage/projectStore'
@@ -59,12 +63,16 @@ type BridgeNoticeKey =
   | 'figplugin.bridge.planCancelled'
   | 'figplugin.bridge.visualBaselineAccepted'
   | 'figplugin.bridge.visualBaselineDeclined'
+  | 'figplugin.bridge.visualCorrectionAuthorized'
+  | 'figplugin.bridge.visualCorrectionDeclined'
+  | 'figplugin.bridge.visualCorrectionCancelled'
 
 const emptyState = (): FigPluginBridgeDesktopState => ({ sessions: [], previews: [] })
 const emptyExecutionState = (): FigPluginExecutionDesktopState => ({
   previews: [],
   statuses: [],
-  baselines: []
+  baselines: [],
+  correctionAuthorizations: []
 })
 const eligible = (item: FigPluginManagedSummary) =>
   !!item.bridgeOrigin &&
@@ -79,6 +87,14 @@ const eligible = (item: FigPluginManagedSummary) =>
 const reviewKey = (call: FigPluginBridgePreview): string => canonicalFigPluginJson(call)
 const executionReviewKey = (preview: FigPluginExecutionPreview): string =>
   canonicalFigPluginJson(preview)
+const correctionReviewKey = (status: FigPluginExecutionStatus): string =>
+  status.visualEvidenceSha256 && status.visualBaselineComparison
+    ? canonicalFigPluginJson({
+        executionId: status.executionId,
+        visualEvidenceSha256: status.visualEvidenceSha256,
+        comparison: status.visualBaselineComparison
+      })
+    : ''
 const shortHash = (value: string): string => value.slice(0, 12)
 const renderVisualEvidence = (items: FigPluginVisualEvidence[]): string =>
   items
@@ -156,6 +172,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   const [reviewed, setReviewed] = useState<Record<string, string>>({})
   const [reviewedExecutions, setReviewedExecutions] = useState<Record<string, string>>({})
   const [reviewedBaselines, setReviewedBaselines] = useState<Record<string, string>>({})
+  const [reviewedCorrections, setReviewedCorrections] = useState<Record<string, string>>({})
   const [monitorUntil, setMonitorUntil] = useState(0)
   const [busy, setBusy] = useState(false)
   const [revoking, setRevoking] = useState(false)
@@ -200,6 +217,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
     setReviewed({})
     setReviewedExecutions({})
     setReviewedBaselines({})
+    setReviewedCorrections({})
     setModels({})
   }, [])
 
@@ -286,10 +304,14 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       (preview) => preview.expiresAt > now
     )
     const activeBaselines = nextExecutions.baselines.filter((baseline) => baseline.expiresAt > now)
+    const activeCorrectionAuthorizations = nextExecutions.correctionAuthorizations.filter(
+      (authorization) => authorization.expiresAt > now
+    )
     setExecutions({
       previews: activeExecutionPreviews,
       statuses: nextExecutions.statuses,
-      baselines: activeBaselines
+      baselines: activeBaselines,
+      correctionAuthorizations: activeCorrectionAuthorizations
     })
     setReviewed((previous) =>
       Object.fromEntries(
@@ -315,6 +337,21 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
               !activeBaselines.some((baseline) => baseline.sourceExecutionId === status.executionId)
           )
           .map((status) => [status.executionId, status.visualEvidenceSha256!])
+      )
+    )
+    setReviewedCorrections((previous) =>
+      Object.fromEntries(
+        nextExecutions.statuses
+          .filter(
+            (status) =>
+              status.visualBaselineComparison?.exactMatch === false &&
+              previous[status.executionId] === correctionReviewKey(status) &&
+              !activeCorrectionAuthorizations.some(
+                (authorization) =>
+                  authorization.baselineId === status.visualBaselineComparison?.baselineId
+              )
+          )
+          .map((status) => [status.executionId, correctionReviewKey(status)])
       )
     )
     setError('')
@@ -385,7 +422,8 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       ...state.previews.map((call) => call.expiresAt),
       ...state.sessions.map((session) => session.expiresAt),
       ...executions.previews.map((previewEx) => previewEx.expiresAt),
-      ...executions.baselines.map((baseline) => baseline.expiresAt)
+      ...executions.baselines.map((baseline) => baseline.expiresAt),
+      ...executions.correctionAuthorizations.map((authorization) => authorization.expiresAt)
     ]
     if (!expiries.length) return
     const timer = setTimeout(
@@ -399,11 +437,15 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         setExecutions((value) => ({
           previews: value.previews.filter((previewEx) => previewEx.expiresAt > now),
           statuses: value.statuses,
-          baselines: value.baselines.filter((baseline) => baseline.expiresAt > now)
+          baselines: value.baselines.filter((baseline) => baseline.expiresAt > now),
+          correctionAuthorizations: value.correctionAuthorizations.filter(
+            (authorization) => authorization.expiresAt > now
+          )
         }))
         setReviewed({})
         setReviewedExecutions({})
         setReviewedBaselines({})
+        setReviewedCorrections({})
       },
       Math.min(2_147_483_647, Math.max(0, Math.min(...expiries) - Date.now()))
     )
@@ -681,6 +723,109 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
           throw new FigPluginBridgeError('INVALID_REQUEST')
         setNotice('figplugin.bridge.visualBaselineAccepted')
       }
+      if (live()) await refresh(live)
+    })
+  }
+
+  const canAuthorizeVisualCorrection = (status: FigPluginExecutionStatus) => {
+    const comparison = status.visualBaselineComparison
+    const preview = executions.previews.find((item) => item.executionId === status.executionId)
+    const baseline = executions.baselines.find(
+      (item) => item.baselineId === comparison?.baselineId && item.expiresAt > Date.now()
+    )
+    return (
+      status.state === 'completed' &&
+      status.effect === 'applied' &&
+      status.visualEvidenceSha256 !== undefined &&
+      comparison?.exactMatch === false &&
+      comparison.changedCount > 0 &&
+      baseline !== undefined &&
+      baseline.visualEvidenceSha256 === comparison.baselineEvidenceSha256 &&
+      baseline.adapterVersion === preview?.adapterVersion &&
+      baseline.correctionRoundsUsed < baseline.maxCorrectionRounds &&
+      preview?.visualAudit === 'hash-only' &&
+      preview.expiresAt > Date.now() &&
+      projects.some((value) => value.id === preview.projectId) &&
+      candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host) &&
+      !executions.correctionAuthorizations.some(
+        (authorization) => authorization.baselineId === baseline.baselineId
+      )
+    )
+  }
+
+  const authorizeVisualCorrection = (status: FigPluginExecutionStatus) => {
+    const comparison = status.visualBaselineComparison
+    const evidenceHash = status.visualEvidenceSha256
+    const preview = executions.previews.find((item) => item.executionId === status.executionId)
+    const baseline = executions.baselines.find((item) => item.baselineId === comparison?.baselineId)
+    const review = correctionReviewKey(status)
+    if (
+      pending.current ||
+      revokePending.current ||
+      !comparison ||
+      !evidenceHash ||
+      !preview ||
+      !baseline ||
+      reviewedCorrections[status.executionId] !== review ||
+      !canAuthorizeVisualCorrection(status)
+    )
+      return
+    if (!getProjectById(preview.projectId)) {
+      stopMonitoring()
+      setError('figplugin.bridge.errors.CONFIGURATION_CHANGED')
+      return
+    }
+    setReviewedCorrections((previous) => {
+      const next = { ...previous }
+      delete next[status.executionId]
+      return next
+    })
+    void run(async (live) => {
+      const value = await api().svcFigPluginCenter.authorizeVisualCorrection(
+        figPluginDesktopVisualCorrectionAuthorizationRequestSchema.parse({
+          executionId: status.executionId,
+          baselineId: baseline.baselineId,
+          visualEvidenceSha256: evidenceHash
+        })
+      )
+      if (!live()) return
+      if (value === null) {
+        setNotice('figplugin.bridge.visualCorrectionDeclined')
+      } else {
+        const authorization = parseFigPluginBridgeValue(
+          figPluginVisualCorrectionAuthorizationSchema,
+          value
+        )
+        const expectedTargets = comparison.targets
+          .filter((target) => target.changed)
+          .map((target) => target.targetId)
+          .sort()
+        if (
+          authorization.sourceExecutionId !== status.executionId ||
+          authorization.baselineId !== baseline.baselineId ||
+          authorization.visualEvidenceSha256 !== evidenceHash ||
+          authorization.expiresAt <= Date.now() ||
+          canonicalFigPluginJson(authorization.authorizedTargetIds) !==
+            canonicalFigPluginJson(expectedTargets)
+        )
+          throw new FigPluginBridgeError('INVALID_REQUEST')
+        setNotice('figplugin.bridge.visualCorrectionAuthorized')
+      }
+      if (live()) await refresh(live)
+    })
+  }
+
+  const cancelVisualCorrectionAuthorization = (
+    authorization: FigPluginVisualCorrectionAuthorization
+  ) => {
+    if (pending.current || revokePending.current) return
+    void run(async (live) => {
+      await api().svcFigPluginCenter.cancelVisualCorrectionAuthorization(
+        figPluginDesktopVisualCorrectionAuthorizationSchema.parse({
+          authorizationId: authorization.authorizationId
+        })
+      )
+      if (live()) setNotice('figplugin.bridge.visualCorrectionCancelled')
       if (live()) await refresh(live)
     })
   }
@@ -1033,6 +1178,11 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
           const canAccept = canAcceptVisualBaseline(executionStatus)
           const evidenceHash = executionStatus.visualEvidenceSha256
           const comparison = executionStatus.visualBaselineComparison
+          const activeCorrectionAuthorization = executions.correctionAuthorizations.find(
+            (authorization) => authorization.baselineId === comparison?.baselineId
+          )
+          const canAuthorizeCorrection = canAuthorizeVisualCorrection(executionStatus)
+          const correctionReview = correctionReviewKey(executionStatus)
           return (
             <Paper key={executionStatus.executionId} variant="outlined" sx={{ p: 2 }}>
               <Stack spacing={1}>
@@ -1103,6 +1253,51 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                         <Alert severity="info">
                           {t('figplugin.bridge.visualComparisonBoundary')}
                         </Alert>
+                        {activeCorrectionAuthorization && (
+                          <Alert severity="success">
+                            {t('figplugin.bridge.visualCorrectionCurrent', {
+                              id: shortHash(activeCorrectionAuthorization.authorizationId),
+                              round: activeCorrectionAuthorization.round,
+                              max: activeCorrectionAuthorization.maxCorrectionRounds
+                            })}
+                          </Alert>
+                        )}
+                        {canAuthorizeCorrection && evidenceHash && (
+                          <>
+                            <FormControlLabel
+                              label={t('figplugin.bridge.reviewVisualCorrection')}
+                              control={
+                                <Checkbox
+                                  disabled={locked}
+                                  checked={
+                                    reviewedCorrections[executionStatus.executionId] ===
+                                    correctionReview
+                                  }
+                                  onChange={(event) => {
+                                    if (!pending.current && !revokePending.current)
+                                      setReviewedCorrections((previous) => ({
+                                        ...previous,
+                                        [executionStatus.executionId]: event.target.checked
+                                          ? correctionReview
+                                          : ''
+                                      }))
+                                  }}
+                                />
+                              }
+                            />
+                            <Button
+                              variant="contained"
+                              disabled={
+                                locked ||
+                                reviewedCorrections[executionStatus.executionId] !==
+                                  correctionReview
+                              }
+                              onClick={() => authorizeVisualCorrection(executionStatus)}
+                            >
+                              {t('figplugin.bridge.authorizeVisualCorrection')}
+                            </Button>
+                          </>
+                        )}
                       </>
                     )}
                     {canAccept && evidenceHash && (
@@ -1196,6 +1391,59 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                 })}
               </Typography>
               <Alert severity="info">{t('figplugin.bridge.visualBaselineBoundary')}</Alert>
+            </Stack>
+          </Paper>
+        ))}
+        <Typography component="h3" variant="subtitle1">
+          {t('figplugin.bridge.visualCorrectionAuthorizations')}
+        </Typography>
+        {!executions.correctionAuthorizations.length && (
+          <Typography>{t('figplugin.bridge.noVisualCorrectionAuthorizations')}</Typography>
+        )}
+        {executions.correctionAuthorizations.map((authorization) => (
+          <Paper key={authorization.authorizationId} variant="outlined" sx={{ p: 2 }}>
+            <Stack spacing={1}>
+              <Typography>
+                {t('figplugin.bridge.visualCorrectionSummary', {
+                  plugin: authorization.pluginId,
+                  host: authorization.host,
+                  project: authorization.projectId,
+                  count: authorization.authorizedTargetIds.length
+                })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.visualCorrectionRound', {
+                  round: authorization.round,
+                  max: authorization.maxCorrectionRounds
+                })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.visualCorrectionHashes', {
+                  baseline: authorization.baselineEvidenceSha256,
+                  current: authorization.visualEvidenceSha256,
+                  comparison: authorization.comparisonSha256
+                })}
+              </Typography>
+              <Box
+                component="pre"
+                tabIndex={0}
+                aria-label={t('figplugin.bridge.visualCorrectionTargets')}
+                sx={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto', m: 0 }}
+              >
+                {authorization.authorizedTargetIds.join('\n')}
+              </Box>
+              <Typography>
+                {t('figplugin.bridge.visualCorrectionExpires', {
+                  expiry: new Date(authorization.expiresAt).toLocaleString()
+                })}
+              </Typography>
+              <Alert severity="info">{t('figplugin.bridge.visualCorrectionBoundary')}</Alert>
+              <Button
+                disabled={locked}
+                onClick={() => cancelVisualCorrectionAuthorization(authorization)}
+              >
+                {t('figplugin.bridge.cancelVisualCorrectionAuthorization')}
+              </Button>
             </Stack>
           </Paper>
         ))}

@@ -26,7 +26,9 @@ import {
   figPluginExecutionResultResponseSchema,
   figPluginExecutionStatusSchema,
   type FigPluginDesktopExecutionApproval,
-  type FigPluginDesktopVisualBaselineAcceptance
+  type FigPluginDesktopVisualBaselineAcceptance,
+  type FigPluginDesktopVisualCorrectionAuthorization,
+  type FigPluginDesktopVisualCorrectionAuthorizationRequest
 } from '@shared/figplugin/execution'
 import { createHostPlanReadback, type HostContext, type HostPlan } from '@shared/figplugin/hostPlan'
 import { FIGPLUGIN_MANAGEMENT_ERRORS } from '@shared/figplugin/management'
@@ -70,6 +72,8 @@ type BridgeMethod =
   | 'planState'
   | 'approvePlanExecution'
   | 'acceptVisualBaseline'
+  | 'authorizeVisualCorrection'
+  | 'cancelVisualCorrectionAuthorization'
   | 'denyPlanExecution'
   | 'cancelPlanExecution'
 type Store = ConstructorParameters<typeof FigPluginBridgeController>[0]
@@ -551,6 +555,23 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
         )
     },
     {
+      name: 'authorizeVisualCorrection',
+      call: (v, c) =>
+        v.service.authorizeVisualCorrection(
+          {
+            executionId: UNKNOWN_CALL,
+            baselineId: UNKNOWN_CALL,
+            visualEvidenceSha256: UNKNOWN_HASH
+          },
+          c
+        )
+    },
+    {
+      name: 'cancelVisualCorrectionAuthorization',
+      call: (v, c) =>
+        v.service.cancelVisualCorrectionAuthorization({ authorizationId: UNKNOWN_CALL }, c)
+    },
+    {
       name: 'denyPlanExecution',
       call: (v, c) => v.service.denyPlanExecution({ executionId: UNKNOWN_CALL }, c)
     },
@@ -655,6 +676,28 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
       'INVALID_REQUEST'
     )
     await rejectsSafely(
+      value.service.authorizeVisualCorrection(
+        {
+          executionId: UNKNOWN_CALL,
+          baselineId: UNKNOWN_CALL,
+          visualEvidenceSha256: UNKNOWN_HASH,
+          checkboxChecked: true
+        } as FigPluginDesktopVisualCorrectionAuthorizationRequest,
+        invocation('authorizeVisualCorrection')
+      ),
+      'INVALID_REQUEST'
+    )
+    await rejectsSafely(
+      value.service.cancelVisualCorrectionAuthorization(
+        {
+          authorizationId: UNKNOWN_CALL,
+          approved: true
+        } as FigPluginDesktopVisualCorrectionAuthorization,
+        invocation('cancelVisualCorrectionAuthorization')
+      ),
+      'INVALID_REQUEST'
+    )
+    await rejectsSafely(
       value.service.denyPlanExecution(
         { executionId: UNKNOWN_CALL, approved: true } as { executionId: string },
         invocation('denyPlanExecution')
@@ -694,7 +737,12 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
   it('state and harmless absent-bridge cancellation never initialize a bridge or prompt', async () => {
     const value = fixture()
     expect(await desktopState(value)).toEqual({ sessions: [], previews: [] })
-    expect(await planDesktopState(value)).toEqual({ previews: [], statuses: [], baselines: [] })
+    expect(await planDesktopState(value)).toEqual({
+      previews: [],
+      statuses: [],
+      baselines: [],
+      correctionAuthorizations: []
+    })
     await value.service.denyBridge({ callId: UNKNOWN_CALL }, invocation('denyBridge'))
     await value.service.revokeBridge({ pluginId: pairRequest.pluginId }, invocation('revokeBridge'))
     await rejectsSafely(
@@ -1735,6 +1783,164 @@ it('real loopback: exact user consent records one bounded visual checkpoint and 
   expect((await planDesktopState(value)).baselines).toEqual([])
 })
 
+it('real loopback: changed visual comparison requires one separate correction authorization', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const first = await completeVisualExecution(value)
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  const baseline = await value.service.acceptVisualBaseline(
+    {
+      executionId: first.execution.executionId,
+      visualEvidenceSha256: first.visualEvidenceSha256
+    },
+    invocation('acceptVisualBaseline')
+  )
+  if (!baseline) throw new Error('Expected accepted visual checkpoint')
+
+  const changedEvidence = [
+    {
+      ...visualEvidence[0],
+      after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) }
+    }
+  ]
+  const changed = await completeVisualExecution(value, changedEvidence, 2)
+  expect(changed.result.status.visualBaselineComparison).toMatchObject({
+    baselineId: baseline.baselineId,
+    changedCount: 1,
+    exactMatch: false
+  })
+
+  const promptCount = native.showMessageBox.mock.calls.length
+  await rejectsSafely(
+    value.service.authorizeVisualCorrection(
+      {
+        executionId: changed.execution.executionId,
+        baselineId: baseline.baselineId,
+        visualEvidenceSha256: UNKNOWN_HASH
+      },
+      invocation('authorizeVisualCorrection')
+    ),
+    'EXPIRED'
+  )
+  expect(native.showMessageBox).toHaveBeenCalledTimes(promptCount)
+
+  const request = {
+    executionId: changed.execution.executionId,
+    baselineId: baseline.baselineId,
+    visualEvidenceSha256: changed.visualEvidenceSha256
+  }
+  const declinedModal = holdModal()
+  const declinedAuthorization = value.service.authorizeVisualCorrection(
+    request,
+    invocation('authorizeVisualCorrection')
+  )
+  const declinedOptions = await declinedModal.opened
+  expectDefaultCancel(declinedOptions)
+  expect(declinedOptions.title).toBe('Authorize one correction round')
+  expect(declinedOptions.buttons).toEqual(['Authorize exact targets', 'Cancel'])
+  expect(declinedOptions.detail).toContain(`Accepted checkpoint: ${baseline.baselineId}`)
+  expect(declinedOptions.detail).toContain(
+    `Current evidence SHA-256: ${changed.visualEvidenceSha256}`
+  )
+  expect(declinedOptions.detail).toContain('"targetId": "1:2"')
+  expect(declinedOptions.detail).toContain('does not call a model')
+  expect(declinedOptions.detail).not.toContain('Synthetic approved label')
+  expect(declinedOptions.detail).not.toContain('Synthetic untrusted label')
+  declinedModal.resolve(cancelled)
+  expect(await declinedAuthorization).toBeNull()
+  expect((await planDesktopState(value)).correctionAuthorizations).toEqual([])
+
+  const approvedModal = holdModal()
+  const authorizing = value.service.authorizeVisualCorrection(
+    request,
+    invocation('authorizeVisualCorrection')
+  )
+  expectDefaultCancel(await approvedModal.opened)
+  approvedModal.resolve(approved)
+  const authorization = await authorizing
+  expect(authorization).toMatchObject({
+    baselineId: baseline.baselineId,
+    sourceExecutionId: changed.execution.executionId,
+    pluginId: pairRequest.pluginId,
+    host: 'figma',
+    projectId: pairRequest.projectId,
+    documentId: visualExecutionContext.documentId,
+    scopeId: visualExecutionContext.scopeId,
+    captureId: visualExecutionContext.captureId,
+    baselineEvidenceSha256: baseline.visualEvidenceSha256,
+    visualEvidenceSha256: changed.visualEvidenceSha256,
+    authorizedTargetIds: ['1:2'],
+    round: 1,
+    maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
+    state: 'authorized'
+  })
+  if (!authorization) throw new Error('Expected correction authorization')
+  expect((await planDesktopState(value)).correctionAuthorizations).toEqual([authorization])
+
+  const idempotentPromptCount = native.showMessageBox.mock.calls.length
+  expect(
+    await value.service.authorizeVisualCorrection(request, invocation('authorizeVisualCorrection'))
+  ).toEqual(authorization)
+  expect(native.showMessageBox).toHaveBeenCalledTimes(idempotentPromptCount)
+  expect(value.model.chat).toHaveBeenCalledTimes(2)
+  expect((await planDesktopState(value)).baselines[0]).toMatchObject({ correctionRoundsUsed: 0 })
+
+  await value.service.cancelVisualCorrectionAuthorization(
+    { authorizationId: authorization.authorizationId },
+    invocation('cancelVisualCorrectionAuthorization')
+  )
+  expect((await planDesktopState(value)).correctionAuthorizations).toEqual([])
+  expect((await planDesktopState(value)).baselines[0]).toMatchObject({ correctionRoundsUsed: 0 })
+})
+
+it('real loopback: correction authorization fails closed after the desktop document epoch changes', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const first = await completeVisualExecution(value)
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  const baseline = await value.service.acceptVisualBaseline(
+    {
+      executionId: first.execution.executionId,
+      visualEvidenceSha256: first.visualEvidenceSha256
+    },
+    invocation('acceptVisualBaseline')
+  )
+  if (!baseline) throw new Error('Expected accepted visual checkpoint')
+  const changed = await completeVisualExecution(
+    value,
+    [
+      {
+        ...visualEvidence[0],
+        after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) }
+      }
+    ],
+    2
+  )
+  const modal = holdModal()
+  const rejected = rejectsSafely(
+    value.service.authorizeVisualCorrection(
+      {
+        executionId: changed.execution.executionId,
+        baselineId: baseline.baselineId,
+        visualEvidenceSha256: changed.visualEvidenceSha256
+      },
+      invocation('authorizeVisualCorrection')
+    ),
+    'CONFIGURATION_CHANGED'
+  )
+  const options = await modal.opened
+  expectDefaultCancel(options)
+  expect(options.title).toBe('Authorize one correction round')
+  value.window.webContents.emit('did-start-navigation', {}, TRUSTED_URL, false, true)
+  modal.resolve(approved)
+  await rejected
+  expect(await planDesktopState(value)).toEqual({
+    previews: [],
+    statuses: [],
+    baselines: [],
+    correctionAuthorizations: []
+  })
+  expect(value.dispose).toHaveBeenCalledTimes(1)
+})
+
 it('real loopback: visual checkpoint consent fails closed after the desktop document epoch changes', async () => {
   const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
   const { execution, visualEvidenceSha256 } = await completeVisualExecution(value)
@@ -1750,7 +1956,12 @@ it('real loopback: visual checkpoint consent fails closed after the desktop docu
   value.window.webContents.emit('did-start-navigation', {}, TRUSTED_URL, false, true)
   modal.resolve(approved)
   await rejected
-  expect(await planDesktopState(value)).toEqual({ previews: [], statuses: [], baselines: [] })
+  expect(await planDesktopState(value)).toEqual({
+    previews: [],
+    statuses: [],
+    baselines: [],
+    correctionAuthorizations: []
+  })
   expect(value.dispose).toHaveBeenCalledTimes(1)
 })
 
