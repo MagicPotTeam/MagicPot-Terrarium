@@ -6,3 +6,6 @@ pnpm-lock.yaml
 LICENSE.md
 tsconfig.json
 tsconfig.*.json
+
+# Deterministic bundled pixel decoder; checked against its source by the generator.
+../../packages/figplugin-hosts/shared/pixel-audit.js
