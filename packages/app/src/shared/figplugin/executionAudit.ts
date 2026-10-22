@@ -94,6 +94,17 @@ export const figPluginExecutionAuditEventSchema = z
       .regex(/^[a-f0-9]{64}$/)
       .optional(),
     visualCorrectionExpiresAt: z.number().int().min(0).optional(),
+    taskRecovery: z
+      .object({
+        baselineId: z.string().regex(/^[a-f0-9]{32}$/),
+        sourceExecutionId: z.string().regex(/^[a-f0-9]{32}$/),
+        round: z.number().int().min(1).max(3),
+        maxCorrectionRounds: z.literal(3),
+        targetCount: z.number().int().min(1).max(20),
+        consumed: z.boolean()
+      })
+      .strict()
+      .optional(),
     correctionAttempt: z
       .object({
         authorizationId: z.string().regex(/^[a-f0-9]{32}$/),
@@ -156,6 +167,13 @@ export const figPluginExecutionAuditEventSchema = z
       FIGPLUGIN_AUDIT_MAX_LINE_BYTES
     )
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Audit event exceeds its byte budget' })
+    if (
+      value.taskRecovery &&
+      (value.correctionAttempt ||
+        (['claimed', 'executing', 'readback', 'completed'].includes(value.state) &&
+          !value.taskRecovery.consumed))
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid recovery consumption' })
     if (value.completed > value.total)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid audit progress' })
     if (

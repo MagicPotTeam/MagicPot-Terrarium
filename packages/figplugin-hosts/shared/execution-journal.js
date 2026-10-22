@@ -78,7 +78,8 @@
       intent.planSha256,
       intent.plan,
       intent.visualCorrection ?? null,
-      intent.visualTargetIds ?? null
+      intent.visualTargetIds ?? null,
+      ...(intent.recovery ? ['task-recovery-v1', intent.recovery] : [])
     ])
     if (serialized.length > 65536) return fail('JOURNAL_INVALID')
     return hash(new TextEncoder().encode(serialized))

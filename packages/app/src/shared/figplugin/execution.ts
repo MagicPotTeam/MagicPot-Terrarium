@@ -1,3 +1,4 @@
+import { figPluginTaskRecoverySchema } from './taskRecovery'
 import { z } from 'zod'
 import { figPluginPixelAuditSchema, pixelAuditMatchesComparison } from './pixelAudit'
 import { FigPluginIdSchema, FIGPLUGIN_HOSTS } from './manifest'
@@ -300,6 +301,7 @@ export const figPluginExecutionPreviewSchema = z
     risk: z.enum(['low', 'medium', 'high']),
     differences: z.array(differenceSchema).min(1).max(20),
     visualCorrection: figPluginVisualCorrectionAttemptSchema.optional(),
+    recovery: figPluginTaskRecoverySchema.optional(),
     state: figPluginExecutionStateSchema,
     requiresWriteApproval: z.literal(true),
     createdAt: safeInteger,
@@ -307,6 +309,14 @@ export const figPluginExecutionPreviewSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (
+      value.recovery &&
+      (value.visualCorrection ||
+        value.recovery.requestId !== value.captureId ||
+        JSON.stringify([...new Set(value.plan.steps.map((step) => step.targetId))].sort()) !==
+          JSON.stringify(value.recovery.targetIds))
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid task recovery preview' })
     if (value.expiresAt <= value.createdAt)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid execution expiry' })
     if (value.differences.length !== value.plan.steps.length)
@@ -337,10 +347,20 @@ export const figPluginExecutionIntentSchema = z
     adapterVersion: z.string().min(1).max(64),
     actionId: hex32,
     visualTargetIds: sortedUniqueIdentifierArraySchema.optional(),
-    visualCorrection: figPluginVisualCorrectionAttemptSchema.optional()
+    visualCorrection: figPluginVisualCorrectionAttemptSchema.optional(),
+    recovery: figPluginTaskRecoverySchema.optional()
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (
+      value.recovery &&
+      (value.visualCorrection ||
+        value.visualTargetIds ||
+        value.recovery.requestId !== value.captureId ||
+        JSON.stringify([...new Set(value.plan.steps.map((step) => step.targetId))].sort()) !==
+          JSON.stringify(value.recovery.targetIds))
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid task recovery intent' })
     if (value.plan.captureId !== value.captureId)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Intent capture mismatch' })
     const planTargetIds = new Set(value.plan.steps.map((step) => step.targetId))
@@ -396,7 +416,9 @@ const publicStatusFields = {
   visualBaselineComparison: figPluginVisualBaselineComparisonSchema.optional(),
   pixelAudit: figPluginPixelAuditSchema.optional(),
   visualCorrection: figPluginVisualCorrectionAttemptSchema.optional(),
-  visualCorrectionConsumed: z.boolean().optional()
+  visualCorrectionConsumed: z.boolean().optional(),
+  recovery: figPluginTaskRecoverySchema.optional(),
+  recoveryConsumed: z.boolean().optional()
 }
 export const figPluginExecutionStatusSchema = z
   .object({
@@ -424,6 +446,17 @@ export const figPluginExecutionStatusSchema = z
         !pixelAuditMatchesComparison(value.pixelAudit, value.visualBaselineComparison))
     )
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pixel audit evidence mismatch' })
+    if (
+      (value.recovery === undefined) !== (value.recoveryConsumed === undefined) ||
+      (value.recovery && value.visualCorrection)
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid task recovery status' })
+    if (
+      value.recovery &&
+      ['claimed', 'executing', 'readback', 'completed'].includes(value.state) &&
+      value.recoveryConsumed !== true
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Recovery was not consumed' })
     if ((value.visualCorrection === undefined) !== (value.visualCorrectionConsumed === undefined))
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

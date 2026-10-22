@@ -79,6 +79,11 @@ export const hostContextSchema = z
     documentId: id,
     scopeId: id,
     captureId: z.string().regex(/^[a-f0-9]{32}$/),
+    // Native runtime identity prevents recovery across unrelated host instances that reuse node IDs.
+    recoveryIdentity: z
+      .string()
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
     nodes: z.array(hostContextNodeSchema).min(1).max(100),
     selectedIds: z.array(id).min(1).max(100).optional(),
     execution: hostExecutionCapabilitySchema.optional()

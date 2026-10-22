@@ -1,3 +1,12 @@
+import {
+  captureTaskRecoveryScope,
+  prepareTaskRecoveryPlan,
+  figPluginTaskRecoveryPrepareRequestSchema,
+  figPluginTaskRecoveryPrepareResponseSchema,
+  type TaskRecoveryScope,
+  type FigPluginTaskRecovery,
+  type FigPluginTaskRecoveryPrepareResponse
+} from '@shared/figplugin/taskRecovery'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import {
   figPluginPixelAuditRequestSchema,
@@ -64,6 +73,7 @@ import {
 } from '@shared/figplugin/hostPlanPreview'
 import {
   validateHostPlanReadback,
+  stepValue,
   type HostContext,
   type HostPlan
 } from '@shared/figplugin/hostPlan'
@@ -118,6 +128,7 @@ type Receipt = {
   requestId: string
   digest: string
   response: FigPluginBridgePrepareResponse
+  recoveryResponse?: FigPluginTaskRecoveryPrepareResponse
 }
 type Session = {
   id: string
@@ -152,6 +163,7 @@ type VisualBaselineRecord = {
   value: FigPluginVisualBaseline
   binding: FigPluginRuntimeBinding
   recoveryPlan: HostPlan
+  recoveryScope: TaskRecoveryScope
 }
 type VisualCorrectionAuthorizationRecord = {
   value: FigPluginVisualCorrectionAuthorization
@@ -183,6 +195,7 @@ type PlanExecution = {
   pixelAuditFingerprint?: string
   visualTargetIds?: string[]
   visualCorrection?: FigPluginVisualCorrectionAttempt
+  recovery?: FigPluginTaskRecovery
   updatedAt: number
   errorCode?: NonNullable<FigPluginExecutionStatus['errorCode']>
 }
@@ -266,6 +279,9 @@ export class FigPluginBridgeRuntime {
           }
         : {}),
       ...(execution.pixelAudit ? { pixelAudit: execution.pixelAudit } : {}),
+      ...(execution.recovery
+        ? { recovery: execution.recovery, recoveryConsumed: execution.claimedAt !== undefined }
+        : {}),
       ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
     })
   }
@@ -281,10 +297,16 @@ export class FigPluginBridgeRuntime {
       documentId: execution.context.documentId,
       scopeId: execution.context.scopeId
     })
-    const baseline = [...this.visualBaselines.values()].find(
+    const record = [...this.visualBaselines.values()].find(
       (record) => visualBaselineScopeKey(record.value) === scopeKey
-    )?.value
-    if (!baseline || baseline.adapterVersion !== execution.preview.adapterVersion) return undefined
+    )
+    const baseline = record?.value
+    if (
+      !baseline ||
+      baseline.adapterVersion !== execution.preview.adapterVersion ||
+      record?.recoveryScope.recoveryIdentity !== execution.context.recoveryIdentity
+    )
+      return undefined
     const currentByTarget = new Map(
       visualEvidence.map((item) => [item.targetId, item.after] as const)
     )
@@ -385,7 +407,8 @@ export class FigPluginBridgeRuntime {
   private registerPlanExecution(
     call: Call,
     content: string,
-    context: HostContext
+    context: HostContext,
+    recovery?: FigPluginTaskRecovery
   ): PlanExecution | undefined {
     let checked: HostPlanningPreview
     try {
@@ -424,6 +447,7 @@ export class FigPluginBridgeRuntime {
       visualAudit: checked.execution.visualAudit,
       risk: checked.risk,
       differences: checked.differences,
+      ...(recovery ? { recovery } : {}),
       state: 'awaiting-approval',
       requiresWriteApproval: true,
       createdAt,
@@ -437,7 +461,8 @@ export class FigPluginBridgeRuntime {
       contextSha256,
       adapterVersion: checked.execution.adapterVersion,
       rollback: checked.execution.rollback,
-      visualAudit: checked.execution.visualAudit
+      visualAudit: checked.execution.visualAudit,
+      ...(recovery ? { recovery } : {})
     })
     const execution: PlanExecution = {
       executionId,
@@ -454,6 +479,7 @@ export class FigPluginBridgeRuntime {
       effect: 'none',
       cursor: 0,
       progress: [],
+      ...(recovery ? { recovery } : {}),
       updatedAt: createdAt
     }
     call.execution = execution
@@ -520,6 +546,18 @@ export class FigPluginBridgeRuntime {
               visualComparisonTargetCount: execution.visualBaselineComparison.targets.length,
               visualComparisonChangedCount: execution.visualBaselineComparison.changedCount,
               visualComparisonSha256: digest(execution.visualBaselineComparison)
+            }
+          : {}),
+        ...(execution.recovery
+          ? {
+              taskRecovery: {
+                baselineId: execution.recovery.baselineId,
+                sourceExecutionId: execution.recovery.sourceExecutionId,
+                round: execution.recovery.round,
+                maxCorrectionRounds: execution.recovery.maxCorrectionRounds,
+                targetCount: execution.recovery.targetIds.length,
+                consumed: execution.claimedAt !== undefined
+              }
             }
           : {}),
         ...(execution.visualCorrection
@@ -863,6 +901,7 @@ export class FigPluginBridgeRuntime {
         execution.effect !== 'applied' ||
         execution.preview.visualAudit !== 'hash-only' ||
         execution.visualCorrection !== undefined ||
+        execution.recovery !== undefined ||
         !evidence ||
         !sha256 ||
         !secretEquals(visualEvidenceSha256, sha256)
@@ -881,6 +920,7 @@ export class FigPluginBridgeRuntime {
         throw new FigPluginBridgeError('INVALID_REQUEST')
       return structuredClone(previous.value)
     }
+    const recoveryScope = captureTaskRecoveryScope(execution.plan, execution.context)
     const acceptedAt = this.clock()
     const baseline = figPluginVisualBaselineSchema.parse({
       protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
@@ -917,7 +957,8 @@ export class FigPluginBridgeRuntime {
     this.visualBaselines.set(baseline.baselineId, {
       value: baseline,
       binding: Object.freeze({ ...execution.call.session.binding }),
-      recoveryPlan: structuredClone(execution.plan)
+      recoveryPlan: structuredClone(execution.plan),
+      recoveryScope
     })
     this.recordExecutionAudit(execution, baseline)
     this.scheduleCleanup()
@@ -982,6 +1023,14 @@ export class FigPluginBridgeRuntime {
     let checked = check()
     await this.checkSession(execution.call.session)
     checked = check()
+    if (
+      this.allPlanExecutions().some(
+        (child) =>
+          child.recovery?.baselineId === checked.baseline.baselineId &&
+          !terminalExecution.has(child.state)
+      )
+    )
+      throw new FigPluginBridgeError('BUSY')
     const existing = [...this.visualCorrectionAuthorizations.values()].find(
       (record) => record.value.baselineId === checked.baseline.baselineId
     )
@@ -1050,6 +1099,142 @@ export class FigPluginBridgeRuntime {
     this.recordExecutionAudit(execution, undefined, authorization)
     this.scheduleCleanup()
     return structuredClone(authorization)
+  }
+
+  private recoveryAuthority(execution: PlanExecution): VisualBaselineRecord | undefined {
+    if (!execution.recovery) return undefined
+    const record = this.visualBaselines.get(execution.recovery.baselineId)
+    if (
+      !record ||
+      record.value.expiresAt <= this.clock() ||
+      record.value.sourceExecutionId !== execution.recovery.sourceExecutionId ||
+      record.value.correctionRoundsUsed + 1 !== execution.recovery.round ||
+      canonicalFigPluginJson(record.binding) !==
+        canonicalFigPluginJson(execution.call.session.binding)
+    )
+      throw new FigPluginBridgeError('EXPIRED')
+    return record
+  }
+
+  async prepareTaskRecovery(
+    sessionId: string,
+    sessionToken: string,
+    input: unknown
+  ): Promise<FigPluginTaskRecoveryPrepareResponse> {
+    const session = this.authenticate(sessionId, sessionToken)
+    if (this.preparing >= 16 || session.preparing >= 2) throw new FigPluginBridgeError('BUSY')
+    this.preparing++
+    session.preparing++
+    try {
+      const request = parseFigPluginBridgeValue(figPluginTaskRecoveryPrepareRequestSchema, input)
+      const fingerprint = digest({ purpose: 'task-recovery', binding: session.binding, request })
+      await this.checkSession(session)
+      this.requireCurrentSession(session)
+      const previous = session.requests.get(request.requestId)
+      if (previous) {
+        if (
+          previous.sequence !== request.sequence ||
+          previous.digest !== fingerprint ||
+          !previous.recoveryResponse
+        )
+          throw new FigPluginBridgeError('INVALID_REQUEST')
+        return structuredClone(previous.recoveryResponse)
+      }
+      if (request.sequence <= session.highWater || !this.allowNativeWrite(session.binding))
+        throw new FigPluginBridgeError('INVALID_REQUEST')
+      const context = request.hostContext
+      const record = [...this.visualBaselines.values()].find(
+        (record) =>
+          record.value.host === context.host &&
+          record.value.documentId === context.documentId &&
+          record.value.scopeId === context.scopeId &&
+          record.value.projectId === session.binding.projectId &&
+          record.value.pluginId === session.binding.pluginId &&
+          canonicalFigPluginJson(record.binding) === canonicalFigPluginJson(session.binding)
+      )
+      if (!record || record.value.expiresAt <= this.clock())
+        throw new FigPluginBridgeError('EXPIRED')
+      if (
+        session.requests.size >= 64 ||
+        [...this.sessions.values()].reduce((sum, item) => sum + item.requests.size, 0) >= 256 ||
+        this.calls.size >= 32 ||
+        [...this.calls.values()].some((call) => call.session === session && active(call)) ||
+        this.allPlanExecutions().some(
+          (execution) =>
+            !terminalExecution.has(execution.state) &&
+            (execution.recovery?.baselineId === record.value.baselineId ||
+              execution.visualCorrection?.baselineId === record.value.baselineId)
+        ) ||
+        [...this.visualCorrectionAuthorizations.values()].some(
+          (auth) => auth.value.baselineId === record.value.baselineId
+        )
+      )
+        throw new FigPluginBridgeError('BUSY')
+      let prepared: ReturnType<typeof prepareTaskRecoveryPlan>
+      try {
+        prepared = prepareTaskRecoveryPlan(record.recoveryPlan, record.recoveryScope, context)
+      } catch {
+        throw new FigPluginBridgeError('INVALID_REQUEST')
+      }
+      const callId = randomBytes(16).toString('hex')
+      const expiresAt = Math.min(this.clock() + CALL_TTL, session.expiresAt, record.value.expiresAt)
+      const receipt: Receipt = {
+        sequence: request.sequence,
+        requestId: request.requestId,
+        digest: fingerprint,
+        response: {
+          protocol: FIGPLUGIN_BRIDGE_PROTOCOL,
+          callId,
+          status: 'awaiting-approval',
+          expiresAt
+        }
+      }
+      let response: FigPluginTaskRecoveryPrepareResponse
+      if (prepared.unchanged) {
+        response = { protocol: 1, status: 'unchanged', baselineId: record.value.baselineId }
+      } else {
+        const round = record.value.correctionRoundsUsed + 1
+        if (round > record.value.maxCorrectionRounds) throw new FigPluginBridgeError('DENIED')
+        const recovery: FigPluginTaskRecovery = {
+          baselineId: record.value.baselineId,
+          sourceExecutionId: record.value.sourceExecutionId,
+          requestId: request.requestId,
+          round,
+          maxCorrectionRounds: 3,
+          targetIds: [...record.recoveryScope.targetIds]
+        }
+        const call: Call = {
+          session,
+          receipt,
+          hostContext: structuredClone(context),
+          status: { protocol: FIGPLUGIN_BRIDGE_PROTOCOL, callId, status: 'completed', content: '' }
+        }
+        const execution = this.registerPlanExecution(
+          call,
+          JSON.stringify({ plan: prepared.plan }),
+          context,
+          recovery
+        )
+        if (!execution) throw new FigPluginBridgeError('INVALID_REQUEST')
+        response = {
+          protocol: 1,
+          status: 'prepared',
+          callId,
+          executionId: execution.executionId,
+          expiresAt,
+          recovery
+        }
+        this.calls.set(callId, call)
+      }
+      receipt.recoveryResponse = figPluginTaskRecoveryPrepareResponseSchema.parse(response)
+      session.requests.set(request.requestId, receipt)
+      session.highWater = request.sequence
+      this.scheduleCleanup()
+      return structuredClone(response)
+    } finally {
+      this.preparing--
+      session.preparing--
+    }
   }
 
   async prepareVisualCorrection(
@@ -1172,6 +1357,7 @@ export class FigPluginBridgeRuntime {
       context.documentId !== authorization.documentId ||
       context.scopeId !== authorization.scopeId ||
       context.captureId !== authorization.authorizationId ||
+      context.recoveryIdentity !== baselineRecord.recoveryScope.recoveryIdentity ||
       context.execution?.mode !== 'native-write' ||
       context.execution.adapterVersion !== authorization.adapterVersion ||
       context.execution.visualAudit !== 'hash-only' ||
@@ -1331,6 +1517,7 @@ export class FigPluginBridgeRuntime {
           execution.preview.expiresAt <= this.clock() ? 'EXPIRED' : 'INVALID_REQUEST'
         )
       if (execution.visualCorrection) this.correctionAuthority(execution)
+      if (execution.recovery) this.recoveryAuthority(execution)
     }
     check()
     await this.checkSession(execution.call.session)
@@ -1422,6 +1609,7 @@ export class FigPluginBridgeRuntime {
         ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
       })
 
+    let recoveryAuthority: VisualBaselineRecord | undefined
     let correctionAuthority:
       | {
           authorizationRecord: VisualCorrectionAuthorizationRecord
@@ -1430,8 +1618,13 @@ export class FigPluginBridgeRuntime {
       | undefined
     try {
       correctionAuthority = this.correctionAuthority(execution)
+      recoveryAuthority = this.recoveryAuthority(execution)
     } catch (error) {
-      if (!execution.visualCorrection || !(error instanceof FigPluginBridgeError)) throw error
+      if (
+        (!execution.visualCorrection && !execution.recovery) ||
+        !(error instanceof FigPluginBridgeError)
+      )
+        throw error
       execution.state = 'expired'
       execution.errorCode = 'EXPIRED'
       execution.updatedAt = this.clock()
@@ -1459,6 +1652,7 @@ export class FigPluginBridgeRuntime {
       expiresAt: execution.preview.expiresAt,
       adapterVersion: execution.preview.adapterVersion,
       actionId: execution.actionId,
+      ...(execution.recovery ? { recovery: structuredClone(execution.recovery) } : {}),
       ...(execution.visualTargetIds ? { visualTargetIds: [...execution.visualTargetIds] } : {}),
       ...(execution.visualCorrection
         ? { visualCorrection: structuredClone(execution.visualCorrection) }
@@ -1474,6 +1668,11 @@ export class FigPluginBridgeRuntime {
         correctionAuthority.authorizationRecord.value.authorizationId
       )
     }
+    if (recoveryAuthority && execution.recovery)
+      recoveryAuthority.value = figPluginVisualBaselineSchema.parse({
+        ...recoveryAuthority.value,
+        correctionRoundsUsed: execution.recovery.round
+      })
     execution.intent = Object.freeze(intent)
     execution.state = 'claimed'
     execution.claimedAt = this.clock()
@@ -1555,6 +1754,20 @@ export class FigPluginBridgeRuntime {
       throw new FigPluginBridgeError('INVALID_REQUEST')
     try {
       validateHostPlanReadback(execution.plan, execution.context, request.readback)
+      if (execution.recovery && request.effect === 'applied') {
+        for (const step of execution.plan.steps) {
+          const observed = request.readback.steps.find(
+            (item) => item.targetId === step.targetId && item.command === step.command
+          )
+          if (
+            !observed ||
+            observed.observation !== 'requested' ||
+            !Object.hasOwn(observed, 'value') ||
+            canonicalFigPluginJson(observed.value) !== canonicalFigPluginJson(stepValue(step))
+          )
+            throw new Error('INVALID_RECOVERY_READBACK')
+        }
+      }
     } catch {
       execution.state = 'failed'
       execution.errorCode = 'STALE_CONTEXT'
@@ -2005,6 +2218,9 @@ export class FigPluginBridgeRuntime {
 
   private removeVisualBaseline(baselineId: string): void {
     this.visualBaselines.delete(baselineId)
+    for (const execution of this.allPlanExecutions())
+      if (execution.recovery?.baselineId === baselineId)
+        this.terminateExecution(execution, 'CONFIGURATION_CHANGED')
     for (const [id, record] of [...this.visualCorrectionAuthorizations]) {
       if (record.value.baselineId === baselineId)
         this.removeVisualCorrectionAuthorization(id, 'CONFIGURATION_CHANGED')

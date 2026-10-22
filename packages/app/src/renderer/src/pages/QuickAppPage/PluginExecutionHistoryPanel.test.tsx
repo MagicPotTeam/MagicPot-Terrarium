@@ -221,3 +221,24 @@ describe('persisted history panel', () => {
       )
   })
 })
+
+it('shows task-recovery lineage in saved evidence without adding a replay action', async () => {
+  mocks.history.mockResolvedValue(
+    reply([
+      event({
+        taskRecovery: {
+          baselineId: 'a'.repeat(32),
+          sourceExecutionId: 'b'.repeat(32),
+          round: 1,
+          maxCorrectionRounds: 3,
+          targetCount: 1,
+          consumed: true
+        }
+      })
+    ])
+  )
+  render(<PluginExecutionHistoryPanel items={items} />)
+  load()
+  await screen.findByText(/figplugin.bridge.taskRecoverySummary/)
+  expect(screen.getAllByRole('button')).toHaveLength(1)
+})

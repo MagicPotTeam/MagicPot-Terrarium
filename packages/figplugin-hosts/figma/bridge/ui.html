@@ -44,6 +44,14 @@
     <button id="pair" disabled>Pair with desktop</button>
     <button id="capture" disabled>Capture selection metadata</button>
     <button id="plan-capture" disabled>Capture native plan context (no changes)</button>
+    <button id="restore-task" disabled>
+      恢复已接受任务属性 / Restore accepted task properties
+    </button>
+    <p>
+      Recovery sends the freshly selected task context only to the paired desktop, not a model.
+      Select the exact accepted target set. Desktop approval is still required. Only accepted task
+      properties are restored; other edits are preserved.
+    </p>
     <p>
       Native planning requires a complete selection of 1–100 items. It captures only properties
       declared executable by this host. Sharing needs explicit consent; model output still requires
@@ -107,6 +115,7 @@
           el('pair').disabled = !configured || !secure() || paired || busy
           el('capture').disabled = !configured || !secure()
           el('plan-capture').disabled = !configured || !secure()
+          el('restore-task').disabled = disposed || !configured || !secure() || !paired || busy
           el('share').disabled =
             !configured ||
             !secure() ||
@@ -211,6 +220,21 @@
             refresh()
             send({ type: 'capture-plan', nonce: nonce(), instanceEpoch })
           } catch {
+            localError()
+          }
+        })
+        el('restore-task').addEventListener('click', () => {
+          if (disposed || !configured || !paired || busy) return
+          try {
+            if (instanceEpoch === null) instanceEpoch = nonce()
+            const requestId = nonce()
+            revision = ''
+            busy = true
+            el('consent').checked = false
+            refresh()
+            send({ type: 'restore-task', nonce: requestId, instanceEpoch })
+          } catch {
+            busy = false
             localError()
           }
         })

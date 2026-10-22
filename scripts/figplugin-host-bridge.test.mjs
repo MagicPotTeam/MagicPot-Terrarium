@@ -1041,3 +1041,22 @@ test('Connected protocol entrypoints contain no evaluation, HTML injection, dire
     assert.doesNotMatch(html, /\son\w+\s*=|<script[^>]+src="https?:/)
   }
 })
+
+test('Figma recovery UI requires parent pairing state and sends only a bounded recovery opcode', () => {
+  const f = fixture('figma')
+  assert.equal(f.el('restore-task').disabled, true)
+  const before = f.uiSends.length
+  f.click('restore-task')
+  assert.equal(f.uiSends.length, before)
+  f.emit({ protocol: 1, type: 'state', label: 'Paired', paired: true, busy: false }, f.parent)
+  assert.equal(f.el('restore-task').disabled, false)
+  f.click('restore-task')
+  const message = f.uiSends.at(-1)
+  assert.equal(message.type, 'restore-task')
+  assert.match(message.nonce, /^[a-f0-9]{32}$/)
+  assert.match(message.instanceEpoch, /^[a-f0-9]{32}$/)
+  assert.equal(Object.hasOwn(message, 'plan'), false)
+  assert.equal(Object.hasOwn(message, 'prompt'), false)
+  assert.equal(f.requests.length, 0)
+  f.clean()
+})

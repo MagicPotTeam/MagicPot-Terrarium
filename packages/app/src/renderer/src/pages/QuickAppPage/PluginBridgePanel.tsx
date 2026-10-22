@@ -676,6 +676,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       status.visualEvidenceSha256 !== undefined &&
       preview?.visualAudit === 'hash-only' &&
       preview.visualCorrection === undefined &&
+      preview.recovery === undefined &&
       preview.expiresAt > Date.now() &&
       projects.some((value) => value.id === preview.projectId) &&
       candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host) &&
@@ -752,10 +753,11 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host) &&
       !executions.statuses.some(
         (child) =>
-          child.visualCorrection?.baselineId === baseline.baselineId &&
+          (child.visualCorrection?.baselineId === baseline.baselineId ||
+            child.recovery?.baselineId === baseline.baselineId) &&
           (!['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(child.state) ||
             (child.visualCorrectionConsumed &&
-              child.visualCorrection.sourceExecutionId === status.executionId))
+              child.visualCorrection?.sourceExecutionId === status.executionId))
       ) &&
       !executions.correctionAuthorizations.some(
         (authorization) => authorization.baselineId === baseline.baselineId
@@ -1107,6 +1109,15 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
             sx={{ p: 2 }}
           >
             <Stack spacing={1}>
+              {previewEx.recovery && (
+                <Alert severity="warning">
+                  {t('figplugin.bridge.taskRecoverySummary', {
+                    id: previewEx.recovery.baselineId.slice(0, 12),
+                    round: previewEx.recovery.round,
+                    max: previewEx.recovery.maxCorrectionRounds
+                  })}
+                </Alert>
+              )}
               <Typography>
                 {t('figplugin.bridge.callSource', {
                   plugin: previewEx.pluginId,
@@ -1205,6 +1216,15 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
           return (
             <Paper key={executionStatus.executionId} variant="outlined" sx={{ p: 2 }}>
               <Stack spacing={1}>
+                {executionStatus.recovery && (
+                  <Alert severity="info">
+                    {t('figplugin.bridge.taskRecoverySummary', {
+                      id: executionStatus.recovery.baselineId.slice(0, 12),
+                      round: executionStatus.recovery.round,
+                      max: executionStatus.recovery.maxCorrectionRounds
+                    })}
+                  </Alert>
+                )}
                 <Typography>
                   {t('figplugin.bridge.executionStatus', {
                     state: executionStatus.state,
@@ -1411,6 +1431,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                 })}
               </Typography>
               <Alert severity="info">{t('figplugin.bridge.visualBaselineBoundary')}</Alert>
+              <Typography>{t('figplugin.bridge.taskRecoveryGuidance')}</Typography>
             </Stack>
           </Paper>
         ))}

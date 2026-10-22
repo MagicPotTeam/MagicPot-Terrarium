@@ -52,6 +52,14 @@ export function buildPlanExecutionApprovalDetails(preview: FigPluginExecutionPre
     `Plan SHA-256: ${preview.planSha256}`,
     `Context SHA-256: ${preview.contextSha256}`,
     ...correction,
+    ...(preview.recovery
+      ? [
+          `Operation: restore accepted task properties (round ${preview.recovery.round}/${preview.recovery.maxCorrectionRounds})`,
+          `Accepted checkpoint: ${preview.recovery.baselineId}`,
+          `Accepted source execution: ${preview.recovery.sourceExecutionId}`,
+          'No model is called. Only the accepted task properties shown below are restored. Other properties, images and resources are not restored. This is not a full-document backup.'
+        ]
+      : []),
     '',
     'Exact document changes:',
     escapePlanningDisplay(JSON.stringify(preview.differences, null, 2)),

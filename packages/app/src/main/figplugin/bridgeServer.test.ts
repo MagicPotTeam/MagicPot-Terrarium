@@ -58,6 +58,7 @@ const makeRuntime = () => ({
   cancel: vi.fn<Runtime['cancel']>().mockResolvedValue(undefined),
   closeSession: vi.fn<Runtime['closeSession']>(),
   planStatus: vi.fn<Runtime['planStatus']>(),
+  prepareTaskRecovery: vi.fn<Runtime['prepareTaskRecovery']>(),
   prepareVisualCorrection: vi.fn<Runtime['prepareVisualCorrection']>().mockResolvedValue({
     protocol: 1,
     status: 'pending',

@@ -68,6 +68,7 @@
   let snapshot = null
   let planningSnapshot = null
   let planningNodes = null
+  const recoveryDocumentIds = new WeakMap()
   let review = null
   let planReview = null
   let activeExecution = null
@@ -92,6 +93,7 @@
     close: '/figplugin/v1/close',
     planStatus: '/figplugin/v1/plan/status',
     planCorrectionPrepare: '/figplugin/v1/plan/correction/prepare',
+    taskRecoveryPrepare: '/figplugin/v1/plan/recovery/prepare',
     planClaim: '/figplugin/v1/plan/claim',
     planProgress: '/figplugin/v1/plan/progress',
     planResult: '/figplugin/v1/plan/result',
@@ -141,6 +143,14 @@
     el('pair').disabled = !config || !secure() || session !== null || pairing
     el('capture').disabled = !config || !secure() || pairing || activeExecution !== null
     el('plan-capture').disabled = !config || !secure() || pairing || activeExecution !== null
+    el('restore-task').disabled =
+      !config ||
+      !secure() ||
+      !session ||
+      pairing ||
+      review !== null ||
+      planReview !== null ||
+      activeExecution !== null
     el('share').disabled =
       !config ||
       !secure() ||
@@ -488,6 +498,8 @@
     if (!layers || typeof layers.length !== 'number' || layers.length < 1 || layers.length > 100)
       throw new Error('CONTEXT')
     const documentId = String(document.id)
+    if (!recoveryDocumentIds.has(document)) recoveryDocumentIds.set(document, nonce())
+    const recoveryIdentity = recoveryDocumentIds.get(document)
     const records = new Map()
     const objects = new Map()
     const selectedIds = []
@@ -577,6 +589,7 @@
       documentId,
       scopeId: documentId,
       captureId,
+      recoveryIdentity,
       nodes: Array.from(records.values()),
       selectedIds,
       execution: {
@@ -974,6 +987,24 @@
     return evidence
   }
   function visualEntriesForIntent(checked, item, intent) {
+    if (intent.recovery || item.recovery) {
+      const recovery = intent.recovery
+      if (
+        !item.recovery ||
+        !recovery ||
+        intent.visualCorrection ||
+        intent.visualTargetIds ||
+        !samePlanValue(recovery, item.recovery) ||
+        recovery.requestId !== item.hostContext.captureId ||
+        !sameIds(
+          [...new Set(checked.map((entry) => entry.step.targetId))].sort(),
+          recovery.targetIds
+        ) ||
+        !sameIds([...item.hostContext.selectedIds].sort(), recovery.targetIds)
+      )
+        throw new Error('REQUEST')
+      return checked.map((entry) => ({ targetId: entry.step.targetId, layer: entry.layer }))
+    }
     if (!intent.visualCorrection && !intent.visualTargetIds)
       return checked.map((entry) => ({ targetId: entry.step.targetId, layer: entry.layer }))
     const authorization = item.authorization
@@ -1307,7 +1338,11 @@
       result = await reportPixelAudit(item, result)
       if (!executionCurrent(item)) return
       if (result && result.status && result.status.state === 'completed') {
-        if (
+        if (item.recovery) {
+          state(
+            'Accepted task properties restored and read back. Check the separate visual comparison; this is not a full-document restore.'
+          )
+        } else if (
           result.status.visualBaselineComparison &&
           result.status.visualBaselineComparison.exactMatch === false &&
           result.status.pixelAudit?.outcome !== 'match'
@@ -1696,6 +1731,117 @@
       }
     }
   }
+  async function restoreTask(requestId) {
+    if (
+      !config ||
+      disposed ||
+      pairing ||
+      review ||
+      planReview ||
+      activeExecution ||
+      !live() ||
+      sequence >= 1000000000
+    )
+      return
+    let captured
+    try {
+      captured = capturePhotoshopHostContext(requestId)
+    } catch {
+      state(
+        'Recovery capture failed. Select the exact accepted task targets; nothing was sent or changed.'
+      )
+      return
+    }
+    planningNodes = captured.nodes
+    snapshot = null
+    planningSnapshot = null
+    clearView()
+    const call = {
+      epoch: ++epoch,
+      auth: session,
+      callId: null,
+      polls: 0,
+      expiresAt: 0,
+      hostContext: captured.context
+    }
+    review = call
+    sequence++
+    state(
+      'Preparing recovery of accepted task properties. No model call and no document changes yet.'
+    )
+    try {
+      const response = await post(
+        'taskRecoveryPrepare',
+        { protocol: 1, requestId, sequence, hostContext: call.hostContext },
+        call.auth
+      )
+      if (!current(call)) return
+      if (
+        keys(response, ['protocol', 'status', 'baselineId']) &&
+        response.protocol === 1 &&
+        response.status === 'unchanged' &&
+        hex(response.baselineId, 32)
+      ) {
+        review = null
+        touch(call.auth)
+        state(
+          'Accepted task properties already match. No write or round was used; this does not prove pixel equality.'
+        )
+        return
+      }
+      const recovery = response && response.recovery
+      if (
+        !keys(response, ['protocol', 'status', 'callId', 'executionId', 'expiresAt', 'recovery']) ||
+        response.protocol !== 1 ||
+        response.status !== 'prepared' ||
+        !hex(response.callId, 32) ||
+        !hex(response.executionId, 32) ||
+        !integer(response.expiresAt) ||
+        response.expiresAt <= Date.now() ||
+        !keys(recovery, [
+          'baselineId',
+          'sourceExecutionId',
+          'requestId',
+          'round',
+          'maxCorrectionRounds',
+          'targetIds'
+        ]) ||
+        !hex(recovery.baselineId, 32) ||
+        !hex(recovery.sourceExecutionId, 32) ||
+        recovery.requestId !== requestId ||
+        !Number.isInteger(recovery.round) ||
+        recovery.round < 1 ||
+        recovery.round > 3 ||
+        recovery.maxCorrectionRounds !== 3 ||
+        !sameIds(recovery.targetIds, [...call.hostContext.selectedIds].sort())
+      )
+        throw new Error('REQUEST')
+      call.callId = response.callId
+      review = null
+      touch(call.auth)
+      planReview = {
+        kind: 'recovery',
+        auth: call.auth,
+        callId: response.callId,
+        executionId: response.executionId,
+        hostContext: call.hostContext,
+        expiresAt: Math.min(response.expiresAt, call.auth.expiresAt),
+        recovery,
+        polls: 0,
+        started: false
+      }
+      state(
+        'Recovery preview ready. Review its exact changes and approve once in MagicPot desktop.'
+      )
+      schedulePlan(planReview)
+    } catch {
+      if (current(call))
+        forget(
+          true,
+          'Recovery unavailable or preparation could not be confirmed. No write started; check desktop and pair again.'
+        )
+    }
+  }
   async function share() {
     if (activeExecution) return
     if (!config || disposed || pairing || review || !live() || !snapshot || !el('consent').checked)
@@ -1771,6 +1917,13 @@
     el('pair').addEventListener('click', () => void pair())
     el('capture').addEventListener('click', capture)
     el('plan-capture').addEventListener('click', capturePlan)
+    el('restore-task').addEventListener('click', () => {
+      try {
+        void restoreTask(nonce())
+      } catch {
+        state('Recovery capture is unavailable.')
+      }
+    })
     el('share').addEventListener('click', () => void share())
     el('prompt').addEventListener('input', () => {
       el('consent').checked = false

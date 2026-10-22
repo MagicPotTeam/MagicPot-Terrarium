@@ -49,6 +49,7 @@
   let snapshot = null
   let planningSnapshot = null
   let planningNodes = null
+  let recoveryDocumentRoot = null
   let review = null
   let planReview = null
   let activeExecution = null
@@ -72,6 +73,7 @@
     close: '/figplugin/v1/close',
     planStatus: '/figplugin/v1/plan/status',
     planCorrectionPrepare: '/figplugin/v1/plan/correction/prepare',
+    taskRecoveryPrepare: '/figplugin/v1/plan/recovery/prepare',
     planClaim: '/figplugin/v1/plan/claim',
     planProgress: '/figplugin/v1/plan/progress',
     planResult: '/figplugin/v1/plan/result',
@@ -430,6 +432,12 @@
   }
   function captureFigmaHostContext(captureId, selectionOverride = null) {
     const root = figma.root
+    if (
+      !hex(snapshotInstanceEpoch, 32) ||
+      (recoveryDocumentRoot !== null && recoveryDocumentRoot !== root)
+    )
+      throw new Error('CONTEXT')
+    recoveryDocumentRoot = root
     const page = figma.currentPage
     const selection = selectionOverride || page.selection
     if (
@@ -582,6 +590,7 @@
       documentId,
       scopeId,
       captureId,
+      recoveryIdentity: snapshotInstanceEpoch,
       nodes,
       selectedIds,
       execution: {
@@ -999,6 +1008,24 @@
     return evidence
   }
   function visualEntriesForIntent(checked, item, intent) {
+    if (intent.recovery || item.recovery) {
+      const recovery = intent.recovery
+      if (
+        !item.recovery ||
+        !recovery ||
+        intent.visualCorrection ||
+        intent.visualTargetIds ||
+        !samePlanValue(recovery, item.recovery) ||
+        recovery.requestId !== item.hostContext.captureId ||
+        !sameIds(
+          [...new Set(checked.map((entry) => entry.step.targetId))].sort(),
+          recovery.targetIds
+        ) ||
+        !sameIds([...item.hostContext.selectedIds].sort(), recovery.targetIds)
+      )
+        throw new Error('REQUEST')
+      return checked.map((entry) => ({ targetId: entry.step.targetId, node: entry.node }))
+    }
     if (!intent.visualCorrection && !intent.visualTargetIds)
       return checked.map((entry) => ({ targetId: entry.step.targetId, node: entry.node }))
     const authorization = item.authorization
@@ -1340,7 +1367,11 @@
       result = await reportPixelAudit(item, result)
       if (!executionCurrent(item)) return
       if (result && result.status && result.status.state === 'completed') {
-        if (
+        if (item.recovery) {
+          state(
+            'Accepted task properties restored and read back. Check the separate visual comparison; this is not a full-document restore.'
+          )
+        } else if (
           result.status.visualBaselineComparison &&
           result.status.visualBaselineComparison.exactMatch === false &&
           result.status.pixelAudit?.outcome !== 'match'
@@ -1729,6 +1760,117 @@
       }
     }
   }
+  async function restoreTask(requestId) {
+    if (
+      !config ||
+      disposed ||
+      pairing ||
+      review ||
+      planReview ||
+      activeExecution ||
+      !live() ||
+      sequence >= 1000000000
+    )
+      return
+    let captured
+    try {
+      captured = captureFigmaHostContext(requestId)
+    } catch {
+      state(
+        'Recovery capture failed. Select the exact accepted task targets; nothing was sent or changed.'
+      )
+      return
+    }
+    planningNodes = captured.nodes
+    snapshot = null
+    planningSnapshot = null
+    clearView()
+    const call = {
+      epoch: ++epoch,
+      auth: session,
+      callId: null,
+      polls: 0,
+      expiresAt: 0,
+      hostContext: captured.context
+    }
+    review = call
+    sequence++
+    state(
+      'Preparing recovery of accepted task properties. No model call and no document changes yet.'
+    )
+    try {
+      const response = await post(
+        'taskRecoveryPrepare',
+        { protocol: 1, requestId, sequence, hostContext: call.hostContext },
+        call.auth
+      )
+      if (!current(call)) return
+      if (
+        keys(response, ['protocol', 'status', 'baselineId']) &&
+        response.protocol === 1 &&
+        response.status === 'unchanged' &&
+        hex(response.baselineId, 32)
+      ) {
+        review = null
+        touch(call.auth)
+        state(
+          'Accepted task properties already match. No write or round was used; this does not prove pixel equality.'
+        )
+        return
+      }
+      const recovery = response && response.recovery
+      if (
+        !keys(response, ['protocol', 'status', 'callId', 'executionId', 'expiresAt', 'recovery']) ||
+        response.protocol !== 1 ||
+        response.status !== 'prepared' ||
+        !hex(response.callId, 32) ||
+        !hex(response.executionId, 32) ||
+        !integer(response.expiresAt) ||
+        response.expiresAt <= Date.now() ||
+        !keys(recovery, [
+          'baselineId',
+          'sourceExecutionId',
+          'requestId',
+          'round',
+          'maxCorrectionRounds',
+          'targetIds'
+        ]) ||
+        !hex(recovery.baselineId, 32) ||
+        !hex(recovery.sourceExecutionId, 32) ||
+        recovery.requestId !== requestId ||
+        !Number.isInteger(recovery.round) ||
+        recovery.round < 1 ||
+        recovery.round > 3 ||
+        recovery.maxCorrectionRounds !== 3 ||
+        !sameIds(recovery.targetIds, [...call.hostContext.selectedIds].sort())
+      )
+        throw new Error('REQUEST')
+      call.callId = response.callId
+      review = null
+      touch(call.auth)
+      planReview = {
+        kind: 'recovery',
+        auth: call.auth,
+        callId: response.callId,
+        executionId: response.executionId,
+        hostContext: call.hostContext,
+        expiresAt: Math.min(response.expiresAt, call.auth.expiresAt),
+        recovery,
+        polls: 0,
+        started: false
+      }
+      state(
+        'Recovery preview ready. Review its exact changes and approve once in MagicPot desktop.'
+      )
+      schedulePlan(planReview)
+    } catch {
+      if (current(call))
+        forget(
+          true,
+          'Recovery unavailable or preparation could not be confirmed. No write started; check desktop and pair again.'
+        )
+    }
+  }
   async function share(message) {
     if (activeExecution) return
     if (
@@ -1824,6 +1966,17 @@
       return
     }
     if (!config) return
+    if (
+      message.type === 'restore-task' &&
+      keys(message, ['protocol', 'type', 'nonce', 'instanceEpoch']) &&
+      hex(message.nonce, 32) &&
+      hex(message.instanceEpoch, 32)
+    ) {
+      if (snapshotInstanceEpoch !== null && snapshotInstanceEpoch !== message.instanceEpoch) return
+      snapshotInstanceEpoch = message.instanceEpoch
+      void restoreTask(message.nonce)
+      return
+    }
     if (
       message.type === 'capture-plan' &&
       keys(message, ['protocol', 'type', 'nonce', 'instanceEpoch']) &&

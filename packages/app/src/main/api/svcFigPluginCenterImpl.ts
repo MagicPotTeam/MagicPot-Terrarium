@@ -855,15 +855,19 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       if (!preview) throw new FigPluginBridgeError('EXPIRED')
       const approval = await this.confirm(parent, {
         type: 'warning',
-        title: preview.visualCorrection
-          ? 'Approve one visual correction write'
-          : 'Approve one native document write',
+        title: preview.recovery
+          ? 'Restore accepted task properties'
+          : preview.visualCorrection
+            ? 'Approve one visual correction write'
+            : 'Approve one native document write',
         message: `${preview.pluginId} (${preview.host})`,
         detail: buildPlanExecutionApprovalDetails(preview),
         buttons: [
-          preview.visualCorrection
-            ? 'Approve this correction plan once'
-            : 'Approve this exact plan once',
+          preview.recovery
+            ? 'Restore these exact task properties once'
+            : preview.visualCorrection
+              ? 'Approve this correction plan once'
+              : 'Approve this exact plan once',
           'Cancel'
         ],
         defaultId: 1,
@@ -908,7 +912,8 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
           item.executionId === request.executionId &&
           item.state === 'completed' &&
           item.visualAudit === 'hash-only' &&
-          item.visualCorrection === undefined
+          item.visualCorrection === undefined &&
+          item.recovery === undefined
       )
       const status = state.statuses.find(
         (item) =>

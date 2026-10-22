@@ -1526,7 +1526,9 @@
         "TIMEOUT": "The plugin bridge request timed out.",
         "UPSTREAM_FAILED": "The plugin bridge upstream request failed.",
         "UNKNOWN": "The plugin bridge request failed."
-      }
+      },
+      "taskRecoverySummary": "Restore accepted task properties: checkpoint {{id}}, round {{round}}/{{max}}. Not a full-document restore.",
+      "taskRecoveryGuidance": "In the same host plugin instance, select exactly these task targets and click “Restore accepted task properties”. Review the fresh differences in desktop before approving. No model call; only this running desktop retains the checkpoint."
     },
     "center": {
       "title": "Plugin packages",

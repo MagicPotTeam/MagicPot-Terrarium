@@ -174,6 +174,15 @@ export default function PluginExecutionHistoryPanel({
                   <Typography variant="body2">
                     {new Date(event.at).toLocaleString()} · {event.durationMs} ms
                   </Typography>
+                  {event.taskRecovery && (
+                    <Typography>
+                      {t('figplugin.bridge.taskRecoverySummary', {
+                        id: event.taskRecovery.baselineId.slice(0, 12),
+                        round: event.taskRecovery.round,
+                        max: event.taskRecovery.maxCorrectionRounds
+                      })}
+                    </Typography>
+                  )}
                   {event.errorCode && (
                     <Typography>
                       {t('figplugin.history.errorCode', { code: event.errorCode })}

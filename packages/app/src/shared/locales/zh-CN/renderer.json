@@ -1526,7 +1526,9 @@
         "TIMEOUT": "桥接请求已超时。",
         "UPSTREAM_FAILED": "桥接上游请求失败。",
         "UNKNOWN": "桥接请求失败。"
-      }
+      },
+      "taskRecoverySummary": "恢复已接受任务属性：检查点 {{id}}，第 {{round}}/{{max}} 轮。不是整份文档恢复。",
+      "taskRecoveryGuidance": "在同一个宿主插件实例中选中这组任务目标，点击“恢复已接受任务属性”，再到桌面核对新差异并确认。不请求模型；当前恢复点仅保留在本次桌面进程中。"
     },
     "center": {
       "title": "插件包",

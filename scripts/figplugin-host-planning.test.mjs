@@ -68,7 +68,10 @@ function fixture(
     journalHelper = true,
     dropResult = false,
     actionSeed = '8',
-    authorityHook = null
+    authorityHook = null,
+    recoveryGate = null,
+    recoveryUnchanged = false,
+    tamperRecovery = false
   } = {}
 ) {
   let time = 1_800_000_000_000,
@@ -229,6 +232,9 @@ function fixture(
     comparisonSha256 = 'a'.repeat(64)
   let approvedContext
   let correctionContext
+  let recoveryContext
+  let recoveryDescriptor
+  const recoveryExecutionId = '0123'.repeat(8)
   let planResult = null
   let lastResultStatus = null
   const planResults = []
@@ -289,7 +295,34 @@ function fixture(
           expiresAt: time + 600_000,
           idleTimeoutMs: 120_000
         }
-      else if (url.endsWith('/plan/correction/prepare')) {
+      else if (url.endsWith('/plan/recovery/prepare')) {
+        assert.deepEqual(Object.keys(body).sort(), [
+          'hostContext',
+          'protocol',
+          'requestId',
+          'sequence'
+        ])
+        recoveryContext = body.hostContext
+        recoveryDescriptor = {
+          baselineId: '4'.repeat(32),
+          sourceExecutionId: '8'.repeat(32),
+          requestId: body.requestId,
+          round: 1,
+          maxCorrectionRounds: 3,
+          targetIds: [...body.hostContext.selectedIds].sort()
+        }
+        if (recoveryGate) await recoveryGate()
+        value = recoveryUnchanged
+          ? { protocol: 1, status: 'unchanged', baselineId: recoveryDescriptor.baselineId }
+          : {
+              protocol: 1,
+              status: 'prepared',
+              callId,
+              executionId: recoveryExecutionId,
+              expiresAt: time + 120000,
+              recovery: recoveryDescriptor
+            }
+      } else if (url.endsWith('/plan/correction/prepare')) {
         const selectedId = approvedContext.nodes[0].id
         if (!body.hostContext) {
           value = {
@@ -353,16 +386,25 @@ function fixture(
       } else if (url.endsWith('/plan/claim')) {
         claimedExecutions.add(body.executionId || sourceExecutionId)
         const correction = body.executionId === correctionExecutionId
-        const context = correction ? correctionContext : approvedContext
+        const restoring = body.executionId === recoveryExecutionId
+        const context = restoring
+          ? recoveryContext
+          : correction
+            ? correctionContext
+            : approvedContext
         const selected = context.nodes[0]
-        const authorizationTargets = [approvedContext.nodes[0].id]
+        const authorizationTargets = [(restoring ? recoveryContext : approvedContext).nodes[0].id]
         value = {
           protocol: 1,
           status: 'ready',
           intent: {
             protocol: 1,
             purpose: 'execute-host-plan',
-            executionId: correction ? correctionExecutionId : sourceExecutionId,
+            executionId: restoring
+              ? recoveryExecutionId
+              : correction
+                ? correctionExecutionId
+                : sourceExecutionId,
             callId,
             pluginId,
             host,
@@ -373,20 +415,39 @@ function fixture(
               schemaVersion: 2,
               kind: 'host-plan',
               captureId: context.captureId,
-              steps: correction
+              steps: restoring
                 ? [
                     {
                       command: 'node.rename',
-                      targetId: selected.id,
-                      name: 'Original owned name'
+                      targetId: context.selectedIds[0],
+                      name: 'Accepted recovery name'
                     }
                   ]
-                : plannedSteps()
+                : correction
+                  ? [
+                      {
+                        command: 'node.rename',
+                        targetId: selected.id,
+                        name: 'Original owned name'
+                      }
+                    ]
+                  : plannedSteps()
             },
             planSha256: correction ? 'f'.repeat(64) : '9'.repeat(64),
             expiresAt: time + 120000,
             adapterVersion: host === 'figma' ? 'figma-native-1' : 'photoshop-uxp-native-1',
-            actionId: correction ? 'e'.repeat(32) : sourceExecutionId,
+            actionId: restoring
+              ? '0123'.repeat(8)
+              : correction
+                ? 'e'.repeat(32)
+                : sourceExecutionId,
+            ...(restoring
+              ? {
+                  recovery: tamperRecovery
+                    ? { ...recoveryDescriptor, baselineId: '0'.repeat(32) }
+                    : recoveryDescriptor
+                }
+              : {}),
             ...(correction
               ? {
                   visualTargetIds: authorizationTargets,
@@ -659,6 +720,10 @@ function fixture(
     pair,
     capture,
     share,
+    restore: () =>
+      host === 'figma'
+        ? send({ type: 'restore-task', nonce: 'f'.repeat(32), instanceEpoch: '6'.repeat(32) })
+        : click('restore-task'),
     tick,
     output,
     requests,
@@ -1353,6 +1418,132 @@ for (const host of ['figma', 'photoshop']) {
       assert.equal(reports.length, 1)
       assert.equal(reports[0].body.targets[0].status, 'unavailable')
       assert.equal(Object.hasOwn(reports[0].body.targets[0], 'changedPixels'), false)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: explicit restore uses fresh targets, waits for approval, restores accepted task values without a model request`, async () => {
+    const f = fixture(host, { approvePlan: true })
+    try {
+      await f.pair()
+      f.node.visible = false
+      f.restore()
+      await flush()
+      assert.equal(f.nativeWrites.length, 0)
+      const request = f.requests.find((r) => r.url.endsWith('/plan/recovery/prepare'))
+      assert.ok(request)
+      assert.equal(request.body.hostContext.nodes[0].visible, false)
+      await f.tick(1000)
+      assert.equal(f.node.name, 'Accepted recovery name')
+      assert.equal(f.node.visible, false)
+      assert.deepEqual(f.nativeWrites, ['Accepted recovery name'])
+      assert.equal(f.planResult().status, 'completed')
+      assert.equal(f.planResult().readback.steps[0].value, 'Accepted recovery name')
+      assert.equal(
+        f.requests.some((r) => new URL(r.url).pathname === '/figplugin/v1/prepare'),
+        false
+      )
+      assert.equal(
+        f.requests.some((r) => r.url.endsWith('/plan/correction/prepare')),
+        false
+      )
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: pending recovery does not claim or write and cancel does not launch late work`, async () => {
+    const f = fixture(host)
+    try {
+      await f.pair()
+      f.restore()
+      await flush()
+      await f.tick(1000)
+      f.cancel()
+      await flush()
+      await f.tick(5000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(
+        f.requests.some((r) => r.url.endsWith('/plan/claim')),
+        false
+      )
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: cancellation while recovery prepare is pending discards the late preview`, async () => {
+    let done
+    const gate = new Promise((r) => {
+      done = r
+    })
+    const f = fixture(host, { approvePlan: true, recoveryGate: () => gate })
+    try {
+      await f.pair()
+      f.restore()
+      await flush()
+      f.cancel()
+      done()
+      await flush()
+      await f.tick(5000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(
+        f.requests.some((r) => r.url.endsWith('/plan/claim')),
+        false
+      )
+    } finally {
+      done()
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: unchanged task properties do not claim, write or create a journal marker`, async () => {
+    const f = fixture(host, { approvePlan: true, recoveryUnchanged: true })
+    try {
+      await f.pair()
+      f.restore()
+      await flush()
+      await f.tick(3000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.persistedActions.size, 0)
+      assert.equal(
+        f.requests.some((r) => r.url.endsWith('/plan/claim')),
+        false
+      )
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: a substituted recovery checkpoint in the claimed intent never writes`, async () => {
+    const f = fixture(host, { approvePlan: true, tamperRecovery: true })
+    try {
+      await f.pair()
+      f.restore()
+      await flush()
+      await f.tick(1000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.persistedActions.size, 0)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: a target edited while recovery approval is pending is not overwritten`, async () => {
+    const f = fixture(host, { approvePlan: true })
+    try {
+      await f.pair()
+      f.restore()
+      await flush()
+      f.node.name = 'Newer user edit'
+      f.nativeWrites.length = 0
+      await f.tick(1000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.node.name, 'Newer user edit')
     } finally {
       f.close()
       await flush()

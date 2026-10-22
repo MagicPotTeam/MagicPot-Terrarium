@@ -1283,3 +1283,39 @@ describe('Bridge localization', () => {
     expect(document.body).not.toHaveTextContent('figplugin.bridge.')
   })
 })
+
+it('labels a completed task-property restoration without allowing it to reset its checkpoint budget', async () => {
+  const preview = nativeExecutionPreview(),
+    status = visualExecutionStatus(),
+    baseline = acceptedVisualBaseline()
+  const recovery = {
+    baselineId: baseline.baselineId,
+    sourceExecutionId: '1'.repeat(32),
+    requestId: preview.captureId,
+    round: 1,
+    maxCorrectionRounds: 3 as const,
+    targetIds: ['node-1']
+  }
+  mocks.center.planState.mockResolvedValue({
+    previews: [{ ...preview, state: 'completed', recovery }],
+    statuses: [{ ...status, recovery, recoveryConsumed: true }],
+    baselines: [baseline],
+    correctionAuthorizations: []
+  })
+  mount()
+  await click('refresh')
+  expect(
+    screen.getAllByText(`${key('taskRecoverySummary')} ${baseline.baselineId.slice(0, 12)} 1 3`)
+  ).toHaveLength(2)
+  expect(screen.getByText(key('taskRecoveryGuidance'))).toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: key('acceptVisualBaseline') })
+  ).not.toBeInTheDocument()
+  expect(mocks.center.acceptVisualBaseline).not.toHaveBeenCalled()
+})
+it('provides task restoration guidance in both supported languages without promising full backup', () => {
+  expect(en.figplugin.bridge.taskRecoverySummary).toContain('Not a full-document')
+  expect(zh.figplugin.bridge.taskRecoverySummary).toContain('不是整份文档')
+  expect(en.figplugin.bridge.taskRecoveryGuidance).toContain('No model call')
+  expect(zh.figplugin.bridge.taskRecoveryGuidance).toContain('本次桌面进程')
+})

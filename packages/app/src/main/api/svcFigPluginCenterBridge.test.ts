@@ -1,3 +1,4 @@
+import { figPluginTaskRecoveryPrepareResponseSchema } from '@shared/figplugin/taskRecovery'
 import { EventEmitter, once } from 'node:events'
 import { request as httpRequest } from 'node:http'
 import { createServer } from 'node:net'
@@ -358,6 +359,7 @@ const executionContext: HostContext = {
 }
 const visualExecutionContext: HostContext = {
   ...structuredClone(executionContext),
+  recoveryIdentity: 'b'.repeat(32),
   execution: { ...executionContext.execution!, visualAudit: 'hash-only' }
 }
 const executionPlan: HostPlan = {
@@ -2255,4 +2257,95 @@ it('real loopback: pixel metrics are bound to an accepted checkpoint without sen
   ).toBe(1)
   expect((await planDesktopState(value)).correctionAuthorizations).toEqual([])
   expect(value.model.chat).toHaveBeenCalledTimes(count)
+})
+
+it('real loopback: directly restores accepted task properties with a fresh native confirmation and no new model call', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const first = await completeVisualExecution(value)
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  const baseline = await value.service.acceptVisualBaseline(
+    { executionId: first.execution.executionId, visualEvidenceSha256: first.visualEvidenceSha256 },
+    invocation('acceptVisualBaseline')
+  )
+  expect(baseline).not.toBeNull()
+  const hostContext = structuredClone(visualExecutionContext)
+  hostContext.captureId = 'f'.repeat(32)
+  hostContext.nodes[0].name = 'Later user change'
+  const request = { protocol: 1, requestId: hostContext.captureId, sequence: 2, hostContext }
+  const calls = value.model.chat.mock.calls.length
+  expect((await post(first.origin, 'plan/recovery/prepare', request)).status).toBe(401)
+  expect(
+    (
+      await post(
+        first.origin,
+        'plan/recovery/prepare',
+        { ...request, plan: 'untrusted' },
+        first.session
+      )
+    ).status
+  ).toBe(400)
+  const prepared = await post(first.origin, 'plan/recovery/prepare', request, first.session)
+  expect(prepared.status).toBe(200)
+  const response = figPluginTaskRecoveryPrepareResponseSchema.parse(prepared.body)
+  if (response.status !== 'prepared') throw new Error('not prepared')
+  expect(await post(first.origin, 'plan/recovery/prepare', request, first.session)).toEqual(
+    prepared
+  )
+  const { preview } = await waitForExecution(value, response.callId, response.executionId)
+  expect(preview.recovery?.baselineId).toBe(baseline!.baselineId)
+  expect(value.model.chat).toHaveBeenCalledTimes(calls)
+  const selector = { protocol: 1, callId: response.callId, executionId: response.executionId }
+  expect((await post(first.origin, 'plan/claim', selector, first.session)).body).toMatchObject({
+    status: 'pending'
+  })
+  const approval = { executionId: preview.executionId, planSha256: preview.planSha256 }
+  const denied = holdModal()
+  const refusal = value.service.approvePlanExecution(approval, invocation('approvePlanExecution'))
+  const dialog = await denied.opened
+  expectDefaultCancel(dialog)
+  expect(dialog.title).toBe('Restore accepted task properties')
+  expect(dialog.detail).toContain('Later user change')
+  expect(dialog.detail).toContain('No model is called')
+  denied.resolve({ response: 1, checkboxChecked: false })
+  expect(await refusal).toEqual({ completed: false })
+  expect((await post(first.origin, 'plan/claim', selector, first.session)).body).toMatchObject({
+    status: 'pending'
+  })
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  expect(
+    await value.service.approvePlanExecution(approval, invocation('approvePlanExecution'))
+  ).toEqual({ completed: true })
+  const claimed = figPluginExecutionClaimResponseSchema.parse(
+    (await post(first.origin, 'plan/claim', selector, first.session)).body
+  )
+  if (claimed.status !== 'ready') throw new Error('not claimed')
+  const after = structuredClone(hostContext)
+  for (const step of claimed.intent.plan.steps) {
+    if (step.command === 'node.rename')
+      after.nodes.find((node) => node.id === step.targetId)!.name = step.name
+  }
+  const result = await post(
+    first.origin,
+    'plan/result',
+    {
+      protocol: 1,
+      executionId: response.executionId,
+      actionId: claimed.intent.actionId,
+      status: 'completed',
+      effect: 'applied',
+      completed: 1,
+      total: 1,
+      readback: createHostPlanReadback(hostContext, after, claimed.intent.plan),
+      visualEvidence
+    },
+    first.session
+  )
+  expect(result.status).toBe(200)
+  expect(figPluginExecutionResultResponseSchema.parse(result.body).status).toMatchObject({
+    state: 'completed',
+    recoveryConsumed: true,
+    visualBaselineComparison: { exactMatch: true }
+  })
+  expect(value.model.chat).toHaveBeenCalledTimes(calls)
+  expect((await planDesktopState(value)).baselines[0].correctionRoundsUsed).toBe(1)
 })

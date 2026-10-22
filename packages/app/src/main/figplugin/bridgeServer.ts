@@ -1,3 +1,7 @@
+import {
+  figPluginTaskRecoveryPrepareRequestSchema,
+  figPluginTaskRecoveryPrepareResponseSchema
+} from '@shared/figplugin/taskRecovery'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
@@ -41,6 +45,7 @@ type Runtime = Pick<
   | 'closeSession'
   | 'planStatus'
   | 'prepareVisualCorrection'
+  | 'prepareTaskRecovery'
   | 'claimPlan'
   | 'planProgress'
   | 'planResult'
@@ -55,6 +60,7 @@ const paths = new Set([
   '/figplugin/v1/close',
   '/figplugin/v1/plan/status',
   '/figplugin/v1/plan/correction/prepare',
+  '/figplugin/v1/plan/recovery/prepare',
   '/figplugin/v1/plan/claim',
   '/figplugin/v1/plan/progress',
   '/figplugin/v1/plan/result',
@@ -211,6 +217,15 @@ const dispatch = async (
           session,
           token,
           parseFigPluginBridgeValue(figPluginExecutionStatusRequestSchema, body)
+        )
+      )
+    case '/figplugin/v1/plan/recovery/prepare':
+      return serialize(
+        figPluginTaskRecoveryPrepareResponseSchema,
+        await runtime.prepareTaskRecovery(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginTaskRecoveryPrepareRequestSchema, body)
         )
       )
     case '/figplugin/v1/plan/correction/prepare':
