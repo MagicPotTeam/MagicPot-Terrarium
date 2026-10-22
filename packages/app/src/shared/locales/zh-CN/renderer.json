@@ -1402,7 +1402,8 @@
         "rolled-back": "已回滚",
         "partial": "部分修改",
         "unknown": "修改结果待核实"
-      }
+      },
+      "pixelAudit": "已保存像素审计：{{outcome}} 变化像素：{{changed}}。"
     },
     "bridge": {
       "title": "FigPlugin 桥接",
@@ -1619,6 +1620,17 @@
         "NOT_INSTALLED": "没有可用的已验证插件包副本，请刷新或先选择插件包。",
         "IDEMPOTENCY_CONFLICT": "此操作标识不能重复使用。请取消、刷新并重新检查。"
       }
+    },
+    "pixelAudit": {
+      "pending": "尚未收到像素报告。仅哈希一致不代表完成像素审计。",
+      "match": "全部 {{count}} 个目标的有界导出像素与已接受检查点一致。",
+      "different": "共 {{count}} 个目标，其中 {{changed}} 个存在像素或尺寸差异。",
+      "incomplete": "像素比较不完整：{{unavailable}} 个目标无法比较，不能判为通过。",
+      "metrics": "变化 {{changed}} / {{total}} 像素（{{percent}}%）；最大通道差 {{max}} / 255；平均绝对通道差 {{mean}} / 255。",
+      "dimensions": "导出尺寸变化；不会强行缩放后判定一致。",
+      "unavailable": "保留像素不可用；不能判定一致。",
+      "bounds": "变化区域（导出像素坐标）：x={{x}}，y={{y}}，宽={{width}}，高={{height}}。",
+      "boundary": "宿主回报的 sRGB 8 位 RGBA 零容差比较，导出宽高各不超过 512 像素；忽略完全透明像素的 RGB。它只检查导出内容，不验证文档坐标、原始分辨率细节或设计质量。像素仅留在插件有上限的内存缓存中，只回传统计，不自动修正或授予写入权限。"
     }
   },
   "image_edit": {

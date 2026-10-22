@@ -1,0 +1,647 @@
+// Generated host-local FIGPLUGIN pixel audit; source binding fcfccb8bb27664aa1d7ae78a5074bb36e1806fddd39c349e20d04ef2bdb21891.
+/* Includes fflate 0.8.3 (MIT):
+MIT License
+
+Copyright (c) 2026 Arjun Barrett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+var MagicPotPixelAuditBundle = (() => {
+  var Q = Object.defineProperty
+  var It = Object.getOwnPropertyDescriptor
+  var St = Object.getOwnPropertyNames
+  var Dt = Object.prototype.hasOwnProperty
+  var Tt = (t, r) => {
+      for (var e in r) Q(t, e, { get: r[e], enumerable: !0 })
+    },
+    Ct = (t, r, e, a) => {
+      if ((r && typeof r == 'object') || typeof r == 'function')
+        for (let i of St(r))
+          !Dt.call(t, i) &&
+            i !== e &&
+            Q(t, i, { get: () => r[i], enumerable: !(a = It(r, i)) || a.enumerable })
+      return t
+    }
+  var Ft = (t) => Ct(Q({}, '__esModule', { value: !0 }), t)
+  var Jt = {}
+  Tt(Jt, { createPixelAuditCache: () => dt, hostPixelAudit: () => Wt })
+  var b = Uint8Array,
+    H = Uint16Array,
+    Et = Int32Array,
+    lt = new b([
+      0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0
+    ]),
+    vt = new b([
+      0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+      13, 0, 0
+    ]),
+    Bt = new b([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]),
+    ct = function (t, r) {
+      for (var e = new H(31), a = 0; a < 31; ++a) e[a] = r += 1 << t[a - 1]
+      for (var i = new Et(e[30]), a = 1; a < 30; ++a)
+        for (var w = e[a]; w < e[a + 1]; ++w) i[w] = ((w - e[a]) << 5) | a
+      return { b: e, r: i }
+    },
+    gt = ct(lt, 2),
+    pt = gt.b,
+    Pt = gt.r
+  ;((pt[28] = 258), (Pt[258] = 28))
+  var yt = ct(vt, 0),
+    Lt = yt.b,
+    Qt = yt.r,
+    et = new H(32768)
+  for (v = 0; v < 32768; ++v)
+    ((N = ((v & 43690) >> 1) | ((v & 21845) << 1)),
+      (N = ((N & 52428) >> 2) | ((N & 13107) << 2)),
+      (N = ((N & 61680) >> 4) | ((N & 3855) << 4)),
+      (et[v] = (((N & 65280) >> 8) | ((N & 255) << 8)) >> 1))
+  var N,
+    v,
+    $ = function (t, r, e) {
+      for (var a = t.length, i = 0, w = new H(r); i < a; ++i) t[i] && ++w[t[i] - 1]
+      var u = new H(r)
+      for (i = 1; i < r; ++i) u[i] = (u[i - 1] + w[i - 1]) << 1
+      var A
+      if (e) {
+        A = new H(1 << r)
+        var D = 15 - r
+        for (i = 0; i < a; ++i)
+          if (t[i])
+            for (
+              var z = (i << 4) | t[i], o = r - t[i], n = u[t[i] - 1]++ << o, f = n | ((1 << o) - 1);
+              n <= f;
+              ++n
+            )
+              A[et[n] >> D] = z
+      } else for (A = new H(a), i = 0; i < a; ++i) t[i] && (A[i] = et[u[t[i] - 1]++] >> (15 - t[i]))
+      return A
+    },
+    V = new b(288)
+  for (v = 0; v < 144; ++v) V[v] = 8
+  var v
+  for (v = 144; v < 256; ++v) V[v] = 9
+  var v
+  for (v = 256; v < 280; ++v) V[v] = 7
+  var v
+  for (v = 280; v < 288; ++v) V[v] = 8
+  var v,
+    wt = new b(32)
+  for (v = 0; v < 32; ++v) wt[v] = 5
+  var v
+  var Zt = $(V, 9, 1)
+  var Ot = $(wt, 5, 1),
+    _ = function (t) {
+      for (var r = t[0], e = 1; e < t.length; ++e) t[e] > r && (r = t[e])
+      return r
+    },
+    O = function (t, r, e) {
+      var a = (r / 8) | 0
+      return ((t[a] | (t[a + 1] << 8)) >> (r & 7)) & e
+    },
+    tt = function (t, r) {
+      var e = (r / 8) | 0
+      return (t[e] | (t[e + 1] << 8) | (t[e + 2] << 16)) >> (r & 7)
+    },
+    Nt = function (t) {
+      return ((t + 7) / 8) | 0
+    },
+    k = function (t, r, e) {
+      return (
+        (r == null || r < 0) && (r = 0),
+        (e == null || e > t.length) && (e = t.length),
+        new b(t.subarray(r, e))
+      )
+    }
+  var Gt = [
+      'unexpected EOF',
+      'invalid block type',
+      'invalid length/literal',
+      'invalid distance',
+      'stream finished',
+      'no stream handler',
+      ,
+      'no callback',
+      'invalid UTF-8 data',
+      'extra field too long',
+      'date not in range 1980-2099',
+      'filename too long',
+      'stream finishing',
+      'invalid zip data'
+    ],
+    S = function (t, r, e) {
+      var a = new Error(r || Gt[t])
+      if (((a.code = t), Error.captureStackTrace && Error.captureStackTrace(a, S), !e)) throw a
+      return a
+    },
+    qt = function (t, r, e, a) {
+      var i = t.length,
+        w = a ? a.length : 0
+      if (!i || (r.f && !r.l)) return e || new b(0)
+      var u = !e,
+        A = u || r.i != 2,
+        D = r.i
+      u && (e = new b(i * 3))
+      var z = function (ft) {
+          var ht = e.length
+          if (ft > ht) {
+            var ut = new b(Math.max(ht * 2, ft))
+            ;(ut.set(e), (e = ut))
+          }
+        },
+        o = r.f || 0,
+        n = r.p || 0,
+        f = r.b || 0,
+        c = r.l,
+        h = r.d,
+        g = r.m,
+        U = r.n,
+        F = i * 8
+      do {
+        if (!c) {
+          o = O(t, n, 1)
+          var E = O(t, n + 1, 3)
+          if (((n += 3), E))
+            if (E == 1) ((c = Zt), (h = Ot), (g = 9), (U = 5))
+            else if (E == 2) {
+              var x = O(t, n, 31) + 257,
+                P = O(t, n + 10, 15) + 4,
+                M = x + O(t, n + 5, 31) + 1
+              n += 14
+              for (var s = new b(M), p = new b(19), l = 0; l < P; ++l) p[Bt[l]] = O(t, n + l * 3, 7)
+              n += P * 3
+              for (var m = _(p), L = (1 << m) - 1, Z = $(p, m, 1), l = 0; l < M;) {
+                var C = Z[O(t, n, L)]
+                n += C & 15
+                var d = C >> 4
+                if (d < 16) s[l++] = d
+                else {
+                  var I = 0,
+                    Y = 0
+                  for (
+                    d == 16
+                      ? ((Y = 3 + O(t, n, 3)), (n += 2), (I = s[l - 1]))
+                      : d == 17
+                        ? ((Y = 3 + O(t, n, 7)), (n += 3))
+                        : d == 18 && ((Y = 11 + O(t, n, 127)), (n += 7));
+                    Y--;
+                  )
+                    s[l++] = I
+                }
+              }
+              var it = s.subarray(0, x),
+                G = s.subarray(x)
+              ;((g = _(it)), (U = _(G)), (c = $(it, g, 1)), (h = $(G, U, 1)))
+            } else S(1)
+          else {
+            var d = Nt(n) + 4,
+              T = t[d - 4] | (t[d - 3] << 8),
+              B = d + T
+            if (B > i) {
+              D && S(0)
+              break
+            }
+            ;(A && z(f + T),
+              e.set(t.subarray(d, B), f),
+              (r.b = f += T),
+              (r.p = n = B * 8),
+              (r.f = o))
+            continue
+          }
+          if (n > F) {
+            D && S(0)
+            break
+          }
+        }
+        A && z(f + 131072)
+        for (var Ut = (1 << g) - 1, Mt = (1 << U) - 1, W = n; ; W = n) {
+          var I = c[tt(t, n) & Ut],
+            q = I >> 4
+          if (((n += I & 15), n > F)) {
+            D && S(0)
+            break
+          }
+          if ((I || S(2), q < 256)) e[f++] = q
+          else if (q == 256) {
+            ;((W = n), (c = null))
+            break
+          } else {
+            var at = q - 254
+            if (q > 264) {
+              var l = q - 257,
+                R = lt[l]
+              ;((at = O(t, n, (1 << R) - 1) + pt[l]), (n += R))
+            }
+            var J = h[tt(t, n) & Mt],
+              K = J >> 4
+            ;(J || S(3), (n += J & 15))
+            var G = Lt[K]
+            if (K > 3) {
+              var R = vt[K]
+              ;((G += tt(t, n) & ((1 << R) - 1)), (n += R))
+            }
+            if (n > F) {
+              D && S(0)
+              break
+            }
+            A && z(f + 131072)
+            var st = f + at
+            if (f < G) {
+              var ot = w - G,
+                bt = Math.min(G, st)
+              for (ot + f < 0 && S(3); f < bt; ++f) e[f] = a[ot + f]
+            }
+            for (; f < st; ++f) e[f] = e[f - G]
+          }
+        }
+        ;((r.l = c),
+          (r.p = W),
+          (r.b = f),
+          (r.f = o),
+          c && ((o = 1), (r.m = g), (r.d = h), (r.n = U)))
+      } while (!o)
+      return f != e.length && u ? k(e, 0, f) : e.subarray(0, f)
+    }
+  var Ht = new b(0)
+  var Rt = function (t, r) {
+    return (
+      ((t[0] & 15) != 8 || t[0] >> 4 > 7 || ((t[0] << 8) | t[1]) % 31) && S(6, 'invalid zlib data'),
+      ((t[1] >> 5) & 1) == +!r &&
+        S(6, 'invalid zlib data: ' + (t[1] & 32 ? 'need' : 'unexpected') + ' dictionary'),
+      ((t[1] >> 3) & 4) + 2
+    )
+  }
+  var rt = (function () {
+    function t(r, e) {
+      ;(typeof r == 'function' && ((e = r), (r = {})), (this.ondata = e))
+      var a = r && r.dictionary && r.dictionary.subarray(-32768)
+      ;((this.s = { i: 0, b: a ? a.length : 0 }),
+        (this.o = new b(32768)),
+        (this.p = new b(0)),
+        a && this.o.set(a))
+    }
+    return (
+      (t.prototype.e = function (r) {
+        if ((this.ondata || S(5), this.d && S(4), !this.p.length)) this.p = r
+        else if (r.length) {
+          var e = new b(this.p.length + r.length)
+          ;(e.set(this.p), e.set(r, this.p.length), (this.p = e))
+        }
+      }),
+      (t.prototype.c = function (r) {
+        this.s.i = +(this.d = r || !1)
+        var e = this.s.b,
+          a = qt(this.p, this.s, this.o)
+        ;(this.ondata(k(a, e, this.s.b), this.d),
+          (this.o = k(a, this.s.b - 32768)),
+          (this.s.b = this.o.length),
+          (this.p = k(this.p, (this.s.p / 8) | 0)),
+          (this.s.p &= 7))
+      }),
+      (t.prototype.push = function (r, e) {
+        ;(this.e(r), this.c(e))
+      }),
+      t
+    )
+  })()
+  var mt = (function () {
+    function t(r, e) {
+      ;(rt.call(this, r, e), (this.v = r && r.dictionary ? 2 : 1))
+    }
+    return (
+      (t.prototype.push = function (r, e) {
+        if ((rt.prototype.e.call(this, r), this.v)) {
+          if (this.p.length < 6 && !e) return
+          ;((this.p = this.p.subarray(Rt(this.p, this.v - 1))), (this.v = 0))
+        }
+        ;(e && (this.p.length < 4 && S(6, 'invalid zlib data'), (this.p = this.p.subarray(0, -4))),
+          rt.prototype.c.call(this, e))
+      }),
+      t
+    )
+  })()
+  var $t = typeof TextDecoder < 'u' && new TextDecoder(),
+    Vt = 0
+  try {
+    ;($t.decode(Ht, { stream: !0 }), (Vt = 1))
+  } catch {}
+  var j = 512,
+    nt = 4 * 1024 * 1024,
+    xt = 64 * 1024 * 1024,
+    zt = 64,
+    Xt = 1440 * 60 * 1e3,
+    y = () => {
+      throw new Error('PIXELS_UNAVAILABLE')
+    },
+    X = (t) => {
+      ;(!t ||
+        !/^[a-f0-9]{64}$/.test(t.sha256) ||
+        !Number.isInteger(t.width) ||
+        !Number.isInteger(t.height) ||
+        t.width < 1 ||
+        t.height < 1 ||
+        t.width > j ||
+        t.height > j) &&
+        y()
+    },
+    At = new Uint32Array(256)
+  for (let t = 0; t < 256; t++) {
+    let r = t
+    for (let e = 0; e < 8; e++) r = r & 1 ? 3988292384 ^ (r >>> 1) : r >>> 1
+    At[t] = r >>> 0
+  }
+  var Yt = (t) => {
+      let r = 4294967295
+      for (let e of t) r = At[(r ^ e) & 255] ^ (r >>> 8)
+      return (r ^ 4294967295) >>> 0
+    },
+    kt = (t, r, e) => {
+      let a = t + r - e,
+        i = Math.abs(a - t),
+        w = Math.abs(a - r),
+        u = Math.abs(a - e)
+      return i <= w && i <= u ? t : w <= u ? r : e
+    }
+  function jt(t) {
+    if (
+      !(t instanceof Uint8Array) ||
+      t.length < 57 ||
+      t.length > nt ||
+      [137, 80, 78, 71, 13, 10, 26, 10].some((s, p) => t[p] !== s)
+    )
+      return y()
+    let r = new DataView(t.buffer, t.byteOffset, t.byteLength),
+      e = 8,
+      a = 0,
+      i = 0,
+      w = 0,
+      u = -1,
+      A = !1,
+      D = !1,
+      z,
+      o,
+      n = [],
+      f = 0,
+      c = 0
+    for (; e < t.length;) {
+      if (++c > 4096 || e + 12 > t.length) return y()
+      let s = r.getUint32(e, !1),
+        p = e + 12 + s
+      if (p > t.length || s > nt) return y()
+      let l = String.fromCharCode(...t.subarray(e + 4, e + 8)),
+        m = t.subarray(e + 8, p - 4)
+      if (
+        !/^[A-Za-z]{4}$/.test(l) ||
+        Yt(t.subarray(e + 4, p - 4)) !== r.getUint32(p - 4, !1) ||
+        (e === 8 && l !== 'IHDR')
+      )
+        return y()
+      if (l === 'IHDR') {
+        if (
+          a ||
+          s !== 13 ||
+          e !== 8 ||
+          ((a = r.getUint32(e + 8, !1)),
+          (i = r.getUint32(e + 12, !1)),
+          (u = m[9]),
+          (w = u === 0 || u === 3 ? 1 : u === 2 ? 3 : u === 4 ? 2 : u === 6 ? 4 : 0),
+          a < 1 ||
+            a > j ||
+            i < 1 ||
+            i > j ||
+            !w ||
+            m[8] !== 8 ||
+            m[10] !== 0 ||
+            m[11] !== 0 ||
+            m[12] !== 0)
+        )
+          return y()
+      } else if (l === 'PLTE') {
+        if (z || n.length || !s || s > 768 || s % 3 || u === 0 || u === 4) return y()
+        z = m
+      } else if (l === 'tRNS') {
+        if (
+          o ||
+          n.length ||
+          (u === 3 && (!z || !s || s > z.length / 3)) ||
+          (u === 0 && s !== 2) ||
+          (u === 2 && s !== 6) ||
+          ![0, 2, 3].includes(u)
+        )
+          return y()
+        o = m
+      } else if (l === 'IDAT') {
+        if (D || (u === 3 && !z) || ((f += s), f > nt)) return y()
+        n.push(m)
+      } else if (l === 'IEND') {
+        if (s || !n.length || p !== t.length) return y()
+        A = !0
+      } else if (/^[A-Z]/.test(l) || ['acTL', 'fcTL', 'fdAT'].includes(l)) return y()
+      ;(n.length && l !== 'IDAT' && (D = !0), (e = p))
+    }
+    if (!A || f < 6) return y()
+    let h = new Uint8Array(f)
+    e = 0
+    for (let s of n) (h.set(s, e), (e += s.length))
+    if ((h[0] & 15) !== 8 || h[0] >>> 4 > 7 || ((h[0] << 8) + h[1]) % 31 || h[1] & 32) return y()
+    let g = a * w,
+      U = new Uint8Array((g + 1) * i),
+      F = 0,
+      E = !1,
+      d = new mt((s, p) => {
+        if (F + s.length > U.length) return y()
+        ;(U.set(s, F), (F += s.length), (E = p))
+      })
+    for (let s = 0; s < h.length; s += 1024)
+      d.push(h.subarray(s, Math.min(s + 1024, h.length)), s + 1024 >= h.length)
+    if (!E || F !== U.length) return y()
+    let T = 1,
+      B = 0
+    for (let s of U) ((T = (T + s) % 65521), (B = (B + T) % 65521))
+    if (((B << 16) | T) >>> 0 !== new DataView(h.buffer).getUint32(h.length - 4, !1)) return y()
+    let x = new Uint8Array(g * i)
+    for (let s = 0; s < i; s++) {
+      let p = U[s * (g + 1)]
+      if (p > 4) return y()
+      for (let l = 0; l < g; l++) {
+        let m = s * g + l,
+          L = l >= w ? x[m - w] : 0,
+          Z = s ? x[m - g] : 0,
+          C = s && l >= w ? x[m - g - w] : 0,
+          I = p === 0 ? 0 : p === 1 ? L : p === 2 ? Z : p === 3 ? (L + Z) >>> 1 : kt(L, Z, C)
+        x[m] = (U[s * (g + 1) + l + 1] + I) & 255
+      }
+    }
+    let P = new Uint8Array(a * i * 4),
+      M = o && u !== 3 ? new DataView(o.buffer, o.byteOffset, o.byteLength) : void 0
+    for (let s = 0; s < a * i; s++) {
+      let p = s * w,
+        l = s * 4,
+        m = 0,
+        L = 0,
+        Z = 0,
+        C = 255
+      if (u === 3) {
+        let I = x[p]
+        if (!z || I * 3 + 2 >= z.length) return y()
+        ;((m = z[I * 3]), (L = z[I * 3 + 1]), (Z = z[I * 3 + 2]), (C = o?.[I] ?? 255))
+      } else
+        u === 0 || u === 4
+          ? ((m = L = Z = x[p]), (C = u === 4 ? x[p + 1] : M?.getUint16(0, !1) === m ? 0 : 255))
+          : ((m = x[p]),
+            (L = x[p + 1]),
+            (Z = x[p + 2]),
+            (C =
+              u === 6
+                ? x[p + 3]
+                : M &&
+                    M.getUint16(0, !1) === m &&
+                    M.getUint16(2, !1) === L &&
+                    M.getUint16(4, !1) === Z
+                  ? 0
+                  : 255))
+      ;((P[l] = C ? m : 0), (P[l + 1] = C ? L : 0), (P[l + 2] = C ? Z : 0), (P[l + 3] = C))
+    }
+    return { width: a, height: i, rgba: P }
+  }
+  function dt(t = {}) {
+    let r = t.now ?? Date.now,
+      e = t.maxFrames ?? zt,
+      a = t.maxBytes ?? xt
+    ;(!Number.isInteger(e) || e < 1 || e > zt || !Number.isInteger(a) || a < 4 || a > xt) && y()
+    let i = new Map(),
+      w = 0,
+      u = 0,
+      A = (o) => {
+        let n = i.get(o)
+        n && ((w -= n.rgba.byteLength), n.rgba.fill(0), i.delete(o))
+      },
+      D = () => {
+        let o = r()
+        for (let [n, f] of i) (f.capturedAt > o || f.capturedAt + Xt <= o) && A(n)
+      },
+      z = (o, n, f) => {
+        if ((X(o), f !== u)) return
+        if (n.byteLength !== o.width * o.height * 4 || n.byteLength > a) return y()
+        for (D(), A(o.sha256); i.size >= e || w + n.byteLength > a;) {
+          let h = i.keys().next().value
+          if (!h) return y()
+          A(h)
+        }
+        let c = new Uint8Array(n)
+        for (let h = 0; h < c.length; h += 4) c[h + 3] === 0 && c.fill(0, h, h + 3)
+        ;(i.set(o.sha256, { ...o, rgba: c, capturedAt: r() }), (w += c.byteLength))
+      }
+    return Object.freeze({
+      epoch: () => u,
+      clear: () => {
+        u++
+        for (let o of i.keys()) A(o)
+      },
+      rememberPng(o, n, f = u) {
+        if ((X(o), f !== u)) return
+        let c = jt(n)
+        if (c.width !== o.width || c.height !== o.height) return y()
+        z(o, c.rgba, f)
+      },
+      rememberPixels(o, n, f, c = u) {
+        if ((X(o), c !== u)) return
+        if (
+          !(n instanceof Uint8Array) ||
+          ![3, 4].includes(f) ||
+          n.byteLength !== o.width * o.height * f
+        )
+          return y()
+        let h = new Uint8Array(o.width * o.height * 4)
+        for (let g = 0; g < o.width * o.height; g++)
+          ((h[g * 4] = n[g * f]),
+            (h[g * 4 + 1] = n[g * f + 1]),
+            (h[g * 4 + 2] = n[g * f + 2]),
+            (h[g * 4 + 3] = f === 4 ? n[g * f + 3] : 255))
+        z(o, h, c)
+      },
+      compare(o) {
+        return !Array.isArray(o) ||
+          !o.length ||
+          o.length > 20 ||
+          new Set(o.map((n) => n.targetId)).size !== o.length
+          ? y()
+          : (D(),
+            o.map((n) => {
+              if (typeof n.targetId != 'string' || !n.targetId.length || n.targetId.length > 160)
+                return y()
+              ;(X(n.baseline), X(n.current))
+              let f = { targetId: n.targetId },
+                c = i.get(n.baseline.sha256),
+                h = i.get(n.current.sha256)
+              if (
+                !c ||
+                !h ||
+                c.width !== n.baseline.width ||
+                c.height !== n.baseline.height ||
+                h.width !== n.current.width ||
+                h.height !== n.current.height
+              )
+                return { ...f, status: 'unavailable' }
+              if (c.width !== h.width || c.height !== h.height)
+                return { ...f, status: 'dimensions-changed' }
+              let g = 0,
+                U = 0,
+                F = 0,
+                E = h.width,
+                d = h.height,
+                T = -1,
+                B = -1
+              for (let x = 0; x < h.width * h.height; x++) {
+                let P = !1
+                for (let M = 0; M < 4; M++) {
+                  let s = Math.abs(c.rgba[x * 4 + M] - h.rgba[x * 4 + M])
+                  ;((F += s), (U = Math.max(U, s)), P || (P = s > 0))
+                }
+                if (P) {
+                  g++
+                  let M = x % h.width,
+                    s = Math.floor(x / h.width)
+                  ;((E = Math.min(E, M)),
+                    (d = Math.min(d, s)),
+                    (T = Math.max(T, M)),
+                    (B = Math.max(B, s)))
+                }
+              }
+              return {
+                ...f,
+                status: 'compared',
+                pixelCount: h.width * h.height,
+                changedPixels: g,
+                maxChannelDelta: U,
+                absoluteDelta: F,
+                changedBounds: g ? { x: E, y: d, width: T - E + 1, height: B - d + 1 } : null
+              }
+            }))
+      }
+    })
+  }
+  var Wt = dt()
+  return Ft(Jt)
+})()
+
+Object.defineProperty(globalThis, 'MagicPotPixelAuditV1', {
+  value: MagicPotPixelAuditBundle.hostPixelAudit,
+  writable: false,
+  configurable: false
+})

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import PixelAuditSummary from './PixelAuditSummary'
 import {
   Alert,
   Box,
@@ -738,6 +739,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       status.state === 'completed' &&
       status.effect === 'applied' &&
       status.visualEvidenceSha256 !== undefined &&
+      status.pixelAudit?.outcome !== 'match' &&
       comparison?.exactMatch === false &&
       comparison.changedCount > 0 &&
       baseline !== undefined &&
@@ -1270,6 +1272,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                         <Alert severity="info">
                           {t('figplugin.bridge.visualComparisonBoundary')}
                         </Alert>
+                        <PixelAuditSummary audit={executionStatus.pixelAudit} />
                         {activeCorrectionAuthorization && (
                           <Alert severity="success">
                             {t('figplugin.bridge.visualCorrectionCurrent', {

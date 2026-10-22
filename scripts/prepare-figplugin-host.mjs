@@ -296,6 +296,10 @@ export function prepareFigPluginHost(options) {
       ? readSourceRegular(SOURCE_ROOT, ['shared', 'execution-journal.js'])
       : null
     if (executionJournalSource) sources.push(executionJournalSource)
+    const pixelAuditSource = connected
+      ? readSourceRegular(SOURCE_ROOT, ['shared', 'pixel-audit.js'])
+      : null
+    if (pixelAuditSource) sources.push(pixelAuditSource)
     const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(sources[0].data))
     requireValid(manifest.id === spec.placeholder)
     requireValid(manifest.main === (host === 'figma' ? spec.code : spec.ui))
@@ -362,6 +366,8 @@ export function prepareFigPluginHost(options) {
           `globalThis.MAGICPOT_BRIDGE_CONFIG = Object.freeze(${JSON.stringify(config)});\n`
         ),
         helperSource.data,
+        Buffer.from('\n;\n'),
+        pixelAuditSource.data,
         Buffer.from('\n;\n'),
         visualEvidenceSource.data,
         Buffer.from('\n;\n'),

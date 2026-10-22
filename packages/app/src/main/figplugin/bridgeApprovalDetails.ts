@@ -43,6 +43,11 @@ export function buildPlanExecutionApprovalDetails(preview: FigPluginExecutionPre
     `Risk: ${preview.risk}`,
     `Rollback: ${preview.rollback}`,
     `Visual audit capability: ${preview.visualAudit}`,
+    ...(preview.visualAudit === 'hash-only'
+      ? [
+          'For pixel comparison, bounded exports may remain in this plugin runtime memory: at most 64 frames / 64 MiB and 24 hours, cleared on disconnect. No pixels are sent to Bridge or a model; only difference metrics are reported. This is not an original-resolution or design-quality review.'
+        ]
+      : []),
     `Adapter: ${preview.adapterVersion}`,
     `Plan SHA-256: ${preview.planSha256}`,
     `Context SHA-256: ${preview.contextSha256}`,

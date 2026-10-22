@@ -94,7 +94,8 @@
     planCorrectionPrepare: '/figplugin/v1/plan/correction/prepare',
     planClaim: '/figplugin/v1/plan/claim',
     planProgress: '/figplugin/v1/plan/progress',
-    planResult: '/figplugin/v1/plan/result'
+    planResult: '/figplugin/v1/plan/result',
+    planPixelAudit: '/figplugin/v1/plan/pixel-audit'
   })
   const el = (id) => document.getElementById(id)
   function captureReadOnlySnapshot() {
@@ -242,6 +243,7 @@
     }
   }
   function forget(sendClose, text, disposing = false) {
+    globalThis.MagicPotPixelAuditV1?.clear()
     const old = session
     stop()
     clearTimeout(expiryTimer)
@@ -1042,6 +1044,54 @@
     // again after the durable marker, immediately before applying any step.
     await checkExecutionAuthority(item)
   }
+  async function reportPixelAudit(item, result) {
+    const comparison = result?.status?.visualBaselineComparison
+    if (!comparison || !executionCurrent(item)) return result
+    try {
+      if (
+        !Array.isArray(comparison.targets) ||
+        !comparison.targets.length ||
+        comparison.targets.length > 20
+      )
+        throw new Error('REQUEST')
+      const helper = globalThis.MagicPotPixelAuditV1
+      let targets
+      try {
+        targets = helper?.compare(comparison.targets)
+      } catch {}
+      targets ??= comparison.targets.map((target) => ({
+        targetId: target.targetId,
+        status: 'unavailable'
+      }))
+      assertExecutionCurrent(item)
+      const audited = await post(
+        'planPixelAudit',
+        {
+          protocol: 1,
+          executionId: item.executionId,
+          actionId: item.actionId,
+          policy: 'rgba8-exact-v1',
+          baselineId: comparison.baselineId,
+          baselineEvidenceSha256: comparison.baselineEvidenceSha256,
+          visualEvidenceSha256: comparison.visualEvidenceSha256,
+          targets
+        },
+        item.auth
+      )
+      assertExecutionCurrent(item)
+      if (
+        audited?.executionId !== item.executionId ||
+        audited.status?.executionId !== item.executionId ||
+        audited.status.pixelAudit?.baselineId !== comparison.baselineId ||
+        audited.status.pixelAudit?.visualEvidenceSha256 !== comparison.visualEvidenceSha256
+      )
+        throw new Error('REQUEST')
+      return audited
+    } catch {
+      // The write receipt remains valid, but an unavailable pixel report never becomes a pass.
+      return result
+    }
+  }
   async function executeClaimedPlan(item, intent) {
     assertExecutionCurrent(item)
     const planner = globalThis.MagicPotPlanPreviewV1
@@ -1231,7 +1281,7 @@
         visualEvidence = undefined
         errorCode = 'QUARANTINED'
       }
-      const result = await post(
+      let result = await post(
         'planResult',
         {
           protocol: 1,
@@ -1254,17 +1304,22 @@
         )
         return
       }
+      result = await reportPixelAudit(item, result)
+      if (!executionCurrent(item)) return
       if (result && result.status && result.status.state === 'completed') {
         if (
           result.status.visualBaselineComparison &&
-          result.status.visualBaselineComparison.exactMatch === false
+          result.status.visualBaselineComparison.exactMatch === false &&
+          result.status.pixelAudit?.outcome !== 'match'
         ) {
           beginCorrectionReview(item, result.status)
         } else {
           state(
             visualEvidence
               ? result.status.visualBaselineComparison?.exactMatch === true
-                ? 'Approved correction matches the accepted visual checkpoint.'
+                ? result.status.pixelAudit?.outcome === 'match'
+                  ? 'Approved result matches the accepted checkpoint in bounded exported pixels.'
+                  : 'Export hashes match; a complete pixel audit has not been confirmed.'
                 : 'Approved plan applied with bounded before/after visual checkpoints.'
               : 'Approved plan applied and verified by document readback.'
           )

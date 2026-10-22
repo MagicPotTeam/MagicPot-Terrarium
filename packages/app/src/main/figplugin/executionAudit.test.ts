@@ -344,3 +344,42 @@ it('does not create missing directories during an empty history read', async () 
   expect(await store.list()).toEqual([])
   expect(await fs.readdir(root)).toEqual([])
 })
+
+it('persists only consistent pixel summary counts, never pixel buffers or target coordinates', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-pixel-audit-'))
+  roots.push(root)
+  const store = new FigPluginExecutionAuditStore(root, () => 1000)
+  const valid = {
+    ...event(1, 1000),
+    visualAudit: 'hash-only' as const,
+    visualEvidenceCount: 1,
+    visualEvidenceSha256: 'c'.repeat(64),
+    visualComparisonBaselineId: 'd'.repeat(32),
+    visualComparisonTargetCount: 1,
+    visualComparisonChangedCount: 1,
+    visualComparisonSha256: 'e'.repeat(64),
+    pixelAudit: {
+      outcome: 'different' as const,
+      comparedTargets: 1,
+      unavailableTargets: 0,
+      changedTargets: 1,
+      changedPixels: 1
+    }
+  }
+  store.record(valid)
+  store.record({
+    ...valid,
+    requestId: 'INVALID_PASS',
+    pixelAudit: { ...valid.pixelAudit, outcome: 'match' }
+  })
+  store.record({
+    ...valid,
+    requestId: 'INVALID_RAW',
+    pixelAudit: { ...valid.pixelAudit, pixels: 'PRIVATE' } as typeof valid.pixelAudit
+  })
+  await store.flush()
+  const reopened = new FigPluginExecutionAuditStore(root, () => 1000)
+  expect(await reopened.list()).toEqual([valid])
+  const text = await fs.readFile(path.join(root, 'execution-audit.jsonl'), 'utf8')
+  expect(text).not.toMatch(/PRIVATE|INVALID_PASS|INVALID_RAW|changedBounds|rgba|png/)
+})

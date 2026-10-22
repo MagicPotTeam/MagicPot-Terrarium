@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { deflateSync } from 'node:zlib'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { createContext, Script } from 'node:vm'
@@ -9,17 +10,37 @@ const read = (name) => readFileSync(new URL(name, root), 'utf8')
 // Drain the current microtask chain without guessing its length; VM timers stay virtual.
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 const plain = (value) => JSON.parse(JSON.stringify(value))
+const pngChunk = (type, data) => {
+  const bytes = Buffer.alloc(data.length + 12)
+  bytes.writeUInt32BE(data.length)
+  bytes.write(type, 4)
+  Buffer.from(data).copy(bytes, 8)
+  let crc = 0xffffffff
+  for (const byte of bytes.subarray(4, -4)) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1
+  }
+  bytes.writeUInt32BE((crc ^ 0xffffffff) >>> 0, bytes.length - 4)
+  return bytes
+}
 const fakePng = (label) => {
-  const data = new Uint8Array(32)
-  data.set([137, 80, 78, 71, 13, 10, 26, 10], 0)
-  data.set([0, 0, 0, 13, 73, 72, 68, 82], 8)
-  const view = new DataView(data.buffer)
-  view.setUint32(16, 64, false)
-  view.setUint32(20, 32, false)
   let marker = 0
-  for (const char of String(label)) marker = (marker + char.codePointAt(0)) & 0xff
-  data.set([marker, marker ^ 0x55, marker ^ 0xaa, 0xff, 1, 2, 3, 4], 24)
-  return data
+  for (const char of String(label)) marker = (marker + char.codePointAt(0)) & 255
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(64)
+  header.writeUInt32BE(32, 4)
+  header[8] = 8
+  header[9] = 6
+  const raw = Buffer.alloc(32 * (64 * 4 + 1))
+  for (let y = 0; y < 32; y++)
+    for (let x = 0; x < 64; x++)
+      raw.set([marker, marker ^ 0x55, marker ^ 0xaa, 255], y * 257 + 1 + x * 4)
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk('IHDR', header),
+    pngChunk('IDAT', deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0))
+  ])
 }
 const fakePixels = (label) => {
   let marker = 0
@@ -209,6 +230,7 @@ function fixture(
   let approvedContext
   let correctionContext
   let planResult = null
+  let lastResultStatus = null
   const planResults = []
   const claimedExecutions = new Set()
   const plannedSteps = () => {
@@ -437,7 +459,41 @@ function fixture(
             }
           })
         }
+        lastResultStatus = statusValue
         value = { protocol: 1, executionId: body.executionId, status: statusValue }
+      } else if (url.endsWith('/plan/pixel-audit')) {
+        assert.equal(body.executionId, lastResultStatus.executionId)
+        const changedTargets = body.targets.filter(
+          (target) =>
+            target.status === 'dimensions-changed' ||
+            (target.status === 'compared' && target.changedPixels > 0)
+        ).length
+        const unavailableTargets = body.targets.filter(
+          (target) => target.status === 'unavailable'
+        ).length
+        value = {
+          protocol: 1,
+          executionId: body.executionId,
+          status: {
+            ...lastResultStatus,
+            pixelAudit: {
+              policy: body.policy,
+              baselineId: body.baselineId,
+              baselineEvidenceSha256: body.baselineEvidenceSha256,
+              visualEvidenceSha256: body.visualEvidenceSha256,
+              targets: body.targets,
+              checkedAt: time,
+              outcome: unavailableTargets ? 'incomplete' : changedTargets ? 'different' : 'match',
+              changedTargets,
+              unavailableTargets,
+              comparedTargets: body.targets.filter((target) => target.status === 'compared').length,
+              changedPixels: body.targets.reduce(
+                (sum, target) => sum + (target.changedPixels || 0),
+                0
+              )
+            }
+          }
+        }
       } else if (url.endsWith('/status')) {
         const selected = approvedContext.nodes[0]
         const plan = {
@@ -517,6 +573,7 @@ function fixture(
                 componentSize: 8,
                 pixelFormat: 'RGBA',
                 colorSpace: 'RGB',
+                colorProfile: 'sRGB IEC61966-2.1',
                 async getData() {
                   return fakePixels(layer.name)
                 },
@@ -535,6 +592,7 @@ function fixture(
     `globalThis.MAGICPOT_BRIDGE_CONFIG = Object.freeze(${JSON.stringify({ protocol: 1, origin, pluginId, host })});`
   ).runInContext(vm)
   new Script(read('shared/selection-snapshot.js')).runInContext(vm)
+  new Script(read('shared/pixel-audit.js')).runInContext(vm)
   new Script(read('shared/visual-evidence.js')).runInContext(vm)
   new Script(read('shared/plan-preview.js')).runInContext(vm)
   if (journalHelper) new Script(read('shared/execution-journal.js')).runInContext(vm)
@@ -1227,6 +1285,74 @@ for (const host of ['figma', 'photoshop']) {
       assert.equal(accesses, 0)
       assert.equal(f.persistedActions.size, 0)
       assert.deepEqual(f.nativeWrites, [])
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: reports real decoded pixels against the accepted checkpoint, then verifies a correction`, async () => {
+    const f = fixture(host, { approvePlan: true, correctionFlow: true })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(1000)
+      await f.tick(1000)
+      await f.tick(1000)
+      const reports = f.requests
+        .filter((request) => request.url.endsWith('/plan/pixel-audit'))
+        .map((request) => request.body)
+      assert.equal(reports.length, 2)
+      assert.equal(reports[0].targets[0].status, 'compared')
+      assert.ok(reports[0].targets[0].changedPixels > 0)
+      assert.equal(reports[1].targets[0].status, 'compared')
+      assert.equal(reports[1].targets[0].changedPixels, 0)
+      assert.doesNotMatch(
+        JSON.stringify(reports),
+        /Original owned name|Approved new name|base64|"rgba"|"png"/i
+      )
+      assert.equal(f.node.name, 'Original owned name')
+      const point = f.planResults()[0].visualEvidence[0].before
+      f.close()
+      await flush()
+      assert.equal(
+        f.vm.MagicPotPixelAuditV1.compare([
+          { targetId: 'owned', baseline: point, current: point }
+        ])[0].status,
+        'unavailable'
+      )
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: missing retained pixels are reported unavailable rather than inferred from hashes`, async () => {
+    let f
+    f = fixture(host, {
+      approvePlan: true,
+      correctionFlow: true,
+      progressHook: async (body) => {
+        if (body.phase === 'readback') f.vm.MagicPotPixelAuditV1.clear()
+      }
+    })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(1000)
+      await f.tick(1000)
+      const reports = f.requests.filter((request) => request.url.endsWith('/plan/pixel-audit'))
+      assert.equal(reports.length, 1)
+      assert.equal(reports[0].body.targets[0].status, 'unavailable')
+      assert.equal(Object.hasOwn(reports[0].body.targets[0], 'changedPixels'), false)
     } finally {
       f.close()
       await flush()

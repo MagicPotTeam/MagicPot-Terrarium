@@ -106,11 +106,51 @@ export const figPluginExecutionAuditEventSchema = z
       })
       .strict()
       .optional(),
+    pixelAudit: z
+      .object({
+        outcome: z.enum(['match', 'different', 'incomplete']),
+        comparedTargets: z.number().int().min(0).max(20),
+        unavailableTargets: z.number().int().min(0).max(20),
+        changedTargets: z.number().int().min(0).max(20),
+        changedPixels: z
+          .number()
+          .int()
+          .min(0)
+          .max(20 * 512 * 512)
+      })
+      .strict()
+      .optional(),
     durationMs: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
     errorCode: figPluginExecutionStatusSchema.innerType().shape.errorCode
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (
+      value.pixelAudit &&
+      (value.state !== 'completed' ||
+        value.effect !== 'applied' ||
+        value.visualComparisonBaselineId === undefined)
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Pixel audit is not bound to completed comparison'
+      })
+    if (value.pixelAudit) {
+      const a = value.pixelAudit,
+        count = value.visualComparisonTargetCount ?? 0
+      const resized = count - a.comparedTargets - a.unavailableTargets
+      const outcome = a.unavailableTargets ? 'incomplete' : a.changedTargets ? 'different' : 'match'
+      if (
+        resized < 0 ||
+        a.changedTargets < resized ||
+        a.changedTargets > count - a.unavailableTargets ||
+        a.changedPixels > a.comparedTargets * 512 * 512 ||
+        (a.changedPixels > 0 && a.changedTargets <= resized) ||
+        a.outcome !== outcome ||
+        (a.outcome === 'match' && a.comparedTargets !== count)
+      )
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Inconsistent pixel audit summary' })
+    }
     if (
       new TextEncoder().encode(`${JSON.stringify(value)}\n`).byteLength >
       FIGPLUGIN_AUDIT_MAX_LINE_BYTES

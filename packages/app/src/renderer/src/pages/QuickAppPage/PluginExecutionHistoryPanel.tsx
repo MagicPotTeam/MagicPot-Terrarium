@@ -192,6 +192,18 @@ export default function PluginExecutionHistoryPanel({
                       })}
                     </Typography>
                   )}
+                  {event.pixelAudit && (
+                    <Typography variant="body2">
+                      {t('figplugin.history.pixelAudit', {
+                        outcome: t(`figplugin.pixelAudit.${event.pixelAudit.outcome}`, {
+                          count: event.visualComparisonTargetCount,
+                          changed: event.pixelAudit.changedTargets,
+                          unavailable: event.pixelAudit.unavailableTargets
+                        }),
+                        changed: event.pixelAudit.changedPixels
+                      })}
+                    </Typography>
+                  )}
                   <Box component="details">
                     <Box component="summary" sx={{ cursor: 'pointer' }}>
                       {t('figplugin.history.identifiers')}

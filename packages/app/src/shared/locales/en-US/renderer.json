@@ -1402,7 +1402,8 @@
         "rolled-back": "rolled back",
         "partial": "partial effect",
         "unknown": "effect unknown"
-      }
+      },
+      "pixelAudit": "Saved pixel audit: {{outcome}} Changed pixels: {{changed}}."
     },
     "bridge": {
       "title": "FigPlugin bridge",
@@ -1619,6 +1620,17 @@
         "NOT_INSTALLED": "No verified package copy is available. Refresh or choose a package first.",
         "IDEMPOTENCY_CONFLICT": "This operation identifier cannot be reused. Cancel, refresh and review again."
       }
+    },
+    "pixelAudit": {
+      "pending": "No pixel report received. Hash equality alone is not a pixel audit.",
+      "match": "All {{count}} targets match the accepted checkpoint in bounded exported pixels.",
+      "different": "Pixel comparison found differences in {{changed}} of {{count}} targets.",
+      "incomplete": "Pixel comparison is incomplete: {{unavailable}} targets unavailable. This is not a pass.",
+      "metrics": "{{changed}} / {{total}} pixels changed ({{percent}}%); maximum channel difference {{max}} / 255; mean absolute channel difference {{mean}} / 255.",
+      "dimensions": "Export dimensions changed; not rescaled or declared matching.",
+      "unavailable": "Retained pixels unavailable; not declared matching.",
+      "bounds": "Changed region in exported pixels: x={{x}}, y={{y}}, width={{width}}, height={{height}}.",
+      "boundary": "Host-reported sRGB 8-bit RGBA comparison, zero tolerance, exported size up to 512 px per edge. Fully transparent RGB is ignored. This checks the exported content, not document coordinates, original-resolution details or design quality. Pixels remain in bounded plugin memory; only metrics are sent. No automatic correction or new write permission."
     }
   },
   "image_edit": {

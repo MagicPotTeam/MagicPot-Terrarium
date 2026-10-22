@@ -1174,3 +1174,201 @@ it('cannot change a prepared correction context via a replay', async () => {
     value.runtime.dispose()
   }
 })
+
+describe('host-local pixel audit reporting', () => {
+  async function setup() {
+    const value = fixture(true, hashOnlyContext)
+    const first = await completedVisualExecution(value)
+    const baseline = await value.runtime.acceptVisualBaseline(
+      first.execution.executionId,
+      first.result.status.visualEvidenceSha256!
+    )
+    const current = await completedVisualExecution(value, [
+      { ...visualEvidence[0], after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) } }
+    ])
+    const comparison = current.result.status.visualBaselineComparison!
+    const target = {
+      targetId: 'node_1',
+      status: 'compared',
+      pixelCount: 64 * 32,
+      changedPixels: 1,
+      maxChannelDelta: 10,
+      absoluteDelta: 10,
+      changedBounds: { x: 2, y: 1, width: 1, height: 1 }
+    }
+    const request = {
+      protocol: 1,
+      executionId: current.execution.executionId,
+      actionId: current.execution.executionId,
+      policy: 'rgba8-exact-v1',
+      baselineId: baseline.baselineId,
+      baselineEvidenceSha256: comparison.baselineEvidenceSha256,
+      visualEvidenceSha256: comparison.visualEvidenceSha256,
+      targets: [target]
+    }
+    const send = (input: unknown = request) =>
+      value.runtime.planPixelAudit(current.session.sessionId, current.session.sessionToken, input)
+    return { ...value, baseline, current, request, send }
+  }
+  it('records exact metrics once and exposes them without changing write authority or round budgets', async () => {
+    const f = await setup()
+    try {
+      const before = f.runtime.listVisualBaselines(),
+        auditBefore = f.audit.length
+      const result = await f.send()
+      expect(result.status.pixelAudit).toMatchObject({
+        outcome: 'different',
+        changedTargets: 1,
+        changedPixels: 1,
+        comparedTargets: 1,
+        unavailableTargets: 0
+      })
+      expect(await f.send()).toEqual(result)
+      expect(f.audit.length).toBe(auditBefore + 1)
+      expect(f.audit.at(-1)?.pixelAudit).toMatchObject({ outcome: 'different', changedPixels: 1 })
+      expect(JSON.stringify(f.audit.at(-1))).not.toMatch(
+        /changedBounds|node_1|pixels|Old name|New name/
+      )
+      expect(f.runtime.listVisualBaselines()).toEqual(before)
+      expect(f.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+      await expect(
+        f.send({ ...f.request, targets: [{ ...f.request.targets[0], absoluteDelta: 11 }] })
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    } finally {
+      f.runtime.dispose()
+    }
+  })
+  it('does not correct a mere encoding/hash change after an exact pixel match', async () => {
+    const f = await setup()
+    try {
+      const result = await f.send({
+        ...f.request,
+        targets: [
+          {
+            ...f.request.targets[0],
+            changedPixels: 0,
+            maxChannelDelta: 0,
+            absoluteDelta: 0,
+            changedBounds: null
+          }
+        ]
+      })
+      expect(result.status.pixelAudit?.outcome).toBe('match')
+      await expect(
+        f.runtime.authorizeVisualCorrection(
+          f.current.execution.executionId,
+          f.baseline.baselineId,
+          f.current.result.status.visualEvidenceSha256!
+        )
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    } finally {
+      f.runtime.dispose()
+    }
+  })
+  it('a late exact report cancels only an unconsumed correction, without spending a round', async () => {
+    const f = await setup()
+    try {
+      const authorization = await f.runtime.authorizeVisualCorrection(
+        f.current.execution.executionId,
+        f.baseline.baselineId,
+        f.current.result.status.visualEvidenceSha256!
+      )
+      const prepared = await f.runtime.prepareVisualCorrection(
+        f.current.session.sessionId,
+        f.current.session.sessionToken,
+        {
+          protocol: 1,
+          sourceExecutionId: f.current.execution.executionId,
+          hostContext: {
+            ...structuredClone(hashOnlyContext),
+            captureId: authorization.authorizationId,
+            nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'Drifted name' }))
+          }
+        }
+      )
+      if (prepared.status !== 'prepared') throw new Error('Expected prepared correction')
+      const child = f.runtime
+        .listPlanExecutions()
+        .find((value) => value.executionId === prepared.executionId)!
+      await f.runtime.approvePlan(child.executionId, child.planSha256)
+      await f.send({
+        ...f.request,
+        targets: [
+          {
+            ...f.request.targets[0],
+            changedPixels: 0,
+            maxChannelDelta: 0,
+            absoluteDelta: 0,
+            changedBounds: null
+          }
+        ]
+      })
+      expect(f.runtime.listVisualCorrectionAuthorizations()).toEqual([])
+      expect(f.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(0)
+      expect(
+        await f.runtime.claimPlan(f.current.session.sessionId, f.current.session.sessionToken, {
+          protocol: 1,
+          callId: f.current.receipt.callId,
+          executionId: child.executionId
+        })
+      ).toMatchObject({ status: 'terminal', state: 'cancelled' })
+    } finally {
+      f.runtime.dispose()
+    }
+  })
+  it('never turns missing pixels into a passed audit', async () => {
+    const f = await setup()
+    try {
+      expect(
+        (await f.send({ ...f.request, targets: [{ targetId: 'node_1', status: 'unavailable' }] }))
+          .status.pixelAudit?.outcome
+      ).toBe('incomplete')
+    } finally {
+      f.runtime.dispose()
+    }
+  })
+  it('rejects mismatched actions, bindings, targets, invalid metrics and pixels before recording anything', async () => {
+    const f = await setup()
+    try {
+      const count = f.audit.length
+      for (const change of [
+        { actionId: 'f'.repeat(32) },
+        { baselineId: 'f'.repeat(32) },
+        { baselineEvidenceSha256: 'f'.repeat(64) },
+        { visualEvidenceSha256: 'f'.repeat(64) },
+        { targets: [{ ...f.request.targets[0], targetId: 'foreign' }] },
+        {
+          targets: [
+            { ...f.request.targets[0], changedBounds: { x: 64, y: 0, width: 1, height: 1 } }
+          ]
+        },
+        { targets: [{ ...f.request.targets[0], pixelCount: 1 }] },
+        { pixels: 'PRIVATE' }
+      ])
+        await expect(f.send({ ...f.request, ...change })).rejects.toMatchObject({
+          code: 'INVALID_REQUEST'
+        })
+      const other = await prepared(f)
+      await expect(
+        f.runtime.planPixelAudit(other.session.sessionId, other.session.sessionToken, f.request)
+      ).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      expect(
+        f.runtime
+          .listPlanStatuses()
+          .find((status) => status.executionId === f.current.execution.executionId)?.pixelAudit
+      ).toBeUndefined()
+      expect(f.audit.slice(0, count).every((event) => event.pixelAudit === undefined)).toBe(true)
+    } finally {
+      f.runtime.dispose()
+    }
+  })
+  it('does not retain a late report after plugin revocation', async () => {
+    const f = await setup()
+    try {
+      f.runtime.revokePlugin(binding.pluginId)
+      await expect(f.send()).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+    } finally {
+      f.runtime.dispose()
+    }
+  })
+})

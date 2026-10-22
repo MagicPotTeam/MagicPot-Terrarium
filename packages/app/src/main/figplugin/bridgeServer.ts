@@ -30,6 +30,7 @@ import {
   figPluginVisualCorrectionPrepareResponseSchema
 } from '@shared/figplugin/execution'
 import type { FigPluginBridgeRuntime } from './bridgeRuntime'
+import { figPluginPixelAuditRequestSchema } from '@shared/figplugin/pixelAudit'
 
 type Runtime = Pick<
   FigPluginBridgeRuntime,
@@ -43,6 +44,7 @@ type Runtime = Pick<
   | 'claimPlan'
   | 'planProgress'
   | 'planResult'
+  | 'planPixelAudit'
 >
 type Options = { origin: string; runtime: Runtime; requestTimeoutMs?: number }
 const paths = new Set([
@@ -55,7 +57,8 @@ const paths = new Set([
   '/figplugin/v1/plan/correction/prepare',
   '/figplugin/v1/plan/claim',
   '/figplugin/v1/plan/progress',
-  '/figplugin/v1/plan/result'
+  '/figplugin/v1/plan/result',
+  '/figplugin/v1/plan/pixel-audit'
 ])
 const allowedHeaders = ['content-type', 'authorization', 'x-figplugin-session']
 const MAX_RAW_HEADERS = 32
@@ -235,6 +238,15 @@ const dispatch = async (
           session,
           token,
           parseFigPluginBridgeValue(figPluginExecutionProgressRequestSchema, body)
+        )
+      )
+    case '/figplugin/v1/plan/pixel-audit':
+      return serialize(
+        figPluginExecutionResultResponseSchema,
+        await runtime.planPixelAudit(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginPixelAuditRequestSchema, body)
         )
       )
     case '/figplugin/v1/plan/result':

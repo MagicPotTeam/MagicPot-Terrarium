@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { figPluginPixelAuditSchema, pixelAuditMatchesComparison } from './pixelAudit'
 import { FigPluginIdSchema, FIGPLUGIN_HOSTS } from './manifest'
 import {
   hostContextSchema,
@@ -393,6 +394,7 @@ const publicStatusFields = {
   visualEvidence: visualEvidenceArraySchema.optional(),
   visualEvidenceSha256: sha256.optional(),
   visualBaselineComparison: figPluginVisualBaselineComparisonSchema.optional(),
+  pixelAudit: figPluginPixelAuditSchema.optional(),
   visualCorrection: figPluginVisualCorrectionAttemptSchema.optional(),
   visualCorrectionConsumed: z.boolean().optional()
 }
@@ -416,6 +418,12 @@ export const figPluginExecutionStatusSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (
+      value.pixelAudit &&
+      (!value.visualBaselineComparison ||
+        !pixelAuditMatchesComparison(value.pixelAudit, value.visualBaselineComparison))
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Pixel audit evidence mismatch' })
     if ((value.visualCorrection === undefined) !== (value.visualCorrectionConsumed === undefined))
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

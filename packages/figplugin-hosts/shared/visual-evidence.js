@@ -147,6 +147,8 @@
     return { width, height }
   }
   const captureFigmaNode = async (node) => {
+    const pixelCache = globalThis.MagicPotPixelAuditV1
+    const pixelEpoch = pixelCache?.epoch()
     if (
       !node ||
       typeof node.exportAsync !== 'function' ||
@@ -171,13 +173,20 @@
     )
     if (bytes.byteLength < 24 || bytes.byteLength > MAX_BYTES) return fail()
     const size = parsePngSize(bytes)
-    return Object.freeze({
+    const result = Object.freeze({
       sha256: hashWithMetadata('magicpot-figplugin-figma-png-v1', size, bytes),
       width: size.width,
       height: size.height
     })
+    // Optional pixel decoding must not fabricate a comparison when the PNG is unsupported.
+    try {
+      pixelCache?.rememberPng(result, bytes, pixelEpoch)
+    } catch {}
+    return result
   }
   const capturePhotoshopLayer = async (imaging, documentId, layerId) => {
+    const pixelCache = globalThis.MagicPotPixelAuditV1
+    const pixelEpoch = pixelCache?.epoch()
     if (
       !imaging ||
       typeof imaging.getPixels !== 'function' ||
@@ -192,8 +201,9 @@
       layerID: layerId,
       targetSize: { width: MAX_DIMENSION, height: MAX_DIMENSION },
       colorSpace: 'RGB',
+      colorProfile: 'sRGB IEC61966-2.1',
       componentSize: 8,
-      applyAlpha: true
+      applyAlpha: false
     })
     const imageData = result && result.imageData
     if (!imageData) return fail()
@@ -226,11 +236,26 @@
         return fail()
       const data = bytesOf(await imageData.getData({ chunky: true }))
       if (data.byteLength !== metadata.width * metadata.height * metadata.components) return fail()
-      return Object.freeze({
-        sha256: hashWithMetadata('magicpot-figplugin-photoshop-pixels-v1', metadata, data),
+      const result = Object.freeze({
+        sha256: hashWithMetadata(
+          'magicpot-figplugin-photoshop-pixels-v1',
+          { ...metadata, colorProfile: imageData.colorProfile ?? '' },
+          data
+        ),
         width: metadata.width,
         height: metadata.height
       })
+      if (
+        metadata.colorSpace === 'RGB' &&
+        imageData.colorProfile === 'sRGB IEC61966-2.1' &&
+        ((metadata.components === 3 && metadata.pixelFormat === 'RGB') ||
+          (metadata.components === 4 && metadata.pixelFormat === 'RGBA'))
+      ) {
+        try {
+          pixelCache?.rememberPixels(result, data, metadata.components, pixelEpoch)
+        } catch {}
+      }
+      return result
     } finally {
       if (typeof imageData.dispose === 'function') imageData.dispose()
     }

@@ -65,7 +65,8 @@ const makeRuntime = () => ({
   }),
   claimPlan: vi.fn<Runtime['claimPlan']>(),
   planProgress: vi.fn<Runtime['planProgress']>(),
-  planResult: vi.fn<Runtime['planResult']>()
+  planResult: vi.fn<Runtime['planResult']>(),
+  planPixelAudit: vi.fn<Runtime['planPixelAudit']>()
 })
 const deferred = <T>() => {
   let resolve!: (value: T) => void

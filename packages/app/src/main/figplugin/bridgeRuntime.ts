@@ -1,5 +1,12 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import {
+  figPluginPixelAuditRequestSchema,
+  figPluginPixelAuditSchema,
+  pixelAuditMatchesComparison,
+  summarizePixelTargets,
+  type FigPluginPixelAudit
+} from '@shared/figplugin/pixelAudit'
+import {
   FIGPLUGIN_BRIDGE_PROTOCOL,
   FigPluginBridgeError,
   figPluginBridgePrepareRequestSchema,
@@ -172,6 +179,8 @@ type PlanExecution = {
   resultFingerprint?: string
   visualEvidence?: FigPluginVisualEvidence[]
   visualBaselineComparison?: FigPluginVisualBaselineComparison
+  pixelAudit?: FigPluginPixelAudit
+  pixelAuditFingerprint?: string
   visualTargetIds?: string[]
   visualCorrection?: FigPluginVisualCorrectionAttempt
   updatedAt: number
@@ -256,6 +265,7 @@ export class FigPluginBridgeRuntime {
             visualCorrectionConsumed: execution.claimedAt !== undefined
           }
         : {}),
+      ...(execution.pixelAudit ? { pixelAudit: execution.pixelAudit } : {}),
       ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
     })
   }
@@ -482,6 +492,17 @@ export class FigPluginBridgeRuntime {
           ? {
               visualEvidenceCount: execution.visualEvidence.length,
               visualEvidenceSha256: digest(execution.visualEvidence)
+            }
+          : {}),
+        ...(execution.pixelAudit
+          ? {
+              pixelAudit: {
+                outcome: execution.pixelAudit.outcome,
+                comparedTargets: execution.pixelAudit.comparedTargets,
+                changedTargets: execution.pixelAudit.changedTargets,
+                unavailableTargets: execution.pixelAudit.unavailableTargets,
+                changedPixels: execution.pixelAudit.changedPixels
+              }
             }
           : {}),
         ...(visualBaseline
@@ -926,6 +947,7 @@ export class FigPluginBridgeRuntime {
         execution.effect !== 'applied' ||
         execution.preview.visualAudit !== 'hash-only' ||
         !comparison ||
+        execution.pixelAudit?.outcome === 'match' ||
         comparison.exactMatch ||
         comparison.changedCount < 1 ||
         comparison.baselineId !== baselineId ||
@@ -1610,6 +1632,62 @@ export class FigPluginBridgeRuntime {
         : undefined
     this.recordExecutionAudit(execution)
     this.scheduleCleanup()
+    return figPluginExecutionResultResponseSchema.parse({
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      executionId: execution.executionId,
+      status: this.executionStatus(execution)
+    })
+  }
+
+  /** A read-only report about a completed result. It cannot mint a write grant. */
+  async planPixelAudit(
+    sessionId: string,
+    sessionToken: string,
+    input: unknown
+  ): Promise<FigPluginExecutionResultResponse> {
+    const session = this.authenticate(sessionId, sessionToken)
+    const request = parseFigPluginBridgeValue(figPluginPixelAuditRequestSchema, input)
+    const execution = this.ownedExecution(session, request.executionId)
+    await this.checkSession(session)
+    this.requireCurrentSession(session)
+    const comparison = execution.visualBaselineComparison
+    const baseline = this.visualBaselines.get(request.baselineId)
+    if (
+      this.ownedExecution(session, request.executionId) !== execution ||
+      execution.state !== 'completed' ||
+      execution.effect !== 'applied' ||
+      execution.intent?.actionId !== request.actionId ||
+      execution.preview.expiresAt <= this.clock() ||
+      !comparison ||
+      !baseline ||
+      baseline.value.expiresAt <= this.clock() ||
+      baseline.value.visualEvidenceSha256 !== request.baselineEvidenceSha256 ||
+      canonicalFigPluginJson(baseline.binding) !== canonicalFigPluginJson(session.binding) ||
+      !pixelAuditMatchesComparison(request, comparison)
+    )
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    const fingerprint = digest(request)
+    if (execution.pixelAuditFingerprint && execution.pixelAuditFingerprint !== fingerprint)
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    if (!execution.pixelAuditFingerprint) {
+      execution.pixelAudit = figPluginPixelAuditSchema.parse({
+        policy: request.policy,
+        baselineId: request.baselineId,
+        baselineEvidenceSha256: request.baselineEvidenceSha256,
+        visualEvidenceSha256: request.visualEvidenceSha256,
+        targets: request.targets,
+        checkedAt: this.clock(),
+        ...summarizePixelTargets(request.targets)
+      })
+      execution.pixelAuditFingerprint = fingerprint
+      if (execution.pixelAudit.outcome === 'match') {
+        for (const [id, record] of [...this.visualCorrectionAuthorizations]) {
+          if (record.value.sourceExecutionId === execution.executionId)
+            this.removeVisualCorrectionAuthorization(id, 'CANCELLED')
+        }
+      }
+      this.recordExecutionAudit(execution)
+    }
     return figPluginExecutionResultResponseSchema.parse({
       protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
       executionId: execution.executionId,

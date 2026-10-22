@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict'
+import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -119,8 +119,9 @@ test('Photoshop capture hashes bounded pixels and always disposes the image buff
       layerID: 9,
       targetSize: { width: 512, height: 512 },
       colorSpace: 'RGB',
+      colorProfile: 'sRGB IEC61966-2.1',
       componentSize: 8,
-      applyAlpha: true
+      applyAlpha: false
     }
   ])
   assert.deepEqual({ width: evidence.width, height: evidence.height }, { width: 2, height: 1 })

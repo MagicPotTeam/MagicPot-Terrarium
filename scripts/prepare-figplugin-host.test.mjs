@@ -30,6 +30,9 @@ const SYNTHETIC_JOURNAL_HELPER = Buffer.from(
   'Object.defineProperty(globalThis, "MagicPotExecutionJournalV1", { value: Object.freeze({}) });\n' +
     'throw new Error("JOURNAL_HELPER_MUST_NOT_RUN");\n// no trailing newline'
 )
+const SYNTHETIC_PIXEL_HELPER = Buffer.from(
+  '/* opaque pixel decoder fixture; never execute during preparation */\n'
+)
 const HELPER_SEPARATOR = Buffer.from('\n;\n')
 // These plausible-format IDs are synthetic fixtures, not claims of registry ownership.
 const HOSTS = {
@@ -175,6 +178,7 @@ async function isolated(t, host = 'figma', connected = false) {
       path.join(path.dirname(helper), 'plan-preview.js'),
       '/* opaque planning validator fixture */\n'
     )
+    fs.writeFileSync(path.join(path.dirname(helper), 'pixel-audit.js'), SYNTHETIC_PIXEL_HELPER)
     fs.writeFileSync(path.join(path.dirname(helper), 'visual-evidence.js'), SYNTHETIC_VISUAL_HELPER)
     fs.writeFileSync(
       path.join(path.dirname(helper), 'execution-journal.js'),
@@ -780,6 +784,8 @@ function checkConnected(input, sourceDir) {
       configPrefix(input),
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'selection-snapshot.js')),
       HELPER_SEPARATOR,
+      fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'pixel-audit.js')),
+      HELPER_SEPARATOR,
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'visual-evidence.js')),
       HELPER_SEPARATOR,
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')),
@@ -841,6 +847,7 @@ for (const [host, spec] of Object.entries(HOSTS)) {
     )
     const helperPaths = [
       path.join(SOURCES, 'shared', 'selection-snapshot.js'),
+      path.join(SOURCES, 'shared', 'pixel-audit.js'),
       path.join(SOURCES, 'shared', 'visual-evidence.js'),
       path.join(SOURCES, 'shared', 'plan-preview.js'),
       path.join(SOURCES, 'shared', 'execution-journal.js')
@@ -1070,7 +1077,8 @@ test('connected native byte bound includes the prepended config and helper', asy
       SYNTHETIC_HELPER.length -
       SYNTHETIC_VISUAL_HELPER.length -
       SYNTHETIC_JOURNAL_HELPER.length -
-      HELPER_SEPARATOR.length * 4 -
+      SYNTHETIC_PIXEL_HELPER.length -
+      HELPER_SEPARATOR.length * 5 -
       fs.statSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')).size,
     32
   )
@@ -1180,3 +1188,17 @@ for (const host of ['figma', 'photoshop']) {
     })
   }
 }
+
+for (const host of Object.keys(HOSTS))
+  for (const fault of ['missing', 'empty', 'oversized', 'directory']) {
+    test(`${host}: pixel decoder source ${fault} is refused before connected artifact output`, async (t) => {
+      const { sourceDir, prepare, input } = await isolated(t, host, true)
+      const helper = path.join(path.dirname(sourceDir), 'shared', 'pixel-audit.js')
+      fs.unlinkSync(helper)
+      if (fault === 'empty') fs.writeFileSync(helper, '')
+      if (fault === 'oversized') fs.writeFileSync(helper, Buffer.alloc(MAX_FILE + 1))
+      if (fault === 'directory') fs.mkdirSync(helper)
+      rejected(input, prepare)
+      assert.equal(fs.existsSync(input.outputDir), false)
+    })
+  }

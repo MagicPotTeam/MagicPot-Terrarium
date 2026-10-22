@@ -2195,3 +2195,64 @@ it('real loopback: correction authorization, exact write approval, one claim and
   // Restoring accepted properties does not call the provider again.
   expect(value.model.chat).toHaveBeenCalledTimes(2)
 })
+
+it('real loopback: pixel metrics are bound to an accepted checkpoint without sending pixels or granting writes', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const first = await completeVisualExecution(value)
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  const baseline = await value.service.acceptVisualBaseline(
+    { executionId: first.execution.executionId, visualEvidenceSha256: first.visualEvidenceSha256 },
+    invocation('acceptVisualBaseline')
+  )
+  if (!baseline) throw new Error('Expected baseline')
+  const current = await completeVisualExecution(
+    value,
+    [{ ...visualEvidence[0], after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) } }],
+    2
+  )
+  const request = {
+    protocol: 1,
+    executionId: current.execution.executionId,
+    actionId: current.execution.executionId,
+    policy: 'rgba8-exact-v1',
+    baselineId: baseline.baselineId,
+    baselineEvidenceSha256: baseline.visualEvidenceSha256,
+    visualEvidenceSha256: current.visualEvidenceSha256,
+    targets: [
+      {
+        targetId: '1:2',
+        status: 'compared',
+        pixelCount: 64 * 32,
+        changedPixels: 1,
+        maxChannelDelta: 12,
+        absoluteDelta: 12,
+        changedBounds: { x: 1, y: 2, width: 1, height: 1 }
+      }
+    ]
+  }
+  expect((await post(current.origin, 'plan/pixel-audit', request)).status).toBe(401)
+  expect(
+    (
+      await post(
+        current.origin,
+        'plan/pixel-audit',
+        { ...request, pixels: 'PRIVATE' },
+        current.session
+      )
+    ).status
+  ).toBe(400)
+  const count = value.model.chat.mock.calls.length
+  const result = await post(current.origin, 'plan/pixel-audit', request, current.session)
+  expect(result.status).toBe(200)
+  expect(figPluginExecutionResultResponseSchema.parse(result.body).status.pixelAudit).toMatchObject(
+    { outcome: 'different', changedPixels: 1, unavailableTargets: 0 }
+  )
+  expect(await post(current.origin, 'plan/pixel-audit', request, current.session)).toEqual(result)
+  expect(
+    (await planDesktopState(value)).statuses.find(
+      (status) => status.executionId === current.execution.executionId
+    )?.pixelAudit?.changedPixels
+  ).toBe(1)
+  expect((await planDesktopState(value)).correctionAuthorizations).toEqual([])
+  expect(value.model.chat).toHaveBeenCalledTimes(count)
+})
