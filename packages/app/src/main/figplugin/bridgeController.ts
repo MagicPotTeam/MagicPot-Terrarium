@@ -1,3 +1,4 @@
+import type { RecoveryCheckpointStore } from './checkpointStore'
 import { randomUUID } from 'node:crypto'
 import { HOST_PLAN_SYSTEM_MESSAGE, governHostPlanResponse } from './planGovernance'
 import type { LLMProxySvc } from '@shared/api/svcLLMProxy'
@@ -39,6 +40,7 @@ type PlanSource = {
   callId: string
 }
 type Options = {
+  checkpoints?: RecoveryCheckpointStore
   startServer?: typeof startFigPluginBridgeServer
   callTimeoutMs?: number
   audit?: (event: FigPluginExecutionAuditEvent) => void
@@ -148,6 +150,7 @@ export class FigPluginBridgeController {
       },
       invoke: (binding, preview, signal) => this.invoke(binding, preview, signal),
       callTimeoutMs: this.#callTimeout,
+      ...(options.checkpoints ? { checkpoints: options.checkpoints } : {}),
       ...(options.audit ? { audit: options.audit } : {}),
       allowNativeWrite: (binding) =>
         this.#writeEnabled.get(bindingKey(binding)) === true && this.isCurrent(binding)

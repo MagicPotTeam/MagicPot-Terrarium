@@ -1,3 +1,4 @@
+import type { RecoveryCheckpointStore, SavedCheckpoint } from './checkpointStore'
 import {
   captureTaskRecoveryScope,
   prepareTaskRecoveryPlan,
@@ -115,6 +116,7 @@ type Options = {
   callTimeoutMs?: number
   audit?: (event: FigPluginExecutionAuditEvent) => void
   allowNativeWrite?: (binding: FigPluginRuntimeBinding) => boolean
+  checkpoints?: RecoveryCheckpointStore
 }
 type Ticket = {
   binding: FigPluginRuntimeBinding
@@ -221,6 +223,7 @@ const visualBaselineScopeKey = (
  * The caller supplies trusted native consent and validates the entire current store binding.
  */
 export class FigPluginBridgeRuntime {
+  private readonly checkpoints?: RecoveryCheckpointStore
   private readonly tickets = new Map<string, Ticket>()
   private readonly sessions = new Map<string, Session>()
   private readonly calls = new Map<string, Call>()
@@ -243,6 +246,7 @@ export class FigPluginBridgeRuntime {
   private closed = false
 
   constructor(options: Options) {
+    this.checkpoints = options.checkpoints
     this.validateBinding = options.validateBinding
     this.invoke = options.invoke
     this.clock = options.now ?? Date.now
@@ -940,11 +944,26 @@ export class FigPluginBridgeRuntime {
         targetId: item.targetId,
         accepted: item.after
       })),
+      ...(this.checkpoints ? { storage: 'encrypted-local' } : {}),
       acceptedAt,
       expiresAt: acceptedAt + FIGPLUGIN_VISUAL_BASELINE_TTL_MS,
       correctionRoundsUsed: 0,
       maxCorrectionRounds: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS
     })
+    const saved: VisualBaselineRecord = {
+      value: baseline,
+      binding: Object.freeze({ ...execution.call.session.binding }),
+      recoveryPlan: structuredClone(execution.plan),
+      recoveryScope
+    }
+    // No await between durable commit and in-memory acceptance. Failure is not success.
+    if (this.checkpoints) {
+      try {
+        this.checkpoints.save(saved as SavedCheckpoint)
+      } catch {
+        throw new FigPluginBridgeError('UPSTREAM_FAILED')
+      }
+    }
     const scopeKey = visualBaselineScopeKey(baseline)
     for (const [id, record] of this.visualBaselines) {
       if (visualBaselineScopeKey(record.value) === scopeKey) this.removeVisualBaseline(id)
@@ -954,12 +973,7 @@ export class FigPluginBridgeRuntime {
       if (!oldest) break
       this.removeVisualBaseline(oldest)
     }
-    this.visualBaselines.set(baseline.baselineId, {
-      value: baseline,
-      binding: Object.freeze({ ...execution.call.session.binding }),
-      recoveryPlan: structuredClone(execution.plan),
-      recoveryScope
-    })
+    this.visualBaselines.set(baseline.baselineId, saved)
     this.recordExecutionAudit(execution, baseline)
     this.scheduleCleanup()
     return structuredClone(baseline)
@@ -1143,6 +1157,41 @@ export class FigPluginBridgeRuntime {
       if (request.sequence <= session.highWater || !this.allowNativeWrite(session.binding))
         throw new FigPluginBridgeError('INVALID_REQUEST')
       const context = request.hostContext
+      if (this.checkpoints) {
+        let persisted: SavedCheckpoint | undefined
+        try {
+          persisted = this.checkpoints.find(session.binding, context)
+        } catch {
+          throw new FigPluginBridgeError('UPSTREAM_FAILED')
+        }
+        if (persisted) {
+          // Validate current selection, host identity, locks and capabilities before rehydration.
+          try {
+            prepareTaskRecoveryPlan(persisted.recoveryPlan, persisted.recoveryScope, context)
+          } catch {
+            throw new FigPluginBridgeError('INVALID_REQUEST')
+          }
+          const previous = this.visualBaselines.get(persisted.value.baselineId)
+          if (
+            previous &&
+            previous.value.correctionRoundsUsed > persisted.value.correctionRoundsUsed
+          )
+            throw new FigPluginBridgeError('UPSTREAM_FAILED')
+          if (!previous && this.visualBaselines.size >= 16) throw new FigPluginBridgeError('BUSY')
+          this.visualBaselines.set(persisted.value.baselineId, persisted)
+        } else {
+          // Deletion/revocation on disk cannot fall back to a stale in-memory checkpoint.
+          for (const [id, item] of this.visualBaselines)
+            if (
+              item.value.storage === 'encrypted-local' &&
+              item.value.pluginId === session.binding.pluginId &&
+              item.value.projectId === session.binding.projectId &&
+              item.value.documentId === context.documentId &&
+              item.value.scopeId === context.scopeId
+            )
+              this.removeVisualBaseline(id)
+        }
+      }
       const record = [...this.visualBaselines.values()].find(
         (record) =>
           record.value.host === context.host &&
@@ -1659,6 +1708,17 @@ export class FigPluginBridgeRuntime {
         : {})
     })
 
+    const durableRecord = recoveryAuthority ?? correctionAuthority?.baselineRecord
+    const durableRound = execution.recovery?.round ?? execution.visualCorrection?.round
+    if (durableRecord?.value.storage === 'encrypted-local') {
+      // Consume before returning an executable intent. A crash can waste a round, never refund it.
+      try {
+        if (!this.checkpoints || durableRound === undefined) throw new Error('NO_STORE')
+        this.checkpoints.consume(durableRecord as SavedCheckpoint, durableRound)
+      } catch {
+        throw new FigPluginBridgeError('UPSTREAM_FAILED')
+      }
+    }
     if (correctionAuthority && execution.visualCorrection) {
       correctionAuthority.baselineRecord.value = figPluginVisualBaselineSchema.parse({
         ...correctionAuthority.baselineRecord.value,
@@ -1932,6 +1992,11 @@ export class FigPluginBridgeRuntime {
         this.removeVisualCorrectionAuthorization(id, 'CONFIGURATION_CHANGED')
     }
     this.scheduleCleanup()
+    try {
+      this.checkpoints?.removeWhere((record) => record.binding.pluginId === pluginId)
+    } catch {
+      throw new FigPluginBridgeError('UPSTREAM_FAILED')
+    }
   }
 
   /** Synchronous authority notification: no polling, metadata discovery or provider await. */
@@ -1958,6 +2023,11 @@ export class FigPluginBridgeRuntime {
         this.removeVisualCorrectionAuthorization(id, 'CONFIGURATION_CHANGED')
     }
     this.scheduleCleanup()
+    try {
+      this.checkpoints?.removeWhere((record) => !valid(record.binding))
+    } catch {
+      throw new FigPluginBridgeError('UPSTREAM_FAILED')
+    }
   }
 
   dispose(): void {

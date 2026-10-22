@@ -93,7 +93,7 @@ export function buildVisualBaselineApprovalDetails(
     'Accepted bounded visual targets:',
     escapePlanningDisplay(JSON.stringify(targets, null, 2)),
     '',
-    'Accepting temporarily retains target IDs, dimensions, hashes and the approved plan values in memory for bounded correction; plan values can include design text. No pixels or plan values are written to the audit log. This is not a full-document backup or semantic visual review. Each correction still needs separate target authorization and exact-plan write approval.'
+    'Accepting retains target IDs, dimensions, hashes and the approved task property values; plan values can include design text. In the production desktop, these are encrypted using the OS account and usable locally for up to 24 hours, with at most 16 checkpoints. Expired ciphertext is cleaned on checkpoint operations, not while the app is stopped. Encryption or persistence failure rejects acceptance; there is no plaintext fallback. After restarting the desktop, explicit pairing, fresh capture and new write approval are required. The native plugin/document instance must remain the same. No sessions, tokens or write grants are saved. No pixels or plan values are written to the audit log. This is not a full-document backup or semantic visual review. Each correction still needs separate target authorization and exact-plan write approval.'
   ].join('\n')
 }
 

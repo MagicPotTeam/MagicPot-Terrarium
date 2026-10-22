@@ -1481,7 +1481,7 @@
       "visualBaselineHash": "Accepted evidence SHA-256: {{hash}}",
       "visualBaselineRounds": "Consumed correction attempts: {{used}} / {{max}} rounds",
       "visualBaselineExpires": "Checkpoint expires: {{expiry}}",
-      "visualBaselineBoundary": "This temporary in-memory checkpoint retains IDs, dimensions, hashes and approved plan values, which may include design text. It is not a full-document backup or semantic review. Audit logs contain no pixels or plan values; every correction requires separate authorization and exact-plan write approval.",
+      "visualBaselineBoundary": "A checkpoint contains task-scoped properties, target identities and bounded visual hashes, not a full-document backup. Pixel caches are not persisted; missing pixels never count as a match. Each recovery requires fresh approval.",
       "reviewVisualCorrection": "I reviewed this exact changed comparison and understand this only authorizes one future correction attempt for its exact changed targets.",
       "authorizeVisualCorrection": "Authorize one correction round",
       "visualCorrectionCurrent": "Correction authorization {{id}} is active for round {{round}} / {{max}}.",
@@ -1528,7 +1528,8 @@
         "UNKNOWN": "The plugin bridge request failed."
       },
       "taskRecoverySummary": "Restore accepted task properties: checkpoint {{id}}, round {{round}}/{{max}}. Not a full-document restore.",
-      "taskRecoveryGuidance": "In the same host plugin instance, select exactly these task targets and click “Restore accepted task properties”. Review the fresh differences in desktop before approving. No model call; only this running desktop retains the checkpoint."
+      "taskRecoveryGuidance": "Select the original task targets in the same native plugin instance and choose Restore accepted task properties. No model call; fresh capture and separate desktop write approval are required. Encrypted checkpoints survive a desktop restart for up to 24 hours, but require explicit re-pairing and never restore old grants. Closing the native plugin or reopening the document invalidates its identity.",
+      "visualBaselineEncrypted": "Encrypted locally; re-pair after restarting MagicPot to retrieve this checkpoint until its existing expiry. Round usage is not reset. Not a full-document backup."
     },
     "center": {
       "title": "Plugin packages",

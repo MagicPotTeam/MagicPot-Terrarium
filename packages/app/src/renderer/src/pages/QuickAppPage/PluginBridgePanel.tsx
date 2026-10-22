@@ -1431,6 +1431,9 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                 })}
               </Typography>
               <Alert severity="info">{t('figplugin.bridge.visualBaselineBoundary')}</Alert>
+              {baseline.storage === 'encrypted-local' && (
+                <Alert severity="info">{t('figplugin.bridge.visualBaselineEncrypted')}</Alert>
+              )}
               <Typography>{t('figplugin.bridge.taskRecoveryGuidance')}</Typography>
             </Stack>
           </Paper>

@@ -1317,5 +1317,20 @@ it('provides task restoration guidance in both supported languages without promi
   expect(en.figplugin.bridge.taskRecoverySummary).toContain('Not a full-document')
   expect(zh.figplugin.bridge.taskRecoverySummary).toContain('不是整份文档')
   expect(en.figplugin.bridge.taskRecoveryGuidance).toContain('No model call')
-  expect(zh.figplugin.bridge.taskRecoveryGuidance).toContain('本次桌面进程')
+  expect(zh.figplugin.bridge.taskRecoveryGuidance).toContain('重启桌面')
+})
+
+it('labels an encrypted checkpoint without turning it into automatic write authority', async () => {
+  mocks.center.planState.mockResolvedValue({
+    previews: [],
+    statuses: [],
+    baselines: [{ ...acceptedVisualBaseline(), storage: 'encrypted-local' }],
+    correctionAuthorizations: []
+  })
+  mount()
+  await click('refresh')
+  expect(screen.getByText(key('visualBaselineEncrypted'))).toBeInTheDocument()
+  expect(screen.getByText(key('taskRecoveryGuidance'))).toBeInTheDocument()
+  expect(mocks.center.approvePlanExecution).not.toHaveBeenCalled()
+  expect(mocks.center.acceptVisualBaseline).not.toHaveBeenCalled()
 })

@@ -141,6 +141,7 @@ export const figPluginVisualBaselineSchema = z
       figPluginVisualBaselineTargetSchema,
       'Duplicate visual baseline target'
     ),
+    storage: z.literal('encrypted-local').optional(),
     acceptedAt: safeInteger,
     expiresAt: safeInteger,
     correctionRoundsUsed: z.number().int().min(0).max(FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS),

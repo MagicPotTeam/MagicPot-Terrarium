@@ -1481,7 +1481,7 @@
       "visualBaselineHash": "已接受证据 SHA-256：{{hash}}",
       "visualBaselineRounds": "已消耗的修正尝试：{{used}} / 最多 {{max}} 轮",
       "visualBaselineExpires": "检查点到期时间：{{expiry}}",
-      "visualBaselineBoundary": "此临时内存检查点保留目标 ID、尺寸、哈希及已批准计划的属性值，属性值可能包含设计文本。它不是完整文档备份或语义审查。审计日志不保存像素或计划正文；每次修正仍须单独授权并确认精确写入计划。",
+      "visualBaselineBoundary": "检查点仅保存任务范围的属性、目标标识和有界视觉哈希，不是整份文档备份。像素缓存不随检查点落盘，缺失时不会判为像素一致；每次恢复仍须单独确认。",
       "reviewVisualCorrection": "我已核对这次精确的变化对比，并理解该操作只会为这些发生变化的目标授权一次后续修正尝试。",
       "authorizeVisualCorrection": "授权一次修正",
       "visualCorrectionCurrent": "修正授权 {{id}} 已生效，对应第 {{round}} / {{max}} 轮。",
@@ -1528,7 +1528,8 @@
         "UNKNOWN": "桥接请求失败。"
       },
       "taskRecoverySummary": "恢复已接受任务属性：检查点 {{id}}，第 {{round}}/{{max}} 轮。不是整份文档恢复。",
-      "taskRecoveryGuidance": "在同一个宿主插件实例中选中这组任务目标，点击“恢复已接受任务属性”，再到桌面核对新差异并确认。不请求模型；当前恢复点仅保留在本次桌面进程中。"
+      "taskRecoveryGuidance": "在原宿主插件实例中选中原任务目标，点击“恢复已接受任务属性”。不调用模型；重新采集并在桌面单独确认后，仅恢复任务已保存的属性。加密保存的检查点在重启桌面后仍可找回，最长保留 24 小时；必须重新配对，旧授权不会恢复。关闭原宿主插件或重开文档后不可直接使用旧恢复点。",
+      "visualBaselineEncrypted": "已加密保存到本机；重启 MagicPot 后可重新配对找回。保留至当前到期时间，修正次数不会重置。不是整份文档备份。"
     },
     "center": {
       "title": "插件包",

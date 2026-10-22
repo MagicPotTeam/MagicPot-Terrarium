@@ -1,3 +1,4 @@
+import { createCheckpointStore } from '../figplugin/checkpointEncryption'
 import {
   buildBridgeApprovalDetails,
   buildPlanExecutionApprovalDetails,
@@ -240,6 +241,19 @@ async function readSelectedPublicKey(filename: string, check: () => void): Promi
   }
 }
 
+const checkpointStore = () =>
+  createCheckpointStore(path.join(app.getPath('userData'), 'figplugin-center'))
+async function createProductionBridge(store: FigPluginCenterStore): Promise<BridgeControl> {
+  const { LLMProxySvcImpl } = await import('./svcLLMProxyImpl')
+  const audit = getFigPluginExecutionAuditStore(
+    path.join(app.getPath('userData'), 'figplugin-center')
+  )
+  return new FigPluginBridgeController(store, new LLMProxySvcImpl(), {
+    audit: (event) => audit.record(event),
+    checkpoints: checkpointStore()
+  })
+}
+
 export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
   private readonly previews = new Map<string, PackagePreview>()
   private pending = false
@@ -319,17 +333,9 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       path.join(app.getPath('userData'), 'figplugin-center')
     ),
     private readonly getMainWindow: () => BrowserWindow | null = () => null,
-    private readonly makeBridge: (store: FigPluginCenterStore) => Promise<BridgeControl> = async (
-      store
-    ) => {
-      const { LLMProxySvcImpl } = await import('./svcLLMProxyImpl')
-      const audit = getFigPluginExecutionAuditStore(
-        path.join(app.getPath('userData'), 'figplugin-center')
-      )
-      return new FigPluginBridgeController(store, new LLMProxySvcImpl(), {
-        audit: (event) => audit.record(event)
-      })
-    },
+    private readonly makeBridge: (
+      store: FigPluginCenterStore
+    ) => Promise<BridgeControl> = createProductionBridge,
     private readonly getAuditStore: () => Pick<
       FigPluginExecutionAuditStore,
       'list' | 'writeFailed'
@@ -942,7 +948,7 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
         cancelId: 1,
         noLink: true,
         checkboxLabel:
-          'I reviewed this exact result and accept its bounded hashes as a temporary checkpoint',
+          'I reviewed this exact result and approve local encrypted retention of its task properties for up to 24 hours',
         checkboxChecked: false
       })
       if (approval.response !== 0 || !approval.checkboxChecked) return null
@@ -1087,6 +1093,13 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       this.pairingOperation.revoked = true
     }
     this.bridge?.revokePlugin(request.pluginId)
+    if (!this.bridge && this.makeBridge === createProductionBridge) {
+      try {
+        checkpointStore().removeWhere((record) => record.binding.pluginId === request.pluginId)
+      } catch {
+        throw new FigPluginBridgeError('UPSTREAM_FAILED')
+      }
+    }
   }
 
   execute = async (
