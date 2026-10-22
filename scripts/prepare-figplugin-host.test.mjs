@@ -26,6 +26,10 @@ const SYNTHETIC_VISUAL_HELPER = Buffer.from(
   'Object.defineProperty(globalThis, "MagicPotVisualEvidenceV1", { value: Object.freeze({}) });\n' +
     'throw new Error("VISUAL_HELPER_MUST_NOT_RUN");\n// no trailing newline'
 )
+const SYNTHETIC_JOURNAL_HELPER = Buffer.from(
+  'Object.defineProperty(globalThis, "MagicPotExecutionJournalV1", { value: Object.freeze({}) });\n' +
+    'throw new Error("JOURNAL_HELPER_MUST_NOT_RUN");\n// no trailing newline'
+)
 const HELPER_SEPARATOR = Buffer.from('\n;\n')
 // These plausible-format IDs are synthetic fixtures, not claims of registry ownership.
 const HOSTS = {
@@ -172,6 +176,10 @@ async function isolated(t, host = 'figma', connected = false) {
       '/* opaque planning validator fixture */\n'
     )
     fs.writeFileSync(path.join(path.dirname(helper), 'visual-evidence.js'), SYNTHETIC_VISUAL_HELPER)
+    fs.writeFileSync(
+      path.join(path.dirname(helper), 'execution-journal.js'),
+      SYNTHETIC_JOURNAL_HELPER
+    )
     const bridgeDir = path.join(sourceDir, 'bridge')
     fs.mkdirSync(bridgeDir)
     // Opaque bytes, including placeholder-looking JS, must be copied without evaluation/substitution.
@@ -776,6 +784,8 @@ function checkConnected(input, sourceDir) {
       HELPER_SEPARATOR,
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')),
       HELPER_SEPARATOR,
+      fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'execution-journal.js')),
+      HELPER_SEPARATOR,
       fs.readFileSync(path.join(sourceDir, 'bridge', spec.code))
     ])
   )
@@ -832,16 +842,19 @@ for (const [host, spec] of Object.entries(HOSTS)) {
     const helperPaths = [
       path.join(SOURCES, 'shared', 'selection-snapshot.js'),
       path.join(SOURCES, 'shared', 'visual-evidence.js'),
-      path.join(SOURCES, 'shared', 'plan-preview.js')
+      path.join(SOURCES, 'shared', 'plan-preview.js'),
+      path.join(SOURCES, 'shared', 'execution-journal.js')
     ]
     const helpersBefore = helperPaths.map(snapshot)
     t.mock.method(globalThis, 'fetch', () => assert.fail('preparation must remain offline'))
     assert.equal(Object.hasOwn(globalThis, 'MagicPotSelectionSnapshotV1'), false)
     assert.equal(Object.hasOwn(globalThis, 'MagicPotVisualEvidenceV1'), false)
+    assert.equal(Object.hasOwn(globalThis, 'MagicPotExecutionJournalV1'), false)
     prepareFigPluginHost(input)
     checkConnected(input, sourceDir)
     assert.equal(Object.hasOwn(globalThis, 'MagicPotSelectionSnapshotV1'), false)
     assert.equal(Object.hasOwn(globalThis, 'MagicPotVisualEvidenceV1'), false)
+    assert.equal(Object.hasOwn(globalThis, 'MagicPotExecutionJournalV1'), false)
     assert.deepEqual(helperPaths.map(snapshot), helpersBefore)
     assert.deepEqual(
       [spec.code, spec.ui].map((name) => snapshot(path.join(sourceDir, 'bridge', name))),
@@ -1056,7 +1069,8 @@ test('connected native byte bound includes the prepended config and helper', asy
       configPrefix(input).length -
       SYNTHETIC_HELPER.length -
       SYNTHETIC_VISUAL_HELPER.length -
-      HELPER_SEPARATOR.length * 3 -
+      SYNTHETIC_JOURNAL_HELPER.length -
+      HELPER_SEPARATOR.length * 4 -
       fs.statSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')).size,
     32
   )
@@ -1151,3 +1165,18 @@ test('connected helper changes during a guarded read are refused before any outp
   assert.equal(changed, true)
   assert.equal(fs.existsSync(input.outputDir), false)
 })
+
+for (const host of ['figma', 'photoshop']) {
+  for (const fault of ['missing', 'empty', 'oversized', 'directory']) {
+    test(`${host}: journal source ${fault} is refused before connected artifact output`, async (t) => {
+      const { sourceDir, prepare, input } = await isolated(t, host, true)
+      const helper = path.join(path.dirname(sourceDir), 'shared', 'execution-journal.js')
+      fs.unlinkSync(helper)
+      if (fault === 'empty') fs.writeFileSync(helper, '')
+      if (fault === 'oversized') fs.writeFileSync(helper, Buffer.alloc(MAX_FILE + 1))
+      if (fault === 'directory') fs.mkdirSync(helper)
+      rejected(input, prepare)
+      assert.equal(fs.existsSync(input.outputDir), false)
+    })
+  }
+}

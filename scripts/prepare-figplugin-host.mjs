@@ -292,6 +292,10 @@ export function prepareFigPluginHost(options) {
       ? readSourceRegular(SOURCE_ROOT, ['shared', 'visual-evidence.js'])
       : null
     if (visualEvidenceSource) sources.push(visualEvidenceSource)
+    const executionJournalSource = connected
+      ? readSourceRegular(SOURCE_ROOT, ['shared', 'execution-journal.js'])
+      : null
+    if (executionJournalSource) sources.push(executionJournalSource)
     const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(sources[0].data))
     requireValid(manifest.id === spec.placeholder)
     requireValid(manifest.main === (host === 'figma' ? spec.code : spec.ui))
@@ -362,6 +366,8 @@ export function prepareFigPluginHost(options) {
         visualEvidenceSource.data,
         Buffer.from('\n;\n'),
         planningSource.data,
+        Buffer.from('\n;\n'),
+        executionJournalSource.data,
         Buffer.from('\n;\n'),
         code
       ])

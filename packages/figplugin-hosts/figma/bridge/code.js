@@ -1072,6 +1072,16 @@
     )
       throw new Error('CANCELLED')
   }
+  let executionJournal = null
+  async function reserveNativeAction(item, intent) {
+    const helper = globalThis.MagicPotExecutionJournalV1
+    if (!helper) throw new Error('JOURNAL_UNAVAILABLE')
+    if (!executionJournal) executionJournal = helper.createFigma()
+    await executionJournal.reserve(intent, () => assertExecutionCurrent(item))
+    // Storage can yield. Desktop cancellation and native state must be checked
+    // again after the durable marker, immediately before applying any step.
+    await checkExecutionAuthority(item)
+  }
   async function executeClaimedPlan(item, intent) {
     assertExecutionCurrent(item)
     const planner = globalThis.MagicPotPlanPreviewV1
@@ -1129,10 +1139,36 @@
     }
     try {
       await checkExecutionAuthority(item)
+      await reserveNativeAction(item, intent)
       checked = precheckPlan(plan, item.hostContext)
-    } catch {
-      if (executionCurrent(item))
+    } catch (error) {
+      if (!executionCurrent(item)) return
+      if (String(error?.message).startsWith('JOURNAL_')) {
+        // A previous crash may already have changed the document. Never claim
+        // that a replay-blocked action had no effect or fabricate a success.
+        try {
+          await post(
+            'planResult',
+            {
+              protocol: 1,
+              executionId: item.executionId,
+              actionId: item.actionId,
+              status: 'failed',
+              effect: 'unknown',
+              completed: 0,
+              total: plan.steps.length,
+              readback: createPlanReadback(item.hostContext, plan),
+              errorCode: 'QUARANTINED'
+            },
+            item.auth
+          )
+        } catch {}
+        state(
+          'Persistent action safety check blocked this write. It was not replayed. Verify the document and request a new approved plan.'
+        )
+      } else {
         state('Execution permission ended or the document changed. No new writes were started.')
+      }
       return
     }
     const applied = []

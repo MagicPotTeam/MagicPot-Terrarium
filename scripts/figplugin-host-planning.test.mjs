@@ -40,7 +40,14 @@ function fixture(
     visualGate = null,
     modalGate = null,
     tamperComparisonIdentity = false,
-    progressHook = null
+    progressHook = null,
+    persistedActions = new Map(),
+    journalHook = null,
+    journalAvailable = true,
+    journalHelper = true,
+    dropResult = false,
+    actionSeed = '8',
+    authorityHook = null
   } = {}
 ) {
   let time = 1_800_000_000_000,
@@ -90,6 +97,40 @@ function fixture(
           isBackgroundLayer: false
         }
   const node = data
+  const nativeWrites = []
+  let firstName = data.name
+  Object.defineProperty(node, 'name', {
+    enumerable: true,
+    configurable: true,
+    get: () => firstName,
+    set: (value) => {
+      nativeWrites.push(value)
+      firstName = value
+    }
+  })
+  const storeRead = (key) => {
+    if (journalHook) journalHook('read', key)
+    return persistedActions.get(key)
+  }
+  const storeWrite = (key, value) => {
+    if (journalHook) journalHook('write', key, value)
+    persistedActions.set(key, value)
+  }
+  const clientStorage = {
+    getAsync: async (key) => storeRead(key),
+    setAsync: async (key, value) => storeWrite(key, value),
+    keysAsync: async () => [...persistedActions.keys()],
+    deleteAsync: async (key) => persistedActions.delete(key)
+  }
+  const localStorage = {
+    get length() {
+      return persistedActions.size
+    },
+    key: (index) => [...persistedActions.keys()][index] ?? null,
+    getItem: (key) => storeRead(key) ?? null,
+    setItem: storeWrite,
+    removeItem: (key) => persistedActions.delete(key)
+  }
   page.selection = [node]
   document.activeLayers = [node]
   let secondName = 'Second original name'
@@ -143,6 +184,7 @@ function fixture(
   const app = Object.freeze({ activeDocument: document, documents: [document] })
   const figma = {
     root: rootNode,
+    ...(journalAvailable ? { clientStorage } : {}),
     currentPage: page,
     showUI() {},
     on() {},
@@ -157,7 +199,7 @@ function fixture(
   const sessionId = 'b'.repeat(32),
     sessionToken = 'c'.repeat(64),
     callId = 'd'.repeat(32),
-    sourceExecutionId = '8'.repeat(32),
+    sourceExecutionId = actionSeed.repeat(32),
     correctionExecutionId = 'a'.repeat(32),
     correctionAuthorizationId = '5'.repeat(32),
     correctionBaselineId = '4'.repeat(32),
@@ -187,6 +229,7 @@ function fixture(
   }
   const sandbox = {
     console,
+    ...(journalAvailable ? { localStorage } : {}),
     AbortController,
     TextEncoder,
     TextDecoder,
@@ -284,6 +327,7 @@ function fixture(
           effect: 'none',
           updatedAt: time
         }
+        if (authorityHook) authorityHook(value)
       } else if (url.endsWith('/plan/claim')) {
         claimedExecutions.add(body.executionId || sourceExecutionId)
         const correction = body.executionId === correctionExecutionId
@@ -349,6 +393,7 @@ function fixture(
           updatedAt: time
         }
       } else if (url.endsWith('/plan/result')) {
+        if (dropResult) throw new Error('Owned result transport loss')
         planResult = body
         planResults.push(plain(body))
         const correction = body.executionId === correctionExecutionId
@@ -492,6 +537,7 @@ function fixture(
   new Script(read('shared/selection-snapshot.js')).runInContext(vm)
   new Script(read('shared/visual-evidence.js')).runInContext(vm)
   new Script(read('shared/plan-preview.js')).runInContext(vm)
+  if (journalHelper) new Script(read('shared/execution-journal.js')).runInContext(vm)
   new Script(
     read(host === 'figma' ? 'figma/bridge/code.js' : 'photoshop-uxp/bridge/main.js')
   ).runInContext(vm)
@@ -564,6 +610,8 @@ function fixture(
     posts,
     element,
     cancel: () => (host === 'figma' ? send({ type: 'cancel' }) : click('cancel')),
+    nativeWrites,
+    persistedActions,
     planResult: () => planResult,
     planResults: () => planResults.map(plain),
     close: () => {
@@ -1009,4 +1057,179 @@ for (const host of ['figma', 'photoshop']) {
       }
     })
   }
+}
+
+// Reloading the VM destroys all host-script globals while retaining only the
+// SDK-shaped persistent store. This is not an actual Figma/Photoshop process.
+async function runApproved(f) {
+  await f.pair()
+  f.capture()
+  f.share()
+  await flush()
+  await f.tick(1000)
+  await f.tick(1000)
+}
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: restart refuses a recorded action even when the server offers it again`, async () => {
+    const persistedActions = new Map()
+    const first = fixture(host, { approvePlan: true, persistedActions })
+    await runApproved(first)
+    assert.deepEqual(first.nativeWrites, ['Approved new name'])
+    assert.equal(persistedActions.size, 1)
+    assert.doesNotMatch(
+      JSON.stringify([...persistedActions]),
+      /Original owned|Approved new|Proposed new|cccccccc|sessionToken/
+    )
+    first.close()
+    await flush()
+    const snapshot = JSON.stringify([...persistedActions])
+    const reopened = fixture(host, { approvePlan: true, persistedActions })
+    try {
+      await runApproved(reopened)
+      assert.deepEqual(reopened.nativeWrites, [])
+      assert.equal(reopened.node.name, 'Original owned name')
+      assert.equal(reopened.planResult().status, 'failed')
+      assert.equal(reopened.planResult().effect, 'unknown')
+      assert.equal(reopened.planResult().errorCode, 'QUARANTINED')
+      assert.equal(reopened.planResult().visualEvidence, undefined)
+      assert.equal(JSON.stringify([...persistedActions]), snapshot)
+    } finally {
+      reopened.close()
+      await flush()
+    }
+  })
+  test(`${host}: lost result receipt never permits a restarted action to write twice`, async () => {
+    const persistedActions = new Map()
+    const first = fixture(host, { approvePlan: true, persistedActions, dropResult: true })
+    await runApproved(first)
+    assert.deepEqual(first.nativeWrites, ['Approved new name'])
+    assert.equal(first.planResult(), null)
+    first.close()
+    await flush()
+    const reopened = fixture(host, { approvePlan: true, persistedActions })
+    try {
+      await runApproved(reopened)
+      assert.deepEqual(reopened.nativeWrites, [])
+      assert.equal(reopened.planResult().errorCode, 'QUARANTINED')
+    } finally {
+      reopened.close()
+      await flush()
+    }
+  })
+  for (const broken of [
+    'missing-storage',
+    'missing-helper',
+    'read-failure',
+    'write-failure',
+    'corrupt'
+  ]) {
+    test(`${host}: ${broken} refuses native writes without clearing safety records`, async () => {
+      const persistedActions = new Map()
+      if (broken === 'corrupt')
+        persistedActions.set('magicpot.figplugin.execution.v1.' + '8'.repeat(32), '{corrupt')
+      const before = JSON.stringify([...persistedActions])
+      const f = fixture(host, {
+        approvePlan: true,
+        persistedActions,
+        journalAvailable: broken !== 'missing-storage',
+        journalHelper: broken !== 'missing-helper',
+        journalHook(stage) {
+          if (broken === stage + '-failure') throw new Error('PRIVATE_STORAGE_ERROR')
+        }
+      })
+      try {
+        await runApproved(f)
+        assert.deepEqual(f.nativeWrites, [])
+        assert.equal(f.node.name, 'Original owned name')
+        assert.equal(f.planResult().status, 'failed')
+        assert.equal(f.planResult().errorCode, 'QUARANTINED')
+        assert.equal(JSON.stringify([...persistedActions]), before)
+        assert.doesNotMatch(JSON.stringify(f.posts), /PRIVATE_STORAGE_ERROR/)
+      } finally {
+        f.close()
+        await flush()
+      }
+    })
+  }
+  test(`${host}: cancellation while recording prevents every native write`, async () => {
+    let f
+    f = fixture(host, {
+      approvePlan: true,
+      journalHook(stage) {
+        if (stage === 'write') f.cancel()
+      }
+    })
+    try {
+      await runApproved(f)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.node.name, 'Original owned name')
+      assert.equal(f.persistedActions.size, 1, 'a cancelled reservation is never reused')
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: desktop cancellation after reservation is checked before mutation`, async () => {
+    let reserved = false
+    const f = fixture(host, {
+      approvePlan: true,
+      journalHook(stage) {
+        if (stage === 'write') reserved = true
+      },
+      authorityHook(status) {
+        if (reserved) status.state = 'cancelled'
+      }
+    })
+    try {
+      await runApproved(f)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.persistedActions.size, 1)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: a new independently approved action does not reuse the old reservation`, async () => {
+    const persistedActions = new Map()
+    const first = fixture(host, { approvePlan: true, persistedActions })
+    await runApproved(first)
+    first.close()
+    await flush()
+    const next = fixture(host, { approvePlan: true, persistedActions, actionSeed: '9' })
+    try {
+      await runApproved(next)
+      assert.deepEqual(next.nativeWrites, ['Approved new name'])
+      assert.equal(next.planResult().status, 'completed')
+      assert.equal(persistedActions.size, 2)
+    } finally {
+      next.close()
+      await flush()
+    }
+  })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: read-only capture and an unapproved plan never access the execution journal`, async () => {
+    let accesses = 0
+    const f = fixture(host, {
+      journalHook() {
+        accesses++
+      }
+    })
+    try {
+      f.capture()
+      await flush()
+      assert.equal(accesses, 0)
+      await f.pair()
+      f.share()
+      await flush()
+      await f.tick(2000)
+      assert.equal(accesses, 0)
+      assert.equal(f.persistedActions.size, 0)
+      assert.deepEqual(f.nativeWrites, [])
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
 }

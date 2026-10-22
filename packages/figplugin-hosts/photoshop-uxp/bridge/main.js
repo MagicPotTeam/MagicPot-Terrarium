@@ -1032,6 +1032,16 @@
     )
       throw new Error('CANCELLED')
   }
+  let executionJournal = null
+  async function reserveNativeAction(item, intent) {
+    const helper = globalThis.MagicPotExecutionJournalV1
+    if (!helper) throw new Error('JOURNAL_UNAVAILABLE')
+    if (!executionJournal) executionJournal = helper.createPhotoshop()
+    await executionJournal.reserve(intent, () => assertExecutionCurrent(item))
+    // Storage can yield. Desktop cancellation and native state must be checked
+    // again after the durable marker, immediately before applying any step.
+    await checkExecutionAuthority(item)
+  }
   async function executeClaimedPlan(item, intent) {
     assertExecutionCurrent(item)
     const planner = globalThis.MagicPotPlanPreviewV1
@@ -1050,6 +1060,7 @@
     let readback = createPlanReadback(item.hostContext, plan)
     let visualEvidence
     let failureCode
+    let journalBlocked = false
     let sequence = 2
     try {
       await executeAsModal(
@@ -1066,6 +1077,12 @@
             visualEntries = visualEntriesForIntent(checked, item, intent)
           }
           await checkExecutionAuthority(item)
+          try {
+            await reserveNativeAction(item, intent)
+          } catch (error) {
+            journalBlocked = String(error?.message).startsWith('JOURNAL_')
+            throw error
+          }
           checked = precheckPlan(plan, item.hostContext)
           const applied = []
           try {
@@ -1163,6 +1180,10 @@
       effect = failureCode === 'ROLLED_BACK' ? 'rolled-back' : failureCode ? 'none' : 'rolled-back'
     else if (observations.some((value) => value === 'requested')) effect = 'partial'
     else effect = 'unknown'
+    if (journalBlocked) {
+      effect = 'unknown'
+      failureCode = 'QUARANTINED'
+    }
     if (effect !== 'applied') visualEvidence = undefined
     if (!executionCurrent(item)) return
     let completed = readback.steps.filter((step) => step.observation === 'requested').length
@@ -1227,6 +1248,12 @@
         item.auth
       )
       if (!executionCurrent(item)) return
+      if (journalBlocked) {
+        state(
+          'Persistent action safety check blocked this write. It was not replayed. Verify the document and request a new approved plan.'
+        )
+        return
+      }
       if (result && result.status && result.status.state === 'completed') {
         if (
           result.status.visualBaselineComparison &&

@@ -1026,7 +1026,7 @@ test('Photoshop initializes once on DOMContentLoaded and reads only explicit act
   assert.equal(f.reads, 1)
   f.clean()
 })
-test('Connected sources contain no runtime evaluation, HTML injection, persistence or model endpoint', () => {
+test('Connected protocol entrypoints contain no evaluation, HTML injection, direct credential storage or model endpoint', () => {
   for (const [host, { code, html }] of Object.entries(sources)) {
     assert.doesNotMatch(
       code + html,
