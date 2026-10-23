@@ -60,6 +60,15 @@ export function buildPlanExecutionApprovalDetails(preview: FigPluginExecutionPre
           'No model is called. Only the accepted task properties shown below are restored. Other properties, images and resources are not restored. This is not a full-document backup.'
         ]
       : []),
+    ...(preview.recovery?.rebind
+      ? [
+          'WARNING: the native plugin instance changed. This is a user-selected checkpoint reassociation, NOT proof that this is the original document.',
+          `Old instance: ${preview.recovery.rebind.previousIdentity}`,
+          `Current instance: ${preview.recovery.rebind.nextIdentity}`,
+          'Verify the currently open host document and exact selected objects. Matching node IDs alone cannot establish identity. Approve only if this saved result belongs to these objects.',
+          'On claim, reassociation and one used round are committed together. Expiry and prior usage are preserved. Other instances using the old checkpoint cannot consume its stale budget.'
+        ]
+      : []),
     '',
     'Exact document changes:',
     escapePlanningDisplay(JSON.stringify(preview.differences, null, 2)),
@@ -93,7 +102,7 @@ export function buildVisualBaselineApprovalDetails(
     'Accepted bounded visual targets:',
     escapePlanningDisplay(JSON.stringify(targets, null, 2)),
     '',
-    'Accepting retains target IDs, dimensions, hashes and the approved task property values; plan values can include design text. In the production desktop, these are encrypted using the OS account and usable locally for up to 24 hours, with at most 16 checkpoints. Expired ciphertext is cleaned on checkpoint operations, not while the app is stopped. Encryption or persistence failure rejects acceptance; there is no plaintext fallback. After restarting the desktop, explicit pairing, fresh capture and new write approval are required. The native plugin/document instance must remain the same. No sessions, tokens or write grants are saved. No pixels or plan values are written to the audit log. This is not a full-document backup or semantic visual review. Each correction still needs separate target authorization and exact-plan write approval.'
+    'Accepting retains target IDs, dimensions, hashes and the approved task property values; plan values can include design text. In the production desktop, these are encrypted using the OS account and usable locally for up to 24 hours, with at most 16 checkpoints. Expired ciphertext is cleaned on checkpoint operations, not while the app is stopped. Encryption or persistence failure rejects acceptance; there is no plaintext fallback. After restarting the desktop, explicit pairing, fresh capture and new write approval are required. Normal recovery requires the same native plugin/document instance. After a plugin reload, the user must explicitly select this checkpoint and separately acknowledge reassociation; document/scope IDs and structural anchors must still match. No sessions, tokens or write grants are saved. No pixels or plan values are written to the audit log. This is not a full-document backup or semantic visual review. Each correction still needs separate target authorization and exact-plan write approval.'
   ].join('\n')
 }
 

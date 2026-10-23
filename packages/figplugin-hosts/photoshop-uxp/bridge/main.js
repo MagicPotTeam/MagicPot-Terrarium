@@ -151,6 +151,8 @@
       review !== null ||
       planReview !== null ||
       activeExecution !== null
+    el('rebind-task').disabled =
+      el('restore-task').disabled || !hex(el('rebind-checkpoint').value.trim(), 32)
     el('share').disabled =
       !config ||
       !secure() ||
@@ -1731,7 +1733,8 @@
       }
     }
   }
-  async function restoreTask(requestId) {
+  async function restoreTask(requestId, rebindBaselineId) {
+    if (rebindBaselineId !== undefined && !hex(rebindBaselineId, 32)) return
     if (
       !config ||
       disposed ||
@@ -1772,7 +1775,13 @@
     try {
       const response = await post(
         'taskRecoveryPrepare',
-        { protocol: 1, requestId, sequence, hostContext: call.hostContext },
+        {
+          protocol: 1,
+          requestId,
+          sequence,
+          hostContext: call.hostContext,
+          ...(rebindBaselineId ? { rebindBaselineId } : {})
+        },
         call.auth
       )
       if (!current(call)) return
@@ -1780,7 +1789,8 @@
         keys(response, ['protocol', 'status', 'baselineId']) &&
         response.protocol === 1 &&
         response.status === 'unchanged' &&
-        hex(response.baselineId, 32)
+        hex(response.baselineId, 32) &&
+        (!rebindBaselineId || response.baselineId === rebindBaselineId)
       ) {
         review = null
         touch(call.auth)
@@ -1798,14 +1808,26 @@
         !hex(response.executionId, 32) ||
         !integer(response.expiresAt) ||
         response.expiresAt <= Date.now() ||
-        !keys(recovery, [
-          'baselineId',
-          'sourceExecutionId',
-          'requestId',
-          'round',
-          'maxCorrectionRounds',
-          'targetIds'
-        ]) ||
+        !keys(
+          recovery,
+          [
+            'baselineId',
+            'sourceExecutionId',
+            'requestId',
+            'round',
+            'maxCorrectionRounds',
+            'targetIds'
+          ],
+          ['rebind']
+        ) ||
+        (rebindBaselineId !== undefined && recovery.baselineId !== rebindBaselineId) ||
+        (recovery.rebind !== undefined &&
+          (!rebindBaselineId ||
+            !keys(recovery.rebind, ['previousIdentity', 'nextIdentity']) ||
+            !hex(recovery.rebind.previousIdentity, 32) ||
+            !hex(recovery.rebind.nextIdentity, 32) ||
+            recovery.rebind.previousIdentity === recovery.rebind.nextIdentity ||
+            recovery.rebind.nextIdentity !== call.hostContext.recoveryIdentity)) ||
         !hex(recovery.baselineId, 32) ||
         !hex(recovery.sourceExecutionId, 32) ||
         recovery.requestId !== requestId ||
@@ -1922,6 +1944,14 @@
         void restoreTask(nonce())
       } catch {
         state('Recovery capture is unavailable.')
+      }
+    })
+    el('rebind-checkpoint').addEventListener('input', () => state())
+    el('rebind-task').addEventListener('click', () => {
+      try {
+        void restoreTask(nonce(), el('rebind-checkpoint').value.trim())
+      } catch {
+        state('Recovery reassociation is unavailable.')
       }
     })
     el('share').addEventListener('click', () => void share())

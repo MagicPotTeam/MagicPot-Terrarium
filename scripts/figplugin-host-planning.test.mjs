@@ -69,6 +69,8 @@ function fixture(
     dropResult = false,
     actionSeed = '8',
     authorityHook = null,
+    recoveryRebindFault = null,
+    unsolicitedRebind = false,
     recoveryGate = null,
     recoveryUnchanged = false,
     tamperRecovery = false
@@ -296,12 +298,16 @@ function fixture(
           idleTimeoutMs: 120_000
         }
       else if (url.endsWith('/plan/recovery/prepare')) {
-        assert.deepEqual(Object.keys(body).sort(), [
-          'hostContext',
-          'protocol',
-          'requestId',
-          'sequence'
-        ])
+        assert.deepEqual(
+          Object.keys(body).sort(),
+          [
+            'hostContext',
+            'protocol',
+            'requestId',
+            'sequence',
+            ...(body.rebindBaselineId ? ['rebindBaselineId'] : [])
+          ].sort()
+        )
         recoveryContext = body.hostContext
         recoveryDescriptor = {
           baselineId: '4'.repeat(32),
@@ -310,6 +316,15 @@ function fixture(
           round: 1,
           maxCorrectionRounds: 3,
           targetIds: [...body.hostContext.selectedIds].sort()
+        }
+        if (body.rebindBaselineId || unsolicitedRebind) {
+          recoveryDescriptor.rebind = {
+            previousIdentity: '1'.repeat(32),
+            nextIdentity: body.hostContext.recoveryIdentity
+          }
+          if (recoveryRebindFault === 'identity')
+            recoveryDescriptor.rebind.nextIdentity = '0'.repeat(32)
+          if (recoveryRebindFault === 'baseline') recoveryDescriptor.baselineId = '0'.repeat(32)
         }
         if (recoveryGate) await recoveryGate()
         value = recoveryUnchanged
@@ -724,6 +739,19 @@ function fixture(
       host === 'figma'
         ? send({ type: 'restore-task', nonce: 'f'.repeat(32), instanceEpoch: '6'.repeat(32) })
         : click('restore-task'),
+    rebind: (baselineId = '4'.repeat(32)) => {
+      if (host === 'figma')
+        send({
+          type: 'restore-task',
+          nonce: 'f'.repeat(32),
+          instanceEpoch: '6'.repeat(32),
+          rebindBaselineId: baselineId
+        })
+      else {
+        element('rebind-checkpoint').value = baselineId
+        click('rebind-task')
+      }
+    },
     tick,
     output,
     requests,
@@ -1545,6 +1573,97 @@ for (const host of ['figma', 'photoshop']) {
       assert.deepEqual(f.nativeWrites, [])
       assert.equal(f.node.name, 'Newer user edit')
     } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: explicit reload reassociation passes the selected checkpoint and still waits for approval`, async () => {
+    const f = fixture(host, { approvePlan: false })
+    try {
+      await f.pair()
+      f.rebind()
+      await flush()
+      await f.tick(1000)
+      const request = f.requests.find((r) => r.url.endsWith('/plan/recovery/prepare'))
+      assert.equal(request.body.rebindBaselineId, '4'.repeat(32))
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(
+        f.requests.filter(
+          (r) => r.url.endsWith('/prepare') && !r.url.endsWith('/plan/recovery/prepare')
+        ).length,
+        0
+      )
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: a fresh native instance executes one explicitly approved reassociation`, async () => {
+    const old = fixture(host)
+    old.close()
+    await flush()
+    const f = fixture(host, { approvePlan: true })
+    try {
+      await f.pair()
+      f.rebind()
+      f.rebind()
+      await flush()
+      await f.tick(1000)
+      assert.equal(f.requests.filter((r) => r.url.endsWith('/plan/recovery/prepare')).length, 1)
+      assert.equal(f.planResult().status, 'completed')
+      assert.equal(f.nativeWrites.length, 1)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  for (const recoveryRebindFault of ['identity', 'baseline'])
+    test(`${host}: refuses substituted rebind ${recoveryRebindFault}`, async () => {
+      const f = fixture(host, { approvePlan: true, recoveryRebindFault })
+      try {
+        await f.pair()
+        f.rebind()
+        await flush()
+        await f.tick(2000)
+        assert.deepEqual(f.nativeWrites, [])
+      } finally {
+        f.close()
+        await flush()
+      }
+    })
+  test(`${host}: an ordinary restore cannot be silently upgraded to reassociation`, async () => {
+    const f = fixture(host, { approvePlan: true, unsolicitedRebind: true })
+    try {
+      await f.pair()
+      f.restore()
+      await flush()
+      await f.tick(2000)
+      assert.deepEqual(f.nativeWrites, [])
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: cancellation drops a late reassociation response`, async () => {
+    let release
+    const gate = new Promise((r) => {
+      release = r
+    })
+    const f = fixture(host, { approvePlan: true, recoveryGate: () => gate })
+    try {
+      await f.pair()
+      f.rebind()
+      await flush()
+      f.cancel()
+      release()
+      await flush()
+      await f.tick(2000)
+      assert.deepEqual(f.nativeWrites, [])
+    } finally {
+      release()
       f.close()
       await flush()
     }

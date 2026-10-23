@@ -28,6 +28,7 @@ import {
   type FigPluginManagedMutation
 } from '../figplugin/management'
 import { z } from 'zod'
+import { savedTaskCheckpointsSchema, type SavedTaskCheckpoint } from '../figplugin/taskRecovery'
 import {
   figPluginExecutionHistoryRequestSchema,
   figPluginExecutionHistorySchema,
@@ -83,6 +84,7 @@ export type FigPluginCenterSvc = {
   revokeBridge(req: { pluginId: string }): Promise<void>
   planState(req: Record<string, never>): Promise<FigPluginExecutionDesktopState>
   executionHistory(req: FigPluginExecutionHistoryRequest): Promise<FigPluginExecutionHistory>
+  listSavedCheckpoints(req: Record<string, never>): Promise<SavedTaskCheckpoint[]>
   approvePlanExecution(req: FigPluginDesktopExecutionApproval): Promise<{ completed: boolean }>
   acceptVisualBaseline(
     req: FigPluginDesktopVisualBaselineAcceptance
@@ -127,6 +129,11 @@ export const figPluginCenterSvcDef: ServiceDefSheet<FigPluginCenterSvc> = {
     type: 'unary',
     request: validated(figPluginManagedTargetSchema.pick({ pluginId: true })),
     response: z.void()
+  },
+  listSavedCheckpoints: {
+    type: 'unary',
+    request: validated(figPluginManagementEmptyRequestSchema),
+    response: savedTaskCheckpointsSchema
   },
   executionHistory: {
     type: 'unary',

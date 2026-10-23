@@ -340,8 +340,12 @@ export class FigPluginBridgeController {
     }
   }
 
-  approvePlanExecution(executionId: string, planSha256: string): Promise<void> {
-    return this.#runtime.approvePlan(executionId, planSha256)
+  approvePlanExecution(
+    executionId: string,
+    planSha256: string,
+    acknowledgeRecoveryRebind = false
+  ): Promise<void> {
+    return this.#runtime.approvePlan(executionId, planSha256, acknowledgeRecoveryRebind)
   }
 
   acceptVisualBaseline(

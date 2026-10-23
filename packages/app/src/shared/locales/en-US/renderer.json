@@ -1528,7 +1528,7 @@
         "UNKNOWN": "The plugin bridge request failed."
       },
       "taskRecoverySummary": "Restore accepted task properties: checkpoint {{id}}, round {{round}}/{{max}}. Not a full-document restore.",
-      "taskRecoveryGuidance": "Select the original task targets in the same native plugin instance and choose Restore accepted task properties. No model call; fresh capture and separate desktop write approval are required. Encrypted checkpoints survive a desktop restart for up to 24 hours, but require explicit re-pairing and never restore old grants. Closing the native plugin or reopening the document invalidates its identity.",
+      "taskRecoveryGuidance": "Select the original task targets in the same native plugin instance and choose Restore accepted task properties. No model call; fresh capture and separate desktop write approval are required. Encrypted checkpoints survive a desktop restart for up to 24 hours, but require explicit re-pairing and never restore old grants. Closing the native plugin or reopening the document invalidates its identity. After plugin reload, read saved checkpoints below and explicitly confirm reassociation; document and target IDs must still match.",
       "visualBaselineEncrypted": "Encrypted locally; re-pair after restarting MagicPot to retrieve this checkpoint until its existing expiry. Round usage is not reset. Not a full-document backup."
     },
     "center": {
@@ -1634,6 +1634,18 @@
       "unavailable": "Retained pixels unavailable; not declared matching.",
       "bounds": "Changed region in exported pixels: x={{x}}, y={{y}}, width={{width}}, height={{height}}.",
       "boundary": "Host-reported sRGB 8-bit RGBA comparison, zero tolerance, exported size up to 512 px per edge. Fully transparent RGB is ignored. This checks the exported content, not document coordinates, original-resolution details or design quality. Pixels remain in bounded plugin memory; only metrics are sent. No automatic correction or new write permission."
+    },
+    "checkpoints": {
+      "title": "Saved task checkpoints",
+      "guidance": "After reloading the plugin, read and verify the original checkpoint. Enter its full ID in the host plugin reload-reassociation controls, select the original task objects, then confirm the association and exact changes in desktop.",
+      "load": "Read saved checkpoints",
+      "failed": "Checkpoints could not be read. No authority or task was restored.",
+      "empty": "No unexpired saved checkpoints.",
+      "scope": "Document: {{document}}; scope: {{scope}}; targets: {{targets}}",
+      "code": "Checkpoint ID (select to copy)",
+      "remaining": "Used {{used}} / {{max}} rounds; accepted {{accepted}}; expires {{expiry}}.",
+      "boundary": "The ID selects data, not write authority. Matching node IDs do not prove document identity: verify the open document. No remapping of document or layer IDs, restoration of credentials, or resetting of usage/expiry.",
+      "rebindWarning": "Native plugin instance changed: this associates the user-selected checkpoint with the current selection. Verify the current host document and objects; matching IDs are not proof of identity."
     }
   },
   "image_edit": {

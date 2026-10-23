@@ -1760,7 +1760,8 @@
       }
     }
   }
-  async function restoreTask(requestId) {
+  async function restoreTask(requestId, rebindBaselineId) {
+    if (rebindBaselineId !== undefined && !hex(rebindBaselineId, 32)) return
     if (
       !config ||
       disposed ||
@@ -1801,7 +1802,13 @@
     try {
       const response = await post(
         'taskRecoveryPrepare',
-        { protocol: 1, requestId, sequence, hostContext: call.hostContext },
+        {
+          protocol: 1,
+          requestId,
+          sequence,
+          hostContext: call.hostContext,
+          ...(rebindBaselineId ? { rebindBaselineId } : {})
+        },
         call.auth
       )
       if (!current(call)) return
@@ -1809,7 +1816,8 @@
         keys(response, ['protocol', 'status', 'baselineId']) &&
         response.protocol === 1 &&
         response.status === 'unchanged' &&
-        hex(response.baselineId, 32)
+        hex(response.baselineId, 32) &&
+        (!rebindBaselineId || response.baselineId === rebindBaselineId)
       ) {
         review = null
         touch(call.auth)
@@ -1827,14 +1835,26 @@
         !hex(response.executionId, 32) ||
         !integer(response.expiresAt) ||
         response.expiresAt <= Date.now() ||
-        !keys(recovery, [
-          'baselineId',
-          'sourceExecutionId',
-          'requestId',
-          'round',
-          'maxCorrectionRounds',
-          'targetIds'
-        ]) ||
+        !keys(
+          recovery,
+          [
+            'baselineId',
+            'sourceExecutionId',
+            'requestId',
+            'round',
+            'maxCorrectionRounds',
+            'targetIds'
+          ],
+          ['rebind']
+        ) ||
+        (rebindBaselineId !== undefined && recovery.baselineId !== rebindBaselineId) ||
+        (recovery.rebind !== undefined &&
+          (!rebindBaselineId ||
+            !keys(recovery.rebind, ['previousIdentity', 'nextIdentity']) ||
+            !hex(recovery.rebind.previousIdentity, 32) ||
+            !hex(recovery.rebind.nextIdentity, 32) ||
+            recovery.rebind.previousIdentity === recovery.rebind.nextIdentity ||
+            recovery.rebind.nextIdentity !== call.hostContext.recoveryIdentity)) ||
         !hex(recovery.baselineId, 32) ||
         !hex(recovery.sourceExecutionId, 32) ||
         recovery.requestId !== requestId ||
@@ -1968,13 +1988,14 @@
     if (!config) return
     if (
       message.type === 'restore-task' &&
-      keys(message, ['protocol', 'type', 'nonce', 'instanceEpoch']) &&
+      keys(message, ['protocol', 'type', 'nonce', 'instanceEpoch'], ['rebindBaselineId']) &&
+      (message.rebindBaselineId === undefined || hex(message.rebindBaselineId, 32)) &&
       hex(message.nonce, 32) &&
       hex(message.instanceEpoch, 32)
     ) {
       if (snapshotInstanceEpoch !== null && snapshotInstanceEpoch !== message.instanceEpoch) return
       snapshotInstanceEpoch = message.instanceEpoch
-      void restoreTask(message.nonce)
+      void restoreTask(message.nonce, message.rebindBaselineId)
       return
     }
     if (

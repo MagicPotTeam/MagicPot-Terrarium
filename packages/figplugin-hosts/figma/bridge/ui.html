@@ -47,6 +47,18 @@
     <button id="restore-task" disabled>
       恢复已接受任务属性 / Restore accepted task properties
     </button>
+    <details>
+      <summary>插件重载后重新关联 / Reassociate after plugin reload</summary>
+      <label for="rebind-checkpoint">已保存恢复点编号 / Saved checkpoint ID</label>
+      <input id="rebind-checkpoint" maxlength="32" autocomplete="off" spellcheck="false" />
+      <p>
+        在 MagicPot
+        插件页读取编号并核对原文档。相同节点编号不是文档身份证明。重新关联和精确修改都需要桌面确认，不重置有效期或轮次。
+      </p>
+      <button id="rebind-task" disabled>
+        重新关联并预览恢复 / Reassociate and preview recovery
+      </button>
+    </details>
     <p>
       Recovery sends the freshly selected task context only to the paired desktop, not a model.
       Select the exact accepted target set. Desktop approval is still required. Only accepted task
@@ -116,6 +128,8 @@
           el('capture').disabled = !configured || !secure()
           el('plan-capture').disabled = !configured || !secure()
           el('restore-task').disabled = disposed || !configured || !secure() || !paired || busy
+          el('rebind-task').disabled =
+            el('restore-task').disabled || !hex(el('rebind-checkpoint').value.trim())
           el('share').disabled =
             !configured ||
             !secure() ||
@@ -223,7 +237,8 @@
             localError()
           }
         })
-        el('restore-task').addEventListener('click', () => {
+        function submitRecovery(rebindBaselineId) {
+          if (rebindBaselineId !== undefined && !hex(rebindBaselineId)) return
           if (disposed || !configured || !paired || busy) return
           try {
             if (instanceEpoch === null) instanceEpoch = nonce()
@@ -232,12 +247,22 @@
             busy = true
             el('consent').checked = false
             refresh()
-            send({ type: 'restore-task', nonce: requestId, instanceEpoch })
+            send({
+              type: 'restore-task',
+              nonce: requestId,
+              instanceEpoch,
+              ...(rebindBaselineId ? { rebindBaselineId } : {})
+            })
           } catch {
             busy = false
             localError()
           }
-        })
+        }
+        el('restore-task').addEventListener('click', () => submitRecovery())
+        el('rebind-task').addEventListener('click', () =>
+          submitRecovery(el('rebind-checkpoint').value.trim())
+        )
+        el('rebind-checkpoint').addEventListener('input', refresh)
         el('share').addEventListener('click', () => {
           if (!configured || !paired || busy || !revision || !el('consent').checked) return
           const prompt = el('prompt').value.trim()

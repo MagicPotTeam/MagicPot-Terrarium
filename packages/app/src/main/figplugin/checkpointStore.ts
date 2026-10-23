@@ -13,6 +13,12 @@ import {
 } from '@shared/figplugin/execution'
 import { hostPlanSchema, type HostContext } from '@shared/figplugin/hostPlan'
 import { canonicalFigPluginJson } from '@shared/figplugin/manifest'
+import {
+  savedTaskCheckpointsSchema,
+  taskRecoveryRebindSchema,
+  type SavedTaskCheckpoint,
+  type TaskRecoveryRebind
+} from '@shared/figplugin/taskRecovery'
 
 export const CHECKPOINT_MAX_RECORDS = 16
 export const CHECKPOINT_MAX_RECORD_BYTES = 64 * 1024
@@ -95,7 +101,13 @@ export type CheckpointCodec = {
 export interface RecoveryCheckpointStore {
   save(record: SavedCheckpoint): void
   find(binding: FigPluginRuntimeBinding, context: HostContext): SavedCheckpoint | undefined
-  consume(record: SavedCheckpoint, round: number): void
+  findForRebind(
+    binding: FigPluginRuntimeBinding,
+    context: HostContext,
+    baselineId: string
+  ): SavedCheckpoint | undefined
+  listSummaries(): SavedTaskCheckpoint[]
+  consume(record: SavedCheckpoint, round: number, rebind?: TaskRecoveryRebind): void
   removeWhere(predicate: (record: SavedCheckpoint) => boolean): void
 }
 const hash = (value: unknown): string =>
@@ -350,7 +362,60 @@ export class FigPluginCheckpointStore implements RecoveryCheckpointStore {
       undefined
     )
   }
-  consume(record: SavedCheckpoint, round: number): void {
+  listSummaries(): SavedTaskCheckpoint[] {
+    return this.transaction(
+      false,
+      (records) =>
+        savedTaskCheckpointsSchema.parse(
+          records
+            .map((r) => ({
+              baselineId: r.value.baselineId,
+              pluginId: r.value.pluginId,
+              projectId: r.value.projectId,
+              host: r.value.host,
+              documentId: r.value.documentId,
+              scopeId: r.value.scopeId,
+              targetIds: r.recoveryScope.targetIds,
+              acceptedAt: r.value.acceptedAt,
+              expiresAt: r.value.expiresAt,
+              correctionRoundsUsed: r.value.correctionRoundsUsed,
+              maxCorrectionRounds: r.value.maxCorrectionRounds
+            }))
+            .sort((a, b) => b.acceptedAt - a.acceptedAt)
+        ),
+      []
+    )
+  }
+  /** A candidate is data only. A separate native write consent must acknowledge the changed
+   * instance before consume can rebind it. Still no cross-document/node-ID remapping. */
+  findForRebind(
+    binding: FigPluginRuntimeBinding,
+    context: HostContext,
+    baselineId: string
+  ): SavedCheckpoint | undefined {
+    if (!/^[a-f0-9]{32}$/.test(baselineId) || !context.recoveryIdentity) throw unavailable()
+    return this.transaction(
+      false,
+      (records) => {
+        const saved = records.find(
+          (r) =>
+            r.value.baselineId === baselineId &&
+            canonicalFigPluginJson(recoveryBinding(r.binding)) ===
+              canonicalFigPluginJson(recoveryBinding(binding)) &&
+            r.value.documentId === context.documentId &&
+            r.value.scopeId === context.scopeId &&
+            r.value.host === context.host
+        )
+        return saved ? { ...saved, binding: structuredClone(binding) } : undefined
+      },
+      undefined
+    )
+  }
+  consume(record: SavedCheckpoint, round: number, rebind?: TaskRecoveryRebind): void {
+    if (rebind) {
+      taskRecoveryRebindSchema.parse(rebind)
+      if (record.recoveryScope.recoveryIdentity !== rebind.previousIdentity) throw unavailable()
+    }
     let consumed = false
     this.transaction(
       false,
@@ -365,6 +430,7 @@ export class FigPluginCheckpointStore implements RecoveryCheckpointStore {
         )
           throw unavailable()
         current.value.correctionRoundsUsed = round
+        if (rebind) current.recoveryScope.recoveryIdentity = rebind.nextIdentity
         consumed = true
       },
       undefined

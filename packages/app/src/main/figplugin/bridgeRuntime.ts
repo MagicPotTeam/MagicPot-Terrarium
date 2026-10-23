@@ -449,7 +449,7 @@ export class FigPluginBridgeRuntime {
       adapterVersion: checked.execution.adapterVersion,
       rollback: checked.execution.rollback,
       visualAudit: checked.execution.visualAudit,
-      risk: checked.risk,
+      risk: recovery?.rebind ? 'high' : checked.risk,
       differences: checked.differences,
       ...(recovery ? { recovery } : {}),
       state: 'awaiting-approval',
@@ -460,7 +460,7 @@ export class FigPluginBridgeRuntime {
     const previewSha256 = digest({
       plan: checked.plan,
       differences: checked.differences,
-      risk: checked.risk,
+      risk: recovery?.rebind ? 'high' : checked.risk,
       planSha256,
       contextSha256,
       adapterVersion: checked.execution.adapterVersion,
@@ -560,7 +560,8 @@ export class FigPluginBridgeRuntime {
                 round: execution.recovery.round,
                 maxCorrectionRounds: execution.recovery.maxCorrectionRounds,
                 targetCount: execution.recovery.targetIds.length,
-                consumed: execution.claimedAt !== undefined
+                consumed: execution.claimedAt !== undefined,
+                ...(execution.recovery.rebind ? { reassociationRequested: true as const } : {})
               }
             }
           : {}),
@@ -1123,6 +1124,10 @@ export class FigPluginBridgeRuntime {
       record.value.expiresAt <= this.clock() ||
       record.value.sourceExecutionId !== execution.recovery.sourceExecutionId ||
       record.value.correctionRoundsUsed + 1 !== execution.recovery.round ||
+      (execution.recovery.rebind
+        ? record.recoveryScope.recoveryIdentity !== execution.recovery.rebind.previousIdentity ||
+          execution.context.recoveryIdentity !== execution.recovery.rebind.nextIdentity
+        : record.recoveryScope.recoveryIdentity !== execution.context.recoveryIdentity) ||
       canonicalFigPluginJson(record.binding) !==
         canonicalFigPluginJson(execution.call.session.binding)
     )
@@ -1157,17 +1162,26 @@ export class FigPluginBridgeRuntime {
       if (request.sequence <= session.highWater || !this.allowNativeWrite(session.binding))
         throw new FigPluginBridgeError('INVALID_REQUEST')
       const context = request.hostContext
+      if (request.rebindBaselineId && !this.checkpoints) throw new FigPluginBridgeError('EXPIRED')
       if (this.checkpoints) {
         let persisted: SavedCheckpoint | undefined
         try {
-          persisted = this.checkpoints.find(session.binding, context)
+          persisted = request.rebindBaselineId
+            ? this.checkpoints.findForRebind(session.binding, context, request.rebindBaselineId)
+            : this.checkpoints.find(session.binding, context)
         } catch {
           throw new FigPluginBridgeError('UPSTREAM_FAILED')
         }
         if (persisted) {
           // Validate current selection, host identity, locks and capabilities before rehydration.
           try {
-            prepareTaskRecoveryPlan(persisted.recoveryPlan, persisted.recoveryScope, context)
+            prepareTaskRecoveryPlan(
+              persisted.recoveryPlan,
+              request.rebindBaselineId && context.recoveryIdentity
+                ? { ...persisted.recoveryScope, recoveryIdentity: context.recoveryIdentity }
+                : persisted.recoveryScope,
+              context
+            )
           } catch {
             throw new FigPluginBridgeError('INVALID_REQUEST')
           }
@@ -1180,6 +1194,8 @@ export class FigPluginBridgeRuntime {
           if (!previous && this.visualBaselines.size >= 16) throw new FigPluginBridgeError('BUSY')
           this.visualBaselines.set(persisted.value.baselineId, persisted)
         } else {
+          // An explicit ID must resolve exactly; never fall back to a different checkpoint.
+          if (request.rebindBaselineId) throw new FigPluginBridgeError('EXPIRED')
           // Deletion/revocation on disk cannot fall back to a stale in-memory checkpoint.
           for (const [id, item] of this.visualBaselines)
             if (
@@ -1219,9 +1235,26 @@ export class FigPluginBridgeRuntime {
         )
       )
         throw new FigPluginBridgeError('BUSY')
+      const rebind =
+        request.rebindBaselineId &&
+        context.recoveryIdentity &&
+        record.recoveryScope.recoveryIdentity !== context.recoveryIdentity
+          ? {
+              previousIdentity: record.recoveryScope.recoveryIdentity!,
+              nextIdentity: context.recoveryIdentity
+            }
+          : undefined
+      if (request.rebindBaselineId && record.value.baselineId !== request.rebindBaselineId)
+        throw new FigPluginBridgeError('INVALID_REQUEST')
       let prepared: ReturnType<typeof prepareTaskRecoveryPlan>
       try {
-        prepared = prepareTaskRecoveryPlan(record.recoveryPlan, record.recoveryScope, context)
+        prepared = prepareTaskRecoveryPlan(
+          record.recoveryPlan,
+          rebind
+            ? { ...record.recoveryScope, recoveryIdentity: rebind.nextIdentity }
+            : record.recoveryScope,
+          context
+        )
       } catch {
         throw new FigPluginBridgeError('INVALID_REQUEST')
       }
@@ -1250,7 +1283,8 @@ export class FigPluginBridgeRuntime {
           requestId: request.requestId,
           round,
           maxCorrectionRounds: 3,
-          targetIds: [...record.recoveryScope.targetIds]
+          targetIds: [...record.recoveryScope.targetIds],
+          ...(rebind ? { rebind } : {})
         }
         const call: Call = {
           session,
@@ -1550,9 +1584,15 @@ export class FigPluginBridgeRuntime {
     void this.execute(call, preview, controller)
   }
 
-  async approvePlan(executionId: string, planSha256: string): Promise<void> {
+  async approvePlan(
+    executionId: string,
+    planSha256: string,
+    acknowledgeRecoveryRebind = false
+  ): Promise<void> {
     this.enter()
     const execution = this.findExecution(executionId)
+    if (execution.recovery?.rebind && !acknowledgeRecoveryRebind)
+      throw new FigPluginBridgeError('DENIED')
     const check = (): void => {
       if (
         this.calls.get(execution.call.receipt.response.callId) !== execution.call ||
@@ -1714,7 +1754,11 @@ export class FigPluginBridgeRuntime {
       // Consume before returning an executable intent. A crash can waste a round, never refund it.
       try {
         if (!this.checkpoints || durableRound === undefined) throw new Error('NO_STORE')
-        this.checkpoints.consume(durableRecord as SavedCheckpoint, durableRound)
+        this.checkpoints.consume(
+          durableRecord as SavedCheckpoint,
+          durableRound,
+          execution.recovery?.rebind
+        )
       } catch {
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
       }
@@ -1728,11 +1772,17 @@ export class FigPluginBridgeRuntime {
         correctionAuthority.authorizationRecord.value.authorizationId
       )
     }
-    if (recoveryAuthority && execution.recovery)
+    if (recoveryAuthority && execution.recovery) {
       recoveryAuthority.value = figPluginVisualBaselineSchema.parse({
         ...recoveryAuthority.value,
         correctionRoundsUsed: execution.recovery.round
       })
+      if (execution.recovery.rebind)
+        recoveryAuthority.recoveryScope = {
+          ...recoveryAuthority.recoveryScope,
+          recoveryIdentity: execution.recovery.rebind.nextIdentity
+        }
+    }
     execution.intent = Object.freeze(intent)
     execution.state = 'claimed'
     execution.claimedAt = this.clock()

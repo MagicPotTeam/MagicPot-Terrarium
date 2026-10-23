@@ -10,7 +10,10 @@ import {
 } from './hostPlan'
 import { canonicalFigPluginJson } from './manifest'
 
-const hex32 = z.string().regex(/^[a-f0-9]{32}$/)
+const hex32 = z
+  .string()
+  .length(32)
+  .regex(/^[a-f0-9]{32}$/)
 const ids = z
   .array(z.string().min(1).max(128))
   .min(1)
@@ -21,6 +24,35 @@ const ids = z
       values.every((value, index) => [...values].sort()[index] === value),
     'Recovery targets must be sorted and unique'
   )
+export const taskRecoveryRebindSchema = z
+  .object({
+    previousIdentity: hex32,
+    nextIdentity: hex32
+  })
+  .strict()
+  .refine((value) => value.previousIdentity !== value.nextIdentity, 'Unchanged recovery identity')
+export type TaskRecoveryRebind = z.output<typeof taskRecoveryRebindSchema>
+
+// Read-only summaries for the trusted desktop. No saved property values or credentials.
+export const savedTaskCheckpointSchema = z
+  .object({
+    baselineId: hex32,
+    pluginId: z.string().min(1).max(128),
+    projectId: z.string().min(1).max(160),
+    host: z.enum(['figma', 'photoshop']),
+    documentId: z.string().min(1).max(128),
+    scopeId: z.string().min(1).max(128),
+    targetIds: ids,
+    acceptedAt: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    expiresAt: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    correctionRoundsUsed: z.number().int().min(0).max(3),
+    maxCorrectionRounds: z.literal(3)
+  })
+  .strict()
+  .refine((value) => value.expiresAt > value.acceptedAt, 'Invalid checkpoint expiry')
+export const savedTaskCheckpointsSchema = z.array(savedTaskCheckpointSchema).max(16)
+export type SavedTaskCheckpoint = z.output<typeof savedTaskCheckpointSchema>
+
 export const figPluginTaskRecoverySchema = z
   .object({
     baselineId: hex32,
@@ -28,7 +60,8 @@ export const figPluginTaskRecoverySchema = z
     requestId: hex32,
     round: z.number().int().min(1).max(3),
     maxCorrectionRounds: z.literal(3),
-    targetIds: ids
+    targetIds: ids,
+    rebind: taskRecoveryRebindSchema.optional()
   })
   .strict()
 export type FigPluginTaskRecovery = z.output<typeof figPluginTaskRecoverySchema>
@@ -37,7 +70,9 @@ export const figPluginTaskRecoveryPrepareRequestSchema = z
     protocol: z.literal(1),
     requestId: hex32,
     sequence: z.number().int().min(1).max(1_000_000_000),
-    hostContext: hostContextSchema
+    hostContext: hostContextSchema,
+    // Explicitly selected by the user; never inferred from matching node IDs.
+    rebindBaselineId: hex32.optional()
   })
   .strict()
   .refine((value) => value.hostContext.captureId === value.requestId, 'Recovery capture mismatch')

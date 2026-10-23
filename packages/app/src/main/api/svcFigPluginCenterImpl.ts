@@ -1,5 +1,9 @@
 import { createCheckpointStore } from '../figplugin/checkpointEncryption'
 import {
+  savedTaskCheckpointsSchema,
+  type SavedTaskCheckpoint
+} from '@shared/figplugin/taskRecovery'
+import {
   buildBridgeApprovalDetails,
   buildPlanExecutionApprovalDetails,
   buildVisualBaselineApprovalDetails,
@@ -340,7 +344,9 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       FigPluginExecutionAuditStore,
       'list' | 'writeFailed'
     > = () =>
-      getFigPluginExecutionAuditStore(path.join(app.getPath('userData'), 'figplugin-center'))
+      getFigPluginExecutionAuditStore(path.join(app.getPath('userData'), 'figplugin-center')),
+    private readonly getCheckpointSummaries: () => SavedTaskCheckpoint[] = () =>
+      createCheckpointStore(path.join(app.getPath('userData'), 'figplugin-center')).listSummaries()
   ) {}
 
   private authorizeManagement(
@@ -407,6 +413,20 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       const result = await this.store.listManaged()
       this.authorizeManagement('listPackages', invocation)
       return result
+    } catch (error) {
+      throw sanitizedManagementError(error)
+    }
+  }
+
+  listSavedCheckpoints = async (
+    req: Record<string, never>,
+    invocation?: ServiceInvocationContext
+  ): Promise<SavedTaskCheckpoint[]> => {
+    parseFigPluginManagementValue(figPluginManagementEmptyRequestSchema, req)
+    this.authorizeManagement('listSavedCheckpoints', invocation)
+    try {
+      // Read retained data only: do not create a Bridge, session or write permission.
+      return savedTaskCheckpointsSchema.parse(this.getCheckpointSummaries())
     } catch (error) {
       throw sanitizedManagementError(error)
     }
@@ -879,14 +899,18 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
         defaultId: 1,
         cancelId: 1,
         noLink: true,
-        checkboxLabel: preview.visualCorrection
-          ? 'I reviewed this correction round, its exact targets and changes, and authorize one native host write'
-          : 'I reviewed the exact document changes and authorize one native host write',
+        checkboxLabel: preview.recovery?.rebind
+          ? 'I verified the current host document and selected objects, choose this saved checkpoint for the new plugin instance, and authorize these exact changes once'
+          : preview.visualCorrection
+            ? 'I reviewed this correction round, its exact targets and changes, and authorize one native host write'
+            : 'I reviewed the exact document changes and authorize one native host write',
         checkboxChecked: false
       })
       if (approval.response !== 0 || !approval.checkboxChecked) return { completed: false }
       check()
-      await controller.approvePlanExecution(request.executionId, request.planSha256)
+      if (preview.recovery?.rebind)
+        await controller.approvePlanExecution(request.executionId, request.planSha256, true)
+      else await controller.approvePlanExecution(request.executionId, request.planSha256)
       return { completed: true }
     })
   }

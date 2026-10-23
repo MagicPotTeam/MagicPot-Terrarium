@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import PixelAuditSummary from './PixelAuditSummary'
+import SavedTaskCheckpoints from './SavedTaskCheckpoints'
 import {
   Alert,
   Box,
@@ -1126,6 +1127,9 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                 })}
               </Typography>
               <Typography>{t('figplugin.bridge.risk', { risk: previewEx.risk })}</Typography>
+              {previewEx.recovery?.rebind && (
+                <Alert severity="warning">{t('figplugin.checkpoints.rebindWarning')}</Alert>
+              )}
               {previewEx.visualCorrection && (
                 <Alert severity="warning">
                   {t('figplugin.bridge.visualCorrectionWritePreview', {
@@ -1438,6 +1442,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
             </Stack>
           </Paper>
         ))}
+        <SavedTaskCheckpoints />
         <Typography component="h3" variant="subtitle1">
           {t('figplugin.bridge.visualCorrectionAuthorizations')}
         </Typography>
