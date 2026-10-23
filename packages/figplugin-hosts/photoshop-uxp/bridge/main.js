@@ -1196,6 +1196,8 @@
           } catch {
             for (const entry of applied.reverse()) {
               try {
+                // A delayed cleanup is still a write; it cannot outlive the original grant.
+                if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
                 rollbackPlanStep(
                   entry.layer,
                   entry.contextNode,
@@ -1232,6 +1234,8 @@
             } catch {
               for (const entry of [...applied].reverse()) {
                 try {
+                  // A delayed cleanup is still a write; it cannot outlive the original grant.
+                  if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
                   rollbackPlanStep(
                     entry.layer,
                     entry.contextNode,
@@ -1565,6 +1569,9 @@
         if (!currentPlan(item)) return
         if (!claim || claim.protocol !== 1) throw new Error('REQUEST')
         if (claim.status === 'pending') {
+          state(
+            '等待同一文档的其他写入结束；尚未修改文档。 Waiting for another document write to finish.'
+          )
           schedulePlan(item)
           return
         }

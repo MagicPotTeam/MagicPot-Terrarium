@@ -369,6 +369,18 @@ describe('direct task recovery through production runtime', () => {
         expect(result.status).toBe('ready')
         f.runtime.cancelPlan(response.executionId)
         expect(f.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(round)
+        if (round < 3) {
+          // Desktop cancellation is not a host-settlement receipt. Keep the document
+          // excluded until the original grant and drain interval expire, then re-pair.
+          f.advance(150_001)
+          const ticket = await f.runtime.createPairing(binding)
+          f.source.session = await f.runtime.redeem({
+            ...pairRequest,
+            ticketId: ticket.ticketId,
+            pairingSecret: ticket.pairingSecret
+          })
+          expect(f.runtime.listVisualBaselines()[0].correctionRoundsUsed).toBe(round)
+        }
       }
       await expect(f.prepare(f.input(6))).rejects.toMatchObject({ code: 'DENIED' })
     } finally {

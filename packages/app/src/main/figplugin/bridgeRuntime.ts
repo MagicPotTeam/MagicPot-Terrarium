@@ -1,3 +1,8 @@
+import {
+  MemoryNativeWriteCoordinator,
+  type NativeWriteCoordinator,
+  type NativeWriteReservation
+} from './nativeWriteCoordinator'
 import type { RecoveryCheckpointStore, SavedCheckpoint } from './checkpointStore'
 import {
   captureTaskRecoveryScope,
@@ -119,6 +124,7 @@ type Options = {
   audit?: (event: FigPluginExecutionAuditEvent) => void
   allowNativeWrite?: (binding: FigPluginRuntimeBinding) => boolean
   checkpoints?: RecoveryCheckpointStore
+  writes?: NativeWriteCoordinator
 }
 type Ticket = {
   binding: FigPluginRuntimeBinding
@@ -192,6 +198,7 @@ type PlanExecution = {
   progress: PlanProgress[]
   intent?: FigPluginExecutionIntent
   claimedAt?: number
+  writeReservation?: NativeWriteReservation
   resultFingerprint?: string
   visualEvidence?: FigPluginVisualEvidence[]
   visualBaselineComparison?: FigPluginVisualBaselineComparison
@@ -226,6 +233,7 @@ const visualBaselineScopeKey = (
  */
 export class FigPluginBridgeRuntime {
   private readonly checkpoints?: RecoveryCheckpointStore
+  private readonly writes: NativeWriteCoordinator
   private readonly tickets = new Map<string, Ticket>()
   private readonly sessions = new Map<string, Session>()
   private readonly calls = new Map<string, Call>()
@@ -252,6 +260,7 @@ export class FigPluginBridgeRuntime {
     this.validateBinding = options.validateBinding
     this.invoke = options.invoke
     this.clock = options.now ?? Date.now
+    this.writes = options.writes ?? new MemoryNativeWriteCoordinator(this.clock)
     this.callTimeout = Number.isFinite(options.callTimeoutMs)
       ? Math.max(1, Math.min(MAX_CALL_TIMEOUT, Math.floor(options.callTimeoutMs!)))
       : MAX_CALL_TIMEOUT
@@ -1686,6 +1695,7 @@ export class FigPluginBridgeRuntime {
     if (!call) throw new FigPluginBridgeError('INVALID_REQUEST')
     const execution = this.executionForCall(call, request.executionId)
     this.expireExecution(execution)
+    this.checkDocumentWrite(execution)
     return this.executionStatus(execution)
   }
 
@@ -1702,6 +1712,7 @@ export class FigPluginBridgeRuntime {
     if (!call) throw new FigPluginBridgeError('INVALID_REQUEST')
     const execution = this.executionForCall(call, request.executionId)
     this.expireExecution(execution)
+    this.checkDocumentWrite(execution)
     if (
       execution.state === 'claimed' ||
       execution.state === 'executing' ||
@@ -1772,6 +1783,29 @@ export class FigPluginBridgeRuntime {
         : {})
     })
 
+    // Deliberately omit plugin/project/session/scope/instance from the exclusion key:
+    // those can differ while the same native document is being changed. A collision
+    // conservatively serializes (Figma root IDs are not globally unique file IDs).
+    const reservation: NativeWriteReservation = {
+      resourceKey: digest(['native-document-write-v1', intent.host, intent.documentId]),
+      actionId: intent.actionId,
+      fingerprint: digest(intent),
+      expiresAt: intent.expiresAt
+    }
+    let acquired: boolean
+    try {
+      acquired = this.writes.reserve(reservation)
+    } catch {
+      throw new FigPluginBridgeError('UPSTREAM_FAILED')
+    }
+    if (!acquired)
+      return figPluginExecutionClaimResponseSchema.parse({
+        protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+        status: 'pending',
+        state: 'approved'
+      })
+    execution.writeReservation = reservation
+
     const durableRecord = recoveryAuthority ?? correctionAuthority?.baselineRecord
     const durableRound = execution.recovery?.round ?? execution.visualCorrection?.round
     if (durableRecord?.value.storage === 'encrypted-local') {
@@ -1784,6 +1818,9 @@ export class FigPluginBridgeRuntime {
           execution.recovery?.rebind
         )
       } catch {
+        // No executable intent escaped. Release only this exact reservation, never
+        // another action's reservation. Failed persistence never consumes authority.
+        this.releaseDocumentWrite(execution)
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
       }
     }
@@ -1838,6 +1875,7 @@ export class FigPluginBridgeRuntime {
     const request = parseFigPluginBridgeValue(figPluginExecutionProgressRequestSchema, input)
     const execution = this.ownedExecution(session, request.executionId)
     this.expireExecution(execution)
+    this.checkDocumentWrite(execution)
     if (
       !execution.intent ||
       execution.intent.actionId !== request.actionId ||
@@ -1873,6 +1911,7 @@ export class FigPluginBridgeRuntime {
     const execution = this.ownedExecution(session, request.executionId)
     const fingerprint = digest(request)
     this.expireExecution(execution)
+    this.checkDocumentWrite(execution)
     if (terminalExecution.has(execution.state)) {
       if (
         execution.resultFingerprint === fingerprint &&
@@ -1983,6 +2022,12 @@ export class FigPluginBridgeRuntime {
       execution.state === 'completed' && execution.visualEvidence
         ? this.compareVisualBaseline(execution, execution.visualEvidence)
         : undefined
+    if (
+      successfulAppliedResult ||
+      ((request.effect === 'none' || request.effect === 'rolled-back') &&
+        observations.every((value) => value === 'original'))
+    )
+      this.releaseDocumentWrite(execution)
     this.recordExecutionAudit(execution)
     this.scheduleCleanup()
     return figPluginExecutionResultResponseSchema.parse({
@@ -2181,6 +2226,34 @@ export class FigPluginBridgeRuntime {
     execution.cursor = event.sequence
     execution.progress.push(event)
     if (execution.progress.length > FIGPLUGIN_EXECUTION_MAX_EVENTS) execution.progress.shift()
+  }
+
+  private releaseDocumentWrite(execution: PlanExecution): void {
+    if (!execution.writeReservation) return
+    try {
+      this.writes.release(execution.writeReservation)
+      execution.writeReservation = undefined
+    } catch {
+      // Keep exclusion until its original deadline plus drain, never pretend a failed
+      // cleanup permits another writer. The verified host result remains truthful.
+    }
+  }
+
+  private checkDocumentWrite(execution: PlanExecution): void {
+    if (!['claimed', 'executing', 'readback'].includes(execution.state)) return
+    let owned = false
+    try {
+      owned = !!execution.writeReservation && this.writes.owns(execution.writeReservation)
+    } catch {
+      /* Missing/corrupt/busy coordination state cannot grant further host steps. */
+    }
+    if (!owned) {
+      execution.state = 'failed'
+      execution.errorCode = 'QUARANTINED'
+      execution.effect = 'unknown'
+      execution.updatedAt = this.clock()
+      this.recordExecutionAudit(execution)
+    }
   }
 
   private expireExecution(execution: PlanExecution): void {

@@ -1,3 +1,4 @@
+import { SqliteNativeWriteCoordinator } from '../figplugin/nativeWriteCoordinator'
 import { createCheckpointStore } from '../figplugin/checkpointEncryption'
 import {
   savedTaskCheckpointsSchema,
@@ -254,7 +255,8 @@ async function createProductionBridge(store: FigPluginCenterStore): Promise<Brid
   )
   return new FigPluginBridgeController(store, new LLMProxySvcImpl(), {
     audit: (event) => audit.record(event),
-    checkpoints: checkpointStore()
+    checkpoints: checkpointStore(),
+    writes: new SqliteNativeWriteCoordinator(path.join(app.getPath('userData'), 'figplugin-center'))
   })
 }
 

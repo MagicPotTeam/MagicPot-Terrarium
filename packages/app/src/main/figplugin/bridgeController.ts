@@ -1,3 +1,4 @@
+import type { NativeWriteCoordinator } from './nativeWriteCoordinator'
 import type { RecoveryCheckpointStore } from './checkpointStore'
 import { randomUUID } from 'node:crypto'
 import { HOST_PLAN_SYSTEM_MESSAGE, governHostPlanResponse } from './planGovernance'
@@ -41,6 +42,7 @@ type PlanSource = {
 }
 type Options = {
   checkpoints?: RecoveryCheckpointStore
+  writes?: NativeWriteCoordinator
   startServer?: typeof startFigPluginBridgeServer
   callTimeoutMs?: number
   audit?: (event: FigPluginExecutionAuditEvent) => void
@@ -151,6 +153,7 @@ export class FigPluginBridgeController {
       invoke: (binding, preview, signal) => this.invoke(binding, preview, signal),
       callTimeoutMs: this.#callTimeout,
       ...(options.checkpoints ? { checkpoints: options.checkpoints } : {}),
+      ...(options.writes ? { writes: options.writes } : {}),
       ...(options.audit ? { audit: options.audit } : {}),
       allowNativeWrite: (binding) =>
         this.#writeEnabled.get(bindingKey(binding)) === true && this.isCurrent(binding)

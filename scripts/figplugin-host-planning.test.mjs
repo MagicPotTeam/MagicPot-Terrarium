@@ -54,6 +54,7 @@ function fixture(
     corruptResult = false,
     locked = false,
     approvePlan = false,
+    pendingClaims = 0,
     twoSteps = false,
     failSecond = false,
     correctionFlow = false,
@@ -415,6 +416,8 @@ function fixture(
           updatedAt: time
         }
         if (authorityHook) authorityHook(value)
+      } else if (url.endsWith('/plan/claim') && pendingClaims-- > 0) {
+        value = { protocol: 1, status: 'pending', state: 'approved' }
       } else if (url.endsWith('/plan/claim')) {
         claimedExecutions.add(body.executionId || sourceExecutionId)
         const correction = body.executionId === correctionExecutionId
@@ -771,6 +774,9 @@ function fixture(
       }
     },
     tick,
+    advanceClock: (ms) => {
+      time += ms
+    },
     output,
     requests,
     node,
@@ -1795,3 +1801,92 @@ test('photoshop: editing a checkpoint clears the document-reopen opt-in', async 
     await flush()
   }
 })
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: document-busy claims wait without a journal write and later execute only once`, async () => {
+    const f = fixture(host, { approvePlan: true, pendingClaims: 2 })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(3000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.persistedActions.size, 0)
+      const status =
+        host === 'figma'
+          ? f.posts.filter((p) => p.type === 'state').at(-1)?.label
+          : f.element('status').textContent
+      assert.match(status, /Waiting for another document write/)
+      await f.tick(3000)
+      assert.deepEqual(f.nativeWrites, ['Approved new name'])
+      assert.equal(f.planResult().status, 'completed')
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: cancel during document-busy waiting never starts a late write`, async () => {
+    const f = fixture(host, { approvePlan: true, pendingClaims: 2 })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(2000)
+      f.cancel()
+      await flush()
+      await f.tick(5000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.persistedActions.size, 0)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: edits made while waiting for the document are not overwritten by the stale approved plan`, async () => {
+    const f = fixture(host, { approvePlan: true, pendingClaims: 2 })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(2000)
+      f.node.name = 'Newer user edit'
+      f.nativeWrites.length = 0
+      await f.tick(5000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.node.name, 'Newer user edit')
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: rollback after a deadline-expired asynchronous step cannot overwrite a newer writer`, async () => {
+    let f
+    f = fixture(host, {
+      approvePlan: true,
+      twoSteps: true,
+      progressHook(body) {
+        if (body.phase === 'executing' && body.completed === 1) f.advanceClock(180000)
+      }
+    })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(2000)
+      assert.deepEqual(f.nativeWrites, ['Approved new name'])
+      assert.equal(f.node.name, 'Approved new name')
+      assert.equal(f.second.name, 'Second original name')
+      assert.equal(
+        f.planResults().some((r) => r.status === 'completed'),
+        false
+      )
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
