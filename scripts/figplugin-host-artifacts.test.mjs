@@ -540,7 +540,7 @@ test('Photoshop without a document yields a fixed empty context, not private err
 })
 
 test('development documentation leaves real host import and integration explicitly incomplete', () => {
-  for (const host of ['figma', 'photoshop-uxp']) {
+  for (const host of ['figma']) {
     const readme = read(`${host}/README.md`)
     assert.match(readme, /local development artifact source/)
     assert.match(readme, /HostAdapter/)
@@ -556,5 +556,14 @@ test('development documentation leaves real host import and integration explicit
   assert.match(read('figma/README.md'), /must use your assigned ID/)
   assert.match(read('photoshop-uxp/README.md'), /__PHOTOSHOP_PLUGIN_ID__/)
   assert.match(read('photoshop-uxp/README.md'), /UXP Developer Tool/)
+  const connected = read('photoshop-uxp/README.md')
+  assert.match(connected, /Offline v1/)
+  assert.match(connected, /Connected v2/)
+  assert.match(connected, /no network, pairing or document writes/)
+  assert.match(connected, /separate MagicPot desktop approval/)
+  assert.match(connected, /not server authentication, Provider readiness/)
+  assert.match(connected, /must never be reported as connected-plugin acceptance/)
+  assert.match(connected, /No application-wide developer settings are written/)
+
   assert.match(read('photoshop-uxp/README.md'), /No `\.ccx` is provided/)
 })

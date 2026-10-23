@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { createContext, Script } from 'node:vm'
+import { buildHostBridgeReadiness } from './build-figplugin-bridge-readiness.mjs'
 
 // Run with Node 22.23.2: node --test scripts/figplugin-host-bridge.test.mjs
 // Every transport and host API below is a fixture; no account, document or endpoint is contacted.
@@ -339,7 +340,7 @@ function fixture(host, options = {}) {
   const fetch = (url, fetchOptions) => {
     assert.match(
       url,
-      /^http:\/\/127\.0\.0\.1:49152\/figplugin\/v1\/(pair|prepare|status|cancel|close)$/
+      /^http:\/\/127\.0\.0\.1:49152\/figplugin\/v1\/(pair|prepare|status|cancel|close|probe)$/
     )
     const route = url.split('/').at(-1)
     const request = { url, route, options: fetchOptions, body: JSON.parse(fetchOptions.body) }
@@ -347,13 +348,15 @@ function fixture(host, options = {}) {
     if (api.handlers.has(route)) return api.handlers.get(route)(request)
     return Promise.resolve(
       response(
-        route === 'pair'
-          ? pairResult()
-          : route === 'prepare'
-            ? prepareResult()
-            : route === 'status'
-              ? statusResult()
-              : undefined,
+        route === 'probe'
+          ? { protocol: 1, kind: 'figplugin-bridge-probe', nonce: request.body.nonce }
+          : route === 'pair'
+            ? pairResult()
+            : route === 'prepare'
+              ? prepareResult()
+              : route === 'status'
+                ? statusResult()
+                : undefined,
         { status: route === 'close' || route === 'cancel' ? 204 : 200 }
       )
     )
@@ -408,7 +411,10 @@ function fixture(host, options = {}) {
       'figma'
     )
     run(
-      injected + sources.figma.code,
+      injected +
+        (options.probeHelper === false ? '' : read('shared/bridge-readiness.js')) +
+        '\n;\n' +
+        sources.figma.code,
       { figma, __html__: sources.figma.html, fetch },
       'figma/bridge/code.js'
     )
@@ -439,7 +445,10 @@ function fixture(host, options = {}) {
       'app'
     )
     run(
-      injected + sources.photoshop.code,
+      injected +
+        (options.probeHelper === false ? '' : read('shared/bridge-readiness.js')) +
+        '\n;\n' +
+        sources.photoshop.code,
       {
         document,
         window,
@@ -1059,4 +1068,109 @@ test('Figma recovery UI requires parent pairing state and sends only a bounded r
   assert.equal(Object.hasOwn(message, 'prompt'), false)
   assert.equal(f.requests.length, 0)
   f.clean()
+})
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: explicit connection probe sends no ticket, context, session or model request`, async () => {
+    const f = fixture(host)
+    const saved = JSON.stringify(f.ticket())
+    f.el('ticket').value = saved
+    f.click('check-connection')
+    await flush()
+    assert.equal(f.requests.length, 1)
+    assert.equal(f.requests[0].route, 'probe')
+    assert.deepEqual(Object.keys(f.requests[0].body).sort(), ['nonce', 'protocol'])
+    assert.deepEqual(Object.keys(f.requests[0].options.headers), ['Content-Type'])
+    assert.equal(f.el('ticket').value, saved)
+    assert.equal(f.reads, 0)
+    assert.match(f.el('connection-status').textContent, /Bridge reachable/)
+    assert.equal(f.el('share').disabled, true)
+    assert.equal(f.el('pair').disabled, false)
+    assert.equal(f.clock.timerCount, 0)
+    f.clean()
+  })
+  test(`${host}: pending connection probe does not permit a second probe or pairing`, async () => {
+    const f = fixture(host),
+      gate = deferred()
+    f.handlers.set('probe', () => gate.promise)
+    f.click('check-connection')
+    f.click('check-connection')
+    await f.pair()
+    assert.equal(f.requests.length, 1)
+    assert.equal(f.el('check-connection').disabled, true)
+    f.click('cancel')
+    await flush()
+    assert.match(f.el('connection-status').textContent, /cancelled/)
+    const text = f.el('connection-status').textContent
+    gate.resolve(
+      response({ protocol: 1, kind: 'figplugin-bridge-probe', nonce: f.requests[0].body.nonce })
+    )
+    await flush()
+    assert.equal(f.el('connection-status').textContent, text)
+    assert.equal(f.clock.timerCount, 0)
+    assert.equal(f.reads, 0)
+    f.clean()
+  })
+  test(`${host}: closing during a probe suppresses late success and clears timers`, async () => {
+    const f = fixture(host, { abort: false }),
+      gate = deferred()
+    f.handlers.set('probe', () => gate.promise)
+    f.click('check-connection')
+    f.click('close')
+    await flush()
+    const text = f.el('connection-status').textContent
+    gate.resolve(
+      response({ protocol: 1, kind: 'figplugin-bridge-probe', nonce: f.requests[0].body.nonce })
+    )
+    await flush()
+    assert.equal(f.el('connection-status').textContent, text)
+    assert.equal(f.clock.timerCount, 0)
+    assert.equal(f.reads, 0)
+    f.clean()
+  })
+  test(`${host}: probe times out without automatic retry or late success`, async () => {
+    const f = fixture(host),
+      gate = deferred()
+    f.handlers.set('probe', () => gate.promise)
+    f.click('check-connection')
+    await f.clock.advance(5001)
+    assert.match(f.el('connection-status').textContent, /timed out/)
+    gate.resolve(
+      response({ protocol: 1, kind: 'figplugin-bridge-probe', nonce: f.requests[0].body.nonce })
+    )
+    await flush()
+    assert.match(f.el('connection-status').textContent, /timed out/)
+    assert.equal(f.requests.length, 1)
+    assert.equal(f.clock.timerCount, 0)
+    f.clean()
+  })
+  test(`${host}: native network refusal is actionable and does not expose the raw error`, async () => {
+    const f = fixture(host)
+    f.handlers.set('probe', async () => {
+      throw new Error(
+        'Script is not permitted to access the network apis, additioanl permissions required PRIVATE_TOKEN'
+      )
+    })
+    f.click('check-connection')
+    await flush()
+    assert.match(f.el('connection-status').textContent, /UXP/)
+    assert.doesNotMatch(f.visible(), /PRIVATE_TOKEN/)
+    assert.equal(f.reads, 0)
+    f.clean()
+  })
+  test(`${host}: missing probe helper does not fall back to an unbounded request`, async () => {
+    const f = fixture(host, { probeHelper: false })
+    f.click('check-connection')
+    await flush()
+    assert.match(f.el('connection-status').textContent, /helper missing/)
+    assert.equal(f.requests.length, 0)
+    assert.equal(f.reads, 0)
+    assert.equal(f.clock.timerCount, 0)
+    f.clean()
+  })
+}
+
+test('native connectivity helper is generated from the same shared source as the server contract', async () => {
+  const generated = await buildHostBridgeReadiness()
+  assert.equal(read('shared/bridge-readiness.js'), generated.text)
 })

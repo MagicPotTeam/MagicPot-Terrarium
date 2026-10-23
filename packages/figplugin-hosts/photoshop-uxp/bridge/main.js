@@ -64,6 +64,7 @@
     return Array.from(data, (value) => value.toString(16).padStart(2, '0')).join('')
   }
   let session = null
+  let connectionProbe = null
   let pairing = false
   let snapshot = null
   let planningSnapshot = null
@@ -140,7 +141,17 @@
     if (!initialized || disposed) return
     el('status').textContent = label
     el('read-only-capture').disabled = !secure()
-    el('pair').disabled = !config || !secure() || session !== null || pairing
+    el('check-connection').disabled =
+      !config ||
+      !secure() ||
+      session !== null ||
+      pairing ||
+      connectionProbe !== null ||
+      review !== null ||
+      planReview !== null ||
+      activeExecution !== null
+    el('pair').disabled =
+      !config || !secure() || session !== null || pairing || connectionProbe !== null
     el('capture').disabled = !config || !secure() || pairing || activeExecution !== null
     el('plan-capture').disabled = !config || !secure() || pairing || activeExecution !== null
     el('restore-task').disabled =
@@ -165,7 +176,8 @@
       !el('consent').checked ||
       !el('prompt').value.trim() ||
       el('prompt').value.length > 16384
-    el('cancel').disabled = review === null && planReview === null && activeExecution === null
+    el('cancel').disabled =
+      connectionProbe === null && review === null && planReview === null && activeExecution === null
   }
   function clearView() {
     if (!initialized || disposed) return
@@ -174,6 +186,12 @@
     el('consent').checked = false
   }
   const stop = () => {
+    if (connectionProbe) {
+      connectionProbe.cancel()
+      connectionProbe = null
+      if (initialized && !disposed)
+        el('connection-status').textContent = '连接检查已取消。 / Connection check cancelled.'
+    }
     epoch += 1
     clearTimeout(pollTimer)
     pollTimer = null
@@ -332,10 +350,51 @@
       throw new Error('TICKET')
     return ticket
   }
+  async function checkConnection() {
+    if (
+      !config ||
+      disposed ||
+      !initialized ||
+      connectionProbe ||
+      pairing ||
+      session ||
+      review ||
+      planReview ||
+      activeExecution
+    )
+      return
+    const helper = globalThis.MagicPotBridgeReadinessV1
+    if (
+      !helper ||
+      typeof helper.startFigPluginBridgeProbe !== 'function' ||
+      typeof helper.bridgeProbeMessage !== 'function'
+    ) {
+      el('connection-status').textContent =
+        '连接检查模块缺失，请更新插件。 / Connection helper missing; update the plugin.'
+      return
+    }
+    const own = epoch
+    let probe
+    try {
+      probe = helper.startFigPluginBridgeProbe(config.origin, nonce())
+      connectionProbe = probe
+      el('connection-status').textContent = '正在检查固定桌面地址… / Checking fixed desktop origin…'
+      state()
+      const code = await probe.result
+      if (disposed || own !== epoch || connectionProbe !== probe) return
+      el('connection-status').textContent = helper.bridgeProbeMessage(code)
+    } catch {
+      if (!disposed && own === epoch)
+        el('connection-status').textContent = '连接检查不可用。 / Connection check unavailable.'
+    } finally {
+      if (connectionProbe === probe) connectionProbe = null
+      if (!disposed && own === epoch) state()
+    }
+  }
   async function pair() {
     let text = el('ticket').value
     el('ticket').value = ''
-    if (!config || disposed || pairing || session || review) return
+    if (!config || disposed || connectionProbe || pairing || session || review) return
     let ticket
     let clientNonce
     try {
@@ -391,6 +450,11 @@
     }
   }
   function cancelReview() {
+    if (connectionProbe) {
+      stop()
+      state()
+      return
+    }
     if (activeExecution) {
       const item = activeExecution
       stop()
@@ -1960,6 +2024,7 @@
       ? HOST + ' / ' + config.pluginId + ' / ' + config.origin
       : 'Bridge configuration is invalid.'
     el('read-only-capture').addEventListener('click', captureReadOnlySnapshot)
+    el('check-connection').addEventListener('click', () => void checkConnection())
     el('pair').addEventListener('click', () => void pair())
     el('capture').addEventListener('click', capture)
     el('plan-capture').addEventListener('click', capturePlan)

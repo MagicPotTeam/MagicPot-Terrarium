@@ -33,6 +33,11 @@
   <body>
     <h2>MagicPot connected review</h2>
     <p id="configuration">Waiting for plugin configuration.</p>
+    <button id="check-connection" disabled>检查桌面连接 / Check desktop connection</button>
+    <p id="connection-status" role="status">
+      仅检查连接，不读取设计、不调用模型、不建立会话。 / Connection check only; no design reads,
+      model calls or session.
+    </p>
     <button id="read-only-capture">Review complete selection locally (read-only)</button>
     <p>
       Local read-only observation. Not authenticated host identity, native revision, mutation
@@ -105,6 +110,7 @@
           value.length <= max &&
           new TextEncoder().encode(value).length <= max
         const hex = (value) => typeof value === 'string' && /^[a-f0-9]{32}$(?![\s\S])/.test(value)
+        let connectionPending = null
         let configured = false
         let paired = false
         let busy = false
@@ -124,7 +130,10 @@
         }
         function refresh() {
           el('read-only-capture').disabled = disposed || !secure() || snapshotPending !== null
-          el('pair').disabled = !configured || !secure() || paired || busy
+          el('check-connection').disabled =
+            disposed || !configured || !secure() || paired || busy || connectionPending !== null
+          el('pair').disabled =
+            !configured || !secure() || paired || busy || connectionPending !== null
           el('capture').disabled = !configured || !secure()
           el('plan-capture').disabled = !configured || !secure()
           el('restore-task').disabled = disposed || !configured || !secure() || !paired || busy
@@ -139,7 +148,7 @@
             !el('consent').checked ||
             !el('prompt').value.trim() ||
             el('prompt').value.length > 16384
-          el('cancel').disabled = !busy
+          el('cancel').disabled = !busy && connectionPending === null
         }
         function localError() {
           el('status').textContent = 'Secure randomness or valid bounded input is unavailable.'
@@ -179,10 +188,35 @@
             refresh()
           }
         })
+        function clearConnectionCheck() {
+          if (connectionPending) clearTimeout(connectionPending.timer)
+          connectionPending = null
+        }
+        el('check-connection').addEventListener('click', () => {
+          if (disposed || !configured || paired || busy || connectionPending) return
+          try {
+            const pending = { nonce: nonce(), timer: null, deadline: Date.now() + 6000 }
+            connectionPending = pending
+            pending.timer = setTimeout(() => {
+              if (connectionPending !== pending) return
+              clearConnectionCheck()
+              el('connection-status').textContent = '连接检查超时。 / Connection check timed out.'
+              refresh()
+            }, 6000)
+            el('connection-status').textContent =
+              '正在检查固定桌面地址… / Checking fixed desktop origin…'
+            refresh()
+            send({ type: 'check-connection', nonce: pending.nonce })
+          } catch {
+            clearConnectionCheck()
+            el('connection-status').textContent = '连接检查不可用。 / Connection check unavailable.'
+            refresh()
+          }
+        })
         el('pair').addEventListener('click', () => {
           let ticket = el('ticket').value
           el('ticket').value = ''
-          if (!configured || paired || busy) return
+          if (!configured || paired || busy || connectionPending) return
           try {
             if (!bounded(ticket, 4096)) throw new Error('INPUT')
             const value = JSON.parse(ticket)
@@ -286,8 +320,17 @@
           refresh()
         })
         el('consent').addEventListener('change', refresh)
-        el('cancel').addEventListener('click', () => send({ type: 'cancel' }))
+        el('cancel').addEventListener('click', () => {
+          if (connectionPending) {
+            clearConnectionCheck()
+            el('connection-status').textContent = '连接检查已取消。 / Connection check cancelled.'
+            refresh()
+          }
+          send({ type: 'cancel' })
+        })
         function close(type) {
+          clearConnectionCheck()
+          el('connection-status').textContent = '连接检查已取消。 / Connection check cancelled.'
           clearSnapshotPending()
           el('read-only-output').textContent = ''
           if (type === 'dispose') {
@@ -311,6 +354,25 @@
           if (event.source !== parent || !keys(event.data, ['pluginMessage'], ['pluginId'])) return
           const value = event.data.pluginMessage
           if (!value || value.protocol !== 1) return
+          if (
+            value.type === 'connection-check' &&
+            keys(value, ['protocol', 'type', 'nonce', 'text'])
+          ) {
+            if (
+              disposed ||
+              !connectionPending ||
+              value.nonce !== connectionPending.nonce ||
+              !bounded(value.text, 1024)
+            )
+              return
+            const expired = Date.now() >= connectionPending.deadline
+            clearConnectionCheck()
+            el('connection-status').textContent = expired
+              ? '连接检查超时。 / Connection check timed out.'
+              : value.text
+            refresh()
+            return
+          }
           if (
             value.type === 'read-only-snapshot' &&
             keys(value, ['protocol', 'type', 'instanceEpoch', 'requestId', 'result'])

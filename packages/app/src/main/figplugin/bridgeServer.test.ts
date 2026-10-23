@@ -1020,3 +1020,36 @@ describe('deadlines, bounded activity, and transport disposal', () => {
     await close()
   })
 })
+
+describe('anonymous bounded bridge connectivity probe', () => {
+  it('echoes only a challenge without pairing, model calls or host operations', async () => {
+    const f = await fixture()
+    const nonce = '7'.repeat(32)
+    const reply = await post(f.origin, '/figplugin/v1/probe', { protocol: 1, nonce }, {})
+    expect(reply.status).toBe(200)
+    expect(JSON.parse(reply.text)).toEqual({ protocol: 1, kind: 'figplugin-bridge-probe', nonce })
+    expect(reply.headers['cache-control']).toBe('no-store')
+    for (const method of Object.values(f.runtime)) expect(method).not.toHaveBeenCalled()
+  })
+
+  it('refuses credentials, extra input, oversized input and foreign browser origins', async () => {
+    const f = await fixture()
+    const body = { protocol: 1, nonce: '7'.repeat(32) }
+    expect((await post(f.origin, '/figplugin/v1/probe', body)).status).toBe(401)
+    expect(
+      (await post(f.origin, '/figplugin/v1/probe', { ...body, prompt: 'PRIVATE' }, {})).status
+    ).toBe(400)
+    expect(
+      (await post(f.origin, '/figplugin/v1/probe', { ...body, nonce: 'x'.repeat(300) }, {})).status
+    ).toBe(400)
+    expect(
+      (await post(f.origin, '/figplugin/v1/probe', body, { Origin: 'https://untrusted.example' }))
+        .status
+    ).toBe(403)
+    expect((await post(f.origin, '/figplugin/v1/probe?alias=1', body, {})).status).toBe(400)
+    expect(
+      (await post(f.origin, '/figplugin/v1/probe', body, { Cookie: 'session=PRIVATE' })).status
+    ).toBe(400)
+    for (const method of Object.values(f.runtime)) expect(method).not.toHaveBeenCalled()
+  })
+})

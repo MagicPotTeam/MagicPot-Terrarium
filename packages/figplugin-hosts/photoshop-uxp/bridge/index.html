@@ -29,6 +29,11 @@
   <body>
     <h2>MagicPot connected review</h2>
     <p id="configuration">Waiting for plugin configuration.</p>
+    <button id="check-connection" disabled>检查桌面连接 / Check desktop connection</button>
+    <p id="connection-status" role="status">
+      仅检查连接，不读取设计、不调用模型、不建立会话。 / Connection check only; no design reads,
+      model calls or session.
+    </p>
     <button id="read-only-capture">Review complete selection locally (read-only)</button>
     <p>
       Local read-only observation. Not authenticated host identity, native revision, mutation

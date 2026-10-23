@@ -1,4 +1,9 @@
 import {
+  figPluginBridgeProbeRequestSchema,
+  figPluginBridgeProbeResponseSchema,
+  FIGPLUGIN_BRIDGE_PROBE_PATH
+} from '@shared/figplugin/bridgeReadiness'
+import {
   figPluginTaskRecoveryPrepareRequestSchema,
   figPluginTaskRecoveryPrepareResponseSchema
 } from '@shared/figplugin/taskRecovery'
@@ -53,6 +58,7 @@ type Runtime = Pick<
 >
 type Options = { origin: string; runtime: Runtime; requestTimeoutMs?: number }
 const paths = new Set([
+  FIGPLUGIN_BRIDGE_PROBE_PATH,
   '/figplugin/v1/pair',
   '/figplugin/v1/prepare',
   '/figplugin/v1/status',
@@ -176,6 +182,14 @@ const dispatch = async (
   body: unknown
 ): Promise<string | undefined> => {
   switch (path) {
+    case FIGPLUGIN_BRIDGE_PROBE_PATH: {
+      const request = parseFigPluginBridgeValue(figPluginBridgeProbeRequestSchema, body)
+      return serialize(figPluginBridgeProbeResponseSchema, {
+        protocol: 1,
+        kind: 'figplugin-bridge-probe',
+        nonce: request.nonce
+      })
+    }
     case '/figplugin/v1/pair':
       return serialize(
         figPluginPairResponseSchema,
@@ -388,7 +402,7 @@ export async function startFigPluginBridgeServer({
       let session = ''
       let token = ''
       const authorization = headers.get('authorization')
-      if (request.url === '/figplugin/v1/pair') {
+      if (request.url === '/figplugin/v1/pair' || request.url === FIGPLUGIN_BRIDGE_PROBE_PATH) {
         if (authorization !== undefined || headers.has('x-figplugin-session')) {
           throw new FigPluginBridgeError('UNAUTHORIZED')
         }
@@ -403,7 +417,12 @@ export async function startFigPluginBridgeServer({
         token = authorization!.slice('Bearer '.length)
       }
       if (headers.get('content-type')?.toLowerCase() !== 'application/json') invalid()
-      const limit = request.url === '/figplugin/v1/pair' ? 16 * 1024 : 64 * 1024
+      const limit =
+        request.url === FIGPLUGIN_BRIDGE_PROBE_PATH
+          ? 256
+          : request.url === '/figplugin/v1/pair'
+            ? 16 * 1024
+            : 64 * 1024
       if (
         length !== undefined &&
         (!Number.isSafeInteger(Number(length)) || Number(length) > limit)

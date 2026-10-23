@@ -45,6 +45,7 @@
     ? Object.freeze({ protocol: 1, origin: input.origin, pluginId: input.pluginId, host: HOST })
     : null
   let session = null
+  let connectionProbe = null
   let pairing = false
   let snapshot = null
   let planningSnapshot = null
@@ -131,6 +132,10 @@
     emit({ type: 'content', text: '' })
   }
   const stop = () => {
+    if (connectionProbe) {
+      connectionProbe.cancel()
+      connectionProbe = null
+    }
     epoch += 1
     clearTimeout(pollTimer)
     pollTimer = null
@@ -281,8 +286,44 @@
       throw new Error('TICKET')
     return ticket
   }
+  async function checkConnection(challenge) {
+    if (
+      !config ||
+      disposed ||
+      connectionProbe ||
+      pairing ||
+      session ||
+      review ||
+      planReview ||
+      activeExecution
+    )
+      return
+    const helper = globalThis.MagicPotBridgeReadinessV1
+    if (
+      !helper ||
+      typeof helper.startFigPluginBridgeProbe !== 'function' ||
+      typeof helper.bridgeProbeMessage !== 'function'
+    ) {
+      emit({
+        type: 'connection-check',
+        nonce: challenge,
+        text: '连接检查模块缺失，请更新插件。 / Connection helper missing; update the plugin.'
+      })
+      return
+    }
+    const own = epoch
+    const probe = helper.startFigPluginBridgeProbe(config.origin, challenge)
+    connectionProbe = probe
+    try {
+      const code = await probe.result
+      if (!disposed && own === epoch && connectionProbe === probe)
+        emit({ type: 'connection-check', nonce: challenge, text: helper.bridgeProbeMessage(code) })
+    } finally {
+      if (connectionProbe === probe) connectionProbe = null
+    }
+  }
   async function pair(message) {
-    if (pairing || session || review) return
+    if (connectionProbe || pairing || session || review) return
     let ticket
     try {
       ticket = ticketOf(message.ticket)
@@ -334,6 +375,11 @@
     }
   }
   function cancelReview() {
+    if (connectionProbe) {
+      stop()
+      state()
+      return
+    }
     if (activeExecution) {
       const item = activeExecution
       stop()
@@ -1993,6 +2039,14 @@
       return
     }
     if (!config) return
+    if (
+      message.type === 'check-connection' &&
+      keys(message, ['protocol', 'type', 'nonce']) &&
+      hex(message.nonce, 32)
+    ) {
+      void checkConnection(message.nonce)
+      return
+    }
     if (
       message.type === 'restore-task' &&
       keys(message, ['protocol', 'type', 'nonce', 'instanceEpoch'], ['rebindBaselineId']) &&

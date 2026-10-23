@@ -1,0 +1,3286 @@
+// Generated read-only FIGPLUGIN connectivity probe; source binding ab1aed1a995ecf8363c19b0d2502d389c72653606fb41604c78843b4c1e2488a.
+/* Includes Zod (MIT):
+MIT License
+
+Copyright (c) 2025 Colin McDonnell
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+*/
+var MagicPotBridgeReadinessBundle = (() => {
+  var Ae = Object.defineProperty
+  var ct = Object.getOwnPropertyDescriptor
+  var dt = Object.getOwnPropertyNames
+  var ut = Object.prototype.hasOwnProperty
+  var $e = (t, e) => {
+      for (var s in e) Ae(t, s, { get: e[s], enumerable: !0 })
+    },
+    lt = (t, e, s, r) => {
+      if ((e && typeof e == 'object') || typeof e == 'function')
+        for (let n of dt(e))
+          !ut.call(t, n) &&
+            n !== s &&
+            Ae(t, n, { get: () => e[n], enumerable: !(r = ct(e, n)) || r.enumerable })
+      return t
+    }
+  var ft = (t) => lt(Ae({}, '__esModule', { value: !0 }), t)
+  var nr = {}
+  $e(nr, {
+    FIGPLUGIN_BRIDGE_PROBE_PATH: () => nt,
+    FIGPLUGIN_BRIDGE_PROBE_TIMEOUT_MS: () => je,
+    bridgeProbeMessage: () => tr,
+    figPluginBridgeProbeRequestSchema: () => it,
+    figPluginBridgeProbeResponseSchema: () => ot,
+    startFigPluginBridgeProbe: () => rr
+  })
+  var p = {}
+  $e(p, {
+    BRAND: () => $t,
+    DIRTY: () => G,
+    EMPTY_PATH: () => gt,
+    INVALID: () => m,
+    NEVER: () => ks,
+    OK: () => w,
+    ParseStatus: () => k,
+    Schema: () => _,
+    ZodAny: () => V,
+    ZodArray: () => $,
+    ZodBigInt: () => W,
+    ZodBoolean: () => J,
+    ZodBranded: () => ge,
+    ZodCatch: () => ae,
+    ZodDate: () => H,
+    ZodDefault: () => ne,
+    ZodDiscriminatedUnion: () => we,
+    ZodEffects: () => E,
+    ZodEnum: () => se,
+    ZodError: () => S,
+    ZodFirstPartyTypeKind: () => g,
+    ZodFunction: () => Se,
+    ZodIntersection: () => K,
+    ZodIssueCode: () => c,
+    ZodLazy: () => ee,
+    ZodLiteral: () => te,
+    ZodMap: () => fe,
+    ZodNaN: () => he,
+    ZodNativeEnum: () => re,
+    ZodNever: () => N,
+    ZodNull: () => Y,
+    ZodNullable: () => F,
+    ZodNumber: () => q,
+    ZodObject: () => I,
+    ZodOptional: () => P,
+    ZodParsedType: () => f,
+    ZodPipeline: () => ye,
+    ZodPromise: () => D,
+    ZodReadonly: () => ie,
+    ZodRecord: () => Te,
+    ZodSchema: () => _,
+    ZodSet: () => pe,
+    ZodString: () => L,
+    ZodSymbol: () => ue,
+    ZodTransformer: () => E,
+    ZodTuple: () => O,
+    ZodType: () => _,
+    ZodUndefined: () => X,
+    ZodUnion: () => Q,
+    ZodUnknown: () => Z,
+    ZodVoid: () => le,
+    addIssueToContext: () => u,
+    any: () => Wt,
+    array: () => Yt,
+    bigint: () => Dt,
+    boolean: () => He,
+    coerce: () => bs,
+    custom: () => qe,
+    date: () => Ut,
+    datetimeRegex: () => Be,
+    defaultErrorMap: () => j,
+    discriminatedUnion: () => ts,
+    effect: () => ps,
+    enum: () => us,
+    function: () => os,
+    getErrorMap: () => oe,
+    getParsedType: () => R,
+    instanceof: () => Lt,
+    intersection: () => ss,
+    isAborted: () => be,
+    isAsync: () => ce,
+    isDirty: () => ke,
+    isValid: () => z,
+    late: () => zt,
+    lazy: () => cs,
+    literal: () => ds,
+    makeIssue: () => me,
+    map: () => as,
+    nan: () => Vt,
+    nativeEnum: () => ls,
+    never: () => Ht,
+    null: () => qt,
+    nullable: () => ms,
+    number: () => Je,
+    object: () => Qt,
+    objectUtil: () => Ee,
+    oboolean: () => xs,
+    onumber: () => vs,
+    optional: () => hs,
+    ostring: () => _s,
+    pipeline: () => ys,
+    preprocess: () => gs,
+    promise: () => fs,
+    quotelessJson: () => pt,
+    record: () => ns,
+    set: () => is,
+    setErrorMap: () => mt,
+    strictObject: () => Kt,
+    string: () => We,
+    symbol: () => Bt,
+    transformer: () => ps,
+    tuple: () => rs,
+    undefined: () => Gt,
+    union: () => es,
+    unknown: () => Jt,
+    util: () => x,
+    void: () => Xt
+  })
+  var x
+  ;(function (t) {
+    t.assertEqual = (n) => {}
+    function e(n) {}
+    t.assertIs = e
+    function s(n) {
+      throw new Error()
+    }
+    ;((t.assertNever = s),
+      (t.arrayToEnum = (n) => {
+        let a = {}
+        for (let o of n) a[o] = o
+        return a
+      }),
+      (t.getValidEnumValues = (n) => {
+        let a = t.objectKeys(n).filter((i) => typeof n[n[i]] != 'number'),
+          o = {}
+        for (let i of a) o[i] = n[i]
+        return t.objectValues(o)
+      }),
+      (t.objectValues = (n) =>
+        t.objectKeys(n).map(function (a) {
+          return n[a]
+        })),
+      (t.objectKeys =
+        typeof Object.keys == 'function'
+          ? (n) => Object.keys(n)
+          : (n) => {
+              let a = []
+              for (let o in n) Object.prototype.hasOwnProperty.call(n, o) && a.push(o)
+              return a
+            }),
+      (t.find = (n, a) => {
+        for (let o of n) if (a(o)) return o
+      }),
+      (t.isInteger =
+        typeof Number.isInteger == 'function'
+          ? (n) => Number.isInteger(n)
+          : (n) => typeof n == 'number' && Number.isFinite(n) && Math.floor(n) === n))
+    function r(n, a = ' | ') {
+      return n.map((o) => (typeof o == 'string' ? `'${o}'` : o)).join(a)
+    }
+    ;((t.joinValues = r),
+      (t.jsonStringifyReplacer = (n, a) => (typeof a == 'bigint' ? a.toString() : a)))
+  })(x || (x = {}))
+  var Ee
+  ;(function (t) {
+    t.mergeShapes = (e, s) => ({ ...e, ...s })
+  })(Ee || (Ee = {}))
+  var f = x.arrayToEnum([
+      'string',
+      'nan',
+      'number',
+      'integer',
+      'float',
+      'boolean',
+      'date',
+      'bigint',
+      'symbol',
+      'function',
+      'undefined',
+      'null',
+      'array',
+      'object',
+      'unknown',
+      'promise',
+      'void',
+      'never',
+      'map',
+      'set'
+    ]),
+    R = (t) => {
+      switch (typeof t) {
+        case 'undefined':
+          return f.undefined
+        case 'string':
+          return f.string
+        case 'number':
+          return Number.isNaN(t) ? f.nan : f.number
+        case 'boolean':
+          return f.boolean
+        case 'function':
+          return f.function
+        case 'bigint':
+          return f.bigint
+        case 'symbol':
+          return f.symbol
+        case 'object':
+          return Array.isArray(t)
+            ? f.array
+            : t === null
+              ? f.null
+              : t.then && typeof t.then == 'function' && t.catch && typeof t.catch == 'function'
+                ? f.promise
+                : typeof Map < 'u' && t instanceof Map
+                  ? f.map
+                  : typeof Set < 'u' && t instanceof Set
+                    ? f.set
+                    : typeof Date < 'u' && t instanceof Date
+                      ? f.date
+                      : f.object
+        default:
+          return f.unknown
+      }
+    }
+  var c = x.arrayToEnum([
+      'invalid_type',
+      'invalid_literal',
+      'custom',
+      'invalid_union',
+      'invalid_union_discriminator',
+      'invalid_enum_value',
+      'unrecognized_keys',
+      'invalid_arguments',
+      'invalid_return_type',
+      'invalid_date',
+      'invalid_string',
+      'too_small',
+      'too_big',
+      'invalid_intersection_types',
+      'not_multiple_of',
+      'not_finite'
+    ]),
+    pt = (t) => JSON.stringify(t, null, 2).replace(/"([^"]+)":/g, '$1:'),
+    S = class t extends Error {
+      get errors() {
+        return this.issues
+      }
+      constructor(e) {
+        ;(super(),
+          (this.issues = []),
+          (this.addIssue = (r) => {
+            this.issues = [...this.issues, r]
+          }),
+          (this.addIssues = (r = []) => {
+            this.issues = [...this.issues, ...r]
+          }))
+        let s = new.target.prototype
+        ;(Object.setPrototypeOf ? Object.setPrototypeOf(this, s) : (this.__proto__ = s),
+          (this.name = 'ZodError'),
+          (this.issues = e))
+      }
+      format(e) {
+        let s =
+            e ||
+            function (a) {
+              return a.message
+            },
+          r = { _errors: [] },
+          n = (a) => {
+            for (let o of a.issues)
+              if (o.code === 'invalid_union') o.unionErrors.map(n)
+              else if (o.code === 'invalid_return_type') n(o.returnTypeError)
+              else if (o.code === 'invalid_arguments') n(o.argumentsError)
+              else if (o.path.length === 0) r._errors.push(s(o))
+              else {
+                let i = r,
+                  d = 0
+                for (; d < o.path.length;) {
+                  let l = o.path[d]
+                  ;(d === o.path.length - 1
+                    ? ((i[l] = i[l] || { _errors: [] }), i[l]._errors.push(s(o)))
+                    : (i[l] = i[l] || { _errors: [] }),
+                    (i = i[l]),
+                    d++)
+                }
+              }
+          }
+        return (n(this), r)
+      }
+      static assert(e) {
+        if (!(e instanceof t)) throw new Error(`Not a ZodError: ${e}`)
+      }
+      toString() {
+        return this.message
+      }
+      get message() {
+        return JSON.stringify(this.issues, x.jsonStringifyReplacer, 2)
+      }
+      get isEmpty() {
+        return this.issues.length === 0
+      }
+      flatten(e = (s) => s.message) {
+        let s = {},
+          r = []
+        for (let n of this.issues)
+          if (n.path.length > 0) {
+            let a = n.path[0]
+            ;((s[a] = s[a] || []), s[a].push(e(n)))
+          } else r.push(e(n))
+        return { formErrors: r, fieldErrors: s }
+      }
+      get formErrors() {
+        return this.flatten()
+      }
+    }
+  S.create = (t) => new S(t)
+  var ht = (t, e) => {
+      let s
+      switch (t.code) {
+        case c.invalid_type:
+          t.received === f.undefined
+            ? (s = 'Required')
+            : (s = `Expected ${t.expected}, received ${t.received}`)
+          break
+        case c.invalid_literal:
+          s = `Invalid literal value, expected ${JSON.stringify(t.expected, x.jsonStringifyReplacer)}`
+          break
+        case c.unrecognized_keys:
+          s = `Unrecognized key(s) in object: ${x.joinValues(t.keys, ', ')}`
+          break
+        case c.invalid_union:
+          s = 'Invalid input'
+          break
+        case c.invalid_union_discriminator:
+          s = `Invalid discriminator value. Expected ${x.joinValues(t.options)}`
+          break
+        case c.invalid_enum_value:
+          s = `Invalid enum value. Expected ${x.joinValues(t.options)}, received '${t.received}'`
+          break
+        case c.invalid_arguments:
+          s = 'Invalid function arguments'
+          break
+        case c.invalid_return_type:
+          s = 'Invalid function return type'
+          break
+        case c.invalid_date:
+          s = 'Invalid date'
+          break
+        case c.invalid_string:
+          typeof t.validation == 'object'
+            ? 'includes' in t.validation
+              ? ((s = `Invalid input: must include "${t.validation.includes}"`),
+                typeof t.validation.position == 'number' &&
+                  (s = `${s} at one or more positions greater than or equal to ${t.validation.position}`))
+              : 'startsWith' in t.validation
+                ? (s = `Invalid input: must start with "${t.validation.startsWith}"`)
+                : 'endsWith' in t.validation
+                  ? (s = `Invalid input: must end with "${t.validation.endsWith}"`)
+                  : x.assertNever(t.validation)
+            : t.validation !== 'regex'
+              ? (s = `Invalid ${t.validation}`)
+              : (s = 'Invalid')
+          break
+        case c.too_small:
+          t.type === 'array'
+            ? (s = `Array must contain ${t.exact ? 'exactly' : t.inclusive ? 'at least' : 'more than'} ${t.minimum} element(s)`)
+            : t.type === 'string'
+              ? (s = `String must contain ${t.exact ? 'exactly' : t.inclusive ? 'at least' : 'over'} ${t.minimum} character(s)`)
+              : t.type === 'number'
+                ? (s = `Number must be ${t.exact ? 'exactly equal to ' : t.inclusive ? 'greater than or equal to ' : 'greater than '}${t.minimum}`)
+                : t.type === 'bigint'
+                  ? (s = `Number must be ${t.exact ? 'exactly equal to ' : t.inclusive ? 'greater than or equal to ' : 'greater than '}${t.minimum}`)
+                  : t.type === 'date'
+                    ? (s = `Date must be ${t.exact ? 'exactly equal to ' : t.inclusive ? 'greater than or equal to ' : 'greater than '}${new Date(Number(t.minimum))}`)
+                    : (s = 'Invalid input')
+          break
+        case c.too_big:
+          t.type === 'array'
+            ? (s = `Array must contain ${t.exact ? 'exactly' : t.inclusive ? 'at most' : 'less than'} ${t.maximum} element(s)`)
+            : t.type === 'string'
+              ? (s = `String must contain ${t.exact ? 'exactly' : t.inclusive ? 'at most' : 'under'} ${t.maximum} character(s)`)
+              : t.type === 'number'
+                ? (s = `Number must be ${t.exact ? 'exactly' : t.inclusive ? 'less than or equal to' : 'less than'} ${t.maximum}`)
+                : t.type === 'bigint'
+                  ? (s = `BigInt must be ${t.exact ? 'exactly' : t.inclusive ? 'less than or equal to' : 'less than'} ${t.maximum}`)
+                  : t.type === 'date'
+                    ? (s = `Date must be ${t.exact ? 'exactly' : t.inclusive ? 'smaller than or equal to' : 'smaller than'} ${new Date(Number(t.maximum))}`)
+                    : (s = 'Invalid input')
+          break
+        case c.custom:
+          s = 'Invalid input'
+          break
+        case c.invalid_intersection_types:
+          s = 'Intersection results could not be merged'
+          break
+        case c.not_multiple_of:
+          s = `Number must be a multiple of ${t.multipleOf}`
+          break
+        case c.not_finite:
+          s = 'Number must be finite'
+          break
+        default:
+          ;((s = e.defaultError), x.assertNever(t))
+      }
+      return { message: s }
+    },
+    j = ht
+  var ze = j
+  function mt(t) {
+    ze = t
+  }
+  function oe() {
+    return ze
+  }
+  var me = (t) => {
+      let { data: e, path: s, errorMaps: r, issueData: n } = t,
+        a = [...s, ...(n.path || [])],
+        o = { ...n, path: a }
+      if (n.message !== void 0) return { ...n, path: a, message: n.message }
+      let i = '',
+        d = r
+          .filter((l) => !!l)
+          .slice()
+          .reverse()
+      for (let l of d) i = l(o, { data: e, defaultError: i }).message
+      return { ...n, path: a, message: i }
+    },
+    gt = []
+  function u(t, e) {
+    let s = oe(),
+      r = me({
+        issueData: e,
+        data: t.data,
+        path: t.path,
+        errorMaps: [t.common.contextualErrorMap, t.schemaErrorMap, s, s === j ? void 0 : j].filter(
+          (n) => !!n
+        )
+      })
+    t.common.issues.push(r)
+  }
+  var k = class t {
+      constructor() {
+        this.value = 'valid'
+      }
+      dirty() {
+        this.value === 'valid' && (this.value = 'dirty')
+      }
+      abort() {
+        this.value !== 'aborted' && (this.value = 'aborted')
+      }
+      static mergeArray(e, s) {
+        let r = []
+        for (let n of s) {
+          if (n.status === 'aborted') return m
+          ;(n.status === 'dirty' && e.dirty(), r.push(n.value))
+        }
+        return { status: e.value, value: r }
+      }
+      static async mergeObjectAsync(e, s) {
+        let r = []
+        for (let n of s) {
+          let a = await n.key,
+            o = await n.value
+          r.push({ key: a, value: o })
+        }
+        return t.mergeObjectSync(e, r)
+      }
+      static mergeObjectSync(e, s) {
+        let r = {}
+        for (let n of s) {
+          let { key: a, value: o } = n
+          if (a.status === 'aborted' || o.status === 'aborted') return m
+          ;(a.status === 'dirty' && e.dirty(),
+            o.status === 'dirty' && e.dirty(),
+            a.value !== '__proto__' &&
+              (typeof o.value < 'u' || n.alwaysSet) &&
+              (r[a.value] = o.value))
+        }
+        return { status: e.value, value: r }
+      }
+    },
+    m = Object.freeze({ status: 'aborted' }),
+    G = (t) => ({ status: 'dirty', value: t }),
+    w = (t) => ({ status: 'valid', value: t }),
+    be = (t) => t.status === 'aborted',
+    ke = (t) => t.status === 'dirty',
+    z = (t) => t.status === 'valid',
+    ce = (t) => typeof Promise < 'u' && t instanceof Promise
+  var h
+  ;(function (t) {
+    ;((t.errToObj = (e) => (typeof e == 'string' ? { message: e } : e || {})),
+      (t.toString = (e) => (typeof e == 'string' ? e : e?.message)))
+  })(h || (h = {}))
+  var A = class {
+      constructor(e, s, r, n) {
+        ;((this._cachedPath = []),
+          (this.parent = e),
+          (this.data = s),
+          (this._path = r),
+          (this._key = n))
+      }
+      get path() {
+        return (
+          this._cachedPath.length ||
+            (Array.isArray(this._key)
+              ? this._cachedPath.push(...this._path, ...this._key)
+              : this._cachedPath.push(...this._path, this._key)),
+          this._cachedPath
+        )
+      }
+    },
+    Le = (t, e) => {
+      if (z(e)) return { success: !0, data: e.value }
+      if (!t.common.issues.length) throw new Error('Validation failed but no issues detected.')
+      return {
+        success: !1,
+        get error() {
+          if (this._error) return this._error
+          let s = new S(t.common.issues)
+          return ((this._error = s), this._error)
+        }
+      }
+    }
+  function y(t) {
+    if (!t) return {}
+    let { errorMap: e, invalid_type_error: s, required_error: r, description: n } = t
+    if (e && (s || r))
+      throw new Error(
+        `Can't use "invalid_type_error" or "required_error" in conjunction with custom error map.`
+      )
+    return e
+      ? { errorMap: e, description: n }
+      : {
+          errorMap: (o, i) => {
+            let { message: d } = t
+            return o.code === 'invalid_enum_value'
+              ? { message: d ?? i.defaultError }
+              : typeof i.data > 'u'
+                ? { message: d ?? r ?? i.defaultError }
+                : o.code !== 'invalid_type'
+                  ? { message: i.defaultError }
+                  : { message: d ?? s ?? i.defaultError }
+          },
+          description: n
+        }
+  }
+  var _ = class {
+      get description() {
+        return this._def.description
+      }
+      _getType(e) {
+        return R(e.data)
+      }
+      _getOrReturnCtx(e, s) {
+        return (
+          s || {
+            common: e.parent.common,
+            data: e.data,
+            parsedType: R(e.data),
+            schemaErrorMap: this._def.errorMap,
+            path: e.path,
+            parent: e.parent
+          }
+        )
+      }
+      _processInputParams(e) {
+        return {
+          status: new k(),
+          ctx: {
+            common: e.parent.common,
+            data: e.data,
+            parsedType: R(e.data),
+            schemaErrorMap: this._def.errorMap,
+            path: e.path,
+            parent: e.parent
+          }
+        }
+      }
+      _parseSync(e) {
+        let s = this._parse(e)
+        if (ce(s)) throw new Error('Synchronous parse encountered promise.')
+        return s
+      }
+      _parseAsync(e) {
+        let s = this._parse(e)
+        return Promise.resolve(s)
+      }
+      parse(e, s) {
+        let r = this.safeParse(e, s)
+        if (r.success) return r.data
+        throw r.error
+      }
+      safeParse(e, s) {
+        let r = {
+            common: { issues: [], async: s?.async ?? !1, contextualErrorMap: s?.errorMap },
+            path: s?.path || [],
+            schemaErrorMap: this._def.errorMap,
+            parent: null,
+            data: e,
+            parsedType: R(e)
+          },
+          n = this._parseSync({ data: e, path: r.path, parent: r })
+        return Le(r, n)
+      }
+      '~validate'(e) {
+        let s = {
+          common: { issues: [], async: !!this['~standard'].async },
+          path: [],
+          schemaErrorMap: this._def.errorMap,
+          parent: null,
+          data: e,
+          parsedType: R(e)
+        }
+        if (!this['~standard'].async)
+          try {
+            let r = this._parseSync({ data: e, path: [], parent: s })
+            return z(r) ? { value: r.value } : { issues: s.common.issues }
+          } catch (r) {
+            ;(r?.message?.toLowerCase()?.includes('encountered') && (this['~standard'].async = !0),
+              (s.common = { issues: [], async: !0 }))
+          }
+        return this._parseAsync({ data: e, path: [], parent: s }).then((r) =>
+          z(r) ? { value: r.value } : { issues: s.common.issues }
+        )
+      }
+      async parseAsync(e, s) {
+        let r = await this.safeParseAsync(e, s)
+        if (r.success) return r.data
+        throw r.error
+      }
+      async safeParseAsync(e, s) {
+        let r = {
+            common: { issues: [], contextualErrorMap: s?.errorMap, async: !0 },
+            path: s?.path || [],
+            schemaErrorMap: this._def.errorMap,
+            parent: null,
+            data: e,
+            parsedType: R(e)
+          },
+          n = this._parse({ data: e, path: r.path, parent: r }),
+          a = await (ce(n) ? n : Promise.resolve(n))
+        return Le(r, a)
+      }
+      refine(e, s) {
+        let r = (n) =>
+          typeof s == 'string' || typeof s > 'u'
+            ? { message: s }
+            : typeof s == 'function'
+              ? s(n)
+              : s
+        return this._refinement((n, a) => {
+          let o = e(n),
+            i = () => a.addIssue({ code: c.custom, ...r(n) })
+          return typeof Promise < 'u' && o instanceof Promise
+            ? o.then((d) => (d ? !0 : (i(), !1)))
+            : o
+              ? !0
+              : (i(), !1)
+        })
+      }
+      refinement(e, s) {
+        return this._refinement((r, n) =>
+          e(r) ? !0 : (n.addIssue(typeof s == 'function' ? s(r, n) : s), !1)
+        )
+      }
+      _refinement(e) {
+        return new E({
+          schema: this,
+          typeName: g.ZodEffects,
+          effect: { type: 'refinement', refinement: e }
+        })
+      }
+      superRefine(e) {
+        return this._refinement(e)
+      }
+      constructor(e) {
+        ;((this.spa = this.safeParseAsync),
+          (this._def = e),
+          (this.parse = this.parse.bind(this)),
+          (this.safeParse = this.safeParse.bind(this)),
+          (this.parseAsync = this.parseAsync.bind(this)),
+          (this.safeParseAsync = this.safeParseAsync.bind(this)),
+          (this.spa = this.spa.bind(this)),
+          (this.refine = this.refine.bind(this)),
+          (this.refinement = this.refinement.bind(this)),
+          (this.superRefine = this.superRefine.bind(this)),
+          (this.optional = this.optional.bind(this)),
+          (this.nullable = this.nullable.bind(this)),
+          (this.nullish = this.nullish.bind(this)),
+          (this.array = this.array.bind(this)),
+          (this.promise = this.promise.bind(this)),
+          (this.or = this.or.bind(this)),
+          (this.and = this.and.bind(this)),
+          (this.transform = this.transform.bind(this)),
+          (this.brand = this.brand.bind(this)),
+          (this.default = this.default.bind(this)),
+          (this.catch = this.catch.bind(this)),
+          (this.describe = this.describe.bind(this)),
+          (this.pipe = this.pipe.bind(this)),
+          (this.readonly = this.readonly.bind(this)),
+          (this.isNullable = this.isNullable.bind(this)),
+          (this.isOptional = this.isOptional.bind(this)),
+          (this['~standard'] = {
+            version: 1,
+            vendor: 'zod',
+            validate: (s) => this['~validate'](s)
+          }))
+      }
+      optional() {
+        return P.create(this, this._def)
+      }
+      nullable() {
+        return F.create(this, this._def)
+      }
+      nullish() {
+        return this.nullable().optional()
+      }
+      array() {
+        return $.create(this)
+      }
+      promise() {
+        return D.create(this, this._def)
+      }
+      or(e) {
+        return Q.create([this, e], this._def)
+      }
+      and(e) {
+        return K.create(this, e, this._def)
+      }
+      transform(e) {
+        return new E({
+          ...y(this._def),
+          schema: this,
+          typeName: g.ZodEffects,
+          effect: { type: 'transform', transform: e }
+        })
+      }
+      default(e) {
+        let s = typeof e == 'function' ? e : () => e
+        return new ne({ ...y(this._def), innerType: this, defaultValue: s, typeName: g.ZodDefault })
+      }
+      brand() {
+        return new ge({ typeName: g.ZodBranded, type: this, ...y(this._def) })
+      }
+      catch(e) {
+        let s = typeof e == 'function' ? e : () => e
+        return new ae({ ...y(this._def), innerType: this, catchValue: s, typeName: g.ZodCatch })
+      }
+      describe(e) {
+        let s = this.constructor
+        return new s({ ...this._def, description: e })
+      }
+      pipe(e) {
+        return ye.create(this, e)
+      }
+      readonly() {
+        return ie.create(this)
+      }
+      isOptional() {
+        return this.safeParse(void 0).success
+      }
+      isNullable() {
+        return this.safeParse(null).success
+      }
+    },
+    yt = /^c[^\s-]{8,}$/i,
+    _t = /^[0-9a-z]+$/,
+    vt = /^[0-9A-HJKMNP-TV-Z]{26}$/i,
+    xt = /^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$/i,
+    bt = /^[a-z0-9_-]{21}$/i,
+    kt = /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/,
+    wt =
+      /^[-+]?P(?!$)(?:(?:[-+]?\d+Y)|(?:[-+]?\d+[.,]\d+Y$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:(?:[-+]?\d+W)|(?:[-+]?\d+[.,]\d+W$))?(?:(?:[-+]?\d+D)|(?:[-+]?\d+[.,]\d+D$))?(?:T(?=[\d+-])(?:(?:[-+]?\d+H)|(?:[-+]?\d+[.,]\d+H$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:[-+]?\d+(?:[.,]\d+)?S)?)??$/,
+    Tt = /^(?!\.)(?!.*\.\.)([A-Z0-9_'+\-\.]*)[A-Z0-9_+-]@([A-Z0-9][A-Z0-9\-]*\.)+[A-Z]{2,}$/i,
+    St = '^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$',
+    Ne,
+    It =
+      /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/,
+    Pt =
+      /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/(3[0-2]|[12]?[0-9])$/,
+    At =
+      /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$/,
+    Et =
+      /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/,
+    Nt = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/,
+    Ct = /^([0-9a-zA-Z-_]{4})*(([0-9a-zA-Z-_]{2}(==)?)|([0-9a-zA-Z-_]{3}(=)?))?$/,
+    De =
+      '((\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-((0[13578]|1[02])-(0[1-9]|[12]\\d|3[01])|(0[469]|11)-(0[1-9]|[12]\\d|30)|(02)-(0[1-9]|1\\d|2[0-8])))',
+    Rt = new RegExp(`^${De}$`)
+  function Ue(t) {
+    let e = '[0-5]\\d'
+    t.precision ? (e = `${e}\\.\\d{${t.precision}}`) : t.precision == null && (e = `${e}(\\.\\d+)?`)
+    let s = t.precision ? '+' : '?'
+    return `([01]\\d|2[0-3]):[0-5]\\d(:${e})${s}`
+  }
+  function Ot(t) {
+    return new RegExp(`^${Ue(t)}$`)
+  }
+  function Be(t) {
+    let e = `${De}T${Ue(t)}`,
+      s = []
+    return (
+      s.push(t.local ? 'Z?' : 'Z'),
+      t.offset && s.push('([+-]\\d{2}:?\\d{2})'),
+      (e = `${e}(${s.join('|')})`),
+      new RegExp(`^${e}$`)
+    )
+  }
+  function Ft(t, e) {
+    return !!(((e === 'v4' || !e) && It.test(t)) || ((e === 'v6' || !e) && At.test(t)))
+  }
+  function jt(t, e) {
+    if (!kt.test(t)) return !1
+    try {
+      let [s] = t.split('.')
+      if (!s) return !1
+      let r = s
+          .replace(/-/g, '+')
+          .replace(/_/g, '/')
+          .padEnd(s.length + ((4 - (s.length % 4)) % 4), '='),
+        n = JSON.parse(atob(r))
+      return !(
+        typeof n != 'object' ||
+        n === null ||
+        ('typ' in n && n?.typ !== 'JWT') ||
+        !n.alg ||
+        (e && n.alg !== e)
+      )
+    } catch {
+      return !1
+    }
+  }
+  function Mt(t, e) {
+    return !!(((e === 'v4' || !e) && Pt.test(t)) || ((e === 'v6' || !e) && Et.test(t)))
+  }
+  var L = class t extends _ {
+    _parse(e) {
+      if ((this._def.coerce && (e.data = String(e.data)), this._getType(e) !== f.string)) {
+        let a = this._getOrReturnCtx(e)
+        return (u(a, { code: c.invalid_type, expected: f.string, received: a.parsedType }), m)
+      }
+      let r = new k(),
+        n
+      for (let a of this._def.checks)
+        if (a.kind === 'min')
+          e.data.length < a.value &&
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, {
+              code: c.too_small,
+              minimum: a.value,
+              type: 'string',
+              inclusive: !0,
+              exact: !1,
+              message: a.message
+            }),
+            r.dirty())
+        else if (a.kind === 'max')
+          e.data.length > a.value &&
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, {
+              code: c.too_big,
+              maximum: a.value,
+              type: 'string',
+              inclusive: !0,
+              exact: !1,
+              message: a.message
+            }),
+            r.dirty())
+        else if (a.kind === 'length') {
+          let o = e.data.length > a.value,
+            i = e.data.length < a.value
+          ;(o || i) &&
+            ((n = this._getOrReturnCtx(e, n)),
+            o
+              ? u(n, {
+                  code: c.too_big,
+                  maximum: a.value,
+                  type: 'string',
+                  inclusive: !0,
+                  exact: !0,
+                  message: a.message
+                })
+              : i &&
+                u(n, {
+                  code: c.too_small,
+                  minimum: a.value,
+                  type: 'string',
+                  inclusive: !0,
+                  exact: !0,
+                  message: a.message
+                }),
+            r.dirty())
+        } else if (a.kind === 'email')
+          Tt.test(e.data) ||
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, { validation: 'email', code: c.invalid_string, message: a.message }),
+            r.dirty())
+        else if (a.kind === 'emoji')
+          (Ne || (Ne = new RegExp(St, 'u')),
+            Ne.test(e.data) ||
+              ((n = this._getOrReturnCtx(e, n)),
+              u(n, { validation: 'emoji', code: c.invalid_string, message: a.message }),
+              r.dirty()))
+        else if (a.kind === 'uuid')
+          xt.test(e.data) ||
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, { validation: 'uuid', code: c.invalid_string, message: a.message }),
+            r.dirty())
+        else if (a.kind === 'nanoid')
+          bt.test(e.data) ||
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, { validation: 'nanoid', code: c.invalid_string, message: a.message }),
+            r.dirty())
+        else if (a.kind === 'cuid')
+          yt.test(e.data) ||
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, { validation: 'cuid', code: c.invalid_string, message: a.message }),
+            r.dirty())
+        else if (a.kind === 'cuid2')
+          _t.test(e.data) ||
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, { validation: 'cuid2', code: c.invalid_string, message: a.message }),
+            r.dirty())
+        else if (a.kind === 'ulid')
+          vt.test(e.data) ||
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, { validation: 'ulid', code: c.invalid_string, message: a.message }),
+            r.dirty())
+        else if (a.kind === 'url')
+          try {
+            new URL(e.data)
+          } catch {
+            ;((n = this._getOrReturnCtx(e, n)),
+              u(n, { validation: 'url', code: c.invalid_string, message: a.message }),
+              r.dirty())
+          }
+        else
+          a.kind === 'regex'
+            ? ((a.regex.lastIndex = 0),
+              a.regex.test(e.data) ||
+                ((n = this._getOrReturnCtx(e, n)),
+                u(n, { validation: 'regex', code: c.invalid_string, message: a.message }),
+                r.dirty()))
+            : a.kind === 'trim'
+              ? (e.data = e.data.trim())
+              : a.kind === 'includes'
+                ? e.data.includes(a.value, a.position) ||
+                  ((n = this._getOrReturnCtx(e, n)),
+                  u(n, {
+                    code: c.invalid_string,
+                    validation: { includes: a.value, position: a.position },
+                    message: a.message
+                  }),
+                  r.dirty())
+                : a.kind === 'toLowerCase'
+                  ? (e.data = e.data.toLowerCase())
+                  : a.kind === 'toUpperCase'
+                    ? (e.data = e.data.toUpperCase())
+                    : a.kind === 'startsWith'
+                      ? e.data.startsWith(a.value) ||
+                        ((n = this._getOrReturnCtx(e, n)),
+                        u(n, {
+                          code: c.invalid_string,
+                          validation: { startsWith: a.value },
+                          message: a.message
+                        }),
+                        r.dirty())
+                      : a.kind === 'endsWith'
+                        ? e.data.endsWith(a.value) ||
+                          ((n = this._getOrReturnCtx(e, n)),
+                          u(n, {
+                            code: c.invalid_string,
+                            validation: { endsWith: a.value },
+                            message: a.message
+                          }),
+                          r.dirty())
+                        : a.kind === 'datetime'
+                          ? Be(a).test(e.data) ||
+                            ((n = this._getOrReturnCtx(e, n)),
+                            u(n, {
+                              code: c.invalid_string,
+                              validation: 'datetime',
+                              message: a.message
+                            }),
+                            r.dirty())
+                          : a.kind === 'date'
+                            ? Rt.test(e.data) ||
+                              ((n = this._getOrReturnCtx(e, n)),
+                              u(n, {
+                                code: c.invalid_string,
+                                validation: 'date',
+                                message: a.message
+                              }),
+                              r.dirty())
+                            : a.kind === 'time'
+                              ? Ot(a).test(e.data) ||
+                                ((n = this._getOrReturnCtx(e, n)),
+                                u(n, {
+                                  code: c.invalid_string,
+                                  validation: 'time',
+                                  message: a.message
+                                }),
+                                r.dirty())
+                              : a.kind === 'duration'
+                                ? wt.test(e.data) ||
+                                  ((n = this._getOrReturnCtx(e, n)),
+                                  u(n, {
+                                    validation: 'duration',
+                                    code: c.invalid_string,
+                                    message: a.message
+                                  }),
+                                  r.dirty())
+                                : a.kind === 'ip'
+                                  ? Ft(e.data, a.version) ||
+                                    ((n = this._getOrReturnCtx(e, n)),
+                                    u(n, {
+                                      validation: 'ip',
+                                      code: c.invalid_string,
+                                      message: a.message
+                                    }),
+                                    r.dirty())
+                                  : a.kind === 'jwt'
+                                    ? jt(e.data, a.alg) ||
+                                      ((n = this._getOrReturnCtx(e, n)),
+                                      u(n, {
+                                        validation: 'jwt',
+                                        code: c.invalid_string,
+                                        message: a.message
+                                      }),
+                                      r.dirty())
+                                    : a.kind === 'cidr'
+                                      ? Mt(e.data, a.version) ||
+                                        ((n = this._getOrReturnCtx(e, n)),
+                                        u(n, {
+                                          validation: 'cidr',
+                                          code: c.invalid_string,
+                                          message: a.message
+                                        }),
+                                        r.dirty())
+                                      : a.kind === 'base64'
+                                        ? Nt.test(e.data) ||
+                                          ((n = this._getOrReturnCtx(e, n)),
+                                          u(n, {
+                                            validation: 'base64',
+                                            code: c.invalid_string,
+                                            message: a.message
+                                          }),
+                                          r.dirty())
+                                        : a.kind === 'base64url'
+                                          ? Ct.test(e.data) ||
+                                            ((n = this._getOrReturnCtx(e, n)),
+                                            u(n, {
+                                              validation: 'base64url',
+                                              code: c.invalid_string,
+                                              message: a.message
+                                            }),
+                                            r.dirty())
+                                          : x.assertNever(a)
+      return { status: r.value, value: e.data }
+    }
+    _regex(e, s, r) {
+      return this.refinement((n) => e.test(n), {
+        validation: s,
+        code: c.invalid_string,
+        ...h.errToObj(r)
+      })
+    }
+    _addCheck(e) {
+      return new t({ ...this._def, checks: [...this._def.checks, e] })
+    }
+    email(e) {
+      return this._addCheck({ kind: 'email', ...h.errToObj(e) })
+    }
+    url(e) {
+      return this._addCheck({ kind: 'url', ...h.errToObj(e) })
+    }
+    emoji(e) {
+      return this._addCheck({ kind: 'emoji', ...h.errToObj(e) })
+    }
+    uuid(e) {
+      return this._addCheck({ kind: 'uuid', ...h.errToObj(e) })
+    }
+    nanoid(e) {
+      return this._addCheck({ kind: 'nanoid', ...h.errToObj(e) })
+    }
+    cuid(e) {
+      return this._addCheck({ kind: 'cuid', ...h.errToObj(e) })
+    }
+    cuid2(e) {
+      return this._addCheck({ kind: 'cuid2', ...h.errToObj(e) })
+    }
+    ulid(e) {
+      return this._addCheck({ kind: 'ulid', ...h.errToObj(e) })
+    }
+    base64(e) {
+      return this._addCheck({ kind: 'base64', ...h.errToObj(e) })
+    }
+    base64url(e) {
+      return this._addCheck({ kind: 'base64url', ...h.errToObj(e) })
+    }
+    jwt(e) {
+      return this._addCheck({ kind: 'jwt', ...h.errToObj(e) })
+    }
+    ip(e) {
+      return this._addCheck({ kind: 'ip', ...h.errToObj(e) })
+    }
+    cidr(e) {
+      return this._addCheck({ kind: 'cidr', ...h.errToObj(e) })
+    }
+    datetime(e) {
+      return typeof e == 'string'
+        ? this._addCheck({ kind: 'datetime', precision: null, offset: !1, local: !1, message: e })
+        : this._addCheck({
+            kind: 'datetime',
+            precision: typeof e?.precision > 'u' ? null : e?.precision,
+            offset: e?.offset ?? !1,
+            local: e?.local ?? !1,
+            ...h.errToObj(e?.message)
+          })
+    }
+    date(e) {
+      return this._addCheck({ kind: 'date', message: e })
+    }
+    time(e) {
+      return typeof e == 'string'
+        ? this._addCheck({ kind: 'time', precision: null, message: e })
+        : this._addCheck({
+            kind: 'time',
+            precision: typeof e?.precision > 'u' ? null : e?.precision,
+            ...h.errToObj(e?.message)
+          })
+    }
+    duration(e) {
+      return this._addCheck({ kind: 'duration', ...h.errToObj(e) })
+    }
+    regex(e, s) {
+      return this._addCheck({ kind: 'regex', regex: e, ...h.errToObj(s) })
+    }
+    includes(e, s) {
+      return this._addCheck({
+        kind: 'includes',
+        value: e,
+        position: s?.position,
+        ...h.errToObj(s?.message)
+      })
+    }
+    startsWith(e, s) {
+      return this._addCheck({ kind: 'startsWith', value: e, ...h.errToObj(s) })
+    }
+    endsWith(e, s) {
+      return this._addCheck({ kind: 'endsWith', value: e, ...h.errToObj(s) })
+    }
+    min(e, s) {
+      return this._addCheck({ kind: 'min', value: e, ...h.errToObj(s) })
+    }
+    max(e, s) {
+      return this._addCheck({ kind: 'max', value: e, ...h.errToObj(s) })
+    }
+    length(e, s) {
+      return this._addCheck({ kind: 'length', value: e, ...h.errToObj(s) })
+    }
+    nonempty(e) {
+      return this.min(1, h.errToObj(e))
+    }
+    trim() {
+      return new t({ ...this._def, checks: [...this._def.checks, { kind: 'trim' }] })
+    }
+    toLowerCase() {
+      return new t({ ...this._def, checks: [...this._def.checks, { kind: 'toLowerCase' }] })
+    }
+    toUpperCase() {
+      return new t({ ...this._def, checks: [...this._def.checks, { kind: 'toUpperCase' }] })
+    }
+    get isDatetime() {
+      return !!this._def.checks.find((e) => e.kind === 'datetime')
+    }
+    get isDate() {
+      return !!this._def.checks.find((e) => e.kind === 'date')
+    }
+    get isTime() {
+      return !!this._def.checks.find((e) => e.kind === 'time')
+    }
+    get isDuration() {
+      return !!this._def.checks.find((e) => e.kind === 'duration')
+    }
+    get isEmail() {
+      return !!this._def.checks.find((e) => e.kind === 'email')
+    }
+    get isURL() {
+      return !!this._def.checks.find((e) => e.kind === 'url')
+    }
+    get isEmoji() {
+      return !!this._def.checks.find((e) => e.kind === 'emoji')
+    }
+    get isUUID() {
+      return !!this._def.checks.find((e) => e.kind === 'uuid')
+    }
+    get isNANOID() {
+      return !!this._def.checks.find((e) => e.kind === 'nanoid')
+    }
+    get isCUID() {
+      return !!this._def.checks.find((e) => e.kind === 'cuid')
+    }
+    get isCUID2() {
+      return !!this._def.checks.find((e) => e.kind === 'cuid2')
+    }
+    get isULID() {
+      return !!this._def.checks.find((e) => e.kind === 'ulid')
+    }
+    get isIP() {
+      return !!this._def.checks.find((e) => e.kind === 'ip')
+    }
+    get isCIDR() {
+      return !!this._def.checks.find((e) => e.kind === 'cidr')
+    }
+    get isBase64() {
+      return !!this._def.checks.find((e) => e.kind === 'base64')
+    }
+    get isBase64url() {
+      return !!this._def.checks.find((e) => e.kind === 'base64url')
+    }
+    get minLength() {
+      let e = null
+      for (let s of this._def.checks)
+        s.kind === 'min' && (e === null || s.value > e) && (e = s.value)
+      return e
+    }
+    get maxLength() {
+      let e = null
+      for (let s of this._def.checks)
+        s.kind === 'max' && (e === null || s.value < e) && (e = s.value)
+      return e
+    }
+  }
+  L.create = (t) => new L({ checks: [], typeName: g.ZodString, coerce: t?.coerce ?? !1, ...y(t) })
+  function Zt(t, e) {
+    let s = (t.toString().split('.')[1] || '').length,
+      r = (e.toString().split('.')[1] || '').length,
+      n = s > r ? s : r,
+      a = Number.parseInt(t.toFixed(n).replace('.', '')),
+      o = Number.parseInt(e.toFixed(n).replace('.', ''))
+    return (a % o) / 10 ** n
+  }
+  var q = class t extends _ {
+    constructor() {
+      ;(super(...arguments),
+        (this.min = this.gte),
+        (this.max = this.lte),
+        (this.step = this.multipleOf))
+    }
+    _parse(e) {
+      if ((this._def.coerce && (e.data = Number(e.data)), this._getType(e) !== f.number)) {
+        let a = this._getOrReturnCtx(e)
+        return (u(a, { code: c.invalid_type, expected: f.number, received: a.parsedType }), m)
+      }
+      let r,
+        n = new k()
+      for (let a of this._def.checks)
+        a.kind === 'int'
+          ? x.isInteger(e.data) ||
+            ((r = this._getOrReturnCtx(e, r)),
+            u(r, {
+              code: c.invalid_type,
+              expected: 'integer',
+              received: 'float',
+              message: a.message
+            }),
+            n.dirty())
+          : a.kind === 'min'
+            ? (a.inclusive ? e.data < a.value : e.data <= a.value) &&
+              ((r = this._getOrReturnCtx(e, r)),
+              u(r, {
+                code: c.too_small,
+                minimum: a.value,
+                type: 'number',
+                inclusive: a.inclusive,
+                exact: !1,
+                message: a.message
+              }),
+              n.dirty())
+            : a.kind === 'max'
+              ? (a.inclusive ? e.data > a.value : e.data >= a.value) &&
+                ((r = this._getOrReturnCtx(e, r)),
+                u(r, {
+                  code: c.too_big,
+                  maximum: a.value,
+                  type: 'number',
+                  inclusive: a.inclusive,
+                  exact: !1,
+                  message: a.message
+                }),
+                n.dirty())
+              : a.kind === 'multipleOf'
+                ? Zt(e.data, a.value) !== 0 &&
+                  ((r = this._getOrReturnCtx(e, r)),
+                  u(r, { code: c.not_multiple_of, multipleOf: a.value, message: a.message }),
+                  n.dirty())
+                : a.kind === 'finite'
+                  ? Number.isFinite(e.data) ||
+                    ((r = this._getOrReturnCtx(e, r)),
+                    u(r, { code: c.not_finite, message: a.message }),
+                    n.dirty())
+                  : x.assertNever(a)
+      return { status: n.value, value: e.data }
+    }
+    gte(e, s) {
+      return this.setLimit('min', e, !0, h.toString(s))
+    }
+    gt(e, s) {
+      return this.setLimit('min', e, !1, h.toString(s))
+    }
+    lte(e, s) {
+      return this.setLimit('max', e, !0, h.toString(s))
+    }
+    lt(e, s) {
+      return this.setLimit('max', e, !1, h.toString(s))
+    }
+    setLimit(e, s, r, n) {
+      return new t({
+        ...this._def,
+        checks: [...this._def.checks, { kind: e, value: s, inclusive: r, message: h.toString(n) }]
+      })
+    }
+    _addCheck(e) {
+      return new t({ ...this._def, checks: [...this._def.checks, e] })
+    }
+    int(e) {
+      return this._addCheck({ kind: 'int', message: h.toString(e) })
+    }
+    positive(e) {
+      return this._addCheck({ kind: 'min', value: 0, inclusive: !1, message: h.toString(e) })
+    }
+    negative(e) {
+      return this._addCheck({ kind: 'max', value: 0, inclusive: !1, message: h.toString(e) })
+    }
+    nonpositive(e) {
+      return this._addCheck({ kind: 'max', value: 0, inclusive: !0, message: h.toString(e) })
+    }
+    nonnegative(e) {
+      return this._addCheck({ kind: 'min', value: 0, inclusive: !0, message: h.toString(e) })
+    }
+    multipleOf(e, s) {
+      return this._addCheck({ kind: 'multipleOf', value: e, message: h.toString(s) })
+    }
+    finite(e) {
+      return this._addCheck({ kind: 'finite', message: h.toString(e) })
+    }
+    safe(e) {
+      return this._addCheck({
+        kind: 'min',
+        inclusive: !0,
+        value: Number.MIN_SAFE_INTEGER,
+        message: h.toString(e)
+      })._addCheck({
+        kind: 'max',
+        inclusive: !0,
+        value: Number.MAX_SAFE_INTEGER,
+        message: h.toString(e)
+      })
+    }
+    get minValue() {
+      let e = null
+      for (let s of this._def.checks)
+        s.kind === 'min' && (e === null || s.value > e) && (e = s.value)
+      return e
+    }
+    get maxValue() {
+      let e = null
+      for (let s of this._def.checks)
+        s.kind === 'max' && (e === null || s.value < e) && (e = s.value)
+      return e
+    }
+    get isInt() {
+      return !!this._def.checks.find(
+        (e) => e.kind === 'int' || (e.kind === 'multipleOf' && x.isInteger(e.value))
+      )
+    }
+    get isFinite() {
+      let e = null,
+        s = null
+      for (let r of this._def.checks) {
+        if (r.kind === 'finite' || r.kind === 'int' || r.kind === 'multipleOf') return !0
+        r.kind === 'min'
+          ? (s === null || r.value > s) && (s = r.value)
+          : r.kind === 'max' && (e === null || r.value < e) && (e = r.value)
+      }
+      return Number.isFinite(s) && Number.isFinite(e)
+    }
+  }
+  q.create = (t) => new q({ checks: [], typeName: g.ZodNumber, coerce: t?.coerce || !1, ...y(t) })
+  var W = class t extends _ {
+    constructor() {
+      ;(super(...arguments), (this.min = this.gte), (this.max = this.lte))
+    }
+    _parse(e) {
+      if (this._def.coerce)
+        try {
+          e.data = BigInt(e.data)
+        } catch {
+          return this._getInvalidInput(e)
+        }
+      if (this._getType(e) !== f.bigint) return this._getInvalidInput(e)
+      let r,
+        n = new k()
+      for (let a of this._def.checks)
+        a.kind === 'min'
+          ? (a.inclusive ? e.data < a.value : e.data <= a.value) &&
+            ((r = this._getOrReturnCtx(e, r)),
+            u(r, {
+              code: c.too_small,
+              type: 'bigint',
+              minimum: a.value,
+              inclusive: a.inclusive,
+              message: a.message
+            }),
+            n.dirty())
+          : a.kind === 'max'
+            ? (a.inclusive ? e.data > a.value : e.data >= a.value) &&
+              ((r = this._getOrReturnCtx(e, r)),
+              u(r, {
+                code: c.too_big,
+                type: 'bigint',
+                maximum: a.value,
+                inclusive: a.inclusive,
+                message: a.message
+              }),
+              n.dirty())
+            : a.kind === 'multipleOf'
+              ? e.data % a.value !== BigInt(0) &&
+                ((r = this._getOrReturnCtx(e, r)),
+                u(r, { code: c.not_multiple_of, multipleOf: a.value, message: a.message }),
+                n.dirty())
+              : x.assertNever(a)
+      return { status: n.value, value: e.data }
+    }
+    _getInvalidInput(e) {
+      let s = this._getOrReturnCtx(e)
+      return (u(s, { code: c.invalid_type, expected: f.bigint, received: s.parsedType }), m)
+    }
+    gte(e, s) {
+      return this.setLimit('min', e, !0, h.toString(s))
+    }
+    gt(e, s) {
+      return this.setLimit('min', e, !1, h.toString(s))
+    }
+    lte(e, s) {
+      return this.setLimit('max', e, !0, h.toString(s))
+    }
+    lt(e, s) {
+      return this.setLimit('max', e, !1, h.toString(s))
+    }
+    setLimit(e, s, r, n) {
+      return new t({
+        ...this._def,
+        checks: [...this._def.checks, { kind: e, value: s, inclusive: r, message: h.toString(n) }]
+      })
+    }
+    _addCheck(e) {
+      return new t({ ...this._def, checks: [...this._def.checks, e] })
+    }
+    positive(e) {
+      return this._addCheck({
+        kind: 'min',
+        value: BigInt(0),
+        inclusive: !1,
+        message: h.toString(e)
+      })
+    }
+    negative(e) {
+      return this._addCheck({
+        kind: 'max',
+        value: BigInt(0),
+        inclusive: !1,
+        message: h.toString(e)
+      })
+    }
+    nonpositive(e) {
+      return this._addCheck({
+        kind: 'max',
+        value: BigInt(0),
+        inclusive: !0,
+        message: h.toString(e)
+      })
+    }
+    nonnegative(e) {
+      return this._addCheck({
+        kind: 'min',
+        value: BigInt(0),
+        inclusive: !0,
+        message: h.toString(e)
+      })
+    }
+    multipleOf(e, s) {
+      return this._addCheck({ kind: 'multipleOf', value: e, message: h.toString(s) })
+    }
+    get minValue() {
+      let e = null
+      for (let s of this._def.checks)
+        s.kind === 'min' && (e === null || s.value > e) && (e = s.value)
+      return e
+    }
+    get maxValue() {
+      let e = null
+      for (let s of this._def.checks)
+        s.kind === 'max' && (e === null || s.value < e) && (e = s.value)
+      return e
+    }
+  }
+  W.create = (t) => new W({ checks: [], typeName: g.ZodBigInt, coerce: t?.coerce ?? !1, ...y(t) })
+  var J = class extends _ {
+    _parse(e) {
+      if ((this._def.coerce && (e.data = !!e.data), this._getType(e) !== f.boolean)) {
+        let r = this._getOrReturnCtx(e)
+        return (u(r, { code: c.invalid_type, expected: f.boolean, received: r.parsedType }), m)
+      }
+      return w(e.data)
+    }
+  }
+  J.create = (t) => new J({ typeName: g.ZodBoolean, coerce: t?.coerce || !1, ...y(t) })
+  var H = class t extends _ {
+    _parse(e) {
+      if ((this._def.coerce && (e.data = new Date(e.data)), this._getType(e) !== f.date)) {
+        let a = this._getOrReturnCtx(e)
+        return (u(a, { code: c.invalid_type, expected: f.date, received: a.parsedType }), m)
+      }
+      if (Number.isNaN(e.data.getTime())) {
+        let a = this._getOrReturnCtx(e)
+        return (u(a, { code: c.invalid_date }), m)
+      }
+      let r = new k(),
+        n
+      for (let a of this._def.checks)
+        a.kind === 'min'
+          ? e.data.getTime() < a.value &&
+            ((n = this._getOrReturnCtx(e, n)),
+            u(n, {
+              code: c.too_small,
+              message: a.message,
+              inclusive: !0,
+              exact: !1,
+              minimum: a.value,
+              type: 'date'
+            }),
+            r.dirty())
+          : a.kind === 'max'
+            ? e.data.getTime() > a.value &&
+              ((n = this._getOrReturnCtx(e, n)),
+              u(n, {
+                code: c.too_big,
+                message: a.message,
+                inclusive: !0,
+                exact: !1,
+                maximum: a.value,
+                type: 'date'
+              }),
+              r.dirty())
+            : x.assertNever(a)
+      return { status: r.value, value: new Date(e.data.getTime()) }
+    }
+    _addCheck(e) {
+      return new t({ ...this._def, checks: [...this._def.checks, e] })
+    }
+    min(e, s) {
+      return this._addCheck({ kind: 'min', value: e.getTime(), message: h.toString(s) })
+    }
+    max(e, s) {
+      return this._addCheck({ kind: 'max', value: e.getTime(), message: h.toString(s) })
+    }
+    get minDate() {
+      let e = null
+      for (let s of this._def.checks)
+        s.kind === 'min' && (e === null || s.value > e) && (e = s.value)
+      return e != null ? new Date(e) : null
+    }
+    get maxDate() {
+      let e = null
+      for (let s of this._def.checks)
+        s.kind === 'max' && (e === null || s.value < e) && (e = s.value)
+      return e != null ? new Date(e) : null
+    }
+  }
+  H.create = (t) => new H({ checks: [], coerce: t?.coerce || !1, typeName: g.ZodDate, ...y(t) })
+  var ue = class extends _ {
+    _parse(e) {
+      if (this._getType(e) !== f.symbol) {
+        let r = this._getOrReturnCtx(e)
+        return (u(r, { code: c.invalid_type, expected: f.symbol, received: r.parsedType }), m)
+      }
+      return w(e.data)
+    }
+  }
+  ue.create = (t) => new ue({ typeName: g.ZodSymbol, ...y(t) })
+  var X = class extends _ {
+    _parse(e) {
+      if (this._getType(e) !== f.undefined) {
+        let r = this._getOrReturnCtx(e)
+        return (u(r, { code: c.invalid_type, expected: f.undefined, received: r.parsedType }), m)
+      }
+      return w(e.data)
+    }
+  }
+  X.create = (t) => new X({ typeName: g.ZodUndefined, ...y(t) })
+  var Y = class extends _ {
+    _parse(e) {
+      if (this._getType(e) !== f.null) {
+        let r = this._getOrReturnCtx(e)
+        return (u(r, { code: c.invalid_type, expected: f.null, received: r.parsedType }), m)
+      }
+      return w(e.data)
+    }
+  }
+  Y.create = (t) => new Y({ typeName: g.ZodNull, ...y(t) })
+  var V = class extends _ {
+    constructor() {
+      ;(super(...arguments), (this._any = !0))
+    }
+    _parse(e) {
+      return w(e.data)
+    }
+  }
+  V.create = (t) => new V({ typeName: g.ZodAny, ...y(t) })
+  var Z = class extends _ {
+    constructor() {
+      ;(super(...arguments), (this._unknown = !0))
+    }
+    _parse(e) {
+      return w(e.data)
+    }
+  }
+  Z.create = (t) => new Z({ typeName: g.ZodUnknown, ...y(t) })
+  var N = class extends _ {
+    _parse(e) {
+      let s = this._getOrReturnCtx(e)
+      return (u(s, { code: c.invalid_type, expected: f.never, received: s.parsedType }), m)
+    }
+  }
+  N.create = (t) => new N({ typeName: g.ZodNever, ...y(t) })
+  var le = class extends _ {
+    _parse(e) {
+      if (this._getType(e) !== f.undefined) {
+        let r = this._getOrReturnCtx(e)
+        return (u(r, { code: c.invalid_type, expected: f.void, received: r.parsedType }), m)
+      }
+      return w(e.data)
+    }
+  }
+  le.create = (t) => new le({ typeName: g.ZodVoid, ...y(t) })
+  var $ = class t extends _ {
+    _parse(e) {
+      let { ctx: s, status: r } = this._processInputParams(e),
+        n = this._def
+      if (s.parsedType !== f.array)
+        return (u(s, { code: c.invalid_type, expected: f.array, received: s.parsedType }), m)
+      if (n.exactLength !== null) {
+        let o = s.data.length > n.exactLength.value,
+          i = s.data.length < n.exactLength.value
+        ;(o || i) &&
+          (u(s, {
+            code: o ? c.too_big : c.too_small,
+            minimum: i ? n.exactLength.value : void 0,
+            maximum: o ? n.exactLength.value : void 0,
+            type: 'array',
+            inclusive: !0,
+            exact: !0,
+            message: n.exactLength.message
+          }),
+          r.dirty())
+      }
+      if (
+        (n.minLength !== null &&
+          s.data.length < n.minLength.value &&
+          (u(s, {
+            code: c.too_small,
+            minimum: n.minLength.value,
+            type: 'array',
+            inclusive: !0,
+            exact: !1,
+            message: n.minLength.message
+          }),
+          r.dirty()),
+        n.maxLength !== null &&
+          s.data.length > n.maxLength.value &&
+          (u(s, {
+            code: c.too_big,
+            maximum: n.maxLength.value,
+            type: 'array',
+            inclusive: !0,
+            exact: !1,
+            message: n.maxLength.message
+          }),
+          r.dirty()),
+        s.common.async)
+      )
+        return Promise.all(
+          [...s.data].map((o, i) => n.type._parseAsync(new A(s, o, s.path, i)))
+        ).then((o) => k.mergeArray(r, o))
+      let a = [...s.data].map((o, i) => n.type._parseSync(new A(s, o, s.path, i)))
+      return k.mergeArray(r, a)
+    }
+    get element() {
+      return this._def.type
+    }
+    min(e, s) {
+      return new t({ ...this._def, minLength: { value: e, message: h.toString(s) } })
+    }
+    max(e, s) {
+      return new t({ ...this._def, maxLength: { value: e, message: h.toString(s) } })
+    }
+    length(e, s) {
+      return new t({ ...this._def, exactLength: { value: e, message: h.toString(s) } })
+    }
+    nonempty(e) {
+      return this.min(1, e)
+    }
+  }
+  $.create = (t, e) =>
+    new $({
+      type: t,
+      minLength: null,
+      maxLength: null,
+      exactLength: null,
+      typeName: g.ZodArray,
+      ...y(e)
+    })
+  function de(t) {
+    if (t instanceof I) {
+      let e = {}
+      for (let s in t.shape) {
+        let r = t.shape[s]
+        e[s] = P.create(de(r))
+      }
+      return new I({ ...t._def, shape: () => e })
+    } else
+      return t instanceof $
+        ? new $({ ...t._def, type: de(t.element) })
+        : t instanceof P
+          ? P.create(de(t.unwrap()))
+          : t instanceof F
+            ? F.create(de(t.unwrap()))
+            : t instanceof O
+              ? O.create(t.items.map((e) => de(e)))
+              : t
+  }
+  var I = class t extends _ {
+    constructor() {
+      ;(super(...arguments),
+        (this._cached = null),
+        (this.nonstrict = this.passthrough),
+        (this.augment = this.extend))
+    }
+    _getCached() {
+      if (this._cached !== null) return this._cached
+      let e = this._def.shape(),
+        s = x.objectKeys(e)
+      return ((this._cached = { shape: e, keys: s }), this._cached)
+    }
+    _parse(e) {
+      if (this._getType(e) !== f.object) {
+        let l = this._getOrReturnCtx(e)
+        return (u(l, { code: c.invalid_type, expected: f.object, received: l.parsedType }), m)
+      }
+      let { status: r, ctx: n } = this._processInputParams(e),
+        { shape: a, keys: o } = this._getCached(),
+        i = []
+      if (!(this._def.catchall instanceof N && this._def.unknownKeys === 'strip'))
+        for (let l in n.data) o.includes(l) || i.push(l)
+      let d = []
+      for (let l of o) {
+        let v = a[l],
+          T = n.data[l]
+        d.push({
+          key: { status: 'valid', value: l },
+          value: v._parse(new A(n, T, n.path, l)),
+          alwaysSet: l in n.data
+        })
+      }
+      if (this._def.catchall instanceof N) {
+        let l = this._def.unknownKeys
+        if (l === 'passthrough')
+          for (let v of i)
+            d.push({
+              key: { status: 'valid', value: v },
+              value: { status: 'valid', value: n.data[v] }
+            })
+        else if (l === 'strict')
+          i.length > 0 && (u(n, { code: c.unrecognized_keys, keys: i }), r.dirty())
+        else if (l !== 'strip')
+          throw new Error('Internal ZodObject error: invalid unknownKeys value.')
+      } else {
+        let l = this._def.catchall
+        for (let v of i) {
+          let T = n.data[v]
+          d.push({
+            key: { status: 'valid', value: v },
+            value: l._parse(new A(n, T, n.path, v)),
+            alwaysSet: v in n.data
+          })
+        }
+      }
+      return n.common.async
+        ? Promise.resolve()
+            .then(async () => {
+              let l = []
+              for (let v of d) {
+                let T = await v.key,
+                  ve = await v.value
+                l.push({ key: T, value: ve, alwaysSet: v.alwaysSet })
+              }
+              return l
+            })
+            .then((l) => k.mergeObjectSync(r, l))
+        : k.mergeObjectSync(r, d)
+    }
+    get shape() {
+      return this._def.shape()
+    }
+    strict(e) {
+      return (
+        h.errToObj,
+        new t({
+          ...this._def,
+          unknownKeys: 'strict',
+          ...(e !== void 0
+            ? {
+                errorMap: (s, r) => {
+                  let n = this._def.errorMap?.(s, r).message ?? r.defaultError
+                  return s.code === 'unrecognized_keys'
+                    ? { message: h.errToObj(e).message ?? n }
+                    : { message: n }
+                }
+              }
+            : {})
+        })
+      )
+    }
+    strip() {
+      return new t({ ...this._def, unknownKeys: 'strip' })
+    }
+    passthrough() {
+      return new t({ ...this._def, unknownKeys: 'passthrough' })
+    }
+    extend(e) {
+      return new t({ ...this._def, shape: () => ({ ...this._def.shape(), ...e }) })
+    }
+    merge(e) {
+      return new t({
+        unknownKeys: e._def.unknownKeys,
+        catchall: e._def.catchall,
+        shape: () => ({ ...this._def.shape(), ...e._def.shape() }),
+        typeName: g.ZodObject
+      })
+    }
+    setKey(e, s) {
+      return this.augment({ [e]: s })
+    }
+    catchall(e) {
+      return new t({ ...this._def, catchall: e })
+    }
+    pick(e) {
+      let s = {}
+      for (let r of x.objectKeys(e)) e[r] && this.shape[r] && (s[r] = this.shape[r])
+      return new t({ ...this._def, shape: () => s })
+    }
+    omit(e) {
+      let s = {}
+      for (let r of x.objectKeys(this.shape)) e[r] || (s[r] = this.shape[r])
+      return new t({ ...this._def, shape: () => s })
+    }
+    deepPartial() {
+      return de(this)
+    }
+    partial(e) {
+      let s = {}
+      for (let r of x.objectKeys(this.shape)) {
+        let n = this.shape[r]
+        e && !e[r] ? (s[r] = n) : (s[r] = n.optional())
+      }
+      return new t({ ...this._def, shape: () => s })
+    }
+    required(e) {
+      let s = {}
+      for (let r of x.objectKeys(this.shape))
+        if (e && !e[r]) s[r] = this.shape[r]
+        else {
+          let a = this.shape[r]
+          for (; a instanceof P;) a = a._def.innerType
+          s[r] = a
+        }
+      return new t({ ...this._def, shape: () => s })
+    }
+    keyof() {
+      return Ge(x.objectKeys(this.shape))
+    }
+  }
+  I.create = (t, e) =>
+    new I({
+      shape: () => t,
+      unknownKeys: 'strip',
+      catchall: N.create(),
+      typeName: g.ZodObject,
+      ...y(e)
+    })
+  I.strictCreate = (t, e) =>
+    new I({
+      shape: () => t,
+      unknownKeys: 'strict',
+      catchall: N.create(),
+      typeName: g.ZodObject,
+      ...y(e)
+    })
+  I.lazycreate = (t, e) =>
+    new I({ shape: t, unknownKeys: 'strip', catchall: N.create(), typeName: g.ZodObject, ...y(e) })
+  var Q = class extends _ {
+    _parse(e) {
+      let { ctx: s } = this._processInputParams(e),
+        r = this._def.options
+      function n(a) {
+        for (let i of a) if (i.result.status === 'valid') return i.result
+        for (let i of a)
+          if (i.result.status === 'dirty')
+            return (s.common.issues.push(...i.ctx.common.issues), i.result)
+        let o = a.map((i) => new S(i.ctx.common.issues))
+        return (u(s, { code: c.invalid_union, unionErrors: o }), m)
+      }
+      if (s.common.async)
+        return Promise.all(
+          r.map(async (a) => {
+            let o = { ...s, common: { ...s.common, issues: [] }, parent: null }
+            return {
+              result: await a._parseAsync({ data: s.data, path: s.path, parent: o }),
+              ctx: o
+            }
+          })
+        ).then(n)
+      {
+        let a,
+          o = []
+        for (let d of r) {
+          let l = { ...s, common: { ...s.common, issues: [] }, parent: null },
+            v = d._parseSync({ data: s.data, path: s.path, parent: l })
+          if (v.status === 'valid') return v
+          ;(v.status === 'dirty' && !a && (a = { result: v, ctx: l }),
+            l.common.issues.length && o.push(l.common.issues))
+        }
+        if (a) return (s.common.issues.push(...a.ctx.common.issues), a.result)
+        let i = o.map((d) => new S(d))
+        return (u(s, { code: c.invalid_union, unionErrors: i }), m)
+      }
+    }
+    get options() {
+      return this._def.options
+    }
+  }
+  Q.create = (t, e) => new Q({ options: t, typeName: g.ZodUnion, ...y(e) })
+  var M = (t) =>
+      t instanceof ee
+        ? M(t.schema)
+        : t instanceof E
+          ? M(t.innerType())
+          : t instanceof te
+            ? [t.value]
+            : t instanceof se
+              ? t.options
+              : t instanceof re
+                ? x.objectValues(t.enum)
+                : t instanceof ne
+                  ? M(t._def.innerType)
+                  : t instanceof X
+                    ? [void 0]
+                    : t instanceof Y
+                      ? [null]
+                      : t instanceof P
+                        ? [void 0, ...M(t.unwrap())]
+                        : t instanceof F
+                          ? [null, ...M(t.unwrap())]
+                          : t instanceof ge || t instanceof ie
+                            ? M(t.unwrap())
+                            : t instanceof ae
+                              ? M(t._def.innerType)
+                              : [],
+    we = class t extends _ {
+      _parse(e) {
+        let { ctx: s } = this._processInputParams(e)
+        if (s.parsedType !== f.object)
+          return (u(s, { code: c.invalid_type, expected: f.object, received: s.parsedType }), m)
+        let r = this.discriminator,
+          n = s.data[r],
+          a = this.optionsMap.get(n)
+        return a
+          ? s.common.async
+            ? a._parseAsync({ data: s.data, path: s.path, parent: s })
+            : a._parseSync({ data: s.data, path: s.path, parent: s })
+          : (u(s, {
+              code: c.invalid_union_discriminator,
+              options: Array.from(this.optionsMap.keys()),
+              path: [r]
+            }),
+            m)
+      }
+      get discriminator() {
+        return this._def.discriminator
+      }
+      get options() {
+        return this._def.options
+      }
+      get optionsMap() {
+        return this._def.optionsMap
+      }
+      static create(e, s, r) {
+        let n = new Map()
+        for (let a of s) {
+          let o = M(a.shape[e])
+          if (!o.length)
+            throw new Error(
+              `A discriminator value for key \`${e}\` could not be extracted from all schema options`
+            )
+          for (let i of o) {
+            if (n.has(i))
+              throw new Error(
+                `Discriminator property ${String(e)} has duplicate value ${String(i)}`
+              )
+            n.set(i, a)
+          }
+        }
+        return new t({
+          typeName: g.ZodDiscriminatedUnion,
+          discriminator: e,
+          options: s,
+          optionsMap: n,
+          ...y(r)
+        })
+      }
+    }
+  function Ce(t, e) {
+    let s = R(t),
+      r = R(e)
+    if (t === e) return { valid: !0, data: t }
+    if (s === f.object && r === f.object) {
+      let n = x.objectKeys(e),
+        a = x.objectKeys(t).filter((i) => n.indexOf(i) !== -1),
+        o = { ...t, ...e }
+      for (let i of a) {
+        let d = Ce(t[i], e[i])
+        if (!d.valid) return { valid: !1 }
+        o[i] = d.data
+      }
+      return { valid: !0, data: o }
+    } else if (s === f.array && r === f.array) {
+      if (t.length !== e.length) return { valid: !1 }
+      let n = []
+      for (let a = 0; a < t.length; a++) {
+        let o = t[a],
+          i = e[a],
+          d = Ce(o, i)
+        if (!d.valid) return { valid: !1 }
+        n.push(d.data)
+      }
+      return { valid: !0, data: n }
+    } else return s === f.date && r === f.date && +t == +e ? { valid: !0, data: t } : { valid: !1 }
+  }
+  var K = class extends _ {
+    _parse(e) {
+      let { status: s, ctx: r } = this._processInputParams(e),
+        n = (a, o) => {
+          if (be(a) || be(o)) return m
+          let i = Ce(a.value, o.value)
+          return i.valid
+            ? ((ke(a) || ke(o)) && s.dirty(), { status: s.value, value: i.data })
+            : (u(r, { code: c.invalid_intersection_types }), m)
+        }
+      return r.common.async
+        ? Promise.all([
+            this._def.left._parseAsync({ data: r.data, path: r.path, parent: r }),
+            this._def.right._parseAsync({ data: r.data, path: r.path, parent: r })
+          ]).then(([a, o]) => n(a, o))
+        : n(
+            this._def.left._parseSync({ data: r.data, path: r.path, parent: r }),
+            this._def.right._parseSync({ data: r.data, path: r.path, parent: r })
+          )
+    }
+  }
+  K.create = (t, e, s) => new K({ left: t, right: e, typeName: g.ZodIntersection, ...y(s) })
+  var O = class t extends _ {
+    _parse(e) {
+      let { status: s, ctx: r } = this._processInputParams(e)
+      if (r.parsedType !== f.array)
+        return (u(r, { code: c.invalid_type, expected: f.array, received: r.parsedType }), m)
+      if (r.data.length < this._def.items.length)
+        return (
+          u(r, {
+            code: c.too_small,
+            minimum: this._def.items.length,
+            inclusive: !0,
+            exact: !1,
+            type: 'array'
+          }),
+          m
+        )
+      !this._def.rest &&
+        r.data.length > this._def.items.length &&
+        (u(r, {
+          code: c.too_big,
+          maximum: this._def.items.length,
+          inclusive: !0,
+          exact: !1,
+          type: 'array'
+        }),
+        s.dirty())
+      let a = [...r.data]
+        .map((o, i) => {
+          let d = this._def.items[i] || this._def.rest
+          return d ? d._parse(new A(r, o, r.path, i)) : null
+        })
+        .filter((o) => !!o)
+      return r.common.async ? Promise.all(a).then((o) => k.mergeArray(s, o)) : k.mergeArray(s, a)
+    }
+    get items() {
+      return this._def.items
+    }
+    rest(e) {
+      return new t({ ...this._def, rest: e })
+    }
+  }
+  O.create = (t, e) => {
+    if (!Array.isArray(t)) throw new Error('You must pass an array of schemas to z.tuple([ ... ])')
+    return new O({ items: t, typeName: g.ZodTuple, rest: null, ...y(e) })
+  }
+  var Te = class t extends _ {
+      get keySchema() {
+        return this._def.keyType
+      }
+      get valueSchema() {
+        return this._def.valueType
+      }
+      _parse(e) {
+        let { status: s, ctx: r } = this._processInputParams(e)
+        if (r.parsedType !== f.object)
+          return (u(r, { code: c.invalid_type, expected: f.object, received: r.parsedType }), m)
+        let n = [],
+          a = this._def.keyType,
+          o = this._def.valueType
+        for (let i in r.data)
+          n.push({
+            key: a._parse(new A(r, i, r.path, i)),
+            value: o._parse(new A(r, r.data[i], r.path, i)),
+            alwaysSet: i in r.data
+          })
+        return r.common.async ? k.mergeObjectAsync(s, n) : k.mergeObjectSync(s, n)
+      }
+      get element() {
+        return this._def.valueType
+      }
+      static create(e, s, r) {
+        return s instanceof _
+          ? new t({ keyType: e, valueType: s, typeName: g.ZodRecord, ...y(r) })
+          : new t({ keyType: L.create(), valueType: e, typeName: g.ZodRecord, ...y(s) })
+      }
+    },
+    fe = class extends _ {
+      get keySchema() {
+        return this._def.keyType
+      }
+      get valueSchema() {
+        return this._def.valueType
+      }
+      _parse(e) {
+        let { status: s, ctx: r } = this._processInputParams(e)
+        if (r.parsedType !== f.map)
+          return (u(r, { code: c.invalid_type, expected: f.map, received: r.parsedType }), m)
+        let n = this._def.keyType,
+          a = this._def.valueType,
+          o = [...r.data.entries()].map(([i, d], l) => ({
+            key: n._parse(new A(r, i, r.path, [l, 'key'])),
+            value: a._parse(new A(r, d, r.path, [l, 'value']))
+          }))
+        if (r.common.async) {
+          let i = new Map()
+          return Promise.resolve().then(async () => {
+            for (let d of o) {
+              let l = await d.key,
+                v = await d.value
+              if (l.status === 'aborted' || v.status === 'aborted') return m
+              ;((l.status === 'dirty' || v.status === 'dirty') && s.dirty(),
+                i.set(l.value, v.value))
+            }
+            return { status: s.value, value: i }
+          })
+        } else {
+          let i = new Map()
+          for (let d of o) {
+            let l = d.key,
+              v = d.value
+            if (l.status === 'aborted' || v.status === 'aborted') return m
+            ;((l.status === 'dirty' || v.status === 'dirty') && s.dirty(), i.set(l.value, v.value))
+          }
+          return { status: s.value, value: i }
+        }
+      }
+    }
+  fe.create = (t, e, s) => new fe({ valueType: e, keyType: t, typeName: g.ZodMap, ...y(s) })
+  var pe = class t extends _ {
+    _parse(e) {
+      let { status: s, ctx: r } = this._processInputParams(e)
+      if (r.parsedType !== f.set)
+        return (u(r, { code: c.invalid_type, expected: f.set, received: r.parsedType }), m)
+      let n = this._def
+      ;(n.minSize !== null &&
+        r.data.size < n.minSize.value &&
+        (u(r, {
+          code: c.too_small,
+          minimum: n.minSize.value,
+          type: 'set',
+          inclusive: !0,
+          exact: !1,
+          message: n.minSize.message
+        }),
+        s.dirty()),
+        n.maxSize !== null &&
+          r.data.size > n.maxSize.value &&
+          (u(r, {
+            code: c.too_big,
+            maximum: n.maxSize.value,
+            type: 'set',
+            inclusive: !0,
+            exact: !1,
+            message: n.maxSize.message
+          }),
+          s.dirty()))
+      let a = this._def.valueType
+      function o(d) {
+        let l = new Set()
+        for (let v of d) {
+          if (v.status === 'aborted') return m
+          ;(v.status === 'dirty' && s.dirty(), l.add(v.value))
+        }
+        return { status: s.value, value: l }
+      }
+      let i = [...r.data.values()].map((d, l) => a._parse(new A(r, d, r.path, l)))
+      return r.common.async ? Promise.all(i).then((d) => o(d)) : o(i)
+    }
+    min(e, s) {
+      return new t({ ...this._def, minSize: { value: e, message: h.toString(s) } })
+    }
+    max(e, s) {
+      return new t({ ...this._def, maxSize: { value: e, message: h.toString(s) } })
+    }
+    size(e, s) {
+      return this.min(e, s).max(e, s)
+    }
+    nonempty(e) {
+      return this.min(1, e)
+    }
+  }
+  pe.create = (t, e) =>
+    new pe({ valueType: t, minSize: null, maxSize: null, typeName: g.ZodSet, ...y(e) })
+  var Se = class t extends _ {
+      constructor() {
+        ;(super(...arguments), (this.validate = this.implement))
+      }
+      _parse(e) {
+        let { ctx: s } = this._processInputParams(e)
+        if (s.parsedType !== f.function)
+          return (u(s, { code: c.invalid_type, expected: f.function, received: s.parsedType }), m)
+        function r(i, d) {
+          return me({
+            data: i,
+            path: s.path,
+            errorMaps: [s.common.contextualErrorMap, s.schemaErrorMap, oe(), j].filter((l) => !!l),
+            issueData: { code: c.invalid_arguments, argumentsError: d }
+          })
+        }
+        function n(i, d) {
+          return me({
+            data: i,
+            path: s.path,
+            errorMaps: [s.common.contextualErrorMap, s.schemaErrorMap, oe(), j].filter((l) => !!l),
+            issueData: { code: c.invalid_return_type, returnTypeError: d }
+          })
+        }
+        let a = { errorMap: s.common.contextualErrorMap },
+          o = s.data
+        if (this._def.returns instanceof D) {
+          let i = this
+          return w(async function (...d) {
+            let l = new S([]),
+              v = await i._def.args.parseAsync(d, a).catch((U) => {
+                throw (l.addIssue(r(d, U)), l)
+              }),
+              T = await Reflect.apply(o, this, v)
+            return await i._def.returns._def.type.parseAsync(T, a).catch((U) => {
+              throw (l.addIssue(n(T, U)), l)
+            })
+          })
+        } else {
+          let i = this
+          return w(function (...d) {
+            let l = i._def.args.safeParse(d, a)
+            if (!l.success) throw new S([r(d, l.error)])
+            let v = Reflect.apply(o, this, l.data),
+              T = i._def.returns.safeParse(v, a)
+            if (!T.success) throw new S([n(v, T.error)])
+            return T.data
+          })
+        }
+      }
+      parameters() {
+        return this._def.args
+      }
+      returnType() {
+        return this._def.returns
+      }
+      args(...e) {
+        return new t({ ...this._def, args: O.create(e).rest(Z.create()) })
+      }
+      returns(e) {
+        return new t({ ...this._def, returns: e })
+      }
+      implement(e) {
+        return this.parse(e)
+      }
+      strictImplement(e) {
+        return this.parse(e)
+      }
+      static create(e, s, r) {
+        return new t({
+          args: e || O.create([]).rest(Z.create()),
+          returns: s || Z.create(),
+          typeName: g.ZodFunction,
+          ...y(r)
+        })
+      }
+    },
+    ee = class extends _ {
+      get schema() {
+        return this._def.getter()
+      }
+      _parse(e) {
+        let { ctx: s } = this._processInputParams(e)
+        return this._def.getter()._parse({ data: s.data, path: s.path, parent: s })
+      }
+    }
+  ee.create = (t, e) => new ee({ getter: t, typeName: g.ZodLazy, ...y(e) })
+  var te = class extends _ {
+    _parse(e) {
+      if (e.data !== this._def.value) {
+        let s = this._getOrReturnCtx(e)
+        return (u(s, { received: s.data, code: c.invalid_literal, expected: this._def.value }), m)
+      }
+      return { status: 'valid', value: e.data }
+    }
+    get value() {
+      return this._def.value
+    }
+  }
+  te.create = (t, e) => new te({ value: t, typeName: g.ZodLiteral, ...y(e) })
+  function Ge(t, e) {
+    return new se({ values: t, typeName: g.ZodEnum, ...y(e) })
+  }
+  var se = class t extends _ {
+    _parse(e) {
+      if (typeof e.data != 'string') {
+        let s = this._getOrReturnCtx(e),
+          r = this._def.values
+        return (
+          u(s, { expected: x.joinValues(r), received: s.parsedType, code: c.invalid_type }),
+          m
+        )
+      }
+      if ((this._cache || (this._cache = new Set(this._def.values)), !this._cache.has(e.data))) {
+        let s = this._getOrReturnCtx(e),
+          r = this._def.values
+        return (u(s, { received: s.data, code: c.invalid_enum_value, options: r }), m)
+      }
+      return w(e.data)
+    }
+    get options() {
+      return this._def.values
+    }
+    get enum() {
+      let e = {}
+      for (let s of this._def.values) e[s] = s
+      return e
+    }
+    get Values() {
+      let e = {}
+      for (let s of this._def.values) e[s] = s
+      return e
+    }
+    get Enum() {
+      let e = {}
+      for (let s of this._def.values) e[s] = s
+      return e
+    }
+    extract(e, s = this._def) {
+      return t.create(e, { ...this._def, ...s })
+    }
+    exclude(e, s = this._def) {
+      return t.create(
+        this.options.filter((r) => !e.includes(r)),
+        { ...this._def, ...s }
+      )
+    }
+  }
+  se.create = Ge
+  var re = class extends _ {
+    _parse(e) {
+      let s = x.getValidEnumValues(this._def.values),
+        r = this._getOrReturnCtx(e)
+      if (r.parsedType !== f.string && r.parsedType !== f.number) {
+        let n = x.objectValues(s)
+        return (
+          u(r, { expected: x.joinValues(n), received: r.parsedType, code: c.invalid_type }),
+          m
+        )
+      }
+      if (
+        (this._cache || (this._cache = new Set(x.getValidEnumValues(this._def.values))),
+        !this._cache.has(e.data))
+      ) {
+        let n = x.objectValues(s)
+        return (u(r, { received: r.data, code: c.invalid_enum_value, options: n }), m)
+      }
+      return w(e.data)
+    }
+    get enum() {
+      return this._def.values
+    }
+  }
+  re.create = (t, e) => new re({ values: t, typeName: g.ZodNativeEnum, ...y(e) })
+  var D = class extends _ {
+    unwrap() {
+      return this._def.type
+    }
+    _parse(e) {
+      let { ctx: s } = this._processInputParams(e)
+      if (s.parsedType !== f.promise && s.common.async === !1)
+        return (u(s, { code: c.invalid_type, expected: f.promise, received: s.parsedType }), m)
+      let r = s.parsedType === f.promise ? s.data : Promise.resolve(s.data)
+      return w(
+        r.then((n) =>
+          this._def.type.parseAsync(n, { path: s.path, errorMap: s.common.contextualErrorMap })
+        )
+      )
+    }
+  }
+  D.create = (t, e) => new D({ type: t, typeName: g.ZodPromise, ...y(e) })
+  var E = class extends _ {
+    innerType() {
+      return this._def.schema
+    }
+    sourceType() {
+      return this._def.schema._def.typeName === g.ZodEffects
+        ? this._def.schema.sourceType()
+        : this._def.schema
+    }
+    _parse(e) {
+      let { status: s, ctx: r } = this._processInputParams(e),
+        n = this._def.effect || null,
+        a = {
+          addIssue: (o) => {
+            ;(u(r, o), o.fatal ? s.abort() : s.dirty())
+          },
+          get path() {
+            return r.path
+          }
+        }
+      if (((a.addIssue = a.addIssue.bind(a)), n.type === 'preprocess')) {
+        let o = n.transform(r.data, a)
+        if (r.common.async)
+          return Promise.resolve(o).then(async (i) => {
+            if (s.value === 'aborted') return m
+            let d = await this._def.schema._parseAsync({ data: i, path: r.path, parent: r })
+            return d.status === 'aborted'
+              ? m
+              : d.status === 'dirty'
+                ? G(d.value)
+                : s.value === 'dirty'
+                  ? G(d.value)
+                  : d
+          })
+        {
+          if (s.value === 'aborted') return m
+          let i = this._def.schema._parseSync({ data: o, path: r.path, parent: r })
+          return i.status === 'aborted'
+            ? m
+            : i.status === 'dirty'
+              ? G(i.value)
+              : s.value === 'dirty'
+                ? G(i.value)
+                : i
+        }
+      }
+      if (n.type === 'refinement') {
+        let o = (i) => {
+          let d = n.refinement(i, a)
+          if (r.common.async) return Promise.resolve(d)
+          if (d instanceof Promise)
+            throw new Error(
+              'Async refinement encountered during synchronous parse operation. Use .parseAsync instead.'
+            )
+          return i
+        }
+        if (r.common.async === !1) {
+          let i = this._def.schema._parseSync({ data: r.data, path: r.path, parent: r })
+          return i.status === 'aborted'
+            ? m
+            : (i.status === 'dirty' && s.dirty(), o(i.value), { status: s.value, value: i.value })
+        } else
+          return this._def.schema
+            ._parseAsync({ data: r.data, path: r.path, parent: r })
+            .then((i) =>
+              i.status === 'aborted'
+                ? m
+                : (i.status === 'dirty' && s.dirty(),
+                  o(i.value).then(() => ({ status: s.value, value: i.value })))
+            )
+      }
+      if (n.type === 'transform')
+        if (r.common.async === !1) {
+          let o = this._def.schema._parseSync({ data: r.data, path: r.path, parent: r })
+          if (!z(o)) return m
+          let i = n.transform(o.value, a)
+          if (i instanceof Promise)
+            throw new Error(
+              'Asynchronous transform encountered during synchronous parse operation. Use .parseAsync instead.'
+            )
+          return { status: s.value, value: i }
+        } else
+          return this._def.schema
+            ._parseAsync({ data: r.data, path: r.path, parent: r })
+            .then((o) =>
+              z(o)
+                ? Promise.resolve(n.transform(o.value, a)).then((i) => ({
+                    status: s.value,
+                    value: i
+                  }))
+                : m
+            )
+      x.assertNever(n)
+    }
+  }
+  E.create = (t, e, s) => new E({ schema: t, typeName: g.ZodEffects, effect: e, ...y(s) })
+  E.createWithPreprocess = (t, e, s) =>
+    new E({
+      schema: e,
+      effect: { type: 'preprocess', transform: t },
+      typeName: g.ZodEffects,
+      ...y(s)
+    })
+  var P = class extends _ {
+    _parse(e) {
+      return this._getType(e) === f.undefined ? w(void 0) : this._def.innerType._parse(e)
+    }
+    unwrap() {
+      return this._def.innerType
+    }
+  }
+  P.create = (t, e) => new P({ innerType: t, typeName: g.ZodOptional, ...y(e) })
+  var F = class extends _ {
+    _parse(e) {
+      return this._getType(e) === f.null ? w(null) : this._def.innerType._parse(e)
+    }
+    unwrap() {
+      return this._def.innerType
+    }
+  }
+  F.create = (t, e) => new F({ innerType: t, typeName: g.ZodNullable, ...y(e) })
+  var ne = class extends _ {
+    _parse(e) {
+      let { ctx: s } = this._processInputParams(e),
+        r = s.data
+      return (
+        s.parsedType === f.undefined && (r = this._def.defaultValue()),
+        this._def.innerType._parse({ data: r, path: s.path, parent: s })
+      )
+    }
+    removeDefault() {
+      return this._def.innerType
+    }
+  }
+  ne.create = (t, e) =>
+    new ne({
+      innerType: t,
+      typeName: g.ZodDefault,
+      defaultValue: typeof e.default == 'function' ? e.default : () => e.default,
+      ...y(e)
+    })
+  var ae = class extends _ {
+    _parse(e) {
+      let { ctx: s } = this._processInputParams(e),
+        r = { ...s, common: { ...s.common, issues: [] } },
+        n = this._def.innerType._parse({ data: r.data, path: r.path, parent: { ...r } })
+      return ce(n)
+        ? n.then((a) => ({
+            status: 'valid',
+            value:
+              a.status === 'valid'
+                ? a.value
+                : this._def.catchValue({
+                    get error() {
+                      return new S(r.common.issues)
+                    },
+                    input: r.data
+                  })
+          }))
+        : {
+            status: 'valid',
+            value:
+              n.status === 'valid'
+                ? n.value
+                : this._def.catchValue({
+                    get error() {
+                      return new S(r.common.issues)
+                    },
+                    input: r.data
+                  })
+          }
+    }
+    removeCatch() {
+      return this._def.innerType
+    }
+  }
+  ae.create = (t, e) =>
+    new ae({
+      innerType: t,
+      typeName: g.ZodCatch,
+      catchValue: typeof e.catch == 'function' ? e.catch : () => e.catch,
+      ...y(e)
+    })
+  var he = class extends _ {
+    _parse(e) {
+      if (this._getType(e) !== f.nan) {
+        let r = this._getOrReturnCtx(e)
+        return (u(r, { code: c.invalid_type, expected: f.nan, received: r.parsedType }), m)
+      }
+      return { status: 'valid', value: e.data }
+    }
+  }
+  he.create = (t) => new he({ typeName: g.ZodNaN, ...y(t) })
+  var $t = Symbol('zod_brand'),
+    ge = class extends _ {
+      _parse(e) {
+        let { ctx: s } = this._processInputParams(e),
+          r = s.data
+        return this._def.type._parse({ data: r, path: s.path, parent: s })
+      }
+      unwrap() {
+        return this._def.type
+      }
+    },
+    ye = class t extends _ {
+      _parse(e) {
+        let { status: s, ctx: r } = this._processInputParams(e)
+        if (r.common.async)
+          return (async () => {
+            let a = await this._def.in._parseAsync({ data: r.data, path: r.path, parent: r })
+            return a.status === 'aborted'
+              ? m
+              : a.status === 'dirty'
+                ? (s.dirty(), G(a.value))
+                : this._def.out._parseAsync({ data: a.value, path: r.path, parent: r })
+          })()
+        {
+          let n = this._def.in._parseSync({ data: r.data, path: r.path, parent: r })
+          return n.status === 'aborted'
+            ? m
+            : n.status === 'dirty'
+              ? (s.dirty(), { status: 'dirty', value: n.value })
+              : this._def.out._parseSync({ data: n.value, path: r.path, parent: r })
+        }
+      }
+      static create(e, s) {
+        return new t({ in: e, out: s, typeName: g.ZodPipeline })
+      }
+    },
+    ie = class extends _ {
+      _parse(e) {
+        let s = this._def.innerType._parse(e),
+          r = (n) => (z(n) && (n.value = Object.freeze(n.value)), n)
+        return ce(s) ? s.then((n) => r(n)) : r(s)
+      }
+      unwrap() {
+        return this._def.innerType
+      }
+    }
+  ie.create = (t, e) => new ie({ innerType: t, typeName: g.ZodReadonly, ...y(e) })
+  function Ve(t, e) {
+    let s = typeof t == 'function' ? t(e) : typeof t == 'string' ? { message: t } : t
+    return typeof s == 'string' ? { message: s } : s
+  }
+  function qe(t, e = {}, s) {
+    return t
+      ? V.create().superRefine((r, n) => {
+          let a = t(r)
+          if (a instanceof Promise)
+            return a.then((o) => {
+              if (!o) {
+                let i = Ve(e, r),
+                  d = i.fatal ?? s ?? !0
+                n.addIssue({ code: 'custom', ...i, fatal: d })
+              }
+            })
+          if (!a) {
+            let o = Ve(e, r),
+              i = o.fatal ?? s ?? !0
+            n.addIssue({ code: 'custom', ...o, fatal: i })
+          }
+        })
+      : V.create()
+  }
+  var zt = { object: I.lazycreate },
+    g
+  ;(function (t) {
+    ;((t.ZodString = 'ZodString'),
+      (t.ZodNumber = 'ZodNumber'),
+      (t.ZodNaN = 'ZodNaN'),
+      (t.ZodBigInt = 'ZodBigInt'),
+      (t.ZodBoolean = 'ZodBoolean'),
+      (t.ZodDate = 'ZodDate'),
+      (t.ZodSymbol = 'ZodSymbol'),
+      (t.ZodUndefined = 'ZodUndefined'),
+      (t.ZodNull = 'ZodNull'),
+      (t.ZodAny = 'ZodAny'),
+      (t.ZodUnknown = 'ZodUnknown'),
+      (t.ZodNever = 'ZodNever'),
+      (t.ZodVoid = 'ZodVoid'),
+      (t.ZodArray = 'ZodArray'),
+      (t.ZodObject = 'ZodObject'),
+      (t.ZodUnion = 'ZodUnion'),
+      (t.ZodDiscriminatedUnion = 'ZodDiscriminatedUnion'),
+      (t.ZodIntersection = 'ZodIntersection'),
+      (t.ZodTuple = 'ZodTuple'),
+      (t.ZodRecord = 'ZodRecord'),
+      (t.ZodMap = 'ZodMap'),
+      (t.ZodSet = 'ZodSet'),
+      (t.ZodFunction = 'ZodFunction'),
+      (t.ZodLazy = 'ZodLazy'),
+      (t.ZodLiteral = 'ZodLiteral'),
+      (t.ZodEnum = 'ZodEnum'),
+      (t.ZodEffects = 'ZodEffects'),
+      (t.ZodNativeEnum = 'ZodNativeEnum'),
+      (t.ZodOptional = 'ZodOptional'),
+      (t.ZodNullable = 'ZodNullable'),
+      (t.ZodDefault = 'ZodDefault'),
+      (t.ZodCatch = 'ZodCatch'),
+      (t.ZodPromise = 'ZodPromise'),
+      (t.ZodBranded = 'ZodBranded'),
+      (t.ZodPipeline = 'ZodPipeline'),
+      (t.ZodReadonly = 'ZodReadonly'))
+  })(g || (g = {}))
+  var Lt = (t, e = { message: `Input not instance of ${t.name}` }) => qe((s) => s instanceof t, e),
+    We = L.create,
+    Je = q.create,
+    Vt = he.create,
+    Dt = W.create,
+    He = J.create,
+    Ut = H.create,
+    Bt = ue.create,
+    Gt = X.create,
+    qt = Y.create,
+    Wt = V.create,
+    Jt = Z.create,
+    Ht = N.create,
+    Xt = le.create,
+    Yt = $.create,
+    Qt = I.create,
+    Kt = I.strictCreate,
+    es = Q.create,
+    ts = we.create,
+    ss = K.create,
+    rs = O.create,
+    ns = Te.create,
+    as = fe.create,
+    is = pe.create,
+    os = Se.create,
+    cs = ee.create,
+    ds = te.create,
+    us = se.create,
+    ls = re.create,
+    fs = D.create,
+    ps = E.create,
+    hs = P.create,
+    ms = F.create,
+    gs = E.createWithPreprocess,
+    ys = ye.create,
+    _s = () => We().optional(),
+    vs = () => Je().optional(),
+    xs = () => He().optional(),
+    bs = {
+      string: (t) => L.create({ ...t, coerce: !0 }),
+      number: (t) => q.create({ ...t, coerce: !0 }),
+      boolean: (t) => J.create({ ...t, coerce: !0 }),
+      bigint: (t) => W.create({ ...t, coerce: !0 }),
+      date: (t) => H.create({ ...t, coerce: !0 })
+    }
+  var ks = m
+  var Xe = 1,
+    ws = 2
+  var Ts = ['figma', 'photoshop'],
+    Ye = ['dialogue', 'background-removal', 'asset-transfer', 'result-transfer'],
+    Qe = ['none', 'prompt'],
+    Ss = ['none', 'read'],
+    Is = ['none', 'write'],
+    _e = 8 * 1024 * 1024,
+    Ps = 64 * 1024,
+    As = 64,
+    Es = 12e4
+  var Ns = 8
+  var Cs = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$/,
+    Rs =
+      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+    Os = /^[A-Fa-f0-9]{64}$/,
+    Fs = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,127}$/,
+    js = /^[A-Fa-f0-9]{128}$/,
+    Ms = /^[A-Za-z0-9_-]{85}[AQgw](?:==)?$/,
+    Zs = /^[A-Za-z0-9._-]+$/,
+    $s = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/,
+    zs = new Set(['.', '..', '__proto__', 'prototype', 'constructor']),
+    Ls = new Set([
+      'con',
+      'prn',
+      'aux',
+      'nul',
+      'com1',
+      'com2',
+      'com3',
+      'com4',
+      'com5',
+      'com6',
+      'com7',
+      'com8',
+      'com9',
+      'lpt1',
+      'lpt2',
+      'lpt3',
+      'lpt4',
+      'lpt5',
+      'lpt6',
+      'lpt7',
+      'lpt8',
+      'lpt9',
+      'conin$',
+      'conout$'
+    ]),
+    Vs = (t) => {
+      if (!$s.test(t) || !Number.isFinite(Date.parse(t))) return !1
+      let e = t.includes('.') ? t : t.replace('Z', '.000Z')
+      return new Date(t).toISOString() === e
+    },
+    Ie = p
+      .string()
+      .trim()
+      .min(1, 'identifier must not be empty')
+      .max(128, 'identifier is too long')
+      .regex(Cs, 'identifier contains unsafe characters'),
+    Ds = p
+      .string()
+      .max(128, 'version is too long')
+      .pipe(p.string().trim().regex(Rs, 'version must be a strict semantic version')),
+    Ke = p
+      .string()
+      .trim()
+      .min(1, 'relative path must not be empty')
+      .max(512, 'relative path is too long')
+      .refine((t) => rt(t), {
+        message: 'path must be a safe relative path without traversal or absolute prefixes'
+      }),
+    Or = p
+      .string()
+      .trim()
+      .min(1, 'file name must not be empty')
+      .max(128, 'file name is too long')
+      .refine((t) => er(t), { message: 'file name must be a single safe file name' }),
+    et = p
+      .string()
+      .trim()
+      .regex(Os, 'sha256 must be exactly 64 hexadecimal characters')
+      .transform((t) => t.toLowerCase()),
+    Us = p
+      .string()
+      .trim()
+      .max(192, 'MIME type is too long')
+      .regex(Fs, 'MIME type must be a valid type/subtype')
+      .transform((t) => t.toLowerCase()),
+    Bs = p
+      .string()
+      .trim()
+      .refine(
+        (t) => js.test(t) || Ms.test(t),
+        'signature must be a 64-byte hexadecimal or base64url value'
+      ),
+    tt = p.string().trim().refine(Vs, 'timestamp must be an ISO-8601 UTC date'),
+    Gs = p
+      .number()
+      .int('payload size must be an integer')
+      .min(1, 'payload size must be greater than zero')
+      .max(_e, 'payload exceeds the FIGPLUGIN bound'),
+    qs = p
+      .object({
+        id: Ie,
+        path: Ke,
+        mimeType: Us.optional(),
+        sizeBytes: Gs.optional(),
+        sha256: et.optional()
+      })
+      .strict(),
+    Re = p
+      .string()
+      .max(22)
+      .regex(/^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}$(?![\s\S])/)
+      .refine((t) => {
+        let e = Number(t.slice(17))
+        return e >= 1024 && e <= 65535
+      }, 'Invalid bridge origin'),
+    Ws = p.object({ protocol: p.literal(1), origin: Re }).strict(),
+    Js = p
+      .object({
+        dialogue: p.enum(Qe).default('none'),
+        backgroundRemoval: p.enum(Qe).default('none'),
+        assetTransfer: p.enum(Ss).default('none'),
+        resultTransfer: p.enum(Is).default('none'),
+        filesystem: p.literal('none').default('none'),
+        network: p.enum(['none', 'desktop-bridge']).default('none')
+      })
+      .strict(),
+    Hs = p
+      .object({
+        maxPayloadBytes: p.number().int().min(1).max(_e).default(_e),
+        maxResultBytes: p.number().int().min(1).max(_e).default(_e),
+        maxConfigBytes: p
+          .number()
+          .int()
+          .min(1)
+          .max(Ps)
+          .default(16 * 1024),
+        maxCallTimeoutMs: p.number().int().min(100).max(Es).default(6e4),
+        maxConcurrentCalls: p.number().int().min(1).max(Ns).default(1)
+      })
+      .strict(),
+    Xs = p
+      .object({
+        publisherId: Ie,
+        publisherName: p.string().trim().min(1).max(128),
+        source: p.enum(['official', 'verified-publisher', 'user-provided']),
+        artifactSha256: et,
+        sourceUrl: p
+          .string()
+          .trim()
+          .url()
+          .refine((t) => t.startsWith('https://'), 'sourceUrl must use https')
+          .optional(),
+        issuedAt: tt
+      })
+      .strict(),
+    Ys = p.object({ algorithm: p.literal('ed25519'), keyId: Ie, value: Bs, signedAt: tt }).strict(),
+    Fr = p
+      .object({
+        schemaVersion: p.union([p.literal(Xe), p.literal(ws)]),
+        id: Ie,
+        name: p.string().trim().min(1).max(128),
+        version: Ds,
+        host: p.enum(Ts),
+        entryPath: Ke.optional(),
+        capabilities: p.array(p.enum(Ye)).min(1).max(Ye.length),
+        permissions: Js,
+        limits: Hs,
+        provenance: Xs,
+        signature: Ys,
+        assets: p.array(qs).max(As).default([]),
+        bridge: Ws.optional()
+      })
+      .strict()
+      .superRefine((t, e) => {
+        let s = new Set()
+        for (let [o, i] of t.capabilities.entries())
+          (s.has(i) &&
+            e.addIssue({
+              code: p.ZodIssueCode.custom,
+              path: ['capabilities', o],
+              message: `duplicate capability: ${i}`
+            }),
+            s.add(i))
+        if (t.schemaVersion === Xe)
+          (t.permissions.network !== 'none' &&
+            e.addIssue({
+              code: p.ZodIssueCode.custom,
+              path: ['permissions', 'network'],
+              message: 'v1 manifests require network permission none'
+            }),
+            'bridge' in t &&
+              e.addIssue({
+                code: p.ZodIssueCode.custom,
+                path: ['bridge'],
+                message: 'v1 manifests must not declare a desktop bridge'
+              }))
+        else {
+          ;(t.permissions.network !== 'desktop-bridge' &&
+            e.addIssue({
+              code: p.ZodIssueCode.custom,
+              path: ['permissions', 'network'],
+              message: 'v2 manifests require explicit desktop-bridge network permission'
+            }),
+            t.bridge === void 0 &&
+              e.addIssue({
+                code: p.ZodIssueCode.custom,
+                path: ['bridge'],
+                message: 'v2 manifests require a desktop bridge declaration'
+              }),
+            t.entryPath === void 0 &&
+              e.addIssue({
+                code: p.ZodIssueCode.custom,
+                path: ['entryPath'],
+                message: 'v2 manifests require a native artifact entryPath'
+              }))
+          for (let o of ['dialogue', 'asset-transfer'])
+            s.has(o) ||
+              e.addIssue({
+                code: p.ZodIssueCode.custom,
+                path: ['capabilities'],
+                message: `v2 manifests require ${o}`
+              })
+        }
+        let r = [
+          ['dialogue', 'dialogue', 'prompt'],
+          ['background-removal', 'backgroundRemoval', 'prompt'],
+          ['asset-transfer', 'assetTransfer', 'read'],
+          ['result-transfer', 'resultTransfer', 'write']
+        ]
+        for (let [o, i, d] of r) {
+          let l = t.permissions[i]
+          ;(s.has(o) &&
+            l !== d &&
+            e.addIssue({
+              code: p.ZodIssueCode.custom,
+              path: ['permissions', i],
+              message: `${i} permission must be ${d} when ${o} is declared`
+            }),
+            !s.has(o) &&
+              l !== 'none' &&
+              e.addIssue({
+                code: p.ZodIssueCode.custom,
+                path: ['permissions', i],
+                message: `${i} permission is over-privileged without ${o}`
+              }))
+        }
+        let n = new Set(),
+          a = new Set()
+        for (let [o, i] of t.assets.entries()) {
+          n.has(i.id) &&
+            e.addIssue({
+              code: p.ZodIssueCode.custom,
+              path: ['assets', o, 'id'],
+              message: `duplicate asset id: ${i.id}`
+            })
+          let d = Ks(i.path)
+          ;(d !== void 0 &&
+            a.has(d) &&
+            e.addIssue({
+              code: p.ZodIssueCode.custom,
+              path: ['assets', o, 'path'],
+              message: `duplicate asset path: ${i.path}`
+            }),
+            n.add(i.id),
+            d !== void 0 && a.add(d))
+        }
+        t.limits.maxResultBytes > t.limits.maxPayloadBytes &&
+          e.addIssue({
+            code: p.ZodIssueCode.custom,
+            path: ['limits', 'maxResultBytes'],
+            message: 'maxResultBytes must not exceed maxPayloadBytes'
+          })
+      })
+  var Oe = (t) => t.toLowerCase().replace(/[. ]+$/g, ''),
+    Qs = (t) => {
+      let s = Oe(t).split('.')[0]
+      return Ls.has(s)
+    },
+    st = (t) => {
+      if (t.length === 0 || t.length > 128 || !Zs.test(t) || /[. ]$/.test(t)) return !1
+      let e = Oe(t)
+      return e.length > 0 && !zs.has(e) && !Qs(t)
+    }
+  function rt(t) {
+    return !t ||
+      t.startsWith('/') ||
+      t.startsWith('\\') ||
+      /^[A-Za-z]:/.test(t) ||
+      t.includes('\\') ||
+      t.includes('%') ||
+      t.includes('\0')
+      ? !1
+      : t.split('/').every(st)
+  }
+  function Ks(t) {
+    if (rt(t)) return t.split('/').map(Oe).join('/')
+  }
+  function er(t) {
+    return (
+      t.length > 0 &&
+      !t.includes('/') &&
+      !t.includes('\\') &&
+      !t.includes('%') &&
+      !t.includes('\0') &&
+      st(t)
+    )
+  }
+  var je = 5e3,
+    nt = '/figplugin/v1/probe',
+    at = p
+      .string()
+      .length(32)
+      .regex(/^[a-f0-9]+$/),
+    it = p.object({ protocol: p.literal(1), nonce: at }).strict(),
+    ot = p
+      .object({ protocol: p.literal(1), kind: p.literal('figplugin-bridge-probe'), nonce: at })
+      .strict(),
+    Fe = {
+      reachable:
+        '\u684C\u9762\u8FDE\u63A5\u6709\u54CD\u5E94\uFF1B\u5C1A\u672A\u914D\u5BF9\uFF0C\u4E5F\u672A\u9A8C\u8BC1\u6A21\u578B\u53EF\u7528\u6216\u53D6\u5F97\u5199\u5165\u6743\u9650\u3002 / Bridge reachable; not authentication, model readiness or write authority.',
+      unavailable:
+        '\u65E0\u6CD5\u8FDE\u63A5\u684C\u9762\u3002\u8BF7\u542F\u52A8 MagicPot \u914D\u5BF9\u670D\u52A1\u5E76\u6838\u5BF9\u63D2\u4EF6\u4E2D\u7684\u56FA\u5B9A\u5730\u5740\u3002 / Bridge unavailable; start desktop pairing and check the fixed origin.',
+      'permission-denied':
+        '\u5BBF\u4E3B\u62D2\u7EDD\u7F51\u7EDC\u6743\u9650\u3002Photoshop \u8BF7\u52A0\u8F7D\u58F0\u660E\u4E86\u7F51\u7EDC\u6743\u9650\u7684 UXP \u63D2\u4EF6\uFF0C\u4E0D\u8981\u4F5C\u4E3A\u72EC\u7ACB .psjs \u811A\u672C\u8FD0\u884C\u3002 / Host denied network permission; use a network-enabled UXP plugin, not a standalone script.',
+      'invalid-response':
+        '\u54CD\u5E94\u4E0D\u5339\u914D\u6216\u63D2\u4EF6\u7248\u672C\u4E0D\u517C\u5BB9\uFF1B\u672A\u5EFA\u7ACB\u4F1A\u8BDD\u3002\u8BF7\u6838\u5BF9\u684C\u9762\u5730\u5740\u5E76\u66F4\u65B0\u63D2\u4EF6\u3002 / Unexpected response; check origin and update the plugin.',
+      'invalid-config':
+        '\u63D2\u4EF6\u8FDE\u63A5\u914D\u7F6E\u6216\u5B89\u5168\u968F\u673A\u6570\u65E0\u6548\u3002 / Invalid plugin origin or secure challenge.',
+      timeout:
+        '\u8FDE\u63A5\u68C0\u67E5\u8D85\u65F6\uFF1B\u672A\u5EFA\u7ACB\u4F1A\u8BDD\u3002 / Connection check timed out; no session created.',
+      cancelled: '\u8FDE\u63A5\u68C0\u67E5\u5DF2\u53D6\u6D88\u3002 / Connection check cancelled.',
+      'helper-unavailable':
+        '\u8FDE\u63A5\u68C0\u67E5\u6A21\u5757\u7F3A\u5931\uFF1B\u8BF7\u91CD\u65B0\u51C6\u5907\u5F00\u53D1\u63D2\u4EF6\u3002 / Connection helper missing; prepare the development plugin again.'
+    }
+  function tr(t) {
+    return Object.prototype.hasOwnProperty.call(Fe, t) ? Fe[t] : Fe['invalid-response']
+  }
+  var sr = (t) => {
+    let e = 0
+    for (let s of t) {
+      let r = s.codePointAt(0)
+      e += r <= 127 ? 1 : r <= 2047 ? 2 : r <= 65535 ? 3 : 4
+    }
+    return e
+  }
+  function rr(t, e, s) {
+    let r = !1,
+      n,
+      a,
+      o,
+      i = new Promise((B) => {
+        o = B
+      }),
+      d = (B) => {
+        if (!r) {
+          if (((r = !0), n !== void 0 && clearTimeout(n), B === 'cancelled' || B === 'timeout'))
+            try {
+              a?.abort()
+            } catch {}
+          o(B)
+        }
+      },
+      l = Object.freeze({ result: i, cancel: () => d('cancelled') }),
+      v = it.safeParse({ protocol: 1, nonce: e })
+    if (!Re.safeParse(t).success || !v.success) return (d('invalid-config'), l)
+    let T = t + nt,
+      ve = Date.now() + je,
+      U = () => (r ? !1 : Date.now() >= ve ? (d('timeout'), !1) : !0)
+    try {
+      ;(typeof AbortController == 'function' && (a = new AbortController()),
+        (n = setTimeout(() => d('timeout'), je)))
+      let B = s ?? ((b, C) => fetch(b, C))
+      ;(async () => {
+        let b = await B(T, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(v.data),
+          credentials: 'omit',
+          redirect: 'error',
+          cache: 'no-store',
+          ...(a ? { signal: a.signal } : {})
+        })
+        if (!U()) return
+        if (!b || b.redirected === !0 || (b.url && b.url !== T)) {
+          d('invalid-response')
+          return
+        }
+        if (b.status !== 200 || b.ok !== !0) {
+          d(b.status >= 500 || b.status === 429 ? 'unavailable' : 'invalid-response')
+          return
+        }
+        let C = b.headers,
+          Pe =
+            C &&
+            (typeof C.get == 'function'
+              ? C.get('content-length')
+              : (C['content-length'] ?? C['Content-Length']))
+        if (Pe != null && (!/^[0-9]+$(?![\s\S])/.test(String(Pe)) || Number(Pe) > 2048)) {
+          d('invalid-response')
+          return
+        }
+        let xe = await b.text()
+        if (!U()) return
+        if (typeof xe != 'string' || xe.length > 2048 || sr(xe) > 2048) {
+          d('invalid-response')
+          return
+        }
+        let Me
+        try {
+          Me = JSON.parse(xe)
+        } catch {
+          d('invalid-response')
+          return
+        }
+        let Ze = ot.safeParse(Me)
+        d(Ze.success && Ze.data.nonce === e ? 'reachable' : 'invalid-response')
+      })().catch((b) => {
+        if (!U()) return
+        let C = ''
+        try {
+          b &&
+            typeof b == 'object' &&
+            'message' in b &&
+            typeof b.message == 'string' &&
+            (C = b.message.slice(0, 512).toLowerCase())
+        } catch {}
+        d(
+          C.includes('script is not permitted to access the network apis')
+            ? 'permission-denied'
+            : 'unavailable'
+        )
+      })
+    } catch {
+      d('unavailable')
+    }
+    return l
+  }
+  return ft(nr)
+})()
+
+Object.defineProperty(globalThis, 'MagicPotBridgeReadinessV1', {
+  value: Object.freeze(MagicPotBridgeReadinessBundle),
+  writable: false,
+  configurable: false
+})

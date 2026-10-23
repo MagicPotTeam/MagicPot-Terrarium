@@ -33,6 +33,9 @@ const SYNTHETIC_JOURNAL_HELPER = Buffer.from(
 const SYNTHETIC_PIXEL_HELPER = Buffer.from(
   '/* opaque pixel decoder fixture; never execute during preparation */\n'
 )
+const SYNTHETIC_READINESS_HELPER = Buffer.from(
+  '/* opaque bounded connectivity helper; no startup network */\n'
+)
 const HELPER_SEPARATOR = Buffer.from('\n;\n')
 // These plausible-format IDs are synthetic fixtures, not claims of registry ownership.
 const HOSTS = {
@@ -177,6 +180,10 @@ async function isolated(t, host = 'figma', connected = false) {
     fs.writeFileSync(
       path.join(path.dirname(helper), 'plan-preview.js'),
       '/* opaque planning validator fixture */\n'
+    )
+    fs.writeFileSync(
+      path.join(path.dirname(helper), 'bridge-readiness.js'),
+      SYNTHETIC_READINESS_HELPER
     )
     fs.writeFileSync(path.join(path.dirname(helper), 'pixel-audit.js'), SYNTHETIC_PIXEL_HELPER)
     fs.writeFileSync(path.join(path.dirname(helper), 'visual-evidence.js'), SYNTHETIC_VISUAL_HELPER)
@@ -782,6 +789,8 @@ function checkConnected(input, sourceDir) {
     read(spec.code),
     Buffer.concat([
       configPrefix(input),
+      fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'bridge-readiness.js')),
+      HELPER_SEPARATOR,
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'selection-snapshot.js')),
       HELPER_SEPARATOR,
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'pixel-audit.js')),
@@ -846,6 +855,7 @@ for (const [host, spec] of Object.entries(HOSTS)) {
       snapshot(path.join(sourceDir, 'bridge', name))
     )
     const helperPaths = [
+      path.join(SOURCES, 'shared', 'bridge-readiness.js'),
       path.join(SOURCES, 'shared', 'selection-snapshot.js'),
       path.join(SOURCES, 'shared', 'pixel-audit.js'),
       path.join(SOURCES, 'shared', 'visual-evidence.js'),
@@ -1078,7 +1088,8 @@ test('connected native byte bound includes the prepended config and helper', asy
       SYNTHETIC_VISUAL_HELPER.length -
       SYNTHETIC_JOURNAL_HELPER.length -
       SYNTHETIC_PIXEL_HELPER.length -
-      HELPER_SEPARATOR.length * 5 -
+      SYNTHETIC_READINESS_HELPER.length -
+      HELPER_SEPARATOR.length * 6 -
       fs.statSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')).size,
     32
   )
@@ -1198,6 +1209,23 @@ for (const host of Object.keys(HOSTS))
       if (fault === 'empty') fs.writeFileSync(helper, '')
       if (fault === 'oversized') fs.writeFileSync(helper, Buffer.alloc(MAX_FILE + 1))
       if (fault === 'directory') fs.mkdirSync(helper)
+      rejected(input, prepare)
+      assert.equal(fs.existsSync(input.outputDir), false)
+    })
+  }
+
+for (const host of Object.keys(HOSTS))
+  for (const fault of ['missing', 'empty', 'oversized', 'directory', 'hardlinked']) {
+    test(`${host}: readiness helper ${fault} refuses preparation before outputs`, async (t) => {
+      const { root, sourceDir, prepare, input } = await isolated(t, host, true)
+      const helper = path.join(path.dirname(sourceDir), 'shared', 'bridge-readiness.js')
+      if (fault === 'hardlinked') fs.linkSync(helper, path.join(root, 'probe-alias'))
+      else {
+        fs.unlinkSync(helper)
+        if (fault === 'empty') fs.writeFileSync(helper, '')
+        if (fault === 'oversized') fs.writeFileSync(helper, Buffer.alloc(MAX_FILE + 1))
+        if (fault === 'directory') fs.mkdirSync(helper)
+      }
       rejected(input, prepare)
       assert.equal(fs.existsSync(input.outputDir), false)
     })
