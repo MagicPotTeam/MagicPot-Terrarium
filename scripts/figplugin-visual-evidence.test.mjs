@@ -170,7 +170,9 @@ test('visual capture works without TextEncoder and preserves UTF-8 fingerprints'
         colorSpace: 'RGB',
         colorProfile: '测试😀',
         getData: async () => new Uint8Array([9, 8, 7, 255]),
-        dispose() {}
+        dispose() {
+          // This byte-array fixture owns no native image resource.
+        }
       }
     })
   }
