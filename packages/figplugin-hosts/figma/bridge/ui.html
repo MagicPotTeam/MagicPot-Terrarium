@@ -416,9 +416,9 @@
             keys(value, ['protocol', 'type', 'origin', 'pluginId', 'host']) &&
             value.host === 'figma' &&
             typeof value.origin === 'string' &&
-            /^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}$(?![\s\S])/.test(value.origin) &&
-            Number(value.origin.slice(17)) >= 1024 &&
-            Number(value.origin.slice(17)) <= 65535 &&
+            /^http:\/\/(?:127\.0\.0\.1|localhost):[1-9][0-9]{3,4}$(?![\s\S])/.test(value.origin) &&
+            Number(value.origin.slice(value.origin.lastIndexOf(':') + 1)) >= 1024 &&
+            Number(value.origin.slice(value.origin.lastIndexOf(':') + 1)) <= 65535 &&
             bounded(value.pluginId, 128)
           ) {
             configured = true

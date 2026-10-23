@@ -176,7 +176,7 @@ describe('inert native rename contracts', () => {
       { generation: Number.MAX_SAFE_INTEGER + 1 },
       { pluginId: ' native.rename' },
       { pluginId: 'native.rename\n' },
-      { bridgeOrigin: 'http://localhost:12345' },
+      { bridgeOrigin: 'http://localhost.invalid:12345' },
       { host: 'photoshop' },
       { projectId: 'project_1\n' },
       { artifactSha256: `${'c'.repeat(63)}\n` }

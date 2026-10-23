@@ -79,3 +79,19 @@ Official references:
 - https://developer.adobe.com/photoshop/uxp/2022/guides/devtool/installation
 - https://developer.adobe.com/photoshop/uxp/2022/scripting/how-it-works/
 - https://developer.adobe.com/photoshop/uxp/2022/guides/uxp-guide/uxp-misc/manifest-v5/
+
+## Photoshop 27.5 / UXP 9.2 loopback compatibility
+
+The loaded-plugin acceptance environment rejected numeric-IP native network declarations with
+`Manifest entry not found`, while an explicit `http://localhost:PORT` declaration worked.
+Use `--bridge-origin http://localhost:PORT` when preparing this development plugin and its matching
+signed MagicPot package. Only that exact origin is granted. `localhost` and `127.0.0.1` are separate
+signed identities: tickets, native manifests and request Host values must match. There is no
+automatic rewriting, retry against another address, or `domains: all` production grant. The desktop
+listener still binds only IPv4 `127.0.0.1`; it is not a LAN service or a general proxy.
+
+The official Adobe CLI is a supported alternative development loader. Both the system UXP
+developer setting and Photoshop's Plugins > Enable Developer Mode setting must be enabled by
+explicit user consent. A native prompt may only open Preferences: check the checkbox itself, save,
+and restart Photoshop normally with user documents preserved. Tool installation or host restart
+must not be hidden in `npm run dev`.

@@ -303,7 +303,7 @@ export async function startFigPluginBridgeServer({
 }: Options): Promise<{ origin: string; close(): Promise<void> }> {
   const canonicalOrigin = parseFigPluginBridgeValue(figPluginBridgeOriginSchema, origin)
   const host = canonicalOrigin.slice('http://'.length)
-  const port = Number(host.slice('127.0.0.1:'.length))
+  const port = Number(host.slice(host.lastIndexOf(':') + 1))
   const timeout = Number.isFinite(requestTimeoutMs)
     ? Math.max(1, Math.min(15_000, Math.floor(requestTimeoutMs!)))
     : 15_000

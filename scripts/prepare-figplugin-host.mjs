@@ -10,7 +10,7 @@ const CLI_ERROR =
 const SUCCESS =
   'FIGPLUGIN development host prepared (4 files). No host code executed; desktop not paired. Package template is unsigned and does not establish publisher trust.\n'
 const USAGE =
-  'Usage: node scripts/prepare-figplugin-host.mjs --host figma|photoshop --plugin-id ID --publisher-id ID --key-id ID --issued-at ISO_UTC --output ABSOLUTE_NEW_DIRECTORY [--bridge-origin http://127.0.0.1:PORT]\n' +
+  'Usage: node scripts/prepare-figplugin-host.mjs --host figma|photoshop --plugin-id ID --publisher-id ID --key-id ID --issued-at ISO_UTC --output ABSOLUTE_NEW_DIRECTORY [--bridge-origin http://127.0.0.1:PORT|http://localhost:PORT]\n' +
   'All six flags are required. Use your own host-assigned plugin ID and signing metadata.\n' +
   'Optional --bridge-origin enables v2 with one exact loopback origin (port 1024..65535); omission preserves offline v1.\n' +
   'The output must not exist; its parent must exist without symlink/junction ancestors.\n' +
@@ -98,9 +98,9 @@ function bridgeOrigin(value) {
   requireValid(
     typeof value === 'string' &&
       value.length <= 22 &&
-      /^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}$(?![\s\S])/.test(value)
+      /^http:\/\/(?:127\.0\.0\.1|localhost):[1-9][0-9]{3,4}$(?![\s\S])/.test(value)
   )
-  const port = Number(value.slice('http://127.0.0.1:'.length))
+  const port = Number(value.slice(value.lastIndexOf(':') + 1))
   requireValid(port >= 1024 && port <= 65_535)
 }
 

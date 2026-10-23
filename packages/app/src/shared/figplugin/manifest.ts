@@ -253,13 +253,14 @@ const FigPluginAssetDeclarationSchema = z
 
 export type FigPluginAssetDeclaration = z.infer<typeof FigPluginAssetDeclarationSchema>
 
-// Signed origins are exact strings: never normalize aliases, credentials, suffixes or ports.
+// Both loopback spellings must be explicitly selected and signed. They are NOT equivalent
+// approval identities; never normalize, auto-rewrite, retry against aliases, or permit suffixes.
 export const FigPluginDesktopBridgeOriginSchema = z
   .string()
   .max(22)
-  .regex(/^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}$(?![\s\S])/)
+  .regex(/^http:\/\/(?:127\.0\.0\.1|localhost):[1-9][0-9]{3,4}$(?![\s\S])/)
   .refine((value) => {
-    const port = Number(value.slice('http://127.0.0.1:'.length))
+    const port = Number(value.slice(value.lastIndexOf(':') + 1))
     return port >= 1024 && port <= 65_535
   }, 'Invalid bridge origin')
 

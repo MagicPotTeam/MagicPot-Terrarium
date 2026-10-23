@@ -47,9 +47,9 @@
     input.protocol === 1 &&
     input.host === HOST &&
     typeof input.origin === 'string' &&
-    /^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}$(?![\s\S])/.test(input.origin) &&
-    Number(input.origin.slice(17)) >= 1024 &&
-    Number(input.origin.slice(17)) <= 65535 &&
+    /^http:\/\/(?:127\.0\.0\.1|localhost):[1-9][0-9]{3,4}$(?![\s\S])/.test(input.origin) &&
+    Number(input.origin.slice(input.origin.lastIndexOf(':') + 1)) >= 1024 &&
+    Number(input.origin.slice(input.origin.lastIndexOf(':') + 1)) <= 65535 &&
     typeof input.pluginId === 'string' &&
     input.pluginId.length <= 128 &&
     /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$(?![\s\S])/.test(input.pluginId)

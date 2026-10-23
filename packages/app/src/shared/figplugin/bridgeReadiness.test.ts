@@ -46,7 +46,7 @@ describe('shared read-only connection probe', () => {
   })
   it.each([
     'https://127.0.0.1:49152',
-    'http://localhost:49152',
+    'http://localhost.invalid:49152',
     'http://127.0.0.1:049152',
     'http://127.0.0.1:49152/path',
     'http://127.0.0.1:49152\n',

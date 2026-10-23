@@ -887,7 +887,7 @@ test('v2 origin is not URL-normalized: aliases, credentials, wildcards, paths an
     '',
     ' ',
     '*',
-    'http://localhost:24816',
+    'http://localhost.invalid:24816',
     'http://127.1:24816',
     'http://2130706433:24816',
     'http://0x7f000001:24816',
@@ -1121,7 +1121,7 @@ test('v2 CLI rejects duplicate bridge keys and invalid origins, then emits the s
       '"bridge":',
       '"bridge":{"protocol":1,"origin":"http://127.0.0.1:24816"},"bridge":'
     ),
-    valid.replace('http://127.0.0.1:24816', 'http://localhost:24816'),
+    valid.replace('http://127.0.0.1:24816', 'http://localhost.invalid:24816'),
     valid.replace('"desktop-bridge"', '"*"'),
     valid.replace('"schemaVersion":2', '"schemaVersion":1')
   ]) {

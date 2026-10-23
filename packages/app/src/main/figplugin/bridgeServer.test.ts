@@ -281,7 +281,7 @@ describe('dedicated FigPlugin bridge HTTP contract', () => {
     'http://127.0.0.1:1023',
     'http://127.0.0.1:65536',
     'http://127.0.0.1:041234',
-    'http://localhost:41234',
+    'http://localhost.invalid:41234',
     'http://0.0.0.0:41234',
     'http://[::1]:41234',
     'http://127.0.0.1:41234/',
@@ -1052,4 +1052,28 @@ describe('anonymous bounded bridge connectivity probe', () => {
     ).toBe(400)
     for (const method of Object.values(f.runtime)) expect(method).not.toHaveBeenCalled()
   })
+})
+
+// The transport still listens ONLY on 127.0.0.1; localhost is an explicitly signed Host identity.
+it('localhost origin binds IPv4 only and refuses numeric Host substitution even on the same port', async () => {
+  const held = await reserve()
+  await held.close()
+  const origin = held.origin.replace('127.0.0.1', 'localhost')
+  const runtime = makeRuntime()
+  const server = await startFigPluginBridgeServer({ origin, runtime })
+  bridges.push(server)
+  expect(server.origin).toBe(origin)
+  const body = { protocol: 1, nonce: 'e'.repeat(32) }
+  const response = await post(held.origin, '/figplugin/v1/probe', body, { Host: origin.slice(7) })
+  expect(response.status).toBe(200)
+  expect(JSON.parse(response.text)).toEqual({ ...body, kind: 'figplugin-bridge-probe' })
+  expectError(await post(held.origin, '/figplugin/v1/probe', body, {}), 'INVALID_REQUEST', 400)
+  expectError(
+    await post(held.origin, '/figplugin/v1/probe', body, {
+      Host: 'LOCALHOST:' + new URL(origin).port
+    }),
+    'INVALID_REQUEST',
+    400
+  )
+  expectUnused(runtime)
 })

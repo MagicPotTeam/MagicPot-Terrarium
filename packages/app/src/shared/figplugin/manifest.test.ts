@@ -295,7 +295,7 @@ describe('FIGPLUGIN manifest contract', () => {
     'http://192.168.1.1:43123',
     'http://0.0.0.0:43123',
     'http://127.0.0.2:43123',
-    'http://localhost:43123',
+    'http://localhost.invalid:43123',
     'http://[::1]:43123',
     'http://127.1:43123',
     'http://2130706433:43123',

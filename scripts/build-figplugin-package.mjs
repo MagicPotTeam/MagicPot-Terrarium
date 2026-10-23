@@ -206,9 +206,9 @@ function bridgeOrigin(value) {
   requireValid(
     typeof value === 'string' &&
       value.length <= 22 &&
-      /^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}$(?![\s\S])/.test(value)
+      /^http:\/\/(?:127\.0\.0\.1|localhost):[1-9][0-9]{3,4}$(?![\s\S])/.test(value)
   )
-  const port = Number(value.slice('http://127.0.0.1:'.length))
+  const port = Number(value.slice(value.lastIndexOf(':') + 1))
   requireValid(port >= 1024 && port <= 65_535)
   return value
 }

@@ -178,7 +178,9 @@ export function startFigPluginBridgeProbe(
         /* Host exceptions are not trusted data and never enter UI output. */
       }
       finish(
-        message.includes('script is not permitted to access the network apis')
+        message.includes('script is not permitted to access the network apis') ||
+          (message.startsWith('permission denied to the url ') &&
+            message.includes('manifest entry not found'))
           ? 'permission-denied'
           : 'unavailable'
       )

@@ -192,7 +192,7 @@ describe('FIGPLUGIN paired host dialogue bridge contracts', () => {
     'http://127.0.0.1',
     'https://127.0.0.1:1024',
     'HTTP://127.0.0.1:1024',
-    'http://localhost:1024',
+    'http://localhost.invalid:1024',
     'http://127.1:1024',
     'http://2130706433:1024',
     'http://[::1]:1024',

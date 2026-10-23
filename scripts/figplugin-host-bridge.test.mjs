@@ -82,6 +82,7 @@ function clockFixture() {
   }
 }
 function fixture(host, options = {}) {
+  const origin = options.origin ?? 'http://127.0.0.1:49152'
   const clock = clockFixture()
   const violations = []
   const posts = []
@@ -340,9 +341,10 @@ function fixture(host, options = {}) {
   const fetch = (url, fetchOptions) => {
     assert.match(
       url,
-      /^http:\/\/127\.0\.0\.1:49152\/figplugin\/v1\/(pair|prepare|status|cancel|close|probe)$/
+      /^http:\/\/(?:127\.0\.0\.1|localhost):49152\/figplugin\/v1\/(pair|prepare|status|cancel|close|probe)$/
     )
     const route = url.split('/').at(-1)
+    assert.equal(url, origin + '/figplugin/v1/' + route)
     const request = { url, route, options: fetchOptions, body: JSON.parse(fetchOptions.body) }
     requests.push(request)
     if (api.handlers.has(route)) return api.handlers.get(route)(request)
@@ -556,7 +558,7 @@ for (const host of ['figma', 'photoshop']) {
       { config: null },
       { unfrozen: true },
       ...[
-        'http://localhost:49152',
+        'http://localhost.invalid:49152',
         'http://127.0.0.1:999',
         'http://127.0.0.1:65536',
         origin + '/',
@@ -1174,3 +1176,18 @@ test('native connectivity helper is generated from the same shared source as the
   const generated = await buildHostBridgeReadiness()
   assert.equal(read('shared/bridge-readiness.js'), generated.text)
 })
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: explicit localhost pairs only against its signed origin and never normalizes a numeric ticket`, async () => {
+    const origin = 'http://localhost:49152'
+    const f = fixture(host, { origin })
+    await f.pair(f.ticket({ bridgeOrigin: 'http://127.0.0.1:49152' }))
+    assert.equal(f.requests.length, 0)
+    await f.pair()
+    assert.equal(f.route('pair').length, 1)
+    assert.equal(f.route('pair')[0].url, origin + '/figplugin/v1/pair')
+    assert.match(f.el('status').textContent, /Paired/)
+    assert.equal(f.el('ticket').value, '')
+    f.clean()
+  })
+}
