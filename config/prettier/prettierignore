@@ -12,3 +12,6 @@ tsconfig.*.json
 
 # Deterministic shared host-plan validator; verified by build-figplugin-plan-preview.mjs.
 ../../packages/figplugin-hosts/shared/plan-preview.js
+
+# Deterministic connectivity probe; verified by build-figplugin-bridge-readiness.mjs.
+../../packages/figplugin-hosts/shared/bridge-readiness.js
