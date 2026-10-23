@@ -63,7 +63,8 @@
       if (typeof intent[field] !== 'string' || !intent[field].length || intent[field].length > 160)
         return fail('JOURNAL_INVALID')
     const hash = globalThis.MagicPotVisualEvidenceV1?.sha256
-    if (typeof hash !== 'function') return fail()
+    const encode = globalThis.MagicPotVisualEvidenceV1?.encodeUtf8
+    if (typeof hash !== 'function' || typeof encode !== 'function') return fail()
     // Hash full approved payload in memory, but NEVER persist plan values,
     // design text, target names, session tokens or other bearer credentials.
     const serialized = JSON.stringify([
@@ -82,7 +83,7 @@
       ...(intent.recovery ? ['task-recovery-v1', intent.recovery] : [])
     ])
     if (serialized.length > 65536) return fail('JOURNAL_INVALID')
-    return hash(new TextEncoder().encode(serialized))
+    return hash(encode(serialized))
   }
   function create(storage, now = Date.now) {
     for (const method of ['read', 'write', 'keys', 'remove'])

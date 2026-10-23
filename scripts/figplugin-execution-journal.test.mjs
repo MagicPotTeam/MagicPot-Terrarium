@@ -39,8 +39,13 @@ const intent = (index = 1, at = 1000) => ({
     steps: [{ command: 'node.rename', targetId: '1:2', name: 'PRIVATE-DESIGN-TEXT' }]
   }
 })
-function module() {
-  const vm = createContext({ TextEncoder, Uint8Array, setTimeout, clearTimeout })
+function module(withTextEncoder = true) {
+  const vm = createContext({
+    ...(withTextEncoder ? { TextEncoder } : {}),
+    Uint8Array,
+    setTimeout,
+    clearTimeout
+  })
   new Script(visual).runInContext(vm)
   new Script(source).runInContext(vm)
   return { vm, api: vm.MagicPotExecutionJournalV1 }
@@ -403,4 +408,26 @@ test('capacity pressure reclaims only already-expired intents instead of blockin
   assert.equal(values.has(PREFIX + marker(1).actionId), false)
   assert.equal(values.has(PREFIX + marker(2).actionId), true)
   assert.equal(values.has(PREFIX + intent(257).actionId), true)
+})
+
+test('journal reserves without TextEncoder and preserves Unicode plan identity', async () => {
+  const { api, vm } = module(false)
+  const values = new Map()
+  const journal = api.create(
+    {
+      read: async (key) => values.get(key),
+      write: async (key, value) => values.set(key, value),
+      keys: async () => [...values.keys()],
+      remove: async (key) => values.delete(key)
+    },
+    () => 1000
+  )
+  const input = intent()
+  input.plan.steps[0].name = '原图😀e\u0301'
+  const receipt = await journal.reserve(input)
+  const expected = fixture()
+  await expected.journal.reserve(input)
+  assert.equal(receipt.fingerprint, JSON.parse([...expected.values.values()][0]).fingerprint)
+  await assert.rejects(() => journal.reserve(input), /JOURNAL_REPLAY/)
+  assert.equal(typeof vm.TextEncoder, 'undefined', 'must not install a global shim')
 })

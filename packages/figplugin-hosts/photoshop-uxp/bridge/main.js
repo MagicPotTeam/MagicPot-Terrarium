@@ -490,7 +490,9 @@
   const normalizedOpacity = (layer) => {
     const value = Number(layer.opacity)
     if (!Number.isFinite(value) || value < 0 || value > 100) return undefined
-    return value / 100
+    // Native opacity is an 8-bit value exposed as a percentage. Canonicalize the
+    // representation, not the accepted error tolerance. Plans use the same grid.
+    return Math.round((value * 255) / 100) / 255
   }
   function capturePhotoshopHostContext(captureId, selectionOverride = null) {
     const document = app.activeDocument
@@ -540,7 +542,7 @@
       if (selected && !effectiveLocked) {
         commands.push('node.rename', 'node.visibility')
         if (opacity !== undefined) commands.push('node.opacity')
-        if (type === 'textLayer' && layer.textItem) {
+        if (type === 'text' && layer.textItem) {
           const contents = exactText(layer.textItem.contents, 4096)
           if (contents !== null) {
             text = contents
@@ -598,6 +600,7 @@
         mode: 'native-write',
         adapterVersion: EXECUTION_ADAPTER_VERSION,
         supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content'],
+        opacityEncoding: 'uint8',
         rollback: 'verified-in-place',
         visualAudit: canCaptureVisualEvidence ? 'hash-only' : 'unavailable'
       }
@@ -772,7 +775,7 @@
       case 'node.visibility':
         return layer.visible
       case 'text.content':
-        return layer.kind === 'textLayer' && layer.textItem ? layer.textItem.contents : undefined
+        return layer.kind === 'text' && layer.textItem ? layer.textItem.contents : undefined
       default:
         return undefined
     }
@@ -855,7 +858,7 @@
         layer.visible = step.visible
         break
       case 'text.content':
-        if (!layer.textItem) throw new Error('UNSUPPORTED_COMMAND')
+        if (layer.kind !== 'text' || !layer.textItem) throw new Error('UNSUPPORTED_COMMAND')
         layer.textItem.contents = step.text
         break
       default:

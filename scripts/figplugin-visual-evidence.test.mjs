@@ -8,7 +8,7 @@ const source = fs.readFileSync(
   'utf8'
 )
 
-const load = () => {
+const load = (withTextEncoder = true) => {
   const context = vm.createContext({
     ArrayBuffer,
     DataView,
@@ -18,7 +18,7 @@ const load = () => {
     Number,
     Object,
     Promise,
-    TextEncoder,
+    ...(withTextEncoder ? { TextEncoder } : {}),
     Uint8Array
   })
   vm.runInContext(source, context, { filename: 'visual-evidence.js' })
@@ -153,4 +153,50 @@ test('Photoshop capture hashes bounded pixels and always disposes the image buff
     /VISUAL_EVIDENCE_UNAVAILABLE/
   )
   assert.equal(disposed, 2)
+})
+
+// Actual Photoshop UXP 27.5 exposes neither TextEncoder nor TextDecoder.
+test('visual capture works without TextEncoder and preserves UTF-8 fingerprints', async () => {
+  const { api, context } = load(false)
+  assert.equal(typeof context.TextEncoder, 'undefined')
+  const imaging = {
+    getPixels: async () => ({
+      imageData: {
+        width: 1,
+        height: 1,
+        components: 4,
+        componentSize: 8,
+        pixelFormat: 'RGBA',
+        colorSpace: 'RGB',
+        colorProfile: '测试😀',
+        getData: async () => new Uint8Array([9, 8, 7, 255]),
+        dispose() {}
+      }
+    })
+  }
+  const actual = await api.capturePhotoshopLayer(imaging, 1, 2)
+  const expected = await load().api.capturePhotoshopLayer(imaging, 1, 2)
+  assert.equal(actual.sha256, expected.sha256)
+  assert.equal(typeof context.TextEncoder, 'undefined', 'must not install a global shim')
+})
+
+test('bounded UTF-8 matches native TextEncoder for code point boundaries and every UTF-16 code unit', () => {
+  const { api } = load(false)
+  const encoder = new TextEncoder()
+  for (const text of [
+    '',
+    'A\0中文😀e\u0301',
+    '\ud800',
+    '\udfff',
+    '\ud800x\udc00',
+    String.fromCodePoint(0x7f, 0x80, 0x7ff, 0x800, 0xffff, 0x10000, 0x10ffff)
+  ])
+    assert.deepEqual(api.encodeUtf8(text), encoder.encode(text))
+  for (let start = 0; start < 65536; start += 1024) {
+    const text = Array.from({ length: 1024 }, (_, i) => String.fromCharCode(start + i)).join('')
+    assert.deepEqual(api.encodeUtf8(text), encoder.encode(text))
+  }
+  assert.equal(api.encodeUtf8('中'.repeat(65536)).byteLength, 196608)
+  assert.throws(() => api.encodeUtf8('x'.repeat(65537)), /VISUAL_EVIDENCE_UNAVAILABLE/)
+  assert.throws(() => api.encodeUtf8({}), /VISUAL_EVIDENCE_UNAVAILABLE/)
 })

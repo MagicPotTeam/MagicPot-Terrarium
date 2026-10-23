@@ -48,7 +48,9 @@ export const hostExecutionCapabilitySchema = z
     adapterVersion: z.string().min(1).max(64),
     supports: z.array(z.enum(HOST_COMMANDS)).min(1).max(HOST_COMMANDS.length),
     rollback: z.enum(HOST_EXECUTION_ROLLBACKS),
-    visualAudit: z.enum(HOST_VISUAL_AUDITS)
+    visualAudit: z.enum(HOST_VISUAL_AUDITS),
+    // Declared by a native adapter, not requested by the model. No arbitrary tolerance.
+    opacityEncoding: z.literal('uint8').optional()
   })
   .strict()
 export type HostExecutionCapability = z.output<typeof hostExecutionCapabilitySchema>
@@ -90,6 +92,8 @@ export const hostContextSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (value.execution?.opacityEncoding && value.host !== 'photoshop')
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Unsupported opacity encoding' })
     const ids = new Set(value.nodes.map((node) => node.id))
     if (ids.size !== value.nodes.length)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate nodes' })
@@ -198,9 +202,24 @@ export function parseHostPlan(text: string, context: HostContext): HostPlan {
     utf8Size(text) > HOST_PLAN_MAX_BYTES
   )
     throw new Error('PLAN_TOO_LARGE')
-  const plan = hostPlanSchema.parse(JSON.parse(text))
+  const plan = normalizeHostPlan(hostPlanSchema.parse(JSON.parse(text)), context)
   validateHostPlan(plan, context)
   return plan
+}
+/** Canonicalize only explicitly advertised native numeric precision BEFORE preview/approval.
+ * Every downstream hash and exact readback refers to these actual representable values. */
+export function normalizeHostPlan(input: HostPlan, rawContext: HostContext): HostPlan {
+  const context = hostContextSchema.parse(rawContext)
+  const plan = hostPlanSchema.parse(input)
+  if (context.execution?.opacityEncoding !== 'uint8') return plan
+  return {
+    ...plan,
+    steps: plan.steps.map((step) =>
+      step.command === 'node.opacity'
+        ? { ...step, opacity: Math.round(step.opacity * 255) / 255 }
+        : step
+    )
+  }
 }
 export function validateHostPlan(plan: HostPlan, rawContext: HostContext): void {
   const context = hostContextSchema.parse(rawContext)
@@ -215,6 +234,13 @@ export function validateHostPlan(plan: HostPlan, rawContext: HostContext): void 
     if (node.locked || node.ancestors.some((ancestor) => ancestor.locked))
       throw new Error('LOCKED_TARGET')
     if (!node.commands.includes(step.command)) throw new Error('UNSUPPORTED_COMMAND')
+    if (
+      step.command === 'node.opacity' &&
+      context.execution?.opacityEncoding === 'uint8' &&
+      step.opacity !== Math.round(step.opacity * 255) / 255
+    )
+      throw new Error('HOST_PRECISION_MISMATCH')
+
     const key = `${step.targetId}\u0000${step.command}`
     if (seen.has(key)) throw new Error('DUPLICATE_COMMAND')
     seen.add(key)

@@ -96,6 +96,7 @@ export const validateHostPlan = (plan: unknown, context: HostContext): HostPlan 
   return parsed
 }
 
+export { normalizeHostPlan } from './hostPlan'
 export { createHostPlanReadback, validateHostPlanReadback }
 
 export const formatContext = (context: HostContext): string =>

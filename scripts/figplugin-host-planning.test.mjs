@@ -54,6 +54,8 @@ function fixture(
     corruptResult = false,
     locked = false,
     approvePlan = false,
+    textPlan = false,
+    nativeTextEncoding = true,
     pendingClaims = 0,
     twoSteps = false,
     failSecond = false,
@@ -115,7 +117,8 @@ function fixture(
         }
       : {
           id: 7,
-          kind: 'pixel',
+          kind: textPlan ? 'text' : 'pixel',
+          ...(textPlan ? { textItem: { contents: 'Original owned text' } } : {}),
           name: 'Original owned name',
           parent: null,
           document,
@@ -246,6 +249,14 @@ function fixture(
   const planResults = []
   const claimedExecutions = new Set()
   const plannedSteps = () => {
+    if (textPlan)
+      return [
+        {
+          command: 'text.content',
+          targetId: approvedContext.nodes[0].id,
+          text: 'Approved owned text 中文😀'
+        }
+      ]
     const steps = [
       {
         command: 'node.rename',
@@ -265,8 +276,7 @@ function fixture(
     console,
     ...(journalAvailable ? { localStorage } : {}),
     AbortController,
-    TextEncoder,
-    TextDecoder,
+    ...(nativeTextEncoding ? { TextEncoder, TextDecoder } : {}),
     Uint8Array,
     Date: class extends Date {
       static now() {
@@ -609,6 +619,7 @@ function fixture(
               : [])
           ]
         }
+        if (textPlan) plan.steps = plannedSteps()
         value = {
           protocol: 1,
           callId,
@@ -617,7 +628,7 @@ function fixture(
             kind: 'host-plan-preview',
             executable: !corruptResult,
             plan,
-            risk: twoSteps ? 'medium' : 'low',
+            risk: twoSteps || textPlan ? 'medium' : 'low',
             execution: {
               mode: 'native-write',
               adapterVersion: host === 'figma' ? 'figma-native-1' : 'photoshop-uxp-native-1',
@@ -628,8 +639,10 @@ function fixture(
             differences: plan.steps.map((step) => ({
               targetId: step.targetId,
               command: step.command,
-              before: approvedContext.nodes.find((item) => item.id === step.targetId)?.name,
-              after: step.name
+              before: approvedContext.nodes.find((item) => item.id === step.targetId)?.[
+                textPlan ? 'text' : 'name'
+              ],
+              after: textPlan ? step.text : step.name
             }))
           })
         }
@@ -1890,3 +1903,41 @@ for (const host of ['figma', 'photoshop']) {
     }
   })
 }
+
+// Real Photoshop 27.5 reports LayerKind.TEXT as "text", not "textLayer".
+test('photoshop: real text kind is captured, approved, written and read back without browser encoders', async () => {
+  const f = fixture('photoshop', { approvePlan: true, textPlan: true, nativeTextEncoding: false })
+  try {
+    await runApproved(f)
+    const request = f.requests.find((r) => r.url.endsWith('/prepare') && !r.url.includes('/plan/'))
+    assert.ok(request)
+    assert.equal(request.body.hostContext.nodes[0].type, 'text')
+    assert.equal(request.body.hostContext.nodes[0].text, 'Original owned text')
+    assert.ok(request.body.hostContext.nodes[0].commands.includes('text.content'))
+    assert.equal(f.node.textItem.contents, 'Approved owned text 中文😀')
+    assert.equal(f.planResult().status, 'completed')
+    assert.equal(f.planResult().readback.steps[0].value, 'Approved owned text 中文😀')
+    assert.equal(f.vm.TextEncoder, undefined)
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('photoshop: real text kind does not bypass locked layer capability checks', async () => {
+  const f = fixture('photoshop', { textPlan: true, locked: true })
+  try {
+    await f.pair()
+    f.capture()
+    f.share()
+    await flush()
+    const request = f.requests.find((r) => r.url.endsWith('/prepare') && !r.url.includes('/plan/'))
+    assert.ok(request)
+    assert.equal(request.body.hostContext.nodes[0].locked, true)
+    assert.equal(request.body.hostContext.nodes[0].commands.includes('text.content'), false)
+    assert.equal(f.node.textItem.contents, 'Original owned text')
+    assert.deepEqual(f.nativeWrites, [])
+  } finally {
+    f.close()
+    await flush()
+  }
+})

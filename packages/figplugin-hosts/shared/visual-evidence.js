@@ -97,9 +97,35 @@
     }
     return Array.from(state, (value) => value.toString(16).padStart(8, '0')).join('')
   }
+  // Photoshop UXP does not expose the browser TextEncoder API. Keep the byte
+  // contract identical (including replacement of lone UTF-16 surrogates), without
+  // installing globals or weakening the existing hash/journal size limits.
+  const encodeUtf8 = (text) => {
+    if (typeof text !== 'string' || text.length > 65536) return fail()
+    const output = new Uint8Array(text.length * 3)
+    let offset = 0
+    for (const char of text) {
+      let point = char.codePointAt(0)
+      if (point >= 0xd800 && point <= 0xdfff) point = 0xfffd
+      if (point <= 0x7f) output[offset++] = point
+      else if (point <= 0x7ff) {
+        output[offset++] = 0xc0 | (point >>> 6)
+        output[offset++] = 0x80 | (point & 0x3f)
+      } else if (point <= 0xffff) {
+        output[offset++] = 0xe0 | (point >>> 12)
+        output[offset++] = 0x80 | ((point >>> 6) & 0x3f)
+        output[offset++] = 0x80 | (point & 0x3f)
+      } else {
+        output[offset++] = 0xf0 | (point >>> 18)
+        output[offset++] = 0x80 | ((point >>> 12) & 0x3f)
+        output[offset++] = 0x80 | ((point >>> 6) & 0x3f)
+        output[offset++] = 0x80 | (point & 0x3f)
+      }
+    }
+    return output.subarray(0, offset)
+  }
   const hashWithMetadata = (domain, metadata, data) => {
-    const encoder = new TextEncoder()
-    const prefix = encoder.encode(`${domain}\u0000${JSON.stringify(metadata)}\u0000`)
+    const prefix = encodeUtf8(`${domain}\u0000${JSON.stringify(metadata)}\u0000`)
     const bytes = bytesOf(data)
     if (bytes.byteLength < 1 || bytes.byteLength > MAX_BYTES) return fail()
     return sha256(concat([prefix, bytes]))
@@ -267,6 +293,7 @@
       captureFigmaNode,
       capturePhotoshopLayer,
       combine,
+      encodeUtf8,
       sha256
     }),
     configurable: false,
