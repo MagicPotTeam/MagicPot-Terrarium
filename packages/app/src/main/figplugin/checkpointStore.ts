@@ -16,6 +16,8 @@ import { canonicalFigPluginJson } from '@shared/figplugin/manifest'
 import {
   savedTaskCheckpointsSchema,
   taskRecoveryRebindSchema,
+  createTaskRecoveryRebind,
+  applyTaskRecoveryRebind,
   type SavedTaskCheckpoint,
   type TaskRecoveryRebind
 } from '@shared/figplugin/taskRecovery'
@@ -104,7 +106,8 @@ export interface RecoveryCheckpointStore {
   findForRebind(
     binding: FigPluginRuntimeBinding,
     context: HostContext,
-    baselineId: string
+    baselineId: string,
+    reopenDocument?: true
   ): SavedCheckpoint | undefined
   listSummaries(): SavedTaskCheckpoint[]
   consume(record: SavedCheckpoint, round: number, rebind?: TaskRecoveryRebind): void
@@ -391,9 +394,11 @@ export class FigPluginCheckpointStore implements RecoveryCheckpointStore {
   findForRebind(
     binding: FigPluginRuntimeBinding,
     context: HostContext,
-    baselineId: string
+    baselineId: string,
+    reopenDocument?: true
   ): SavedCheckpoint | undefined {
-    if (!/^[a-f0-9]{32}$/.test(baselineId) || !context.recoveryIdentity) throw unavailable()
+    if (baselineId.length !== 32 || !/^[a-f0-9]{32}$/.test(baselineId) || !context.recoveryIdentity)
+      throw unavailable()
     return this.transaction(
       false,
       (records) => {
@@ -402,11 +407,13 @@ export class FigPluginCheckpointStore implements RecoveryCheckpointStore {
             r.value.baselineId === baselineId &&
             canonicalFigPluginJson(recoveryBinding(r.binding)) ===
               canonicalFigPluginJson(recoveryBinding(binding)) &&
-            r.value.documentId === context.documentId &&
-            r.value.scopeId === context.scopeId &&
-            r.value.host === context.host
+            r.value.host === context.host &&
+            ((r.value.documentId === context.documentId && r.value.scopeId === context.scopeId) ||
+              (reopenDocument === true && context.host === 'photoshop'))
         )
-        return saved ? { ...saved, binding: structuredClone(binding) } : undefined
+        if (!saved) return undefined
+        createTaskRecoveryRebind(saved.recoveryScope, context, reopenDocument === true)
+        return { ...saved, binding: structuredClone(binding) }
       },
       undefined
     )
@@ -429,8 +436,23 @@ export class FigPluginCheckpointStore implements RecoveryCheckpointStore {
           round > 3
         )
           throw unavailable()
+        if (rebind) {
+          const nextScope = applyTaskRecoveryRebind(current.recoveryScope, rebind)
+          const next = {
+            ...current,
+            value: {
+              ...current.value,
+              documentId: nextScope.documentId,
+              scopeId: nextScope.scopeId
+            }
+          }
+          // Never overwrite an independently accepted checkpoint at the destination.
+          if (records.some((other) => other !== current && scopeKey(other) === scopeKey(next)))
+            throw unavailable()
+          current.recoveryScope = scopeSchema.parse(nextScope)
+          current.value = next.value
+        }
         current.value.correctionRoundsUsed = round
-        if (rebind) current.recoveryScope.recoveryIdentity = rebind.nextIdentity
         consumed = true
       },
       undefined

@@ -1733,7 +1733,8 @@
       }
     }
   }
-  async function restoreTask(requestId, rebindBaselineId) {
+  async function restoreTask(requestId, rebindBaselineId, reopenDocument = false) {
+    if (reopenDocument && !rebindBaselineId) return
     if (rebindBaselineId !== undefined && !hex(rebindBaselineId, 32)) return
     if (
       !config ||
@@ -1780,7 +1781,8 @@
           requestId,
           sequence,
           hostContext: call.hostContext,
-          ...(rebindBaselineId ? { rebindBaselineId } : {})
+          ...(rebindBaselineId ? { rebindBaselineId } : {}),
+          ...(reopenDocument ? { reopenDocument: true } : {})
         },
         call.auth
       )
@@ -1823,11 +1825,23 @@
         (rebindBaselineId !== undefined && recovery.baselineId !== rebindBaselineId) ||
         (recovery.rebind !== undefined &&
           (!rebindBaselineId ||
-            !keys(recovery.rebind, ['previousIdentity', 'nextIdentity']) ||
+            !keys(recovery.rebind, ['previousIdentity', 'nextIdentity'], ['document']) ||
             !hex(recovery.rebind.previousIdentity, 32) ||
             !hex(recovery.rebind.nextIdentity, 32) ||
             recovery.rebind.previousIdentity === recovery.rebind.nextIdentity ||
-            recovery.rebind.nextIdentity !== call.hostContext.recoveryIdentity)) ||
+            recovery.rebind.nextIdentity !== call.hostContext.recoveryIdentity ||
+            (recovery.rebind.document !== undefined &&
+              (!reopenDocument ||
+                !keys(recovery.rebind.document, ['host', 'previousDocumentId', 'nextDocumentId']) ||
+                recovery.rebind.document.host !== 'photoshop' ||
+                typeof recovery.rebind.document.previousDocumentId !== 'string' ||
+                recovery.rebind.document.previousDocumentId.length > 16 ||
+                !/^[1-9][0-9]{0,15}$(?![\s\S])/.test(recovery.rebind.document.previousDocumentId) ||
+                !Number.isSafeInteger(Number(recovery.rebind.document.previousDocumentId)) ||
+                recovery.rebind.document.previousDocumentId ===
+                  recovery.rebind.document.nextDocumentId ||
+                recovery.rebind.document.nextDocumentId !== call.hostContext.documentId ||
+                call.hostContext.scopeId !== call.hostContext.documentId)))) ||
         !hex(recovery.baselineId, 32) ||
         !hex(recovery.sourceExecutionId, 32) ||
         recovery.requestId !== requestId ||
@@ -1946,10 +1960,15 @@
         state('Recovery capture is unavailable.')
       }
     })
-    el('rebind-checkpoint').addEventListener('input', () => state())
+    el('rebind-checkpoint').addEventListener('input', () => {
+      el('reopen-document').checked = false
+      state()
+    })
     el('rebind-task').addEventListener('click', () => {
       try {
-        void restoreTask(nonce(), el('rebind-checkpoint').value.trim())
+        const reopen = el('reopen-document').checked === true
+        el('reopen-document').checked = false
+        void restoreTask(nonce(), el('rebind-checkpoint').value.trim(), reopen)
       } catch {
         state('Recovery reassociation is unavailable.')
       }

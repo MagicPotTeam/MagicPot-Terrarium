@@ -24,10 +24,28 @@ const ids = z
       values.every((value, index) => [...values].sort()[index] === value),
     'Recovery targets must be sorted and unique'
   )
+const photoshopDocumentId = z
+  .string()
+  .max(16)
+  .regex(/^[1-9][0-9]*$(?![\s\S])/)
+  .refine((value) => Number.isSafeInteger(Number(value)), 'Invalid Photoshop document ID')
+export const taskRecoveryDocumentRebindSchema = z
+  .object({
+    host: z.literal('photoshop'),
+    previousDocumentId: photoshopDocumentId,
+    nextDocumentId: photoshopDocumentId
+  })
+  .strict()
+  .refine(
+    (value) => value.previousDocumentId !== value.nextDocumentId,
+    'Unchanged Photoshop document ID'
+  )
+
 export const taskRecoveryRebindSchema = z
   .object({
     previousIdentity: hex32,
-    nextIdentity: hex32
+    nextIdentity: hex32,
+    document: taskRecoveryDocumentRebindSchema.optional()
   })
   .strict()
   .refine((value) => value.previousIdentity !== value.nextIdentity, 'Unchanged recovery identity')
@@ -72,10 +90,20 @@ export const figPluginTaskRecoveryPrepareRequestSchema = z
     sequence: z.number().int().min(1).max(1_000_000_000),
     hostContext: hostContextSchema,
     // Explicitly selected by the user; never inferred from matching node IDs.
-    rebindBaselineId: hex32.optional()
+    rebindBaselineId: hex32.optional(),
+    // Explicit user intent, never inferred from a newly captured document number.
+    reopenDocument: z.literal(true).optional()
   })
   .strict()
   .refine((value) => value.hostContext.captureId === value.requestId, 'Recovery capture mismatch')
+  .refine(
+    (value) =>
+      value.reopenDocument !== true ||
+      (value.rebindBaselineId !== undefined &&
+        value.hostContext.host === 'photoshop' &&
+        value.hostContext.scopeId === value.hostContext.documentId),
+    'Explicit Photoshop checkpoint selection required'
+  )
 export const figPluginTaskRecoveryPrepareResponseSchema = z.discriminatedUnion('status', [
   z.object({ protocol: z.literal(1), status: z.literal('unchanged'), baselineId: hex32 }).strict(),
   z
@@ -150,6 +178,66 @@ export function captureTaskRecoveryScope(
           : {})
       }
     })
+  }
+}
+
+/** Reassociation is explicit user selection, not a proof of file identity. Photoshop's
+ * Document.id is valid only while open. The optional exception changes that root only;
+ * layer IDs, parent chains, text/font and command checks remain exact. */
+export function createTaskRecoveryRebind(
+  scope: TaskRecoveryScope,
+  context: HostContext,
+  allowReopenedDocument = false
+): TaskRecoveryRebind | undefined {
+  if (!scope.recoveryIdentity || !context.recoveryIdentity)
+    throw new Error('INVALID_RECOVERY_SCOPE')
+  let document: z.output<typeof taskRecoveryDocumentRebindSchema> | undefined
+  if (scope.documentId !== context.documentId || scope.scopeId !== context.scopeId) {
+    if (
+      !allowReopenedDocument ||
+      scope.host !== 'photoshop' ||
+      context.host !== 'photoshop' ||
+      scope.scopeId !== scope.documentId ||
+      context.scopeId !== context.documentId
+    )
+      throw new Error('INVALID_RECOVERY_SCOPE')
+    document = taskRecoveryDocumentRebindSchema.parse({
+      host: 'photoshop',
+      previousDocumentId: scope.documentId,
+      nextDocumentId: context.documentId
+    })
+  }
+  if (scope.recoveryIdentity === context.recoveryIdentity) {
+    if (document) throw new Error('INVALID_RECOVERY_SCOPE')
+    return undefined
+  }
+  return taskRecoveryRebindSchema.parse({
+    previousIdentity: scope.recoveryIdentity,
+    nextIdentity: context.recoveryIdentity,
+    ...(document ? { document } : {})
+  })
+}
+
+/** Pure projection for preview/transaction validation; does not mutate persisted data. */
+export function applyTaskRecoveryRebind(
+  scope: TaskRecoveryScope,
+  value: TaskRecoveryRebind
+): TaskRecoveryScope {
+  const rebind = taskRecoveryRebindSchema.parse(value)
+  if (scope.recoveryIdentity !== rebind.previousIdentity) throw new Error('STALE_RECOVERY_SCOPE')
+  if (
+    rebind.document &&
+    (scope.host !== 'photoshop' ||
+      scope.documentId !== rebind.document.previousDocumentId ||
+      scope.scopeId !== scope.documentId)
+  )
+    throw new Error('STALE_RECOVERY_SCOPE')
+  return {
+    ...scope,
+    recoveryIdentity: rebind.nextIdentity,
+    ...(rebind.document
+      ? { documentId: rebind.document.nextDocumentId, scopeId: rebind.document.nextDocumentId }
+      : {})
   }
 }
 

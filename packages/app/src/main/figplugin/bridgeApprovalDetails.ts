@@ -70,6 +70,14 @@ export function buildPlanExecutionApprovalDetails(preview: FigPluginExecutionPre
         ]
       : []),
     '',
+    ...(preview.recovery?.rebind?.document
+      ? [
+          'WARNING: Photoshop document ID changed after reopening. This is an explicitly selected destination, NOT verified file identity.',
+          `Previously accepted document ID: ${preview.recovery.rebind.document.previousDocumentId}`,
+          `Currently selected document ID: ${preview.recovery.rebind.document.nextDocumentId}`,
+          'Only the document root is reassociated. Layer IDs, parent chains, locks and supported properties must still match. No file is opened, saved, or selected automatically.'
+        ]
+      : []),
     'Exact document changes:',
     escapePlanningDisplay(JSON.stringify(preview.differences, null, 2)),
     '',

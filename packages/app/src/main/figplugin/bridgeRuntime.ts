@@ -1,6 +1,8 @@
 import type { RecoveryCheckpointStore, SavedCheckpoint } from './checkpointStore'
 import {
   captureTaskRecoveryScope,
+  createTaskRecoveryRebind,
+  applyTaskRecoveryRebind,
   prepareTaskRecoveryPlan,
   figPluginTaskRecoveryPrepareRequestSchema,
   figPluginTaskRecoveryPrepareResponseSchema,
@@ -561,7 +563,10 @@ export class FigPluginBridgeRuntime {
                 maxCorrectionRounds: execution.recovery.maxCorrectionRounds,
                 targetCount: execution.recovery.targetIds.length,
                 consumed: execution.claimedAt !== undefined,
-                ...(execution.recovery.rebind ? { reassociationRequested: true as const } : {})
+                ...(execution.recovery.rebind ? { reassociationRequested: true as const } : {}),
+                ...(execution.recovery.rebind?.document
+                  ? { documentReassociationRequested: true as const }
+                  : {})
               }
             }
           : {}),
@@ -1132,6 +1137,19 @@ export class FigPluginBridgeRuntime {
         canonicalFigPluginJson(execution.call.session.binding)
     )
       throw new FigPluginBridgeError('EXPIRED')
+    if (execution.recovery.rebind) {
+      try {
+        const expected = createTaskRecoveryRebind(
+          record.recoveryScope,
+          execution.context,
+          execution.recovery.rebind.document !== undefined
+        )
+        if (canonicalFigPluginJson(expected) !== canonicalFigPluginJson(execution.recovery.rebind))
+          throw new Error('STALE_RECOVERY_SCOPE')
+      } catch {
+        throw new FigPluginBridgeError('EXPIRED')
+      }
+    }
     return record
   }
 
@@ -1167,7 +1185,12 @@ export class FigPluginBridgeRuntime {
         let persisted: SavedCheckpoint | undefined
         try {
           persisted = request.rebindBaselineId
-            ? this.checkpoints.findForRebind(session.binding, context, request.rebindBaselineId)
+            ? this.checkpoints.findForRebind(
+                session.binding,
+                context,
+                request.rebindBaselineId,
+                request.reopenDocument
+              )
             : this.checkpoints.find(session.binding, context)
         } catch {
           throw new FigPluginBridgeError('UPSTREAM_FAILED')
@@ -1175,10 +1198,17 @@ export class FigPluginBridgeRuntime {
         if (persisted) {
           // Validate current selection, host identity, locks and capabilities before rehydration.
           try {
+            const reassociation = request.rebindBaselineId
+              ? createTaskRecoveryRebind(
+                  persisted.recoveryScope,
+                  context,
+                  request.reopenDocument === true
+                )
+              : undefined
             prepareTaskRecoveryPlan(
               persisted.recoveryPlan,
-              request.rebindBaselineId && context.recoveryIdentity
-                ? { ...persisted.recoveryScope, recoveryIdentity: context.recoveryIdentity }
+              reassociation
+                ? applyTaskRecoveryRebind(persisted.recoveryScope, reassociation)
                 : persisted.recoveryScope,
               context
             )
@@ -1208,15 +1238,17 @@ export class FigPluginBridgeRuntime {
               this.removeVisualBaseline(id)
         }
       }
-      const record = [...this.visualBaselines.values()].find(
-        (record) =>
-          record.value.host === context.host &&
-          record.value.documentId === context.documentId &&
-          record.value.scopeId === context.scopeId &&
-          record.value.projectId === session.binding.projectId &&
-          record.value.pluginId === session.binding.pluginId &&
-          canonicalFigPluginJson(record.binding) === canonicalFigPluginJson(session.binding)
-      )
+      const record = request.rebindBaselineId
+        ? this.visualBaselines.get(request.rebindBaselineId)
+        : [...this.visualBaselines.values()].find(
+            (record) =>
+              record.value.host === context.host &&
+              record.value.documentId === context.documentId &&
+              record.value.scopeId === context.scopeId &&
+              record.value.projectId === session.binding.projectId &&
+              record.value.pluginId === session.binding.pluginId &&
+              canonicalFigPluginJson(record.binding) === canonicalFigPluginJson(session.binding)
+          )
       if (!record || record.value.expiresAt <= this.clock())
         throw new FigPluginBridgeError('EXPIRED')
       if (
@@ -1235,24 +1267,16 @@ export class FigPluginBridgeRuntime {
         )
       )
         throw new FigPluginBridgeError('BUSY')
-      const rebind =
-        request.rebindBaselineId &&
-        context.recoveryIdentity &&
-        record.recoveryScope.recoveryIdentity !== context.recoveryIdentity
-          ? {
-              previousIdentity: record.recoveryScope.recoveryIdentity!,
-              nextIdentity: context.recoveryIdentity
-            }
-          : undefined
+      const rebind = request.rebindBaselineId
+        ? createTaskRecoveryRebind(record.recoveryScope, context, request.reopenDocument === true)
+        : undefined
       if (request.rebindBaselineId && record.value.baselineId !== request.rebindBaselineId)
         throw new FigPluginBridgeError('INVALID_REQUEST')
       let prepared: ReturnType<typeof prepareTaskRecoveryPlan>
       try {
         prepared = prepareTaskRecoveryPlan(
           record.recoveryPlan,
-          rebind
-            ? { ...record.recoveryScope, recoveryIdentity: rebind.nextIdentity }
-            : record.recoveryScope,
+          rebind ? applyTaskRecoveryRebind(record.recoveryScope, rebind) : record.recoveryScope,
           context
         )
       } catch {
@@ -1777,11 +1801,17 @@ export class FigPluginBridgeRuntime {
         ...recoveryAuthority.value,
         correctionRoundsUsed: execution.recovery.round
       })
-      if (execution.recovery.rebind)
-        recoveryAuthority.recoveryScope = {
-          ...recoveryAuthority.recoveryScope,
-          recoveryIdentity: execution.recovery.rebind.nextIdentity
-        }
+      if (execution.recovery.rebind) {
+        recoveryAuthority.recoveryScope = applyTaskRecoveryRebind(
+          recoveryAuthority.recoveryScope,
+          execution.recovery.rebind
+        )
+        recoveryAuthority.value = figPluginVisualBaselineSchema.parse({
+          ...recoveryAuthority.value,
+          documentId: recoveryAuthority.recoveryScope.documentId,
+          scopeId: recoveryAuthority.recoveryScope.scopeId
+        })
+      }
     }
     execution.intent = Object.freeze(intent)
     execution.state = 'claimed'

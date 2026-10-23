@@ -881,11 +881,13 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       if (!preview) throw new FigPluginBridgeError('EXPIRED')
       const approval = await this.confirm(parent, {
         type: 'warning',
-        title: preview.recovery
-          ? 'Restore accepted task properties'
-          : preview.visualCorrection
-            ? 'Approve one visual correction write'
-            : 'Approve one native document write',
+        title: preview.recovery?.rebind?.document
+          ? 'Restore into a reopened Photoshop document'
+          : preview.recovery
+            ? 'Restore accepted task properties'
+            : preview.visualCorrection
+              ? 'Approve one visual correction write'
+              : 'Approve one native document write',
         message: `${preview.pluginId} (${preview.host})`,
         detail: buildPlanExecutionApprovalDetails(preview),
         buttons: [
@@ -899,11 +901,13 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
         defaultId: 1,
         cancelId: 1,
         noLink: true,
-        checkboxLabel: preview.recovery?.rebind
-          ? 'I verified the current host document and selected objects, choose this saved checkpoint for the new plugin instance, and authorize these exact changes once'
-          : preview.visualCorrection
-            ? 'I reviewed this correction round, its exact targets and changes, and authorize one native host write'
-            : 'I reviewed the exact document changes and authorize one native host write',
+        checkboxLabel: preview.recovery?.rebind?.document
+          ? 'I verified the original PSD and the old/new document IDs, and authorize restoring only the displayed unchanged layer IDs once'
+          : preview.recovery?.rebind
+            ? 'I verified the current host document and selected objects, choose this saved checkpoint for the new plugin instance, and authorize these exact changes once'
+            : preview.visualCorrection
+              ? 'I reviewed this correction round, its exact targets and changes, and authorize one native host write'
+              : 'I reviewed the exact document changes and authorize one native host write',
         checkboxChecked: false
       })
       if (approval.response !== 0 || !approval.checkboxChecked) return { completed: false }

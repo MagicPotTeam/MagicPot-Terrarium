@@ -102,7 +102,8 @@ export const figPluginExecutionAuditEventSchema = z
         maxCorrectionRounds: z.literal(3),
         targetCount: z.number().int().min(1).max(20),
         consumed: z.boolean(),
-        reassociationRequested: z.literal(true).optional()
+        reassociationRequested: z.literal(true).optional(),
+        documentReassociationRequested: z.literal(true).optional()
       })
       .strict()
       .optional(),

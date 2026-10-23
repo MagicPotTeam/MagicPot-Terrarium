@@ -70,6 +70,9 @@ function fixture(
     actionSeed = '8',
     authorityHook = null,
     recoveryRebindFault = null,
+    documentRebindFault = null,
+    unsolicitedDocumentRebind = false,
+    nativeDocumentId = 5,
     unsolicitedRebind = false,
     recoveryGate = null,
     recoveryUnchanged = false,
@@ -98,7 +101,7 @@ function fixture(
   }
   const rootNode = { id: '0:0', type: 'DOCUMENT' }
   const page = { id: '0:1', type: 'PAGE', name: 'Owned page', parent: rootNode, selection: [] }
-  const document = { id: 5, activeLayers: [], layers: [] }
+  const document = { id: nativeDocumentId, activeLayers: [], layers: [] }
   const data =
     host === 'figma'
       ? {
@@ -305,7 +308,8 @@ function fixture(
             'protocol',
             'requestId',
             'sequence',
-            ...(body.rebindBaselineId ? ['rebindBaselineId'] : [])
+            ...(body.rebindBaselineId ? ['rebindBaselineId'] : []),
+            ...(body.reopenDocument ? ['reopenDocument'] : [])
           ].sort()
         )
         recoveryContext = body.hostContext
@@ -321,6 +325,19 @@ function fixture(
           recoveryDescriptor.rebind = {
             previousIdentity: '1'.repeat(32),
             nextIdentity: body.hostContext.recoveryIdentity
+          }
+          if (body.reopenDocument || unsolicitedDocumentRebind) {
+            recoveryDescriptor.rebind.document = {
+              host: 'photoshop',
+              previousDocumentId: '101',
+              nextDocumentId: body.hostContext.documentId
+            }
+            if (documentRebindFault === 'current')
+              recoveryDescriptor.rebind.document.nextDocumentId = '999'
+            if (documentRebindFault === 'previous')
+              recoveryDescriptor.rebind.document.previousDocumentId = '101\n'
+            if (documentRebindFault === 'host') recoveryDescriptor.rebind.document.host = 'figma'
+            if (documentRebindFault === 'extra') recoveryDescriptor.rebind.document.file = 'PRIVATE'
           }
           if (recoveryRebindFault === 'identity')
             recoveryDescriptor.rebind.nextIdentity = '0'.repeat(32)
@@ -739,7 +756,7 @@ function fixture(
       host === 'figma'
         ? send({ type: 'restore-task', nonce: 'f'.repeat(32), instanceEpoch: '6'.repeat(32) })
         : click('restore-task'),
-    rebind: (baselineId = '4'.repeat(32)) => {
+    rebind: (baselineId = '4'.repeat(32), reopenDocument = false) => {
       if (host === 'figma')
         send({
           type: 'restore-task',
@@ -749,6 +766,7 @@ function fixture(
         })
       else {
         element('rebind-checkpoint').value = baselineId
+        element('reopen-document').checked = reopenDocument
         click('rebind-task')
       }
     },
@@ -1669,3 +1687,111 @@ for (const host of ['figma', 'photoshop']) {
     }
   })
 }
+
+// Production Photoshop entrypoint with API-shaped fixtures. Not an actual PSD acceptance.
+test('photoshop: document-reopen opt-in sends the new root and restores only after claim', async () => {
+  const f = fixture('photoshop', { approvePlan: true, nativeDocumentId: 202 })
+  try {
+    await f.pair()
+    f.node.visible = false
+    f.rebind('4'.repeat(32), true)
+    await flush()
+    const request = f.requests.find((r) => r.url.endsWith('/plan/recovery/prepare'))
+    assert.equal(request.body.reopenDocument, true)
+    assert.equal(request.body.hostContext.documentId, '202')
+    assert.equal(request.body.hostContext.scopeId, '202')
+    assert.equal(f.element('reopen-document').checked, false)
+    assert.deepEqual(f.nativeWrites, [])
+    await f.tick(1000)
+    assert.deepEqual(f.nativeWrites, ['Accepted recovery name'])
+    assert.equal(f.node.visible, false)
+    assert.equal(f.planResult().status, 'completed')
+    assert.equal(f.planResult().readback.steps[0].targetId, '7')
+    assert.equal(
+      f.requests.some((r) => new URL(r.url).pathname === '/figplugin/v1/prepare'),
+      false
+    )
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('photoshop: ordinary rebind cannot silently become document-root reassociation', async () => {
+  const f = fixture('photoshop', {
+    approvePlan: true,
+    nativeDocumentId: 202,
+    unsolicitedDocumentRebind: true
+  })
+  try {
+    await f.pair()
+    f.rebind()
+    await flush()
+    await f.tick(2000)
+    assert.deepEqual(f.nativeWrites, [])
+    assert.equal(f.persistedActions.size, 0)
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+for (const documentRebindFault of ['current', 'previous', 'host', 'extra'])
+  test(`photoshop: document-reopen rejects substituted ${documentRebindFault}`, async () => {
+    const f = fixture('photoshop', {
+      approvePlan: true,
+      nativeDocumentId: 202,
+      documentRebindFault
+    })
+    try {
+      await f.pair()
+      f.rebind('4'.repeat(32), true)
+      await flush()
+      await f.tick(2000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.persistedActions.size, 0)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+test('photoshop: cancellation while document-reopen capture is pending drops late work', async () => {
+  let release
+  const gate = new Promise((r) => {
+    release = r
+  })
+  const f = fixture('photoshop', {
+    approvePlan: true,
+    nativeDocumentId: 202,
+    recoveryGate: () => gate
+  })
+  try {
+    await f.pair()
+    f.rebind('4'.repeat(32), true)
+    await flush()
+    f.cancel()
+    release()
+    await flush()
+    await f.tick(3000)
+    assert.deepEqual(f.nativeWrites, [])
+    assert.equal(
+      f.requests.some((r) => r.url.endsWith('/plan/claim')),
+      false
+    )
+  } finally {
+    release()
+    f.close()
+    await flush()
+  }
+})
+test('photoshop: editing a checkpoint clears the document-reopen opt-in', async () => {
+  const f = fixture('photoshop')
+  try {
+    await f.pair()
+    f.element('reopen-document').checked = true
+    f.element('rebind-checkpoint').handlers.input()
+    assert.equal(f.element('reopen-document').checked, false)
+    assert.deepEqual(f.nativeWrites, [])
+  } finally {
+    f.close()
+    await flush()
+  }
+})

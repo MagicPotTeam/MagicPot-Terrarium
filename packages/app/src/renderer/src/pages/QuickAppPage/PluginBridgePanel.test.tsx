@@ -1334,3 +1334,43 @@ it('labels an encrypted checkpoint without turning it into automatic write autho
   expect(mocks.center.approvePlanExecution).not.toHaveBeenCalled()
   expect(mocks.center.acceptVisualBaseline).not.toHaveBeenCalled()
 })
+
+it('shows the old and new document roots without silently approving a reopened PSD', async () => {
+  const preview = { ...nativeExecutionPreview(), host: 'photoshop' as const }
+  const recovery = {
+    baselineId: 'a'.repeat(32),
+    sourceExecutionId: 'b'.repeat(32),
+    requestId: preview.captureId,
+    round: 1,
+    maxCorrectionRounds: 3 as const,
+    targetIds: ['node-1'],
+    rebind: {
+      previousIdentity: 'c'.repeat(32),
+      nextIdentity: 'd'.repeat(32),
+      document: { host: 'photoshop' as const, previousDocumentId: '101', nextDocumentId: '202' }
+    }
+  }
+  mocks.center.planState.mockResolvedValue({
+    previews: [
+      {
+        ...preview,
+        state: 'awaiting-approval',
+        risk: 'high',
+        documentId: '202',
+        scopeId: '202',
+        recovery
+      }
+    ],
+    statuses: [],
+    baselines: [],
+    correctionAuthorizations: []
+  })
+  mount([{ ...target, host: 'photoshop' }])
+  await click('refresh')
+  expect(
+    screen.getByText('figplugin.checkpoints.documentRebindWarning 101 202')
+  ).toBeInTheDocument()
+  expect(mocks.center.approvePlanExecution).not.toHaveBeenCalled()
+  expect(en.figplugin.checkpoints.documentRebindWarning).toContain('layer IDs')
+  expect(zh.figplugin.checkpoints.documentRebindWarning).toContain('图层编号')
+})

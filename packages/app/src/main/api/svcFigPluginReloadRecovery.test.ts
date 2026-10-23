@@ -217,4 +217,56 @@ describe('trusted saved-checkpoint lookup and explicit rebind approval', () => {
     await expect(pending).rejects.toMatchObject({ code: 'CONFIGURATION_CHANGED' })
     expect(f.bridge.approvePlanExecution).not.toHaveBeenCalled()
   })
+  it.each([
+    { response: 0, checkboxChecked: false },
+    { response: 1, checkboxChecked: true },
+    { response: 0, checkboxChecked: true }
+  ])('reopened PSD requires explicit old/new document confirmation: %j', async (answer) => {
+    const f = fixture()
+    const current: FigPluginExecutionPreview = {
+      ...structuredClone(preview),
+      host: 'photoshop',
+      documentId: '202',
+      scopeId: '202',
+      risk: 'high',
+      recovery: {
+        ...preview.recovery!,
+        rebind: {
+          ...rebind,
+          document: { host: 'photoshop', previousDocumentId: '101', nextDocumentId: '202' }
+        }
+      }
+    }
+    f.bridge.planState.mockReturnValue({
+      previews: [current],
+      statuses: [],
+      baselines: [],
+      correctionAuthorizations: []
+    })
+    await (f.service as unknown as { getBridge(): Promise<unknown> }).getBridge()
+    native.showMessageBox.mockResolvedValue(answer)
+    const result = await f.service.approvePlanExecution(
+      { executionId: current.executionId, planSha256: current.planSha256 },
+      invocation('approvePlanExecution')
+    )
+    const options = native.showMessageBox.mock.calls[0][1]
+    expect(options).toMatchObject({
+      title: 'Restore into a reopened Photoshop document',
+      defaultId: 1,
+      cancelId: 1,
+      checkboxChecked: false
+    })
+    expect(options.detail).toContain('Previously accepted document ID: 101')
+    expect(options.detail).toContain('Currently selected document ID: 202')
+    expect(options.checkboxLabel).toContain('original PSD')
+    const approved = answer.response === 0 && answer.checkboxChecked
+    expect(result.completed).toBe(approved)
+    if (approved)
+      expect(f.bridge.approvePlanExecution).toHaveBeenCalledExactlyOnceWith(
+        current.executionId,
+        current.planSha256,
+        true
+      )
+    else expect(f.bridge.approvePlanExecution).not.toHaveBeenCalled()
+  })
 })

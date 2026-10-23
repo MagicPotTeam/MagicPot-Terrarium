@@ -318,6 +318,14 @@ export const figPluginExecutionPreviewSchema = z
           JSON.stringify(value.recovery.targetIds))
     )
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid task recovery preview' })
+    const reboundDocument = value.recovery?.rebind?.document
+    if (
+      reboundDocument &&
+      (value.host !== 'photoshop' ||
+        value.documentId !== reboundDocument.nextDocumentId ||
+        value.scopeId !== value.documentId)
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid reopened document binding' })
     if (value.expiresAt <= value.createdAt)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid execution expiry' })
     if (value.differences.length !== value.plan.steps.length)
@@ -362,6 +370,14 @@ export const figPluginExecutionIntentSchema = z
           JSON.stringify(value.recovery.targetIds))
     )
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid task recovery intent' })
+    const reboundDocument = value.recovery?.rebind?.document
+    if (
+      reboundDocument &&
+      (value.host !== 'photoshop' ||
+        value.documentId !== reboundDocument.nextDocumentId ||
+        value.scopeId !== value.documentId)
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid reopened document binding' })
     if (value.plan.captureId !== value.captureId)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Intent capture mismatch' })
     const planTargetIds = new Set(value.plan.steps.map((step) => step.targetId))

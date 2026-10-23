@@ -1644,8 +1644,9 @@
       "scope": "Document: {{document}}; scope: {{scope}}; targets: {{targets}}",
       "code": "Checkpoint ID (select to copy)",
       "remaining": "Used {{used}} / {{max}} rounds; accepted {{accepted}}; expires {{expiry}}.",
-      "boundary": "The ID selects data, not write authority. Matching node IDs do not prove document identity: verify the open document. No remapping of document or layer IDs, restoration of credentials, or resetting of usage/expiry.",
-      "rebindWarning": "Native plugin instance changed: this associates the user-selected checkpoint with the current selection. Verify the current host document and objects; matching IDs are not proof of identity."
+      "boundary": "The ID selects data, not write authority. Verify the actual open file. Photoshop may explicitly reassociate a changed document ID after reopening; layer IDs and structure must still match. No automatic layer remapping, credential restoration, or resetting usage/expiry.",
+      "rebindWarning": "Native plugin instance changed: this associates the user-selected checkpoint with the current selection. Verify the current host document and objects; matching IDs are not proof of identity.",
+      "documentRebindWarning": "Photoshop document ID: {{previous}} → {{current}}. Verify the actual reopened PSD; only the document root changes, layer IDs and structure must match."
     }
   },
   "image_edit": {

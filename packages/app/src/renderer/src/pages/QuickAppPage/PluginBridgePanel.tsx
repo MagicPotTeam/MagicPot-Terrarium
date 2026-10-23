@@ -1130,6 +1130,14 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
               {previewEx.recovery?.rebind && (
                 <Alert severity="warning">{t('figplugin.checkpoints.rebindWarning')}</Alert>
               )}
+              {previewEx.recovery?.rebind?.document && (
+                <Alert severity="warning">
+                  {t('figplugin.checkpoints.documentRebindWarning', {
+                    previous: previewEx.recovery.rebind.document.previousDocumentId,
+                    current: previewEx.recovery.rebind.document.nextDocumentId
+                  })}
+                </Alert>
+              )}
               {previewEx.visualCorrection && (
                 <Alert severity="warning">
                   {t('figplugin.bridge.visualCorrectionWritePreview', {
