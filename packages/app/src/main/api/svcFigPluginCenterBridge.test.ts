@@ -1376,8 +1376,8 @@ it('real loopback: pair -> prepare -> native desktop approval -> one mock model 
     conversationId: expect.any(String),
     temperature: 0.2,
     maxOutputTokens: 1200,
+    systemPrompt: expect.stringContaining('Do not use tools'),
     messages: [
-      { role: 'system', content: expect.stringContaining('Do not use tools') },
       {
         role: 'user',
         content: JSON.stringify({

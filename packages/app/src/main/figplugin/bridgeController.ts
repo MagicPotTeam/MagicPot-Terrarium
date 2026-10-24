@@ -602,11 +602,14 @@ export class FigPluginBridgeController {
       if (Buffer.byteLength(content, 'utf8') > Math.min(limits.maxPayloadBytes, 64 * 1024)) {
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
       }
-      const messages = [
-        { role: 'system' as const, content: planning ? HOST_PLAN_SYSTEM_MESSAGE : SYSTEM_MESSAGE },
-        { role: 'user' as const, content }
-      ]
-      const inputTokens = Math.ceil(Buffer.byteLength(JSON.stringify(messages), 'utf8') / 3)
+      // LLMProxy forwards this dedicated field to provider instructions. Responses
+      // deliberately excludes system-role history entries, so embedding the plan
+      // contract only in messages silently discards it on that transport.
+      const systemPrompt = planning ? HOST_PLAN_SYSTEM_MESSAGE : SYSTEM_MESSAGE
+      const messages = [{ role: 'user' as const, content }]
+      const inputTokens = Math.ceil(
+        Buffer.byteLength(JSON.stringify({ systemPrompt, messages }), 'utf8') / 3
+      )
       if (budget.tokens !== undefined && inputTokens + MAX_OUTPUT_TOKENS > budget.tokens) {
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
       }
@@ -619,6 +622,7 @@ export class FigPluginBridgeController {
           expectedProfileRevision: binding.profileRevision,
           profileScope: 'agent',
           conversationId,
+          systemPrompt,
           messages,
           temperature: 0.2,
           maxOutputTokens: MAX_OUTPUT_TOKENS

@@ -841,8 +841,8 @@ describe('FigPluginBridgeController native approval and bounded read-only infere
       conversationId: expect.stringMatching(/^[a-f0-9-]{36}$/),
       temperature: 0.2,
       maxOutputTokens: 1200,
+      systemPrompt: expect.stringContaining('untrusted'),
       messages: [
-        { role: 'system', content: expect.stringContaining('untrusted') },
         {
           role: 'user',
           content: JSON.stringify({
@@ -853,8 +853,8 @@ describe('FigPluginBridgeController native approval and bounded read-only infere
         }
       ]
     })
-    expect(input.messages[0].content).toContain('read-only')
-    expect(input.messages[0].content).toContain('Do not use tools')
+    expect(input.systemPrompt).toContain('read-only')
+    expect(input.systemPrompt).toContain('Do not use tools')
     expect(options?.signal).toBeInstanceOf(AbortSignal)
     expect(value.model.listProfiles).toHaveBeenCalledTimes(1)
     expect(await call.status()).toMatchObject({
@@ -883,8 +883,8 @@ describe('FigPluginBridgeController native approval and bounded read-only infere
       content
     })
     const input = value.model.chat.mock.calls[0][0]
-    expect(input.messages[0].content).toContain('read-only')
-    expect(input.messages[0].content).toContain('Do not use tools')
+    expect(input.systemPrompt).toContain('read-only')
+    expect(input.systemPrompt).toContain('Do not use tools')
     expect(input).not.toHaveProperty('tools')
     expect(value.model.chat).toHaveBeenCalledOnce()
     expect(value.controller.desktopState().previews).toEqual([])
