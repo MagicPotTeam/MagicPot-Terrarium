@@ -1,3 +1,4 @@
+import { figmaTypography, typographyFontKey } from '@shared/figplugin/hostTypography'
 import { OpenAIAPICli } from '@shared/llm/clients'
 import { HOST_PLAN_SYSTEM_MESSAGE } from './planGovernance'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -299,6 +300,16 @@ it.each([true, false])(
       boundsKind: 'axis-aligned-no-effects',
       bounds: { x: -20.5, y: 60, width: 80, height: 40 }
     }
+    const text = input.hostContext.nodes[0].text!
+    input.hostContext.nodes[0].typography = figmaTypography(text, false, [
+      {
+        start: 0,
+        end: text.length,
+        fontName: { family: 'Owned Sans', style: 'Regular' },
+        fontSize: 14
+      }
+    ])
+    input.hostContext.nodes[0].fontKey = typographyFontKey(input.hostContext.nodes[0].typography)
     const { featureId: _feature, hostContext: _context, ...dialogue } = input
     const f = await fixture(planning ? input : dialogue)
     const output = planning ? JSON.stringify(proposal()) : 'Owned read-only analysis'
@@ -379,6 +390,12 @@ it.each([true, false])(
       )
     }
     expect(wire.input.every((message: { role: string }) => message.role === 'user')).toBe(true)
+    if (planning) {
+      expect(JSON.parse(wire.input[0].content[0].text).hostContext.nodes[0].typography).toEqual(
+        input.hostContext.nodes[0].typography
+      )
+      expect(wire.instructions).toContain('primary-style-only')
+    }
     expect(wire.tools).toBeUndefined()
     expect(outcome.status).toBe('completed')
     expect(f.model.chat.mock.calls[0][0].messages.map((message) => message.role)).toEqual(['user'])

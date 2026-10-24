@@ -487,6 +487,20 @@
       return { status: 'unavailable' }
     }
   }
+  function readTypography(node) {
+    const helper = globalThis.MagicPotPlanPreviewV1
+    if (!helper || typeof helper.figmaTypography !== 'function') throw new Error('SNAPSHOT')
+    try {
+      const text = exactText(node.characters, 4096)
+      if (text === null) return { status: 'unavailable' }
+      const segments = text.length
+        ? node.getStyledTextSegments(['fontName', 'fontSize'], 0, text.length)
+        : [{ start: 0, end: 0, fontName: node.fontName, fontSize: node.fontSize }]
+      return helper.figmaTypography(text, node.hasMissingFont, segments)
+    } catch {
+      return { status: 'unavailable' }
+    }
+  }
   function captureFigmaHostContext(captureId, selectionOverride = null) {
     const root = figma.root
     if (
@@ -571,6 +585,8 @@
       const ancestors = ancestorsOf(node)
       const effectiveLocked = node.locked || ancestors.some((ancestor) => ancestor.locked)
       const parentId = ancestors[0]?.id ?? null
+      const typography = type === 'TEXT' ? readTypography(node) : undefined
+      const fontKey = typography && globalThis.MagicPotPlanPreviewV1.typographyFontKey(typography)
       const commands = []
       let layout = null
       let text
@@ -580,7 +596,12 @@
           commands.push('node.opacity')
         if (type === 'TEXT' && exactText(node.characters, 4096) !== null) {
           text = node.characters
-          commands.push('text.content')
+          if (
+            typography?.status === 'available' &&
+            typography.hasMissingFont === false &&
+            typeof figma.loadFontAsync === 'function'
+          )
+            commands.push('text.content')
         }
         layout = readLayout(node)
         if (layout) commands.push('layout.flow')
@@ -594,6 +615,8 @@
         locked: node.locked,
         visible: node.visible,
         spatial: readSpatial(node),
+        ...(typography ? { typography } : {}),
+        ...(fontKey === undefined ? {} : { fontKey }),
         ...(typeof node.opacity === 'number' && Number.isFinite(node.opacity)
           ? { opacity: Math.max(0, Math.min(1, node.opacity)) }
           : {}),
@@ -876,6 +899,11 @@
     // after our own text/layout step has legitimately changed document geometry.
     if (checkSpatial)
       for (const record of context.nodes) {
+        if (record.typography !== undefined) {
+          const native = planningNodes && planningNodes.get(record.id)
+          if (!native || !samePlanValue(record.typography, readTypography(native)))
+            throw new Error('STALE_CONTEXT')
+        }
         if (record.spatial !== undefined) {
           const native = planningNodes && planningNodes.get(record.id)
           if (!native || !samePlanValue(record.spatial, readSpatial(native)))
@@ -899,6 +927,11 @@
       if (!contextNode || !contextNode.commands.includes(step.command))
         throw new Error('UNSUPPORTED_COMMAND')
       const node = verifyNativeNode(contextNode)
+      if (
+        step.command === 'text.content' &&
+        (!contextNode.typography || !samePlanValue(contextNode.typography, readTypography(node)))
+      )
+        throw new Error('STALE_CONTEXT')
       const expected = readNodeValue(node, step.command)
       const baseline =
         step.command === 'node.rename'
@@ -944,7 +977,13 @@
         throw new Error('UNSUPPORTED_COMMAND')
     }
   }
-  function rollbackPlanStep(node, contextNode, step) {
+  function rollbackPlanStep(node, contextNode, step, appliedTypography) {
+    if (
+      step.command === 'text.content' &&
+      appliedTypography !== undefined &&
+      !samePlanValue(appliedTypography, readTypography(node))
+    )
+      throw new Error('STALE_CONTEXT')
     // Roll back only a value still owned by this attempt. Never overwrite a later
     // user edit, a moved/replaced object, or a newly locked target.
     const requested =
@@ -1228,6 +1267,72 @@
       return result
     }
   }
+  async function prepareTextFonts(checked, item) {
+    const helper = globalThis.MagicPotPlanPreviewV1
+    const fonts = new Map()
+    for (const entry of checked) {
+      if (entry.step.command !== 'text.content') continue
+      for (const font of helper.requiredFigmaFonts(entry.contextNode.typography))
+        fonts.set(JSON.stringify(font), font)
+    }
+    if (!fonts.size) return
+    if (fonts.size > 32 || typeof figma.loadFontAsync !== 'function')
+      throw new Error('FONT_UNAVAILABLE')
+    assertExecutionCurrent(item)
+    state('Preparing approved text fonts; no document changes have been made.')
+    const deadline = Math.min(item.expiresAt, Date.now() + 15000)
+    let timer,
+      cancel,
+      stopped = false
+    const interrupted = new Promise((_, reject) => {
+      cancel = () => {
+        stopped = true
+        reject(new Error('FONT_UNAVAILABLE'))
+      }
+      operations.add(cancel)
+      timer = setTimeout(cancel, Math.max(1, deadline - Date.now()))
+    })
+    const work = (async () => {
+      for (const font of fonts.values()) {
+        if (stopped || Date.now() >= deadline) throw new Error('FONT_UNAVAILABLE')
+        assertExecutionCurrent(item)
+        await figma.loadFontAsync(font)
+        if (stopped || Date.now() >= deadline) throw new Error('FONT_UNAVAILABLE')
+        assertExecutionCurrent(item)
+      }
+    })()
+    try {
+      await Promise.race([work, interrupted])
+    } finally {
+      stopped = true
+      clearTimeout(timer)
+      operations.delete(cancel)
+    }
+  }
+  async function reportPreparationFailure(item, plan, errorCode) {
+    if (!executionCurrent(item)) return
+    try {
+      await postPlanProgress(item, 2, 'readback', 0, 0, plan.steps.length, 'none')
+      assertExecutionCurrent(item)
+      await post(
+        'planResult',
+        {
+          protocol: 1,
+          executionId: item.executionId,
+          actionId: item.actionId,
+          status: 'failed',
+          effect: 'none',
+          completed: 0,
+          total: plan.steps.length,
+          readback: createPlanReadback(item.hostContext, plan),
+          errorCode
+        },
+        item.auth
+      )
+    } catch {
+      /* An unconfirmed receipt never authorizes another write. */
+    }
+  }
   async function executeClaimedPlan(item, intent) {
     assertExecutionCurrent(item)
     const planner = globalThis.MagicPotPlanPreviewV1
@@ -1244,12 +1349,40 @@
       checked = precheckPlan(plan, item.hostContext)
       visualEntries = visualEntriesForIntent(checked, item, intent)
     } catch {
+      await reportPreparationFailure(item, plan, 'STALE_CONTEXT')
       state(
         'The document changed after capture or the correction scope was invalid. No plan steps were applied.'
       )
       return
     }
     let sequence = 2
+    try {
+      await prepareTextFonts(checked, item)
+      assertExecutionCurrent(item)
+      checked = precheckPlan(plan, item.hostContext)
+    } catch {
+      if (!executionCurrent(item)) return
+      try {
+        await postPlanProgress(item, sequence++, 'readback', 0, 0, plan.steps.length, 'none')
+        await post(
+          'planResult',
+          {
+            protocol: 1,
+            executionId: item.executionId,
+            actionId: item.actionId,
+            status: 'failed',
+            effect: 'none',
+            completed: 0,
+            total: plan.steps.length,
+            readback: createPlanReadback(item.hostContext, plan),
+            errorCode: 'HOST_UNAVAILABLE'
+          },
+          item.auth
+        )
+      } catch {}
+      state('Font preparation failed or the text context changed. No document changes were made.')
+      return
+    }
     let beforeVisual = null
     if (item.hostContext.execution.visualAudit === 'hash-only') {
       try {
@@ -1313,6 +1446,7 @@
           'Persistent action safety check blocked this write. It was not replayed. Verify the document and request a new approved plan.'
         )
       } else {
+        await reportPreparationFailure(item, plan, 'STALE_CONTEXT')
         state('Execution permission ended or the document changed. No new writes were started.')
       }
       return
@@ -1327,6 +1461,8 @@
         // immediately before its synchronous mutation, not only before the loop.
         precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext, false)
         applyPlanStep(entry.node, entry.step)
+        if (entry.step.command === 'text.content')
+          entry.appliedTypography = readTypography(entry.node)
         applied.push(entry)
         const completed = index + 1
         effect = completed === checked.length ? 'applied' : 'partial'
@@ -1347,7 +1483,7 @@
         try {
           // A delayed cleanup is still a write; it cannot outlive the original grant.
           if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
-          rollbackPlanStep(entry.node, entry.contextNode, entry.step)
+          rollbackPlanStep(entry.node, entry.contextNode, entry.step, entry.appliedTypography)
         } catch {}
       }
       effect = applied.length ? 'rolled-back' : 'none'
@@ -1374,7 +1510,7 @@
           try {
             // A delayed cleanup is still a write; it cannot outlive the original grant.
             if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
-            rollbackPlanStep(entry.node, entry.contextNode, entry.step)
+            rollbackPlanStep(entry.node, entry.contextNode, entry.step, entry.appliedTypography)
           } catch {}
         }
         visualEvidence = undefined

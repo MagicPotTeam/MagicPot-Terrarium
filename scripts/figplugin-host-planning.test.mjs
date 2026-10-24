@@ -55,6 +55,8 @@ function fixture(
     locked = false,
     approvePlan = false,
     textPlan = false,
+    fontGate = null,
+    missingFonts = false,
     nativeTextEncoding = true,
     pendingClaims = 0,
     twoSteps = false,
@@ -117,7 +119,15 @@ function fixture(
     host === 'figma'
       ? {
           id: '1:2',
-          type: 'RECTANGLE',
+          type: textPlan ? 'TEXT' : 'RECTANGLE',
+          ...(textPlan
+            ? {
+                characters: 'Original owned text',
+                fontName: { family: 'Owned Sans', style: 'Regular' },
+                fontSize: 14,
+                hasMissingFont: missingFonts
+              }
+            : {}),
           name: 'Original owned name',
           parent: page,
           locked,
@@ -126,7 +136,14 @@ function fixture(
       : {
           id: 7,
           kind: textPlan ? 'text' : 'pixel',
-          ...(textPlan ? { textItem: { contents: 'Original owned text' } } : {}),
+          ...(textPlan
+            ? {
+                textItem: {
+                  contents: 'Original owned text',
+                  characterStyle: { font: 'OwnedSans-Regular', size: 14 }
+                }
+              }
+            : {}),
           name: 'Original owned name',
           parent: null,
           document,
@@ -138,6 +155,29 @@ function fixture(
           isBackgroundLayer: false
         }
   const node = data
+  const fontLoads = [],
+    textWrites = [],
+    loadedFonts = new Set()
+  if (host === 'figma' && textPlan) {
+    let characters = node.characters
+    node.getStyledTextSegments = () => [
+      { start: 0, end: characters.length, fontName: node.fontName, fontSize: node.fontSize }
+    ]
+    Object.defineProperty(node, 'characters', {
+      enumerable: true,
+      configurable: true,
+      get: () => characters,
+      set(value) {
+        const fonts = characters.length
+          ? node.getStyledTextSegments().map((x) => x.fontName)
+          : [node.fontName]
+        if (fonts.some((font) => !loadedFonts.has(JSON.stringify(font))))
+          throw Error('Fixture font was not loaded')
+        textWrites.push(value)
+        characters = value
+      }
+    })
+  }
   const nativeWrites = []
   let firstName = data.name
   Object.defineProperty(node, 'name', {
@@ -229,6 +269,11 @@ function fixture(
   const app = Object.freeze({ activeDocument: document, documents: [document] })
   const figma = {
     root: rootNode,
+    async loadFontAsync(font) {
+      fontLoads.push(plain(font))
+      if (fontGate) await fontGate({ node, font })
+      loadedFonts.add(JSON.stringify(font))
+    },
     ...(journalAvailable ? { clientStorage } : {}),
     currentPage: page,
     showUI() {},
@@ -812,6 +857,9 @@ function fixture(
     element,
     cancel: () => (host === 'figma' ? send({ type: 'cancel' }) : click('cancel')),
     nativeWrites,
+    fontLoads,
+    textWrites,
+    loadedFonts,
     persistedActions,
     planResult: () => planResult,
     planResults: () => planResults.map(plain),
@@ -2090,6 +2138,243 @@ test('photoshop: invalid canvas values remain unknown rather than becoming a 72p
     const context = f.requests.find((r) => r.url.endsWith('/prepare')).body.hostContext
     assert.deepEqual(context.canvas, { status: 'unavailable' })
     assert.equal(context.nodes[0].spatial.status, 'available')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
+// Font preparation tests execute production native code; native APIs and HTTP are fixtures.
+const fontContextOf = (f) => f.requests.find((r) => r.url.endsWith('/prepare'))?.body.hostContext
+const runFontPlan = async (f) => {
+  await f.pair()
+  f.capture()
+  f.share()
+  await flush()
+  await f.tick(3000)
+}
+test('font resources: Figma captures bounded font runs, sends only after share, and loads only after write approval', async () => {
+  const f = fixture('figma', { textPlan: true })
+  try {
+    f.capture()
+    await flush()
+    assert.equal(f.requests.length, 0)
+    assert.deepEqual(f.fontLoads, [])
+    await f.pair()
+    f.share()
+    await flush()
+    await f.tick(2000)
+    const n = fontContextOf(f).nodes[0]
+    assert.equal(n.typography.kind, 'figma-font-runs')
+    assert.equal(n.typography.runs[0].font.family, 'Owned Sans')
+    assert.equal(n.typography.runs[0].fontSizePx, 14)
+    assert.ok(n.fontKey.includes('Owned Sans'))
+    assert.deepEqual(f.fontLoads, [])
+    assert.deepEqual(f.textWrites, [])
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('font resources: Figma loads the exact current font before approved text mutation', async () => {
+  const f = fixture('figma', { textPlan: true, approvePlan: true })
+  try {
+    await runFontPlan(f)
+    assert.deepEqual(f.fontLoads, [{ family: 'Owned Sans', style: 'Regular' }])
+    assert.deepEqual(f.textWrites, ['Approved owned text 中文😀'])
+    assert.equal(f.planResult()?.status, 'completed')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('font resources: mixed and variable Figma fonts are all loaded without substitution', async () => {
+  const f = fixture('figma', { textPlan: true, approvePlan: true })
+  try {
+    const a = { family: 'Owned Sans', style: 'Regular' },
+      b = { family: 'Owned Variable', style: 'Bold', variationSettings: { wght: 650 } }
+    f.node.getStyledTextSegments = () => [
+      { start: 0, end: 4, fontName: a, fontSize: 14 },
+      { start: 4, end: f.node.characters.length, fontName: b, fontSize: 18 }
+    ]
+    await runFontPlan(f)
+    assert.deepEqual(f.fontLoads, [a, b])
+    assert.equal(f.textWrites.length, 1)
+    assert.equal(f.planResult()?.status, 'completed')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('font resources: missing Figma fonts do not advertise text writes or load a substitute', async () => {
+  const f = fixture('figma', { textPlan: true, missingFonts: true, approvePlan: true })
+  try {
+    await runFontPlan(f)
+    const n = fontContextOf(f).nodes[0]
+    assert.equal(n.typography.hasMissingFont, true)
+    assert.ok(!n.commands.includes('text.content'))
+    assert.ok(n.commands.includes('node.rename'))
+    assert.deepEqual(f.fontLoads, [])
+    assert.deepEqual(f.textWrites, [])
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('font resources: unavailable Figma typography is explicit and not a text capability', async () => {
+  const f = fixture('figma', { textPlan: true })
+  try {
+    f.node.getStyledTextSegments = () => {
+      throw Error('PRIVATE font path')
+    }
+    await runFontPlan(f)
+    const n = fontContextOf(f).nodes[0]
+    assert.deepEqual(n.typography, { status: 'unavailable' })
+    assert.ok(!n.commands.includes('text.content'))
+    assert.ok(!JSON.stringify(f.requests).includes('PRIVATE'))
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+for (const mode of ['cancel', 'timeout', 'font-changed', 'text-changed', 'lock-changed']) {
+  test(`font resources: ${mode} during Figma font preparation prevents late text writes`, async () => {
+    let release
+    const wait = new Promise((resolve) => {
+      release = resolve
+    })
+    const f = fixture('figma', { textPlan: true, approvePlan: true, fontGate: () => wait })
+    try {
+      await runFontPlan(f)
+      assert.equal(f.fontLoads.length, 1)
+      assert.equal(f.textWrites.length, 0)
+      if (mode === 'cancel') f.cancel()
+      if (mode === 'timeout') await f.tick(16000)
+      if (mode === 'font-changed') f.node.fontName = { family: 'Other Font', style: 'Regular' }
+      if (mode === 'text-changed') {
+        f.loadedFonts.add(JSON.stringify(f.node.fontName))
+        f.node.characters = 'Later user text'
+        f.textWrites.length = 0
+      }
+      if (mode === 'lock-changed') f.node.locked = true
+      release()
+      await flush()
+      await f.tick(3000)
+      assert.deepEqual(f.textWrites, [])
+      assert.equal(f.persistedActions.size, 0)
+      if (mode === 'timeout') assert.equal(f.planResult()?.errorCode, 'HOST_UNAVAILABLE')
+    } finally {
+      release()
+      f.close()
+      await flush()
+    }
+  })
+}
+test('font resources: font loader rejection is a failed receipt, not successful execution', async () => {
+  const f = fixture('figma', {
+    textPlan: true,
+    approvePlan: true,
+    fontGate: () => Promise.reject(Error('PRIVATE loader details'))
+  })
+  try {
+    await runFontPlan(f)
+    assert.equal(f.planResult()?.status, 'failed')
+    assert.equal(f.planResult()?.effect, 'none')
+    assert.equal(f.planResult()?.errorCode, 'HOST_UNAVAILABLE')
+    assert.deepEqual(f.textWrites, [])
+    assert.ok(!JSON.stringify(f.posts).includes('PRIVATE'))
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('font resources: Photoshop sends explicitly primary style metadata with native size units', async () => {
+  const f = fixture('photoshop', { textPlan: true, approvePlan: true })
+  try {
+    await runFontPlan(f)
+    assert.deepEqual(fontContextOf(f).nodes[0].typography, {
+      status: 'available',
+      kind: 'photoshop-character-style',
+      coverage: 'primary-style-only',
+      fontPostScriptName: 'OwnedSans-Regular',
+      size: { value: 14, unit: 'px-at-72ppi' }
+    })
+    assert.equal(f.planResult()?.status, 'completed')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('font resources: Photoshop font change without geometry change invalidates first write', async () => {
+  const f = fixture('photoshop', {
+    textPlan: true,
+    approvePlan: true,
+    visualGate: ({ node }) => {
+      node.textItem.characterStyle.font = 'Different-Font'
+    }
+  })
+  try {
+    await runFontPlan(f)
+    assert.equal(f.node.textItem.contents, 'Original owned text')
+    assert.equal(f.planResult()?.effect, 'none')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
+for (const host of ['figma', 'photoshop']) {
+  test(`font resources: ${host} rollback does not overwrite text after another font edit`, async () => {
+    const f = fixture(host, {
+      textPlan: true,
+      approvePlan: true,
+      progressHook: (body, { node }) => {
+        if (body.phase === 'executing') {
+          if (host === 'figma') node.fontName = { family: 'Later font', style: 'Bold' }
+          else node.textItem.characterStyle.font = 'LaterFont-Bold'
+          throw Error('Owned failed receipt after concurrent font edit')
+        }
+      }
+    })
+    try {
+      await runFontPlan(f)
+      const text = host === 'figma' ? f.node.characters : f.node.textItem.contents
+      assert.equal(text, 'Approved owned text 中文😀')
+      if (host === 'figma') assert.equal(f.textWrites.length, 1)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+test('font resources: Figma empty text uses its explicit insertion style', async () => {
+  const f = fixture('figma', { textPlan: true, approvePlan: true })
+  try {
+    f.loadedFonts.add(JSON.stringify(f.node.fontName))
+    f.node.characters = ''
+    f.textWrites.length = 0
+    f.loadedFonts.clear()
+    await runFontPlan(f)
+    assert.deepEqual(f.fontLoads, [{ family: 'Owned Sans', style: 'Regular' }])
+    assert.equal(f.planResult()?.status, 'completed')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
+test('font resources: changed Figma font before claim returns a terminal stale receipt', async () => {
+  const f = fixture('figma', { textPlan: true, approvePlan: true })
+  try {
+    await f.pair()
+    f.capture()
+    f.node.fontName = { family: 'Later Font', style: 'Bold' }
+    f.share()
+    await flush()
+    await f.tick(3000)
+    assert.deepEqual(f.textWrites, [])
+    assert.deepEqual(f.fontLoads, [])
+    assert.equal(f.planResult()?.errorCode, 'STALE_CONTEXT')
   } finally {
     f.close()
     await flush()

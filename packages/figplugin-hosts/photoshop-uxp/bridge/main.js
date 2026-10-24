@@ -583,6 +583,16 @@
       return { status: 'unavailable' }
     }
   }
+  function readTypography(layer) {
+    const helper = globalThis.MagicPotPlanPreviewV1
+    if (!helper || typeof helper.photoshopTypography !== 'function') throw new Error('SNAPSHOT')
+    try {
+      const style = layer.textItem.characterStyle
+      return helper.photoshopTypography(style.font, style.size)
+    } catch {
+      return { status: 'unavailable' }
+    }
+  }
   function capturePhotoshopHostContext(captureId, selectionOverride = null) {
     const document = app.activeDocument
     if (!document || !Number.isSafeInteger(document.id) || document.id <= 0)
@@ -626,6 +636,8 @@
       const locked = layerLocked(layer)
       const effectiveLocked = locked || ancestors.some((ancestor) => ancestor.locked)
       const opacity = normalizedOpacity(layer)
+      const typography = type === 'text' ? readTypography(layer) : undefined
+      const fontKey = typography && globalThis.MagicPotPlanPreviewV1.typographyFontKey(typography)
       const commands = []
       let text
       if (selected && !effectiveLocked) {
@@ -648,6 +660,8 @@
         locked,
         visible: layer.visible,
         spatial: readSpatial(layer),
+        ...(typography ? { typography } : {}),
+        ...(fontKey === undefined ? {} : { fontKey }),
         ...(opacity === undefined ? {} : { opacity }),
         commands,
         ...(text === undefined ? {} : { text })
@@ -917,6 +931,11 @@
       throw new Error('STALE_CONTEXT')
     if (checkSpatial)
       for (const record of context.nodes) {
+        if (record.typography !== undefined) {
+          const native = planningNodes && planningNodes.get(record.id)
+          if (!native || !samePlanValue(record.typography, readTypography(native)))
+            throw new Error('STALE_CONTEXT')
+        }
         if (record.spatial !== undefined) {
           const native = planningNodes && planningNodes.get(record.id)
           if (!native || !samePlanValue(record.spatial, readSpatial(native)))
@@ -940,6 +959,12 @@
       if (!contextNode || !contextNode.commands.includes(step.command))
         throw new Error('UNSUPPORTED_COMMAND')
       const layer = verifyNativeLayer(contextNode, context.documentId)
+      if (
+        step.command === 'text.content' &&
+        contextNode.typography !== undefined &&
+        !samePlanValue(contextNode.typography, readTypography(layer))
+      )
+        throw new Error('STALE_CONTEXT')
       const expected = readNodeValue(layer, step.command)
       const baseline =
         step.command === 'node.rename'
@@ -973,7 +998,13 @@
         throw new Error('UNSUPPORTED_COMMAND')
     }
   }
-  function rollbackPlanStep(layer, contextNode, step, documentId) {
+  function rollbackPlanStep(layer, contextNode, step, documentId, appliedTypography) {
+    if (
+      step.command === 'text.content' &&
+      appliedTypography !== undefined &&
+      !samePlanValue(appliedTypography, readTypography(layer))
+    )
+      throw new Error('STALE_CONTEXT')
     // Roll back only a value still owned by this attempt. Never overwrite a later
     // user edit, a moved/replaced object, or a newly locked target.
     const requested =
@@ -1285,6 +1316,8 @@
               assertExecutionCurrent(item)
               precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext, false)
               applyPlanStep(entry.layer, entry.step)
+              if (entry.step.command === 'text.content')
+                entry.appliedTypography = readTypography(entry.layer)
               applied.push(entry)
               await post(
                 'planProgress',
@@ -1313,7 +1346,8 @@
                   entry.layer,
                   entry.contextNode,
                   entry.step,
-                  item.hostContext.documentId
+                  item.hostContext.documentId,
+                  entry.appliedTypography
                 )
               } catch {}
             }
@@ -1351,7 +1385,8 @@
                     entry.layer,
                     entry.contextNode,
                     entry.step,
-                    item.hostContext.documentId
+                    item.hostContext.documentId,
+                    entry.appliedTypography
                   )
                 } catch {}
               }

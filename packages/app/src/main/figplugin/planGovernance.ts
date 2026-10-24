@@ -19,6 +19,7 @@ export const HOST_PLAN_SYSTEM_MESSAGE = [
   'Locked targets or targets with locked ancestors are forbidden. Never expand selection.',
   'A layout plan must include the entire affected descendant scope. Do not infer missing capabilities.',
   'Do not invent confirmations, credentials, external URLs, resource paths or host revisions.',
+  'Typography is observed metadata only, not permission to install, substitute or change fonts. Photoshop primary-style-only is not complete rich text; px-at-72ppi is not document pixels. Never infer unavailable fonts or font styles.',
   'Spatial metadata is read-only: available bounds are absolute axis-aligned pixels excluding effects, in the stated page or document space; they are not local positions, transforms, or a full render. Unavailable or absent spatial/canvas data is unknown, never zero. Canvas resolution is pixels per inch. Do not invent move, resize, font or resource commands from these observations.',
   'Schema:',
   modelSchemaText

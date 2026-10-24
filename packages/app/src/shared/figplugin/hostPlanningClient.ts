@@ -1,3 +1,9 @@
+export {
+  figmaTypography,
+  photoshopTypography,
+  typographyFontKey,
+  requiredFigmaFonts
+} from './hostTypography'
 import { checkFigPluginSelectionSnapshot } from './selectionSnapshot'
 import {
   createHostPlanReadback,

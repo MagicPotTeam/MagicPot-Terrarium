@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { hostSpatialSchema, hostCanvasSchema } from './hostSpatial'
+import { hostTypographySchema, typographyFontKey } from './hostTypography'
 
 /** Shared data contract for Bridge planning and future native-host validation.
  * A valid plan is data, never consent or proof that a host performed a change. */
@@ -74,6 +75,7 @@ export const hostContextNodeSchema = z
     spatial: hostSpatialSchema.optional(),
     text: z.string().max(4096).optional(),
     fontKey: z.string().max(4096).optional(),
+    typography: hostTypographySchema.optional(),
     layout: hostLayoutSchema.optional()
   })
   .strict()
@@ -108,6 +110,28 @@ export const hostContextSchema = z
       )
     )
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Spatial coordinate space mismatch' })
+    for (const node of value.nodes) {
+      const type = node.typography
+      if (type?.status === 'available') {
+        if (
+          (value.host === 'figma' ? 'figma-font-runs' : 'photoshop-character-style') !==
+            type.kind ||
+          node.type !== (value.host === 'figma' ? 'TEXT' : 'text') ||
+          (node.fontKey !== undefined && node.fontKey !== typographyFontKey(type)) ||
+          (type.kind === 'figma-font-runs' &&
+            node.text !== undefined &&
+            node.text.length !== type.characterCount)
+        )
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Font observation mismatch' })
+      }
+      if (
+        value.host === 'figma' &&
+        type !== undefined &&
+        node.commands.includes('text.content') &&
+        (type.status !== 'available' || type.kind !== 'figma-font-runs' || type.hasMissingFont)
+      )
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Text font resources unavailable' })
+    }
     const ids = new Set(value.nodes.map((node) => node.id))
     if (ids.size !== value.nodes.length)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate nodes' })
