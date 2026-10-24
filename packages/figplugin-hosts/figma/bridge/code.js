@@ -476,6 +476,17 @@
       state('Selection capture failed. Capture again before sharing.')
     }
   }
+  function readSpatial(node) {
+    const helper = globalThis.MagicPotPlanPreviewV1
+    if (!helper || typeof helper.spatialBounds !== 'function') throw new Error('SNAPSHOT')
+    try {
+      const bounds = node.absoluteBoundingBox
+      if (!bounds) return { status: 'unavailable' }
+      return helper.spatialBounds('page', bounds.x, bounds.y, bounds.width, bounds.height)
+    } catch {
+      return { status: 'unavailable' }
+    }
+  }
   function captureFigmaHostContext(captureId, selectionOverride = null) {
     const root = figma.root
     if (
@@ -582,6 +593,7 @@
         ancestors,
         locked: node.locked,
         visible: node.visible,
+        spatial: readSpatial(node),
         ...(typeof node.opacity === 'number' && Number.isFinite(node.opacity)
           ? { opacity: Math.max(0, Math.min(1, node.opacity)) }
           : {}),
@@ -858,7 +870,18 @@
       throw new Error('LOCKED_TARGET')
     return node
   }
-  function precheckPlan(plan, context) {
+  function precheckPlan(plan, context, checkSpatial = true) {
+    // Revalidate the complete planning observation before the first write, including
+    // after async exports/authority/journal waits. Do not compare an old rectangle
+    // after our own text/layout step has legitimately changed document geometry.
+    if (checkSpatial)
+      for (const record of context.nodes) {
+        if (record.spatial !== undefined) {
+          const native = planningNodes && planningNodes.get(record.id)
+          if (!native || !samePlanValue(record.spatial, readSpatial(native)))
+            throw new Error('STALE_CONTEXT')
+        }
+      }
     if (!Array.isArray(plan.steps) || plan.steps.length < 1 || plan.steps.length > 20)
       throw new Error('INVALID_PLAN')
     const nodes = new Map(context.nodes.map((node) => [node.id, node]))
@@ -1302,7 +1325,7 @@
         assertExecutionCurrent(item)
         // Each progress receipt yields to other host edits. Revalidate this step
         // immediately before its synchronous mutation, not only before the loop.
-        precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext)
+        precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext, false)
         applyPlanStep(entry.node, entry.step)
         applied.push(entry)
         const completed = index + 1

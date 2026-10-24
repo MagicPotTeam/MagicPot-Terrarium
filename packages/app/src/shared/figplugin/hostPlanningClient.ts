@@ -97,6 +97,7 @@ export const validateHostPlan = (plan: unknown, context: HostContext): HostPlan 
 }
 
 export { normalizeHostPlan } from './hostPlan'
+export { spatialBounds, spatialEdges, canvasMetrics } from './hostSpatial'
 export { createHostPlanReadback, validateHostPlanReadback }
 
 export const formatContext = (context: HostContext): string =>

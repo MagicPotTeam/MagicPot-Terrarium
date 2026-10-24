@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { hostSpatialSchema, hostCanvasSchema } from './hostSpatial'
 
 /** Shared data contract for Bridge planning and future native-host validation.
  * A valid plan is data, never consent or proof that a host performed a change. */
@@ -69,6 +70,8 @@ export const hostContextNodeSchema = z
     commands: z.array(z.enum(HOST_COMMANDS)).max(HOST_COMMANDS.length),
     children: z.array(id).max(100).optional(),
     geometry: z.object({ x: finite, y: finite, width: finite, height: finite }).strict().optional(),
+    // Explicit absolute bounds; legacy geometry has no new inferred meaning.
+    spatial: hostSpatialSchema.optional(),
     text: z.string().max(4096).optional(),
     fontKey: z.string().max(4096).optional(),
     layout: hostLayoutSchema.optional()
@@ -86,6 +89,7 @@ export const hostContextSchema = z
       .string()
       .regex(/^[a-f0-9]{32}$/)
       .optional(),
+    canvas: hostCanvasSchema.optional(),
     nodes: z.array(hostContextNodeSchema).min(1).max(100),
     selectedIds: z.array(id).min(1).max(100).optional(),
     execution: hostExecutionCapabilitySchema.optional()
@@ -94,6 +98,16 @@ export const hostContextSchema = z
   .superRefine((value, ctx) => {
     if (value.execution?.opacityEncoding && value.host !== 'photoshop')
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Unsupported opacity encoding' })
+    if (value.canvas !== undefined && value.host !== 'photoshop')
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Unsupported finite canvas metadata' })
+    if (
+      value.nodes.some(
+        (node) =>
+          node.spatial?.status === 'available' &&
+          node.spatial.coordinateSpace !== (value.host === 'figma' ? 'page' : 'document')
+      )
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Spatial coordinate space mismatch' })
     const ids = new Set(value.nodes.map((node) => node.id))
     if (ids.size !== value.nodes.length)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate nodes' })

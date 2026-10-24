@@ -558,6 +558,31 @@
     // representation, not the accepted error tolerance. Plans use the same grid.
     return Math.round((value * 255) / 100) / 255
   }
+  function readSpatial(layer) {
+    const helper = globalThis.MagicPotPlanPreviewV1
+    if (!helper || typeof helper.spatialEdges !== 'function') throw new Error('SNAPSHOT')
+    try {
+      const bounds = layer.boundsNoEffects
+      if (!bounds) return { status: 'unavailable' }
+      return helper.spatialEdges(bounds.left, bounds.top, bounds.right, bounds.bottom)
+    } catch {
+      return { status: 'unavailable' }
+    }
+  }
+  function readCanvas(document) {
+    const helper = globalThis.MagicPotPlanPreviewV1
+    if (!helper || typeof helper.canvasMetrics !== 'function') throw new Error('SNAPSHOT')
+    try {
+      return helper.canvasMetrics(
+        document.width,
+        document.height,
+        document.resolution,
+        document.pixelAspectRatio
+      )
+    } catch {
+      return { status: 'unavailable' }
+    }
+  }
   function capturePhotoshopHostContext(captureId, selectionOverride = null) {
     const document = app.activeDocument
     if (!document || !Number.isSafeInteger(document.id) || document.id <= 0)
@@ -622,6 +647,7 @@
         ancestors,
         locked,
         visible: layer.visible,
+        spatial: readSpatial(layer),
         ...(opacity === undefined ? {} : { opacity }),
         commands,
         ...(text === undefined ? {} : { text })
@@ -658,6 +684,7 @@
       scopeId: documentId,
       captureId,
       recoveryIdentity,
+      canvas: readCanvas(document),
       nodes: Array.from(records.values()),
       selectedIds,
       execution: {
@@ -878,7 +905,24 @@
       throw new Error('LOCKED_TARGET')
     return layer
   }
-  function precheckPlan(plan, context) {
+  function precheckPlan(plan, context, checkSpatial = true) {
+    // Revalidate the complete planning observation before the first write, including
+    // after async exports/authority/journal waits. Do not compare an old rectangle
+    // after our own text/layout step has legitimately changed document geometry.
+    if (
+      checkSpatial &&
+      context.canvas !== undefined &&
+      !samePlanValue(context.canvas, readCanvas(app.activeDocument))
+    )
+      throw new Error('STALE_CONTEXT')
+    if (checkSpatial)
+      for (const record of context.nodes) {
+        if (record.spatial !== undefined) {
+          const native = planningNodes && planningNodes.get(record.id)
+          if (!native || !samePlanValue(record.spatial, readSpatial(native)))
+            throw new Error('STALE_CONTEXT')
+        }
+      }
     if (!Array.isArray(plan.steps) || plan.steps.length < 1 || plan.steps.length > 20)
       throw new Error('INVALID_PLAN')
     const nodes = new Map(context.nodes.map((node) => [node.id, node]))
@@ -1239,7 +1283,7 @@
             for (let index = 0; index < checked.length; index += 1) {
               const entry = checked[index]
               assertExecutionCurrent(item)
-              precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext)
+              precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext, false)
               applyPlanStep(entry.layer, entry.step)
               applied.push(entry)
               await post(

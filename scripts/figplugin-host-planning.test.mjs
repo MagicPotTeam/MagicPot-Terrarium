@@ -104,7 +104,15 @@ function fixture(
   }
   const rootNode = { id: '0:0', type: 'DOCUMENT' }
   const page = { id: '0:1', type: 'PAGE', name: 'Owned page', parent: rootNode, selection: [] }
-  const document = { id: nativeDocumentId, activeLayers: [], layers: [] }
+  const document = {
+    id: nativeDocumentId,
+    activeLayers: [],
+    layers: [],
+    width: 320,
+    height: 180,
+    resolution: 300,
+    pixelAspectRatio: 1
+  }
   const data =
     host === 'figma'
       ? {
@@ -191,6 +199,10 @@ function fixture(
           isBackgroundLayer: false
         }
   document.layers = [node, second]
+  for (const item of [node, second]) {
+    if (host === 'figma') item.absoluteBoundingBox = { x: -24.5, y: 16.25, width: 64, height: 32 }
+    else item.boundsNoEffects = { left: -24.5, top: 16.25, right: 39.5, bottom: 48.25 }
+  }
   if (host === 'figma') {
     for (const item of [node, second]) {
       item.width = 64
@@ -792,6 +804,7 @@ function fixture(
     },
     output,
     requests,
+    nativeDocument: document,
     node,
     second,
     vm,
@@ -1936,6 +1949,147 @@ test('photoshop: real text kind does not bypass locked layer capability checks',
     assert.equal(request.body.hostContext.nodes[0].commands.includes('text.content'), false)
     assert.equal(f.node.textItem.contents, 'Original owned text')
     assert.deepEqual(f.nativeWrites, [])
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: spatial context reaches the explicitly shared planning request without capture-time traffic`, async () => {
+    const f = fixture(host)
+    try {
+      f.capture()
+      await flush()
+      assert.equal(f.requests.length, 0)
+      await f.pair()
+      f.share()
+      await flush()
+      const context = f.requests.find((r) => r.url.endsWith('/prepare')).body.hostContext
+      assert.deepEqual(context.nodes[0].spatial, {
+        status: 'available',
+        coordinateSpace: host === 'figma' ? 'page' : 'document',
+        unit: 'px',
+        boundsKind: 'axis-aligned-no-effects',
+        bounds: { x: -24.5, y: 16.25, width: 64, height: 32 }
+      })
+      if (host === 'photoshop')
+        assert.deepEqual(context.canvas, {
+          status: 'available',
+          unit: 'px',
+          width: 320,
+          height: 180,
+          resolutionPpi: 300,
+          pixelAspectRatio: 1
+        })
+      else assert.equal(Object.hasOwn(context, 'canvas'), false)
+      assert.equal(f.nativeWrites.length, 0)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: unreadable bounds are explicit unavailable metadata, not invented zero geometry`, async () => {
+    const f = fixture(host)
+    try {
+      Object.defineProperty(f.node, host === 'figma' ? 'absoluteBoundingBox' : 'boundsNoEffects', {
+        get() {
+          throw new Error('PRIVATE_DOCUMENT_PATH')
+        },
+        configurable: true
+      })
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      const request = f.requests.find((r) => r.url.endsWith('/prepare'))
+      assert.ok(request)
+      assert.deepEqual(request.body.hostContext.nodes[0].spatial, { status: 'unavailable' })
+      assert.equal(JSON.stringify(request.body).includes('PRIVATE_DOCUMENT_PATH'), false)
+      assert.equal(f.nativeWrites.length, 0)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: changed spatial input during asynchronous checkpoint collection prevents first write`, async () => {
+    const f = fixture(host, {
+      approvePlan: true,
+      visualGate: async ({ node }) => {
+        if (host === 'figma') node.absoluteBoundingBox.x += 1
+        else node.boundsNoEffects.left += 1
+      }
+    })
+    try {
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(5000)
+      assert.equal(f.nativeWrites.length, 0)
+      assert.equal(f.node.name, 'Original owned name')
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+test('photoshop: changed document resolution before the first write invalidates the approved context', async () => {
+  let f
+  f = fixture('photoshop', {
+    approvePlan: true,
+    visualGate: async () => {
+      f.nativeDocument.resolution = 72
+    }
+  })
+  try {
+    await f.pair()
+    f.capture()
+    f.share()
+    await flush()
+    await f.tick(5000)
+    assert.equal(f.nativeWrites.length, 0)
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
+test('photoshop: an approved text change may change its own bounds without invalidating final readback', async () => {
+  const f = fixture('photoshop', { approvePlan: true, textPlan: true })
+  let text = f.node.textItem.contents
+  Object.defineProperty(f.node.textItem, 'contents', {
+    get: () => text,
+    set: (value) => {
+      text = value
+      f.node.boundsNoEffects.right += 50
+    }
+  })
+  try {
+    await f.pair()
+    f.capture()
+    f.share()
+    await flush()
+    await f.tick(5000)
+    assert.equal(text, 'Approved owned text 中文😀')
+    assert.equal(f.planResult().status, 'completed')
+    assert.equal(f.planResult().effect, 'applied')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('photoshop: invalid canvas values remain unknown rather than becoming a 72ppi default', async () => {
+  const f = fixture('photoshop')
+  try {
+    f.nativeDocument.resolution = '300'
+    await f.pair()
+    f.capture()
+    f.share()
+    await flush()
+    const context = f.requests.find((r) => r.url.endsWith('/prepare')).body.hostContext
+    assert.deepEqual(context.canvas, { status: 'unavailable' })
+    assert.equal(context.nodes[0].spatial.status, 'available')
   } finally {
     f.close()
     await flush()
