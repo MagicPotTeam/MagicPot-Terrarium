@@ -2363,6 +2363,179 @@ test('font resources: Figma empty text uses its explicit insertion style', async
   }
 })
 
+const appearanceContext = (f) =>
+  f.requests.find((r) => r.url.endsWith('/prepare'))?.body.hostContext
+const solidPaint = () => ({
+  type: 'SOLID',
+  color: { r: 0.25, g: 0.5, b: 0.75 },
+  opacity: 0.8,
+  visible: true
+})
+const setAppearance = (f, host) => {
+  if (host === 'figma') {
+    f.node.fills = [solidPaint()]
+    f.node.strokes = []
+    f.vm.figma.root.documentColorProfile = 'DISPLAY_P3'
+  } else {
+    f.node.textItem.characterStyle.color = {
+      base: { typename: 'RGBColor', red: 64, green: 128, blue: 192 }
+    }
+  }
+}
+for (const host of ['figma', 'photoshop']) {
+  test(`appearance context: ${host} captures actual paint or native text color only after explicit share`, async () => {
+    const f = fixture(host, { approvePlan: true, textPlan: host === 'photoshop' })
+    try {
+      setAppearance(f, host)
+      f.capture()
+      assert.equal(f.requests.length, 0)
+      await f.pair()
+      f.share()
+      await flush()
+      await f.tick(3000)
+      const appearance = appearanceContext(f).nodes[0].appearance
+      assert.equal(appearance.status, 'available')
+      assert.equal(appearance.kind, host === 'figma' ? 'figma-paints' : 'photoshop-text-color')
+      if (host === 'figma') {
+        assert.equal(appearance.documentColorProfile, 'DISPLAY_P3')
+        assert.deepEqual(appearance.fills.paints, [solidPaint()])
+      } else assert.deepEqual(appearance.color, { model: 'RGB', red: 64, green: 128, blue: 192 })
+      assert.equal(f.planResult()?.status, 'completed')
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`appearance context: ${host} changed color with unchanged geometry prevents first write`, async () => {
+    const f = fixture(host, {
+      approvePlan: true,
+      textPlan: host === 'photoshop',
+      visualGate: ({ node }) => {
+        if (host === 'figma') node.fills[0].color.r = 0.9
+        else node.textItem.characterStyle.color.base.red = 230
+      }
+    })
+    try {
+      setAppearance(f, host)
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(3000)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.deepEqual(f.textWrites, [])
+      assert.equal(f.planResult()?.status, 'failed')
+      assert.equal(f.planResult()?.effect, 'none')
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`appearance context: ${host} unreadable appearance does not invent a default color or leak errors`, async () => {
+    const f = fixture(host, { approvePlan: true, textPlan: host === 'photoshop' })
+    try {
+      setAppearance(f, host)
+      const object = host === 'figma' ? f.node : f.node.textItem.characterStyle
+      Object.defineProperty(object, host === 'figma' ? 'fills' : 'color', {
+        get() {
+          throw Error('PRIVATE_COLOR_PATH')
+        },
+        configurable: true
+      })
+      await f.pair()
+      f.capture()
+      f.share()
+      await flush()
+      await f.tick(3000)
+      assert.deepEqual(appearanceContext(f).nodes[0].appearance, { status: 'unavailable' })
+      assert.ok(!JSON.stringify(f.requests).includes('PRIVATE_COLOR_PATH'))
+      assert.equal(f.planResult()?.status, 'completed')
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+test('appearance context: Figma document profile drift invalidates unchanged numeric color', async () => {
+  const f = fixture('figma', {
+    approvePlan: true,
+    visualGate: () => {
+      f.vm.figma.root.documentColorProfile = 'SRGB'
+    }
+  })
+  try {
+    setAppearance(f, 'figma')
+    await f.pair()
+    f.capture()
+    f.share()
+    await flush()
+    await f.tick(3000)
+    assert.deepEqual(f.nativeWrites, [])
+    assert.equal(f.planResult()?.effect, 'none')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('appearance context: Figma image reference is not fetched and replacement invalidates planning', async () => {
+  const f = fixture('figma', {
+    approvePlan: true,
+    visualGate: ({ node }) => {
+      node.fills[0].imageHash = 'b'.repeat(40)
+    }
+  })
+  try {
+    setAppearance(f, 'figma')
+    f.node.fills = [{ type: 'IMAGE', imageHash: 'a'.repeat(40), scaleMode: 'FILL' }]
+    f.vm.figma.getImageByHash = () => {
+      throw Error('Resource bytes must not be requested')
+    }
+    await f.pair()
+    f.capture()
+    f.share()
+    await flush()
+    await f.tick(3000)
+    const paint = appearanceContext(f).nodes[0].appearance.fills.paints[0]
+    assert.equal(paint.imageHash, 'a'.repeat(40))
+    assert.equal(paint.coverage, 'reference-only')
+    assert.deepEqual(f.nativeWrites, [])
+    assert.equal(f.planResult()?.effect, 'none')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+test('appearance context: Photoshop only reads SolidColor.base without conversion accessors', async () => {
+  const f = fixture('photoshop', { textPlan: true, approvePlan: true })
+  try {
+    setAppearance(f, 'photoshop')
+    const color = f.node.textItem.characterStyle.color
+    color.base = { typename: 'CMYKColor', cyan: 10, magenta: 20, yellow: 30, black: 40 }
+    for (const field of ['rgb', 'cmyk', 'lab', 'gray', 'hsb'])
+      Object.defineProperty(color, field, {
+        get() {
+          throw Error('Do not convert')
+        }
+      })
+    await f.pair()
+    f.capture()
+    f.share()
+    await flush()
+    await f.tick(3000)
+    assert.deepEqual(appearanceContext(f).nodes[0].appearance.color, {
+      model: 'CMYK',
+      cyan: 10,
+      magenta: 20,
+      yellow: 30,
+      black: 40
+    })
+    assert.equal(f.planResult()?.status, 'completed')
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
 test('font resources: changed Figma font before claim returns a terminal stale receipt', async () => {
   const f = fixture('figma', { textPlan: true, approvePlan: true })
   try {
@@ -2380,3 +2553,38 @@ test('font resources: changed Figma font before claim returns a terminal stale r
     await flush()
   }
 })
+
+for (const host of ['figma', 'photoshop']) {
+  test(`appearance context: ${host} rollback preserves later color edits`, async () => {
+    const f = fixture(host, {
+      textPlan: true,
+      approvePlan: true,
+      progressHook: (body, { node }) => {
+        if (body.phase !== 'executing') return
+        if (host === 'figma') node.fills[0].color.r = 0.9
+        else node.textItem.characterStyle.color.base.red = 230
+        throw Error('Owned receipt failure after a later style edit')
+      }
+    })
+    try {
+      setAppearance(f, host)
+      await runFontPlan(f)
+      {
+        assert.equal(
+          host === 'figma' ? f.node.characters : f.node.textItem.contents,
+          'Approved owned text 中文😀'
+        )
+        assert.equal(
+          host === 'figma'
+            ? f.node.fills[0].color.r
+            : f.node.textItem.characterStyle.color.base.red,
+          host === 'figma' ? 0.9 : 230
+        )
+        if (host === 'figma') assert.equal(f.textWrites.length, 1)
+      }
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}

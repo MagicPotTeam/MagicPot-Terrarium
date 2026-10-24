@@ -476,6 +476,20 @@
       state('Selection capture failed. Capture again before sharing.')
     }
   }
+  function readAppearance(node) {
+    const helper = globalThis.MagicPotPlanPreviewV1
+    if (!helper || typeof helper.figmaAppearance !== 'function') throw new Error('SNAPSHOT')
+    try {
+      return helper.figmaAppearance(
+        node.fills,
+        node.strokes,
+        figma.root.documentColorProfile,
+        figma.mixed
+      )
+    } catch {
+      return { status: 'unavailable' }
+    }
+  }
   function readSpatial(node) {
     const helper = globalThis.MagicPotPlanPreviewV1
     if (!helper || typeof helper.spatialBounds !== 'function') throw new Error('SNAPSHOT')
@@ -615,6 +629,7 @@
         locked: node.locked,
         visible: node.visible,
         spatial: readSpatial(node),
+        appearance: readAppearance(node),
         ...(typography ? { typography } : {}),
         ...(fontKey === undefined ? {} : { fontKey }),
         ...(typeof node.opacity === 'number' && Number.isFinite(node.opacity)
@@ -899,6 +914,11 @@
     // after our own text/layout step has legitimately changed document geometry.
     if (checkSpatial)
       for (const record of context.nodes) {
+        if (record.appearance !== undefined) {
+          const native = planningNodes && planningNodes.get(record.id)
+          if (!native || !samePlanValue(record.appearance, readAppearance(native)))
+            throw new Error('STALE_CONTEXT')
+        }
         if (record.typography !== undefined) {
           const native = planningNodes && planningNodes.get(record.id)
           if (!native || !samePlanValue(record.typography, readTypography(native)))
@@ -930,6 +950,12 @@
       if (
         step.command === 'text.content' &&
         (!contextNode.typography || !samePlanValue(contextNode.typography, readTypography(node)))
+      )
+        throw new Error('STALE_CONTEXT')
+      if (
+        step.command === 'text.content' &&
+        contextNode.appearance !== undefined &&
+        !samePlanValue(contextNode.appearance, readAppearance(node))
       )
         throw new Error('STALE_CONTEXT')
       const expected = readNodeValue(node, step.command)
@@ -977,7 +1003,13 @@
         throw new Error('UNSUPPORTED_COMMAND')
     }
   }
-  function rollbackPlanStep(node, contextNode, step, appliedTypography) {
+  function rollbackPlanStep(node, contextNode, step, appliedTypography, appliedAppearance) {
+    if (
+      step.command === 'text.content' &&
+      appliedAppearance !== undefined &&
+      !samePlanValue(appliedAppearance, readAppearance(node))
+    )
+      throw new Error('STALE_CONTEXT')
     if (
       step.command === 'text.content' &&
       appliedTypography !== undefined &&
@@ -1461,8 +1493,10 @@
         // immediately before its synchronous mutation, not only before the loop.
         precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext, false)
         applyPlanStep(entry.node, entry.step)
-        if (entry.step.command === 'text.content')
+        if (entry.step.command === 'text.content') {
           entry.appliedTypography = readTypography(entry.node)
+          entry.appliedAppearance = readAppearance(entry.node)
+        }
         applied.push(entry)
         const completed = index + 1
         effect = completed === checked.length ? 'applied' : 'partial'
@@ -1483,7 +1517,13 @@
         try {
           // A delayed cleanup is still a write; it cannot outlive the original grant.
           if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
-          rollbackPlanStep(entry.node, entry.contextNode, entry.step, entry.appliedTypography)
+          rollbackPlanStep(
+            entry.node,
+            entry.contextNode,
+            entry.step,
+            entry.appliedTypography,
+            entry.appliedAppearance
+          )
         } catch {}
       }
       effect = applied.length ? 'rolled-back' : 'none'
@@ -1510,7 +1550,13 @@
           try {
             // A delayed cleanup is still a write; it cannot outlive the original grant.
             if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
-            rollbackPlanStep(entry.node, entry.contextNode, entry.step, entry.appliedTypography)
+            rollbackPlanStep(
+              entry.node,
+              entry.contextNode,
+              entry.step,
+              entry.appliedTypography,
+              entry.appliedAppearance
+            )
           } catch {}
         }
         visualEvidence = undefined

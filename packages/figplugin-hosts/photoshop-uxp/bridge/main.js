@@ -558,6 +558,15 @@
     // representation, not the accepted error tolerance. Plans use the same grid.
     return Math.round((value * 255) / 100) / 255
   }
+  function readAppearance(layer) {
+    const helper = globalThis.MagicPotPlanPreviewV1
+    if (!helper || typeof helper.photoshopTextAppearance !== 'function') throw new Error('SNAPSHOT')
+    try {
+      return helper.photoshopTextAppearance(layer.textItem.characterStyle.color.base)
+    } catch {
+      return { status: 'unavailable' }
+    }
+  }
   function readSpatial(layer) {
     const helper = globalThis.MagicPotPlanPreviewV1
     if (!helper || typeof helper.spatialEdges !== 'function') throw new Error('SNAPSHOT')
@@ -660,6 +669,7 @@
         locked,
         visible: layer.visible,
         spatial: readSpatial(layer),
+        ...(type === 'text' ? { appearance: readAppearance(layer) } : {}),
         ...(typography ? { typography } : {}),
         ...(fontKey === undefined ? {} : { fontKey }),
         ...(opacity === undefined ? {} : { opacity }),
@@ -931,6 +941,11 @@
       throw new Error('STALE_CONTEXT')
     if (checkSpatial)
       for (const record of context.nodes) {
+        if (record.appearance !== undefined) {
+          const native = planningNodes && planningNodes.get(record.id)
+          if (!native || !samePlanValue(record.appearance, readAppearance(native)))
+            throw new Error('STALE_CONTEXT')
+        }
         if (record.typography !== undefined) {
           const native = planningNodes && planningNodes.get(record.id)
           if (!native || !samePlanValue(record.typography, readTypography(native)))
@@ -963,6 +978,12 @@
         step.command === 'text.content' &&
         contextNode.typography !== undefined &&
         !samePlanValue(contextNode.typography, readTypography(layer))
+      )
+        throw new Error('STALE_CONTEXT')
+      if (
+        step.command === 'text.content' &&
+        contextNode.appearance !== undefined &&
+        !samePlanValue(contextNode.appearance, readAppearance(layer))
       )
         throw new Error('STALE_CONTEXT')
       const expected = readNodeValue(layer, step.command)
@@ -998,7 +1019,20 @@
         throw new Error('UNSUPPORTED_COMMAND')
     }
   }
-  function rollbackPlanStep(layer, contextNode, step, documentId, appliedTypography) {
+  function rollbackPlanStep(
+    layer,
+    contextNode,
+    step,
+    documentId,
+    appliedTypography,
+    appliedAppearance
+  ) {
+    if (
+      step.command === 'text.content' &&
+      appliedAppearance !== undefined &&
+      !samePlanValue(appliedAppearance, readAppearance(layer))
+    )
+      throw new Error('STALE_CONTEXT')
     if (
       step.command === 'text.content' &&
       appliedTypography !== undefined &&
@@ -1316,8 +1350,10 @@
               assertExecutionCurrent(item)
               precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext, false)
               applyPlanStep(entry.layer, entry.step)
-              if (entry.step.command === 'text.content')
+              if (entry.step.command === 'text.content') {
                 entry.appliedTypography = readTypography(entry.layer)
+                entry.appliedAppearance = readAppearance(entry.layer)
+              }
               applied.push(entry)
               await post(
                 'planProgress',
@@ -1347,7 +1383,8 @@
                   entry.contextNode,
                   entry.step,
                   item.hostContext.documentId,
-                  entry.appliedTypography
+                  entry.appliedTypography,
+                  entry.appliedAppearance
                 )
               } catch {}
             }
@@ -1386,7 +1423,8 @@
                     entry.contextNode,
                     entry.step,
                     item.hostContext.documentId,
-                    entry.appliedTypography
+                    entry.appliedTypography,
+                    entry.appliedAppearance
                   )
                 } catch {}
               }

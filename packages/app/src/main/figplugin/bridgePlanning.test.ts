@@ -300,6 +300,18 @@ it.each([true, false])(
       boundsKind: 'axis-aligned-no-effects',
       bounds: { x: -20.5, y: 60, width: 80, height: 40 }
     }
+    input.hostContext.nodes[0].appearance = {
+      status: 'available',
+      kind: 'figma-paints',
+      coverage: 'paint-properties-only',
+      colorEncoding: 'document-rgb-0..1',
+      documentColorProfile: 'DISPLAY_P3',
+      fills: {
+        status: 'available',
+        paints: [{ type: 'SOLID', color: { r: 0.25, g: 0.5, b: 0.75 } }]
+      },
+      strokes: { status: 'available', paints: [] }
+    }
     const text = input.hostContext.nodes[0].text!
     input.hostContext.nodes[0].typography = figmaTypography(text, false, [
       {
@@ -395,6 +407,10 @@ it.each([true, false])(
         input.hostContext.nodes[0].typography
       )
       expect(wire.instructions).toContain('primary-style-only')
+      expect(JSON.parse(wire.input[0].content[0].text).hostContext.nodes[0].appearance).toEqual(
+        input.hostContext.nodes[0].appearance
+      )
+      expect(wire.instructions).toContain('Image hashes are host-local references only')
     }
     expect(wire.tools).toBeUndefined()
     expect(outcome.status).toBe('completed')

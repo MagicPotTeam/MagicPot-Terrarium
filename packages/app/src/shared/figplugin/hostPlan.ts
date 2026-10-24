@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { hostAppearanceSchema } from './hostAppearance'
 import { hostSpatialSchema, hostCanvasSchema } from './hostSpatial'
 import { hostTypographySchema, typographyFontKey } from './hostTypography'
 
@@ -76,6 +77,7 @@ export const hostContextNodeSchema = z
     text: z.string().max(4096).optional(),
     fontKey: z.string().max(4096).optional(),
     typography: hostTypographySchema.optional(),
+    appearance: hostAppearanceSchema.optional(),
     layout: hostLayoutSchema.optional()
   })
   .strict()
@@ -111,6 +113,13 @@ export const hostContextSchema = z
     )
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Spatial coordinate space mismatch' })
     for (const node of value.nodes) {
+      const appearance = node.appearance
+      if (
+        appearance?.status === 'available' &&
+        (appearance.kind !== (value.host === 'figma' ? 'figma-paints' : 'photoshop-text-color') ||
+          (appearance.kind === 'photoshop-text-color' && node.type !== 'text'))
+      )
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Appearance host mismatch' })
       const type = node.typography
       if (type?.status === 'available') {
         if (

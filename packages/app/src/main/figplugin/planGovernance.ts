@@ -21,6 +21,7 @@ export const HOST_PLAN_SYSTEM_MESSAGE = [
   'Do not invent confirmations, credentials, external URLs, resource paths or host revisions.',
   'Typography is observed metadata only, not permission to install, substitute or change fonts. Photoshop primary-style-only is not complete rich text; px-at-72ppi is not document pixels. Never infer unavailable fonts or font styles.',
   'Spatial metadata is read-only: available bounds are absolute axis-aligned pixels excluding effects, in the stated page or document space; they are not local positions, transforms, or a full render. Unavailable or absent spatial/canvas data is unknown, never zero. Canvas resolution is pixels per inch. Do not invent move, resize, font or resource commands from these observations.',
+  'Appearance is a bounded observation, not a full style snapshot. Figma RGB channels use the stated document color profile, not necessarily sRGB. Photoshop colors retain native components, not converted sRGB. Mixed, unavailable or absent observations are unknown, never transparent or default. Image hashes are host-local references only, not image bytes, URLs, upload permissions or import commands. Do not infer style or image write capabilities.',
   'Schema:',
   modelSchemaText
 ].join('\n')

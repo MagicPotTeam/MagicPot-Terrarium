@@ -4,6 +4,7 @@ export {
   typographyFontKey,
   requiredFigmaFonts
 } from './hostTypography'
+export { figmaAppearance, photoshopTextAppearance } from './hostAppearance'
 import { checkFigPluginSelectionSnapshot } from './selectionSnapshot'
 import {
   createHostPlanReadback,
