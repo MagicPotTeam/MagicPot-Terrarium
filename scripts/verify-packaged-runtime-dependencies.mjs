@@ -18,9 +18,13 @@ export const documentWorkerRuntimeAssets = [
   'node_modules/pdfjs-dist/LICENSE'
 ]
 
+export const bridgeChildRuntimeAssets = ['out/bridge-child/index.cjs']
+
 export const requiredRuntimeFiles = [
   ...documentWorkerRuntimeAssets,
   'out/document-worker/manifest.json',
+  ...bridgeChildRuntimeAssets,
+  'out/bridge-child/manifest.json',
   'node_modules/pdfjs-dist/package.json',
   'node_modules/@modelcontextprotocol/sdk/package.json',
   'node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js',
@@ -55,9 +59,7 @@ const supportedElectronPlatformNames = new Set(['win32', 'darwin', 'linux'])
 
 function assertSupportedElectronPlatformName(electronPlatformName) {
   if (electronPlatformName === undefined) {
-    throw new Error(
-      'electronPlatformName is required (expected win32, darwin, or linux)'
-    )
+    throw new Error('electronPlatformName is required (expected win32, darwin, or linux)')
   }
   if (!supportedElectronPlatformNames.has(electronPlatformName)) {
     throw new Error(
@@ -220,11 +222,40 @@ export function verifyPackagedDocumentWorker(asarPath) {
     throw new Error('Packaged document worker PDF resolution mismatch')
 }
 
-export function verifyPackagedRuntimeDependencies(
-  appOutDir,
-  packager,
-  electronPlatformName
-) {
+export function verifyPackagedBridgeChild(asarPath) {
+  const read = (relative) => asar.extractFile(asarPath, toArchivePath(relative))
+  let manifest
+  try {
+    manifest = JSON.parse(read('out/bridge-child/manifest.json').toString('utf8'))
+  } catch {
+    throw new Error('Packaged Bridge child manifest unavailable')
+  }
+  if (
+    manifest?.protocol !== 'magicpot-figplugin-bridge-child-assets/v1' ||
+    !Array.isArray(manifest.files) ||
+    manifest.files.length !== bridgeChildRuntimeAssets.length
+  )
+    throw new Error('Packaged Bridge child manifest invalid')
+  for (const [index, relative] of bridgeChildRuntimeAssets.entries()) {
+    const expected = manifest.files[index]
+    if (
+      expected?.path !== relative ||
+      typeof expected.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(expected.sha256)
+    )
+      throw new Error('Packaged Bridge child manifest invalid')
+    let bytes
+    try {
+      bytes = read(relative)
+    } catch {
+      throw new Error('Packaged Bridge child asset missing')
+    }
+    if (createHash('sha256').update(bytes).digest('hex') !== expected.sha256)
+      throw new Error('Packaged Bridge child asset SHA-256 mismatch')
+  }
+}
+
+export function verifyPackagedRuntimeDependencies(appOutDir, packager, electronPlatformName) {
   assertSupportedElectronPlatformName(electronPlatformName)
   const resourcesDir = packager?.getResourcesDir
     ? packager.getResourcesDir(appOutDir)
@@ -253,6 +284,7 @@ export function verifyPackagedRuntimeDependencies(
   }
 
   verifyPackagedDocumentWorker(asarPath)
+  verifyPackagedBridgeChild(asarPath)
   console.log(
     `[verify-packaged-runtime-dependencies] Verified ${requiredRuntimeFiles.length} files and ${closure.packageCount} runtime packages in ${asarPath}`
   )

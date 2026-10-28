@@ -19,6 +19,13 @@ export class LauncherAlreadyRunningError extends Error {
   }
 }
 
+export class LauncherHealthCheckFailedError extends Error {
+  constructor() {
+    super('Launched application did not confirm health before the launcher deadline')
+    this.name = 'LauncherHealthCheckFailedError'
+  }
+}
+
 type WithSessionLock = <T>(root: string, operation: () => Promise<T>) => Promise<T>
 
 export type LauncherRunOnLaunchResult =
@@ -126,12 +133,20 @@ async function waitForLaunchResolution(
   const sleep =
     options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)))
   const pollIntervalMs = options.healthPollIntervalMs ?? 250
+  let observedPending = false
   for (;;) {
     const state = await core.readHealthState()
-    if (!state.pending) return
+    if (!state.pending) {
+      // Test doubles and legacy callers may not create a pending marker. In the real
+      // launcher, spawnActive always creates one before returning.
+      if (!observedPending) return
+      if (!state.lastHealthy) throw new LauncherHealthCheckFailedError()
+      return
+    }
+    observedPending = true
     if (now() >= Date.parse(state.pending.deadline)) {
       await core.recoverExpiredPending()
-      return
+      continue
     }
     await sleep(pollIntervalMs)
   }

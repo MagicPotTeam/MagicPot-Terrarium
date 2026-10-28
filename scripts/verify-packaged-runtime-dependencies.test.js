@@ -7,6 +7,8 @@ import { createPackage } from '@electron/asar'
 import {
   requiredRuntimeFiles,
   documentWorkerRuntimeAssets,
+  bridgeChildRuntimeAssets,
+  verifyPackagedBridgeChild,
   verifyPackagedDocumentWorker,
   verifyPackagedRuntimeDependencies
 } from './verify-packaged-runtime-dependencies.mjs'
@@ -15,11 +17,28 @@ const tempRoots = []
 const require = createRequire(import.meta.url)
 const { createTransformer } = require('app-builder-lib/out/fileTransformer.js')
 
+function removeFixtureDirectory(target, fixtureRoot) {
+  const trashRoot = fs.realpathSync(path.join(process.cwd(), '.magicpot-trash'))
+  const root = fs.realpathSync(fixtureRoot)
+  const resolved = fs.realpathSync(target)
+  const relative = path.relative(root, resolved)
+  if (
+    path.dirname(root) !== trashRoot ||
+    !path.basename(root).startsWith('packaged-runtime-dependencies-test-') ||
+    path.isAbsolute(relative) ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`)
+  )
+    throw new Error('Refusing recursive cleanup outside the owned packaged fixture')
+  fs.rmSync(resolved, { recursive: true, force: true })
+}
+
 async function createTempApp(
   includedFiles,
   packageJsonByRoot = {},
   corruptDocument = false,
-  transformPdfMetadata = false
+  transformPdfMetadata = false,
+  bridgeChange = {}
 ) {
   const trashRoot = path.join(process.cwd(), '.magicpot-trash')
   fs.mkdirSync(trashRoot, { recursive: true })
@@ -90,6 +109,28 @@ async function createTempApp(
   if (corruptDocument)
     fs.writeFileSync(path.join(sourceDir, 'out/document-worker/index.cjs'), 'corrupt owned bytes')
 
+  const bridgeManifestPath = path.join(sourceDir, 'out/bridge-child/manifest.json')
+  if (fs.existsSync(bridgeManifestPath)) {
+    const manifest = {
+      protocol: 'magicpot-figplugin-bridge-child-assets/v1',
+      files: bridgeChildRuntimeAssets.map((relative) => ({
+        path: relative,
+        sha256: fs.existsSync(path.join(sourceDir, relative))
+          ? createHash('sha256')
+              .update(fs.readFileSync(path.join(sourceDir, relative)))
+              .digest('hex')
+          : '0'.repeat(64)
+      }))
+    }
+    bridgeChange.mutateManifest?.(manifest)
+    fs.writeFileSync(bridgeManifestPath, JSON.stringify(manifest))
+  }
+  if (bridgeChange.corruptEntry)
+    fs.writeFileSync(
+      path.join(sourceDir, bridgeChildRuntimeAssets[0]),
+      'corrupt Bridge child bytes'
+    )
+
   const helper = path.join(appOutDir, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
   fs.mkdirSync(path.dirname(helper), { recursive: true })
   fs.writeFileSync(helper, 'trusted-helper')
@@ -104,11 +145,73 @@ async function createTempApp(
 
 afterEach(() => {
   for (const root of tempRoots.splice(0)) {
-    fs.rmSync(root, { recursive: true, force: true })
+    removeFixtureDirectory(root, root)
   }
 })
 
 describe('verify-packaged-runtime-dependencies', () => {
+  it.each(['win32', 'darwin', 'linux'])(
+    'verifies the Bridge child in the complete %s packaged gate',
+    async (platform) => {
+      const appOutDir = await createTempApp(
+        requiredRuntimeFiles,
+        {
+          'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
+        },
+        false,
+        false,
+        { corruptEntry: true }
+      )
+      expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, platform)).toThrow(
+        'Bridge child asset SHA-256 mismatch'
+      )
+    }
+  )
+
+  it.each(['out/bridge-child/manifest.json', ...bridgeChildRuntimeAssets])(
+    'rejects missing Bridge child closure file %s',
+    async (missing) => {
+      const appOutDir = await createTempApp(requiredRuntimeFiles.filter((file) => file !== missing))
+      expect(() => verifyPackagedBridgeChild(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+        missing.endsWith('manifest.json') ? 'manifest unavailable' : 'asset missing'
+      )
+      expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).toThrow(
+        missing
+      )
+    }
+  )
+
+  it.each([
+    (manifest) => {
+      manifest.protocol = 'wrong'
+    },
+    (manifest) => {
+      manifest.files = []
+    },
+    (manifest) => {
+      manifest.files.push(manifest.files[0])
+    },
+    (manifest) => {
+      manifest.files[0].path = '../../outside.cjs'
+    },
+    (manifest) => {
+      manifest.files[0].sha256 = 'not-a-hash'
+    },
+    (manifest) => {
+      manifest.files[0].sha256 = 'A'.repeat(64)
+    },
+    (manifest) => {
+      manifest.files[0].sha256 = [manifest.files[0].sha256]
+    }
+  ])('rejects malformed or redirected Bridge child manifest %#', async (mutateManifest) => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {}, false, false, {
+      mutateManifest
+    })
+    expect(() => verifyPackagedBridgeChild(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'manifest invalid'
+    )
+  })
+
   it('rejects a missing PDF module in the packaged document closure', async () => {
     const appOutDir = await createTempApp(
       requiredRuntimeFiles.filter(
@@ -199,7 +302,7 @@ describe('verify-packaged-runtime-dependencies', () => {
       const appOutDir = await createTempApp(requiredRuntimeFiles, {
         'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
       })
-      fs.rmSync(path.join(appOutDir, 'bin'), { recursive: true, force: true })
+      removeFixtureDirectory(path.join(appOutDir, 'bin'), path.dirname(appOutDir))
 
       expect(() =>
         verifyPackagedRuntimeDependencies(appOutDir, undefined, electronPlatformName)

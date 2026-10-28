@@ -1,13 +1,9 @@
-import {
-  createHash,
-  createPrivateKey,
-  createPublicKey,
-  timingSafeEqual
-} from 'node:crypto'
+import { createHash, createPrivateKey, createPublicKey, timingSafeEqual } from 'node:crypto'
 import { lstatSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { validateConfiguration } from './generate-update-config.mjs'
+import { parseStrictJson } from './strict-json.mjs'
 
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const CHANNELS = new Set(['stable', 'beta', 'nightly'])
@@ -31,7 +27,11 @@ function decodePublicKey(value, label) {
 
 export function deriveEd25519PublicKey(privateKeyPem) {
   const pem = Buffer.isBuffer(privateKeyPem) ? privateKeyPem : Buffer.from(privateKeyPem)
-  if (!/^-----BEGIN PRIVATE KEY-----\r?\n[\s\S]*\r?\n-----END PRIVATE KEY-----\r?\n?$/.test(pem.toString('utf8'))) {
+  if (
+    !/^-----BEGIN PRIVATE KEY-----\r?\n[\s\S]*\r?\n-----END PRIVATE KEY-----\r?\n?$/.test(
+      pem.toString('utf8')
+    )
+  ) {
     fail('private key must be PKCS#8 PEM')
   }
 
@@ -65,8 +65,10 @@ function configuredKey(entries, keyId, location) {
 
 export function checkSigningKey(options) {
   if (!KEY_ID.test(options.keyId) || options.keyId.includes('..')) fail('key ID is invalid')
-  if (!['publicKeys', 'bootstrapPublicKeys'].includes(options.keySet)) fail('key set must be publicKeys or bootstrapPublicKeys')
-  if (options.keySet === 'publicKeys' && !CHANNELS.has(options.channel)) fail('channel must be stable, beta, or nightly')
+  if (!['publicKeys', 'bootstrapPublicKeys'].includes(options.keySet))
+    fail('key set must be publicKeys or bootstrapPublicKeys')
+  if (options.keySet === 'publicKeys' && !CHANNELS.has(options.channel))
+    fail('channel must be stable, beta, or nightly')
 
   const configuration = validateConfiguration(options.configuration, options.launcherVersion)
   const expected = decodePublicKey(options.expectedPublicKeyBase64, 'expected public key')
@@ -84,7 +86,12 @@ export function checkSigningKey(options) {
     } catch {
       fail('manifest URL must be an absolute HTTPS URL')
     }
-    if (manifestUrl.protocol !== 'https:' || manifestUrl.username || manifestUrl.password || manifestUrl.hash) {
+    if (
+      manifestUrl.protocol !== 'https:' ||
+      manifestUrl.username ||
+      manifestUrl.password ||
+      manifestUrl.hash
+    ) {
       fail('manifest URL must be credential-free HTTPS without a fragment')
     }
     if (configuration.channels[options.channel].href !== manifestUrl.href) {
@@ -121,7 +128,12 @@ function readRegularFile(filePath, maximumBytes, label) {
   }
   const bytes = readFileSync(resolved)
   const after = lstatSync(resolved)
-  if (before.dev !== after.dev || before.ino !== after.ino || after.nlink !== 1 || after.size !== bytes.length) {
+  if (
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    after.nlink !== 1 ||
+    after.size !== bytes.length
+  ) {
     fail(`${label} changed while it was being read`)
   }
   return bytes
@@ -142,18 +154,30 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index]
     const value = argv[index + 1]
-    if (!allowed.has(name) || !value || value.startsWith('--') || values.has(name)) fail('invalid command line')
+    if (!allowed.has(name) || !value || value.startsWith('--') || values.has(name))
+      fail('invalid command line')
     values.set(name, value)
   }
-  for (const name of ['--private-key', '--config', '--launcher-version', '--key-id', '--expected-public-key-base64', '--key-set']) {
+  for (const name of [
+    '--private-key',
+    '--config',
+    '--launcher-version',
+    '--key-id',
+    '--expected-public-key-base64',
+    '--key-set'
+  ]) {
     if (!values.has(name)) fail(`${name} is required`)
   }
   const keySet = values.get('--key-set')
-  if (!['publicKeys', 'bootstrapPublicKeys'].includes(keySet)) fail('--key-set must be publicKeys or bootstrapPublicKeys')
+  if (!['publicKeys', 'bootstrapPublicKeys'].includes(keySet))
+    fail('--key-set must be publicKeys or bootstrapPublicKeys')
   if (keySet === 'publicKeys' && (!values.has('--channel') || !values.has('--manifest-url'))) {
     fail('--channel and --manifest-url are required for publicKeys')
   }
-  if (keySet === 'bootstrapPublicKeys' && (values.has('--channel') || values.has('--manifest-url'))) {
+  if (
+    keySet === 'bootstrapPublicKeys' &&
+    (values.has('--channel') || values.has('--manifest-url'))
+  ) {
     fail('--channel and --manifest-url are not valid for bootstrapPublicKeys')
   }
   return Object.fromEntries([...values].map(([name, value]) => [name.slice(2), value]))
@@ -165,7 +189,7 @@ export function main(argv = process.argv.slice(2)) {
   const configBytes = readRegularFile(args.config, MAX_CONFIG_BYTES, 'configuration')
   let configuration
   try {
-    configuration = JSON.parse(configBytes.toString('utf8'))
+    configuration = parseStrictJson(configBytes.toString('utf8'), 'configuration')
   } catch {
     fail('configuration is not valid JSON')
   }
@@ -179,7 +203,9 @@ export function main(argv = process.argv.slice(2)) {
     channel: args.channel,
     manifestUrl: args['manifest-url']
   })
-  process.stdout.write(`signing key verified keyId=${args['key-id']} publicKeyFingerprint=${result.fingerprint}\n`)
+  process.stdout.write(
+    `signing key verified keyId=${args['key-id']} publicKeyFingerprint=${result.fingerprint}\n`
+  )
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

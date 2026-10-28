@@ -135,7 +135,10 @@ function copyTree(source, destination, shouldSkip = () => false) {
     throw new Error(`Missing required source: ${source}`)
   }
 
-  const sourceStat = fs.statSync(source)
+  const sourceStat = fs.lstatSync(source)
+  if (sourceStat.isSymbolicLink()) {
+    throw new Error(`Source contains symlink or reparse point: ${source}`)
+  }
   if (!sourceStat.isDirectory()) {
     throw new Error(`Expected directory: ${source}`)
   }
@@ -148,15 +151,23 @@ function copyTree(source, destination, shouldSkip = () => false) {
       continue
     }
 
-    const stat = fs.statSync(sourcePath)
+    const stat = fs.lstatSync(sourcePath)
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Source contains symlink or reparse point: ${sourcePath}`)
+    }
     if (stat.isDirectory()) {
       copyTree(sourcePath, destinationPath, shouldSkip)
       continue
     }
     if (stat.isFile()) {
+      if (stat.nlink !== 1) {
+        throw new Error(`Source contains hardlink: ${sourcePath}`)
+      }
       ensureDir(path.dirname(destinationPath))
       fs.copyFileSync(sourcePath, destinationPath)
+      continue
     }
+    throw new Error(`Source contains special file: ${sourcePath}`)
   }
 }
 
@@ -166,7 +177,10 @@ function walkFiles(root, onFile) {
   }
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     const entryPath = path.join(root, entry.name)
-    const stat = fs.statSync(entryPath)
+    const stat = fs.lstatSync(entryPath)
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Staging contains symlink or reparse point: ${entryPath}`)
+    }
     if (stat.isDirectory()) {
       walkFiles(entryPath, onFile)
     } else if (stat.isFile()) {

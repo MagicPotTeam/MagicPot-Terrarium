@@ -189,8 +189,14 @@ describe('build-image-worker normal compatibility', () => {
         expect(f.realpath).not.toHaveBeenCalled()
         expect(f.stat).not.toHaveBeenCalled()
         expect(fs.readFileSync(f.paths.outputBinaryPath, 'utf8')).toBe('old cache binary')
-        if (platform === 'win32') expect(chmod).not.toHaveBeenCalled()
-        else expect(chmod).toHaveBeenCalledExactlyOnceWith(f.paths.outputBinaryPath, 0o755)
+        if (platform === 'win32') {
+          expect(chmod).not.toHaveBeenCalled()
+        } else {
+          expect(chmod).toHaveBeenCalledTimes(1)
+          expect(chmod.mock.calls[0][0]).toContain(`${f.paths.outputBinaryPath}.`)
+          expect(chmod.mock.calls[0][0]).toContain('.tmp')
+          expect(chmod.mock.calls[0][1]).toBe(0o755)
+        }
       }
     )
   }
@@ -267,12 +273,12 @@ describe('build-image-worker reproducible opt-in', () => {
       )
       expect(fs.readFileSync(f.paths.sourceBinaryPath, 'utf8')).toBe('old cache binary')
       expect(mutations[0]).toHaveBeenCalledExactlyOnceWith(f.paths.outputDir, { recursive: true })
-      expect(mutations[1]).toHaveBeenCalledExactlyOnceWith(f.paths.outputBinaryPath, {
-        force: true
-      })
       expect(mutations[2]).toHaveBeenCalledExactlyOnceWith(
         f.sourceBinaryPath,
-        f.paths.outputBinaryPath
+        expect.stringContaining(`${f.paths.outputBinaryPath}.`)
+      )
+      expect(mutations[1].mock.calls.some(([file]) => file === f.paths.outputBinaryPath)).toBe(
+        false
       )
       expect(mutations[3]).not.toHaveBeenCalled()
       expect(env.CARGO_ENCODED_RUSTFLAGS).toBe('-Copt-level=2')

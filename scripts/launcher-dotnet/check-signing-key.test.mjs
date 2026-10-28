@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { generateKeyPairSync } from 'node:crypto'
 import test from 'node:test'
 import { checkSigningKey, deriveEd25519PublicKey } from './check-signing-key.mjs'
+import { parseStrictJson } from './strict-json.mjs'
 
 const keyPair = () => {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
@@ -10,7 +11,8 @@ const keyPair = () => {
   return { pem, publicKeyBase64: Buffer.from(jwk.x, 'base64url').toString('base64') }
 }
 
-const manifestUrl = 'https://example.test/owner/repo/releases/download/release%2F1/magicpot-launcher-stable-win32-x64-channel.json'
+const manifestUrl =
+  'https://example.test/owner/repo/releases/download/release%2F1/magicpot-launcher-stable-win32-x64-channel.json'
 const configuration = (publicKeyBase64) => ({
   schema: 1,
   launcherVersion: '1.2.3',
@@ -45,7 +47,6 @@ test('accepts a key that matches the expected manifest trust configuration', () 
   assert.equal(checked.publicKeyBase64, pair.publicKeyBase64)
   assert.match(checked.fingerprint, /^[0-9a-f]{16}$/)
 })
-
 test('accepts a distinct key from bootstrapPublicKeys', () => {
   const manifest = keyPair()
   const bootstrap = keyPair()
@@ -60,9 +61,21 @@ test('accepts a distinct key from bootstrapPublicKeys', () => {
   assert.equal(checkSigningKey(value).publicKeyBase64, bootstrap.publicKeyBase64)
 })
 
+test('rejects duplicate textual key IDs in configuration', () => {
+  const pair = keyPair()
+  const duplicateJson = JSON.stringify(configuration(pair.publicKeyBase64)).replace(
+    '"publicKeys":{"release-key":',
+    '"publicKeys":{"release-key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","release-key":'
+  )
+  assert.throws(() => parseStrictJson(duplicateJson, 'configuration'), /duplicate object key/)
+})
+
 test('rejects a private key that does not match the declared expected public key', () => {
   const pair = keyPair()
-  assert.throws(() => checkSigningKey({ ...options(pair), expectedPublicKeyBase64: keyPair().publicKeyBase64 }), /private key does not match expected/)
+  assert.throws(
+    () => checkSigningKey({ ...options(pair), expectedPublicKeyBase64: keyPair().publicKeyBase64 }),
+    /private key does not match expected/
+  )
 })
 
 test('rejects mismatched or missing manifest trust configuration', () => {
@@ -78,7 +91,10 @@ test('rejects mismatched or missing manifest trust configuration', () => {
 
 test('rejects a selected channel URL that is not the manifest being published', () => {
   const pair = keyPair()
-  assert.throws(() => checkSigningKey({ ...options(pair), manifestUrl: `${manifestUrl}.other` }), /does not point at the manifest being published/)
+  assert.throws(
+    () => checkSigningKey({ ...options(pair), manifestUrl: `${manifestUrl}.other` }),
+    /does not point at the manifest being published/
+  )
 })
 
 test('rejects non-Ed25519 private keys', () => {

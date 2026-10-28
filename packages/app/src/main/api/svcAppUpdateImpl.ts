@@ -50,20 +50,47 @@ export class AppUpdateSvcImpl implements AppUpdateSvc {
     resp: ServerStreaming<AppUpdateStatus>
   ): Promise<void> => {
     let stop = false
-    const cleanup = addAppUpdateStatusListener((status) => {
+    let cleanup: (() => void) | undefined
+    let resolveWait: (() => void) | undefined
+    let waitTimer: ReturnType<typeof setTimeout> | undefined
+    const finish = (): void => {
+      if (stop) return
+      stop = true
+      cleanup?.()
+      cleanup = undefined
+      if (waitTimer !== undefined) {
+        clearTimeout(waitTimer)
+        waitTimer = undefined
+      }
+      resolveWait?.()
+      resolveWait = undefined
+    }
+
+    cleanup = addAppUpdateStatusListener((status) => {
       if (!stop) {
         resp.onData(status)
       }
     })
+    // Abort handlers are delivered as soon as the transferred MessagePort is
+    // closed. Keep the timer only as a fallback for direct/test callers that
+    // expose an `isAborted` check without a live abort callback.
+    resp.abortReceiver?.onAbort(finish)
 
     while (!stop) {
       if (resp.abortReceiver?.isAborted()) {
-        stop = true
+        finish()
         break
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000))
+      await new Promise<void>((resolve) => {
+        resolveWait = resolve
+        waitTimer = setTimeout(() => {
+          waitTimer = undefined
+          resolveWait = undefined
+          resolve()
+        }, 1000)
+      })
     }
 
-    cleanup()
+    finish()
   }
 }
