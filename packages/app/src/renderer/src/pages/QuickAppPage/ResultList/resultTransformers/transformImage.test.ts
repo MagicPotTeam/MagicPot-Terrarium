@@ -111,7 +111,8 @@ describe('transformImage', () => {
     expect(importOutputImageMock).toHaveBeenCalledWith({
       filename: 'ComfyUI_final.png',
       subfolder: '',
-      type: 'output'
+      type: 'output',
+      taskId: 'prompt-1'
     })
     expect(getViewMock).not.toHaveBeenCalled()
     expect(URL.createObjectURL).not.toHaveBeenCalled()

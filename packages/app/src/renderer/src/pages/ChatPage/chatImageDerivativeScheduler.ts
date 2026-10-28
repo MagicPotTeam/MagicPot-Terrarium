@@ -83,7 +83,10 @@ export class CancellablePriorityScheduler {
       }
       this.activeCount += 1
       void Promise.resolve()
-        .then(entry.task)
+        .then(() => {
+          if (entry.signal?.aborted) throw abortError()
+          return entry.task()
+        })
         .then(entry.resolve, entry.reject)
         .finally(() => {
           this.activeCount -= 1
@@ -116,6 +119,19 @@ export const getChatImageDerivativeCacheKey = (
   reference: MediaReference & { kind: 'managed'; sha256: string },
   maxEdge: ManagedMediaDerivativeMaxEdge
 ): string => `${reference.sha256}:${reference.relativePath}:${maxEdge}`
+
+export const invalidateCachedChatImageDerivative = (key: string, expectedUrl: string): boolean => {
+  const entry = cache.get(key)
+  if (
+    entry?.state !== 'resolved' ||
+    entry.result.status !== 'ready' ||
+    entry.result.descriptor.localMediaUrl !== expectedUrl
+  ) {
+    return false
+  }
+  cache.delete(key)
+  return true
+}
 
 const rejectPendingEntry = (entry: PendingCacheEntry, error: Error): void => {
   clearTimeout(entry.timeoutId)
@@ -156,7 +172,10 @@ const awaitWithAbort = <T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
   if (!signal) return promise
   if (signal.aborted) return Promise.reject(abortError())
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortError())
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort)
+      reject(abortError())
+    }
     signal.addEventListener('abort', onAbort, { once: true })
     promise.then(
       (value) => {

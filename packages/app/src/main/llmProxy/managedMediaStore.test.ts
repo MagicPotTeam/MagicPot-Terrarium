@@ -452,6 +452,68 @@ describe('managedMediaStore', () => {
     }
   })
 
+  it('resolves task-scoped Comfy output references after restart', async () => {
+    const taskRoot = path.join(authorizedRoot, 'comfy-outputs', 'tasks', 'prompt-123')
+    const imported = await importManagedMedia(taskRoot, input(), { authorizedRoot })
+    const taskReference = {
+      ...imported.reference,
+      relativePath: `comfy-outputs/tasks/prompt-123/${imported.reference.relativePath}`
+    }
+
+    const resolved = await resolveManagedMediaReference(authorizedRoot, taskReference, {
+      authorizedRoot
+    })
+    expect(resolved.storeRoot).toBe(await fs.realpath(taskRoot))
+    expect(resolved.absolutePath).toBe(imported.absolutePath)
+    expect(await fs.readFile(resolved.absolutePath)).toEqual(pngBytes)
+  })
+
+  it.each([
+    ['task', 'task-123'],
+    ['model', 'model-123'],
+    ['user-output', 'export-123']
+  ] as const)(
+    'encodes and restores the %s lifecycle namespace after restart',
+    async (namespace, scope) => {
+      const namespaceRoot = path.join(authorizedRoot, namespace, scope)
+      const imported = await importManagedMedia(namespaceRoot, input(), { authorizedRoot })
+      const localReferencePath = imported.reference.relativePath.replace(
+        `${namespace}/${scope}/`,
+        ''
+      )
+      expect(imported.reference.relativePath).toBe(`${namespace}/${scope}/${localReferencePath}`)
+      expect(localReferencePath).toMatch(/^originals\/[a-f0-9]{2}\/[a-f0-9]{64}\.png$/u)
+
+      const persistedReference = JSON.parse(JSON.stringify(imported.reference))
+      const resolved = await resolveManagedMediaReference(authorizedRoot, persistedReference, {
+        authorizedRoot
+      })
+      expect(resolved.storeRoot).toBe(await fs.realpath(namespaceRoot))
+      expect(resolved.absolutePath).toBe(imported.absolutePath)
+      expect(await fs.readFile(resolved.absolutePath)).toEqual(pngBytes)
+    }
+  )
+
+  it('rejects malformed lifecycle namespace prefixes instead of resolving nested stores', async () => {
+    const namespaceRoot = path.join(authorizedRoot, 'task', 'task-123')
+    const imported = await importManagedMedia(namespaceRoot, input(), { authorizedRoot })
+    for (const relativePath of [
+      `task-123/${imported.reference.relativePath}`,
+      `task/task-123/nested/${imported.reference.relativePath.replace('task/task-123/', '')}`,
+      `Task/task-123/${imported.reference.relativePath.replace('task/task-123/', '')}`,
+      `user-output/../${imported.reference.relativePath.replace('task/task-123/', '')}`,
+      `task/TASK-123/${imported.reference.relativePath.replace('task/task-123/', '')}`
+    ]) {
+      await expect(
+        resolveManagedMediaReference(
+          authorizedRoot,
+          { ...imported.reference, relativePath },
+          { authorizedRoot }
+        )
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+    }
+  })
+
   it('restores a managed PNG from a JSON-safe reference after restart without adapters', async () => {
     // This is intentionally a store-only restart test: no Chat, Canvas, or Comfy adapter.
     const imported = await importMedia()

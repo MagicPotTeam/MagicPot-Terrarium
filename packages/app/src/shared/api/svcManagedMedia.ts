@@ -1,6 +1,12 @@
 import type { ServiceDefSheet } from './apiUtils/serviceDefSheet'
 import { ServiceValidationError } from './apiUtils/serviceValidation'
 import {
+  validateBinaryChunkFrameSet,
+  validateBinaryChunkReference,
+  type BinaryChunkFrame,
+  type BinaryChunkReference
+} from '../binaryChunkProtocol'
+import {
   isNormalizedMediaRelativePath,
   normalizeMediaReference,
   type MediaReference
@@ -29,27 +35,44 @@ export type EnsureManagedMediaDerivativeResp =
   | { status: 'ready'; descriptor: ManagedMediaDerivativeDescriptor }
   | { status: 'fallbackOriginal'; reason: 'animated-gif'; localMediaUrl: string }
 
-export type MaterializeManagedMediaForRequestReq = {
-  reference: MediaReference
-  transport: 'request-data-url'
-}
+export type MaterializeManagedMediaForRequestReq =
+  | { reference: MediaReference; transport: 'request-data-url' }
+  | { reference: MediaReference; transport: 'chunked-binary-v1' }
 
-export type MaterializeManagedMediaForRequestResp = {
-  transport: 'request-data-url'
-  dataUrl: string
-  mimeType: string
-  sizeBytes: number
+export type MaterializeManagedMediaForRequestResp =
+  | {
+      transport: 'request-data-url'
+      dataUrl: string
+      mimeType: string
+      sizeBytes: number
+    }
+  | {
+      transport: 'chunked-binary-v1'
+      reference: BinaryChunkReference
+      chunks: BinaryChunkFrame[]
+    }
+
+export const MANAGED_MEDIA_STORAGE_NAMESPACES = ['task', 'model', 'user-output'] as const
+export type ManagedMediaStorageNamespace = (typeof MANAGED_MEDIA_STORAGE_NAMESPACES)[number]
+export type ManagedMediaStorage = {
+  namespace: ManagedMediaStorageNamespace
+  /** Canonical lower-case scope; never sanitized or lower-cased implicitly. */
+  scope: string
 }
 
 export type ImportManagedMediaFileReq = {
   sourcePath: string
   mimeType: string
   originalFileName: string
+  /** Optional physical lifecycle namespace. Omitted requests retain legacy storage. */
+  storage?: ManagedMediaStorage
 }
 
 export type ImportManagedMediaDataUrlReq = {
   dataUrl: string
   originalFileName: string
+  /** Optional physical lifecycle namespace. Omitted requests retain legacy storage. */
+  storage?: ManagedMediaStorage
 }
 
 export type ImportManagedMediaResp = {
@@ -64,6 +87,8 @@ export type MigrateLegacyManagedMediaReq = {
     sourceWidth?: number
     sourceHeight?: number
   }
+  /** Optional physical lifecycle namespace; omitted requests stay legacy-compatible. */
+  storage?: ManagedMediaStorage
 }
 
 export type MigrateLegacyManagedMediaResp = ImportManagedMediaResp & {
@@ -79,6 +104,8 @@ export type UpdateManagedMediaReferenceSnapshotReq = {
   version: 1
   complete: boolean
   ids: string[]
+  /** Number of durable records currently referring to each managed media ID. */
+  referenceCounts?: Record<string, number>
 }
 export type UpdateManagedMediaReferenceSnapshotResp = { version: 1; accepted: true }
 export type ReclaimLegacyManagedMediaResp = { queued: true }
@@ -104,6 +131,36 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
   Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key))
 const isPositiveSafeInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+
+const MANAGED_MEDIA_STORAGE_SCOPE_PATTERN = /^[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?$/u
+const isManagedMediaStorageNamespace = (value: unknown): value is ManagedMediaStorageNamespace =>
+  typeof value === 'string' &&
+  (MANAGED_MEDIA_STORAGE_NAMESPACES as readonly string[]).includes(value)
+const isManagedMediaStorageScope = (value: unknown): value is string =>
+  typeof value === 'string' && MANAGED_MEDIA_STORAGE_SCOPE_PATTERN.test(value)
+const hasAllowedKeys = (
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = []
+): boolean => {
+  const keys = Object.keys(value)
+  return (
+    required.every((key) => keys.includes(key)) &&
+    keys.every((key) => required.includes(key) || optional.includes(key))
+  )
+}
+const validateManagedMediaStorage = (value: unknown): ManagedMediaStorage | undefined => {
+  if (value === undefined) return undefined
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['namespace', 'scope']) ||
+    !isManagedMediaStorageNamespace(value.namespace) ||
+    !isManagedMediaStorageScope(value.scope)
+  ) {
+    throw new ServiceValidationError('svcManagedMedia storage')
+  }
+  return { namespace: value.namespace, scope: value.scope }
+}
 
 /** Validates an absolute, hostless local-media URL and returns its decoded canonical path. */
 function decodedLocalMediaPath(value: unknown): string | undefined {
@@ -207,7 +264,7 @@ const validImportDataUrl = (value: unknown): value is string => {
 export const validateImportManagedMediaFileReq = (value: unknown): ImportManagedMediaFileReq => {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ['sourcePath', 'mimeType', 'originalFileName']) ||
+    !hasAllowedKeys(value, ['sourcePath', 'mimeType', 'originalFileName'], ['storage']) ||
     !isCanonicalAbsoluteFileSource(value.sourcePath) ||
     typeof value.mimeType !== 'string' ||
     !MIME_TYPE_PATTERN.test(value.mimeType) ||
@@ -215,10 +272,12 @@ export const validateImportManagedMediaFileReq = (value: unknown): ImportManaged
   ) {
     throw new ServiceValidationError('svcManagedMedia.importFile request')
   }
+  const storage = validateManagedMediaStorage(value.storage)
   return {
     sourcePath: value.sourcePath,
     mimeType: value.mimeType.toLowerCase(),
-    originalFileName: value.originalFileName
+    originalFileName: value.originalFileName,
+    ...(storage ? { storage } : {})
   }
 }
 
@@ -227,13 +286,18 @@ export const validateImportManagedMediaDataUrlReq = (
 ): ImportManagedMediaDataUrlReq => {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ['dataUrl', 'originalFileName']) ||
+    !hasAllowedKeys(value, ['dataUrl', 'originalFileName'], ['storage']) ||
     !validImportDataUrl(value.dataUrl) ||
     !isSafeOriginalFileName(value.originalFileName)
   ) {
     throw new ServiceValidationError('svcManagedMedia.importDataUrl request')
   }
-  return value as ImportManagedMediaDataUrlReq
+  const storage = validateManagedMediaStorage(value.storage)
+  return {
+    dataUrl: value.dataUrl,
+    originalFileName: value.originalFileName,
+    ...(storage ? { storage } : {})
+  }
 }
 
 export const validateImportManagedMediaResp = (value: unknown): ImportManagedMediaResp => {
@@ -256,7 +320,7 @@ export const validateMigrateLegacyManagedMediaReq = (
 ): MigrateLegacyManagedMediaReq => {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ['dataUrl', 'metadata']) ||
+    !hasAllowedKeys(value, ['dataUrl', 'metadata'], ['storage']) ||
     !validImportDataUrl(value.dataUrl)
   ) {
     throw new ServiceValidationError('svcManagedMedia.migrateLegacyDataUrl request')
@@ -272,7 +336,16 @@ export const validateMigrateLegacyManagedMediaReq = (
   ) {
     throw new ServiceValidationError('svcManagedMedia.migrateLegacyDataUrl request')
   }
-  return value as MigrateLegacyManagedMediaReq
+  const storage = validateManagedMediaStorage(value.storage)
+  return {
+    dataUrl: value.dataUrl,
+    metadata: {
+      originalFileName: metadata.originalFileName,
+      ...(metadata.sourceWidth !== undefined ? { sourceWidth: metadata.sourceWidth } : {}),
+      ...(metadata.sourceHeight !== undefined ? { sourceHeight: metadata.sourceHeight } : {})
+    },
+    ...(storage ? { storage } : {})
+  }
 }
 
 export const validateMigrateLegacyManagedMediaResp = (
@@ -420,45 +493,95 @@ export const validateMaterializeManagedMediaForRequestReq = (
     throw new ServiceValidationError('svcManagedMedia.materializeForRequest request')
   }
   const reference = normalizeMediaReference(value.reference)
-  if (!reference || reference.kind !== 'managed' || value.transport !== 'request-data-url') {
+  if (
+    !reference ||
+    reference.kind !== 'managed' ||
+    (value.transport !== 'request-data-url' && value.transport !== 'chunked-binary-v1')
+  ) {
     throw new ServiceValidationError('svcManagedMedia.materializeForRequest request')
   }
-  return { reference, transport: 'request-data-url' }
+  // Preserve the caller's selected transport through IPC validation. Collapsing
+  // chunked requests to the legacy data-url variant silently defeats the bounded
+  // binary transport and makes the response shape disagree with the request.
+  return {
+    reference,
+    transport: value.transport as MaterializeManagedMediaForRequestReq['transport']
+  }
 }
 
 export const validateMaterializeManagedMediaForRequestResp = (
   value: unknown
 ): MaterializeManagedMediaForRequestResp => {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ['transport', 'dataUrl', 'mimeType', 'sizeBytes']) ||
-    value.transport !== 'request-data-url' ||
-    typeof value.mimeType !== 'string' ||
-    !/^[-!#$%&'*+.^_`|~0-9A-Za-z]+\/[-!#$%&'*+.^_`|~0-9A-Za-z]+$/.test(value.mimeType) ||
-    !isPositiveSafeInteger(value.sizeBytes) ||
-    typeof value.dataUrl !== 'string' ||
-    !value.dataUrl.startsWith(`data:${value.mimeType};base64,`)
-  ) {
+  if (!isRecord(value) || typeof value.transport !== 'string') {
     throw new ServiceValidationError('svcManagedMedia.materializeForRequest response')
   }
-  return value as MaterializeManagedMediaForRequestResp
+  if (value.transport === 'request-data-url') {
+    if (
+      !hasExactKeys(value, ['transport', 'dataUrl', 'mimeType', 'sizeBytes']) ||
+      typeof value.mimeType !== 'string' ||
+      !/^[-!#$%&'*+.^_`|~0-9A-Za-z]+\/[-!#$%&'*+.^_`|~0-9A-Za-z]+$/.test(value.mimeType) ||
+      !isPositiveSafeInteger(value.sizeBytes) ||
+      typeof value.dataUrl !== 'string' ||
+      !value.dataUrl.startsWith(`data:${value.mimeType};base64,`)
+    ) {
+      throw new ServiceValidationError('svcManagedMedia.materializeForRequest response')
+    }
+    return value as MaterializeManagedMediaForRequestResp
+  }
+  if (value.transport === 'chunked-binary-v1') {
+    if (
+      !hasExactKeys(value, ['transport', 'reference', 'chunks']) ||
+      !Array.isArray(value.chunks)
+    ) {
+      throw new ServiceValidationError('svcManagedMedia.materializeForRequest response')
+    }
+    try {
+      const reference = validateBinaryChunkReference(value.reference)
+      const chunks = validateBinaryChunkFrameSet(reference, value.chunks)
+      return { transport: 'chunked-binary-v1', reference, chunks }
+    } catch {
+      throw new ServiceValidationError('svcManagedMedia.materializeForRequest response')
+    }
+  }
+  throw new ServiceValidationError('svcManagedMedia.materializeForRequest response')
 }
 
 const validateUpdateReferenceSnapshotReq = (
   value: unknown
 ): UpdateManagedMediaReferenceSnapshotReq => {
+  const hasCounts =
+    isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'referenceCounts')
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ['version', 'complete', 'ids']) ||
+    !(
+      hasExactKeys(value, ['version', 'complete', 'ids']) ||
+      hasExactKeys(value, ['version', 'complete', 'ids', 'referenceCounts'])
+    ) ||
     value.version !== 1 ||
     typeof value.complete !== 'boolean' ||
     !Array.isArray(value.ids) ||
     value.ids.length > 100_000 ||
-    value.ids.some((id) => typeof id !== 'string' || !/^[a-f0-9]{64}$/u.test(id))
+    value.ids.some((id) => typeof id !== 'string' || !/^[a-f0-9]{64}$/u.test(id)) ||
+    (hasCounts &&
+      (!isRecord(value.referenceCounts) ||
+        Object.keys(value.referenceCounts).length > 100_000 ||
+        Object.entries(value.referenceCounts).some(
+          ([id, count]) =>
+            !/^[a-f0-9]{64}$/u.test(id) ||
+            typeof count !== 'number' ||
+            !Number.isSafeInteger(count) ||
+            count <= 0
+        ) ||
+        Object.keys(value.referenceCounts).some((id) => !(value.ids as string[]).includes(id))))
   ) {
     throw new ServiceValidationError('svcManagedMedia.updateReferenceSnapshot request')
   }
-  return { version: 1, complete: value.complete, ids: [...new Set(value.ids)] }
+  const ids = [...new Set(value.ids as string[])]
+  if (!hasCounts) return { version: 1, complete: value.complete, ids }
+  const referenceCounts: Record<string, number> = {}
+  for (const id of ids)
+    referenceCounts[id] = (value.referenceCounts as Record<string, number>)[id] ?? 1
+  return { version: 1, complete: value.complete, ids, referenceCounts }
 }
 
 const validateUpdateReferenceSnapshotResp = (

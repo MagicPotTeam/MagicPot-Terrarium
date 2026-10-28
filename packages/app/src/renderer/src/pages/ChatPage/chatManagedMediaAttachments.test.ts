@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
-import { importChatAttachment, importChatAttachmentUrl } from './chatManagedMediaAttachments'
+import {
+  CHAT_ATTACHMENT_STORAGE,
+  importChatAttachment,
+  importChatAttachmentUrl
+} from './chatManagedMediaAttachments'
 
 const reference = {
   version: 1 as const,
@@ -62,7 +66,8 @@ describe('chatManagedMediaAttachments', () => {
     expect(service.importFile).toHaveBeenCalledWith({
       sourcePath: '/selected/file.png',
       mimeType: 'image/png',
-      originalFileName: 'file.png'
+      originalFileName: 'file.png',
+      storage: CHAT_ATTACHMENT_STORAGE
     })
     expect(service.importDataUrl).not.toHaveBeenCalled()
     expect(attachment).toMatchObject({
@@ -95,7 +100,8 @@ describe('chatManagedMediaAttachments', () => {
     expect(service.importFile).not.toHaveBeenCalled()
     expect(service.importDataUrl).toHaveBeenCalledWith({
       dataUrl: 'data:image/png;base64,AQID',
-      originalFileName: 'paste.png'
+      originalFileName: 'paste.png',
+      storage: CHAT_ATTACHMENT_STORAGE
     })
     expect(attachment.url).toBe(imported.localMediaUrl)
     expect(attachment.url).not.toMatch(/^(?:blob|data):/)
@@ -124,13 +130,32 @@ describe('chatManagedMediaAttachments', () => {
 
     expect(service.importDataUrl).toHaveBeenCalledWith({
       dataUrl: 'data:image/png;base64,AQID',
-      originalFileName: 'preview.png'
+      originalFileName: 'preview.png',
+      storage: CHAT_ATTACHMENT_STORAGE
     })
     expect(attachment).toMatchObject({
       url: imported.localMediaUrl,
       media: reference,
       sourceWidth: 4,
       sourceHeight: 5
+    })
+  })
+
+  it('passes an explicit lifecycle scope without allowing the helper to rewrite it', async () => {
+    globalThis.FileReader = TestFileReader as unknown as typeof FileReader
+    const service = {
+      importFile: vi.fn(),
+      importDataUrl: vi.fn(async () => imported)
+    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+    const storage = { namespace: 'task' as const, scope: 'run_01' }
+    const file = new File([new Uint8Array([1, 2, 3])], 'task.png', { type: 'image/png' })
+
+    await importChatAttachment({ service, file, type: 'image', storage })
+
+    expect(service.importDataUrl).toHaveBeenCalledWith({
+      dataUrl: 'data:image/png;base64,AQID',
+      originalFileName: 'task.png',
+      storage
     })
   })
 

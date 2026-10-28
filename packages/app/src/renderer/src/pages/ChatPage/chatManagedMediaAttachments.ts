@@ -1,8 +1,15 @@
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
+import type { ManagedMediaStorage } from '@shared/api/svcManagedMedia'
 
 export type ManagedAttachmentFile = File & { path?: string }
 type Dimensions = { sourceWidth?: number; sourceHeight?: number }
+
+/** Chat attachments are user-owned outputs, not task scratch data. */
+export const CHAT_ATTACHMENT_STORAGE = {
+  namespace: 'user-output',
+  scope: 'chat-attachments'
+} as const satisfies ManagedMediaStorage
 
 type ImportChatAttachmentInput = {
   service?: Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
@@ -11,6 +18,7 @@ type ImportChatAttachmentInput = {
   mimeType?: string
   relativePath?: string
   dimensions?: Dimensions
+  storage?: ManagedMediaStorage
 }
 
 type ImportChatAttachmentUrlInput = {
@@ -18,6 +26,7 @@ type ImportChatAttachmentUrlInput = {
   url: string
   fileName: string
   dimensions?: Dimensions
+  storage?: ManagedMediaStorage
 }
 
 const readFileAsDataUrl = (file: File): Promise<string> =>
@@ -42,16 +51,23 @@ export const importChatAttachment = async ({
   type,
   mimeType,
   relativePath,
-  dimensions
+  dimensions,
+  storage = CHAT_ATTACHMENT_STORAGE
 }: ImportChatAttachmentInput): Promise<ChatAttachment> => {
   if (!service) throw new Error('Managed media service is unavailable')
   const originalFileName = file.name || 'attachment'
   const sourcePath = typeof file.path === 'string' ? file.path.trim() : ''
   const imported = sourcePath
-    ? await service.importFile({ sourcePath, mimeType: mimeType || file.type, originalFileName })
+    ? await service.importFile({
+        sourcePath,
+        mimeType: mimeType || file.type,
+        originalFileName,
+        storage
+      })
     : await service.importDataUrl({
         dataUrl: await readFileAsDataUrl(file),
-        originalFileName
+        originalFileName,
+        storage
       })
   return {
     type,
@@ -69,7 +85,8 @@ export const importChatAttachmentUrl = async ({
   service,
   url,
   fileName,
-  dimensions
+  dimensions,
+  storage = CHAT_ATTACHMENT_STORAGE
 }: ImportChatAttachmentUrlInput): Promise<ChatAttachment> => {
   if (!service) throw new Error('Managed media service is unavailable')
   if (!url.startsWith('data:') && !url.startsWith('blob:')) {
@@ -77,7 +94,8 @@ export const importChatAttachmentUrl = async ({
   }
   const imported = await service.importDataUrl({
     dataUrl: await readUrlAsDataUrl(url),
-    originalFileName: fileName
+    originalFileName: fileName,
+    storage
   })
   return {
     type: 'image',

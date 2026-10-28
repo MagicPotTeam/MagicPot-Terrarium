@@ -77,6 +77,64 @@ export function formatFileSize(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`
 }
 
+const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const decodePngTextMetadata = (bytes: Uint8Array): Map<string, string> | null => {
+  const metadata = new Map<string, string>()
+  let offset = PNG_SIGNATURE.length
+
+  while (offset < bytes.length) {
+    if (bytes.length - offset < 12) return null
+    const length = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0)
+    const dataStart = offset + 8
+    const dataEnd = dataStart + length
+    const nextOffset = dataEnd + 4
+    if (dataEnd < dataStart || nextOffset > bytes.length) return null
+
+    const chunkType = String.fromCharCode(
+      bytes[offset + 4],
+      bytes[offset + 5],
+      bytes[offset + 6],
+      bytes[offset + 7]
+    )
+    const chunkData = bytes.subarray(dataStart, dataEnd)
+    if (chunkType === 'tEXt') {
+      const separator = chunkData.indexOf(0)
+      if (separator >= 0) {
+        const keyword = new TextDecoder('latin1').decode(chunkData.subarray(0, separator))
+        const value = new TextDecoder('latin1').decode(chunkData.subarray(separator + 1))
+        if (keyword === 'workflow' || keyword === 'prompt' || keyword === 'comfy') {
+          metadata.set(keyword, value)
+        }
+      }
+    } else if (chunkType === 'iTXt') {
+      const keywordEnd = chunkData.indexOf(0)
+      if (keywordEnd >= 0) {
+        let cursor = keywordEnd + 1
+        const compressionFlag = chunkData[cursor++]
+        const compressionMethod = chunkData[cursor++]
+        const languageEnd = chunkData.indexOf(0, cursor)
+        if (languageEnd < 0) return null
+        cursor = languageEnd + 1
+        const translatedKeywordEnd = chunkData.indexOf(0, cursor)
+        if (translatedKeywordEnd < 0) return null
+        cursor = translatedKeywordEnd + 1
+        if (compressionFlag === 0 && compressionMethod === 0) {
+          const keyword = new TextDecoder().decode(chunkData.subarray(0, keywordEnd))
+          const value = new TextDecoder().decode(chunkData.subarray(cursor))
+          if (keyword === 'workflow' || keyword === 'prompt' || keyword === 'comfy') {
+            metadata.set(keyword, value)
+          }
+        }
+      }
+    }
+
+    if (chunkType === 'IEND') return metadata
+    offset = nextOffset
+  }
+
+  return null
+}
+
 export async function extractWorkflowFromPNG(file: File): Promise<string | null> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -105,41 +163,10 @@ export async function extractWorkflowFromPNG(file: File): Promise<string | null>
           return
         }
 
-        let offset = 8
-        const workflowChunks = new Map<string, string>()
-
-        while (offset < bytes.length - 8) {
-          const length =
-            (bytes[offset] << 24) |
-            (bytes[offset + 1] << 16) |
-            (bytes[offset + 2] << 8) |
-            bytes[offset + 3]
-          offset += 4
-
-          const chunkType = String.fromCharCode(
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3]
-          )
-          offset += 4
-
-          if (chunkType === 'tEXt') {
-            const chunkData = new Uint8Array(bytes.buffer, offset, length)
-            const text = new TextDecoder('latin1').decode(chunkData)
-            const nullIndex = text.indexOf('\0')
-
-            if (nullIndex >= 0) {
-              const keyword = text.substring(0, nullIndex)
-              const value = text.substring(nullIndex + 1)
-
-              if (keyword === 'workflow' || keyword === 'prompt' || keyword === 'comfy') {
-                workflowChunks.set(keyword, value)
-              }
-            }
-          }
-
-          offset += length + 4
+        const workflowChunks = decodePngTextMetadata(bytes)
+        if (!workflowChunks) {
+          resolve(null)
+          return
         }
 
         for (const key of ['prompt', 'workflow', 'comfy']) {

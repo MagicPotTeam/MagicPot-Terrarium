@@ -14,6 +14,7 @@ import {
   type ImportedManagedMedia
 } from '../llmProxy/managedMediaStore'
 import { ManagedMediaSvcImpl } from './svcManagedMediaImpl'
+import { assembleBinaryChunks } from '@shared/binaryChunkProtocol'
 
 // These races exercise Windows handles/reparse points, not memfs behavior.
 vi.mock('./canvasThumbnailSidecarAdapter', () => ({
@@ -110,6 +111,19 @@ describe('managed media request materialization races (real filesystem)', () => 
     expect(result.sizeBytes).toBe(bytes.length)
     expect(result.mimeType).toBe('image/gif')
     expect(ensureDerivative).not.toHaveBeenCalled()
+  })
+
+  it('materializes an integrity-checked chunk reference when the chunk transport is requested', async () => {
+    const { imported, bytes } = await fixture('original')
+    const service = new ManagedMediaSvcImpl({ getMediaDir: () => root })
+    const result = await service.materializeForRequest({
+      reference: imported.reference,
+      transport: 'chunked-binary-v1'
+    })
+    expect(result.transport).toBe('chunked-binary-v1')
+    await expect(assembleBinaryChunks(result.reference, result.chunks)).resolves.toEqual(
+      new Uint8Array(bytes)
+    )
   })
 
   it('resolves and materializes legacy scoped references from the real filesystem', async () => {

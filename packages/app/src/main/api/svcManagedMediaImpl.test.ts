@@ -9,6 +9,10 @@ import {
 } from '../llmProxy/managedMediaStore'
 import { ManagedMediaSvcImpl, type ManagedMediaSvcImplDependencies } from './svcManagedMediaImpl'
 
+vi.mock('electron', () => ({
+  app: { getPath: vi.fn(() => '/tmp/magicpot-test-user-data') }
+}))
+
 function png(): Buffer {
   return Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -134,6 +138,185 @@ describe('ManagedMediaSvcImpl', () => {
         `local-media://${pathToFileURL(absolutePath).toString().slice('file://'.length)}`
       )
       expect(importFile).toHaveBeenCalledOnce()
+    })
+  })
+
+  it.each([
+    ['task', 'task-123'],
+    ['model', 'model-123'],
+    ['user-output', 'export-123']
+  ] as const)(
+    'preserves a %s lifecycle namespace path in the service response',
+    async (namespace, scope) => {
+      await withImportFixture(async ({ root, source }) => {
+        const relativePath = `${namespace}/${scope}/originals/imported.png`
+        const absolutePath = path.join(root, ...relativePath.split('/'))
+        const importFile = vi.fn(async () => ({
+          reference: {
+            version: 1 as const,
+            kind: 'managed' as const,
+            relativePath,
+            sha256: 'a'.repeat(64),
+            sizeBytes: 12,
+            mimeType: 'image/png' as const,
+            originalFileName: 'imported.png'
+          },
+          absolutePath,
+          localMediaUrl: 'local-media://stale',
+          metadataPath: `${absolutePath}.json`
+        }))
+        const service = new ManagedMediaSvcImpl({
+          getMediaDir: () => root,
+          importFile,
+          ensureDerivative: vi.fn(async () => undefined as never)
+        })
+        const imported = await service.importFile({
+          sourcePath: source,
+          mimeType: 'image/png',
+          originalFileName: 'imported.png'
+        })
+        expect(imported.localMediaUrl).toBe(
+          `local-media://${pathToFileURL(absolutePath).toString().slice('file://'.length)}`
+        )
+        expect(imported.reference.relativePath).toBe(relativePath)
+        expect(importFile).toHaveBeenCalledOnce()
+      })
+    }
+  )
+
+  it('routes an explicit storage namespace to a contained physical import root', async () => {
+    await withImportFixture(async ({ root, source }) => {
+      const namespaceRoot = path.join(root, 'user-output', 'chat-attachments')
+      const importFile = vi.fn(async (input: { chatMediaRoot: string }) => ({
+        reference: {
+          version: 1 as const,
+          kind: 'managed' as const,
+          relativePath: 'user-output/chat-attachments/originals/imported.png',
+          sha256: 'a'.repeat(64),
+          sizeBytes: 12,
+          mimeType: 'image/png' as const,
+          originalFileName: 'imported.png'
+        },
+        absolutePath: path.join(input.chatMediaRoot, 'originals', 'imported.png'),
+        localMediaUrl: 'local-media://stale',
+        metadataPath: path.join(input.chatMediaRoot, 'metadata', 'imported.json')
+      }))
+      const service = new ManagedMediaSvcImpl({
+        getMediaDir: () => root,
+        getMediaNamespaceDir: () => namespaceRoot,
+        realpath: (async (value: string) => value) as typeof fs.realpath,
+        importFile,
+        ensureDerivative: vi.fn(async () => undefined as never)
+      })
+
+      await service.importFile({
+        sourcePath: source,
+        mimeType: 'image/png',
+        originalFileName: 'imported.png',
+        storage: { namespace: 'user-output', scope: 'chat-attachments' }
+      })
+
+      expect(importFile).toHaveBeenCalledWith(
+        expect.objectContaining({ chatMediaRoot: namespaceRoot }),
+        { authorizedRoot: root }
+      )
+    })
+  })
+
+  it('rejects an unsafe storage namespace before invoking the importer', async () => {
+    const importFile = vi.fn()
+    const service = new ManagedMediaSvcImpl({
+      getMediaDir: () => '/configured/media',
+      getMediaNamespaceDir: () => '/configured/media/../outside',
+      realpath: (async (value: string) => value) as typeof fs.realpath,
+      importFile
+    })
+    await expect(
+      service.importFile({
+        sourcePath: '/selected/file.png',
+        mimeType: 'image/png',
+        originalFileName: 'selected.png',
+        storage: { namespace: 'task', scope: '../outside' }
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+    expect(importFile).not.toHaveBeenCalled()
+  })
+
+  it('rejects a symlinked or otherwise non-canonical media root before import', async () => {
+    const importFile = vi.fn()
+    const service = new ManagedMediaSvcImpl({
+      getMediaDir: () => '/configured/media',
+      realpath: (async (value: string) =>
+        value === path.resolve('/configured/media')
+          ? '/outside/media'
+          : value) as typeof fs.realpath,
+      importFile
+    })
+
+    await expect(
+      service.importFile({
+        sourcePath: '/selected/file.png',
+        mimeType: 'image/png',
+        originalFileName: 'selected.png'
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+    expect(importFile).not.toHaveBeenCalled()
+  })
+
+  it('routes legacy migration through an explicit lifecycle storage root', async () => {
+    await withImportFixture(async ({ root }) => {
+      const namespaceRoot = path.join(root, 'user-output', 'chat-attachments')
+      const absolutePath = path.join(namespaceRoot, 'originals', 'legacy.png')
+      const migrateLegacy = vi.fn(
+        async (input: { chatMediaRoot: string; authorizedRoot: string }) => ({
+          status: 'migrated' as const,
+          value: {
+            version: 1 as const,
+            kind: 'managed' as const,
+            relativePath: 'user-output/chat-attachments/originals/legacy.png',
+            sha256: 'a'.repeat(64),
+            sizeBytes: 12,
+            mimeType: 'image/png' as const,
+            originalFileName: 'legacy.png'
+          },
+          checkpoint: { version: 1 as const, rollbackToken: null },
+          imported: {
+            reference: {
+              version: 1 as const,
+              kind: 'managed' as const,
+              relativePath: 'user-output/chat-attachments/originals/legacy.png',
+              sha256: 'a'.repeat(64),
+              sizeBytes: 12,
+              mimeType: 'image/png' as const,
+              originalFileName: 'legacy.png'
+            },
+            absolutePath,
+            localMediaUrl: 'local-media://stale',
+            metadataPath: `${absolutePath}.json`
+          }
+        })
+      )
+      const service = new ManagedMediaSvcImpl({
+        getMediaDir: () => root,
+        getMediaNamespaceDir: () => namespaceRoot,
+        realpath: (async (value: string) => value) as typeof fs.realpath,
+        migrateLegacy,
+        ensureDerivative: vi.fn(async () => undefined as never)
+      })
+
+      const migrated = await service.migrateLegacyDataUrl({
+        dataUrl: 'data:image/png;base64,AQID',
+        metadata: { originalFileName: 'legacy.png' },
+        storage: { namespace: 'user-output', scope: 'chat-attachments' }
+      })
+
+      expect(migrateLegacy).toHaveBeenCalledWith(
+        expect.objectContaining({ chatMediaRoot: namespaceRoot, authorizedRoot: root })
+      )
+      expect(migrated.reference.relativePath).toBe(
+        'user-output/chat-attachments/originals/legacy.png'
+      )
+      expect(migrated.checkpoint.reclaim.reference).toEqual(migrated.reference)
     })
   })
 
@@ -390,6 +573,23 @@ describe('ManagedMediaSvcImpl', () => {
     expect(updateReferenceSnapshot).toHaveBeenCalledWith({
       complete: true,
       ids: ['a'.repeat(64)]
+    })
+  })
+
+  it('forwards durable reference counts without exposing media content', async () => {
+    const updateReferenceSnapshot = vi.fn()
+    const service = new ManagedMediaSvcImpl({ updateReferenceSnapshot })
+    const id = 'a'.repeat(64)
+    await service.updateReferenceSnapshot({
+      version: 1,
+      complete: true,
+      ids: [id],
+      referenceCounts: { [id]: 4 }
+    })
+    expect(updateReferenceSnapshot).toHaveBeenCalledWith({
+      complete: true,
+      ids: [id],
+      referenceCounts: { [id]: 4 }
     })
   })
 

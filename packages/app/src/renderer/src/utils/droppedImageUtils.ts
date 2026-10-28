@@ -15,6 +15,8 @@ import {
 import { loadImageFromSrc } from '@renderer/pages/ProjectCanvasPage/canvasAssetIntakeHelpers'
 import { resolveCanvasLocalFilePathFromSource } from '@renderer/pages/ProjectCanvasPage/canvasLocalImageSource'
 import { stripHtmlToText } from './htmlText'
+import { parseExternalImageDrop } from '@shared/externalImageDrop'
+import { getChatAttachmentMaxSizeMB } from '@renderer/features/chat/chatAttachmentUtils'
 
 export const QAPP_IMAGE_DRAG_MIME = 'application/x-qapp-image'
 export const AGENT_IMAGE_DRAG_MIME = 'application/x-ai-image'
@@ -458,6 +460,9 @@ export const getDroppedImageUrl = (dataTransfer: DragDataReader): string | null 
   const directAgentUrl = dataTransfer.getData(AGENT_IMAGE_DRAG_MIME).trim()
   if (directAgentUrl && isLikelyImageUrl(directAgentUrl)) return directAgentUrl
 
+  const localImageUrls = getDroppedLocalImageContent(dataTransfer).fileUrls
+  if (localImageUrls.length) return localImageUrls[0]
+
   const uriList = dataTransfer.getData('text/uri-list').trim()
   if (uriList && isLikelyImageUrl(uriList)) return uriList
 
@@ -500,15 +505,39 @@ const inferFileNameFromUrl = (url: string, fallback: string): string => {
   }
 }
 
-const resolveAuthorizedDroppedLocalPath = async (url: string): Promise<string | null> => {
+const resolveAuthorizedDroppedLocalPath = async (
+  url: string,
+  isCurrent = () => true
+): Promise<string | null> => {
   const localPath = decodeLocalImagePath(url)
-  if (!localPath || typeof window === 'undefined') return null
+  if (!localPath || typeof window === 'undefined' || !isCurrent()) return null
 
   try {
-    return (await window.electronFile?.resolveAuthorizedLocalMediaPath?.(localPath)) || null
+    const existingPath = await window.electronFile?.resolveAuthorizedLocalMediaPath?.(localPath)
+    if (!isCurrent()) return null
+    if (existingPath) return existingPath
+    const droppedPath = await window.electronFile?.authorizeDroppedLocalImage?.(url)
+    return isCurrent() ? droppedPath || null : null
   } catch {
     return null
   }
+}
+
+const readDroppedLocalImage = async (
+  authorizedPath: string,
+  fallbackFileName: string,
+  maxBytes?: number
+): Promise<File> => {
+  const { image, filename } = await api().svcFs.readImageFromPath({
+    fullPath: authorizedPath,
+    ...(maxBytes === undefined ? {} : { maxBytes })
+  })
+  if (maxBytes !== undefined && (!image.byteLength || image.byteLength > maxBytes))
+    throw new Error('Dropped image is empty or exceeds the attachment size limit')
+  const fileName = filename || fallbackFileName
+  return new File([image as BlobPart], fileName, {
+    type: inferMimeTypeFromFileName(fileName)
+  })
 }
 
 const authorizeNativeDroppedImageFile = async (file: File): Promise<void> => {
@@ -527,11 +556,7 @@ const loadImageFileFromUrl = async (url: string, fallbackFileName: string): Prom
     if (!authorizedPath) {
       throw new Error('Local image path is not authorized')
     }
-    const { image, filename } = await api().svcFs.readImageFromPath({ fullPath: authorizedPath })
-    const fileName = filename || fallbackFileName
-    return new File([image as BlobPart], fileName, {
-      type: inferMimeTypeFromFileName(fileName)
-    })
+    return readDroppedLocalImage(authorizedPath, fallbackFileName)
   }
 
   const response = await fetch(url)
@@ -851,6 +876,54 @@ export const getDroppedImageFile = async (
   if (!droppedImageUrl) return null
 
   return loadImageFileFromUrl(droppedImageUrl, 'dropped-image.png')
+}
+
+export const getDroppedLocalImageContent = (dataTransfer: DragDataReader) => {
+  if (parseInternalImageDragPayload(dataTransfer)) return { fileUrls: [], text: '' }
+  return parseExternalImageDrop({
+    plainText:
+      dataTransfer.getData('text/plain') ||
+      dataTransfer.getData('text') ||
+      dataTransfer.getData('Text'),
+    uriList: dataTransfer.getData('text/uri-list'),
+    html: dataTransfer.getData('text/html')
+  })
+}
+
+/** Read only the explicitly dropped file bytes; do not infer another original or path grant. */
+export const getDroppedLocalImageFiles = async (
+  content: ReturnType<typeof getDroppedLocalImageContent>,
+  options: { isCurrent?: () => boolean } = {}
+): Promise<{ files: File[]; failedUrls: string[] }> => {
+  const isCurrent = options.isCurrent ?? (() => true)
+  const files: File[] = []
+  const failedUrls: string[] = []
+  if (!isCurrent()) return { files, failedUrls }
+  // Consume short-lived drop leases together; large reads then proceed sequentially.
+  const paths = await Promise.all(
+    content.fileUrls.map((url) => resolveAuthorizedDroppedLocalPath(url, isCurrent))
+  )
+  if (!isCurrent()) return { files, failedUrls }
+  const maxBytes = getChatAttachmentMaxSizeMB('image') * 1024 * 1024
+  for (let index = 0; index < content.fileUrls.length; index++) {
+    if (!isCurrent()) return { files: [], failedUrls: [] }
+    const url = content.fileUrls[index]
+    try {
+      const authorizedPath = paths[index]
+      if (!authorizedPath) throw new Error('Local image path is not authorized')
+      const file = await readDroppedLocalImage(
+        authorizedPath,
+        inferFileNameFromUrl(url, 'dropped-image.png'),
+        maxBytes
+      )
+      if (!isCurrent()) return { files: [], failedUrls: [] }
+      files.push(file)
+    } catch {
+      if (!isCurrent()) return { files: [], failedUrls: [] }
+      failedUrls.push(url)
+    }
+  }
+  return { files, failedUrls }
 }
 
 export const getDroppedAttachmentFile = async (

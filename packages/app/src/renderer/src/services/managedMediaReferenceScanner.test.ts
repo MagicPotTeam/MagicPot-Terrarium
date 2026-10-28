@@ -49,7 +49,11 @@ describe('managed media reference scanner', () => {
         getItem: (key) => storage.get(key) ?? null
       }
     })
-    expect(result).toEqual({ ok: true, ids: [a, b, c, d] })
+    expect(result).toEqual({
+      ok: true,
+      ids: [a, b, c, d],
+      referenceCounts: { [a]: 1, [b]: 1, [c]: 1, [d]: 1 }
+    })
   })
 
   it('returns an empty fail-closed result when any store read fails', async () => {
@@ -59,7 +63,7 @@ describe('managed media reference scanner', () => {
         throw new Error('read failed')
       }
     })
-    expect(result).toEqual({ ok: false, ids: [] })
+    expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
   })
 
   it('fails closed for malformed or invalid media references', async () => {
@@ -69,7 +73,7 @@ describe('managed media reference scanner', () => {
         { messages: [{ attachments: [{ media: { kind: 'managed', sha256: 'bad' } }] }] }
       ]
     })
-    expect(result).toEqual({ ok: false, ids: [] })
+    expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
   })
 
   it('ignores unrelated localStorage keys', async () => {
@@ -88,6 +92,15 @@ describe('managed media reference scanner', () => {
         getItem: (key) => storage.get(key) ?? null
       }
     })
-    expect(result).toEqual({ ok: true, ids: [id] })
+    expect(result).toEqual({ ok: true, ids: [id], referenceCounts: { [id]: 1 } })
+  })
+
+  it('counts repeated references instead of only recording set membership', async () => {
+    const id = 'f'.repeat(64)
+    const result = await scanManagedMediaReferenceIds({
+      ...sources(),
+      readChatSessions: async () => [{ attachments: [{ media: ref(id) }, { media: ref(id) }] }]
+    })
+    expect(result).toEqual({ ok: true, ids: [id], referenceCounts: { [id]: 2 } })
   })
 })

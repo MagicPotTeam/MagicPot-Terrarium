@@ -15,6 +15,7 @@ import type {
   UpdateManagedMediaReferenceSnapshotResp,
   ManagedMediaDerivativeDescriptor,
   ManagedMediaSvc,
+  ManagedMediaStorage,
   MaterializeManagedMediaForRequestReq,
   MaterializeManagedMediaForRequestResp
 } from '@shared/api/svcManagedMedia'
@@ -26,7 +27,8 @@ import {
 } from '@shared/api/svcManagedMedia'
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
 import { normalizeMediaReference } from '@shared/mediaReference'
-import { getChatMediaDir } from '../llmProxy/chatMediaDir'
+import { createBinaryChunkTransport } from '@shared/binaryChunkProtocol'
+import { getChatMediaDir, getChatMediaNamespaceDir } from '../llmProxy/chatMediaDir'
 import { migrateLegacyBase64MediaOnDemand } from '../llmProxy/legacyBase64MediaMigration'
 import {
   ensureManagedMediaDerivative,
@@ -48,6 +50,7 @@ export type ManagedMediaSvcImplDependencies = {
   importBytes?: typeof importManagedMedia
   ensureDerivative?: typeof ensureManagedMediaDerivative
   getMediaDir?: typeof getChatMediaDir
+  getMediaNamespaceDir?: typeof getChatMediaNamespaceDir
   realpath?: typeof fs.realpath
   readMediaBytes?: typeof readManagedMediaBytes
   resolveReference?: typeof resolveManagedMediaReference
@@ -55,6 +58,7 @@ export type ManagedMediaSvcImplDependencies = {
   updateReferenceSnapshot?: (snapshot: {
     complete: boolean
     ids: readonly string[]
+    referenceCounts?: Readonly<Record<string, number>>
   }) => void | Promise<void>
 }
 
@@ -80,9 +84,9 @@ function importResponse(
     .split(path.sep)
     .join('/')
   const importedReferencePath = reference.relativePath
-  const codexScopedPhysicalPath =
-    /^codex-images(?:\/|-[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?\/)/u
-  const expectedReferencePath = codexScopedPhysicalPath.test(relativePath)
+  const scopedPhysicalPath =
+    /^(?:codex-images(?:\/|-[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?\/)|(?:task|model|user-output)\/[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?\/)/u
+  const expectedReferencePath = scopedPhysicalPath.test(relativePath)
     ? relativePath
     : importedReferencePath
   if (
@@ -90,7 +94,7 @@ function importResponse(
     path.isAbsolute(relativePath) ||
     relativePath.startsWith('../') ||
     relativePath.includes('\\') ||
-    (codexScopedPhysicalPath.test(relativePath) && importedReferencePath !== relativePath) ||
+    (scopedPhysicalPath.test(relativePath) && importedReferencePath !== relativePath) ||
     !isPathInsideRoot(
       canonicalAuthorizedRoot,
       path.join(canonicalAuthorizedRoot, ...expectedReferencePath.split('/'))
@@ -106,6 +110,52 @@ function importResponse(
     reference,
     localMediaUrl: `local-media://${fileUrl.slice('file://'.length)}`
   })
+}
+
+type ManagedMediaImportRoots = {
+  /** Physical store used for this import; always contained by authorizedRoot. */
+  importRoot: string
+  /** Base `.chat_media` root used to authorize and later resolve references. */
+  authorizedRoot: string
+}
+
+function sameFilesystemPath(left: string, right: string): boolean {
+  const a = path.resolve(left)
+  const b = path.resolve(right)
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+}
+
+async function resolveImportRoots(
+  storage: ManagedMediaStorage | undefined,
+  dependencies: ManagedMediaSvcImplDependencies
+): Promise<ManagedMediaImportRoots> {
+  const getMediaDir = dependencies.getMediaDir ?? getChatMediaDir
+  const realpath = dependencies.realpath ?? fs.realpath
+  const baseRoot = getMediaDir()
+  const authorizedRoot = await realpath(baseRoot)
+  // Do not turn a symlinked `.chat_media` directory into the authorization
+  // root. The store's canonical-root checks rely on this boundary remaining
+  // the app-owned path selected by Electron.
+  if (!sameFilesystemPath(baseRoot, authorizedRoot)) {
+    throw new ServiceError('Managed media root is not a canonical directory', {
+      code: 'MANAGED_MEDIA_IMPORT_INVALID'
+    })
+  }
+  if (!storage) return { importRoot: baseRoot, authorizedRoot }
+
+  // The namespace helper rejects unknown namespaces and non-canonical scopes;
+  // the containment check below also protects injected test/host adapters.
+  const namespaceDir = (dependencies.getMediaNamespaceDir ?? getChatMediaNamespaceDir)(
+    storage.namespace,
+    storage.scope
+  )
+  const canonicalNamespaceDir = await realpath(namespaceDir)
+  if (!isPathInsideRoot(authorizedRoot, canonicalNamespaceDir)) {
+    throw new ServiceError('Managed media storage namespace is not authorized', {
+      code: 'MANAGED_MEDIA_IMPORT_INVALID'
+    })
+  }
+  return { importRoot: canonicalNamespaceDir, authorizedRoot }
 }
 
 function readyDescriptor(
@@ -150,14 +200,20 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
   async updateReferenceSnapshot(
     req: UpdateManagedMediaReferenceSnapshotReq
   ): Promise<UpdateManagedMediaReferenceSnapshotResp> {
-    await this.dependencies.updateReferenceSnapshot?.({ complete: req.complete, ids: req.ids })
+    await this.dependencies.updateReferenceSnapshot?.({
+      complete: req.complete,
+      ids: req.ids,
+      ...(req.referenceCounts ? { referenceCounts: req.referenceCounts } : {})
+    })
     return { version: 1, accepted: true }
   }
 
   async importFile(req: ImportManagedMediaFileReq): Promise<ImportManagedMediaResp> {
     try {
-      const mediaDir = this.dependencies.getMediaDir?.() ?? getChatMediaDir()
-      const authorizedRoot = await (this.dependencies.realpath ?? fs.realpath)(mediaDir)
+      const { importRoot, authorizedRoot } = await resolveImportRoots(
+        req.storage,
+        this.dependencies
+      )
       const isUri = /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(req.sourcePath)
       if (isUri && !req.sourcePath.startsWith('file:')) {
         throw new ServiceError('Managed media source must be a file URI or absolute path', {
@@ -172,7 +228,7 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       }
       const imported = await (this.dependencies.importFile ?? importManagedMediaFile)(
         {
-          chatMediaRoot: mediaDir,
+          chatMediaRoot: importRoot,
           sourcePath,
           mimeType: req.mimeType,
           originalFileName: req.originalFileName,
@@ -202,11 +258,13 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
     req: MigrateLegacyManagedMediaReq
   ): Promise<MigrateLegacyManagedMediaResp> {
     try {
-      const mediaDir = this.dependencies.getMediaDir?.() ?? getChatMediaDir()
-      const authorizedRoot = await (this.dependencies.realpath ?? fs.realpath)(mediaDir)
+      const { importRoot, authorizedRoot } = await resolveImportRoots(
+        req.storage,
+        this.dependencies
+      )
       const result = await (this.dependencies.migrateLegacy ?? migrateLegacyBase64MediaOnDemand)({
         value: req.dataUrl,
-        chatMediaRoot: mediaDir,
+        chatMediaRoot: importRoot,
         authorizedRoot,
         rollbackToken: null,
         provenance: {
@@ -221,6 +279,7 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
         checkpoint: { version: 1, reclaim: { reference: imported.reference } }
       })
     } catch (error) {
+      if (error instanceof ServiceError) throw error
       if (error instanceof ManagedMediaImportError) {
         throw new ServiceError(error.message, { code: error.code })
       }
@@ -283,10 +342,12 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       if (!match) throw new Error('Invalid data URL')
       const bytes = Buffer.from(match[2], 'base64')
       if (!bytes.length || bytes.toString('base64') !== match[2]) throw new Error('Invalid base64')
-      const mediaDir = this.dependencies.getMediaDir?.() ?? getChatMediaDir()
-      const authorizedRoot = await (this.dependencies.realpath ?? fs.realpath)(mediaDir)
+      const { importRoot, authorizedRoot } = await resolveImportRoots(
+        req.storage,
+        this.dependencies
+      )
       const imported = await (this.dependencies.importBytes ?? importManagedMedia)(
-        mediaDir,
+        importRoot,
         {
           bytes,
           mimeType: match[1],
@@ -303,6 +364,7 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       }).catch(() => undefined)
       return response
     } catch (error) {
+      if (error instanceof ServiceError) throw error
       if (error instanceof ManagedMediaImportError) {
         throw new ServiceError(error.message, { code: error.code })
       }
@@ -364,6 +426,12 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
   }
 
   async materializeForRequest(
+    req: Extract<MaterializeManagedMediaForRequestReq, { transport: 'request-data-url' }>
+  ): Promise<Extract<MaterializeManagedMediaForRequestResp, { transport: 'request-data-url' }>>
+  async materializeForRequest(
+    req: Extract<MaterializeManagedMediaForRequestReq, { transport: 'chunked-binary-v1' }>
+  ): Promise<Extract<MaterializeManagedMediaForRequestResp, { transport: 'chunked-binary-v1' }>>
+  async materializeForRequest(
     req: MaterializeManagedMediaForRequestReq
   ): Promise<MaterializeManagedMediaForRequestResp> {
     const getMediaDir = this.dependencies.getMediaDir ?? getChatMediaDir
@@ -378,6 +446,16 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       const bytes = await readMediaBytes(resolved.storeRoot ?? authorizedRoot, selected, {
         authorizedRoot
       })
+      if (req.transport === 'chunked-binary-v1') {
+        const transport = await createBinaryChunkTransport(bytes, {
+          mimeType: selected.mimeType
+        })
+        return validateMaterializeManagedMediaForRequestResp({
+          transport: 'chunked-binary-v1',
+          reference: transport.reference,
+          chunks: transport.chunks
+        })
+      }
       return validateMaterializeManagedMediaForRequestResp({
         transport: 'request-data-url',
         dataUrl: `data:${selected.mimeType};base64,${bytes.toString('base64')}`,

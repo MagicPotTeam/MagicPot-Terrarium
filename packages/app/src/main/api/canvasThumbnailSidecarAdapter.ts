@@ -49,8 +49,7 @@ export type CanvasThumbnailSidecarFallback = {
 }
 
 export type CanvasThumbnailSidecarResult<TResponse> =
-  | CanvasThumbnailSidecarSuccess<TResponse>
-  | CanvasThumbnailSidecarFallback
+  CanvasThumbnailSidecarSuccess<TResponse> | CanvasThumbnailSidecarFallback
 
 export type CanvasThumbnailSidecarProcess = {
   env: NodeJS.ProcessEnv
@@ -105,6 +104,8 @@ export type CanvasThumbnailSidecarResolveOptions = {
 }
 
 export type CanvasThumbnailSidecarRunOptions = CanvasThumbnailSidecarResolveOptions & {
+  /** Required consumers use the installed worker independently of the optional canvas feature. */
+  required?: boolean
   spawn?: CanvasThumbnailSidecarSpawn
   args?: string[]
   timeoutMs?: number
@@ -483,7 +484,7 @@ export async function runCanvasThumbnailSidecarJson<TResponse = unknown>(
   options: CanvasThumbnailSidecarRunOptions = {}
 ): Promise<CanvasThumbnailSidecarResult<TResponse>> {
   const sidecarProcess = options.process ?? getDefaultProcess()
-  if (!isCanvasThumbnailSidecarEnabled(sidecarProcess.env)) {
+  if (!options.required && !isCanvasThumbnailSidecarEnabled(sidecarProcess.env)) {
     return createFallback('feature-disabled', 'Canvas thumbnail sidecar feature flag is disabled.')
   }
 

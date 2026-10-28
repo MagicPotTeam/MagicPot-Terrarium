@@ -176,6 +176,66 @@ describe('canvasThumbnailSidecarAdapter', () => {
     })
   })
 
+  it.each([undefined, '0'])(
+    'runs a required managed-media worker without enabling optional canvas work (flag: %s)',
+    async (flag) => {
+      const { calls, spawn } = createSpawn()
+      const env = flag === undefined ? {} : { [CANVAS_THUMBNAIL_SIDECAR_FEATURE_FLAG_ENV]: flag }
+      const sidecarProcess = createProcess(env)
+      const resultPromise = generateCanvasThumbnailsViaSidecar(
+        { cacheRoot: 'C:/owned-cache', items: [], thumbnail: { levels: [256], format: 'webp' } },
+        {
+          required: true,
+          process: sidecarProcess,
+          access: vi.fn(async () => {}),
+          spawn,
+          timeoutMs: 500
+        }
+      )
+
+      await vi.waitUntil(() => calls.length === 1)
+      const call = calls[0]
+      expect(call.options).toMatchObject({
+        shell: false,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+      call.child.stdout.emit(
+        'data',
+        JSON.stringify({ ok: true, cacheRoot: 'C:/owned-cache', results: [] })
+      )
+      call.child.emit('close', 0, null)
+      await expect(resultPromise).resolves.toMatchObject({ ok: true })
+
+      expect(isCanvasThumbnailSidecarEnabled(sidecarProcess.env)).toBe(false)
+      await expect(
+        generateCanvasThumbnailsViaSidecar(
+          { cacheRoot: 'C:/owned-cache', items: [] },
+          { process: sidecarProcess, spawn }
+        )
+      ).resolves.toMatchObject({ ok: false, reason: 'feature-disabled' })
+      expect(calls).toHaveLength(1)
+    }
+  )
+
+  it('retains binary availability checks for required calls', async () => {
+    const spawn = vi.fn()
+    await expect(
+      runCanvasThumbnailSidecarJson(
+        {},
+        {
+          required: true,
+          process: createProcess(),
+          access: vi.fn(async () => {
+            throw new Error('missing')
+          }),
+          spawn
+        }
+      )
+    ).resolves.toMatchObject({ ok: false, reason: 'binary-not-found' })
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
   it('spawns with shell disabled, writes JSON over stdin, and parses stdout JSON', async () => {
     const { calls, spawn } = createSpawn()
     const sidecarProcess = createProcess({ [CANVAS_THUMBNAIL_SIDECAR_FEATURE_FLAG_ENV]: '1' })

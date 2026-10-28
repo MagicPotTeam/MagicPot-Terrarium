@@ -50,6 +50,11 @@ export const getChatAttachmentTypeForFile = (
 ): ChatAttachment['type'] => {
   if (file.type.startsWith('image/')) return 'image'
   if (file.type.startsWith('video/')) return 'video'
+  if (
+    (!file.type || file.type === 'application/octet-stream') &&
+    /\.(?:png|jpe?g|webp|gif)$/i.test(file.name)
+  )
+    return 'image'
 
   const extensionIndex = file.name.lastIndexOf('.')
   const extension = extensionIndex >= 0 ? file.name.toLowerCase().slice(extensionIndex) : ''

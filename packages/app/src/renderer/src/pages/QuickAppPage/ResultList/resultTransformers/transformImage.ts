@@ -73,7 +73,8 @@ const transformImageItem = async (
         importPromise = comfyService.importOutputImage({
           filename: item.filename,
           subfolder: item.subfolder,
-          type: 'output'
+          type: 'output',
+          taskId: promptId
         })
       } catch (error) {
         throw new UnexpectedManagedImportError(error)

@@ -82,6 +82,21 @@ describe('CancellablePriorityScheduler', () => {
     ).rejects.toMatchObject({ name: 'AbortError' })
   })
 
+  it('does not start work cancelled between queue admission and its task microtask', async () => {
+    const scheduler = new CancellablePriorityScheduler(1)
+    const controller = new AbortController()
+    const task = vi.fn(async () => 'unwanted work')
+    const pending = scheduler.schedule(task, { priority: 0, signal: controller.signal })
+    const failure = pending.catch((error: unknown) => error)
+    queueMicrotask(() => controller.abort())
+
+    expect(await failure).toMatchObject({ name: 'AbortError' })
+    expect(task).not.toHaveBeenCalled()
+    await expect(scheduler.schedule(async () => 'next request', { priority: 0 })).resolves.toBe(
+      'next request'
+    )
+  })
+
   it('rejects cancellation before start and while the caller awaits', async () => {
     const scheduler = new CancellablePriorityScheduler(1)
     const gate = deferred<void>()
@@ -110,6 +125,37 @@ describe('CancellablePriorityScheduler', () => {
 })
 
 describe('chat managed-image derivative scheduling', () => {
+  it('releases an aborted subscriber listener without waiting for shared backend completion', async () => {
+    const gate = deferred<typeof result>()
+    const ensureDerivative = vi.fn(() => gate.promise)
+    const controller = new AbortController()
+    const add = vi.spyOn(controller.signal, 'addEventListener')
+    const remove = vi.spyOn(controller.signal, 'removeEventListener')
+    const caller = ensureCachedChatImageDerivative(
+      { ensureDerivative } as never,
+      reference('8'),
+      512,
+      { signal: controller.signal }
+    )
+    const observed = caller.catch((error: unknown) => error)
+    const sibling = ensureCachedChatImageDerivative(
+      { ensureDerivative } as never,
+      reference('8'),
+      512
+    )
+    try {
+      await flushScheduler()
+      controller.abort()
+      expect(await observed).toMatchObject({ name: 'AbortError' })
+      const listener = add.mock.calls.find(([event]) => event === 'abort')![1]
+      expect(remove).toHaveBeenCalledWith('abort', listener)
+    } finally {
+      gate.resolve(result)
+      await sibling
+    }
+    expect(ensureDerivative).toHaveBeenCalledOnce()
+  })
+
   it('deduplicates a shared backend request and cancellation only rejects that caller', async () => {
     const gate = deferred<typeof result>()
     const ensureDerivative = vi.fn(() => gate.promise)

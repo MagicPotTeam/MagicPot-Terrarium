@@ -349,6 +349,7 @@ function sameFileState(
   left: Awaited<ReturnType<FileHandle['stat']>>,
   right: Awaited<ReturnType<FileHandle['stat']>>
 ): boolean {
+  if (left === undefined || right === undefined) return false
   return (
     left.isFile() &&
     right.isFile() &&
@@ -708,9 +709,48 @@ type ManagedMediaReferencePath = {
 const CODEX_MEDIA_SCOPE_PATTERN = /^[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?$/u
 const CODEX_SCOPED_REFERENCE_PATTERN = /^codex-images\/([^/]+)\/(originals\/.+)$/u
 const CODEX_LEGACY_DASH_REFERENCE_PATTERN = /^codex-images-(.+)\/(originals\/.+)$/u
+const COMFY_TASK_REFERENCE_PATTERN = /^comfy-outputs\/tasks\/([^/]+)\/(originals\/.+)$/u
+const LIFECYCLE_NAMESPACE_PATTERN = /^(task|model|user-output)\/([^/]+)\/(originals\/.+)$/u
+
+/**
+ * A namespace store is encoded in a reference only when it is the direct
+ * `namespace/scope` child of the authorized chat-media root.  Keeping this
+ * recognition strict prevents arbitrary nested directories from becoming a
+ * second store-root resolution mechanism.
+ */
+function lifecycleNamespaceStorePrefix(
+  canonicalRoot: string,
+  authorizedRoot: string
+): string | undefined {
+  const relative = path.relative(authorizedRoot, canonicalRoot).split(path.sep).join('/')
+  const segments = relative.split('/').filter(Boolean)
+  if (
+    segments.length !== 2 ||
+    !['task', 'model', 'user-output'].includes(segments[0]) ||
+    !CODEX_MEDIA_SCOPE_PATTERN.test(segments[1])
+  )
+    return undefined
+  return `${segments[0]}/${segments[1]}`
+}
 
 function splitManagedMediaReferencePath(relativePath: string): ManagedMediaReferencePath {
+  const lifecycleMatch = LIFECYCLE_NAMESPACE_PATTERN.exec(relativePath)
+  if (lifecycleMatch) {
+    const [, namespace, scope, innerRelativePath] = lifecycleMatch
+    if (
+      !CODEX_MEDIA_SCOPE_PATTERN.test(scope) ||
+      !isNormalizedMediaRelativePath(innerRelativePath)
+    ) {
+      throw new Error('Managed media reference scope is malformed')
+    }
+    return {
+      storePrefix: `${namespace}/${scope}`,
+      relativePath: innerRelativePath
+    }
+  }
+
   const match =
+    COMFY_TASK_REFERENCE_PATTERN.exec(relativePath) ??
     CODEX_SCOPED_REFERENCE_PATTERN.exec(relativePath) ??
     CODEX_LEGACY_DASH_REFERENCE_PATTERN.exec(relativePath)
   if (!match) {
@@ -727,7 +767,9 @@ function splitManagedMediaReferencePath(relativePath: string): ManagedMediaRefer
   }
 
   return {
-    storePrefix: `codex-images-${scope}`,
+    storePrefix: match[0].startsWith('comfy-outputs/tasks/')
+      ? `comfy-outputs/tasks/${scope}`
+      : `codex-images-${scope}`,
     relativePath: innerRelativePath
   }
 }
@@ -849,12 +891,15 @@ async function publishImport(
 ): Promise<ImportedManagedMedia> {
   const fileSystem = dependencies.fs ?? fs
   const randomId = dependencies.randomId ?? randomUUID
+  const authorizedRoot = await canonicalAuthorizedRoot(dependencies.authorizedRoot, fileSystem)
   const mimeType = normalizeMime(input.mimeType)
   const originalFileName = canonicalOriginalFileName(input.originalFileName)
   serializeProvenance(input.provenance)
   await validateImageFile(staged.stagedPath, staged.size, mimeType, fileSystem)
   const extension = extensions[mimeType]
   const relativePath = `originals/${staged.sha256.slice(0, 2)}/${staged.sha256}.${extension}`
+  const namespacePrefix = lifecycleNamespaceStorePrefix(canonicalRoot, authorizedRoot)
+  const referencePath = namespacePrefix ? `${namespacePrefix}/${relativePath}` : relativePath
   const originalsDirectory = path.join(canonicalRoot, 'originals', staged.sha256.slice(0, 2))
   const metadataDirectory = path.join(canonicalRoot, 'metadata')
   await prepareContainedDirectory(canonicalRoot, originalsDirectory, fileSystem)
@@ -924,7 +969,7 @@ async function publishImport(
     const reference = normalizeMediaReference({
       version: MEDIA_REFERENCE_VERSION,
       kind: 'managed',
-      relativePath,
+      relativePath: referencePath,
       sha256: staged.sha256,
       sizeBytes: staged.size,
       mimeType,
