@@ -36,6 +36,7 @@ type LegacyConfigWithLLM = {
     bind_host?: unknown
     access_token?: unknown
     access_tokens?: unknown
+    cors_allowed_origins?: unknown
   } | null
   remote_llm_server_config?: {
     server_origin?: unknown
@@ -65,6 +66,37 @@ const toNumber = (value: unknown, fallback: number): number => {
 
 const toStringValue = (value: unknown, fallback = ''): string => {
   return typeof value === 'string' ? value : fallback
+}
+
+/** Keep only exact HTTP(S) origins; CORS must never accept a wildcard pattern. */
+const toCorsAllowedOrigins = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return []
+  const origins = new Set<string>()
+  for (const candidate of value) {
+    if (typeof candidate !== 'string') continue
+    const raw = candidate.trim()
+    if (raw === 'null') {
+      origins.add(raw)
+      continue
+    }
+    try {
+      const parsed = new URL(raw)
+      if (
+        (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+        parsed.username ||
+        parsed.password ||
+        parsed.pathname !== '/' ||
+        parsed.search ||
+        parsed.hash
+      ) {
+        continue
+      }
+      origins.add(parsed.origin)
+    } catch {
+      // Ignore malformed entries instead of broadening the policy.
+    }
+  }
+  return [...origins].sort()
 }
 
 const canonicalProxyLabelPattern = /^(?:用户|User)\s*\d+$/u
@@ -219,7 +251,10 @@ export const migratorLegacyLLM: Migrator<DeepPartial<Config>> = {
           DEFAULT_CONFIG.local_llm_server_config.bind_host
         ),
         access_token: migratedLegacyAccessToken,
-        access_tokens: localAccessTokens
+        access_tokens: localAccessTokens,
+        cors_allowed_origins: toCorsAllowedOrigins(
+          nextConfig.local_llm_server_config?.cors_allowed_origins
+        )
       },
       remote_llm_server_config: {
         server_origin: toStringValue(

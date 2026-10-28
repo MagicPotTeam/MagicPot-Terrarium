@@ -10,6 +10,7 @@ import type {
 export type ElectronFileBridge = {
   getPathForFile(file: File): string
   authorizeLocalMediaFile(file: File): Promise<string>
+  authorizeDroppedLocalImage(canonicalUrl: string): Promise<string>
   resolveAuthorizedLocalMediaPath(filePath: string): Promise<string>
 }
 

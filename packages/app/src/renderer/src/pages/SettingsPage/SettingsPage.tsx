@@ -11,6 +11,7 @@ import {
 } from '@mui/icons-material'
 import { useTheme } from '@mui/material/styles'
 import { useLocation } from 'react-router-dom'
+import type { resources } from '../../i18n'
 import { useTranslation } from 'react-i18next'
 import { Config, DEFAULT_CONFIG } from '@shared/config/config'
 import { PACKAGE_VERSION } from '@shared/config/viteEnv'
@@ -51,6 +52,17 @@ const getInitialSettingsTab = (location: ReturnType<typeof useLocation>): Settin
   return 'general'
 }
 
+type SettingsTranslationKey =
+  | `settings.tabs.${Extract<
+      keyof (typeof resources)['zh-CN']['translation']['settings']['tabs'],
+      string
+    >}`
+  | `settings.tab_descs.${Extract<
+      keyof (typeof resources)['zh-CN']['translation']['settings']['tab_descs'],
+      string
+    >}`
+type LocalizedText = (key: SettingsTranslationKey, fallback: string) => string
+
 interface SettingsPageProps {
   onClose?: () => void
 }
@@ -71,8 +83,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
     [updateConfig]
   )
 
-  const localizedText = useCallback(
-    (key: string, fallback: string) => {
+  const localizedText = useCallback<LocalizedText>(
+    (key, fallback) => {
       const value = t(key)
       return value === key ? fallback : value
     },
@@ -80,7 +92,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
   )
 
   const tabText = useCallback(
-    (key: string, chineseFallback: string, englishFallback: string) =>
+    (key: SettingsTranslationKey, chineseFallback: string, englishFallback: string) =>
       isChineseUi ? chineseFallback : localizedText(key, englishFallback),
     [isChineseUi, localizedText]
   )

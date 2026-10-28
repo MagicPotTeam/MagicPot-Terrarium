@@ -76,10 +76,47 @@ describe('managed media reference bootstrap', () => {
     expect(mocks.updateReferenceSnapshot).toHaveBeenCalledWith({
       version: 1,
       complete: true,
-      ids: ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)]
+      ids: ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)],
+      referenceCounts: {
+        ['a'.repeat(64)]: 1,
+        ['b'.repeat(64)]: 1,
+        ['c'.repeat(64)]: 1
+      }
     })
 
     stop()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('loads each project canvas storage key from the canonical project registry', async () => {
+    localStorage.setItem(
+      'magicpot.projects.v1',
+      JSON.stringify([
+        {
+          id: 'project-a',
+          name: 'Project A',
+          createdAt: 1,
+          updatedAt: 2,
+          canvasStorageKey: 'canvas-storage-a'
+        }
+      ])
+    )
+    mocks.loadAllSessions.mockResolvedValue([])
+    mocks.readSessionDraftBackup.mockReturnValue(undefined)
+    mocks.loadCanvasItems.mockResolvedValue({ items: [] })
+    mocks.updateReferenceSnapshot.mockResolvedValue(undefined)
+
+    const stop = startManagedMediaReferenceScanner()
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(mocks.loadCanvasItems).toHaveBeenCalledWith('canvas-storage-a')
+    expect(mocks.updateReferenceSnapshot).toHaveBeenCalledWith({
+      version: 1,
+      complete: true,
+      ids: [],
+      referenceCounts: {}
+    })
+
+    stop()
   })
 })

@@ -9,6 +9,9 @@ export type ProjectTraceCanvasItemMetric = {
   height: number
   rotation: number
   zIndex: number
+  // Only retained in the renderer's transient comparison snapshot. Never include
+  // committed text (or a fingerprint of it) in the operation event/signature.
+  committedText?: string
 }
 
 export type ProjectTraceCanvasSnapshot = {
@@ -45,7 +48,10 @@ export function buildProjectTraceCanvasItemMetrics(
           width: roundProjectTraceCanvasNumber(measured.width),
           height: roundProjectTraceCanvasNumber(measured.height),
           rotation: roundProjectTraceCanvasNumber(measured.rotation),
-          zIndex: measured.zIndex || 0
+          zIndex: measured.zIndex || 0,
+          ...(item.type === 'text' || item.type === 'annotation'
+            ? { committedText: item.text || '' }
+            : {})
         }
       ]
     })
@@ -78,7 +84,12 @@ export function summarizeProjectTraceCanvasChange(
   selectedCount: number,
   selectionChanged: boolean,
   isChineseUi: boolean
-): { summary: string; affectedItemCount: number; movementDistancePx?: number } {
+): {
+  summary: string
+  affectedItemCount: number
+  textEditedItemCount: number
+  movementDistancePx?: number
+} {
   const previousIds = new Set(Object.keys(previous))
   const nextIds = new Set(Object.keys(next))
   const created = Object.values(next).filter((item) => !previousIds.has(item.id))
@@ -104,6 +115,9 @@ export function summarizeProjectTraceCanvasChange(
   )
   const rotated = changedPairs.filter(({ before, after }) => before.rotation !== after.rotation)
   const reordered = changedPairs.filter(({ before, after }) => before.zIndex !== after.zIndex)
+  const textEdited = changedPairs.filter(
+    ({ before, after }) => before.committedText !== after.committedText
+  )
   void isChineseUi
   const parts = [
     created.length ? `Added ${created.length} canvas item(s)` : '',
@@ -114,11 +128,13 @@ export function summarizeProjectTraceCanvasChange(
     resized.length ? `Resized ${resized.length} canvas item(s)` : '',
     rotated.length ? `Rotated ${rotated.length} canvas item(s)` : '',
     reordered.length ? `Changed z-order for ${reordered.length} canvas item(s)` : '',
+    textEdited.length ? `Edited text on ${textEdited.length} canvas item(s)` : '',
     selectionChanged ? `Selection changed to ${selectedCount} item(s)` : ''
   ].filter(Boolean)
 
   return {
     summary: parts.join('; ') || 'Updated canvas state',
+    textEditedItemCount: textEdited.length,
     affectedItemCount:
       created.length +
       removed.length +
@@ -126,6 +142,7 @@ export function summarizeProjectTraceCanvasChange(
       resized.length +
       rotated.length +
       reordered.length +
+      textEdited.length +
       (selectionChanged ? selectedCount : 0),
     ...(moved.length > 0
       ? { movementDistancePx: roundProjectTraceCanvasNumber(movementDistancePx) }

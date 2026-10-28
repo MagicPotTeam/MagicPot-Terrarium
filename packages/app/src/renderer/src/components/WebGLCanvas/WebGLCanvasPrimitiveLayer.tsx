@@ -2,6 +2,7 @@ import { Container, Graphics } from 'pixi.js'
 import React, { useEffect, useMemo, useRef } from 'react'
 import { useRequiredWebGLCanvasRuntime } from './WebGLCanvasContext'
 import type { WebGLCanvasPrimitive } from './webglCanvasTypes'
+import { destroyWebGLCanvasPrimitiveChildren } from './webglCanvasPrimitiveLifecycle'
 
 type WebGLCanvasPrimitiveLayerProps = {
   primitives: WebGLCanvasPrimitive[]
@@ -104,7 +105,7 @@ export default function WebGLCanvasPrimitiveLayer({
       return
     }
 
-    container.removeChildren()
+    destroyWebGLCanvasPrimitiveChildren(container)
 
     sortedPrimitives.forEach((primitive) => {
       const graphics = new Graphics()
@@ -118,6 +119,9 @@ export default function WebGLCanvasPrimitiveLayer({
 
   useEffect(
     () => () => {
+      if (containerRef.current) {
+        destroyWebGLCanvasPrimitiveChildren(containerRef.current)
+      }
       containerRef.current?.removeFromParent()
       containerRef.current = null
     },

@@ -7,8 +7,10 @@ import { useLocation, useNavigate } from 'react-router-dom'
 const CUSTOM_APP_PATH = '/qappdesign'
 const CUSTOM_SKILL_PATH = '/custom-skill-manager'
 const TARGET_MANAGER_PATH = '/target-manager'
+const PLUGINS_PATH = '/workshop/plugins'
 
 const resolveWorkshopTabValue = (pathname: string): string => {
+  if (pathname === PLUGINS_PATH) return PLUGINS_PATH
   if (pathname === CUSTOM_SKILL_PATH) return CUSTOM_SKILL_PATH
   if (pathname === TARGET_MANAGER_PATH) return TARGET_MANAGER_PATH
   return CUSTOM_APP_PATH
@@ -84,6 +86,10 @@ const CustomWorkshopTabs: React.FC<CustomWorkshopTabsProps> = ({
         <Tab
           value={TARGET_MANAGER_PATH}
           label={t('custom_workshop.target', { defaultValue: '自定义目标' })}
+        />
+        <Tab
+          value={PLUGINS_PATH}
+          label={t('figplugin.center.title', { defaultValue: 'Plugins' })}
         />
       </Tabs>
 

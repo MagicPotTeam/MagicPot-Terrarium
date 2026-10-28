@@ -1,0 +1,701 @@
+import { z } from 'zod'
+import { hostAppearanceSchema } from './hostAppearance'
+import { hostSpatialSchema, hostCanvasSchema } from './hostSpatial'
+import { hostTypographySchema, typographyFontKey } from './hostTypography'
+import { canonicalFigPluginJson } from './manifest'
+import {
+  figPluginPlanningAssetMetadataSchema,
+  type FigPluginPlanningAssetMetadata
+} from './hostPlanningAssets'
+import {
+  hostImageBoundsSchema,
+  hostImageEvidenceSchema,
+  recoveryImageTarget,
+  validateRecoveryImagePlanBinding,
+  type FigPluginRecoveryExecutionImages
+} from './hostImageRecovery'
+export {
+  hostImageBoundsSchema,
+  hostImageEvidenceSchema,
+  type HostImageEvidence
+} from './hostImageRecovery'
+
+/** Shared data contract for Bridge planning and future native-host validation.
+ * A valid plan is data, never consent or proof that a host performed a change. */
+export const HOST_PLAN_VERSION = 2 as const
+export const HOST_CONTEXT_MAX_BYTES = 40 * 1024
+export const HOST_PLAN_MAX_BYTES = 16 * 1024
+export const HOST_COMMANDS = [
+  'node.rename',
+  'node.opacity',
+  'node.visibility',
+  'text.content',
+  'layout.flow',
+  'image.fill',
+  'image.pixels'
+] as const
+export const HOST_EXECUTION_ROLLBACKS = ['verified-in-place', 'native-history', 'none'] as const
+export const HOST_VISUAL_AUDITS = ['hash-only', 'unavailable'] as const
+const id = z.string().min(1).max(128)
+const name = z.string().min(1).max(4096)
+const finite = z.number().finite().min(-10_000_000).max(10_000_000)
+const imageHash = z
+  .string()
+  .length(64)
+  .regex(/^[a-f0-9]{64}$/)
+const imageAssetId = z
+  .string()
+  .length(32)
+  .regex(/^[a-f0-9]{32}$/)
+const imageDimension = z.number().int().min(1).max(4096)
+export const hostImageFillSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('available'), fingerprint: imageHash }).strict(),
+  z.object({ status: z.literal('unavailable') }).strict()
+])
+export const hostImagePixelsSchema = z
+  .discriminatedUnion('status', [
+    z
+      .object({
+        status: z.literal('available'),
+        historyStateId: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+        bounds: hostImageBoundsSchema,
+        width: imageDimension,
+        height: imageDimension
+      })
+      .strict(),
+    z.object({ status: z.literal('unavailable') }).strict()
+  ])
+  .refine(
+    (image) =>
+      image.status === 'unavailable' ||
+      (image.width === image.bounds.right - image.bounds.left &&
+        image.height === image.bounds.bottom - image.bounds.top),
+    { message: 'Image dimensions do not match bounds' }
+  )
+const planningResourcesSchema = z
+  .array(figPluginPlanningAssetMetadataSchema)
+  .max(4)
+  .refine((assets) => new Set(assets.map((asset) => asset.assetId)).size === assets.length, {
+    message: 'Duplicate image resource'
+  })
+const hasUnsafeControlCharacter = (value: string): boolean => {
+  for (const character of value) {
+    const code = character.codePointAt(0)!
+    if (
+      code <= 0x1f ||
+      (code >= 0x7f && code <= 0x9f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069)
+    )
+      return true
+  }
+  return false
+}
+export const hostLayoutSchema = z
+  .object({
+    direction: z.enum(['NONE', 'HORIZONTAL', 'VERTICAL']),
+    gap: z.number().finite().min(0).max(10000),
+    padding: z.tuple([
+      z.number().min(0).max(10000),
+      z.number().min(0).max(10000),
+      z.number().min(0).max(10000),
+      z.number().min(0).max(10000)
+    ])
+  })
+  .strict()
+export const hostExecutionCapabilitySchema = z
+  .object({
+    mode: z.literal('native-write'),
+    adapterVersion: z.string().min(1).max(64),
+    supports: z
+      .array(z.enum(HOST_COMMANDS))
+      .min(1)
+      .max(HOST_COMMANDS.length)
+      .superRefine((commands, ctx) => {
+        if (new Set(commands).size !== commands.length)
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate host capabilities' })
+      }),
+    rollback: z.enum(HOST_EXECUTION_ROLLBACKS),
+    visualAudit: z.enum(HOST_VISUAL_AUDITS),
+    // Declared by a native adapter, not requested by the model. No arbitrary tolerance.
+    opacityEncoding: z.literal('uint8').optional()
+  })
+  .strict()
+export type HostExecutionCapability = z.output<typeof hostExecutionCapabilitySchema>
+export const hostContextNodeSchema = z
+  .object({
+    id,
+    type: z.string().min(1).max(128),
+    name: z.string().max(4096),
+    parentId: id.nullable(),
+    ancestors: z
+      .array(z.object({ id, type: z.string().max(128), locked: z.boolean() }).strict())
+      .max(32),
+    locked: z.boolean(),
+    visible: z.boolean(),
+    opacity: z.number().finite().min(0).max(1).optional(),
+    commands: z
+      .array(z.enum(HOST_COMMANDS))
+      .max(HOST_COMMANDS.length)
+      .superRefine((commands, ctx) => {
+        if (new Set(commands).size !== commands.length)
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate node capabilities' })
+      }),
+    children: z.array(id).max(100).optional(),
+    geometry: z.object({ x: finite, y: finite, width: finite, height: finite }).strict().optional(),
+    // Explicit absolute bounds; legacy geometry has no new inferred meaning.
+    spatial: hostSpatialSchema.optional(),
+    text: z.string().max(4096).optional(),
+    fontKey: z.string().max(4096).optional(),
+    typography: hostTypographySchema.optional(),
+    appearance: hostAppearanceSchema.optional(),
+    imageFill: hostImageFillSchema.optional(),
+    imagePixels: hostImagePixelsSchema.optional(),
+    layout: hostLayoutSchema.optional()
+  })
+  .strict()
+export const hostContextSchema = z
+  .object({
+    version: z.literal(1),
+    host: z.enum(['figma', 'photoshop']),
+    documentId: id,
+    scopeId: id,
+    captureId: z.string().regex(/^[a-f0-9]{32}$/),
+    // Native runtime identity prevents recovery across unrelated host instances that reuse node IDs.
+    recoveryIdentity: z
+      .string()
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    canvas: hostCanvasSchema.optional(),
+    nodes: z.array(hostContextNodeSchema).min(1).max(100),
+    selectedIds: z.array(id).min(1).max(100).optional(),
+    execution: hostExecutionCapabilitySchema.optional()
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const foreignCommand = value.host === 'figma' ? 'image.pixels' : 'image.fill'
+    if (value.execution?.supports.includes(foreignCommand))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Image capability host mismatch' })
+    if (value.execution?.opacityEncoding && value.host !== 'photoshop')
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Unsupported opacity encoding' })
+    if (value.canvas !== undefined && value.host !== 'photoshop')
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Unsupported finite canvas metadata' })
+    if (
+      value.nodes.some(
+        (node) =>
+          node.spatial?.status === 'available' &&
+          node.spatial.coordinateSpace !== (value.host === 'figma' ? 'page' : 'document')
+      )
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Spatial coordinate space mismatch' })
+    for (const node of value.nodes) {
+      if (
+        (value.host !== 'figma' && node.imageFill !== undefined) ||
+        (value.host !== 'photoshop' && node.imagePixels !== undefined) ||
+        node.commands.includes(foreignCommand) ||
+        (node.commands.includes('image.fill') && node.imageFill?.status !== 'available') ||
+        (node.commands.includes('image.pixels') && node.imagePixels?.status !== 'available')
+      )
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Image observation unavailable or host mismatch'
+        })
+      const appearance = node.appearance
+      if (
+        appearance?.status === 'available' &&
+        (appearance.kind !== (value.host === 'figma' ? 'figma-paints' : 'photoshop-text-color') ||
+          (appearance.kind === 'photoshop-text-color' && node.type !== 'text'))
+      )
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Appearance host mismatch' })
+      const type = node.typography
+      if (type?.status === 'available') {
+        if (
+          (value.host === 'figma' ? 'figma-font-runs' : 'photoshop-character-style') !==
+            type.kind ||
+          node.type !== (value.host === 'figma' ? 'TEXT' : 'text') ||
+          (node.fontKey !== undefined && node.fontKey !== typographyFontKey(type)) ||
+          (type.kind === 'figma-font-runs' &&
+            node.text !== undefined &&
+            node.text.length !== type.characterCount)
+        )
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Font observation mismatch' })
+      }
+      if (
+        value.host === 'figma' &&
+        type !== undefined &&
+        node.commands.includes('text.content') &&
+        (type.status !== 'available' || type.kind !== 'figma-font-runs' || type.hasMissingFont)
+      )
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Text font resources unavailable' })
+    }
+    const ids = new Set(value.nodes.map((node) => node.id))
+    if (ids.size !== value.nodes.length)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate nodes' })
+    const selected = new Set(value.selectedIds ?? [])
+    if (selected.size !== (value.selectedIds?.length ?? 0))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate selected nodes' })
+    if (value.selectedIds && value.selectedIds.some((nodeId) => !ids.has(nodeId)))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Selected node is missing' })
+    if (value.execution && !value.selectedIds)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Native execution requires a scope' })
+    if (
+      value.execution &&
+      value.nodes.some((node) =>
+        node.commands.some((command) => !value.execution!.supports.includes(command))
+      )
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Node advertises unsupported commands' })
+    if (utf8Size(JSON.stringify(value)) > HOST_CONTEXT_MAX_BYTES)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Context is too large' })
+  })
+export type HostContext = z.output<typeof hostContextSchema>
+export type HostContextNode = z.output<typeof hostContextNodeSchema>
+export const hostStepSchema = z.discriminatedUnion('command', [
+  z
+    .object({
+      command: z.literal('node.rename'),
+      targetId: id,
+      name: name.refine((value) => value.trim().length > 0 && !hasUnsafeControlCharacter(value))
+    })
+    .strict(),
+  z
+    .object({
+      command: z.literal('node.opacity'),
+      targetId: id,
+      opacity: z.number().finite().min(0).max(1)
+    })
+    .strict(),
+  z.object({ command: z.literal('node.visibility'), targetId: id, visible: z.boolean() }).strict(),
+  z
+    .object({ command: z.literal('text.content'), targetId: id, text: z.string().max(4096) })
+    .strict(),
+  z.object({ command: z.literal('layout.flow'), targetId: id, layout: hostLayoutSchema }).strict(),
+  z
+    .object({
+      command: z.literal('image.fill'),
+      targetId: id,
+      assetId: imageAssetId,
+      sha256: imageHash,
+      scaleMode: z.enum(['FILL', 'FIT'])
+    })
+    .strict(),
+  z
+    .object({
+      command: z.literal('image.pixels'),
+      targetId: id,
+      assetId: imageAssetId,
+      sha256: imageHash
+    })
+    .strict()
+])
+export const hostPlanSchema = z
+  .object({
+    schemaVersion: z.literal(HOST_PLAN_VERSION),
+    kind: z.literal('host-plan'),
+    captureId: z.string().regex(/^[a-f0-9]{32}$/),
+    steps: z.array(hostStepSchema).min(1).max(20)
+  })
+  .strict()
+export type HostPlan = z.output<typeof hostPlanSchema>
+export type HostStep = z.output<typeof hostStepSchema>
+export type HostCommand = (typeof HOST_COMMANDS)[number]
+export const hostPlanReadbackSchema = z
+  .object({
+    version: z.literal(1),
+    kind: z.literal('host-plan-readback'),
+    host: z.enum(['figma', 'photoshop']),
+    documentId: id,
+    scopeId: id,
+    captureId: z.string().regex(/^[a-f0-9]{32}$/),
+    steps: z
+      .array(
+        z
+          .object({
+            targetId: id,
+            command: z.enum(HOST_COMMANDS),
+            observation: z.enum(['original', 'requested', 'other', 'unknown']),
+            value: z.unknown().optional(),
+            imageEvidence: hostImageEvidenceSchema.optional()
+          })
+          .strict()
+      )
+      .min(1)
+      .max(20)
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const seen = new Set<string>()
+    for (const [index, step] of value.steps.entries()) {
+      const imageCommand = step.command === 'image.fill' || step.command === 'image.pixels'
+      if (
+        (step.imageEvidence !== undefined && (!imageCommand || step.observation !== 'requested')) ||
+        (imageCommand && step.observation === 'requested' && step.imageEvidence === undefined) ||
+        (step.imageEvidence?.kind === 'figma-image-fill' &&
+          (step.command !== 'image.fill' || value.host !== 'figma')) ||
+        (step.imageEvidence?.kind === 'photoshop-pixels' &&
+          (step.command !== 'image.pixels' ||
+            value.host !== 'photoshop' ||
+            step.imageEvidence.width !==
+              step.imageEvidence.bounds.right - step.imageEvidence.bounds.left ||
+            step.imageEvidence.height !==
+              step.imageEvidence.bounds.bottom - step.imageEvidence.bounds.top))
+      )
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Invalid image readback evidence',
+          path: ['steps', index]
+        })
+      const key = `${step.targetId}\u0000${step.command}`
+      if (seen.has(key))
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Duplicate readback step',
+          path: ['steps', index]
+        })
+      seen.add(key)
+    }
+    if (utf8Size(JSON.stringify(value)) > HOST_PLAN_MAX_BYTES)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Readback is too large' })
+  })
+export type HostPlanReadback = z.output<typeof hostPlanReadbackSchema>
+export function utf8Size(text: string): number {
+  let bytes = 0
+  for (const char of text) {
+    const code = char.codePointAt(0)!
+    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4
+  }
+  return bytes
+}
+export function parseHostPlan(
+  text: string,
+  context: HostContext,
+  resources?: readonly FigPluginPlanningAssetMetadata[],
+  imageRecovery?: FigPluginRecoveryExecutionImages
+): HostPlan {
+  if (
+    typeof text !== 'string' ||
+    text.length > HOST_PLAN_MAX_BYTES ||
+    utf8Size(text) > HOST_PLAN_MAX_BYTES
+  )
+    throw new Error('PLAN_TOO_LARGE')
+  const plan = normalizeHostPlan(
+    hostPlanSchema.parse(JSON.parse(text)),
+    context,
+    resources,
+    imageRecovery
+  )
+  validateHostPlan(plan, context, resources, imageRecovery)
+  return plan
+}
+/** Canonicalize only explicitly advertised native numeric precision BEFORE preview/approval.
+ * Every downstream hash and exact readback refers to these actual representable values. */
+export function normalizeHostPlan(
+  input: HostPlan,
+  rawContext: HostContext,
+  resources?: readonly FigPluginPlanningAssetMetadata[],
+  imageRecovery?: FigPluginRecoveryExecutionImages
+): HostPlan {
+  const context = hostContextSchema.parse(rawContext)
+  const plan = hostPlanSchema.parse(input)
+  validateImageResources(plan, context, resources, imageRecovery)
+  if (context.execution?.opacityEncoding !== 'uint8') return plan
+  return {
+    ...plan,
+    steps: plan.steps.map((step) =>
+      step.command === 'node.opacity'
+        ? { ...step, opacity: Math.round(step.opacity * 255) / 255 }
+        : step
+    )
+  }
+}
+function validateImageResources(
+  plan: HostPlan,
+  context: HostContext,
+  resources?: readonly FigPluginPlanningAssetMetadata[],
+  imageRecovery?: FigPluginRecoveryExecutionImages
+): void {
+  validateRecoveryImagePlanBinding(plan, imageRecovery)
+  const assets = resources === undefined ? [] : planningResourcesSchema.parse(resources)
+  for (const step of plan.steps) {
+    if (step.command !== 'image.fill' && step.command !== 'image.pixels') continue
+    const asset = assets.find(
+      (asset) => asset.assetId === step.assetId && asset.sha256 === step.sha256
+    )
+    if (!asset) throw new Error('IMAGE_RESOURCE_UNBOUND')
+    const node = context.nodes.find((node) => node.id === step.targetId)
+    if (step.command === 'image.fill') {
+      if (context.host !== 'figma' || node?.imageFill?.status !== 'available')
+        throw new Error('IMAGE_CONTEXT_UNAVAILABLE')
+    } else {
+      if (context.host !== 'photoshop' || node?.imagePixels?.status !== 'available')
+        throw new Error('IMAGE_CONTEXT_UNAVAILABLE')
+      const desired = recoveryImageTarget(imageRecovery, step.targetId, step.command)
+      const pixels =
+        desired?.command === 'image.pixels' ? desired.acceptedEvidence : node.imagePixels
+      if (asset.width !== pixels.width || asset.height !== pixels.height)
+        throw new Error('IMAGE_RESOURCE_DIMENSIONS')
+    }
+  }
+}
+
+export function validateHostPlan(
+  plan: HostPlan,
+  rawContext: HostContext,
+  resources?: readonly FigPluginPlanningAssetMetadata[],
+  imageRecovery?: FigPluginRecoveryExecutionImages
+): void {
+  const context = hostContextSchema.parse(rawContext)
+  plan = hostPlanSchema.parse(plan)
+  validateImageResources(plan, context, resources, imageRecovery)
+  if (plan.captureId !== context.captureId) throw new Error('STALE_CONTEXT')
+  const selected = new Map(context.nodes.map((node) => [node.id, node]))
+  const allowedTargets = context.selectedIds ? new Set(context.selectedIds) : undefined
+  const seen = new Set<string>()
+  for (const step of plan.steps) {
+    const node = selected.get(step.targetId)
+    if (!node) throw new Error('OUT_OF_SCOPE')
+    if (allowedTargets && !allowedTargets.has(step.targetId)) throw new Error('OUT_OF_SCOPE')
+    if (node.locked || node.ancestors.some((ancestor) => ancestor.locked))
+      throw new Error('LOCKED_TARGET')
+    if (!node.commands.includes(step.command)) throw new Error('UNSUPPORTED_COMMAND')
+    if (
+      step.command === 'node.opacity' &&
+      context.execution?.opacityEncoding === 'uint8' &&
+      step.opacity !== Math.round(step.opacity * 255) / 255
+    )
+      throw new Error('HOST_PRECISION_MISMATCH')
+
+    const key = `${step.targetId}\u0000${step.command}`
+    if (seen.has(key)) throw new Error('DUPLICATE_COMMAND')
+    seen.add(key)
+    if (step.command === 'layout.flow') {
+      if (!node.children) throw new Error('LAYOUT_SCOPE_INCOMPLETE')
+      const pending = [...node.children]
+      const visited = new Set<string>([node.id])
+      while (pending.length) {
+        const childId = pending.pop()!
+        const child = selected.get(childId)
+        if (
+          !child ||
+          visited.has(childId) ||
+          child.locked ||
+          child.ancestors.some((ancestor) => ancestor.locked)
+        )
+          throw new Error('LAYOUT_SCOPE_INCOMPLETE')
+        visited.add(childId)
+        if (!child.children) throw new Error('LAYOUT_SCOPE_INCOMPLETE')
+        pending.push(...child.children)
+      }
+    }
+  }
+}
+
+export function validateHostPlanExecution(
+  plan: HostPlan,
+  rawContext: HostContext,
+  resources?: readonly FigPluginPlanningAssetMetadata[],
+  imageRecovery?: FigPluginRecoveryExecutionImages
+): void {
+  const context = hostContextSchema.parse(rawContext)
+  if (!context.execution || context.execution.mode !== 'native-write')
+    throw new Error('EXECUTION_UNAVAILABLE')
+  if (!context.selectedIds) throw new Error('INCOMPLETE_CONTEXT')
+  for (const step of plan.steps) {
+    if (!context.execution.supports.includes(step.command)) throw new Error('UNSUPPORTED_COMMAND')
+  }
+  validateHostPlan(plan, context, resources, imageRecovery)
+}
+export function stepValue(step: HostStep): unknown {
+  switch (step.command) {
+    case 'node.rename':
+      return step.name
+    case 'node.opacity':
+      return step.opacity
+    case 'node.visibility':
+      return step.visible
+    case 'text.content':
+      return step.text
+    case 'layout.flow':
+      return step.layout
+    case 'image.fill':
+      return { assetId: step.assetId, sha256: step.sha256, scaleMode: step.scaleMode }
+    case 'image.pixels':
+      return { assetId: step.assetId, sha256: step.sha256 }
+  }
+}
+export function nodeValue(node: HostContextNode, command: HostCommand): unknown {
+  switch (command) {
+    case 'node.rename':
+      return node.name
+    case 'node.opacity':
+      return node.opacity
+    case 'node.visibility':
+      return node.visible
+    case 'text.content':
+      return node.text
+    case 'layout.flow':
+      return node.layout
+    case 'image.fill':
+      return node.imageFill?.status === 'available'
+        ? { fingerprint: node.imageFill.fingerprint }
+        : undefined
+    case 'image.pixels': {
+      if (node.imagePixels?.status !== 'available') return undefined
+      const { historyStateId, bounds, width, height } = node.imagePixels
+      return { historyStateId, bounds, width, height }
+    }
+  }
+}
+
+export function createHostPlanReadback(
+  before: HostContext,
+  after: HostContext,
+  plan: HostPlan,
+  resources?: readonly FigPluginPlanningAssetMetadata[],
+  imageRecovery?: FigPluginRecoveryExecutionImages
+): HostPlanReadback {
+  validateHostPlan(plan, before, resources, imageRecovery)
+  const context = hostContextSchema.parse(after)
+  if (
+    context.host !== before.host ||
+    context.documentId !== before.documentId ||
+    context.scopeId !== before.scopeId ||
+    context.captureId !== before.captureId
+  )
+    throw new Error('STALE_CONTEXT')
+  const previous = new Map(before.nodes.map((node) => [node.id, node]))
+  const current = new Map(context.nodes.map((node) => [node.id, node]))
+  const readback = hostPlanReadbackSchema.parse({
+    version: 1,
+    kind: 'host-plan-readback',
+    host: before.host,
+    documentId: before.documentId,
+    scopeId: before.scopeId,
+    captureId: before.captureId,
+    steps: plan.steps.map((step) => {
+      const oldNode = previous.get(step.targetId)
+      const newNode = current.get(step.targetId)
+      if (!oldNode || !newNode) throw new Error('OUT_OF_SCOPE')
+      // Context metadata alone cannot prove that an image was written or restored.
+      if (step.command === 'image.fill' || step.command === 'image.pixels')
+        return { targetId: step.targetId, command: step.command, observation: 'unknown' }
+      const expected = stepValue(step)
+      const value = nodeValue(newNode, step.command)
+      return {
+        targetId: step.targetId,
+        command: step.command,
+        observation:
+          value === undefined
+            ? 'unknown'
+            : JSON.stringify(value) === JSON.stringify(expected)
+              ? 'requested'
+              : JSON.stringify(value) === JSON.stringify(nodeValue(oldNode, step.command))
+                ? 'original'
+                : 'other',
+        ...(value === undefined ? {} : { value })
+      }
+    })
+  })
+  return readback
+}
+
+export function validateHostPlanReadback(
+  plan: HostPlan,
+  before: HostContext,
+  rawReadback: unknown,
+  resources?: readonly FigPluginPlanningAssetMetadata[],
+  imageRecovery?: FigPluginRecoveryExecutionImages
+): HostPlanReadback {
+  validateHostPlan(plan, before, resources, imageRecovery)
+  const readback = hostPlanReadbackSchema.parse(rawReadback)
+  if (
+    readback.host !== before.host ||
+    readback.documentId !== before.documentId ||
+    readback.scopeId !== before.scopeId ||
+    readback.captureId !== plan.captureId
+  )
+    throw new Error('STALE_CONTEXT')
+  if (readback.steps.length !== plan.steps.length) throw new Error('INCOMPLETE_READBACK')
+  const expected = new Map(
+    plan.steps.map((step) => [`${step.targetId}\u0000${step.command}`, step])
+  )
+  const beforeNodes = new Map(before.nodes.map((node) => [node.id, node]))
+  const equalJson = (left: unknown, right: unknown): boolean => {
+    try {
+      return canonicalFigPluginJson(left) === canonicalFigPluginJson(right)
+    } catch {
+      throw new Error('INVALID_READBACK')
+    }
+  }
+  for (const step of readback.steps) {
+    const source = expected.get(`${step.targetId}\u0000${step.command}`)
+    if (!source) throw new Error('OUT_OF_SCOPE')
+    const beforeNode = beforeNodes.get(step.targetId)
+    if (!beforeNode) throw new Error('OUT_OF_SCOPE')
+    expected.delete(`${step.targetId}\u0000${step.command}`)
+
+    const hasValue = Object.hasOwn(step, 'value')
+    const hasDefinedValue = hasValue && step.value !== undefined
+    const requestedValue = stepValue(source)
+    const originalValue = nodeValue(beforeNode, source.command)
+    if (step.imageEvidence !== undefined) {
+      const evidence = step.imageEvidence
+      if (
+        (source.command !== 'image.fill' && source.command !== 'image.pixels') ||
+        evidence.sourceSha256 !== source.sha256
+      )
+        throw new Error('INVALID_READBACK')
+      if (source.command === 'image.pixels') {
+        const desired = recoveryImageTarget(imageRecovery, source.targetId, source.command)
+        const accepted = desired?.command === 'image.pixels' ? desired.acceptedEvidence : undefined
+        const pixels = accepted ?? beforeNode.imagePixels
+        if (
+          evidence.kind !== 'photoshop-pixels' ||
+          !pixels ||
+          ('status' in pixels && pixels.status !== 'available') ||
+          !('width' in pixels) ||
+          evidence.width !== pixels.width ||
+          evidence.height !== pixels.height ||
+          !equalJson(evidence.bounds, pixels.bounds) ||
+          (accepted !== undefined && evidence.pixelSha256 !== accepted.pixelSha256)
+        )
+          throw new Error('INVALID_READBACK')
+      } else if (evidence.kind !== 'figma-image-fill') throw new Error('INVALID_READBACK')
+    }
+    switch (step.observation) {
+      case 'unknown':
+        // Unknown is an explicit absence of an observation, not an untrusted arbitrary value.
+        if (hasValue) throw new Error('INVALID_READBACK')
+        break
+      case 'requested':
+        if (!hasDefinedValue || !equalJson(step.value, requestedValue))
+          throw new Error('INVALID_READBACK')
+        break
+      case 'original':
+        // An undefined original cannot be represented in this JSON contract; it is unknown.
+        if (
+          !hasDefinedValue ||
+          originalValue === undefined ||
+          !equalJson(step.value, originalValue)
+        )
+          throw new Error('INVALID_READBACK')
+        break
+      case 'other':
+        if (!hasDefinedValue || equalJson(step.value, requestedValue))
+          throw new Error('INVALID_READBACK')
+        if (originalValue !== undefined && equalJson(step.value, originalValue))
+          throw new Error('INVALID_READBACK')
+        break
+    }
+  }
+  if (expected.size) throw new Error('INCOMPLETE_READBACK')
+  return readback
+}
+
+/** Reversible display escaping only. Never use display text as a permission/hash input. */
+export function escapePlanningDisplay(text: string): string {
+  return text.replace(
+    /[\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
+    (character) => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0')
+  )
+}

@@ -189,6 +189,60 @@ describe('authorizeMagicPotMcpToolInvocation', () => {
     })
   })
 
+  it.each(['files.tree', 'files.read', 'files.glob', 'files.json.read'])(
+    'allows the bound readonly %s tool without granting access outside its workspace',
+    async (toolName) => {
+      const runtimeModule = await import('./runtime')
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'canvas-1',
+        threadId: 'agent-2'
+      }
+      const decision = runtimeModule.authorizeMagicPotMcpToolInvocation({
+        actor: 'assistant:session-1',
+        action: 'tool.invoke',
+        target: `chat.tool.${toolName}`,
+        metadata: { route }
+      })
+      expect(decision.allowed).toBe(true)
+      const outside = runtimeModule.authorizeMagicPotMcpToolInvocation({
+        actor: 'assistant:session-1',
+        action: 'file.read',
+        target: 'C:/tmp/other-project/secret.txt',
+        metadata: {
+          route,
+          currentCanvasRootDir: 'C:/tmp/current-canvas',
+          filePath: 'C:/tmp/other-project/secret.txt'
+        }
+      })
+      expect(outside.allowed).toBe(false)
+    }
+  )
+
+  it.each([
+    'files.write',
+    'files.edit',
+    'files.patch',
+    'files.multi-edit',
+    'files.json.write',
+    'files.snapshot.restore',
+    'commands.background',
+    'agent.terminal.run',
+    'files.unknown'
+  ])('does not widen the readonly canvas tool list to %s', async (toolName) => {
+    const runtimeModule = await import('./runtime')
+    const decision = runtimeModule.authorizeMagicPotMcpToolInvocation({
+      actor: 'assistant:session-1',
+      action: 'tool.invoke',
+      target: `chat.tool.${toolName}`,
+      metadata: {
+        route: { channel: 'canvas', scopeType: 'thread', scopeId: 'canvas-1', threadId: 'agent-2' }
+      }
+    })
+    expect(decision.allowed).toBe(false)
+  })
+
   it('denies non-approved canvas tools for assistant actors', async () => {
     const runtimeModule = await import('./runtime')
 

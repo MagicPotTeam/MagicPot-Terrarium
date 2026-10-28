@@ -15,6 +15,8 @@ import {
   extractProjectTraceMovementLimitPx,
   extractProjectTraceRuleText
 } from '@shared/projectTraceMemory'
+import { PROJECTS_STORAGE_KEY } from '@renderer/pages/MainPage/projectStore'
+import { redactProjectTraceText, sanitizeProjectHistory } from './projectOneShotTrace'
 
 export { extractProjectTraceMovementLimitPx } from '@shared/projectTraceMemory'
 
@@ -22,7 +24,7 @@ export const PROJECT_TRACE_RUNTIME_EVENT = 'project-trace:event'
 export const PROJECT_TRACE_CAPTURE_STATE_EVENT = 'project-trace:capture-state-changed'
 export const PROJECT_TRACE_TARGET_REFERENCE_EVENT = 'project-trace:target-reference-changed'
 export const PROJECT_TRACE_REALTIME_ADVICE_EVENT = 'project-trace:realtime-advice'
-const RECENT_EVENT_LIMIT = 120
+const MAX_RECENT_JSON_LENGTH = 1024 * 1024
 const REALTIME_ADVICE_COOLDOWN_MS = 5000
 const REALTIME_ADVICE_TRACKER_MAX_SIZE = 2000
 const REALTIME_ADVICE_RETENTION_MS = REALTIME_ADVICE_COOLDOWN_MS * 12
@@ -31,11 +33,14 @@ const ACTIVE_CAPTURE_KEY_PREFIX = 'projectTrace.activeCapture.'
 const ACTIVE_REALTIME_KEY_PREFIX = 'projectTrace.activeRealtime.'
 const TARGET_REFERENCE_KEY_PREFIX = 'projectTrace.targetReferences.'
 const realtimeAdviceLastDispatchedAt = new Map<string, number>()
+// Private append guard: a failed read must never turn an unavailable history into an empty one.
+const recentProjectTraceReadUnavailable = new Set<string>()
+const recentProjectTraceHistory = new Map<string, ProjectTraceEventSummary[]>()
 
 export type ProjectTraceRuntimeEvent = {
   projectId?: string
   projectName?: string
-  event: ProjectTraceEventSummary
+  event?: ProjectTraceEventSummary
 }
 
 export type ProjectTraceCaptureStateEvent = {
@@ -79,15 +84,8 @@ type ProjectTraceRealtimeModelReview = {
 }
 
 function normalizeText(value: unknown, maxLength = 500): string {
-  const normalized = String(value ?? '')
-    .replace(/\s+/g, ' ')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer [redacted-token]')
-    .replace(/\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^,\s;]+/gi, '$1=[redacted]')
-    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[redacted-email]')
-    .replace(/\b[A-Za-z]:[\\/][^\s"'<>]+/g, '[redacted-local-path]')
-    .replace(/\b(?:file|local-media):\/\/\/?[^\s"'<>]+/gi, '[redacted-local-media]')
-    .trim()
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized
+  // Sanitize complete bounded input before cutting it; repeated capture/read sanitization is stable.
+  return redactProjectTraceText(typeof value === 'string' ? value : '', maxLength)
 }
 
 function truncateRuntimeText(value: string | undefined, maxLength = 1600): string {
@@ -389,6 +387,16 @@ function evaluateRealtimeTraceRule(
   return null
 }
 
+function isValidProjectId(projectId: unknown): projectId is string {
+  return (
+    typeof projectId === 'string' &&
+    projectId.trim().length > 0 &&
+    projectId.length <= 160 &&
+    !/[\\/\p{Cc}\p{Cf}]/u.test(projectId) &&
+    !/^\s*(?:[a-z]:|file:|local-media:)/i.test(projectId)
+  )
+}
+
 function getStorageKey(projectId: string): string {
   return `${STORAGE_KEY_PREFIX}${projectId}`
 }
@@ -429,29 +437,112 @@ function dispatchRealtimeAdvice(detail: ProjectTraceRealtimeAdviceEvent): void {
   )
 }
 
+function cloneProjectTraceHistory(
+  events: readonly ProjectTraceEventSummary[]
+): ProjectTraceEventSummary[] {
+  return events.map((event) => ({
+    ...event,
+    ...(event.inputKinds ? { inputKinds: [...event.inputKinds] } : {}),
+    ...(event.outputKinds ? { outputKinds: [...event.outputKinds] } : {}),
+    ...(event.riskSignals ? { riskSignals: [...event.riskSignals] } : {})
+  }))
+}
+
+function rememberProjectTraceHistory(
+  projectId: string,
+  events: readonly ProjectTraceEventSummary[]
+): void {
+  recentProjectTraceHistory.set(projectId, cloneProjectTraceHistory(events))
+}
+
+function getRememberedProjectTraceHistory(projectId: string): ProjectTraceEventSummary[] {
+  const events = recentProjectTraceHistory.get(projectId)
+  return events ? cloneProjectTraceHistory(events) : []
+}
+
 export function readRecentProjectTraceEvents(projectId: string): ProjectTraceEventSummary[] {
+  if (!isValidProjectId(projectId)) return []
+  const storageKey = getStorageKey(projectId)
+  let raw: string | null
   try {
-    const raw = localStorage.getItem(getStorageKey(projectId))
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? (parsed as ProjectTraceEventSummary[]) : []
+    raw = localStorage.getItem(storageKey)
   } catch {
+    recentProjectTraceReadUnavailable.add(projectId)
+    return getRememberedProjectTraceHistory(projectId)
+  }
+  if (!raw) {
+    recentProjectTraceReadUnavailable.delete(projectId)
+    rememberProjectTraceHistory(projectId, [])
     return []
   }
+  if (raw.length > MAX_RECENT_JSON_LENGTH) {
+    recentProjectTraceReadUnavailable.add(projectId)
+    return []
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    recentProjectTraceReadUnavailable.add(projectId)
+    return []
+  }
+  if (!Array.isArray(parsed)) {
+    recentProjectTraceReadUnavailable.add(projectId)
+    return []
+  }
+
+  let events: ProjectTraceEventSummary[]
+  try {
+    events = sanitizeProjectHistory(parsed)
+  } catch {
+    recentProjectTraceReadUnavailable.add(projectId)
+    return []
+  }
+  recentProjectTraceReadUnavailable.delete(projectId)
+  rememberProjectTraceHistory(projectId, events)
+  const normalized = JSON.stringify(events)
+  if (normalized !== raw) {
+    try {
+      localStorage.setItem(storageKey, normalized)
+    } catch {
+      /* Read-only fallback when pruning cannot persist. */
+    }
+  }
+  return cloneProjectTraceHistory(events)
 }
 
 export function writeRecentProjectTraceEvents(
   projectId: string,
   events: ProjectTraceEventSummary[]
 ): void {
+  if (!isValidProjectId(projectId)) return
   try {
-    localStorage.setItem(
-      getStorageKey(projectId),
-      JSON.stringify(events.slice(-RECENT_EVENT_LIMIT))
-    )
+    const sanitized = sanitizeProjectHistory(events)
+    const raw = JSON.stringify(sanitized)
+    if (raw.length > MAX_RECENT_JSON_LENGTH) return
+    localStorage.setItem(getStorageKey(projectId), raw)
+    rememberProjectTraceHistory(projectId, sanitized)
+    recentProjectTraceReadUnavailable.delete(projectId)
   } catch {
-    /* ignore storage failures */
+    /* Event capture remains best-effort when storage is unavailable. */
   }
+}
+
+export function clearRecentProjectTraceEvents(projectId: string): void {
+  if (!isValidProjectId(projectId)) throw new Error('Invalid project')
+  try {
+    localStorage.removeItem(getStorageKey(projectId))
+  } catch {
+    throw new Error('Unable to clear project history')
+  }
+  recentProjectTraceHistory.delete(projectId)
+  recentProjectTraceReadUnavailable.delete(projectId)
+  window.dispatchEvent(
+    new CustomEvent<ProjectTraceRuntimeEvent>(PROJECT_TRACE_RUNTIME_EVENT, {
+      detail: { projectId }
+    })
+  )
 }
 
 export function readActiveProjectTraceCapture(
@@ -710,16 +801,51 @@ function buildReferenceBackedTraceDocument(reference: ProjectTraceReference): Pr
   }
 }
 
+function isProjectTraceRealtimeAllowed(projectId: string): boolean {
+  try {
+    // Read the registry directly: listProjects also migrates and writes storage.
+    const raw = localStorage.getItem(PROJECTS_STORAGE_KEY)
+    if (!raw) return true
+    if (raw.length > MAX_RECENT_JSON_LENGTH) return false
+    const projects: unknown = JSON.parse(raw)
+    return (
+      Array.isArray(projects) &&
+      !projects.some((project) => project?.id === projectId && project.analysisMode === 'manual')
+    )
+  } catch {
+    return false
+  }
+}
+
+function isCurrentProjectTraceRealtimeTarget(
+  projectId: string,
+  target: ProjectTraceActiveRealtimeTarget
+): boolean {
+  const current = readActiveProjectTraceRealtime(projectId)
+  if (!current || current.projectId !== target.projectId) return false
+  if (current.referenceTraceIds.length !== target.referenceTraceIds.length) return false
+  if (
+    current.referenceTraceIds.some((traceId, index) => traceId !== target.referenceTraceIds[index])
+  ) {
+    return false
+  }
+  return (
+    current.modelProfileId === target.modelProfileId &&
+    current.modelReasoningEffort === target.modelReasoningEffort
+  )
+}
+
 async function evaluateActiveProjectTraceRealtimeEvent(
   projectId: string,
   event: ProjectTraceEventSummary
 ): Promise<void> {
+  if (event.scope !== 'canvas' || !isProjectTraceRealtimeAllowed(projectId)) return
   // Realtime trace pipeline: user operation -> redacted software event -> software rule screening
   // -> candidate anomaly -> optional model review with redacted summaries. Without a selected
   // review model, software rules produce feedback directly. Runtime reads compact reference packs;
   // full trace documents, full canvas, and raw media are not sent.
   const realtime = readActiveProjectTraceRealtime(projectId)
-  if (!realtime || event.scope !== 'canvas') return
+  if (!realtime || !isCurrentProjectTraceRealtimeTarget(projectId, realtime)) return
 
   try {
     const { api } = await import('@renderer/utils/windowUtils')
@@ -732,7 +858,10 @@ async function evaluateActiveProjectTraceRealtimeEvent(
         maxCharsPerTrace: 1200
       })
     ).references
+    if (!isCurrentProjectTraceRealtimeTarget(projectId, realtime)) return
     for (const reference of references) {
+      if (!isProjectTraceRealtimeAllowed(projectId)) return
+      if (!isCurrentProjectTraceRealtimeTarget(projectId, realtime)) return
       const runtimePolicy = reference.referencePack?.runtimePolicy || reference.runtimePolicy
       if (runtimePolicy?.allowRealtime === false) continue
       const referenceTraceId = reference.id
@@ -744,6 +873,8 @@ async function evaluateActiveProjectTraceRealtimeEvent(
       if (!ruleMatch) {
         if (!canUseModelReview || !event.canvasMutation) continue
         for (const semanticRule of resolveRealtimeSemanticRules(trace)) {
+          if (!isProjectTraceRealtimeAllowed(projectId)) return
+          if (!isCurrentProjectTraceRealtimeTarget(projectId, realtime)) return
           if (
             !shouldDispatchRealtimeAdvice(
               projectId,
@@ -760,6 +891,8 @@ async function evaluateActiveProjectTraceRealtimeEvent(
             event,
             semanticRule
           })
+          if (!isProjectTraceRealtimeAllowed(projectId)) return
+          if (!isCurrentProjectTraceRealtimeTarget(projectId, realtime)) return
           if (!modelReview?.shouldFeedback) continue
           const adviceText = modelReview.advice || semanticRule.feedback
           dispatchRealtimeAdvice({
@@ -806,6 +939,8 @@ async function evaluateActiveProjectTraceRealtimeEvent(
             softwareAdvice: ruleMatch.advice
           })
         : null
+      if (!isCurrentProjectTraceRealtimeTarget(projectId, realtime)) return
+      if (!isProjectTraceRealtimeAllowed(projectId)) return
       if (modelReview && !modelReview.shouldFeedback) {
         continue
       }
@@ -869,7 +1004,7 @@ export function emitProjectTraceRuntimeEvent(input: {
   canvasMutation?: boolean
   riskSignals?: string[]
 }): ProjectTraceEventSummary {
-  const event: ProjectTraceEventSummary = {
+  const candidate: ProjectTraceEventSummary = {
     id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     at: new Date().toISOString(),
     scope: normalizeScope(input.scope),
@@ -879,8 +1014,8 @@ export function emitProjectTraceRuntimeEvent(input: {
     safeSummary: normalizeText(input.safeSummary, 500) || 'Operation recorded.',
     ...(input.entityType ? { entityType: normalizeText(input.entityType, 80) } : {}),
     ...(typeof input.entityCount === 'number' ? { entityCount: input.entityCount } : {}),
-    ...(input.inputKinds?.length ? { inputKinds: input.inputKinds.slice(0, 12) } : {}),
-    ...(input.outputKinds?.length ? { outputKinds: input.outputKinds.slice(0, 12) } : {}),
+    ...(Array.isArray(input.inputKinds) ? { inputKinds: input.inputKinds } : {}),
+    ...(Array.isArray(input.outputKinds) ? { outputKinds: input.outputKinds } : {}),
     ...(typeof input.affectedItemCount === 'number'
       ? { affectedItemCount: input.affectedItemCount }
       : {}),
@@ -912,21 +1047,29 @@ export function emitProjectTraceRuntimeEvent(input: {
       ? { maxLayerDelta: normalizeMetric(input.maxLayerDelta) }
       : {}),
     ...(typeof input.canvasMutation === 'boolean' ? { canvasMutation: input.canvasMutation } : {}),
-    ...(input.riskSignals?.length ? { riskSignals: input.riskSignals.slice(0, 12) } : {})
+    ...(Array.isArray(input.riskSignals) ? { riskSignals: input.riskSignals } : {})
   }
+  const event = sanitizeProjectHistory([candidate])[0]
+  if (!event) throw new Error('Invalid project trace event')
+  const projectId = isValidProjectId(input.projectId) ? input.projectId : undefined
+  const projectName = input.projectName
+    ? sanitizeProjectHistory([{ ...event, label: input.projectName }])[0]?.label
+    : undefined
 
-  if (input.projectId) {
-    const recent = readRecentProjectTraceEvents(input.projectId)
-    writeRecentProjectTraceEvents(input.projectId, [...recent, event])
-    void appendActiveProjectTraceCaptureEvent(input.projectId, event)
-    void evaluateActiveProjectTraceRealtimeEvent(input.projectId, event)
+  if (projectId) {
+    const recent = readRecentProjectTraceEvents(projectId)
+    if (!recentProjectTraceReadUnavailable.has(projectId)) {
+      writeRecentProjectTraceEvents(projectId, [...recent, event])
+    }
+    void appendActiveProjectTraceCaptureEvent(projectId, event)
+    void evaluateActiveProjectTraceRealtimeEvent(projectId, event)
   }
 
   window.dispatchEvent(
     new CustomEvent<ProjectTraceRuntimeEvent>(PROJECT_TRACE_RUNTIME_EVENT, {
       detail: {
-        projectId: input.projectId,
-        projectName: input.projectName,
+        projectId,
+        projectName,
         event
       }
     })

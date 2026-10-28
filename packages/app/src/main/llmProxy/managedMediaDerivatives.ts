@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -10,25 +10,44 @@ import {
   type CanvasThumbnailSidecarThumbnailManifest
 } from '../api/canvasThumbnailSidecarAdapter'
 import { isPathInsideRoot, resolveManagedMediaReference } from './managedMediaStore'
+import {
+  MANAGED_MEDIA_DERIVATIVE_CROP_POLICY,
+  MANAGED_MEDIA_DERIVATIVE_ENCODER_VERSION,
+  MANAGED_MEDIA_DERIVATIVE_MAX_EDGES,
+  MANAGED_MEDIA_DERIVATIVE_MAX_GENERATED_BYTES,
+  MANAGED_MEDIA_DERIVATIVE_ORIENTATION_POLICY,
+  MANAGED_MEDIA_DERIVATIVE_SCHEMA,
+  managedMediaDerivativeIdentityFor,
+  parseManagedMediaDerivativeManifest,
+  type ManagedMediaDerivativeFormat,
+  type ManagedMediaDerivativeManifest,
+  type ManagedMediaDerivativeMaxEdge,
+  type ManagedMediaDerivativeMimeType
+} from './managedMediaDerivativeManifest'
+import {
+  acquireManagedMediaGenerationLock,
+  cleanupManagedMediaGenerationArtifacts,
+  managedMediaGenerationArtifactName,
+  removeOwnedManagedMediaGenerationTree,
+  type ManagedMediaGenerationLockOwner
+} from './managedMediaGenerationLock'
 
-export const MANAGED_MEDIA_DERIVATIVE_MAX_EDGES = [256, 512, 1024, 2048] as const
-export type ManagedMediaDerivativeMaxEdge = (typeof MANAGED_MEDIA_DERIVATIVE_MAX_EDGES)[number]
-export type ManagedMediaDerivativeFormat = 'png' | 'webp' | 'jpeg'
+export {
+  MANAGED_MEDIA_DERIVATIVE_MAX_EDGES,
+  type ManagedMediaDerivativeFormat,
+  type ManagedMediaDerivativeMaxEdge
+}
 
-const SCHEMA = 'magicpot.managed-media-derivative/v4'
-const ENCODER_VERSION = 'canvas-thumbnail-sidecar/v2'
-const ORIENTATION_POLICY = 'apply-exif-before-resize/v1'
-const CROP_POLICY = 'crop-meaningful-transparent-border/v1'
 const MAX_DECODED_PIXELS = 64 * 1024 * 1024
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024
-const MAX_GENERATED_BYTES = 25 * 1024 * 1024
+const MAX_GENERATED_BYTES = MANAGED_MEDIA_DERIVATIVE_MAX_GENERATED_BYTES
 const IO_CHUNK_BYTES = 64 * 1024
 const LOCK_RETRY_MS = 20
 const LOCK_TIMEOUT_MS = 30_000
 const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0
 const inflight = new Map<string, Promise<EnsureManagedMediaDerivativeResult>>()
 
-type ImageMime = 'image/png' | 'image/webp' | 'image/jpeg'
+type ImageMime = ManagedMediaDerivativeMimeType
 export type ManagedMediaDerivativeDescriptor = {
   purpose: 'managed-media-derivative'
   maxEdge: ManagedMediaDerivativeMaxEdge
@@ -48,23 +67,14 @@ export type UnsupportedManagedMediaDerivative = {
   original: Awaited<ReturnType<typeof resolveManagedMediaReference>>
 }
 export type EnsureManagedMediaDerivativeResult =
-  | ManagedMediaDerivativeDescriptor
-  | UnsupportedManagedMediaDerivative
+  ManagedMediaDerivativeDescriptor | UnsupportedManagedMediaDerivative
 export type EnsureManagedMediaDerivativeInput = {
   authorizedRoot: string
   reference: MediaReference
   maxEdge: ManagedMediaDerivativeMaxEdge
   format?: ManagedMediaDerivativeFormat
 }
-type DerivativeMetadata = ManagedMediaDerivativeDescriptor & {
-  schema: typeof SCHEMA
-  identity: string
-  originalSha256: string
-  format: ManagedMediaDerivativeFormat
-  encoderVersion: typeof ENCODER_VERSION
-  orientationPolicy: typeof ORIENTATION_POLICY
-  cropPolicy: typeof CROP_POLICY
-}
+type DerivativeMetadata = ManagedMediaDerivativeManifest
 
 type BoundOutput = {
   generatedPath: string
@@ -100,11 +110,7 @@ function identityFor(
   maxEdge: ManagedMediaDerivativeMaxEdge,
   format: ManagedMediaDerivativeFormat
 ): string {
-  return createHash('sha256')
-    .update(
-      `${originalSha256}\0${maxEdge}\0${format}\0${ENCODER_VERSION}\0${ORIENTATION_POLICY}\0${CROP_POLICY}`
-    )
-    .digest('hex')
+  return managedMediaDerivativeIdentityFor(originalSha256, maxEdge, format)
 }
 function expectedMime(format: ManagedMediaDerivativeFormat): ImageMime {
   return format === 'jpeg' ? 'image/jpeg' : `image/${format}`
@@ -112,10 +118,38 @@ function expectedMime(format: ManagedMediaDerivativeFormat): ImageMime {
 function extensionFor(format: ManagedMediaDerivativeFormat): string {
   return format === 'jpeg' ? 'jpg' : format
 }
+function resolvedFilesystemPath(value: string): string {
+  const resolved = path.resolve(value)
+  if (process.platform !== 'win32') return resolved
+  // Rust canonicalize returns verbatim Windows paths; only normalize ordinary drive/UNC aliases.
+  if (/^\\\\\?\\[a-z]:\\/i.test(resolved)) return resolved.slice(4)
+  if (/^\\\\\?\\UNC\\[^\\]+\\[^\\]+/i.test(resolved)) return `\\\\${resolved.slice(8)}`
+  return resolved
+}
 function samePath(a: string, b: string): boolean {
-  const left = path.resolve(a)
-  const right = path.resolve(b)
+  const left = resolvedFilesystemPath(a)
+  const right = resolvedFilesystemPath(b)
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
+}
+function sourceUrlMatchesPath(src: string, filePath: string): boolean {
+  if (!src.startsWith('local-media://')) return false
+  try {
+    const url = new URL(src)
+    if (url.username || url.password || url.port || url.search || url.hash) return false
+    if (/%(?:2f|5c)/i.test(url.pathname)) return false
+    // Decode once: a literal "%20" folder must not become a different space-named folder.
+    const pathname = decodeURIComponent(url.pathname)
+    const hostname = decodeURIComponent(url.hostname)
+    let decodedPath = hostname ? `//${hostname}${pathname}` : pathname
+    if (process.platform === 'win32') {
+      decodedPath = /^[a-z]$/i.test(hostname)
+        ? `${hostname}:${pathname}`
+        : decodedPath.replace(/^\/(?=[a-z]:[\\/])/i, '')
+    }
+    return path.isAbsolute(decodedPath) && samePath(decodedPath, filePath)
+  } catch {
+    return false
+  }
 }
 async function canonicalRoot(root: string): Promise<string> {
   const resolved = path.resolve(root)
@@ -297,7 +331,9 @@ async function createVerifiedSnapshot(
   return snapshotPath
 }
 function resolveSidecarPath(workRoot: string, value: string): string {
-  const resolved = path.isAbsolute(value) ? path.resolve(value) : path.resolve(workRoot, value)
+  const resolved = resolvedFilesystemPath(
+    path.isAbsolute(value) ? value : path.resolve(workRoot, value)
+  )
   if (!isPathInsideRoot(workRoot, resolved)) throw new Error('Sidecar output escaped work root')
   return resolved
 }
@@ -364,7 +400,7 @@ function bindManifest(
     !sidecarFormats.includes(manifest.thumbnail.format) ||
     level.sizeBytes !== manifest.thumbnail.sizeBytes ||
     level.filename !== path.basename(level.path) ||
-    !samePath(level.src, level.path)
+    !sourceUrlMatchesPath(level.src, level.path)
   )
     throw new Error('Sidecar requested level or format response mismatch')
   const entryRoot = path.resolve(workRoot, sourceIdentity.cacheKey)
@@ -473,25 +509,20 @@ async function validateCommitted(
   format: ManagedMediaDerivativeFormat
 ): Promise<ManagedMediaDerivativeDescriptor> {
   await validateDirectoryChain(root, committedDir)
-  const metadata = JSON.parse(
-    (await readSafeFile(root, path.join(committedDir, 'manifest.json'), 64 * 1024)).toString('utf8')
-  ) as DerivativeMetadata
+  const metadata = parseManagedMediaDerivativeManifest(
+    JSON.parse(
+      (await readSafeFile(root, path.join(committedDir, 'manifest.json'), 64 * 1024)).toString(
+        'utf8'
+      )
+    ),
+    { root, originalSha256, identity }
+  )
   const imagePath = path.join(committedDir, `image.${extensionFor(format)}`)
   const relativePath = path.relative(root, imagePath).split(path.sep).join('/')
   if (
-    metadata.schema !== SCHEMA ||
-    metadata.identity !== identity ||
-    metadata.originalSha256 !== originalSha256 ||
     metadata.format !== format ||
     metadata.maxEdge !== maxEdge ||
-    metadata.relativePath !== relativePath ||
-    metadata.encoderVersion !== ENCODER_VERSION ||
-    metadata.orientationPolicy !== ORIENTATION_POLICY ||
-    metadata.cropPolicy !== CROP_POLICY ||
-    metadata.mimeType !== expectedMime(format) ||
-    metadata.purpose !== 'managed-media-derivative' ||
-    metadata.localMediaUrl !== localUrl(imagePath) ||
-    !dimensionsMatch(metadata.width, metadata.height, metadata.width, metadata.height, maxEdge)
+    metadata.relativePath !== relativePath
   )
     throw new Error('Derivative commit manifest mismatch')
   const actual = await hashSafeFile(root, imagePath, MAX_GENERATED_BYTES)
@@ -510,19 +541,22 @@ async function validateCommitted(
   }
 }
 
-async function acquireLock(lockDir: string): Promise<() => Promise<void>> {
-  const deadline = Date.now() + LOCK_TIMEOUT_MS
-  while (true) {
-    try {
-      await fs.mkdir(lockDir)
-      return async () => fs.rm(lockDir, { recursive: true, force: true })
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      if (Date.now() >= deadline)
-        throw new Error('Timed out waiting for derivative generation lock')
-      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS))
-    }
-  }
+async function removeQuarantinedCommit(
+  root: string,
+  identityRoot: string,
+  quarantineDir: string,
+  owner: ManagedMediaGenerationLockOwner
+): Promise<void> {
+  const resolvedIdentityRoot = path.resolve(identityRoot)
+  const resolvedQuarantineDir = path.resolve(quarantineDir)
+  if (
+    !isPathInsideRoot(root, resolvedIdentityRoot) ||
+    path.dirname(resolvedQuarantineDir) !== resolvedIdentityRoot
+  )
+    throw new Error('Derivative quarantine path is unsafe')
+
+  await validateDirectoryChain(root, resolvedIdentityRoot)
+  await removeOwnedManagedMediaGenerationTree(resolvedIdentityRoot, resolvedQuarantineDir, owner)
 }
 
 async function generate(
@@ -533,31 +567,60 @@ async function generate(
 ): Promise<ManagedMediaDerivativeDescriptor> {
   const originalSha256 = original.reference.sha256!
   const identity = identityFor(originalSha256, maxEdge, format)
+  const storeRoot = original.storeRoot ?? root
+  const derivativeRoot = path.join(storeRoot, 'derivatives')
   const identityRoot = path.join(
-    root,
-    'derivatives',
+    derivativeRoot,
     originalSha256.slice(0, 2),
     originalSha256,
     identity
   )
   await ensureSafeDirectory(root, identityRoot)
   const committedDir = path.join(identityRoot, 'committed')
+  let cached: ManagedMediaDerivativeDescriptor | undefined
   try {
-    return await validateCommitted(root, committedDir, identity, originalSha256, maxEdge, format)
+    cached = await validateCommitted(root, committedDir, identity, originalSha256, maxEdge, format)
   } catch {
     // Publication and repair are serialized below.
   }
-  const release = await acquireLock(path.join(identityRoot, '.generation-lock'))
+  if (cached) {
+    // Cache hits must also offer recovery after a crash following publication.
+    // Never make a usable image wait for another process's live generation.
+    const maintenance = await acquireManagedMediaGenerationLock(identityRoot, {
+      waitTimeoutMs: 0
+    }).catch(() => undefined)
+    if (maintenance) {
+      try {
+        await cleanupManagedMediaGenerationArtifacts(identityRoot).catch(() => undefined)
+      } finally {
+        await maintenance.release().catch(() => undefined)
+      }
+    }
+    return cached
+  }
+  const lock = await acquireManagedMediaGenerationLock(identityRoot, {
+    waitTimeoutMs: LOCK_TIMEOUT_MS,
+    retryDelayMs: LOCK_RETRY_MS
+  })
   try {
+    // A process crash can leave bounded, owner-tagged work/commit/quarantine
+    // trees behind. Only reclaim dead owners while this identity lock is held.
+    await cleanupManagedMediaGenerationArtifacts(identityRoot).catch(() => undefined)
     try {
       return await validateCommitted(root, committedDir, identity, originalSha256, maxEdge, format)
     } catch {
       // This lock owner is responsible for creating or repairing the deterministic commit.
     }
-    const owner = randomUUID()
-    const ownedRoot = path.join(identityRoot, `.work-${owner}`)
+    const ownedRoot = path.join(
+      identityRoot,
+      managedMediaGenerationArtifactName('work', lock.owner)
+    )
     const sidecarRoot = path.join(ownedRoot, 'sidecar')
-    const stagedCommit = path.join(identityRoot, `.commit-${owner}`)
+    const stagedCommit = path.join(
+      identityRoot,
+      managedMediaGenerationArtifactName('commit', lock.owner)
+    )
+    let quarantineDir: string | undefined
     await ensureSafeDirectory(root, sidecarRoot)
     await ensureSafeDirectory(root, stagedCommit)
     try {
@@ -568,22 +631,25 @@ async function generate(
         originalSha256,
         ownedRoot
       )
-      const result = await generateCanvasThumbnailsViaSidecar({
-        cacheRoot: sidecarRoot,
-        items: [{ id: identity, path: snapshotPath }],
-        thumbnail: {
-          levels: [maxEdge],
-          allowUpscale: false,
-          cropTransparent: true,
-          format: format as CanvasThumbnailSidecarThumbnailFormat
+      const result = await generateCanvasThumbnailsViaSidecar(
+        {
+          cacheRoot: sidecarRoot,
+          items: [{ id: identity, path: snapshotPath }],
+          thumbnail: {
+            levels: [maxEdge],
+            allowUpscale: false,
+            cropTransparent: true,
+            format: format as CanvasThumbnailSidecarThumbnailFormat
+          },
+          maxConcurrency: 1,
+          maxDecodedPixels: MAX_DECODED_PIXELS,
+          maxSourceBytes: Math.min(MAX_SOURCE_BYTES, original.reference.sizeBytes!),
+          maxOutputPixels: maxEdge * maxEdge,
+          maxGeneratedBytes: MAX_GENERATED_BYTES,
+          hash: 'sha256'
         },
-        maxConcurrency: 1,
-        maxDecodedPixels: MAX_DECODED_PIXELS,
-        maxSourceBytes: Math.min(MAX_SOURCE_BYTES, original.reference.sizeBytes!),
-        maxOutputPixels: maxEdge * maxEdge,
-        maxGeneratedBytes: MAX_GENERATED_BYTES,
-        hash: 'sha256'
-      })
+        { required: true }
+      )
       if (!result.ok) throw new Error(`Managed derivative sidecar unavailable: ${result.reason}`)
       if (
         !result.response.ok ||
@@ -621,13 +687,13 @@ async function generate(
       }
       const metadata: DerivativeMetadata = {
         ...descriptor,
-        schema: SCHEMA,
+        schema: MANAGED_MEDIA_DERIVATIVE_SCHEMA,
         identity,
         originalSha256,
         format,
-        encoderVersion: ENCODER_VERSION,
-        orientationPolicy: ORIENTATION_POLICY,
-        cropPolicy: CROP_POLICY
+        encoderVersion: MANAGED_MEDIA_DERIVATIVE_ENCODER_VERSION,
+        orientationPolicy: MANAGED_MEDIA_DERIVATIVE_ORIENTATION_POLICY,
+        cropPolicy: MANAGED_MEDIA_DERIVATIVE_CROP_POLICY
       }
       await fs.writeFile(
         path.join(stagedCommit, 'manifest.json'),
@@ -636,18 +702,44 @@ async function generate(
       )
       await fs.chmod(path.join(stagedCommit, 'manifest.json'), 0o400).catch(() => undefined)
       try {
-        await fs.rename(committedDir, path.join(identityRoot, `.quarantine-${Date.now()}-${owner}`))
+        quarantineDir = path.join(
+          identityRoot,
+          managedMediaGenerationArtifactName('quarantine', lock.owner)
+        )
+        await fs.rename(committedDir, quarantineDir)
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        quarantineDir = undefined
       }
       await fs.rename(stagedCommit, committedDir)
-      return await validateCommitted(root, committedDir, identity, originalSha256, maxEdge, format)
+      const validated = await validateCommitted(
+        root,
+        committedDir,
+        identity,
+        originalSha256,
+        maxEdge,
+        format
+      )
+      // The new commit has already been validated and is usable. If a
+      // platform sharing violation prevents removing the old quarantine,
+      // retain it for owner/age-gated recovery rather than failing the request.
+      if (quarantineDir)
+        await removeQuarantinedCommit(root, identityRoot, quarantineDir, lock.owner).catch(
+          () => undefined
+        )
+      return validated
     } finally {
-      await fs.rm(ownedRoot, { recursive: true, force: true }).catch(() => undefined)
-      await fs.rm(stagedCommit, { recursive: true, force: true }).catch(() => undefined)
+      // Private current-operation trees only; stale nonempty trees are not
+      // recursively reclaimed by the recovery pass.
+      await removeOwnedManagedMediaGenerationTree(identityRoot, ownedRoot, lock.owner).catch(
+        () => undefined
+      )
+      await removeOwnedManagedMediaGenerationTree(identityRoot, stagedCommit, lock.owner).catch(
+        () => undefined
+      )
     }
   } finally {
-    await release()
+    await lock.release().catch(() => undefined)
   }
 }
 
@@ -673,10 +765,11 @@ export async function ensureManagedMediaDerivative(
       maxEdge: input.maxEdge,
       original
     }
-  const key = `${root}\0${original.reference.sha256}\0${input.maxEdge}\0${format}`
+  const storeRoot = original.storeRoot ?? root
+  const key = `${storeRoot}\0${original.reference.sha256}\0${input.maxEdge}\0${format}`
   const existing = inflight.get(key)
   if (existing) return existing
-  const promise = generate(root, original, input.maxEdge, format)
+  const promise = generate(storeRoot, original, input.maxEdge, format)
   inflight.set(key, promise)
   try {
     return await promise

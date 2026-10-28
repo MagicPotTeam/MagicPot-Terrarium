@@ -206,10 +206,18 @@ export const assertRemoteFetchHostnameIsNotExplicitlyLocal = (hostname: string):
 }
 
 export const resolveRemoteFetchAddress = async (
-  hostname: string
+  hostname: string,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {}
 ): Promise<RemoteFetchResolvedAddress> => {
+  const throwIfAborted = (): void => {
+    if (!options.signal?.aborted) return
+    throw options.signal.reason instanceof Error
+      ? options.signal.reason
+      : Object.assign(new Error('Remote fetch DNS lookup was aborted.'), { name: 'AbortError' })
+  }
   const normalizedHostname = normalizeRemoteFetchHostname(hostname)
   assertRemoteFetchHostnameIsNotExplicitlyLocal(normalizedHostname)
+  throwIfAborted()
 
   const directIpv4Octets = getIpv4Octets(normalizedHostname)
   if (directIpv4Octets) {
@@ -221,7 +229,57 @@ export const resolveRemoteFetchAddress = async (
     return { address: normalizedHostname, family: 6 }
   }
 
-  const resolved = await dns.lookup(normalizedHostname, { all: true, verbatim: false })
+  const lookup = dns.lookup(normalizedHostname, { all: true, verbatim: false })
+  const timeoutMs =
+    typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs)
+      ? Math.max(1_000, Math.trunc(options.timeoutMs))
+      : undefined
+  const resolved = await new Promise<Awaited<typeof lookup>>((resolve, reject) => {
+    let settled = false
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const cleanup = (): void => {
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      options.signal?.removeEventListener('abort', onAbort)
+    }
+    const finish = (error?: unknown, value?: Awaited<typeof lookup>): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (error !== undefined) reject(error)
+      else resolve(value!)
+    }
+    const onAbort = (): void => {
+      finish(
+        options.signal?.reason instanceof Error
+          ? options.signal.reason
+          : Object.assign(new Error('Remote fetch DNS lookup was aborted.'), {
+              name: 'AbortError'
+            })
+      )
+    }
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    if (timeoutMs !== undefined) {
+      timeoutId = setTimeout(
+        () =>
+          finish(
+            Object.assign(new Error('Remote fetch DNS lookup timed out.'), { name: 'TimeoutError' })
+          ),
+        timeoutMs
+      )
+    }
+    if (options.signal?.aborted) {
+      onAbort()
+      return
+    }
+    // DNS lookup itself is not cancellable on all supported Node versions, but
+    // the bounded wrapper prevents a late result from opening a request after
+    // cancellation or timeout. The handlers also consume late rejections.
+    lookup.then(
+      (value) => finish(undefined, value),
+      (error) => finish(error)
+    )
+  })
+  throwIfAborted()
   if (!resolved.length) {
     throw new Error('Remote fetch URL host could not be resolved.')
   }
@@ -257,10 +315,10 @@ const sanitizeRemoteFetchHeaders = (
   return sanitized
 }
 
-export const parseAndValidateRemoteFetchRequest = async (
+export const validateRemoteFetchRequest = (
   req: LLMRemoteFetchReq,
   config: Config
-): Promise<ValidatedRemoteFetchRequest> => {
+): Omit<ValidatedRemoteFetchRequest, 'resolvedAddress'> => {
   const parsedUrl = new URL(req.url)
   if (parsedUrl.protocol !== 'https:') {
     throw new Error('Remote fetch URL must use https.')
@@ -290,6 +348,15 @@ export const parseAndValidateRemoteFetchRequest = async (
     ),
     MAX_REMOTE_FETCH_TIMEOUT_MS
   )
-  const resolvedAddress = await resolveRemoteFetchAddress(parsedUrl.hostname)
-  return { parsedUrl, headers, timeoutMs, resolvedAddress }
+  assertRemoteFetchHostnameIsNotExplicitlyLocal(parsedUrl.hostname)
+  return { parsedUrl, headers, timeoutMs }
+}
+
+export const parseAndValidateRemoteFetchRequest = async (
+  req: LLMRemoteFetchReq,
+  config: Config
+): Promise<ValidatedRemoteFetchRequest> => {
+  const validated = validateRemoteFetchRequest(req, config)
+  const resolvedAddress = await resolveRemoteFetchAddress(validated.parsedUrl.hostname)
+  return { ...validated, resolvedAddress }
 }

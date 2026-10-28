@@ -7,6 +7,7 @@ import PanelEnvironment from './PanelEnvironment'
 const translations: Record<string, string> = {
   'llm.proxy_mode_title': '魔壶代理模式',
   'llm.proxy_mode_desc': '魔壶代理模式说明',
+  'llm.llm_server_cors_origins_label': '浏览器允许来源（逗号分隔）',
   'environment.comfyui_title': 'ComfyUI',
   'environment.comfyui_desc': 'Unified ComfyUI endpoint',
   'environment.comfy_batch_profiles_title': 'ComfyUI Instances',
@@ -191,6 +192,23 @@ describe('PanelEnvironment', () => {
     expect(screen.getByRole('heading', { name: '魔壶代理模式' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'DCC 桥接' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Adobe 桥接' })).toBeTruthy()
+  })
+
+  it('edits the explicit browser CORS allowlist without changing bearer tokens', async () => {
+    const saveSettings = vi.fn()
+    render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={saveSettings} />)
+
+    const origins = await screen.findByLabelText('浏览器允许来源（逗号分隔）')
+    fireEvent.change(origins, {
+      target: { value: ' http://localhost:3000, http://localhost:3000, https://lan.example ' }
+    })
+    fireEvent.blur(origins)
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      local_llm_server_config: {
+        cors_allowed_origins: ['http://localhost:3000', 'https://lan.example']
+      }
+    })
   })
 
   it('renders unified ComfyUI settings and batch profiles without a mode switch', async () => {

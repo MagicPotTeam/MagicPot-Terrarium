@@ -1,4 +1,5 @@
 import fs from 'fs'
+import fsPromises from 'fs/promises'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -40,6 +41,7 @@ describe('FsSvcImpl', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     clearScopedLocalMediaPathsForTest()
     fs.rmSync(testRoot, { recursive: true, force: true })
   })
@@ -60,6 +62,162 @@ describe('FsSvcImpl', () => {
         filename: 'image.png'
       })
     })
+
+    it('does not let a caller byte budget authorize an arbitrary path', async () => {
+      const fullPath = path.join(testRoot, 'image.png')
+      fs.writeFileSync(fullPath, Buffer.from([10, 20, 30]))
+      const readFile = vi.spyOn(fsPromises, 'readFile')
+
+      await expect(service.readImageFromPath({ fullPath, maxBytes: 3 })).rejects.toThrow(
+        'Local image path is not authorized'
+      )
+      expect(readFile).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('readImageFromPath byte budgets', () => {
+    const createAuthorizedImage = (): string => {
+      const fullPath = path.join(testRoot, 'image.png')
+      fs.writeFileSync(fullPath, Buffer.from([10, 20, 30]))
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+      return fullPath
+    }
+
+    it('accepts an image exactly at the caller byte budget', async () => {
+      const fullPath = createAuthorizedImage()
+      const readFile = vi.spyOn(fsPromises, 'readFile')
+      const handle = await fsPromises.open(fullPath, 'r')
+      const close = vi.spyOn(handle, 'close')
+      vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle)
+
+      await expect(service.readImageFromPath({ fullPath, maxBytes: 3 })).resolves.toEqual({
+        image: new Uint8Array([10, 20, 30]),
+        filename: 'image.png'
+      })
+      expect(readFile).not.toHaveBeenCalled()
+      expect(close).toHaveBeenCalledOnce()
+    })
+
+    it('rejects a preexisting oversized image before reading its bytes', async () => {
+      const fullPath = createAuthorizedImage()
+      const readFile = vi.spyOn(fsPromises, 'readFile')
+      const handle = await fsPromises.open(fullPath, 'r')
+      const read = vi.spyOn(handle, 'read')
+      const close = vi.spyOn(handle, 'close')
+      vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle)
+
+      await expect(service.readImageFromPath({ fullPath, maxBytes: 2 })).rejects.toThrow(
+        /2-byte full-file IPC limit/
+      )
+      expect(readFile).not.toHaveBeenCalled()
+      expect(read).not.toHaveBeenCalled()
+      expect(close).toHaveBeenCalledOnce()
+    })
+
+    it('preserves exact bytes when a successful read spans multiple chunks', async () => {
+      const fullPath = createAuthorizedImage()
+      const expected = Buffer.alloc(64 * 1024 + 17, 23)
+      expected[0] = 11
+      expected[expected.length - 1] = 99
+      fs.writeFileSync(fullPath, expected)
+
+      await expect(
+        service.readImageFromPath({ fullPath, maxBytes: expected.length })
+      ).resolves.toEqual({ image: new Uint8Array(expected), filename: 'image.png' })
+    })
+
+    it('rejects a directory through the opened handle before reading', async () => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+      const handle = await fsPromises.open(testRoot, 'r')
+      const read = vi.spyOn(handle, 'read')
+      const close = vi.spyOn(handle, 'close')
+      vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle)
+
+      await expect(service.readImageFromPath({ fullPath: testRoot, maxBytes: 3 })).rejects.toThrow(
+        `Path is not a file: ${testRoot}`
+      )
+      expect(read).not.toHaveBeenCalled()
+      expect(close).toHaveBeenCalledOnce()
+    })
+
+    it.each([3, 64 * 1024 + 5])(
+      'reads at most the %i-byte budget plus one detection byte after a file grows',
+      async (maxBytes) => {
+        const fullPath = createAuthorizedImage()
+        const handle = await fsPromises.open(fullPath, 'r')
+        const originalStat = handle.stat.bind(handle)
+        vi.spyOn(handle, 'stat').mockImplementationOnce(async () => {
+          const stats = await originalStat()
+          fs.writeFileSync(fullPath, Buffer.alloc(maxBytes + 1000, 7))
+          return stats
+        })
+        const read = vi.spyOn(handle, 'read')
+        const close = vi.spyOn(handle, 'close')
+        vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle)
+        const readFile = vi.spyOn(fsPromises, 'readFile')
+
+        await expect(service.readImageFromPath({ fullPath, maxBytes })).rejects.toThrow(
+          `${maxBytes}-byte IPC limit`
+        )
+        const requests =
+          maxBytes < 64 * 1024
+            ? [{ length: maxBytes + 1, position: 0 }]
+            : [
+                { length: 64 * 1024, position: 0 },
+                { length: 6, position: 64 * 1024 }
+              ]
+        expect(read).toHaveBeenCalledTimes(requests.length)
+        requests.forEach((request, index) => {
+          expect(read).toHaveBeenNthCalledWith(
+            index + 1,
+            expect.any(Buffer),
+            0,
+            request.length,
+            request.position
+          )
+        })
+        expect(readFile).not.toHaveBeenCalled()
+        expect(close).toHaveBeenCalledOnce()
+      }
+    )
+
+    it('closes the bounded file handle if a read fails', async () => {
+      const fullPath = createAuthorizedImage()
+      const handle = await fsPromises.open(fullPath, 'r')
+      vi.spyOn(handle, 'read').mockRejectedValueOnce(new Error('synthetic read failed'))
+      const close = vi.spyOn(handle, 'close')
+      vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle)
+
+      await expect(service.readImageFromPath({ fullPath, maxBytes: 3 })).rejects.toThrow(
+        'synthetic read failed'
+      )
+      expect(close).toHaveBeenCalledOnce()
+    })
+
+    it('continues to enforce the default full-file limit without a caller budget', async () => {
+      const fullPath = createAuthorizedImage()
+      const stats = await fsPromises.stat(fullPath)
+      vi.spyOn(fsPromises, 'stat').mockResolvedValueOnce({
+        ...stats,
+        size: MAX_FULL_FILE_BYTES + 1,
+        isFile: () => true
+      })
+      const readFile = vi.spyOn(fsPromises, 'readFile')
+
+      await expect(service.readImageFromPath({ fullPath })).rejects.toThrow(/full-file IPC limit/)
+      expect(readFile).not.toHaveBeenCalled()
+    })
+
+    it.each([0, -1, 1.5, NaN, Infinity, MAX_FULL_FILE_BYTES + 1])(
+      'rejects invalid direct-service byte budget %s without reading',
+      async (maxBytes) => {
+        const fullPath = createAuthorizedImage()
+        const readFile = vi.spyOn(fsPromises, 'readFile')
+
+        await expect(service.readImageFromPath({ fullPath, maxBytes })).rejects.toThrow(/maxBytes/)
+        expect(readFile).not.toHaveBeenCalled()
+      }
+    )
   })
 
   describe('readFileFromPath', () => {

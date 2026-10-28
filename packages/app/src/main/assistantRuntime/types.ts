@@ -2,14 +2,7 @@ import { getAgentSessionKey, normalizeAgentRoute } from '@shared/agent'
 import type { ChatAttachment, ChatMessage, LLMChatResp } from '@shared/api/svcLLMProxy'
 
 export type AssistantChannel =
-  | 'telegram'
-  | 'feishu'
-  | 'discord'
-  | 'qq'
-  | 'wechat'
-  | 'imessage'
-  | 'generic'
-  | string
+  'telegram' | 'feishu' | 'discord' | 'qq' | 'wechat' | 'imessage' | 'generic' | string
 export type AssistantScopeType = 'dm' | 'group' | 'channel' | 'thread' | 'topic'
 
 export type AssistantRoute = {
@@ -43,12 +36,7 @@ export type AssistantInboundMessage = {
 }
 
 export type AssistantRunStatus =
-  | 'queued'
-  | 'acknowledged'
-  | 'running'
-  | 'completed'
-  | 'cancelled'
-  | 'failed'
+  'queued' | 'acknowledged' | 'running' | 'completed' | 'cancelled' | 'failed'
 
 export type AssistantRunOrigin = 'new' | 'continue' | 'retry' | 'resume'
 export type AssistantResumeMode = 'requeue'
@@ -58,7 +46,7 @@ export type AssistantExecutionPolicy = {
   mode?: AssistantExecutionMode
   allowHistory?: boolean
   contextMessageLimit?: number | 'all'
-  allowedToolNames?: string[]
+  allowedToolNames?: string[] | null
   maxToolCalls?: number
   traceLabel?: string
   captureArtifacts?: boolean
@@ -83,20 +71,10 @@ export type AssistantQualityGateState = {
 }
 
 export type AssistantTaskGroupAction =
-  | 'start'
-  | 'progress'
-  | 'cancel'
-  | 'resume'
-  | 'approve'
-  | 'export'
+  'start' | 'progress' | 'cancel' | 'resume' | 'approve' | 'export'
 
 export type AssistantTaskGroupStatus =
-  | 'draft'
-  | 'running'
-  | 'waiting-approval'
-  | 'approved'
-  | 'exported'
-  | 'cancelled'
+  'draft' | 'running' | 'waiting-approval' | 'approved' | 'exported' | 'cancelled'
 
 export type AssistantTaskGroupProgress = {
   completed?: number

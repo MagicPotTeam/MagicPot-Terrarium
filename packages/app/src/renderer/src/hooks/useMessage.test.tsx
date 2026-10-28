@@ -35,6 +35,19 @@ function TestSuccessComponent() {
   )
 }
 
+function TestOverloadComponent() {
+  const { notifyError } = useMessage()
+
+  return (
+    <button
+      type="button"
+      onClick={() => notifyError('Our servers are currently overloaded. Please try again later.')}
+    >
+      trigger overload
+    </button>
+  )
+}
+
 describe('useMessage', () => {
   beforeEach(() => {
     enqueueSnackbarMock.mockReset()
@@ -65,6 +78,19 @@ describe('useMessage', () => {
     render(<TestSuccessComponent />)
     fireEvent.click(screen.getByRole('button', { name: 'trigger success' }))
 
+    expect(enqueueSnackbarMock).not.toHaveBeenCalled()
+  })
+
+  it('suppresses transient model-capacity error snackbars', () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    render(<TestOverloadComponent />)
+    fireEvent.click(screen.getByRole('button', { name: 'trigger overload' }))
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '[Error]',
+      'Our servers are currently overloaded. Please try again later.'
+    )
     expect(enqueueSnackbarMock).not.toHaveBeenCalled()
   })
 })

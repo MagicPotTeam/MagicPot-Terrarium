@@ -7,10 +7,30 @@ import { generateBootstrapTrustSource, main } from './generate-bootstrap-trust-c
 
 const descriptorKey = Buffer.alloc(32, 1).toString('base64')
 const manifestKey = Buffer.alloc(32, 2).toString('base64')
+const argsFor = (output) => [
+  '--output',
+  output,
+  '--descriptor-key-id',
+  'descriptor-key',
+  '--descriptor-public-key-base64',
+  descriptorKey,
+  '--manifest-key-id',
+  'manifest-key',
+  '--manifest-public-key-base64',
+  manifestKey
+]
 
 test('emits deterministic compiled public trust only', () => {
-  const source = generateBootstrapTrustSource('descriptor-key', descriptorKey, 'manifest-key', manifestKey)
-  assert.equal(source, generateBootstrapTrustSource('descriptor-key', descriptorKey, 'manifest-key', manifestKey))
+  const source = generateBootstrapTrustSource(
+    'descriptor-key',
+    descriptorKey,
+    'manifest-key',
+    manifestKey
+  )
+  assert.equal(
+    source,
+    generateBootstrapTrustSource('descriptor-key', descriptorKey, 'manifest-key', manifestKey)
+  )
   assert.match(source, /CompiledBootstrapTrustConfiguration/)
   assert.match(source, /CreateCompiled\(\s*true,/)
   assert.match(source, /\["descriptor-key"\]/)
@@ -20,15 +40,36 @@ test('emits deterministic compiled public trust only', () => {
 })
 
 test('rejects non-canonical or non-32-byte public keys and unsafe key IDs', () => {
-  assert.throws(() => generateBootstrapTrustSource('bad key', descriptorKey, 'manifest-key', manifestKey), /key-id is invalid/)
-  assert.throws(() => generateBootstrapTrustSource('key', Buffer.alloc(31).toString('base64'), 'manifest-key', manifestKey), /32 bytes/)
-  assert.throws(() => generateBootstrapTrustSource('key', descriptorKey.replace(/=$/, ''), 'manifest-key', manifestKey), /canonical base64/)
+  assert.throws(
+    () => generateBootstrapTrustSource('bad key', descriptorKey, 'manifest-key', manifestKey),
+    /key-id is invalid/
+  )
+  assert.throws(
+    () =>
+      generateBootstrapTrustSource(
+        'key',
+        Buffer.alloc(31).toString('base64'),
+        'manifest-key',
+        manifestKey
+      ),
+    /32 bytes/
+  )
+  assert.throws(
+    () =>
+      generateBootstrapTrustSource(
+        'key',
+        descriptorKey.replace(/=$/, ''),
+        'manifest-key',
+        manifestKey
+      ),
+    /canonical base64/
+  )
 })
 
 test('requires an absolute safe C# output and atomically replaces a regular file', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'magicpot-bootstrap-trust-'))
   const output = path.join(root, 'CompiledBootstrapTrustConfiguration.Generated.cs')
-  const args = ['--output', output, '--descriptor-key-id', 'descriptor-key', '--descriptor-public-key-base64', descriptorKey, '--manifest-key-id', 'manifest-key', '--manifest-public-key-base64', manifestKey]
+  const args = argsFor(output)
   await main(args)
   const first = await readFile(output, 'utf8')
   await main(args)
@@ -36,12 +77,18 @@ test('requires an absolute safe C# output and atomically replaces a regular file
   await assert.rejects(main(['--output', 'relative.cs', ...args.slice(2)]), /absolute/)
 })
 
-test('rejects a symlinked output parent', async (t) => {
-  if (process.platform === 'win32') return t.skip('symlink creation is not generally available on Windows test hosts')
+test('rejects symlinked output parents without creating directories in the target', async (t) => {
+  if (process.platform === 'win32')
+    return t.skip('symlink creation is not generally available on Windows test hosts')
   const root = await mkdtemp(path.join(os.tmpdir(), 'magicpot-bootstrap-trust-link-'))
   const real = path.join(root, 'real')
   const linked = path.join(root, 'linked')
+  const outsideNested = path.join(real, 'new-directory')
   await mkdir(real)
   await symlink(real, linked, 'dir')
-  await assert.rejects(main(['--output', path.join(linked, 'trust.cs'), '--descriptor-key-id', 'descriptor-key', '--descriptor-public-key-base64', descriptorKey, '--manifest-key-id', 'manifest-key', '--manifest-public-key-base64', manifestKey]), /real directories/)
+  await assert.rejects(
+    main(argsFor(path.join(linked, 'new-directory', 'trust.cs'))),
+    /real directories/
+  )
+  await assert.rejects(readFile(outsideNested), { code: 'ENOENT' })
 })

@@ -66,6 +66,10 @@ export default function ProjectCanvasPageInlineTextEditor({
   setSelectedIds,
   setTool
 }: ProjectCanvasPageInlineTextEditorProps) {
+  const editSessionRef = React.useRef({ edit: inlineTextEdit, handled: false })
+  if (editSessionRef.current.edit !== inlineTextEdit) {
+    editSessionRef.current = { edit: inlineTextEdit, handled: false }
+  }
   if (!inlineTextEdit) {
     return null
   }
@@ -78,7 +82,10 @@ export default function ProjectCanvasPageInlineTextEditor({
     : buildCanvasSelectionOutlineStyles(true)
   const portalHost = canvasContainerElement ?? canvasContainerRef.current
 
+  // Keep a late blur bound to this draft, never to a subsequently opened editor.
+  const editSession = editSessionRef.current
   const handleBlur = (event: React.FocusEvent<HTMLTextAreaElement>) => {
+    if (editSession.handled) return
     const trimmedText = inlineTextEdit.text.trim()
     const actualWidth = event.target.offsetWidth / stageScale
     const actualHeight = event.target.offsetHeight / stageScale
@@ -97,10 +104,12 @@ export default function ProjectCanvasPageInlineTextEditor({
         return
       }
 
+      editSession.handled = true
       setInlineTextEdit(null)
       return
     }
 
+    editSession.handled = true
     if (trimmedText) {
       let bestFontSize = 16
       let finalWidth = actualWidth
@@ -237,7 +246,10 @@ export default function ProjectCanvasPageInlineTextEditor({
       onKeyDown={(event) => {
         event.stopPropagation()
         if (event.key === 'Escape') {
-          event.currentTarget.blur()
+          event.preventDefault()
+          editSession.handled = true
+          setInlineTextEdit(null)
+          setTool('select')
         }
       }}
       style={{

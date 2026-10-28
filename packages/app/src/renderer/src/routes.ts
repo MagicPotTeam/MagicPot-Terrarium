@@ -27,6 +27,7 @@ const ContactPage = lazyWithRetry(() => import('./pages/ContactPage'))
 const QAppExecutePage = lazyWithRetry(() => import('./pages/QuickAppPage/QAppExecutePage'))
 const QAppDesignPage = lazyWithRetry(() => import('./pages/QuickAppPage/QAppDesignPage'))
 const QAppWorkshopPage = lazyWithRetry(() => import('./pages/QuickAppPage/QAppWorkshopPage'))
+const WorkshopPluginsPage = lazyWithRetry(() => import('./pages/QuickAppPage/WorkshopPluginsPage'))
 const TargetManagerPage = lazyWithRetry(() => import('./pages/QuickAppPage/TargetManagerPage'))
 const CustomSkillManagerPage = lazyWithRetry(
   () => import('./pages/QuickAppPage/CustomSkillManagerPage')
@@ -44,6 +45,7 @@ export type PageType =
   | 'contact'
   | 'qappexecute'
   | 'workshop'
+  | 'workshop_plugins'
   | 'qappdesign'
   | 'target_manager'
   | 'custom_skill_manager'
@@ -103,6 +105,15 @@ export const routes: RouteConfig[] = [
     labelKey: 'menu.custom_workshop',
     Icon: ArchitectureIcon,
     Page: QAppWorkshopPage,
+    showInSidebar: false
+  },
+  {
+    id: 'workshop_plugins',
+    path: '/workshop/plugins',
+    label: 'Plugins',
+    labelKey: 'figplugin.center.title',
+    Icon: ArchitectureIcon,
+    Page: WorkshopPluginsPage,
     showInSidebar: false
   },
   {

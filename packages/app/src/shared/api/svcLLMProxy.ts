@@ -1,3 +1,4 @@
+import type { LLMRetryStatus } from '../llm/modelCapacityRetry'
 // LLM 代理服务 API 定义
 // 用于 AIEngine 实例之间的 LLM 请求转发
 
@@ -7,17 +8,30 @@ import type { AgentRouteLike } from '@shared/agent'
 import {
   LLMDeployment,
   LLMModelUse,
+  LLMOpenAIApiMode,
+  LLMProfileCallType,
+  LLMProvider,
   TaggerProviderOption,
   TaggerRuntimeCacheScopeOption
 } from '@shared/config/config'
 import type {
+  ImageRequestContract,
   LLMImageHistoryPolicy,
   OpenAIImageGenerationOptions,
+  ToolHistoryEntry,
+  LLMToolStatus,
   VideoGenerationOptions
 } from '@shared/llm/types'
-import type { LLMReasoningEffort } from '@shared/llm/profileCapabilities'
+import type {
+  LLMReasoningEffort,
+  ProviderAttachmentTransport
+} from '@shared/llm/profileCapabilities'
 import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
+import type { LLMStructuredOutput } from '@shared/llm/structuredOutput'
+import type { BinaryChunkFrame, BinaryChunkReference } from '../binaryChunkProtocol'
+
+export type { LLMToolStatus } from '@shared/llm/types'
 
 // ==================== 聊天相关类型 ====================
 
@@ -32,6 +46,8 @@ export type ChatAttachment = {
   sizeBytes?: number
   sourceWidth?: number
   sourceHeight?: number
+  /** Caller-requested image budget hint, not a guarantee of provider billing. */
+  imageDetail?: 'low'
   ocrResult?: OCRResult
   finishReason?: 'stop' | 'length' | 'tool_call' | 'cancelled' | 'error'
   metadata?: Record<string, unknown>
@@ -40,6 +56,14 @@ export type ChatAttachment = {
   reportBundleRefName?: string
   reportBundleManifestUrl?: string
   reportBundleLabel?: string
+  /** Optional pre-discovered image count for a provider-owned report bundle; no I/O is implied. */
+  reportBundleImageCount?: number
+  /** Optional content-addressed binary payload used at the main-process LLM boundary. */
+  binary?: {
+    transport: 'chunked-binary-v1'
+    reference: BinaryChunkReference
+    chunks: BinaryChunkFrame[]
+  }
 }
 
 export type ChatMessage = {
@@ -51,6 +75,8 @@ export type ChatMessage = {
   /** 生成此消息的模型名称（仅 assistant 消息，用于 UI 显示） */
   preferredDownloadBaseName?: string
   modelName?: string
+  /** Structured tool-loop records persisted with assistant messages. */
+  toolHistory?: ToolHistoryEntry[]
 }
 
 export type OCRBoundingBox = {
@@ -126,18 +152,31 @@ export type LLMProfileScope = 'agent' | 'qapp'
  * 聊天请求
  */
 export type LLMChatReq = {
+  /** Request-scoped cancellation ownership; never forwarded as provider authority. */
+  cancellationId?: string
+  /** Main-issued identifier used to correlate Desktop, Bridge and Provider stages. */
+  correlationId?: string
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
+  /** Main-owned provider output hint; it does not authorize host execution. */
+  structuredOutput?: LLMStructuredOutput
   temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
   videoGenerationOptions?: VideoGenerationOptions
   skillRuntime?: LLMChatSkillRuntime
   route?: AgentRouteLike
   /** 指定使用的模型配置 ID，如果不指定则使用服务端默认配置 */
   profileId?: string
+  /** Opaque main-issued revision for explicit consent to a model configuration snapshot. */
+  expectedProfileRevision?: string
+  /** Explicit comparison transport; local is for the authenticated receiving proxy, never recursive. */
+  comparisonRouting?: 'configured' | 'local'
+  /** Optional per-request override for OpenAI-compatible API routing. */
+  apiMode?: LLMOpenAIApiMode
   profileScope?: LLMProfileScope
   /** 会话续传 URL（可选） */
   sessionUrl?: string
@@ -178,7 +217,8 @@ export type LLMChatOptions = {
 export type LLMChatStreamReq = LLMChatReq
 
 export type LLMChatStreamResp = {
-  type: 'text-delta' | 'attachment' | 'session' | 'done' | 'error'
+  type: 'text-delta' | 'attachment' | 'session' | 'tool-status' | 'retry' | 'done' | 'error'
+  retry?: LLMRetryStatus
   /** 增量内容 */
   delta: string
   /** 是否完成 */
@@ -193,7 +233,12 @@ export type LLMChatStreamResp = {
   ocrResult?: OCRResult
   finishReason?: 'stop' | 'length' | 'tool_call' | 'cancelled' | 'error'
   error?: string
+  /** Sanitized diagnostic HTTP status from the main process, when available. */
+  status?: number
+  /** Bounded/redacted diagnostic body from the main process; never raw upstream content. */
+  body?: string
   metadata?: Record<string, unknown>
+  toolStatus?: LLMToolStatus
   usage?: {
     promptTokens?: number
     inputTextTokens?: number
@@ -206,20 +251,42 @@ export type LLMChatStreamResp = {
 /**
  * 获取可用的模型配置列表
  */
-export type LLMListProfilesReq = {}
+export type LLMListProfilesReq = {
+  includeConfigurationRevision?: boolean
+  comparisonRouting?: 'configured' | 'local'
+}
 
 export type LLMListProfilesResp = {
+  comparisonDestination?: { kind: 'local' } | { kind: 'remote'; origin: string }
   profiles: Array<{
     id: string
     /** Base config profile ID when `id` represents a model-specific composite selection. */
     base_profile_id?: string
+    /** Opaque consent revision; absent when snapshot-pinned requests are unavailable. */
+    configurationRevision?: string
     model_name: string
+    /** Resolved standard API route; absent for extension-owned/local runtime routes. */
+    provider?: LLMProvider
+    /** Effective OpenAI wire mode, not the configured `auto` value. */
+    api_mode?: Exclude<LLMOpenAIApiMode, 'auto'>
+    /** Wire modes by request override; `default` keeps config, `auto` forces auto resolution. */
+    openai_api_modes?: Record<'default' | LLMOpenAIApiMode, Exclude<LLMOpenAIApiMode, 'auto'>>
+    call_type?: LLMProfileCallType
+    auth_mode?: string
     deployment?: LLMDeployment
     model_use?: LLMModelUse
     context_window_tokens?: number
     context_budget_tokens?: number
+    max_input_images?: number
+    maxInputImages?: number
+    max_images?: number
+    maxImages?: number
     is_vision_model?: boolean
     is_ocr_model?: boolean
+    /** Normalized declared capabilities, never inferred from model names. */
+    attachment_transports?: ProviderAttachmentTransport[]
+    preferred_attachment_transport?: ProviderAttachmentTransport
+    supports_session_continuation?: boolean
     tagger_provider?: TaggerProviderOption
     tagger_endpoint?: string
     tagger_runtime_cache_scope?: TaggerRuntimeCacheScopeOption
@@ -242,6 +309,7 @@ export type LLMServerStatusResp = {
  * 远程 HTTP 请求代理（通过 main 进程的 net.fetch 发起，正确处理系统代理和 SSL）
  */
 export type LLMRemoteFetchReq = {
+  cancellationId?: string
   url: string
   method: 'GET' | 'POST'
   body?: string
@@ -256,8 +324,27 @@ export type LLMRemoteFetchResp = {
   body: string
 }
 
+export type LLMExternalAgentStreamReq = {
+  cancellationId?: string
+  url: string
+  method: 'POST'
+  body?: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+  conversationId?: string
+  runId?: string
+}
+
+export type LLMExternalAgentStreamResp = LLMChatStreamResp & {
+  eventId?: string
+  runId?: string
+  terminal?: boolean
+}
+
 export type LLMCancelConversationReq = {
   conversationId: string
+  /** When supplied, a delayed cancel cannot abort a later request in the same chat. */
+  cancellationId?: string
 }
 
 export type LLMCancelConversationResp = {
@@ -338,6 +425,16 @@ export type LLMProxySvc = {
    */
   remoteFetch(req: LLMRemoteFetchReq): Promise<LLMRemoteFetchResp>
 
+  /**
+   * Stream a configured external-agent endpoint without buffering the response.
+   * The main process validates the endpoint and forwards only raw SSE/NDJSON
+   * events; JSON-only responses use an explicit non-stream fallback event.
+   */
+  externalAgentStream(
+    req: LLMExternalAgentStreamReq,
+    resp: ServerStreaming<LLMExternalAgentStreamResp>
+  ): Promise<void>
+
   cancelConversation(req: LLMCancelConversationReq): Promise<LLMCancelConversationResp>
 
   uploadHy3DModel(req: LLMUploadHy3DModelReq): Promise<LLMUploadHy3DModelResp>
@@ -362,6 +459,9 @@ export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
   },
   remoteFetch: {
     type: 'unary'
+  },
+  externalAgentStream: {
+    type: 'serverStreaming'
   },
   cancelConversation: {
     type: 'unary'

@@ -845,20 +845,16 @@ describe('chatStorage', () => {
     expect(fakeIndexedDb.deletedNames).toEqual([])
   })
 
-  it('resets corrupted IndexedDB storage after fatal read errors and accepts future saves', async () => {
+  it('preserves corrupted IndexedDB data and surfaces read errors for a later retry', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
 
     const storage = await import('./chatStorage')
 
-    await expect(storage.loadAllSessions('default')).resolves.toEqual([])
-    expect(fakeIndexedDb.deletedNames).toEqual(['magicpot-chat'])
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      '[ChatStorage] Reset corrupted IndexedDB database "magicpot-chat".'
-    )
+    await expect(storage.loadAllSessions('default')).rejects.toThrow(/missing file|irrecoverable/i)
+    expect(fakeIndexedDb.deletedNames).toEqual([])
 
     await storage.saveSessionToDB(
       {
@@ -880,5 +876,243 @@ describe('chatStorage', () => {
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       expect.stringContaining('[ChatStorage] loadAllSessions failed: NotReadableError:')
     )
+  })
+
+  describe('guarded saveSessionToDB (expectedSession)', () => {
+    const session = (id: string, content: string): import('./chatStorage').ChatSession => ({
+      id,
+      title: id,
+      messages: [{ role: 'user', content }]
+    })
+
+    it('rejects a stale whole-snapshot save instead of overwriting a newer reply', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+
+      const v0 = session('cross-writer', 'old draft')
+      await storage.saveSessionToDB(v0, 'workspace-a')
+      // Writer A advances the record with a new reply.
+      const vNewReply = session('cross-writer', 'new reply from A')
+      await storage.saveSessionToDB(vNewReply, 'workspace-a')
+
+      // Writer B still holds the old snapshot and must not clobber A's reply.
+      const vB = session('cross-writer', 'stale draft from B')
+      await expect(
+        storage.saveSessionToDB(vB, 'workspace-a', { expectedSession: v0 })
+      ).rejects.toMatchObject({
+        name: 'ChatSessionSaveConflictError',
+        code: 'CHAT_SESSION_SAVE_CONFLICT'
+      })
+
+      await expect(storage.loadSessionFromDB('cross-writer', 'workspace-a')).resolves.toMatchObject(
+        {
+          messages: [{ role: 'user', content: 'new reply from A' }]
+        }
+      )
+    })
+
+    it('applies the guarded save when the stored record still equals the expected snapshot', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+
+      const v0 = session('guarded-ok', 'v0')
+      await storage.saveSessionToDB(v0, 'workspace-a')
+      const v1 = session('guarded-ok', 'v1 reply')
+      await storage.saveSessionToDB(v1, 'workspace-a', { expectedSession: v0 })
+
+      await expect(storage.loadSessionFromDB('guarded-ok', 'workspace-a')).resolves.toMatchObject({
+        messages: [{ role: 'user', content: 'v1 reply' }]
+      })
+    })
+
+    it('rejects a guarded create when a record already exists', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+
+      await storage.saveSessionToDB(session('create-guard', 'existing'), 'workspace-a')
+      await expect(
+        storage.saveSessionToDB(session('create-guard', 'duplicate'), 'workspace-a', {
+          expectedSession: null
+        })
+      ).rejects.toMatchObject({ name: 'ChatSessionSaveConflictError' })
+      await expect(storage.loadSessionFromDB('create-guard', 'workspace-a')).resolves.toMatchObject(
+        {
+          messages: [{ role: 'user', content: 'existing' }]
+        }
+      )
+    })
+
+    it('keeps the same id isolated across storage scopes during a guarded create', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+
+      await storage.saveSessionToDB(session('shared-id', 'scope B'), 'workspace-b')
+      // Creating the same id in workspace-a must not conflict with workspace-b.
+      await storage.saveSessionToDB(session('shared-id', 'scope A'), 'workspace-a', {
+        expectedSession: null
+      })
+
+      await expect(storage.loadSessionFromDB('shared-id', 'workspace-a')).resolves.toMatchObject({
+        messages: [{ role: 'user', content: 'scope A' }]
+      })
+      await expect(storage.loadSessionFromDB('shared-id', 'workspace-b')).resolves.toMatchObject({
+        messages: [{ role: 'user', content: 'scope B' }]
+      })
+    })
+
+    it('does not resurrect a deleted session through a guarded save', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+
+      const v0 = session('deleted-guard', 'before delete')
+      await storage.saveSessionToDB(v0, 'workspace-a')
+      storage.setSessionDeleteTombstone('deleted-guard', 'workspace-a')
+      await storage.deleteSessionFromDB('deleted-guard', 'workspace-a')
+
+      await storage.saveSessionToDB(session('deleted-guard', 'stale replay'), 'workspace-a', {
+        expectedSession: v0
+      })
+      await expect(storage.loadSessionFromDB('deleted-guard', 'workspace-a')).resolves.toBeNull()
+    })
+
+    it('treats an identical snapshot retry as idempotent', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+
+      const v0 = session('idempotent', 'v0')
+      await storage.saveSessionToDB(v0, 'workspace-a')
+      const v1 = session('idempotent', 'v1')
+      await storage.saveSessionToDB(v1, 'workspace-a', { expectedSession: v0 })
+      // Retrying the exact snapshot that is now stored must succeed, not conflict.
+      await storage.saveSessionToDB(v1, 'workspace-a', { expectedSession: v1 })
+
+      await expect(storage.loadSessionFromDB('idempotent', 'workspace-a')).resolves.toMatchObject({
+        messages: [{ role: 'user', content: 'v1' }]
+      })
+    })
+
+    it('treats a lost-ack retry of an already-persisted snapshot as idempotent without a new put', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+
+      await storage.saveSessionToDB(session('lost-ack', 'v1'), 'workspace-a')
+      const putCountBefore = fakeIndexedDb.state.putCount
+      // Caller still thinks it started from v0 (ack lost); stored already equals the incoming v1.
+      await storage.saveSessionToDB(session('lost-ack', 'v1'), 'workspace-a', {
+        expectedSession: session('lost-ack', 'v0')
+      })
+      expect(fakeIndexedDb.state.putCount).toBe(putCountBefore)
+      await expect(storage.loadSessionFromDB('lost-ack', 'workspace-a')).resolves.toMatchObject({
+        messages: [{ role: 'user', content: 'v1' }]
+      })
+    })
+
+    it('treats a guarded create retry of an already-persisted snapshot as idempotent without a new put', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+
+      await storage.saveSessionToDB(session('create-retry', 'v1'), 'workspace-a', {
+        expectedSession: null
+      })
+      const putCountBefore = fakeIndexedDb.state.putCount
+      await storage.saveSessionToDB(session('create-retry', 'v1'), 'workspace-a', {
+        expectedSession: null
+      })
+      expect(fakeIndexedDb.state.putCount).toBe(putCountBefore)
+      await expect(storage.loadSessionFromDB('create-retry', 'workspace-a')).resolves.toMatchObject(
+        { messages: [{ role: 'user', content: 'v1' }] }
+      )
+    })
+
+    it('treats equal sessions with different object key order / incomplete raw fields as equal (no self-conflict)', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+      type S = import('./chatStorage').ChatSession
+
+      const base = {
+        id: 'key-order',
+        title: 'key-order',
+        messages: [{ role: 'user', content: 'hi' }],
+        sessionUrl: 'https://x.test/s',
+        sessionProfileId: 'base-model',
+        profileId: 'base-model',
+        draft: { inputValue: 'd', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 5 }
+      } as unknown as S
+      await storage.saveSessionToDB(base, 'workspace-a')
+
+      // Same semantic content, different object key insertion order and missing storageScope.
+      const expected = {
+        draft: { updatedAt: 5, pendingHiddenContext: '', pendingAttachments: [], inputValue: 'd' },
+        profileId: 'base-model',
+        sessionProfileId: 'base-model',
+        messages: [{ content: 'hi', role: 'user' }],
+        title: 'key-order',
+        id: 'key-order',
+        sessionUrl: 'https://x.test/s'
+      } as unknown as S
+      const incoming = {
+        ...base,
+        messages: [{ content: 'hi', role: 'user' }]
+      } as unknown as S
+      await expect(
+        storage.saveSessionToDB(incoming, 'workspace-a', { expectedSession: expected })
+      ).resolves.toBeUndefined()
+    })
+
+    it('supports consecutive raw saves and clearing the draft without self-conflict', async () => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+      type S = import('./chatStorage').ChatSession
+
+      const draft = {
+        inputValue: 'draft',
+        pendingAttachments: [],
+        pendingHiddenContext: '',
+        updatedAt: 1
+      }
+      const raw0 = {
+        id: 'raw-seq',
+        title: 'raw-seq',
+        messages: [{ role: 'user', content: 'q' }],
+        draft
+      } as unknown as S
+      await storage.saveSessionToDB(raw0, 'workspace-a', { expectedSession: null })
+
+      const raw1 = {
+        id: 'raw-seq',
+        title: 'raw-seq',
+        messages: [
+          { role: 'user', content: 'q' },
+          { role: 'assistant', content: 'a' }
+        ],
+        draft
+      } as unknown as S
+      await storage.saveSessionToDB(raw1, 'workspace-a', { expectedSession: raw0 })
+
+      // Clearing the draft (no draft field) against the raw snapshot that still had one.
+      const raw2 = {
+        id: 'raw-seq',
+        title: 'raw-seq',
+        messages: [
+          { role: 'user', content: 'q' },
+          { role: 'assistant', content: 'a' }
+        ]
+      } as unknown as S
+      await storage.saveSessionToDB(raw2, 'workspace-a', { expectedSession: raw1 })
+
+      const loaded = await storage.loadSessionFromDB('raw-seq', 'workspace-a')
+      expect(loaded?.messages).toHaveLength(2)
+      expect(loaded?.draft).toBeUndefined()
+    })
   })
 })

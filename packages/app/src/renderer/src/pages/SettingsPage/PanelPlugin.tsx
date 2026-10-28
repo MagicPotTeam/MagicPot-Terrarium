@@ -8,6 +8,7 @@ import InputSelect from '@renderer/components/inputs/InputSelect'
 import InputNumber from '@renderer/components/inputs/InputNumber'
 import InputPath from '@renderer/components/inputs/InputPath'
 import { PanelProps } from './PanelProps'
+import type { resources } from '../../i18n'
 import { useTranslation } from 'react-i18next'
 import { LLMAPIProfile } from '@shared/config/config'
 import { isVisionCapableApiProfile } from '@shared/config/apiProfileSelectors'
@@ -28,6 +29,12 @@ import {
   prepareClonedQuickAppProfile,
   resolveQuickAppApiProfileLists
 } from './settingsPageExtensions'
+
+type QuickAppTranslationKey = `quickapp_api.${Extract<
+  keyof (typeof resources)['zh-CN']['translation']['quickapp_api'],
+  string
+>}`
+type QuickAppText = (key: QuickAppTranslationKey, fallback: string) => string
 
 type SaveSettings = PanelProps['saveSettings']
 
@@ -134,8 +141,8 @@ const DuplicateCheckSection: React.FC<DuplicateCheckSectionProps> = ({
 }) => {
   const { t, i18n } = useTranslation()
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
-  const qt = React.useCallback(
-    (key: string, fallback: string) => {
+  const qt = React.useCallback<QuickAppText>(
+    (key, fallback) => {
       const value = t(key)
       return isChineseUi && value === key ? fallback : value
     },
@@ -587,8 +594,8 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
     () => settingsValue.plugin_config?.api_profiles ?? [],
     [settingsValue.plugin_config?.api_profiles]
   )
-  const qt = React.useCallback(
-    (key: string, fallback: string) => {
+  const qt = React.useCallback<QuickAppText>(
+    (key, fallback) => {
       const value = t(key)
       return isChineseUi && value === key ? fallback : value
     },

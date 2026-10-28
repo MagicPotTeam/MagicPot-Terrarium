@@ -4,11 +4,14 @@ import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
 import {
-  DEFAULT_MANAGED_MEDIA_MAX_BYTES,
   ManagedMediaResolutionError,
   type ResolvedManagedMedia
 } from '../llmProxy/managedMediaStore'
 import { ManagedMediaSvcImpl, type ManagedMediaSvcImplDependencies } from './svcManagedMediaImpl'
+
+vi.mock('electron', () => ({
+  app: { getPath: vi.fn(() => '/tmp/magicpot-test-user-data') }
+}))
 
 function png(): Buffer {
   return Buffer.from(
@@ -107,6 +110,216 @@ describe('ManagedMediaSvcImpl', () => {
     })
   })
 
+  it('preserves a scoped physical import path in the service response', async () => {
+    await withImportFixture(async ({ root, source }) => {
+      const scope = 'owned-scope'
+      const absolutePath = path.join(root, `codex-images-${scope}`, 'originals', 'imported.png')
+      const importFile = vi.fn(async () => ({
+        reference: {
+          version: 1 as const,
+          kind: 'managed' as const,
+          relativePath: `codex-images-${scope}/originals/imported.png`,
+          sha256: 'a'.repeat(64),
+          sizeBytes: 12,
+          mimeType: 'image/png' as const,
+          originalFileName: 'imported.png'
+        },
+        absolutePath,
+        localMediaUrl: 'local-media://stale',
+        metadataPath: `${absolutePath}.json`
+      }))
+      const service = new ManagedMediaSvcImpl({ getMediaDir: () => root, importFile })
+      const imported = await service.importFile({
+        sourcePath: source,
+        mimeType: 'image/png',
+        originalFileName: 'imported.png'
+      })
+      expect(imported.localMediaUrl).toBe(
+        `local-media://${pathToFileURL(absolutePath).toString().slice('file://'.length)}`
+      )
+      expect(importFile).toHaveBeenCalledOnce()
+    })
+  })
+
+  it.each([
+    ['task', 'task-123'],
+    ['model', 'model-123'],
+    ['user-output', 'export-123']
+  ] as const)(
+    'preserves a %s lifecycle namespace path in the service response',
+    async (namespace, scope) => {
+      await withImportFixture(async ({ root, source }) => {
+        const relativePath = `${namespace}/${scope}/originals/imported.png`
+        const absolutePath = path.join(root, ...relativePath.split('/'))
+        const importFile = vi.fn(async () => ({
+          reference: {
+            version: 1 as const,
+            kind: 'managed' as const,
+            relativePath,
+            sha256: 'a'.repeat(64),
+            sizeBytes: 12,
+            mimeType: 'image/png' as const,
+            originalFileName: 'imported.png'
+          },
+          absolutePath,
+          localMediaUrl: 'local-media://stale',
+          metadataPath: `${absolutePath}.json`
+        }))
+        const service = new ManagedMediaSvcImpl({
+          getMediaDir: () => root,
+          importFile,
+          ensureDerivative: vi.fn(async () => undefined as never)
+        })
+        const imported = await service.importFile({
+          sourcePath: source,
+          mimeType: 'image/png',
+          originalFileName: 'imported.png'
+        })
+        expect(imported.localMediaUrl).toBe(
+          `local-media://${pathToFileURL(absolutePath).toString().slice('file://'.length)}`
+        )
+        expect(imported.reference.relativePath).toBe(relativePath)
+        expect(importFile).toHaveBeenCalledOnce()
+      })
+    }
+  )
+
+  it('routes an explicit storage namespace to a contained physical import root', async () => {
+    await withImportFixture(async ({ root, source }) => {
+      const namespaceRoot = path.join(root, 'user-output', 'chat-attachments')
+      const importFile = vi.fn(async (input: { chatMediaRoot: string }) => ({
+        reference: {
+          version: 1 as const,
+          kind: 'managed' as const,
+          relativePath: 'user-output/chat-attachments/originals/imported.png',
+          sha256: 'a'.repeat(64),
+          sizeBytes: 12,
+          mimeType: 'image/png' as const,
+          originalFileName: 'imported.png'
+        },
+        absolutePath: path.join(input.chatMediaRoot, 'originals', 'imported.png'),
+        localMediaUrl: 'local-media://stale',
+        metadataPath: path.join(input.chatMediaRoot, 'metadata', 'imported.json')
+      }))
+      const service = new ManagedMediaSvcImpl({
+        getMediaDir: () => root,
+        getMediaNamespaceDir: () => namespaceRoot,
+        realpath: (async (value: string) => value) as typeof fs.realpath,
+        importFile,
+        ensureDerivative: vi.fn(async () => undefined as never)
+      })
+
+      await service.importFile({
+        sourcePath: source,
+        mimeType: 'image/png',
+        originalFileName: 'imported.png',
+        storage: { namespace: 'user-output', scope: 'chat-attachments' }
+      })
+
+      expect(importFile).toHaveBeenCalledWith(
+        expect.objectContaining({ chatMediaRoot: namespaceRoot }),
+        { authorizedRoot: root }
+      )
+    })
+  })
+
+  it('rejects an unsafe storage namespace before invoking the importer', async () => {
+    const importFile = vi.fn()
+    const service = new ManagedMediaSvcImpl({
+      getMediaDir: () => '/configured/media',
+      getMediaNamespaceDir: () => '/configured/media/../outside',
+      realpath: (async (value: string) => value) as typeof fs.realpath,
+      importFile
+    })
+    await expect(
+      service.importFile({
+        sourcePath: '/selected/file.png',
+        mimeType: 'image/png',
+        originalFileName: 'selected.png',
+        storage: { namespace: 'task', scope: '../outside' }
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+    expect(importFile).not.toHaveBeenCalled()
+  })
+
+  it('rejects a symlinked or otherwise non-canonical media root before import', async () => {
+    const importFile = vi.fn()
+    const service = new ManagedMediaSvcImpl({
+      getMediaDir: () => '/configured/media',
+      realpath: (async (value: string) =>
+        value === path.resolve('/configured/media')
+          ? '/outside/media'
+          : value) as typeof fs.realpath,
+      importFile
+    })
+
+    await expect(
+      service.importFile({
+        sourcePath: '/selected/file.png',
+        mimeType: 'image/png',
+        originalFileName: 'selected.png'
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+    expect(importFile).not.toHaveBeenCalled()
+  })
+
+  it('routes legacy migration through an explicit lifecycle storage root', async () => {
+    await withImportFixture(async ({ root }) => {
+      const namespaceRoot = path.join(root, 'user-output', 'chat-attachments')
+      const absolutePath = path.join(namespaceRoot, 'originals', 'legacy.png')
+      const migrateLegacy = vi.fn(
+        async (input: { chatMediaRoot: string; authorizedRoot: string }) => ({
+          status: 'migrated' as const,
+          value: {
+            version: 1 as const,
+            kind: 'managed' as const,
+            relativePath: 'user-output/chat-attachments/originals/legacy.png',
+            sha256: 'a'.repeat(64),
+            sizeBytes: 12,
+            mimeType: 'image/png' as const,
+            originalFileName: 'legacy.png'
+          },
+          checkpoint: { version: 1 as const, rollbackToken: null },
+          imported: {
+            reference: {
+              version: 1 as const,
+              kind: 'managed' as const,
+              relativePath: 'user-output/chat-attachments/originals/legacy.png',
+              sha256: 'a'.repeat(64),
+              sizeBytes: 12,
+              mimeType: 'image/png' as const,
+              originalFileName: 'legacy.png'
+            },
+            absolutePath,
+            localMediaUrl: 'local-media://stale',
+            metadataPath: `${absolutePath}.json`
+          }
+        })
+      )
+      const service = new ManagedMediaSvcImpl({
+        getMediaDir: () => root,
+        getMediaNamespaceDir: () => namespaceRoot,
+        realpath: (async (value: string) => value) as typeof fs.realpath,
+        migrateLegacy,
+        ensureDerivative: vi.fn(async () => undefined as never)
+      })
+
+      const migrated = await service.migrateLegacyDataUrl({
+        dataUrl: 'data:image/png;base64,AQID',
+        metadata: { originalFileName: 'legacy.png' },
+        storage: { namespace: 'user-output', scope: 'chat-attachments' }
+      })
+
+      expect(migrateLegacy).toHaveBeenCalledWith(
+        expect.objectContaining({ chatMediaRoot: namespaceRoot, authorizedRoot: root })
+      )
+      expect(migrated.reference.relativePath).toBe(
+        'user-output/chat-attachments/originals/legacy.png'
+      )
+      expect(migrated.checkpoint.reclaim.reference).toEqual(migrated.reference)
+    })
+  })
+
   it('rejects non-file URIs and noncanonical paths before store import', async () => {
     const importFile = vi.fn()
     const service = new ManagedMediaSvcImpl({
@@ -122,7 +335,7 @@ describe('ManagedMediaSvcImpl', () => {
     expect(importFile).not.toHaveBeenCalled()
   })
 
-  it('lets the store reject symlink and managed-root sources and enforce max size', async () => {
+  it('lets the store reject symlink and managed-root sources without an implicit size cap', async () => {
     await withImportFixture(async ({ root, media, source }) => {
       const { rememberTrustedLocalFileSelections } = await import('./trustedFileSelection')
       rememberTrustedLocalFileSelections([source])
@@ -154,16 +367,6 @@ describe('ManagedMediaSvcImpl', () => {
           originalFileName: 'managed.png'
         })
       ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
-
-      const large = path.join(root, 'large.png')
-      await fs.writeFile(large, Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1, 1))
-      await expect(
-        service.importFile({
-          sourcePath: large,
-          mimeType: 'image/png',
-          originalFileName: 'large.png'
-        })
-      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
     })
   })
 
@@ -179,7 +382,7 @@ describe('ManagedMediaSvcImpl', () => {
     })
   })
 
-  it('uses the processed WebP for request materialization and falls back to original on failure', async () => {
+  it('uses the fully verified original for request materialization and never selects a derivative', async () => {
     const original = Buffer.from('original')
     const processed = Buffer.from('processed')
     const resolved: ResolvedManagedMedia = {
@@ -196,48 +399,56 @@ describe('ManagedMediaSvcImpl', () => {
         extension: 'png',
         relativePath: reference.relativePath
       },
+      storeRoot: '/canonical/media',
       integrityVerified: true,
       verifiedAt: new Date(0).toISOString()
     }
     const resolveReference = vi.fn<
       NonNullable<ManagedMediaSvcImplDependencies['resolveReference']>
     >(async () => resolved)
-    const readFile = vi.fn(async (filePath: Parameters<typeof fs.readFile>[0]) =>
-      filePath.toString().endsWith('image.webp') ? processed : original
-    ) as unknown as typeof fs.readFile
-    const derivative = {
+    const readMediaBytes = vi.fn<NonNullable<ManagedMediaSvcImplDependencies['readMediaBytes']>>(
+      async (_root, selected) =>
+        selected.relativePath.endsWith('image.webp') ? processed : original
+    )
+    const ensureDerivative = vi.fn(async () => ({
       ...descriptor,
       maxEdge: 2048 as const,
       relativePath: 'derivatives/x/committed/image.webp'
-    }
-    const service = create(
-      vi.fn(async () => derivative),
-      { resolveReference, readFile }
-    )
+    }))
+    const service = create(ensureDerivative, { resolveReference, readMediaBytes })
     await expect(
       service.materializeForRequest({ reference, transport: 'request-data-url' })
-    ).resolves.toMatchObject({
-      mimeType: 'image/webp',
-      sizeBytes: processed.length,
-      dataUrl: `data:image/webp;base64,${processed.toString('base64')}`
-    })
-
-    const fallback = create(
-      vi.fn(async () => {
-        throw new Error('derive failed')
-      }),
-      {
-        resolveReference,
-        readFile
-      }
-    )
-    await expect(
-      fallback.materializeForRequest({ reference, transport: 'request-data-url' })
     ).resolves.toMatchObject({
       mimeType: 'image/png',
       sizeBytes: original.length,
       dataUrl: `data:image/png;base64,${original.toString('base64')}`
     })
+    expect(ensureDerivative).not.toHaveBeenCalled()
+    expect(readMediaBytes).toHaveBeenCalledWith('/canonical/media', resolved.metadata, {
+      authorizedRoot: '/canonical/media'
+    })
+    const scopedRoot = '/canonical/media/codex-images/scope'
+    const scopedResolved: ResolvedManagedMedia = {
+      ...resolved,
+      absolutePath: `${scopedRoot}/originals/ab/file.png`,
+      localMediaUrl: `local-media://${scopedRoot}/originals/ab/file.png`,
+      metadataPath: `${scopedRoot}/metadata/file.json`,
+      storeRoot: scopedRoot
+    }
+    const scopedResolveReference = vi.fn(async () => scopedResolved)
+    const scopedReadMediaBytes = vi.fn(async (root: string) => {
+      expect(root).toBe(scopedRoot)
+      return original
+    })
+    const scopedService = create(ensureDerivative, {
+      resolveReference: scopedResolveReference,
+      readMediaBytes: scopedReadMediaBytes
+    })
+    await scopedService.materializeForRequest({ reference, transport: 'request-data-url' })
+    expect(scopedReadMediaBytes).toHaveBeenCalledWith(scopedRoot, scopedResolved.metadata, {
+      authorizedRoot: '/canonical/media'
+    })
+    expect(processed).not.toEqual(original)
   })
 
   it('keeps import successful when automatic preprocessing fails', async () => {
@@ -342,14 +553,14 @@ describe('ManagedMediaSvcImpl', () => {
     'preserves typed %s errors without leaking paths',
     async (code) => {
       const derive = vi.fn(async () => {
-        throw new ManagedMediaResolutionError(code, 'secret /private/path')
+        throw new ManagedMediaResolutionError(code, 'secret /fixture-data/path')
       })
       await expect(
         create(derive).ensureDerivative({ reference, maxEdge: 512 })
       ).rejects.toMatchObject({ code })
       await create(derive)
         .ensureDerivative({ reference, maxEdge: 512 })
-        .catch((error: ServiceError) => expect(error.message).not.toContain('/private/path'))
+        .catch((error: ServiceError) => expect(error.message).not.toContain('/fixture-data/path'))
     }
   )
 
@@ -365,9 +576,26 @@ describe('ManagedMediaSvcImpl', () => {
     })
   })
 
+  it('forwards durable reference counts without exposing media content', async () => {
+    const updateReferenceSnapshot = vi.fn()
+    const service = new ManagedMediaSvcImpl({ updateReferenceSnapshot })
+    const id = 'a'.repeat(64)
+    await service.updateReferenceSnapshot({
+      version: 1,
+      complete: true,
+      ids: [id],
+      referenceCounts: { [id]: 4 }
+    })
+    expect(updateReferenceSnapshot).toHaveBeenCalledWith({
+      complete: true,
+      ids: [id],
+      referenceCounts: { [id]: 4 }
+    })
+  })
+
   it('sanitizes generic errors', async () => {
     const derive = vi.fn(async () => {
-      throw new Error('secret /private/path')
+      throw new Error('secret /fixture-data/path')
     })
     await expectSanitizedFailure(create(derive).ensureDerivative({ reference, maxEdge: 512 }))
   })

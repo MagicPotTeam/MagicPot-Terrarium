@@ -7,34 +7,33 @@ import {
   type McpExternalServerTransport
 } from '@shared/config/config'
 import InputSelect from '@renderer/components/inputs/InputSelect'
+import type { resources } from '../../i18n'
 import { useTranslation } from 'react-i18next'
 import type { PanelProps } from './PanelProps'
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15000
 const DEFAULT_REQUEST_TIMEOUT_MS = 60000
 
-const ZH_MISSING_FALLBACKS: Record<string, string> = {
-  'mcp.page_title': 'MCP 服务器',
-  'mcp.page_subtitle':
-    'MCP 服务器会通过 Model Context Protocol 为代理提供外部工具。代理会将发现到的工具注册为 mcp.<server>.<tool> 形式的具体工具并直接调用它们。',
-  'mcp.servers_label': '服务器',
+type McpTranslationKey = `mcp.${Extract<
+  keyof (typeof resources)['zh-CN']['translation']['mcp'],
+  string
+>}`
+type QtFn = (key: McpTranslationKey, fallback: string) => string
+
+const ZH_MISSING_FALLBACKS: Partial<Record<McpTranslationKey, string>> = {
+  'mcp.transport': '传输方式',
   'mcp.new_server_title': '新增 MCP 服务器',
   'mcp.server_name': '名称 *',
-  'mcp.transport': '传输方式',
   'mcp.transport_stdio_child': 'stdio（子进程）',
   'mcp.command_required': '命令 *',
   'mcp.url_required': '服务器 URL *',
   'mcp.args_spaced': '参数（以空格分隔）',
-  'mcp.headers': '请求头',
   'mcp.create_server': '新增服务器',
   'mcp.add_server': '添加服务器',
   'mcp.remove_server': '移除',
   'mcp.command_missing': '尚未配置启动命令。',
   'mcp.url_missing': '尚未配置服务器 URL。'
 }
-
-type QtFn = (key: string, fallback: string) => string
-
 const parseSpaceSeparatedArgs = (value: string): string[] =>
   value
     .trim()

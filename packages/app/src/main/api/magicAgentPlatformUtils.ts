@@ -141,7 +141,17 @@ export const resolvePackageAgentAllowedToolNames = (
   packageToolNames: MagicAgentPlatformAgentDefinition['toolNames']
 ): MagicAgentPlatformRunReq['allowedToolNames'] => {
   if (requested === undefined) {
-    return undefined
+    // An installed package may publish a concrete tool allowlist. Preserve it
+    // even when the caller omits a request-level list; otherwise the platform
+    // adapter's default web tools would silently bypass the package boundary.
+    if (!Array.isArray(packageToolNames)) return undefined
+    return [
+      ...new Set(
+        packageToolNames
+          .map((toolName) => normalizeMagicPotToolName(toolName))
+          .filter((toolName) => Boolean(toolName) && !isMagicAgentPlatformDeniedToolName(toolName))
+      )
+    ]
   }
   if (!Array.isArray(requested)) {
     return requested

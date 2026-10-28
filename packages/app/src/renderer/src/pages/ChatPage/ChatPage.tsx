@@ -1,3 +1,4 @@
+import { mergeToolCheckpoint } from './chatToolCheckpoint'
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
@@ -32,11 +33,15 @@ import {
   type LLMReasoningEffort,
   type OpenAIImageGenerationOptions,
   normalizeReasoningEffort,
-  resolveChatProfileCapabilities
+  resolveChatProfileCapabilities,
+  resolveProfileModelUse,
+  resolveProfileProvider
 } from '@shared/llm'
 import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
+import { shouldUseOpenAIImageGeneration } from '@shared/llm/openaiResponses'
 import type { AgentRouteLike } from '@shared/agent'
 import type { ProjectTraceEventStatus } from '@shared/projectTrace'
+import { startScopedChatPageRun } from '@shared/chatPageRunLifecycle'
 import {
   selectFile,
   fileToBlobUrl,
@@ -47,7 +52,6 @@ import {
 import {
   loadAllSessions,
   compareAndUpdateSessionInDB,
-  saveSessionToDB,
   deleteSessionFromDB,
   cancelDebouncedSessionSave,
   deleteSessionDraftBackup,
@@ -61,9 +65,11 @@ import {
   type ChatSession,
   type ChatSessionDraft
 } from './chatStorage'
+import { ChatSessionSaveBaseline } from './chatSaveBaseline'
 import {
   buildAutoSavedChatImageKey,
   buildChatWorkspaceControlsPortalId,
+  generateUUID,
   buildHy3dProfileId,
   getBaseProfileId,
   getDownloadFileNameFromUrl,
@@ -81,11 +87,15 @@ import {
   STORAGE_KEY_LOADING_IDS,
   STORAGE_KEY_SELECTED_PROFILE,
   updateScopedActiveLoadingSessionId,
-  updateScopedExternalLoadingSessionId
+  updateScopedExternalLoadingSessionId,
+  dispatchScopedChatRunEvent,
+  readScopedChatRun,
+  startScopedChatRun
 } from './chatPageShared'
 import {
   buildChatContextCompactPromptMessages,
   buildChatContextCompressionPlan,
+  assertChatContextBudget,
   buildChatContextTokenCalibrationFingerprint,
   createContextCompressionSourceHash,
   estimateChatMessagesTokenBreakdown,
@@ -99,7 +109,7 @@ import {
   type ChatContextTokenCalibration
 } from './chatContextCompression'
 import type { ChatLoadingStatus } from './chatLoadingStatus'
-import { buildAssistantMessageFromResult } from './chatMessageUtils'
+import { buildAssistantMessageFromResult, normalizeChatToolHistory } from './chatMessageUtils'
 import {
   appendAssistantDeltaToSession,
   appendAssistantPlaceholderToSession,
@@ -116,9 +126,11 @@ import {
 } from './chatSessionUtils'
 import { getLocalizedConversationTitle } from './chatLocaleUtils'
 import {
+  preflightChatRequestImages,
   requestChatCompletion,
   requestChatCompletionStream,
   isInvalidSessionContinuationError,
+  resolveChatRequestRouteFingerprint,
   resolveChatPageRequestExecutionImagePolicy,
   resolveAttachmentBatchCapability,
   supportsStreamingChatCompletion,
@@ -154,6 +166,8 @@ import {
 } from './chatAttachmentBatchUtils'
 import { mergeChatAttachmentsWithSkillReferenceAttachments } from '@renderer/utils/customSkillReferenceAttachments'
 import {
+  getDroppedLocalImageContent,
+  getDroppedLocalImageFiles,
   isImageOnlyInternalDragPayload,
   materializeInternalImageDragAttachment,
   parseInternalImageDragPayload
@@ -161,6 +175,7 @@ import {
 import { collectDroppedDirectoryFiles } from '../ProjectCanvasPage/dropDirectory'
 import { importChatAttachment, importChatAttachmentUrl } from './chatManagedMediaAttachments'
 import {
+  BUILT_IN_TAGGING_SKILL_ID,
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
   mergeBuiltInSkills
@@ -290,6 +305,7 @@ type ExternalInitialChatMessage = {
   content?: string
   attachments?: ChatAttachment[]
   ocrResult?: ChatMessage['ocrResult']
+  toolHistory?: ChatMessage['toolHistory']
   modelName?: string
 }
 
@@ -335,6 +351,30 @@ const HY3D_POST_PROCESS_ACTIONS = new Set([
   'SubmitTextureTo3DJob',
   'Convert3DFormat'
 ])
+
+const shouldUseExplicitAttachmentBatching = (
+  attachments: ChatAttachment[] | undefined,
+  skillId: string | null,
+  skillRuntime: {
+    skill: unknown
+    execution: { outputMode: string; fallbackStrategy: string }
+  }
+): boolean => {
+  if (!shouldBatchAttachments(attachments)) return false
+
+  // The legacy built-in tagging skill is no longer included in the picker, but
+  // existing sessions still carry its id and retain its per-image contract.
+  if (skillId === BUILT_IN_TAGGING_SKILL_ID) return true
+
+  // Ordinary multimodal chat must preserve one request with all references.
+  // Batch only skills that explicitly declare per-attachment output semantics.
+  return Boolean(
+    skillRuntime.skill &&
+    (skillRuntime.execution.outputMode === 'structured' ||
+      skillRuntime.execution.outputMode === 'sidecar' ||
+      skillRuntime.execution.fallbackStrategy !== 'default')
+  )
+}
 
 const chatLoadingStatusByScope = new Map<string, Map<string, ChatLoadingStatus>>()
 
@@ -603,6 +643,71 @@ const hasDuplicateAttachment = (
         attachment.sizeBytes === candidate.sizeBytes)
   )
 
+const attachmentDescriptorsMatch = (left: ChatAttachment, right: ChatAttachment): boolean =>
+  left.type === right.type && left.url === right.url && left.fileName === right.fileName
+
+const getVideoBoundaryFrameFileNames = (attachment: ChatAttachment): string[] => {
+  const sourceName = attachment.fileName || 'video'
+  const lastDotIndex = sourceName.lastIndexOf('.')
+  const baseName = lastDotIndex > 0 ? sourceName.slice(0, lastDotIndex) : sourceName
+  return [`${baseName}-first-frame.png`, `${baseName}-last-frame.png`]
+}
+
+const mergePreAugmentedVideoFramesWithResolvedAttachments = (
+  content: string,
+  attachments: ChatAttachment[] | undefined,
+  preAugmentedMessage: Pick<ChatMessage, 'content' | 'attachments'> | undefined
+): Pick<ChatMessage, 'content' | 'attachments'> | undefined => {
+  if (!preAugmentedMessage) return undefined
+  const resolvedAttachments = attachments || []
+  const preparedAttachments = preAugmentedMessage.attachments || []
+  const exactMatch =
+    preparedAttachments.length === resolvedAttachments.length &&
+    resolvedAttachments.every((attachment) =>
+      preparedAttachments.some((preparedAttachment) =>
+        attachmentDescriptorsMatch(attachment, preparedAttachment)
+      )
+    )
+  if (exactMatch) {
+    return {
+      content: preAugmentedMessage.content,
+      attachments: resolvedAttachments
+    }
+  }
+
+  const matchingVideos = resolvedAttachments.filter(
+    (attachment) =>
+      attachment.type === 'video' &&
+      preparedAttachments.some((preparedAttachment) =>
+        attachmentDescriptorsMatch(attachment, preparedAttachment)
+      )
+  )
+  if (matchingVideos.length === 0) return undefined
+
+  const matchingFrameNames = new Set(matchingVideos.flatMap(getVideoBoundaryFrameFileNames))
+  const supplementalFrames = preparedAttachments.filter(
+    (attachment) => attachment.type === 'image' && matchingFrameNames.has(attachment.fileName || '')
+  )
+  const selectedNotes = preAugmentedMessage.content
+    .split('\n')
+    .filter((line) =>
+      matchingVideos.some((video) => line.includes(`video "${video.fileName || 'unnamed-video'}"`))
+    )
+  const mergedAttachments = [...resolvedAttachments]
+  for (const frame of supplementalFrames) {
+    if (!mergedAttachments.some((attachment) => attachmentDescriptorsMatch(attachment, frame))) {
+      mergedAttachments.push(frame)
+    }
+  }
+
+  return {
+    content: [content.trim(), ...selectedNotes.filter((line) => !content.includes(line))]
+      .filter(Boolean)
+      .join('\n\n'),
+    attachments: mergedAttachments
+  }
+}
+
 const convertInlineImageToAttachment = async (
   imageUrl: string,
   fileName = 'pasted-image.png'
@@ -799,6 +904,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // ==================== Sessions 状态 ====================
   const [sessions, setSessionsState] = useState<ChatSession[]>([])
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  const [sessionLoadError, setSessionLoadError] = useState<string | null>(null)
+  const [sessionSaveError, setSessionSaveError] = useState<string | null>(null)
   const storageScopeRef = useRef(storageScope)
   const previousStorageScopeRef = useRef(storageScope)
   const sessionLoadEpochRef = useRef(0)
@@ -813,6 +920,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingDeleteRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const sessionPersistenceGateRef = useRef(true)
   const persistedSessionsRef = useRef<Map<string, ChatSession>>(new Map())
+  const dirtySessionSnapshotsRef = useRef<Map<string, ChatSession>>(new Map())
+  const chatSaveBaselineRef = useRef<ChatSessionSaveBaseline>(new ChatSessionSaveBaseline())
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
   const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
@@ -831,26 +940,111 @@ const ChatPage: React.FC<ChatPageProps> = ({
     sessionsRef.current = next
     setSessionsState(next)
   }, [])
+  const getSessionStorageKey = useCallback(
+    (scope: string, sessionId: string): string => `${scope}\u0000${sessionId}`,
+    []
+  )
+  const getDirtySessionSnapshots = useCallback((scope: string): ChatSession[] => {
+    const prefix = `${scope}\u0000`
+    return [...dirtySessionSnapshotsRef.current.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, session]) => session)
+  }, [])
+  const getDirtySessionIds = useCallback(
+    (scope: string): string[] => getDirtySessionSnapshots(scope).map((session) => session.id),
+    [getDirtySessionSnapshots]
+  )
+  const setDirtySessionSnapshot = useCallback(
+    (scope: string, session: ChatSession): void => {
+      // Freeze the save baseline synchronously on first dirty so a later external refresh cannot
+      // advance the persisted map and let a stale snapshot overwrite a newer reply.
+      chatSaveBaselineRef.current.freeze(
+        scope,
+        session.id,
+        persistedSessionsRef.current.get(session.id) ?? null
+      )
+      dirtySessionSnapshotsRef.current.set(getSessionStorageKey(scope, session.id), session)
+    },
+    [getSessionStorageKey]
+  )
+  const replacePersistedSessions = useCallback(
+    (scope: string, sessions: ChatSession[]): void => {
+      // Replace the id-keyed persisted map AND adopt loaded baselines for clean, non-in-flight keys
+      // of this scope only. Dirty or in-flight sessions keep their frozen baseline. Centralised so
+      // every accepted external snapshot (initial load / refresh / polling / request finally) does
+      // not leave a clean window on a stale baseline that would self-conflict on the next save.
+      persistedSessionsRef.current = new Map(sessions.map((session) => [session.id, session]))
+      chatSaveBaselineRef.current.adoptLoaded(scope, sessions, new Set(getDirtySessionIds(scope)))
+    },
+    [getDirtySessionIds]
+  )
+  const clearDirtySessionSnapshotIfCurrent = useCallback(
+    (scope: string, session: ChatSession): void => {
+      const key = getSessionStorageKey(scope, session.id)
+      if (storageScopeRef.current !== scope) {
+        if (dirtySessionSnapshotsRef.current.get(key) === session)
+          dirtySessionSnapshotsRef.current.delete(key)
+        return
+      }
+      const current = sessionsRef.current.find((candidate) => candidate.id === session.id)
+      if (current === session) {
+        dirtySessionSnapshotsRef.current.delete(key)
+        persistedSessionsRef.current.set(session.id, session)
+      } else if (current) {
+        dirtySessionSnapshotsRef.current.set(key, current)
+      }
+    },
+    [getSessionStorageKey]
+  )
+  const persistSessionWithBaseline = useCallback(
+    async (session: ChatSession, scope: string): Promise<void> => {
+      await chatSaveBaselineRef.current.persist(scope, session, () => {
+        return persistedSessionsRef.current.get(session.id) ?? null
+      })
+    },
+    []
+  )
   const persistCurrentSessionSnapshot = useCallback(
     async (
       sessionId: string,
       label = '',
       refreshReason: ChatPreviewRefreshReason = 'storage-updated'
-    ): Promise<void> => {
-      try {
-        const session = sessionsRef.current.find((candidate) => candidate.id === sessionId)
-        if (!session) {
-          return
-        }
+    ): Promise<boolean> => {
+      const requestScope = storageScope
+      if (storageScopeRef.current !== requestScope) return false
+      const session = sessionsRef.current.find((candidate) => candidate.id === sessionId)
+      if (!session) return false
+      setDirtySessionSnapshot(requestScope, session)
 
-        await saveSessionToDB(session, storageScope)
+      try {
+        await persistSessionWithBaseline(session, requestScope)
+        clearDirtySessionSnapshotIfCurrent(requestScope, session)
+        if (storageScopeRef.current !== requestScope) return true
+        if (getDirtySessionIds(requestScope).length === 0) setSessionSaveError(null)
         emitPreviewRefresh(refreshReason)
         console.log(`[ChatPage] persistCurrentSessionSnapshot(${label}): saved`)
+        return true
       } catch (e) {
+        if (storageScopeRef.current !== requestScope) return false
+        const current = sessionsRef.current.find((candidate) => candidate.id === sessionId)
+        if (current) setDirtySessionSnapshot(requestScope, current)
+        const message = e instanceof Error ? e.message : String(e)
+        const detail = `Failed to save chat session: ${message}`
+        setSessionSaveError(detail)
+        notifyError(detail)
         console.warn('[ChatPage] persistCurrentSessionSnapshot failed:', e)
+        return false
       }
     },
-    [emitPreviewRefresh, storageScope]
+    [
+      clearDirtySessionSnapshotIfCurrent,
+      getDirtySessionIds,
+      emitPreviewRefresh,
+      notifyError,
+      persistSessionWithBaseline,
+      setDirtySessionSnapshot,
+      storageScope
+    ]
   )
   const migrateLoadedChatMediaSessions = useCallback(
     async (
@@ -960,6 +1154,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         })
         if (!committed) return false
+        chatSaveBaselineRef.current.advance(expectedScope, sessionId, committed)
 
         if (
           storageScopeRef.current !== expectedScope ||
@@ -968,6 +1163,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ) {
           return true
         }
+        // Only reflect the committed snapshot into the id-keyed persisted map once we know we are
+        // still in the same live scope, so an old-scope same-id commit cannot pollute a new scope.
+        persistedSessionsRef.current.set(sessionId, committed)
         setSessions((prev) =>
           prev.map((session) => {
             if (session.id !== sessionId) return session
@@ -989,7 +1187,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return false
       }
     },
-    [storageScope]
+    [setSessions, storageScope]
   )
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
     try {
@@ -999,26 +1197,31 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   })
   const currentSessionIdRef = useRef<string | null>(currentSessionId)
+  const attachmentDropTargetEpochRef = useRef(0)
   const isMountedRef = useRef(true)
   const selectSessionRef = useRef<(sessionId: string) => void>(() => {})
   const pendingSessionIdRef = useRef<string | null>(null)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    isMountedRef.current = true
+    const compactAbortControllers = contextCompactAbortControllersRef.current
+    const compactingSessionIds = compactingSessionIdsRef.current
+    const pendingDeleteRetryTimers = pendingDeleteRetryTimersRef.current
+    return () => {
       isMountedRef.current = false
-      contextCompactAbortControllersRef.current.forEach((controller) => {
+      attachmentDropTargetEpochRef.current += 1
+      compactAbortControllers.forEach((controller) => {
         controller.abort('Chat page unmounted.')
       })
-      contextCompactAbortControllersRef.current.clear()
-      compactingSessionIdsRef.current.clear()
+      compactAbortControllers.clear()
+      compactingSessionIds.clear()
       if (sessionPersistenceRetryTimerRef.current) {
         clearTimeout(sessionPersistenceRetryTimerRef.current)
         sessionPersistenceRetryTimerRef.current = null
       }
-      for (const timer of pendingDeleteRetryTimersRef.current.values()) clearTimeout(timer)
-      pendingDeleteRetryTimersRef.current.clear()
-    },
-    []
-  )
+      for (const timer of pendingDeleteRetryTimers.values()) clearTimeout(timer)
+      pendingDeleteRetryTimers.clear()
+    }
+  }, [])
 
   // 从 IndexedDB 加载 sessions（含 localStorage 迁移）
   useEffect(() => {
@@ -1027,6 +1230,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     storageScopeRef.current = storageScope
     const loadEpoch = ++sessionLoadEpochRef.current
     setSessionsLoaded(false)
+    setSessionLoadError(null)
     sessionPersistenceGateRef.current = true
     persistedSessionsRef.current = new Map()
     sessionMutationEpochRef.current += 1
@@ -1038,6 +1242,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
     sessionPersistenceRetryCountRef.current = 0
     if (scopeChanged) {
+      attachmentDropTargetEpochRef.current += 1
+      // Old-scope dirty data remains in its own keyed snapshot, never in the new scope UI.
+      const restoredDirty = getDirtySessionSnapshots(storageScope)
+      setSessions(restoredDirty)
+      setSessionSaveError(
+        restoredDirty.length
+          ? 'This thread has unsaved changes. Retry saving before closing it.'
+          : null
+      )
       pendingSessionIdRef.current = null
       let rememberedSessionId: string | null = null
       try {
@@ -1047,7 +1260,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       currentSessionIdRef.current = rememberedSessionId
       setCurrentSessionId(rememberedSessionId)
-      setSessions([])
     }
     ;(async () => {
       let storedSessions: ChatSession[] | null = null
@@ -1056,6 +1268,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         storedSessions = migrated || (await loadAllSessions(storageScope))
         if (loadEpoch !== sessionLoadEpochRef.current) return
 
+        setSessionLoadError(null)
         const migrationMutationEpoch = sessionMutationEpochRef.current
         const migratedSessions = await migrateLoadedChatMediaSessions(
           storedSessions,
@@ -1070,9 +1283,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
           )
         )
-        persistedSessionsRef.current = new Map(
-          sortedStoredSessions.map((session) => [session.id, session])
-        )
+        replacePersistedSessions(storageScope, sortedStoredSessions)
         const locallyMutatedSessionIds =
           loadMutationEpoch === sessionMutationEpochRef.current
             ? []
@@ -1084,15 +1295,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
             sortedStoredSessions,
             prev,
             [pendingSessionIdRef.current, currentSessionIdRef.current],
-            locallyMutatedSessionIds
+            [...locallyMutatedSessionIds, ...getDirtySessionIds(storageScope)]
           )
         )
       } catch (e) {
         if (loadEpoch === sessionLoadEpochRef.current) {
+          const message = e instanceof Error ? e.message : String(e)
+          const detail = `Failed to load chat sessions: ${message}`
+          setSessionLoadError(detail)
+          notifyError(detail)
           console.error('[ChatPage] 加载会话失败', e)
         }
       } finally {
-        if (loadEpoch === sessionLoadEpochRef.current) {
+        if (loadEpoch === sessionLoadEpochRef.current && storedSessions !== null) {
           sessionPersistenceGateRef.current = false
           setSessionsLoaded(true)
         }
@@ -1104,7 +1319,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionLoadEpochRef.current += 1
       }
     }
-  }, [currentSessionStorageKey, migrateLoadedChatMediaSessions, setSessions, storageScope])
+  }, [
+    currentSessionStorageKey,
+    getDirtySessionIds,
+    getDirtySessionSnapshots,
+    migrateLoadedChatMediaSessions,
+    notifyError,
+    setSessions,
+    storageScope
+  ])
 
   const refreshSessionsFromStorage = useCallback(async (): Promise<void> => {
     const refreshEpoch = sessionLoadEpochRef.current
@@ -1136,22 +1359,55 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (mutationEpoch !== sessionMutationEpochRef.current) {
         return
       }
-      persistedSessionsRef.current = new Map(visibleStored.map((session) => [session.id, session]))
+      replacePersistedSessions(storageScope, visibleStored)
       setSessions((prev) =>
-        mergeLoadedSessionsWithLocal(visibleStored, prev, [
-          pendingSessionIdRef.current,
-          currentSessionIdRef.current
-        ])
+        mergeLoadedSessionsWithLocal(
+          visibleStored,
+          prev,
+          [pendingSessionIdRef.current, currentSessionIdRef.current],
+          getDirtySessionIds(storageScope)
+        )
       )
+      setSessionLoadError(null)
+      sessionPersistenceGateRef.current = false
+      setSessionsLoaded(true)
     } catch (e) {
       if (
         refreshEpoch === sessionLoadEpochRef.current &&
         storageScope === storageScopeRef.current
       ) {
+        const message = e instanceof Error ? e.message : String(e)
+        const detail = `Failed to refresh chat sessions: ${message}`
+        setSessionLoadError(detail)
+        notifyError(detail)
         console.warn('[ChatPage] refreshSessionsFromStorage failed:', e)
       }
     }
-  }, [migrateLoadedChatMediaSessions, setSessions, storageScope])
+  }, [getDirtySessionIds, migrateLoadedChatMediaSessions, notifyError, setSessions, storageScope])
+
+  const retrySessionLoad = useCallback(async () => {
+    const requestScope = storageScope
+    const dirty = getDirtySessionSnapshots(requestScope)
+    let allSaved = true
+    for (const snapshot of dirty) {
+      if (storageScopeRef.current !== requestScope) return
+      if (!(await persistCurrentSessionSnapshot(snapshot.id, 'retry-unsaved'))) allSaved = false
+    }
+    if (
+      storageScopeRef.current !== requestScope ||
+      !allSaved ||
+      getDirtySessionIds(requestScope).length
+    )
+      return
+    setSessionSaveError(null)
+    await refreshSessionsFromStorage()
+  }, [
+    getDirtySessionIds,
+    getDirtySessionSnapshots,
+    persistCurrentSessionSnapshot,
+    refreshSessionsFromStorage,
+    storageScope
+  ])
 
   useEffect(() => {
     for (const key of deletedSessionKeysRef.current) {
@@ -1199,6 +1455,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   const setActiveSessionId = useCallback(
     (sessionId: string | null) => {
+      if (currentSessionIdRef.current !== sessionId) {
+        attachmentDropTargetEpochRef.current += 1
+      }
       currentSessionIdRef.current = sessionId
       setCurrentSessionId(sessionId)
       try {
@@ -1239,7 +1498,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return new Set(readScopedExternalLoadingSessionIds(storageScope))
   })
   const externalLoadingSessionIdsRef = useRef<Set<string>>(externalLoadingSessionIds)
+  const runIdRef = useRef(0)
+  const activeRunIdBySessionRef = useRef<Map<string, number>>(new Map())
+  const lifecycleRunIdBySessionRef = useRef<Map<string, string>>(new Map())
   const sessionAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
+  // Incremented for every explicit stop/termination. Sends that are still in
+  // async preparation capture the value and must not continue when it changes.
+  const sessionTerminationEpochRef = useRef<Map<string, number>>(new Map())
   const cancelledSessionsRef = useRef<Set<string>>(new Set())
   const [loadingStatusBySessionId, setLoadingStatusBySessionId] = useState<
     Record<string, ChatLoadingStatus>
@@ -1311,7 +1576,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const clearLoadingSessionTracking = useCallback(
-    (sessionId: string, completed = true) => {
+    (sessionId: string, completed = true, runId?: number) => {
+      if (runId !== undefined && activeRunIdBySessionRef.current.get(sessionId) !== runId) {
+        return
+      }
       const nextLoadingIds = new Set(loadingSessionIdsRef.current)
       nextLoadingIds.delete(sessionId)
       loadingSessionIdsRef.current = nextLoadingIds
@@ -1336,8 +1604,36 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const terminateSession = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, options?: { dropQueued?: boolean }) => {
+      sessionTerminationEpochRef.current.set(
+        sessionId,
+        (sessionTerminationEpochRef.current.get(sessionId) ?? 0) + 1
+      )
       cancelledSessionsRef.current.add(sessionId)
+      if (options?.dropQueued) {
+        // Explicit session/scope termination must not drain work queued behind
+        // the cancelled run. A manual Stop keeps the existing FIFO contract.
+        const queuedSends = queuedSessionSendsRef.current.get(sessionId)
+        if (queuedSends?.length) {
+          for (const queuedSend of queuedSends) {
+            if (queuedSend.queueKey) {
+              pendingSessionSendKeysRef.current.delete(queuedSend.queueKey)
+            }
+          }
+          const nextQueues = new Map(queuedSessionSendsRef.current)
+          nextQueues.delete(sessionId)
+          updateQueuedSessionSends(nextQueues)
+        }
+      }
+      const activeLifecycleId = lifecycleRunIdBySessionRef.current.get(sessionId)
+      if (activeLifecycleId) {
+        dispatchScopedChatRunEvent(storageScope, sessionId, {
+          runId: activeLifecycleId,
+          status: 'cancelled',
+          unread: false
+        })
+        lifecycleRunIdBySessionRef.current.delete(sessionId)
+      }
       sessionAbortControllersRef.current.get(sessionId)?.abort('Chat session cancelled.')
       sessionAbortControllersRef.current.delete(sessionId)
       contextCompactAbortControllersRef.current
@@ -1345,7 +1641,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ?.abort('Chat context compression cancelled.')
       contextCompactAbortControllersRef.current.delete(sessionId)
       compactingSessionIdsRef.current.delete(sessionId)
-      clearLoadingSessionTracking(sessionId, false)
+      clearLoadingSessionTracking(sessionId, false, activeRunIdBySessionRef.current.get(sessionId))
       setSessions((prev) => removeTrailingEmptyAssistantMessage(prev, sessionId))
       emitPreviewRefresh('preview-only')
       window.dispatchEvent(
@@ -1357,7 +1653,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         })
       )
     },
-    [clearLoadingSessionTracking, emitPreviewRefresh, setSessions, storageScope]
+    [
+      clearLoadingSessionTracking,
+      emitPreviewRefresh,
+      setSessions,
+      storageScope,
+      updateQueuedSessionSends
+    ]
   )
 
   // 后台恢复：轮询 localStorage 检测 loading 是否完成
@@ -1392,14 +1694,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   !deletedSessionKeysRef.current.has(`${pollingScope}\u0000${session.id}`)
               )
             )
-            persistedSessionsRef.current = new Map(
-              visibleStored.map((session) => [session.id, session])
-            )
+            replacePersistedSessions(pollingScope, visibleStored)
             setSessions((prev) =>
-              mergeLoadedSessionsWithLocal(visibleStored, prev, [
-                pendingSessionIdRef.current,
-                currentSessionIdRef.current
-              ])
+              mergeLoadedSessionsWithLocal(
+                visibleStored,
+                prev,
+                [pendingSessionIdRef.current, currentSessionIdRef.current],
+                getDirtySessionIds(storageScope)
+              )
             )
             setLoadingSessionIds(new Set())
             if (intervalId) clearInterval(intervalId)
@@ -1419,14 +1721,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   !deletedSessionKeysRef.current.has(`${pollingScope}\u0000${session.id}`)
               )
             )
-            persistedSessionsRef.current = new Map(
-              visibleStored.map((session) => [session.id, session])
-            )
+            replacePersistedSessions(pollingScope, visibleStored)
             setSessions((prev) =>
-              mergeLoadedSessionsWithLocal(visibleStored, prev, [
-                pendingSessionIdRef.current,
-                currentSessionIdRef.current
-              ])
+              mergeLoadedSessionsWithLocal(
+                visibleStored,
+                prev,
+                [pendingSessionIdRef.current, currentSessionIdRef.current],
+                getDirtySessionIds(storageScope)
+              )
             )
             setLoadingSessionIds((prev) => {
               const prevIds = [...prev].sort().join(',')
@@ -1442,7 +1744,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return () => {
       if (intervalId) clearInterval(intervalId)
     }
-  }, [active, loadingIdsStorageKey, setSessions, storageScope])
+  }, [active, getDirtySessionIds, loadingIdsStorageKey, setSessions, storageScope])
 
   // 校验 loading IDs：实时请求可以已经写入流式内容，controller/external run 才是权威状态。
   useEffect(() => {
@@ -1489,6 +1791,36 @@ const ChatPage: React.FC<ChatPageProps> = ({
     loadingSessionIdsRef.current = nextLoadingIds
     setLoadingSessionIds(nextLoadingIds)
     for (const sessionId of removedLoadingIds) {
+      const session = sessions.find((item) => item.id === sessionId)
+      const hasLiveRequest =
+        sessionAbortControllersRef.current.has(sessionId) ||
+        externalLoadingSessionIdsRef.current.has(sessionId) ||
+        activeRunIdBySessionRef.current.has(sessionId)
+
+      if (session && session.messages.length > 0 && !hasLiveRequest) {
+        const currentRun = readScopedChatRun(storageScope, sessionId)
+        if (
+          currentRun.status !== 'completed' &&
+          currentRun.status !== 'failed' &&
+          currentRun.status !== 'cancelled' &&
+          currentRun.status !== 'interrupted'
+        ) {
+          const recoveryRunId = currentRun.runId ?? `recovery:${generateUUID()}`
+          if (currentRun.runId === null) {
+            startScopedChatPageRun({
+              scope: storageScope,
+              sessionId,
+              runId: recoveryRunId
+            })
+          }
+          dispatchScopedChatRunEvent(storageScope, sessionId, {
+            runId: recoveryRunId,
+            status: 'interrupted',
+            unread: false
+          })
+        }
+      }
+
       updateScopedActiveLoadingSessionId(storageScope, sessionId, false, false)
       setSessionLoadingStatus(sessionId, null)
     }
@@ -1559,6 +1891,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingHiddenContextRef = useRef(pendingHiddenContext)
   const pendingExternalSendToAgentRef = useRef<ExternalSendToAgentDetail[]>([])
   const [pendingExternalSendToAgentVersion, setPendingExternalSendToAgentVersion] = useState(0)
+  const editingAttachmentReceiverRef = useRef<((attachment: ChatAttachment) => void) | null>(null)
+  const registerEditingAttachmentReceiver = useCallback(
+    (receiver: ((attachment: ChatAttachment) => void) | null) => {
+      if (editingAttachmentReceiverRef.current !== receiver) {
+        attachmentDropTargetEpochRef.current += 1
+      }
+      editingAttachmentReceiverRef.current = receiver
+    },
+    []
+  )
   const queueExternalSendToAgentInput = useCallback((detail: ExternalSendToAgentDetail) => {
     pendingExternalSendToAgentRef.current.push(detail)
     setPendingExternalSendToAgentVersion((version) => version + 1)
@@ -1692,6 +2034,42 @@ const ChatPage: React.FC<ChatPageProps> = ({
             ChatAttachment => item !== null
         ) as ChatAttachment[]
 
+      // While a user message is being edited, canvas send-to-agent attachments
+      // belong to that edit form instead of the bottom composer. The edit form
+      // registers a short-lived receiver while it is mounted.
+      const editingAttachmentReceiver = editingAttachmentReceiverRef.current
+      if (editingMessageIndex !== null && !autoSend && editingAttachmentReceiver) {
+        const receiverEpoch = attachmentDropTargetEpochRef.current
+        const isEditingReceiverCurrent = (): boolean =>
+          isMountedRef.current &&
+          attachmentDropTargetEpochRef.current === receiverEpoch &&
+          editingAttachmentReceiverRef.current === editingAttachmentReceiver
+
+        void resolveAttachments()
+          .then((resolvedAttachments) => {
+            if (!isEditingReceiverCurrent()) return
+            resolvedAttachments.forEach((item) => editingAttachmentReceiver(item))
+          })
+          .catch((err) => {
+            console.error('[ChatPage] Failed to materialize edit attachments:', err)
+          })
+
+        if (image) {
+          void convertInlineImageToAttachment(image, 'pasted-image.png')
+            .then((imageAttachment) => {
+              if (imageAttachment && isEditingReceiverCurrent()) {
+                editingAttachmentReceiver(imageAttachment)
+              }
+            })
+            .catch((err) => console.error('[ChatPage] Failed to parse edit image:', err))
+        }
+
+        if (text) {
+          setEditingContent((prev) => (prev ? `${prev}\n${text}` : text))
+        }
+        return
+      }
+
       if (autoSend && sendMessageRef.current) {
         const normalizedText = text || ''
         const sendMessage = sendMessageRef.current
@@ -1700,10 +2078,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           content: normalizedText,
           hiddenContext: hiddenText || '',
           queueKey: detail.requestId ?? detail.eventId ?? detail.runId,
-          queuedAttachmentTypes: [
-            ...rawAttachments.map((item) => item.type),
-            ...(image ? (['image'] as ChatAttachment['type'][]) : [])
-          ],
+          attachments: rawAttachments.length ? rawAttachments : undefined,
           resolveAttachments: async () => {
             const resolvedAttachments = await resolveAttachments(false)
             if (!image) return resolvedAttachments
@@ -1755,7 +2130,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [
       mergeHiddenContext,
+      editingMessageIndex,
       queueExternalSendToAgentInput,
+      setEditingContent,
       setInputValue,
       setPendingAttachments,
       setPendingHiddenContext
@@ -1925,12 +2302,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
 
       try {
-        await saveSessionToDB(updatedSession, storageScope)
+        // Mark dirty (also freezes the baseline) before the guarded save so a failed draft write
+        // stays visible and is never dropped by a later storage refresh.
+        setDirtySessionSnapshot(storageScope, updatedSession)
+        await persistSessionWithBaseline(updatedSession, storageScope)
+        clearDirtySessionSnapshotIfCurrent(storageScope, updatedSession)
+        setSessionLoadError(null)
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const detail = `Failed to save chat draft: ${message}`
+        setSessionLoadError(detail)
+        notifyError(detail)
         console.error('[ChatPage] Failed to persist session draft:', error)
       }
     },
-    [storageScope]
+    [
+      clearDirtySessionSnapshotIfCurrent,
+      notifyError,
+      persistSessionWithBaseline,
+      setDirtySessionSnapshot,
+      storageScope
+    ]
   )
 
   const clearScheduledDraftPersistence = useCallback(() => {
@@ -2473,7 +2865,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       pendingAttachments,
       pendingHiddenContext,
       selectedCapabilityProfile,
-      selectedProfileCapabilities.supportsSessionContinuation
+      selectedProfileCapabilities.supportsSessionContinuation,
+      currentSession?.sessionUrl
     ]
   )
   const canCompressCurrentContext = Boolean(currentSession && currentSession.messages.length > 0)
@@ -2674,6 +3067,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
             storageScope,
             route,
             profileId: compactProfileSelection.profileId,
+            remoteProfile: config.use_remote_llm
+              ? availableProfiles.find(
+                  (profile) => profile.id === compactProfileSelection.profileId
+                )
+              : undefined,
             reasoningEffort: compactReasoningEffort,
             maxOutputTokens: compactSummaryMaxTokens,
             conversationId: `${options.sessionId}:compact:${now}`,
@@ -2698,20 +3096,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const replayImageMessages = [
             ...(previousSummary?.replayImageMessages || []),
             ...messagesToCompress.flatMap((message, index) => {
-              if (message.role !== 'user') return []
               const imageAttachments = (message.attachments || []).filter(
                 (attachment) => attachment.type === 'image'
               )
               if (imageAttachments.length === 0) return []
+              if (message.role !== 'user' && message.role !== 'assistant') return []
               return [
                 {
-                  role: 'user' as const,
-                  content: `Historical image replay from compacted user message ${index + 1}.`,
+                  role: message.role,
+                  content: `Historical image replay from compacted ${message.role} message ${index + 1}.`,
                   attachments: imageAttachments
                 }
               ]
             })
           ]
+          const contextUsage = result.contextUsage ?? result.usage
           const summary: ChatContextCompressionSummary = {
             summary: summaryText,
             coveredMessageCount:
@@ -2722,11 +3121,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
             updatedAt: Date.now(),
             lastCompactAttemptAt: now,
             lastCompactSuccessAt: Date.now(),
-            ...(result.usage?.promptTokens !== undefined
-              ? { lastPromptTokens: result.usage.promptTokens }
+            ...(contextUsage?.promptTokens !== undefined
+              ? { lastPromptTokens: contextUsage.promptTokens }
               : {}),
-            ...(result.usage?.totalTokens !== undefined
-              ? { lastTotalTokens: result.usage.totalTokens }
+            ...(contextUsage?.totalTokens !== undefined
+              ? { lastTotalTokens: contextUsage.totalTokens }
               : {}),
             ...(options.manual ? { manual: true } : {}),
             ...(replayImageMessages.length > 0 ? { replayImageMessages } : {}),
@@ -2785,7 +3184,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 ...candidate,
                 messages: candidate.messages.slice(messagesToCompress.length),
                 contextCompression: summary,
-                sessionUrl: undefined
+                sessionUrl: undefined,
+                sessionProfileId: undefined,
+                sessionRouteFingerprint: undefined
               }
               updatedSessionToPersist = updatedSession
               changed = true
@@ -2796,7 +3197,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           })
 
           if (updatedSessionToPersist) {
-            await saveSessionToDB(updatedSessionToPersist, storageScope)
+            await persistSessionWithBaseline(updatedSessionToPersist, storageScope)
             emitPreviewRefresh()
             emitChatActivity('compact_complete', compactCompleteActivity)
             if (!options.manual) {
@@ -2888,6 +3289,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return true
     },
     [
+      availableProfiles,
       config,
       emitChatActivity,
       emitCompactSkipped,
@@ -3166,7 +3568,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   useEffect(() => {
     const handleSendToAgent = (e: Event) => {
-      if (!acceptExternalInput) return
       const customEvent = e as CustomEvent<{
         image?: string
         text?: string
@@ -3183,8 +3584,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const detail = customEvent.detail
       const targetScope = detail.targetScope ?? detail.scope
       if (targetScope) {
+        // Explicit deliveries keep their destination even if the user has since switched panes.
         if (targetScope !== storageScope) return
-      } else if (!active) {
+      } else if (!active || !acceptExternalInput) {
         return
       }
       if (!sessionsLoaded) {
@@ -3314,8 +3716,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const changedSessions = sessions.filter(
       (session) => previousSessions.get(session.id) !== session
     )
+    for (const session of changedSessions) setDirtySessionSnapshot(storageScope, session)
     debouncedSaveSessions(changedSessions, 500, storageScope, {
+      saveOne: (session) => persistSessionWithBaseline(session, storageScope),
       onSuccess: (savedSessions) => {
+        for (const session of savedSessions)
+          clearDirtySessionSnapshotIfCurrent(storageScope, session)
+        if (storageScope !== storageScopeRef.current) return
+        if (getDirtySessionIds(storageScope).length === 0) setSessionSaveError(null)
         sessionPersistenceRetryCountRef.current = 0
         if (sessionPersistenceRetryTimerRef.current) {
           clearTimeout(sessionPersistenceRetryTimerRef.current)
@@ -3327,10 +3735,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         }
       },
-      onError: () => {
-        if (storageScope !== storageScopeRef.current || sessionPersistenceRetryTimerRef.current) {
-          return
-        }
+      onError: (error) => {
+        if (storageScope !== storageScopeRef.current) return
+        const detail = error instanceof Error ? error.message : String(error)
+        setSessionSaveError(`Failed to save chat session: ${detail}`)
+        if (sessionPersistenceRetryTimerRef.current) return
         const retryDelayMs = Math.min(
           30_000,
           1_000 * 2 ** Math.min(sessionPersistenceRetryCountRef.current, 5)
@@ -3344,7 +3753,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }, retryDelayMs)
       }
     })
-  }, [sessions, sessionsLoaded, storageScope])
+  }, [
+    clearDirtySessionSnapshotIfCurrent,
+    getDirtySessionIds,
+    persistSessionWithBaseline,
+    sessions,
+    sessionsLoaded,
+    setDirtySessionSnapshot,
+    storageScope
+  ])
 
   // ==================== 同步 currentSessionId 与 profile ====================
   useEffect(() => {
@@ -3455,7 +3872,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // 自动创建初始 session
   useEffect(() => {
-    if (!sessionsLoaded) return
+    if (!sessionsLoaded || sessionLoadError) return
     const canCreateSession =
       availableProfiles.length > 0 || config?.use_remote_llm || hasExternalAgentSkills
     if (sessions.length === 0 && canCreateSession) {
@@ -3498,7 +3915,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     setSessions,
     sessions.length,
     sessionsLoaded,
-    setActiveSessionId,
+    sessionLoadError,
     storageScope,
     t
   ])
@@ -3621,7 +4038,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const cs = sessions.find((s) => s.id === currentSessionId)
       if (!cs) return
 
+      const dropTargetEpoch = attachmentDropTargetEpochRef.current
+      const editingAttachmentReceiver =
+        editingMessageIndex !== null ? editingAttachmentReceiverRef.current : null
+      if (editingMessageIndex !== null && !editingAttachmentReceiver) return
+      // Retain the original destination, including when a session or edit is reopened.
+      const isDropTargetCurrent = () =>
+        isMountedRef.current &&
+        attachmentDropTargetEpochRef.current === dropTargetEpoch &&
+        currentSessionIdRef.current === cs.id &&
+        storageScopeRef.current === storageScope
+
       const internalPayload = parseInternalImageDragPayload(e.dataTransfer)
+      const externalImageContent = getDroppedLocalImageContent(e.dataTransfer)
       if (internalPayload) {
         try {
           const {
@@ -3654,12 +4083,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 relativePath: draggedImageFile.name
               }
             )
+            if (!isDropTargetCurrent()) return
             const materializedDraggedFileAttachment =
               (await materializeInternalImageDragAttachment(draggedFileAttachment)) ||
               draggedFileAttachment
             if (materializedDraggedFileAttachment.url !== draggedFileAttachment.url) {
               revokeBlobUrl(draggedFileAttachment.url)
             }
+            if (!isDropTargetCurrent()) return
             nextAttachments.push({
               ...materializedDraggedFileAttachment,
               metadata: {
@@ -3708,6 +4139,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
               ChatAttachment => attachment !== null
           ) as ChatAttachment[]
 
+          if (!isDropTargetCurrent()) return
+          if (
+            editingAttachmentReceiver &&
+            (materializedAttachments.length > 0 || droppedText || droppedHiddenText)
+          ) {
+            materializedAttachments.forEach((item) => editingAttachmentReceiver(item))
+            if (droppedText) {
+              setEditingContent((prev) => (prev ? `${prev}\n${droppedText}` : droppedText))
+            }
+            return
+          }
+
           if (materializedAttachments.length > 0) {
             setPendingAttachments((prev) => {
               const seen = new Set(
@@ -3744,6 +4187,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             return
           }
         } catch (err) {
+          if (!isDropTargetCurrent()) return
           console.error('[ChatPage] 内部拖拽数据解析失败:', err)
         }
       }
@@ -3752,6 +4196,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (hasDroppedDirectory(dataTransferItems)) {
         try {
           const droppedEntries = await collectDroppedDirectoryFiles(dataTransferItems)
+          if (!isDropTargetCurrent()) return
           const droppedDirectoryFiles = resolveDroppedDirectoryImageFiles(droppedEntries)
 
           if (droppedDirectoryFiles.length === 0) {
@@ -3778,18 +4223,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
               continue
             }
 
-            nextAttachments.push(
-              await buildChatAttachmentFromDroppedFile(entry.file, {
-                relativePath: entry.relativePath
-              })
-            )
+            const attachment = await buildChatAttachmentFromDroppedFile(entry.file, {
+              relativePath: entry.relativePath
+            })
+            if (!isDropTargetCurrent()) return
+            nextAttachments.push(attachment)
           }
 
           if (nextAttachments.length > 0) {
-            setPendingAttachments((prev) => [...prev, ...nextAttachments])
+            if (editingAttachmentReceiver) {
+              nextAttachments.forEach((attachment) => editingAttachmentReceiver(attachment))
+            } else {
+              setPendingAttachments((prev) => [...prev, ...nextAttachments])
+            }
           }
           return
         } catch (error) {
+          if (!isDropTargetCurrent()) return
           console.error('[ChatPage] Failed to process dropped directory:', error)
           notifyError(
             t('chat.drop_folder_process_failed', {
@@ -3800,8 +4250,70 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
       }
 
-      const files = e.dataTransfer.files
+      let files = Array.from(e.dataTransfer.files || [])
+      if (!files.length && externalImageContent.fileUrls.length) {
+        let resolved: Awaited<ReturnType<typeof getDroppedLocalImageFiles>>
+        try {
+          resolved = await getDroppedLocalImageFiles(externalImageContent, {
+            isCurrent: isDropTargetCurrent
+          })
+        } catch {
+          resolved = { files: [], failedUrls: externalImageContent.fileUrls }
+        }
+        if (!isDropTargetCurrent()) return
+        files = resolved.files
+        for (const url of resolved.failedUrls) {
+          notifyError(
+            t('chat.drop_local_image_failed', {
+              name: getDownloadFileNameFromUrl(url, 'image'),
+              defaultValue:
+                'Unable to read dropped image {{name}}. Its source cache may have expired, access was denied, or the image exceeds the attachment limit. Please drag it again or save it and upload.'
+            })
+          )
+        }
+      }
+      if (externalImageContent.fileUrls.length && externalImageContent.text.trim()) {
+        if (editingAttachmentReceiver) {
+          setEditingContent((prev) =>
+            prev ? `${prev}\n${externalImageContent.text}` : externalImageContent.text
+          )
+        } else {
+          setInputValue((prev) =>
+            prev ? `${prev}\n\n${externalImageContent.text}` : externalImageContent.text
+          )
+        }
+      }
       if (!files || files.length === 0) return
+
+      if (editingAttachmentReceiver) {
+        const imageFiles = Array.from(files).filter(
+          (file) => getChatAttachmentTypeForFile(file) === 'image'
+        )
+        if (imageFiles.length > 0) {
+          for (const file of imageFiles) {
+            try {
+              const maxSizeMB = getChatAttachmentMaxSizeMB('image')
+              if (!checkFileSize(file, maxSizeMB)) {
+                throw new Error(`${file.name} is too large. Max ${maxSizeMB}MB.`)
+              }
+              const attachment = await buildImageChatAttachmentFromFile(file)
+              if (!isDropTargetCurrent()) return
+              editingAttachmentReceiver(attachment)
+            } catch (error) {
+              if (!isDropTargetCurrent()) return
+              console.error('[ChatPage] Failed to process dropped edit image:', error)
+              notifyError(
+                t('chat.image_process_failed', {
+                  name: file.name,
+                  defaultValue: 'Failed to process image {{name}}.'
+                })
+              )
+            }
+          }
+        }
+        // Do not leak non-image drops into the bottom composer while editing.
+        return
+      }
 
       const nextAttachments: ChatAttachment[] = []
       for (let i = 0; i < files.length; i++) {
@@ -3822,8 +4334,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
             continue
           }
 
-          nextAttachments.push(await buildChatAttachmentFromDroppedFile(file))
+          const attachment = await buildChatAttachmentFromDroppedFile(file)
+          if (!isDropTargetCurrent()) return
+          nextAttachments.push(attachment)
         } catch (error) {
+          if (!isDropTargetCurrent()) return
           console.error('[ChatPage] Failed to process dropped file:', error)
           const messageKey =
             getChatAttachmentTypeForFile(file) === 'image'
@@ -3845,13 +4360,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [
       active,
       currentSessionId,
+      editingMessageIndex,
       mergeHiddenContext,
       notifyError,
       notifyWarning,
       sessions,
+      setEditingContent,
       setInputValue,
       setPendingAttachments,
       setPendingHiddenContext,
+      storageScope,
       t
     ]
   )
@@ -3889,7 +4407,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
       }
       setActiveSessionId(newSession.id)
-      await saveSessionToDB(newSession, storageScope)
+      await persistSessionWithBaseline(newSession, storageScope)
       emitPreviewRefresh()
     },
     [
@@ -3937,7 +4455,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 {
                   content: message.content,
                   attachments: message.attachments,
-                  ocrResult: message.ocrResult
+                  ocrResult: message.ocrResult,
+                  toolHistory: message.toolHistory
                 },
                 message.modelName,
                 {
@@ -4169,10 +4688,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       const sessionIds = new Set<string>([
         ...loadingSessionIdsRef.current,
-        ...externalLoadingSessionIdsRef.current
+        ...externalLoadingSessionIdsRef.current,
+        ...queuedSessionSendsRef.current.keys()
       ])
       sessionIds.forEach((sessionId) => {
-        terminateSession(sessionId)
+        terminateSession(sessionId, { dropQueued: true })
       })
     }
     const handleTerminateSession = (event: Event): void => {
@@ -4185,7 +4705,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const sessionId = customEvent.detail?.sessionId
       if (!sessionId) return
 
-      terminateSession(sessionId)
+      terminateSession(sessionId, { dropQueued: true })
     }
 
     window.addEventListener('chat:terminate-scope', handleTerminateScope)
@@ -4382,7 +4902,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }
 
   const deleteSession = (sessionId: string) => {
-    terminateSession(sessionId)
+    terminateSession(sessionId, { dropQueued: true })
     deleteSessionDraftBackup(sessionId, storageScope)
     cancelDebouncedSessionSave(sessionId, storageScope)
     deletedSessionKeysRef.current.add(`${storageScope}\u0000${sessionId}`)
@@ -4483,7 +5003,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
             ? {
                 ...s,
                 profileId: nextProfileId ?? undefined,
-                ...(profileChanged ? { sessionUrl: undefined, sessionProfileId: undefined } : {})
+                ...(profileChanged
+                  ? {
+                      sessionUrl: undefined,
+                      sessionProfileId: undefined,
+                      sessionRouteFingerprint: undefined
+                    }
+                  : {})
               }
             : s
         )
@@ -4630,28 +5156,31 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
   // ==================== 发送消息 ====================
   const persistUserImageAttachments = useCallback(
-    async (attachments: ChatAttachment[] | undefined): Promise<ChatAttachment[] | undefined> => {
+    async (
+      attachments: ChatAttachment[] | undefined,
+      persistenceByBlobUrl?: Map<string, Promise<string | null>>
+    ): Promise<ChatAttachment[] | undefined> => {
       if (!attachments?.length) return attachments
 
       const targetDir = resolveAssistantImageAutoSaveDir({
         config: { download_dir: config.download_dir },
         storageScope
       })
-      const persistenceByBlobUrl = new Map<string, Promise<string | null>>()
+      const persistenceMap = persistenceByBlobUrl || new Map<string, Promise<string | null>>()
       const persistedAttachments = await Promise.all(
         attachments.map(async (attachment, attachmentIndex): Promise<ChatAttachment> => {
           if (attachment.type !== 'image' || !attachment.url.startsWith('blob:')) {
             return attachment
           }
 
-          let persistence = persistenceByBlobUrl.get(attachment.url)
+          let persistence = persistenceMap.get(attachment.url)
           if (!persistence) {
             persistence = saveChatImageAttachmentBlobToDir({
               attachment,
               attachmentIndex,
               targetDir
             })
-            persistenceByBlobUrl.set(attachment.url, persistence)
+            persistenceMap.set(attachment.url, persistence)
           }
           const savedPath = await persistence
 
@@ -4672,21 +5201,29 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const prepareOutgoingUserMessage = useCallback(
-    async (content: string, attachments?: ChatAttachment[]): Promise<ChatMessage> => {
-      const persistedAttachments = await persistUserImageAttachments(attachments)
-      const preparedMessage: ChatMessage = {
-        role: 'user',
-        content: content || '',
-        attachments: persistedAttachments
-      }
-
-      const augmentedMessage = await augmentAttachmentsWithVideoBoundaryFrames(
-        preparedMessage.attachments,
-        preparedMessage.content
+    async (
+      content: string,
+      attachments?: ChatAttachment[],
+      validate?: (message: ChatMessage) => void,
+      persistenceByBlobUrl?: Map<string, Promise<string | null>>,
+      preAugmentedMessage?: Pick<ChatMessage, 'content' | 'attachments'>
+    ): Promise<ChatMessage> => {
+      const descriptor: ChatMessage = { role: 'user', content: content || '', attachments }
+      validate?.(descriptor)
+      const reusablePreparedMessage = mergePreAugmentedVideoFramesWithResolvedAttachments(
+        descriptor.content,
+        attachments,
+        preAugmentedMessage
       )
-      preparedMessage.content = augmentedMessage.content
-      preparedMessage.attachments = augmentedMessage.attachments
-
+      const augmentedMessage =
+        reusablePreparedMessage ||
+        (await augmentAttachmentsWithVideoBoundaryFrames(attachments, descriptor.content))
+      const preparedMessage: ChatMessage = { ...descriptor, ...augmentedMessage }
+      validate?.(preparedMessage)
+      preparedMessage.attachments = await persistUserImageAttachments(
+        preparedMessage.attachments,
+        persistenceByBlobUrl
+      )
       return preparedMessage
     },
     [persistUserImageAttachments]
@@ -4703,25 +5240,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
         : pendingAttachmentsRef.current.length > 0
           ? [...pendingAttachmentsRef.current]
           : undefined
-      if (overrides?.resolveAttachments) {
-        msgAttachments = await overrides.resolveAttachments()
-      }
+      const provisionalAttachments = msgAttachments || []
       const msgHiddenContext = (
         overrides ? overrides.hiddenContext : pendingHiddenContextRef.current
       )?.trim()
 
       if (!cs || !targetSessionId) return
 
-      const activeSkillId = resolveAvailableSkillId(
-        overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
-      )
-      const activeSkill = findCustomSkillById(customSkills, activeSkillId)
-      const rawAttachments = mergeChatAttachmentsWithSkillReferenceAttachments(
-        msgAttachments,
-        activeSkill?.type === 'agent' ? undefined : activeSkill?.referenceAttachments
-      )
+      const requestTerminationEpoch = sessionTerminationEpochRef.current.get(targetSessionId) ?? 0
+      const isPreflightCurrent = (): boolean =>
+        (sessionTerminationEpochRef.current.get(targetSessionId) ?? 0) === requestTerminationEpoch
 
-      if (!msgContent && !rawAttachments?.length) return
+      const requestedSkillId = overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
+      const activeSkillId = resolveAvailableSkillId(requestedSkillId)
+      const activeSkill = findCustomSkillById(customSkills, activeSkillId)
+      let rawAttachments =
+        mergeChatAttachmentsWithSkillReferenceAttachments(
+          provisionalAttachments,
+          activeSkill?.type === 'agent' ? undefined : activeSkill?.referenceAttachments
+        ) || []
+
+      if (!msgContent && !rawAttachments?.length && !overrides?.resolveAttachments) return
 
       console.log(
         '[ChatPage] sendMessage: attachments:',
@@ -4749,13 +5288,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const activeSystemPrompt = buildSystemPromptFromSkillRuntime(activeSkillRuntime)
       const activeUserPrompt = buildUserPromptFromSkillRuntime(activeSkillRuntime)
       const activeSkillCapabilityContext = buildSkillRuntimeCapabilityContext(activeSkillRuntime)
-      const activeSkillResources = await resolveSkillRuntimeResourceEntries({
-        runtime: activeSkillRuntime,
-        config,
-        runtimeApps: availableRuntimeApps,
-        runtimeMcpStatus
-      })
-      const activeSkillResourceContext = buildSkillRuntimeResourceContext(activeSkillResources)
       const preScriptReport = resolveSkillRuntimePreScripts({
         runtime: activeSkillRuntime,
         content: requestContent
@@ -4781,36 +5313,285 @@ const ChatPage: React.FC<ChatPageProps> = ({
           : resolveProfileIdForSkill(activeSkillId, cs.profileId || selectedProfileId, {
               preferConfiguredProfile: Boolean(overrides?.forcedSkillId)
             }))
+      let baseProfileId = getBaseProfileId(profileId)
+      let remoteRequestProfile = config.use_remote_llm
+        ? availableProfiles.find((profile) => profile.id === profileId)
+        : undefined
+      if (config.use_remote_llm && !activeExternalAgentSkill && !remoteRequestProfile) {
+        notifyError(
+          'Remote profile metadata is unavailable. Refresh the remote profiles before sending.'
+        )
+        return
+      }
+
+      let earlyPreparedMessage: Pick<ChatMessage, 'content' | 'attachments'> | undefined
+      if (!activeExternalAgentSkill) {
+        const provisionalPreparedMessage = await augmentAttachmentsWithVideoBoundaryFrames(
+          rawAttachments,
+          requestContent
+        )
+        if (!isPreflightCurrent()) return
+        earlyPreparedMessage = provisionalPreparedMessage
+        rawAttachments = provisionalPreparedMessage.attachments || rawAttachments
+        requestContent = provisionalPreparedMessage.content
+        userMessage = {
+          ...userMessage,
+          content: requestContent,
+          attachments: rawAttachments
+        }
+      }
+
+      const provisionalActiveProfile = config.use_remote_llm
+        ? remoteRequestProfile || null
+        : profileId
+          ? availableProfiles.find((profile) => profile.id === profileId) ||
+            availableProfiles.find((profile) => profile.id === baseProfileId) ||
+            null
+          : null
+      const provisionalActiveCapabilityProfile =
+        provisionalActiveProfile as ChatCapabilityProfile | null
+      const provisionalCapabilities = resolveChatProfileCapabilities(
+        provisionalActiveCapabilityProfile
+      )
+      const provisionalProvider = provisionalActiveProfile
+        ? resolveProfileProvider(provisionalActiveProfile)
+        : undefined
+      const provisionalModelUse = provisionalActiveProfile
+        ? resolveProfileModelUse(provisionalActiveProfile)
+        : undefined
+      const provisionalIsImageGenerationRequest =
+        isImageGenerationSelected ||
+        activeSkillRuntime.execution.outputMode === 'image' ||
+        (provisionalProvider === 'openai' &&
+          (provisionalActiveProfile?.api_mode === 'images' || provisionalModelUse === 'image')) ||
+        (provisionalProvider === 'openai' &&
+          shouldUseOpenAIImageGeneration({
+            messages: [{ ...userMessage, content: requestContent }],
+            modelUse: provisionalModelUse,
+            imageGenerationOptions
+          }))
+      const historyMessages = executionContext.historyMessages
+      const currentSessionUrl = executionContext.sessionUrl
+      const provisionalContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
+      const provisionalRouteFingerprint = resolveChatRequestRouteFingerprint(
+        config,
+        profileId,
+        remoteRequestProfile
+      )
+      const provisionalContinuationMatches =
+        !currentSessionUrl ||
+        (Boolean(cs.sessionProfileId) &&
+          normalizeChatProfileIdForStorage(cs.sessionProfileId) ===
+            provisionalContinuationProfileId &&
+          (!config.use_remote_llm ||
+            (Boolean(cs.sessionRouteFingerprint) &&
+              cs.sessionRouteFingerprint === provisionalRouteFingerprint)))
+      const provisionalImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: provisionalCapabilities.supportsSessionContinuation,
+        hasUsableSessionContinuation: Boolean(
+          provisionalCapabilities.supportsSessionContinuation &&
+          provisionalContinuationMatches &&
+          currentSessionUrl?.trim()
+        ),
+        hasRealSessionContinuationTransport: !activeExternalAgentSkill,
+        shouldResetContinuation: false,
+        isImageGenerationRequest: provisionalIsImageGenerationRequest
+      }).imageHistoryPolicy
+      const provisionalUserMessage: ChatMessage = {
+        ...userMessage,
+        content: requestContent,
+        attachments: rawAttachments
+      }
+      try {
+        preflightChatRequestImages({
+          config,
+          messages: [...historyMessages, provisionalUserMessage],
+          profileId,
+          remoteProfile: remoteRequestProfile,
+          externalAgentSkill: activeExternalAgentSkill,
+          imageHistoryPolicy: provisionalImageHistoryPolicy
+        })
+      } catch (error) {
+        notifyError(error instanceof Error ? error.message : String(error))
+        return
+      }
+
+      if (overrides?.resolveAttachments) {
+        msgAttachments = await overrides.resolveAttachments()
+        if (!isPreflightCurrent()) return
+        rawAttachments =
+          mergeChatAttachmentsWithSkillReferenceAttachments(
+            msgAttachments,
+            activeSkill?.type === 'agent' ? undefined : activeSkill?.referenceAttachments
+          ) || []
+        if (!requestContent && !rawAttachments?.length) return
+
+        const resolvedPreparedMessage = mergePreAugmentedVideoFramesWithResolvedAttachments(
+          requestContent,
+          rawAttachments,
+          earlyPreparedMessage
+        )
+        if (resolvedPreparedMessage) {
+          earlyPreparedMessage = resolvedPreparedMessage
+          rawAttachments = resolvedPreparedMessage.attachments || rawAttachments
+          requestContent = resolvedPreparedMessage.content
+        } else {
+          earlyPreparedMessage = undefined
+        }
+
+        userMessage = {
+          ...userMessage,
+          content: requestContent,
+          attachments: rawAttachments
+        }
+        try {
+          preflightChatRequestImages({
+            config,
+            messages: [...historyMessages, userMessage],
+            profileId,
+            remoteProfile: remoteRequestProfile,
+            externalAgentSkill: activeExternalAgentSkill,
+            imageHistoryPolicy: provisionalImageHistoryPolicy
+          })
+        } catch (error) {
+          notifyError(error instanceof Error ? error.message : String(error))
+          return
+        }
+      }
+
       if (getBaseProfileId(profileId) === HUNYUAN_3D_PROFILE_ID) {
         const hp = overrides?.hy3dParams
           ? await refreshHy3dModelUrlIfNeeded(overrides.hy3dParams)
           : await refreshHy3dModelUrlIfNeeded(getHy3dParams())
+        if (!isPreflightCurrent()) return
         profileId = buildHy3dProfileId(hp)
 
-        // For post-processing modes that need a model URL, inject it into message content
         if (HY3D_POST_PROCESS_ACTIONS.has(hp.apiAction) && hp.modelUrl) {
-          // Prepend model URL to message content so backend can parse it
           const urlPrefix = hp.modelUrl.trim()
           if (urlPrefix && !requestContent.includes(urlPrefix)) {
             requestContent = `${urlPrefix}\n${requestContent}`.trim()
           }
         }
-        // For texture mode, inject texturePrompt if user didn't type anything
         if (hp.apiAction === 'SubmitTextureTo3DJob' && !msgContent && hp.texturePrompt) {
           requestContent = `${hp.modelUrl || ''}\n${hp.texturePrompt}`.trim()
         }
       }
 
-      const baseProfileId = getBaseProfileId(profileId)
-      const activeProfile = profileId
-        ? availableProfiles.find((profile) => profile.id === profileId) ||
-          availableProfiles.find((profile) => profile.id === baseProfileId) ||
-          null
-        : null
+      baseProfileId = getBaseProfileId(profileId)
+      remoteRequestProfile = config.use_remote_llm
+        ? availableProfiles.find((profile) => profile.id === profileId)
+        : undefined
+      if (config.use_remote_llm && !activeExternalAgentSkill && !remoteRequestProfile) {
+        notifyError(
+          'Remote profile metadata is unavailable. Refresh the remote profiles before sending.'
+        )
+        return
+      }
+
+      const activeProfile = config.use_remote_llm
+        ? remoteRequestProfile || null
+        : profileId
+          ? availableProfiles.find((profile) => profile.id === profileId) ||
+            availableProfiles.find((profile) => profile.id === baseProfileId) ||
+            null
+          : null
       const activeCapabilityProfile = activeProfile as ChatCapabilityProfile | null
       const activeProfileCapabilities = resolveChatProfileCapabilities(activeCapabilityProfile)
       const responseModelName =
         (activeProfile?.model_name || baseProfileId || '').trim() || undefined
+      const activeProfileProvider = activeProfile
+        ? resolveProfileProvider(activeProfile)
+        : undefined
+      const activeProfileModelUse = activeProfile
+        ? resolveProfileModelUse(activeProfile)
+        : undefined
+      const isImageGenerationRequest =
+        isImageGenerationSelected ||
+        activeSkillRuntime.execution.outputMode === 'image' ||
+        (activeProfileProvider === 'openai' &&
+          (activeProfile?.api_mode === 'images' || activeProfileModelUse === 'image')) ||
+        (activeProfileProvider === 'openai' &&
+          shouldUseOpenAIImageGeneration({
+            messages: [{ ...userMessage, content: requestContent, attachments: rawAttachments }],
+            modelUse: activeProfileModelUse,
+            imageGenerationOptions
+          }))
+      const activeContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
+      const routeFingerprint = resolveChatRequestRouteFingerprint(
+        config,
+        profileId,
+        remoteRequestProfile
+      )
+      const continuationProfileMatches =
+        !currentSessionUrl ||
+        (Boolean(cs.sessionProfileId) &&
+          normalizeChatProfileIdForStorage(cs.sessionProfileId) === activeContinuationProfileId &&
+          (!config.use_remote_llm ||
+            (Boolean(cs.sessionRouteFingerprint) &&
+              cs.sessionRouteFingerprint === routeFingerprint)))
+      const preflightImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
+        hasUsableSessionContinuation: Boolean(
+          activeProfileCapabilities.supportsSessionContinuation &&
+          continuationProfileMatches &&
+          currentSessionUrl?.trim()
+        ),
+        hasRealSessionContinuationTransport: !activeExternalAgentSkill,
+        shouldResetContinuation: false,
+        isImageGenerationRequest
+      }).imageHistoryPolicy
+      const explicitToolCommand = parseExplicitToolCommand(requestContent)
+      const shouldPreserveMultiAttachmentRequest = isImageGenerationRequest
+      const requestImageGenerationOptions = resolveImageGenerationOptionsForAttachments(
+        imageGenerationOptions,
+        rawAttachments
+      )
+      const useAttachmentBatching =
+        !shouldPreserveMultiAttachmentRequest &&
+        shouldUseExplicitAttachmentBatching(rawAttachments, requestedSkillId, activeSkillRuntime)
+
+      try {
+        preflightChatRequestImages({
+          config,
+          messages: [
+            ...historyMessages,
+            {
+              ...userMessage,
+              content: requestContent,
+              attachments: rawAttachments
+            }
+          ],
+          profileId,
+          remoteProfile: remoteRequestProfile,
+          externalAgentSkill: activeExternalAgentSkill,
+          imageHistoryPolicy: preflightImageHistoryPolicy
+        })
+      } catch (error) {
+        notifyError(error instanceof Error ? error.message : String(error))
+        return
+      }
+
+      if (!activeExternalAgentSkill) {
+        try {
+          preflightChatRequestImages({
+            config,
+            messages: [
+              ...historyMessages,
+              {
+                ...userMessage,
+                ...earlyPreparedMessage
+              }
+            ],
+            profileId,
+            remoteProfile: remoteRequestProfile,
+            externalAgentSkill: activeExternalAgentSkill,
+            imageHistoryPolicy: preflightImageHistoryPolicy
+          })
+        } catch (error) {
+          notifyError(error instanceof Error ? error.message : String(error))
+          return
+        }
+      }
       const skillAttachmentSupport =
         activeSkill && activeProfile
           ? inspectSkillAttachmentSupport(rawAttachments, activeProfile)
@@ -4832,8 +5613,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
-      const explicitToolCommand = parseExplicitToolCommand(requestContent)
-      userMessage = await prepareOutgoingUserMessage(requestContent, rawAttachments)
+      const latestContextCompressionSummary = cs.contextCompression
+      const activeSkillResourceContext = buildSkillRuntimeResourceContext(
+        await resolveSkillRuntimeResourceEntries({
+          runtime: activeSkillRuntime,
+          config,
+          runtimeApps: availableRuntimeApps,
+          runtimeMcpStatus
+        })
+      )
+      if (!isPreflightCurrent()) return
+      userMessage = await prepareOutgoingUserMessage(
+        requestContent,
+        rawAttachments,
+        undefined,
+        undefined,
+        earlyPreparedMessage
+      )
+      if (!isPreflightCurrent()) return
       const resolvedHiddenContext = explicitToolCommand
         ? msgHiddenContext || ''
         : mergeHiddenContext(
@@ -4846,22 +5643,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (resolvedHiddenContext) {
         userMessage.hiddenContext = resolvedHiddenContext
       }
-      const historyMessages = executionContext.historyMessages
-      const currentSessionUrl = executionContext.sessionUrl
-      const shouldPreserveMultiAttachmentRequest = isImageGenerationSelected
-      const requestImageGenerationOptions = resolveImageGenerationOptionsForAttachments(
-        imageGenerationOptions,
-        rawAttachments
-      )
-      const useAttachmentBatching =
-        shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
-      const latestContextCompressionSummary = cs.contextCompression
       let shouldDiscardSessionUrlForContextCompact = false
-      const activeContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
-      const continuationProfileMatches =
-        !currentSessionUrl ||
-        !cs.sessionProfileId ||
-        normalizeChatProfileIdForStorage(cs.sessionProfileId) === activeContinuationProfileId
       let requestContinuationUrl =
         activeProfileCapabilities.supportsSessionContinuation && continuationProfileMatches
           ? currentSessionUrl?.trim() || undefined
@@ -4870,8 +5652,38 @@ const ChatPage: React.FC<ChatPageProps> = ({
         shouldDiscardSessionUrlForContextCompact = true
       }
       let requestHistoryMessages = historyMessages
+      const runId = ++runIdRef.current
+      const lifecycleId = generateUUID()
+      const lifecycleScope = storageScope
+      const lifecycleSessionId = targetSessionId
+      let lifecycleTerminal = false
+      const lifecycleEvent = (
+        status: 'running' | 'waiting-tool' | 'completed' | 'failed' | 'cancelled'
+      ): void => {
+        if (lifecycleTerminal) return
+        const currentRun = activeRunIdBySessionRef.current.get(targetSessionId) === runId
+        if (!currentRun) return
+        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          lifecycleTerminal = true
+        }
+        dispatchScopedChatRunEvent(lifecycleScope, lifecycleSessionId, {
+          runId: lifecycleId,
+          status,
+          unread: status === 'completed'
+        })
+      }
+      startScopedChatRun(lifecycleScope, lifecycleSessionId, lifecycleId)
+      activeRunIdBySessionRef.current.set(targetSessionId, runId)
+      lifecycleRunIdBySessionRef.current.set(targetSessionId, lifecycleId)
       const sessionAbortController = new AbortController()
       sessionAbortControllersRef.current.set(targetSessionId, sessionAbortController)
+      cancelledSessionsRef.current.delete(targetSessionId)
+      const isCurrentRun = (): boolean =>
+        activeRunIdBySessionRef.current.get(targetSessionId) === runId
+      const staleRunError = Symbol('stale-chat-run')
+      const assertCurrentRun = (): void => {
+        if (!isCurrentRun()) throw staleRunError
+      }
 
       const withLatestContextCompression = (
         updater: (prev: ChatSession[]) => ChatSession[]
@@ -4882,6 +5694,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         step: number,
         totalSteps = CHAT_LOADING_TOTAL_STEPS
       ) => {
+        if (!isCurrentRun()) return
         setSessionLoadingStatus(targetSessionId, {
           label,
           detail,
@@ -4906,6 +5719,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (!overrides) {
         inputValueRef.current = ''
         setInputValue('')
+        // The debounced parent value can still be empty after a rapid send.
+        setComposerClearVersion((version) => version + 1)
         pendingAttachmentsRef.current = []
         setPendingAttachments([])
         pendingHiddenContextRef.current = ''
@@ -4949,14 +5764,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
         1
       )
 
-      // 同步保存到 IndexedDB
-      void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder')
+      // 同步保存到 IndexedDB; the helper reports failures and notifies the user.
+      void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder').catch(
+        () => undefined
+      )
 
+      let sessionSnapshotSaveFailed = false
       const persistSessionsToStorage = async (
         _updater: (prev: ChatSession[]) => ChatSession[],
         label = ''
       ): Promise<void> => {
-        await persistCurrentSessionSnapshot(targetSessionId, label)
+        if (!(await persistCurrentSessionSnapshot(targetSessionId, label)))
+          sessionSnapshotSaveFailed = true
       }
 
       const buildRequestMessageWithRuntimeContext = (requestMessage: ChatMessage): ChatMessage =>
@@ -4982,7 +5801,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const preliminaryImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
           supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
           hasUsableSessionContinuation,
-          shouldResetContinuation: false
+          hasRealSessionContinuationTransport: !activeExternalAgentSkill,
+          shouldResetContinuation: false,
+          isImageGenerationRequest
         }).preliminaryImageHistoryPolicy
         const preliminaryCalibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
           profileId,
@@ -5008,7 +5829,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const imageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
           supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
           hasUsableSessionContinuation,
-          shouldResetContinuation: shouldDropSessionUrlForCompressedRequest
+          hasRealSessionContinuationTransport: !activeExternalAgentSkill,
+          shouldResetContinuation: shouldDropSessionUrlForCompressedRequest,
+          isImageGenerationRequest
         }).imageHistoryPolicy
         const calibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
           profileId,
@@ -5029,6 +5852,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             force: compressionPlan.shouldCompress
           })
         }
+
+        assertChatContextBudget(compressionPlan)
 
         if (shouldDropSessionUrlForCompressedRequest) {
           shouldDiscardSessionUrlForContextCompact = true
@@ -5090,17 +5915,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           requestMessages,
           imageHistoryPolicy
         )
-        const selectedImageCount = selectedRequestMessages.reduce(
-          (total, message) =>
-            total +
-            (message.attachments || []).filter((attachment) => attachment.type === 'image').length,
-          0
-        )
-        if (selectedImageCount > 10) {
-          throw new Error(
-            `This request reconstructs ${selectedImageCount} images, exceeding the supported limit of 10. Start a new session or remove older image references.`
-          )
-        }
         return {
           compressionPlan,
           calibrationFingerprint,
@@ -5162,9 +5976,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const shouldStreamStandardResponse = supportsStreamingChatCompletion({
         config,
         profileId,
+        remoteProfile: remoteRequestProfile,
         externalAgentSkill: activeExternalAgentSkill
       })
       let streamedResponse = ''
+      let streamedToolHistory: ChatMessage['toolHistory']
       let streamedAttachments: ChatAttachment[] = []
       let streamedSessionUrl = currentSessionUrl
       let streamedOcrResult: ChatMessage['ocrResult']
@@ -5193,13 +6009,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }),
           3
         )
-        const dispatchCompletion = (state: ReturnType<typeof buildRequestExecutionState>) =>
-          requestChatCompletion({
+        const dispatchCompletion = (state: ReturnType<typeof buildRequestExecutionState>) => {
+          assertCurrentRun()
+          return requestChatCompletion({
             config,
             messages: state.requestMessages,
             storageScope,
             route,
             profileId,
+            remoteProfile: remoteRequestProfile,
             systemPrompt: activeSystemPrompt,
             reasoningEffort: selectedReasoningEffort,
             imageGenerationOptions: requestImageGenerationOptions,
@@ -5211,12 +6029,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
             isEdit: !!overrides?.baseMessages,
             signal: sessionAbortController.signal
           })
+        }
         let completedRequestState = requestState
         let result
         try {
           result = await dispatchCompletion(requestState)
         } catch (error) {
-          if (!requestState.sessionUrl || !isInvalidSessionContinuationError(error)) {
+          if (!isCurrentRun()) throw staleRunError
+          if (!requestState.sessionUrl || !isInvalidSessionContinuationError(error, true)) {
             throw error
           }
           requestContinuationUrl = undefined
@@ -5224,7 +6044,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           completedRequestState = buildRequestExecutionState(requestMessage, undefined)
           result = await dispatchCompletion(completedRequestState)
         }
-        maybeStartContextCompactFromUsage(result.usage)
+        assertCurrentRun()
+        const contextUsage = result.contextUsage ?? result.usage
+        maybeStartContextCompactFromUsage(contextUsage)
         contextTokenCalibrationByFingerprintRef.current.set(
           completedRequestState.calibrationFingerprint,
           recordChatContextTokenObservation(
@@ -5234,9 +6056,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
             {
               estimatedTextTokens: completedRequestState.estimatedTokens.textTokens,
               estimatedImageTokens: completedRequestState.estimatedTokens.imageTokens,
-              actualInputTextTokens: result.usage?.inputTextTokens,
-              actualInputImageTokens: result.usage?.inputImageTokens,
-              actualInputTokens: result.usage?.promptTokens
+              actualInputTextTokens: contextUsage?.inputTextTokens,
+              actualInputImageTokens: contextUsage?.inputImageTokens,
+              actualInputTokens: contextUsage?.promptTokens
             }
           )
         )
@@ -5295,6 +6117,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           storageScope,
           route,
           profileId,
+          remoteProfile: remoteRequestProfile,
           systemPrompt: activeSystemPrompt,
           reasoningEffort: selectedReasoningEffort,
           imageGenerationOptions: requestImageGenerationOptions,
@@ -5306,7 +6129,67 @@ const ChatPage: React.FC<ChatPageProps> = ({
           isEdit: !!overrides?.baseMessages,
           signal: sessionAbortController.signal,
           onEvent: (event) => {
+            if (targetSessionId && activeRunIdBySessionRef.current.get(targetSessionId) !== runId) {
+              return
+            }
             if (targetSessionId && cancelledSessionsRef.current.has(targetSessionId)) {
+              return
+            }
+
+            if (event.type === 'retry') {
+              hasMarkedStreamingOutput = false
+              lifecycleEvent('running')
+              setSessionLoadingStatus(targetSessionId, {
+                label: t(
+                  event.retry.reason === 'request-timeout'
+                    ? 'chat.loading_timeout_retry'
+                    : event.retry.reason === 'server-error'
+                      ? 'chat.loading_auto_retry_server_error'
+                      : 'chat.loading_auto_retry'
+                ),
+                retry: event.retry
+              })
+              return
+            }
+
+            if (event.type === 'tool-status') {
+              const checkpoint = mergeToolCheckpoint(
+                streamedToolHistory,
+                event.toolHistory,
+                event.toolStatus
+              )
+              if (checkpoint) {
+                streamedToolHistory = checkpoint
+                // Tool effects can finish long before the model answers. Save this
+                // evidence now so a renderer crash does not turn them into unknown work.
+                setSessions((previous) =>
+                  previous.map((session) => {
+                    if (session.id !== targetSessionId) return session
+                    const last = session.messages.at(-1)
+                    if (last?.role !== 'assistant') return session
+                    return {
+                      ...session,
+                      messages: [
+                        ...session.messages.slice(0, -1),
+                        { ...last, toolHistory: checkpoint }
+                      ]
+                    }
+                  })
+                )
+                void persistSessionsToStorage((previous) => previous, 'tool-checkpoint').catch(
+                  () => undefined
+                )
+              }
+              const status = event.toolStatus.status
+              lifecycleEvent(
+                status === 'running'
+                  ? 'waiting-tool'
+                  : status === 'completed'
+                    ? 'running'
+                    : status === 'cancelled'
+                      ? 'cancelled'
+                      : 'failed'
+              )
               return
             }
 
@@ -5323,6 +6206,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   4
                 )
               }
+              if (
+                targetSessionId &&
+                activeRunIdBySessionRef.current.get(targetSessionId) !== runId
+              ) {
+                return
+              }
               streamedResponse += event.delta
               setSessions((prev) =>
                 appendAssistantDeltaToSession(prev, {
@@ -5334,6 +6223,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
 
             if (event.type === 'attachment') {
+              if (
+                targetSessionId &&
+                activeRunIdBySessionRef.current.get(targetSessionId) !== runId
+              ) {
+                return
+              }
               updateLoadingStatus(
                 t('chat.loading_collect_attachments', {
                   defaultValue: '整理结果'
@@ -5348,6 +6243,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
 
             if (event.type === 'session') {
+              if (
+                targetSessionId &&
+                activeRunIdBySessionRef.current.get(targetSessionId) !== runId
+              ) {
+                return
+              }
               streamedSessionUrl = event.sessionUrl
             }
           }
@@ -5356,20 +6257,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
         try {
           streamedResult = await streamedResultPromise
         } catch (error) {
+          if (!isCurrentRun()) throw staleRunError
           if (
             !requestState.sessionUrl ||
-            !isInvalidSessionContinuationError(error) ||
+            !isInvalidSessionContinuationError(error, true) ||
             streamedResponse ||
-            streamedAttachments.length > 0
+            streamedAttachments.length > 0 ||
+            Boolean(streamedToolHistory?.length)
           ) {
             throw error
           }
           requestContinuationUrl = undefined
           shouldDiscardSessionUrlForContextCompact = true
-          return requestCompletionForUserMessage(requestMessage, undefined)
+          return requestStreamedCompletionForUserMessage(requestMessage, undefined)
         }
 
-        maybeStartContextCompactFromUsage(streamedResult.result.usage)
+        assertCurrentRun()
+        const contextUsage = streamedResult.result.contextUsage ?? streamedResult.result.usage
+        maybeStartContextCompactFromUsage(contextUsage)
         contextTokenCalibrationByFingerprintRef.current.set(
           requestState.calibrationFingerprint,
           recordChatContextTokenObservation(
@@ -5379,9 +6284,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
             {
               estimatedTextTokens: requestState.estimatedTokens.textTokens,
               estimatedImageTokens: requestState.estimatedTokens.imageTokens,
-              actualInputTextTokens: streamedResult.result.usage?.inputTextTokens,
-              actualInputImageTokens: streamedResult.result.usage?.inputImageTokens,
-              actualInputTokens: streamedResult.result.usage?.promptTokens
+              actualInputTextTokens: contextUsage?.inputTextTokens,
+              actualInputImageTokens: contextUsage?.inputImageTokens,
+              actualInputTokens: contextUsage?.promptTokens
             }
           )
         )
@@ -5424,6 +6329,44 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
 
       const completedAssistantMessages: ChatMessage[] = []
+      const buildPreparedMessageForAttachments = (
+        content: string,
+        selectedAttachments: ChatAttachment[]
+      ): Pick<ChatMessage, 'content' | 'attachments'> | undefined => {
+        if (!earlyPreparedMessage) return undefined
+        const selectedVideos = selectedAttachments.filter(
+          (attachment) => attachment.type === 'video'
+        )
+        const selectedVideoFrameNames = new Set(
+          selectedVideos.flatMap((attachment) => {
+            const sourceName = attachment.fileName || 'video'
+            const lastDotIndex = sourceName.lastIndexOf('.')
+            const baseName = lastDotIndex > 0 ? sourceName.slice(0, lastDotIndex) : sourceName
+            return [`${baseName}-first-frame.png`, `${baseName}-last-frame.png`]
+          })
+        )
+        const selected = (earlyPreparedMessage.attachments || []).filter(
+          (attachment) =>
+            selectedAttachments.some(
+              (selectedAttachment) =>
+                selectedAttachment.type === attachment.type &&
+                selectedAttachment.url === attachment.url &&
+                selectedAttachment.fileName === attachment.fileName
+            ) ||
+            (attachment.type === 'image' && selectedVideoFrameNames.has(attachment.fileName || ''))
+        )
+        const selectedNotes = earlyPreparedMessage.content
+          .split('\n')
+          .filter((line) =>
+            selectedVideos.some((videoAttachment) =>
+              line.includes(`video "${videoAttachment.fileName || 'unnamed-video'}"`)
+            )
+          )
+        return {
+          content: [content.trim(), ...selectedNotes].filter(Boolean).join('\n\n'),
+          attachments: selected.length > 0 ? selected : selectedAttachments
+        }
+      }
       const traceProjectId = resolveTraceProjectIdFromAgentRoute(route)
       const traceInputKinds = summarizeChatAttachmentKindsForTrace(rawAttachments)
       const traceLabel = activeSkill ? getCustomSkillName(activeSkill) : 'Agent'
@@ -5494,7 +6437,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   content: runSkillRuntimePostScripts({
                     runtime: activeSkillRuntime,
                     content: toolResult.content || ''
-                  })
+                  }),
+                  metadata: toolResult.metadata
                 },
                 undefined,
                 {
@@ -5513,8 +6457,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const maxAttachmentsPerRequest = await resolveAttachmentBatchCapability({
             config,
             profileId,
+            remoteProfile: remoteRequestProfile,
             systemPrompt: activeSystemPrompt,
-            externalAgentSkill: activeExternalAgentSkill
+            externalAgentSkill: activeExternalAgentSkill,
+            signal: sessionAbortController.signal
           })
           const attachmentBatchEntries = buildAttachmentBatchEntries(userMessage.attachments)
           const attachmentChunks = chunkAttachmentBatchEntries(
@@ -5525,9 +6471,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const executeSingleAttachmentEntry = async (
             entry: (typeof attachmentBatchEntries)[number]
           ) => {
-            const singleUserMessage = await prepareOutgoingUserMessage(requestContent, [
-              entry.attachment
-            ])
+            const singleUserMessage = await prepareOutgoingUserMessage(
+              requestContent,
+              [entry.attachment],
+              undefined,
+              undefined,
+              buildPreparedMessageForAttachments(requestContent, [entry.attachment])
+            )
             const singleResult = await requestCompletionForUserMessage(
               singleUserMessage,
               requestContinuationUrl
@@ -5545,7 +6495,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     content: singleResult.response
                   }),
                   attachments: singleResult.result.attachments,
-                  ocrResult: singleResult.result.ocrResult
+                  ocrResult: singleResult.result.ocrResult,
+                  metadata: singleResult.result.metadata
                 },
                 responseModelName,
                 {
@@ -5564,9 +6515,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
 
             const batchPrompt = buildAttachmentBatchPrompt(requestContent, chunk)
+            const chunkAttachments = chunk.map((entry) => entry.attachment)
             const chunkUserMessage = await prepareOutgoingUserMessage(
               batchPrompt,
-              chunk.map((entry) => entry.attachment)
+              chunkAttachments,
+              undefined,
+              undefined,
+              buildPreparedMessageForAttachments(batchPrompt, chunkAttachments)
             )
             const { result, response } = await requestCompletionForUserMessage(
               chunkUserMessage,
@@ -5589,7 +6544,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                       content: runSkillRuntimePostScripts({
                         runtime: activeSkillRuntime,
                         content: responseContent
-                      })
+                      }),
+                      ...(index === 0 ? { metadata: result.metadata } : {})
                     },
                     responseModelName,
                     {
@@ -5625,7 +6581,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
               sessionId: targetSessionId,
               messages: completedAssistantMessages,
               sessionUrl: resolvePersistedSessionUrl(returnedSessionUrl),
-              sessionProfileId: returnedSessionUrl ? activeContinuationProfileId : null
+              sessionProfileId: returnedSessionUrl ? activeContinuationProfileId : null,
+              sessionRouteFingerprint: returnedSessionUrl ? routeFingerprint : null
             })
           )
 
@@ -5649,7 +6606,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     content: response
                   }),
                   attachments: result.attachments,
-                  ocrResult: result.ocrResult
+                  ocrResult: result.ocrResult,
+                  metadata: result.metadata
                 },
                 responseModelName,
                 {
@@ -5657,16 +6615,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 }
               ),
               sessionUrl: resolvePersistedSessionUrl(result.sessionUrl),
-              sessionProfileId: result.sessionUrl ? activeContinuationProfileId : null
+              sessionProfileId: result.sessionUrl ? activeContinuationProfileId : null,
+              sessionRouteFingerprint: result.sessionUrl ? routeFingerprint : null
             })
           )
 
           setSessions(responseUpdater)
-          clearLoadingSessionTracking(targetSessionId, true)
+          clearLoadingSessionTracking(targetSessionId, true, runId)
           await persistSessionsToStorage(responseUpdater, 'response')
           traceOutputKinds = summarizeChatAttachmentKindsForTrace(result.attachments)
           traceResponseCount = 1
         }
+        lifecycleEvent('completed')
         emitAgentTraceEvent(
           'success',
           `Agent response completed with ${traceResponseCount || 1} assistant message(s).`,
@@ -5676,21 +6636,37 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         )
       } catch (error) {
+        if (error === staleRunError || !isCurrentRun()) return
+        const failedResult =
+          error && typeof error === 'object'
+            ? (error as {
+                metadata?: Record<string, unknown>
+                partialResult?: { content?: string; metadata?: Record<string, unknown> }
+              })
+            : undefined
+        const failedToolHistory = normalizeChatToolHistory(
+          failedResult?.metadata?.toolHistory ??
+            failedResult?.partialResult?.metadata?.toolHistory ??
+            streamedToolHistory
+        )
         const wasCancelled = Boolean(
           targetSessionId && cancelledSessionsRef.current.has(targetSessionId)
         )
         if (wasCancelled) {
+          lifecycleEvent('cancelled')
           const hasPartialStreamedResponse =
             Boolean(streamedResponse.trim()) ||
             streamedAttachments.length > 0 ||
-            Boolean(streamedOcrResult)
+            Boolean(streamedOcrResult) ||
+            Boolean(failedToolHistory?.length)
           const cancelledUpdater = withLatestContextCompression((prev: ChatSession[]) => {
             if (completedAssistantMessages.length > 0) {
               return replaceLastMessageWithMessagesInSession(prev, {
                 sessionId: targetSessionId,
                 messages: completedAssistantMessages,
                 sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl),
-                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null
+                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null,
+                sessionRouteFingerprint: streamedSessionUrl ? routeFingerprint : null
               })
             }
 
@@ -5700,12 +6676,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 message: {
                   role: 'assistant',
                   content: streamedResponse,
+                  ...(failedToolHistory ? { toolHistory: failedToolHistory } : {}),
                   ...(streamedAttachments.length > 0 ? { attachments: streamedAttachments } : {}),
                   ...(streamedOcrResult ? { ocrResult: streamedOcrResult } : {}),
                   ...(responseModelName ? { modelName: responseModelName } : {})
                 },
                 sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl),
-                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null
+                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null,
+                sessionRouteFingerprint: streamedSessionUrl ? routeFingerprint : null
               })
             }
 
@@ -5728,15 +6706,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           )
         } else {
+          lifecycleEvent('failed')
+          if (error === staleRunError || !isCurrentRun()) return
           console.error('[ChatPage] Send message error:', error)
+          notifyError(error instanceof Error ? error.message : String(error))
           const runId = targetSessionId || null
           const rawErrorMessage = error instanceof Error ? error.message : String(error)
           const decoratedErrorMessage = formatChatFailureMessage(rawErrorMessage, runId)
           const errorMessage: ChatMessage = {
             role: 'assistant',
-            content: t('chat.error_message', {
-              error: decoratedErrorMessage
-            })
+            content: [
+              failedResult?.partialResult?.content || streamedResponse,
+              t('chat.error_message', {
+                error: decoratedErrorMessage
+              })
+            ]
+              .filter(Boolean)
+              .join('\n\n'),
+            ...(failedToolHistory ? { toolHistory: failedToolHistory } : {})
           }
           const archivePayload = buildChatFailureArchivePayload({
             sessionId: runId,
@@ -5755,19 +6742,26 @@ const ChatPage: React.FC<ChatPageProps> = ({
             payload: archivePayload
           })
           const errorSessionUrl = shouldDiscardSessionUrlForContextCompact ? null : undefined
+          const errorSessionProfileId = errorSessionUrl ? activeContinuationProfileId : null
+          const errorSessionRouteFingerprint = errorSessionUrl ? routeFingerprint : null
+          assertCurrentRun()
           const errorUpdater = withLatestContextCompression((prev: ChatSession[]) => {
             if (completedAssistantMessages.length > 0) {
               return replaceLastMessageWithMessagesInSession(prev, {
                 sessionId: targetSessionId,
                 messages: [...completedAssistantMessages, errorMessage],
-                sessionUrl: errorSessionUrl
+                sessionUrl: errorSessionUrl,
+                sessionProfileId: errorSessionProfileId,
+                sessionRouteFingerprint: errorSessionRouteFingerprint
               })
             }
 
             return replaceLastMessageInSession(prev, {
               sessionId: targetSessionId,
               message: errorMessage,
-              sessionUrl: errorSessionUrl
+              sessionUrl: errorSessionUrl,
+              sessionProfileId: errorSessionProfileId,
+              sessionRouteFingerprint: errorSessionRouteFingerprint
             })
           })
           setSessions(errorUpdater)
@@ -5779,44 +6773,51 @@ const ChatPage: React.FC<ChatPageProps> = ({
       } finally {
         if (targetSessionId) {
           const wasCancelled = cancelledSessionsRef.current.has(targetSessionId)
-          if (sessionAbortControllersRef.current.get(targetSessionId) === sessionAbortController) {
-            sessionAbortControllersRef.current.delete(targetSessionId)
-          }
-          clearLoadingSessionTracking(targetSessionId, !wasCancelled)
-          emitPreviewRefresh('preview-only')
-
-          if (!wasCancelled) {
-            try {
-              const requestScope = storageScope
-              const requestEpoch = sessionLoadEpochRef.current
-              const requestMutationEpoch = sessionMutationEpochRef.current
-              const latestStored = await loadAllSessions(requestScope)
-              const requestIsCurrent =
-                requestEpoch === sessionLoadEpochRef.current &&
-                requestMutationEpoch === sessionMutationEpochRef.current &&
-                requestScope === storageScopeRef.current
-              if (requestIsCurrent) {
-                const visibleStored = sortSessionsByRecencyDesc(
-                  latestStored.filter(
-                    (session) =>
-                      !deletedSessionKeysRef.current.has(`${requestScope}\u0000${session.id}`)
-                  )
-                )
-                persistedSessionsRef.current = new Map(
-                  visibleStored.map((session) => [session.id, session])
-                )
-                setSessions((prev) =>
-                  mergeLoadedSessionsWithLocal(visibleStored, prev, [
-                    pendingSessionIdRef.current,
-                    currentSessionIdRef.current
-                  ])
-                )
-              }
-            } catch (e) {
-              console.warn('[ChatPage] finally: 从 IndexedDB 重新加载失败:', e)
+          const isCurrentRun = activeRunIdBySessionRef.current.get(targetSessionId) === runId
+          if (isCurrentRun) {
+            if (
+              sessionAbortControllersRef.current.get(targetSessionId) === sessionAbortController
+            ) {
+              sessionAbortControllersRef.current.delete(targetSessionId)
             }
+            lifecycleRunIdBySessionRef.current.delete(targetSessionId)
+            clearLoadingSessionTracking(targetSessionId, !wasCancelled, runId)
+            emitPreviewRefresh('preview-only')
+
+            if (!wasCancelled && !sessionSnapshotSaveFailed) {
+              try {
+                const requestScope = storageScope
+                const requestEpoch = sessionLoadEpochRef.current
+                const requestMutationEpoch = sessionMutationEpochRef.current
+                const latestStored = await loadAllSessions(requestScope)
+                const requestIsCurrent =
+                  requestEpoch === sessionLoadEpochRef.current &&
+                  requestMutationEpoch === sessionMutationEpochRef.current &&
+                  requestScope === storageScopeRef.current
+                if (requestIsCurrent) {
+                  const visibleStored = sortSessionsByRecencyDesc(
+                    latestStored.filter(
+                      (session) =>
+                        !deletedSessionKeysRef.current.has(`${requestScope}\u0000${session.id}`)
+                    )
+                  )
+                  replacePersistedSessions(requestScope, visibleStored)
+                  setSessions((prev) =>
+                    mergeLoadedSessionsWithLocal(
+                      visibleStored,
+                      prev,
+                      [pendingSessionIdRef.current, currentSessionIdRef.current],
+                      getDirtySessionIds(storageScope)
+                    )
+                  )
+                }
+              } catch (e) {
+                console.warn('[ChatPage] finally: 从 IndexedDB 重新加载失败:', e)
+              }
+            }
+            cancelledSessionsRef.current.delete(targetSessionId)
+            activeRunIdBySessionRef.current.delete(targetSessionId)
           }
-          cancelledSessionsRef.current.delete(targetSessionId)
         }
       }
     },
@@ -5851,6 +6852,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setSessions,
       storageScope,
       t,
+      notifyError,
       notifyWarning,
       isAutoContextCompressionAvailable,
       selectedCapabilityProfile,
@@ -6080,59 +7082,86 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [active, notifyWarning, refreshHy3dModelUrlIfNeeded, sendMessage])
 
   // ==================== 文件上传 ====================
+  const pickChatAttachment = async (imagesOnly = false): Promise<ChatAttachment | undefined> => {
+    const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp']
+    const file = await selectFile(
+      imagesOnly
+        ? imageExtensions
+        : [
+            '.png',
+            '.jpg',
+            '.jpeg',
+            '.gif',
+            '.webp',
+            '.mp4',
+            '.webm',
+            '.mov',
+            '.avi',
+            '.glb',
+            '.gltf',
+            '.obj',
+            '.fbx',
+            '.dae',
+            '.3ds',
+            '.ply',
+            '.stl'
+          ]
+    )
+    if (!file) return undefined
+
+    const isImage = file.type.startsWith('image/')
+    const isVideo = file.type.startsWith('video/')
+    const model3dExtensions = ['.glb', '.gltf', '.obj', '.fbx', '.dae', '.3ds', '.ply', '.stl']
+    const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'))
+    const isModel3d = model3dExtensions.includes(fileExtension)
+
+    if (!isImage && !isVideo && !isModel3d) return undefined
+    if (imagesOnly && !isImage) return undefined
+
+    const attachmentType: ChatAttachment['type'] = isVideo
+      ? 'video'
+      : isModel3d
+        ? 'model3d'
+        : 'image'
+    const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
+    if (!checkFileSize(file, maxSizeMB)) {
+      alert(`File is too large. Max ${maxSizeMB}MB, current size ${formatFileSize(file.size)}.`)
+      return undefined
+    }
+
+    return isImage
+      ? buildImageChatAttachmentFromFile(file)
+      : importChatAttachment({
+          service: api().svcManagedMedia,
+          file,
+          type: isVideo ? 'video' : 'model3d',
+          mimeType: normalizeFileMimeType(file.name, file.type)
+        })
+  }
+
+  const handleDropEditingImages = useCallback(async (files: File[]): Promise<ChatAttachment[]> => {
+    const imageFiles = files.filter(
+      (file) =>
+        file.type.startsWith('image/') || /\.(?:png|jpe?g|gif|webp|bmp|avif)$/i.test(file.name)
+    )
+    const maxSizeMB = getChatAttachmentMaxSizeMB('image')
+    return Promise.all(
+      imageFiles.map((file) => {
+        if (!checkFileSize(file, maxSizeMB)) {
+          throw new Error(`${file.name} is too large. Max ${maxSizeMB}MB.`)
+        }
+        return buildImageChatAttachmentFromFile(file)
+      })
+    )
+  }, [])
+
   const handleUploadFile = async () => {
     try {
-      const file = await selectFile([
-        '.png',
-        '.jpg',
-        '.jpeg',
-        '.gif',
-        '.webp',
-        '.mp4',
-        '.webm',
-        '.mov',
-        '.avi',
-        '.glb',
-        '.gltf',
-        '.obj',
-        '.fbx',
-        '.dae',
-        '.3ds',
-        '.ply',
-        '.stl'
-      ])
-      if (!file) return
-
-      const isImage = file.type.startsWith('image/')
-      const isVideo = file.type.startsWith('video/')
-      const model3dExtensions = ['.glb', '.gltf', '.obj', '.fbx', '.dae', '.3ds', '.ply', '.stl']
-      const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'))
-      const isModel3d = model3dExtensions.includes(fileExtension)
-
-      if (!isImage && !isVideo && !isModel3d) return
-
-      const attachmentType: ChatAttachment['type'] = isVideo
-        ? 'video'
-        : isModel3d
-          ? 'model3d'
-          : 'image'
-      const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
-      if (!checkFileSize(file, maxSizeMB)) {
-        alert(`File is too large. Max ${maxSizeMB}MB, current size ${formatFileSize(file.size)}.`)
-        return
-      }
-
+      const attachment = await pickChatAttachment()
+      if (!attachment) return
       const attachmentIndex = pendingAttachments.length
 
       setUploadProgress((prev) => ({ ...prev, [attachmentIndex]: 100 }))
-      const attachment: ChatAttachment = isImage
-        ? await buildImageChatAttachmentFromFile(file)
-        : await importChatAttachment({
-            service: api().svcManagedMedia,
-            file,
-            type: isVideo ? 'video' : 'model3d',
-            mimeType: normalizeFileMimeType(file.name, file.type)
-          })
       setPendingAttachments((prev) => [...prev, attachment])
       setTimeout(() => {
         setUploadProgress((prev) => {
@@ -6352,6 +7381,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const deprecatedSkillPortalDisabled = false
 
   // ==================== 渲染 ====================
+
   if (!isReady || !config) {
     return (
       <Box
@@ -6466,6 +7496,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
+        onDropCapture={() => setIsDragging(false)}
         onDrop={handleDrop}
       >
         {/* 拖拽覆盖层 */}
@@ -6496,7 +7527,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           </Box>
         )}
 
-        {/* 左侧会话列表（非 compact 模式） */}
         {!compact && (
           <SessionSidebar
             sessions={sessions}
@@ -6513,6 +7543,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
         {/* 主聊天区域 */}
         <Box
+          data-chat-main-column="true"
           sx={{
             flex: 1,
             display: 'flex',
@@ -6521,6 +7552,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
             minWidth: 0
           }}
         >
+          {sessionSaveError || sessionLoadError ? (
+            <Alert
+              severity="error"
+              action={
+                <Button color="inherit" size="small" onClick={retrySessionLoad}>
+                  Retry
+                </Button>
+              }
+              sx={{ m: 1, flexShrink: 0, maxHeight: 144, overflow: 'auto' }}
+            >
+              {sessionSaveError || sessionLoadError}
+            </Alert>
+          ) : null}
           {/* compact 模式历史弹窗 */}
           {compact && (
             <SessionHistoryDialog
@@ -6551,6 +7595,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 editingContent={editingContent}
                 onSetEditingIndex={setEditingMessageIndex}
                 onSetEditingContent={setEditingContent}
+                onDropImageAttachments={handleDropEditingImages}
+                onRegisterEditingAttachmentReceiver={registerEditingAttachmentReceiver}
                 onSendEditedMessage={handleSendEditedMessage}
                 onPreviewImage={imagePreview.setPreviewImage}
                 onImageContextMenu={handleImageContextMenu}
@@ -6687,6 +7733,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               ) : null}
 
               {/* 底部输入框 */}
+
               <ChatComposer
                 active={active}
                 inputValue={inputValue}

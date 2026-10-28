@@ -32,8 +32,9 @@ export class UnsavedChangesController {
   }
 
   attach(window: BrowserWindow): void {
+    const senderId = window.webContents.id
     window.webContents.on('destroyed', () => {
-      this.states.delete(window.webContents.id)
+      this.states.delete(senderId)
     })
     window.webContents.on('will-prevent-unload', (event) => {
       void this.confirm(window).then((shouldLeave) => {

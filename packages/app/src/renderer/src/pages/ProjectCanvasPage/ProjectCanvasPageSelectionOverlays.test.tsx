@@ -375,11 +375,9 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
         })
       }))
     }
-    const buildCanvasDragPayload = vi.fn(
-      (): CanvasDragPayload => ({
-        sourceCanvasId: 'canvas-1'
-      })
-    )
+    const buildCanvasDragPayload = vi.fn((): CanvasDragPayload => ({
+      sourceCanvasId: 'canvas-1'
+    }))
     const stageRef = {
       current: {
         getStage: () => stage
@@ -1244,11 +1242,9 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
         getStage: () => stage
       }
     } as unknown as React.RefObject<KonvaStage | null>
-    const buildCanvasDragPayload = vi.fn(
-      (): CanvasDragPayload => ({
-        sourceCanvasId: 'canvas-1'
-      })
-    )
+    const buildCanvasDragPayload = vi.fn((): CanvasDragPayload => ({
+      sourceCanvasId: 'canvas-1'
+    }))
     const setCanvasDragPayload = vi.fn()
     const prepareQuickCanvasItemsImageUrl = vi.fn(async () => 'blob:visible-image')
     const getQuickCanvasItemsImageUrl = vi.fn(() => 'blob:visible-image')
@@ -1336,11 +1332,9 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
         getStage: () => stage
       }
     } as unknown as React.RefObject<KonvaStage | null>
-    const buildCanvasDragPayload = vi.fn(
-      (): CanvasDragPayload => ({
-        sourceCanvasId: 'canvas-1'
-      })
-    )
+    const buildCanvasDragPayload = vi.fn((): CanvasDragPayload => ({
+      sourceCanvasId: 'canvas-1'
+    }))
     const setCanvasDragPayload = vi.fn()
     const prepareQuickCanvasItemsImageUrl = vi.fn(async () => 'blob:preview-text')
     const getQuickCanvasItemsImageUrl = vi.fn(() => 'blob:preview-text')

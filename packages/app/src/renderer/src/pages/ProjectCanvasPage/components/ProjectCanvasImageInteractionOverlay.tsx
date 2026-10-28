@@ -1,4 +1,5 @@
 import React from 'react'
+import { createPortal } from 'react-dom'
 import { Box } from '@mui/material'
 import type { CanvasImageItem } from '../types'
 import {
@@ -66,6 +67,7 @@ type ProjectCanvasImageInteractionOverlayProps = {
   domImagePreviewBackdropColor?: string
   isDraggable: boolean
   showTransformer: boolean
+  transformControlsPortal?: HTMLElement | null
   allowPointerPassthrough?: boolean
   stagePos: { x: number; y: number }
   stageScale: number
@@ -590,6 +592,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
   domImagePreviewBackdropColor,
   isDraggable,
   showTransformer,
+  transformControlsPortal,
   allowPointerPassthrough = false,
   stagePos,
   stageScale,
@@ -603,6 +606,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
   onContextMenu
 }) => {
   const elementRef = React.useRef<HTMLDivElement | null>(null)
+  const transformControlsRef = React.useRef<HTMLDivElement | null>(null)
   const sessionRef = React.useRef<InteractionSession | null>(null)
   const draftTransformRef = React.useRef<CanvasImageTransform | null>(null)
   const previewChangeFrameRef = React.useRef<number | null>(null)
@@ -670,12 +674,11 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
   React.useEffect(() => detachWindowPointerListeners, [detachWindowPointerListeners])
 
   const applyElementTransform = React.useCallback((transform: CanvasImageTransform) => {
-    const element = elementRef.current
-    if (!element) {
-      return
+    for (const element of [elementRef.current, transformControlsRef.current]) {
+      if (element) {
+        element.style.transform = buildElementTransform(transform)
+      }
     }
-
-    element.style.transform = buildElementTransform(transform)
   }, [])
 
   const emitPreviewChangeNow = React.useCallback(
@@ -770,7 +773,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
 
   React.useLayoutEffect(() => {
     applyElementTransform(draftTransformRef.current ?? activeTransform)
-  }, [activeTransform, applyElementTransform])
+  }, [activeTransform, applyElementTransform, showTransformer, transformControlsPortal])
 
   const flushPendingDraftTransformCommit = React.useCallback(
     (nextTransform: CanvasImageTransform | null = draftTransformRef.current ?? null) => {
@@ -1216,6 +1219,77 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
       renderMode === 'budget-image-proxy' ||
       renderMode === 'fallback-image-proxy')
 
+  const transformControls = showTransformer ? (
+    <>
+      {HANDLE_POSITIONS.map(({ handle, left, top }) => (
+        <Box
+          key={handle}
+          data-canvas-image-handle={handle}
+          onPointerDown={(event: React.PointerEvent<HTMLDivElement>) => startResize(handle, event)}
+          sx={{
+            position: 'absolute',
+            left,
+            top,
+            width: HANDLE_HIT_SIZE,
+            height: HANDLE_HIT_SIZE,
+            transform: `translate(-50%, -50%) scale(${handleScaleCompensation})`,
+            transformOrigin: 'center',
+            zIndex: 2,
+            pointerEvents: allowPointerPassthrough ? 'none' : 'auto',
+            cursor:
+              handle === 'top-left' || handle === 'bottom-right' ? 'nwse-resize' : 'nesw-resize'
+          }}
+        >
+          <Box
+            sx={{
+              position: 'absolute',
+              left: '50%',
+              top: '50%',
+              width: HANDLE_SIZE,
+              height: HANDLE_SIZE,
+              transform: 'translate(-50%, -50%)',
+              borderRadius: '2px',
+              bgcolor: '#6366f1',
+              border: '1.5px solid #ffffff',
+              boxShadow: '0 2px 8px rgba(15,23,42,0.22)',
+              pointerEvents: 'none'
+            }}
+          />
+        </Box>
+      ))}
+      {CORNER_ROTATE_HOTSPOTS.map(
+        ({ handle, part, left, top, offsetX, offsetY, width, height, anchorMode }) => {
+          const compensatedOffsetX = offsetX * handleScaleCompensation
+          const compensatedOffsetY = offsetY * handleScaleCompensation
+          const compensatedWidth = width * handleScaleCompensation
+          const compensatedHeight = height * handleScaleCompensation
+          return (
+            <Box
+              key={`${handle}-rotate-${part}`}
+              data-canvas-image-rotate-hotspot={handle}
+              data-canvas-image-rotate-hotspot-part={part}
+              onPointerDown={startRotate}
+              sx={{
+                position: 'absolute',
+                left: toCssOffset(left, compensatedOffsetX),
+                top: toCssOffset(top, compensatedOffsetY),
+                width: compensatedWidth,
+                height: compensatedHeight,
+                transform: anchorMode === 'center' ? 'translate(-50%, -50%)' : 'none',
+                transformOrigin: 'center',
+                borderRadius: '999px',
+                bgcolor: 'transparent',
+                pointerEvents: allowPointerPassthrough ? 'none' : 'auto',
+                zIndex: 1,
+                cursor: ROTATE_CURSOR
+              }}
+            />
+          )
+        }
+      )}
+    </>
+  ) : null
+
   return (
     <Box
       sx={{
@@ -1263,79 +1337,30 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
             stageScale={stageScale}
           />
         )}
-        {showTransformer && (
-          <>
-            {HANDLE_POSITIONS.map(({ handle, left, top }) => (
+        {transformControlsPortal && transformControls
+          ? createPortal(
               <Box
-                key={handle}
-                data-canvas-image-handle={handle}
-                onPointerDown={(event: React.PointerEvent<HTMLDivElement>) =>
-                  startResize(handle, event)
-                }
+                ref={transformControlsRef}
+                data-canvas-item-id={item.id}
+                data-canvas-overlay="transform-controls"
+                data-canvas-transform-controls="image"
                 sx={{
                   position: 'absolute',
-                  left,
-                  top,
-                  width: HANDLE_HIT_SIZE,
-                  height: HANDLE_HIT_SIZE,
-                  transform: `translate(-50%, -50%) scale(${handleScaleCompensation})`,
-                  transformOrigin: 'center',
-                  zIndex: 2,
-                  cursor:
-                    handle === 'top-left' || handle === 'bottom-right'
-                      ? 'nwse-resize'
-                      : 'nesw-resize'
+                  left: 0,
+                  top: 0,
+                  width: item.width,
+                  height: item.height,
+                  transform: buildElementTransform(activeTransform),
+                  transformOrigin: '0 0',
+                  pointerEvents: 'none',
+                  touchAction: 'none'
                 }}
               >
-                <Box
-                  sx={{
-                    position: 'absolute',
-                    left: '50%',
-                    top: '50%',
-                    width: HANDLE_SIZE,
-                    height: HANDLE_SIZE,
-                    transform: 'translate(-50%, -50%)',
-                    borderRadius: '2px',
-                    bgcolor: '#6366f1',
-                    border: '1.5px solid #ffffff',
-                    boxShadow: '0 2px 8px rgba(15,23,42,0.22)',
-                    pointerEvents: 'none'
-                  }}
-                />
-              </Box>
-            ))}
-            {CORNER_ROTATE_HOTSPOTS.map(
-              ({ handle, part, left, top, offsetX, offsetY, width, height, anchorMode }) => {
-                const compensatedOffsetX = offsetX * handleScaleCompensation
-                const compensatedOffsetY = offsetY * handleScaleCompensation
-                const compensatedWidth = width * handleScaleCompensation
-                const compensatedHeight = height * handleScaleCompensation
-                return (
-                  <Box
-                    key={`${handle}-rotate-${part}`}
-                    data-canvas-image-rotate-hotspot={handle}
-                    data-canvas-image-rotate-hotspot-part={part}
-                    onPointerDown={startRotate}
-                    sx={{
-                      position: 'absolute',
-                      left: toCssOffset(left, compensatedOffsetX),
-                      top: toCssOffset(top, compensatedOffsetY),
-                      width: compensatedWidth,
-                      height: compensatedHeight,
-                      transform: anchorMode === 'center' ? 'translate(-50%, -50%)' : 'none',
-                      transformOrigin: 'center',
-                      borderRadius: '999px',
-                      bgcolor: 'transparent',
-                      pointerEvents: 'auto',
-                      zIndex: 1,
-                      cursor: ROTATE_CURSOR
-                    }}
-                  />
-                )
-              }
-            )}
-          </>
-        )}
+                {transformControls}
+              </Box>,
+              transformControlsPortal
+            )
+          : transformControls}
       </Box>
     </Box>
   )
@@ -1386,6 +1411,8 @@ function areImageInteractionOverlayPropsEqual(
     previousProps.domImagePreviewBackdropColor === nextProps.domImagePreviewBackdropColor &&
     previousProps.isDraggable === nextProps.isDraggable &&
     previousProps.showTransformer === nextProps.showTransformer &&
+    previousProps.transformControlsPortal === nextProps.transformControlsPortal &&
+    previousProps.allowPointerPassthrough === nextProps.allowPointerPassthrough &&
     stageTransformEqual &&
     previousProps.stagePosRef === nextProps.stagePosRef &&
     previousProps.stageScaleRef === nextProps.stageScaleRef &&

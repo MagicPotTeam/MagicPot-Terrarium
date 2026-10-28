@@ -649,15 +649,15 @@ export const buildChatContextCompressionPlan = (input: {
   const messagesToCompress = input.historyMessages.slice(0, compressionCount)
   const requestHistoryMessages = input.historyMessages.slice(compressionCount)
   const currentReplayImageMessages = messagesToCompress.flatMap((message, index) => {
-    if (message.role !== 'user') return []
+    if (message.role !== 'user' && message.role !== 'assistant') return []
     const imageAttachments = (message.attachments || []).filter(
       (attachment) => attachment.type === 'image'
     )
     if (imageAttachments.length === 0) return []
     return [
       {
-        role: 'user' as const,
-        content: `Historical image replay from compacted user message ${index + 1}.`,
+        role: message.role,
+        content: `Historical image replay from compacted ${message.role} message ${index + 1}.`,
         attachments: imageAttachments
       }
     ]
@@ -727,5 +727,28 @@ export const buildChatContextCompressionPlan = (input: {
     compressionSummary,
     requestHistoryMessages,
     requestReplayImageMessages
+  }
+}
+
+/** Stop an unsendable plan instead of repeatedly summarizing or silently removing images. */
+export const assertChatContextBudget = (
+  plan: Pick<ChatContextCompressionPlan, 'contextBudgetTokens' | 'estimatedCompressedInputTokens'>
+): void => {
+  const budget = plan.contextBudgetTokens
+  if (
+    budget !== null &&
+    Number.isFinite(budget) &&
+    budget > 0 &&
+    plan.estimatedCompressedInputTokens > budget
+  ) {
+    const error = new Error(
+      `Context remains over the model budget after compaction (${Math.ceil(plan.estimatedCompressedInputTokens)} > ${budget} tokens). Historical images were preserved; choose a larger-context model or start a separate thread.`
+    )
+    Object.assign(error, {
+      code: 'CHAT_CONTEXT_BUDGET_EXCEEDED',
+      estimatedTokens: plan.estimatedCompressedInputTokens,
+      budgetTokens: budget
+    })
+    throw error
   }
 }

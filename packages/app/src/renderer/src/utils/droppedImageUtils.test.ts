@@ -9,6 +9,7 @@ const { loadImageFromSrcMock } = vi.hoisted(() => ({
 const originalGetContext = HTMLCanvasElement.prototype.getContext
 const originalToDataURL = HTMLCanvasElement.prototype.toDataURL
 const originalElectronFile = window.electronFile
+const originalFileReader = FileReader
 
 vi.mock('./windowUtils', () => ({
   api: () => ({
@@ -74,7 +75,16 @@ describe('droppedImageUtils', () => {
         onerror: (() => void) | null = null
 
         readAsDataURL(blob: Blob) {
-          void blob.arrayBuffer().then((buffer) => {
+          const bufferPromise =
+            typeof blob.arrayBuffer === 'function'
+              ? blob.arrayBuffer()
+              : new Promise<ArrayBuffer>((resolve, reject) => {
+                  const reader = new originalFileReader()
+                  reader.onload = () => resolve(reader.result as ArrayBuffer)
+                  reader.onerror = () => reject(reader.error)
+                  reader.readAsArrayBuffer(blob)
+                })
+          void bufferPromise.then((buffer) => {
             const bytes = new Uint8Array(buffer)
             let binary = ''
             for (const byte of bytes) binary += String.fromCharCode(byte)

@@ -2,9 +2,15 @@ import fs from 'fs/promises'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
+import { AGENT_LOCAL_FILE_LIMITS } from '@shared/api/svcAgentLocalFiles'
 import { buildProjectStorageDirName } from '@shared/projectStorage'
 import type { ProjectTraceProjectRef } from '@shared/projectTrace'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
+
+// This suite invokes a real child process. Validation, cwd creation and spawn must
+// observe the same filesystem; memfs canonicalization can otherwise change Windows drives.
+vi.unmock('node:fs')
+vi.unmock('node:fs/promises')
 
 const { buildDataDirRef } = vi.hoisted(() => ({
   buildDataDirRef: { current: process.cwd() }
@@ -300,6 +306,8 @@ describe('AssistantToolRegistry', () => {
 
     expect(registry.listTools().map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
+        'web_search',
+        'web_fetch',
         'session.status',
         'files.write',
         'files.edit',
@@ -438,6 +446,62 @@ describe('AssistantToolRegistry', () => {
     expect(cleanup.content).toContain('"sessionCount": 0')
   })
 
+  it('prunes exact persisted workspace roots and keeps a shared root until its last session', async () => {
+    const registry = new AssistantToolRegistry()
+    const oldRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'prune-old' }
+    const retainedRoute = {
+      channel: 'generic',
+      scopeType: 'dm' as const,
+      scopeId: 'prune-retained'
+    }
+    const sharedRoot = path.join(tempDir, 'shared-workspace-root')
+    const oldWorkspace = {
+      ...getAssistantWorkspaceState(oldRoute, 'shared-prune-workspace'),
+      rootDir: sharedRoot,
+      memoryDir: path.join(sharedRoot, 'memory'),
+      memoryFile: path.join(sharedRoot, 'memory', 'today.md'),
+      contextFile: path.join(sharedRoot, 'context.json'),
+      taskContextFile: path.join(sharedRoot, 'task-context.json'),
+      pinnedContextFile: path.join(sharedRoot, 'pinned-context.json')
+    }
+    const retainedWorkspace = {
+      ...getAssistantWorkspaceState(retainedRoute, 'shared-prune-workspace'),
+      rootDir: sharedRoot,
+      memoryDir: path.join(sharedRoot, 'memory'),
+      memoryFile: path.join(sharedRoot, 'memory', 'today.md'),
+      contextFile: path.join(sharedRoot, 'context.json'),
+      taskContextFile: path.join(sharedRoot, 'task-context.json'),
+      pinnedContextFile: path.join(sharedRoot, 'pinned-context.json')
+    }
+    await store.attachWorkspace(oldRoute, oldWorkspace)
+    await store.attachWorkspace(retainedRoute, retainedWorkspace)
+    await fs.mkdir(oldWorkspace.memoryDir, { recursive: true })
+    await fs.writeFile(oldWorkspace.taskContextFile, 'shared task context')
+    const oldSession = await store.getSession(oldRoute)
+    const retainedSession = await store.getSession(retainedRoute)
+    if (!oldSession || !retainedSession) throw new Error('missing prune fixture sessions')
+    oldSession.updatedAt = Date.now() - 2 * 24 * 60 * 60 * 1_000
+
+    const first = await registry.callTool(
+      'session.cleanup',
+      { mode: 'prune', olderThanDays: 1 },
+      createToolContext(oldRoute, createTaskState(oldRoute))
+    )
+    expect(JSON.parse(first.content)).toMatchObject({ mode: 'prune', removedCount: 1 })
+    await expect(fs.readFile(oldWorkspace.taskContextFile, 'utf8')).resolves.toBe(
+      'shared task context'
+    )
+
+    retainedSession.updatedAt = Date.now() - 2 * 24 * 60 * 60 * 1_000
+    const second = await registry.callTool(
+      'session.cleanup',
+      { mode: 'prune', olderThanDays: 1 },
+      createToolContext(retainedRoute, createTaskState(retainedRoute))
+    )
+    expect(JSON.parse(second.content)).toMatchObject({ mode: 'prune', removedCount: 1 })
+    await expect(fs.access(oldWorkspace.taskContextFile)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('includes the active task-group summary in session.status output', async () => {
     const registry = new AssistantToolRegistry()
     const route = {
@@ -570,6 +634,30 @@ describe('AssistantToolRegistry', () => {
     expect(mcpStatus.content).toContain('"id": "echo"')
   })
 
+  it('keeps built-in tool definitions authoritative when an MCP alias collides', () => {
+    const mcpClientManager = {
+      listToolsSnapshot: vi.fn(() => [
+        {
+          name: 'web_search',
+          description: 'MCP replacement',
+          inputSchema: { type: 'object' }
+        },
+        {
+          name: 'mcp.echo.echo',
+          description: 'Echo from MCP',
+          inputSchema: { type: 'object' }
+        }
+      ])
+    }
+
+    const registry = new AssistantToolRegistry(mcpClientManager as never)
+    const tools = registry.listTools()
+
+    expect(tools.filter((tool) => tool.name === 'web_search')).toHaveLength(1)
+    expect(tools.find((tool) => tool.name === 'web_search')?.description).toContain('public web')
+    expect(tools.map((tool) => tool.name)).toContain('mcp.echo.echo')
+  })
+
   it('validates tool input against the declared input schema before execution', async () => {
     const registry = new AssistantToolRegistry()
     const route = {
@@ -596,6 +684,20 @@ describe('AssistantToolRegistry', () => {
     ).toMatchObject({
       required: ['taskGroupId']
     })
+    expect(
+      (
+        registry.listTools().find((tool) => tool.name === 'files.read')?.inputSchema as {
+          properties?: { maxBytes?: { maximum?: number } }
+        }
+      ).properties?.maxBytes?.maximum
+    ).toBe(AGENT_LOCAL_FILE_LIMITS.documentBytes)
+
+    expect(
+      registry.listTools().find((tool) => tool.name === 'web_search')?.inputSchema
+    ).toMatchObject({ required: ['query'] })
+    expect(
+      registry.listTools().find((tool) => tool.name === 'web_fetch')?.inputSchema
+    ).toMatchObject({ required: ['url'] })
 
     await expect(
       registry.callTool('task.group.cancel', {}, createToolContext(route, taskState))
@@ -804,6 +906,88 @@ describe('AssistantToolRegistry', () => {
     } finally {
       await realFs.rm(tempDir, { recursive: true, force: true })
     }
+  })
+
+  it.each([true, false])(
+    'runs a confirmed command in its main-owned route workspace (explicit cwd=%s)',
+    async (explicit) => {
+      const registry = new AssistantToolRegistry()
+      const workspaceRootDir = path.join(tempDir, 'owned-route-workspace')
+      await fs.mkdir(workspaceRootDir, { recursive: true })
+      const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'terminal-owned-root' }
+      const config = {
+        ...DEFAULT_CONFIG,
+        download_dir: process.cwd(),
+        output_dir: process.cwd(),
+        workflow_dir: process.cwd(),
+        project_trace_config: {
+          ...DEFAULT_CONFIG.project_trace_config,
+          enable_agent_terminal: true
+        }
+      }
+      const requestSpy = vi.spyOn(getAssistantTerminalPolicyRuntime(), 'createRequest')
+      try {
+        const result = await registry.callTool(
+          'agent.terminal.run',
+          {
+            command: 'node',
+            args: ['--version'],
+            confirm: true,
+            ...(explicit ? { cwd: workspaceRootDir } : {}),
+            timeoutMs: 3000
+          },
+          createToolContext(route, createTaskState(route), { config, workspaceRootDir })
+        )
+        const parsed = JSON.parse(result.content)
+        expect(parsed).toMatchObject({ status: 'completed', exitCode: 0 })
+        expect(parsed.stdout.trim()).toBe(process.version)
+        expect(requestSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ cwd: await fs.realpath(workspaceRootDir) })
+        )
+      } finally {
+        requestSpy.mockRestore()
+      }
+    }
+  )
+
+  it('keeps a canvas terminal inside its own workspace even when global roots allow the sibling', async () => {
+    const registry = new AssistantToolRegistry()
+    const root = path.join(tempDir, 'canvas-a')
+    const sibling = path.join(tempDir, 'canvas-b')
+    await fs.mkdir(root, { recursive: true })
+    await fs.mkdir(sibling, { recursive: true })
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread' as const,
+      scopeId: 'owned-project',
+      threadId: 'a'
+    }
+    const config = {
+      ...DEFAULT_CONFIG,
+      download_dir: tempDir,
+      project_trace_config: { ...DEFAULT_CONFIG.project_trace_config, enable_agent_terminal: true }
+    }
+    const context = createToolContext(route, createTaskState(route), {
+      config,
+      workspaceRootDir: root
+    })
+    await expect(
+      registry.callTool(
+        'agent.terminal.run',
+        { command: 'node', args: ['--version'], cwd: sibling },
+        context
+      )
+    ).rejects.toThrow('outside the allowed roots')
+    const result = await registry.callTool(
+      'agent.terminal.run',
+      { command: 'node', args: ['--version'] },
+      context
+    )
+    expect(JSON.parse(result.content)).toMatchObject({
+      status: 'completed',
+      exitCode: 0,
+      stdout: expect.stringContaining(process.version)
+    })
   })
 
   it('detaches a route from a shared workspace and archives the prior workspace identity', async () => {

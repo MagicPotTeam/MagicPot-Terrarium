@@ -11,6 +11,10 @@ on:
         description: The release name to release
         type: string
         required: true
+      update_release_metadata:
+        description: Whether to create or update the release metadata and assets.
+        type: boolean
+        default: true
       ref:
         description: The ref to release
         type: string
@@ -23,7 +27,7 @@ jobs:
       contents: write
       actions: read
     outputs:
-      github_release_url: ${{ steps.create_release.outputs.url }}
+      github_release_url: ${{ steps.publish_release.outputs.url }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -63,6 +67,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $jobStartedAt = (Get-Date).ToUniversalTime().ToString('o')
+          "MAGICPOT_RELEASE_JOB_STARTED_AT=$jobStartedAt" >> $env:GITHUB_ENV
           $timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
           "MAGICPOT_RELEASE_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
           Write-Host "Release asset timestamp: $timestamp"
@@ -203,83 +209,82 @@ jobs:
 
           Get-ChildItem -LiteralPath $assetsDir | Select-Object Name,Length
 
-      - name: Create draft release with exact asset contract
-        id: create_release
+      - name: Stage and verify Windows release
+        id: stage_release
+        if: ${{ inputs.update_release_metadata }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: release/${{ inputs.tag_name }}
           RELEASE_NAME: ${{ inputs.release_name }}
-          RELEASE_REF: ${{ inputs.ref }}
           RELEASE_ASSET_DIR: dist/release-assets
-          RELEASE_VERSION: ${{ inputs.tag_name }}
           RELEASE_TIMESTAMP: ${{ env.MAGICPOT_RELEASE_TIMESTAMP }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
+          node scripts/release/publish-release.mjs stage
+          if ($LASTEXITCODE -ne 0) { throw "release staging failed with exit code $LASTEXITCODE" }
+
+      - name: Upload assets to existing release
+        id: retry_release
+        if: ${{ !inputs.update_release_metadata }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: release/${{ inputs.tag_name }}
+          RELEASE_ASSET_DIR: dist/release-assets
+          RELEASE_TIMESTAMP: ${{ env.MAGICPOT_RELEASE_TIMESTAMP }}
+          RELEASE_JOB_STARTED_AT: ${{ env.MAGICPOT_RELEASE_JOB_STARTED_AT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease,body,assets,tagName,targetCommitish,id,url | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release) { throw "Existing release $env:RELEASE_TAG was not found" }
+          if (-not $release.isDraft -or $release.isPrerelease) { throw 'Retry may only repair a draft, non-prerelease release' }
+          if ($release.tagName -ne $env:RELEASE_TAG) { throw 'Existing release tag does not match requested tag' }
+          if ($release.targetCommitish -and $release.targetCommitish -ne $env:GITHUB_SHA) { throw "Existing release target $($release.targetCommitish) does not match workflow SHA $env:GITHUB_SHA" }
           $package = Get-Content -Raw -LiteralPath package.json | ConvertFrom-Json
           $version = [string]$package.version
-          if ($env:RELEASE_VERSION -notmatch '-(\d+\.\d+\.\d+)$') { throw 'Release tag does not contain a stable SemVer' }
-          if ($Matches[1] -ne $version) { throw "Release tag version $($Matches[1]) does not match package.json $version" }
+          $tagPattern = 'nightly-\d{8}-(\d+\.\d+\.\d+)$'
+          if ($env:RELEASE_TAG -notmatch $tagPattern) { throw 'Retry release tag does not contain a stable SemVer' }
+          if ($Matches[1] -ne $version) { throw "Retry release tag version $($Matches[1]) does not match package.json $version" }
           if ($env:RELEASE_TIMESTAMP -notmatch '^\d{8}T\d{6}Z$') { throw 'Release timestamp is invalid' }
           $expectedNames = @(
             "magicpot-$version-$env:RELEASE_TIMESTAMP-setup.exe",
             "magicpot-$version-$env:RELEASE_TIMESTAMP-win.7z"
           )
           $assets = @(Get-ChildItem -LiteralPath $env:RELEASE_ASSET_DIR -File | Sort-Object Name)
-          if ($assets.Count -ne 2 -or (@($assets.Name | Where-Object { $_ -notin $expectedNames }).Count -ne 0) -or (@($expectedNames | Where-Object { $_ -notin $assets.Name }).Count -ne 0)) {
-            throw "Release assets must be exactly: $($expectedNames -join ', ')"
+          if ($assets.Count -ne 2 -or (@($assets.Name | Where-Object { $_ -notin $expectedNames }).Count -ne 0)) { throw "Release assets must be exactly: $($expectedNames -join ', ')" }
+          $existingNames = @($release.assets | ForEach-Object name)
+          foreach ($existing in $existingNames) {
+            if ($existing -notin $expectedNames) {
+              gh release delete-asset $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY $existing --yes
+              if ($LASTEXITCODE -ne 0) { throw "Failed to remove stale release asset $existing" }
+            }
           }
-          $sha = (git rev-parse HEAD).Trim().ToLowerInvariant()
-          $tree = (git rev-parse 'HEAD^{tree}').Trim().ToLowerInvariant()
-          $runId = [int64]$env:GITHUB_RUN_ID
-          $runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
-          $markerObject = [ordered]@{
-            schema = 1
-            runId = $runId
-            runAttempt = $runAttempt
-            sourceCommit = $sha
-            sourceTree = $tree
-            version = $version
-            timestamp = $env:RELEASE_TIMESTAMP
+          foreach ($asset in $assets) {
+            gh release upload $env:RELEASE_TAG $asset.FullName --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload release asset $($asset.Name)" }
           }
-          $marker = '<!-- magicpot-release: ' + ($markerObject | ConvertTo-Json -Compress) + ' -->'
-          $body = @"
-          Windows releases include:
-          - embedded `.7z` for first-time full runtime delivery
-          - timestamped `setup.exe` for app-body updates
-
-          $marker
-          "@
-          $assetArgs = @($assets | ForEach-Object { $_.FullName })
-          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_REF --title $env:RELEASE_NAME --notes $body --draft --verify-tag=false $assetArgs
-          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE" }
-          $releaseUrl = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json url --jq .url
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseUrl)) { throw "Unable to resolve created release URL" }
-          "url=$releaseUrl" >> $env:GITHUB_OUTPUT
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to publish repaired release' }
+          $published = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease,assets,body | ConvertFrom-Json
+          if ($published.isDraft -or $published.isPrerelease -or (($published.assets | Measure-Object).Count -ne 2)) { throw 'Repaired release failed final two-asset verification' }
+          if ([string]$published.body -notmatch '<!-- magicpot-release: \{') { throw 'Existing release marker is missing' }
+          "url=$($release.url)" >> $env:GITHUB_OUTPUT
 
       - name: Publish verified Windows release
-        id: publish_verified_release
+        id: publish_release
+        if: ${{ inputs.update_release_metadata }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: release/${{ inputs.tag_name }}
+          RELEASE_NAME: ${{ inputs.release_name }}
           RELEASE_ASSET_DIR: dist/release-assets
+          RELEASE_TIMESTAMP: ${{ env.MAGICPOT_RELEASE_TIMESTAMP }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease,body,assets,tagName,targetCommitish | ConvertFrom-Json
-          if (-not $release.isDraft -or $release.isPrerelease) { throw 'Release must be a draft and non-prerelease before final publication' }
-          if (($release.assets | Measure-Object).Count -ne 2) { throw 'Release must contain exactly two uploaded assets' }
-          $names = @($release.assets | ForEach-Object name)
-          if ($names | Where-Object { $_ -like '*.blockmap' -or $_ -eq 'latest.yml' }) { throw 'Release contains forbidden latest.yml/blockmap assets' }
-          foreach ($asset in $release.assets) {
-            if ([int64]$asset.size -le 0 -or [string]::IsNullOrWhiteSpace([string]$asset.digest)) { throw "Release asset $($asset.name) has invalid size or digest" }
-          }
-          $body = [string]$release.body
-          if ($body -notmatch '<!-- magicpot-release: \{') { throw 'Release marker is missing before publication' }
-          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
-          if ($LASTEXITCODE -ne 0) { throw "gh release publish failed with exit code $LASTEXITCODE" }
-          $published = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease,assets | ConvertFrom-Json
-          if ($published.isDraft -or $published.isPrerelease -or (($published.assets | Measure-Object).Count -ne 2)) { throw 'Published release verification failed' }
-          Write-Host "Published verified Windows release $env:RELEASE_TAG with assets: $($names -join ', ')"
+          node scripts/release/publish-release.mjs publish
+          if ($LASTEXITCODE -ne 0) { throw "release publication failed with exit code $LASTEXITCODE" }

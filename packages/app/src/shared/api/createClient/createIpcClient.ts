@@ -25,32 +25,58 @@ function normalizeInvokeError(error: unknown): Error {
   return normalizedError
 }
 
-function streamingRespToPort<T>(resp: ServerStreaming<T>): [MessagePort, Promise<void>] {
+function streamingRespToPort<T>(
+  resp: ServerStreaming<T>
+): [MessagePort, Promise<void>, (error: unknown) => void] {
   const channel = new MessageChannel()
+  let rejectStream: ((error: unknown) => void) | undefined
   const promise = new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (settle: () => void, closePort = true): void => {
+      if (settled) return
+      settled = true
+      channel.port1.onmessage = null
+      channel.port1.onmessageerror = null
+      channel.port1.removeEventListener('close', handleClose)
+      // Reject before closing: a synchronous close notification must not turn failure into success.
+      settle()
+      if (closePort) channel.port1.close()
+    }
+    const handleClose = (): void => finish(resolve, false)
+    rejectStream = (error: unknown): void => {
+      finish(() => reject(error))
+    }
     channel.port1.onmessage = (event: { data: ServerStreamingTransport<T> }) => {
-      if ('data' in event.data) {
-        resp.onData(event.data.data)
-      } else {
-        reject(event.data.error)
+      if (settled) return
+      try {
+        if ('data' in event.data) {
+          resp.onData(event.data.data)
+        } else {
+          const error = event.data.error
+          finish(() => reject(error))
+        }
+      } catch (error) {
+        finish(() => reject(error))
       }
     }
     channel.port1.onmessageerror = (event) => {
-      reject({
-        message: event.data.toString() || 'Unknown error'
-      } as ServerStreamingError)
+      if (settled) return
+      let message = 'Unknown error'
+      try {
+        const rendered = event.data?.toString()
+        if (typeof rendered === 'string' && rendered) message = rendered
+      } catch {
+        // A failed structured-clone payload may not have a usable string representation.
+      }
+      finish(() => reject({ message } as ServerStreamingError))
     }
-    channel.port1.addEventListener('close', () => {
-      resolve()
+    channel.port1.addEventListener('close', handleClose)
+    resp.abortReceiver?.onAbort(() => {
+      finish(resolve)
     })
   })
-  if (resp.abortReceiver) {
-    resp.abortReceiver.onAbort(() => {
-      channel.port1.close()
-    })
-  }
 
-  return [channel.port2, promise]
+  return [channel.port2, promise, (error) => rejectStream?.(error)]
 }
 
 function invokeUnary<REQ, RESP>(name: string): (req: REQ) => Promise<RESP> {
@@ -75,8 +101,16 @@ function invokeServerStreaming<REQ, RESP>(
 ): (req: REQ, resp: ServerStreaming<RESP>) => Promise<void> {
   return async (req: REQ, resp: ServerStreaming<RESP>) => {
     // console.log(name, req)
-    const [port, promise] = streamingRespToPort(resp)
-    ipcRenderer.postMessage(name, req, [port])
+    const [port, promise, rejectStream] = streamingRespToPort(resp)
+    try {
+      ipcRenderer.postMessage(name, req, [port])
+    } catch (error) {
+      // A synchronous DataCloneError/channel failure must not leave the local
+      // stream pending forever. Reject through the same terminal path used by
+      // transport errors, then close the untransferred peer as well.
+      rejectStream(error)
+      port.close()
+    }
     return promise
   }
 }

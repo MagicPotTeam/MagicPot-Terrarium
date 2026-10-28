@@ -46,7 +46,7 @@ export const valueToFileItem = (value: string): FileItem => {
     const type = match[2]
     const pathParts = fullPath.split('/')
     const filename = pathParts[pathParts.length - 1]
-    const subfolder = pathParts.length > 1 ? pathParts[0] : undefined
+    const subfolder = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : undefined
 
     return {
       filename,

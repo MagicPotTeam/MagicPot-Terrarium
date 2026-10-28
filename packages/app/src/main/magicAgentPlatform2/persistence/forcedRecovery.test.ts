@@ -43,7 +43,7 @@ beforeAll(async () => {
     outfile: workerBundle,
     bundle: true,
     platform: 'node',
-    target: 'node22',
+    target: 'node24',
     format: 'cjs',
     external: ['node:sqlite']
   })

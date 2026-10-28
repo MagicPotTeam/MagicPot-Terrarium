@@ -192,6 +192,43 @@ describe('InputComfyImage', () => {
     expect(notifyErrorMock.mock.calls[0][0]).toBe(UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE)
   })
 
+  it('loads an existing nested ComfyUI image from its complete subfolder', async () => {
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:nested-preview')
+    })
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL
+    })
+    apiMocks.getView.mockResolvedValue({ result: new Uint8Array([1, 2, 3]) })
+    const onChange = vi.fn()
+    const value = 'project/session/masks/image.png [input]'
+    const { unmount } = render(
+      <InputComfyImage
+        label="Quick App Image"
+        value={value}
+        onChange={onChange}
+        placeholder="Drop an image"
+      />
+    )
+
+    expect(await screen.findByRole('img', { name: value })).toHaveAttribute(
+      'src',
+      'blob:nested-preview'
+    )
+    expect(apiMocks.getView).toHaveBeenCalledExactlyOnceWith({
+      filename: 'image.png',
+      type: 'input',
+      subfolder: 'project/session/masks'
+    })
+    expect(onChange).not.toHaveBeenCalled()
+    expect(apiMocks.uploadImage).not.toHaveBeenCalled()
+    unmount()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:nested-preview')
+  })
+
   it('preserves the selected value when preview loading fails', async () => {
     apiMocks.getView.mockRejectedValue(new Error('preview offline'))
     const onChange = vi.fn()

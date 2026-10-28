@@ -1,16 +1,29 @@
 import React from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ThemeProvider } from '@mui/material'
 import { theme } from '@renderer/theme'
 import CanvasSelectionActionToolbar from './CanvasSelectionActionToolbar'
+import type { CanvasTranslate } from '../canvasTranslation'
 import type { CanvasItem } from '../types'
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key
-  })
-}))
+function createTranslate(): CanvasTranslate {
+  const translate = (key: string, options?: Record<string, unknown>) => {
+    switch (key) {
+      case 'canvas.action_send':
+        return 'Send'
+      case 'canvas.action_send_agent':
+        return 'Send selected items to Agent'
+      case 'canvas.action_generate_from_selection':
+        return 'Generate from selection'
+      case 'canvas.group_create_button':
+        return 'Group'
+      default:
+        return key
+    }
+  }
+  return translate as CanvasTranslate
+}
 
 function createImageItem(id: string): CanvasItem {
   return {
@@ -51,6 +64,7 @@ describe('CanvasSelectionActionToolbar', () => {
           selectionActionStackPosition={{ left: 12, top: 24 }}
           stagePos={{ x: 8, y: 16 }}
           stageScale={1}
+          t={createTranslate()}
           onDragSelectedItems={onDragSelectedItems}
           onCopySelectedItems={vi.fn()}
           onDownloadSelectedItems={vi.fn()}
@@ -66,22 +80,41 @@ describe('CanvasSelectionActionToolbar', () => {
     expect(container.querySelector('.selection-action-stack')).toBeNull()
     expect(screen.getAllByRole('button')).toHaveLength(6)
 
-    const toolbarButtons = container.querySelectorAll('.group-action-toolbar button')
-    fireEvent.dragStart(toolbarButtons.item(0) as HTMLElement, {
+    const toolbar = container.querySelector('.group-action-toolbar') as HTMLElement
+    const toolbarButtons = within(toolbar).getAllByRole('button')
+    const sendButton = within(toolbar).getByRole('button', { name: 'Send' })
+    const agentButton = within(toolbar).getByRole('button', {
+      name: 'Send selected items to Agent'
+    })
+    const generateButton = within(toolbar).getByRole('button', { name: 'Generate from selection' })
+
+    expect(toolbarButtons.at(-1)).toBe(agentButton)
+    expect(toolbarButtons.at(-2)).toBe(generateButton)
+    fireEvent.dragStart(toolbarButtons[0], {
       dataTransfer: {}
     })
-    fireEvent.click(toolbarButtons.item(3) as HTMLElement)
-    fireEvent.click(toolbarButtons.item(4) as HTMLElement)
-    fireEvent.click(toolbarButtons.item(5) as HTMLElement)
-
     expect(onDragSelectedItems).toHaveBeenCalledWith(selectedItems, expect.any(Object))
-    expect(onSendSelectedItems).toHaveBeenCalledWith(expect.any(HTMLElement), selectedItems)
+
+    fireEvent.click(sendButton)
+    expect(onSendSelectedItems).toHaveBeenCalledWith(sendButton, selectedItems)
+    expect(onChatSelectedItems).not.toHaveBeenCalled()
+    expect(onGenerateSelectedItems).not.toHaveBeenCalled()
+
+    fireEvent.click(agentButton)
     expect(onChatSelectedItems).toHaveBeenCalledWith(selectedItems)
+    expect(onSendSelectedItems).toHaveBeenCalledTimes(1)
+    expect(onGenerateSelectedItems).not.toHaveBeenCalled()
+
+    fireEvent.click(generateButton)
     expect(onGenerateSelectedItems).toHaveBeenCalledWith(selectedItems)
+    expect(onChatSelectedItems).toHaveBeenCalledTimes(1)
   })
 
-  it('renders the generic multi-selection toolbar as a bottom action row', () => {
-    const selectedItems = [createImageItem('image-1')]
+  it('keeps Agent last in the generic selection row without a group action', () => {
+    const selectedItems = [createImageItem('image-1'), createImageItem('image-2')]
+    const onSendSelectedItems = vi.fn()
+    const onChatSelectedItems = vi.fn()
+    const onGenerateSelectedItems = vi.fn()
 
     const { container } = render(
       <ThemeProvider theme={theme}>
@@ -92,26 +125,42 @@ describe('CanvasSelectionActionToolbar', () => {
           selectionActionStackPosition={{ left: 120, top: 240 }}
           stagePos={{ x: 8, y: 16 }}
           stageScale={1}
+          t={createTranslate()}
           onDragSelectedItems={vi.fn()}
           onCopySelectedItems={vi.fn()}
           onDownloadSelectedItems={vi.fn()}
-          onSendSelectedItems={vi.fn()}
-          onChatSelectedItems={vi.fn()}
-          onGenerateSelectedItems={vi.fn()}
+          onSendSelectedItems={onSendSelectedItems}
+          onChatSelectedItems={onChatSelectedItems}
+          onGenerateSelectedItems={onGenerateSelectedItems}
           onCreateGroupFromSelection={vi.fn()}
         />
       </ThemeProvider>
     )
 
-    const toolbar = container.querySelector('.selection-action-stack') as HTMLElement | null
+    const toolbar = container.querySelector('.selection-action-stack') as HTMLElement
     expect(toolbar).toBeTruthy()
     expect(container.querySelector('.group-action-toolbar')).toBeNull()
     expect(screen.getAllByRole('button')).toHaveLength(6)
-    expect(toolbar?.querySelectorAll('button')).toHaveLength(6)
+    const toolbarButtons = within(toolbar).getAllByRole('button')
+    const agentButton = within(toolbar).getByRole('button', {
+      name: 'Send selected items to Agent'
+    })
+    const generateButton = within(toolbar).getByRole('button', { name: 'Generate from selection' })
+
+    expect(toolbarButtons.at(-1)).toBe(agentButton)
+    expect(toolbarButtons.at(-2)).toBe(generateButton)
+    fireEvent.click(agentButton)
+    expect(onChatSelectedItems).toHaveBeenCalledExactlyOnceWith(selectedItems)
+    expect(onSendSelectedItems).not.toHaveBeenCalled()
+    expect(onGenerateSelectedItems).not.toHaveBeenCalled()
   })
 
-  it('keeps the group create action for multi-item generic selections', () => {
+  it('keeps the group create action before Agent for multi-item generic selections', () => {
     const selectedItems = [createImageItem('image-1'), createImageItem('image-2')]
+    const onSendSelectedItems = vi.fn()
+    const onChatSelectedItems = vi.fn()
+    const onGenerateSelectedItems = vi.fn()
+    const onCreateGroupFromSelection = vi.fn()
 
     const { container } = render(
       <ThemeProvider theme={theme}>
@@ -122,19 +171,40 @@ describe('CanvasSelectionActionToolbar', () => {
           selectionActionStackPosition={{ left: 12, top: 24 }}
           stagePos={{ x: 8, y: 16 }}
           stageScale={1}
+          t={createTranslate()}
           onDragSelectedItems={vi.fn()}
           onCopySelectedItems={vi.fn()}
           onDownloadSelectedItems={vi.fn()}
-          onSendSelectedItems={vi.fn()}
-          onChatSelectedItems={vi.fn()}
-          onGenerateSelectedItems={vi.fn()}
-          onCreateGroupFromSelection={vi.fn()}
+          onSendSelectedItems={onSendSelectedItems}
+          onChatSelectedItems={onChatSelectedItems}
+          onGenerateSelectedItems={onGenerateSelectedItems}
+          onCreateGroupFromSelection={onCreateGroupFromSelection}
         />
       </ThemeProvider>
     )
 
     expect(container.querySelectorAll('.selection-action-stack > *')).toHaveLength(7)
     expect(container.querySelector('.group-action-button')).toBeTruthy()
+    const toolbar = container.querySelector('.selection-action-stack') as HTMLElement
+    const toolbarButtons = within(toolbar).getAllByRole('button')
+    const agentButton = within(toolbar).getByRole('button', {
+      name: 'Send selected items to Agent'
+    })
+    const groupButton = within(toolbar).getByRole('button', { name: 'Group' })
+    const generateButton = within(toolbar).getByRole('button', { name: 'Generate from selection' })
+
+    expect(toolbarButtons.at(-1)).toBe(agentButton)
+    expect(toolbarButtons.at(-2)).toBe(groupButton)
+    expect(toolbarButtons.at(-3)).toBe(generateButton)
+    fireEvent.click(agentButton)
+    expect(onChatSelectedItems).toHaveBeenCalledExactlyOnceWith(selectedItems)
+    expect(onSendSelectedItems).not.toHaveBeenCalled()
+    expect(onGenerateSelectedItems).not.toHaveBeenCalled()
+    expect(onCreateGroupFromSelection).not.toHaveBeenCalled()
+
+    fireEvent.click(groupButton)
+    expect(onCreateGroupFromSelection).toHaveBeenCalledExactlyOnceWith(groupButton)
+    expect(onChatSelectedItems).toHaveBeenCalledTimes(1)
   })
 
   it('hides create-group when the selection overlaps an existing group', () => {
@@ -149,6 +219,7 @@ describe('CanvasSelectionActionToolbar', () => {
           selectionActionStackPosition={{ left: 12, top: 24 }}
           stagePos={{ x: 8, y: 16 }}
           stageScale={1}
+          t={createTranslate()}
           onDragSelectedItems={vi.fn()}
           onCopySelectedItems={vi.fn()}
           onDownloadSelectedItems={vi.fn()}

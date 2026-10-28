@@ -1,0 +1,12 @@
+{
+  "name": "MagicPot",
+  "id": "__FIGMA_ASSIGNED_PLUGIN_ID__",
+  "api": "1.0.0",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "main": "code.js",
+  "ui": "ui.html",
+  "networkAccess": {
+    "allowedDomains": ["none"]
+  }
+}

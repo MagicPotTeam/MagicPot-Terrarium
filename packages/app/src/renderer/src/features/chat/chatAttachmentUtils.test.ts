@@ -24,6 +24,18 @@ describe('chatAttachmentUtils', () => {
     expect(getChatAttachmentMaxSizeMB('file')).toBe(10)
   })
 
+  it('recognizes supported native dropped images when an app omits their MIME type', () => {
+    for (const name of ['photo.JPG', 'photo.jpeg', 'photo.png', 'photo.webp', 'photo.gif']) {
+      expect(getChatAttachmentTypeForFile({ name, type: '' })).toBe('image')
+      expect(getChatAttachmentTypeForFile({ name, type: 'application/octet-stream' })).toBe('image')
+    }
+    expect(
+      getChatAttachmentTypeForFile({ name: 'not-an-image.jpg', type: 'application/pdf' })
+    ).toBe('file')
+    expect(getChatAttachmentTypeForFile({ name: 'active.svg', type: '' })).toBe('file')
+    expect(getChatAttachmentTypeForFile({ name: 'notes.txt', type: '' })).toBe('file')
+  })
+
   it('normalizes local file paths and avoids logging full data urls', () => {
     const file = { path: 'C:\\Users\\me\\image.png' } as unknown as File
 

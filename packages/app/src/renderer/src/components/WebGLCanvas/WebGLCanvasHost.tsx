@@ -40,6 +40,12 @@ export default function WebGLCanvasHost({
   const hostRef = useRef<HTMLDivElement | null>(null)
   const appRef = useRef<Application | null>(null)
   const worldRef = useRef<Container | null>(null)
+  // Keep observer callbacks fresh without treating their identity as a runtime
+  // lifecycle boundary. Callers commonly create these inline on every render.
+  const onReadyChangeRef = useRef(onReadyChange)
+  const onRuntimeChangeRef = useRef(onRuntimeChange)
+  onReadyChangeRef.current = onReadyChange
+  onRuntimeChangeRef.current = onRuntimeChange
   const [state, setState] = useState<WebGLCanvasHostState>({
     ready: false,
     mode,
@@ -95,16 +101,16 @@ export default function WebGLCanvasHost({
       }
 
       setState(runtime.state)
-      onReadyChange?.(true)
-      onRuntimeChange?.(runtime)
+      onReadyChangeRef.current?.(true)
+      onRuntimeChangeRef.current?.(runtime)
     }
 
     void initialize()
 
     return () => {
       disposed = true
-      onReadyChange?.(false)
-      onRuntimeChange?.(null)
+      onReadyChangeRef.current?.(false)
+      onRuntimeChangeRef.current?.(null)
       worldRef.current = null
       if (appRef.current) {
         appRef.current.destroy(true, { children: true })
@@ -117,7 +123,7 @@ export default function WebGLCanvasHost({
         capabilities: resolveHostCapabilities(mode)
       })
     }
-  }, [mode, onReadyChange, onRuntimeChange])
+  }, [mode])
 
   const runtime = useMemo<WebGLCanvasRuntime | null>(() => {
     if (!appRef.current || !worldRef.current) {

@@ -5,13 +5,14 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   MEDIA_REFERENCE_VERSION,
+  isNormalizedMediaRelativePath,
   normalizeMediaReference,
   type MediaReference
 } from '../../shared/mediaReference'
 
 export const MANAGED_MEDIA_METADATA_VERSION = 1 as const
-export const DEFAULT_MANAGED_MEDIA_MAX_BYTES = 20 * 1024 * 1024
-
+/** Legacy compatibility limit for remote/derived callers; local selected-file imports omit it. */
+export const DEFAULT_MANAGED_MEDIA_MAX_BYTES = Number.MAX_SAFE_INTEGER
 const METADATA_SCHEMA = 'magicpot.managed-media/v1'
 const MAX_METADATA_BYTES = 64 * 1024
 const MAX_JPEG_HEADER_BYTES = 1024 * 1024
@@ -59,6 +60,8 @@ export type ImportedManagedMedia = {
   metadataPath: string
 }
 export type ResolvedManagedMedia = ImportedManagedMedia & {
+  /** Canonical managed-media store containing the resolved original. */
+  storeRoot?: string
   metadata: ManagedMediaMetadata
   /** Integrity was checked through an open no-follow handle immediately before this result. */
   integrityVerified: true
@@ -113,11 +116,11 @@ function abortError(): Error {
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError()
 }
-function sizeLimit(value?: number): number {
-  const maxBytes = value ?? DEFAULT_MANAGED_MEDIA_MAX_BYTES
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)
+function sizeLimit(value?: number): number | undefined {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || value <= 0)
     throw new ManagedMediaImportError('MANAGED_MEDIA_INVALID', 'Invalid managed media size limit')
-  return Math.min(maxBytes, DEFAULT_MANAGED_MEDIA_MAX_BYTES)
+  return value
 }
 function canonicalOriginalFileName(value: string): string {
   const normalized = String(value || '')
@@ -342,20 +345,63 @@ async function hashHandle(handle: FileHandle, expectedSize: number): Promise<str
   }
   return hash.digest('hex')
 }
+function sameFileState(
+  left: Awaited<ReturnType<FileHandle['stat']>>,
+  right: Awaited<ReturnType<FileHandle['stat']>>
+): boolean {
+  if (left === undefined || right === undefined) return false
+  return (
+    left.isFile() &&
+    right.isFile() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink
+  )
+}
 async function readRegularFile(
   filePath: string,
-  maxBytes: number,
-  fileSystem: typeof fs
+  maxBytes: number | undefined,
+  fileSystem: typeof fs,
+  verifyFileState = false
 ): Promise<Buffer> {
   const before = await fileSystem.lstat(filePath)
-  if (before.isSymbolicLink() || !before.isFile() || before.size > maxBytes)
+  if (
+    before.isSymbolicLink() ||
+    !before.isFile() ||
+    (maxBytes !== undefined && before.size > maxBytes)
+  )
     throw new Error('Managed media destination conflicts with existing content')
   const handle = await fileSystem.open(filePath, fsConstants.O_RDONLY | NOFOLLOW)
   try {
     const opened = await handle.stat()
-    if (!opened.isFile() || opened.size !== before.size)
+    if (
+      verifyFileState
+        ? !sameFileState(before, opened)
+        : !opened.isFile() || opened.size !== before.size
+    )
       throw new Error('Managed media destination changed while reading')
-    return await readAt(handle, 0, opened.size)
+    if (!verifyFileState) return await readAt(handle, 0, opened.size)
+    const bytes = Buffer.alloc(opened.size)
+    let position = 0
+    while (position < bytes.length) {
+      const { bytesRead } = await handle.read(
+        bytes,
+        position,
+        Math.min(IO_CHUNK_BYTES, bytes.length - position),
+        position
+      )
+      if (!bytesRead) throw new Error('Managed media destination was truncated')
+      position += bytesRead
+    }
+    const after = await handle.stat()
+    const current = await fileSystem.lstat(filePath)
+    if (current.isSymbolicLink() || !sameFileState(opened, after) || !sameFileState(after, current))
+      throw new Error('Managed media destination changed while reading')
+    return bytes
   } finally {
     await handle.close()
   }
@@ -655,9 +701,83 @@ function metadataIsConsistent(
     metadata.relativePath === expected.relativePath
   )
 }
+type ManagedMediaReferencePath = {
+  storePrefix?: string
+  relativePath: string
+}
+
+const CODEX_MEDIA_SCOPE_PATTERN = /^[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?$/u
+const CODEX_SCOPED_REFERENCE_PATTERN = /^codex-images\/([^/]+)\/(originals\/.+)$/u
+const CODEX_LEGACY_DASH_REFERENCE_PATTERN = /^codex-images-(.+)\/(originals\/.+)$/u
+const COMFY_TASK_REFERENCE_PATTERN = /^comfy-outputs\/tasks\/([^/]+)\/(originals\/.+)$/u
+const LIFECYCLE_NAMESPACE_PATTERN = /^(task|model|user-output)\/([^/]+)\/(originals\/.+)$/u
+
+/**
+ * A namespace store is encoded in a reference only when it is the direct
+ * `namespace/scope` child of the authorized chat-media root.  Keeping this
+ * recognition strict prevents arbitrary nested directories from becoming a
+ * second store-root resolution mechanism.
+ */
+function lifecycleNamespaceStorePrefix(
+  canonicalRoot: string,
+  authorizedRoot: string
+): string | undefined {
+  const relative = path.relative(authorizedRoot, canonicalRoot).split(path.sep).join('/')
+  const segments = relative.split('/').filter(Boolean)
+  if (
+    segments.length !== 2 ||
+    !['task', 'model', 'user-output'].includes(segments[0]) ||
+    !CODEX_MEDIA_SCOPE_PATTERN.test(segments[1])
+  )
+    return undefined
+  return `${segments[0]}/${segments[1]}`
+}
+
+function splitManagedMediaReferencePath(relativePath: string): ManagedMediaReferencePath {
+  const lifecycleMatch = LIFECYCLE_NAMESPACE_PATTERN.exec(relativePath)
+  if (lifecycleMatch) {
+    const [, namespace, scope, innerRelativePath] = lifecycleMatch
+    if (
+      !CODEX_MEDIA_SCOPE_PATTERN.test(scope) ||
+      !isNormalizedMediaRelativePath(innerRelativePath)
+    ) {
+      throw new Error('Managed media reference scope is malformed')
+    }
+    return {
+      storePrefix: `${namespace}/${scope}`,
+      relativePath: innerRelativePath
+    }
+  }
+
+  const match =
+    COMFY_TASK_REFERENCE_PATTERN.exec(relativePath) ??
+    CODEX_SCOPED_REFERENCE_PATTERN.exec(relativePath) ??
+    CODEX_LEGACY_DASH_REFERENCE_PATTERN.exec(relativePath)
+  if (!match) {
+    return { relativePath }
+  }
+
+  const [, scope, innerRelativePath] = match
+  if (
+    !CODEX_MEDIA_SCOPE_PATTERN.test(scope) ||
+    !isNormalizedMediaRelativePath(innerRelativePath) ||
+    (match[0].startsWith('codex-images-') && !relativePath.startsWith(`codex-images-${scope}/`))
+  ) {
+    throw new Error('Managed media reference scope is malformed')
+  }
+
+  return {
+    storePrefix: match[0].startsWith('comfy-outputs/tasks/')
+      ? `comfy-outputs/tasks/${scope}`
+      : `codex-images-${scope}`,
+    relativePath: innerRelativePath
+  }
+}
+
 function metadataMatchesReference(
   value: unknown,
-  reference: MediaReference
+  reference: MediaReference,
+  expectedRelativePath = reference.relativePath
 ): value is ManagedMediaMetadata {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const metadata = value as Record<string, unknown>
@@ -669,7 +789,7 @@ function metadataMatchesReference(
     metadata.sizeBytes === reference.sizeBytes &&
     metadata.mimeType === reference.mimeType &&
     metadata.extension === expectedExtension &&
-    metadata.relativePath === reference.relativePath
+    metadata.relativePath === expectedRelativePath
   )
 }
 function localUrl(absolutePath: string): string {
@@ -698,7 +818,7 @@ async function nextWithAbort<T>(
 async function stageIterable(
   canonicalRoot: string,
   iterable: AsyncIterable<Uint8Array | string>,
-  maxBytes: number,
+  maxBytes: number | undefined,
   signal: AbortSignal | undefined,
   fileSystem: typeof fs,
   randomId: () => string
@@ -728,7 +848,7 @@ async function stageIterable(
       const byteLength =
         typeof result.value === 'string' ? Buffer.byteLength(result.value) : result.value.byteLength
       if (!byteLength) continue
-      if (byteLength > maxBytes - size)
+      if (maxBytes !== undefined && byteLength > maxBytes - size)
         throw new ManagedMediaImportError(
           'MANAGED_MEDIA_TOO_LARGE',
           `Managed media exceeds the ${maxBytes} byte limit`
@@ -771,12 +891,15 @@ async function publishImport(
 ): Promise<ImportedManagedMedia> {
   const fileSystem = dependencies.fs ?? fs
   const randomId = dependencies.randomId ?? randomUUID
+  const authorizedRoot = await canonicalAuthorizedRoot(dependencies.authorizedRoot, fileSystem)
   const mimeType = normalizeMime(input.mimeType)
   const originalFileName = canonicalOriginalFileName(input.originalFileName)
   serializeProvenance(input.provenance)
   await validateImageFile(staged.stagedPath, staged.size, mimeType, fileSystem)
   const extension = extensions[mimeType]
   const relativePath = `originals/${staged.sha256.slice(0, 2)}/${staged.sha256}.${extension}`
+  const namespacePrefix = lifecycleNamespaceStorePrefix(canonicalRoot, authorizedRoot)
+  const referencePath = namespacePrefix ? `${namespacePrefix}/${relativePath}` : relativePath
   const originalsDirectory = path.join(canonicalRoot, 'originals', staged.sha256.slice(0, 2))
   const metadataDirectory = path.join(canonicalRoot, 'metadata')
   await prepareContainedDirectory(canonicalRoot, originalsDirectory, fileSystem)
@@ -846,7 +969,7 @@ async function publishImport(
     const reference = normalizeMediaReference({
       version: MEDIA_REFERENCE_VERSION,
       kind: 'managed',
-      relativePath,
+      relativePath: referencePath,
       sha256: staged.sha256,
       sizeBytes: staged.size,
       mimeType,
@@ -909,7 +1032,7 @@ export async function importManagedMediaFile(
     throw new Error('Managed media source cannot be a managed target or temporary file')
   const maxBytes = sizeLimit(input.maxBytes)
   if (!sourceLstat.size) throw new Error('Managed media cannot be empty')
-  if (sourceLstat.size > maxBytes)
+  if (maxBytes !== undefined && sourceLstat.size > maxBytes)
     throw new Error(`Managed media exceeds the ${maxBytes} byte limit`)
   const sourceHandle = await fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW)
   let staged: { stagedPath: string; size: number; sha256: string } | undefined
@@ -970,7 +1093,7 @@ export async function importManagedMedia(
   dependencies: ManagedMediaStoreDependencies
 ): Promise<ImportedManagedMedia> {
   const maxBytes = sizeLimit(input.maxBytes)
-  if (input.bytes.byteLength > maxBytes)
+  if (maxBytes !== undefined && input.bytes.byteLength > maxBytes)
     throw new ManagedMediaImportError(
       'MANAGED_MEDIA_TOO_LARGE',
       `Managed media exceeds the ${maxBytes} byte limit`
@@ -992,6 +1115,55 @@ export async function importManagedMedia(
     },
     dependencies
   )
+}
+
+/** Materialize only the selected content, never a later unverified pathname read. */
+export async function readManagedMediaBytes(
+  chatMediaRoot: string,
+  selected: Pick<ManagedMediaMetadata, 'relativePath' | 'mimeType' | 'sizeBytes' | 'sha256'>,
+  dependencies: Pick<ManagedMediaStoreDependencies, 'authorizedRoot' | 'fs'> & {
+    maxBytes?: number
+  }
+): Promise<Buffer> {
+  const fileSystem = dependencies.fs ?? fs
+  try {
+    const { maxBytes } = dependencies
+    if (
+      (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)) ||
+      !Number.isSafeInteger(selected.sizeBytes) ||
+      selected.sizeBytes <= 0 ||
+      (maxBytes !== undefined && selected.sizeBytes > maxBytes) ||
+      !/^[a-f0-9]{64}$/.test(selected.sha256) ||
+      !isNormalizedMediaRelativePath(selected.relativePath) ||
+      normalizeMime(selected.mimeType) !== selected.mimeType ||
+      !selected.relativePath.endsWith('.' + extensions[selected.mimeType])
+    )
+      throw new Error('Invalid selected managed media metadata')
+    const authorizedRoot = await canonicalAuthorizedRoot(dependencies.authorizedRoot, fileSystem)
+    const canonicalRoot = await existingStoreRoot(chatMediaRoot, authorizedRoot, fileSystem)
+    const absolutePath = path.join(canonicalRoot, ...selected.relativePath.split('/'))
+    await validateExistingPath(canonicalRoot, absolutePath, 'file', fileSystem)
+    // Cap allocation to the selected size, not just the transport limit. Hash the exact returned
+    // buffer so even an in-place write with restored timestamps cannot substitute request bytes.
+    const bytes = await readRegularFile(absolutePath, selected.sizeBytes, fileSystem, true)
+    if (
+      bytes.length !== selected.sizeBytes ||
+      createHash('sha256').update(bytes).digest('hex') !== selected.sha256
+    )
+      throw new Error('Selected managed media failed integrity validation')
+    await canonicalAuthorizedRoot(authorizedRoot, fileSystem)
+    await validateExistingPath(canonicalRoot, absolutePath, 'file', fileSystem)
+    return bytes
+  } catch (error) {
+    if (error instanceof ManagedMediaResolutionError) throw error
+    throw new ManagedMediaResolutionError(
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'MANAGED_MEDIA_MISSING'
+        : 'MANAGED_MEDIA_CORRUPT',
+      'Unable to read selected managed media',
+      { cause: error }
+    )
+  }
 }
 
 export async function resolveManagedMediaReference(
@@ -1016,8 +1188,18 @@ export async function resolveManagedMediaReference(
       { cause: error }
     )
   }
+  let referencePath: ManagedMediaReferencePath
+  try {
+    referencePath = splitManagedMediaReferencePath(reference.relativePath)
+  } catch (error) {
+    throw new ManagedMediaResolutionError(
+      'MANAGED_MEDIA_CORRUPT',
+      'Malformed managed media reference path',
+      { cause: error }
+    )
+  }
   const expectedPath = `originals/${reference.sha256?.slice(0, 2)}/${reference.sha256}.${extensions[mimeType]}`
-  if (reference.relativePath !== expectedPath)
+  if (referencePath.relativePath !== expectedPath)
     throw new ManagedMediaResolutionError(
       'MANAGED_MEDIA_CORRUPT',
       'Forged managed media reference path'
@@ -1025,7 +1207,10 @@ export async function resolveManagedMediaReference(
   let canonicalRoot: string
   try {
     const authorizedRoot = await canonicalAuthorizedRoot(dependencies.authorizedRoot, fileSystem)
-    canonicalRoot = await existingStoreRoot(chatMediaRoot, authorizedRoot, fileSystem)
+    const requestedStoreRoot = referencePath.storePrefix
+      ? path.resolve(authorizedRoot, ...referencePath.storePrefix.split('/'))
+      : chatMediaRoot
+    canonicalRoot = await existingStoreRoot(requestedStoreRoot, authorizedRoot, fileSystem)
   } catch (error) {
     if (error instanceof ManagedMediaResolutionError) throw error
     throw new ManagedMediaResolutionError(
@@ -1036,7 +1221,7 @@ export async function resolveManagedMediaReference(
       }
     )
   }
-  const absolutePath = path.join(canonicalRoot, ...reference.relativePath.split('/'))
+  const absolutePath = path.join(canonicalRoot, ...referencePath.relativePath.split('/'))
   const metadataPath = path.join(canonicalRoot, 'metadata', `${reference.sha256}.json`)
   if (
     !isPathInsideRoot(canonicalRoot, absolutePath) ||
@@ -1061,9 +1246,9 @@ export async function resolveManagedMediaReference(
     )
     await validateExistingPath(canonicalRoot, metadataPath, 'file', fileSystem)
     await validateExistingPath(canonicalRoot, absolutePath, 'file', fileSystem)
-    const metadataBytes = await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)
+    const metadataBytes = await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem, true)
     const metadata = JSON.parse(metadataBytes.toString()) as unknown
-    if (!metadataMatchesReference(metadata, reference))
+    if (!metadataMatchesReference(metadata, reference, referencePath.relativePath))
       throw new ManagedMediaResolutionError(
         'MANAGED_MEDIA_CORRUPT',
         'Managed media metadata does not match reference'
@@ -1077,12 +1262,14 @@ export async function resolveManagedMediaReference(
     const handle = await fileSystem.open(absolutePath, fsConstants.O_RDONLY | NOFOLLOW)
     try {
       const opened = await handle.stat()
+      const contentHash = await hashHandle(handle, opened.size)
+      const after = await handle.stat()
+      const current = await fileSystem.lstat(absolutePath)
       if (
-        !opened.isFile() ||
-        opened.dev !== before.dev ||
-        opened.ino !== before.ino ||
-        opened.size !== reference.sizeBytes ||
-        (await hashHandle(handle, opened.size)) !== reference.sha256
+        !sameFileState(before, opened) ||
+        !sameFileState(opened, after) ||
+        !sameFileState(after, current) ||
+        contentHash !== reference.sha256
       )
         throw new ManagedMediaResolutionError(
           'MANAGED_MEDIA_CORRUPT',
@@ -1096,6 +1283,7 @@ export async function resolveManagedMediaReference(
     return {
       reference,
       absolutePath,
+      storeRoot: canonicalRoot,
       localMediaUrl: localUrl(absolutePath),
       metadataPath,
       metadata: metadata as ManagedMediaMetadata,

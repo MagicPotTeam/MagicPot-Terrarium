@@ -507,7 +507,7 @@ export const QAppDesignPopUpPanel = ({
                   }}
                 >
                   <Typography variant="subtitle1" fontWeight="bold">
-                    {t('预览')}
+                    {t('qapp.design.preview_panel_title')}
                   </Typography>
                 </Box>
 
@@ -590,7 +590,7 @@ export const QAppDesignPopUpPanel = ({
               startIcon={showPreview ? <VisibilityOff /> : <Visibility />}
               sx={{ width: '150px', height: '48px' }}
             >
-              {showPreview ? t('关闭预览') : t('预览')}
+              {showPreview ? t('qapp.design.preview_close') : t('qapp.design.preview_open')}
             </Button>
           </Stack>
         </DialogActions>
@@ -603,14 +603,16 @@ export const QAppDesignPopUpPanel = ({
         maxWidth="xs"
         fullWidth
       >
-        <DialogTitle>{t('未保存的更改')}</DialogTitle>
+        <DialogTitle>{t('qapp.design.unsaved_changes_title')}</DialogTitle>
         <DialogContent>
-          <Typography>{t('当前有未保存的更改，确定要放弃吗？')}</Typography>
+          <Typography>{t('qapp.design.unsaved_changes_message')}</Typography>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setShowDiscardConfirm(false)}>{t('继续编辑')}</Button>
+          <Button onClick={() => setShowDiscardConfirm(false)}>
+            {t('qapp.design.continue_editing')}
+          </Button>
           <Button onClick={handleConfirmDiscard} color="error" variant="contained">
-            {t('放弃更改')}
+            {t('qapp.design.discard_changes')}
           </Button>
         </DialogActions>
       </Dialog>

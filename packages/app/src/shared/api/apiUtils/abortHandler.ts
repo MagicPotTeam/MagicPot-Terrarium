@@ -17,17 +17,20 @@ export function newAbortHandler(): [AbortSender, AbortReceiver] {
   return [
     {
       abort: () => {
+        if (isAborted) return
         isAborted = true
-        abortHandlers.forEach((handler) => handler())
+        const handlers = abortHandlers.splice(0)
+        handlers.forEach((handler) => handler())
       }
     },
     {
       isAborted: () => isAborted,
       onAbort: (handler: () => void) => {
-        abortHandlers.push(handler)
         if (isAborted) {
           handler()
+          return
         }
+        abortHandlers.push(handler)
       }
     }
   ]

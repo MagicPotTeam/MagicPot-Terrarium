@@ -72,16 +72,29 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
 
   useEffect(() => {
     const generation = ++discoveryGenerationRef.current
-    const profiles = (config?.llm_config?.api_profiles || []).filter(
-      isChatProfileDiscoveryCandidate
-    )
-    const profileIds = new Set(profiles.map((profile) => profile.id))
+    const configuredProfiles = config?.llm_config?.api_profiles || []
+    const discoveryProfiles = configuredProfiles.filter(isChatProfileDiscoveryCandidate)
+    const configuredProfileIds = new Set(configuredProfiles.map((profile) => profile.id))
+    const discoverModelNames = rendererHostExtensionApiV1.chat?.discoverModelNames
+    const compatibilityProbeProfiles = discoverModelNames
+      ? configuredProfiles.filter(
+          (profile) =>
+            profile.auth_mode !== 'codex_oauth' &&
+            profile.call_type !== 'codex' &&
+            profile.call_type !== 'cliproxyapi' &&
+            !isChatProfileDiscoveryCandidate(profile)
+        )
+      : []
+    const profiles = [...discoveryProfiles, ...compatibilityProbeProfiles]
+    const discoveryProfileIds = new Set(discoveryProfiles.map((profile) => profile.id))
 
     // Configuration can change while this pane is inactive. Drop discoveries whose
     // base profile no longer exists, but retain valid discoveries across deactivation.
     setDiscoveredModelsByProfileId((current) => {
       const retained = Object.fromEntries(
-        Object.entries(current).filter(([profileId]) => !useRemoteLlm && profileIds.has(profileId))
+        Object.entries(current).filter(
+          ([profileId]) => !useRemoteLlm && configuredProfileIds.has(profileId)
+        )
       )
       return Object.keys(retained).length === Object.keys(current).length ? current : retained
     })
@@ -93,8 +106,10 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
       profiles.map(async (profile) => {
         try {
           if (controller.signal.aborted) return null
-          const modelNames = await rendererHostExtensionApiV1.chat?.discoverModelNames?.(profile)
-          return [profile.id, modelNames || []] as const
+          const modelNames = await discoverModelNames?.(profile)
+          return discoveryProfileIds.has(profile.id)
+            ? ([profile.id, modelNames || []] as const)
+            : null
         } catch (error) {
           console.warn('[ChatPage] Failed to discover CLIProxyAPI/Codex models:', error)
           return null

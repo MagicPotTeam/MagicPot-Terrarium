@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { McpClientConnectionSnapshot } from '@shared/api/svcState'
+import { normalizeMagicPotToolName } from '@shared/app/types'
 import { Config, McpExternalServerConfig } from '@shared/config/config'
 import { createAbortError, isAbortError, throwIfAborted } from '@shared/agent'
 
@@ -67,21 +68,41 @@ const withTimeout = async <T>(
 
   let timer: NodeJS.Timeout | undefined
   let abortHandler: (() => void) | undefined
+  let settled = false
+
+  // Keep the settlement gate explicit. MCP transports may reject after a
+  // timeout or cancellation; the late rejection remains observed while the
+  // caller receives exactly one deterministic outcome.
   try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
-          timeoutMs
-        )
-        if (signal) {
-          abortHandler = () => reject(createAbortError(signal.reason))
-          signal.addEventListener('abort', abortHandler, { once: true })
-        }
-      })
-    ])
+    return await new Promise<T>((resolve, reject) => {
+      const finish = (callback: () => void): void => {
+        if (settled) return
+        settled = true
+        callback()
+      }
+
+      // Promise.resolve observes both normal and late rejection paths. Once a
+      // timeout/abort has settled the outer promise, the rejection handler is
+      // still attached and simply returns.
+      Promise.resolve(promise).then(
+        (value) => finish(() => resolve(value)),
+        (error) => finish(() => reject(error))
+      )
+
+      timer = setTimeout(
+        () => finish(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`))),
+        timeoutMs
+      )
+      if (signal) {
+        abortHandler = () => finish(() => reject(createAbortError(signal.reason)))
+        signal.addEventListener('abort', abortHandler, { once: true })
+        // The signal can transition between the initial check and listener
+        // registration. Re-check after subscribing so that race is covered.
+        if (signal.aborted) abortHandler()
+      }
+    })
   } finally {
+    settled = true
     if (timer) clearTimeout(timer)
     if (signal && abortHandler) {
       signal.removeEventListener('abort', abortHandler)
@@ -187,9 +208,15 @@ export class McpClientManager {
     signal?: AbortSignal
   ): Promise<ExternalToolCallResult | null> {
     throwIfAborted(signal)
+    const normalizedAlias = normalizeMagicPotToolName(alias)
 
     for (const state of this.clients.values()) {
-      const tool = state.tools.find((item) => item.name === alias)
+      // The assistant/runtime normalizes tool names before dispatching. Match
+      // MCP aliases the same way while preserving the original tool name for
+      // the upstream MCP request.
+      const tool = state.tools.find(
+        (item) => normalizeMagicPotToolName(item.name) === normalizedAlias
+      )
       if (!tool) continue
       if (!state.client) {
         throw new Error(`MCP server "${state.id}" is not connected.`)

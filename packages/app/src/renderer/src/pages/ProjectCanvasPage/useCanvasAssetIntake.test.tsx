@@ -410,7 +410,7 @@ describe('useCanvasAssetIntake', () => {
     expect(results).toEqual(inputs.filter((value) => value !== 2))
   })
 
-  it('imports path-backed images through managed media without retaining sourceFile', async () => {
+  it('imports path-backed images above the former cap without retaining sourceFile', async () => {
     const originalImageCtor = window.Image
     const originalApi = window.api
     const importFile = vi.fn().mockResolvedValue({
@@ -437,7 +437,7 @@ describe('useCanvasAssetIntake', () => {
       const source = {
         src: 'local-media:///C:/incoming/path-image.png',
         fileName: 'path-image.png',
-        sizeBytes: 4,
+        sizeBytes: 26 * 1024 * 1024,
         sourcePath: String.raw`C:\incoming\hash#query?\literal%2F-%25-图像.png`
       } satisfies CanvasImageSourceInput & { sourcePath: string }
       const onComplete = vi.fn()
@@ -450,7 +450,11 @@ describe('useCanvasAssetIntake', () => {
       expect(importFile).toHaveBeenCalledWith({
         sourcePath: 'C:/incoming/hash#query?/literal%2F-%25-图像.png',
         mimeType: 'image/png',
-        originalFileName: 'path-image.png'
+        originalFileName: 'path-image.png',
+        storage: {
+          namespace: 'user-output',
+          scope: 'canvas-assets'
+        }
       })
       expect(importDataUrl).not.toHaveBeenCalled()
       const [items] = onComplete.mock.calls[0] as [CanvasItem[]]
@@ -501,7 +505,11 @@ describe('useCanvasAssetIntake', () => {
       expect(importFile).not.toHaveBeenCalled()
       expect(importDataUrl).toHaveBeenCalledWith({
         dataUrl: 'data:image/png;base64,cG5n',
-        originalFileName: 'pathless.png'
+        originalFileName: 'pathless.png',
+        storage: {
+          namespace: 'user-output',
+          scope: 'canvas-assets'
+        }
       })
       const [items] = onComplete.mock.calls[0] as [CanvasItem[]]
       const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')

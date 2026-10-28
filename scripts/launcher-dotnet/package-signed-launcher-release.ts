@@ -11,7 +11,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
@@ -138,21 +138,30 @@ function timestamp(value: string, label: string): string {
   if (!UTC.test(value) || Number.isNaN(Date.parse(value))) fail(`${label} must be a UTC timestamp`)
   return value
 }
-function directory(path: string, label: string): string {
-  if (!isAbsolute(path)) fail(`${label} must be absolute`)
-  const resolved = resolve(path)
-  let current = resolved
-  while (true) {
-    const stat = lstatSync(current)
-    if (stat.isSymbolicLink()) fail(`${label} must not traverse a symlink or reparse point`)
-    const parent = resolve(current, '..')
-    if (parent === current) break
-    current = parent
+export function ensureSafeDirectory(directoryPath: string, label = 'directory'): string {
+  if (!isAbsolute(directoryPath)) fail(`${label} must be absolute`)
+  const resolved = resolve(directoryPath)
+  let current = parse(resolved).root
+  for (const part of relative(current, resolved).split(sep).filter(Boolean)) {
+    current = join(current, part)
+    let stat
+    try {
+      stat = lstatSync(current)
+    } catch (error) {
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined
+      if (code !== 'ENOENT') throw error
+      mkdirSync(current)
+      stat = lstatSync(current)
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      fail(`${label} must not traverse a symlink or reparse point`)
   }
-  const stat = lstatSync(resolved)
-  if (!stat.isDirectory()) fail(`${label} must be a real directory`)
   return resolved
 }
+
 function file(path: string, label: string): string {
   if (!isAbsolute(path)) fail(`${label} must be absolute`)
   const stat = lstatSync(path)
@@ -236,8 +245,8 @@ export function planRelease(argv: readonly string[]): ReleasePlan {
     value(values, '--runtime-relative-path', false) ?? DEFAULT_RUNTIME_RELATIVE_PATH
   if (!isSafeRelativePath(runtimeRelativePath))
     fail('runtime-relative-path must be a safe relative path')
-  const appDir = directory(value(values, '--app-dir')!, 'app-dir'),
-    runtimeDir = directory(value(values, '--runtime-dir')!, 'runtime-dir')
+  const appDir = ensureSafeDirectory(value(values, '--app-dir')!, 'app-dir'),
+    runtimeDir = ensureSafeDirectory(value(values, '--runtime-dir')!, 'runtime-dir')
   if (normalized(runtimeDir) !== normalized(join(appDir, ...runtimeRelativePath.split('/'))))
     fail('runtime-dir must equal app-dir/runtime-relative-path')
   const safeVersion = version.replaceAll('+', '_'),
@@ -308,8 +317,7 @@ function writeJson(path: string, value: unknown): void {
 }
 export async function run(argv: readonly string[]): Promise<void> {
   const plan = planRelease(argv)
-  mkdirSync(plan.outputDir, { recursive: true })
-  directory(plan.outputDir, 'output-dir')
+  ensureSafeDirectory(plan.outputDir, 'output-dir')
   const stagingRoot = mkdtempSync(join(tmpdir(), 'magicpot-launcher-release-')),
     stagedApp = join(stagingRoot, 'app')
   const app = join(plan.outputDir, plan.names.app),
@@ -458,4 +466,5 @@ if (resolve(process.argv[1] ?? '') === resolve(fileURLToPath(import.meta.url)))
     process.stderr.write(
       `${error instanceof Error ? error.message : 'launcher release packaging failed'}\n`
     )
+    process.exitCode = 1
   })

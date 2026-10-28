@@ -13,55 +13,122 @@ const FILENAME_QUERY_KEYS = [
   'path'
 ]
 
-const decodeSafely = (value: string): string => {
-  let decoded = String(value || '').trim()
+const decodePercentOnce = (value: string): string | null => {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return null
+  }
+}
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const next = decodeURIComponent(decoded.replace(/\+/g, '%20'))
-      if (next === decoded) break
-      decoded = next
-    } catch {
-      break
+const hasUnsafeFileNameCharacters = (value: string): boolean =>
+  Array.from(value).some((character) => {
+    const code = character.charCodeAt(0)
+    return code <= 0x1f || code === 0x7f
+  })
+
+const stripWrappingQuotes = (value: string): string => value.replace(/^['"]|['"]$/g, '').trim()
+
+const getLastPathSegment = (value: string, { stripUrlSuffix = false } = {}): string => {
+  let normalized = String(value || '').trim()
+  if (stripUrlSuffix) {
+    normalized = normalized.split('#')[0].split('?')[0]
+  }
+  if (!normalized || normalized.endsWith('/') || normalized.endsWith('\\')) return ''
+  const segments = normalized.split(/[\\/]/).filter(Boolean)
+  return segments[segments.length - 1] || ''
+}
+
+const normalizeDecodedFileName = (value: string): string => {
+  const decoded = decodePercentOnce(value)
+  if (decoded === null) return ''
+  const candidate = getLastPathSegment(decoded)
+  return hasUnsafeFileNameCharacters(candidate) ? '' : stripWrappingQuotes(candidate)
+}
+
+const normalizePathFileName = (value: string, stripUrlSuffix = false): string => {
+  const rawCandidate = getLastPathSegment(value, { stripUrlSuffix })
+  if (!rawCandidate) return ''
+  return normalizeDecodedFileName(rawCandidate)
+}
+
+const normalizeQueryFileName = (value: string): string => {
+  const candidate = getLastPathSegment(value)
+  return hasUnsafeFileNameCharacters(candidate) ? '' : stripWrappingQuotes(candidate)
+}
+
+const hasExplicitExtension = (value: string): boolean => /\.[a-z0-9]{1,12}$/i.test(value)
+
+const parseContentDispositionParameters = (value: string): Map<string, string> => {
+  const parameters = new Map<string, string>()
+  let index = value.indexOf(';')
+  if (index < 0) return parameters
+
+  while (index < value.length) {
+    index += 1
+    while (/\s/.test(value[index] || '')) index += 1
+    const nameStart = index
+    while (index < value.length && value[index] !== '=' && value[index] !== ';') index += 1
+    if (value[index] !== '=') {
+      while (index < value.length && value[index] !== ';') index += 1
+      continue
     }
+    const name = value.slice(nameStart, index).trim().toLowerCase()
+    index += 1
+    while (/\s/.test(value[index] || '')) index += 1
+
+    let parameterValue = ''
+    if (value[index] === '"') {
+      index += 1
+      let closed = false
+      while (index < value.length) {
+        const character = value[index++]
+        if (character === '\\' && index < value.length) {
+          parameterValue += value[index++]
+        } else if (character === '"') {
+          closed = true
+          break
+        } else {
+          parameterValue += character
+        }
+      }
+      if (!closed) continue
+      while (index < value.length && value[index] !== ';') index += 1
+    } else {
+      const valueStart = index
+      while (index < value.length && value[index] !== ';') index += 1
+      parameterValue = value.slice(valueStart, index).trim()
+    }
+
+    if (name && !parameters.has(name)) parameters.set(name, parameterValue)
   }
 
-  return decoded
+  return parameters
 }
 
-const stripWrappingQuotes = (value: string): string => value.replace(/^['"]+|['"]+$/g, '').trim()
-
-const getLastPathSegment = (value: string): string => {
-  const normalized = String(value || '')
-    .split('#')[0]
-    .split('?')[0]
-  const segments = normalized.split(/[\\/]/).filter(Boolean)
-  return segments[segments.length - 1] || normalized
+const normalizeExtendedFileName = (value: string): string => {
+  const match = value.match(/^([^']*)'[^']*'(.*)$/)
+  if (!match || !/^utf-8$/i.test(match[1])) return ''
+  const decoded = decodePercentOnce(match[2])
+  if (decoded === null) return ''
+  return normalizeQueryFileName(decoded)
 }
 
-const normalizeCandidateFileName = (value: string): string =>
-  stripWrappingQuotes(getLastPathSegment(decodeSafely(value)))
-
-const hasExplicitExtension = (value: string): boolean =>
-  /\.[a-z0-9]{1,12}$/i.test(normalizeCandidateFileName(value))
+const normalizeCandidateFileName = (value: string): string => normalizeQueryFileName(value)
 
 export const getFileNameHintFromContentDisposition = (value: string): string => {
-  const decoded = decodeSafely(value)
-
-  const starMatch = decoded.match(/filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i)
-  if (starMatch?.[1]) {
-    const candidate = normalizeCandidateFileName(starMatch[1])
-    if (hasExplicitExtension(candidate)) {
-      return candidate
-    }
+  if (!value || hasUnsafeFileNameCharacters(value)) return ''
+  const parameters = parseContentDispositionParameters(value)
+  const extended = parameters.get('filename*')
+  if (extended) {
+    const candidate = normalizeExtendedFileName(extended)
+    if (hasExplicitExtension(candidate)) return candidate
   }
 
-  const plainMatch = decoded.match(/filename\s*=\s*([^;]+)/i)
-  if (plainMatch?.[1]) {
-    const candidate = normalizeCandidateFileName(plainMatch[1])
-    if (hasExplicitExtension(candidate)) {
-      return candidate
-    }
+  const plain = parameters.get('filename')
+  if (plain) {
+    const candidate = normalizeQueryFileName(plain)
+    if (hasExplicitExtension(candidate)) return candidate
   }
 
   return ''
@@ -73,17 +140,21 @@ const extractHelpfulQueryFileName = (value: string): string => {
     return contentDispositionFileName
   }
 
+  if (/^\s*(?:attachment|inline)\s*(?:;|$)/i.test(value)) return ''
   const candidate = normalizeCandidateFileName(value)
   return hasExplicitExtension(candidate) ? candidate : ''
 }
 
 export const getFileNameHintFromUrl = (url: string): string => {
   const normalizedUrl = String(url || '').trim()
-  if (!normalizedUrl) return ''
+  if (/^[A-Za-z]:[\\/]/.test(normalizedUrl)) {
+    const localPathCandidate = normalizeQueryFileName(normalizedUrl)
+    return hasExplicitExtension(localPathCandidate) ? localPathCandidate : ''
+  }
 
   try {
     const parsedUrl = new URL(normalizedUrl)
-    const pathCandidate = normalizeCandidateFileName(parsedUrl.pathname)
+    const pathCandidate = normalizePathFileName(parsedUrl.pathname)
     if (hasExplicitExtension(pathCandidate)) {
       return pathCandidate
     }
@@ -105,7 +176,11 @@ export const getFileNameHintFromUrl = (url: string): string => {
       }
     }
   } catch {
-    return hasExplicitExtension(normalizedUrl) ? normalizeCandidateFileName(normalizedUrl) : ''
+    const isWindowsPath = /^[A-Za-z]:[\\/]/.test(normalizedUrl)
+    const fallback = isWindowsPath
+      ? normalizeQueryFileName(normalizedUrl)
+      : normalizePathFileName(normalizedUrl, true)
+    return hasExplicitExtension(fallback) ? fallback : ''
   }
 
   return ''

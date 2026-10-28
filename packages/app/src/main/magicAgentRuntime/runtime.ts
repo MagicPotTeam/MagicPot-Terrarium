@@ -308,12 +308,20 @@ export class MagicAgentRuntime {
     args: Record<string, unknown> = {},
     context: Partial<MagicAgentToolContext> = {}
   ): Promise<MagicAgentToolResult> {
-    return this.toolRegistry.call(name, args, {
+    // Avoid starting a handler after cancellation. Besides being cheaper, this
+    // ensures the rejected registry promise is observed instead of becoming an
+    // unhandled rejection when withAbort immediately returns its own abort error.
+    if (context.signal) throwIfAborted(context.signal)
+    const call = this.toolRegistry.call(name, args, {
       runId: context.runId || this.randomUUID(),
       agentId: context.agentId || DEFAULT_MAGIC_AGENT_ID,
       ...(context.signal ? { signal: context.signal } : {}),
       ...(context.metadata ? { metadata: context.metadata } : {})
     })
+    // Direct tool callers have the same cancellation contract as run-loop
+    // executions. A handler may honor the signal cooperatively, but callers
+    // must not remain blocked forever when it does not.
+    return context.signal ? this.withAbort(call, context.signal) : call
   }
 
   async run(request: MagicAgentRunRequest): Promise<MagicAgentRunResult> {
@@ -422,6 +430,10 @@ export class MagicAgentRuntime {
   }): Promise<LLMChatResp> {
     const maxToolIterations = this.resolveMaxToolIterations(options.request, options.agent)
     let lastReply: LLMChatResp = { content: '' }
+    // Provider retries/continuations must not be able to replay an already
+    // executed native call ID. Keep this per run so an explicit new run still
+    // has a clean idempotency boundary.
+    const executedToolCallIds = new Set<string>()
 
     for (let iteration = 0; iteration <= maxToolIterations; iteration += 1) {
       throwIfAborted(options.signal)
@@ -464,6 +476,14 @@ export class MagicAgentRuntime {
       for (const toolCall of parsedToolCalls) {
         throwIfAborted(options.signal)
         this.assertToolAllowed(toolCall.name, options.request, options.agent)
+        if (executedToolCallIds.has(toolCall.id)) {
+          const error = new Error(
+            `Duplicate tool call id "${toolCall.id}"; the operation was not executed again.`
+          )
+          error.name = 'ToolReplayError'
+          throw error
+        }
+        executedToolCallIds.add(toolCall.id)
         options.toolCalls.push(toolCall)
         options.emit('tool.requested', `Tool requested: ${toolCall.name}`, {
           toolCallId: toolCall.id,
@@ -497,7 +517,11 @@ export class MagicAgentRuntime {
     messages: MagicAgentMessage[]
   }): LLMChatReq {
     const tools = options.request.enableToolExecution
-      ? this.filterToolsForAgent(this.toolRegistry.list(), options.agent)
+      ? this.filterToolsForRequest(
+          this.toolRegistry.list(),
+          options.agent,
+          options.request.allowedToolNames
+        )
       : []
     const systemPrompt = [options.agent.systemPrompt, options.request.systemPrompt]
       .filter(Boolean)
@@ -526,11 +550,43 @@ export class MagicAgentRuntime {
     } as LLMChatReq
   }
 
+  /**
+   * Keep the model-visible tool catalog in lockstep with the execution policy.
+   * Filtering only at dispatch time lets a model select a tool that the run
+   * can never execute, producing avoidable permission failures and leaking the
+   * names/schemas of tools outside the caller's allowlist.
+   */
+  private filterToolsForRequest(
+    tools: MagicAgentToolDefinition[],
+    agent: MagicAgentDefinition,
+    requestedToolNames?: string[] | null
+  ): MagicAgentToolDefinition[] {
+    const agentFiltered = this.filterToolsForAgent(tools, agent)
+    const requestAllowlist =
+      requestedToolNames === null
+        ? new Set<string>()
+        : Array.isArray(requestedToolNames)
+          ? new Set(requestedToolNames.map(cleanString).filter(Boolean))
+          : undefined
+    if (!requestAllowlist) return agentFiltered
+    return agentFiltered.filter((tool) => requestAllowlist.has(tool.name))
+  }
+
   private parseToolCalls(reply: LLMChatResp): ParsedToolCall[] {
-    return [
+    const candidates = [
       ...parseToolCallsFromMetadata(reply.metadata, this.randomUUID),
       ...parseToolCallsFromContent(reply.content, this.randomUUID)
     ]
+    // Some provider adapters expose the same native call in both metadata and
+    // the textual compatibility payload. Preserve distinct calls while
+    // preventing one effect from being executed twice for the same id.
+    const seenIds = new Set<string>()
+    return candidates.filter((toolCall) => {
+      const id = cleanString(toolCall.id)
+      if (!id || seenIds.has(id)) return !id
+      seenIds.add(id)
+      return true
+    })
   }
 
   private filterToolsForAgent(
@@ -549,14 +605,17 @@ export class MagicAgentRuntime {
     request: MagicAgentRunRequest,
     agent: MagicAgentDefinition
   ): void {
-    const requestAllowlist = Array.isArray(request.allowedToolNames)
-      ? request.allowedToolNames.map(cleanString).filter(Boolean)
-      : null
+    const requestAllowlist =
+      request.allowedToolNames === null
+        ? []
+        : Array.isArray(request.allowedToolNames)
+          ? request.allowedToolNames.map(cleanString).filter(Boolean)
+          : undefined
     const agentAllowlist = Array.isArray(agent.toolNames)
       ? agent.toolNames.map(cleanString).filter(Boolean)
       : null
-    const effectiveAllowlist = requestAllowlist || agentAllowlist
-    if (!effectiveAllowlist) {
+    const effectiveAllowlist = requestAllowlist !== undefined ? requestAllowlist : agentAllowlist
+    if (effectiveAllowlist === null) {
       return
     }
 
@@ -584,6 +643,10 @@ export class MagicAgentRuntime {
 
   private async withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
     if (signal.aborted) {
+      // The operation has already been started by the caller. Observe its late
+      // rejection before returning the cancellation error to avoid an
+      // unhandled rejection from a provider/tool that races cancellation.
+      promise.catch(() => undefined)
       throw createAbortError(signal.reason)
     }
     return Promise.race([

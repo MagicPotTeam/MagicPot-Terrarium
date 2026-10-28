@@ -1,6 +1,6 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -17,7 +17,7 @@ const stores: MagicAgentEventStore[] = []
 const roots: string[] = []
 const approver = { kind: 'user', id: 'user' } as const
 function mkdirRealTemp(): string {
-  return mkdtempSync(path.join(tmpdir(), 'magic-command-jobs-'))
+  return realpathSync.native(mkdtempSync(path.join(tmpdir(), 'magic-command-jobs-')))
 }
 
 class FakeChildProcess extends EventEmitter {

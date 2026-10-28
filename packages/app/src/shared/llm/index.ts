@@ -5,6 +5,7 @@
 export type {
   ChatAttachment,
   ChatMessage,
+  ToolHistoryEntry,
   GeneratePromptParams,
   LLMChatFinishReason,
   LLMChatMetadata,
@@ -13,6 +14,7 @@ export type {
   LLMChatParams,
   LLMChatResult,
   LLMDeltaEvent,
+  LLMStructuredOutput,
   LLMCli,
   LLMCliWithPrompt,
   OpenAIImageGenerationAction,
@@ -21,7 +23,45 @@ export type {
   OpenAIImageGenerationOutputFormat,
   OpenAIImageGenerationQuality
 } from './types'
+export type {
+  ModelInvocationContract,
+  ModelInvocationError,
+  ModelInvocationEvent,
+  ModelInvocationIdentity,
+  ModelInvocationPermission,
+  ModelInvocationRequest,
+  ModelInvocationResourceRef,
+  ModelInvocationTimeout
+} from './modelInvocationContract'
 export { normalizeLLMChatResult, parseStructuredLLMChatResult } from './types'
+export {
+  normalizeLLMStructuredOutput,
+  LLM_STRUCTURED_OUTPUT_MAX_SCHEMA_BYTES
+} from './structuredOutput'
+export {
+  MODEL_INVOCATION_DEFAULT_DEADLINE_MS,
+  MODEL_INVOCATION_SCHEMA,
+  MODEL_INVOCATION_VERSION,
+  buildModelInvocationHeaders,
+  createModelInvocationContract,
+  createModelInvocationRequest,
+  isCurrentModelInvocation,
+  normalizeModelInvocationContract,
+  normalizeModelInvocationError,
+  toModelInvocationError
+} from './modelInvocationContract'
+export type {
+  ImageRequestAction,
+  ImageHistoryContinuationRefs,
+  ImageRequestLimits,
+  ImageRequestPermission,
+  ImageRequestControl,
+  ImageRequestUsage,
+  ImageRequestError,
+  ImageRequestContract,
+  ImageRequestContractInput
+} from './imageRequestContract'
+export { buildImageRequestContract, validateImageRequestContract } from './imageRequestContract'
 export {
   getReasoningEffortLabel,
   normalizeReasoningEffort,
@@ -48,9 +88,15 @@ export {
   normalizeGeminiModelName,
   normalizeGeminiBaseUrl,
   normalizeClaudeBaseUrl,
-  normalizeOllamaBaseUrl
+  normalizeOllamaBaseUrl,
+  UpstreamHttpError
 } from './clients'
-export type { FetchImpl } from './clients'
+export type {
+  FetchImpl,
+  OpenAIClientApiMode,
+  OpenAIClientOptions,
+  OpenAIImageAttachmentLoader
+} from './clients'
 export {
   isGeminiUrl,
   isClaudeUrl,
@@ -65,8 +111,10 @@ export {
   resolveProfileDeployment,
   resolveProfileModelUse,
   isRunnableProfile,
+  isCodexFastModeEnabled,
   cliFromProfile
 } from './utils'
+export { isPrivateOrLocalProviderHost, validateProviderBaseUrl } from './providerEndpointPolicy'
 export {
   isOpenAIFileSearchAttachment,
   collectOpenAIFileSearchAttachments,
@@ -74,6 +122,7 @@ export {
   createOpenAIFileSearchSession
 } from './openaiFileSearch'
 export { normalizeOpenAIImageGenerationSize } from './openaiResponses'
+export { readOpenAIStream } from './openaiStreaming'
 export {
   KlingVideoAPICli,
   VolcengineSeedanceAPICli,

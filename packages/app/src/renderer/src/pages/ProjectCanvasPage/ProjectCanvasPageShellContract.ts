@@ -1,11 +1,13 @@
 import type React from 'react'
 
+import type { CanvasTranslate } from './canvasTranslation'
 import type { CanvasGroupSummary } from './groupMenuUtils'
-import type { CanvasGroupPlaybackState } from './useCanvasGroupPlayback'
 import type { CanvasSaveOptions, CanvasTool } from './projectCanvasPageShared'
 import type { AnnotationShape, CanvasGroup, CanvasGroupBranch, CanvasItem } from './types'
 
-export type ProjectCanvasPageTranslate = (key: string, options?: Record<string, unknown>) => string
+import type { CanvasGroupPlaybackState } from './useCanvasGroupPlayback'
+
+export type ProjectCanvasPageTranslate = CanvasTranslate
 
 export type ProjectCanvasViewportPoint = {
   x: number
@@ -79,6 +81,12 @@ export type ProjectCanvasPageTopToolbarProps = ProjectCanvasPageToolbarGroupTree
   exportSubmenuPlacement: 'left' | 'right'
   exportableItems: readonly unknown[]
   generationTraceRecentRecords: readonly unknown[]
+  historyRevision?: number
+  historySnapshots?: ReadonlyArray<{ index: number; items: CanvasItem[] }>
+  historyCount?: number
+  selectedHistoryRevision?: number | null
+  restoreHistoryRevision?: (index: number) => void
+  setSelectedHistoryRevision?: React.Dispatch<React.SetStateAction<number | null>>
   groupMenuAnchor: HTMLElement | null
   groupPlayback: CanvasGroupPlaybackState | null
   handleAutoArrangeGroup: (group: CanvasGroup) => void
@@ -138,7 +146,7 @@ export type ProjectCanvasPageTopToolbarProps = ProjectCanvasPageToolbarGroupTree
   stageSize: ProjectCanvasViewportSize | null
   startGroupPlayback: (group: CanvasGroupSummary) => void
   stopGroupPlayback: () => void
-  t: ProjectCanvasPageTranslate
+  t: CanvasTranslate
   theme: ProjectCanvasToolbarTheme
   tool: CanvasTool
   toolShortcutCtxMenu: ProjectCanvasToolShortcutContextMenu

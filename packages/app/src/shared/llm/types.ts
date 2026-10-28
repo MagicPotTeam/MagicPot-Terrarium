@@ -1,7 +1,15 @@
+import type { LLMRetryStatus } from './modelCapacityRetry'
+import type { LLMFunctionCall, LLMFunctionTool, LLMToolTurn } from './nativeTools'
 import type { OCRResult } from '@shared/api/svcLLMProxy'
+import type { ImageRequestContract } from './imageRequestContract'
+export type { ImageRequestContract } from './imageRequestContract'
 import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
 import type { LLMReasoningEffort } from './profileCapabilities'
+import type { LLMStructuredOutput } from './structuredOutput'
+export type { LLMStructuredOutput } from './structuredOutput'
+import type { BinaryChunkFrame, BinaryChunkReference } from '../binaryChunkProtocol'
+import type { ModelInvocationContract } from './modelInvocationContract'
 
 /**
  * Shared LLM types used by both main process and renderer process.
@@ -20,12 +28,40 @@ export interface ChatAttachment {
   sizeBytes?: number
   sourceWidth?: number
   sourceHeight?: number
+  /** Caller-requested image budget hint, not a guarantee of provider billing. */
+  imageDetail?: 'low'
   ocrResult?: OCRResult
   reportBundleId?: string
   reportBundleRole?: ReportBundleRole
   reportBundleRefName?: string
   reportBundleManifestUrl?: string
   reportBundleLabel?: string
+  /** Optional pre-discovered image count for a provider-owned report bundle; no I/O is implied. */
+  reportBundleImageCount?: number
+  /** Optional content-addressed binary payload used at the main-process LLM boundary. */
+  binary?: {
+    transport: 'chunked-binary-v1'
+    reference: BinaryChunkReference
+    chunks: BinaryChunkFrame[]
+  }
+}
+
+export type ToolHistoryEntry = {
+  runId: string
+  toolCallId: string
+  toolName: string
+  args: Record<string, unknown>
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  content?: string
+  error?: string
+  metadata?: Record<string, unknown>
+}
+
+export type LLMToolStatus = {
+  runId: string
+  toolCallId: string
+  toolName: string
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
 }
 
 /** A single chat message */
@@ -37,6 +73,8 @@ export interface ChatMessage {
   hiddenContext?: string
   preferredDownloadBaseName?: string
   modelName?: string
+  /** Structured tool-loop records persisted separately from visible assistant prose. */
+  toolHistory?: ToolHistoryEntry[]
 }
 
 /** Parameters for prompt generation (renderer-only feature) */
@@ -61,6 +99,8 @@ export type LLMChatTokenUsage = {
 export type LLMImageHistoryPolicy = 'latest-user-turn' | 'all'
 
 export interface LLMChatResult {
+  toolCalls?: LLMFunctionCall[]
+  toolResponseItems?: Record<string, unknown>[]
   content: string
   imageUrl?: string
   sessionUrl?: string
@@ -72,7 +112,8 @@ export interface LLMChatResult {
 }
 
 export interface LLMDeltaEvent {
-  type: 'text-delta' | 'attachment' | 'session' | 'done' | 'error'
+  type: 'text-delta' | 'attachment' | 'session' | 'tool-status' | 'retry' | 'done' | 'error'
+  retry?: LLMRetryStatus
   delta?: string
   attachment?: ChatAttachment
   sessionUrl?: string
@@ -82,15 +123,17 @@ export interface LLMDeltaEvent {
   finishReason?: LLMChatFinishReason
   error?: string
   metadata?: LLMChatMetadata
+  toolStatus?: LLMToolStatus
 }
 
 export type OpenAIImageGenerationAction = 'auto' | 'generate' | 'edit'
 export type OpenAIImageGenerationBackground = 'auto' | 'opaque' | 'transparent'
 export type OpenAIImageGenerationOutputFormat = 'png' | 'webp' | 'jpeg'
-export type OpenAIImageGenerationQuality = 'auto' | 'low' | 'medium' | 'high'
+export type OpenAIImageGenerationQuality = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface OpenAIImageGenerationOptions {
   action?: OpenAIImageGenerationAction
+  model?: string
   background?: OpenAIImageGenerationBackground
   enabled?: boolean
   outputFormat?: OpenAIImageGenerationOutputFormat
@@ -165,19 +208,30 @@ export interface VideoGenerationOptions {
 }
 
 export interface LLMChatParams {
+  /** Main-issued identifier propagated to provider requests for end-to-end diagnostics. */
+  correlationId?: string
+  /** Main-selected native tools; not renderer-supplied execution authority. */
+  tools?: LLMFunctionTool[]
+  toolTurns?: LLMToolTurn[]
+  /** Main-owned interactive Agent policy, not a permission or remote retry directive. */
+  retryCapacity?: boolean
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
   temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
-  /** Controls whether provider requests reconstruct historical image bytes from local artifacts. */
+  imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
   videoGenerationOptions?: VideoGenerationOptions
   signal?: AbortSignal
   sessionUrl?: string
   conversationId?: string
   onDelta?: (event: LLMDeltaEvent) => void
+  /** Optional provider-native JSON output hint; callers still validate the result. */
+  structuredOutput?: LLMStructuredOutput
+  /** Main-issued provider-neutral invocation metadata; never carries model input. */
+  invocation?: ModelInvocationContract
 }
 
 const LLM_CHAT_FINISH_REASONS = new Set<LLMChatFinishReason>([
@@ -261,6 +315,10 @@ export const normalizeLLMChatResult = (value: string | LLMChatResult): LLMChatRe
   if (typeof value !== 'string') {
     return {
       content: typeof value.content === 'string' ? value.content : '',
+      ...(Array.isArray(value.toolCalls) ? { toolCalls: value.toolCalls } : {}),
+      ...(Array.isArray(value.toolResponseItems)
+        ? { toolResponseItems: value.toolResponseItems }
+        : {}),
       ...(typeof value.imageUrl === 'string' ? { imageUrl: value.imageUrl } : {}),
       ...(typeof value.sessionUrl === 'string' ? { sessionUrl: value.sessionUrl } : {}),
       ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
@@ -290,6 +348,7 @@ export const normalizeLLMChatResult = (value: string | LLMChatResult): LLMChatRe
 
 /** Common LLM client interface chat only (shared) */
 export interface LLMCli {
+  readonly supportsNativeTools?: boolean
   chat(params: LLMChatParams): Promise<LLMChatResult>
 }
 

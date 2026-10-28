@@ -10,7 +10,22 @@ const asar = require('@electron/asar')
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
 
+export const documentWorkerRuntimeAssets = [
+  'out/document-worker/index.cjs',
+  'out/document-worker/THIRD-PARTY-NOTICES.txt',
+  'node_modules/pdfjs-dist/legacy/build/pdf.mjs',
+  'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs',
+  'node_modules/pdfjs-dist/LICENSE'
+]
+
+export const bridgeChildRuntimeAssets = ['out/bridge-child/index.cjs']
+
 export const requiredRuntimeFiles = [
+  ...documentWorkerRuntimeAssets,
+  'out/document-worker/manifest.json',
+  ...bridgeChildRuntimeAssets,
+  'out/bridge-child/manifest.json',
+  'node_modules/pdfjs-dist/package.json',
   'node_modules/@modelcontextprotocol/sdk/package.json',
   'node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js',
   'node_modules/@modelcontextprotocol/sdk/dist/cjs/client/stdio.js',
@@ -40,6 +55,18 @@ export const requiredRuntimeFiles = [
 ]
 
 const runtimeRootPackages = ['@modelcontextprotocol/sdk']
+const supportedElectronPlatformNames = new Set(['win32', 'darwin', 'linux'])
+
+function assertSupportedElectronPlatformName(electronPlatformName) {
+  if (electronPlatformName === undefined) {
+    throw new Error('electronPlatformName is required (expected win32, darwin, or linux)')
+  }
+  if (!supportedElectronPlatformNames.has(electronPlatformName)) {
+    throw new Error(
+      `Unsupported electronPlatformName "${String(electronPlatformName)}" (expected win32, darwin, or linux)`
+    )
+  }
+}
 
 export function verifyPackagedWindowsCommandJobHelper(packagedRoot) {
   const helper = path.join(packagedRoot, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
@@ -149,11 +176,93 @@ export function findMissingRuntimeDependencyClosure(asarPath) {
   return { missing, packageCount: visited.size }
 }
 
-export function verifyPackagedRuntimeDependencies(appOutDir, packager) {
+export function verifyPackagedDocumentWorker(asarPath) {
+  const read = (relative) => asar.extractFile(asarPath, toArchivePath(relative))
+  let manifest
+  try {
+    manifest = JSON.parse(read('out/document-worker/manifest.json').toString('utf8'))
+  } catch {
+    throw new Error('Packaged document worker manifest unavailable')
+  }
+  if (
+    manifest?.protocol !== 'magicpot-document-worker-assets/v2' ||
+    manifest.pdfjsVersion !== '6.3.289' ||
+    manifest.saxesVersion !== '6.0.0' ||
+    !Array.isArray(manifest.files) ||
+    manifest.files.length !== documentWorkerRuntimeAssets.length
+  )
+    throw new Error('Packaged document worker manifest invalid')
+  for (const [index, relative] of documentWorkerRuntimeAssets.entries()) {
+    const expected = manifest.files[index]
+    if (expected?.path !== relative || !/^[a-f0-9]{64}$/.test(expected.sha256))
+      throw new Error('Packaged document worker manifest invalid')
+    let bytes
+    try {
+      bytes = read(relative)
+    } catch {
+      throw new Error('Packaged document worker asset missing')
+    }
+    if (createHash('sha256').update(bytes).digest('hex') !== expected.sha256)
+      throw new Error('Packaged document worker asset SHA-256 mismatch')
+  }
+  // Package scripts/keywords/bugs are intentionally rewritten by electron-builder.
+  // Only its module resolution contract is stable; executable assets stay hashed.
+  let pdf
+  try {
+    pdf = JSON.parse(read('node_modules/pdfjs-dist/package.json').toString('utf8'))
+  } catch {
+    throw new Error('Packaged document worker PDF metadata unavailable')
+  }
+  if (
+    pdf?.name !== 'pdfjs-dist' ||
+    pdf.version !== '6.3.289' ||
+    pdf.main !== 'build/pdf.mjs' ||
+    Object.hasOwn(pdf, 'exports')
+  )
+    throw new Error('Packaged document worker PDF resolution mismatch')
+}
+
+export function verifyPackagedBridgeChild(asarPath) {
+  const read = (relative) => asar.extractFile(asarPath, toArchivePath(relative))
+  let manifest
+  try {
+    manifest = JSON.parse(read('out/bridge-child/manifest.json').toString('utf8'))
+  } catch {
+    throw new Error('Packaged Bridge child manifest unavailable')
+  }
+  if (
+    manifest?.protocol !== 'magicpot-figplugin-bridge-child-assets/v1' ||
+    !Array.isArray(manifest.files) ||
+    manifest.files.length !== bridgeChildRuntimeAssets.length
+  )
+    throw new Error('Packaged Bridge child manifest invalid')
+  for (const [index, relative] of bridgeChildRuntimeAssets.entries()) {
+    const expected = manifest.files[index]
+    if (
+      expected?.path !== relative ||
+      typeof expected.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(expected.sha256)
+    )
+      throw new Error('Packaged Bridge child manifest invalid')
+    let bytes
+    try {
+      bytes = read(relative)
+    } catch {
+      throw new Error('Packaged Bridge child asset missing')
+    }
+    if (createHash('sha256').update(bytes).digest('hex') !== expected.sha256)
+      throw new Error('Packaged Bridge child asset SHA-256 mismatch')
+  }
+}
+
+export function verifyPackagedRuntimeDependencies(appOutDir, packager, electronPlatformName) {
+  assertSupportedElectronPlatformName(electronPlatformName)
   const resourcesDir = packager?.getResourcesDir
     ? packager.getResourcesDir(appOutDir)
     : path.join(appOutDir, 'resources')
-  verifyPackagedWindowsCommandJobHelper(path.dirname(resourcesDir))
+  if (electronPlatformName === 'win32') {
+    verifyPackagedWindowsCommandJobHelper(path.dirname(resourcesDir))
+  }
   const asarPath = path.join(resourcesDir, 'app.asar')
   if (!fs.existsSync(asarPath)) {
     throw new Error(`Packaged app.asar was not found: ${asarPath}`)
@@ -174,6 +283,8 @@ export function verifyPackagedRuntimeDependencies(appOutDir, packager) {
     )
   }
 
+  verifyPackagedDocumentWorker(asarPath)
+  verifyPackagedBridgeChild(asarPath)
   console.log(
     `[verify-packaged-runtime-dependencies] Verified ${requiredRuntimeFiles.length} files and ${closure.packageCount} runtime packages in ${asarPath}`
   )
@@ -183,7 +294,7 @@ function main(argv = process.argv.slice(2)) {
   const appOutDir = argv[0]
     ? path.resolve(argv[0])
     : path.join(repoRoot, 'dist', process.env.PACKAGE_MODE || 'pure', 'win-unpacked')
-  verifyPackagedRuntimeDependencies(appOutDir)
+  verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

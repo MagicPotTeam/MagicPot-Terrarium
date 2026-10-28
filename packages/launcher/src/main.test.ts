@@ -10,6 +10,7 @@ import {
   UPDATE_STATUS_ENV,
   UPDATE_VERSION_ENV,
   LauncherAlreadyRunningError,
+  LauncherHealthCheckFailedError,
   createDisabledUpdateRunner,
   createLaunchEnvironment,
   forwardedLauncherArguments,
@@ -221,6 +222,34 @@ describe('stable launcher entrypoint', () => {
     expect(h.spawnActive).not.toHaveBeenCalled()
   })
 
+  it('reports an asynchronous health failure instead of returning launcher success', async () => {
+    const h = harness('manual')
+    let reads = 0
+    h.readHealthState.mockImplementation(async () => {
+      reads += 1
+      if (reads === 1) return { schema: 1, failedAttemptCount: 0 }
+      if (reads === 2) {
+        return {
+          schema: 1,
+          failedAttemptCount: 0,
+          pending: {
+            buildId: 'build-1',
+            runtimeId: 'runtime-1',
+            launchToken: 'token-1',
+            attemptCount: 1,
+            startedAt: '2026-07-17T00:00:00.000Z',
+            deadline: '2026-07-17T00:01:00.000Z'
+          }
+        }
+      }
+      return { schema: 1, failedAttemptCount: 1 }
+    })
+
+    await expect(runStableLauncher(h.options)).rejects.toBeInstanceOf(
+      LauncherHealthCheckFailedError
+    )
+    expect(h.spawnActive).toHaveBeenCalledOnce()
+  })
   it('propagates synchronous spawn failure after core records it', async () => {
     const h = harness('manual')
     h.spawnActive.mockImplementationOnce(async () => {

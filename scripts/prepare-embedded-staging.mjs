@@ -4,6 +4,10 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { materializeGitFileSymlinks } from './embedded-staging-symlinks.mjs'
+import { parseOfflineRembgFlag, stageOfflineRembg } from './comfy/stage-offline-rembg.mjs'
+
+// Default remains unchanged; the owned node bundle is copied only with this explicit build flag.
+const offlineRembgEnabled = parseOfflineRembgFlag(process.argv.slice(2))
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -131,7 +135,10 @@ function copyTree(source, destination, shouldSkip = () => false) {
     throw new Error(`Missing required source: ${source}`)
   }
 
-  const sourceStat = fs.statSync(source)
+  const sourceStat = fs.lstatSync(source)
+  if (sourceStat.isSymbolicLink()) {
+    throw new Error(`Source contains symlink or reparse point: ${source}`)
+  }
   if (!sourceStat.isDirectory()) {
     throw new Error(`Expected directory: ${source}`)
   }
@@ -144,15 +151,23 @@ function copyTree(source, destination, shouldSkip = () => false) {
       continue
     }
 
-    const stat = fs.statSync(sourcePath)
+    const stat = fs.lstatSync(sourcePath)
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Source contains symlink or reparse point: ${sourcePath}`)
+    }
     if (stat.isDirectory()) {
       copyTree(sourcePath, destinationPath, shouldSkip)
       continue
     }
     if (stat.isFile()) {
+      if (stat.nlink !== 1) {
+        throw new Error(`Source contains hardlink: ${sourcePath}`)
+      }
       ensureDir(path.dirname(destinationPath))
       fs.copyFileSync(sourcePath, destinationPath)
+      continue
     }
+    throw new Error(`Source contains special file: ${sourcePath}`)
   }
 }
 
@@ -162,7 +177,10 @@ function walkFiles(root, onFile) {
   }
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     const entryPath = path.join(root, entry.name)
-    const stat = fs.statSync(entryPath)
+    const stat = fs.lstatSync(entryPath)
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Staging contains symlink or reparse point: ${entryPath}`)
+    }
     if (stat.isDirectory()) {
       walkFiles(entryPath, onFile)
     } else if (stat.isFile()) {
@@ -248,6 +266,7 @@ function main() {
   copyTree(customNodesSrc, customNodesDst, shouldSkipCustomNodeSource)
   removeRepositoryMetadata(customNodesDst)
   applySeedVr2CpuDeviceFallback()
+  stageOfflineRembg({ projectRoot: repoRoot, enabled: offlineRembgEnabled })
 
   validateStaging()
   console.log(`[prepare-embedded-staging] Wrote ${comfyDst}`)

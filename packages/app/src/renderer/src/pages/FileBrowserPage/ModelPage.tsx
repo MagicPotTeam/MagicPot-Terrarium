@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   Box,
   Paper,
@@ -32,6 +32,7 @@ import {
 import { useTheme } from '@mui/material/styles'
 import FileBrowserPannel from './FileBrowserPannel'
 import { useConfig } from '@renderer/hooks/useConfig'
+import { useMessage } from '@renderer/hooks/useMessage'
 import whiteHu from '@renderer/assets/whitehu.png'
 import { api } from '@renderer/utils/windowUtils'
 import { useTranslation } from 'react-i18next'
@@ -404,6 +405,11 @@ const ModelPage: React.FC<ModelPageProps> = ({ compact = false }) => {
   const isLight = theme.palette.mode === 'light'
   const { t } = useTranslation()
   const { configUtils } = useConfig()
+  const { notifyError } = useMessage()
+  const tRef = useRef(t)
+  const notifyErrorRef = useRef(notifyError)
+  tRef.current = t
+  notifyErrorRef.current = notifyError
 
   const sections = [
     {
@@ -473,7 +479,54 @@ const ModelPage: React.FC<ModelPageProps> = ({ compact = false }) => {
 
   const [currentTab, setCurrentTab] = useState<ExtendedFileType>('checkpoint')
   const PILL_3D_SHADOW = '8px 0 10px rgba(0,0,0,0.04), 0 8px 10px rgba(0,0,0,0.04)'
-  const currentTabInfo = sections.find((t) => t.value === currentTab)
+  const currentTabInfo = sections.find((section) => section.value === currentTab)
+  const currentDirPath = currentTabInfo?.getDirPath() ?? ''
+  const rootScopeKey = `${currentTab}\u0000${currentDirPath}`
+  const rootScope = useMemo(() => ({ key: rootScopeKey }), [rootScopeKey])
+  const rootScopeRef = useRef(rootScope)
+  rootScopeRef.current = rootScope
+  const rootActionRef = useRef<{ scope: typeof rootScope; id: symbol } | null>(null)
+  const [pendingRootScope, setPendingRootScope] = useState<typeof rootScope | null>(null)
+  const mountedRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  const handleOpenCurrentRoot = () => {
+    if (!currentDirPath || rootActionRef.current?.scope === rootScope) return
+    const lock = { scope: rootScope, id: Symbol('model-root-open') }
+    rootActionRef.current = lock
+    setPendingRootScope(rootScope)
+    void (async () => {
+      try {
+        const result = await api().svcShell.openPath(currentDirPath)
+        if (result !== '') throw new Error('The shell rejected the directory.')
+      } catch {
+        if (
+          mountedRef.current &&
+          rootScopeRef.current === lock.scope &&
+          rootActionRef.current === lock
+        ) {
+          notifyErrorRef.current(
+            tRef.current('qapp.callout.open_directory_failed', {
+              error: tRef.current('chat.unknown_error')
+            })
+          )
+        }
+      } finally {
+        if (rootActionRef.current === lock) {
+          rootActionRef.current = null
+          if (mountedRef.current && rootScopeRef.current === lock.scope) {
+            setPendingRootScope(null)
+          }
+        }
+      }
+    })()
+  }
 
   // ─── compact 模式：VS Code 风格文件树 ───
   if (compact) {
@@ -523,6 +576,7 @@ const ModelPage: React.FC<ModelPageProps> = ({ compact = false }) => {
       >
         <Box sx={{ px: 2, pt: 2 }}>
           <Box
+            role="tablist"
             sx={{
               display: 'flex',
               flexDirection: 'row',
@@ -537,6 +591,8 @@ const ModelPage: React.FC<ModelPageProps> = ({ compact = false }) => {
               return (
                 <Button
                   key={t.value}
+                  role="tab"
+                  aria-selected={selected}
                   onClick={() => setCurrentTab(t.value)}
                   disableElevation
                   startIcon={t.icon}
@@ -572,8 +628,9 @@ const ModelPage: React.FC<ModelPageProps> = ({ compact = false }) => {
 
         <FileBrowserPannel
           label={currentTabInfo?.label ?? ''}
-          dirPath={currentTabInfo?.getDirPath() ?? ''}
+          dirPath={currentDirPath}
           exts={currentTabInfo?.exts}
+          requestScopeKey={currentTab}
           showFooter={false}
         />
       </Paper>
@@ -593,11 +650,8 @@ const ModelPage: React.FC<ModelPageProps> = ({ compact = false }) => {
           variant="contained"
           color="inherit"
           size="large"
-          onClick={() => {
-            const dir = currentTabInfo?.getDirPath() ?? ''
-            if (!dir) return
-            api().svcShell.openPath(dir)
-          }}
+          disabled={pendingRootScope === rootScope}
+          onClick={handleOpenCurrentRoot}
           sx={{
             position: 'relative',
             bgcolor: '#7e73fd',

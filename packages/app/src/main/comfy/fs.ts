@@ -1,4 +1,5 @@
 // AIEngineElectron/packages/app/src/main/comfy/fs.ts
+import { AbortReceiver } from '@shared/api/apiUtils/abortHandler'
 import { Config } from '@shared/config/config'
 import { BuildEnv } from '@shared/config/buildEnv'
 import fs from 'fs/promises'
@@ -37,9 +38,19 @@ export class ComfyFSCli {
   private async walkAndEmit(
     absDir: string,
     exts: string[] | undefined,
-    onFile: (file: FileInfo) => Promise<void>
+    onFile: (file: FileInfo) => Promise<void>,
+    abortReceiver?: AbortReceiver
   ): Promise<void> {
-    if (!(await exists(absDir))) return
+    if (abortReceiver?.isAborted()) return
+
+    let directoryExists: boolean
+    try {
+      directoryExists = await exists(absDir)
+    } catch (error) {
+      if (abortReceiver?.isAborted()) return
+      throw error
+    }
+    if (abortReceiver?.isAborted() || !directoryExists) return
 
     // 统一扩展名为 .xxx 形式（小写）
     const allowExts =
@@ -47,26 +58,42 @@ export class ComfyFSCli {
         ? exts.map((e) => (e.startsWith('.') ? e.toLowerCase() : `.${e.toLowerCase()}`))
         : null
 
-    const dirents = await fs.readdir(absDir, { withFileTypes: true })
+    let dirents: Array<import('fs').Dirent<string>>
+    try {
+      dirents = await fs.readdir(absDir, { withFileTypes: true })
+    } catch (error) {
+      if (abortReceiver?.isAborted()) return
+      throw error
+    }
+    if (abortReceiver?.isAborted()) return
+
     for (const d of dirents) {
+      if (abortReceiver?.isAborted()) return
       const full = path.join(absDir, d.name)
       if (d.isDirectory()) {
         // 继续递归子目录
-        await this.walkAndEmit(full, exts, onFile)
+        await this.walkAndEmit(full, exts, onFile, abortReceiver)
       } else if (d.isFile()) {
         // 后缀过滤
         if (allowExts) {
           const ext = path.extname(d.name).toLowerCase()
           if (!allowExts.includes(ext)) continue
         }
-        // 读取 stat，并把可能的 bigint 转成 number
-        const st = await fs.stat(full)
+        let st
+        try {
+          st = await fs.stat(full)
+        } catch (error) {
+          if (abortReceiver?.isAborted()) return
+          throw error
+        }
+        if (abortReceiver?.isAborted()) return
         await onFile({
           name: d.name,
           path: full,
           size: st.size,
           lastModified: st.mtimeMs
         })
+        if (abortReceiver?.isAborted()) return
       }
       // 其他类型（符号链接/管道等）忽略
     }
@@ -78,14 +105,16 @@ export class ComfyFSCli {
   async forEachFileInfo(
     comfyDir: string,
     exts: string[] | undefined,
-    onFile: (file: FileInfo) => Promise<void>
+    onFile: (file: FileInfo) => Promise<void>,
+    abortReceiver?: AbortReceiver
   ): Promise<void> {
     const absDir = this.configUtils.comfySubDir(comfyDir)
     if (!absDir) {
       console.error('[ComfyFSCli] base dir is not available:', comfyDir)
       return
     }
-    await this.walkAndEmit(absDir, exts, onFile)
+    if (abortReceiver?.isAborted()) return
+    await this.walkAndEmit(absDir, exts, onFile, abortReceiver)
   }
 
   async getExtraModelPaths(): Promise<ExtraModelPaths> {

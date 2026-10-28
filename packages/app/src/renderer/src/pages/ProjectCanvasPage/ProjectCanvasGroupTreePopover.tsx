@@ -31,6 +31,7 @@ import {
 import { alpha } from '@mui/material/styles'
 
 import type { CanvasGroupSummary } from './groupMenuUtils'
+import type { CanvasTranslate } from './canvasTranslation'
 import { buildCanvasGroupBranchSections, UNGROUPED_BRANCH_KEY } from './groupTreeUtils'
 import type { CanvasGroup, CanvasGroupBranch } from './types'
 
@@ -49,7 +50,7 @@ type ProjectCanvasGroupTreePopoverProps = {
   anchorEl: HTMLElement | null
   open: boolean
   onClose: () => void
-  t: (key: string, options?: Record<string, unknown>) => string
+  t: CanvasTranslate
   groupSummaries: CanvasGroupSummary[]
   groupBranches: CanvasGroupBranch[]
   exactSelectedGroup: CanvasGroup | null

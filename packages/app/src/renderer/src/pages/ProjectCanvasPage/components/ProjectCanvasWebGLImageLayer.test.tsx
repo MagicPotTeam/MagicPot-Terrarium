@@ -1341,6 +1341,45 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(app.render).toHaveBeenCalledTimes(renderCountBeforeClear + 1)
   }, 15000)
 
+  it('drops preview state when an item is removed before its id is reused', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    const item = createItem({ id: 'reused-preview-item' })
+    const { rerender } = render(
+      <ProjectCanvasWebGLImageLayer ref={ref} items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+
+    await waitFor(
+      () => {
+        expect(ref.current).not.toBeNull()
+        expect(getLiveSpriteByLabel(item.id)).not.toBeNull()
+      },
+      { timeout: 15000 }
+    )
+
+    act(() => {
+      ref.current?.syncItemPreview(item.id, {
+        x: 400,
+        y: 500,
+        width: item.width,
+        height: item.height,
+        scaleX: item.scaleX,
+        scaleY: item.scaleY,
+        rotation: item.rotation
+      })
+    })
+    expect(getLiveSpriteByLabel(item.id)?.position.x).toBe(400)
+
+    rerender(<ProjectCanvasWebGLImageLayer items={[]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+    await waitFor(() => expect(getLiveSpriteByLabel(item.id)).toBeNull(), { timeout: 15000 })
+
+    rerender(
+      <ProjectCanvasWebGLImageLayer ref={ref} items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+    await waitFor(() => expect(getLiveSpriteByLabel(item.id)).not.toBeNull(), { timeout: 15000 })
+    expect(getLiveSpriteByLabel(item.id)?.position.x).toBe(item.x)
+  }, 30000)
+
   it('refreshes the texture source when a tiny preview grows back to visible size', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()

@@ -529,21 +529,60 @@ export const buildAssistantMessageFromResponse = (
   }
 }
 
+/** Validate persisted/provider records without treating tool output as executable instructions. */
+export const normalizeChatToolHistory = (value: unknown): ChatMessage['toolHistory'] => {
+  if (!Array.isArray(value)) return undefined
+  const records: NonNullable<ChatMessage['toolHistory']> = []
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const entry = raw as Record<string, unknown>
+    if (
+      typeof entry.runId !== 'string' ||
+      !entry.runId.trim() ||
+      typeof entry.toolCallId !== 'string' ||
+      !entry.toolCallId.trim() ||
+      typeof entry.toolName !== 'string' ||
+      !entry.toolName.trim() ||
+      !['running', 'completed', 'failed', 'cancelled'].includes(String(entry.status)) ||
+      !entry.args ||
+      typeof entry.args !== 'object' ||
+      Array.isArray(entry.args)
+    )
+      continue
+    records.push({
+      runId: entry.runId,
+      toolCallId: entry.toolCallId,
+      toolName: entry.toolName,
+      args: { ...(entry.args as Record<string, unknown>) },
+      status: entry.status as NonNullable<ChatMessage['toolHistory']>[number]['status'],
+      ...(typeof entry.content === 'string' ? { content: entry.content } : {}),
+      ...(typeof entry.error === 'string' ? { error: entry.error } : {}),
+      ...(entry.metadata && typeof entry.metadata === 'object' && !Array.isArray(entry.metadata)
+        ? { metadata: { ...(entry.metadata as Record<string, unknown>) } }
+        : {})
+    })
+  }
+  return records.length ? records : undefined
+}
+
 export const buildAssistantMessageFromResult = (
   result: {
     content?: string
     attachments?: ChatAttachment[]
     ocrResult?: ChatMessage['ocrResult']
+    toolHistory?: ChatMessage['toolHistory']
+    metadata?: Record<string, unknown>
   },
   modelName?: string,
   options?: {
     skillId?: string | null
   }
 ): ChatMessage => {
+  const toolHistory = normalizeChatToolHistory(result.toolHistory ?? result.metadata?.toolHistory)
   if (options?.skillId === BUILT_IN_TAGGING_SKILL_ID) {
     const taggingMessage = buildBuiltInTaggingAssistantMessage(result, modelName)
     if (taggingMessage) {
-      return taggingMessage
+      return { ...taggingMessage, ...(toolHistory ? { toolHistory } : {}) }
     }
   }
 
@@ -560,6 +599,7 @@ export const buildAssistantMessageFromResult = (
     content,
     ...(attachments?.length ? { attachments } : {}),
     ...(result.ocrResult ? { ocrResult: result.ocrResult } : {}),
+    ...(toolHistory ? { toolHistory } : {}),
     modelName
   }
 

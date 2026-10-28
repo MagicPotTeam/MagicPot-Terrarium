@@ -83,7 +83,7 @@ export class QueueManager<T> {
     }
 
     const item = this.source.next()
-    if (!item) {
+    if (item === null || item === undefined) {
       return
     }
 

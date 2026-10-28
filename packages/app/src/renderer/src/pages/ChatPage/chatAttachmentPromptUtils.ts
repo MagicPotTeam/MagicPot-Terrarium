@@ -221,6 +221,11 @@ function createBundleAttachmentFromEntry(
     fileName: entry.fileName,
     mimeType: entry.mimeType,
     sizeBytes: entry.sizeBytes,
+    ...(typeof entry.imageCount === 'number' &&
+    Number.isSafeInteger(entry.imageCount) &&
+    entry.imageCount >= 0
+      ? { reportBundleImageCount: entry.imageCount }
+      : {}),
     reportBundleId: manifest.bundleId,
     reportBundleRole: entry.role,
     reportBundleRefName: entry.refName || entry.fileName,

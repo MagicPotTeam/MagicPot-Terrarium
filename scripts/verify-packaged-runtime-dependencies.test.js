@@ -1,16 +1,45 @@
 import fs from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPackage } from '@electron/asar'
 import {
   requiredRuntimeFiles,
+  documentWorkerRuntimeAssets,
+  bridgeChildRuntimeAssets,
+  verifyPackagedBridgeChild,
+  verifyPackagedDocumentWorker,
   verifyPackagedRuntimeDependencies
 } from './verify-packaged-runtime-dependencies.mjs'
 
 const tempRoots = []
+const require = createRequire(import.meta.url)
+const { createTransformer } = require('app-builder-lib/out/fileTransformer.js')
 
-function createTempApp(includedFiles, packageJsonByRoot = {}) {
+function removeFixtureDirectory(target, fixtureRoot) {
+  const trashRoot = fs.realpathSync(path.join(process.cwd(), '.magicpot-trash'))
+  const root = fs.realpathSync(fixtureRoot)
+  const resolved = fs.realpathSync(target)
+  const relative = path.relative(root, resolved)
+  if (
+    path.dirname(root) !== trashRoot ||
+    !path.basename(root).startsWith('packaged-runtime-dependencies-test-') ||
+    path.isAbsolute(relative) ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`)
+  )
+    throw new Error('Refusing recursive cleanup outside the owned packaged fixture')
+  fs.rmSync(resolved, { recursive: true, force: true })
+}
+
+async function createTempApp(
+  includedFiles,
+  packageJsonByRoot = {},
+  corruptDocument = false,
+  transformPdfMetadata = false,
+  bridgeChange = {}
+) {
   const trashRoot = path.join(process.cwd(), '.magicpot-trash')
   fs.mkdirSync(trashRoot, { recursive: true })
   const root = fs.mkdtempSync(path.join(trashRoot, 'packaged-runtime-dependencies-test-'))
@@ -32,13 +61,82 @@ function createTempApp(includedFiles, packageJsonByRoot = {}) {
     )
   }
 
+  // Synthetic packaged closure: real hashes of owned fixture bytes, not production assets.
+  const manifestPath = path.join(sourceDir, 'out/document-worker/manifest.json')
+  if (fs.existsSync(manifestPath)) {
+    const pdfPackagePath = path.join(sourceDir, 'node_modules/pdfjs-dist/package.json')
+    if (fs.existsSync(pdfPackagePath))
+      fs.writeFileSync(
+        pdfPackagePath,
+        JSON.stringify({
+          name: 'pdfjs-dist',
+          version: '6.3.289',
+          main: 'build/pdf.mjs',
+          keywords: ['fixture'],
+          bugs: 'https://fixture.invalid/',
+          scripts: {},
+          ...packageJsonByRoot['node_modules/pdfjs-dist']
+        })
+      )
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        protocol: 'magicpot-document-worker-assets/v2',
+        pdfjsVersion: '6.3.289',
+        saxesVersion: '6.0.0',
+        files: documentWorkerRuntimeAssets.map((relative) => ({
+          path: relative,
+          sha256: fs.existsSync(path.join(sourceDir, relative))
+            ? createHash('sha256')
+                .update(fs.readFileSync(path.join(sourceDir, relative)))
+                .digest('hex')
+            : '0'.repeat(64)
+        }))
+      })
+    )
+  }
+
+  if (transformPdfMetadata) {
+    const metadata = path.join(sourceDir, 'node_modules/pdfjs-dist/package.json')
+    const transformer = createTransformer(sourceDir, {}, {})
+    const changed = await transformer(metadata)
+    expect(changed).not.toBeNull()
+    expect(JSON.parse(changed)).not.toHaveProperty('scripts')
+    expect(JSON.parse(changed)).not.toHaveProperty('keywords')
+    fs.writeFileSync(metadata, changed)
+  }
+
+  if (corruptDocument)
+    fs.writeFileSync(path.join(sourceDir, 'out/document-worker/index.cjs'), 'corrupt owned bytes')
+
+  const bridgeManifestPath = path.join(sourceDir, 'out/bridge-child/manifest.json')
+  if (fs.existsSync(bridgeManifestPath)) {
+    const manifest = {
+      protocol: 'magicpot-figplugin-bridge-child-assets/v1',
+      files: bridgeChildRuntimeAssets.map((relative) => ({
+        path: relative,
+        sha256: fs.existsSync(path.join(sourceDir, relative))
+          ? createHash('sha256')
+              .update(fs.readFileSync(path.join(sourceDir, relative)))
+              .digest('hex')
+          : '0'.repeat(64)
+      }))
+    }
+    bridgeChange.mutateManifest?.(manifest)
+    fs.writeFileSync(bridgeManifestPath, JSON.stringify(manifest))
+  }
+  if (bridgeChange.corruptEntry)
+    fs.writeFileSync(
+      path.join(sourceDir, bridgeChildRuntimeAssets[0]),
+      'corrupt Bridge child bytes'
+    )
+
   const helper = path.join(appOutDir, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
   fs.mkdirSync(path.dirname(helper), { recursive: true })
   fs.writeFileSync(helper, 'trusted-helper')
   fs.writeFileSync(
     `${helper}.sha256`,
-    `${createHash('sha256').update(fs.readFileSync(helper)).digest('hex')}
-`
+    `${createHash('sha256').update(fs.readFileSync(helper)).digest('hex')}\n`
   )
   return createPackage(sourceDir, path.join(appOutDir, 'resources', 'app.asar')).then(
     () => appOutDir
@@ -47,11 +145,121 @@ function createTempApp(includedFiles, packageJsonByRoot = {}) {
 
 afterEach(() => {
   for (const root of tempRoots.splice(0)) {
-    fs.rmSync(root, { recursive: true, force: true })
+    removeFixtureDirectory(root, root)
   }
 })
 
 describe('verify-packaged-runtime-dependencies', () => {
+  it.each(['win32', 'darwin', 'linux'])(
+    'verifies the Bridge child in the complete %s packaged gate',
+    async (platform) => {
+      const appOutDir = await createTempApp(
+        requiredRuntimeFiles,
+        {
+          'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
+        },
+        false,
+        false,
+        { corruptEntry: true }
+      )
+      expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, platform)).toThrow(
+        'Bridge child asset SHA-256 mismatch'
+      )
+    }
+  )
+
+  it.each(['out/bridge-child/manifest.json', ...bridgeChildRuntimeAssets])(
+    'rejects missing Bridge child closure file %s',
+    async (missing) => {
+      const appOutDir = await createTempApp(requiredRuntimeFiles.filter((file) => file !== missing))
+      expect(() => verifyPackagedBridgeChild(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+        missing.endsWith('manifest.json') ? 'manifest unavailable' : 'asset missing'
+      )
+      expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).toThrow(
+        missing
+      )
+    }
+  )
+
+  it.each([
+    (manifest) => {
+      manifest.protocol = 'wrong'
+    },
+    (manifest) => {
+      manifest.files = []
+    },
+    (manifest) => {
+      manifest.files.push(manifest.files[0])
+    },
+    (manifest) => {
+      manifest.files[0].path = '../../outside.cjs'
+    },
+    (manifest) => {
+      manifest.files[0].sha256 = 'not-a-hash'
+    },
+    (manifest) => {
+      manifest.files[0].sha256 = 'A'.repeat(64)
+    },
+    (manifest) => {
+      manifest.files[0].sha256 = [manifest.files[0].sha256]
+    }
+  ])('rejects malformed or redirected Bridge child manifest %#', async (mutateManifest) => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {}, false, false, {
+      mutateManifest
+    })
+    expect(() => verifyPackagedBridgeChild(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'manifest invalid'
+    )
+  })
+
+  it('rejects a missing PDF module in the packaged document closure', async () => {
+    const appOutDir = await createTempApp(
+      requiredRuntimeFiles.filter(
+        (file) => file !== 'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'
+      )
+    )
+    expect(() => verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'asset missing'
+    )
+  })
+
+  it('rejects an altered document asset rather than trusting a stale manifest', async () => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {}, true)
+    expect(() => verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'SHA-256 mismatch'
+    )
+  })
+
+  it('accepts real electron-builder metadata rewriting without weakening code asset hashes', async () => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {}, false, true)
+    expect(() =>
+      verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))
+    ).not.toThrow()
+  })
+
+  it('rejects missing PDF metadata even though it is not a code byte-hash entry', async () => {
+    const appOutDir = await createTempApp(
+      requiredRuntimeFiles.filter((file) => file !== 'node_modules/pdfjs-dist/package.json')
+    )
+    expect(() => verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'PDF metadata unavailable'
+    )
+  })
+
+  it.each([
+    { name: 'wrong-owned-name' },
+    { version: '0.0.0' },
+    { main: '../../wrong-owned-entry.mjs' },
+    { exports: null }
+  ])('rejects module resolution metadata mismatch %j', async (metadata) => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {
+      'node_modules/pdfjs-dist': metadata
+    })
+    expect(() => verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'PDF resolution mismatch'
+    )
+  })
+
   it('accepts an app.asar containing the required MCP runtime closure', async () => {
     const appOutDir = await createTempApp(requiredRuntimeFiles, {
       'node_modules/@modelcontextprotocol/sdk': {
@@ -70,18 +278,45 @@ describe('verify-packaged-runtime-dependencies', () => {
       'node_modules/hono': { name: 'hono' },
       'node_modules/zod-to-json-schema': { name: 'zod-to-json-schema' }
     })
-    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).not.toThrow()
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).not.toThrow()
   })
 
-  it('rejects a missing or tampered Windows Job Object helper', async () => {
+  it('rejects a missing or tampered Windows Job Object helper for a Windows target', async () => {
     const appOutDir = await createTempApp(requiredRuntimeFiles, {
       'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
     })
     const helper = path.join(appOutDir, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
     fs.writeFileSync(helper, 'tampered-helper')
-    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow('SHA-256 mismatch')
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).toThrow(
+      'SHA-256 mismatch'
+    )
     fs.rmSync(helper)
-    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow('helper was not found')
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).toThrow(
+      'helper was not found'
+    )
+  })
+
+  it.each(['darwin', 'linux'])(
+    'does not require the Windows Job Object helper for a %s target',
+    async (electronPlatformName) => {
+      const appOutDir = await createTempApp(requiredRuntimeFiles, {
+        'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
+      })
+      removeFixtureDirectory(path.join(appOutDir, 'bin'), path.dirname(appOutDir))
+
+      expect(() =>
+        verifyPackagedRuntimeDependencies(appOutDir, undefined, electronPlatformName)
+      ).not.toThrow()
+    }
+  )
+
+  it('rejects a missing or unknown electron platform name', () => {
+    expect(() => verifyPackagedRuntimeDependencies('/unused', undefined)).toThrow(
+      'electronPlatformName is required'
+    )
+    expect(() => verifyPackagedRuntimeDependencies('/unused', undefined, 'freebsd')).toThrow(
+      'Unsupported electronPlatformName "freebsd"'
+    )
   })
 
   it('reports missing transitive MCP runtime dependencies', async () => {
@@ -96,7 +331,7 @@ describe('verify-packaged-runtime-dependencies', () => {
         }
       }
     )
-    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow(
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).toThrow(
       '@modelcontextprotocol/sdk -> zod-to-json-schema'
     )
   })
@@ -109,6 +344,8 @@ describe('verify-packaged-runtime-dependencies', () => {
     const platformAppOutDir = path.join(path.dirname(appOutDir), 'MagicPot.app')
     const packager = { getResourcesDir: () => resourcesDir }
 
-    expect(() => verifyPackagedRuntimeDependencies(platformAppOutDir, packager)).not.toThrow()
+    expect(() =>
+      verifyPackagedRuntimeDependencies(platformAppOutDir, packager, 'win32')
+    ).not.toThrow()
   })
 })

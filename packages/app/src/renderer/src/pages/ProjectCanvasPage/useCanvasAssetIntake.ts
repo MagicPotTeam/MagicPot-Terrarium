@@ -7,8 +7,8 @@ import {
   type SetStateAction
 } from 'react'
 import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
+import type { ManagedMediaStorage } from '@shared/api/svcManagedMedia'
 import type { FileItem } from '@shared/comfy/types'
-import { MAX_MANAGED_MEDIA_IMPORT_BYTES } from '@shared/api/svcManagedMedia'
 import {
   getDownloadFileNameFromUrl,
   normalizeLocalMediaUrl,
@@ -185,6 +185,12 @@ type NormalizedCanvasImageSource = Exclude<CanvasImageSourceInput, string> & {
   sourceUrlOwned?: boolean
 }
 
+/** Canvas images are durable user-owned assets, not task scratch material. */
+export const CANVAS_ASSET_STORAGE = {
+  namespace: 'user-output',
+  scope: 'canvas-assets'
+} as const satisfies ManagedMediaStorage
+
 const MANAGED_MEDIA_SAFE_FILE_NAME_PATTERN = /^[^\\/\p{Cc}<>:"|?*]+$/u
 
 function canImportCanvasImageAsManagedMedia(
@@ -194,7 +200,7 @@ function canImportCanvasImageAsManagedMedia(
 ): boolean {
   return (
     sizeBytes > 0 &&
-    sizeBytes <= MAX_MANAGED_MEDIA_IMPORT_BYTES &&
+    Number.isSafeInteger(sizeBytes) &&
     mimeType.startsWith('image/') &&
     fileName.length > 0 &&
     fileName.length <= 255 &&
@@ -235,11 +241,13 @@ async function importCanvasImageSourceToManagedMedia(
       ? await managedMedia.importFile({
           sourcePath,
           mimeType,
-          originalFileName: fileName
+          originalFileName: fileName,
+          storage: CANVAS_ASSET_STORAGE
         })
       : await managedMedia.importDataUrl({
           dataUrl: await readFileAsDataURL(sourceFile!),
-          originalFileName: fileName
+          originalFileName: fileName,
+          storage: CANVAS_ASSET_STORAGE
         })
 
   const {

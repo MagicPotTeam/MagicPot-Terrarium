@@ -1,7 +1,11 @@
 import fs from 'node:fs/promises'
 import net from 'node:net'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { resetChatMediaDirCacheForTests } from './chatMediaDir'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
+import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
 import { subscribeTrustedChannelMessages } from '../magicAgentPlatform2/triggers/channelMessageEvents'
@@ -47,11 +51,9 @@ type MockToolResponse = {
   metadata?: Record<string, unknown>
 }
 
-const chatMock = vi.fn(
-  async (_req?: unknown, _options?: unknown): Promise<MockChatResponse> => ({
-    content: 'chat ok'
-  })
-)
+const chatMock = vi.fn(async (_req?: unknown, _options?: unknown): Promise<MockChatResponse> => ({
+  content: 'chat ok'
+}))
 
 let rawLocalMediaPath = 'file:///tmp/reference.png'
 
@@ -86,6 +88,13 @@ vi.mock('../api/svcLLMProxyImpl', () => ({
     async chat(req: unknown): Promise<MockChatResponse> {
       chatRequestCapture = req
       return await chatMock(req)
+    }
+
+    async chatStream(req: unknown, stream: ServerStreaming<LLMChatStreamResp>): Promise<void> {
+      chatRequestCapture = req
+      const response = await chatMock(req)
+      stream.onData({ type: 'text-delta', delta: response.content, done: false })
+      stream.onData({ type: 'done', delta: '', done: true, finishReason: 'stop' })
     }
 
     async listProfiles(): Promise<{
@@ -260,6 +269,7 @@ describe('LLM proxy server legacy compatibility', () => {
   beforeEach(async () => {
     port = await getAvailableFetchSafePort()
     testArtifactDir = await createNodeTestArtifactDir('llm-proxy-server')
+    resetChatMediaDirCacheForTests()
     currentConfig = {
       ...DEFAULT_CONFIG,
       download_dir: testArtifactDir,
@@ -886,7 +896,89 @@ describe('LLM proxy server legacy compatibility', () => {
     })
   })
 
-  it('returns ordinary JSON when OpenAI-compatible clients request streaming', async () => {
+  it.each([
+    'outside-root',
+    'other-scope',
+    'prefix-sibling',
+    'directory-link',
+    'hardlink',
+    'unsupported-extension'
+  ])('refuses provider-selected %s files without publishing or disclosing them', async (kind) => {
+    const scopeRoot = path.join(testArtifactDir, '.chat_media', 'canvas-agent-2')
+    const outside = path.join(testArtifactDir, 'outside-owned-fixture')
+    await fs.mkdir(scopeRoot, { recursive: true })
+    await fs.mkdir(outside, { recursive: true })
+    const privateFile = path.join(outside, 'private-fixture.png')
+    await fs.writeFile(privateFile, 'not-authorized-for-this-request')
+    let selected = privateFile
+    if (kind === 'other-scope' || kind === 'prefix-sibling') {
+      const sibling = path.join(
+        testArtifactDir,
+        '.chat_media',
+        kind === 'other-scope' ? 'other-scope' : 'canvas-agent-2-other'
+      )
+      await fs.mkdir(sibling, { recursive: true })
+      selected = path.join(sibling, 'private-fixture.png')
+      await fs.copyFile(privateFile, selected)
+    } else if (kind === 'directory-link') {
+      const linkedDirectory = path.join(scopeRoot, 'linked')
+      await fs.symlink(outside, linkedDirectory, process.platform === 'win32' ? 'junction' : 'dir')
+      selected = path.join(linkedDirectory, 'private-fixture.png')
+    } else if (kind === 'hardlink') {
+      selected = path.join(scopeRoot, 'hardlink.png')
+      await fs.link(privateFile, selected)
+    } else if (kind === 'unsupported-extension') {
+      selected = path.join(scopeRoot, 'private-fixture.txt')
+      await fs.copyFile(privateFile, selected)
+    }
+    const before = await fs.readdir(scopeRoot)
+    const url = pathToFileURL(selected).href
+    chatMock.mockResolvedValueOnce({ content: 'generated output', imageUrl: url })
+    const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer proxy-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'fixture input' }] })
+    })
+    expect(response.status).toBe(502)
+    const text = await response.text()
+    expect(JSON.parse(text)).toEqual({ error: 'LLM proxy request failed.' })
+    expect(text).not.toContain(selected)
+    expect(text).not.toContain(url)
+    expect(text).not.toContain('/api/images/')
+    expect(await fs.readdir(scopeRoot)).toEqual(before)
+    expect(await fs.readFile(privateFile, 'utf8')).toBe('not-authorized-for-this-request')
+  })
+
+  it.each([429, 500, 502])(
+    'keeps error status %s but never relays provider diagnostics',
+    async (status) => {
+      const secret = 'fixture-private-diagnostic'
+      chatMock.mockRejectedValueOnce(
+        Object.assign(
+          new Error(`${secret}: ${path.join(testArtifactDir, 'owned-error-fixture.png')}`),
+          {
+            status,
+            body: JSON.stringify({ stack: secret, token: secret })
+          }
+        )
+      )
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer proxy-secret', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'fixture input' }] })
+      })
+      expect(response.status).toBe(status)
+      const text = await response.text()
+      expect(JSON.parse(text)).toEqual({
+        error: status === 429 ? 'Request rate limit exceeded.' : 'LLM proxy request failed.'
+      })
+      expect(text).not.toContain(secret)
+      expect(text).not.toContain('stack')
+      expect(text).not.toContain('body')
+    }
+  )
+
+  it('streams SSE when OpenAI-compatible clients request streaming', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
       method: 'POST',
       headers: {
@@ -902,26 +994,23 @@ describe('LLM proxy server legacy compatibility', () => {
         ]
       })
     })
-    const body = await response.json()
+    const body = await response.text()
 
     expect(response.status).toBe(200)
-    expect(response.headers.get('x-magicpot-stream-fallback')).toBe('non-stream-json')
-    expect(response.headers.get('access-control-expose-headers')).toContain(
-      'X-MagicPot-Stream-Fallback'
-    )
-    expect(body).toMatchObject({
-      object: 'chat.completion',
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    expect(response.headers.get('x-magicpot-stream-fallback')).toBeNull()
+    const frames = body
+      .split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => line.slice(6))
+    expect(frames.at(-1)).toBe('[DONE]')
+    const chunks = frames.slice(0, -1).map((frame) => JSON.parse(frame))
+    expect(chunks[0]).toMatchObject({
+      object: 'chat.completion.chunk',
       model: 'profile-1',
-      choices: [
-        {
-          message: {
-            role: 'assistant',
-            content: 'chat ok'
-          },
-          finish_reason: 'stop'
-        }
-      ]
+      choices: [{ delta: { content: 'chat ok' }, finish_reason: null }]
     })
+    expect(chunks.at(-1)).toMatchObject({ choices: [{ finish_reason: 'stop' }] })
     expect(chatRequestCapture).toMatchObject({
       messages: [{ role: 'user', content: 'hello' }],
       systemPrompt: 'system prompt',

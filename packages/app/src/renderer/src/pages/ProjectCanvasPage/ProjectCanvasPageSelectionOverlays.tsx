@@ -15,6 +15,7 @@ import {
   Send as SendIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
+import type { CanvasTranslate } from './canvasTranslation'
 
 import CanvasMultiSelectionOverlay from './components/CanvasMultiSelectionOverlay'
 import { useLiveSelectionOverlayGroups } from './canvasLiveOverlayBounds'
@@ -321,6 +322,7 @@ type ProjectCanvasPageSelectionOverlaysProps = {
   mediaCaptionActionLabel: string
   legacySelectionToolbarEnabled: boolean
   groupCreateLabel: string
+  t?: CanvasTranslate
   handleFocusGroup: (group: SelectionOverlayGroup) => void
   buildCanvasDragPayload: (
     targetItems: CanvasItem[],
@@ -380,6 +382,7 @@ export default function ProjectCanvasPageSelectionOverlays({
   mediaCaptionActionLabel,
   legacySelectionToolbarEnabled,
   groupCreateLabel,
+  t: providedT,
   handleFocusGroup,
   buildCanvasDragPayload,
   setCanvasDragPayload,
@@ -409,7 +412,8 @@ export default function ProjectCanvasPageSelectionOverlays({
   Model3DIcon,
   ExportIcon
 }: ProjectCanvasPageSelectionOverlaysProps) {
-  const { i18n } = useTranslation()
+  const { t: i18nT, i18n } = useTranslation()
+  const t = providedT ?? i18nT
   const portalHost = canvasContainerElement ?? canvasContainerRef.current
   const viewportInteractionActiveRef = React.useRef(false)
   const pendingViewportChromeSyncRef = React.useRef(false)
@@ -1821,6 +1825,7 @@ export default function ProjectCanvasPageSelectionOverlays({
         stagePos={stagePos}
         stageScale={stageScale}
         groupCreateLabel={groupCreateLabel}
+        t={t}
         onDragSelectedItems={(itemsToDrag, dataTransfer) => {
           const objectUrl = getQuickCanvasItemsImageUrl(itemsToDrag)
           if (!objectUrl) return

@@ -5,10 +5,15 @@ import pkgPath from 'path'
 import type { AppEventBridge, BuiltInPath, CanvasScreenshotBridge } from '@shared/utils/utilWindow'
 import type { Api } from '@shared/api'
 import { winBridge } from './winBridge'
+import { createExternalImageDropAuthorization } from './externalImageDropLease'
 
 // 渲染进程的自定义 API
 const api: Api = newApiIpc()
 const path: BuiltInPath = pkgPath as unknown as BuiltInPath
+const droppedLocalImages = createExternalImageDropAuthorization({
+  target: typeof window === 'undefined' ? undefined : window,
+  authorizePath: authorizeLocalMediaFilePath
+})
 const electronFile = {
   getPathForFile(file: unknown): string {
     try {
@@ -24,6 +29,9 @@ const electronFile = {
     } catch {
       return ''
     }
+  },
+  authorizeDroppedLocalImage(canonicalUrl: string): Promise<string> {
+    return droppedLocalImages.authorizeDroppedLocalImage(canonicalUrl)
   },
   async resolveAuthorizedLocalMediaPath(filePath: string): Promise<string> {
     try {
@@ -107,8 +115,7 @@ const appEvents: AppEventBridge = {
 async function authorizeLocalMediaFilePath(filePath: string): Promise<boolean> {
   if (!filePath) return false
   try {
-    // The picker/drag File object is validated in preload with webUtils, so the renderer
-    // cannot manufacture an arbitrary absolute path for this capability.
+    // Paths come only from native File objects or the private trusted-drop lease.
     return (await ipcRenderer.invoke('local-media:authorize-picker-path', filePath)) === true
   } catch {
     return false

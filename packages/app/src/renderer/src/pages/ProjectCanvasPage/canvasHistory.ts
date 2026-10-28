@@ -1,3 +1,4 @@
+import { getCanvasImageSourceRevisionKey } from './canvasImageResourceLifecycle'
 import type { CanvasImageAsset, CanvasItem } from './types'
 
 export const CANVAS_HISTORY_LIMIT = 50
@@ -26,17 +27,18 @@ export function restoreCanvasHistorySnapshot(
   snapshot: CanvasItem[],
   referenceItems: CanvasItem[]
 ): CanvasItem[] {
-  const imageById = new Map<string, CanvasImageAsset>()
-  const imageBySrc = new Map<string, CanvasImageAsset>()
+  const imageById = new Map<string, { sourceKey: string; image: CanvasImageAsset }>()
+  const imageBySource = new Map<string, CanvasImageAsset>()
 
   for (const item of referenceItems) {
-    if (item.type !== 'image' || !item.image) {
+    if (item.type !== 'image' || !item.image || !item.src) {
       continue
     }
 
-    imageById.set(item.id, item.image)
-    if (!imageBySrc.has(item.src)) {
-      imageBySrc.set(item.src, item.image)
+    const sourceKey = getCanvasImageSourceRevisionKey(item)
+    imageById.set(item.id, { sourceKey, image: item.image })
+    if (!imageBySource.has(sourceKey)) {
+      imageBySource.set(sourceKey, item.image)
     }
   }
 
@@ -45,7 +47,10 @@ export function restoreCanvasHistorySnapshot(
       return item
     }
 
-    const image = imageById.get(item.id) ?? imageBySrc.get(item.src)
+    const sourceKey = getCanvasImageSourceRevisionKey(item)
+    const sameItem = imageById.get(item.id)
+    // Undo can restore a different source under the same item id.
+    const image = sameItem?.sourceKey === sourceKey ? sameItem.image : imageBySource.get(sourceKey)
     return image ? { ...item, image } : item
   })
 }

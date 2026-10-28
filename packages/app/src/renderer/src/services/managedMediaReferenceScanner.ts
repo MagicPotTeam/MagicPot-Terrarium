@@ -1,6 +1,8 @@
 import { normalizeMediaReference, type MediaReference } from '../../../shared/mediaReference'
 
-export type ManagedMediaReferenceScanResult = { ok: true; ids: string[] } | { ok: false; ids: [] }
+export type ManagedMediaReferenceScanResult =
+  | { ok: true; ids: string[]; referenceCounts: Record<string, number> }
+  | { ok: false; ids: []; referenceCounts: Record<string, number> }
 
 export type ManagedMediaReferenceScannerSources = {
   readChatSessions: () => Promise<unknown>
@@ -21,17 +23,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function addMediaReference(value: unknown, ids: Set<string>): void {
+function addMediaReference(value: unknown, ids: Map<string, number>): void {
   const reference = normalizeMediaReference(value)
   if (!reference || reference.kind !== 'managed' || !reference.sha256) {
     throw new Error('Invalid managed media reference')
   }
   const id = reference.sha256.toLowerCase()
   if (!SHA256_PATTERN.test(id)) throw new Error('Invalid managed media id')
-  ids.add(id)
+  ids.set(id, (ids.get(id) ?? 0) + 1)
 }
 
-function scanValue(value: unknown, ids: Set<string>): void {
+function scanValue(value: unknown, ids: Map<string, number>): void {
   if (Array.isArray(value)) {
     for (const entry of value) scanValue(entry, ids)
     return
@@ -65,26 +67,28 @@ function readDraftBackups(
 export async function scanManagedMediaReferenceIds(
   sources: ManagedMediaReferenceScannerSources
 ): Promise<ManagedMediaReferenceScanResult> {
-  const ids = new Set<string>()
+  const references = new Map<string, number>()
   try {
     const [sessions, drafts, canvasItems] = await Promise.all([
       sources.readChatSessions(),
       sources.readChatDrafts(),
       sources.readCanvasItems()
     ])
-    scanValue(sessions, ids)
-    scanValue(drafts, ids)
+    scanValue(sessions, references)
+    scanValue(drafts, references)
     scanValue(
       readDraftBackups(
         sources.localStorage,
         sources.draftBackupKeyPrefix ?? DEFAULT_DRAFT_BACKUP_KEY_PREFIX
       ),
-      ids
+      references
     )
-    scanValue(canvasItems, ids)
-    return { ok: true, ids: [...ids].sort() }
+    scanValue(canvasItems, references)
+    const ids = [...references.keys()].sort()
+    const referenceCounts = Object.fromEntries(ids.map((id) => [id, references.get(id) as number]))
+    return { ok: true, ids, referenceCounts }
   } catch {
-    return { ok: false, ids: [] }
+    return { ok: false, ids: [], referenceCounts: {} }
   }
 }
 

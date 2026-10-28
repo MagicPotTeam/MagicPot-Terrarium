@@ -8,7 +8,7 @@ import {
   type Dispatch,
   type SetStateAction
 } from 'react'
-import type { TFunction } from 'i18next'
+import type { CanvasTranslate } from './canvasTranslation'
 
 import {
   buildNormalizedDefaultGroupName,
@@ -85,7 +85,7 @@ type UseCanvasGroupPlaybackOptions = {
   notifyInfo: NotifyFn
   notifySuccess: NotifyFn
   notifyError: NotifyFn
-  t: TFunction
+  t: CanvasTranslate
   isChineseUi: boolean
 }
 

@@ -4,8 +4,11 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
+
+vi.unmock('node:fs')
+vi.unmock('node:fs/promises')
+
 import {
-  DEFAULT_MANAGED_MEDIA_MAX_BYTES,
   importManagedMedia,
   importManagedMediaFile,
   importManagedMediaStream,
@@ -26,6 +29,16 @@ function png(width = 1, height = 1): Buffer {
   return Buffer.concat([signature, ihdr, iend])
 }
 const pngBytes = png()
+function largePng(extraBytes: number): Buffer {
+  const payload = Buffer.alloc(extraBytes)
+  const chunk = Buffer.alloc(12 + payload.length)
+  chunk.writeUInt32BE(payload.length, 0)
+  chunk.write('tEXt', 4, 'ascii')
+  payload.copy(chunk, 8)
+  const iend = Buffer.alloc(12)
+  iend.write('IEND', 4, 'ascii')
+  return Buffer.concat([pngBytes.subarray(0, 33), chunk, iend])
+}
 
 function input(overrides: Record<string, unknown> = {}) {
   return {
@@ -111,13 +124,14 @@ describe('managedMediaStore', () => {
     })
   })
 
-  it('enforces a 20 MiB hard limit even when a larger override is requested', async () => {
-    expect(DEFAULT_MANAGED_MEDIA_MAX_BYTES).toBe(20 * 1024 * 1024)
-    const bytes = Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1)
-    pngBytes.copy(bytes)
-    await expect(
-      importMedia({ bytes, maxBytes: DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1024 })
-    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
+  it('allows a trusted import above the former default while retaining explicit finite limits', async () => {
+    const bytes = largePng(256 * 1024)
+    await expect(importMedia({ bytes })).resolves.toMatchObject({
+      reference: { sizeBytes: bytes.length }
+    })
+    await expect(importMedia({ bytes, maxBytes: bytes.length - 1 })).rejects.toMatchObject({
+      code: 'MANAGED_MEDIA_TOO_LARGE'
+    })
   })
 
   it.each(['CON.png', 'name. ', 'bad?.png', '../escape.png', 'folder/file.png'])(
@@ -396,6 +410,108 @@ describe('managedMediaStore', () => {
       )
     ).rejects.toThrow('changed during import')
     expect(await fs.readdir(path.join(storeRoot, '.staging'))).toEqual([])
+  })
+
+  it('resolves legacy scoped references beneath the authorized root and rejects traversal prefixes', async () => {
+    const scopedRoot = path.join(authorizedRoot, 'codex-images-owned-scope')
+    const imported = await importManagedMedia(scopedRoot, input(), { authorizedRoot })
+    const scopedReference = {
+      ...imported.reference,
+      relativePath: `codex-images-owned-scope/${imported.reference.relativePath}`
+    }
+    const resolved = await resolveManagedMediaReference(authorizedRoot, scopedReference, {
+      authorizedRoot
+    })
+    expect(resolved.storeRoot).toBe(await fs.realpath(scopedRoot))
+    expect(resolved.absolutePath).toBe(imported.absolutePath)
+    expect(await fs.readFile(resolved.absolutePath)).toEqual(pngBytes)
+
+    const longScope = `a${'b'.repeat(127)}a`
+    const longReference = {
+      ...scopedReference,
+      relativePath: `codex-images-${longScope}/${imported.reference.relativePath}`
+    }
+    await expect(
+      resolveManagedMediaReference(authorizedRoot, longReference, { authorizedRoot })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+
+    for (const relativePath of [
+      `codex-images-../outside/${imported.reference.relativePath}`,
+      `codex-images--owned-scope/${imported.reference.relativePath}`,
+      `codex-images-owned-scope-nested/x/${imported.reference.relativePath}`,
+      `arbitrary-store/owned-scope/${imported.reference.relativePath}`,
+      `../outside/${imported.reference.relativePath}`
+    ]) {
+      await expect(
+        resolveManagedMediaReference(
+          authorizedRoot,
+          { ...scopedReference, relativePath },
+          { authorizedRoot }
+        )
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+    }
+  })
+
+  it('resolves task-scoped Comfy output references after restart', async () => {
+    const taskRoot = path.join(authorizedRoot, 'comfy-outputs', 'tasks', 'prompt-123')
+    const imported = await importManagedMedia(taskRoot, input(), { authorizedRoot })
+    const taskReference = {
+      ...imported.reference,
+      relativePath: `comfy-outputs/tasks/prompt-123/${imported.reference.relativePath}`
+    }
+
+    const resolved = await resolveManagedMediaReference(authorizedRoot, taskReference, {
+      authorizedRoot
+    })
+    expect(resolved.storeRoot).toBe(await fs.realpath(taskRoot))
+    expect(resolved.absolutePath).toBe(imported.absolutePath)
+    expect(await fs.readFile(resolved.absolutePath)).toEqual(pngBytes)
+  })
+
+  it.each([
+    ['task', 'task-123'],
+    ['model', 'model-123'],
+    ['user-output', 'export-123']
+  ] as const)(
+    'encodes and restores the %s lifecycle namespace after restart',
+    async (namespace, scope) => {
+      const namespaceRoot = path.join(authorizedRoot, namespace, scope)
+      const imported = await importManagedMedia(namespaceRoot, input(), { authorizedRoot })
+      const localReferencePath = imported.reference.relativePath.replace(
+        `${namespace}/${scope}/`,
+        ''
+      )
+      expect(imported.reference.relativePath).toBe(`${namespace}/${scope}/${localReferencePath}`)
+      expect(localReferencePath).toMatch(/^originals\/[a-f0-9]{2}\/[a-f0-9]{64}\.png$/u)
+
+      const persistedReference = JSON.parse(JSON.stringify(imported.reference))
+      const resolved = await resolveManagedMediaReference(authorizedRoot, persistedReference, {
+        authorizedRoot
+      })
+      expect(resolved.storeRoot).toBe(await fs.realpath(namespaceRoot))
+      expect(resolved.absolutePath).toBe(imported.absolutePath)
+      expect(await fs.readFile(resolved.absolutePath)).toEqual(pngBytes)
+    }
+  )
+
+  it('rejects malformed lifecycle namespace prefixes instead of resolving nested stores', async () => {
+    const namespaceRoot = path.join(authorizedRoot, 'task', 'task-123')
+    const imported = await importManagedMedia(namespaceRoot, input(), { authorizedRoot })
+    for (const relativePath of [
+      `task-123/${imported.reference.relativePath}`,
+      `task/task-123/nested/${imported.reference.relativePath.replace('task/task-123/', '')}`,
+      `Task/task-123/${imported.reference.relativePath.replace('task/task-123/', '')}`,
+      `user-output/../${imported.reference.relativePath.replace('task/task-123/', '')}`,
+      `task/TASK-123/${imported.reference.relativePath.replace('task/task-123/', '')}`
+    ]) {
+      await expect(
+        resolveManagedMediaReference(
+          authorizedRoot,
+          { ...imported.reference, relativePath },
+          { authorizedRoot }
+        )
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+    }
   })
 
   it('restores a managed PNG from a JSON-safe reference after restart without adapters', async () => {

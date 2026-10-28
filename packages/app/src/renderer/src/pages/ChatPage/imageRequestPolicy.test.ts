@@ -25,6 +25,31 @@ describe('resolveChatPageRequestExecutionImagePolicy', () => {
     ).toBe('all')
   })
 
+  it('replays all historical user images for GPT Image/image-generation requests', () => {
+    expect(
+      resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: false,
+        hasUsableSessionContinuation: false,
+        shouldResetContinuation: false,
+        isImageGenerationRequest: true
+      })
+    ).toEqual({
+      preliminaryImageHistoryPolicy: 'all',
+      imageHistoryPolicy: 'all'
+    })
+  })
+
+  it('keeps all image history for image generation when continuation is reset', () => {
+    expect(
+      resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: true,
+        hasUsableSessionContinuation: true,
+        shouldResetContinuation: true,
+        isImageGenerationRequest: true
+      }).imageHistoryPolicy
+    ).toBe('all')
+  })
+
   it('uses latest-user-turn only with an explicit usable continuation', () => {
     expect(
       resolveChatPageRequestExecutionImagePolicy({

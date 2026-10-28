@@ -10,6 +10,54 @@ const MAX_OUTPUT_CHARS = 60_000
 const DEFAULT_GIT_LOG_LIMIT = 20
 const MAX_GIT_LOG_LIMIT = 50
 
+const SAFE_AGENT_TERMINAL_ENV_KEYS = new Set([
+  'PATH',
+  'PATHEXT',
+  'SystemRoot',
+  'WINDIR',
+  'ComSpec',
+  'TEMP',
+  'TMP',
+  'LC_ALL',
+  'LC_COLLATE',
+  'LC_CTYPE',
+  'LC_MESSAGES',
+  'LC_MONETARY',
+  'LC_NUMERIC',
+  'LC_TIME',
+  'LANGUAGE'
+])
+const WINDOWS_AGENT_TERMINAL_ENV_KEYS = new Map(
+  [...SAFE_AGENT_TERMINAL_ENV_KEYS].map((key) => [key.toLowerCase(), key])
+)
+
+const resolveSafeAgentTerminalEnvKey = (
+  key: string,
+  platform: NodeJS.Platform
+): string | undefined => {
+  if (platform === 'win32') {
+    return WINDOWS_AGENT_TERMINAL_ENV_KEYS.get(key.toLowerCase())
+  }
+  return SAFE_AGENT_TERMINAL_ENV_KEYS.has(key) ? key : undefined
+}
+
+export const buildAgentTerminalEnvironment = (
+  source: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv => {
+  const environment: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue
+    const safeKey = resolveSafeAgentTerminalEnvKey(key, platform)
+    if (!safeKey) continue
+    environment[safeKey] = value
+  }
+  environment.GIT_OPTIONAL_LOCKS = '0'
+  environment.GIT_PAGER = 'cat'
+  environment.PAGER = 'cat'
+  return environment
+}
+
 export type AgentTerminalCommandInput = {
   command?: unknown
   args?: unknown
@@ -22,6 +70,8 @@ export type AgentTerminalCommandInput = {
 export type AgentTerminalRunContext = {
   config: Config
   workspaceRoots?: string[]
+  /** Main-owned canvas routes must not inherit global download/output roots. */
+  restrictToWorkspaceRoots?: boolean
   signal?: AbortSignal
 }
 
@@ -124,13 +174,13 @@ const resolveExistingDirectory = async (targetPath: string): Promise<string> => 
 
 const collectAllowedRoots = async (
   config: Config,
-  workspaceRoots: string[] | undefined
+  workspaceRoots: string[] | undefined,
+  restrictToWorkspaceRoots = false
 ): Promise<string[]> => {
   const candidateRoots = uniqueResolvedPaths([
-    process.cwd(),
-    config.download_dir,
-    config.output_dir,
-    config.workflow_dir,
+    ...(restrictToWorkspaceRoots
+      ? []
+      : [process.cwd(), config.download_dir, config.output_dir, config.workflow_dir]),
     ...(workspaceRoots || [])
   ])
 
@@ -144,7 +194,11 @@ const resolveAgentTerminalCwd = async (
 ): Promise<ResolvedAgentTerminalCwd> => {
   const requestedCwd = cleanString(cwd) || process.cwd()
   const resolvedCwd = await resolveExistingDirectory(requestedCwd)
-  const allowedRoots = await collectAllowedRoots(context.config, context.workspaceRoots)
+  const allowedRoots = await collectAllowedRoots(
+    context.config,
+    context.workspaceRoots,
+    context.restrictToWorkspaceRoots
+  )
 
   if (!allowedRoots.some((root) => isSameOrInside(root, resolvedCwd))) {
     throw new Error('agent.terminal.run cwd is outside the allowed roots.')
@@ -509,12 +563,7 @@ export const runAgentTerminalCommand = async (
       cwd,
       shell: false,
       windowsHide: true,
-      env: {
-        ...process.env,
-        GIT_OPTIONAL_LOCKS: '0',
-        GIT_PAGER: 'cat',
-        PAGER: 'cat'
-      }
+      env: buildAgentTerminalEnvironment()
     })
 
     const cleanup = (): void => {

@@ -16,7 +16,8 @@ const roots: string[] = []
 const fileOps = {
   realpath: (value: string) => realFs.realpathSync.native(value),
   isFile: (value: string) => realFs.statSync(value).isFile(),
-  read: (value: string, encoding?: BufferEncoding) => realFs.readFileSync(value, encoding)
+  read: (value: string, encoding?: BufferEncoding) =>
+    encoding === undefined ? realFs.readFileSync(value) : realFs.readFileSync(value, { encoding })
 }
 
 afterEach(() => {

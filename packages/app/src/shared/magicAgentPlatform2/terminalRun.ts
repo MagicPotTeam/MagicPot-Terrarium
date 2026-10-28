@@ -1,4 +1,4 @@
-export type TerminalRunStatus = 'completed' | 'timed-out' | 'output-limit' | 'failed'
+export type TerminalRunStatus = 'completed' | 'timed-out' | 'output-limit' | 'failed' | 'cancelled'
 
 export type TerminalRunAuditEvidence = Readonly<{
   tool: 'terminal.run'

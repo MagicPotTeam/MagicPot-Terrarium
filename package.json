@@ -4,17 +4,17 @@
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
-  "homepage": "https://github.com/MagicPotTeam/magicpot-open",
+  "homepage": "https://github.com/MagicPotTeam/MagicPot-Terrarium",
   "repository": {
     "type": "git",
-    "url": "https://github.com/MagicPotTeam/magicpot-open.git"
+    "url": "https://github.com/MagicPotTeam/MagicPot-Terrarium.git"
   },
   "bugs": {
-    "url": "https://github.com/MagicPotTeam/magicpot-open/issues"
+    "url": "https://github.com/MagicPotTeam/MagicPot-Terrarium/issues"
   },
   "license": "AGPL-3.0-only",
   "engines": {
-    "node": ">=22.19.0 <23",
+    "node": ">=24.18.0 <25",
     "npm": ">=10.5.1"
   },
   "scripts": {
@@ -34,15 +34,15 @@
     "typecheck:node": "tsc --noEmit -p config/tsconfig/tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p config/tsconfig/tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "start:pure": "node scripts/run-electron-vite.mjs preview --mode pure",
-    "start:embedded": "node scripts/run-electron-vite.mjs preview --mode embedded",
+    "start:pure": "npm run build:document-worker && node scripts/run-electron-vite.mjs preview --mode pure",
+    "start:embedded": "npm run build:document-worker && node scripts/run-electron-vite.mjs preview --mode embedded",
     "start": "npm run start:pure",
     "dev:pure": "node scripts/run-electron-vite.mjs dev --mode pure",
     "dev:embedded": "cross-env TIPO_NO_AUTO_INSTALL=1 VITE_BUILD_MODE=embedded VITE_PACKAGE_MODE=embedded VITE_BUILD_MODE_NAME=Embedded VITE_MAGICPOT_AUTO_START_COMFYUI=true node scripts/run-electron-vite.mjs dev --mode embedded",
     "dev": "cross-env TIPO_NO_AUTO_INSTALL=1 VITE_MAGICPOT_AUTO_START_COMFYUI=true npm run dev:pure",
-    "build:pure": "npm run build:lora-trigger-sidecar && npm run build:magicpot-command-job && npm run typecheck && cross-env VITE_BUILD_MODE=pure VITE_PACKAGE_MODE=pure VITE_BUILD_MODE_NAME=Pure electron-vite build --config config/electron/electron.vite.config.ts --mode pure",
+    "build:pure": "npm run build:lora-trigger-sidecar && npm run build:magicpot-command-job && npm run build:document-worker && npm run typecheck && cross-env VITE_BUILD_MODE=pure VITE_PACKAGE_MODE=pure VITE_BUILD_MODE_NAME=Pure electron-vite build --config config/electron/electron.vite.config.ts --mode pure",
     "analyze:bundle": "npm run typecheck && cross-env ANALYZE_BUNDLE=true VITE_BUILD_MODE=pure VITE_PACKAGE_MODE=pure VITE_BUILD_MODE_NAME=Pure electron-vite build --config config/electron/electron.vite.config.ts --mode pure",
-    "build:embedded": "npm run build:lora-trigger-sidecar && npm run build:magicpot-command-job && npm run typecheck && cross-env VITE_BUILD_MODE=embedded VITE_PACKAGE_MODE=embedded VITE_BUILD_MODE_NAME=Embedded electron-vite build --config config/electron/electron.vite.config.ts --mode embedded",
+    "build:embedded": "npm run build:lora-trigger-sidecar && npm run build:magicpot-command-job && npm run build:document-worker && npm run typecheck && cross-env VITE_BUILD_MODE=embedded VITE_PACKAGE_MODE=embedded VITE_BUILD_MODE_NAME=Embedded electron-vite build --config config/electron/electron.vite.config.ts --mode embedded",
     "build:lora-trigger-sidecar": "node scripts/build-lora-trigger-sidecar.mjs",
     "prepare:embedded-sources": "node scripts/prepare-embedded-comfyui-sources.mjs",
     "prepare:embedded-sources:dry-run": "node scripts/prepare-embedded-comfyui-sources.mjs --dry-run",
@@ -52,11 +52,11 @@
     "prepare:embedded-python:dry-run": "cross-env EMBEDDED_DRY_RUN=1 node scripts/prepare-embedded-python.mjs",
     "prepare:embedded": "npm run prepare:embedded-sources && npm run test:embedded-staging && npm run prepare:embedded-staging && npm run prepare:embedded-python",
     "postinstall": "electron-builder install-app-deps",
-    "package:win": "npm run build:magicpot-command-job && electron-builder --config config/electron/electron-builder.config.js --win --x64",
+    "package:win": "npm run build:magicpot-command-job && npm run build:bridge-child && npm run build:document-worker && electron-builder --config config/electron/electron-builder.config.js --win --x64",
     "verify:packaged-runtime-dependencies": "node scripts/verify-packaged-runtime-dependencies.mjs",
     "test:packaged-runtime-dependencies": "vitest run --config scripts/verify-packaged-runtime-dependencies.vitest.config.mjs",
-    "package:mac": "electron-builder --config config/electron/electron-builder.config.js --mac --arm64",
-    "package:linux": "electron-builder --config config/electron/electron-builder.config.js --linux",
+    "package:mac": "npm run build:bridge-child && npm run build:document-worker && electron-builder --config config/electron/electron-builder.config.js --mac --arm64",
+    "package:linux": "npm run build:bridge-child && npm run build:document-worker && electron-builder --config config/electron/electron-builder.config.js --linux",
     "package:all": "npm run package:win && npm run package:mac",
     "release:pure": "npm run build:pure && cross-env PACKAGE_MODE=pure npm run package:all",
     "release:pure:win": "npm run build:pure && npm run build:image-worker && cross-env PACKAGE_MODE=pure npm run package:win -- --publish never",
@@ -102,6 +102,8 @@
     "verify:ci-local": "npm run typecheck && npm run test:project-canvas:benchmark-smoke && npm run qa:security-posture",
     "build:canvas-spatial-index-wasm": "node scripts/build-canvas-spatial-index-wasm.mjs",
     "build:image-worker": "node scripts/build-image-worker.mjs",
+    "build:bridge-child": "node scripts/build-bridge-child.mjs",
+    "build:document-worker": "node scripts/build-document-worker.mjs",
     "probe:project-canvas:dev-watch": "cross-env NODE_OPTIONS=--max-old-space-size=6144 node scripts/projectCanvas/devWatcherProbe.mjs",
     "qa:security-posture": "node scripts/qa-security-posture.mjs",
     "test:project-canvas:3d": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DConvergenceStress.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DStageLoadQueue.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DStageQuality.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/Canvas3DStage.cameraSync.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/Model3DViewerDialog.test.tsx packages/app/src/renderer/src/pages/ProjectCanvasPage/components/modelLoaders/sceneInstanceCloneCache.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/modelLoaders/sceneInstanceCloneCacheKey.test.ts --pool=forks --maxWorkers=1",
@@ -143,7 +145,6 @@
       "node scripts/check-text-encoding.mjs"
     ],
     "*.{js,jsx,ts,tsx}": [
-      "eslint --config config/eslint/eslint.config.mjs --fix --quiet",
       "prettier --write --config config/prettier/prettier.config.cjs --ignore-path config/prettier/prettierignore"
     ]
   },
@@ -155,7 +156,7 @@
     "@hello-pangea/dnd": "^18.0.1",
     "@hono/node-server": "2.1.0",
     "@larksuiteoapi/node-sdk": "1.72.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@mui/icons-material": "^7.3.1",
     "@mui/lab": "^7.0.0-beta.16",
     "@mui/material": "^7.3.1",
@@ -181,22 +182,23 @@
     "express": "5.2.1",
     "express-rate-limit": "8.6.2",
     "gifenc": "^1.0.3",
-    "hono": "4.13.8",
+    "hono": "4.13.11",
     "i18next": "^25.5.3",
     "i18next-browser-languagedetector": "^8.2.0",
     "jose": "6.2.2",
-    "js-yaml": "5.2.3",
+    "js-yaml": "5.5.0",
     "json-schema-typed": "8.0.2",
     "jszip": "^3.10.1",
     "konva": "^9.3.22",
     "notistack": "^3.0.2",
     "openai": "^6.34.0",
     "pathe": "^2.0.3",
+    "pdfjs-dist": "6.3.289",
     "pixi.js": "^8.17.1",
     "pkce-challenge": "5.0.1",
     "playwright": "^1.57.0",
     "proper-lockfile": "^4.1.2",
-    "puppeteer-core": "^25.6.0",
+    "puppeteer-core": "25.16.0",
     "raw-body": "3.0.2",
     "react-dnd": "^16.0.1",
     "react-dnd-html5-backend": "^16.0.1",
@@ -207,12 +209,13 @@
     "react-router-dom": "7.18.2",
     "react-syntax-highlighter": "^16.1.1",
     "remark-gfm": "^4.0.1",
+    "saxes": "6.0.0",
     "tencentcloud-sdk-nodejs-ai3d": "^4.1.197",
     "three": "^0.182.0",
     "use-image": "^1.1.4",
     "ws": "^8.21.0",
     "yaml": "^2.8.4",
-    "zod": "3.25.76",
+    "zod": "4.6.7",
     "zod-to-json-schema": "3.25.2"
   },
   "devDependencies": {
@@ -222,7 +225,7 @@
     "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^22.16.5",
+    "@types/node": "^24.18.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@types/react-syntax-highlighter": "^15.5.13",
@@ -231,7 +234,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "@vitest/coverage-v8": "^4.1.11",
     "cross-env": "^10.0.0",
-    "electron": "^41.10.3",
+    "electron": "42.11.16",
     "electron-builder": "^26.8.1",
     "electron-devtools-installer": "^4.0.0",
     "electron-vite": "^4.0.0",
@@ -239,6 +242,7 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
+    "fflate": "0.8.3",
     "husky": "^9.1.7",
     "javascript-obfuscator": "^5.3.0",
     "jsdom": "^27.0.0",
@@ -266,7 +270,7 @@
       "js-yaml": "4.3.2"
     },
     "axios": {
-      ".": "1.19.0",
+      ".": "1.20.0",
       "form-data": "4.0.6"
     },
     "basic-ftp": "5.3.1",
@@ -278,7 +282,7 @@
       "ajv-formats": "3.0.1"
     },
     "cos-request": {
-      "qs": "6.16.0",
+      "qs": "6.16.1",
       "uuid": "11.1.1",
       "form-data": "2.5.6"
     },
@@ -294,21 +298,23 @@
     "eslint-plugin-react": {
       "es-iterator-helpers": "^1.2.1"
     },
-    "fast-uri": "3.1.6",
+    "fast-uri": "3.1.9",
     "fast-xml-parser": "5.7.3",
-    "follow-redirects": "1.16.0",
-    "hono": "4.13.8",
-    "ip-address": "10.4.0",
+    "follow-redirects": "1.16.1",
+    "hono": "4.13.11",
+    "ip-address": "10.7.4",
     "postcss": "8.5.26",
     "protobufjs": "7.6.5",
-    "qs": "6.16.0",
+    "qs": "6.16.1",
     "react-router": "7.18.2",
     "tencentcloud-sdk-nodejs-common": {
       "uuid": "11.1.1",
       "form-data": "3.0.5"
     },
     "nanoid": "3.3.18",
-    "body-parser": "2.3.0"
+    "body-parser": "2.4.0",
+    "proxy-addr": "2.0.8",
+    "undici": "7.30.1"
   },
   "prettier": "./config/prettier/prettier.config.cjs"
 }

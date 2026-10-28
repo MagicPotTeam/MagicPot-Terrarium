@@ -162,13 +162,14 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
 
   attachWindowStatePersistence(mainWindow, statePath)
   winController.registerWindow(mainWindow)
+  const senderId = mainWindow.webContents.id
   const trustedRendererUrl = resolveMainWindowRendererUrl()
-  registerMagicAgentTrustedRouteBinding(mainWindow.webContents.id, undefined, {
+  registerMagicAgentTrustedRouteBinding(senderId, undefined, {
     trustedUrl: trustedRendererUrl,
     trustedWebContents: mainWindow.webContents
   })
   mainWindow.on('closed', () => {
-    unregisterMagicAgentTrustedRouteBinding(mainWindow.webContents.id)
+    unregisterMagicAgentTrustedRouteBinding(senderId)
   })
 
   mainWindow.on('ready-to-show', () => {

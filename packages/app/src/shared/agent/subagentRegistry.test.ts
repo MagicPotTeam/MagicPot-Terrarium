@@ -338,4 +338,71 @@ describe('subagentRegistry', () => {
       qualityGate: { status: 'passed' }
     })
   })
+
+  it('retains active runs and removes only terminal records past TTL', () => {
+    subagentRegistry.registerRun({
+      runId: 'active-run',
+      childSessionId: 'child-active',
+      requesterSessionId: 'requester-1',
+      task: 'active'
+    })
+    subagentRegistry.registerRun({
+      runId: 'expired-run',
+      childSessionId: 'child-expired',
+      requesterSessionId: 'requester-1',
+      task: 'expired'
+    })
+    subagentRegistry.updateRun('expired-run', { endedAt: 1, outcome: { status: 'ok' } })
+
+    const audit = subagentRegistry.cleanupRetainedRuns({ now: 1_000, ttlMs: 100 })
+
+    expect(subagentRegistry.getRun('active-run')).toBeDefined()
+    expect(subagentRegistry.getRun('expired-run')).toBeUndefined()
+    expect(audit).toEqual({
+      scannedRunCount: 2,
+      activeRunCount: 1,
+      expiredRunCount: 1,
+      evictedRunCount: 0,
+      retainedRunCount: 1,
+      activeLimitExceeded: false
+    })
+    expect(JSON.stringify(audit)).not.toContain('expired-run')
+  })
+
+  it('evicts oldest terminal records when the explicit retained-run quota is exceeded', () => {
+    for (const runId of ['old-run', 'new-run', 'active-run']) {
+      subagentRegistry.registerRun({
+        runId,
+        childSessionId: `child-${runId}`,
+        requesterSessionId: 'requester-1',
+        task: runId
+      })
+    }
+    subagentRegistry.updateRun('old-run', { endedAt: 10, outcome: { status: 'ok' } })
+    subagentRegistry.updateRun('new-run', { endedAt: 20, outcome: { status: 'ok' } })
+
+    const audit = subagentRegistry.cleanupRetainedRuns({
+      now: 100,
+      ttlMs: 1_000,
+      maxRetainedRuns: 2
+    })
+
+    expect(subagentRegistry.getRun('old-run')).toBeUndefined()
+    expect(subagentRegistry.getRun('new-run')).toBeDefined()
+    expect(subagentRegistry.getRun('active-run')).toBeDefined()
+    expect(audit).toMatchObject({
+      scannedRunCount: 3,
+      activeRunCount: 1,
+      expiredRunCount: 0,
+      evictedRunCount: 1,
+      retainedRunCount: 2,
+      activeLimitExceeded: false
+    })
+  })
+
+  it('rejects unbounded or invalid retention values', () => {
+    expect(() => subagentRegistry.cleanupRetainedRuns({ now: Number.NaN })).toThrow(RangeError)
+    expect(() => subagentRegistry.cleanupRetainedRuns({ ttlMs: -1 })).toThrow(RangeError)
+    expect(() => subagentRegistry.cleanupRetainedRuns({ maxRetainedRuns: 0 })).toThrow(RangeError)
+  })
 })

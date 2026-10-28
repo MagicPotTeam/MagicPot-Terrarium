@@ -39,7 +39,10 @@ function createImageItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageI
   }
 }
 
-function renderSelectionUiActions(items: CanvasImageItem[]) {
+function renderSelectionUiActions(
+  items: CanvasImageItem[],
+  handleSendCanvasItemsToAgent = vi.fn()
+) {
   return renderHook(() =>
     useCanvasSelectionUiActions({
       alpha: (color: string) => color,
@@ -55,7 +58,7 @@ function renderSelectionUiActions(items: CanvasImageItem[]) {
       handleCopyCanvasItemsAsImage: vi.fn(),
       handleDownloadCanvasItemsAsImage: vi.fn(),
       handleSendCanvasItemsSnapshotToPhotoshop: vi.fn(),
-      handleSendSelectionToAgent: vi.fn(),
+      handleSendCanvasItemsToAgent,
       isChineseUi: false,
       isFillableAnnotationShape: () => false,
       items,
@@ -261,7 +264,7 @@ describe('useCanvasSelectionUiActions drag payload', () => {
         handleCopyCanvasItemsAsImage: vi.fn(),
         handleDownloadCanvasItemsAsImage: vi.fn(),
         handleSendCanvasItemsSnapshotToPhotoshop: vi.fn(),
-        handleSendSelectionToAgent: vi.fn(),
+        handleSendCanvasItemsToAgent: vi.fn(),
         isChineseUi: false,
         isFillableAnnotationShape: () => false,
         items: [selected],
@@ -371,5 +374,30 @@ describe('useCanvasSelectionUiActions drag payload', () => {
     ])
     expect(payload.hiddenTextContent).toContain('dimensions=100x80')
     expect(JSON.stringify(payload)).not.toContain('magicpotCanvasCropSource')
+  })
+
+  it('wires Agent drops to the explicit dragged item even with no selected IDs', () => {
+    const dragged = createImageItem({ id: 'dragged-image' })
+    const sendItems = vi.fn()
+    const workspace = document.createElement('div')
+    workspace.dataset.agentWorkspaceRoot = 'canvas-drag-target'
+    const previousElementFromPoint = Object.getOwnPropertyDescriptor(document, 'elementFromPoint')
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => workspace
+    })
+
+    try {
+      const { result } = renderSelectionUiActions([dragged], sendItems)
+
+      expect(result.current.tryHandleCanvasExternalDrop(dragged.id, 150, 50)).toBe(true)
+      expect(sendItems).toHaveBeenCalledExactlyOnceWith([dragged], 'canvas-drag-target.agent-1')
+    } finally {
+      if (previousElementFromPoint) {
+        Object.defineProperty(document, 'elementFromPoint', previousElementFromPoint)
+      } else {
+        Reflect.deleteProperty(document, 'elementFromPoint')
+      }
+    }
   })
 })

@@ -27,14 +27,16 @@ export function useRuntimeMcpStatusSource({
   const [isRuntimeMcpStatusLoading, setIsRuntimeMcpStatusLoading] = useState(false)
   const [runtimeMcpStatusError, setRuntimeMcpStatusError] = useState<string | null>(null)
   const isMountedRef = useRef(true)
+  const requestGenerationRef = useRef(0)
 
   const refreshRuntimeMcpStatus = useCallback(async () => {
-    if (!enabled) {
+    if (!enabled || !isMountedRef.current) {
       return null
     }
 
+    const requestGeneration = ++requestGenerationRef.current
     try {
-      if (isMountedRef.current) {
+      if (isMountedRef.current && requestGenerationRef.current === requestGeneration) {
         setIsRuntimeMcpStatusLoading(true)
         setRuntimeMcpStatusError(null)
       }
@@ -44,21 +46,32 @@ export function useRuntimeMcpStatusSource({
       }
 
       const nextStatus = await runtimeApi.getMcpStatus({})
-      if (isMountedRef.current && nextStatus) {
+      if (
+        isMountedRef.current &&
+        requestGenerationRef.current === requestGeneration &&
+        nextStatus
+      ) {
         setRuntimeMcpStatus(nextStatus)
       }
       return nextStatus || null
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      console.warn('[useRuntimeMcpStatus] Failed to load MCP runtime status:', error)
-      if (isMountedRef.current) {
+      if (isMountedRef.current && requestGenerationRef.current === requestGeneration) {
+        console.warn('[useRuntimeMcpStatus] Failed to load MCP runtime status:', error)
         setRuntimeMcpStatusError(message)
       }
       return null
     } finally {
-      if (isMountedRef.current) {
+      if (isMountedRef.current && requestGenerationRef.current === requestGeneration) {
         setIsRuntimeMcpStatusLoading(false)
       }
+    }
+  }, [enabled])
+
+  useEffect(() => {
+    if (!enabled) {
+      requestGenerationRef.current += 1
+      setIsRuntimeMcpStatusLoading(false)
     }
   }, [enabled])
 

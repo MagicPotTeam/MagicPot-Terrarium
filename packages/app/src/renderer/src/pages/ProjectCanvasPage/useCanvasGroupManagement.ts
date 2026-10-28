@@ -22,6 +22,7 @@ import {
   translateCanvasItem,
   type CanvasTool
 } from './projectCanvasPageShared'
+import type { CanvasTranslate } from './canvasTranslation'
 import type { CanvasGroup, CanvasGroupBranch, CanvasItem } from './types'
 import type { SelectionRect } from './useCanvasTargetWorkflow'
 
@@ -34,7 +35,7 @@ type CanvasBounds = {
 
 type NotifyFn = (message: string) => unknown
 
-type TranslateFn = (key: string, options?: Record<string, unknown>) => string
+type TranslateFn = CanvasTranslate
 
 type UseCanvasGroupManagementOptions = {
   groups: CanvasGroup[]

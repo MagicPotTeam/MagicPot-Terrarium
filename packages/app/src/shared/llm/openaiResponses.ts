@@ -12,7 +12,7 @@ import { selectMessagesForImageHistoryPolicy } from './imageHistory'
 type ResponsesInputContent =
   | { type: 'input_text'; text: string }
   | { type: 'output_text'; text: string }
-  | { type: 'input_image'; image_url: string }
+  | { type: 'input_image'; image_url: string; detail?: 'low' }
 
 export type OpenAIResponsesInputMessage = {
   role: 'user' | 'assistant'
@@ -27,6 +27,7 @@ export type OpenAIResponsesImageAttachment = {
 
 export type OpenAIResponsesImageGenerationTool = {
   type: 'image_generation'
+  model?: string
   action?: OpenAIImageGenerationAction
   background?: OpenAIImageGenerationBackground
   output_format?: OpenAIImageGenerationOutputFormat
@@ -54,12 +55,11 @@ export type OpenAIResponsesImagePolicy = {
 }
 
 export const DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY: OpenAIResponsesImagePolicy = {
-  maxImages: 10,
-  maxDecodedBytesPerImage: 8 * 1024 * 1024,
-  // Allows for base64 expansion and JSON overhead below the 16 MiB proxy limit.
-  maxAggregateDecodedBytes: 11 * 1024 * 1024,
-  maxPixelsPerImage: 36_000_000,
-  maxRequestBodyBytes: 16 * 1024 * 1024
+  maxImages: Infinity,
+  maxDecodedBytesPerImage: Infinity,
+  maxAggregateDecodedBytes: Infinity,
+  maxPixelsPerImage: Infinity,
+  maxRequestBodyBytes: Infinity
 }
 
 const supportedInputImageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -82,21 +82,39 @@ export const inspectOpenAIResponsesImageDataUrl = (
   }
 }
 
+// Count the complete provider-bound selection before inspecting/materializing any
+// reference. A late count check can otherwise upload files before rejecting it.
+export const assertOpenAIResponsesImageCount = (
+  messages: readonly ChatMessage[],
+  maxImages: number = DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY.maxImages
+): number => {
+  if (maxImages !== Infinity && (!Number.isSafeInteger(maxImages) || maxImages < 0)) {
+    throw new Error('Invalid image count limit.')
+  }
+  let imageCount = 0
+  for (const message of messages) {
+    for (const attachment of message.attachments || []) {
+      if (attachment.type !== 'image') continue
+      if (++imageCount > maxImages) {
+        throw new Error(`Too many images; the limit is ${maxImages}.`)
+      }
+    }
+  }
+  return imageCount
+}
+
 export const validateOpenAIResponsesImages = (
   messages: ChatMessage[],
   policy: OpenAIResponsesImagePolicy = DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY
 ): { imageCount: number; decodedBytes: number } => {
-  let imageCount = 0
+  const imageCount = assertOpenAIResponsesImageCount(messages, policy.maxImages)
   let decodedBytes = 0
   for (const message of messages) {
     for (const attachment of message.attachments || []) {
       if (attachment.type !== 'image') continue
-      imageCount += 1
-      if (imageCount > policy.maxImages)
-        throw new Error(`Too many images; the limit is ${policy.maxImages}.`)
       const inspected = inspectOpenAIResponsesImageDataUrl(attachment.url)
-      if (!inspected && !/^https:\/\/[^\s]+$/i.test(attachment.url.trim())) {
-        throw new Error('Images must be supported base64 data URLs or public HTTPS URLs.')
+      if (!inspected && !/^https?:\/\/[^\s]+$/i.test(attachment.url.trim())) {
+        throw new Error(OPENAI_RESPONSES_IMAGE_VALIDATION_ERROR)
       }
       const bytes = inspected?.decodedBytes || attachment.sizeBytes || 0
       if (bytes > policy.maxDecodedBytesPerImage) {
@@ -134,6 +152,7 @@ const DEFAULT_IMAGE_ANALYSIS_PROMPT = 'Please analyze the attached image.'
 const DEFAULT_FILE_ANALYSIS_PROMPT = 'Please analyze the attached files.'
 const DEFAULT_MULTIMODAL_ANALYSIS_PROMPT = 'Please analyze the attached files and images.'
 const DEFAULT_IMAGE_MIME_TYPE = 'image/png'
+export const DEFAULT_RESPONSES_IMAGE_MODEL = 'gpt-image-2.5-sunburst'
 
 const IMAGE_GENERATION_ACTIONS = new Set<OpenAIImageGenerationAction>(['auto', 'generate', 'edit'])
 const IMAGE_GENERATION_BACKGROUNDS = new Set<OpenAIImageGenerationBackground>([
@@ -150,7 +169,9 @@ const IMAGE_GENERATION_QUALITIES = new Set<OpenAIImageGenerationQuality>([
   'auto',
   'low',
   'medium',
-  'high'
+  'high',
+  'xhigh',
+  'max'
 ])
 const IMAGE_GENERATION_SIZE_PATTERN = /^([1-9]\d{0,4})x([1-9]\d{0,4})$/
 const IMAGE_GENERATION_SIZE_STEP = 16
@@ -291,6 +312,8 @@ export const normalizeOpenAIImageGenerationOptions = (
   }
 
   const action = normalizeImageGenerationEnum(options.action, IMAGE_GENERATION_ACTIONS)
+  const model =
+    typeof options.model === 'string' && options.model.trim() ? options.model.trim() : undefined
   const background = normalizeImageGenerationEnum(options.background, IMAGE_GENERATION_BACKGROUNDS)
   const outputFormat = normalizeImageGenerationEnum(
     options.outputFormat,
@@ -302,6 +325,7 @@ export const normalizeOpenAIImageGenerationOptions = (
 
   const normalized: OpenAIImageGenerationOptions = {
     ...(action ? { action } : {}),
+    ...(model ? { model } : {}),
     ...(background ? { background } : {}),
     ...(enabled ? { enabled } : {}),
     ...(outputFormat ? { outputFormat } : {}),
@@ -343,6 +367,7 @@ export const buildOpenAIImageGenerationTool = (options: {
   const normalizedOptions = normalizeOpenAIImageGenerationOptions(options.imageGenerationOptions)
   const tool: OpenAIResponsesImageGenerationTool = {
     type: 'image_generation',
+    model: normalizedOptions?.model || DEFAULT_RESPONSES_IMAGE_MODEL,
     action:
       normalizedOptions?.action || (hasUserImageAttachment(options.messages) ? 'auto' : 'generate')
   }
@@ -353,6 +378,9 @@ export const buildOpenAIImageGenerationTool = (options: {
       ? requestedSize
       : referenceImageSize || requestedSize || 'auto'
 
+  if (normalizedOptions?.model) {
+    tool.model = normalizedOptions.model
+  }
   if (normalizedOptions?.outputFormat) {
     tool.output_format = normalizedOptions.outputFormat
   }
@@ -365,7 +393,6 @@ export const buildOpenAIImageGenerationTool = (options: {
   if (normalizedOptions?.background) {
     tool.background = normalizedOptions.background
   }
-
   return tool
 }
 
@@ -619,6 +646,10 @@ const tryExtractImageAttachment = (value: unknown): OpenAIResponsesImageAttachme
     return normalizeDataUrl(record.partial_image_b64.trim(), mimeType)
   }
 
+  if (typeof record.partial_image_b64_json === 'string' && record.partial_image_b64_json.trim()) {
+    return normalizeDataUrl(record.partial_image_b64_json.trim(), mimeType)
+  }
+
   if (typeof record.result === 'string' && record.result.trim()) {
     return normalizeDataUrl(record.result.trim(), mimeType)
   }
@@ -640,13 +671,9 @@ const collectOutputTextAndImages = (
   pushUniqueText(textParts, record.output_text)
   pushUniqueText(textParts, record.text)
 
+  const recordType = String(record.type || '').toLowerCase()
   const directImage = tryExtractImageAttachment(record)
-  if (
-    directImage &&
-    String(record.type || '')
-      .toLowerCase()
-      .includes('image')
-  ) {
+  if (directImage && recordType === 'image_generation_call') {
     pushImageAttachment(images, directImage)
   }
 
@@ -688,41 +715,38 @@ const collectOutputTextAndImages = (
     const contentImage = tryExtractImageAttachment(itemRecord)
     if (
       contentImage &&
-      String(itemRecord.type || '')
-        .toLowerCase()
-        .includes('image')
+      (String(itemRecord.type || '').toLowerCase() === 'image_generation_call' ||
+        itemRecord.type === undefined)
     ) {
       pushImageAttachment(images, contentImage)
     }
   }
 
-  const result = record.result
-  if (Array.isArray(result)) {
-    for (const item of result) {
-      pushImageAttachment(images, tryExtractImageAttachment(item))
-    }
-  } else {
-    const resultImage = tryExtractImageAttachment(result)
-    if (resultImage) {
-      pushImageAttachment(images, resultImage)
+  if (recordType === 'image_generation_call') {
+    const result = record.result
+    if (Array.isArray(result)) {
+      for (const item of result) {
+        pushImageAttachment(images, tryExtractImageAttachment(item))
+      }
+    } else {
+      const resultImage = tryExtractImageAttachment(result)
+      if (resultImage) {
+        pushImageAttachment(images, resultImage)
+      }
     }
   }
 }
 
-const OPENAI_RESPONSES_IMAGE_URL_ERROR =
+export const OPENAI_RESPONSES_IMAGE_URL_ERROR =
   'OpenAI Responses image attachments must use an HTTP(S) URL or a base64 data:image URL.'
+const OPENAI_RESPONSES_IMAGE_VALIDATION_ERROR =
+  'Images must be supported base64 data URLs or public HTTP(S) URLs.'
 
 const assertOpenAIResponsesImageUrl = (value: string): string => {
   const normalized = value.trim()
-  if (/^https?:\/\/[^\s]+$/i.test(normalized)) {
-    return normalized
-  }
-
+  if (/^https?:\/\/[^\s]+$/i.test(normalized)) return normalized
   const dataUrlMatch = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/]+={0,2})$/i.exec(normalized)
-  if (dataUrlMatch && dataUrlMatch[2].length % 4 === 0) {
-    return normalized
-  }
-
+  if (dataUrlMatch && dataUrlMatch[2].length % 4 === 0) return normalized
   throw new Error(OPENAI_RESPONSES_IMAGE_URL_ERROR)
 }
 
@@ -732,6 +756,8 @@ export function buildOpenAIResponsesInput(
 ): OpenAIResponsesInputMessage[] {
   const input: OpenAIResponsesInputMessage[] = []
   const selectedMessages = selectMessagesForImageHistoryPolicy(messages, options?.imageHistory)
+  // Count only images that will actually be sent. Any configured policy is
+  // enforced by the owning request path before materialization/fetch.
 
   for (const message of selectedMessages) {
     if (message.role === 'system') {
@@ -772,7 +798,8 @@ export function buildOpenAIResponsesInput(
       for (const attachment of imageAttachments) {
         content.push({
           type: 'input_image',
-          image_url: assertOpenAIResponsesImageUrl(attachment.url)
+          image_url: assertOpenAIResponsesImageUrl(attachment.url),
+          ...(attachment.imageDetail === 'low' ? { detail: 'low' as const } : {})
         })
       }
 
@@ -793,6 +820,28 @@ export function buildOpenAIResponsesInput(
             type: 'output_text',
             text: message.content
           }
+        ]
+      })
+    }
+
+    // Responses does not accept input_image parts in assistant content. Keep the
+    // original assistant turn intact and add a user reference block instead.
+    const imageAttachments = (message.attachments || []).filter(
+      (attachment) => attachment.type === 'image'
+    )
+    if (imageAttachments.length > 0) {
+      input.push({
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Reference image(s) from the previous assistant response:'
+          },
+          ...imageAttachments.map((attachment) => ({
+            type: 'input_image' as const,
+            image_url: assertOpenAIResponsesImageUrl(attachment.url),
+            ...(attachment.imageDetail === 'low' ? { detail: 'low' as const } : {})
+          }))
         ]
       })
     }

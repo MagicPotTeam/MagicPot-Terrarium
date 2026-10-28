@@ -32,8 +32,8 @@ MagicPot 是一个基于 Electron 的 AI 工作台。它把 AI 对话、ComfyUI 
 
 建议使用：
 
-- Node.js 22.x
-- npm 10.x 或随 Node.js 附带的 npm
+- Node.js 24.18+
+- npm 11.x 或随 Node.js 附带的 npm
 - Git
 - Windows 10/11 作为主要开发和 embedded 打包环境
 

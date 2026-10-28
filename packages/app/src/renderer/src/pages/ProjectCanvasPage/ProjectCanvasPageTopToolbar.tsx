@@ -38,6 +38,7 @@ import {
   LayersOutlined as LayersOutlinedIcon,
   ChevronRight as ChevronRightIcon,
   FormatBold as FormatBoldIcon,
+  History as HistoryIcon,
   LocalOfferOutlined as LocalOfferOutlinedIcon
 } from '@mui/icons-material'
 import {
@@ -218,6 +219,10 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
     generationTaskPack,
     generationTraceHistoryDialogOpen,
     generationTraceRecentRecords,
+    historySnapshots,
+    selectedHistoryRevision,
+    restoreHistoryRevision,
+    setSelectedHistoryRevision,
     gridColor,
     groupMenuAnchor,
     groupPlayback,
@@ -420,6 +425,9 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
     videoItems,
     visibleItems
   } = props
+  const [historyMenuAnchor, setHistoryMenuAnchor] = React.useState<HTMLElement | null>(null)
+  const historyCount = historySnapshots?.length ?? 0
+  const resolvedHistorySnapshots = historySnapshots || []
   const groupTreePopoverProps = {
     groupBranches,
     handleCreateGroupBranch,
@@ -1216,6 +1224,52 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
       </Tooltip>
 
       <Box sx={{ flex: 1 }} />
+
+      {historyCount > 0 && (
+        <Tooltip
+          title={t('canvas.history_open', { defaultValue: 'Open canvas history' })}
+          placement="bottom"
+        >
+          <Chip
+            icon={<HistoryIcon sx={{ fontSize: '16px !important' }} />}
+            label={isChineseUi ? `历史 ${historyCount}` : `History ${historyCount}`}
+            variant={selectedHistoryRevision === null ? 'outlined' : 'filled'}
+            onClick={(event) => setHistoryMenuAnchor(event.currentTarget)}
+            sx={{ mr: 1, cursor: 'pointer', flexShrink: 0 }}
+          />
+        </Tooltip>
+      )}
+
+      {historyMenuAnchor && (
+        <Menu
+          anchorEl={historyMenuAnchor}
+          open={Boolean(historyMenuAnchor)}
+          onClose={() => setHistoryMenuAnchor(null)}
+        >
+          {resolvedHistorySnapshots.map((entry) => (
+            <MenuItem
+              key={entry.index}
+              selected={selectedHistoryRevision === entry.index}
+              onClick={() => {
+                restoreHistoryRevision?.(entry.index)
+                setSelectedHistoryRevision?.(entry.index)
+                setHistoryMenuAnchor(null)
+              }}
+            >
+              <ListItemText
+                primary={
+                  isChineseUi ? `历史节点 ${entry.index + 1}` : `History node ${entry.index + 1}`
+                }
+                secondary={
+                  isChineseUi
+                    ? `${entry.items.length} 个画布元素`
+                    : `${entry.items.length} canvas items`
+                }
+              />
+            </MenuItem>
+          ))}
+        </Menu>
+      )}
 
       <Tooltip title={countLabel} placement="bottom">
         <Typography

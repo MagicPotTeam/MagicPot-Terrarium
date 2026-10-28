@@ -8,11 +8,17 @@ import { tripoMainLlmProxyExtension } from './tripoMainExtension'
 
 export type MainApiExtensionContextV1 = {
   baseApi: BaseApi
+  getMainWindow?: () => Electron.BrowserWindow | null
 }
 
 export type MainLlmProxyExtensionContextV1 = {
   config: Config
   fetchImpl?: FetchImpl
+  imageAttachmentLoader?: (
+    url: URL,
+    signal?: AbortSignal
+  ) => Promise<{ blob: Blob; finalUrl?: URL }>
+  requireImageAttachmentLoader?: boolean
   rawProfileId?: string
   requestedProfileId?: string
   signal?: AbortSignal

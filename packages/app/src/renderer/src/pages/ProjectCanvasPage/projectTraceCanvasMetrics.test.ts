@@ -63,6 +63,46 @@ describe('projectTraceCanvasMetrics', () => {
     )
   })
 
+  it('detects committed text on text nodes and annotations but emits only a count', () => {
+    for (const shape of [undefined, 'text-anno', 'rect'] as const) {
+      const item = shape
+        ? createTextItem({ type: 'annotation', shape, text: 'sensitive-a' } as Partial<CanvasItem>)
+        : createTextItem({ text: 'sensitive-a' })
+      const previous = buildProjectTraceCanvasItemMetrics([item])
+      const next = buildProjectTraceCanvasItemMetrics([
+        { ...item, text: 'sensitive-b' } as CanvasItem
+      ])
+      const summary = summarizeProjectTraceCanvasChange(previous, next, 0, false, false)
+      expect(summary).toMatchObject({
+        summary: 'Edited text on 1 canvas item(s)',
+        affectedItemCount: 1
+      })
+      expect(JSON.stringify(summary)).not.toContain('sensitive')
+      expect(summarizeProjectTraceCanvasChange(next, next, 0, false, true).affectedItemCount).toBe(
+        0
+      )
+    }
+  })
+
+  it('does not treat creation or image metadata as a committed text edit', () => {
+    const added = buildProjectTraceCanvasItemMetrics([createTextItem({ text: 'secret' })])
+    expect(summarizeProjectTraceCanvasChange({}, added, 0, false, false).summary).toBe(
+      'Added 1 canvas item(s)'
+    )
+    const image = createTextItem({
+      type: 'image',
+      src: 'owned-image',
+      fileName: 'private-a'
+    } as Partial<CanvasItem>)
+    const before = buildProjectTraceCanvasItemMetrics([image])
+    const after = buildProjectTraceCanvasItemMetrics([
+      { ...image, fileName: 'private-b' } as CanvasItem
+    ])
+    expect(
+      summarizeProjectTraceCanvasChange(before, after, 0, false, false).affectedItemCount
+    ).toBe(0)
+  })
+
   it('measures rule metrics and summarizes item types', () => {
     const previous = buildProjectTraceCanvasItemMetrics([
       createTextItem({ id: 'removed' }),

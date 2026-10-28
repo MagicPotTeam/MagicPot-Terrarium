@@ -44,6 +44,7 @@ import { QAppMenuItem } from '@shared/api/svcQApp'
 import { isComfyFrontendOnlyNodeClassType } from '@shared/comfy/funcs'
 import type { Config } from '@shared/config/config'
 import { useConfig } from '@renderer/hooks/useConfig'
+import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
 import { extractWorkflowFromImage } from '@renderer/utils/fileUtils'
@@ -98,6 +99,10 @@ const fetchRemoteQAppList = async (remoteOrigin: string, config?: Config) => {
 
 const QAPP_MENU_CACHE_KEY = 'qapp.menu.cachedItems.v1'
 type QAppCategory = SharedQAppCategory
+
+type QAppMenuTranslation = TFunction<'translation'>
+
+const getQAppNameTranslationKey = (key: string): string => `qapp.names.${key}`
 
 const isBuiltinHunyuan3DQApp = (key: string): boolean => key === BUILTIN_HUNYUAN3D_QAPP_KEY
 const isBuiltinTripo3DQApp = (key: string): boolean => key === BUILTIN_TRIPO3D_QAPP_KEY
@@ -704,6 +709,7 @@ export default function QAppMenu({
   renderExpandedContent
 }: QAppMenuProps) {
   const { t } = useTranslation()
+  const translateQApp: QAppMenuTranslation = t
   const { notifyError, notifySuccess } = useMessage()
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
@@ -781,24 +787,27 @@ export default function QAppMenu({
 
   // 辅助函数
   const getDisplayName = useCallback(
-    (v?: string) => {
+    (v?: string): string => {
       if (!v) return ''
       if (v === BUILTIN_HUNYUAN3D_QAPP_KEY || v === 'hunyuan3d') {
-        return t('qapp.names.hunyuan3d_quick_app')
+        return translateQApp('qapp.names.hunyuan3d_quick_app')
       }
       if (v === BUILTIN_TRIPO3D_QAPP_KEY || v === 'tripo3d') {
-        const tripoLabel = t('qapp.names.tripo3d_quick_app')
-        return tripoLabel === 'qapp.names.tripo3d_quick_app' ? 'Tripo3D' : tripoLabel
+        const tripoLabel = translateQApp('qapp.names.tripo3d_quick_app', {
+          defaultValue: 'Tripo3D'
+        })
+        return tripoLabel
       }
       if (isBuiltinDuplicateCheckQApp(v) || v === '重复图检查') {
         return '重复图检查'
       }
       if (isBuiltinVideoGenerationQApp(v) || v === 'ai_video_generation') {
-        return t('qapp.names.ai_video_generation')
+        return translateQApp('qapp.names.ai_video_generation')
       }
-      return t(`qapp.names.${v}`) !== `qapp.names.${v}` ? t(`qapp.names.${v}`) : v
+      const resolvedName = translateQApp(getQAppNameTranslationKey(v), { defaultValue: v })
+      return resolvedName
     },
-    [t]
+    [translateQApp]
   )
   const findFirstLeaf = useCallback(
     (items: QAppMenuItem[]): string | null => {

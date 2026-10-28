@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font-size: 12px;
+        padding: 16px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 70px;
+      }
+      button {
+        margin: 6px 4px 6px 0;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        max-height: 180px;
+        overflow: auto;
+      }
+      label {
+        display: block;
+        margin-top: 10px;
+      }
+      #context-image-view {
+        margin: 12px 0;
+        padding: 8px;
+        border: 1px solid #888;
+      }
+      #context-image {
+        max-width: 256px;
+        max-height: 256px;
+      }
+      #context-image-details {
+        overflow-wrap: anywhere;
+      }
+      #session-asset-image {
+        max-width: 100%;
+        max-height: 320px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>MagicPot connected review</h2>
+    <p id="configuration">Waiting for plugin configuration.</p>
+    <button id="check-connection" disabled>检查桌面连接 / Check desktop connection</button>
+    <p id="connection-status" role="status">
+      仅检查连接，不读取设计、不调用模型、不建立会话。 / Connection check only; no design reads,
+      model calls or session.
+    </p>
+    <button id="check-readiness" disabled>检查分层就绪 / Check readiness</button>
+    <pre id="readiness-status" role="status" aria-live="polite">
+配对后可检查分层就绪。 / Pair first to check layered readiness.</pre>
+    <button id="read-only-capture">Review complete selection locally (read-only)</button>
+    <p>
+      Local read-only observation. Not authenticated host identity, native revision, mutation
+      exclusion or permission to write.
+    </p>
+    <p>
+      This local review reads metadata only; it does not execute commands or connect to desktop.
+    </p>
+    <pre id="read-only-output" aria-live="polite"></pre>
+    <label for="ticket">Paste desktop pairing ticket JSON (memory only)</label>
+    <textarea id="ticket" maxlength="4096" autocomplete="off" spellcheck="false"></textarea>
+    <button id="pair" disabled>Pair with desktop</button>
+    <section aria-label="Text-only image generation">
+      <h3>Generate one image from text</h3>
+      <p>
+        Send only the exact text below to the paired desktop for review. No selection, document,
+        captured image or image metadata is included. Desktop must separately approve the configured
+        image model and any charge. The result stays in desktop; it is not shared here or applied to
+        your document. Sharing, local preview and native writes each need their own approval.
+        Cancellation cannot undo an already dispatched model charge.
+      </p>
+      <label for="generation-prompt">Image prompt (text only)</label>
+      <textarea
+        id="generation-prompt"
+        maxlength="8192"
+        autocomplete="off"
+        spellcheck="false"
+      ></textarea>
+      <label
+        ><input id="generation-consent" type="checkbox" />Send only this exact prompt for desktop
+        image-generation review</label
+      >
+      <button id="generation-submit" disabled>Request image generation</button>
+      <button id="generation-cancel" disabled>Cancel image generation</button>
+      <p id="generation-status" role="status">Pair, enter a prompt, then explicitly consent.</p>
+    </section>
+    <section aria-label="Desktop session images">
+      <h3>Desktop images - local preview and optional planning metadata</h3>
+      <p>
+        Refresh lists only images explicitly published by desktop to this session. Choose one to
+        read its pixels. No model call, document write, upload or context-image consent is granted.
+        Images stay in memory and expire within two minutes. PNG, JPEG and WebP require exact native
+        decoding; unsupported formats fail closed without conversion. Revocation blocks new reads;
+        already delivered pixels cannot be recalled. This preview clears on its original expiry,
+        refresh, clear, cancel or session close.
+      </p>
+      <button id="session-assets-refresh" disabled>Refresh desktop image catalog</button>
+      <button id="session-assets-clear" disabled>Clear desktop image preview</button>
+      <p id="session-assets-status" role="status">Pair, then refresh explicitly.</p>
+      <div id="session-assets-list"></div>
+      <p>
+        Optional planning metadata is off by default. Select exact catalog entries to include only
+        their ID, hash, MIME type, byte size, dimensions and expiry in the next native-plan model
+        request, after fresh Share consent and separate desktop model approval. No desktop image
+        pixels are uploaded. Local preview permission is not model consent or image-write
+        permission.
+      </p>
+      <div id="planning-assets-list"></div>
+      <p id="planning-assets-status" role="status">
+        No desktop image metadata selected for planning.
+      </p>
+      <div id="session-asset-view" hidden>
+        <img id="session-asset-image" alt="Exact desktop session image, local preview only" />
+        <p id="session-asset-details"></p>
+      </div>
+    </section>
+    <button id="capture" disabled>Capture selection metadata</button>
+    <button id="plan-capture" disabled>Capture native plan context (no changes)</button>
+    <button id="image-capture" disabled>Capture one layer image locally</button>
+    <p id="context-image-status" role="status">Checking local image capture capabilities.</p>
+    <button id="restore-task" disabled>
+      恢复已接受任务属性 / Restore accepted task properties
+    </button>
+    <details>
+      <summary>插件重载后重新关联 / Reassociate after plugin reload</summary>
+      <label for="rebind-checkpoint">已保存恢复点编号 / Saved checkpoint ID</label>
+      <input id="rebind-checkpoint" maxlength="32" autocomplete="off" spellcheck="false" />
+      <p>
+        在 MagicPot
+        插件页读取编号并核对原文档。相同节点编号不是文档身份证明。重新关联和精确修改都需要桌面确认，不重置有效期或轮次。
+      </p>
+      <label
+        ><input id="reopen-document" type="checkbox" />
+        原 PSD 已关闭重开，允许预览文档编号变化 / Preview changed document ID after reopening the
+        original PSD
+      </label>
+      <p>
+        仅文档编号可变；图层编号、父子层级和锁仍须匹配。请核对当前实际文件，桌面将再次确认旧／新编号。不猜测或重建图层。
+      </p>
+      <button id="rebind-task" disabled>
+        重新关联并预览恢复 / Reassociate and preview recovery
+      </button>
+    </details>
+    <p>
+      Recovery sends the freshly selected task context only to the paired desktop, not a model.
+      Select the exact accepted target set. Desktop approval is still required. Only accepted task
+      properties are restored; other edits are preserved. Accepted image content and placement can
+      be restored after reload or restart from encrypted saved source bytes, with a fresh preview
+      and approval. Recovery verifies the full canonical pixels before and after the write; it does
+      not call a model or publish saved images to the local-preview catalog.
+    </p>
+    <p>
+      Native planning requires a complete selection of 1–100 active layers. It captures only
+      properties declared executable by this host. Sharing needs explicit consent; model output
+      still requires a separate desktop write approval before any document change.
+    </p>
+    <p>
+      Image writes require a separate exact desktop write approval and a claim-bound image read;
+      local preview and planning metadata never grant write permission. image.pixels replaces all
+      pixels of an existing selected pixel layer at its captured position, with the image's native
+      dimensions: no resizing and no partial-region patch. Only unlocked, non-background,
+      non-clipping RGB / sRGB / 8-bit layers with no pixel selection and all component channels
+      active qualify. Bounds must fit the canvas. The 128 MiB plugin pixel-buffer budget allows at
+      most 8,388,544 pixels per image including hash-buffer overhead, and may reject combinations of
+      images. This is not a bound on Photoshop's own document or decoder memory.
+    </p>
+    <p>
+      Approved execution decodes only its authenticated bytes through a private temporary file and
+      owned Photoshop document, then releases them. Full-resolution observed sRGB RGBA is checked
+      independently: trimmed transparent margins are padded, RGB is expanded and RGB under zero
+      alpha is ignored. This does not certify Photoshop's hidden raw pixel storage. A failed image
+      plan uses an owned native history transaction only while its history is unchanged; later edits
+      are not overwritten. Recovery keeps the accepted destination separate from this attempt's
+      fresh native rollback baseline. Unverifiable results remain unknown. Automatic image
+      correction is not supported; bounded thumbnails are not image backups.
+    </p>
+    <p>
+      Metadata-only capture reads the first 100 active layers. Capture again to replace that
+      snapshot and cancel any pending review. Image capture instead requires exactly one selected
+      layer and invalidates when observed document, selection or host state changes.
+    </p>
+    <p>
+      Image capture is local and explicit: one PNG, at most 256 pixels per edge and 24 KiB. Native
+      imaging, change observation and exact image decoding must be available; otherwise choose
+      metadata capture. No file is saved and no image is sent in the background. Share locally
+      rechecks the same captured image before sending only the original preview for separate desktop
+      approval. A changed or failed image requires a new capture and new consent.
+    </p>
+    <pre id="selection"></pre>
+    <div id="context-image-view" hidden>
+      <p>Exact layer image proposed for desktop review</p>
+      <img id="context-image" alt="Exact selected-layer image proposed for desktop review" />
+      <p id="context-image-details"></p>
+    </div>
+    <label for="prompt">Prompt</label>
+    <textarea id="prompt" maxlength="16384" autocomplete="off" spellcheck="false"></textarea>
+    <label
+      ><input id="consent" type="checkbox" /><span id="consent-description"
+        >Send this prompt and selection metadata to MagicPot for desktop approval; may incur model
+        charges only after approval</span
+      ></label
+    >
+    <button id="share" disabled>Share for desktop approval</button>
+    <button id="cancel" disabled>Cancel review</button>
+    <button id="close">Close session</button>
+    <p id="status" role="status">Not connected.</p>
+    <pre id="result"></pre>
+    <p>
+      Model output is shown as a validated plan. Nothing is applied unless you separately approve
+      the exact native plan in MagicPot desktop. Closing is best effort; desktop expiry covers
+      interrupted shutdown.
+    </p>
+    <script src="main.js"></script>
+  </body>
+</html>

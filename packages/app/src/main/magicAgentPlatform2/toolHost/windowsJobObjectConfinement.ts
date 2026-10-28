@@ -18,7 +18,8 @@ export interface WindowsCommandJobFileOps {
 const defaultFileOps: WindowsCommandJobFileOps = {
   realpath: (value) => realpathSync.native(value),
   isFile: (value) => statSync(value).isFile(),
-  read: (value, encoding) => readFileSync(value, encoding)
+  read: (value, encoding) =>
+    encoding === undefined ? readFileSync(value) : readFileSync(value, { encoding })
 }
 
 export const resolveWindowsCommandJobHelper = (

@@ -4,7 +4,12 @@ import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type ProviderAttachmentTransport =
-  'file-id' | 'multipart' | 'accessible-url' | 'request-data-url'
+  | 'file-id'
+  | 'multipart'
+  | 'accessible-url'
+  | 'request-data-url'
+  /** Content-addressed binary frames consumed by the main-process LLM boundary. */
+  | 'chunked-binary-v1'
 
 export type ChatCapabilityProfile = {
   model_name?: string
@@ -13,6 +18,15 @@ export type ChatCapabilityProfile = {
   provider?: LLMProviderOption | string
   deployment?: LLMDeployment | string
   base_url?: string
+  api_mode?: string
+  apiMode?: string
+  openai_api_modes?: {
+    default?: string
+    auto?: string
+    responses?: string
+    'chat-completions'?: string
+    images?: string
+  }
   context_window_tokens?: number
   context_budget_tokens?: number
   contextWindowTokens?: number
@@ -22,6 +36,10 @@ export type ChatCapabilityProfile = {
   preferred_attachment_transport?: ProviderAttachmentTransport | string
   preferredAttachmentTransport?: ProviderAttachmentTransport | string
   supports_session_continuation?: boolean
+  max_input_images?: number
+  maxInputImages?: number
+  max_images?: number
+  maxImages?: number
   supportsSessionContinuation?: boolean
 }
 
@@ -32,6 +50,8 @@ export type ChatProfileCapabilities = {
   contextBudgetTokens?: number
   supportsAutoContextCompression: boolean
   supportsSessionContinuation: boolean
+  /** Finite provider-declared input image limit for the selected route. */
+  maxInputImages?: number
   attachmentTransports: ProviderAttachmentTransport[]
   preferredAttachmentTransport?: ProviderAttachmentTransport
 }
@@ -62,7 +82,8 @@ const normalizeAttachmentTransport = (
   return normalized === 'file-id' ||
     normalized === 'multipart' ||
     normalized === 'accessible-url' ||
-    normalized === 'request-data-url'
+    normalized === 'request-data-url' ||
+    normalized === 'chunked-binary-v1'
     ? normalized
     : undefined
 }
@@ -84,6 +105,24 @@ const resolveAttachmentCapabilities = (
       ? { preferredAttachmentTransport }
       : {})
   }
+}
+
+const normalizeFiniteImageLimit = (value: unknown): number | undefined => {
+  if (value === Infinity) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return undefined
+  return value
+}
+
+const resolveImageCapabilities = (
+  profile?: ChatCapabilityProfile | null
+): Pick<ChatProfileCapabilities, 'maxInputImages'> => {
+  const value =
+    profile?.max_input_images ??
+    profile?.maxInputImages ??
+    profile?.max_images ??
+    profile?.maxImages
+  const maxInputImages = normalizeFiniteImageLimit(value)
+  return maxInputImages === undefined ? {} : { maxInputImages }
 }
 
 const normalizeModelName = (value?: string): string =>
@@ -137,8 +176,46 @@ const resolveExplicitContextTokens = (
   }
 }
 
+const isOfficialOpenAIBaseUrl = (baseUrl?: string): boolean => {
+  if (!baseUrl) return false
+  try {
+    const parsed = new URL(baseUrl.trim())
+    return parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'api.openai.com'
+  } catch {
+    return false
+  }
+}
+
+const isOpenAIResponsesProfile = (profile?: ChatCapabilityProfile | null): boolean => {
+  if (
+    !profile ||
+    String(profile.provider || '')
+      .trim()
+      .toLowerCase() !== 'openai'
+  )
+    return false
+  if (profile.auth_mode === 'codex_oauth') return false
+
+  const callType = String(profile.call_type || '')
+    .trim()
+    .toLowerCase()
+  if (callType === 'codex' || callType === 'cliproxyapi') return false
+  if (callType && callType !== 'api') return false
+
+  const apiMode = String(profile.api_mode ?? profile.apiMode ?? '')
+    .trim()
+    .toLowerCase()
+  const defaultMode = String(profile.openai_api_modes?.default || '')
+    .trim()
+    .toLowerCase()
+  if (apiMode === 'responses' || defaultMode === 'responses') return true
+
+  return (apiMode === '' || apiMode === 'auto') && isOfficialOpenAIBaseUrl(profile.base_url)
+}
+
 const resolveSessionContinuationCapability = (profile?: ChatCapabilityProfile | null): boolean =>
-  profile?.supports_session_continuation === true || profile?.supportsSessionContinuation === true
+  !isOpenAIResponsesProfile(profile) &&
+  (profile?.supports_session_continuation === true || profile?.supportsSessionContinuation === true)
 
 const isCodexReasoningProfile = (profile?: ChatCapabilityProfile | null): boolean => {
   if (!profile) {
@@ -207,13 +284,15 @@ export const resolveChatProfileCapabilities = (
   if (!isCodexReasoningProfile(profile)) {
     const explicitContextTokens = resolveExplicitContextTokens(profile)
     const attachmentCapabilities = resolveAttachmentCapabilities(profile)
+    const imageCapabilities = resolveImageCapabilities(profile)
 
     return applyExtensions({
       reasoningEfforts: [],
       ...explicitContextTokens,
       supportsAutoContextCompression: Boolean(explicitContextTokens.contextBudgetTokens),
       supportsSessionContinuation: resolveSessionContinuationCapability(profile),
-      ...attachmentCapabilities
+      ...attachmentCapabilities,
+      ...imageCapabilities
     })
   }
 
@@ -249,6 +328,7 @@ export const resolveChatProfileCapabilities = (
   )
   const explicitContextTokens = resolveExplicitContextTokens(profile)
   const attachmentCapabilities = resolveAttachmentCapabilities(profile)
+  const imageCapabilities = resolveImageCapabilities(profile)
   const resolvedContextWindowTokens =
     explicitContextTokens.contextWindowTokens || contextWindowTokens
   const contextBudgetTokens = deriveContextBudgetTokens(
@@ -265,7 +345,8 @@ export const resolveChatProfileCapabilities = (
     ...(contextBudgetTokens ? { contextBudgetTokens } : {}),
     supportsAutoContextCompression: Boolean(contextBudgetTokens),
     supportsSessionContinuation: resolveSessionContinuationCapability(profile),
-    ...attachmentCapabilities
+    ...attachmentCapabilities,
+    ...imageCapabilities
   })
 }
 

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { killWindowsProcessTree } from './windows-process-tree.mjs'
 
@@ -49,6 +49,30 @@ const args = [
   ...(command === 'dev' ? ['-w'] : []),
   ...commandArgs
 ]
+
+// The document worker is an independent build, not an electron-vite main input.
+// Keep npm dev scripts chain-free while ensuring its assets exist before launch.
+if (command === 'dev') {
+  const build = spawnSync(
+    process.execPath,
+    [path.join(process.cwd(), 'scripts/build-document-worker.mjs')],
+    {
+      cwd: process.cwd(),
+      env,
+      shell: false,
+      stdio: 'inherit'
+    }
+  )
+  if (build.error) {
+    console.error(build.error)
+    process.exit(1)
+  }
+  if (build.signal) {
+    process.kill(process.pid, build.signal)
+    process.exit(1)
+  }
+  if (build.status !== 0) process.exit(build.status ?? 1)
+}
 
 const child = spawn(electronViteBin, args, {
   env,

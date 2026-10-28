@@ -48,7 +48,11 @@ exports.default = async function (context) {
     path.resolve(__dirname, '..', '..', '..', 'scripts', 'verify-packaged-runtime-dependencies.mjs')
   ).href
   const { verifyPackagedRuntimeDependencies } = await import(verifierUrl)
-  verifyPackagedRuntimeDependencies(context.appOutDir, context.packager)
+  verifyPackagedRuntimeDependencies(
+    context.appOutDir,
+    context.packager,
+    context.electronPlatformName
+  )
 
   // 只在 embedded 模式下运行
   if (process.env.PACKAGE_MODE !== 'embedded') return

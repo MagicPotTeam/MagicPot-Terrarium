@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -33,11 +33,12 @@ afterEach(() => {
 
 function setup(effect: PolicyRule['effect'] = 'require-approval', constraints?: PolicyConstraints) {
   const workerId = process.env.VITEST_WORKER_ID ?? '0'
-  const root = path.join(
+  let root = path.join(
     tmpdir(),
     `magic-tool-host-${process.pid}-${workerId}-${Math.random().toString(36).slice(2)}`
   )
   mkdirSync(root)
+  root = realpathSync.native(root)
   roots.push(root)
   const store = new MagicAgentEventStore(':memory:')
   stores.push(store)
@@ -320,5 +321,61 @@ describe('TerminalRunToolHost', () => {
         allowedCommands: [command]
       }).run({ ...runInput, args: ['-e', 'process.stdout.write("different")'] })
     ).rejects.toBeInstanceOf(TerminalRunValidationError)
+  })
+})
+
+describe('TerminalRunToolHost caller cancellation', () => {
+  it('rejects an already stopped request before authorization or spawn', async () => {
+    const { root, authorization } = setup()
+    const marker = path.join(root, 'must-not-run.txt')
+    const controller = new AbortController()
+    controller.abort()
+    const authorize = vi.spyOn(authorization, 'authorize')
+    const host = new TerminalRunToolHost(authorization, { allowedRoots: [root] })
+    const task = host.run({
+      ...input(
+        root,
+        ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`],
+        authorization
+      ),
+      signal: controller.signal
+    })
+    await expect(task).rejects.toMatchObject({ name: 'AbortError' })
+    expect(authorize).not.toHaveBeenCalled()
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  it('cancels a running command tree and waits for real process close before reporting cancelled', async () => {
+    const { root, authorization } = setup()
+    const ready = path.join(root, 'owned-processes.json')
+    const controller = new AbortController()
+    const script = `const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});require('node:fs').writeFileSync(process.argv[1],JSON.stringify([process.pid,child.pid]));setInterval(()=>{},1000)`
+    const audit: TerminalRunAuditEvidence[] = []
+    const host = new TerminalRunToolHost(authorization, {
+      allowedRoots: [root],
+      onAudit: (e) => {
+        audit.push(e)
+      }
+    })
+    const task = host.run({
+      ...input(root, ['-e', script, ready], authorization),
+      signal: controller.signal,
+      timeoutMs: 2500
+    })
+    await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 1500 })
+    const ids: number[] = JSON.parse(readFileSync(ready, 'utf8'))
+    controller.abort()
+    const result = await task
+    // Even a failing baseline must finish/close its owned tree before assertions.
+    await vi.waitFor(
+      () => {
+        for (const pid of ids) expect(() => process.kill(pid, 0)).toThrow()
+      },
+      { timeout: 1500 }
+    )
+    expect(result.status).toBe('cancelled')
+    expect(result.durationMs).toBeLessThan(2000)
+    expect(audit).toHaveLength(1)
+    expect(audit[0].status).toBe('cancelled')
   })
 })

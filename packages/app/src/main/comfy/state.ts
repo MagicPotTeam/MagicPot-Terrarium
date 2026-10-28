@@ -25,6 +25,7 @@ type ComfySocketConnection = {
   reconnectTimer: NodeJS.Timeout | null
   reconnectAttempts: number
   wsErrorLogged: boolean
+  lastStatusLogKey: string | null
 }
 
 class ComfyStateManager {
@@ -73,7 +74,8 @@ class ComfyStateManager {
         generation: 0,
         reconnectTimer: null,
         reconnectAttempts: 0,
-        wsErrorLogged: false
+        wsErrorLogged: false,
+        lastStatusLogKey: null
       }
       this.sockets.set(baseUrl, connection)
     }
@@ -98,11 +100,20 @@ class ComfyStateManager {
         const data = JSON.parse(evt.data as string) as JsonDict
         if (data.type === 'crystools.monitor') return
 
-        console.log(`[ComfyUI State] received (${baseUrl})`, data)
+        // ComfyUI can emit the same status frame more than once. Keep forwarding
+        // every frame to consumers, but avoid filling the terminal with adjacent
+        // duplicate status lines.
+        const statusLogKey = data.type === 'status' ? JSON.stringify(data) : null
+        if (statusLogKey === null || statusLogKey !== connection.lastStatusLogKey) {
+          console.log(`[ComfyUI State] received (${baseUrl})`, data)
+        }
+        connection.lastStatusLogKey = statusLogKey
         this.comfyState.lastMessage = data
         if (isComfyEvent(data)) {
           // 保留原始 prompt_id，转换为内部任务 ID 由 svcComfy.connectWs 统一完成。
-          eventCenter.emit(data)
+          void eventCenter.emit(data).catch((error) => {
+            console.error('[ComfyUI State] event listener error', error)
+          })
         }
       } catch (error) {
         console.error('[ComfyUI State] error', error)
@@ -249,7 +260,4 @@ export function getComfyState() {
 
 export function listenComfyEvent(listener: EventListener<ComfyEvent>) {
   eventCenter.addListener(listener)
-  listener.abortReceiver?.onAbort(() => {
-    eventCenter.removeListener(listener.id)
-  })
 }

@@ -36,6 +36,7 @@ const WHEEL_ZOOM_STEP_SCALE = 1.12
 const VIEWPORT_INTERACTION_IDLE_MS = 240
 const SELECTION_MARQUEE_ACTIVATION_PX = 3
 const POINT_HIT_TEST_SCREEN_RADIUS_PX = 2
+const CANVAS_POINTER_BRIDGE_HANDLED_KEY = '__projectCanvasPointerBridgeHandled'
 
 function isCanvasInteractionDebugEnabled() {
   return (
@@ -152,6 +153,15 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
   } | null>(null)
   const viewportInteractionIdleTimeoutRef = useRef<number | null>(null)
   const isViewportInteractionActiveRef = useRef(false)
+  // Keep the window-level pan listeners removable when the stage unmounts
+  // mid-gesture (for example, switching projects while holding the middle
+  // button). Without this, the stale listeners keep applying deltas to the
+  // next canvas and can leave a visible drag trail.
+  const globalPanListenersCleanupRef = useRef<(() => void) | null>(null)
+  // Pointer capture is owned by ProjectCanvasPageStageScene. Once a pointer
+  // move is observed, ignore the browser's compatibility mousemove for the
+  // same gesture; before that, retain the mouse-only fallback path.
+  const pointerMoveObservedRef = useRef(false)
   // Keep a stable ref to onViewportChange so rAF callbacks don't capture stale closures
   const onViewportChangeRef = useRef<
     ((pos: { x: number; y: number }, scale: number) => void) | undefined
@@ -563,6 +573,11 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
 
   useEffect(() => {
     return () => {
+      globalPanListenersCleanupRef.current?.()
+      globalPanListenersCleanupRef.current = null
+      isPanningRef.current = false
+      isMiddleMouseRef.current = false
+      pointerMoveObservedRef.current = false
       cancelPendingViewportCommit()
       cancelPendingZoomCommit()
       cancelPendingSelectionRectCommit()
@@ -576,6 +591,7 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
     cancelPendingSelectionRectCommit,
     clearViewportInteractionIdleTimeout,
     clearPointerCanvasViewportRect,
+    isMiddleMouseRef,
     setSelectionMarqueeActive
   ])
 
@@ -583,9 +599,12 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
     (event: CanvasStageMouseEvent) => {
       canvasContainerRef.current?.focus({ preventScroll: true })
       clearPointerCanvasViewportRect()
+      pointerMoveObservedRef.current = false
 
       isMiddleMouseRef.current = event.evt.button === 1
       if (event.evt.button === 1 || tool === 'hand') {
+        globalPanListenersCleanupRef.current?.()
+        globalPanListenersCleanupRef.current = null
         beginViewportInteraction()
         isPanningRef.current = true
         setIsPanning(true)
@@ -597,22 +616,68 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
             return
           }
 
+          // ProjectCanvasPageStageScene forwards PointerEvents from a capture
+          // listener. Chromium also emits a compatibility `mousemove` for the
+          // same physical motion; processing both samples makes a middle-button
+          // pan advance twice and leaves visible frame trails. Keep the mouse
+          // listener only as a fallback for browsers without PointerEvent.
+          if (moveEvent.type === 'pointermove') {
+            pointerMoveObservedRef.current = true
+            if (
+              (
+                moveEvent as PointerEvent & {
+                  [CANVAS_POINTER_BRIDGE_HANDLED_KEY]?: boolean
+                }
+              )[CANVAS_POINTER_BRIDGE_HANDLED_KEY]
+            ) {
+              return
+            }
+          } else if (pointerMoveObservedRef.current) {
+            return
+          }
+
           moveEvent.preventDefault()
           applyPanViewportDelta(moveEvent.clientX, moveEvent.clientY)
           scheduleViewportCommit()
         }
 
-        const handleGlobalPointerUp = () => {
-          isMiddleMouseRef.current = false
-          isPanningRef.current = false
-          endViewportInteraction(true)
-          setIsPanning(false)
+        const removeGlobalPanListeners = () => {
           window.removeEventListener('pointermove', handleGlobalPointerMove)
           window.removeEventListener('mousemove', handleGlobalPointerMove)
           window.removeEventListener('pointerup', handleGlobalPointerUp)
           window.removeEventListener('pointercancel', handleGlobalPointerUp)
           window.removeEventListener('mouseup', handleGlobalPointerUp)
+          if (globalPanListenersCleanupRef.current === removeGlobalPanListeners) {
+            globalPanListenersCleanupRef.current = null
+          }
         }
+
+        const handleGlobalPointerUp = (upEvent?: MouseEvent | PointerEvent) => {
+          // A stage capture bridge may have already committed this native
+          // pointer event. Keep the fallback listener only for teardown in
+          // that case; running the cleanup twice can cause duplicate React
+          // updates and visible pan trails.
+          const wasForwardedByPointerBridge =
+            upEvent?.type === 'pointerup' || upEvent?.type === 'pointercancel'
+              ? (
+                  upEvent as PointerEvent & {
+                    [CANVAS_POINTER_BRIDGE_HANDLED_KEY]?: boolean
+                  }
+                )[CANVAS_POINTER_BRIDGE_HANDLED_KEY] === true
+              : false
+
+          if (!wasForwardedByPointerBridge) {
+            isMiddleMouseRef.current = false
+            isPanningRef.current = false
+            pointerMoveObservedRef.current = false
+            endViewportInteraction(true)
+            setIsPanning(false)
+          }
+
+          removeGlobalPanListeners()
+        }
+
+        globalPanListenersCleanupRef.current = removeGlobalPanListeners
 
         window.addEventListener('pointermove', handleGlobalPointerMove, { passive: false })
         window.addEventListener('mousemove', handleGlobalPointerMove, { passive: false })
@@ -920,6 +985,8 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
       ) {
         return
       }
+
+      pointerMoveObservedRef.current = false
 
       if (isPanningRef.current || isMiddleMouseRef.current) {
         isMiddleMouseRef.current = false

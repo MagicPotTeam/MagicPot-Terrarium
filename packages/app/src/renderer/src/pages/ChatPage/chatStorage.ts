@@ -14,6 +14,7 @@ import { normalizeMediaReference } from '@shared/mediaReference'
 import { api } from '@renderer/utils/windowUtils'
 import { normalizeChatProfileIdForStorage } from './chatPageShared'
 import type { ChatContextCompressionSummary } from './chatContextCompression'
+import { CHAT_ATTACHMENT_STORAGE } from './chatManagedMediaAttachments'
 
 export interface ChatSessionDraft {
   inputValue: string
@@ -43,6 +44,8 @@ export interface ChatSession {
   sessionUrl?: string
   /** Base profile id that owns sessionUrl; prevents reuse after a profile/provider switch. */
   sessionProfileId?: string
+  /** Canonical remote route fingerprint that owns sessionUrl, when applicable. */
+  sessionRouteFingerprint?: string
   createdAt?: number
 }
 
@@ -59,9 +62,6 @@ const DELETE_TOMBSTONE_STORAGE_KEY_PREFIX = 'magicpot-chat-delete-tombstone:'
 
 let dbInstance: IDBDatabase | null = null
 let dbInitPromise: Promise<IDBDatabase> | null = null
-let fatalStorageError: Error | null = null
-let fatalStorageErrorLogged = false
-let storageRecoveryPromise: Promise<boolean> | null = null
 const sessionMutationQueues = new Map<string, Promise<void>>()
 const legacyMigrationFlights = new Map<string, Promise<ChatSession>>()
 
@@ -102,7 +102,11 @@ async function migrateLegacyAttachmentsInSession(
         originalFileName: attachment.fileName || 'legacy-image',
         sourceWidth: attachment.sourceWidth,
         sourceHeight: attachment.sourceHeight
-      }
+      },
+      // Legacy chat images become durable user-owned media rather than task
+      // scratch data. The explicit namespace keeps old requests compatible
+      // while allowing the physical lifecycle policy to apply on migration.
+      storage: CHAT_ATTACHMENT_STORAGE
     })
     pendingReclaims.push(migrated.checkpoint)
     changed = true
@@ -420,6 +424,7 @@ function normalizeSession(session: ChatSession | LegacyChatSession, scope?: stri
   const {
     sessionUrl,
     sessionProfileId,
+    sessionRouteFingerprint,
     draft,
     storageKey: _storageKey,
     ...rest
@@ -438,6 +443,9 @@ function normalizeSession(session: ChatSession | LegacyChatSession, scope?: stri
     ...(sessionUrl || legacySessionUrl ? { sessionUrl: sessionUrl || legacySessionUrl } : {}),
     ...(typeof sessionProfileId === 'string' && sessionProfileId.trim()
       ? { sessionProfileId: normalizeChatProfileIdForStorage(sessionProfileId) }
+      : {}),
+    ...(typeof sessionRouteFingerprint === 'string' && sessionRouteFingerprint.trim()
+      ? { sessionRouteFingerprint: sessionRouteFingerprint.trim() }
       : {}),
     ...(normalizedDraft ? { draft: normalizedDraft } : {}),
     profileId: normalizeChatProfileIdForStorage(session.profileId),
@@ -463,6 +471,42 @@ function createStorageError(error: unknown, fallbackMessage: string): Error {
   return new Error(fallbackMessage)
 }
 
+/**
+ * Order-insensitive (for object keys) but array-order-strict deep equality. Null/undefined values
+ * are treated as absent so a raw snapshot and a normalized stored record that only differ by an
+ * explicit `undefined`/key insertion order still compare equal. Avoids JSON.stringify ordering bugs.
+ */
+function stableDeepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return a === b
+  const aIsArray = Array.isArray(a)
+  const bIsArray = Array.isArray(b)
+  if (aIsArray !== bIsArray) return false
+  if (aIsArray) {
+    const arrA = a as unknown[]
+    const arrB = b as unknown[]
+    if (arrA.length !== arrB.length) return false
+    for (let index = 0; index < arrA.length; index += 1) {
+      if (!stableDeepEqual(arrA[index], arrB[index])) return false
+    }
+    return true
+  }
+  const recA = a as Record<string, unknown>
+  const recB = b as Record<string, unknown>
+  const keysA = Object.keys(recA).filter((key) => recA[key] !== undefined)
+  const keysB = Object.keys(recB).filter((key) => recB[key] !== undefined)
+  if (keysA.length !== keysB.length) return false
+  for (const key of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(recB, key)) return false
+    if (!stableDeepEqual(recA[key], recB[key])) return false
+  }
+  return true
+}
+
+function normalizedSessionsEqual(a: ChatSession, b: ChatSession, scope: string): boolean {
+  return stableDeepEqual(normalizeSession(a, scope), normalizeSession(b, scope))
+}
+
 function describeStorageError(error: unknown): string {
   if (error instanceof Error) {
     const detail = error.message?.trim() || 'Unknown error'
@@ -481,132 +525,23 @@ function describeStorageError(error: unknown): string {
   return 'Unknown error'
 }
 
-function isFatalStorageError(error: Error): boolean {
-  return (
-    error.name === 'NotReadableError' ||
-    error.name === 'InvalidStateError' ||
-    /missing file/i.test(error.message) ||
-    /irrecoverable/i.test(error.message)
-  )
-}
-
+/** Invalidate only our connection. A read failure is never permission to delete history. */
 function closeCachedDb(): void {
-  if (!dbInstance) {
-    dbInitPromise = null
-    return
-  }
-
-  try {
-    dbInstance.close()
-  } catch {
-    /* ignore close failure */
-  }
-
+  const previous = dbInstance
   dbInstance = null
   dbInitPromise = null
-}
-
-function rememberFatalStorageError(error: Error): void {
-  if (!isFatalStorageError(error)) {
-    return
+  try {
+    previous?.close()
+  } catch {
+    // Preserve the original operation error if the failed connection cannot close.
   }
-
-  fatalStorageError = error
-  closeCachedDb()
-}
-
-function clearFatalStorageError(): void {
-  fatalStorageError = null
-  fatalStorageErrorLogged = false
-}
-
-async function resetCorruptedStorage(error: Error): Promise<boolean> {
-  if (!isFatalStorageError(error)) {
-    return false
-  }
-
-  if (storageRecoveryPromise) {
-    return storageRecoveryPromise
-  }
-
-  rememberFatalStorageError(error)
-
-  storageRecoveryPromise = new Promise<boolean>((resolve) => {
-    const finalize = (recovered: boolean) => {
-      storageRecoveryPromise = null
-      if (recovered) {
-        clearFatalStorageError()
-      }
-      resolve(recovered)
-    }
-
-    try {
-      const request = indexedDB.deleteDatabase(DB_NAME)
-      request.onsuccess = () => {
-        console.warn(`[ChatStorage] Reset corrupted IndexedDB database "${DB_NAME}".`)
-        finalize(true)
-      }
-      request.onerror = () => {
-        const resetError = createStorageError(
-          request.error ?? error,
-          'IndexedDB failed to reset corrupted chat storage.'
-        )
-        rememberFatalStorageError(resetError)
-        console.error(
-          `[ChatStorage] Failed to reset corrupted IndexedDB database: ${describeStorageError(resetError)}`
-        )
-        finalize(false)
-      }
-      request.onblocked = () => {
-        console.warn('[ChatStorage] IndexedDB reset is blocked by another open connection.')
-      }
-    } catch (resetError) {
-      const nextError = createStorageError(
-        resetError,
-        'IndexedDB failed to reset corrupted chat storage.'
-      )
-      rememberFatalStorageError(nextError)
-      console.error(
-        `[ChatStorage] Failed to reset corrupted IndexedDB database: ${describeStorageError(nextError)}`
-      )
-      finalize(false)
-    }
-  })
-
-  return storageRecoveryPromise
-}
-
-function isStorageDisabled(): boolean {
-  if (!fatalStorageError) {
-    return false
-  }
-
-  if (storageRecoveryPromise) {
-    return true
-  }
-
-  if (!fatalStorageErrorLogged) {
-    console.error(
-      `[ChatStorage] IndexedDB disabled due to fatal error: ${describeStorageError(fatalStorageError)}`
-    )
-    fatalStorageErrorLogged = true
-  }
-
-  return true
-}
-
-async function ensureStorageAvailable(): Promise<boolean> {
-  if (storageRecoveryPromise) {
-    await storageRecoveryPromise
-  }
-
-  return !isStorageDisabled()
 }
 
 async function handleStorageFailure(error: Error, operation: string): Promise<void> {
-  rememberFatalStorageError(error)
+  closeCachedDb()
   console.error(`[ChatStorage] ${operation}: ${describeStorageError(error)}`)
-  await resetCorruptedStorage(error)
+  // The caller receives the failure. Its next explicit attempt opens the same database;
+  // there is no automatic reset, destructive migration, or unbounded retry loop.
 }
 
 /** Open (or create) the IndexedDB database. */
@@ -654,24 +589,27 @@ function openDB(): Promise<IDBDatabase> {
       }
       settled = true
       clearTimeout(openTimeout)
-      dbInstance = request.result
-      dbInstance.onclose = () => {
-        dbInstance = null
-        dbInitPromise = null
+      const openedDb = request.result
+      dbInstance = openedDb
+      openedDb.onclose = () => {
+        if (dbInstance === openedDb) {
+          dbInstance = null
+          dbInitPromise = null
+        }
       }
-      dbInstance.onversionchange = () => {
-        dbInstance?.close()
-        dbInstance = null
-        dbInitPromise = null
+      openedDb.onversionchange = () => {
+        openedDb.close()
+        if (dbInstance === openedDb) {
+          dbInstance = null
+          dbInitPromise = null
+        }
       }
-      resolve(dbInstance)
+      resolve(openedDb)
     }
 
     request.onerror = () => {
       clearTimeout(openTimeout)
       const error = createStorageError(request.error, 'IndexedDB failed to open chat storage.')
-      rememberFatalStorageError(error)
-      void resetCorruptedStorage(error)
       rejectOpen(error)
     }
 
@@ -685,10 +623,6 @@ function openDB(): Promise<IDBDatabase> {
 
 /** Load all sessions, sorted by creation order. */
 export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]> {
-  if (!(await ensureStorageAvailable())) {
-    return []
-  }
-
   let sessions: ChatSession[]
   const targetScope = normalizeScope(scope)
   try {
@@ -710,7 +644,7 @@ export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]>
   } catch (error) {
     const storageError = createStorageError(error, 'IndexedDB failed to load chat sessions.')
     await handleStorageFailure(storageError, 'loadAllSessions failed')
-    return []
+    throw storageError
   }
 
   // Listing stays cheap. Legacy media is migrated only when its session is opened, preserving
@@ -723,10 +657,6 @@ async function loadSessionRawFromDB(
   sessionId: string,
   scope = 'default'
 ): Promise<ChatSession | null> {
-  if (!(await ensureStorageAvailable())) {
-    return null
-  }
-
   try {
     const db = await openDB()
     return await new Promise((resolve, reject) => {
@@ -754,7 +684,7 @@ async function loadSessionRawFromDB(
   } catch (error) {
     const storageError = createStorageError(error, 'IndexedDB failed to load the chat session.')
     await handleStorageFailure(storageError, 'loadSession failed')
-    return null
+    throw storageError
   }
 }
 
@@ -783,10 +713,6 @@ export async function compareAndUpdateSessionInDB(
   options: CompareAndUpdateSessionOptions
 ): Promise<ChatSession | null> {
   return queueSessionMutation(sessionId, scope, async () => {
-    if (!(await ensureStorageAvailable())) {
-      throw fatalStorageError || new Error('Chat storage is unavailable.')
-    }
-
     try {
       const db = await openDB()
       return await new Promise<ChatSession | null>((resolve, reject) => {
@@ -795,26 +721,50 @@ export async function compareAndUpdateSessionInDB(
         const store = tx.objectStore(STORE_NAME)
         const request = store.get(createSessionStorageKey(sessionId, targetScope))
         let updatedSession: ChatSession | null = null
-        request.onsuccess = () => {
-          const stored = request.result as StoredChatSession | undefined
-          if (!stored || normalizeScope(stored.storageScope) !== targetScope) return
-
-          const currentSession = normalizeSession(stored, targetScope)
-          if (
-            JSON.stringify(currentSession) !== JSON.stringify(options.expectedSession) ||
-            (options.shouldUpdate && !options.shouldUpdate(currentSession))
-          ) {
-            return
+        let failed = false
+        const fail = (error: Error): void => {
+          if (failed) return
+          failed = true
+          try {
+            tx.abort()
+          } catch {
+            /* ignore abort failures on an already-settled/aborted transaction */
           }
+          reject(error)
+        }
+        request.onsuccess = () => {
+          try {
+            const stored = request.result as StoredChatSession | undefined
+            if (!stored || normalizeScope(stored.storageScope) !== targetScope) return
 
-          updatedSession = options.update(currentSession)
-          store.put(createStoredSession(updatedSession, targetScope))
+            const currentSession = normalizeSession(stored, targetScope)
+            if (
+              !normalizedSessionsEqual(currentSession, options.expectedSession, targetScope) ||
+              (options.shouldUpdate && !options.shouldUpdate(currentSession))
+            ) {
+              return
+            }
+
+            updatedSession = options.update(currentSession)
+            store.put(createStoredSession(updatedSession, targetScope))
+          } catch (error) {
+            fail(createStorageError(error, 'IndexedDB failed to compare the chat session.'))
+          }
         }
         request.onerror = () =>
-          reject(createStorageError(request.error, 'IndexedDB failed to compare the chat session.'))
-        tx.oncomplete = () => resolve(updatedSession)
+          fail(createStorageError(request.error, 'IndexedDB failed to compare the chat session.'))
+        tx.oncomplete = () => {
+          if (!failed) resolve(updatedSession)
+        }
         tx.onerror = () =>
-          reject(createStorageError(tx.error, 'IndexedDB failed to update the chat session.'))
+          fail(createStorageError(tx.error, 'IndexedDB failed to update the chat session.'))
+        tx.onabort = () =>
+          fail(
+            createStorageError(
+              tx.error,
+              'IndexedDB transaction aborted while updating the chat session.'
+            )
+          )
       })
     } catch (error) {
       const storageError = createStorageError(
@@ -827,28 +777,132 @@ export async function compareAndUpdateSessionInDB(
   })
 }
 
+export interface SaveSessionToDBOptions {
+  /**
+   * Optional pre-write consistency guard evaluated inside the same readwrite transaction as the
+   * upsert, so a stale whole-session snapshot cannot clobber a newer record written elsewhere:
+   * - omitted (legacy): unconditional upsert, unchanged for existing callers
+   * - null: the session is expected to be absent (create); a present record is a conflict
+   * - ChatSession: the stored record must equal this snapshot; a mismatch is a conflict
+   */
+  expectedSession?: ChatSession | null
+}
+
+/** Raised when a guarded save would overwrite a record that changed since the caller's snapshot. */
+export class ChatSessionSaveConflictError extends Error {
+  readonly code = 'CHAT_SESSION_SAVE_CONFLICT'
+  readonly sessionId: string
+  readonly scope: string
+  constructor(sessionId: string, scope: string) {
+    super(
+      `Chat session ${sessionId} changed in another writer; refusing to overwrite the newer record.`
+    )
+    this.name = 'ChatSessionSaveConflictError'
+    this.sessionId = sessionId
+    this.scope = normalizeScope(scope)
+  }
+}
+
 /** Save a single session (upsert) - efficient for single-session updates. */
-export async function saveSessionToDB(session: ChatSession, scope = 'default'): Promise<void> {
+export async function saveSessionToDB(
+  session: ChatSession,
+  scope = 'default',
+  options?: SaveSessionToDBOptions
+): Promise<void> {
   cancelDebouncedSessionSave(session.id, scope)
+  const guard =
+    options && Object.prototype.hasOwnProperty.call(options, 'expectedSession')
+      ? options.expectedSession
+      : undefined
+  const guarded = guard === null || (guard !== undefined && typeof guard === 'object')
+
   return queueSessionMutation(session.id, scope, async () => {
     if (hasSessionDeleteTombstone(session.id, scope)) {
       return
     }
-    if (!(await ensureStorageAvailable())) {
-      throw fatalStorageError || new Error('Chat storage is unavailable.')
-    }
-
+    const targetScope = normalizeScope(scope)
     try {
       const db = await openDB()
       await new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readwrite')
         const store = tx.objectStore(STORE_NAME)
-        store.put(createStoredSession(session, scope))
-        tx.oncomplete = () => resolve()
+        let conflict: ChatSessionSaveConflictError | null = null
+        let failed = false
+        const fail = (error: Error): void => {
+          if (failed) return
+          failed = true
+          try {
+            tx.abort()
+          } catch {
+            /* ignore abort failures on an already-settled/aborted transaction */
+          }
+          reject(error)
+        }
+        const write = (): void => {
+          store.put(createStoredSession(session, targetScope))
+        }
+
+        if (!guarded) {
+          write()
+        } else {
+          const request = store.get(createSessionStorageKey(session.id, targetScope))
+          request.onsuccess = () => {
+            try {
+              const stored = request.result as StoredChatSession | undefined
+              const exists = !!stored && normalizeScope(stored.storageScope) === targetScope
+              // Idempotent retry: a previous save already persisted exactly this snapshot but its
+              // acknowledgement was lost. Treat as success without adding another put. Uses a stable
+              // (key-order-insensitive, array-order-strict) deep compare, not JSON.stringify order.
+              const alreadyPersisted =
+                exists && normalizedSessionsEqual(stored as StoredChatSession, session, targetScope)
+              if (guard === null) {
+                if (alreadyPersisted) return
+                if (exists) {
+                  conflict = new ChatSessionSaveConflictError(session.id, targetScope)
+                  return
+                }
+                write()
+                return
+              }
+              const expectedMatches =
+                exists &&
+                normalizedSessionsEqual(
+                  stored as StoredChatSession,
+                  guard as ChatSession,
+                  targetScope
+                )
+              if (expectedMatches || alreadyPersisted) {
+                if (!alreadyPersisted) write()
+                return
+              }
+              conflict = new ChatSessionSaveConflictError(session.id, targetScope)
+            } catch (error) {
+              fail(createStorageError(error, 'IndexedDB failed to compare the chat session.'))
+            }
+          }
+          request.onerror = () =>
+            fail(createStorageError(request.error, 'IndexedDB failed to compare the chat session.'))
+        }
+
+        tx.oncomplete = () => {
+          if (failed) return
+          if (conflict) reject(conflict)
+          else resolve()
+        }
         tx.onerror = () =>
-          reject(createStorageError(tx.error, 'IndexedDB failed to save the chat session.'))
+          fail(createStorageError(tx.error, 'IndexedDB failed to save the chat session.'))
+        tx.onabort = () =>
+          fail(
+            createStorageError(
+              tx.error,
+              'IndexedDB transaction aborted while saving the chat session.'
+            )
+          )
       })
     } catch (error) {
+      if (error instanceof ChatSessionSaveConflictError) {
+        throw error
+      }
       const storageError = createStorageError(error, 'IndexedDB failed to save the chat session.')
       await handleStorageFailure(storageError, 'saveSession failed')
       throw storageError
@@ -858,10 +912,6 @@ export async function saveSessionToDB(session: ChatSession, scope = 'default'): 
 
 /** Save all sessions (replace entire store). */
 export async function saveAllSessions(sessions: ChatSession[], scope = 'default'): Promise<void> {
-  if (!(await ensureStorageAvailable())) {
-    throw fatalStorageError || new Error('Chat storage is unavailable.')
-  }
-
   try {
     const db = await openDB()
     const targetScope = normalizeScope(scope)
@@ -898,10 +948,6 @@ export async function saveAllSessions(sessions: ChatSession[], scope = 'default'
 export async function deleteSessionFromDB(sessionId: string, scope = 'default'): Promise<void> {
   cancelDebouncedSessionSave(sessionId, scope)
   return queueSessionMutation(sessionId, scope, async () => {
-    if (!(await ensureStorageAvailable())) {
-      throw fatalStorageError || new Error('Chat storage is unavailable.')
-    }
-
     try {
       const db = await openDB()
       await new Promise<void>((resolve, reject) => {
@@ -926,10 +972,6 @@ export async function deleteSessionFromDB(sessionId: string, scope = 'default'):
  */
 export async function migrateFromLocalStorage(): Promise<ChatSession[] | null> {
   const STORAGE_KEY = 'chat.sessions'
-  if (!(await ensureStorageAvailable())) {
-    return null
-  }
-
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (!saved) return null
@@ -986,6 +1028,8 @@ const pendingSessionSaves = new Map<string, Map<string, ChatSession>>()
 export interface DebouncedSessionSaveOptions {
   onSuccess?: (sessions: ChatSession[]) => void
   onError?: (error: unknown, sessions: ChatSession[]) => void
+  /** Optional single-session writer (e.g. a baseline-guarded save); defaults to saveSessionToDB. */
+  saveOne?: (session: ChatSession, scope: string) => Promise<unknown>
 }
 
 const pendingSaveCallbacks = new Map<string, DebouncedSessionSaveOptions>()
@@ -1034,7 +1078,13 @@ export function debouncedSaveSessions(
     pendingSessionSaves.delete(targetScope)
     pendingSaveCallbacks.delete(targetScope)
     saveTimers.delete(targetScope)
-    Promise.all(sessionsToSave.map((session) => saveSessionToDB(session, targetScope))).then(
+    Promise.all(
+      sessionsToSave.map((session) =>
+        callbacks?.saveOne
+          ? callbacks.saveOne(session, targetScope)
+          : saveSessionToDB(session, targetScope)
+      )
+    ).then(
       () => {
         callbacks?.onSuccess?.(sessionsToSave)
       },

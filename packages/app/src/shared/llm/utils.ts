@@ -10,6 +10,7 @@ import type {
   LLMDeployment,
   LLMModelUse,
   LLMModelUseOption,
+  LLMOpenAIApiMode,
   LLMProfileCallType,
   LLMProvider,
   LLMProviderOption
@@ -22,9 +23,13 @@ import {
   ClaudeAPICli,
   OpencodeZenAPICli,
   OllamaAPICli,
-  type FetchImpl
+  resolveOpenAIClientApiMode,
+  type FetchImpl,
+  type OpenAIImageAttachmentLoader
 } from './clients'
 import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
+import { resolveOpencodeZenAlias, resolveOpencodeZenModelApi } from './opencodeZenModels'
+import { validateProviderBaseUrl } from './providerEndpointPolicy'
 
 type ProfileLike = {
   api_key?: string
@@ -38,6 +43,14 @@ type ProfileLike = {
   provider?: LLMProviderOption
   deployment?: LLMDeployment
   model_use?: LLMModelUseOption
+  api_mode?: LLMOpenAIApiMode
+  attachment_transports?: string[]
+  preferred_attachment_transport?: string
+  max_input_images?: number
+  maxInputImages?: number
+  max_images?: number
+  maxImages?: number
+  request_timeout_ms?: number
   is_ollama?: boolean
   is_vision_model?: boolean
   is_ocr_model?: boolean
@@ -48,7 +61,7 @@ const isCodexProfile = (profile: Pick<ProfileLike, 'auth_mode' | 'call_type'>): 
 
 export const isCodexFastModeEnabled = (
   profile: Pick<ProfileLike, 'auth_mode' | 'call_type' | 'codex_fast_mode'>
-): boolean => isCodexProfile(profile) && profile.codex_fast_mode !== false
+): boolean => profile.codex_fast_mode === true
 
 const normalizeCallType = (callType?: string): LLMProfileCallType | undefined => {
   switch (callType) {
@@ -71,6 +84,10 @@ export const resolveProfileCallType = (profile: ProfileLike): LLMProfileCallType
   const explicitCallType = normalizeCallType(profile.call_type)
   if (explicitCallType) {
     return explicitCallType
+  }
+
+  if (profile.call_type === 'cliproxyapi' || profile.call_type === 'codex') {
+    return profile.call_type
   }
 
   return 'api'
@@ -421,6 +438,14 @@ export const resolveProfileModelUse = (profile: ProfileLike): LLMModelUse => {
     return 'vision'
   }
 
+  if (
+    profile.api_mode === 'images' ||
+    ((profile.api_mode === undefined || profile.api_mode === 'auto') &&
+      /^gpt-image-/i.test(String(profile.model_name || '').trim()))
+  ) {
+    return 'image'
+  }
+
   return 'chat'
 }
 
@@ -439,11 +464,15 @@ export const isRunnableProfile = (profile: ProfileLike): boolean => {
     return false
   }
 
-  if (!profile.model_name?.trim()) {
-    return false
+  if (profile.auth_mode === 'codex_oauth') {
+    return true
   }
 
-  if (!profile.base_url?.trim()) {
+  if (profile.call_type === 'cliproxyapi') {
+    return Boolean(profile.base_url?.trim() && profile.api_key?.trim())
+  }
+
+  if (!profile.model_name?.trim()) {
     return false
   }
 
@@ -467,6 +496,31 @@ export const isRunnableProfile = (profile: ProfileLike): boolean => {
   return Boolean(profile.api_key?.trim())
 }
 
+// The standard client route is pure: preflight can run before attachment reads,
+// IPC, hosted-file uploads or model requests. Extension-owned routes are not
+// silently assigned another provider's count policy.
+export const usesOpenAIResponsesImagePolicy = (
+  profile: ProfileLike,
+  apiMode?: LLMOpenAIApiMode
+): boolean => {
+  if (resolveProfileCallType(profile) !== 'api' || profile.auth_mode === 'codex_oauth') return false
+  if (isOpencodeZenUrl(profile.base_url || '')) {
+    return (
+      resolveOpencodeZenModelApi(resolveOpencodeZenAlias(profile.model_name || '')) ===
+      'openai-responses'
+    )
+  }
+  if (resolveProfileProvider(profile) !== 'openai') return false
+  const effectiveProfile = { ...profile, api_mode: apiMode ?? profile.api_mode }
+  return (
+    resolveOpenAIClientApiMode(profile.base_url || '', profile.model_name || '', {
+      apiMode: effectiveProfile.api_mode,
+      modelUse: resolveProfileModelUse(effectiveProfile),
+      callType: profile.call_type
+    }) === 'responses'
+  )
+}
+
 /**
  * Create an LLM client from an API profile config object.
  * The profile must have at minimum: api_key, base_url, model_name.
@@ -479,13 +533,37 @@ export const cliFromProfile = (
     base_url: string
     codex_fast_mode?: boolean
     model_name: string
+    call_type?: LLMProfileCallType
     provider?: LLMProviderOption
     deployment?: LLMDeployment
+    model_use?: LLMModelUseOption
+    api_mode?: LLMOpenAIApiMode
+    attachment_transports?: string[]
+    preferred_attachment_transport?: string
+    maxInputImages?: number
+    max_input_images?: number
+    max_images?: number
+    maxImages?: number
     is_ollama?: boolean
+    request_timeout_ms?: number
   },
-  options?: { fetchImpl?: FetchImpl }
+  options?: {
+    fetchImpl?: FetchImpl
+    imageAttachmentLoader?: OpenAIImageAttachmentLoader
+    requireImageAttachmentLoader?: boolean
+    /** Enable provider-hosted tools for Codex-compatible gateways. */
+    enableHostedTools?: boolean
+    /** Codex-compatible gateways expose web search without file-search uploads. */
+    enableHostedWebSearch?: boolean
+    /** Force Responses requests to use SSE even for unary callers. */
+    forceStreaming?: boolean
+  }
 ): LLMCli | undefined => {
   if (!isRunnableProfile(profile)) {
+    return undefined
+  }
+
+  if (profile.auth_mode === 'codex_oauth') {
     return undefined
   }
 
@@ -503,6 +581,11 @@ export const cliFromProfile = (
     }
   }
 
+  // Built-in clients all use fetch directly. Validate the persisted endpoint
+  // immediately before selecting one so a malformed profile cannot become an
+  // unbounded outbound request or leak credentials over public HTTP.
+  validateProviderBaseUrl(profileWithDefaults.base_url)
+
   if (isOpencodeZenUrl(profileWithDefaults.base_url || '')) {
     return new OpencodeZenAPICli(
       profileWithDefaults.api_key,
@@ -514,26 +597,23 @@ export const cliFromProfile = (
 
   switch (resolveProfileProvider(profileWithDefaults)) {
     case 'ollama':
-      return new OllamaAPICli(
-        profile.api_key,
-        profile.base_url,
-        profile.model_name,
-        options?.fetchImpl
-      )
+      return new OllamaAPICli(profile.api_key, profile.base_url, profile.model_name, {
+        fetchImpl: options?.fetchImpl,
+        requestTimeoutMs:
+          typeof profile.request_timeout_ms === 'number' ? profile.request_timeout_ms : undefined
+      })
     case 'gemini':
-      return new GeminiAPICli(
-        profile.api_key,
-        profile.base_url,
-        profile.model_name,
-        options?.fetchImpl
-      )
+      return new GeminiAPICli(profile.api_key, profile.base_url, profile.model_name, {
+        fetchImpl: options?.fetchImpl,
+        requestTimeoutMs:
+          typeof profile.request_timeout_ms === 'number' ? profile.request_timeout_ms : undefined
+      })
     case 'claude':
-      return new ClaudeAPICli(
-        profile.api_key,
-        profile.base_url,
-        profile.model_name,
-        options?.fetchImpl
-      )
+      return new ClaudeAPICli(profile.api_key, profile.base_url, profile.model_name, {
+        fetchImpl: options?.fetchImpl,
+        requestTimeoutMs:
+          typeof profile.request_timeout_ms === 'number' ? profile.request_timeout_ms : undefined
+      })
     case 'kling':
       return new KlingVideoAPICli(
         profile.api_key,
@@ -549,11 +629,42 @@ export const cliFromProfile = (
         profile.model_name,
         options?.fetchImpl
       )
-    case 'openai':
+    case 'openai': {
+      const modelUse = resolveProfileModelUse(profile)
+      const codexGateway = profile.call_type === 'cliproxyapi' || profile.call_type === 'codex'
       return new OpenAIAPICli(profile.api_key, profile.base_url, profile.model_name, {
-        modelUse: resolveProfileModelUse(profile),
-        fetchImpl: options?.fetchImpl
+        modelUse,
+        // CLIProxyAPI/Codex mirrors Codex OAuth: Responses + SSE and priority
+        // processing are part of the gateway contract rather than user hints.
+        serviceTier: codexGateway || isCodexFastModeEnabled(profile) ? 'priority' : undefined,
+        callType: profile.call_type,
+        apiMode: codexGateway
+          ? 'responses'
+          : (profile.api_mode ??
+            (modelUse === 'image' && /^gpt-image-/i.test(profile.model_name.trim())
+              ? 'images'
+              : 'auto')),
+        // Codex-compatible gateways expose web search, but do not necessarily
+        // implement OpenAI's file-upload/vector-store lifecycle. Keep those
+        // capabilities separate so search works without creating remote files.
+        enableHostedTools: options?.enableHostedTools ?? (codexGateway ? false : undefined),
+        enableHostedWebSearch: options?.enableHostedWebSearch ?? (codexGateway ? true : undefined),
+        forceStreaming: options?.forceStreaming ?? codexGateway,
+        maxInputImages:
+          typeof profile.max_input_images === 'number'
+            ? profile.max_input_images
+            : typeof profile.maxInputImages === 'number'
+              ? profile.maxInputImages
+              : typeof profile.max_images === 'number'
+                ? profile.max_images
+                : profile.maxImages,
+        fetchImpl: options?.fetchImpl,
+        imageAttachmentLoader: options?.imageAttachmentLoader,
+        requireImageAttachmentLoader: options?.requireImageAttachmentLoader,
+        requestTimeoutMs:
+          typeof profile.request_timeout_ms === 'number' ? profile.request_timeout_ms : undefined
       })
+    }
     default:
       return undefined
   }

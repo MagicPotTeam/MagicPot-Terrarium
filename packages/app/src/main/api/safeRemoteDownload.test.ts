@@ -88,6 +88,62 @@ describe('safeRemoteDownload', () => {
     ).rejects.toThrow('response is too large')
   })
 
+  it('aborts an in-flight request when the caller signal is cancelled', async () => {
+    const abortController = new AbortController()
+    let requestDestroyed = false
+    requestMock.mockImplementationOnce((_options, _callback) => {
+      const request = new EventEmitter() as EventEmitter & {
+        setTimeout: ReturnType<typeof vi.fn>
+        destroy: (error: Error) => void
+        end: ReturnType<typeof vi.fn>
+      }
+      request.setTimeout = vi.fn()
+      request.destroy = (error) => {
+        requestDestroyed = true
+        request.emit('error', error)
+      }
+      request.end = vi.fn()
+      return request
+    })
+
+    const pending = safeRemoteDownload('https://public.example/image.png', {
+      allowedContentTypes: ['image/'],
+      signal: abortController.signal
+    })
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    abortController.abort(new Error('cancelled'))
+    await expect(pending).rejects.toThrow('cancelled')
+    expect(requestDestroyed).toBe(true)
+  })
+
+  it.each(['NaN', 'Infinity', '-1', '1.5', '1e2', ' 1'])(
+    'rejects an invalid Content-Length value: %s',
+    async (contentLength) => {
+      mockResponse(200, {
+        'content-type': 'image/png',
+        'content-length': contentLength
+      })
+
+      await expect(
+        safeRemoteDownload('https://public.example/image.png', {
+          allowedContentTypes: ['image/']
+        })
+      ).rejects.toThrow('invalid content length')
+    }
+  )
+
+  it('rejects a response whose Content-Length does not match the bytes received at EOF', async () => {
+    mockResponse(200, { 'content-type': 'image/png', 'content-length': '4' }, [
+      Buffer.from([1, 2, 3])
+    ])
+
+    await expect(
+      safeRemoteDownload('https://public.example/image.png', {
+        allowedContentTypes: ['image/']
+      })
+    ).rejects.toThrow('content length mismatch')
+  })
+
   it('downloads a valid public HTTPS resource', async () => {
     mockResponse(200, { 'content-type': 'image/png' }, [Buffer.from([1, 2]), Buffer.from([3])])
 

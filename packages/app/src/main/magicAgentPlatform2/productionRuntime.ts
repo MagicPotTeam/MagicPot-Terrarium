@@ -145,7 +145,10 @@ export type AssistantTerminalPolicyRuntime = Readonly<{
   readonly eventStore: MagicAgentEventStore
   authorization: MagicAgentPolicyAuthorizationService
   createTrustedApproval(request: PolicyRequest): Omit<TerminalApprovalReference, 'authorizationId'>
-  requestTerminalApproval(request: PolicyRequest): Promise<TerminalApprovalReference>
+  requestTerminalApproval(
+    request: PolicyRequest,
+    signal?: AbortSignal
+  ): Promise<TerminalApprovalReference>
   requestTerminalApprovalWithSnapshot(
     request: PolicyRequest,
     graphContext: NonNullable<PendingTerminalApproval['graphContext']>
@@ -420,7 +423,7 @@ export const getAssistantTerminalPolicyRuntime = (): AssistantTerminalPolicyRunt
     eventStore: store,
     authorization,
     createTrustedApproval,
-    requestTerminalApproval: (request) => approvals.request(request),
+    requestTerminalApproval: (request, signal) => approvals.request(request, undefined, signal),
     requestTerminalApprovalWithSnapshot: (request, graphContext) =>
       approvals.requestWithSnapshot(request, graphContext),
     listPendingTerminalApprovals: () => approvals.list(),

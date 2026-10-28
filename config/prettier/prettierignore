@@ -6,3 +6,12 @@ pnpm-lock.yaml
 LICENSE.md
 tsconfig.json
 tsconfig.*.json
+
+# Deterministic bundled pixel decoder; checked against its source by the generator.
+../../packages/figplugin-hosts/shared/pixel-audit.js
+
+# Deterministic shared host-plan validator; verified by build-figplugin-plan-preview.mjs.
+../../packages/figplugin-hosts/shared/plan-preview.js
+
+# Deterministic connectivity probe; verified by build-figplugin-bridge-readiness.mjs.
+../../packages/figplugin-hosts/shared/bridge-readiness.js

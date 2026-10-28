@@ -24,6 +24,7 @@ const notifyWarningMock = vi.fn()
 const getObjectInfoMock = vi.fn(async () => ({}))
 const watchQueueMock = vi.fn(async () => undefined)
 const getQAppCfgMock = vi.fn(async () => ({ cfg: {}, workflow: {} }))
+const signHy3DModelMock = vi.fn()
 let comfyEventCallback: ((event: { type: string; data: Record<string, unknown> }) => void) | null =
   null
 const createConfig = (): Config => ({
@@ -106,6 +107,9 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcQApp: {
       getQAppCfg: getQAppCfgMock
+    },
+    svcLLMProxy: {
+      signHy3DModel: signHy3DModelMock
     }
   })
 }))
@@ -272,7 +276,15 @@ vi.mock('../pages/ChatPage/Hunyuan3DPanel', () => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: 'zh-CN' },
-    t: (key: string) => key
+    t: (key: string, options?: { defaultValue?: string }) =>
+      ({
+        'quickapp.workspace.open_quickapp_api': '配置',
+        'quickapp.workspace.title': '快应用',
+        'quickapp.workspace.more_categories': '更多分类',
+        'qapp.batch.open_jobs': '展开批处理任务'
+      })[key] ??
+      options?.defaultValue ??
+      key
   })
 }))
 
@@ -290,6 +302,7 @@ describe('SidePanel', () => {
     getObjectInfoMock.mockClear()
     watchQueueMock.mockClear()
     getQAppCfgMock.mockClear()
+    signHy3DModelMock.mockReset()
     comfyEventCallback = null
     currentConfig = createConfig()
     requestChatCompletionMock.mockResolvedValue({
@@ -310,7 +323,7 @@ describe('SidePanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '3D' }))
 
     expect(await screen.findByText('Hunyuan3D Panel')).toBeTruthy()
-    expect(await screen.findByRole('button', { name: /API/ })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: '配置' })).toBeTruthy()
   })
 
   it('renders the built-in video app directly in inline mode when selected from the SidePanel', async () => {
@@ -364,7 +377,7 @@ describe('SidePanel', () => {
 
     expect(await screen.findByText('Hunyuan3D Panel')).toBeTruthy()
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /API/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: '配置' })).toBeNull()
     })
   })
 
@@ -659,6 +672,121 @@ describe('SidePanel', () => {
     } finally {
       window.removeEventListener('canvas:add-model3d', handleGenerate)
     }
+  })
+
+  it('passes a cancellation signal and aborts an in-flight Hy3D request on unmount', async () => {
+    let releaseRequest!: (value: { content: string }) => void
+    const request = new Promise<{ content: string }>((resolve) => {
+      releaseRequest = resolve
+    })
+    requestChatCompletionMock.mockImplementationOnce(({ signal }: { signal?: AbortSignal }) => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+      return request
+    })
+
+    const view = render(<SidePanel />)
+    await screen.findByText('Hunyuan3D Panel')
+    fireEvent.click(screen.getByRole('button', { name: 'Seed Mixed Media' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Switch To Image Mode' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Trigger Generate' }))
+
+    await waitFor(() => {
+      expect(requestChatCompletionMock).toHaveBeenCalledTimes(1)
+    })
+    const signal = requestChatCompletionMock.mock.calls[0][0].signal as AbortSignal
+
+    view.unmount()
+    expect(signal.aborted).toBe(true)
+
+    await act(async () => {
+      releaseRequest({ content: '[Generated 3D Model](https://example.com/late.glb)' })
+      await Promise.resolve()
+    })
+    expect(notifyErrorMock).not.toHaveBeenCalled()
+    expect(notifySuccessMock).not.toHaveBeenCalled()
+    expect(localStorage.getItem('hy3d.params')).not.toContain('https://example.com/late.glb')
+  })
+
+  it('aborts a replaced generation and ignores its late reply without clearing the new request', async () => {
+    let releaseFirst!: (value: { content: string }) => void
+    const firstRequest = new Promise<{ content: string }>((resolve) => {
+      releaseFirst = resolve
+    })
+    let releaseSecond!: (value: { content: string }) => void
+    const secondRequest = new Promise<{ content: string }>((resolve) => {
+      releaseSecond = resolve
+    })
+    requestChatCompletionMock.mockReturnValueOnce(firstRequest).mockReturnValueOnce(secondRequest)
+
+    const view = render(<SidePanel />)
+    await screen.findByText('Hunyuan3D Panel')
+    fireEvent.click(screen.getByRole('button', { name: 'Seed Mixed Media' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Switch To Image Mode' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Trigger Generate' }))
+    await waitFor(() => expect(requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const firstSignal = requestChatCompletionMock.mock.calls[0][0].signal as AbortSignal
+
+    fireEvent.click(screen.getByRole('button', { name: 'Trigger Generate' }))
+    await waitFor(() => expect(requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    const secondSignal = requestChatCompletionMock.mock.calls[1][0].signal as AbortSignal
+    expect(firstSignal.aborted).toBe(true)
+    expect(secondSignal.aborted).toBe(false)
+
+    await act(async () => {
+      releaseFirst({ content: '[Generated 3D Model](https://example.com/stale.glb)' })
+      await firstRequest
+    })
+    expect(notifySuccessMock).not.toHaveBeenCalled()
+    expect(localStorage.getItem('hy3d.params')).not.toContain('https://example.com/stale.glb')
+
+    view.unmount()
+    expect(secondSignal.aborted).toBe(true)
+    await act(async () => {
+      releaseSecond({ content: '[Generated 3D Model](https://example.com/new-late.glb)' })
+      await secondRequest
+    })
+    expect(notifyErrorMock).not.toHaveBeenCalled()
+    expect(notifySuccessMock).not.toHaveBeenCalled()
+  })
+
+  it('cancels while refreshing a signed model URL without sending or persisting a late URL', async () => {
+    localStorage.setItem('qapp.currentQAppKey', '~builtin/hunyuan3d/split')
+    localStorage.setItem(
+      'hy3d.params',
+      JSON.stringify({
+        apiAction: 'SubmitHunyuan3DPartJob',
+        modelUrl: 'https://example.com/source-model.fbx',
+        modelSourceFileName: 'source-model.fbx',
+        modelStorageKey: 'model/source-model.fbx',
+        modelStorageBucket: 'test-bucket',
+        modelStorageRegion: 'ap-guangzhou',
+        modelSignedUrlExpiresAt: '2020-01-01T00:00:00.000Z'
+      })
+    )
+    let releaseSigned!: (value: { url: string; expiresAt: string }) => void
+    const signedRequest = new Promise<{ url: string; expiresAt: string }>((resolve) => {
+      releaseSigned = resolve
+    })
+    signHy3DModelMock.mockReturnValueOnce(signedRequest)
+
+    const view = render(<SidePanel />)
+    await screen.findByText('Hunyuan3D Panel')
+    fireEvent.click(screen.getByRole('button', { name: 'Trigger Generate' }))
+    await waitFor(() => expect(signHy3DModelMock).toHaveBeenCalledTimes(1))
+    view.unmount()
+
+    await waitFor(() => expect(closeMessageMock).toHaveBeenCalledWith('hy3d-progress'))
+    await act(async () => {
+      releaseSigned({
+        url: 'https://example.com/late-signed-model.fbx',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      })
+      await signedRequest
+    })
+    expect(requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(localStorage.getItem('hy3d.params')).not.toContain('late-signed-model')
+    expect(notifyErrorMock).not.toHaveBeenCalled()
+    expect(notifySuccessMock).not.toHaveBeenCalled()
   })
 
   it('prefers the generated GLB when Hunyuan returns preview images together with OBJ and GLB outputs', async () => {

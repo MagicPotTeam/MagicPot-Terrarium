@@ -128,6 +128,39 @@ function createV2WithSnapshot(): void {
   store.close()
 }
 
+function replaceSnapshotTable(snapshotSql: string): void {
+  createV2WithSnapshot()
+  const db = inspect()
+  try {
+    db.exec(
+      `DROP INDEX snapshots_stream_version_idx;
+       DROP INDEX snapshots_stream_covered_idx;
+       DROP TABLE snapshots;
+       ${snapshotSql};
+       ${SNAPSHOT_VERSION_INDEX_DDL};
+       ${SNAPSHOT_COVERED_INDEX_DDL};`
+    )
+    db.prepare(
+      `INSERT INTO snapshots (
+      snapshot_id, stream_id, snapshot_version, covered_sequence, state_type,
+      state_json, metadata_json, created_at, inserted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'snapshot-1',
+      'stream-a',
+      1,
+      0,
+      'counter',
+      canonicalJson({ count: 1 }),
+      canonicalJson({ source: 'test' }),
+      2000,
+      2001
+    )
+  } finally {
+    db.close()
+  }
+}
+
 function normalBundle(): RecoveryBundle {
   return {
     snapshot: null,
@@ -245,14 +278,7 @@ describe('snapshot schema migration', () => {
     ['CHECK', SNAPSHOTS_DDL.replace(' CHECK(length(trim(snapshot_id)) > 0)', '')],
     ['STRICT', SNAPSHOTS_DDL.replace(/ STRICT$/, '')]
   ])('rejects snapshot table SQL with missing %s semantics', (_label, forgedSql) => {
-    createV2WithSnapshot()
-    const db = inspect()
-    db.exec('PRAGMA writable_schema = ON')
-    db.prepare("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'snapshots'").run(
-      forgedSql
-    )
-    db.exec('PRAGMA writable_schema = OFF; PRAGMA schema_version = 99')
-    db.close()
+    replaceSnapshotTable(forgedSql)
     expectOpenCorrupt(path)
   })
 

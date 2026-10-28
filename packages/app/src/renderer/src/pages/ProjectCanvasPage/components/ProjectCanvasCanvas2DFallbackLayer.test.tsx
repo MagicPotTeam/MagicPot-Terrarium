@@ -294,4 +294,64 @@ describe('ProjectCanvasCanvas2DFallbackLayer', () => {
     expect(context.translate).toHaveBeenCalledWith(50, 60)
     expect(context.translate).toHaveBeenCalledWith(12, 14)
   })
+
+  it('ignores a late image callback after an item id starts loading a new source', async () => {
+    const createdImages: MockImage[] = []
+    class MockImage {
+      onload: (() => void) | null = null
+      onerror: ((error: unknown) => void) | null = null
+      decoding = 'async'
+      draggable = false
+      naturalWidth = 100
+      naturalHeight = 80
+      private currentSrc = ''
+
+      constructor() {
+        createdImages.push(this)
+      }
+
+      get src() {
+        return this.currentSrc
+      }
+
+      set src(value: string) {
+        this.currentSrc = value
+      }
+    }
+    vi.stubGlobal('Image', MockImage)
+
+    const first = createItem('reused', {
+      src: 'https://example.com/first.png',
+      image: undefined as unknown as HTMLImageElement
+    })
+    const second = { ...first, src: 'https://example.com/second.png' }
+    const { rerender } = render(
+      <ProjectCanvasCanvas2DFallbackLayer
+        items={[first]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 320, height: 240 }}
+      />
+    )
+
+    await waitFor(() => expect(document.querySelector('canvas')).not.toBeNull())
+    await waitFor(() => expect(createdImages).toHaveLength(1))
+    const staleOnload = createdImages[0].onload
+    rerender(
+      <ProjectCanvasCanvas2DFallbackLayer
+        items={[second]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 320, height: 240 }}
+      />
+    )
+    await waitFor(() => expect(createdImages).toHaveLength(2))
+    const drawCountBeforeLateCallback = context.drawImage.mock.calls.length
+    staleOnload?.()
+    await Promise.resolve()
+    expect(context.drawImage.mock.calls.length).toBe(drawCountBeforeLateCallback)
+
+    createdImages[1].onload?.()
+    await waitFor(() => expect(context.drawImage.mock.calls.length).toBeGreaterThan(0))
+  })
 })

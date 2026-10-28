@@ -19,14 +19,21 @@ import {
   StopCircleOutlined as StopIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import ChatPage from '@renderer/pages/ChatPage/ChatPage'
 import { loadAllSessions, type ChatSession } from '@renderer/pages/ChatPage/chatStorage'
 import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLocaleUtils'
 import {
   CHAT_SESSION_LOADING_STATE_EVENT,
+  CHAT_SESSION_RUN_STATE_EVENT,
+  markScopedChatRunRead,
+  readScopedChatRun,
+  readScopedChatRuns,
   readScopedActiveLoadingSessionIds,
   readScopedExternalLoadingSessionIds,
-  type ChatSessionLoadingStateEvent
+  type ChatSessionLoadingStateEvent,
+  type ChatSessionRunState,
+  type ChatSessionRunStateEvent
 } from '@renderer/pages/ChatPage/chatPageShared'
 import {
   buildAgentPaneScope,
@@ -49,12 +56,14 @@ type AgentPane = {
   enabled: boolean
 }
 
-type PanePreviewStatus = 'idle' | 'running' | 'done'
+type PanePreviewStatus = 'idle' | ChatSessionRunState['status']
 
 type PanePreview = {
   title: string
   subtitle: string
   status: PanePreviewStatus
+  unread: boolean
+  runState?: ChatSessionRunState
 }
 
 type AgentWorkspaceStrings = {
@@ -162,9 +171,9 @@ const getPaneLabel = (
   getLabel: AgentWorkspaceStrings['paneLabel']
 ): string => getLabel(getPaneNumber(paneId, index))
 
-const createAgentWorkspaceStrings = (
-  t: ReturnType<typeof useTranslation>['t']
-): AgentWorkspaceStrings => ({
+type AgentWorkspaceTranslator = TFunction<'translation'>
+
+const createAgentWorkspaceStrings = (t: AgentWorkspaceTranslator): AgentWorkspaceStrings => ({
   newConversation: t('chat.new_conversation'),
   latestReply: t('agent_workspace.latest_reply'),
   latestPrompt: t('agent_workspace.latest_prompt'),
@@ -205,7 +214,10 @@ const arePanePreviewsEqual = (
       rightPreview !== undefined &&
       leftPreview.title === rightPreview.title &&
       leftPreview.subtitle === rightPreview.subtitle &&
-      leftPreview.status === rightPreview.status
+      leftPreview.status === rightPreview.status &&
+      leftPreview.unread === rightPreview.unread &&
+      leftPreview.runState?.runId === rightPreview.runState?.runId &&
+      leftPreview.runState?.sessionId === rightPreview.runState?.sessionId
     )
   })
 }
@@ -217,21 +229,32 @@ const isPaneRunning = (scope: string): boolean => {
   )
 }
 
+const readLatestPaneRunState = (scope: string): ChatSessionRunState | undefined => {
+  let latest: ChatSessionRunState | undefined
+
+  for (const state of readScopedChatRuns(scope)) {
+    if (!state.runId || state.status === 'idle') continue
+    if (!latest || state.updatedAt >= latest.updatedAt) {
+      latest = state
+    }
+  }
+
+  return latest
+}
+
 const buildPanePreview = (
   paneId: string,
   index: number,
   sessions: ChatSession[],
   running: boolean,
-  strings: AgentWorkspaceStrings
+  strings: AgentWorkspaceStrings,
+  runState?: ChatSessionRunState
 ): PanePreview => {
   const latestSession = sessions[sessions.length - 1]
   const latestMessage = latestSession ? getLatestRenderableMessage(latestSession.messages) : null
   const paneLabel = getPaneLabel(paneId, index, strings.paneLabel)
-  const status: PanePreviewStatus = running
-    ? 'running'
-    : latestMessage || latestSession
-      ? 'done'
-      : 'idle'
+  const status: PanePreviewStatus = runState?.status || (running ? 'running' : 'idle')
+  const unread = runState?.unread === true
 
   if (latestMessage?.content) {
     const assistantModelName =
@@ -242,7 +265,9 @@ const buildPanePreview = (
         latestMessage.role === 'assistant'
           ? assistantModelName || strings.latestReply
           : strings.latestPrompt,
-      status
+      status,
+      unread,
+      ...(runState ? { runState } : {})
     }
   }
 
@@ -252,22 +277,10 @@ const buildPanePreview = (
       paneLabel
     ),
     subtitle: latestSession ? strings.conversationCreated : strings.emptyConversation,
-    status
+    status,
+    unread,
+    ...(runState ? { runState } : {})
   }
-}
-
-const loadPreviewMap = async (
-  panes: AgentPane[],
-  projectId: string,
-  strings: AgentWorkspaceStrings
-): Promise<Record<string, PanePreview>> => {
-  const entries = await Promise.all(
-    panes.map(async (pane, index) => {
-      return loadPanePreview(pane, index, projectId, strings)
-    })
-  )
-
-  return Object.fromEntries(entries) as Record<string, PanePreview>
 }
 
 const loadPanePreview = async (
@@ -278,18 +291,65 @@ const loadPanePreview = async (
 ): Promise<readonly [string, PanePreview]> => {
   const scope = buildAgentPaneScope(projectId, pane.id)
   const sessions = await loadAllSessions(scope)
+  const runState = readLatestPaneRunState(scope)
   return [
     pane.id,
-    buildPanePreview(pane.id, index, sessions, isPaneRunning(scope), strings)
+    buildPanePreview(pane.id, index, sessions, isPaneRunning(scope), strings, runState)
   ] as const
 }
 
-const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status = 'idle' }) => {
-  if (status === 'running') {
+const loadPanePreviewWithFallback = async (
+  pane: AgentPane,
+  index: number,
+  projectId: string,
+  strings: AgentWorkspaceStrings,
+  previousPreviews: Record<string, PanePreview>
+): Promise<readonly [string, PanePreview]> => {
+  try {
+    return await loadPanePreview(pane, index, projectId, strings)
+  } catch (error) {
+    console.error('[AgentWorkspace] Failed to load pane preview', pane.id, error)
+    return [
+      pane.id,
+      previousPreviews[pane.id] ||
+        buildPanePreview(
+          pane.id,
+          index,
+          [],
+          isPaneRunning(buildAgentPaneScope(projectId, pane.id)),
+          strings
+        )
+    ] as const
+  }
+}
+
+const loadPreviewMap = async (
+  panes: AgentPane[],
+  projectId: string,
+  strings: AgentWorkspaceStrings,
+  previousPreviews: Record<string, PanePreview>
+): Promise<Record<string, PanePreview>> => {
+  const entries = await Promise.all(
+    panes.map((pane, index) =>
+      loadPanePreviewWithFallback(pane, index, projectId, strings, previousPreviews)
+    )
+  )
+
+  return Object.fromEntries(entries) as Record<string, PanePreview>
+}
+
+const PaneStatusIndicator: React.FC<{
+  status?: PanePreviewStatus
+  unread?: boolean
+}> = ({ status = 'idle', unread = false }) => {
+  const runStatus = status
+
+  if (runStatus === 'queued' || runStatus === 'running') {
     return (
       <CircularProgress
         data-testid="agent-thread-status"
-        data-status="running"
+        data-status={runStatus === 'running' ? 'running' : 'queued'}
+        data-run-status={runStatus}
         size={12}
         thickness={6}
         sx={{ color: 'primary.main', flexShrink: 0 }}
@@ -297,11 +357,29 @@ const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status 
     )
   }
 
-  if (status === 'done') {
+  if (runStatus === 'waiting-tool') {
+    return (
+      <Box
+        data-testid="agent-thread-status"
+        data-status="waiting-tool"
+        data-run-status={runStatus}
+        sx={(theme) => ({
+          width: 9,
+          height: 9,
+          borderRadius: '50%',
+          flexShrink: 0,
+          backgroundColor: theme.palette.warning.main
+        })}
+      />
+    )
+  }
+
+  if (unread) {
     return (
       <Box
         data-testid="agent-thread-status"
         data-status="unread"
+        data-run-status={runStatus}
         sx={(theme) => ({
           width: 9,
           height: 9,
@@ -316,10 +394,47 @@ const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status 
     )
   }
 
+  if (runStatus === 'completed') {
+    return (
+      <Box
+        data-testid="agent-thread-status"
+        data-status="read"
+        data-run-status={runStatus}
+        sx={(theme) => ({
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          flexShrink: 0,
+          backgroundColor:
+            theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.22)'
+        })}
+      />
+    )
+  }
+
+  if (runStatus === 'failed' || runStatus === 'cancelled' || runStatus === 'interrupted') {
+    return (
+      <Box
+        data-testid="agent-thread-status"
+        data-status={runStatus}
+        data-run-status={runStatus}
+        sx={(theme) => ({
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          flexShrink: 0,
+          backgroundColor:
+            runStatus === 'failed' ? theme.palette.error.main : theme.palette.warning.main
+        })}
+      />
+    )
+  }
+
   return (
     <Box
       data-testid="agent-thread-status"
       data-status="read"
+      data-run-status={runStatus}
       sx={(theme) => ({
         width: 8,
         height: 8,
@@ -427,9 +542,7 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     })}
   >
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, flex: 1 }}>
-      <PaneStatusIndicator
-        status={preview?.status === 'done' && !unread ? 'idle' : preview?.status}
-      />
+      <PaneStatusIndicator status={preview?.status} unread={unread || Boolean(preview?.unread)} />
 
       <Box sx={{ minWidth: 0, flex: 1 }}>
         <Typography
@@ -526,15 +639,25 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
     () => readLocalStorage(collapsedStorageKey) === '1'
   )
   const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>({})
+  const panePreviewsRef = useRef<Record<string, PanePreview>>({})
   const [unreadPaneIds, setUnreadPaneIds] = useState<Set<string>>(new Set())
-  const clearPaneUnread = useCallback((paneId: string) => {
-    setUnreadPaneIds((prev) => {
-      if (!prev.has(paneId)) return prev
-      const next = new Set(prev)
-      next.delete(paneId)
-      return next
-    })
-  }, [])
+  const clearPaneUnread = useCallback(
+    (paneId: string) => {
+      setUnreadPaneIds((prev) => {
+        if (!prev.has(paneId)) return prev
+        const next = new Set(prev)
+        next.delete(paneId)
+        return next
+      })
+
+      const scope = buildAgentPaneScope(projectId, paneId)
+      const runState = readLatestPaneRunState(scope)
+      if (runState?.unread && runState.runId !== null) {
+        markScopedChatRunRead(scope, runState.sessionId, runState.runId)
+      }
+    },
+    [projectId]
+  )
   const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null)
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null)
   const [tracePanelOpen, setTracePanelOpen] = useState(false)
@@ -563,13 +686,25 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
       if (Object.keys(panePreviews).length === 0) return
       previewsInitializedRef.current = true
       for (const [paneId, preview] of Object.entries(panePreviews)) {
-        if (preview.status === 'running') panesObservedRunningRef.current.add(paneId)
+        if (
+          preview.status === 'queued' ||
+          preview.status === 'running' ||
+          preview.status === 'waiting-tool'
+        ) {
+          panesObservedRunningRef.current.add(paneId)
+        }
       }
       return
     }
 
     for (const [paneId, preview] of Object.entries(panePreviews)) {
-      if (preview.status === 'running') panesObservedRunningRef.current.add(paneId)
+      if (
+        preview.status === 'queued' ||
+        preview.status === 'running' ||
+        preview.status === 'waiting-tool'
+      ) {
+        panesObservedRunningRef.current.add(paneId)
+      }
     }
   }, [panePreviews])
 
@@ -583,19 +718,27 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
     const paneIdByScope = new Map(
       openPanes.map((pane) => [buildAgentPaneScope(projectId, pane.id), pane.id])
     )
-    const handleLoadingState = (event: Event) => {
-      const detail = (event as CustomEvent<Partial<ChatSessionLoadingStateEvent>>).detail
-      const paneId = detail?.scope ? paneIdByScope.get(detail.scope) : undefined
-      if (!paneId) return
+    const updatePaneFromRunState = (detail: ChatSessionRunStateEvent) => {
+      const paneId = paneIdByScope.get(detail.scope)
+      if (!paneId || !detail.sessionId || detail.runId === null) return
+
+      const eventState = readScopedChatRun(detail.scope, detail.sessionId)
+      if (eventState.runId !== detail.runId) return
+      const next = readLatestPaneRunState(detail.scope)
+      if (!next) return
 
       setPanePreviews((prev) => {
         const current = prev[paneId]
-        const status: PanePreviewStatus = detail.running
-          ? 'running'
-          : detail.completed === true
-            ? 'done'
-            : 'idle'
-        if (current?.status === status) return prev
+        const nextStatus = next.status
+        const nextUnread = next.unread
+        if (
+          current?.status === nextStatus &&
+          current.unread === nextUnread &&
+          current.runState?.runId === next.runId &&
+          current.runState?.sessionId === next.sessionId
+        ) {
+          return prev
+        }
 
         const paneIndex = openPanes.findIndex((pane) => pane.id === paneId)
         return {
@@ -603,7 +746,67 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
           [paneId]: {
             title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
             subtitle: current?.subtitle || workspaceStrings.emptyConversation,
-            status
+            status: nextStatus,
+            unread: nextUnread,
+            runState: next
+          }
+        }
+      })
+      if (next.status === 'queued' || next.status === 'running' || next.status === 'waiting-tool') {
+        panesObservedRunningRef.current.add(paneId)
+      } else {
+        panesObservedRunningRef.current.delete(paneId)
+      }
+      setUnreadPaneIds((prev) => {
+        const shouldHaveUnread = next.unread
+        if (prev.has(paneId) === shouldHaveUnread) return prev
+        const updated = new Set(prev)
+        if (shouldHaveUnread) updated.add(paneId)
+        else updated.delete(paneId)
+        return updated
+      })
+    }
+
+    const handleRunState = (event: Event) => {
+      const detail = (event as CustomEvent<ChatSessionRunStateEvent>).detail
+      if (!detail || typeof detail.scope !== 'string' || typeof detail.sessionId !== 'string')
+        return
+      updatePaneFromRunState(detail)
+    }
+
+    window.addEventListener(CHAT_SESSION_RUN_STATE_EVENT, handleRunState)
+    return () => window.removeEventListener(CHAT_SESSION_RUN_STATE_EVENT, handleRunState)
+  }, [openPanes, projectId, workspaceStrings])
+
+  useEffect(() => {
+    const paneIdByScope = new Map(
+      openPanes.map((pane) => [buildAgentPaneScope(projectId, pane.id), pane.id])
+    )
+    const handleLoadingState = (event: Event) => {
+      const detail = (event as CustomEvent<Partial<ChatSessionLoadingStateEvent>>).detail
+      const scope = detail?.scope
+      const paneId = scope ? paneIdByScope.get(scope) : undefined
+      if (!scope || !paneId) return
+      if (readScopedChatRuns(scope).some((state) => state.runId !== null)) return
+
+      setPanePreviews((prev) => {
+        const current = prev[paneId]
+        const status: PanePreviewStatus = detail.running
+          ? 'running'
+          : detail.completed === true
+            ? 'completed'
+            : 'idle'
+        if (current?.status === status && current.unread === (detail.completed === true))
+          return prev
+
+        const paneIndex = openPanes.findIndex((pane) => pane.id === paneId)
+        return {
+          ...prev,
+          [paneId]: {
+            title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
+            subtitle: current?.subtitle || workspaceStrings.emptyConversation,
+            status,
+            unread: detail.completed === true
           }
         }
       })
@@ -619,8 +822,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
         return
       }
 
-      if (!panesObservedRunningRef.current.delete(paneId)) return
-      if (detail.completed !== true) return
+      const wasRunning = panesObservedRunningRef.current.delete(paneId)
+      if (!wasRunning || detail.completed !== true) return
       setUnreadPaneIds((prev) => new Set(prev).add(paneId))
     }
 
@@ -749,25 +952,36 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
           const targetPane = paneEntriesByScope.get(targetScope)
           if (!targetPane) return
 
-          const [paneId, preview] = await loadPanePreview(
+          const [paneId, preview] = await loadPanePreviewWithFallback(
             targetPane.pane,
             targetPane.index,
             projectId,
-            workspaceStrings
+            workspaceStrings,
+            panePreviewsRef.current
           )
           if (cancelled || sequence !== previewRefreshSequenceRef.current) return
 
           setPanePreviews((prev) => {
             const nextPreviews = { ...prev, [paneId]: preview }
+            panePreviewsRef.current = nextPreviews
             return arePanePreviewsEqual(prev, nextPreviews) ? prev : nextPreviews
           })
           return
         }
 
-        const nextPreviews = await loadPreviewMap(openPanes, projectId, workspaceStrings)
+        const nextPreviews = await loadPreviewMap(
+          openPanes,
+          projectId,
+          workspaceStrings,
+          panePreviewsRef.current
+        )
         if (cancelled || sequence !== previewRefreshSequenceRef.current) return
 
-        setPanePreviews((prev) => (arePanePreviewsEqual(prev, nextPreviews) ? prev : nextPreviews))
+        setPanePreviews((prev) => {
+          const next = arePanePreviewsEqual(prev, nextPreviews) ? prev : nextPreviews
+          panePreviewsRef.current = next
+          return next
+        })
       } catch (error) {
         console.error('[AgentWorkspace] Failed to refresh pane previews', error)
       }

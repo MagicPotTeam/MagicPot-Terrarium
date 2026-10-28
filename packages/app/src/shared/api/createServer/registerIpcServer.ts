@@ -1,5 +1,6 @@
 import { ipcMain, MessagePortMain } from 'electron'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
+import type { AbortReceiver, AbortSender } from '@shared/api/apiUtils/abortHandler'
 import { ServerStreaming, ServerStreamingTransport } from '@shared/api/apiUtils/streaming'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import {
@@ -11,25 +12,67 @@ import {
 } from '@shared/api/apiUtils/serviceValidation'
 import { ApiDefSheet } from '../apiUtils/serviceDefSheet'
 
-function portToStreamingResp<T>(port: MessagePortMain): ServerStreaming<T> {
+function portToStreamingResp<T>(
+  port: MessagePortMain,
+  abortReceiver: AbortReceiver,
+  abortSender: AbortSender
+): { response: ServerStreaming<T>; close: () => void } {
+  let closed = false
   return {
-    onData: (data) => {
-      port.postMessage({ data })
+    response: {
+      onData: (data) => {
+        // A handler may observe cancellation only between awaited operations and
+        // emit one more event. Do not write to a renderer-owned port after the
+        // stream has been aborted/disconnected.
+        if (closed || abortReceiver.isAborted()) return
+        try {
+          port.postMessage({ data })
+        } catch {
+          // A disconnected renderer can race the MessagePort `close` event.
+          // Convert that transport failure into cancellation instead of
+          // throwing through an unrelated EventCenter/config save callback.
+          closed = true
+          try {
+            abortSender.abort()
+          } catch {
+            // Abort callbacks are best-effort during transport teardown.
+          }
+        }
+      }
+    },
+    close: () => {
+      closed = true
     }
   }
 }
 
-function cleanupPort(port: MessagePortMain, handleResult: Promise<void>): Promise<void> {
+function cleanupPort(
+  port: MessagePortMain,
+  handleResult: Promise<void>,
+  options: { beforeClose?: () => void; isAborted?: () => boolean } = {}
+): Promise<void> {
   return handleResult
     .catch((error) => {
+      // Once the renderer has disconnected, cancellation is the authoritative
+      // terminal state. There is no consumer for a serialized error and
+      // logging it only creates duplicate noise during normal navigation/close.
+      if (options.isAborted?.()) return
       const serializedError = serializeServiceError(error)
       console.error('cleanupPort error', serializedError)
       const transport: ServerStreamingTransport<void> = {
         error: serializedError
       }
-      port.postMessage(transport)
+      try {
+        // The renderer may have already disconnected the transferred port. In
+        // that case there is nowhere to deliver the terminal error; do not let
+        // a second postMessage failure turn cleanup into an unhandled reject.
+        port.postMessage(transport)
+      } catch (postError) {
+        console.error('cleanupPort transport error', serializeServiceError(postError))
+      }
     })
     .finally(() => {
+      options.beforeClose?.()
       port.close()
     })
 }
@@ -86,18 +129,59 @@ function registerServerStreaming<REQ, RESP>(
 ) {
   ipcMain.on(name, (event, req: REQ) => {
     const port = event.ports[0]
-    const resp = portToStreamingResp<RESP>(port)
+    if (!port) {
+      // A malformed renderer message must not crash the main process before a
+      // service handler has a chance to run. There is no transport available
+      // for returning a structured error in this case.
+      console.error(`${name}: missing MessagePort for server-streaming request`)
+      return
+    }
     const [abortSender, abortReceiver] = newAbortHandler()
+    const { response: resp, close: closeResponse } = portToStreamingResp<RESP>(
+      port,
+      abortReceiver,
+      abortSender
+    )
     resp.abortReceiver = abortReceiver
-    port.on('message', () => {
-      abortSender.abort()
-    })
-    port.on('close', () => {
-      abortSender.abort()
-    })
+    const abortStream = (): void => {
+      if (!abortReceiver.isAborted()) abortSender.abort()
+    }
+    const abortOnNavigation = (
+      details: { isMainFrame?: boolean; isSameDocument?: boolean },
+      _url?: string,
+      isInPlace?: boolean,
+      isMainFrame?: boolean
+    ): void => {
+      const mainFrame = details.isMainFrame ?? isMainFrame
+      const sameDocument = details.isSameDocument ?? isInPlace
+      if (mainFrame === true && sameDocument === false) abortStream()
+    }
+    const sender = event.sender
+    // A renderer reload can orphan its port before MessagePortMain reports close.
+    sender?.on?.('did-start-navigation', abortOnNavigation)
+    sender?.on?.('render-process-gone', abortStream)
+    sender?.on?.('destroyed', abortStream)
+    port.on('message', abortStream)
+    port.on('close', abortStream)
     // MessagePortMain 需要 start 才能正常接收消息
     port.start()
-    return cleanupPort(port, handler(req, resp, createInvocationContext(name, event)))
+    let handleResult: Promise<void>
+    try {
+      handleResult = Promise.resolve(handler(req, resp, createInvocationContext(name, event)))
+    } catch (error) {
+      handleResult = Promise.reject(error)
+    }
+    return cleanupPort(port, handleResult, {
+      isAborted: () => abortReceiver.isAborted(),
+      beforeClose: () => {
+        closeResponse()
+        port.removeListener?.('message', abortStream)
+        port.removeListener?.('close', abortStream)
+        sender?.removeListener?.('did-start-navigation', abortOnNavigation)
+        sender?.removeListener?.('render-process-gone', abortStream)
+        sender?.removeListener?.('destroyed', abortStream)
+      }
+    })
   })
 }
 

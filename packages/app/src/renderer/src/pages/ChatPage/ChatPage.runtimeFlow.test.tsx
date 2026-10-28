@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type {
@@ -45,13 +45,14 @@ const hoisted = vi.hoisted(() => ({
     ] as Array<{
       id: string
       model_name: string
-      model_use?: 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr'
+      model_use?: 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr' | 'image'
       is_vision_model?: boolean
       is_ocr_model?: boolean
       auth_mode?: string
       call_type?: string
       provider?: string
       deployment?: string
+      api_mode?: 'auto' | 'responses' | 'chat-completions' | 'images'
       context_window_tokens?: number
       context_budget_tokens?: number
       supports_session_continuation?: boolean
@@ -73,6 +74,14 @@ const hoisted = vi.hoisted(() => ({
   resolveAttachmentBatchCapabilityMock: vi.fn(),
   supportsStreamingChatCompletionMock: vi.fn(),
   selectFileMock: vi.fn(),
+  agentLocalFilesService: {
+    setScope: vi.fn(),
+    choose: vi.fn(),
+    read: vi.fn(),
+    list: vi.fn(),
+    revoke: vi.fn(),
+    cancel: vi.fn()
+  },
   fileToBlobUrlMock: vi.fn(() => 'blob:chat-draft'),
   fileToDataUrlMock: vi.fn(async () => 'data:application/octet-stream;base64,QUJD'),
   importManagedFileMock: vi.fn(),
@@ -174,6 +183,7 @@ vi.mock('@renderer/hooks/useMessage', () => ({
 
 vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
+    svcAgentLocalFiles: hoisted.agentLocalFilesService,
     svcFs: {
       readTextFile: hoisted.readTextFileMock
     },
@@ -508,8 +518,17 @@ vi.mock('./components/ChatComposer', () => ({
     disableClearContext?: boolean
   }) {
     const [draftValue, setDraftValue] = React.useState(inputValue)
+    const lastInputSyncRef = React.useRef({ key: inputSyncKey, value: inputValue })
 
     React.useEffect(() => {
+      // Match the real composer's controlled synchronization. An initial effect
+      // with unchanged props must not overwrite a user edit queued before it.
+      if (
+        inputSyncKey === lastInputSyncRef.current.key &&
+        inputValue === lastInputSyncRef.current.value
+      )
+        return
+      lastInputSyncRef.current = { key: inputSyncKey, value: inputValue }
       setDraftValue(inputValue)
     }, [inputSyncKey, inputValue])
 
@@ -658,6 +677,16 @@ const renderWithProviders = (ui: React.ReactElement) =>
     </MemoryRouter>
   )
 
+const createExpiredContinuationError = (): Error & { status: number; body: string } => {
+  const error = new Error('410 expired session continuation') as Error & {
+    status: number
+    body: string
+  }
+  error.status = 410
+  error.body = JSON.stringify({ error: { code: 'session_expired' } })
+  return error
+}
+
 const renderChatPage = (
   storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean } = 'runtime-flow'
 ) => {
@@ -776,6 +805,12 @@ describe('ChatPage runtime workflow integration', () => {
       hoisted.storedSessions.value = cloneValue(sessions)
     })
     hoisted.readTextFileMock.mockReset()
+    Object.values(hoisted.agentLocalFilesService).forEach((method) => method.mockReset())
+    hoisted.agentLocalFilesService.setScope.mockResolvedValue(undefined)
+    hoisted.agentLocalFilesService.choose.mockResolvedValue(null)
+    hoisted.agentLocalFilesService.list.mockResolvedValue({ entries: [], truncated: false })
+    hoisted.agentLocalFilesService.revoke.mockResolvedValue(undefined)
+    hoisted.agentLocalFilesService.cancel.mockResolvedValue(undefined)
     hoisted.saveImageToDirMock.mockReset()
     hoisted.saveImageToDirMock.mockResolvedValue({
       savedPath: 'C:/MagicPot/AutoSave/Agent/chat_upload.png'
@@ -859,6 +894,215 @@ describe('ChatPage runtime workflow integration', () => {
       configurable: true,
       value: vi.fn()
     })
+  })
+
+  describe('canvas file paths as plain text', () => {
+    const route = {
+      channel: 'canvas' as const,
+      scopeType: 'thread' as const,
+      scopeId: 'local-file-project',
+      threadId: 'local-file-pane'
+    }
+
+    function expectNoLocalFileReadActivity() {
+      expect(screen.queryByRole('region', { name: 'Text preview' })).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'Use this text in the conversation' })
+      ).not.toBeInTheDocument()
+      expect(hoisted.agentLocalFilesService.choose).not.toHaveBeenCalled()
+      expect(hoisted.agentLocalFilesService.read).not.toHaveBeenCalled()
+      expect(hoisted.agentLocalFilesService.list).not.toHaveBeenCalled()
+      expect(hoisted.agentLocalFilesService.cancel).not.toHaveBeenCalled()
+      expect(hoisted.readTextFileMock).not.toHaveBeenCalled()
+      expect(hoisted.selectFileMock).not.toHaveBeenCalled()
+      expect(hoisted.importManagedFileMock).not.toHaveBeenCalled()
+      expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
+      expect(hoisted.importManagedUrlMock).not.toHaveBeenCalled()
+    }
+
+    it.each([
+      { name: 'Windows backslash path', value: String.raw`C:\Users\tester\notes\launch.txt` },
+      { name: 'relative path', value: './notes/launch.txt' },
+      { name: 'path with spaces', value: String.raw`C:\Project Notes\release brief.pdf` }
+    ])('sends $name unchanged without a chooser or attachment', async ({ value }) => {
+      const { unmount } = renderWithProviders(
+        <ChatPage compact storageScope="runtime-flow" route={route} />
+      )
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const sessionId = readCurrentSessionState()!.id
+      const input = screen.getByTestId('chat-composer-input-mock')
+      fireEvent.change(input, { target: { value } })
+      await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(value))
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expectNoLocalFileReadActivity()
+
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      const request = hoisted.requestChatCompletionMock.mock.calls[0][0] as {
+        messages: ChatMessage[]
+      }
+      const sent = request.messages.filter((message) => message.role === 'user').at(-1)!
+      expect(sent.content).toBe(value)
+      expect(sent.attachments ?? []).toEqual([])
+      await waitFor(() => {
+        const saved = hoisted.storedSessions.value.find((session) => session.id === sessionId)
+        expect(saved?.messages.find((message) => message.role === 'user')?.content).toBe(value)
+        expect(saved?.messages.at(-1)?.content).toBe('default reply')
+      })
+      expectNoLocalFileReadActivity()
+      unmount()
+      expectNoLocalFileReadActivity()
+    })
+
+    it('isolates and restores path drafts across sessions without choosing or reading files', async () => {
+      const sessions: ChatSession[] = [
+        { id: 'local-file-old', title: 'Old session', messages: [], createdAt: 100 },
+        { id: 'local-file-new', title: 'New session', messages: [], createdAt: 200 }
+      ]
+      hoisted.storedSessions.value = sessions
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        sessions[0].id
+      )
+      const { unmount } = renderWithProviders(
+        <ChatPage compact storageScope="runtime-flow" route={route} />
+      )
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(sessions[0].id))
+      const firstPath = String.raw`C:\Project Notes\first.txt`
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: firstPath }
+      })
+      expectNoLocalFileReadActivity()
+
+      await dispatchSwitchSession(sessions[1].id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(sessions[1].id))
+      await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(''))
+      const secondPath = './notes/second draft.txt'
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: secondPath }
+      })
+      expectNoLocalFileReadActivity()
+
+      await dispatchSwitchSession(sessions[0].id)
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(firstPath)
+      )
+      await dispatchSwitchSession(sessions[1].id)
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(secondPath)
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expectNoLocalFileReadActivity()
+      unmount()
+      expectNoLocalFileReadActivity()
+    })
+
+    it('keeps an unsent path draft without opening a chooser or reading the file', async () => {
+      const { unmount } = renderWithProviders(
+        <ChatPage compact storageScope="runtime-flow" route={route} />
+      )
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const value = String.raw`C:\Users\tester\unsent notes.txt`
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value } })
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(value)
+      expectNoLocalFileReadActivity()
+      unmount()
+      expectNoLocalFileReadActivity()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    })
+  })
+
+  it('keeps a user-entered local file path as plain message text without choosing or reading a local file', async () => {
+    const route = {
+      channel: 'canvas' as const,
+      scopeType: 'thread' as const,
+      scopeId: 'path-project',
+      threadId: 'path-pane'
+    }
+    const filePath = 'C:/Users/tester/notes/launch.txt'
+    renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+    expect(screen.queryByRole('region', { name: 'Local files' })).not.toBeInTheDocument()
+    expect(hoisted.agentLocalFilesService.setScope).not.toHaveBeenCalled()
+    expect(hoisted.agentLocalFilesService.choose).not.toHaveBeenCalled()
+    expect(hoisted.agentLocalFilesService.read).not.toHaveBeenCalled()
+
+    const input = screen.getByTestId('chat-composer-input-mock')
+    fireEvent.change(input, { target: { value: filePath } })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const request = hoisted.requestChatCompletionMock.mock.calls[0][0] as {
+      messages: ChatMessage[]
+    }
+    expect(request.messages.filter((message) => message.role === 'user').at(-1)?.content).toBe(
+      filePath
+    )
+    expect(hoisted.agentLocalFilesService.choose).not.toHaveBeenCalled()
+    expect(hoisted.agentLocalFilesService.read).not.toHaveBeenCalled()
+  })
+
+  describe('canvas chat uses messages instead of a persistent file form', () => {
+    it.each([true, false])(
+      'has no local-file form before, during, or after a path request (compact=%s)',
+      async (compact) => {
+        const route = {
+          channel: 'canvas' as const,
+          scopeType: 'thread' as const,
+          scopeId: 'message-path-project',
+          threadId: 'message-path-pane'
+        }
+        let finish!: (value: { content: string }) => void
+        hoisted.requestChatCompletionMock.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve
+            })
+        )
+        renderWithProviders(
+          <ChatPage compact={compact} storageScope="runtime-flow" route={route} />
+        )
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+        const assertNoForm = () => {
+          expect(screen.queryByRole('region', { name: 'Local files' })).not.toBeInTheDocument()
+          expect(screen.queryByRole('region', { name: 'Text preview' })).not.toBeInTheDocument()
+          expect(screen.queryByRole('button', { name: 'Choose file' })).not.toBeInTheDocument()
+          expect(screen.queryByRole('button', { name: 'Choose directory' })).not.toBeInTheDocument()
+          expect(
+            screen.queryByRole('button', { name: 'Use this text in the conversation' })
+          ).not.toBeInTheDocument()
+          expect(hoisted.agentLocalFilesService.setScope).not.toHaveBeenCalled()
+          expect(hoisted.agentLocalFilesService.choose).not.toHaveBeenCalled()
+          expect(hoisted.agentLocalFilesService.read).not.toHaveBeenCalled()
+          expect(screen.getByTestId('chat-composer-input-mock')).toBeInTheDocument()
+          expect(screen.getByTestId('chat-composer-upload-mock')).toBeInTheDocument()
+        }
+        assertNoForm()
+        const text = String.raw`请读取 "D:\项目资料\设计 文档.txt" 并总结。`
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: text }
+        })
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+        expect(hoisted.requestChatCompletionMock.mock.calls[0][0].messages.at(-1).content).toBe(
+          text
+        )
+        assertNoForm()
+        await act(async () => finish({ content: 'request handled by agent tools' }))
+        await waitFor(() =>
+          expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe(
+            'request handled by agent tools'
+          )
+        )
+        assertNoForm()
+      }
+    )
   })
 
   it('restores the last selected model when bootstrapping the initial session', async () => {
@@ -1368,6 +1612,8 @@ describe('ChatPage runtime workflow integration', () => {
       title: 'Supported continuation image replay',
       profileId: 'continuation-model',
       sessionUrl: 'session-supported',
+      sessionProfileId: 'continuation-model',
+      sessionRouteFingerprint: 'local-continuation-model',
       messages: [
         {
           role: 'user',
@@ -1581,6 +1827,8 @@ describe('ChatPage runtime workflow integration', () => {
       title: 'Expired continuation',
       profileId: 'continuation-model',
       sessionUrl: 'expired-session',
+      sessionProfileId: 'continuation-model',
+      sessionRouteFingerprint: 'local-continuation-model',
       messages: [
         {
           role: 'user',
@@ -1595,7 +1843,7 @@ describe('ChatPage runtime workflow integration', () => {
       session.id
     )
     hoisted.requestChatCompletionMock
-      .mockRejectedValueOnce(new Error('410 expired session continuation'))
+      .mockRejectedValueOnce(createExpiredContinuationError())
       .mockResolvedValueOnce({ content: 'recovered' })
 
     renderChatPage()
@@ -1621,6 +1869,84 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
+  it('persists completed tool evidence before the pending model answer or cancellation', async () => {
+    const checkpoint: NonNullable<ChatMessage['toolHistory']> = [
+      {
+        runId: 'owned-checkpoint-run',
+        toolCallId: 'owned-checkpoint-call',
+        toolName: 'files.write',
+        args: { path: 'owned.txt', content: 'owned output' },
+        status: 'completed',
+        content: '{"path":"owned.txt","created":true}'
+      }
+    ]
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let pendingInput: { onEvent: (event: unknown) => void; signal: AbortSignal } | undefined
+    let settle!: (value: unknown) => void
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pendingInput = input
+      return new Promise((resolve) => {
+        settle = resolve
+      })
+    })
+    const view = renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const sessionId = readCurrentSessionState()!.id
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'write a file' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(pendingInput).toBeDefined())
+    try {
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'owned-checkpoint-run',
+            toolCallId: 'owned-checkpoint-call',
+            toolName: 'files.write',
+            status: 'completed'
+          },
+          toolHistory: checkpoint
+        })
+      })
+      await waitFor(() => {
+        const saved = hoisted.storedSessions.value.find((session) => session.id === sessionId)
+        expect(saved?.messages.at(-1)?.toolHistory).toEqual(checkpoint)
+        expect(saved?.messages.at(-1)?.content).toBe('')
+      })
+      // A late or foreign run snapshot cannot replace this run's completed evidence.
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'owned-checkpoint-run',
+            toolCallId: 'foreign-call',
+            toolName: 'files.write',
+            status: 'completed'
+          },
+          toolHistory: [
+            {
+              ...checkpoint[0],
+              runId: 'foreign-run',
+              toolCallId: 'foreign-call',
+              content: 'FOREIGN_NOT_SAVED'
+            }
+          ]
+        })
+      })
+      expect(JSON.stringify(hoisted.storedSessions.value)).not.toContain('FOREIGN_NOT_SAVED')
+    } finally {
+      await act(async () => {
+        settle({
+          result: { content: 'finished', metadata: { toolHistory: checkpoint } },
+          response: 'finished'
+        })
+      })
+      view.unmount()
+    }
+  })
+
   it('falls back from an expired streaming continuation before any output is emitted', async () => {
     hoisted.availableProfiles.value = [
       {
@@ -1644,10 +1970,12 @@ describe('ChatPage runtime workflow integration', () => {
       session.id
     )
     hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
-    hoisted.requestChatCompletionStreamMock.mockRejectedValueOnce(
-      new Error('410 expired session continuation')
-    )
-    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: 'stream recovered' })
+    hoisted.requestChatCompletionStreamMock.mockRejectedValueOnce(createExpiredContinuationError())
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce(async (input) => {
+      input.onEvent({ type: 'text-delta', delta: 'stream recovered' })
+      input.onEvent({ type: 'done' })
+      return { result: { content: 'stream recovered' }, response: 'stream recovered' }
+    })
 
     renderChatPage()
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
@@ -1656,10 +1984,11 @@ describe('ChatPage runtime workflow integration', () => {
     })
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
 
-    await waitFor(() => expect(hoisted.requestChatCompletionStreamMock).toHaveBeenCalledTimes(1))
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-    expect(hoisted.requestChatCompletionMock.mock.calls[0]?.[0].sessionUrl).toBeUndefined()
-    expect(hoisted.requestChatCompletionMock.mock.calls[0]?.[0].imageHistoryPolicy).toBe('all')
+    await waitFor(() => expect(hoisted.requestChatCompletionStreamMock).toHaveBeenCalledTimes(2))
+    expect(hoisted.requestChatCompletionStreamMock.mock.calls[1]?.[0].sessionUrl).toBeUndefined()
+    expect(hoisted.requestChatCompletionStreamMock.mock.calls[1]?.[0].imageHistoryPolicy).toBe(
+      'all'
+    )
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
@@ -1677,6 +2006,8 @@ describe('ChatPage runtime workflow integration', () => {
       title: 'Generic continuation failure',
       profileId: 'continuation-model',
       sessionUrl: 'usable-session',
+      sessionProfileId: 'continuation-model',
+      sessionRouteFingerprint: 'local-continuation-model',
       messages: []
     }
     hoisted.storedSessions.value = [session]
@@ -1712,6 +2043,7 @@ describe('ChatPage runtime workflow integration', () => {
       profileId: 'continuation-model',
       sessionUrl: 'expired-session',
       sessionProfileId: 'continuation-model',
+      sessionRouteFingerprint: 'local-continuation-model',
       messages: []
     }
     hoisted.storedSessions.value = [session]
@@ -1720,7 +2052,7 @@ describe('ChatPage runtime workflow integration', () => {
       session.id
     )
     hoisted.requestChatCompletionMock
-      .mockRejectedValueOnce(new Error('410 expired session continuation'))
+      .mockRejectedValueOnce(createExpiredContinuationError())
       .mockRejectedValueOnce(new Error('503 recovery unavailable'))
 
     renderChatPage()
@@ -1734,7 +2066,7 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
-  it('blocks a reconstructed request before dispatch when image history exceeds the provider limit', async () => {
+  it('dispatches an 11-image historical request without a local image-count guard', async () => {
     const session: ChatSession = {
       id: 'too-many-history-images',
       title: 'Too many history images',
@@ -1758,12 +2090,15 @@ describe('ChatPage runtime workflow integration', () => {
     })
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
 
-    await waitFor(() => {
-      expect(readCurrentSessionState()?.messages.at(-1)?.content).toContain(
-        'exceeding the supported limit of 10'
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const request = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as {
+      messages?: ChatMessage[]
+    }
+    expect(
+      request.messages?.flatMap((message) =>
+        (message.attachments || []).filter((attachment) => attachment.type === 'image')
       )
-    })
-    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    ).toHaveLength(11)
   })
 
   it('replays prior successful attachment chunks when no continuation is available', async () => {
@@ -1863,7 +2198,7 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
-  it('persists duplicate blob image URLs once and uses durable URLs for history and batched requests', async () => {
+  it('persists duplicate blob image URLs once and uses durable URLs for history and one request', async () => {
     const fetchMock = vi.fn(async () => ({
       blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
     }))
@@ -1914,7 +2249,7 @@ describe('ChatPage runtime workflow integration', () => {
       )
     })
 
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledWith('blob:duplicate-user-upload')
@@ -2058,6 +2393,69 @@ describe('ChatPage runtime workflow integration', () => {
     expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context compressed.')
   })
 
+  it('preserves assistant images through manual compaction and the next request', async () => {
+    const assistantImage = createImageAttachment('assistant-generated.png')
+    const session: ChatSession = {
+      id: 'manual-assistant-image-session',
+      title: 'Manual assistant image session',
+      profileId: 'base-model',
+      messages: Array.from({ length: 24 }, (_, index) => ({
+        role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+        content: `history message ${index + 1}`,
+        ...(index === 1 ? { attachments: [assistantImage] } : {})
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    fireEvent.click(screen.getByTestId('chat-composer-compress-context-mock'))
+
+    await waitFor(() => {
+      const compression = readCurrentSessionState()?.contextCompression
+      expect(compression?.manual).toBe(true)
+      expect(compression?.replayImageMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: 'assistant',
+            attachments: [expect.objectContaining({ url: assistantImage.url })]
+          })
+        ])
+      )
+    })
+    await waitFor(() =>
+      expect(hoisted.storedSessions.value[0]?.contextCompression?.replayImageMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: 'assistant',
+            attachments: [expect.objectContaining({ url: assistantImage.url })]
+          })
+        ])
+      )
+    )
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'edit the generated image' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    const requestMessages = hoisted.requestChatCompletionMock.mock.calls.at(-1)?.[0]
+      ?.messages as ChatMessage[]
+    expect(requestMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          attachments: [expect.objectContaining({ url: assistantImage.url })]
+        })
+      ])
+    )
+  })
   it('sends manual compressed context with the next request', async () => {
     const compressedSession: ChatSession = {
       id: 'compressed-session',
@@ -2268,6 +2666,72 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  it('does not trigger compact from aggregate usage when context usage stays below the threshold', async () => {
+    hoisted.availableProfiles.value = [
+      {
+        id: 'base-model',
+        model_name: 'GPT-4o',
+        model_use: 'chat' as const,
+        context_window_tokens: 44,
+        context_budget_tokens: 33
+      }
+    ]
+    const activityEvents: Array<Record<string, unknown>> = []
+    const handleActivity = (event: Event) => {
+      activityEvents.push((event as CustomEvent<Record<string, unknown>>).detail)
+    }
+    window.addEventListener('chat:activity', handleActivity)
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({
+      content: 'below-threshold response',
+      usage: { promptTokens: 33, completionTokens: 5, totalTokens: 38 },
+      contextUsage: { promptTokens: 20, completionTokens: 3, totalTokens: 23 }
+    })
+    const session: ChatSession = {
+      id: 'below-threshold-session',
+      title: 'Below threshold session',
+      profileId: 'base-model',
+      messages: [{ role: 'user', content: 'previous message' }]
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+
+    try {
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'stay below the context threshold' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('below-threshold response')
+      )
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(activityEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'send_progress',
+            promptTokens: 20,
+            totalTokens: 23,
+            triggerTokens: 33
+          })
+        ])
+      )
+      expect(activityEvents.some((event) => event.type === 'compact_start')).toBe(false)
+    } finally {
+      window.removeEventListener('chat:activity', handleActivity)
+    }
+  })
   it('aborts in-flight compact without writing a summary or showing an error toast', async () => {
     let observedSignal: AbortSignal | undefined
     hoisted.requestChatCompletionMock.mockReset()
@@ -2351,6 +2815,45 @@ describe('ChatPage runtime workflow integration', () => {
     expect(messages?.[messages.length - 1]).toEqual(
       expect.objectContaining({ role: 'user', content: 'send before debounce commit' })
     )
+    await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(''))
+  })
+
+  it('keeps a newer draft after an accepted normal send clears the old draft', async () => {
+    let finishRequest: ((value: { content: string }) => void) | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRequest = resolve
+        })
+    )
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const input = screen.getByTestId('chat-composer-input-mock')
+    fireEvent.change(input, { target: { value: 'accepted old draft' } })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    try {
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(input).toHaveValue(''))
+      fireEvent.change(input, { target: { value: 'new draft while the reply is pending' } })
+      await act(async () => finishRequest?.({ content: 'accepted old reply' }))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('accepted old reply')
+      )
+      expect(input).toHaveValue('new draft while the reply is pending')
+    } finally {
+      finishRequest?.({ content: 'accepted old reply' })
+    }
+  })
+
+  it('preserves an unsendable draft when local validation rejects a normal send', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const input = screen.getByTestId('chat-composer-input-mock')
+    fireEvent.change(input, { target: { value: '   ' } })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    expect(input).toHaveValue('   ')
   })
 
   it('clears stale persisted loading placeholders after restart', async () => {
@@ -2654,7 +3157,12 @@ describe('ChatPage runtime workflow integration', () => {
     renderWithProviders(
       <>
         <div data-testid="agent-a">
-          <ChatPage compact storageScope="runtime-flow-a" active={false} />
+          <ChatPage
+            compact
+            storageScope="runtime-flow-a"
+            active={false}
+            acceptExternalInput={false}
+          />
         </div>
         <div data-testid="agent-b">
           <ChatPage compact storageScope="runtime-flow-b" active />
@@ -2707,14 +3215,9 @@ describe('ChatPage runtime workflow integration', () => {
         onload: (() => void) | null = null
         onerror: (() => void) | null = null
 
-        readAsDataURL(blob: Blob) {
-          void blob.arrayBuffer().then((buffer) => {
-            const bytes = new Uint8Array(buffer)
-            let binary = ''
-            for (const byte of bytes) binary += String.fromCharCode(byte)
-            this.result = `data:${blob.type};base64,${btoa(binary)}`
-            this.onload?.()
-          })
+        readAsDataURL(_blob: Blob) {
+          this.result = 'data:image/png;base64,Y2FudmFz'
+          void Promise.resolve().then(() => this.onload?.())
         }
       }
     )
@@ -2756,6 +3259,443 @@ describe('ChatPage runtime workflow integration', () => {
       vi.stubGlobal('FileReader', originalFileReader)
       vi.stubGlobal('fetch', originalFetch)
     }
+  })
+
+  describe('asynchronous drop destination isolation', () => {
+    const originalFetch = globalThis.fetch
+    const originalFileReader = globalThis.FileReader
+    const originalImage = globalThis.Image
+    type EditingProps = {
+      onSetEditingIndex: (index: number | null) => void
+      onSetEditingContent: (content: string) => void
+      onRegisterEditingAttachmentReceiver: (
+        receiver: ((attachment: ChatAttachment) => void) | null
+      ) => void
+    }
+    const editingProps = () => hoisted.chatMessageListMock.mock.lastCall?.[0] as EditingProps
+    const dropRoot = () => {
+      const root = document.querySelector('[data-chat-page-root="runtime-flow"]')
+      if (!(root instanceof HTMLElement)) throw new Error('Chat drop target is not mounted')
+      return root
+    }
+
+    beforeEach(() => {
+      hoisted.storedSessions.value = ['drop-session-a', 'drop-session-b'].map((id) => ({
+        id,
+        title: id,
+        profileId: 'vision-model',
+        messages: [
+          { role: 'user', content: 'First editable message' },
+          { role: 'assistant', content: 'First reply' },
+          { role: 'user', content: 'Second editable message' }
+        ]
+      }))
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        'drop-session-a'
+      )
+    })
+
+    afterEach(() => {
+      vi.stubGlobal('fetch', originalFetch)
+      vi.stubGlobal('FileReader', originalFileReader)
+      vi.stubGlobal('Image', originalImage)
+    })
+
+    const startEditing = (receiver: (attachment: ChatAttachment) => void) => {
+      act(() => {
+        editingProps().onSetEditingIndex(0)
+        editingProps().onSetEditingContent('First editable message')
+        editingProps().onRegisterEditingAttachmentReceiver(receiver)
+      })
+    }
+
+    const imageFiles = () =>
+      ['first.png', 'second.png'].map((name) =>
+        createLocalFile(name, 'image/png', `C:\\magicpot\\${name}`)
+      )
+    const stubImageDimensions = () => {
+      vi.stubGlobal(
+        'Image',
+        class {
+          naturalWidth = 64
+          naturalHeight = 32
+          onload: (() => void) | null = null
+          set src(_value: string) {
+            queueMicrotask(() => this.onload?.())
+          }
+        }
+      )
+    }
+    const directoryTransfer = (files: File[]) => {
+      const entry = {
+        name: 'references',
+        isDirectory: true,
+        isFile: false,
+        createReader: () => {
+          let read = false
+          return {
+            readEntries: (callback: (entries: unknown[]) => void) => {
+              callback(
+                read
+                  ? []
+                  : files.map((file) => ({
+                      name: file.name,
+                      fullPath: `/references/${file.name}`,
+                      isDirectory: false,
+                      isFile: true,
+                      file: (receiveFile: (file: File) => void) => receiveFile(file)
+                    }))
+              )
+              read = true
+            }
+          }
+        }
+      }
+      return {
+        files: [],
+        items: [{ kind: 'file', webkitGetAsEntry: () => entry }],
+        types: ['Files'],
+        getData: () => ''
+      }
+    }
+
+    const beginBlobDrop = () => {
+      let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
+      const readAsDataURL = vi.fn()
+      vi.stubGlobal(
+        'FileReader',
+        class {
+          result: string | null = null
+          onload: (() => void) | null = null
+          onerror: (() => void) | null = null
+          readAsDataURL(blob: Blob) {
+            readAsDataURL(blob)
+            this.result = 'data:image/png;base64,Y2FudmFz'
+            queueMicrotask(() => this.onload?.())
+          }
+        }
+      )
+      const pendingFetch = new Promise<Pick<Response, 'ok' | 'blob'>>((resolve) => {
+        releaseFetch = resolve
+      })
+      const fetchMock = vi.fn(() => pendingFetch)
+      vi.stubGlobal('fetch', fetchMock)
+      const payload = JSON.stringify({
+        attachments: [{ type: 'image', url: 'blob:delayed-drop', fileName: 'delayed-drop.png' }],
+        textContent: 'text from delayed drop'
+      })
+      fireEvent.drop(dropRoot(), {
+        dataTransfer: {
+          files: [],
+          items: [],
+          types: ['application/x-qapp-image'],
+          getData: (type: string) => (type === 'application/x-qapp-image' ? payload : '')
+        }
+      })
+      expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop')
+      return async () => {
+        await act(async () => {
+          releaseFetch({
+            ok: true,
+            blob: async () => new Blob(['canvas'], { type: 'image/png' })
+          })
+        })
+        await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+      }
+    }
+
+    it('delivers an awaited internal image to the original edit while it remains open', async () => {
+      const receiveAttachment = vi.fn()
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(receiveAttachment)
+
+      const finishDrop = beginBlobDrop()
+      await finishDrop()
+
+      expect(receiveAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ fileName: 'delayed-drop.png' })
+      )
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it('accepts a current drop after StrictMode replays the mount lifecycle', async () => {
+      render(
+        <React.StrictMode>
+          <MemoryRouter>
+            <ThemeProvider theme={theme}>
+              <ChatPage compact storageScope="runtime-flow" />
+            </ThemeProvider>
+          </MemoryRouter>
+        </React.StrictMode>
+      )
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+
+      const finishDrop = beginBlobDrop()
+      await finishDrop()
+
+      expect(screen.getByTestId('chat-composer-attachment-names')).toHaveTextContent(
+        'delayed-drop.png'
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('text from delayed drop')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it.each(['cancel', 'another edit', 'edit round trip'])(
+      'discards the old internal drop after %s instead of retargeting it',
+      async (change) => {
+        const originalReceiver = vi.fn()
+        const nextReceiver = vi.fn()
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        startEditing(originalReceiver)
+        const finishDrop = beginBlobDrop()
+
+        act(() => {
+          editingProps().onSetEditingIndex(null)
+          editingProps().onSetEditingContent('')
+          editingProps().onRegisterEditingAttachmentReceiver(null)
+        })
+        if (change !== 'cancel') {
+          act(() => {
+            editingProps().onSetEditingIndex(change === 'another edit' ? 2 : 0)
+            editingProps().onRegisterEditingAttachmentReceiver(
+              change === 'another edit' ? nextReceiver : originalReceiver
+            )
+          })
+        }
+        await finishDrop()
+
+        expect(originalReceiver).not.toHaveBeenCalled()
+        expect(nextReceiver).not.toHaveBeenCalled()
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
+    it('discards a delayed send-to-agent attachment after its edit is cancelled', async () => {
+      const originalReceiver = vi.fn()
+      let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
+      const readAsDataURL = vi.fn()
+      vi.stubGlobal(
+        'FileReader',
+        class {
+          result: string | null = null
+          onload: (() => void) | null = null
+          onerror: (() => void) | null = null
+          readAsDataURL(blob: Blob) {
+            readAsDataURL(blob)
+            this.result = 'data:image/png;base64,Y2FudmFz'
+            queueMicrotask(() => this.onload?.())
+          }
+        }
+      )
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          () =>
+            new Promise<Pick<Response, 'ok' | 'blob'>>((resolve) => {
+              releaseFetch = resolve
+            })
+        )
+      )
+
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(originalReceiver)
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              targetScope: 'runtime-flow',
+              attachments: [
+                { type: 'image', url: 'blob:delayed-send', fileName: 'delayed-send.png' }
+              ]
+            }
+          })
+        )
+      })
+
+      act(() => {
+        editingProps().onSetEditingIndex(null)
+        editingProps().onRegisterEditingAttachmentReceiver(null)
+      })
+      await act(async () => {
+        releaseFetch({
+          ok: true,
+          blob: async () => new Blob(['canvas'], { type: 'image/png' })
+        })
+      })
+      await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+
+      expect(originalReceiver).not.toHaveBeenCalled()
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it.each(['switch', 'session round trip'])(
+      'discards the old internal drop after a %s even when the session id returns',
+      async (change) => {
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        const finishDrop = beginBlobDrop()
+
+        await dispatchSwitchSession('drop-session-b')
+        if (change === 'session round trip') await dispatchSwitchSession('drop-session-a')
+        await finishDrop()
+
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
+    it('discards a delayed ordinary file import after switching sessions away and back', async () => {
+      let finishImport!: () => void
+      hoisted.importManagedFileMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishImport = () =>
+              resolve({
+                version: 1,
+                reference: {
+                  version: 1,
+                  kind: 'managed',
+                  relativePath: `originals/${'b'.repeat(64)}.glb`,
+                  sha256: 'b'.repeat(64),
+                  mimeType: 'model/gltf-binary',
+                  sizeBytes: 3,
+                  originalFileName: 'delayed.glb'
+                },
+                localMediaUrl: 'media://managed/delayed.glb',
+                mimeType: 'model/gltf-binary',
+                sizeBytes: 3,
+                sha256: 'b'.repeat(64)
+              })
+          })
+      )
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      fireEvent.drop(dropRoot(), {
+        dataTransfer: {
+          files: [createLocalFile('delayed.glb', 'model/gltf-binary', 'C:\\magicpot\\delayed.glb')],
+          items: [],
+          types: ['Files'],
+          getData: () => ''
+        }
+      })
+      await waitFor(() => expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce())
+
+      await dispatchSwitchSession('drop-session-b')
+      await dispatchSwitchSession('drop-session-a')
+      await act(async () => finishImport())
+
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it('routes a dropped image directory to the open edit instead of the bottom composer', async () => {
+      stubImageDimensions()
+      const receiveAttachment = vi.fn()
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(receiveAttachment)
+
+      fireEvent.drop(dropRoot(), { dataTransfer: directoryTransfer(imageFiles()) })
+
+      await waitFor(() => expect(receiveAttachment).toHaveBeenCalledTimes(2))
+      expect(receiveAttachment.mock.calls.map(([attachment]) => attachment.fileName)).toEqual([
+        'first.png',
+        'second.png'
+      ])
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it.each(['image files', 'image directory'])(
+      'stops a dropped batch of %s after its edit is cancelled',
+      async (source) => {
+        stubImageDimensions()
+        const receiveAttachment = vi.fn()
+        const originalImport = hoisted.importManagedFileMock.getMockImplementation()!
+        let finishImport!: () => void
+        hoisted.importManagedFileMock.mockImplementationOnce(
+          (...args: unknown[]) =>
+            new Promise((resolve, reject) => {
+              finishImport = () => {
+                void Promise.resolve(originalImport(...args)).then(resolve, reject)
+              }
+            })
+        )
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        startEditing(receiveAttachment)
+        const files = imageFiles()
+        fireEvent.drop(dropRoot(), {
+          dataTransfer:
+            source === 'image directory'
+              ? directoryTransfer(files)
+              : { files, items: [], types: ['Files'], getData: () => '' }
+        })
+        await waitFor(() => expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce())
+
+        act(() => {
+          editingProps().onSetEditingIndex(null)
+          editingProps().onRegisterEditingAttachmentReceiver(null)
+        })
+        await act(async () => finishImport())
+
+        expect(receiveAttachment).not.toHaveBeenCalled()
+        expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce()
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
+    it('discards an internal drop after the original ChatPage unmounts', async () => {
+      const receiveAttachment = vi.fn()
+      const { unmount } = renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(receiveAttachment)
+      const finishDrop = beginBlobDrop()
+
+      unmount()
+      await finishDrop()
+
+      expect(receiveAttachment).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it('invalidates a drop across scope changes even with the same session id', async () => {
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'other-drop-scope'),
+        'drop-session-a'
+      )
+      const { rerender } = renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      const finishDrop = beginBlobDrop()
+      const changeScope = (scope: string) =>
+        rerender(
+          <MemoryRouter>
+            <ThemeProvider theme={theme}>
+              <ChatPage compact storageScope={scope} />
+            </ThemeProvider>
+          </MemoryRouter>
+        )
+
+      changeScope('other-drop-scope')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      changeScope('runtime-flow')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      await finishDrop()
+
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+    })
   })
 
   it('clears normal-response loading before deferred persistence completes', async () => {
@@ -2863,6 +3803,124 @@ describe('ChatPage runtime workflow integration', () => {
         attachments: [expect.objectContaining({ fileName: 'queued.png' })]
       })
     )
+  })
+
+  it('drops queued sends when the session is explicitly terminated', async () => {
+    let firstSignal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          firstSignal = signal
+          signal?.addEventListener(
+            'abort',
+            () => {
+              const error = new Error('aborted')
+              error.name = 'AbortError'
+              reject(error)
+            },
+            { once: true }
+          )
+        })
+    )
+
+    renderChatPage('terminate-clears-queue')
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'active request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    for (const content of ['queued one', 'queued two']) {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: content }
+      })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+    }
+    expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2)
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:terminate-session', {
+          detail: { scope: 'terminate-clears-queue', sessionId: readCurrentSessionState()?.id }
+        })
+      )
+    })
+
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true))
+    await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not send after explicit termination during attachment preparation', async () => {
+    let releaseImport!: (value: unknown) => void
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 32
+        naturalHeight = 32
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    hoisted.importManagedDataUrlMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseImport = resolve
+        })
+    )
+
+    renderChatPage('terminate-during-preflight')
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const sessionId = readCurrentSessionState()!.id
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: 'terminate-during-preflight',
+            autoSend: true,
+            text: 'must not send after termination',
+            image: 'data:image/png;base64,ZW1wdHk='
+          }
+        })
+      )
+    })
+    console.log('DEBUG import/data', hoisted.importManagedDataUrlMock.mock.calls.length)
+    await waitFor(() => expect(hoisted.importManagedDataUrlMock).toHaveBeenCalledOnce())
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:terminate-session', {
+          detail: { scope: 'terminate-during-preflight', sessionId }
+        })
+      )
+    })
+    await act(async () => {
+      releaseImport({
+        localMediaUrl: 'media://managed/delayed.png',
+        reference: {
+          version: 1,
+          kind: 'managed',
+          relativePath: `originals/${'d'.repeat(64)}.png`,
+          sha256: 'd'.repeat(64),
+          mimeType: 'image/png',
+          sizeBytes: 5,
+          originalFileName: 'delayed.png'
+        }
+      })
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
   })
 
   it('does not clear the draft when a busy enqueue has no sendable content', async () => {
@@ -3036,44 +4094,170 @@ describe('ChatPage runtime workflow integration', () => {
     )
   })
 
-  it('allows scoped send-to-agent input to mutate an explicit inactive target scope', async () => {
-    renderWithProviders(
-      <>
-        <div data-testid="agent-a">
-          <ChatPage compact storageScope="runtime-flow-a" active />
-        </div>
-        <div data-testid="agent-b">
-          <ChatPage compact storageScope="runtime-flow-b" active={false} />
-        </div>
-      </>
-    )
+  it.each(['targetScope', 'scope'])(
+    'allows scoped send-to-agent input into an explicit inactive target with input disabled (%s)',
+    async (scopeKey) => {
+      renderWithProviders(
+        <>
+          <div data-testid="agent-a">
+            <ChatPage compact storageScope="runtime-flow-a" active />
+          </div>
+          <div data-testid="agent-b">
+            <ChatPage
+              compact
+              storageScope="runtime-flow-b"
+              active={false}
+              acceptExternalInput={false}
+            />
+          </div>
+        </>
+      )
 
+      const agentA = screen.getByTestId('agent-a')
+      const agentB = screen.getByTestId('agent-b')
+
+      await waitFor(() =>
+        expect(within(agentA).getByTestId('chat-composer-mock')).toBeInTheDocument()
+      )
+      await waitFor(() =>
+        expect(within(agentB).getByTestId('chat-composer-mock')).toBeInTheDocument()
+      )
+
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              text: 'explicit inactive target',
+              attachment: createImageAttachment('inactive-target.png'),
+              [scopeKey]: 'runtime-flow-b'
+            }
+          })
+        )
+      })
+
+      await waitFor(() => {
+        expect(within(agentA).getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(within(agentA).getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(within(agentB).getByTestId('chat-composer-input-mock')).toHaveValue(
+          'explicit inactive target'
+        )
+        expect(within(agentB).getByTestId('chat-composer-attachment-names')).toHaveTextContent(
+          'inactive-target.png'
+        )
+      })
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    { active: false, acceptExternalInput: false, targetScope: undefined },
+    { active: true, acceptExternalInput: false, targetScope: undefined },
+    { active: false, acceptExternalInput: true, targetScope: undefined },
+    { active: false, acceptExternalInput: false, targetScope: '' },
+    { active: false, acceptExternalInput: false, targetScope: 'other-agent' }
+  ])(
+    'rejects send-to-agent without matching scope when active=$active, accepts=$acceptExternalInput, target=$targetScope',
+    async ({ active, acceptExternalInput, targetScope }) => {
+      renderChatPage({ active, acceptExternalInput })
+      await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              targetScope,
+              text: 'must not reach this pane',
+              attachment: createImageAttachment('wrong-pane.png'),
+              autoSend: true
+            }
+          })
+        )
+      })
+
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps delayed scoped send-to-agent attachments in their target after switching active panes', async () => {
+    function PaneSwitchFixture() {
+      const [activePane, setActivePane] = React.useState('b')
+      return (
+        <>
+          <button type="button" onClick={() => setActivePane('a')}>
+            switch to pane a
+          </button>
+          {['a', 'b'].map((pane) => (
+            <div key={pane} data-testid={`agent-${pane}`}>
+              <ChatPage
+                compact
+                storageScope={`runtime-flow-${pane}`}
+                active={activePane === pane}
+                acceptExternalInput={activePane === pane}
+              />
+            </div>
+          ))}
+        </>
+      )
+    }
+    renderWithProviders(<PaneSwitchFixture />)
     const agentA = screen.getByTestId('agent-a')
     const agentB = screen.getByTestId('agent-b')
+    await waitFor(() => expect(readCurrentSessionStateWithin(agentB)?.id).toBeTruthy())
 
-    await waitFor(() =>
-      expect(within(agentA).getByTestId('chat-composer-mock')).toBeInTheDocument()
-    )
-    await waitFor(() =>
-      expect(within(agentB).getByTestId('chat-composer-mock')).toBeInTheDocument()
-    )
+    let resolveAttachment!: (attachment: ChatAttachment) => void
+    const delivery = new Promise<ChatAttachment>((resolve) => {
+      resolveAttachment = resolve
+    }).then((attachment) => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: { attachment, targetScope: 'runtime-flow-b' }
+        })
+      )
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'switch to pane a' }))
+    await act(async () => {
+      resolveAttachment(createImageAttachment('delayed-target.png'))
+      await delivery
+    })
+
+    await waitFor(() => {
+      expect(within(agentA).getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(within(agentB).getByTestId('chat-composer-attachment-names')).toHaveTextContent(
+        'delayed-target.png'
+      )
+    })
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+  })
+
+  it('honors only explicit scoped autoSend in an inactive pane with input disabled', async () => {
+    renderChatPage({ active: false, acceptExternalInput: false })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
 
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent('send-to-agent', {
           detail: {
-            text: 'explicit inactive target',
-            targetScope: 'runtime-flow-b'
+            text: 'explicit background send',
+            attachment: createImageAttachment('explicit-background.png'),
+            targetScope: 'runtime-flow',
+            autoSend: true
           }
         })
       )
     })
 
-    await waitFor(() => {
-      expect(within(agentA).getByTestId('chat-composer-input-mock')).toHaveValue('')
-      expect(within(agentB).getByTestId('chat-composer-input-mock')).toHaveValue(
-        'explicit inactive target'
-      )
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+    const request = hoisted.requestChatCompletionMock.mock.calls[0][0]
+    expect(request.storageScope).toBe('runtime-flow')
+    expect(request.messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: 'explicit background send',
+      attachments: [expect.objectContaining({ fileName: 'explicit-background.png' })]
     })
   })
 
@@ -3947,6 +5131,160 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  it.each([false, true])(
+    'carries selected remote routing metadata to the request entrypoint (stream wrapper=%s)',
+    async (stream) => {
+      const remoteProfile = {
+        id: 'base-model',
+        model_name: 'Remote opaque model',
+        model_use: 'chat' as const,
+        provider: 'openai',
+        api_mode: 'responses' as const
+      }
+      hoisted.currentConfig.value!.use_remote_llm = true
+      hoisted.currentConfig.value!.llm_config.api_profiles = [
+        {
+          id: 'base-model',
+          model_name: 'Local conflicting image model',
+          base_url: 'https://api.openai.com/v1',
+          api_key: 'fixture-not-a-credential',
+          api_mode: 'images'
+        }
+      ]
+      hoisted.availableProfiles.value = [remoteProfile]
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      hoisted.requestChatCompletionStreamMock.mockResolvedValue({
+        result: { content: 'fixture remote response.' },
+        response: 'fixture remote response.'
+      })
+      const session: ChatSession = {
+        id: 'remote-routing-metadata',
+        title: 'Remote routing metadata',
+        profileId: remoteProfile.id,
+        messages: []
+      }
+      hoisted.storedSessions.value = [session]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        session.id
+      )
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Send using the selected remote route.' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      const target = stream
+        ? hoisted.requestChatCompletionStreamMock
+        : hoisted.requestChatCompletionMock
+      await waitFor(() => expect(target).toHaveBeenCalledTimes(1))
+      expect(target.mock.calls[0][0]).toMatchObject({
+        profileId: remoteProfile.id,
+        remoteProfile
+      })
+      expect(target.mock.calls[0][0].apiMode).toBeUndefined()
+    }
+  )
+
+  it('dispatches historical image references for image generation requests', async () => {
+    const session: ChatSession = {
+      id: 'image-generation-history',
+      title: 'Image generation history',
+      profileId: 'vision-model',
+      messages: Array.from({ length: 11 }, (_, index) => ({
+        role: 'user' as const,
+        content: `historical reference ${index + 1}`,
+        attachments: [createImageAttachment(`historical-${index + 1}.png`)]
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(
+      scopedStorageKey('chat.imageGenerationOptions', 'runtime-flow'),
+      JSON.stringify({
+        enabled: true,
+        action: 'generate',
+        outputFormat: 'png',
+        quality: 'high',
+        background: 'auto',
+        size: 'auto'
+      })
+    )
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'generated' })
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'Generate a new image without old references.' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as {
+      imageHistoryPolicy?: string
+      messages?: ChatMessage[]
+    }
+    expect(firstCall.imageHistoryPolicy).toBe('all')
+    expect(
+      firstCall.messages?.flatMap((message) =>
+        (message.attachments || []).filter((attachment) => attachment.type === 'image')
+      )
+    ).toHaveLength(11)
+    expect(firstCall.messages?.at(-1)?.content).toBe('Generate a new image without old references.')
+  })
+
+  it('dispatches historical image history automatically for GPT Image profiles', async () => {
+    hoisted.availableProfiles.value = [
+      {
+        id: 'gpt-image-profile',
+        model_name: 'gpt-image-2.5-sunburst',
+        model_use: 'image' as const,
+        api_mode: 'images' as const,
+        provider: 'openai',
+        is_vision_model: true
+      }
+    ]
+    const session: ChatSession = {
+      id: 'gpt-image-history',
+      title: 'GPT Image history',
+      profileId: 'gpt-image-profile',
+      messages: Array.from({ length: 11 }, (_, index) => ({
+        role: 'user' as const,
+        content: `historical reference ${index + 1}`,
+        attachments: [createImageAttachment(`gpt-history-${index + 1}.png`)]
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'generated' })
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'Generate with GPT Image.' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+    expect(firstCall.profileId).toBe('gpt-image-profile')
+    expect(firstCall.apiMode).toBeUndefined()
+    expect(firstCall.imageHistoryPolicy).toBe('all')
+    expect(
+      firstCall.messages.flatMap((message) =>
+        (message.attachments || []).filter((attachment) => attachment.type === 'image')
+      )
+    ).toHaveLength(11)
+  })
+
   it('keeps multiple image references together for image generation requests', async () => {
     localStorage.setItem(
       scopedStorageKey('chat.imageGenerationOptions', 'runtime-flow'),
@@ -3987,6 +5325,7 @@ describe('ChatPage runtime workflow integration', () => {
       action: 'edit',
       size: '1024x1024'
     })
+    expect(firstCall.imageHistoryPolicy).toBe('all')
     const lastRequestMessage = firstCall.messages[firstCall.messages.length - 1]
     expect(lastRequestMessage.attachments).toEqual([
       expect.objectContaining({
@@ -3998,6 +5337,73 @@ describe('ChatPage runtime workflow integration', () => {
         fileName: 'ghost.png'
       })
     ])
+  })
+
+  it('keeps ordinary multi-image chat in one request without attachment batching', async () => {
+    hoisted.resolveAttachmentBatchCapabilityMock.mockClear()
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'ordinary multimodal reply' })
+
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    await dispatchNewSession({
+      profileId: 'vision-model',
+      initialMessage: '把图一改的这层黄光减弱一点，参考其他图的风格，但是氛围不变',
+      initialAttachments: Array.from({ length: 6 }, (_, index) =>
+        createImageAttachment(`reference-${index + 1}.png`)
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(hoisted.resolveAttachmentBatchCapabilityMock).not.toHaveBeenCalled()
+    const request = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+    expect(request.messages.at(-1)?.attachments).toHaveLength(6)
+    await waitFor(() =>
+      expect(
+        readCurrentSessionState()?.messages.filter((message) => message.role === 'assistant')
+      ).toHaveLength(1)
+    )
+  })
+
+  it('sends current-turn image references without triggering a local image-count guard', async () => {
+    localStorage.setItem(
+      scopedStorageKey('chat.imageGenerationOptions', 'runtime-flow'),
+      JSON.stringify({
+        enabled: true,
+        action: 'edit',
+        outputFormat: 'png',
+        quality: 'high',
+        background: 'auto',
+        size: 'auto'
+      })
+    )
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({
+      content: 'generated from ten current-turn references'
+    })
+
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    await dispatchNewSession({
+      profileId: 'vision-model',
+      initialMessage: 'Use all ten references together.',
+      initialAttachments: Array.from({ length: 10 }, (_, index) =>
+        createImageAttachment(`current-${index + 1}.png`)
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as {
+      imageHistoryPolicy?: string
+      messages?: ChatMessage[]
+    }
+    expect(firstCall.imageHistoryPolicy).toBe('all')
+    expect(firstCall.messages?.at(-1)?.attachments).toHaveLength(10)
+    expect(
+      firstCall.messages?.at(-1)?.attachments?.map((attachment) => attachment.fileName)
+    ).toEqual(Array.from({ length: 10 }, (_, index) => `current-${index + 1}.png`))
   })
 
   it('warns and blocks skill execution when the selected model supports neither images nor documents', async () => {

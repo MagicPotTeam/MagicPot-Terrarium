@@ -1,4 +1,5 @@
 import { Config } from '@shared/config/config'
+import { AGENT_LOCAL_FILE_LIMITS } from '@shared/api/svcAgentLocalFiles'
 import type { PolicyJsonRecord } from '../../shared/magicAgentPlatform2'
 import { throwIfAborted } from '@shared/agent'
 import { MAGICPOT_SESSION_STATUS_TOOL_NAME, normalizeMagicPotToolName } from '@shared/app/types'
@@ -58,12 +59,15 @@ import {
   createMagicAgentToolAuditSink
 } from '../magicAgentPlatform2/toolHost'
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
+import type { CanvasPathReadHandler } from '../api/canvasPathReadApproval'
 import { ProjectTraceFSCli } from '../projectTrace/fs'
 import {
   buildProjectTraceReplayBundle,
   buildProjectTraceVerificationBundle,
   normalizeProjectTraceVerificationEvents
 } from './projectTraceTools'
+import { webFetch, webSearch } from './webTools'
 
 export type AssistantToolDefinition = {
   name: string
@@ -82,6 +86,8 @@ export type AssistantToolCallContext = {
   workspacePinnedContext?: AssistantPinnedContext
   workspaceReusableContext?: AssistantReusableContextPack
   workspaceRootDir?: string
+  // Main-owned, per-request consent callback. Never sourced from tool arguments.
+  readExternalFile?: CanvasPathReadHandler
   toolPolicyOrigin?: 'assistant' | 'graph'
   terminalPolicyRuntime?: AssistantTerminalPolicyRuntime
   commandConfinementAdapter?: CommandJobsConfinementAdapter
@@ -484,6 +490,36 @@ const summarizeStoreLimits = async (
 
 const baseDefinitions: AssistantToolDefinition[] = [
   {
+    name: 'web_search',
+    description:
+      'Search the public web when current or externally verifiable information is needed. Returns bounded snippets and source URLs; cite those URLs in the final answer when relying on them.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['query'],
+      properties: {
+        query: { type: 'string', minLength: 1, maxLength: 512 },
+        maxResults: { type: 'integer', minimum: 1, maximum: 8 },
+        timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000 }
+      }
+    }
+  },
+  {
+    name: 'web_fetch',
+    description:
+      'Fetch a public HTTPS page after SSRF and redirect checks. Returns bounded readable text and page metadata for source verification.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['url'],
+      properties: {
+        url: { type: 'string', minLength: 1, maxLength: 4096 },
+        maxChars: { type: 'integer', minimum: 1000, maximum: 24000 },
+        timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000 }
+      }
+    }
+  },
+  {
     name: 'files.tree',
     description: 'List a bounded, deterministic tree within the current route workspace.',
     inputSchema: {
@@ -501,14 +537,14 @@ const baseDefinitions: AssistantToolDefinition[] = [
   {
     name: 'files.read',
     description:
-      'Read bounded UTF-8 text, allowlisted PNG/JPEG/GIF/WebP bytes, or conservatively extracted PDF text and metadata from a regular workspace file. Media type is verified by magic bytes; binary payloads are never audited.',
+      'Read bounded UTF-8 text, allowlisted PNG/JPEG/GIF/WebP bytes, or conservatively extracted PDF/DOCX/XLSX/PPTX text and metadata. Regular workspace files remain capped at 1 MiB; an approved absolute local document path may be up to 8 MiB. Media type is verified by magic bytes; binary payloads are never audited.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       required: ['path'],
       properties: {
         path: { type: 'string' },
-        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxBytes: { type: 'integer', minimum: 1, maximum: AGENT_LOCAL_FILE_LIMITS.documentBytes },
         maxStringLength: { type: 'integer', minimum: 1, maximum: 1048576 },
         timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
       }
@@ -1963,7 +1999,7 @@ const runPythonTool = async (
       ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
       : context.terminalApproval
         ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
-        : await runtime.requestTerminalApproval(request)
+        : await runtime.requestTerminalApproval(request, context.signal)
   const input = {
     ...common,
     request,
@@ -1977,6 +2013,32 @@ const runPythonTool = async (
 
 const toolHandlers: Record<string, AssistantToolHandler> = {
   [MAGICPOT_SESSION_STATUS_TOOL_NAME]: buildSessionStatusToolResult,
+  web_search: async (args, context) => {
+    const result = await webSearch(String(args.query || ''), {
+      maxResults: typeof args.maxResults === 'number' ? args.maxResults : undefined,
+      timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined,
+      signal: context.signal
+    })
+    const sources = result.results.map(({ title, url }) => ({ title, url }))
+    return jsonToolResult(result, {
+      web: true,
+      backend: result.source,
+      query: result.query,
+      sources
+    })
+  },
+  web_fetch: async (args, context) => {
+    const result = await webFetch(String(args.url || ''), {
+      maxChars: typeof args.maxChars === 'number' ? args.maxChars : undefined,
+      timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined,
+      signal: context.signal
+    })
+    return jsonToolResult(result, {
+      web: true,
+      backend: 'public-https-fetch',
+      sources: [{ title: result.title || result.finalUrl, url: result.finalUrl }]
+    })
+  },
   'session.summary': async (_args, context) => {
     const session = await context.sessionStore.getSession(context.route)
     const latestRun = session?.runs ? session.runs[session.runs.length - 1] : undefined
@@ -2041,17 +2103,26 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     })
   },
   'agent.terminal.run': async (args, context) => {
+    context.signal?.throwIfAborted()
     const contextSnapshot = context.workspaceReusableContext?.contextSnapshot
+    const canvasWorkspaceOnly = context.route.channel === 'canvas'
+    if (canvasWorkspaceOnly && !context.workspaceRootDir)
+      throw new Error('Canvas terminal commands require their main-owned thread workspace.')
     const workspaceRoots = [
-      contextSnapshot?.downloadDir,
-      contextSnapshot?.outputDir,
-      contextSnapshot?.workflowDir
+      context.workspaceRootDir,
+      ...(canvasWorkspaceOnly
+        ? []
+        : [contextSnapshot?.downloadDir, contextSnapshot?.outputDir, contextSnapshot?.workflowDir])
     ].filter((entry): entry is string => Boolean(entry))
-    const prepared = await prepareAgentTerminalCommand(args, {
-      config: context.config,
-      signal: context.signal,
-      workspaceRoots
-    })
+    const prepared = await prepareAgentTerminalCommand(
+      { ...args, cwd: args.cwd ?? context.workspaceRootDir },
+      {
+        config: context.config,
+        signal: context.signal,
+        workspaceRoots,
+        restrictToWorkspaceRoots: canvasWorkspaceOnly
+      }
+    )
     const sessionId = getAssistantSessionKey(context.route)
     const policyRuntime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
     const request = policyRuntime.createRequest({
@@ -2067,8 +2138,10 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
         ? { ...policyRuntime.createTrustedApproval(request), authorizationId: randomUUID() }
         : context.terminalApproval
           ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
-          : await policyRuntime.requestTerminalApproval(request)
+          : await policyRuntime.requestTerminalApproval(request, context.signal)
+    context.signal?.throwIfAborted()
     const result = await policyRuntime.run({
+      signal: context.signal,
       authorizationId: approval.authorizationId ?? randomUUID(),
       idempotencyKey: randomUUID(),
       request,
@@ -2080,6 +2153,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       ...(approval ?? {})
     })
 
+    context.signal?.throwIfAborted()
     return jsonToolResult(result)
   },
   'python.run': async (args, context) => runPythonTool('python.run', args, context),
@@ -2110,7 +2184,8 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
         ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
         : context.terminalApproval
           ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
-          : await runtime.requestTerminalApproval(request)
+          : await runtime.requestTerminalApproval(request, context.signal)
+    context.signal?.throwIfAborted()
     const result = await getCommandJobHost(context).background({
       authorizationId: approval.authorizationId ?? randomUUID(),
       idempotencyKey: randomUUID(),
@@ -2172,17 +2247,35 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
         throw new Error('session.cleanup prune requires olderThanDays.')
       }
 
-      const beforeUpdatedAt = Date.now() - Math.trunc(olderThanDays) * 24 * 60 * 60 * 1000
+      // Preserve fractional days so callers can use a short, deterministic
+      // retention window without accidentally turning the cutoff into "now".
+      const beforeUpdatedAt = Date.now() - olderThanDays * 24 * 60 * 60 * 1000
+      const sessionsBeforePrune = await context.sessionStore.listSessions()
+      const workspaceBySessionKey = new Map(
+        sessionsBeforePrune.map((session) => [session.sessionKey, session.workspace])
+      )
       const pruneResult = await context.sessionStore.pruneSessions(beforeUpdatedAt)
+      const retainedWorkspaceRoots = new Set(
+        (await context.sessionStore.listSessions()).map((session) => session.workspace.rootDir)
+      )
+      const clearedWorkspaceRoots = new Set<string>()
       await Promise.all(
         pruneResult.removedSessions.map(async (session) => {
-          await clearAssistantReusableContext(getAssistantWorkspaceState(session.route))
+          const workspace = workspaceBySessionKey.get(session.sessionKey)
+          if (
+            workspace &&
+            !retainedWorkspaceRoots.has(workspace.rootDir) &&
+            !clearedWorkspaceRoots.has(workspace.rootDir)
+          ) {
+            clearedWorkspaceRoots.add(workspace.rootDir)
+            await clearAssistantReusableContext(workspace)
+          }
         })
       )
 
       const payload = {
         mode: 'prune',
-        olderThanDays: Math.trunc(olderThanDays),
+        olderThanDays,
         ...pruneResult
       }
 
@@ -2990,7 +3083,13 @@ export class AssistantToolRegistry {
   }
 
   listTools(): AssistantToolDefinition[] {
-    return [...baseDefinitions, ...this.mcpClientManager.listToolsSnapshot()]
+    const seen = new Set<string>()
+    return [...baseDefinitions, ...this.mcpClientManager.listToolsSnapshot()].filter((tool) => {
+      const normalizedName = normalizeMagicPotToolName(tool.name)
+      if (seen.has(normalizedName)) return false
+      seen.add(normalizedName)
+      return true
+    })
   }
 
   async callTool(
@@ -3078,7 +3177,7 @@ export class AssistantToolRegistry {
           ? context.terminalApproval(request)
           : process.env.NODE_ENV === 'test'
             ? runtime.createTrustedApproval(request)
-            : await runtime.requestTerminalApproval(request)
+            : await runtime.requestTerminalApproval(request, context.signal)
         : undefined
       const common = {
         authorizationId: randomUUID(),
@@ -3151,7 +3250,7 @@ export class AssistantToolRegistry {
           ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
           : context.terminalApproval
             ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
-            : await runtime.requestTerminalApproval(request)
+            : await runtime.requestTerminalApproval(request, context.signal)
       const common = {
         authorizationId: approval.authorizationId ?? randomUUID(),
         idempotencyKey:
@@ -3238,7 +3337,7 @@ export class AssistantToolRegistry {
           ? context.terminalApproval(request)
           : process.env.NODE_ENV === 'test'
             ? runtime.createTrustedApproval(request)
-            : await runtime.requestTerminalApproval(request)
+            : await runtime.requestTerminalApproval(request, context.signal)
         : undefined
       const common = {
         authorizationId: randomUUID(),
@@ -3284,6 +3383,19 @@ export class AssistantToolRegistry {
       ].includes(normalizedName)
     ) {
       if (!context.workspaceRootDir) throw new Error('File tools require a route workspace root.')
+      if (
+        normalizedName === 'files.read' &&
+        typeof args.path === 'string' &&
+        path.isAbsolute(args.path) &&
+        context.readExternalFile
+      ) {
+        return context.readExternalFile(args.path, context.signal, {
+          maxBytes: typeof args.maxBytes === 'number' ? args.maxBytes : undefined,
+          maxStringLength:
+            typeof args.maxStringLength === 'number' ? args.maxStringLength : undefined,
+          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined
+        })
+      }
       const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
       const requestedPath =
         typeof args.path === 'string' && args.path ? args.path.replace(/\\/g, '/') : '.'
@@ -3329,7 +3441,7 @@ export class AssistantToolRegistry {
           ? context.terminalApproval(request)
           : process.env.NODE_ENV === 'test'
             ? runtime.createTrustedApproval(request)
-            : await runtime.requestTerminalApproval(request)
+            : await runtime.requestTerminalApproval(request, context.signal)
         : undefined
       const common = {
         authorizationId: randomUUID(),
@@ -3399,7 +3511,7 @@ export class AssistantToolRegistry {
     const workspaceTaskContext = workspaceReusableContext.taskContext
     const workspacePinnedContext = workspaceReusableContext.pinnedContext
 
-    if (name === 'context.pinned') {
+    if (normalizedName === 'context.pinned') {
       const action = String(args.action || 'list')
         .trim()
         .toLowerCase()

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import {
+  Alert,
   Box,
   Typography,
   Divider,
@@ -14,21 +15,20 @@ import {
   Button,
   InputBase,
   Checkbox,
-  FormControlLabel,
-  CircularProgress
+  FormControlLabel
 } from '@mui/material'
 import { AddBox, Edit, Delete, FolderOpenRounded } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
-import { flushSync } from 'react-dom'
 import { useAppDispatch } from '../../store'
 import { openTab, setActiveTab, updateTabLabel, closeTab } from '../../store/slices/layoutSlice'
 import { toProjectCanvasRoutePath } from '../ProjectCanvasPage/projectCanvasRouting'
 import {
   createProjectRecord,
   listProjects,
-  saveProjects,
+  trySaveProjects,
   touchProjectOpen,
+  PROJECT_NAME_MAX_LENGTH,
   type ProjectRecord
 } from './projectStore'
 
@@ -51,6 +51,7 @@ const PURPLE_MAIN = '#2d2464'
 const PURPLE_LIGHT = '#8b3a8f'
 const SIDE_SHADOW_LIGHT = '8px 0 16px rgba(0,0,0,0.08), 0 8px 16px rgba(0,0,0,0.12)'
 const SIDE_SHADOW_DARK = '8px 0 14px rgba(0,0,0,0.45), 0 8px 18px rgba(0,0,0,0.55)'
+let projectIdSequence = 0
 
 const scheduleIdle = (callback: () => void, timeout = 1500): (() => void) => {
   const idleApi = window as Window & {
@@ -110,33 +111,27 @@ const ProjectCard: React.FC<{
   onClick: () => void
   onDelete: () => void
   onEdit: (name: string) => void
-  autoEdit?: boolean
-  onAutoEditDone?: () => void
-}> = ({ project, onClick, onDelete, onEdit, autoEdit, onAutoEditDone }) => {
+}> = ({ project, onClick, onDelete, onEdit }) => {
+  const { t } = useTranslation()
   const [hovered, setHovered] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editName, setEditName] = useState(project.name)
-  const autoEditTriggered = useRef(false)
 
   useEffect(() => {
     setEditName(project.name)
   }, [project.name])
 
-  useEffect(() => {
-    if (autoEdit && !autoEditTriggered.current) {
-      autoEditTriggered.current = true
-      setIsEditing(true)
-    }
-  }, [autoEdit])
-
   const handleSave = () => {
-    if (editName.trim() && editName.trim() !== project.name) {
+    if (
+      editName.trim() &&
+      editName.length <= PROJECT_NAME_MAX_LENGTH &&
+      editName.trim() !== project.name
+    ) {
       onEdit(editName.trim())
     } else {
       setEditName(project.name)
     }
     setIsEditing(false)
-    onAutoEditDone?.()
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -147,7 +142,6 @@ const ProjectCard: React.FC<{
       e.stopPropagation()
       setEditName(project.name)
       setIsEditing(false)
-      onAutoEditDone?.()
     }
   }
 
@@ -182,6 +176,7 @@ const ProjectCard: React.FC<{
     >
       <IconButton
         size="small"
+        aria-label={t('project.delete_title')}
         onClick={(e) => {
           e.stopPropagation()
           onDelete()
@@ -221,6 +216,10 @@ const ProjectCard: React.FC<{
             <InputBase
               autoFocus
               value={editName}
+              inputProps={{
+                maxLength: PROJECT_NAME_MAX_LENGTH,
+                'aria-label': t('project.details.name', { defaultValue: 'Project name' })
+              }}
               onChange={(e) => setEditName(e.target.value)}
               onBlur={handleSave}
               onKeyDown={handleKeyDown}
@@ -273,6 +272,7 @@ const ProjectCard: React.FC<{
               </Typography>
               <IconButton
                 size="small"
+                aria-label={t('project.details.rename', { defaultValue: 'Rename project' })}
                 onClick={(e) => {
                   e.stopPropagation()
                   setIsEditing(true)
@@ -329,26 +329,16 @@ const MainPage: React.FC = () => {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
 
-  const [projects, setProjects] = useState<ProjectItem[]>(listProjects())
-  const [openingProjectId, setOpeningProjectId] = useState<string | null>(null)
-  const [newlyCreatedId, setNewlyCreatedId] = useState<string | null>(null)
+  const [projects, setProjects] = useState<ProjectItem[]>(listProjects)
 
+  const [projectSaveError, setProjectSaveError] = useState(false)
   const [deleteProjectId, setDeleteProjectId] = useState<string | null>(null)
   const [dontAskAgain, setDontAskAgain] = useState(false)
-  const openProjectTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     return scheduleIdle(() => {
       void prefetchProjectCanvasPage()
     })
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      if (openProjectTimerRef.current != null) {
-        window.clearTimeout(openProjectTimerRef.current)
-      }
-    }
   }, [])
 
   useEffect(() => {
@@ -360,44 +350,61 @@ const MainPage: React.FC = () => {
   }, [])
 
   const handleCreateProject = () => {
-    const id = `tab-project-${Date.now()}`
-    const routePath = toProjectCanvasRoutePath(id)
-
-    // Auto-generate name: find the next available number
-    const existingNumbers = projects
-      .map((p) => {
-        const match = p.name.match(/^(\d+)$/)
-        return match ? parseInt(match[1], 10) : 0
-      })
-      .filter((n) => n > 0)
+    const current = listProjects()
+    const existingNumbers = current
+      .map((project) => (/^\d+$/.test(project.name) ? Number(project.name) : 0))
+      .filter((number) => Number.isSafeInteger(number) && number > 0)
     const nextNumber = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : 1
-    const autoName = String(nextNumber)
+    const createdAt = Date.now()
+    let id = `tab-project-${globalThis.crypto?.randomUUID?.() ?? `${createdAt}-${++projectIdSequence}`}`
+    while (current.some((project) => project.id === id)) {
+      id = `tab-project-${createdAt}-${++projectIdSequence}`
+    }
 
     const newItem = createProjectRecord({
       id,
-      name: autoName,
-      createdAt: Date.now()
+      createdAt,
+      name: String(nextNumber),
+      introduction: '',
+      analysisProfileId: ''
     })
-    const updated = [newItem, ...projects]
-    setProjects(updated)
-    saveProjects(updated)
+    const saved = trySaveProjects([newItem, ...current])
+    if (!saved) {
+      setProjectSaveError(true)
+      return
+    }
+    setProjectSaveError(false)
+    setProjects(saved)
     dispatch(
       openTab({
-        id,
-        label: autoName,
-        routePath,
+        id: newItem.id,
+        label: newItem.name,
+        routePath: toProjectCanvasRoutePath(newItem.id),
         closable: true
       })
     )
-    dispatch(setActiveTab(id))
-    setNewlyCreatedId(id)
+    dispatch(setActiveTab(newItem.id))
+    navigate(toProjectCanvasRoutePath(newItem.id))
   }
 
-  const doDeleteProject = (id: string) => {
-    const updated = projects.filter((p) => p.id !== id)
-    setProjects(updated)
-    saveProjects(updated)
+  const doDeleteProject = (id: string): boolean => {
+    // Read at action time. The rendered card can be stale when another window or
+    // storage channel has added projects or changed their metadata meanwhile.
+    const current = listProjects()
+    if (!current.some((project) => project.id === id)) {
+      setProjects(current)
+      return true
+    }
+    const updated = current.filter((p) => p.id !== id)
+    const saved = trySaveProjects(updated)
+    if (!saved) {
+      setProjectSaveError(true)
+      return false
+    }
+    setProjectSaveError(false)
+    setProjects(saved)
     dispatch(closeTab(id))
+    return true
   }
 
   const handleDeleteProject = (id: string) => {
@@ -412,24 +419,41 @@ const MainPage: React.FC = () => {
 
   const confirmDeleteProject = () => {
     if (deleteProjectId) {
+      if (!doDeleteProject(deleteProjectId)) return
       if (dontAskAgain) {
-        localStorage.setItem('confirmDeleteProject', 'false')
+        try {
+          localStorage.setItem('confirmDeleteProject', 'false')
+        } catch {
+          // The preference is optional; the project deletion already persisted.
+        }
       }
-      doDeleteProject(deleteProjectId)
       setDeleteProjectId(null)
     }
   }
 
   const handleRenameProject = (id: string, newName: string) => {
-    if (!newName.trim()) return
-    const updated = projects.map((p) => {
+    if (!newName.trim() || newName.length > PROJECT_NAME_MAX_LENGTH) return
+    // Do not write the closure's possibly stale project list. Rebase the single
+    // rename on the latest trusted storage snapshot so external additions and
+    // introduction/model changes survive this UI action.
+    const current = listProjects()
+    if (!current.some((project) => project.id === id)) {
+      setProjects(current)
+      return
+    }
+    const updated = current.map((p) => {
       if (p.id === id) {
-        return { ...p, name: newName.trim() }
+        return { ...p, name: newName.trim(), updatedAt: Date.now() }
       }
       return p
     })
-    setProjects(updated)
-    saveProjects(updated)
+    const saved = trySaveProjects(updated)
+    if (!saved) {
+      setProjectSaveError(true)
+      return
+    }
+    setProjectSaveError(false)
+    setProjects(saved)
     dispatch(updateTabLabel({ id, label: newName.trim() }))
   }
 
@@ -437,25 +461,22 @@ const MainPage: React.FC = () => {
     const routePath = toProjectCanvasRoutePath(p.id)
     void prefetchProjectCanvasPage()
     touchProjectOpen(p.id)
-
-    flushSync(() => {
-      setOpeningProjectId(p.id)
-    })
-
-    if (openProjectTimerRef.current != null) {
-      window.clearTimeout(openProjectTimerRef.current)
-    }
-
-    openProjectTimerRef.current = window.setTimeout(() => {
-      dispatch(openTab({ id: p.id, label: p.name, routePath, closable: true }))
-      dispatch(setActiveTab(p.id))
-      navigate(routePath)
-    }, 0)
+    dispatch(openTab({ id: p.id, label: p.name, routePath, closable: true }))
+    dispatch(setActiveTab(p.id))
+    navigate(routePath)
   }
 
   return (
     <Stack spacing={0} sx={{ height: '100%', bgcolor: 'background.default', position: 'relative' }}>
       <Box sx={{ flex: 1, overflowY: 'auto', p: 3 }}>
+        {projectSaveError && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {t('project.saveError', {
+              defaultValue:
+                'Unable to save project changes. Check local storage availability and try again.'
+            })}
+          </Alert>
+        )}
         <Stack spacing={3}>
           <Box>
             <Typography
@@ -480,6 +501,14 @@ const MainPage: React.FC = () => {
           >
             {/* New Project Card */}
             <Card
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  handleCreateProject()
+                }
+              }}
               onClick={handleCreateProject}
               onMouseEnter={() => void prefetchProjectCanvasPage()}
               sx={(theme) => ({
@@ -547,8 +576,6 @@ const MainPage: React.FC = () => {
                 onClick={() => handleOpenProject(p)}
                 onDelete={() => handleDeleteProject(p.id)}
                 onEdit={(name) => handleRenameProject(p.id, name)}
-                autoEdit={p.id === newlyCreatedId}
-                onAutoEditDone={() => setNewlyCreatedId(null)}
               />
             ))}
           </Box>
@@ -581,43 +608,6 @@ const MainPage: React.FC = () => {
           </Button>
         </DialogActions>
       </Dialog>
-
-      {openingProjectId && (
-        <Box
-          data-testid="project-open-overlay"
-          sx={(theme) => ({
-            position: 'absolute',
-            inset: 0,
-            zIndex: 10,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            backgroundColor:
-              theme.palette.mode === 'dark'
-                ? 'rgba(15, 15, 18, 0.76)'
-                : 'rgba(248, 249, 252, 0.82)',
-            backdropFilter: 'blur(8px)'
-          })}
-        >
-          <Box
-            sx={(theme) => ({
-              width: 56,
-              height: 56,
-              borderRadius: 3,
-              display: 'grid',
-              placeItems: 'center',
-              backgroundColor:
-                theme.palette.mode === 'dark' ? 'rgba(36, 37, 43, 0.92)' : 'rgba(255,255,255,0.95)',
-              boxShadow:
-                theme.palette.mode === 'dark'
-                  ? '0 18px 42px rgba(0,0,0,0.34)'
-                  : '0 18px 42px rgba(45,56,84,0.16)'
-            })}
-          >
-            <CircularProgress size={24} />
-          </Box>
-        </Box>
-      )}
     </Stack>
   )
 }

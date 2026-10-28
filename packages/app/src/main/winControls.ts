@@ -24,6 +24,10 @@ class WinController {
     this.mainWindow = mainWindow
   }
 
+  getMainWindow(): BrowserWindow | null {
+    return this.mainWindow && !this.mainWindow.isDestroyed() ? this.mainWindow : null
+  }
+
   async confirmAppQuit(): Promise<boolean> {
     if (!this.mainWindow || this.mainWindow.isDestroyed()) return true
     return unsavedChangesController.confirm(this.mainWindow)

@@ -13,6 +13,21 @@ type LogListener = (entry: LogEntry) => void
 const listeners: Set<LogListener> = new Set()
 const MAX_HISTORY = 1000
 const history: LogEntry[] = []
+let reportingListenerError = false
+
+function reportListenerError(prefix: string, error: unknown): void {
+  // console.error is itself routed through the hook below. Guard the report so
+  // a broken stream listener cannot recursively report its own failure forever.
+  if (reportingListenerError) return
+  reportingListenerError = true
+  try {
+    console.error(prefix, error)
+  } catch {
+    // Logging must not turn a listener failure into another uncaught failure.
+  } finally {
+    reportingListenerError = false
+  }
+}
 
 function isBrokenConsoleStreamError(error: unknown): error is NodeJS.ErrnoException {
   if (!(error instanceof Error)) return false
@@ -21,16 +36,19 @@ function isBrokenConsoleStreamError(error: unknown): error is NodeJS.ErrnoExcept
 }
 
 export const addLogListener = (listener: LogListener) => {
+  let replayFailed = false
   // Replay history
   history.forEach((entry) => {
     try {
       listener(entry)
     } catch (e) {
-      console.error('Log replay error:', e)
+      replayFailed = true
+      reportListenerError('Log replay error:', e)
     }
   })
 
-  listeners.add(listener)
+  // Do not retain a listener that already failed while replaying history.
+  if (!replayFailed) listeners.add(listener)
   return () => listeners.delete(listener)
 }
 
@@ -102,13 +120,20 @@ log.hooks.push((message, transport) => {
     history.shift()
   }
 
-  listeners.forEach((listener) => {
+  // Iterate over a snapshot: a listener can fail or unsubscribe reentrantly
+  // while another listener is handling the same entry.
+  for (const listener of [...listeners]) {
+    if (!listeners.has(listener)) continue
     try {
       listener(entry)
     } catch (e) {
-      console.error('Log listener error:', e)
+      // A stream whose onData throws is no longer usable (usually because its
+      // MessagePort has closed). Remove it before reporting the failure so the
+      // report itself cannot be delivered back to the broken listener.
+      listeners.delete(listener)
+      reportListenerError('Log listener error:', e)
     }
-  })
+  }
 
   return message
 })

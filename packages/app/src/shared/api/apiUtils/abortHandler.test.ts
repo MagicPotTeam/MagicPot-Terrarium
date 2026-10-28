@@ -29,4 +29,16 @@ describe('newAbortHandler', () => {
     expect(receiver.isAborted()).toBe(true)
     expect(late).toHaveBeenCalledTimes(1)
   })
+
+  it('does not retain or re-run handlers when abort is called repeatedly', () => {
+    const [sender, receiver] = newAbortHandler()
+    const handler = vi.fn()
+
+    receiver.onAbort(handler)
+    sender.abort()
+    sender.abort()
+    receiver.onAbort(handler)
+
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
 })

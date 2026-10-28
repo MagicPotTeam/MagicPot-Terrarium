@@ -1,4 +1,7 @@
+import type { LLMRetryStatus } from '@shared/llm/modelCapacityRetry'
+
 export type ChatLoadingStatus = {
+  retry?: LLMRetryStatus
   label: string
   detail?: string
   step?: number

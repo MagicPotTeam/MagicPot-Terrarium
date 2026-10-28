@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>MagicPot local development</title>
+    <style>
+      body {
+        padding: 16px;
+        font-size: 13px;
+      }
+      p {
+        margin-bottom: 12px;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>MagicPot</h1>
+    <p>Local development selection reader.</p>
+    <p id="connection-status">Desktop not paired.</p>
+    <p>
+      Capabilities disabled: HostAdapter, pairing, dialogue, background removal (rembg), and
+      document writes. No bridge connection is available.
+    </p>
+    <p>
+      Read selection displays up to 100 active layers locally. Names may contain sensitive
+      information. No text contents, pixels, child layers, or other documents are read.
+    </p>
+    <button id="read-selection" type="button">Read selection</button>
+    <pre id="selection" aria-live="polite">Selection has not been read.</pre>
+    <script src="main.js"></script>
+  </body>
+</html>

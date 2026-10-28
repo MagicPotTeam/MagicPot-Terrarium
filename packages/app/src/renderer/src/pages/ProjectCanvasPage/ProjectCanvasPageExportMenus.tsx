@@ -1,9 +1,10 @@
 import React from 'react'
 import { Box, Button, Menu, MenuItem, TextField, Typography, ListItemText } from '@mui/material'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
+import type { CanvasTranslate } from './canvasTranslation'
 import type { CanvasSaveOptions } from './projectCanvasPageShared'
 
-type TranslateFn = (key: string, options?: Record<string, unknown>) => string
+type TranslateFn = CanvasTranslate
 
 type ExportScope = 'scene' | 'selected-scene' | 'all-elements' | 'selected-elements'
 type ExportFormat = 'png' | 'jpeg' | 'svg'

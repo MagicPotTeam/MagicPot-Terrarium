@@ -33,6 +33,7 @@ export type JsonObject = { [key: string]: JsonValue }
 
 export type ToolInvokePayload = {
   invocationId: string
+  toolCallId?: string
   toolName: string
   args: JsonObject
   requestedAt: number
@@ -42,6 +43,7 @@ export type ToolInvokeAction = AgentAction<ToolInvokePayload> & { type: 'tool.in
 
 export type ToolResultPayload = {
   invocationId: string
+  toolCallId?: string
   toolName: string
   ok: boolean
   content?: string

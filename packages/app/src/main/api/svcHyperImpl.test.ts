@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ComfyFSCli } from '../comfy/fs'
 
 const {
   getBuildEnvMock,
@@ -222,6 +223,56 @@ describe('HyperSvcImpl.comfyPortDetect', () => {
     })
 
     await expect(svc.comfyPortDetect({})).resolves.toEqual({ pid: 60004 })
+  })
+})
+
+describe('HyperSvcImpl.listComfyFiles', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    getConfigMock.mockReturnValue(baseConfig)
+    getBuildEnvMock.mockReturnValue(windowsBuildEnv)
+  })
+
+  it('passes the streaming abort receiver to recursive Comfy file listing', async () => {
+    const svc = new HyperSvcImpl()
+    const forEachFileInfoMock = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(ComfyFSCli).mockImplementation(function MockComfyFSCli() {
+      return { forEachFileInfo: forEachFileInfoMock } as unknown as ComfyFSCli
+    })
+    const abortReceiver = {
+      isAborted: vi.fn(() => false),
+      onAbort: vi.fn()
+    }
+    const onData = vi.fn()
+
+    await svc.listComfyFiles({ dir: 'models', exts: ['.ckpt'] }, { onData, abortReceiver })
+
+    expect(forEachFileInfoMock).toHaveBeenCalledWith(
+      'models',
+      ['.ckpt'],
+      expect.any(Function),
+      abortReceiver
+    )
+  })
+
+  it('does not emit a pre-cancelled Comfy listing stream', async () => {
+    const svc = new HyperSvcImpl()
+    const forEachFileInfoMock = vi.fn(async (...args: unknown[]) => {
+      const callback = args[2] as (file: { name: string }) => Promise<void>
+      const receiver = args[3] as { isAborted: () => boolean }
+      if (!receiver.isAborted()) await callback({ name: 'unexpected.ckpt' })
+    })
+    vi.mocked(ComfyFSCli).mockImplementation(function MockComfyFSCli() {
+      return { forEachFileInfo: forEachFileInfoMock } as unknown as ComfyFSCli
+    })
+    const onData = vi.fn()
+
+    await svc.listComfyFiles(
+      { dir: 'models', exts: ['.ckpt'] },
+      { onData, abortReceiver: { isAborted: () => true, onAbort: vi.fn() } }
+    )
+
+    expect(onData).not.toHaveBeenCalled()
   })
 })
 

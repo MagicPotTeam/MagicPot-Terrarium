@@ -6,7 +6,9 @@ import {
   validateEnsureManagedMediaDerivativeResp,
   validateImportManagedMediaDataUrlReq,
   validateImportManagedMediaFileReq,
-  validateImportManagedMediaResp
+  validateImportManagedMediaResp,
+  validateMaterializeManagedMediaForRequestReq,
+  validateMigrateLegacyManagedMediaReq
 } from './svcManagedMedia'
 
 const reference = {
@@ -147,9 +149,81 @@ describe('svcManagedMedia contract', () => {
         validateImportManagedMediaDataUrlReq({ dataUrl, originalFileName: 'paste.png' })
       ).toThrow(ServiceValidationError)
     }
-    const oversized = `data:image/png;base64,${'AAAA'.repeat(Math.ceil((25 * 1024 * 1024 + 1) / 3))}`
+    const largeButValid = `data:image/png;base64,${'AAAA'.repeat(Math.ceil((256 * 1024) / 3))}`
+    expect(
+      validateImportManagedMediaDataUrlReq({
+        dataUrl: largeButValid,
+        originalFileName: 'paste.png'
+      }).dataUrl
+    ).toBe(largeButValid)
+  })
+
+  it('accepts strict lifecycle storage and rejects unknown or non-canonical scopes', () => {
+    const storage = { namespace: 'user-output' as const, scope: 'chat-attachments' }
+    expect(
+      validateImportManagedMediaDataUrlReq({
+        dataUrl: 'data:image/png;base64,AQID',
+        originalFileName: 'paste.png',
+        storage
+      })
+    ).toEqual({
+      dataUrl: 'data:image/png;base64,AQID',
+      originalFileName: 'paste.png',
+      storage
+    })
+    expect(
+      validateImportManagedMediaFileReq({
+        sourcePath: '/Users/example/selected.png',
+        mimeType: 'image/png',
+        originalFileName: 'selected.png',
+        storage: { namespace: 'task', scope: 'run_01' }
+      }).storage
+    ).toEqual({ namespace: 'task', scope: 'run_01' })
+    expect(
+      validateMigrateLegacyManagedMediaReq({
+        dataUrl: 'data:image/png;base64,AQID',
+        metadata: { originalFileName: 'legacy.png' },
+        storage
+      })
+    ).toEqual({
+      dataUrl: 'data:image/png;base64,AQID',
+      metadata: { originalFileName: 'legacy.png' },
+      storage
+    })
+
+    for (const storage of [
+      { namespace: 'unknown', scope: 'scope' },
+      { namespace: 'task', scope: 'Task-01' },
+      { namespace: 'task', scope: '../escape' },
+      { namespace: 'task', scope: 'scope/' },
+      { namespace: 'task', scope: '' },
+      { namespace: 'task', scope: 'a'.repeat(129) },
+      { namespace: 'task', scope: 'scope', extra: true },
+      { namespace: 'task' },
+      { scope: 'scope' }
+    ]) {
+      expect(() =>
+        validateImportManagedMediaDataUrlReq({
+          dataUrl: 'data:image/png;base64,AQID',
+          originalFileName: 'paste.png',
+          storage
+        })
+      ).toThrow(ServiceValidationError)
+      expect(() =>
+        validateMigrateLegacyManagedMediaReq({
+          dataUrl: 'data:image/png;base64,AQID',
+          metadata: { originalFileName: 'legacy.png' },
+          storage
+        })
+      ).toThrow(ServiceValidationError)
+    }
     expect(() =>
-      validateImportManagedMediaDataUrlReq({ dataUrl: oversized, originalFileName: 'paste.png' })
+      validateImportManagedMediaDataUrlReq({
+        dataUrl: 'data:image/png;base64,AQID',
+        originalFileName: 'paste.png',
+        storage: { namespace: 'task', scope: 'scope' },
+        arbitrary: true
+      })
     ).toThrow(ServiceValidationError)
   })
 
@@ -166,6 +240,28 @@ describe('svcManagedMedia contract', () => {
       validateImportManagedMediaResp({
         ...response,
         localMediaUrl: 'local-media:///canonical/root/ab/other.png'
+      })
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('preserves the requested materialization transport through validation', () => {
+    expect(
+      validateMaterializeManagedMediaForRequestReq({
+        reference,
+        transport: 'request-data-url'
+      })
+    ).toEqual({ reference, transport: 'request-data-url' })
+    expect(
+      validateMaterializeManagedMediaForRequestReq({
+        reference,
+        transport: 'chunked-binary-v1'
+      })
+    ).toEqual({ reference, transport: 'chunked-binary-v1' })
+    expect(() =>
+      validateMaterializeManagedMediaForRequestReq({
+        reference,
+        transport: 'chunked-binary-v1',
+        extra: true
       })
     ).toThrow(ServiceValidationError)
   })

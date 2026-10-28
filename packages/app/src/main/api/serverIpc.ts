@@ -9,6 +9,10 @@ import { TargetSchemeSvcImpl } from './svcTargetSchemeImpl'
 import { CustomSkillSvcImpl } from './svcCustomSkillImpl'
 import { DialogSvcImpl } from './svcDialogImpl'
 import { FigmaSvcImpl } from './svcFigmaImpl'
+import { FigPluginCenterSvcImpl } from './svcFigPluginCenterImpl'
+import { AgentLocalFilesSvcImpl } from './svcAgentLocalFilesImpl'
+import { LocalFileReadGrants } from '../agentLocalFiles/readGrants'
+import { createDocumentUtilityExtractor } from '../agentLocalFiles/documents/documentUtilityProcess'
 import { ShellSvcImpl } from './svcShellImpl'
 import { QAppSvcImpl } from './svcQAppImpl'
 import { HyperSvcImpl } from './svcHyperImpl'
@@ -27,7 +31,10 @@ import { ManagedMediaSvcImpl } from './svcManagedMediaImpl'
 import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaCleanupScheduler'
 import { getChatMediaDir } from '../llmProxy/chatMediaDir'
 
-export const createServer = (managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler): Api => {
+export const createServer = (
+  managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler,
+  getMainWindow: () => Electron.BrowserWindow | null = () => null
+): Api => {
   const comfyBatch = new ComfyBatchSvcImpl()
   const resumeRecoveredJobs = (
     comfyBatch as ComfyBatchSvcImpl & { resumeRecoveredJobs?: () => Promise<void> }
@@ -52,6 +59,11 @@ export const createServer = (managedMediaCleanupScheduler?: ManagedMediaCleanupS
     svcCanvasThumbnail: new CanvasThumbnailSvcImpl(),
     svcDialog: new DialogSvcImpl(),
     svcFigma: new FigmaSvcImpl(),
+    svcFigPluginCenter: new FigPluginCenterSvcImpl(undefined, getMainWindow),
+    svcAgentLocalFiles: new AgentLocalFilesSvcImpl(
+      new LocalFileReadGrants(createDocumentUtilityExtractor()),
+      getMainWindow
+    ),
     svcShell: new ShellSvcImpl(),
     svcPhotoshop: new PhotoshopSvcImpl(),
     svcLLMProxy: new LLMProxySvcImpl(),
@@ -67,7 +79,8 @@ export const createServer = (managedMediaCleanupScheduler?: ManagedMediaCleanupS
         managedMediaCleanupScheduler?.submitSnapshot({
           complete: snapshot.complete,
           chatMediaRoot,
-          referencedMediaIds: snapshot.ids
+          referencedMediaIds: snapshot.ids,
+          referenceCounts: snapshot.referenceCounts
         })
       }
     })
@@ -75,11 +88,14 @@ export const createServer = (managedMediaCleanupScheduler?: ManagedMediaCleanupS
 
   return {
     ...baseApi,
-    ...createApiExtensionServices({ baseApi })
+    ...createApiExtensionServices({ baseApi, getMainWindow })
   }
 }
 
-export function initServerIpc(managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler): void {
-  const api: Api = createServer(managedMediaCleanupScheduler)
+export function initServerIpc(
+  managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler,
+  getMainWindow: () => Electron.BrowserWindow | null = () => null
+): void {
+  const api: Api = createServer(managedMediaCleanupScheduler, getMainWindow)
   registerIpcServer(apiDef, api)
 }

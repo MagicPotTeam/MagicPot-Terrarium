@@ -37,6 +37,20 @@ const MAX_PINNED_NOTES = 8
 const MAX_WORKSPACE_SHARED_NOTES = 8
 const MAX_PROMPT_MEMORY_CHARS = 2000
 const MAX_PROMPT_TEXT_CHARS = 400
+
+/**
+ * Workspace context is a short-lived task index, not an archive. Keep stale
+ * request/response material from surviving indefinitely while preserving an
+ * active run that may still need to resume after a restart.
+ */
+export const ASSISTANT_WORKSPACE_RETENTION = {
+  taskContextTtlMs: 7 * 24 * 60 * 60 * 1_000,
+  contextSnapshotTtlMs: 7 * 24 * 60 * 60 * 1_000,
+  maxTaskContextBytes: 128 * 1024,
+  maxContextSnapshotBytes: 32 * 1024
+} as const
+
+const ACTIVE_TASK_STATUSES = new Set<AssistantRunStatus>(['queued', 'acknowledged', 'running'])
 const QUALITY_GATE_STATUSES = new Set<AssistantQualityGateState['status']>([
   'unknown',
   'pending',
@@ -46,6 +60,38 @@ const QUALITY_GATE_STATUSES = new Set<AssistantQualityGateState['status']>([
 ])
 
 const workspaceMetaMutationQueues = new Map<string, Promise<void>>()
+const taskContextMutationQueues = new Map<string, Promise<void>>()
+
+/**
+ * Workspace identity directories use a readable, sanitized name for backwards
+ * compatibility. Different IDs can therefore map to the same directory (for
+ * example `team/a` and `team_a`). Never treat metadata from a colliding
+ * directory as belonging to the requested workspace.
+ */
+const createWorkspaceIdentityCollisionError = (requestedId: string, persistedId: string): Error =>
+  new Error(
+    `Workspace identity collision: requested ${JSON.stringify(requestedId)} but found ${JSON.stringify(persistedId)} in the same metadata directory.`
+  )
+
+const parseWorkspaceMeta = (
+  raw: string,
+  expectedWorkspaceId?: string
+): AssistantWorkspaceMeta | undefined => {
+  try {
+    const parsed = JSON.parse(raw) as Partial<AssistantWorkspaceMeta>
+    const expected = expectedWorkspaceId ? cleanString(expectedWorkspaceId, 120) : undefined
+    const persisted = cleanString(parsed.workspaceId, 120)
+    if (expected && persisted && persisted !== expected) {
+      throw createWorkspaceIdentityCollisionError(expected, persisted)
+    }
+    return parsed as AssistantWorkspaceMeta
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Workspace identity collision:')) {
+      throw error
+    }
+    throw error
+  }
+}
 
 const serializeWorkspaceMetaMutation = async <T>(
   workspaceMetaFile: string,
@@ -65,6 +111,28 @@ const serializeWorkspaceMetaMutation = async <T>(
   } finally {
     if (workspaceMetaMutationQueues.get(key) === tail) {
       workspaceMetaMutationQueues.delete(key)
+    }
+  }
+}
+
+const serializeTaskContextMutation = async <T>(
+  taskContextFile: string,
+  mutation: () => Promise<T>
+): Promise<T> => {
+  const key = path.resolve(taskContextFile)
+  const previous = taskContextMutationQueues.get(key) || Promise.resolve()
+  const operation = previous.catch(() => undefined).then(mutation)
+  const tail = operation.then(
+    () => undefined,
+    () => undefined
+  )
+  taskContextMutationQueues.set(key, tail)
+
+  try {
+    return await operation
+  } finally {
+    if (taskContextMutationQueues.get(key) === tail) {
+      taskContextMutationQueues.delete(key)
     }
   }
 }
@@ -213,19 +281,21 @@ export const persistAssistantContextSnapshot = async (
   workspace: AssistantWorkspaceState,
   snapshot: AssistantContextSnapshot
 ): Promise<void> => {
-  await fs.mkdir(path.dirname(workspace.contextFile), { recursive: true })
-  await fs.writeFile(workspace.contextFile, JSON.stringify(snapshot, null, 2), 'utf8')
+  await writeJsonFileAtomic(workspace.contextFile, snapshot)
 }
 
 export const readAssistantWorkspaceMeta = async (
-  workspace: AssistantWorkspaceState
+  workspace: Pick<AssistantWorkspaceState, 'workspaceId' | 'workspaceMetaFile'>
 ): Promise<AssistantWorkspaceMeta | undefined> => {
   const raw = await readOptionalTextFile(workspace.workspaceMetaFile)
   if (!raw) return undefined
 
   try {
-    return JSON.parse(raw) as AssistantWorkspaceMeta
+    return parseWorkspaceMeta(raw, workspace.workspaceId)
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Workspace identity collision:')) {
+      throw error
+    }
     console.warn('[AssistantWorkspace] Failed to parse workspace metadata:', error)
     return undefined
   }
@@ -239,8 +309,11 @@ export const readAssistantWorkspaceMetaById = async (
   if (!raw) return undefined
 
   try {
-    return JSON.parse(raw) as AssistantWorkspaceMeta
+    return parseWorkspaceMeta(raw, workspace.workspaceId)
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Workspace identity collision:')) {
+      throw error
+    }
     console.warn('[AssistantWorkspace] Failed to parse workspace metadata by id:', error)
     return undefined
   }
@@ -268,7 +341,11 @@ export const listAssistantWorkspaceMetas = async (
         )
         if (!raw) return undefined
         try {
-          return JSON.parse(raw) as AssistantWorkspaceMeta
+          const parsed = parseWorkspaceMeta(raw)
+          if (!parsed?.workspaceId || sanitizePathSegment(parsed.workspaceId) !== entry.name) {
+            return undefined
+          }
+          return parsed
         } catch (error) {
           console.warn('[AssistantWorkspace] Failed to parse workspace metadata entry:', error)
           return undefined
@@ -607,6 +684,44 @@ const readOptionalTextFile = async (filePath: string): Promise<string | undefine
   }
 }
 
+const readBoundedTextFile = async (
+  filePath: string,
+  maxBytes: number
+): Promise<string | undefined> => {
+  try {
+    const stat = await fs.stat(filePath)
+    if (!stat.isFile()) return undefined
+    if (stat.size > maxBytes) {
+      await fs.rm(filePath, { force: true })
+      return undefined
+    }
+    return readOptionalTextFile(filePath)
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException
+    if (err?.code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+const removeExpiredOrOversizedFile = async (filePath: string): Promise<void> => {
+  await fs.rm(filePath, { force: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error?.code !== 'ENOENT') throw error
+  })
+}
+
+// Older persisted fixtures used small relative counters rather than epoch ms.
+// Keep those records readable while enforcing TTL for real wall-clock values.
+const MIN_PLAUSIBLE_EPOCH_MS = Date.UTC(2000, 0, 1)
+
+const isFreshEnough = (updatedAt: number, ttlMs: number, now = Date.now()): boolean =>
+  Number.isFinite(updatedAt) && (updatedAt < MIN_PLAUSIBLE_EPOCH_MS || updatedAt >= now - ttlMs)
+
+const hasActiveTask = (taskContext: AssistantTaskContext): boolean =>
+  ACTIVE_TASK_STATUSES.has(taskContext.latestStatus as AssistantRunStatus) ||
+  taskContext.recentRuns.some((run) => ACTIVE_TASK_STATUSES.has(run.status)) ||
+  taskContext.taskGroup?.status === 'running' ||
+  taskContext.taskGroup?.status === 'waiting-approval'
+
 const cleanString = (
   value?: string | null,
   maxLength = MAX_PROMPT_TEXT_CHARS
@@ -638,8 +753,7 @@ export const normalizeArtifactLineage = (
 
   const taskGroupId = cleanString(lineage.taskGroupId, 120)
   const taskGroupAction = cleanString(lineage.taskGroupAction, 32) as
-    | AssistantTaskGroupAction
-    | undefined
+    AssistantTaskGroupAction | undefined
   const workspaceRunId = cleanString(lineage.workspaceRunId, 120)
   const workspaceId = cleanString(lineage.workspaceId, 120)
   const rootRunId = cleanString(lineage.rootRunId, 120)
@@ -777,8 +891,7 @@ const normalizeTaskContextArtifact = (
   const runId = cleanString(artifact?.runId, 120)
   const kind = cleanString(artifact?.kind, 32) as AssistantTaskContextArtifact['kind'] | undefined
   const source = cleanString(artifact?.source, 32) as
-    | AssistantTaskContextArtifact['source']
-    | undefined
+    AssistantTaskContextArtifact['source'] | undefined
 
   if (!artifactId || !runId || !kind || !source) return undefined
 
@@ -978,11 +1091,21 @@ export const readAssistantContextSnapshot = async (
 export const readAssistantContextSnapshotFromFile = async (
   contextFile: string
 ): Promise<AssistantContextSnapshot | undefined> => {
-  const raw = await readOptionalTextFile(contextFile)
+  const raw = await readBoundedTextFile(
+    contextFile,
+    ASSISTANT_WORKSPACE_RETENTION.maxContextSnapshotBytes
+  )
   if (!raw) return undefined
 
   try {
-    return JSON.parse(raw) as AssistantContextSnapshot
+    const parsed = JSON.parse(raw) as Partial<AssistantContextSnapshot>
+    if (
+      !isFreshEnough(Number(parsed.generatedAt), ASSISTANT_WORKSPACE_RETENTION.contextSnapshotTtlMs)
+    ) {
+      await removeExpiredOrOversizedFile(contextFile)
+      return undefined
+    }
+    return parsed as AssistantContextSnapshot
   } catch (error) {
     console.warn('[AssistantWorkspace] Failed to parse context snapshot:', error)
     return undefined
@@ -992,13 +1115,38 @@ export const readAssistantContextSnapshotFromFile = async (
 export const readAssistantTaskContextFromFile = async (
   taskContextFile: string
 ): Promise<AssistantTaskContext | undefined> => {
-  const raw = await readOptionalTextFile(taskContextFile)
+  const raw = await readBoundedTextFile(
+    taskContextFile,
+    ASSISTANT_WORKSPACE_RETENTION.maxTaskContextBytes
+  )
   if (!raw) return undefined
 
   try {
     const parsed = JSON.parse(raw) as Partial<AssistantTaskContext>
     if (!parsed?.route) return undefined
-    return normalizeTaskContext(parsed.route, parsed)
+    // Never refresh a missing or malformed persisted timestamp during
+    // normalization: doing so would turn an untrusted old record into a fresh
+    // one and bypass the retention boundary.
+    if (!Number.isFinite(parsed.updatedAt)) {
+      await removeExpiredOrOversizedFile(taskContextFile)
+      return undefined
+    }
+    if (
+      Array.isArray(parsed.recentRuns) &&
+      parsed.recentRuns.some((run) => !run || !Number.isFinite(run.updatedAt))
+    ) {
+      await removeExpiredOrOversizedFile(taskContextFile)
+      return undefined
+    }
+    const normalized = normalizeTaskContext(parsed.route, parsed)
+    if (
+      !isFreshEnough(normalized.updatedAt, ASSISTANT_WORKSPACE_RETENTION.taskContextTtlMs) &&
+      !hasActiveTask(normalized)
+    ) {
+      await removeExpiredOrOversizedFile(taskContextFile)
+      return undefined
+    }
+    return normalized
   } catch (error) {
     console.warn('[AssistantWorkspace] Failed to parse task context:', error)
     return undefined
@@ -1047,58 +1195,61 @@ export const updateAssistantTaskContext = async (
     taskGroup?: Partial<AssistantTaskGroupState> | null
   }
 ): Promise<AssistantTaskContext> => {
-  const previous = await readAssistantTaskContext(workspace)
-  const updatedAt = Number.isFinite(entry.updatedAt) ? Number(entry.updatedAt) : Date.now()
-  const nextRun: AssistantTaskContextRun = {
-    runId: entry.runId,
-    workspaceId: cleanString(entry.workspaceId, 120) || getDefaultWorkspaceId(entry.route),
-    status: entry.status,
-    runOrigin: entry.runOrigin || 'new',
-    updatedAt,
-    ...(cleanString(entry.parentRunId, 120)
-      ? { parentRunId: cleanString(entry.parentRunId, 120) }
-      : {}),
-    rootRunId: cleanString(entry.rootRunId, 120) || entry.runId,
-    ...(cleanString(entry.resumeSourceRunId, 120)
-      ? { resumeSourceRunId: cleanString(entry.resumeSourceRunId, 120) }
-      : {}),
-    ...(Number.isFinite(entry.resumeAttempt) ? { resumeAttempt: Number(entry.resumeAttempt) } : {}),
-    ...(cleanString(entry.resumeMode, 32)
-      ? { resumeMode: cleanString(entry.resumeMode, 32) as 'requeue' }
-      : {}),
-    ...(cleanString(entry.profileId) ? { profileId: cleanString(entry.profileId) } : {}),
-    ...(cleanString(entry.requestText) ? { requestText: cleanString(entry.requestText) } : {}),
-    ...(cleanString(entry.responseText) ? { responseText: cleanString(entry.responseText) } : {}),
-    ...(cleanString(entry.errorMessage) ? { errorMessage: cleanString(entry.errorMessage) } : {}),
-    artifactIds: dedupeStrings(entry.artifactIds || [], MAX_TASK_CONTEXT_ARTIFACT_IDS),
-    toolNames: dedupeStrings(
-      (entry.toolCalls || []).map((toolCall) => toolCall.toolName),
-      MAX_TASK_CONTEXT_TOOL_NAMES
-    ),
-    ...(entry.taskGroup ? { taskGroup: normalizeTaskGroupState(entry.taskGroup) } : {})
-  }
+  return serializeTaskContextMutation(workspace.taskContextFile, async () => {
+    const previous = await readAssistantTaskContext(workspace)
+    const updatedAt = Number.isFinite(entry.updatedAt) ? Number(entry.updatedAt) : Date.now()
+    const nextRun: AssistantTaskContextRun = {
+      runId: entry.runId,
+      workspaceId: cleanString(entry.workspaceId, 120) || getDefaultWorkspaceId(entry.route),
+      status: entry.status,
+      runOrigin: entry.runOrigin || 'new',
+      updatedAt,
+      ...(cleanString(entry.parentRunId, 120)
+        ? { parentRunId: cleanString(entry.parentRunId, 120) }
+        : {}),
+      rootRunId: cleanString(entry.rootRunId, 120) || entry.runId,
+      ...(cleanString(entry.resumeSourceRunId, 120)
+        ? { resumeSourceRunId: cleanString(entry.resumeSourceRunId, 120) }
+        : {}),
+      ...(Number.isFinite(entry.resumeAttempt)
+        ? { resumeAttempt: Number(entry.resumeAttempt) }
+        : {}),
+      ...(cleanString(entry.resumeMode, 32)
+        ? { resumeMode: cleanString(entry.resumeMode, 32) as 'requeue' }
+        : {}),
+      ...(cleanString(entry.profileId) ? { profileId: cleanString(entry.profileId) } : {}),
+      ...(cleanString(entry.requestText) ? { requestText: cleanString(entry.requestText) } : {}),
+      ...(cleanString(entry.responseText) ? { responseText: cleanString(entry.responseText) } : {}),
+      ...(cleanString(entry.errorMessage) ? { errorMessage: cleanString(entry.errorMessage) } : {}),
+      artifactIds: dedupeStrings(entry.artifactIds || [], MAX_TASK_CONTEXT_ARTIFACT_IDS),
+      toolNames: dedupeStrings(
+        (entry.toolCalls || []).map((toolCall) => toolCall.toolName),
+        MAX_TASK_CONTEXT_TOOL_NAMES
+      ),
+      ...(entry.taskGroup ? { taskGroup: normalizeTaskGroupState(entry.taskGroup) } : {})
+    }
 
-  const normalized = normalizeTaskContext(entry.route, {
-    ...(previous || {}),
-    workspaceId: cleanString(entry.workspaceId, 120) || previous?.workspaceId,
-    updatedAt,
-    latestStatus: entry.status,
-    latestProfileId: cleanString(entry.profileId) || previous?.latestProfileId,
-    latestRequestText: cleanString(entry.requestText) || previous?.latestRequestText,
-    latestResponseText: cleanString(entry.responseText) || previous?.latestResponseText,
-    latestErrorMessage: cleanString(entry.errorMessage),
-    recentArtifactIds: [...nextRun.artifactIds, ...(previous?.recentArtifactIds || [])],
-    recentArtifacts: [...(entry.artifacts || []), ...(previous?.recentArtifacts || [])],
-    recentToolNames: [...nextRun.toolNames, ...(previous?.recentToolNames || [])],
-    recentRuns: [
-      nextRun,
-      ...(previous?.recentRuns || []).filter((run) => run.runId !== entry.runId)
-    ]
+    const normalized = normalizeTaskContext(entry.route, {
+      ...(previous || {}),
+      workspaceId: cleanString(entry.workspaceId, 120) || previous?.workspaceId,
+      updatedAt,
+      latestStatus: entry.status,
+      latestProfileId: cleanString(entry.profileId) || previous?.latestProfileId,
+      latestRequestText: cleanString(entry.requestText) || previous?.latestRequestText,
+      latestResponseText: cleanString(entry.responseText) || previous?.latestResponseText,
+      latestErrorMessage: cleanString(entry.errorMessage),
+      recentArtifactIds: [...nextRun.artifactIds, ...(previous?.recentArtifactIds || [])],
+      recentArtifacts: [...(entry.artifacts || []), ...(previous?.recentArtifacts || [])],
+      recentToolNames: [...nextRun.toolNames, ...(previous?.recentToolNames || [])],
+      recentRuns: [
+        nextRun,
+        ...(previous?.recentRuns || []).filter((run) => run.runId !== entry.runId)
+      ]
+    })
+
+    await writeJsonFileAtomic(workspace.taskContextFile, normalized)
+    return normalized
   })
-
-  await fs.mkdir(path.dirname(workspace.taskContextFile), { recursive: true })
-  await fs.writeFile(workspace.taskContextFile, JSON.stringify(normalized, null, 2), 'utf8')
-  return normalized
 }
 
 export const updateAssistantPinnedContext = async (
@@ -1221,6 +1372,7 @@ export const readAssistantReusableContextPackFromFiles = async (files: {
 export const clearAssistantReusableContext = async (
   workspace: AssistantWorkspaceState
 ): Promise<void> => {
+  await fs.rm(workspace.contextFile, { force: true })
   await fs.rm(workspace.taskContextFile, { force: true })
   await fs.rm(workspace.pinnedContextFile, { force: true })
   await fs.rm(workspace.memoryDir, { recursive: true, force: true })

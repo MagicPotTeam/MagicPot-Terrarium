@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { fileURLToPath } from 'node:url'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const {
   exposeMock,
@@ -34,6 +35,8 @@ vi.mock('./apiIpc', () => ({ newApiIpc: () => ({}) }))
 vi.mock('./winBridge', () => ({ winBridge: {} }))
 
 describe('preload capability boundary', () => {
+  let windowListeners: Map<string, EventListener>
+  let addWindowListener: ReturnType<typeof vi.fn>
   beforeEach(async () => {
     vi.resetModules()
     exposeMock.mockReset()
@@ -43,9 +46,18 @@ describe('preload capability boundary', () => {
     removeListenerMock.mockReset()
     sendMock.mockReset()
     sendSyncMock.mockReset()
+    windowListeners = new Map()
+    addWindowListener = vi.fn((name: string, listener: EventListener) => {
+      windowListeners.set(name, listener)
+    })
+    vi.stubGlobal('window', {
+      addEventListener: addWindowListener,
+      removeEventListener: vi.fn()
+    })
     Object.defineProperty(process, 'contextIsolated', { configurable: true, value: true })
     await import('./index')
   })
+  afterEach(() => vi.unstubAllGlobals())
 
   it('does not expose the generic Electron ipcRenderer API', () => {
     const exposedNames = exposeMock.mock.calls.map(([name]) => name)
@@ -76,6 +88,69 @@ describe('preload capability boundary', () => {
       '/picked/selected.png'
     )
     expect(sendSyncMock).not.toHaveBeenCalled()
+  })
+
+  it('captures trusted drops before bridge exposure without exposing a trust setter', () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    expect(Object.keys(electronFile).sort()).toEqual([
+      'authorizeDroppedLocalImage',
+      'authorizeLocalMediaFile',
+      'getPathForFile',
+      'resolveAuthorizedLocalMediaPath'
+    ])
+    expect(addWindowListener).toHaveBeenCalledWith('drop', expect.any(Function), true)
+    expect(addWindowListener.mock.invocationCallOrder[0]).toBeLessThan(
+      exposeMock.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('never sends string-only or synthetic-drop requests to path authorization IPC', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const url = 'file:///C:/Synthetic%20Lark/unselected.png'
+    await expect(electronFile.authorizeDroppedLocalImage(url, { isTrusted: true })).resolves.toBe(
+      ''
+    )
+    windowListeners.get('drop')?.({
+      isTrusted: false,
+      dataTransfer: { getData: (type: string) => (type === 'text/plain' ? url : '') }
+    } as unknown as Event)
+    await expect(electronFile.authorizeDroppedLocalImage(url)).resolves.toBe('')
+    expect(invokeMock).not.toHaveBeenCalled()
+    expect(getPathForFileMock).not.toHaveBeenCalled()
+  })
+
+  it('routes only the exact captured image URL through the existing async path-grant IPC', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const url =
+      process.platform === 'win32'
+        ? 'file:///C:/Synthetic%20Lark/drop.png'
+        : 'file:///tmp/Synthetic%20Lark/drop.png'
+    invokeMock.mockResolvedValue(true)
+    windowListeners.get('drop')?.({
+      isTrusted: true,
+      dataTransfer: { getData: (type: string) => (type === 'text/plain' ? url : '') }
+    } as unknown as Event)
+    expect(invokeMock).not.toHaveBeenCalled()
+    await expect(electronFile.authorizeDroppedLocalImage(url)).resolves.toBe(fileURLToPath(url))
+    await expect(electronFile.authorizeDroppedLocalImage(url)).resolves.toBe('')
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith(
+      'local-media:authorize-picker-path',
+      fileURLToPath(url)
+    )
+    expect(getPathForFileMock).not.toHaveBeenCalled()
+    expect(sendSyncMock).not.toHaveBeenCalled()
+  })
+
+  it('invalidates an unconsumed trusted drop on navigation', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const url = 'file:///C:/Synthetic%20Lark/drop.png'
+    windowListeners.get('drop')?.({
+      isTrusted: true,
+      dataTransfer: { getData: (type: string) => (type === 'text/plain' ? url : '') }
+    } as unknown as Event)
+    windowListeners.get('pagehide')?.({} as Event)
+    await expect(electronFile.authorizeDroppedLocalImage(url)).resolves.toBe('')
+    expect(invokeMock).not.toHaveBeenCalled()
   })
 
   it('exposes only named main-process event subscriptions', () => {

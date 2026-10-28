@@ -194,6 +194,7 @@ type ReplaceLastMessageInput = {
   message: ChatMessage
   sessionUrl?: string | null
   sessionProfileId?: string | null
+  sessionRouteFingerprint?: string | null
 }
 
 type ReplaceLastMessagesInput = {
@@ -201,6 +202,7 @@ type ReplaceLastMessagesInput = {
   messages: ChatMessage[]
   sessionUrl?: string | null
   sessionProfileId?: string | null
+  sessionRouteFingerprint?: string | null
 }
 
 const resolveNextSessionUrl = (
@@ -236,6 +238,10 @@ export const replaceLastMessageInSession = (
       sessionUrl: resolveNextSessionUrl(session.sessionUrl, input.sessionUrl),
       sessionProfileId:
         input.sessionUrl === null ? undefined : input.sessionProfileId || session.sessionProfileId,
+      sessionRouteFingerprint:
+        input.sessionUrl === null
+          ? undefined
+          : input.sessionRouteFingerprint || session.sessionRouteFingerprint,
       messages:
         session.messages.length > 0
           ? [...session.messages.slice(0, -1), input.message]
@@ -266,6 +272,10 @@ export const replaceLastMessageWithMessagesInSession = (
       sessionUrl: resolveNextSessionUrl(session.sessionUrl, input.sessionUrl),
       sessionProfileId:
         input.sessionUrl === null ? undefined : input.sessionProfileId || session.sessionProfileId,
+      sessionRouteFingerprint:
+        input.sessionUrl === null
+          ? undefined
+          : input.sessionRouteFingerprint || session.sessionRouteFingerprint,
       messages:
         session.messages.length > 0
           ? [...session.messages.slice(0, -1), ...input.messages]
@@ -289,7 +299,13 @@ export const removeTrailingEmptyAssistantMessage = (
 ): ChatSession[] =>
   updateSessionById(sessions, sessionId, (session) => {
     const lastMessage = session.messages[session.messages.length - 1]
-    if (lastMessage?.role !== 'assistant' || lastMessage.content) {
+    if (
+      lastMessage?.role !== 'assistant' ||
+      lastMessage.content ||
+      lastMessage.toolHistory?.length ||
+      lastMessage.attachments?.length ||
+      lastMessage.ocrResult
+    ) {
       return session
     }
 

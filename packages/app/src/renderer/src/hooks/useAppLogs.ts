@@ -5,6 +5,9 @@ import { api } from '@renderer/utils/windowUtils'
 import { createLogBuffer } from '@renderer/utils/logBuffer'
 import { retainLogLines } from '@renderer/utils/logText'
 
+const isComfyLog = (message: string): boolean =>
+  message.trimStart().toLowerCase().startsWith('[comfyui')
+
 export function useAppLogs() {
   const [output, setOutput] = useState({ lines: [] as string[], firstIndex: 0, generation: 0 })
   const bufferRef = useRef<ReturnType<typeof createLogBuffer> | null>(null)
@@ -26,6 +29,9 @@ export function useAppLogs() {
           {
             onData: (data) => {
               if (!mounted) return
+              // Keep the shared terminal clean even while an older main process
+              // replays ComfyUI history before it is restarted with the server filter.
+              if (isComfyLog(data.message)) return
               const time = new Date(data.timestamp).toLocaleTimeString()
               const level = data.level === 'info' ? '' : `[${data.level.toUpperCase()}] `
               buffer.push(`${time} ${level}${data.message}`)

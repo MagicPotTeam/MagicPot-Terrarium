@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { deflateSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,6 +10,7 @@ import {
   ensureManagedMediaDerivative,
   selectManagedMediaDerivativeBucket
 } from './managedMediaDerivatives'
+import { managedMediaGenerationArtifactName } from './managedMediaGenerationLock'
 
 const sidecar = vi.hoisted(() => ({ generate: vi.fn() }))
 vi.mock('../api/canvasThumbnailSidecarAdapter', () => ({
@@ -55,6 +57,15 @@ function gif(): Buffer {
   return Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64')
 }
 
+function sidecarLocalUrl(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, '/')
+  const encoded = normalized
+    .split('/')
+    .map((part) => encodeURIComponent(part).replace(/%3A/gi, ':'))
+    .join('/')
+  return `local-media://${encoded.startsWith('/') ? '' : '/'}${encoded}`
+}
+
 describe('selectManagedMediaDerivativeBucket', () => {
   it.each([
     [1, 1, 256],
@@ -78,8 +89,9 @@ describe('ensureManagedMediaDerivative', () => {
 
   beforeEach(async () => {
     tempRoot = await createNodeTestArtifactDir('managed-media-derivatives')
-    root = path.join(tempRoot, 'managed')
+    root = path.resolve(path.join(tempRoot, 'managed'))
     await fs.mkdir(root, { recursive: true })
+    root = await fs.realpath(root)
     sidecar.generate.mockReset()
     sidecar.generate.mockImplementation(async (request) => {
       const sourceBytes = await fs.readFile(request.items[0].path)
@@ -138,7 +150,7 @@ describe('ensureManagedMediaDerivative', () => {
                     height: 4,
                     filename: 'generated.png',
                     path: output,
-                    src: output,
+                    src: sidecarLocalUrl(output),
                     mimeType: 'image/png',
                     sizeBytes: bytes.length
                   }
@@ -160,7 +172,10 @@ describe('ensureManagedMediaDerivative', () => {
       }
     })
   })
-  afterEach(async () => fs.rm(tempRoot, { recursive: true, force: true }))
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await fs.rm(tempRoot, { recursive: true, force: true })
+  })
 
   async function imported(bytes = png(), mimeType = 'image/png', name = 'source.png') {
     return importManagedMedia(
@@ -199,7 +214,39 @@ describe('ensureManagedMediaDerivative', () => {
       maxDecodedPixels: 64 * 1024 * 1024,
       maxOutputPixels: 512 * 512
     })
+    expect(sidecar.generate.mock.calls[0][1]).toEqual({ required: true })
     expect(first.purpose).toBe('managed-media-derivative')
+  })
+
+  it('keeps lifecycle namespace imports and derivatives in the same store after restart', async () => {
+    const authorizedRoot = path.join(tempRoot, 'authorized')
+    const namespaceRoot = path.join(authorizedRoot, 'task', 'task-123')
+    await fs.mkdir(namespaceRoot, { recursive: true })
+    const canonicalAuthorizedRoot = await fs.realpath(authorizedRoot)
+    const canonicalNamespaceRoot = await fs.realpath(namespaceRoot)
+    const media = await importManagedMedia(
+      canonicalNamespaceRoot,
+      {
+        bytes: png(),
+        mimeType: 'image/png',
+        originalFileName: 'source.png',
+        provenance: { source: 'namespace-test' }
+      },
+      { authorizedRoot: canonicalAuthorizedRoot }
+    )
+    expect(media.reference.relativePath).toMatch(/^task\/task-123\/originals\//u)
+
+    const result = await ensureManagedMediaDerivative({
+      authorizedRoot: canonicalAuthorizedRoot,
+      reference: JSON.parse(JSON.stringify(media.reference)),
+      maxEdge: 256,
+      format: 'png'
+    })
+    if (result.purpose !== 'managed-media-derivative') throw new Error('unexpected fallback')
+    const derivativePath = path.join(canonicalNamespaceRoot, ...result.relativePath.split('/'))
+    expect(await fs.readFile(derivativePath)).toBeInstanceOf(Buffer)
+    expect(result.localMediaUrl).toContain(canonicalNamespaceRoot.replace(/\\/g, '/'))
+    await expect(fs.access(path.join(canonicalAuthorizedRoot, 'derivatives'))).rejects.toThrow()
   })
 
   it('hits durable cache after completion and regenerates missing or corrupt files', async () => {
@@ -228,6 +275,10 @@ describe('ensureManagedMediaDerivative', () => {
       format: 'png'
     })
     expect(sidecar.generate).toHaveBeenCalledTimes(2)
+    const identityRoot = path.dirname(path.dirname(derivative))
+    expect(
+      (await fs.readdir(identityRoot)).filter((name) => name.startsWith('.quarantine-'))
+    ).toEqual([])
     await fs.unlink(derivative)
     await ensureManagedMediaDerivative({
       authorizedRoot: root,
@@ -236,6 +287,143 @@ describe('ensureManagedMediaDerivative', () => {
       format: 'png'
     })
     expect(sidecar.generate).toHaveBeenCalledTimes(3)
+    expect(
+      (await fs.readdir(identityRoot)).filter((name) => name.startsWith('.quarantine-'))
+    ).toEqual([])
+  })
+
+  it('keeps a validated replacement usable when old quarantine cleanup fails', async () => {
+    const media = await imported()
+    const input = {
+      authorizedRoot: root,
+      reference: media.reference,
+      maxEdge: 256 as const,
+      format: 'png' as const
+    }
+    const first = await ensureManagedMediaDerivative(input)
+    if (first.purpose !== 'managed-media-derivative') throw new Error('unexpected fallback')
+    const image = path.join(root, ...first.relativePath.split('/'))
+    await fs.chmod(image, 0o600)
+    await fs.writeFile(image, 'corrupt')
+    const originalUnlink = fs.unlink.bind(fs)
+    vi.spyOn(fs, 'unlink').mockImplementation(async (target) => {
+      if (String(target).includes('.quarantine-'))
+        throw Object.assign(new Error('sharing violation'), { code: 'EACCES' })
+      return originalUnlink(target)
+    })
+    await expect(ensureManagedMediaDerivative(input)).resolves.toMatchObject({
+      purpose: 'managed-media-derivative',
+      sha256: first.sha256
+    })
+    expect(await fs.readFile(image)).toEqual(png())
+    expect(
+      (await fs.readdir(path.dirname(path.dirname(image)))).some((name) =>
+        name.startsWith('.quarantine-')
+      )
+    ).toBe(true)
+  })
+
+  it('runs conservative restart cleanup on valid cache hits without regenerating', async () => {
+    const media = await imported()
+    const input = {
+      authorizedRoot: root,
+      reference: media.reference,
+      maxEdge: 256 as const,
+      format: 'png' as const
+    }
+    const first = await ensureManagedMediaDerivative(input)
+    if (first.purpose !== 'managed-media-derivative') throw new Error('unexpected fallback')
+    const identityRoot = path.dirname(
+      path.dirname(path.join(root, ...first.relativePath.split('/')))
+    )
+    const owner = {
+      schema: 2 as const,
+      pid: 2_000_000_000,
+      hostname: os.hostname(),
+      createdAt: Date.now() - 100_000,
+      token: '11111111-1111-4111-8111-111111111111'
+    }
+    const empty = path.join(identityRoot, managedMediaGenerationArtifactName('work', owner))
+    const nonempty = path.join(identityRoot, managedMediaGenerationArtifactName('commit', owner))
+    await fs.mkdir(empty)
+    await fs.mkdir(nonempty)
+    await fs.writeFile(path.join(nonempty, 'partial'), 'partial')
+    for (const directory of [empty, nonempty])
+      await fs.utimes(directory, new Date(owner.createdAt), new Date(owner.createdAt))
+    await expect(ensureManagedMediaDerivative(input)).resolves.toEqual(first)
+    expect(sidecar.generate).toHaveBeenCalledTimes(1)
+    await expect(fs.lstat(empty)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(path.join(nonempty, 'partial'), 'utf8')).toBe('partial')
+  })
+
+  it('accepts the worker canonical Windows path namespace and local-media URL contract', async () => {
+    const media = await imported()
+    const implementation = sidecar.generate.getMockImplementation()!
+    sidecar.generate.mockImplementationOnce(async (request) => {
+      const result = await implementation(request)
+      result.response.cacheRoot = path.toNamespacedPath(result.response.cacheRoot)
+      const manifest = result.response.results[0].manifest!
+      manifest.canonicalPath = path.toNamespacedPath(manifest.canonicalPath)
+      manifest.sourceIdentity.canonicalPath = path.toNamespacedPath(
+        manifest.sourceIdentity.canonicalPath
+      )
+      manifest.sourceIdentity.cacheRootDir = path.toNamespacedPath(
+        manifest.sourceIdentity.cacheRootDir
+      )
+      manifest.source.path = path.toNamespacedPath(manifest.source.path)
+      manifest.source.canonicalPath = path.toNamespacedPath(manifest.source.canonicalPath)
+      manifest.levels[0].path = path.toNamespacedPath(manifest.levels[0].path)
+      manifest.levels[0].src = sidecarLocalUrl(manifest.levels[0].path)
+      manifest.thumbnail.path = path.toNamespacedPath(manifest.thumbnail.path)
+      manifest.manifestPath = path.toNamespacedPath(manifest.manifestPath)
+      return result
+    })
+
+    await expect(
+      ensureManagedMediaDerivative({
+        authorizedRoot: root,
+        reference: media.reference,
+        maxEdge: 256,
+        format: 'png'
+      })
+    ).resolves.toMatchObject({ purpose: 'managed-media-derivative', width: 8, height: 4 })
+  })
+
+  it('decodes worker URLs once for literal percent escapes, spaces and non-ASCII directories', async () => {
+    root = path.join(tempRoot, 'managed %20 %2F \u56fe\u7247')
+    await fs.mkdir(root)
+    root = await fs.realpath(root)
+    const media = await imported()
+    await expect(
+      ensureManagedMediaDerivative({
+        authorizedRoot: root,
+        reference: media.reference,
+        maxEdge: 256,
+        format: 'png'
+      })
+    ).resolves.toMatchObject({ purpose: 'managed-media-derivative', width: 8, height: 4 })
+  })
+
+  it('rejects a double-encoded source URL that only matches after an extra decode', async () => {
+    root = path.join(tempRoot, 'managed space')
+    await fs.mkdir(root)
+    root = await fs.realpath(root)
+    const media = await imported()
+    const implementation = sidecar.generate.getMockImplementation()!
+    sidecar.generate.mockImplementationOnce(async (request) => {
+      const result = await implementation(request)
+      const level = result.response.results[0].manifest!.levels![0]
+      level.src = level.src.replace(/%20/g, '%2520')
+      return result
+    })
+    await expect(
+      ensureManagedMediaDerivative({
+        authorizedRoot: root,
+        reference: media.reference,
+        maxEdge: 256,
+        format: 'png'
+      })
+    ).rejects.toThrow(/Sidecar requested level or format response mismatch/)
   })
 
   it('rejects non-managed/traversal references and original corruption', async () => {
@@ -315,6 +503,50 @@ describe('ensureManagedMediaDerivative', () => {
       }
     ],
     [
+      'mismatched source URL',
+      (
+        result: Awaited<
+          ReturnType<NonNullable<ReturnType<typeof sidecar.generate.getMockImplementation>>>
+        >
+      ) => {
+        result.response.results[0].manifest!.levels![0].src = sidecarLocalUrl(
+          path.join(tempRoot, 'different.png')
+        )
+      }
+    ],
+    [
+      'nonlocal source URL',
+      (
+        result: Awaited<
+          ReturnType<NonNullable<ReturnType<typeof sidecar.generate.getMockImplementation>>>
+        >
+      ) => {
+        result.response.results[0].manifest!.levels![0].src = 'https://example.com/preview.png'
+      }
+    ],
+    [
+      'file source URL',
+      (
+        result: Awaited<
+          ReturnType<NonNullable<ReturnType<typeof sidecar.generate.getMockImplementation>>>
+        >
+      ) => {
+        const level = result.response.results[0].manifest!.levels![0]
+        level.src = sidecarLocalUrl(level.path).replace('local-media:', 'file:')
+      }
+    ],
+    [
+      'foreign namespace source path',
+      (
+        result: Awaited<
+          ReturnType<NonNullable<ReturnType<typeof sidecar.generate.getMockImplementation>>>
+        >
+      ) => {
+        result.response.results[0].manifest!.sourceIdentity!.canonicalPath =
+          '\\\\?\\Z:\\outside\\source.png'
+      }
+    ],
+    [
       'output path',
       (
         result: Awaited<
@@ -322,8 +554,8 @@ describe('ensureManagedMediaDerivative', () => {
         >
       ) => {
         const manifest = result.response.results[0].manifest!
-        manifest.levels![0].path = path.join(tempRoot, 'escaped.png')
-        manifest.levels![0].src = manifest.levels![0].path
+        manifest.levels![0].path = path.toNamespacedPath(path.join(tempRoot, 'escaped.png'))
+        manifest.levels![0].src = sidecarLocalUrl(manifest.levels![0].path)
         manifest.thumbnail.path = manifest.levels![0].path
       }
     ]

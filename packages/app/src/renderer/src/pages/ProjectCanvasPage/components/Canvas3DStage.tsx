@@ -885,11 +885,16 @@ const ContextRecovery: React.FC = () => {
   return null
 }
 
-const AutoFitCamera: React.FC = () => {
+export const AutoFitCamera: React.FC = () => {
   const { scene, controls, camera, size } = useThree()
 
   useEffect(() => {
+    let disposed = false
+    const pendingRafIds = new Set<number>()
+
     const updateCamera = (event?: ModelSceneEventMap['model-centered']) => {
+      if (disposed) return
+
       const orbitControls = asOrbitControls(controls)
       if (!orbitControls || !(camera instanceof THREE.PerspectiveCamera)) return
 
@@ -933,14 +938,25 @@ const AutoFitCamera: React.FC = () => {
       orbitControls.update()
     }
 
-    const raf = requestAnimationFrame(() => updateCamera())
-    const handler = (event: ModelSceneEventMap['model-centered']) =>
-      requestAnimationFrame(() => updateCamera(event))
+    const scheduleCameraUpdate = (event?: ModelSceneEventMap['model-centered']) => {
+      const rafId = requestAnimationFrame(() => {
+        pendingRafIds.delete(rafId)
+        updateCamera(event)
+      })
+      pendingRafIds.add(rafId)
+    }
+
+    scheduleCameraUpdate()
+    const handler = (event: ModelSceneEventMap['model-centered']) => scheduleCameraUpdate(event)
     const dispatcher = asModelSceneDispatcher(scene)
     dispatcher.addEventListener('model-centered', handler)
 
     return () => {
-      cancelAnimationFrame(raf)
+      disposed = true
+      for (const rafId of pendingRafIds) {
+        cancelAnimationFrame(rafId)
+      }
+      pendingRafIds.clear()
       dispatcher.removeEventListener('model-centered', handler)
     }
   }, [scene, controls, camera, size.height, size.width])

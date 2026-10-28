@@ -4,14 +4,15 @@ import { ThemeProvider } from '@mui/material'
 import { describe, expect, it, vi } from 'vitest'
 
 import { theme } from '@renderer/theme'
+import type { CanvasTranslate } from './canvasTranslation'
 import ProjectCanvasPageTopToolbar from './ProjectCanvasPageTopToolbar'
 
 vi.mock('./ProjectCanvasPageExportMenus', () => ({
   default: () => null
 }))
 
-function createTranslate() {
-  return (key: string, options?: Record<string, unknown>) => {
+function createTranslate(): CanvasTranslate {
+  return ((key: string, options?: Record<string, unknown>) => {
     switch (key) {
       case 'canvas.group_toolbar':
         return '组合'
@@ -78,7 +79,7 @@ function createTranslate() {
       default:
         return key
     }
-  }
+  }) as CanvasTranslate
 }
 
 function buildBaseProps(overrides: Record<string, unknown> = {}) {

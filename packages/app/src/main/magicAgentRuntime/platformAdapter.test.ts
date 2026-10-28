@@ -12,6 +12,14 @@ vi.mock('electron', () => ({
   }
 }))
 
+// `@electron-toolkit/utils` is inlined by the node Vitest config and its CJS
+// build requires Electron before the test-local Electron mock can intercept it.
+// Keep this unit suite independent from a downloaded Electron binary.
+vi.mock('@electron-toolkit/utils', () => ({
+  is: { dev: true },
+  platform: { isWindows: false, isMacOS: false, isLinux: true }
+}))
+
 import { AgentKernel } from '../agentKernel'
 import { MagicAgentPlatformAdapter } from './platformAdapter'
 import { attachDriveTrustedDispatchContext } from './driveTrustedDispatchContext'
@@ -1891,7 +1899,7 @@ describe('MagicAgentPlatformAdapter', () => {
     expect(receivedSignal).toBe(controller.signal)
   })
 
-  it('defaults route-scoped agent runs to no assistant tools when allowedToolNames is omitted', async () => {
+  it('defaults route-scoped agent runs to read-only web tools when allowedToolNames is omitted', async () => {
     const assistantRuntime = createAssistantRuntime()
     const adapter = new MagicAgentPlatformAdapter({
       chatService: createChatService(),
@@ -1907,8 +1915,67 @@ describe('MagicAgentPlatformAdapter', () => {
 
     expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        execution: expect.objectContaining({ allowedToolNames: [] })
+        execution: expect.objectContaining({
+          allowedToolNames: ['web_search', 'web_fetch']
+        })
       })
+    )
+  })
+
+  it('honors a registered agent allowlist when the request omits allowed tools', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+    adapter.registerAgent({
+      id: 'configured.agent',
+      name: 'Configured agent',
+      toolNames: [' Session.Status ', 'web_fetch ']
+    })
+
+    await adapter.runAgent({
+      agentId: 'configured.agent',
+      text: 'use configured tools',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'configured-agent' }
+    })
+
+    expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({ allowedToolNames: ['session.status', 'web_fetch'] })
+      })
+    )
+  })
+
+  it('keeps an explicit empty or null allowlist fail-closed', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+
+    await adapter.runAgent({
+      agentId: 'magicpot.default.chat',
+      text: 'no tools explicitly',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' },
+      allowedToolNames: []
+    })
+    await adapter.runAgent({
+      agentId: 'magicpot.default.chat',
+      text: 'no tools explicitly null',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo-2' },
+      allowedToolNames: null
+    })
+
+    expect(assistantRuntime.handleMessage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ execution: expect.objectContaining({ allowedToolNames: [] }) })
+    )
+    expect(assistantRuntime.handleMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ execution: expect.objectContaining({ allowedToolNames: [] }) })
     )
   })
 

@@ -1,5 +1,6 @@
 import { loadAllSessions, readSessionDraftBackup } from '../pages/ChatPage/chatStorage'
 import { loadCanvasItems } from '../pages/ProjectCanvasPage/canvasStorage'
+import { LEGACY_PROJECTS_STORAGE_KEY, PROJECTS_STORAGE_KEY } from '../pages/MainPage/projectStore'
 import { api } from '../utils/windowUtils'
 import {
   scanManagedMediaReferenceIds,
@@ -9,17 +10,29 @@ import {
 const SNAPSHOT_DEBOUNCE_MS = 2_000
 const SNAPSHOT_RECONCILE_MS = 5 * 60_000
 
-type ProjectIndexEntry = { id?: unknown; canvasId?: unknown }
+type ProjectIndexEntry = {
+  id?: unknown
+  canvasId?: unknown
+  canvasStorageKey?: unknown
+}
 
 function readProjectIds(): string[] {
-  const raw = localStorage.getItem('ai_engine_projects')
+  const raw =
+    localStorage.getItem(PROJECTS_STORAGE_KEY) ?? localStorage.getItem(LEGACY_PROJECTS_STORAGE_KEY)
   if (!raw) return []
   const parsed: unknown = JSON.parse(raw)
   if (!Array.isArray(parsed)) throw new Error('Malformed project index')
   return parsed.map((project) => {
     if (!project || typeof project !== 'object') throw new Error('Malformed project entry')
     const candidate = project as ProjectIndexEntry
-    const id = typeof candidate.canvasId === 'string' ? candidate.canvasId : candidate.id
+    // The canonical registry can use a separate storage key. Older records
+    // only have id/canvasId, so keep those fallbacks for migration safety.
+    const id =
+      typeof candidate.canvasStorageKey === 'string'
+        ? candidate.canvasStorageKey
+        : typeof candidate.canvasId === 'string'
+          ? candidate.canvasId
+          : candidate.id
     if (typeof id !== 'string' || !id.trim()) throw new Error('Malformed project entry')
     return id
   })
@@ -47,7 +60,8 @@ async function publishManagedMediaReferenceSnapshot(): Promise<void> {
   await api().svcManagedMedia.updateReferenceSnapshot({
     version: 1,
     complete: result.ok,
-    ids: result.ids
+    ids: result.ids,
+    referenceCounts: result.referenceCounts
   })
 }
 

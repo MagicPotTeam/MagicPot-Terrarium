@@ -1,6 +1,5 @@
-/* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { execFileSync } from 'node:child_process'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -11,6 +10,7 @@ const TEXT_EXTENSIONS = new Set([
   '.jsx',
   '.mjs',
   '.cjs',
+  '.py',
   '.json',
   '.md',
   '.txt',
@@ -27,6 +27,8 @@ const SKIP_SEGMENTS = new Set([
   'node_modules',
   'dist',
   'out',
+  'generated',
+  'vendor',
   '.aiengineelectron-dev',
   'comfyui'
 ])
@@ -53,7 +55,7 @@ function normalizeCliFile(file) {
 function shouldSkip(file) {
   return normalizeCliFile(file)
     .split(/[\\/]+/)
-    .some((segment) => SKIP_SEGMENTS.has(segment))
+    .some((segment) => SKIP_SEGMENTS.has(segment.toLowerCase()))
 }
 
 function isTextLikeFile(file) {
@@ -63,22 +65,37 @@ function isTextLikeFile(file) {
   return SPECIAL_TEXT_FILES.has(baseName) || TEXT_EXTENSIONS.has(extension)
 }
 
+function canonicalizePath(file) {
+  let resolved = path.resolve(file)
+  try {
+    resolved = realpathSync.native(resolved)
+  } catch {
+    // The path may be a deleted explicit lint-staged file; path.resolve is the best fallback.
+  }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function getGitRoot() {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
 function listTrackedFiles() {
   return execFileSync('git', ['ls-files', '-z'], { cwd: process.cwd(), encoding: 'utf8' })
     .split('\0')
     .filter(Boolean)
 }
 
-function hasGitRepository() {
-  try {
-    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd: process.cwd(),
-      stdio: ['ignore', 'ignore', 'ignore']
-    })
-    return true
-  } catch {
-    return false
-  }
+function isActualGitRoot() {
+  const gitRoot = getGitRoot()
+  return gitRoot !== null && canonicalizePath(gitRoot) === canonicalizePath(process.cwd())
 }
 
 function walkCurrentDirectory(dir = process.cwd(), files = []) {
@@ -88,7 +105,7 @@ function walkCurrentDirectory(dir = process.cwd(), files = []) {
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name)
     const relativePath = path.relative(process.cwd(), fullPath)
-    if (shouldSkip(relativePath)) {
+    if (entry.isSymbolicLink() || shouldSkip(relativePath)) {
       continue
     }
     if (entry.isDirectory()) {
@@ -101,7 +118,7 @@ function walkCurrentDirectory(dir = process.cwd(), files = []) {
 }
 
 function listDefaultFiles() {
-  return hasGitRepository() ? listTrackedFiles() : walkCurrentDirectory()
+  return isActualGitRoot() ? listTrackedFiles() : walkCurrentDirectory()
 }
 
 function dedupeFiles(files) {
@@ -133,8 +150,11 @@ function updateBlockCommentState(line, inBlockComment) {
   return false
 }
 
-function hasSuspiciousMojibake(line, inBlockComment) {
-  const isCommentLike = isCommentLikeLine(line, inBlockComment)
+function hasSuspiciousMojibake(line, inBlockComment, isPython) {
+  // Only full-line hash comments are covered for Python; this is not tokenization.
+  const isCommentLike = isPython
+    ? line.trimStart().startsWith('#')
+    : isCommentLikeLine(line, inBlockComment)
   if (line.includes(REPLACEMENT_CHAR) || PRIVATE_USE_CHAR_PATTERN.test(line)) return true
   if (isCommentLike && line.match(SUSPICIOUS_CHAR_PATTERN)?.length) return true
   if (isCommentLike && COMMENT_PLACEHOLDER_PATTERN.test(line)) return true
@@ -160,10 +180,11 @@ function checkFile(file) {
     ]
   }
 
+  const isPython = path.extname(absolutePath).toLowerCase() === '.py'
   let inBlockComment = false
   return text.split(/\r?\n/).flatMap((line, index) => {
-    const suspicious = hasSuspiciousMojibake(line, inBlockComment)
-    inBlockComment = updateBlockCommentState(line, inBlockComment)
+    const suspicious = hasSuspiciousMojibake(line, inBlockComment, isPython)
+    if (!isPython) inBlockComment = updateBlockCommentState(line, inBlockComment)
 
     if (!line || !suspicious) return []
     return [
@@ -177,9 +198,23 @@ function checkFile(file) {
   })
 }
 
-const filesToCheck = dedupeFiles(
-  process.argv.length > 2 ? process.argv.slice(2) : listDefaultFiles()
-).filter((file) => !shouldSkip(file) && isTextLikeFile(file))
+const cliArguments = process.argv.slice(2)
+const allMode = cliArguments.includes('--all')
+const explicitFiles = cliArguments.filter((argument) => argument !== '--all')
+const sourceScan = allMode || explicitFiles.length === 0
+const candidateFiles = allMode
+  ? walkCurrentDirectory()
+  : explicitFiles.length > 0
+    ? explicitFiles
+    : listDefaultFiles()
+const filesToCheck = dedupeFiles(candidateFiles).filter(
+  (file) => !shouldSkip(file) && isTextLikeFile(file)
+)
+
+if (sourceScan && filesToCheck.length === 0) {
+  console.error('Encoding check failed (no text files found).')
+  process.exit(1)
+}
 
 const issues = filesToCheck.flatMap((file) => checkFile(file))
 

@@ -55,4 +55,26 @@ describe('migratorLegacyLLM', () => {
 
     expect(migrated.plugin_config?.api_profiles).toEqual([])
   })
+
+  it('normalizes legacy CORS origins without accepting wildcard or credentialed entries', () => {
+    const migrated = migratorLegacyLLM.migrate({
+      local_llm_server_config: {
+        cors_allowed_origins: [
+          ' https://client.example/ ',
+          'http://localhost:4173',
+          'null',
+          '*',
+          'https://user:secret@client.example',
+          'https://client.example/path',
+          'not-an-origin'
+        ]
+      }
+    })
+
+    expect(migrated.local_llm_server_config?.cors_allowed_origins).toEqual([
+      'http://localhost:4173',
+      'https://client.example',
+      'null'
+    ])
+  })
 })
