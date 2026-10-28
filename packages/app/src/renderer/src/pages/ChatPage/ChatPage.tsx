@@ -166,6 +166,8 @@ import {
 } from './chatAttachmentBatchUtils'
 import { mergeChatAttachmentsWithSkillReferenceAttachments } from '@renderer/utils/customSkillReferenceAttachments'
 import {
+  getDroppedLocalImageContent,
+  getDroppedLocalImageFiles,
   isImageOnlyInternalDragPayload,
   materializeInternalImageDragAttachment,
   parseInternalImageDragPayload
@@ -173,6 +175,7 @@ import {
 import { collectDroppedDirectoryFiles } from '../ProjectCanvasPage/dropDirectory'
 import { importChatAttachment, importChatAttachmentUrl } from './chatManagedMediaAttachments'
 import {
+  BUILT_IN_TAGGING_SKILL_ID,
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
   mergeBuiltInSkills
@@ -348,6 +351,30 @@ const HY3D_POST_PROCESS_ACTIONS = new Set([
   'SubmitTextureTo3DJob',
   'Convert3DFormat'
 ])
+
+const shouldUseExplicitAttachmentBatching = (
+  attachments: ChatAttachment[] | undefined,
+  skillId: string | null,
+  skillRuntime: {
+    skill: unknown
+    execution: { outputMode: string; fallbackStrategy: string }
+  }
+): boolean => {
+  if (!shouldBatchAttachments(attachments)) return false
+
+  // The legacy built-in tagging skill is no longer included in the picker, but
+  // existing sessions still carry its id and retain its per-image contract.
+  if (skillId === BUILT_IN_TAGGING_SKILL_ID) return true
+
+  // Ordinary multimodal chat must preserve one request with all references.
+  // Batch only skills that explicitly declare per-attachment output semantics.
+  return Boolean(
+    skillRuntime.skill &&
+    (skillRuntime.execution.outputMode === 'structured' ||
+      skillRuntime.execution.outputMode === 'sidecar' ||
+      skillRuntime.execution.fallbackStrategy !== 'default')
+  )
+}
 
 const chatLoadingStatusByScope = new Map<string, Map<string, ChatLoadingStatus>>()
 
@@ -1170,26 +1197,31 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   })
   const currentSessionIdRef = useRef<string | null>(currentSessionId)
+  const attachmentDropTargetEpochRef = useRef(0)
   const isMountedRef = useRef(true)
   const selectSessionRef = useRef<(sessionId: string) => void>(() => {})
   const pendingSessionIdRef = useRef<string | null>(null)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    isMountedRef.current = true
+    const compactAbortControllers = contextCompactAbortControllersRef.current
+    const compactingSessionIds = compactingSessionIdsRef.current
+    const pendingDeleteRetryTimers = pendingDeleteRetryTimersRef.current
+    return () => {
       isMountedRef.current = false
-      contextCompactAbortControllersRef.current.forEach((controller) => {
+      attachmentDropTargetEpochRef.current += 1
+      compactAbortControllers.forEach((controller) => {
         controller.abort('Chat page unmounted.')
       })
-      contextCompactAbortControllersRef.current.clear()
-      compactingSessionIdsRef.current.clear()
+      compactAbortControllers.clear()
+      compactingSessionIds.clear()
       if (sessionPersistenceRetryTimerRef.current) {
         clearTimeout(sessionPersistenceRetryTimerRef.current)
         sessionPersistenceRetryTimerRef.current = null
       }
-      for (const timer of pendingDeleteRetryTimersRef.current.values()) clearTimeout(timer)
-      pendingDeleteRetryTimersRef.current.clear()
-    },
-    []
-  )
+      for (const timer of pendingDeleteRetryTimers.values()) clearTimeout(timer)
+      pendingDeleteRetryTimers.clear()
+    }
+  }, [])
 
   // 从 IndexedDB 加载 sessions（含 localStorage 迁移）
   useEffect(() => {
@@ -1210,6 +1242,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
     sessionPersistenceRetryCountRef.current = 0
     if (scopeChanged) {
+      attachmentDropTargetEpochRef.current += 1
       // Old-scope dirty data remains in its own keyed snapshot, never in the new scope UI.
       const restoredDirty = getDirtySessionSnapshots(storageScope)
       setSessions(restoredDirty)
@@ -1422,6 +1455,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   const setActiveSessionId = useCallback(
     (sessionId: string | null) => {
+      if (currentSessionIdRef.current !== sessionId) {
+        attachmentDropTargetEpochRef.current += 1
+      }
       currentSessionIdRef.current = sessionId
       setCurrentSessionId(sessionId)
       try {
@@ -1466,6 +1502,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const activeRunIdBySessionRef = useRef<Map<string, number>>(new Map())
   const lifecycleRunIdBySessionRef = useRef<Map<string, string>>(new Map())
   const sessionAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
+  // Incremented for every explicit stop/termination. Sends that are still in
+  // async preparation capture the value and must not continue when it changes.
+  const sessionTerminationEpochRef = useRef<Map<string, number>>(new Map())
   const cancelledSessionsRef = useRef<Set<string>>(new Set())
   const [loadingStatusBySessionId, setLoadingStatusBySessionId] = useState<
     Record<string, ChatLoadingStatus>
@@ -1565,8 +1604,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const terminateSession = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, options?: { dropQueued?: boolean }) => {
+      sessionTerminationEpochRef.current.set(
+        sessionId,
+        (sessionTerminationEpochRef.current.get(sessionId) ?? 0) + 1
+      )
       cancelledSessionsRef.current.add(sessionId)
+      if (options?.dropQueued) {
+        // Explicit session/scope termination must not drain work queued behind
+        // the cancelled run. A manual Stop keeps the existing FIFO contract.
+        const queuedSends = queuedSessionSendsRef.current.get(sessionId)
+        if (queuedSends?.length) {
+          for (const queuedSend of queuedSends) {
+            if (queuedSend.queueKey) {
+              pendingSessionSendKeysRef.current.delete(queuedSend.queueKey)
+            }
+          }
+          const nextQueues = new Map(queuedSessionSendsRef.current)
+          nextQueues.delete(sessionId)
+          updateQueuedSessionSends(nextQueues)
+        }
+      }
       const activeLifecycleId = lifecycleRunIdBySessionRef.current.get(sessionId)
       if (activeLifecycleId) {
         dispatchScopedChatRunEvent(storageScope, sessionId, {
@@ -1595,7 +1653,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         })
       )
     },
-    [clearLoadingSessionTracking, emitPreviewRefresh, setSessions, storageScope]
+    [
+      clearLoadingSessionTracking,
+      emitPreviewRefresh,
+      setSessions,
+      storageScope,
+      updateQueuedSessionSends
+    ]
   )
 
   // 后台恢复：轮询 localStorage 检测 loading 是否完成
@@ -1827,6 +1891,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingHiddenContextRef = useRef(pendingHiddenContext)
   const pendingExternalSendToAgentRef = useRef<ExternalSendToAgentDetail[]>([])
   const [pendingExternalSendToAgentVersion, setPendingExternalSendToAgentVersion] = useState(0)
+  const editingAttachmentReceiverRef = useRef<((attachment: ChatAttachment) => void) | null>(null)
+  const registerEditingAttachmentReceiver = useCallback(
+    (receiver: ((attachment: ChatAttachment) => void) | null) => {
+      if (editingAttachmentReceiverRef.current !== receiver) {
+        attachmentDropTargetEpochRef.current += 1
+      }
+      editingAttachmentReceiverRef.current = receiver
+    },
+    []
+  )
   const queueExternalSendToAgentInput = useCallback((detail: ExternalSendToAgentDetail) => {
     pendingExternalSendToAgentRef.current.push(detail)
     setPendingExternalSendToAgentVersion((version) => version + 1)
@@ -1960,6 +2034,42 @@ const ChatPage: React.FC<ChatPageProps> = ({
             ChatAttachment => item !== null
         ) as ChatAttachment[]
 
+      // While a user message is being edited, canvas send-to-agent attachments
+      // belong to that edit form instead of the bottom composer. The edit form
+      // registers a short-lived receiver while it is mounted.
+      const editingAttachmentReceiver = editingAttachmentReceiverRef.current
+      if (editingMessageIndex !== null && !autoSend && editingAttachmentReceiver) {
+        const receiverEpoch = attachmentDropTargetEpochRef.current
+        const isEditingReceiverCurrent = (): boolean =>
+          isMountedRef.current &&
+          attachmentDropTargetEpochRef.current === receiverEpoch &&
+          editingAttachmentReceiverRef.current === editingAttachmentReceiver
+
+        void resolveAttachments()
+          .then((resolvedAttachments) => {
+            if (!isEditingReceiverCurrent()) return
+            resolvedAttachments.forEach((item) => editingAttachmentReceiver(item))
+          })
+          .catch((err) => {
+            console.error('[ChatPage] Failed to materialize edit attachments:', err)
+          })
+
+        if (image) {
+          void convertInlineImageToAttachment(image, 'pasted-image.png')
+            .then((imageAttachment) => {
+              if (imageAttachment && isEditingReceiverCurrent()) {
+                editingAttachmentReceiver(imageAttachment)
+              }
+            })
+            .catch((err) => console.error('[ChatPage] Failed to parse edit image:', err))
+        }
+
+        if (text) {
+          setEditingContent((prev) => (prev ? `${prev}\n${text}` : text))
+        }
+        return
+      }
+
       if (autoSend && sendMessageRef.current) {
         const normalizedText = text || ''
         const sendMessage = sendMessageRef.current
@@ -2020,7 +2130,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [
       mergeHiddenContext,
+      editingMessageIndex,
       queueExternalSendToAgentInput,
+      setEditingContent,
       setInputValue,
       setPendingAttachments,
       setPendingHiddenContext
@@ -3456,7 +3568,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   useEffect(() => {
     const handleSendToAgent = (e: Event) => {
-      if (!acceptExternalInput) return
       const customEvent = e as CustomEvent<{
         image?: string
         text?: string
@@ -3473,8 +3584,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const detail = customEvent.detail
       const targetScope = detail.targetScope ?? detail.scope
       if (targetScope) {
+        // Explicit deliveries keep their destination even if the user has since switched panes.
         if (targetScope !== storageScope) return
-      } else if (!active) {
+      } else if (!active || !acceptExternalInput) {
         return
       }
       if (!sessionsLoaded) {
@@ -3926,7 +4038,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const cs = sessions.find((s) => s.id === currentSessionId)
       if (!cs) return
 
+      const dropTargetEpoch = attachmentDropTargetEpochRef.current
+      const editingAttachmentReceiver =
+        editingMessageIndex !== null ? editingAttachmentReceiverRef.current : null
+      if (editingMessageIndex !== null && !editingAttachmentReceiver) return
+      // Retain the original destination, including when a session or edit is reopened.
+      const isDropTargetCurrent = () =>
+        isMountedRef.current &&
+        attachmentDropTargetEpochRef.current === dropTargetEpoch &&
+        currentSessionIdRef.current === cs.id &&
+        storageScopeRef.current === storageScope
+
       const internalPayload = parseInternalImageDragPayload(e.dataTransfer)
+      const externalImageContent = getDroppedLocalImageContent(e.dataTransfer)
       if (internalPayload) {
         try {
           const {
@@ -3959,12 +4083,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 relativePath: draggedImageFile.name
               }
             )
+            if (!isDropTargetCurrent()) return
             const materializedDraggedFileAttachment =
               (await materializeInternalImageDragAttachment(draggedFileAttachment)) ||
               draggedFileAttachment
             if (materializedDraggedFileAttachment.url !== draggedFileAttachment.url) {
               revokeBlobUrl(draggedFileAttachment.url)
             }
+            if (!isDropTargetCurrent()) return
             nextAttachments.push({
               ...materializedDraggedFileAttachment,
               metadata: {
@@ -4013,6 +4139,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
               ChatAttachment => attachment !== null
           ) as ChatAttachment[]
 
+          if (!isDropTargetCurrent()) return
+          if (
+            editingAttachmentReceiver &&
+            (materializedAttachments.length > 0 || droppedText || droppedHiddenText)
+          ) {
+            materializedAttachments.forEach((item) => editingAttachmentReceiver(item))
+            if (droppedText) {
+              setEditingContent((prev) => (prev ? `${prev}\n${droppedText}` : droppedText))
+            }
+            return
+          }
+
           if (materializedAttachments.length > 0) {
             setPendingAttachments((prev) => {
               const seen = new Set(
@@ -4049,6 +4187,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             return
           }
         } catch (err) {
+          if (!isDropTargetCurrent()) return
           console.error('[ChatPage] 内部拖拽数据解析失败:', err)
         }
       }
@@ -4057,6 +4196,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (hasDroppedDirectory(dataTransferItems)) {
         try {
           const droppedEntries = await collectDroppedDirectoryFiles(dataTransferItems)
+          if (!isDropTargetCurrent()) return
           const droppedDirectoryFiles = resolveDroppedDirectoryImageFiles(droppedEntries)
 
           if (droppedDirectoryFiles.length === 0) {
@@ -4083,18 +4223,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
               continue
             }
 
-            nextAttachments.push(
-              await buildChatAttachmentFromDroppedFile(entry.file, {
-                relativePath: entry.relativePath
-              })
-            )
+            const attachment = await buildChatAttachmentFromDroppedFile(entry.file, {
+              relativePath: entry.relativePath
+            })
+            if (!isDropTargetCurrent()) return
+            nextAttachments.push(attachment)
           }
 
           if (nextAttachments.length > 0) {
-            setPendingAttachments((prev) => [...prev, ...nextAttachments])
+            if (editingAttachmentReceiver) {
+              nextAttachments.forEach((attachment) => editingAttachmentReceiver(attachment))
+            } else {
+              setPendingAttachments((prev) => [...prev, ...nextAttachments])
+            }
           }
           return
         } catch (error) {
+          if (!isDropTargetCurrent()) return
           console.error('[ChatPage] Failed to process dropped directory:', error)
           notifyError(
             t('chat.drop_folder_process_failed', {
@@ -4105,8 +4250,70 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
       }
 
-      const files = e.dataTransfer.files
+      let files = Array.from(e.dataTransfer.files || [])
+      if (!files.length && externalImageContent.fileUrls.length) {
+        let resolved: Awaited<ReturnType<typeof getDroppedLocalImageFiles>>
+        try {
+          resolved = await getDroppedLocalImageFiles(externalImageContent, {
+            isCurrent: isDropTargetCurrent
+          })
+        } catch {
+          resolved = { files: [], failedUrls: externalImageContent.fileUrls }
+        }
+        if (!isDropTargetCurrent()) return
+        files = resolved.files
+        for (const url of resolved.failedUrls) {
+          notifyError(
+            t('chat.drop_local_image_failed', {
+              name: getDownloadFileNameFromUrl(url, 'image'),
+              defaultValue:
+                'Unable to read dropped image {{name}}. Its source cache may have expired, access was denied, or the image exceeds the attachment limit. Please drag it again or save it and upload.'
+            })
+          )
+        }
+      }
+      if (externalImageContent.fileUrls.length && externalImageContent.text.trim()) {
+        if (editingAttachmentReceiver) {
+          setEditingContent((prev) =>
+            prev ? `${prev}\n${externalImageContent.text}` : externalImageContent.text
+          )
+        } else {
+          setInputValue((prev) =>
+            prev ? `${prev}\n\n${externalImageContent.text}` : externalImageContent.text
+          )
+        }
+      }
       if (!files || files.length === 0) return
+
+      if (editingAttachmentReceiver) {
+        const imageFiles = Array.from(files).filter(
+          (file) => getChatAttachmentTypeForFile(file) === 'image'
+        )
+        if (imageFiles.length > 0) {
+          for (const file of imageFiles) {
+            try {
+              const maxSizeMB = getChatAttachmentMaxSizeMB('image')
+              if (!checkFileSize(file, maxSizeMB)) {
+                throw new Error(`${file.name} is too large. Max ${maxSizeMB}MB.`)
+              }
+              const attachment = await buildImageChatAttachmentFromFile(file)
+              if (!isDropTargetCurrent()) return
+              editingAttachmentReceiver(attachment)
+            } catch (error) {
+              if (!isDropTargetCurrent()) return
+              console.error('[ChatPage] Failed to process dropped edit image:', error)
+              notifyError(
+                t('chat.image_process_failed', {
+                  name: file.name,
+                  defaultValue: 'Failed to process image {{name}}.'
+                })
+              )
+            }
+          }
+        }
+        // Do not leak non-image drops into the bottom composer while editing.
+        return
+      }
 
       const nextAttachments: ChatAttachment[] = []
       for (let i = 0; i < files.length; i++) {
@@ -4127,8 +4334,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
             continue
           }
 
-          nextAttachments.push(await buildChatAttachmentFromDroppedFile(file))
+          const attachment = await buildChatAttachmentFromDroppedFile(file)
+          if (!isDropTargetCurrent()) return
+          nextAttachments.push(attachment)
         } catch (error) {
+          if (!isDropTargetCurrent()) return
           console.error('[ChatPage] Failed to process dropped file:', error)
           const messageKey =
             getChatAttachmentTypeForFile(file) === 'image'
@@ -4150,13 +4360,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [
       active,
       currentSessionId,
+      editingMessageIndex,
       mergeHiddenContext,
       notifyError,
       notifyWarning,
       sessions,
+      setEditingContent,
       setInputValue,
       setPendingAttachments,
       setPendingHiddenContext,
+      storageScope,
       t
     ]
   )
@@ -4475,10 +4688,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       const sessionIds = new Set<string>([
         ...loadingSessionIdsRef.current,
-        ...externalLoadingSessionIdsRef.current
+        ...externalLoadingSessionIdsRef.current,
+        ...queuedSessionSendsRef.current.keys()
       ])
       sessionIds.forEach((sessionId) => {
-        terminateSession(sessionId)
+        terminateSession(sessionId, { dropQueued: true })
       })
     }
     const handleTerminateSession = (event: Event): void => {
@@ -4491,7 +4705,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const sessionId = customEvent.detail?.sessionId
       if (!sessionId) return
 
-      terminateSession(sessionId)
+      terminateSession(sessionId, { dropQueued: true })
     }
 
     window.addEventListener('chat:terminate-scope', handleTerminateScope)
@@ -4688,7 +4902,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }
 
   const deleteSession = (sessionId: string) => {
-    terminateSession(sessionId)
+    terminateSession(sessionId, { dropQueued: true })
     deleteSessionDraftBackup(sessionId, storageScope)
     cancelDebouncedSessionSave(sessionId, storageScope)
     deletedSessionKeysRef.current.add(`${storageScope}\u0000${sessionId}`)
@@ -5033,9 +5247,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       if (!cs || !targetSessionId) return
 
-      const activeSkillId = resolveAvailableSkillId(
-        overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
-      )
+      const requestTerminationEpoch = sessionTerminationEpochRef.current.get(targetSessionId) ?? 0
+      const isPreflightCurrent = (): boolean =>
+        (sessionTerminationEpochRef.current.get(targetSessionId) ?? 0) === requestTerminationEpoch
+
+      const requestedSkillId = overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
+      const activeSkillId = resolveAvailableSkillId(requestedSkillId)
       const activeSkill = findCustomSkillById(customSkills, activeSkillId)
       let rawAttachments =
         mergeChatAttachmentsWithSkillReferenceAttachments(
@@ -5113,6 +5330,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           rawAttachments,
           requestContent
         )
+        if (!isPreflightCurrent()) return
         earlyPreparedMessage = provisionalPreparedMessage
         rawAttachments = provisionalPreparedMessage.attachments || rawAttachments
         requestContent = provisionalPreparedMessage.content
@@ -5200,6 +5418,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       if (overrides?.resolveAttachments) {
         msgAttachments = await overrides.resolveAttachments()
+        if (!isPreflightCurrent()) return
         rawAttachments =
           mergeChatAttachmentsWithSkillReferenceAttachments(
             msgAttachments,
@@ -5244,6 +5463,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const hp = overrides?.hy3dParams
           ? await refreshHy3dModelUrlIfNeeded(overrides.hy3dParams)
           : await refreshHy3dModelUrlIfNeeded(getHy3dParams())
+        if (!isPreflightCurrent()) return
         profileId = buildHy3dProfileId(hp)
 
         if (HY3D_POST_PROCESS_ACTIONS.has(hp.apiAction) && hp.modelUrl) {
@@ -5327,7 +5547,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         rawAttachments
       )
       const useAttachmentBatching =
-        shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
+        !shouldPreserveMultiAttachmentRequest &&
+        shouldUseExplicitAttachmentBatching(rawAttachments, requestedSkillId, activeSkillRuntime)
 
       try {
         preflightChatRequestImages({
@@ -5401,6 +5622,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           runtimeMcpStatus
         })
       )
+      if (!isPreflightCurrent()) return
       userMessage = await prepareOutgoingUserMessage(
         requestContent,
         rawAttachments,
@@ -5408,6 +5630,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         undefined,
         earlyPreparedMessage
       )
+      if (!isPreflightCurrent()) return
       const resolvedHiddenContext = explicitToolCommand
         ? msgHiddenContext || ''
         : mergeHiddenContext(
@@ -6236,7 +6459,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             profileId,
             remoteProfile: remoteRequestProfile,
             systemPrompt: activeSystemPrompt,
-            externalAgentSkill: activeExternalAgentSkill
+            externalAgentSkill: activeExternalAgentSkill,
+            signal: sessionAbortController.signal
           })
           const attachmentBatchEntries = buildAttachmentBatchEntries(userMessage.attachments)
           const attachmentChunks = chunkAttachmentBatchEntries(
@@ -6858,59 +7082,86 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [active, notifyWarning, refreshHy3dModelUrlIfNeeded, sendMessage])
 
   // ==================== 文件上传 ====================
+  const pickChatAttachment = async (imagesOnly = false): Promise<ChatAttachment | undefined> => {
+    const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp']
+    const file = await selectFile(
+      imagesOnly
+        ? imageExtensions
+        : [
+            '.png',
+            '.jpg',
+            '.jpeg',
+            '.gif',
+            '.webp',
+            '.mp4',
+            '.webm',
+            '.mov',
+            '.avi',
+            '.glb',
+            '.gltf',
+            '.obj',
+            '.fbx',
+            '.dae',
+            '.3ds',
+            '.ply',
+            '.stl'
+          ]
+    )
+    if (!file) return undefined
+
+    const isImage = file.type.startsWith('image/')
+    const isVideo = file.type.startsWith('video/')
+    const model3dExtensions = ['.glb', '.gltf', '.obj', '.fbx', '.dae', '.3ds', '.ply', '.stl']
+    const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'))
+    const isModel3d = model3dExtensions.includes(fileExtension)
+
+    if (!isImage && !isVideo && !isModel3d) return undefined
+    if (imagesOnly && !isImage) return undefined
+
+    const attachmentType: ChatAttachment['type'] = isVideo
+      ? 'video'
+      : isModel3d
+        ? 'model3d'
+        : 'image'
+    const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
+    if (!checkFileSize(file, maxSizeMB)) {
+      alert(`File is too large. Max ${maxSizeMB}MB, current size ${formatFileSize(file.size)}.`)
+      return undefined
+    }
+
+    return isImage
+      ? buildImageChatAttachmentFromFile(file)
+      : importChatAttachment({
+          service: api().svcManagedMedia,
+          file,
+          type: isVideo ? 'video' : 'model3d',
+          mimeType: normalizeFileMimeType(file.name, file.type)
+        })
+  }
+
+  const handleDropEditingImages = useCallback(async (files: File[]): Promise<ChatAttachment[]> => {
+    const imageFiles = files.filter(
+      (file) =>
+        file.type.startsWith('image/') || /\.(?:png|jpe?g|gif|webp|bmp|avif)$/i.test(file.name)
+    )
+    const maxSizeMB = getChatAttachmentMaxSizeMB('image')
+    return Promise.all(
+      imageFiles.map((file) => {
+        if (!checkFileSize(file, maxSizeMB)) {
+          throw new Error(`${file.name} is too large. Max ${maxSizeMB}MB.`)
+        }
+        return buildImageChatAttachmentFromFile(file)
+      })
+    )
+  }, [])
+
   const handleUploadFile = async () => {
     try {
-      const file = await selectFile([
-        '.png',
-        '.jpg',
-        '.jpeg',
-        '.gif',
-        '.webp',
-        '.mp4',
-        '.webm',
-        '.mov',
-        '.avi',
-        '.glb',
-        '.gltf',
-        '.obj',
-        '.fbx',
-        '.dae',
-        '.3ds',
-        '.ply',
-        '.stl'
-      ])
-      if (!file) return
-
-      const isImage = file.type.startsWith('image/')
-      const isVideo = file.type.startsWith('video/')
-      const model3dExtensions = ['.glb', '.gltf', '.obj', '.fbx', '.dae', '.3ds', '.ply', '.stl']
-      const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'))
-      const isModel3d = model3dExtensions.includes(fileExtension)
-
-      if (!isImage && !isVideo && !isModel3d) return
-
-      const attachmentType: ChatAttachment['type'] = isVideo
-        ? 'video'
-        : isModel3d
-          ? 'model3d'
-          : 'image'
-      const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
-      if (!checkFileSize(file, maxSizeMB)) {
-        alert(`File is too large. Max ${maxSizeMB}MB, current size ${formatFileSize(file.size)}.`)
-        return
-      }
-
+      const attachment = await pickChatAttachment()
+      if (!attachment) return
       const attachmentIndex = pendingAttachments.length
 
       setUploadProgress((prev) => ({ ...prev, [attachmentIndex]: 100 }))
-      const attachment: ChatAttachment = isImage
-        ? await buildImageChatAttachmentFromFile(file)
-        : await importChatAttachment({
-            service: api().svcManagedMedia,
-            file,
-            type: isVideo ? 'video' : 'model3d',
-            mimeType: normalizeFileMimeType(file.name, file.type)
-          })
       setPendingAttachments((prev) => [...prev, attachment])
       setTimeout(() => {
         setUploadProgress((prev) => {
@@ -7245,6 +7496,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
+        onDropCapture={() => setIsDragging(false)}
         onDrop={handleDrop}
       >
         {/* 拖拽覆盖层 */}
@@ -7343,6 +7595,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 editingContent={editingContent}
                 onSetEditingIndex={setEditingMessageIndex}
                 onSetEditingContent={setEditingContent}
+                onDropImageAttachments={handleDropEditingImages}
+                onRegisterEditingAttachmentReceiver={registerEditingAttachmentReceiver}
                 onSendEditedMessage={handleSendEditedMessage}
                 onPreviewImage={imagePreview.setPreviewImage}
                 onImageContextMenu={handleImageContextMenu}

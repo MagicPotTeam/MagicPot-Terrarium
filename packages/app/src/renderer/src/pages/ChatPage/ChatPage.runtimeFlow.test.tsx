@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type {
@@ -923,7 +923,7 @@ describe('ChatPage runtime workflow integration', () => {
       const sessionId = readCurrentSessionState()!.id
       const input = screen.getByTestId('chat-composer-input-mock')
       fireEvent.change(input, { target: { value } })
-      expect(input).toHaveValue(value)
+      await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(value))
       expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
@@ -2189,7 +2189,7 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
-  it('persists duplicate blob image URLs once and uses durable URLs for history and batched requests', async () => {
+  it('persists duplicate blob image URLs once and uses durable URLs for history and one request', async () => {
     const fetchMock = vi.fn(async () => ({
       blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
     }))
@@ -2240,7 +2240,7 @@ describe('ChatPage runtime workflow integration', () => {
       )
     })
 
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledWith('blob:duplicate-user-upload')
@@ -3148,7 +3148,12 @@ describe('ChatPage runtime workflow integration', () => {
     renderWithProviders(
       <>
         <div data-testid="agent-a">
-          <ChatPage compact storageScope="runtime-flow-a" active={false} />
+          <ChatPage
+            compact
+            storageScope="runtime-flow-a"
+            active={false}
+            acceptExternalInput={false}
+          />
         </div>
         <div data-testid="agent-b">
           <ChatPage compact storageScope="runtime-flow-b" active />
@@ -3245,6 +3250,443 @@ describe('ChatPage runtime workflow integration', () => {
       vi.stubGlobal('FileReader', originalFileReader)
       vi.stubGlobal('fetch', originalFetch)
     }
+  })
+
+  describe('asynchronous drop destination isolation', () => {
+    const originalFetch = globalThis.fetch
+    const originalFileReader = globalThis.FileReader
+    const originalImage = globalThis.Image
+    type EditingProps = {
+      onSetEditingIndex: (index: number | null) => void
+      onSetEditingContent: (content: string) => void
+      onRegisterEditingAttachmentReceiver: (
+        receiver: ((attachment: ChatAttachment) => void) | null
+      ) => void
+    }
+    const editingProps = () => hoisted.chatMessageListMock.mock.lastCall?.[0] as EditingProps
+    const dropRoot = () => {
+      const root = document.querySelector('[data-chat-page-root="runtime-flow"]')
+      if (!(root instanceof HTMLElement)) throw new Error('Chat drop target is not mounted')
+      return root
+    }
+
+    beforeEach(() => {
+      hoisted.storedSessions.value = ['drop-session-a', 'drop-session-b'].map((id) => ({
+        id,
+        title: id,
+        profileId: 'vision-model',
+        messages: [
+          { role: 'user', content: 'First editable message' },
+          { role: 'assistant', content: 'First reply' },
+          { role: 'user', content: 'Second editable message' }
+        ]
+      }))
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        'drop-session-a'
+      )
+    })
+
+    afterEach(() => {
+      vi.stubGlobal('fetch', originalFetch)
+      vi.stubGlobal('FileReader', originalFileReader)
+      vi.stubGlobal('Image', originalImage)
+    })
+
+    const startEditing = (receiver: (attachment: ChatAttachment) => void) => {
+      act(() => {
+        editingProps().onSetEditingIndex(0)
+        editingProps().onSetEditingContent('First editable message')
+        editingProps().onRegisterEditingAttachmentReceiver(receiver)
+      })
+    }
+
+    const imageFiles = () =>
+      ['first.png', 'second.png'].map((name) =>
+        createLocalFile(name, 'image/png', `C:\\magicpot\\${name}`)
+      )
+    const stubImageDimensions = () => {
+      vi.stubGlobal(
+        'Image',
+        class {
+          naturalWidth = 64
+          naturalHeight = 32
+          onload: (() => void) | null = null
+          set src(_value: string) {
+            queueMicrotask(() => this.onload?.())
+          }
+        }
+      )
+    }
+    const directoryTransfer = (files: File[]) => {
+      const entry = {
+        name: 'references',
+        isDirectory: true,
+        isFile: false,
+        createReader: () => {
+          let read = false
+          return {
+            readEntries: (callback: (entries: unknown[]) => void) => {
+              callback(
+                read
+                  ? []
+                  : files.map((file) => ({
+                      name: file.name,
+                      fullPath: `/references/${file.name}`,
+                      isDirectory: false,
+                      isFile: true,
+                      file: (receiveFile: (file: File) => void) => receiveFile(file)
+                    }))
+              )
+              read = true
+            }
+          }
+        }
+      }
+      return {
+        files: [],
+        items: [{ kind: 'file', webkitGetAsEntry: () => entry }],
+        types: ['Files'],
+        getData: () => ''
+      }
+    }
+
+    const beginBlobDrop = () => {
+      let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
+      const readAsDataURL = vi.fn()
+      vi.stubGlobal(
+        'FileReader',
+        class {
+          result: string | null = null
+          onload: (() => void) | null = null
+          onerror: (() => void) | null = null
+          readAsDataURL(blob: Blob) {
+            readAsDataURL(blob)
+            this.result = 'data:image/png;base64,Y2FudmFz'
+            queueMicrotask(() => this.onload?.())
+          }
+        }
+      )
+      const pendingFetch = new Promise<Pick<Response, 'ok' | 'blob'>>((resolve) => {
+        releaseFetch = resolve
+      })
+      const fetchMock = vi.fn(() => pendingFetch)
+      vi.stubGlobal('fetch', fetchMock)
+      const payload = JSON.stringify({
+        attachments: [{ type: 'image', url: 'blob:delayed-drop', fileName: 'delayed-drop.png' }],
+        textContent: 'text from delayed drop'
+      })
+      fireEvent.drop(dropRoot(), {
+        dataTransfer: {
+          files: [],
+          items: [],
+          types: ['application/x-qapp-image'],
+          getData: (type: string) => (type === 'application/x-qapp-image' ? payload : '')
+        }
+      })
+      expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop')
+      return async () => {
+        await act(async () => {
+          releaseFetch({
+            ok: true,
+            blob: async () => new Blob(['canvas'], { type: 'image/png' })
+          })
+        })
+        await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+      }
+    }
+
+    it('delivers an awaited internal image to the original edit while it remains open', async () => {
+      const receiveAttachment = vi.fn()
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(receiveAttachment)
+
+      const finishDrop = beginBlobDrop()
+      await finishDrop()
+
+      expect(receiveAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ fileName: 'delayed-drop.png' })
+      )
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it('accepts a current drop after StrictMode replays the mount lifecycle', async () => {
+      render(
+        <React.StrictMode>
+          <MemoryRouter>
+            <ThemeProvider theme={theme}>
+              <ChatPage compact storageScope="runtime-flow" />
+            </ThemeProvider>
+          </MemoryRouter>
+        </React.StrictMode>
+      )
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+
+      const finishDrop = beginBlobDrop()
+      await finishDrop()
+
+      expect(screen.getByTestId('chat-composer-attachment-names')).toHaveTextContent(
+        'delayed-drop.png'
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('text from delayed drop')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it.each(['cancel', 'another edit', 'edit round trip'])(
+      'discards the old internal drop after %s instead of retargeting it',
+      async (change) => {
+        const originalReceiver = vi.fn()
+        const nextReceiver = vi.fn()
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        startEditing(originalReceiver)
+        const finishDrop = beginBlobDrop()
+
+        act(() => {
+          editingProps().onSetEditingIndex(null)
+          editingProps().onSetEditingContent('')
+          editingProps().onRegisterEditingAttachmentReceiver(null)
+        })
+        if (change !== 'cancel') {
+          act(() => {
+            editingProps().onSetEditingIndex(change === 'another edit' ? 2 : 0)
+            editingProps().onRegisterEditingAttachmentReceiver(
+              change === 'another edit' ? nextReceiver : originalReceiver
+            )
+          })
+        }
+        await finishDrop()
+
+        expect(originalReceiver).not.toHaveBeenCalled()
+        expect(nextReceiver).not.toHaveBeenCalled()
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
+    it('discards a delayed send-to-agent attachment after its edit is cancelled', async () => {
+      const originalReceiver = vi.fn()
+      let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
+      const readAsDataURL = vi.fn()
+      vi.stubGlobal(
+        'FileReader',
+        class {
+          result: string | null = null
+          onload: (() => void) | null = null
+          onerror: (() => void) | null = null
+          readAsDataURL(blob: Blob) {
+            readAsDataURL(blob)
+            this.result = 'data:image/png;base64,Y2FudmFz'
+            queueMicrotask(() => this.onload?.())
+          }
+        }
+      )
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          () =>
+            new Promise<Pick<Response, 'ok' | 'blob'>>((resolve) => {
+              releaseFetch = resolve
+            })
+        )
+      )
+
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(originalReceiver)
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              targetScope: 'runtime-flow',
+              attachments: [
+                { type: 'image', url: 'blob:delayed-send', fileName: 'delayed-send.png' }
+              ]
+            }
+          })
+        )
+      })
+
+      act(() => {
+        editingProps().onSetEditingIndex(null)
+        editingProps().onRegisterEditingAttachmentReceiver(null)
+      })
+      await act(async () => {
+        releaseFetch({
+          ok: true,
+          blob: async () => new Blob(['canvas'], { type: 'image/png' })
+        })
+      })
+      await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+
+      expect(originalReceiver).not.toHaveBeenCalled()
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it.each(['switch', 'session round trip'])(
+      'discards the old internal drop after a %s even when the session id returns',
+      async (change) => {
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        const finishDrop = beginBlobDrop()
+
+        await dispatchSwitchSession('drop-session-b')
+        if (change === 'session round trip') await dispatchSwitchSession('drop-session-a')
+        await finishDrop()
+
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
+    it('discards a delayed ordinary file import after switching sessions away and back', async () => {
+      let finishImport!: () => void
+      hoisted.importManagedFileMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishImport = () =>
+              resolve({
+                version: 1,
+                reference: {
+                  version: 1,
+                  kind: 'managed',
+                  relativePath: `originals/${'b'.repeat(64)}.glb`,
+                  sha256: 'b'.repeat(64),
+                  mimeType: 'model/gltf-binary',
+                  sizeBytes: 3,
+                  originalFileName: 'delayed.glb'
+                },
+                localMediaUrl: 'media://managed/delayed.glb',
+                mimeType: 'model/gltf-binary',
+                sizeBytes: 3,
+                sha256: 'b'.repeat(64)
+              })
+          })
+      )
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      fireEvent.drop(dropRoot(), {
+        dataTransfer: {
+          files: [createLocalFile('delayed.glb', 'model/gltf-binary', 'C:\\magicpot\\delayed.glb')],
+          items: [],
+          types: ['Files'],
+          getData: () => ''
+        }
+      })
+      await waitFor(() => expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce())
+
+      await dispatchSwitchSession('drop-session-b')
+      await dispatchSwitchSession('drop-session-a')
+      await act(async () => finishImport())
+
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it('routes a dropped image directory to the open edit instead of the bottom composer', async () => {
+      stubImageDimensions()
+      const receiveAttachment = vi.fn()
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(receiveAttachment)
+
+      fireEvent.drop(dropRoot(), { dataTransfer: directoryTransfer(imageFiles()) })
+
+      await waitFor(() => expect(receiveAttachment).toHaveBeenCalledTimes(2))
+      expect(receiveAttachment.mock.calls.map(([attachment]) => attachment.fileName)).toEqual([
+        'first.png',
+        'second.png'
+      ])
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it.each(['image files', 'image directory'])(
+      'stops a dropped batch of %s after its edit is cancelled',
+      async (source) => {
+        stubImageDimensions()
+        const receiveAttachment = vi.fn()
+        const originalImport = hoisted.importManagedFileMock.getMockImplementation()!
+        let finishImport!: () => void
+        hoisted.importManagedFileMock.mockImplementationOnce(
+          (...args: unknown[]) =>
+            new Promise((resolve, reject) => {
+              finishImport = () => {
+                void Promise.resolve(originalImport(...args)).then(resolve, reject)
+              }
+            })
+        )
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        startEditing(receiveAttachment)
+        const files = imageFiles()
+        fireEvent.drop(dropRoot(), {
+          dataTransfer:
+            source === 'image directory'
+              ? directoryTransfer(files)
+              : { files, items: [], types: ['Files'], getData: () => '' }
+        })
+        await waitFor(() => expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce())
+
+        act(() => {
+          editingProps().onSetEditingIndex(null)
+          editingProps().onRegisterEditingAttachmentReceiver(null)
+        })
+        await act(async () => finishImport())
+
+        expect(receiveAttachment).not.toHaveBeenCalled()
+        expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce()
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
+    it('discards an internal drop after the original ChatPage unmounts', async () => {
+      const receiveAttachment = vi.fn()
+      const { unmount } = renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(receiveAttachment)
+      const finishDrop = beginBlobDrop()
+
+      unmount()
+      await finishDrop()
+
+      expect(receiveAttachment).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
+
+    it('invalidates a drop across scope changes even with the same session id', async () => {
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'other-drop-scope'),
+        'drop-session-a'
+      )
+      const { rerender } = renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      const finishDrop = beginBlobDrop()
+      const changeScope = (scope: string) =>
+        rerender(
+          <MemoryRouter>
+            <ThemeProvider theme={theme}>
+              <ChatPage compact storageScope={scope} />
+            </ThemeProvider>
+          </MemoryRouter>
+        )
+
+      changeScope('other-drop-scope')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      changeScope('runtime-flow')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      await finishDrop()
+
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+    })
   })
 
   it('clears normal-response loading before deferred persistence completes', async () => {
@@ -3352,6 +3794,124 @@ describe('ChatPage runtime workflow integration', () => {
         attachments: [expect.objectContaining({ fileName: 'queued.png' })]
       })
     )
+  })
+
+  it('drops queued sends when the session is explicitly terminated', async () => {
+    let firstSignal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          firstSignal = signal
+          signal?.addEventListener(
+            'abort',
+            () => {
+              const error = new Error('aborted')
+              error.name = 'AbortError'
+              reject(error)
+            },
+            { once: true }
+          )
+        })
+    )
+
+    renderChatPage('terminate-clears-queue')
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'active request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    for (const content of ['queued one', 'queued two']) {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: content }
+      })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+    }
+    expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2)
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:terminate-session', {
+          detail: { scope: 'terminate-clears-queue', sessionId: readCurrentSessionState()?.id }
+        })
+      )
+    })
+
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true))
+    await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not send after explicit termination during attachment preparation', async () => {
+    let releaseImport!: (value: unknown) => void
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 32
+        naturalHeight = 32
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    hoisted.importManagedDataUrlMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseImport = resolve
+        })
+    )
+
+    renderChatPage('terminate-during-preflight')
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const sessionId = readCurrentSessionState()!.id
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: 'terminate-during-preflight',
+            autoSend: true,
+            text: 'must not send after termination',
+            image: 'data:image/png;base64,ZW1wdHk='
+          }
+        })
+      )
+    })
+    console.log('DEBUG import/data', hoisted.importManagedDataUrlMock.mock.calls.length)
+    await waitFor(() => expect(hoisted.importManagedDataUrlMock).toHaveBeenCalledOnce())
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:terminate-session', {
+          detail: { scope: 'terminate-during-preflight', sessionId }
+        })
+      )
+    })
+    await act(async () => {
+      releaseImport({
+        localMediaUrl: 'media://managed/delayed.png',
+        reference: {
+          version: 1,
+          kind: 'managed',
+          relativePath: `originals/${'d'.repeat(64)}.png`,
+          sha256: 'd'.repeat(64),
+          mimeType: 'image/png',
+          sizeBytes: 5,
+          originalFileName: 'delayed.png'
+        }
+      })
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
   })
 
   it('does not clear the draft when a busy enqueue has no sendable content', async () => {
@@ -3525,44 +4085,170 @@ describe('ChatPage runtime workflow integration', () => {
     )
   })
 
-  it('allows scoped send-to-agent input to mutate an explicit inactive target scope', async () => {
-    renderWithProviders(
-      <>
-        <div data-testid="agent-a">
-          <ChatPage compact storageScope="runtime-flow-a" active />
-        </div>
-        <div data-testid="agent-b">
-          <ChatPage compact storageScope="runtime-flow-b" active={false} />
-        </div>
-      </>
-    )
+  it.each(['targetScope', 'scope'])(
+    'allows scoped send-to-agent input into an explicit inactive target with input disabled (%s)',
+    async (scopeKey) => {
+      renderWithProviders(
+        <>
+          <div data-testid="agent-a">
+            <ChatPage compact storageScope="runtime-flow-a" active />
+          </div>
+          <div data-testid="agent-b">
+            <ChatPage
+              compact
+              storageScope="runtime-flow-b"
+              active={false}
+              acceptExternalInput={false}
+            />
+          </div>
+        </>
+      )
 
+      const agentA = screen.getByTestId('agent-a')
+      const agentB = screen.getByTestId('agent-b')
+
+      await waitFor(() =>
+        expect(within(agentA).getByTestId('chat-composer-mock')).toBeInTheDocument()
+      )
+      await waitFor(() =>
+        expect(within(agentB).getByTestId('chat-composer-mock')).toBeInTheDocument()
+      )
+
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              text: 'explicit inactive target',
+              attachment: createImageAttachment('inactive-target.png'),
+              [scopeKey]: 'runtime-flow-b'
+            }
+          })
+        )
+      })
+
+      await waitFor(() => {
+        expect(within(agentA).getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(within(agentA).getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(within(agentB).getByTestId('chat-composer-input-mock')).toHaveValue(
+          'explicit inactive target'
+        )
+        expect(within(agentB).getByTestId('chat-composer-attachment-names')).toHaveTextContent(
+          'inactive-target.png'
+        )
+      })
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    { active: false, acceptExternalInput: false, targetScope: undefined },
+    { active: true, acceptExternalInput: false, targetScope: undefined },
+    { active: false, acceptExternalInput: true, targetScope: undefined },
+    { active: false, acceptExternalInput: false, targetScope: '' },
+    { active: false, acceptExternalInput: false, targetScope: 'other-agent' }
+  ])(
+    'rejects send-to-agent without matching scope when active=$active, accepts=$acceptExternalInput, target=$targetScope',
+    async ({ active, acceptExternalInput, targetScope }) => {
+      renderChatPage({ active, acceptExternalInput })
+      await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              targetScope,
+              text: 'must not reach this pane',
+              attachment: createImageAttachment('wrong-pane.png'),
+              autoSend: true
+            }
+          })
+        )
+      })
+
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps delayed scoped send-to-agent attachments in their target after switching active panes', async () => {
+    function PaneSwitchFixture() {
+      const [activePane, setActivePane] = React.useState('b')
+      return (
+        <>
+          <button type="button" onClick={() => setActivePane('a')}>
+            switch to pane a
+          </button>
+          {['a', 'b'].map((pane) => (
+            <div key={pane} data-testid={`agent-${pane}`}>
+              <ChatPage
+                compact
+                storageScope={`runtime-flow-${pane}`}
+                active={activePane === pane}
+                acceptExternalInput={activePane === pane}
+              />
+            </div>
+          ))}
+        </>
+      )
+    }
+    renderWithProviders(<PaneSwitchFixture />)
     const agentA = screen.getByTestId('agent-a')
     const agentB = screen.getByTestId('agent-b')
+    await waitFor(() => expect(readCurrentSessionStateWithin(agentB)?.id).toBeTruthy())
 
-    await waitFor(() =>
-      expect(within(agentA).getByTestId('chat-composer-mock')).toBeInTheDocument()
-    )
-    await waitFor(() =>
-      expect(within(agentB).getByTestId('chat-composer-mock')).toBeInTheDocument()
-    )
+    let resolveAttachment!: (attachment: ChatAttachment) => void
+    const delivery = new Promise<ChatAttachment>((resolve) => {
+      resolveAttachment = resolve
+    }).then((attachment) => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: { attachment, targetScope: 'runtime-flow-b' }
+        })
+      )
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'switch to pane a' }))
+    await act(async () => {
+      resolveAttachment(createImageAttachment('delayed-target.png'))
+      await delivery
+    })
+
+    await waitFor(() => {
+      expect(within(agentA).getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(within(agentB).getByTestId('chat-composer-attachment-names')).toHaveTextContent(
+        'delayed-target.png'
+      )
+    })
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+  })
+
+  it('honors only explicit scoped autoSend in an inactive pane with input disabled', async () => {
+    renderChatPage({ active: false, acceptExternalInput: false })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
 
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent('send-to-agent', {
           detail: {
-            text: 'explicit inactive target',
-            targetScope: 'runtime-flow-b'
+            text: 'explicit background send',
+            attachment: createImageAttachment('explicit-background.png'),
+            targetScope: 'runtime-flow',
+            autoSend: true
           }
         })
       )
     })
 
-    await waitFor(() => {
-      expect(within(agentA).getByTestId('chat-composer-input-mock')).toHaveValue('')
-      expect(within(agentB).getByTestId('chat-composer-input-mock')).toHaveValue(
-        'explicit inactive target'
-      )
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+    const request = hoisted.requestChatCompletionMock.mock.calls[0][0]
+    expect(request.storageScope).toBe('runtime-flow')
+    expect(request.messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: 'explicit background send',
+      attachments: [expect.objectContaining({ fileName: 'explicit-background.png' })]
     })
   })
 
@@ -4642,6 +5328,33 @@ describe('ChatPage runtime workflow integration', () => {
         fileName: 'ghost.png'
       })
     ])
+  })
+
+  it('keeps ordinary multi-image chat in one request without attachment batching', async () => {
+    hoisted.resolveAttachmentBatchCapabilityMock.mockClear()
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'ordinary multimodal reply' })
+
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    await dispatchNewSession({
+      profileId: 'vision-model',
+      initialMessage: '把图一改的这层黄光减弱一点，参考其他图的风格，但是氛围不变',
+      initialAttachments: Array.from({ length: 6 }, (_, index) =>
+        createImageAttachment(`reference-${index + 1}.png`)
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(hoisted.resolveAttachmentBatchCapabilityMock).not.toHaveBeenCalled()
+    const request = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+    expect(request.messages.at(-1)?.attachments).toHaveLength(6)
+    await waitFor(() =>
+      expect(
+        readCurrentSessionState()?.messages.filter((message) => message.role === 'assistant')
+      ).toHaveLength(1)
+    )
   })
 
   it('sends current-turn image references without triggering a local image-count guard', async () => {

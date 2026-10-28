@@ -1,5 +1,7 @@
 import { DEFAULT_CONFIG, type Config, type LLMOpenAIApiMode } from '@shared/config/config'
 import { describe, expect, it, vi } from 'vitest'
+import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
+import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
 import { DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY } from '@shared/llm/openaiResponses'
 import {
   preflightChatRequestImages,
@@ -74,9 +76,23 @@ const fixture = () => {
       }) => Promise<{ content: string }>
     >()
     .mockResolvedValue({ content: 'Owned fixture answer.' })
-  const chatStream = vi.fn().mockImplementation(async (payload: { messages: ChatMessage[] }) => {
-    await chat(payload)
-  })
+  const chatStream = vi
+    .fn()
+    .mockImplementation(
+      async (
+        payload: { messages: ChatMessage[] },
+        response: ServerStreaming<LLMChatStreamResp>
+      ) => {
+        const result = await chat(payload)
+        response.onData({
+          type: 'done',
+          delta: '',
+          done: true,
+          content: result.content,
+          finishReason: 'stop'
+        })
+      }
+    )
   const remoteFetch = vi.fn()
   vi.stubGlobal('fetch', fetchMock)
   window.api = {

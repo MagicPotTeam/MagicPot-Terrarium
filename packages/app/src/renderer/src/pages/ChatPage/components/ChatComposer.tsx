@@ -50,8 +50,14 @@ import {
   detectDisplayFileKind,
   getFileBadgeText
 } from '@renderer/utils/fileDisplay'
-import { getDroppedTextContent } from '@renderer/utils/droppedImageUtils'
-import { getVisibleChatAttachmentEntries } from '../chatAttachmentVisibility'
+import {
+  getDroppedLocalImageContent,
+  getDroppedTextContent
+} from '@renderer/utils/droppedImageUtils'
+import {
+  getChatAttachmentRenderKeys,
+  getVisibleChatAttachmentEntries
+} from '../chatAttachmentVisibility'
 import type { MagicPotAppToolDescriptor } from '@shared/app/types'
 
 interface ChatComposerProps {
@@ -381,6 +387,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
 }) => {
   const { t } = useTranslation()
   const visiblePendingAttachmentEntries = getVisibleChatAttachmentEntries(pendingAttachments)
+  const pendingAttachmentKeys = getChatAttachmentRenderKeys(
+    visiblePendingAttachmentEntries.map(({ attachment }) => attachment)
+  )
   const theme = useTheme()
   const hasModelSelectorSlot = modelSelectorSlot != null
 
@@ -611,6 +620,11 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
 
   const handleInputDragOver = (event: React.DragEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     if (disabled) return
+    if (
+      event.dataTransfer.files?.length ||
+      getDroppedLocalImageContent(event.dataTransfer).fileUrls.length
+    )
+      return
     if (!getDroppedTextContent(event.dataTransfer)) return
 
     event.preventDefault()
@@ -620,6 +634,11 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
 
   const handleInputDrop = (event: React.DragEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     if (disabled) return
+    if (
+      event.dataTransfer.files?.length ||
+      getDroppedLocalImageContent(event.dataTransfer).fileUrls.length
+    )
+      return
 
     const droppedText = getDroppedTextContent(event.dataTransfer)
     if (!droppedText) return
@@ -799,7 +818,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 const progress = uploadProgress[originalIndex]
                 return (
                   <Box
-                    key={idx}
+                    key={pendingAttachmentKeys[idx]}
                     sx={{
                       position: 'relative',
                       width: 80,

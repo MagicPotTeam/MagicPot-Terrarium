@@ -171,6 +171,62 @@ describe('normalizeChatAttachmentsForRequest', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('keeps managed chunked binary payloads out of renderer data URLs', async () => {
+    const media = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      relativePath:
+        'originals/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png',
+      sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      sizeBytes: 3,
+      mimeType: 'image/png',
+      originalFileName: 'durable.png'
+    }
+    const chunks = [
+      {
+        version: 1 as const,
+        kind: 'content-addressed-binary-chunk' as const,
+        sha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        index: 0,
+        chunkCount: 1,
+        bytesBase64: 'YWJj'
+      }
+    ]
+    const reference = {
+      version: 1 as const,
+      kind: 'content-addressed-binary' as const,
+      sha256: chunks[0].sha256,
+      sizeBytes: 3,
+      mimeType: 'image/png',
+      chunkSize: 3,
+      chunkCount: 1
+    }
+    const materializeForRequest = vi.fn().mockResolvedValue({
+      transport: 'chunked-binary-v1',
+      reference,
+      chunks
+    })
+    const normalized = await normalizeChatAttachmentsForRequest(
+      [{ type: 'image', url: 'local-media:///durable.png', media }],
+      {
+        managedMediaService: { materializeForRequest } as never,
+        allowManagedChunkedBinary: true
+      }
+    )
+
+    expect(materializeForRequest).toHaveBeenCalledWith({
+      reference: media,
+      transport: 'chunked-binary-v1'
+    })
+    expect(normalized?.[0]).toMatchObject({
+      url: 'local-media:///durable.png',
+      mimeType: 'image/png',
+      sizeBytes: 3,
+      binary: { transport: 'chunked-binary-v1', reference, chunks }
+    })
+    expect(normalized?.[0]).not.toHaveProperty('media')
+  })
+
   it('does not send or fetch an implicit local URL for managed media', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
@@ -667,6 +723,27 @@ describe('resolveAttachmentRequestCapabilities', () => {
       preserveRemoteUrl: false
     })
   })
+
+  it('exposes managed chunked binary only when the selected profile declares it', () => {
+    const config = createConfig()
+    config.llm_config.api_profiles = [
+      {
+        id: 'chunked-profile',
+        model_name: 'vision-model',
+        base_url: 'https://api.example.com',
+        api_key: 'key',
+        attachment_transports: ['chunked-binary-v1']
+      } as Config['llm_config']['api_profiles'][number]
+    ]
+
+    expect(resolveAttachmentRequestCapabilities(config, 'chunked-profile')).toEqual({
+      allowManagedRequestDataUrl: false,
+      allowRequestDataUrl: false,
+      allowAccessibleUrl: false,
+      preserveRemoteUrl: false,
+      allowManagedChunkedBinary: true
+    })
+  })
 })
 
 describe('requestChatCompletion', () => {
@@ -685,6 +762,7 @@ describe('requestChatCompletion', () => {
     })
 
     expect(chat).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       messages: [{ role: 'user', content: 'hello', attachments: undefined }],
       profileId: 'foo',
       systemPrompt: undefined,
@@ -785,10 +863,15 @@ describe('requestChatCompletion', () => {
       signal: controller.signal
     })
 
+    await vi.waitFor(() => expect(chat).toHaveBeenCalledOnce())
     controller.abort('user cancelled')
 
     await expect(completion).rejects.toMatchObject({ name: 'AbortError' })
-    expect(cancelConversation).toHaveBeenCalledWith({ conversationId: 'conversation-local' })
+    expect(cancelConversation).toHaveBeenCalledWith({
+      conversationId: 'conversation-local',
+      cancellationId: (chat.mock.calls[0] as unknown as [{ cancellationId: string }])[0]
+        .cancellationId
+    })
   })
 
   it('rejects local attachments before fetch or dispatch when request-data-url is undeclared', async () => {
@@ -861,6 +944,7 @@ describe('requestChatCompletion', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith('local-media:///C:/magicpot/lv1.png')
     expect(chat).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       messages: [
         {
           role: 'user',
@@ -928,6 +1012,7 @@ describe('requestChatCompletion', () => {
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(chat).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       messages: [
         {
           role: 'user',
@@ -979,6 +1064,7 @@ describe('requestChatCompletion', () => {
     })
 
     expect(chat).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       messages: [
         {
           role: 'user',
@@ -1022,6 +1108,7 @@ describe('requestChatCompletion', () => {
     })
 
     expect(chat).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       messages: [
         {
           role: 'user',
@@ -1463,6 +1550,7 @@ describe('requestChatCompletion', () => {
     ).resolves.toEqual({ content: 'local reply', sessionUrl: undefined })
 
     expect(chat).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       messages: [{ role: 'user', content: 'hello', attachments: undefined }],
       profileId: 'foo',
       systemPrompt: 'Use this instruction set.',
@@ -1513,6 +1601,7 @@ describe('requestChatCompletion', () => {
     ).resolves.toEqual({ content: 'local reply', sessionUrl: undefined })
 
     expect(chat).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       messages: [{ role: 'user', content: 'hello', attachments: undefined }],
       profileId: undefined,
       systemPrompt: 'Use this instruction set.',
@@ -1698,6 +1787,7 @@ describe('requestChatCompletion', () => {
     })
 
     expect(remoteFetch).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       url: 'https://skills.example.com/api/chat',
       method: 'POST',
       headers: {
@@ -1748,6 +1838,7 @@ describe('requestChatCompletion', () => {
     })
 
     expect(remoteFetch).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       url: 'https://skills.example.com/agent',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1925,6 +2016,7 @@ describe('requestChatCompletion', () => {
 
     expect(chat).not.toHaveBeenCalled()
     expect(remoteFetch).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       url: 'https://skills.example.com/agent',
       method: 'POST',
       headers: {
@@ -2211,6 +2303,7 @@ describe('requestChatCompletion', () => {
 
     expect(chat).toHaveBeenCalledTimes(1)
     expect(chat).toHaveBeenCalledWith({
+      cancellationId: expect.any(String),
       messages: [
         {
           role: 'user',
@@ -2222,7 +2315,7 @@ describe('requestChatCompletion', () => {
       profileId: 'profile-batch',
       systemPrompt: undefined,
       sessionUrl: undefined,
-      conversationId: undefined,
+      conversationId: expect.stringMatching(/^capability-probe:attachment-batch:/),
       isEdit: false
     })
   })

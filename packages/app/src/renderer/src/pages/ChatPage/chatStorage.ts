@@ -14,6 +14,7 @@ import { normalizeMediaReference } from '@shared/mediaReference'
 import { api } from '@renderer/utils/windowUtils'
 import { normalizeChatProfileIdForStorage } from './chatPageShared'
 import type { ChatContextCompressionSummary } from './chatContextCompression'
+import { CHAT_ATTACHMENT_STORAGE } from './chatManagedMediaAttachments'
 
 export interface ChatSessionDraft {
   inputValue: string
@@ -101,7 +102,11 @@ async function migrateLegacyAttachmentsInSession(
         originalFileName: attachment.fileName || 'legacy-image',
         sourceWidth: attachment.sourceWidth,
         sourceHeight: attachment.sourceHeight
-      }
+      },
+      // Legacy chat images become durable user-owned media rather than task
+      // scratch data. The explicit namespace keeps old requests compatible
+      // while allowing the physical lifecycle policy to apply on migration.
+      storage: CHAT_ATTACHMENT_STORAGE
     })
     pendingReclaims.push(migrated.checkpoint)
     changed = true

@@ -102,7 +102,10 @@ describe('remote Responses IPC stream watchdog', () => {
     expect(await result).toMatchObject({ name: 'TimeoutError' })
     expect(f.abort).toHaveBeenCalledOnce()
     expect(f.stream().abortReceiver.isAborted()).toBe(true)
-    expect(f.cancelConversation).toHaveBeenCalledWith({ conversationId: 'fixture-watchdog' })
+    expect(f.cancelConversation).toHaveBeenCalledWith({
+      conversationId: 'fixture-watchdog',
+      cancellationId: (f.chatStream.mock.calls[0][0] as { cancellationId: string }).cancellationId
+    })
     expectReleased(f)
     f.stream().onData(delta)
     f.stream().onData(done)

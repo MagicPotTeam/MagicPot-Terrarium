@@ -471,21 +471,34 @@ describe('remote endpoint fallback preserves application continuation errors', (
     }
   )
 
-  it('cancels an abort-aware retry sleep immediately and preserves the caller reason', async () => {
+  it('settles an uncertain POST failure without queuing a retry or replacing it on later abort', async () => {
     vi.useFakeTimers()
     const controller = new AbortController()
-    const reason = new Error('fixture-retry-cancel')
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockRejectedValue(new Error('fixture transient failure'))
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener')
+    const failure = new Error('fixture response lost after POST acceptance')
+    const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(failure)
     vi.stubGlobal('fetch', fetchMock)
 
-    const pending = run(false, controller.signal).catch((error: unknown) => error)
+    let settled = false
+    const pending = run(false, controller.signal).catch((error: unknown) => {
+      settled = true
+      return error
+    })
     await vi.advanceTimersByTimeAsync(0)
-    controller.abort(reason)
-    await vi.advanceTimersByTimeAsync(0)
-    await expect(pending).resolves.toBe(reason)
+    expect(settled).toBe(true)
+    await expect(pending).resolves.toBe(failure)
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://fixture-proxy.example/api/chat',
+      expect.objectContaining({ method: 'POST' })
+    )
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function))
+    expect(vi.getTimerCount()).toBe(0)
+
+    controller.abort(new Error('fixture cancellation after settlement'))
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000)
+    await expect(pending).resolves.toBe(failure)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('uses one absolute deadline across retry attempts instead of restarting it', async () => {

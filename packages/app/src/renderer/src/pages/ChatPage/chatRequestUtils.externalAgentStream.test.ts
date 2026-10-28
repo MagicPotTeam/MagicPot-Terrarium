@@ -130,7 +130,8 @@ describe('external-agent and IPC stream completion gates', () => {
 
     expect(onEvent).not.toHaveBeenCalled()
     expect(cancelConversation).toHaveBeenCalledWith({
-      conversationId: 'stream-abort-fixture'
+      conversationId: 'stream-abort-fixture',
+      cancellationId: (chatStream.mock.calls[0][0] as { cancellationId: string }).cancellationId
     })
   })
 

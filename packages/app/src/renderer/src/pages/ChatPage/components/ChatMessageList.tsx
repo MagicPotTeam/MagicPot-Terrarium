@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-refresh/only-export-components */
 import React from 'react'
+import { isEqual } from 'es-toolkit'
 import {
   Box,
   TextField,
@@ -37,7 +38,7 @@ import {
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components as MarkdownComponents } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism } from 'react-syntax-highlighter'
 import { prism, vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -55,7 +56,7 @@ import {
   resolveAssistantReplyDownloadMode,
   resolveAssistantSidecarExportEntries
 } from '../chatReplyDownloadUtils'
-import { getVisibleChatAttachments } from '../chatAttachmentVisibility'
+import { getChatAttachmentRenderKeys, getVisibleChatAttachments } from '../chatAttachmentVisibility'
 import {
   setAgentAttachmentDragPayload,
   setAgentImageDragPayload,
@@ -70,13 +71,15 @@ import {
 } from '@renderer/utils/fileDisplay'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
+import { getDroppedLocalImageContent } from '@renderer/utils/droppedImageUtils'
 import { DccBridgeTarget, isSupportedDccBridgeModelSourceFormat } from '@shared/api/svcDccBridge'
 import type { ManagedMediaDerivativeMaxEdge, ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference, type MediaReference } from '@shared/mediaReference'
 import type { SxProps, Theme } from '@mui/material/styles'
 import {
   ensureCachedChatImageDerivative,
-  getChatImageDerivativeCacheKey
+  getChatImageDerivativeCacheKey,
+  invalidateCachedChatImageDerivative
 } from '../chatImageDerivativeScheduler'
 
 export {
@@ -95,6 +98,10 @@ interface ChatMessageListProps {
   editingContent: string
   onSetEditingIndex: (index: number | null) => void
   onSetEditingContent: (content: string) => void
+  onDropImageAttachments?: (files: File[]) => Promise<ChatAttachment[]>
+  onRegisterEditingAttachmentReceiver?: (
+    receiver: ((attachment: ChatAttachment) => void) | null
+  ) => void
   onSendEditedMessage: (
     content: string,
     attachments: ChatAttachment[] | undefined,
@@ -129,6 +136,103 @@ const CHAT_IMAGE_FALLBACK_WIDTH = 320
 const CHAT_IMAGE_FALLBACK_HEIGHT = 240
 const CHAT_IMAGE_DERIVATIVE_ROOT_MARGIN = '800px 0px'
 const CHAT_IMAGE_DERIVATIVE_BUCKETS = [256, 512, 1024, 2048] as const
+
+type ChatMessageIdentitySnapshot = {
+  sessionId: string | undefined
+  messages: ChatMessage[]
+  identities: string[]
+  nextIdentity: number
+}
+
+const getSuppliedMessageId = (message: ChatMessage): string | undefined => {
+  const candidate = message as ChatMessage & { id?: string; messageId?: string }
+  return candidate.id || candidate.messageId
+}
+
+const reconcileMessageIdentities = (
+  previous: ChatMessageIdentitySnapshot,
+  messages: ChatMessage[],
+  sessionId: string | undefined
+): ChatMessageIdentitySnapshot => {
+  const sameSession = previous.sessionId === sessionId
+  const previousMessages = sameSession ? previous.messages : []
+  const previousIdentities = sameSession ? previous.identities : []
+  const namespace = JSON.stringify(sessionId ?? null)
+  const objectIdentities = new Map<ChatMessage, string[]>()
+  previousMessages.forEach((message, index) => {
+    if (getSuppliedMessageId(message)) return
+    const identities = objectIdentities.get(message) ?? []
+    identities.push(previousIdentities[index])
+    objectIdentities.set(message, identities)
+  })
+
+  const claimed = new Set<string>()
+  const occurrences = new Map<string, number>()
+  const identities = messages.map((message) => {
+    const suppliedId = getSuppliedMessageId(message)
+    if (suppliedId) {
+      const occurrence = occurrences.get(suppliedId) ?? 0
+      occurrences.set(suppliedId, occurrence + 1)
+      return `${namespace}:message-id:${JSON.stringify(suppliedId)}:${occurrence}`
+    }
+    const identity = objectIdentities.get(message)?.shift()
+    if (identity) claimed.add(identity)
+    return identity
+  })
+
+  // Match cloned history before considering streaming slot updates. A prepend or
+  // reorder must move the original row's state rather than lend it to a new row.
+  const unmatchedByContent = new Map<string, number[]>()
+  previousMessages.forEach((message, index) => {
+    if (getSuppliedMessageId(message) || claimed.has(previousIdentities[index])) return
+    const candidates = unmatchedByContent.get(message.content) ?? []
+    candidates.push(index)
+    unmatchedByContent.set(message.content, candidates)
+  })
+  messages.forEach((message, index) => {
+    if (identities[index]) return
+    const candidates = unmatchedByContent.get(message.content)
+    const match = candidates?.findIndex(
+      (previousIndex) =>
+        previousMessages[previousIndex].role === message.role &&
+        isEqual(previousMessages[previousIndex], message)
+    )
+    if (!candidates || match === undefined || match < 0) return
+    const [previousIndex] = candidates.splice(match, 1)
+    const identity = previousIdentities[previousIndex]
+    identities[index] = identity
+    claimed.add(identity)
+  })
+  const previousIndices = new Map(previousIdentities.map((identity, index) => [identity, index]))
+  const stableSlots =
+    previousMessages.length === messages.length &&
+    identities.every(
+      (identity, index) =>
+        !identity || !previousIndices.has(identity) || previousIndices.get(identity) === index
+    )
+  const currentObjects = new Set(messages)
+  let nextIdentity = previous.nextIdentity
+  const resolvedIdentities = identities.map((identity, index) => {
+    if (identity) return identity
+    const previousMessage = previousMessages[index]
+    const previousIdentity = previousIdentities[index]
+    // Immutable stream/storage updates keep their slot, but never steal a moved row's identity.
+    if (
+      stableSlots &&
+      previousMessage &&
+      previousMessage.role === messages[index].role &&
+      !getSuppliedMessageId(previousMessage) &&
+      !currentObjects.has(previousMessage) &&
+      !claimed.has(previousIdentity)
+    ) {
+      claimed.add(previousIdentity)
+      return previousIdentity
+    }
+    return `${namespace}:message-local:${nextIdentity++}`
+  })
+
+  return { sessionId, messages, identities: resolvedIdentities, nextIdentity }
+}
 
 export const getChatImageDerivativeMaxEdge = (
   cssMaxDimension: number,
@@ -173,20 +277,62 @@ const ChatImage: React.FC<{
   const frameRef = React.useRef<HTMLDivElement | null>(null)
   const generationRef = React.useRef(0)
   const abortControllerRef = React.useRef<AbortController | null>(null)
-  const [displaySrc, setDisplaySrc] = React.useState<string | null>(null)
+  const [displaySource, setDisplaySource] = React.useState<{
+    src: string
+    cacheKey?: string
+  } | null>(null)
+  const displaySrc = displaySource?.src ?? null
   const [failed, setFailed] = React.useState(false)
-  const [nearViewport, setNearViewport] = React.useState(false)
+  const [visibility, setVisibility] = React.useState({ nearViewport: false, revision: 0 })
+  const nearViewportRef = React.useRef(false)
+  const { nearViewport, revision: visibilityRevision } = visibility
   const [maxEdge, setMaxEdge] = React.useState<ManagedMediaDerivativeMaxEdge | null>(null)
-  const [brokenDerivativeKey, setBrokenDerivativeKey] = React.useState<string | null>(null)
+  const brokenDerivativeKeyRef = React.useRef<string | null>(null)
+  const previousManagedMediaRef = React.useRef<
+    (MediaReference & { kind: 'managed'; sha256: string }) | undefined
+  >(undefined)
   const managedMedia = React.useMemo(() => {
     const normalized = normalizeMediaReference(media)
-    return normalized?.kind === 'managed' && normalized.sha256
-      ? (normalized as MediaReference & { kind: 'managed'; sha256: string })
-      : undefined
+    if (normalized?.kind !== 'managed' || !normalized.sha256) return undefined
+    const previous = previousManagedMediaRef.current
+    // Storage clones and derivative/status bookkeeping do not change the image's contents.
+    if (
+      previous?.version === normalized.version &&
+      previous.relativePath === normalized.relativePath &&
+      previous.sha256 === normalized.sha256 &&
+      previous.sizeBytes === normalized.sizeBytes &&
+      previous.mimeType === normalized.mimeType &&
+      previous.originalFileName === normalized.originalFileName &&
+      previous.mediaId === normalized.mediaId &&
+      previous.originalUrl === normalized.originalUrl &&
+      previous.width === normalized.width &&
+      previous.height === normalized.height
+    ) {
+      return previous
+    }
+    return normalized as MediaReference & { kind: 'managed'; sha256: string }
   }, [media])
+  React.useLayoutEffect(() => {
+    previousManagedMediaRef.current = managedMedia
+  }, [managedMedia])
   const mediaKey = managedMedia
     ? `${managedMedia.version}:${managedMedia.relativePath}:${managedMedia.sha256}`
     : ''
+  const isManagedMedia = Boolean(managedMedia)
+
+  const updateNearViewport = React.useCallback((next: boolean) => {
+    if (nearViewportRef.current === next) return
+    nearViewportRef.current = next
+    generationRef.current += 1
+    // Keep both transitions even if React batches an offscreen/on-screen pair.
+    setVisibility((previous) => ({ nearViewport: next, revision: previous.revision + 1 }))
+    if (!next) {
+      abortControllerRef.current?.abort()
+      abortControllerRef.current = null
+      setDisplaySource(null)
+      setFailed(false)
+    }
+  }, [])
 
   const hasValidSourceDimensions =
     Number.isFinite(sourceWidth) &&
@@ -201,40 +347,41 @@ const ChatImage: React.FC<{
 
   React.useEffect(() => {
     generationRef.current += 1
-    setDisplaySrc(null)
+    setDisplaySource(null)
     setFailed(false)
-    setNearViewport(false)
+    updateNearViewport(false)
     setMaxEdge(null)
-    setBrokenDerivativeKey(null)
-  }, [managedMedia, originalSrc, mediaKey])
+    brokenDerivativeKeyRef.current = null
+  }, [originalSrc, mediaKey, updateNearViewport])
 
   React.useEffect(() => {
     const frame = frameRef.current
     if (!frame) return
     if (typeof IntersectionObserver === 'undefined') {
       // Preserve legacy image behavior in runtimes that cannot report visibility.
-      if (!managedMedia) setNearViewport(true)
+      if (!isManagedMedia) updateNearViewport(true)
       return
     }
     const root = frame.closest('[data-chat-scroll-root]')
+    let observing = true
     const observer = new IntersectionObserver(
       (entries) => {
-        const entry = entries.find((candidate) => candidate.target === frame) ?? entries[0]
-        if (!entry) return
-        generationRef.current += 1
-        setNearViewport(entry.isIntersecting)
-        if (!entry.isIntersecting) {
-          abortControllerRef.current?.abort()
-          abortControllerRef.current = null
-          setDisplaySrc(null)
-          setFailed(false)
+        if (!observing) return
+        let entry: IntersectionObserverEntry | undefined
+        for (const candidate of entries) {
+          if (candidate.target === frame) entry = candidate
         }
+        if (!entry) return
+        updateNearViewport(entry.isIntersecting)
       },
       { root, rootMargin: CHAT_IMAGE_DERIVATIVE_ROOT_MARGIN }
     )
     observer.observe(frame)
-    return () => observer.disconnect()
-  }, [mediaKey, originalSrc])
+    return () => {
+      observing = false
+      observer.disconnect()
+    }
+  }, [isManagedMedia, mediaKey, originalSrc, updateNearViewport])
 
   const measureRequiredEdge = React.useCallback(() => {
     const rect = frameRef.current?.getBoundingClientRect()
@@ -264,19 +411,19 @@ const ChatImage: React.FC<{
   React.useEffect(() => {
     if (!nearViewport) return
     if (!managedMedia || !maxEdge) {
-      setDisplaySrc(originalSrc)
+      setDisplaySource({ src: originalSrc })
       return
     }
 
     const cacheKey = getChatImageDerivativeCacheKey(managedMedia, maxEdge)
-    if (cacheKey === brokenDerivativeKey) {
-      setDisplaySrc(originalSrc)
+    if (cacheKey === brokenDerivativeKeyRef.current) {
+      setDisplaySource({ src: originalSrc })
       return
     }
 
     const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc })?.svcManagedMedia
     if (typeof service?.ensureDerivative !== 'function') {
-      setDisplaySrc(originalSrc)
+      setDisplaySource({ src: originalSrc })
       return
     }
 
@@ -291,21 +438,22 @@ const ChatImage: React.FC<{
       (result) => {
         if (generation !== generationRef.current || !nearViewport) return
         setFailed(false)
-        setDisplaySrc(
-          result.status === 'ready' ? result.descriptor.localMediaUrl : result.localMediaUrl
-        )
+        setDisplaySource({
+          src: result.status === 'ready' ? result.descriptor.localMediaUrl : result.localMediaUrl,
+          cacheKey
+        })
       },
       () => {
         if (generation !== generationRef.current || !nearViewport) return
         setFailed(false)
-        setDisplaySrc(originalSrc)
+        setDisplaySource({ src: originalSrc })
       }
     )
     return () => {
       abortController.abort()
       if (abortControllerRef.current === abortController) abortControllerRef.current = null
     }
-  }, [brokenDerivativeKey, managedMedia, maxEdge, nearViewport, originalSrc])
+  }, [managedMedia, maxEdge, nearViewport, originalSrc, visibilityRevision])
 
   React.useEffect(
     () => () => {
@@ -375,12 +523,23 @@ const ChatImage: React.FC<{
           onLoad={measureRequiredEdge}
           onError={() => {
             if (displaySrc !== originalSrc) {
-              if (managedMedia && maxEdge) {
-                setBrokenDerivativeKey(getChatImageDerivativeCacheKey(managedMedia, maxEdge))
+              const failedCacheKey = displaySource?.cacheKey
+              if (failedCacheKey) {
+                invalidateCachedChatImageDerivative(failedCacheKey, displaySrc)
+                brokenDerivativeKeyRef.current = failedCacheKey
               }
-              generationRef.current += 1
+              const requestedCacheKey =
+                managedMedia && maxEdge
+                  ? getChatImageDerivativeCacheKey(managedMedia, maxEdge)
+                  : null
+              // A smaller preview can fail while a newer size is still being prepared.
+              if (!failedCacheKey || failedCacheKey === requestedCacheKey) {
+                generationRef.current += 1
+                abortControllerRef.current?.abort()
+                abortControllerRef.current = null
+              }
               setFailed(false)
-              setDisplaySrc(originalSrc)
+              setDisplaySource({ src: originalSrc })
               return
             }
             setFailed(true)
@@ -400,40 +559,67 @@ const ChatImage: React.FC<{
 const CopiableIconButton: React.FC<{
   copyLabel: string
   copiedLabel: string
+  content: string
+  active?: boolean
   iconSize?: number | string
   buttonSx?: SxProps<Theme>
-  onCopy: () => void
-}> = ({ copyLabel, copiedLabel, iconSize = 14, buttonSx, onCopy }) => {
+}> = ({ copyLabel, copiedLabel, content, active = true, iconSize = 14, buttonSx }) => {
+  const { t } = useTranslation()
+  const { notifySuccess, notifyError } = useMessage()
   const [copied, setCopied] = React.useState(false)
   const [tooltipOpen, setTooltipOpen] = React.useState(false)
   const timerRef = React.useRef<number | null>(null)
+  const pendingRef = React.useRef<symbol | null>(null)
+  const generationRef = React.useRef(0)
 
-  React.useEffect(
-    () => () => {
-      if (timerRef.current) {
-        window.clearTimeout(timerRef.current)
-      }
-    },
-    []
-  )
-
-  const handleClick = React.useCallback(() => {
-    onCopy()
-    setCopied(true)
-    setTooltipOpen(true)
-    if (timerRef.current) {
-      window.clearTimeout(timerRef.current)
-    }
-    timerRef.current = window.setTimeout(() => {
-      setCopied(false)
-      setTooltipOpen(false)
+  React.useLayoutEffect(() => {
+    generationRef.current += 1
+    pendingRef.current = null
+    setCopied(false)
+    setTooltipOpen(false)
+    return () => {
+      generationRef.current += 1
+      pendingRef.current = null
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current)
       timerRef.current = null
-    }, COPIED_FEEDBACK_DURATION_MS)
-  }, [onCopy])
+    }
+  }, [active, content])
+
+  const handleClick = React.useCallback(async () => {
+    if (!active || !content || pendingRef.current) return
+    const generation = generationRef.current
+    const operation = Symbol('clipboard-write')
+    pendingRef.current = operation
+    setCopied(false)
+    setTooltipOpen(false)
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current)
+    timerRef.current = null
+    const isCurrent = () => generationRef.current === generation && pendingRef.current === operation
+
+    try {
+      await navigator.clipboard.writeText(content)
+      // An old clipboard promise must not update a different message or a closed thread.
+      if (!isCurrent()) return
+      notifySuccess(copiedLabel)
+      setCopied(true)
+      setTooltipOpen(true)
+      timerRef.current = window.setTimeout(() => {
+        setCopied(false)
+        setTooltipOpen(false)
+        timerRef.current = null
+      }, COPIED_FEEDBACK_DURATION_MS)
+    } catch {
+      if (!isCurrent()) return
+      notifyError(t('chat.copy_failed', { defaultValue: 'Failed to copy text. Try again.' }))
+    } finally {
+      if (pendingRef.current === operation) pendingRef.current = null
+    }
+  }, [active, content, copiedLabel, notifyError, notifySuccess, t])
 
   return (
     <Tooltip
       title={copied ? copiedLabel : copyLabel}
+      describeChild
       placement="top"
       open={tooltipOpen}
       onOpen={() => setTooltipOpen(true)}
@@ -443,19 +629,22 @@ const CopiableIconButton: React.FC<{
         }
       }}
     >
-      <IconButton
-        size="small"
-        aria-label={copied ? copiedLabel : copyLabel}
-        onClick={handleClick}
-        color={copied ? 'success' : 'default'}
-        sx={buttonSx}
-      >
-        {copied ? (
-          <CopyDoneIcon data-testid="copy-done-icon" sx={{ fontSize: iconSize }} />
-        ) : (
-          <ContentCopyIcon data-testid="copy-icon" sx={{ fontSize: iconSize }} />
-        )}
-      </IconButton>
+      <span style={{ display: 'inline-flex' }}>
+        <IconButton
+          size="small"
+          aria-label={copied ? copiedLabel : copyLabel}
+          disabled={!active || !content}
+          onClick={handleClick}
+          color={copied ? 'success' : 'default'}
+          sx={buttonSx}
+        >
+          {copied ? (
+            <CopyDoneIcon data-testid="copy-done-icon" sx={{ fontSize: iconSize }} />
+          ) : (
+            <ContentCopyIcon data-testid="copy-icon" sx={{ fontSize: iconSize }} />
+          )}
+        </IconButton>
+      </span>
     </Tooltip>
   )
 }
@@ -508,6 +697,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   editingContent,
   onSetEditingIndex,
   onSetEditingContent,
+  onDropImageAttachments,
+  onRegisterEditingAttachmentReceiver,
   onSendEditedMessage,
   onPreviewImage,
   onImageContextMenu,
@@ -536,29 +727,26 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     scrollLeft: number
   } | null>(null)
 
-  const messageIdentityMap = React.useRef(new WeakMap<object, string>())
-  const nextMessageIdentityRef = React.useRef(0)
+  const committedMessageIdentitiesRef = React.useRef<ChatMessageIdentitySnapshot>({
+    sessionId: undefined,
+    messages: [],
+    identities: [],
+    nextIdentity: 0
+  })
   const restoredSessionIdRef = React.useRef<string | null>(null)
-  const messageIdentities = React.useMemo(() => {
-    const seen = new Map<string, number>()
-    return messages.map((message) => {
-      const candidate = message as ChatMessage & { id?: string; messageId?: string }
-      const suppliedId = candidate.id || candidate.messageId
-      let base: string
-      if (suppliedId) {
-        base = `message-id:${suppliedId}`
-      } else {
-        const messageObject = message as object
-        base =
-          messageIdentityMap.current.get(messageObject) ??
-          `message-object:${nextMessageIdentityRef.current++}`
-        messageIdentityMap.current.set(messageObject, base)
-      }
-      const occurrence = seen.get(base) ?? 0
-      seen.set(base, occurrence + 1)
-      return `${base}:${occurrence}`
-    })
-  }, [messages])
+  const messageIdentitySnapshot = React.useMemo(
+    () =>
+      reconcileMessageIdentities(
+        committedMessageIdentitiesRef.current,
+        messages,
+        currentSession?.id
+      ),
+    [currentSession?.id, messages]
+  )
+  React.useLayoutEffect(() => {
+    committedMessageIdentitiesRef.current = messageIdentitySnapshot
+  }, [messageIdentitySnapshot])
+  const messageIdentities = messageIdentitySnapshot.identities
   const measuredHeights = React.useRef(new Map<string, number>())
   const [scroll, setScroll] = React.useState({ top: 0, viewport: 0 })
   const [heightRevision, setHeightRevision] = React.useState(0)
@@ -667,15 +855,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
       forcedLoadingIndex,
       anchorStart
     }
-  }, [
-    heightRevision,
-    itemHeight,
-    loadingIndex,
-    messages.length,
-    messageIdentities,
-    scroll,
-    virtualized
-  ])
+  }, [heightRevision, itemHeight, loadingIndex, messages.length, scroll, virtualized])
   visibleStartRef.current = virtualWindow.anchorStart
 
   React.useLayoutEffect(() => {
@@ -840,6 +1020,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     index={index}
                     editingContent={editingContent}
                     onSetEditingContent={onSetEditingContent}
+                    onDropImageAttachments={onDropImageAttachments}
+                    onRegisterEditingAttachmentReceiver={onRegisterEditingAttachmentReceiver}
                     onCancel={() => {
                       onSetEditingIndex(null)
                       onSetEditingContent('')
@@ -862,6 +1044,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   <UserMessageBubble
                     message={message}
                     index={index}
+                    active={active}
                     isLight={isLight}
                     onEdit={() => {
                       handleStartEditing(index, message.content || '')
@@ -870,7 +1053,6 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     onImageContextMenu={onImageContextMenu}
                     onDownloadAttachment={onDownloadAttachment}
                     onSendModelToDcc={onSendModelToDcc}
-                    notifySuccess={notifySuccess}
                     t={t}
                     theme={theme}
                   />
@@ -1409,6 +1591,9 @@ const getAttachmentDownloadFileName = (attachment: ChatAttachment): string => {
   return getDownloadFileNameFromUrl(attachment.url, fallback)
 }
 
+const isDroppedImageFile = (file: File): boolean =>
+  file.type.startsWith('image/') || /\.(?:png|jpe?g|gif|webp|bmp|avif)$/i.test(file.name)
+
 const buildAttachmentDownloadMenuLabel = (
   attachment: ChatAttachment,
   t: TFunction<'translation'>
@@ -1442,6 +1627,10 @@ const UserMessageEditForm: React.FC<{
   index: number
   editingContent: string
   onSetEditingContent: (content: string) => void
+  onDropImageAttachments?: (files: File[]) => Promise<ChatAttachment[]>
+  onRegisterEditingAttachmentReceiver?: (
+    receiver: ((attachment: ChatAttachment) => void) | null
+  ) => void
   onCancel: () => void
   onSubmit: (content: string, attachments?: ChatAttachment[]) => void
   savedChatScrollPositionRef: React.MutableRefObject<{
@@ -1453,6 +1642,8 @@ const UserMessageEditForm: React.FC<{
   message,
   editingContent,
   onSetEditingContent,
+  onDropImageAttachments,
+  onRegisterEditingAttachmentReceiver,
   onCancel,
   onSubmit,
   savedChatScrollPositionRef,
@@ -1462,10 +1653,105 @@ const UserMessageEditForm: React.FC<{
   const [editingAttachments, setEditingAttachments] = React.useState<ChatAttachment[]>(
     () => message.attachments ?? []
   )
+  const [attachmentError, setAttachmentError] = React.useState<string | null>(null)
+  const [isDraggingImage, setIsDraggingImage] = React.useState(false)
+  const pendingImageImportsRef = React.useRef(new Set<symbol>())
+  const [pendingImageImportCount, setPendingImageImportCount] = React.useState(0)
+  React.useLayoutEffect(() => {
+    const pendingImports = pendingImageImportsRef.current
+    return () => pendingImports.clear()
+  }, [])
   const visibleAttachments = getVisibleChatAttachments(editingAttachments)
+  const imageAttachments = visibleAttachments.filter((attachment) => attachment.type === 'image')
+  const nonImageAttachments = visibleAttachments.filter((attachment) => attachment.type !== 'image')
+  const imageAttachmentKeys = getChatAttachmentRenderKeys(imageAttachments)
+  const nonImageAttachmentKeys = getChatAttachmentRenderKeys(nonImageAttachments)
   const removeAttachment = (attachment: ChatAttachment): void => {
     setEditingAttachments((current) => current.filter((item) => item !== attachment))
   }
+  const handleImageDragOver = React.useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const hasFiles = Array.from(event.dataTransfer.types || []).some(
+        (type) => type === 'Files' || type.startsWith('image/')
+      )
+      if (!hasFiles || !onDropImageAttachments) return
+      event.preventDefault()
+      event.stopPropagation()
+      event.dataTransfer.dropEffect = 'copy'
+      setIsDraggingImage(true)
+    },
+    [onDropImageAttachments]
+  )
+  const handleImageDragLeave = React.useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const hasFiles = Array.from(event.dataTransfer.types || []).some(
+        (type) => type === 'Files' || type.startsWith('image/')
+      )
+      if (!onDropImageAttachments || !hasFiles) return
+      event.preventDefault()
+      event.stopPropagation()
+      const relatedTarget = event.relatedTarget as Node | null
+      if (!relatedTarget || !event.currentTarget.contains(relatedTarget)) {
+        setIsDraggingImage(false)
+      }
+    },
+    [onDropImageAttachments]
+  )
+  const handleImageDrop = React.useCallback(
+    async (event: React.DragEvent<HTMLDivElement>) => {
+      setIsDraggingImage(false)
+      const files = Array.from(event.dataTransfer.files || []).filter(isDroppedImageFile)
+      if (!onDropImageAttachments || files.length === 0) return
+      // ChatPage owns external image metadata, accompanying text, and destination guards.
+      if (
+        typeof event.dataTransfer.getData === 'function' &&
+        getDroppedLocalImageContent(event.dataTransfer).fileUrls.length
+      )
+        return
+
+      event.preventDefault()
+      event.stopPropagation()
+      setAttachmentError(null)
+      const operation = Symbol('edit-image-import')
+      const pendingImports = pendingImageImportsRef.current
+      pendingImports.add(operation)
+      setPendingImageImportCount(pendingImports.size)
+      try {
+        const attachments = await onDropImageAttachments(files)
+        if (!pendingImports.has(operation)) return
+        if (attachments.length > 0) {
+          setEditingAttachments((current) => [...current, ...attachments])
+        }
+      } catch (error) {
+        if (!pendingImports.has(operation)) return
+        setAttachmentError(error instanceof Error ? error.message : String(error))
+      } finally {
+        if (pendingImports.delete(operation)) {
+          setPendingImageImportCount(pendingImports.size)
+        }
+      }
+    },
+    [onDropImageAttachments]
+  )
+
+  React.useEffect(() => {
+    if (!onRegisterEditingAttachmentReceiver) return
+    const receiveAttachment = (attachment: ChatAttachment) => {
+      if (attachment.type !== 'image') return
+      setAttachmentError(null)
+      setEditingAttachments((current) => {
+        const duplicate = current.some(
+          (item) =>
+            item.type === attachment.type &&
+            item.url === attachment.url &&
+            item.fileName === attachment.fileName
+        )
+        return duplicate ? current : [...current, attachment]
+      })
+    }
+    onRegisterEditingAttachmentReceiver(receiveAttachment)
+    return () => onRegisterEditingAttachmentReceiver(null)
+  }, [onRegisterEditingAttachmentReceiver])
   const editorRef = React.useRef<HTMLTextAreaElement | null>(null)
   const initialCaretPositionRef = React.useRef(editingContent.length)
   const hasPositionedInitialCaretRef = React.useRef(false)
@@ -1552,11 +1838,66 @@ const UserMessageEditForm: React.FC<{
   return (
     <Box sx={{ px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
       <Box sx={{ maxWidth: '85%', width: '100%' }}>
-        {visibleAttachments.length > 0 && (
+        {imageAttachments.length > 0 ? (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
-            {visibleAttachments.map((attachment, attachmentIndex) => (
+            {imageAttachments.map((attachment, attachmentIndex) => (
               <Box
-                key={`${attachment.fileName || attachment.url || 'attachment'}-${attachmentIndex}`}
+                key={imageAttachmentKeys[attachmentIndex]}
+                sx={{ position: 'relative', width: 168, height: 128 }}
+              >
+                <ChatImage
+                  src={normalizeLocalMediaUrl(attachment.url)}
+                  media={attachment.media}
+                  alt={attachment.fileName || `Edit image ${attachmentIndex + 1}`}
+                  sourceWidth={attachment.sourceWidth}
+                  sourceHeight={attachment.sourceHeight}
+                  maxHeight={128}
+                  onPreview={() => undefined}
+                  onContextMenu={(event) => event.preventDefault()}
+                />
+                <IconButton
+                  size="small"
+                  aria-label={`Remove ${attachment.fileName || 'image'}`}
+                  onClick={() => removeAttachment(attachment)}
+                  sx={{
+                    position: 'absolute',
+                    top: 4,
+                    right: 4,
+                    p: 0.25,
+                    color: 'common.white',
+                    bgcolor: 'rgba(0,0,0,0.55)',
+                    '&:hover': { bgcolor: 'rgba(0,0,0,0.75)' }
+                  }}
+                >
+                  <CloseIcon sx={{ fontSize: 16 }} />
+                </IconButton>
+                <Typography
+                  variant="caption"
+                  sx={{
+                    position: 'absolute',
+                    left: 6,
+                    right: 6,
+                    bottom: 5,
+                    px: 0.5,
+                    borderRadius: 0.5,
+                    color: 'common.white',
+                    bgcolor: 'rgba(0,0,0,0.55)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {attachment.fileName || `Image ${attachmentIndex + 1}`}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        ) : null}
+        {nonImageAttachments.length > 0 ? (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
+            {nonImageAttachments.map((attachment, attachmentIndex) => (
+              <Box
+                key={nonImageAttachmentKeys[attachmentIndex]}
                 sx={{
                   display: 'flex',
                   alignItems: 'center',
@@ -1574,11 +1915,11 @@ const UserMessageEditForm: React.FC<{
                   variant="body2"
                   sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                 >
-                  {attachment.fileName || 'Image'}
+                  {attachment.fileName || 'Attachment'}
                 </Typography>
                 <IconButton
                   size="small"
-                  aria-label={`Remove ${attachment.fileName || 'image'}`}
+                  aria-label={`Remove ${attachment.fileName || 'attachment'}`}
                   onClick={() => removeAttachment(attachment)}
                   sx={{ flexShrink: 0 }}
                 >
@@ -1587,27 +1928,48 @@ const UserMessageEditForm: React.FC<{
               </Box>
             ))}
           </Box>
-        )}
-        <TextField
-          fullWidth
-          multiline
-          inputRef={editorRef}
-          value={editingContent}
-          onChange={handleEditorChange}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') onCancel()
-          }}
-          variant="outlined"
+        ) : null}
+        <Box
+          data-testid="edit-message-composer"
+          aria-busy={pendingImageImportCount > 0}
+          onDragOver={handleImageDragOver}
+          onDragLeave={handleImageDragLeave}
+          onDrop={(event) => void handleImageDrop(event)}
           sx={{
-            '& .MuiOutlinedInput-root': {
-              borderRadius: '18px',
-              bgcolor: userBubbleBg
-            },
-            '& .MuiInputBase-input': {
-              color: userBubbleText
-            }
+            position: 'relative',
+            borderRadius: '18px',
+            outline: isDraggingImage ? '2px dashed' : 'none',
+            outlineColor: 'primary.main',
+            outlineOffset: 2,
+            transition: 'outline-color 120ms ease'
           }}
-        />
+        >
+          <TextField
+            fullWidth
+            multiline
+            inputRef={editorRef}
+            value={editingContent}
+            onChange={handleEditorChange}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') onCancel()
+            }}
+            variant="outlined"
+            sx={{
+              '& .MuiOutlinedInput-root': {
+                borderRadius: '18px',
+                bgcolor: userBubbleBg
+              },
+              '& .MuiInputBase-input': {
+                color: userBubbleText
+              }
+            }}
+          />
+        </Box>
+        {attachmentError ? (
+          <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.25 }}>
+            {attachmentError}
+          </Typography>
+        ) : null}
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 1 }}>
           <Button
             variant="text"
@@ -1620,10 +1982,13 @@ const UserMessageEditForm: React.FC<{
           <Button
             variant="contained"
             size="small"
-            disabled={!editingContent.trim()}
+            disabled={!editingContent.trim() || pendingImageImportCount > 0}
+            startIcon={
+              pendingImageImportCount > 0 ? <CircularProgress size={12} color="inherit" /> : null
+            }
             onClick={() => {
               const newContent = editingContent.trim()
-              if (!newContent) return
+              if (!newContent || pendingImageImportsRef.current.size > 0) return
               onSubmit(newContent, editingAttachments.length > 0 ? editingAttachments : undefined)
             }}
             sx={{ borderRadius: '18px', textTransform: 'none' }}
@@ -1640,28 +2005,29 @@ const UserMessageEditForm: React.FC<{
 const UserMessageBubble: React.FC<{
   message: ChatMessage
   index: number
+  active: boolean
   isLight: boolean
   onEdit: () => void
   onPreviewImage: (url: string) => void
   onImageContextMenu: (event: React.MouseEvent, imageUrl: string) => void
   onDownloadAttachment: (attachment: ChatAttachment) => void
   onSendModelToDcc: (attachment: ChatAttachment, target: DccBridgeTarget) => void
-  notifySuccess: (msg: string) => void
   t: TFunction<'translation'>
   theme: any
 }> = ({
   message,
+  active,
   isLight,
   onEdit,
   onPreviewImage,
   onImageContextMenu,
   onDownloadAttachment,
   onSendModelToDcc,
-  notifySuccess,
   t,
   theme
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
+  const attachmentKeys = getChatAttachmentRenderKeys(visibleAttachments)
   const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
   const userBubbleText = isLight ? '#2f235f' : '#ffffff'
 
@@ -1669,67 +2035,13 @@ const UserMessageBubble: React.FC<{
     <Box
       sx={{
         display: 'flex',
+        flexDirection: 'column',
         justifyContent: 'flex-end',
         alignItems: 'flex-end',
         mb: 2,
-        px: 2,
-        '&:hover .user-msg-actions': {
-          opacity: 1
-        }
+        px: 2
       }}
     >
-      {/* 操作按钮 */}
-      <Box
-        className="user-msg-actions"
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 0,
-          mr: 0.5,
-          opacity: 0,
-          transition: 'opacity 0.15s ease'
-        }}
-      >
-        <CopiableIconButton
-          copyLabel={t('chat.copy_prompt')}
-          copiedLabel={t('chat.prompt_copied')}
-          onCopy={() => {
-            if (message.content) {
-              navigator.clipboard.writeText(message.content)
-              notifySuccess(t('chat.prompt_copied'))
-            }
-          }}
-          buttonSx={{
-            color: 'text.disabled',
-            width: 28,
-            height: 28,
-            '&:hover': { color: 'text.secondary' },
-            '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
-              color: 'success.main'
-            }
-          }}
-        />
-        <Tooltip title={t('chat.edit_message')} placement="top">
-          <IconButton
-            size="small"
-            onClick={onEdit}
-            sx={{
-              color: 'text.disabled',
-              width: 28,
-              height: 28,
-              '&:hover': { color: 'text.secondary' }
-            }}
-          >
-            <EditIcon sx={{ fontSize: 14 }} />
-          </IconButton>
-        </Tooltip>
-        {message.content ? (
-          <TextDragHandle
-            content={message.content}
-            title={t('chat.drag_prompt_to_canvas', { defaultValue: 'Drag prompt to canvas' })}
-          />
-        ) : null}
-      </Box>
       <Box
         sx={{
           position: 'relative',
@@ -1747,9 +2059,26 @@ const UserMessageBubble: React.FC<{
         }}
       >
         {visibleAttachments.length > 0 && (
-          <Box sx={{ mb: message.content ? 1.5 : 0 }}>
+          <Box
+            data-chat-user-attachments="true"
+            sx={{
+              mb: message.content ? 1.5 : 0,
+              width: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-start'
+            }}
+          >
             {visibleAttachments.map((attachment, attIdx) => (
-              <Box key={attIdx} sx={{ mb: 1 }}>
+              <Box
+                key={attachmentKeys[attIdx]}
+                sx={{
+                  mb: 1,
+                  width: '100%',
+                  display: 'flex',
+                  justifyContent: 'flex-start'
+                }}
+              >
                 {attachment.type === 'image' ? (
                   <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
@@ -1813,6 +2142,63 @@ const UserMessageBubble: React.FC<{
           </Typography>
         )}
       </Box>
+      {/* Keep footer actions available without requiring a hover path from the bubble. */}
+      <Box
+        className="user-msg-actions"
+        data-testid="user-message-actions"
+        sx={{
+          position: 'relative',
+          zIndex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 0,
+          mt: 0.5,
+          mr: 0,
+          opacity: 1,
+          visibility: 'visible',
+          pointerEvents: 'auto',
+          '& .MuiIconButton-root': {
+            visibility: 'visible',
+            pointerEvents: 'auto'
+          }
+        }}
+      >
+        <CopiableIconButton
+          copyLabel={t('chat.copy_prompt')}
+          copiedLabel={t('chat.prompt_copied')}
+          content={message.content || ''}
+          active={active}
+          buttonSx={{
+            color: 'text.disabled',
+            width: 28,
+            height: 28,
+            '&:hover': { color: 'text.secondary' },
+            '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+              color: 'success.main'
+            }
+          }}
+        />
+        <Tooltip title={t('chat.edit_message')} placement="top">
+          <IconButton
+            size="small"
+            onClick={onEdit}
+            sx={{
+              color: 'text.disabled',
+              width: 28,
+              height: 28,
+              '&:hover': { color: 'text.secondary' }
+            }}
+          >
+            <EditIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+        {message.content ? (
+          <TextDragHandle
+            content={message.content}
+            title={t('chat.drag_prompt_to_canvas', { defaultValue: 'Drag prompt to canvas' })}
+          />
+        ) : null}
+      </Box>
     </Box>
   )
 }
@@ -1852,6 +2238,7 @@ const AssistantMessageBubble: React.FC<{
   theme
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
+  const attachmentKeys = getChatAttachmentRenderKeys(visibleAttachments)
   const retry = isLoading ? loadingStatus?.retry : undefined
   const [retryNow, setRetryNow] = React.useState(Date.now)
   React.useEffect(() => {
@@ -1883,7 +2270,7 @@ const AssistantMessageBubble: React.FC<{
         {visibleAttachments.length > 0 && (
           <Box sx={{ mb: message.content ? 1.5 : 0 }}>
             {visibleAttachments.map((attachment, attIdx) => (
-              <Box key={attIdx} sx={{ mb: 1 }}>
+              <Box key={attachmentKeys[attIdx]} sx={{ mb: 1 }}>
                 {attachment.type === 'image' ? (
                   <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
@@ -2129,6 +2516,128 @@ const AssistantVideoPlayer: React.FC<{ url: string; fileName?: string }> = ({ ur
 }
 
 // --- AI Markdown 文本内容 ---
+type ChatMarkdownRenderContextValue = {
+  active: boolean
+  isLight: boolean
+  onPreviewImage: (url: string) => void
+  onImageContextMenu: (event: React.MouseEvent, imageUrl: string) => void
+  t: TFunction<'translation'>
+}
+
+const ChatMarkdownRenderContext = React.createContext<ChatMarkdownRenderContextValue | null>(null)
+
+const useChatMarkdownRenderContext = (): ChatMarkdownRenderContextValue => {
+  const context = React.useContext(ChatMarkdownRenderContext)
+  if (!context) throw new Error('Chat Markdown render context is missing')
+  return context
+}
+
+const ChatMarkdownParagraph: React.FC<React.PropsWithChildren> = ({ children }) => (
+  <div style={{ margin: '0.8em 0' }}>{children}</div>
+)
+
+const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ src, alt }) => {
+  const { onPreviewImage, onImageContextMenu, t } = useChatMarkdownRenderContext()
+  return src ? (
+    <ChatImage
+      src={src}
+      alt={alt || t('chat.image_alt', { defaultValue: 'Image' })}
+      maxHeight={600}
+      margin="8px 0"
+      onPreview={() => onPreviewImage(src)}
+      onContextMenu={(event) => onImageContextMenu(event, src)}
+    />
+  ) : null
+}
+
+const ChatMarkdownAnchor: React.FC<React.PropsWithChildren<{ href?: string }>> = ({
+  href,
+  children
+}) => (
+  <a
+    href={href}
+    target="_blank"
+    rel="noopener noreferrer"
+    onClick={(event) => {
+      event.preventDefault()
+      if (href) window.open(href, '_blank')
+    }}
+  >
+    {children}
+  </a>
+)
+
+const ChatMarkdownCode = ({ node, inline, className, children, ...props }: any) => {
+  const { active, isLight, t } = useChatMarkdownRenderContext()
+  const codeMatch = /language-(\w+)/.exec(className || '')
+  const codeContent = children == null ? '' : String(children).replace(/\n$/, '')
+  return !inline && codeMatch ? (
+    <div style={{ position: 'relative' }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          backgroundColor: isLight ? '#f6f8fa' : '#1e1e1e',
+          padding: '4px 12px',
+          borderTopLeftRadius: '8px',
+          borderTopRightRadius: '8px',
+          borderBottom: isLight ? '1px solid #e1e4e8' : '1px solid #333',
+          fontSize: '12px',
+          color: isLight ? '#24292e' : '#e1e4e8',
+          fontFamily: 'monospace'
+        }}
+      >
+        <span>{codeMatch[1]}</span>
+        <CopiableIconButton
+          copyLabel={t('chat.copy_code', { defaultValue: 'Copy code' })}
+          copiedLabel={t('chat.code_copied')}
+          iconSize="14px"
+          content={codeContent}
+          active={active}
+          buttonSx={{
+            color: 'inherit',
+            padding: '2px',
+            '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+              color: 'success.main'
+            }
+          }}
+        />
+      </div>
+      <Prism
+        style={isLight ? prism : vscDarkPlus}
+        language={codeMatch[1]}
+        PreTag="div"
+        customStyle={{
+          margin: 0,
+          borderTopLeftRadius: 0,
+          borderTopRightRadius: 0,
+          borderBottomLeftRadius: '8px',
+          borderBottomRightRadius: '8px',
+          backgroundColor: isLight ? '#ffffff' : '#1e1e1e',
+          fontSize: '14px',
+          lineHeight: 1.5,
+          padding: '16px'
+        }}
+        {...props}
+      >
+        {codeContent}
+      </Prism>
+    </div>
+  ) : (
+    <code className={className} {...props}>
+      {children}
+    </code>
+  )
+}
+
+const CHAT_MARKDOWN_COMPONENTS: MarkdownComponents = {
+  p: ChatMarkdownParagraph,
+  img: ChatMarkdownImage,
+  a: ChatMarkdownAnchor,
+  code: ChatMarkdownCode
+}
+
 const AssistantMarkdownContent: React.FC<{
   content: string
   replyDownloadBaseName: string
@@ -2362,112 +2871,17 @@ const AssistantMarkdownContent: React.FC<{
         </Box>
       */}
       {textContent && (
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          urlTransform={(url) => {
-            if (url.startsWith('local-media://') || url.startsWith('file://')) {
-              return url
-            }
-            if (url.startsWith('http://') || url.startsWith('https://')) {
-              return url
-            }
-            return url
-          }}
-          components={{
-            p: ({ children }) => <div style={{ margin: '0.8em 0' }}>{children}</div>,
-            img: ({ src, alt }) =>
-              src ? (
-                <ChatImage
-                  src={src}
-                  alt={alt || t('chat.image_alt', { defaultValue: 'Image' })}
-                  maxHeight={600}
-                  margin="8px 0"
-                  onPreview={() => onPreviewImage(src)}
-                  onContextMenu={(event) => onImageContextMenu(event, src)}
-                />
-              ) : null,
-            a: ({ href, children }) => (
-              <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => {
-                  e.preventDefault()
-                  if (href) {
-                    window.open(href, '_blank')
-                  }
-                }}
-              >
-                {children}
-              </a>
-            ),
-            code({ node, inline, className, children, ...props }: any) {
-              const codeMatch = /language-(\w+)/.exec(className || '')
-              return !inline && codeMatch ? (
-                <div style={{ position: 'relative' }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      backgroundColor: isLight ? '#f6f8fa' : '#1e1e1e',
-                      padding: '4px 12px',
-                      borderTopLeftRadius: '8px',
-                      borderTopRightRadius: '8px',
-                      borderBottom: isLight ? '1px solid #e1e4e8' : '1px solid #333',
-                      fontSize: '12px',
-                      color: isLight ? '#24292e' : '#e1e4e8',
-                      fontFamily: 'monospace'
-                    }}
-                  >
-                    <span>{codeMatch[1]}</span>
-                    <CopiableIconButton
-                      copyLabel={t('chat.copy_code', { defaultValue: 'Copy code' })}
-                      copiedLabel={t('chat.code_copied')}
-                      iconSize="14px"
-                      onCopy={() => {
-                        navigator.clipboard.writeText(String(children).replace(/\n$/, ''))
-                        notifySuccess(t('chat.code_copied'))
-                      }}
-                      buttonSx={{
-                        color: 'inherit',
-                        padding: '2px',
-                        '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
-                          color: 'success.main'
-                        }
-                      }}
-                    />
-                  </div>
-                  <Prism
-                    style={isLight ? prism : vscDarkPlus}
-                    language={codeMatch[1]}
-                    PreTag="div"
-                    customStyle={{
-                      margin: 0,
-                      borderTopLeftRadius: 0,
-                      borderTopRightRadius: 0,
-                      borderBottomLeftRadius: '8px',
-                      borderBottomRightRadius: '8px',
-                      backgroundColor: isLight ? '#ffffff' : '#1e1e1e',
-                      fontSize: '14px',
-                      lineHeight: 1.5,
-                      padding: '16px'
-                    }}
-                    {...props}
-                  >
-                    {String(children).replace(/\n$/, '')}
-                  </Prism>
-                </div>
-              ) : (
-                <code className={className} {...props}>
-                  {children}
-                </code>
-              )
-            }
-          }}
+        <ChatMarkdownRenderContext.Provider
+          value={{ active, isLight, onPreviewImage, onImageContextMenu, t }}
         >
-          {textContent}
-        </ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            urlTransform={(url) => url}
+            components={CHAT_MARKDOWN_COMPONENTS}
+          >
+            {textContent}
+          </ReactMarkdown>
+        </ChatMarkdownRenderContext.Provider>
       )}
       {videos.map((url) => (
         <div
@@ -2537,10 +2951,8 @@ const AssistantMarkdownContent: React.FC<{
             <CopiableIconButton
               copyLabel={t('chat.copy_reply', { defaultValue: 'Copy reply' })}
               copiedLabel={t('chat.reply_copied', { defaultValue: 'Reply copied' })}
-              onCopy={() => {
-                navigator.clipboard.writeText(textContent)
-                notifySuccess(t('chat.reply_copied', { defaultValue: 'Reply copied' }))
-              }}
+              content={textContent}
+              active={active}
               buttonSx={{
                 color: 'text.disabled',
                 width: 28,

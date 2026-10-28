@@ -8,6 +8,7 @@ import type {
   OCRResult
 } from '@shared/api/svcLLMProxy'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
+import { getServiceErrorMessage } from '@shared/api/apiUtils/serviceValidation'
 import type { AgentRouteLike } from '@shared/agent'
 import {
   isOpenAIFileSearchAttachment,
@@ -30,7 +31,7 @@ import {
   augmentMessageContentWithFileAttachments,
   expandReportBundleAttachments
 } from './chatAttachmentPromptUtils'
-import { getBaseProfileId, HUNYUAN_3D_PROFILE_ID } from './chatPageShared'
+import { generateUUID, getBaseProfileId, HUNYUAN_3D_PROFILE_ID } from './chatPageShared'
 import {
   buildRemoteLlmServerErrorMessage,
   buildRemoteLlmServerHeaders,
@@ -205,17 +206,20 @@ const createLocalTimeoutError = (message: string): Error => {
 const createRemoteDeadlineError = (): Error =>
   createLocalTimeoutError('Remote chat request timed out locally after 15 minutes.')
 
-const IPC_STREAM_DEADLINE_MS = 15 * 60 * 1000
+const IPC_STREAM_IDLE_TIMEOUT_MS = 15 * 60 * 1000
+
+const resolveAbortReason = (reason: unknown): Error => {
+  // DOMException and errors from another window need not pass this realm's instanceof Error.
+  const tag = Object.prototype.toString.call(reason)
+  if (reason instanceof Error || tag === '[object Error]' || tag === '[object DOMException]') {
+    return reason as Error
+  }
+  return createAbortError(typeof reason === 'string' ? reason : 'The request was aborted.')
+}
 
 const throwIfAborted = (signal?: AbortSignal): void => {
   if (!signal?.aborted) return
-
-  const reason = signal.reason
-  if (reason instanceof Error) {
-    throw reason
-  }
-
-  throw createAbortError(typeof reason === 'string' ? reason : 'The request was aborted.')
+  throw resolveAbortReason(signal.reason)
 }
 
 const awaitWithAbort = async <T>(
@@ -230,16 +234,15 @@ const awaitWithAbort = async <T>(
     rejectAbort = reject
   })
   const handleAbort = (): void => {
+    rejectAbort(resolveAbortReason(signal.reason))
     onAbort?.()
-    const reason = signal.reason
-    rejectAbort(reason instanceof Error ? reason : createAbortError('The request was aborted.'))
   }
 
   signal.addEventListener('abort', handleAbort, { once: true })
   if (signal.aborted) handleAbort()
 
   try {
-    return await Promise.race([promise, abortPromise])
+    return await Promise.race([abortPromise, promise])
   } finally {
     signal.removeEventListener('abort', handleAbort)
     void promise.catch(() => undefined)
@@ -312,6 +315,7 @@ export const isInvalidSessionContinuationError = (
 }
 
 type LocalChatRequestError = Error & {
+  code?: string
   status?: number
   body?: string
   partialContent?: string
@@ -331,6 +335,21 @@ const createLocalChatRequestError = (
   return error
 }
 
+const normalizeLocalChatRequestError = (value: unknown): LocalChatRequestError => {
+  if (value instanceof Error) return value as LocalChatRequestError
+
+  // IPC streaming errors cross the context bridge as plain service-error records.
+  const record = isRecord(value) ? value : undefined
+  const error = createLocalChatRequestError(
+    getServiceErrorMessage(value, 'The chat request failed.'),
+    record?.status ?? record?.statusCode,
+    record?.body
+  )
+  if (typeof record?.code === 'string') error.code = record.code
+  if (typeof record?.name === 'string' && record.name.trim()) error.name = record.name
+  return error
+}
+
 const mergeStreamMetadata = (
   current: Record<string, unknown> | undefined,
   next: Record<string, unknown> | undefined
@@ -346,10 +365,7 @@ const attachStreamPartialToError = (
   finishReason?: LLMChatStreamResp['finishReason'],
   metadata?: Record<string, unknown>
 ): LocalChatRequestError => {
-  const diagnostic: LocalChatRequestError =
-    error instanceof Error
-      ? (error as LocalChatRequestError)
-      : createLocalChatRequestError(String(error))
+  const diagnostic = normalizeLocalChatRequestError(error)
   diagnostic.partialContent = partialContent
   if (finishReason !== undefined) diagnostic.finishReason = finishReason
   if (metadata !== undefined) diagnostic.metadata = metadata
@@ -535,6 +551,7 @@ export const normalizeChatAttachmentsForRequest = async (
   options: {
     managedMediaService?: ManagedMediaSvc
     allowManagedRequestDataUrl?: boolean
+    allowManagedChunkedBinary?: boolean
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
     preserveRemoteUrl?: boolean
@@ -550,6 +567,26 @@ export const normalizeChatAttachmentsForRequest = async (
       const media = normalizeMediaReference(attachment.media)
       if (media?.kind === 'managed') {
         if (
+          options.allowManagedChunkedBinary &&
+          typeof options.managedMediaService?.materializeForRequest === 'function'
+        ) {
+          const materialized = await options.managedMediaService.materializeForRequest({
+            reference: media,
+            transport: 'chunked-binary-v1'
+          })
+          if (materialized.transport !== 'chunked-binary-v1') {
+            throw new Error('Managed media request transport returned an unexpected protocol')
+          }
+          const requestAttachment = { ...attachment }
+          delete requestAttachment.media
+          return {
+            ...requestAttachment,
+            binary: materialized,
+            mimeType: materialized.reference.mimeType,
+            sizeBytes: materialized.reference.sizeBytes
+          }
+        }
+        if (
           !options.allowManagedRequestDataUrl ||
           typeof options.managedMediaService?.materializeForRequest !== 'function'
         ) {
@@ -561,6 +598,9 @@ export const normalizeChatAttachmentsForRequest = async (
           reference: media,
           transport: 'request-data-url'
         })
+        if (materialized.transport !== 'request-data-url') {
+          throw new Error('Managed media request transport returned an unexpected protocol')
+        }
         const requestAttachment = { ...attachment }
         delete requestAttachment.media
         return {
@@ -589,9 +629,50 @@ type AttachmentBatchCapability = {
   source: 'probe' | 'fallback'
 }
 
+const CAPABILITY_PROBE_TIMEOUT_MS = 60_000
+
+const createCapabilityProbeConversationId = (kind: 'report-inline' | 'attachment-batch'): string =>
+  `capability-probe:${kind}:${generateUUID()}`
+
+const createCapabilityProbeContext = (
+  kind: 'report-inline' | 'attachment-batch',
+  parentSignal?: AbortSignal
+): {
+  conversationId: string
+  signal: AbortSignal
+  dispose: () => void
+} => {
+  const controller = new AbortController()
+  const abortFromParent = (): void => {
+    controller.abort(resolveAbortReason(parentSignal?.reason))
+  }
+  if (parentSignal?.aborted) abortFromParent()
+  else parentSignal?.addEventListener('abort', abortFromParent, { once: true })
+  const timerId = window.setTimeout(() => {
+    const timeout = createLocalTimeoutError(
+      `Capability probe timed out after ${CAPABILITY_PROBE_TIMEOUT_MS / 1000} seconds.`
+    )
+    controller.abort(timeout)
+  }, CAPABILITY_PROBE_TIMEOUT_MS)
+  return {
+    conversationId: createCapabilityProbeConversationId(kind),
+    signal: controller.signal,
+    dispose: () => {
+      window.clearTimeout(timerId)
+      parentSignal?.removeEventListener('abort', abortFromParent)
+    }
+  }
+}
+
 export type ResolveAttachmentBatchCapabilityInput = Pick<
   RequestChatCompletionInput,
-  'config' | 'profileId' | 'remoteProfile' | 'apiMode' | 'systemPrompt' | 'externalAgentSkill'
+  | 'config'
+  | 'profileId'
+  | 'remoteProfile'
+  | 'apiMode'
+  | 'systemPrompt'
+  | 'externalAgentSkill'
+  | 'signal'
 >
 
 const isOfficialOpenAIBaseUrl = (baseUrl: string | undefined): boolean => {
@@ -1290,6 +1371,7 @@ const prepareMessagesForRequest = async (
     skipInlineAttachmentSummary?: (attachment: ChatAttachment) => boolean
     managedMediaService?: ManagedMediaSvc
     allowManagedRequestDataUrl?: boolean
+    allowManagedChunkedBinary?: boolean
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
     preserveRemoteUrl?: boolean
@@ -1474,7 +1556,10 @@ const parseExternalAgentSkillResponse = (
   }
 }
 
-const cancelConversationSilently = async (conversationId?: string): Promise<void> => {
+const cancelConversationSilently = async (
+  conversationId?: string,
+  cancellationId?: string
+): Promise<void> => {
   const normalizedConversationId = String(conversationId || '').trim()
   if (!normalizedConversationId) {
     return
@@ -1482,7 +1567,8 @@ const cancelConversationSilently = async (conversationId?: string): Promise<void
 
   try {
     await window.api.svcLLMProxy.cancelConversation({
-      conversationId: normalizedConversationId
+      conversationId: normalizedConversationId,
+      ...(cancellationId ? { cancellationId } : {})
     })
   } catch (error) {
     console.warn('[ChatPage] Failed to cancel conversation:', normalizedConversationId, error)
@@ -1498,60 +1584,49 @@ const requestExternalAgentSkillCompletion = async (
     throw new Error('External agent skill routing requires a configured API address.')
   }
 
-  if (input.signal?.aborted) {
-    await cancelConversationSilently(input.conversationId)
-    throwIfAborted(input.signal)
-  }
   throwIfAborted(input.signal)
+  const cancellationId = generateUUID()
   const handleAbort = () => {
-    void cancelConversationSilently(input.conversationId)
-  }
-  if (input.signal) {
-    input.signal.addEventListener('abort', handleAbort, { once: true })
+    void cancelConversationSilently(input.conversationId, cancellationId)
   }
 
-  try {
-    const response = await awaitWithAbort(
-      window.api.svcLLMProxy.remoteFetch({
-        url: apiAddress,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(skill.apiKey?.trim()
-            ? {
-                Authorization: `Bearer ${skill.apiKey.trim()}`
-              }
-            : {})
-        },
-        body: JSON.stringify(
-          buildChatRequestPayload({
-            ...input,
-            profileId: undefined,
-            sessionUrl: undefined
-          })
-        ),
-        conversationId: input.conversationId
-      }),
-      input.signal,
-      handleAbort
+  const response = await awaitWithAbort(
+    window.api.svcLLMProxy.remoteFetch({
+      cancellationId,
+      url: apiAddress,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(skill.apiKey?.trim()
+          ? {
+              Authorization: `Bearer ${skill.apiKey.trim()}`
+            }
+          : {})
+      },
+      body: JSON.stringify(
+        buildChatRequestPayload({
+          ...input,
+          profileId: undefined,
+          sessionUrl: undefined
+        })
+      ),
+      conversationId: input.conversationId
+    }),
+    input.signal,
+    handleAbort
+  )
+  throwIfAborted(input.signal)
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(
+      `External agent skill request failed (${response.status} ${response.statusText}): ${response.body}`
     )
-    throwIfAborted(input.signal)
-
-    if (response.status < 200 || response.status >= 300) {
-      throw new Error(
-        `External agent skill request failed (${response.status} ${response.statusText}): ${response.body}`
-      )
-    }
-
-    throwIfAborted(input.signal)
-    const result = normalizeResponse(parseExternalAgentSkillResponse(response.body))
-    throwIfAborted(input.signal)
-    return result
-  } finally {
-    if (input.signal) {
-      input.signal.removeEventListener('abort', handleAbort)
-    }
   }
+
+  throwIfAborted(input.signal)
+  const result = normalizeResponse(parseExternalAgentSkillResponse(response.body))
+  throwIfAborted(input.signal)
+  return result
 }
 
 const remoteResponseCleanup = new WeakMap<Response, () => void>()
@@ -1753,42 +1828,25 @@ const requestRemoteChatCompletion = async (
 const requestLocalChatCompletion = async (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
-  if (input.signal?.aborted) {
-    await cancelConversationSilently(input.conversationId)
-    throwIfAborted(input.signal)
-  }
   throwIfAborted(input.signal)
+  const cancellationId = generateUUID()
   const handleAbort = () => {
-    void cancelConversationSilently(input.conversationId)
-  }
-  if (input.signal) {
-    input.signal.addEventListener('abort', handleAbort, { once: true })
+    void cancelConversationSilently(input.conversationId, cancellationId)
   }
 
   try {
-    return normalizeResponse(await window.api.svcLLMProxy.chat(buildChatRequestPayload(input)))
-  } catch (error) {
-    const message = mapLocalChatRequestErrorMessage(
-      error instanceof Error ? error.message : String(error)
+    const response = await awaitWithAbort(
+      window.api.svcLLMProxy.chat({ ...buildChatRequestPayload(input), cancellationId }),
+      input.signal,
+      handleAbort
     )
-    if (error instanceof Error && message === error.message) {
-      const diagnostic = error as LocalChatRequestError
-      if (diagnostic.status !== undefined || diagnostic.body !== undefined) {
-        throw createLocalChatRequestError(message, diagnostic.status, diagnostic.body)
-      }
-      throw error
-    }
-
-    if (error instanceof Error) {
-      const diagnostic = error as LocalChatRequestError
-      throw createLocalChatRequestError(message, diagnostic.status, diagnostic.body)
-    }
-
-    throw new Error(message)
-  } finally {
-    if (input.signal) {
-      input.signal.removeEventListener('abort', handleAbort)
-    }
+    throwIfAborted(input.signal)
+    return normalizeResponse(response)
+  } catch (error) {
+    throwIfAborted(input.signal)
+    const diagnostic = normalizeLocalChatRequestError(error)
+    diagnostic.message = mapLocalChatRequestErrorMessage(diagnostic.message)
+    throw diagnostic
   }
 }
 
@@ -1826,11 +1884,8 @@ const requestLocalChatCompletionStream = async (
   invoke?: RendererStreamInvoker,
   request?: unknown
 ): Promise<RequestChatCompletionStreamResult> => {
-  if (input.signal?.aborted) {
-    await cancelConversationSilently(input.conversationId)
-    throwIfAborted(input.signal)
-  }
   throwIfAborted(input.signal)
+  const cancellationId = generateUUID()
 
   const [abortSender, abortReceiver] = newAbortHandler()
   let streamActive = true
@@ -1848,7 +1903,7 @@ const requestLocalChatCompletionStream = async (
   const handleAbort = () => {
     const reason = input.signal?.reason
     abortSender.abort()
-    void cancelConversationSilently(input.conversationId)
+    void cancelConversationSilently(input.conversationId, cancellationId)
     rejectStream(reason instanceof Error ? reason : createAbortError('The request was aborted.'))
   }
   if (input.signal) {
@@ -1865,24 +1920,44 @@ const requestLocalChatCompletionStream = async (
   let receivedTerminalDone = false
   let observedError: LocalChatRequestError | null = null
   let streamDeadlineTimer: number | undefined
-  const streamDeadline = new Promise<never>((_resolve, reject) => {
-    const timerId = window.setTimeout(() => {
+  const refreshStreamDeadline = (retryWaitMs = 0): void => {
+    if (streamDeadlineTimer !== undefined) {
+      window.clearTimeout(streamDeadlineTimer)
+    }
+    const deadlineAt = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      Date.now() + retryWaitMs + IPC_STREAM_IDLE_TIMEOUT_MS
+    )
+    const checkIdleDeadline = (): void => {
+      if (!streamActive) return
+      const remainingMs = deadlineAt - Date.now()
+      if (remainingMs > 0) {
+        // Long Retry-After advice must not overflow a JavaScript timer or end retries early.
+        streamDeadlineTimer = window.setTimeout(
+          checkIdleDeadline,
+          Math.min(remainingMs, IPC_STREAM_IDLE_TIMEOUT_MS)
+        )
+        return
+      }
+      streamDeadlineTimer = undefined
       const timeoutError = createLocalTimeoutError(
-        'Local IPC chat stream timed out after 15 minutes.'
+        'Local IPC chat stream timed out after 15 minutes without activity.'
       )
       abortSender.abort()
-      void cancelConversationSilently(input.conversationId)
+      void cancelConversationSilently(input.conversationId, cancellationId)
       rejectStream(timeoutError)
-      reject(timeoutError)
-    }, IPC_STREAM_DEADLINE_MS)
-    streamDeadlineTimer = timerId
-  })
-  void streamDeadline.catch(() => undefined)
+    }
+    checkIdleDeadline()
+  }
+  refreshStreamDeadline()
 
   try {
     const streamInvoker =
       invoke || (window.api.svcLLMProxy.chatStream as unknown as RendererStreamInvoker)
-    const streamRequest = request ?? buildChatRequestPayload(input)
+    const streamRequest = {
+      ...((request ?? buildChatRequestPayload(input)) as object),
+      cancellationId
+    }
     const streamPromise = streamInvoker(streamRequest, {
       abortReceiver,
       onData: (chunk) => {
@@ -1893,6 +1968,7 @@ const requestLocalChatCompletionStream = async (
         partialMetadata = mergeStreamMetadata(partialMetadata, chunk.metadata)
         partialFinishReason = chunk.finishReason ?? partialFinishReason
         if (chunk.type === 'text-delta' && chunk.delta) {
+          refreshStreamDeadline()
           partialContent += chunk.delta
           input.onEvent({
             type: 'text-delta',
@@ -1901,6 +1977,7 @@ const requestLocalChatCompletionStream = async (
         }
 
         if (chunk.type === 'attachment' && chunk.attachment) {
+          refreshStreamDeadline()
           input.onEvent({
             type: 'attachment',
             attachment: chunk.attachment
@@ -1908,6 +1985,7 @@ const requestLocalChatCompletionStream = async (
         }
 
         if (chunk.type === 'session' && chunk.sessionUrl) {
+          refreshStreamDeadline()
           input.onEvent({
             type: 'session',
             sessionUrl: chunk.sessionUrl
@@ -1917,6 +1995,7 @@ const requestLocalChatCompletionStream = async (
         if (chunk.type === 'retry') {
           const retry = normalizeModelRetryStatus(chunk.retry)
           if (!retry) throw new Error('Invalid model retry event.')
+          refreshStreamDeadline(Math.max(retry.delayMs, retry.nextRetryAt - Date.now()))
           input.onEvent({ type: 'retry', retry })
           return
         }
@@ -1926,6 +2005,7 @@ const requestLocalChatCompletionStream = async (
           if (!toolStatus) {
             throw invalidToolStatusEventError()
           }
+          refreshStreamDeadline()
           input.onEvent({
             type: 'tool-status',
             toolStatus,
@@ -1958,6 +2038,7 @@ const requestLocalChatCompletionStream = async (
           streamActive = false
           streamedResponse = toRequestChatCompletionStreamResult({
             ...chunk,
+            content: chunk.content ?? chunk.fullContent ?? partialContent,
             attachments: chunk.attachments ?? streamedResponse.result.attachments,
             sessionUrl: chunk.sessionUrl ?? streamedResponse.result.sessionUrl,
             ocrResult: chunk.ocrResult ?? streamedResponse.result.ocrResult,
@@ -1985,7 +2066,7 @@ const requestLocalChatCompletionStream = async (
     })
 
     void streamPromise.catch(() => undefined)
-    await Promise.race([streamPromise, control, streamDeadline])
+    await Promise.race([streamPromise, control])
 
     if (input.signal?.aborted) {
       throwIfAborted(input.signal)
@@ -2136,13 +2217,17 @@ const ensureReportInlineCapability = async (
     source: 'fallback'
   }
 
+  const probe = createCapabilityProbeContext('report-inline', input.signal)
   try {
     const probeResult = await dispatchChatCompletionRequest({
       ...input,
       messages: [{ role: 'user', content: REPORT_INLINE_CAPABILITY_PROBE }],
       systemPrompt: undefined,
       sessionUrl: undefined,
-      conversationId: undefined,
+      // Keep capability discovery independent from the user turn while still
+      // giving local IPC cancellation a concrete conversation to abort.
+      conversationId: probe.conversationId,
+      signal: probe.signal,
       isEdit: false
     })
     const reportedChars = parseReportedInlineChars(probeResult.content)
@@ -2158,9 +2243,12 @@ const ensureReportInlineCapability = async (
     writeCachedReportInlineCapability(input.profileId, input.remoteProfile, probedCapability)
     return probedCapability
   } catch (error) {
+    throwIfAborted(input.signal)
     console.warn('[ChatPage] Failed to probe report inline capability:', error)
     writeCachedReportInlineCapability(input.profileId, input.remoteProfile, fallbackCapability)
     return fallbackCapability
+  } finally {
+    probe.dispose()
   }
 }
 
@@ -2179,6 +2267,7 @@ export const resolveAttachmentBatchCapability = async (
     source: 'fallback'
   }
 
+  const probe = createCapabilityProbeContext('attachment-batch', input.signal)
   try {
     const probeResult = await dispatchChatCompletionRequest({
       config: input.config,
@@ -2189,7 +2278,8 @@ export const resolveAttachmentBatchCapability = async (
       systemPrompt: undefined,
       externalAgentSkill: input.externalAgentSkill,
       sessionUrl: undefined,
-      conversationId: undefined,
+      conversationId: probe.conversationId,
+      signal: probe.signal,
       isEdit: false
     })
     const reportedCapability = parseReportedAttachmentBatchCapability(probeResult.content)
@@ -2205,9 +2295,12 @@ export const resolveAttachmentBatchCapability = async (
     writeCachedAttachmentBatchCapability(input, probedCapability)
     return probedCapability.maxAttachments
   } catch (error) {
+    throwIfAborted(input.signal)
     console.warn('[ChatPage] Failed to probe attachment batch capability:', error)
     writeCachedAttachmentBatchCapability(input, fallbackCapability)
     return fallbackCapability.maxAttachments
+  } finally {
+    probe.dispose()
   }
 }
 
@@ -2218,6 +2311,7 @@ export const resolveAttachmentRequestCapabilities = (
   remoteProfile?: RemoteRequestProfile | null
 ): {
   allowManagedRequestDataUrl: boolean
+  allowManagedChunkedBinary?: boolean
   allowRequestDataUrl: boolean
   allowAccessibleUrl: boolean
   preserveRemoteUrl: boolean
@@ -2241,6 +2335,12 @@ export const resolveAttachmentRequestCapabilities = (
     available: { 'request-data-url': true },
     requested: 'request-data-url'
   })
+  // Chunked binary is intentionally selected explicitly when declared. It avoids
+  // turning a managed asset into one giant renderer-side data URL before IPC.
+  const chunkedBinaryTransport = selectProviderAttachmentTransport(capabilities, {
+    available: { 'chunked-binary-v1': true },
+    requested: 'chunked-binary-v1'
+  })
   const accessibleUrlTransport = selectProviderAttachmentTransport(capabilities, {
     available: { 'accessible-url': true },
     requested: 'accessible-url'
@@ -2249,7 +2349,8 @@ export const resolveAttachmentRequestCapabilities = (
     allowManagedRequestDataUrl: requestDataUrlTransport === 'request-data-url' || gptImageProfile,
     allowRequestDataUrl: requestDataUrlTransport === 'request-data-url' || gptImageProfile,
     allowAccessibleUrl: accessibleUrlTransport === 'accessible-url',
-    preserveRemoteUrl: gptImageProfile
+    preserveRemoteUrl: gptImageProfile,
+    ...(chunkedBinaryTransport === 'chunked-binary-v1' ? { allowManagedChunkedBinary: true } : {})
   }
 }
 

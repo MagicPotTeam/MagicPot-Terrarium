@@ -61,6 +61,10 @@ const buildChatMessageList = (
     isLoading?: boolean
     editingMessageIndex?: number | null
     editingContent?: string
+    onDropImageAttachments?: (files: File[]) => Promise<ChatAttachment[]>
+    onRegisterEditingAttachmentReceiver?: (
+      receiver: ((attachment: ChatAttachment) => void) | null
+    ) => void
     onSendEditedMessage?: OnSendEditedMessage
     onDownloadAttachment?: OnDownloadAttachment
     onSetEditingIndex?: (index: number | null) => void
@@ -81,6 +85,8 @@ const buildChatMessageList = (
       editingContent={options?.editingContent ?? ''}
       onSetEditingIndex={options?.onSetEditingIndex ?? vi.fn()}
       onSetEditingContent={options?.onSetEditingContent ?? vi.fn()}
+      onDropImageAttachments={options?.onDropImageAttachments}
+      onRegisterEditingAttachmentReceiver={options?.onRegisterEditingAttachmentReceiver}
       onSendEditedMessage={options?.onSendEditedMessage ?? vi.fn<OnSendEditedMessage>()}
       onPreviewImage={options?.onPreviewImage ?? vi.fn()}
       onImageContextMenu={options?.onImageContextMenu ?? vi.fn()}
@@ -100,6 +106,10 @@ const renderChatMessageList = (
     isLoading?: boolean
     editingMessageIndex?: number | null
     editingContent?: string
+    onDropImageAttachments?: (files: File[]) => Promise<ChatAttachment[]>
+    onRegisterEditingAttachmentReceiver?: (
+      receiver: ((attachment: ChatAttachment) => void) | null
+    ) => void
     onSendEditedMessage?: OnSendEditedMessage
     onDownloadAttachment?: OnDownloadAttachment
     onSetEditingIndex?: (index: number | null) => void
@@ -264,7 +274,7 @@ describe('ChatMessageList text selection and reply actions', () => {
     expect(screen.getByText('This reply has a model label.')).toBeInTheDocument()
   })
 
-  it('copies the assistant reply from the action bar and shows copied feedback', () => {
+  it('copies the assistant reply from the action bar and shows copied feedback', async () => {
     renderChatMessageList({
       id: 'session-copy-reply',
       title: 'Reply copy',
@@ -278,12 +288,47 @@ describe('ChatMessageList text selection and reply actions', () => {
 
     const writeTextMock = vi.mocked(navigator.clipboard.writeText)
 
-    fireEvent.click(screen.getByLabelText('Copy reply'))
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Copy reply'))
+    })
 
     expect(writeTextMock).toHaveBeenCalledWith('Copy this reply.')
     expect(notifySuccessMock).toHaveBeenCalledWith('Reply copied')
     expect(screen.getByLabelText('Reply copied')).toBeInTheDocument()
     expect(screen.getByTestId('copy-done-icon')).toBeInTheDocument()
+  })
+
+  it('keeps user actions visible and interactive below the bubble without requiring text hover', async () => {
+    const content = 'Copy, edit or drag this prompt from its footer.'
+    const onSetEditingIndex = vi.fn()
+    const onSetEditingContent = vi.fn()
+    renderChatMessageList(
+      {
+        id: 'session-user-action-footer',
+        title: 'User action footer',
+        messages: [{ role: 'user', content }]
+      },
+      { onSetEditingIndex, onSetEditingContent }
+    )
+
+    const actions = screen.getByTestId('user-message-actions')
+    const text = screen.getByText(content)
+    expect(actions).toHaveStyle({ opacity: '1', visibility: 'visible', pointerEvents: 'auto' })
+    expect(actions.parentElement).toContainElement(text)
+    expect(text.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('chat.copy_prompt'))
+    })
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(content)
+    fireEvent.click(screen.getByRole('button', { name: 'chat.edit_message' }))
+    expect(onSetEditingIndex).toHaveBeenCalledWith(0)
+    expect(onSetEditingContent).toHaveBeenCalledWith(content)
+
+    const dataTransfer = { setData: vi.fn(), effectAllowed: '' }
+    fireEvent.dragStart(screen.getByLabelText('Drag prompt to canvas'), { dataTransfer })
+    expect(dataTransfer.setData).toHaveBeenCalledWith('text/plain', content)
+    expect(dataTransfer.effectAllowed).toBe('copy')
   })
 
   it('keeps the Agent thread scrollbar fixed when clicking edit on a long prompt', () => {
@@ -895,6 +940,41 @@ describe('ChatMessageList text selection and reply actions', () => {
     expect(screen.queryByRole('img', { name: 'Attachment image 1' })).not.toBeInTheDocument()
   })
 
+  it('keeps multiple user attachments aligned to the left edge of the bubble', () => {
+    const { container } = renderChatMessageList({
+      id: 'session-user-image-layout',
+      title: 'User image layout',
+      messages: [
+        {
+          role: 'user',
+          content: 'Two references',
+          attachments: [
+            { type: 'image', url: 'data:image/png;base64,first', fileName: 'first.png' },
+            { type: 'image', url: 'data:image/png;base64,second', fileName: 'second.png' }
+          ]
+        }
+      ]
+    })
+
+    const attachments = container.querySelector('[data-chat-user-attachments]') as HTMLElement
+    expect(attachments).toHaveStyle({
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'flex-start',
+      width: '100%'
+    })
+
+    const attachmentRows = Array.from(attachments.children) as HTMLElement[]
+    expect(attachmentRows).toHaveLength(2)
+    attachmentRows.forEach((row) => {
+      expect(row).toHaveStyle({
+        display: 'flex',
+        justifyContent: 'flex-start',
+        width: '100%'
+      })
+    })
+  })
+
   it('keeps generation feedback inside the assistant placeholder instead of the latest user bubble', () => {
     renderChatMessageList(
       {
@@ -969,6 +1049,95 @@ describe('ChatMessageList text selection and reply actions', () => {
     expect(onSendEditedMessage).toHaveBeenCalledWith(
       'Describe the remaining image',
       [keptAttachment],
+      undefined,
+      []
+    )
+  })
+
+  it('previews existing images and receives a new image from the canvas', async () => {
+    const onSendEditedMessage = vi.fn<OnSendEditedMessage>()
+    const onRegisterEditingAttachmentReceiver =
+      vi.fn<(receiver: ((attachment: ChatAttachment) => void) | null) => void>()
+    const existingAttachment: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,existing',
+      fileName: 'existing.png'
+    }
+
+    renderChatMessageList(
+      {
+        id: 'session-edit-add-image',
+        title: 'Edit image',
+        messages: [{ role: 'user', content: 'Edit this image', attachments: [existingAttachment] }]
+      },
+      {
+        editingMessageIndex: 0,
+        editingContent: 'Edit this image',
+        onRegisterEditingAttachmentReceiver,
+        onSendEditedMessage
+      }
+    )
+
+    expect(screen.getByRole('img', { name: 'existing.png' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add image' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Attach image' })).toBeNull()
+    await waitFor(() => expect(onRegisterEditingAttachmentReceiver).toHaveBeenCalled())
+    const receiver = onRegisterEditingAttachmentReceiver.mock.calls[0][0]
+    receiver?.({
+      type: 'image',
+      url: 'data:image/png;base64,added',
+      fileName: 'added.png'
+    })
+    expect(await screen.findByRole('img', { name: 'added.png' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage).toHaveBeenCalledWith(
+      'Edit this image',
+      [existingAttachment, expect.objectContaining({ fileName: 'added.png' })],
+      undefined,
+      []
+    )
+  })
+
+  it('accepts dropped image files in the edit composer', async () => {
+    const onDropImageAttachments = vi.fn<(files: File[]) => Promise<ChatAttachment[]>>()
+    onDropImageAttachments.mockImplementation(async (files) =>
+      files.map((file) => ({
+        type: 'image',
+        url: `data:image/png;base64,${file.name}`,
+        fileName: file.name
+      }))
+    )
+    const onSendEditedMessage = vi.fn<OnSendEditedMessage>()
+    renderChatMessageList(
+      {
+        id: 'session-edit-drop-image',
+        title: 'Edit image drop',
+        messages: [{ role: 'user', content: 'Drop an image' }]
+      },
+      {
+        editingMessageIndex: 0,
+        editingContent: 'Drop an image',
+        onDropImageAttachments,
+        onSendEditedMessage
+      }
+    )
+
+    const file = new File(['image'], 'dropped.png', { type: 'image/png' })
+    const composer = screen.getByTestId('edit-message-composer')
+    fireEvent.dragOver(composer, {
+      dataTransfer: { types: ['Files'], files: [file], dropEffect: 'none' }
+    })
+    fireEvent.drop(composer, {
+      dataTransfer: { types: ['Files'], files: [file], dropEffect: 'none' }
+    })
+    expect(onDropImageAttachments).toHaveBeenCalledWith([file])
+    expect(await screen.findByRole('img', { name: 'dropped.png' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage).toHaveBeenCalledWith(
+      'Drop an image',
+      [expect.objectContaining({ fileName: 'dropped.png' })],
       undefined,
       []
     )
@@ -1121,6 +1290,7 @@ describe('ChatMessageList managed image derivatives', () => {
     originalFileName: 'original.png'
   }
   let intersectionCallbacks: IntersectionObserverCallback[]
+  let intersectionTargets: Map<IntersectionObserverCallback, Element>
   let intersectionOptions: IntersectionObserverInit[]
   let resizeCallback: ResizeObserverCallback | null = null
   const ensureDerivative = vi.fn()
@@ -1129,6 +1299,7 @@ describe('ChatMessageList managed image derivatives', () => {
     ensureDerivative.mockReset()
     resetChatImageDerivativeCacheForTests()
     intersectionCallbacks = []
+    intersectionTargets = new Map()
     intersectionOptions = []
     Object.defineProperty(window, 'api', {
       configurable: true,
@@ -1153,9 +1324,10 @@ describe('ChatMessageList managed image derivatives', () => {
           intersectionOptions.push(options ?? {})
         }
         observe(target: Element) {
-          void target
+          intersectionTargets.set(this.callback, target)
         }
         disconnect() {
+          intersectionTargets.delete(this.callback)
           intersectionCallbacks = intersectionCallbacks.filter(
             (callback) => callback !== this.callback
           )
@@ -1210,7 +1382,12 @@ describe('ChatMessageList managed image derivatives', () => {
 
   const markIntersection = (isIntersecting: boolean) =>
     intersectionCallbacks.forEach((callback) =>
-      callback([{ isIntersecting } as unknown as IntersectionObserverEntry], {} as never)
+      callback(
+        [
+          { target: intersectionTargets.get(callback), isIntersecting } as IntersectionObserverEntry
+        ],
+        {} as never
+      )
     )
   const markNear = () => markIntersection(true)
 
