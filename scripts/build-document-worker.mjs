@@ -69,7 +69,7 @@ export async function buildDocumentWorker({ repoRoot = defaultRoot } = {}) {
     configFile: false,
     logLevel: 'warn',
     build: {
-      target: 'node22',
+      target: 'node24',
       outDir: output,
       emptyOutDir: false,
       minify: false,

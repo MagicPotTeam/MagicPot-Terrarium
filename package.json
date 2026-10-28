@@ -14,7 +14,7 @@
   },
   "license": "AGPL-3.0-only",
   "engines": {
-    "node": ">=22.19.0 <23",
+    "node": ">=24.18.0 <25",
     "npm": ">=10.5.1"
   },
   "scripts": {
@@ -224,7 +224,7 @@
     "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^22.16.5",
+    "@types/node": "^24.18.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@types/react-syntax-highlighter": "^15.5.13",
