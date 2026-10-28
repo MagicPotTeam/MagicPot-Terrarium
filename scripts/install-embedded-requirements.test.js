@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import {
   embeddedRuntimeExtras,
+  embeddedTorchRequirements,
   installEmbeddedRequirements
 } from './install-embedded-requirements.mjs'
 
@@ -62,6 +63,20 @@ describe('embedded runtime requirements resolution', () => {
     expect(calls.at(-1)).toEqual(['check'])
   })
 
+  it('pins a compatible CUDA wheel family and constrains later resolver upgrades', () => {
+    expect(embeddedTorchRequirements).toEqual([
+      'torch==2.11.0+cu130',
+      'torchvision==0.26.0+cu130',
+      'torchaudio==2.11.0+cu130'
+    ])
+    const source = fs.readFileSync(
+      new URL('./prepare-embedded-python.mjs', import.meta.url),
+      'utf8'
+    )
+    expect(source).toMatch(/\.\.\.embeddedTorchRequirements,\s*'--index-url',\s*torchIndexUrl/)
+    expect(source).toMatch(/'numpy<2.5',\s*\.\.\.embeddedTorchRequirements/)
+  })
+
   it('does not turn a resolver conflict into success or continue installing other nodes', () => {
     const calls = []
     const failure = new Error('ResolutionImpossible: incompatible dependencies')
@@ -95,7 +110,7 @@ describe('embedded runtime requirements resolution', () => {
       'utf8'
     )
     expect(source).toContain(
-      'const requirementFiles = [comfyRequirements, ...customRequirementFiles]'
+      'const requirementFiles = [comfyRequirements, ...runtimeRequirementFiles]'
     )
     expect(source).toMatch(
       /installEmbeddedRequirements\(\{\s*requirementFiles,\s*constraintsPath,\s*indexArgs: extraIndexArgs\(\),\s*extraRequirements: embeddedRuntimeExtras,\s*pip\s*\}\)/

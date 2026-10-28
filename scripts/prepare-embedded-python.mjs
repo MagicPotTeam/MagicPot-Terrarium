@@ -7,8 +7,10 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
   embeddedRuntimeExtras,
+  embeddedTorchRequirements,
   installEmbeddedRequirements
 } from './install-embedded-requirements.mjs'
+import { compatibleEmbeddedRequirements } from './embedded-requirements-compatibility.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -229,6 +231,7 @@ function writeConstraints() {
       `huggingface-hub==${huggingfaceHubVersion}`,
       `decorator==${decoratorVersion}`,
       'numpy<2.5',
+      ...embeddedTorchRequirements,
       ''
     ].join('\n')
   )
@@ -249,10 +252,9 @@ function installTorchStack() {
     'install',
     '--upgrade',
     '--prefer-binary',
-    'torch',
-    'torchvision',
-    'torchaudio',
-    ...extraIndexArgs()
+    ...embeddedTorchRequirements,
+    '--index-url',
+    torchIndexUrl
   ])
 }
 
@@ -330,7 +332,21 @@ function installRequirements(constraintsPath) {
     )}\n`
   )
 
-  const requirementFiles = [comfyRequirements, ...customRequirementFiles]
+  const compatibilityRoot = path.join(stagingRoot, 'runtime-requirements')
+  const runtimeRequirementFiles = customRequirementFiles.map((file) => {
+    const relative = path.relative(path.join(comfyDir, 'custom_nodes'), file)
+    const original = fs.readFileSync(file, 'utf8')
+    const compatible = compatibleEmbeddedRequirements(original, relative)
+    if (compatible === original) return file
+    const output = path.join(compatibilityRoot, relative)
+    fs.mkdirSync(path.dirname(output), { recursive: true })
+    fs.writeFileSync(output, compatible, { flag: 'wx' })
+    console.log(
+      `[prepare-embedded-python] Using audited Accelerate compatibility input for ${relative}; vendor file unchanged`
+    )
+    return output
+  })
+  const requirementFiles = [comfyRequirements, ...runtimeRequirementFiles]
   for (const requirementsFile of requirementFiles) {
     console.log(
       `[prepare-embedded-python] Resolving ${path.relative(stagingRoot, requirementsFile)}`

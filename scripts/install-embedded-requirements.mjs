@@ -2,6 +2,13 @@
 // installs can replace a dependency chosen for an earlier custom node with a
 // version that violates that node's metadata (for example Hydra/OmegaConf).
 export const embeddedRuntimeExtras = ['rotary-embedding-torch', 'compel==2.3.1', 'py-cord[voice]']
+// Use a matching CUDA wheel family. An unpinned --extra-index-url install can
+// prefer a newer CPU-only PyPI wheel and silently break the NVIDIA launchers.
+export const embeddedTorchRequirements = [
+  'torch==2.11.0+cu130',
+  'torchvision==0.26.0+cu130',
+  'torchaudio==2.11.0+cu130'
+]
 
 export function installEmbeddedRequirements({
   requirementFiles,
