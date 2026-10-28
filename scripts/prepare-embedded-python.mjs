@@ -5,7 +5,12 @@ import https from 'node:https'
 import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { installEmbeddedRequirements } from './install-embedded-requirements.mjs'
+import {
+  embeddedRuntimeExtras,
+  embeddedTorchRequirements,
+  installEmbeddedRequirements
+} from './install-embedded-requirements.mjs'
+import { createEmbeddedRequirementsInput } from './embedded-requirements-compatibility.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -226,6 +231,7 @@ function writeConstraints() {
       `huggingface-hub==${huggingfaceHubVersion}`,
       `decorator==${decoratorVersion}`,
       'numpy<2.5',
+      ...embeddedTorchRequirements,
       ''
     ].join('\n')
   )
@@ -246,10 +252,9 @@ function installTorchStack() {
     'install',
     '--upgrade',
     '--prefer-binary',
-    'torch',
-    'torchvision',
-    'torchaudio',
-    ...extraIndexArgs()
+    ...embeddedTorchRequirements,
+    '--index-url',
+    torchIndexUrl
   ])
 }
 
@@ -327,7 +332,17 @@ function installRequirements(constraintsPath) {
     )}\n`
   )
 
-  const requirementFiles = [comfyRequirements, ...customRequirementFiles]
+  const compatibilityRoot = path.join(stagingRoot, 'runtime-requirements')
+  const runtimeRequirementFiles = customRequirementFiles.map((file) => {
+    const relative = path.relative(path.join(comfyDir, 'custom_nodes'), file)
+    const output = createEmbeddedRequirementsInput(file, relative, compatibilityRoot)
+    if (output === file) return file
+    console.log(
+      `[prepare-embedded-python] Using audited Accelerate compatibility input for ${relative}; vendor file unchanged`
+    )
+    return output
+  })
+  const requirementFiles = [comfyRequirements, ...runtimeRequirementFiles]
   for (const requirementsFile of requirementFiles) {
     console.log(
       `[prepare-embedded-python] Resolving ${path.relative(stagingRoot, requirementsFile)}`
@@ -337,6 +352,7 @@ function installRequirements(constraintsPath) {
     requirementFiles,
     constraintsPath,
     indexArgs: extraIndexArgs(),
+    extraRequirements: embeddedRuntimeExtras,
     pip
   })
 }
@@ -356,18 +372,6 @@ async function ensureVerifiedLlamaCppWheel() {
 
 function installVerifiedLlamaCppWheel(wheelPath) {
   pip(['install', '--upgrade', '--force-reinstall', '--no-deps', wheelPath])
-}
-
-function installSmokeRuntimeExtras() {
-  pip(['install', '--upgrade', '--prefer-binary', 'rotary-embedding-torch', ...extraIndexArgs()])
-
-  // smZNodes imports compel, but installing compel with full dependencies pulls notebook/ipython
-  // and conflicts with moviepy's decorator pin. Existing ComfyUI deps cover the imports it uses.
-  pip(['install', '--upgrade', '--prefer-binary', '--no-deps', 'compel==2.3.1'])
-
-  // comfyui_LLM_party attempts to install this during startup; install it here so smoke tests
-  // do not mutate the staged environment.
-  pip(['install', '--upgrade', '--prefer-binary', 'py-cord[voice]'])
 }
 
 function removePythonCaches() {
@@ -649,7 +653,6 @@ async function main() {
   const constraintsPath = runPhase('write-constraints', writeConstraints)
   runPhase('install-torch', installTorchStack)
   runPhase('install-requirements', () => installRequirements(constraintsPath))
-  runPhase('install-smoke-extras', installSmokeRuntimeExtras)
   runPhase('install-verified-llama-cpp', () => installVerifiedLlamaCppWheel(llamaCppWheelPath))
   runPhase('verify-final-dependencies', () => pip(['check']))
   runPhase('prune-runtime', pruneEmbeddedRuntime)
