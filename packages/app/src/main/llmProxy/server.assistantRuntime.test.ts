@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import net from 'node:net'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { resetChatMediaDirCacheForTests } from './chatMediaDir'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
@@ -267,6 +269,7 @@ describe('LLM proxy server legacy compatibility', () => {
   beforeEach(async () => {
     port = await getAvailableFetchSafePort()
     testArtifactDir = await createNodeTestArtifactDir('llm-proxy-server')
+    resetChatMediaDirCacheForTests()
     currentConfig = {
       ...DEFAULT_CONFIG,
       download_dir: testArtifactDir,
@@ -892,6 +895,88 @@ describe('LLM proxy server legacy compatibility', () => {
       }
     })
   })
+
+  it.each([
+    'outside-root',
+    'other-scope',
+    'prefix-sibling',
+    'directory-link',
+    'hardlink',
+    'unsupported-extension'
+  ])('refuses provider-selected %s files without publishing or disclosing them', async (kind) => {
+    const scopeRoot = path.join(testArtifactDir, '.chat_media', 'canvas-agent-2')
+    const outside = path.join(testArtifactDir, 'outside-owned-fixture')
+    await fs.mkdir(scopeRoot, { recursive: true })
+    await fs.mkdir(outside, { recursive: true })
+    const privateFile = path.join(outside, 'private-fixture.png')
+    await fs.writeFile(privateFile, 'not-authorized-for-this-request')
+    let selected = privateFile
+    if (kind === 'other-scope' || kind === 'prefix-sibling') {
+      const sibling = path.join(
+        testArtifactDir,
+        '.chat_media',
+        kind === 'other-scope' ? 'other-scope' : 'canvas-agent-2-other'
+      )
+      await fs.mkdir(sibling, { recursive: true })
+      selected = path.join(sibling, 'private-fixture.png')
+      await fs.copyFile(privateFile, selected)
+    } else if (kind === 'directory-link') {
+      const linkedDirectory = path.join(scopeRoot, 'linked')
+      await fs.symlink(outside, linkedDirectory, process.platform === 'win32' ? 'junction' : 'dir')
+      selected = path.join(linkedDirectory, 'private-fixture.png')
+    } else if (kind === 'hardlink') {
+      selected = path.join(scopeRoot, 'hardlink.png')
+      await fs.link(privateFile, selected)
+    } else if (kind === 'unsupported-extension') {
+      selected = path.join(scopeRoot, 'private-fixture.txt')
+      await fs.copyFile(privateFile, selected)
+    }
+    const before = await fs.readdir(scopeRoot)
+    const url = pathToFileURL(selected).href
+    chatMock.mockResolvedValueOnce({ content: 'generated output', imageUrl: url })
+    const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer proxy-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'fixture input' }] })
+    })
+    expect(response.status).toBe(502)
+    const text = await response.text()
+    expect(JSON.parse(text)).toEqual({ error: 'LLM proxy request failed.' })
+    expect(text).not.toContain(selected)
+    expect(text).not.toContain(url)
+    expect(text).not.toContain('/api/images/')
+    expect(await fs.readdir(scopeRoot)).toEqual(before)
+    expect(await fs.readFile(privateFile, 'utf8')).toBe('not-authorized-for-this-request')
+  })
+
+  it.each([429, 500, 502])(
+    'keeps error status %s but never relays provider diagnostics',
+    async (status) => {
+      const secret = 'fixture-private-diagnostic'
+      chatMock.mockRejectedValueOnce(
+        Object.assign(
+          new Error(`${secret}: ${path.join(testArtifactDir, 'owned-error-fixture.png')}`),
+          {
+            status,
+            body: JSON.stringify({ stack: secret, token: secret })
+          }
+        )
+      )
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer proxy-secret', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'fixture input' }] })
+      })
+      expect(response.status).toBe(status)
+      const text = await response.text()
+      expect(JSON.parse(text)).toEqual({
+        error: status === 429 ? 'Request rate limit exceeded.' : 'LLM proxy request failed.'
+      })
+      expect(text).not.toContain(secret)
+      expect(text).not.toContain('stack')
+      expect(text).not.toContain('body')
+    }
+  )
 
   it('streams SSE when OpenAI-compatible clients request streaming', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {

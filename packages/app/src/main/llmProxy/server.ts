@@ -254,16 +254,6 @@ const getRequesterAddress = (req: http.IncomingMessage): string => {
   return candidate.replace(/^::ffff:/i, '')
 }
 
-const sanitizeProxyAssetFileStem = (value?: string | null): string => {
-  const normalized = String(value || '')
-    .trim()
-    .replace(/\.[^.]+$/, '')
-    .replace(/[^a-zA-Z0-9._-]+/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^[-.]+|[-.]+$/g, '')
-  return normalized || 'asset'
-}
-
 const buildProxyMediaAccessSignature = (
   filename: string,
   resourceScope: string | undefined,
@@ -332,33 +322,47 @@ const buildScopedProxyMediaUrl = (
     return cached
   }
 
-  const normalizedSourcePath = normalizeLocalFilePath(sourceUrl)
-  const fallbackFilename = path.basename(normalizedSourcePath)
-  let proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(fallbackFilename, undefined, accessToken, requesterAddress).replace(/^\//, '')}`
-
+  let proxiedUrl: string
   try {
-    if (normalizedSourcePath && fs.existsSync(normalizedSourcePath)) {
-      const extension = path.extname(normalizedSourcePath)
-      const fileStem = sanitizeProxyAssetFileStem(path.basename(normalizedSourcePath, extension))
-      const stagedFilename = `${fileStem}-${randomUUID()}${extension}`
-      const targetDir = getChatMediaDir(resourceScope)
-      const targetPath = path.join(targetDir, stagedFilename)
-      const sourceStat = fs.statSync(normalizedSourcePath)
-
-      if (path.resolve(normalizedSourcePath) !== path.resolve(targetPath)) {
-        fs.copyFileSync(normalizedSourcePath, targetPath)
-      }
-
-      recordLlmProxyAccessUsage(accessToken, {
-        activity: 'media-generated',
-        requesterAddress,
-        generatedMediaBytes: sourceStat.size
-      })
-
-      proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(stagedFilename, resourceScope, accessToken, requesterAddress).replace(/^\//, '')}`
-    }
-  } catch (error) {
-    console.warn('[LLMProxyServer] Failed to stage local media for remote access:', error)
+    const normalizedSourcePath = path.resolve(normalizeLocalFilePath(sourceUrl))
+    const targetDir = path.resolve(getChatMediaDir(resourceScope))
+    // A provider/model URL is not permission to read an arbitrary desktop file.
+    // Only this request's media namespace (or its legacy temp namespace) may
+    // be published. Check lexically before probing a caller-selected path.
+    const legacyDir = path.resolve(getLlmProxyTempDir(resourceScope))
+    if (
+      !normalizedSourcePath.startsWith(targetDir + path.sep) &&
+      !normalizedSourcePath.startsWith(legacyDir + path.sep)
+    )
+      throw new Error('Media source is outside the request scope')
+    const sourceRoot = normalizedSourcePath.startsWith(targetDir + path.sep) ? targetDir : legacyDir
+    if (fs.lstatSync(sourceRoot).isSymbolicLink() || fs.lstatSync(targetDir).isSymbolicLink())
+      throw new Error('Media roots must not be links')
+    const realRoot = path.resolve(fs.realpathSync(sourceRoot))
+    const realSourcePath = path.resolve(fs.realpathSync(normalizedSourcePath))
+    if (!realSourcePath.startsWith(realRoot + path.sep))
+      throw new Error('Media source link escapes the request scope')
+    const sourceStat = fs.lstatSync(normalizedSourcePath)
+    if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1)
+      throw new Error('Media source must be a single-link regular file')
+    const extension = path.extname(realSourcePath).toLowerCase()
+    if (!['.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp4', '.webm'].includes(extension))
+      throw new Error('Unsupported generated media type')
+    // Generated names avoid leaking local filenames and need no regex-based
+    // sanitization of untrusted model text. Never overwrite an existing asset.
+    const stagedFilename = `${randomUUID()}${extension}`
+    const targetPath = path.join(targetDir, stagedFilename)
+    fs.copyFileSync(realSourcePath, targetPath, fs.constants.COPYFILE_EXCL)
+    recordLlmProxyAccessUsage(accessToken, {
+      activity: 'media-generated',
+      requesterAddress,
+      generatedMediaBytes: sourceStat.size
+    })
+    proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(stagedFilename, resourceScope, accessToken, requesterAddress).replace(/^\//, '')}`
+  } catch {
+    // Do not issue a signed basename fallback: it could expose a different
+    // existing asset, nor disclose local paths in a provider error response.
+    throw new HttpRequestError(502, 'Unable to stage generated media for remote access.')
   }
 
   stagedUrlCache?.set(cacheKey, proxiedUrl)
@@ -2257,15 +2261,6 @@ export function startLLMProxyServer(): void {
     } catch (error) {
       console.error('[LLMProxyServer] Error:', error)
       if (res.headersSent || res.destroyed) return
-      const errorBody =
-        error instanceof HttpRequestError &&
-        typeof (error as HttpRequestError & { body?: unknown }).body === 'string'
-          ? (error as HttpRequestError & { body: string }).body
-          : error &&
-              typeof error === 'object' &&
-              typeof (error as { body?: unknown }).body === 'string'
-            ? (error as { body: string }).body
-            : undefined
       const rawStatus =
         error instanceof HttpRequestError
           ? error.statusCode
@@ -2274,12 +2269,23 @@ export function startLLMProxyServer(): void {
               (error as { statusCode?: unknown }).statusCode)
             : undefined
       const statusCode =
-        typeof rawStatus === 'number' && rawStatus >= 400 && rawStatus <= 599 ? rawStatus : 500
+        typeof rawStatus === 'number' &&
+        Number.isInteger(rawStatus) &&
+        rawStatus >= 400 &&
+        rawStatus <= 599
+          ? rawStatus
+          : 500
       res.writeHead(statusCode, { 'Content-Type': 'application/json' })
       res.end(
         JSON.stringify({
-          error: error instanceof Error ? error.message : String(error),
-          ...(errorBody !== undefined ? { body: errorBody } : {})
+          error:
+            statusCode === 429
+              ? 'Request rate limit exceeded.'
+              : statusCode === 413
+                ? 'Request body is too large.'
+                : statusCode >= 500
+                  ? 'LLM proxy request failed.'
+                  : 'Invalid LLM proxy request.'
         })
       )
     }

@@ -642,7 +642,12 @@ describe('LLM proxy server legacy compatibility', () => {
   })
 
   it('rewrites raw local-media attachments in the final /api/chat response to scoped proxy URLs', async () => {
-    const scopedAssetPath = path.join(testArtifactDir, 'source-assets', 'reference.png')
+    const scopedAssetPath = path.join(
+      testArtifactDir,
+      '.chat_media',
+      'canvas-agent-2',
+      'reference.png'
+    )
     await fs.mkdir(path.dirname(scopedAssetPath), { recursive: true })
     await fs.writeFile(scopedAssetPath, 'png-bytes', 'utf8')
     rawLocalMediaPath = `file:///${scopedAssetPath.replace(/\\/g, '/')}`
