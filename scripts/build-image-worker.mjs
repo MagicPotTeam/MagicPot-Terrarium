@@ -4,6 +4,7 @@ import { dirname, join, resolve, win32 } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { getNativeBuildOptions } from './native-build-options.mjs'
+import { prepareCargoImageWorkerSource } from './cargo-image-worker-source.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const defaultRepoRoot = resolve(__dirname, '..')
@@ -163,13 +164,18 @@ export function buildImageWorker({
   if (result.status !== 0) throw new Error(`cargo build failed with ${describeExit(result)}`)
   if (!fs.existsSync(paths.sourceBinaryPath))
     throw new Error(`cargo build completed but binary was not found: ${paths.sourceBinaryPath}`)
-  publishImageWorkerBinary(
-    paths.sourceBinaryPath,
-    paths.outputBinaryPath,
-    paths.outputDir,
-    fs,
-    platform
-  )
+  const prepared = prepareCargoImageWorkerSource(paths.sourceBinaryPath)
+  try {
+    publishImageWorkerBinary(
+      prepared.sourcePath,
+      paths.outputBinaryPath,
+      paths.outputDir,
+      fs,
+      platform
+    )
+  } finally {
+    prepared.cleanup()
+  }
   console.log(`[image-worker] copied from: ${paths.sourceBinaryPath}`)
   console.log(`[image-worker] wrote: ${paths.outputBinaryPath}`)
   return paths
