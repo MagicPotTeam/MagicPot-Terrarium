@@ -621,19 +621,28 @@ test('parent junctions and output links are refused without touching their synth
   assert.equal(fs.existsSync(path.join(target, 'output')), false)
 })
 
-test(
-  'Windows case aliases are accepted without relaxing junction rejection',
-  { skip: process.platform !== 'win32' },
-  (t) => {
-    const root = temporary(t)
-    const outputDir = path.join(root.toUpperCase(), 'MixedCaseOutput')
+test('native case aliases follow platform rules without relaxing junction rejection', (t) => {
+  const root = temporary(t)
+  const aliasOutput = path.join(root.toUpperCase(), 'MixedCaseOutput')
+  if (process.platform === 'win32') {
+    assert.deepEqual(prepareFigPluginHost(options(root, 'figma', { outputDir: aliasOutput })), {
+      host: 'figma',
+      fileCount: 4
+    })
+    assert.equal(fs.readdirSync(aliasOutput).length, 4)
+  } else {
+    // POSIX path identity is case-sensitive. Exercise the rejection rather than
+    // skipping the entire regression and leaving the strict focused gate empty.
+    rejected(options(root, 'figma', { outputDir: aliasOutput }))
+    assert.equal(fs.existsSync(aliasOutput), false)
+    const outputDir = path.join(root, 'MixedCaseOutput')
     assert.deepEqual(prepareFigPluginHost(options(root, 'figma', { outputDir })), {
       host: 'figma',
       fileCount: 4
     })
     assert.equal(fs.readdirSync(outputDir).length, 4)
   }
-)
+})
 
 for (const name of ['manifest.template.json', 'code.js', 'ui.html']) {
   for (const kind of ['empty', 'oversized', 'hardlinked', 'directory']) {
