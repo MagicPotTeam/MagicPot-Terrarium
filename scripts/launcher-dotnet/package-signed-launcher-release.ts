@@ -11,7 +11,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
@@ -141,14 +141,18 @@ function timestamp(value: string, label: string): string {
 export function ensureSafeDirectory(directoryPath: string, label = 'directory'): string {
   if (!isAbsolute(directoryPath)) fail(`${label} must be absolute`)
   const resolved = resolve(directoryPath)
-  let current = path.parse(resolved).root
+  let current = parse(resolved).root
   for (const part of relative(current, resolved).split(sep).filter(Boolean)) {
     current = join(current, part)
     let stat
     try {
       stat = lstatSync(current)
     } catch (error) {
-      if (error?.code !== 'ENOENT') throw error
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined
+      if (code !== 'ENOENT') throw error
       mkdirSync(current)
       stat = lstatSync(current)
     }
