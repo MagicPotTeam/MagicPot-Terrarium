@@ -122,6 +122,20 @@ const getLocalProxyAccessTokens = (config: Config): LLMProxyAccessTokenEntry[] =
     : []
 }
 
+const getLocalProxyCorsOrigins = (config: Config): string[] =>
+  Array.isArray(config.local_llm_server_config?.cors_allowed_origins)
+    ? config.local_llm_server_config.cors_allowed_origins
+    : []
+
+const parseLocalProxyCorsOrigins = (value: string): string[] => [
+  ...new Set(
+    value
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+  )
+]
+
 const getDefaultProxyAccessTokenIndex = (
   entry: Pick<LLMProxyAccessTokenEntry, 'resource_scope'>,
   index: number
@@ -190,6 +204,7 @@ const ProxyModeSection: React.FC<ProxyModeSectionProps> = ({
   text
 }) => {
   const accessTokens = getLocalProxyAccessTokens(settingsValue)
+  const corsOrigins = getLocalProxyCorsOrigins(settingsValue)
 
   const persistAccessTokens = (nextTokens: LLMProxyAccessTokenEntry[]) => {
     saveSettings({
@@ -293,6 +308,21 @@ const ProxyModeSection: React.FC<ProxyModeSectionProps> = ({
               }
               placeholder="3721"
             />
+            <InputText
+              label={t('llm.llm_server_cors_origins_label')}
+              value={corsOrigins.join(', ')}
+              onChange={(value) =>
+                saveSettings({
+                  local_llm_server_config: {
+                    cors_allowed_origins: parseLocalProxyCorsOrigins(value)
+                  }
+                })
+              }
+              placeholder="http://localhost:3000, http://192.168.1.20:3000"
+            />
+            <Typography variant="caption" color="text.secondary">
+              {t('llm.llm_server_cors_origins_help')}
+            </Typography>
 
             <Stack spacing={1.5}>
               <Box

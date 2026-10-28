@@ -9,6 +9,26 @@ import {
 import { ObjectInfoMap, Workflow } from './types'
 
 describe('valueToFileItem', () => {
+  it.each(['input', 'output', 'temp'])(
+    'preserves the full nested subfolder for annotated %s files',
+    (type) => {
+      expect(valueToFileItem(`project/session/masks/image.png [${type}]`)).toEqual({
+        filename: 'image.png',
+        type,
+        subfolder: 'project/session/masks'
+      })
+    }
+  )
+
+  it('round-trips uploaded images in nested subfolders', () => {
+    const fileItem = {
+      filename: 'image with spaces.png',
+      type: 'input',
+      subfolder: 'project/session/masks'
+    }
+    expect(valueToFileItem(fileItemToValue(fileItem))).toEqual(fileItem)
+  })
+
   it('should return the correct file item', () => {
     expect(valueToFileItem('spaceship-launch.jpg')).toEqual({
       filename: 'spaceship-launch.jpg',

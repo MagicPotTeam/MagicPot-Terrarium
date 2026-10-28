@@ -54,7 +54,7 @@ import { processWorkflowLoras } from '../comfy/loraBypass'
 import { normalizeExecutableWorkflow } from '@shared/comfy/funcs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
-import { getChatMediaDir } from '../llmProxy/chatMediaDir'
+import { getChatMediaDir, sanitizeChatMediaScope } from '../llmProxy/chatMediaDir'
 import {
   DEFAULT_MANAGED_MEDIA_MAX_BYTES,
   importManagedMediaStream,
@@ -62,6 +62,12 @@ import {
 } from '../llmProxy/managedMediaStore'
 
 const COMFY_OUTPUT_IMPORT_TIMEOUT_MS = 30_000
+const COMFY_TASK_SCOPE_PATTERN = /^[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?$/u
+
+function normalizeComfyTaskScope(value: unknown): string | undefined {
+  const normalized = sanitizeChatMediaScope(typeof value === 'string' ? value : undefined)
+  return normalized && COMFY_TASK_SCOPE_PATTERN.test(normalized) ? normalized : undefined
+}
 
 function isCanonicalUnencoded(value: string): boolean {
   try {
@@ -173,7 +179,8 @@ function isComfyEndpointFailure(error: unknown): boolean {
 async function importOutputImageFromCli(
   cli: ComfyHttpCli,
   filename: string,
-  subfolder: string
+  subfolder: string,
+  taskId?: string
 ): Promise<ImportOutputImageResp> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), COMFY_OUTPUT_IMPORT_TIMEOUT_MS)
@@ -213,11 +220,13 @@ async function importOutputImageFromCli(
     }
     if (!response.body) throw new Error('ComfyUI view returned an empty body')
     const authorizedRoot = getChatMediaDir()
-    // Global content-addressed storage is intentional. Session/lifecycle ownership lives in
-    // persisted references, not renderer-provided directory isolation.
+    const taskScope = normalizeComfyTaskScope(taskId)
+    const outputRoot = taskScope
+      ? path.join(authorizedRoot, 'comfy-outputs', 'tasks', taskScope)
+      : path.join(authorizedRoot, 'comfy-outputs', 'global')
     const imported = await importManagedMediaStream(
       {
-        chatMediaRoot: path.join(authorizedRoot, 'comfy-outputs', 'global'),
+        chatMediaRoot: outputRoot,
         stream: Readable.fromWeb(
           response.body as import('node:stream/web').ReadableStream<Uint8Array>
         ),
@@ -229,7 +238,14 @@ async function importOutputImageFromCli(
       },
       { authorizedRoot }
     )
-    const importedReference = imported.reference
+    // Keep the physical task directory encoded in the logical reference so a later
+    // resolve can reopen the same store after restart. Legacy callers remain global.
+    const importedReference = taskScope
+      ? {
+          ...imported.reference,
+          relativePath: `comfy-outputs/tasks/${taskScope}/${imported.reference.relativePath}`
+        }
+      : imported.reference
     const importedMimeType = importedReference.mimeType
     const importedSizeBytes = importedReference.sizeBytes
     const importedFileName = importedReference.originalFileName
@@ -403,7 +419,7 @@ export class ComfySvcImpl implements ComfySvc {
     const filename = validateComfyOutputFilename(req.filename)
     const subfolder = validateComfyOutputSubfolder(req.subfolder)
     if (!this.usesInstancePool()) {
-      return importOutputImageFromCli(this.cli(), filename, subfolder)
+      return importOutputImageFromCli(this.cli(), filename, subfolder, req.taskId)
     }
 
     const pool = getComfyInstancePool()
@@ -414,7 +430,12 @@ export class ComfySvcImpl implements ComfySvc {
     let lastError: unknown = null
     for (const instance of instances) {
       try {
-        const result = await importOutputImageFromCli(instance.client, filename, subfolder)
+        const result = await importOutputImageFromCli(
+          instance.client,
+          filename,
+          subfolder,
+          req.taskId
+        )
         pool.preferBaseUrl?.(instance.profile.baseUrl)
         return result
       } catch (error) {

@@ -193,6 +193,23 @@ describe('PanelEnvironment', () => {
     expect(screen.getByRole('heading', { name: 'Adobe 桥接' })).toBeTruthy()
   })
 
+  it('edits the explicit browser CORS allowlist without changing bearer tokens', async () => {
+    const saveSettings = vi.fn()
+    render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={saveSettings} />)
+
+    const origins = await screen.findByLabelText('浏览器允许来源（逗号分隔）')
+    fireEvent.change(origins, {
+      target: { value: ' http://localhost:3000, http://localhost:3000, https://lan.example ' }
+    })
+    fireEvent.blur(origins)
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      local_llm_server_config: {
+        cors_allowed_origins: ['http://localhost:3000', 'https://lan.example']
+      }
+    })
+  })
+
   it('renders unified ComfyUI settings and batch profiles without a mode switch', async () => {
     render(
       <PanelEnvironment

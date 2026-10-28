@@ -118,7 +118,14 @@ vi.mock('../comfy/comfyInstancePool', () => ({
 }))
 
 vi.mock('../llmProxy/chatMediaDir', () => ({
-  getChatMediaDir: vi.fn(() => 'C:/media')
+  getChatMediaDir: vi.fn(() => 'C:/media'),
+  sanitizeChatMediaScope: (value?: string | null) =>
+    String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/-{2,}/g, '-')
+      .replace(/^[-.]+|[-.]+$/g, '') || undefined
 }))
 
 vi.mock('../llmProxy/managedMediaStore', () => ({
@@ -207,6 +214,47 @@ describe('ComfySvcImpl', () => {
             subfolder: 'batch 1/nested',
             type: 'output'
           }
+        }),
+        { authorizedRoot: 'C:/media' }
+      )
+    })
+
+    it('stores task-scoped output under an isolated physical directory', async () => {
+      const svc = new ComfySvcImpl()
+      const viewResponse = vi.fn().mockResolvedValue(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/png' }
+        })
+      )
+      setComfyCli(svc, { viewResponse })
+      const reference = {
+        version: 1,
+        kind: 'managed',
+        relativePath: 'originals/ab/' + 'a'.repeat(64) + '.png',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 3,
+        mimeType: 'image/png',
+        originalFileName: 'result.png'
+      }
+      importManagedMediaStreamMock.mockResolvedValue({
+        reference,
+        localMediaUrl: 'local-media:/managed',
+        absolutePath: 'hidden',
+        metadataPath: 'hidden'
+      })
+
+      const result = await svc.importOutputImage({
+        filename: 'result.png',
+        type: 'output',
+        taskId: 'Prompt 123'
+      })
+
+      expect(result.reference.relativePath).toBe(
+        'comfy-outputs/tasks/prompt-123/originals/ab/' + 'a'.repeat(64) + '.png'
+      )
+      expect(importManagedMediaStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatMediaRoot: expect.stringMatching(/comfy-outputs[\\/]tasks[\\/]prompt-123$/)
         }),
         { authorizedRoot: 'C:/media' }
       )

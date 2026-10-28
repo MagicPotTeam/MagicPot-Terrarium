@@ -102,6 +102,32 @@ describe('ComfyStateManager websocket lifecycle', () => {
     expect(listener).toHaveBeenCalledWith(progress)
   })
 
+  it('deduplicates adjacent identical status logs without dropping status events', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    try {
+      initComfyStateListener()
+      const status = {
+        type: 'status',
+        data: { status: { exec_info: { queue_remaining: 1 } } }
+      }
+      sockets[0].onmessage?.({ data: JSON.stringify(status) })
+      sockets[0].onmessage?.({ data: JSON.stringify(status) })
+
+      const changedStatus = {
+        ...status,
+        data: { status: { exec_info: { queue_remaining: 2 } } }
+      }
+      sockets[0].onmessage?.({ data: JSON.stringify(changedStatus) })
+
+      const receivedLogs = logSpy.mock.calls.filter(
+        ([message]) => message === '[ComfyUI State] received (http://127.0.0.1:8188/)'
+      )
+      expect(receivedLogs).toHaveLength(2)
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
   it('creates only one reconnect timer and ignores callbacks from the replaced socket', () => {
     initComfyStateListener()
     const firstSocket = sockets[0]

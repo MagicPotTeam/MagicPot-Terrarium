@@ -72,7 +72,13 @@ export type GetViewResp = {
   result: Uint8Array
 }
 
-export type ImportOutputImageReq = { filename: string; subfolder?: string; type: 'output' }
+export type ImportOutputImageReq = {
+  filename: string
+  subfolder?: string
+  type: 'output'
+  /** Optional producing task identity used to isolate imported output files. */
+  taskId?: string
+}
 export type ImportOutputImageResp = {
   reference: MediaReference
   localMediaUrl: string
