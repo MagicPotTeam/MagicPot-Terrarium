@@ -9,6 +9,11 @@ import {
   type HostPlan
 } from './hostPlan'
 import { canonicalFigPluginJson } from './manifest'
+import {
+  figPluginRecoveryExecutionImagesSchema,
+  type FigPluginRecoveryExecutionImages
+} from './hostImageRecovery'
+import type { FigPluginPlanningAssetMetadata } from './hostPlanningAssets'
 
 const hex32 = z
   .string()
@@ -79,7 +84,8 @@ export const figPluginTaskRecoverySchema = z
     round: z.number().int().min(1).max(3),
     maxCorrectionRounds: z.literal(3),
     targetIds: ids,
-    rebind: taskRecoveryRebindSchema.optional()
+    rebind: taskRecoveryRebindSchema.optional(),
+    images: figPluginRecoveryExecutionImagesSchema.optional()
   })
   .strict()
 export type FigPluginTaskRecovery = z.output<typeof figPluginTaskRecoverySchema>
@@ -140,10 +146,11 @@ export type TaskRecoveryScope = {
 }
 export function captureTaskRecoveryScope(
   plan: HostPlan,
-  rawContext: HostContext
+  rawContext: HostContext,
+  resources?: readonly FigPluginPlanningAssetMetadata[]
 ): TaskRecoveryScope {
   const context = hostContextSchema.parse(rawContext)
-  validateHostPlanExecution(hostPlanSchema.parse(plan), context)
+  validateHostPlanExecution(hostPlanSchema.parse(plan), context, resources)
   const targetIds = [...new Set(plan.steps.map((step) => step.targetId))].sort()
   const byId = new Map(context.nodes.map((node) => [node.id, node]))
   const included = new Set(targetIds)
@@ -245,8 +252,10 @@ export function applyTaskRecoveryRebind(
 export function prepareTaskRecoveryPlan(
   savedPlan: HostPlan,
   scope: TaskRecoveryScope,
-  rawContext: HostContext
+  rawContext: HostContext,
+  imageRecovery?: FigPluginRecoveryExecutionImages
 ): { plan: HostPlan; unchanged: boolean } {
+  const images = imageRecovery && figPluginRecoveryExecutionImagesSchema.parse(imageRecovery)
   const context = hostContextSchema.parse(rawContext)
   const equal = (a: unknown, b: unknown) => canonicalFigPluginJson(a) === canonicalFigPluginJson(b)
   if (
@@ -276,14 +285,35 @@ export function prepareTaskRecoveryPlan(
     )
       throw new Error('STALE_RECOVERY_SCOPE')
   }
-  const plan = hostPlanSchema.parse({ ...savedPlan, captureId: context.captureId })
-  validateHostPlanExecution(plan, context)
+  const plan = hostPlanSchema.parse({
+    ...savedPlan,
+    captureId: context.captureId,
+    steps: savedPlan.steps.map((step) => {
+      if (step.command !== 'image.fill' && step.command !== 'image.pixels') return step
+      const binding = images?.assetBindings.find(
+        (binding) => binding.sourceAssetId === step.assetId
+      )
+      if (!binding) throw new Error('IMAGE_RECOVERY_UNBOUND')
+      return { ...step, assetId: binding.assetId }
+    })
+  })
+  const resources = images?.manifest.assets.map((asset) => ({
+    ...asset,
+    assetId: images.assetBindings.find((binding) => binding.sourceAssetId === asset.assetId)!
+      .assetId,
+    expiresAt: Number.MAX_SAFE_INTEGER
+  }))
+  validateHostPlanExecution(plan, context, resources, images)
   if (!equal([...new Set(plan.steps.map((step) => step.targetId))].sort(), scope.targetIds))
     throw new Error('INVALID_RECOVERY_SCOPE')
   return {
     plan,
-    unchanged: plan.steps.every((step) =>
-      equal(nodeValue(byId.get(step.targetId)!, step.command), stepValue(step))
+    // History IDs, fingerprints and thumbnails do not prove exact accepted image state.
+    unchanged: plan.steps.every(
+      (step) =>
+        step.command !== 'image.fill' &&
+        step.command !== 'image.pixels' &&
+        equal(nodeValue(byId.get(step.targetId)!, step.command), stepValue(step))
     )
   }
 }

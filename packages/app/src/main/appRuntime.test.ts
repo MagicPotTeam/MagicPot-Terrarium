@@ -65,7 +65,7 @@ vi.mock('./testWindowRuntime', () => ({
   getTestWindowPolicy: vi.fn()
 }))
 
-import { protocol } from 'electron'
+import { net, protocol } from 'electron'
 import {
   initializeMainProcessRuntime,
   setupReadyAppRuntime,
@@ -81,6 +81,7 @@ describe('appRuntime local-media protocol helpers', () => {
     resolveAuthorizedLocalMediaPathMock.mockReset()
     vi.mocked(protocol.handle).mockClear()
     vi.mocked(protocol.registerSchemesAsPrivileged).mockClear()
+    vi.mocked(net.fetch).mockReset()
   })
 
   it('registers local-media as a CORS-enabled privileged scheme without bypassing CSP', () => {
@@ -159,6 +160,37 @@ describe('appRuntime local-media protocol helpers', () => {
 
     expect(response.status).toBe(403)
     expect(resolveAuthorizedLocalMediaPathMock).not.toHaveBeenCalled()
+  })
+
+  it('authorizes and fetches literal percent-escape filenames separately from space filenames', async () => {
+    resolveAuthorizedLocalMediaPathMock.mockImplementation((filePath: string) => filePath)
+    vi.mocked(net.fetch).mockImplementation(async () => new Response('synthetic-image-bytes'))
+    await setupReadyAppRuntime()
+    const handler = vi.mocked(protocol.handle).mock.calls.at(-1)?.[1] as (
+      request: Request
+    ) => Promise<Response>
+
+    const literalPercentResponse = await handler(
+      new Request('local-media:///C:/images/image%2520one.png')
+    )
+    const actualSpaceResponse = await handler(
+      new Request('local-media:///C:/images/image%20one.png')
+    )
+
+    expect(literalPercentResponse.status).toBe(200)
+    expect(actualSpaceResponse.status).toBe(200)
+    expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenNthCalledWith(
+      1,
+      'C:/images/image%20one.png',
+      expect.any(Array)
+    )
+    expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenNthCalledWith(
+      2,
+      'C:/images/image one.png',
+      expect.any(Array)
+    )
+    expect(net.fetch).toHaveBeenNthCalledWith(1, 'file:///C:/images/image%2520one.png')
+    expect(net.fetch).toHaveBeenNthCalledWith(2, 'file:///C:/images/image%20one.png')
   })
 
   it('adds CORS headers while preserving the proxied local file response metadata', async () => {

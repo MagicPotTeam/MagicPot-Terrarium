@@ -41,7 +41,7 @@ The visible **Desktop not paired** / **Capabilities disabled** notices are not a
 
 ## Verification boundary
 
-From the repository root with Node 22:
+From the repository root with Node 24:
 
 ```sh
 node --test scripts/figplugin-host-artifacts.test.mjs

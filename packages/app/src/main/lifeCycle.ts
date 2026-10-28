@@ -1,3 +1,5 @@
+import path from 'node:path'
+import { app } from 'electron'
 import type { Config } from '@shared/config/config'
 import { initServerIpc } from './api/serverIpc'
 import {
@@ -9,6 +11,12 @@ import {
   createManagedMediaCleanupScheduler,
   type ManagedMediaCleanupScheduler
 } from './llmProxy/managedMediaCleanupScheduler'
+import { cleanupManagedMediaStagingOnShutdown } from './llmProxy/managedMediaCleanup'
+import {
+  loadManagedMediaReferenceSnapshot,
+  persistManagedMediaReferenceSnapshot
+} from './llmProxy/managedMediaReferenceSnapshotStore'
+import { getChatMediaDir } from './llmProxy/chatMediaDir'
 import { initializeAgentKernelRuntime, refreshAgentKernelRuntime } from './agentKernel/runtime'
 import { initComfyStateListener, stopComfyStateListener } from './comfy/state'
 import { getConfig, initConfig, listenConfig } from './config/config'
@@ -46,10 +54,17 @@ import { closeMagicPotMcpLegacySseSessions } from './mcp/platform/httpBridge'
 import { stopMcpClientManager, syncMcpClientManager } from './mcp/runtime'
 import { initTaskQueue, stopTaskQueue } from './queue/taskQueue'
 import { cleanupSubProcesses } from './subprocess/subprocess'
+import { disposeFigPluginBridges } from './api/svcFigPluginCenterImpl'
 import { setConsoleTransportEnabled } from './utils/loggingOverride'
 import { winController } from './winControls'
+import { createCheckpointStore } from './figplugin/checkpointEncryption'
+import {
+  createCheckpointCleanupScheduler,
+  type CheckpointCleanupScheduler
+} from './figplugin/checkpointCleanupScheduler'
 
 let managedMediaCleanupScheduler: ManagedMediaCleanupScheduler | undefined
+let checkpointCleanupScheduler: CheckpointCleanupScheduler | undefined
 let magicAgentSdkHttpServer: MagicAgentSdkHttpServer | undefined
 
 async function runLifecycleStep(
@@ -91,7 +106,28 @@ function startBackgroundTasks(): void {
   initComfyStateListener()
   winController.initIpc()
   if (!managedMediaCleanupScheduler) {
-    managedMediaCleanupScheduler = createManagedMediaCleanupScheduler()
+    const chatMediaRoot = getChatMediaDir()
+    managedMediaCleanupScheduler = createManagedMediaCleanupScheduler({
+      persistSnapshot: persistManagedMediaReferenceSnapshot,
+      loadPersistedSnapshot: () => loadManagedMediaReferenceSnapshot(chatMediaRoot),
+      logger: {
+        snapshotPersistenceFailed: () =>
+          console.warn('[ManagedMedia] Failed to persist the reference snapshot')
+      }
+    })
+    void managedMediaCleanupScheduler.restorePersistedSnapshot()
+  }
+  if (!checkpointCleanupScheduler) {
+    const checkpointRoot = path.join(app.getPath('userData'), 'figplugin-center')
+    checkpointCleanupScheduler = createCheckpointCleanupScheduler({
+      createStore: () => createCheckpointStore(checkpointRoot),
+      cleanupCompleted: ({ expiredRecordCount }) => {
+        if (expiredRecordCount > 0)
+          console.log(`[FIGPLUGIN] Removed ${expiredRecordCount} expired checkpoint(s)`)
+      },
+      cleanupFailed: () => console.warn('[FIGPLUGIN] Checkpoint cleanup pass failed')
+    })
+    checkpointCleanupScheduler.start()
   }
   initServerIpc(managedMediaCleanupScheduler, () => winController.getMainWindow())
 }
@@ -176,16 +212,29 @@ export async function beforeShow() {
 
 export async function beforeQuit() {
   await runLifecycleStep('LLM server stopped', () => stopLLMProxyServer())
+  const managedMediaSchedulerStopped = await runLifecycleStep(
+    'Managed media cleanup scheduler stopped',
+    async () => {
+      await managedMediaCleanupScheduler?.stop()
+      managedMediaCleanupScheduler = undefined
+    }
+  )
+  await runLifecycleStep('FIGPLUGIN checkpoint cleanup scheduler stopped', async () => {
+    await checkpointCleanupScheduler?.stop()
+    checkpointCleanupScheduler = undefined
+  })
+  if (managedMediaSchedulerStopped) {
+    await runLifecycleStep('Managed media shutdown staging cleanup finished', async () => {
+      await cleanupManagedMediaStagingOnShutdown({ chatMediaRoot: getChatMediaDir() })
+    })
+  }
   await runLifecycleStep('MCP legacy SSE sessions stopped', () =>
     closeMagicPotMcpLegacySseSessions()
   )
   await runLifecycleStep('MCP clients stopped', () => stopMcpClientManager())
   await runLifecycleStep('MCP platform stopped', () => stopMagicPotMcpPlatformRuntime())
   await runLifecycleStep('Comfy listener stopped', () => stopComfyStateListener())
-  await runLifecycleStep('Managed media cleanup scheduler stopped', async () => {
-    await managedMediaCleanupScheduler?.stop()
-    managedMediaCleanupScheduler = undefined
-  })
+  await runLifecycleStep('FigPlugin Bridge children stopped', () => disposeFigPluginBridges())
   await runLifecycleStep('MagicAgent SDK server stopped', async () => {
     await magicAgentSdkHttpServer?.close()
     magicAgentSdkHttpServer = undefined

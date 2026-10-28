@@ -161,23 +161,29 @@ describe('persistent accepted task checkpoints through the production runtime', 
     await expect(
       next.r.prepareTaskRecovery(accepted.session.sessionId, accepted.session.sessionToken, input())
     ).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
-    const session = await pair(next.r, 'f'.repeat(64)),
-      recovered = await prepare(next.r, session)
+    const session = await pair(next.r, 'f'.repeat(64))
+    const blocked = next.r.prepareTaskRecovery(session.sessionId, session.sessionToken, input())
+    await expect(blocked).rejects.toMatchObject({ code: 'BUSY' })
+    // The previous process consumed the round but did not leave a host receipt. The
+    // persisted crash fence expires before a fresh recovery intent may be prepared.
+    f.advance(120_001)
+    const freshSession = await pair(next.r, 'f'.repeat(64))
+    const recovered = await prepare(next.r, freshSession)
     expect(recovered.recovery.round).toBe(2)
     expect(
       (
-        await next.r.claimPlan(session.sessionId, session.sessionToken, {
+        await next.r.claimPlan(freshSession.sessionId, freshSession.sessionToken, {
           protocol: 1,
           callId: recovered.callId
         })
       ).status
     ).toBe('pending')
     expect(f.store().find(binding, context)?.value.correctionRoundsUsed).toBe(1)
-    const claimed = await approveClaim(next.r, session, recovered)
+    const claimed = await approveClaim(next.r, freshSession, recovered)
     if (claimed.status !== 'ready') throw new Error('missing intent')
     const after = structuredClone(input().hostContext)
     after.nodes[0].name = (plan.steps[0] as { name: string }).name
-    const result = next.r.planResult(session.sessionId, session.sessionToken, {
+    const result = next.r.planResult(freshSession.sessionId, freshSession.sessionToken, {
       protocol: 1,
       executionId: recovered.executionId,
       actionId: claimed.intent.actionId,
@@ -200,9 +206,14 @@ describe('persistent accepted task checkpoints through the production runtime', 
       recoveryConsumed: true,
       visualBaselineComparison: { exactMatch: true }
     })
+    expect(f.store().find(binding, context)?.activeRecovery).toBeUndefined()
     expect(after.nodes[0].opacity).toBe(0.2)
     expect(f.store().find(binding, context)?.value.correctionRoundsUsed).toBe(2)
     expect(next.invoke).not.toHaveBeenCalled()
+    next.r.dispose()
+    const settled = f.make(),
+      settledSession = await pair(settled.r)
+    expect((await prepare(settled.r, settledSession)).recovery.round).toBe(3)
   })
   it('declining before claim spends no round, restarting cannot exceed the shared three-round limit', async () => {
     const f = setup()
@@ -228,7 +239,9 @@ describe('persistent accepted task checkpoints through the production runtime', 
       expect(['pending', 'ready']).toContain(b.status)
       expect(f.store().find(binding, context)?.value.correctionRoundsUsed).toBe(round)
       current.r.dispose()
+      if (round < 3) f.advance(120_001)
     }
+    f.advance(120_001)
     const fourth = f.make(),
       s = await pair(fourth.r)
     await expect(prepare(fourth.r, s)).rejects.toMatchObject({ code: 'DENIED' })

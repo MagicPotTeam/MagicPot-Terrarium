@@ -1,26 +1,35 @@
+import { createHash } from 'node:crypto'
 import { figmaTypography, typographyFontKey } from '@shared/figplugin/hostTypography'
 import { OpenAIAPICli } from '@shared/llm/clients'
 import { HOST_PLAN_SYSTEM_MESSAGE } from './planGovernance'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { LLMProxySvc } from '@shared/api/svcLLMProxy'
+import type { LLMListProfilesResp, LLMProxySvc } from '@shared/api/svcLLMProxy'
 import type { HostContext } from '@shared/figplugin/hostPlan'
+import { contextImageSummary, type HostContextImage } from '@shared/figplugin/hostContextImage'
+import { encodeContextPng } from '@shared/figplugin/pixelAuditRuntime'
 import type { FigPluginBridgePrepareRequest } from '@shared/figplugin/bridge'
+import {
+  figPluginPlanningAuditEventSchema,
+  type FigPluginPlanningAuditEvent
+} from '@shared/figplugin/planningAudit'
+import type { FigPluginExecutionAuditEvent } from '@shared/figplugin/executionAudit'
 import { FigPluginBridgeController } from './bridgeController'
 import type { startFigPluginBridgeServer } from './bridgeServer'
 import type { FigPluginRuntimeDescriptor } from './centerStore'
 
-const capture = (executable = false): HostContext => ({
+type Host = HostContext['host']
+const capture = (executable = false, host: Host = 'figma'): HostContext => ({
   version: 1,
-  host: 'figma',
-  documentId: 'doc',
-  scopeId: 'page',
+  host,
+  documentId: host === 'figma' ? 'doc' : '7',
+  scopeId: host === 'figma' ? 'page' : '7',
   captureId: 'a'.repeat(32),
   nodes: [
     {
-      id: '1:2',
-      type: 'TEXT',
+      id: host === 'figma' ? '1:2' : '42',
+      type: host === 'figma' ? 'TEXT' : 'text',
       name: 'Owned layer',
-      parentId: 'page',
+      parentId: host === 'figma' ? 'page' : '7',
       ancestors: [],
       locked: false,
       visible: true,
@@ -32,10 +41,10 @@ const capture = (executable = false): HostContext => ({
   ],
   ...(executable
     ? {
-        selectedIds: ['1:2'],
+        selectedIds: [host === 'figma' ? '1:2' : '42'],
         execution: {
           mode: 'native-write' as const,
-          adapterVersion: 'figma-native-1',
+          adapterVersion: host === 'figma' ? 'figma-native-1' : 'photoshop-uxp-native-1',
           supports: ['node.rename' as const, 'node.opacity' as const, 'text.content' as const],
           rollback: 'verified-in-place' as const,
           visualAudit: 'unavailable' as const
@@ -43,23 +52,32 @@ const capture = (executable = false): HostContext => ({
       }
     : {})
 })
-const proposal = () => ({
+const proposal = (host: Host = 'figma') => ({
   schemaVersion: 2,
   kind: 'host-plan',
   captureId: 'a'.repeat(32),
-  steps: [{ command: 'node.rename', targetId: '1:2', name: 'Reviewed layer' }]
+  steps: [
+    { command: 'node.rename', targetId: host === 'figma' ? '1:2' : '42', name: 'Reviewed layer' }
+  ]
 })
-const planningRequest = (executable = false) => ({
+const planningRequest = (executable = false, host: Host = 'figma') => ({
   protocol: 1 as const,
   requestId: 'owned-request',
   sequence: 1,
   prompt: 'Rename the selected layer',
   context: {
     selectionRevision: 'a'.repeat(32),
-    nodes: [{ id: '1:2', type: 'TEXT', name: 'Owned layer', locked: false }]
+    nodes: [
+      {
+        id: host === 'figma' ? '1:2' : '42',
+        type: host === 'figma' ? 'TEXT' : 'text',
+        name: 'Owned layer',
+        locked: false
+      }
+    ]
   },
   featureId: 'plan-preview' as const,
-  hostContext: capture(executable)
+  hostContext: capture(executable, host)
 })
 const all: FigPluginBridgeController[] = []
 afterEach(async () => {
@@ -71,9 +89,15 @@ async function fixture(
     'dialogue',
     'asset-transfer',
     'result-transfer'
-  ]
+  ],
+  profileOverrides: Partial<LLMListProfilesResp['profiles'][number]> = {},
+  limits: Partial<FigPluginRuntimeDescriptor['limits']> = {},
+  onPlanningEvent?: (event: FigPluginPlanningAuditEvent) => void,
+  host: Host = 'figma'
 ) {
   const revision = 'd'.repeat(64)
+  const planningEvents: FigPluginPlanningAuditEvent[] = []
+  const executionEvents: FigPluginExecutionAuditEvent[] = []
   let runtime!: Parameters<typeof startFigPluginBridgeServer>[0]['runtime']
   const model = {
     listProfiles: vi.fn<LLMProxySvc['listProfiles']>().mockResolvedValue({
@@ -83,13 +107,14 @@ async function fixture(
           model_name: 'Owned model',
           model_use: 'chat',
           configurationRevision: revision,
-          context_budget_tokens: 16000
+          context_budget_tokens: 16000,
+          ...profileOverrides
         }
       ]
     }),
     chat: vi
       .fn<LLMProxySvc['chat']>()
-      .mockResolvedValue({ content: JSON.stringify(proposal()), finishReason: 'stop' }),
+      .mockResolvedValue({ content: JSON.stringify(proposal(host)), finishReason: 'stop' }),
     cancelConversation: vi
       .fn<LLMProxySvc['cancelConversation']>()
       .mockResolvedValue({ cancelled: true }),
@@ -99,8 +124,8 @@ async function fixture(
   const controller = new FigPluginBridgeController(
     {
       getRuntimeDescriptor: async () => ({
-        pluginId: 'owned.figma',
-        host: 'figma',
+        pluginId: `owned.${host}`,
+        host,
         generation: 1,
         artifactSha256: 'b'.repeat(64),
         signerFingerprint: 'c'.repeat(64),
@@ -113,13 +138,19 @@ async function fixture(
           maxResultBytes: 32768,
           maxConfigBytes: 1024,
           maxCallTimeoutMs: 30000,
-          maxConcurrentCalls: 1
+          maxConcurrentCalls: 1,
+          ...limits
         }
       }),
       onRuntimeInvalidated: () => () => undefined
     },
     model,
     {
+      planningAudit: (event) => {
+        planningEvents.push(structuredClone(event))
+        onPlanningEvent?.(event)
+      },
+      audit: (event) => executionEvents.push(structuredClone(event)),
       startServer: async (options) => {
         runtime = options.runtime
         return { origin: options.origin, close: async () => undefined }
@@ -128,7 +159,7 @@ async function fixture(
   )
   all.push(controller)
   const binding = await controller.resolveBinding(
-    { pluginId: 'owned.figma', expectedGeneration: 1 },
+    { pluginId: `owned.${host}`, expectedGeneration: 1 },
     'owned-project'
   )
   const ticket = await controller.createPairing(binding)
@@ -144,7 +175,7 @@ async function fixture(
   const start = () =>
     runtime.prepare(session.sessionId, session.sessionToken, input as FigPluginBridgePrepareRequest)
   const status = (callId: string) => runtime.status(session.sessionId, session.sessionToken, callId)
-  return { controller, runtime, model, session, start, status }
+  return { controller, runtime, model, session, start, status, planningEvents, executionEvents }
 }
 async function finished(f: Awaited<ReturnType<typeof fixture>>, callId: string) {
   for (let i = 0; i < 30; i++) {
@@ -159,6 +190,532 @@ async function finished(f: Awaited<ReturnType<typeof fixture>>, callId: string) 
   }
   throw Error('owned fixture did not settle')
 }
+
+const visionProfile: Partial<LLMListProfilesResp['profiles'][number]> = {
+  provider: 'openai',
+  api_mode: 'responses',
+  is_vision_model: true,
+  attachment_transports: ['request-data-url']
+}
+const contextImage = (host: Host = 'figma'): HostContextImage => {
+  const encoded =
+    host === 'photoshop'
+      ? encodeContextPng(2, 1, new Uint8Array([91, 82, 73, 0, 64, 55, 46, 127]), 4)
+      : Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==',
+          'base64'
+        )
+  if (!encoded) throw new Error('Synthetic context image exceeded its budget')
+  const bytes = Buffer.from(encoded)
+  return {
+    version: 1,
+    kind: 'host-context-image',
+    captureId: 'a'.repeat(32),
+    targetId: host === 'figma' ? '1:2' : '42',
+    mimeType: 'image/png',
+    width: host === 'figma' ? 1 : 2,
+    height: 1,
+    sizeBytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    bytesBase64: bytes.toString('base64')
+  }
+}
+const imageRequest = (host: Host = 'figma') => ({
+  ...planningRequest(true, host),
+  contextImage: contextImage(host)
+})
+
+describe('controller planning diagnostics', () => {
+  it('records handoff only after calling the model even when the audit sink exhausts the deadline', async () => {
+    let elapsed = 0
+    let callsAtHandoff = -1
+    const monotonic = vi.spyOn(performance, 'now').mockImplementation(() => elapsed)
+    try {
+      const f = await fixture(planningRequest(), undefined, {}, {}, (event) => {
+        if (event.state !== 'provider-dispatched') return
+        callsAtHandoff = f.model.chat.mock.calls.length
+        elapsed = 30_001
+      })
+      const receipt = await f.start()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({
+        status: 'failed',
+        errorCode: 'TIMEOUT'
+      })
+      expect(callsAtHandoff).toBe(1)
+      expect(f.model.chat).toHaveBeenCalledTimes(1)
+      expect(f.planningEvents.map((event) => event.state)).toEqual([
+        'awaiting-approval',
+        'running',
+        'provider-dispatched',
+        'failed'
+      ])
+      expect(f.planningEvents.at(-1)?.errorCode).toBe('TIMEOUT')
+      expect(f.executionEvents).toEqual([])
+    } finally {
+      monotonic.mockRestore()
+    }
+  })
+
+  it('records a synchronously rejected model handoff without retaining its private error', async () => {
+    const f = await fixture()
+    f.model.chat.mockImplementation(() => {
+      throw new Error('Private model service failure')
+    })
+    const receipt = await f.start()
+    await f.controller.approve(
+      receipt.callId,
+      f.controller.desktopState().previews[0].payloadSha256
+    )
+    expect(await finished(f, receipt.callId)).toMatchObject({
+      status: 'failed',
+      errorCode: 'UPSTREAM_FAILED'
+    })
+    expect(f.model.chat).toHaveBeenCalledTimes(1)
+    expect(f.planningEvents.map((event) => event.state)).toEqual([
+      'awaiting-approval',
+      'running',
+      'provider-dispatched',
+      'failed'
+    ])
+    expect(JSON.stringify(f.planningEvents)).not.toContain('Private model service failure')
+    expect(f.executionEvents).toEqual([])
+  })
+
+  it('retains the earlier runtime deadline as a final pre-dispatch authority check', async () => {
+    let now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    try {
+      const f = await fixture(planningRequest(), undefined, {}, {}, (event) => {
+        if (event.state === 'running') now += 90_001
+      })
+      const receipt = await f.start()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      // Let invocation preflight finish before status polling can prune the expired call.
+      for (let tick = 0; tick < 20; tick += 1) await Promise.resolve()
+      expect(f.model.chat).not.toHaveBeenCalled()
+      expect(await finished(f, receipt.callId)).toMatchObject({
+        status: 'failed',
+        errorCode: 'TIMEOUT'
+      })
+      expect(f.planningEvents.map((event) => event.state)).toEqual([
+        'awaiting-approval',
+        'running',
+        'failed'
+      ])
+      expect(f.planningEvents.at(-1)?.errorCode).toBe('TIMEOUT')
+      expect(f.executionEvents).toEqual([])
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  it.each(['figma', 'photoshop'] as const)(
+    'links %s image planning to the resulting write preview without storing either content',
+    async (host) => {
+      const f = await fixture(imageRequest(host), undefined, visionProfile, {}, undefined, host)
+      const receipt = await f.start()
+      expect(f.planningEvents.map((event) => event.state)).toEqual(['awaiting-approval'])
+      expect(f.executionEvents).toEqual([])
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({ status: 'completed' })
+      expect(f.planningEvents.map((event) => event.state)).toEqual([
+        'awaiting-approval',
+        'running',
+        'provider-dispatched',
+        'completed'
+      ])
+      for (const event of f.planningEvents) {
+        expect(figPluginPlanningAuditEventSchema.parse(event)).toEqual(event)
+        expect(event).toMatchObject({
+          host,
+          pluginId: `owned.${host}`,
+          profileId: 'owned-model',
+          profileRevision: 'd'.repeat(64),
+          provider: 'openai',
+          modelName: 'Owned model',
+          featureId: 'plan-preview',
+          imageCount: 1,
+          imageBytes: contextImage(host).sizeBytes
+        })
+      }
+      const correlation = f.planningEvents[0].correlationId
+      expect(f.model.chat.mock.calls[0][0].correlationId).toBe(correlation)
+      expect(f.executionEvents).toHaveLength(1)
+      expect(f.executionEvents[0]).toMatchObject({
+        correlationId: correlation,
+        state: 'awaiting-approval'
+      })
+      const serialized = JSON.stringify(f.planningEvents)
+      for (const content of [
+        contextImage(host).bytesBase64,
+        'Owned text',
+        'Reviewed layer',
+        'Rename the selected layer'
+      ])
+        expect(serialized).not.toContain(content)
+      expect(f.planningEvents.at(-1)?.resultBytes).toBeGreaterThan(0)
+    }
+  )
+
+  it.each([{ is_vision_model: false }, { context_budget_tokens: 100 }])(
+    'never records a model dispatch for a local preflight rejection %#',
+    async (profile) => {
+      const f = await fixture(imageRequest(), undefined, { ...visionProfile, ...profile })
+      const receipt = await f.start()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({ status: 'failed' })
+      expect(f.model.chat).not.toHaveBeenCalled()
+      expect(f.planningEvents.map((event) => event.state)).toEqual([
+        'awaiting-approval',
+        'running',
+        'failed'
+      ])
+      expect(f.planningEvents.at(-1)?.errorCode).toBe('UPSTREAM_FAILED')
+      expect(f.executionEvents).toEqual([])
+      expect(
+        (await f.runtime.readiness(f.session.sessionId, f.session.sessionToken)).provider
+      ).toEqual({ state: 'unknown', code: 'provider-not-probed' })
+    }
+  )
+
+  it('does not let repeated local image rejections block a valid text request on the same profile', async () => {
+    const input: FigPluginBridgePrepareRequest = imageRequest()
+    const f = await fixture(input, undefined, { ...visionProfile, is_vision_model: false })
+    for (let sequence = 1; sequence <= 3; sequence += 1) {
+      input.sequence = sequence
+      input.requestId = `local-image-${sequence}`
+      const receipt = await f.start()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({ status: 'failed' })
+    }
+    expect(f.model.chat).not.toHaveBeenCalled()
+    expect(
+      (await f.runtime.readiness(f.session.sessionId, f.session.sessionToken)).provider
+    ).toEqual({ state: 'unknown', code: 'provider-not-probed' })
+    delete input.contextImage
+    input.sequence = 4
+    input.requestId = 'valid-text'
+    const receipt = await f.start()
+    await f.controller.approve(
+      receipt.callId,
+      f.controller.desktopState().previews[0].payloadSha256
+    )
+    expect(await finished(f, receipt.callId)).toMatchObject({ status: 'completed' })
+    expect(f.model.chat).toHaveBeenCalledTimes(1)
+    expect(
+      (await f.runtime.readiness(f.session.sessionId, f.session.sessionToken)).provider
+    ).toEqual({ state: 'ready', code: 'provider-observed' })
+    expect(f.planningEvents.filter((event) => event.state === 'provider-dispatched')).toHaveLength(
+      1
+    )
+  })
+
+  it('records invalid model plans as failure, not native execution or planning success', async () => {
+    const f = await fixture(planningRequest(true), undefined, { provider: 'openai' })
+    f.model.chat.mockResolvedValue({
+      content: 'Private malformed model plan',
+      finishReason: 'stop'
+    })
+    const receipt = await f.start()
+    await f.controller.approve(
+      receipt.callId,
+      f.controller.desktopState().previews[0].payloadSha256
+    )
+    expect(await finished(f, receipt.callId)).toMatchObject({ status: 'failed' })
+    expect(f.planningEvents.map((event) => event.state)).toEqual([
+      'awaiting-approval',
+      'running',
+      'provider-dispatched',
+      'failed'
+    ])
+    expect(f.executionEvents).toEqual([])
+    expect(f.planningEvents.at(-1)).not.toHaveProperty('resultBytes')
+    expect(JSON.stringify(f.planningEvents)).not.toContain('Private malformed model plan')
+  })
+
+  it('uses only the paired profile metadata snapshot and excludes unsafe optional labels', async () => {
+    const f = await fixture(planningRequest(), undefined, { provider: 'openai' })
+    f.model.listProfiles.mockResolvedValue({
+      profiles: [
+        {
+          id: 'owned-model',
+          model_name: 'Changed without a new binding',
+          provider: 'gemini',
+          configurationRevision: 'd'.repeat(64)
+        }
+      ]
+    })
+    const receipt = await f.start()
+    await f.controller.approve(
+      receipt.callId,
+      f.controller.desktopState().previews[0].payloadSha256
+    )
+    expect(await finished(f, receipt.callId)).toMatchObject({ status: 'completed' })
+    for (const event of f.planningEvents)
+      expect(event).toMatchObject({ provider: 'openai', modelName: 'Owned model' })
+    const unsafe = await fixture(planningRequest(), undefined, { model_name: 'unsafe\nlabel' })
+    const next = await unsafe.start()
+    await unsafe.controller.approve(
+      next.callId,
+      unsafe.controller.desktopState().previews[0].payloadSha256
+    )
+    expect(await finished(unsafe, next.callId)).toMatchObject({ status: 'completed' })
+    expect(unsafe.planningEvents).toHaveLength(4)
+    for (const event of unsafe.planningEvents) expect(event).not.toHaveProperty('modelName')
+  })
+})
+
+describe.each(['figma', 'photoshop'] as const)(
+  'approved %s single-image native planning',
+  (host) => {
+    const forHost = (
+      input: unknown,
+      profile: Partial<LLMListProfilesResp['profiles'][number]> = {},
+      limits: Partial<FigPluginRuntimeDescriptor['limits']> = {}
+    ) => fixture(input, undefined, profile, limits, undefined, host)
+
+    it('rejects the other host before model approval or execution authority is retained', async () => {
+      const f = await forHost(imageRequest(host === 'figma' ? 'photoshop' : 'figma'), visionProfile)
+      await expect(f.start()).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+      expect(f.controller.desktopState().previews).toEqual([])
+      expect(f.controller.planState().previews).toEqual([])
+      expect(f.model.chat).not.toHaveBeenCalled()
+      expect(f.planningEvents).toEqual([])
+      expect(f.executionEvents).toEqual([])
+    })
+
+    it('sends only an approved inline image and keeps native write approval independent', async () => {
+      const f = await forHost(imageRequest(host), visionProfile)
+      const receipt = await f.start()
+      expect(f.model.chat).not.toHaveBeenCalled()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({ status: 'completed' })
+      const request = f.model.chat.mock.calls[0][0]
+      expect(request.messages).toHaveLength(1)
+      const message = request.messages[0]
+      expect(JSON.parse(message.content).hostContext).toEqual(capture(true, host))
+      expect(JSON.parse(message.content).contextImage).toEqual(
+        contextImageSummary(contextImage(host))
+      )
+      expect(message.content).not.toContain(contextImage(host).bytesBase64)
+      expect(message.attachments).toEqual([
+        {
+          type: 'image',
+          url: `data:image/png;base64,${contextImage(host).bytesBase64}`,
+          mimeType: 'image/png',
+          sizeBytes: contextImage(host).sizeBytes,
+          sourceWidth: contextImage(host).width,
+          sourceHeight: contextImage(host).height,
+          imageDetail: 'low'
+        }
+      ])
+      expect(request.structuredOutput).toMatchObject({ strict: true, name: 'figplugin_host_plan' })
+      expect(request.expectedProfileRevision).toBe('d'.repeat(64))
+      expect(request).not.toHaveProperty('tools')
+      expect(f.controller.planState().previews[0]).toMatchObject({
+        state: 'awaiting-approval',
+        host,
+        plan: proposal(host)
+      })
+      expect(JSON.stringify(f.controller.planState())).not.toContain(contextImage(host).bytesBase64)
+      const claim = await f.runtime.claimPlan(f.session.sessionId, f.session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      expect(claim.status).not.toBe('ready')
+    })
+
+    it.each<Partial<LLMListProfilesResp['profiles'][number]>>([
+      { is_vision_model: false },
+      { is_vision_model: undefined },
+      { provider: 'claude' },
+      { provider: undefined },
+      { api_mode: 'images' },
+      { api_mode: undefined },
+      { attachment_transports: [] },
+      { attachment_transports: ['accessible-url'] },
+      { max_input_images: 0 },
+      { max_input_images: -1 },
+      { max_input_images: NaN },
+      { max_input_images: Infinity },
+      { maxInputImages: 1.5 },
+      { max_input_images: 1, maxImages: 0 }
+    ])(
+      'never silently strips images or dispatches to an incompatible profile %#',
+      async (override) => {
+        const f = await forHost(imageRequest(host), { ...visionProfile, ...override })
+        const receipt = await f.start()
+        await f.controller.approve(
+          receipt.callId,
+          f.controller.desktopState().previews[0].payloadSha256
+        )
+        expect(await finished(f, receipt.callId)).toMatchObject({ status: 'failed' })
+        expect(f.model.chat).not.toHaveBeenCalled()
+        expect(f.controller.planState().previews).toEqual([])
+      }
+    )
+
+    it('accepts an explicitly compatible vision profile, including a single-image limit', async () => {
+      const f = await forHost(imageRequest(host), {
+        ...visionProfile,
+        model_use: 'vision',
+        max_input_images: 1
+      })
+      const receipt = await f.start()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({ status: 'completed' })
+    })
+
+    it('reserves image tokens in addition to text and output, not base64 text tokens', async () => {
+      const profile = { ...visionProfile, context_budget_tokens: 5500 }
+      for (const image of [false, true]) {
+        const f = await forHost(image ? imageRequest(host) : planningRequest(true, host), profile)
+        const receipt = await f.start()
+        await f.controller.approve(
+          receipt.callId,
+          f.controller.desktopState().previews[0].payloadSha256
+        )
+        expect(await finished(f, receipt.callId)).toMatchObject({
+          status: image ? 'failed' : 'completed'
+        })
+        expect(f.model.chat).toHaveBeenCalledTimes(image ? 0 : 1)
+      }
+    })
+
+    it('counts image transport bytes against the signed package payload limit', async () => {
+      const f = await forHost(imageRequest(host), visionProfile)
+      const receipt = await f.start()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({ status: 'completed' })
+      const message = f.model.chat.mock.calls[0][0].messages[0]
+      const limit = Math.ceil(
+        (Buffer.byteLength(message.content) + Buffer.byteLength(JSON.stringify([message]))) / 2
+      )
+      const capped = await forHost(imageRequest(host), visionProfile, {
+        maxPayloadBytes: limit,
+        maxResultBytes: limit
+      })
+      const next = await capped.start()
+      await capped.controller.approve(
+        next.callId,
+        capped.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(capped, next.callId)).toMatchObject({ status: 'failed' })
+      expect(capped.model.chat).not.toHaveBeenCalled()
+    })
+
+    it('does not gain image capability from metadata changed after the pairing snapshot', async () => {
+      const f = await forHost(imageRequest(host))
+      const initial = await f.model.listProfiles({ includeConfigurationRevision: true })
+      f.model.listProfiles.mockResolvedValue({
+        profiles: [{ ...initial.profiles[0], ...visionProfile }]
+      })
+      const receipt = await f.start()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({ status: 'failed' })
+      expect(f.model.chat).not.toHaveBeenCalled()
+    })
+
+    it('uses the real Responses SSE image serializer without weakening static-plan governance', async () => {
+      const f = await forHost(imageRequest(host), visionProfile)
+      const output = JSON.stringify(proposal(host))
+      const transport = vi.fn<typeof fetch>().mockImplementation(
+        async () =>
+          new Response(
+            'data: ' +
+              JSON.stringify({ type: 'response.output_text.delta', delta: output }) +
+              '\n\n' +
+              'data: ' +
+              JSON.stringify({
+                type: 'response.completed',
+                response: {
+                  status: 'completed',
+                  output: [
+                    {
+                      type: 'message',
+                      role: 'assistant',
+                      content: [{ type: 'output_text', text: output }]
+                    }
+                  ]
+                }
+              }) +
+              '\n\n',
+            { headers: { 'content-type': 'text/event-stream' } }
+          )
+      )
+      const client = new OpenAIAPICli('test-key', 'https://fixture.invalid/v1', 'owned-model', {
+        apiMode: 'responses',
+        forceStreaming: true,
+        enableHostedTools: false,
+        fetchImpl: transport
+      })
+      f.model.chat.mockImplementation(async (request, options) => {
+        const result = await client.chat({
+          messages: request.messages,
+          systemPrompt: request.systemPrompt,
+          structuredOutput: request.structuredOutput,
+          maxOutputTokens: request.maxOutputTokens,
+          signal: options?.signal,
+          onDelta: () => {}
+        })
+        return { content: result.content, finishReason: result.finishReason }
+      })
+      const receipt = await f.start()
+      expect(transport).not.toHaveBeenCalled()
+      await f.controller.approve(
+        receipt.callId,
+        f.controller.desktopState().previews[0].payloadSha256
+      )
+      expect(await finished(f, receipt.callId)).toMatchObject({ status: 'completed' })
+      const wire = JSON.parse(String(transport.mock.calls[0][1]?.body))
+      expect(wire.input[0].content).toEqual([
+        { type: 'input_text', text: f.model.chat.mock.calls[0][0].messages[0].content },
+        {
+          type: 'input_image',
+          image_url: `data:image/png;base64,${contextImage(host).bytesBase64}`,
+          detail: 'low'
+        }
+      ])
+      expect(wire.instructions).toBe(HOST_PLAN_SYSTEM_MESSAGE)
+      expect(wire.text.format).toMatchObject({
+        type: 'json_schema',
+        name: 'figplugin_host_plan',
+        strict: true
+      })
+      expect(wire.tools).toBeUndefined()
+      expect(wire.stream).toBe(true)
+      expect(f.controller.planState().previews[0].state).toBe('awaiting-approval')
+    })
+  }
+)
 
 describe('approved read-only host planning through the production Bridge', () => {
   it('requires desktop consent before model planning and returns a validated non-executable preview', async () => {

@@ -4,11 +4,16 @@ import { canonicalFigPluginJson } from '@shared/figplugin/manifest'
 import { FIGPLUGIN_PLAN_MAX_BYTES, snapshotFigPluginPlanData } from '@shared/figplugin/plan'
 import {
   checkFigPluginRenameSnapshot,
+  bindFigPluginRenameTransactionCancellation,
+  closeFigPluginRenameTransaction,
+  inspectFigPluginAdapterCapabilityState,
+  isFigPluginRenameTransactionTransition,
   readFigPluginAdapterDescriptor,
   type FigPluginAdapterDescriptor,
   type FigPluginHostAdapter,
   type FigPluginRenameSnapshot,
-  type FigPluginRenameTransaction
+  type FigPluginRenameTransaction,
+  type FigPluginRenameTransactionPhase
 } from './hostAdapter'
 import {
   createFigPluginPlanPreview,
@@ -17,9 +22,9 @@ import {
   type FigPluginPlanScope
 } from './planPreview'
 
-// Main-only synthetic foundation, optionally owned by the controller. No native adapter, IPC
-// or provider parsing. Production controllers supply no adapter, so preparation is unavailable.
-// Digest possession is NOT approval. All authorities/callbacks below must be selected by main.
+// Main-owned plan executor. Synthetic adapters remain test-only; native adapters may be enabled
+// only by a caller that resolved them through the main-owned registry. Digest possession is NOT
+// approval. All authorities/callbacks below must be selected by main.
 export type FigPluginExecutionEffect =
   'not-applied' | 'applied' | 'rolled-back' | 'partial' | 'unknown'
 type Stop = 'CANCELLED' | 'REVOKED' | 'EXPIRED' | 'TIMED_OUT' | 'DISPOSED'
@@ -30,13 +35,14 @@ type PreparationCode =
   | 'BUSY'
   | 'QUARANTINED'
   | 'INVALID_PLAN'
+  | 'UNSUPPORTED_COMMAND'
   | 'INVALID_SCOPE'
   | 'NO_CHANGES'
   | 'ERROR'
 type Observation = { index: number; state: 'original' | 'requested' | 'other' }
 export type FigPluginExecutionOutcome = {
   attemptId?: string
-  synthetic: true
+  synthetic: boolean
   reason: Reason
   effect: FigPluginExecutionEffect
   observations: readonly Observation[]
@@ -55,7 +61,7 @@ export type FigPluginExecutionPreview = {
     rollback: 'transaction-only'
   }
   payloadSha256: string
-  synthetic: true
+  synthetic: boolean
   display: readonly { index: number; oldName: string; newName: string }[]
 }
 export type FigPluginExecutionScope = {
@@ -67,6 +73,8 @@ type Options = {
   resolveScope?: (signal: AbortSignal) => Promise<FigPluginExecutionScope | undefined>
   isCurrent?: (authorityEpoch: string) => boolean
   confirm?: (preview: FigPluginExecutionPreview) => Promise<boolean>
+  /** Native adapters are accepted only for a registry-backed production route. */
+  allowNativeAdapter?: boolean
   now?: () => number
 }
 type Phase = 'preparing' | 'ready' | 'confirming' | 'running' | 'recovering' | 'closing'
@@ -98,6 +106,35 @@ const freeze = <T>(value: T): T => {
 }
 const same = (left: unknown, right: unknown): boolean =>
   canonicalFigPluginJson(left) === canonicalFigPluginJson(right)
+// Confirmation UI can outlive the execution slot. Race it with the slot signal so a
+// cancellation/deadline always reaches the normal settlement path, while consuming a late
+// confirmation rejection to avoid an unhandled promise after the slot has been released.
+const awaitAbortable = <T>(value: PromiseLike<T>, signal: AbortSignal): Promise<T> => {
+  const settled = Promise.resolve(value)
+  if (signal.aborted) {
+    void settled.catch(() => undefined)
+    return Promise.reject(new Error('ABORTED'))
+  }
+  return new Promise<T>((resolve, reject) => {
+    let done = false
+    const cleanup = () => signal.removeEventListener('abort', onAbort)
+    const finish = (callback: () => void) => {
+      if (done) return
+      done = true
+      cleanup()
+      callback()
+    }
+    const onAbort = () => finish(() => reject(new Error('ABORTED')))
+    signal.addEventListener('abort', onAbort, { once: true })
+    // Abort may be requested synchronously while the listener is being installed by a
+    // re-entrant trusted callback; check again before waiting for the confirmation promise.
+    if (signal.aborted) onAbort()
+    settled.then(
+      (result) => finish(() => resolve(result)),
+      (error) => finish(() => reject(error))
+    )
+  })
+}
 // Reversible full display, including bidi/non-ASCII UTF-16 units. Never silently elides old values.
 const escaped = (text: string): string =>
   JSON.stringify(text).replace(
@@ -180,7 +217,9 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
   ): FigPluginExecutionOutcome =>
     freeze({
       ...(slot ? { attemptId: slot.id } : {}),
-      synthetic: true,
+      // A pre-preview stop has no descriptor. Keep the historical synthetic marker for that
+      // inert result; once a preview exists, preserve the adapter kind in the receipt.
+      synthetic: slot?.preview?.synthetic ?? true,
       reason,
       effect,
       observations
@@ -263,7 +302,11 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
       // Retain independently resolved identity values before any adapter await.
       const { adapter, authorityEpoch } = authority
       const descriptor = readFigPluginAdapterDescriptor(adapter.descriptor)
-      if (!descriptor || descriptor.kind !== 'synthetic') {
+      if (!descriptor || (descriptor.kind === 'native' && options.allowNativeAdapter !== true)) {
+        failure = 'UNAVAILABLE'
+        throw new Error(failure)
+      }
+      if (descriptor.kind === 'native' && descriptor.host !== authority.scope.binding.host) {
         failure = 'UNAVAILABLE'
         throw new Error(failure)
       }
@@ -284,6 +327,14 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
       const inert = createFigPluginPlanPreview(input.data, authority.scope, authority.scope.context)
       if (!inert.ok) {
         failure = 'INVALID_PLAN'
+        throw new Error(failure)
+      }
+      const capability = inspectFigPluginAdapterCapabilityState(
+        descriptor,
+        inert.preview.envelope.plan
+      )
+      if (capability.state !== 'ready') {
+        failure = capability.code === 'UNSUPPORTED_COMMAND' ? 'UNSUPPORTED_COMMAND' : 'UNAVAILABLE'
         throw new Error(failure)
       }
       const raw = await adapter.capture(
@@ -343,7 +394,7 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
         payloadSha256: createHash('sha256')
           .update(canonicalFigPluginJson(envelope), 'utf8')
           .digest('hex'),
-        synthetic: true,
+        synthetic: descriptor.kind === 'synthetic',
         display: envelope.plan.steps.map((step, index) => ({
           index,
           oldName: escaped(envelope.before.targets[index].name),
@@ -406,6 +457,9 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
       inert = slot.inert!
     const signal = slot.abort.signal
     let transaction: FigPluginRenameTransaction | undefined
+    let transactionCancellation:
+      ReturnType<typeof bindFigPluginRenameTransactionCancellation> | undefined
+    let transactionPhase: FigPluginRenameTransactionPhase | undefined
     let dispatched = false
     let effect: FigPluginExecutionEffect = 'not-applied'
     let reason: Reason = 'SUCCESS'
@@ -418,7 +472,8 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
     ])
     try {
       guard(slot)
-      const accepted = await (options.confirm?.(preview) ?? Promise.resolve(false))
+      const confirmation = options.confirm?.(preview) ?? Promise.resolve(false)
+      const accepted = await awaitAbortable(confirmation, signal)
       guard(slot)
       if (accepted !== true) {
         reason = 'DECLINED'
@@ -435,6 +490,14 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
       ) {
         stop(slot, 'REVOKED')
         throw new Error('REVOKED')
+      }
+      const currentDescriptor = readFigPluginAdapterDescriptor(adapter.descriptor)
+      const capability = currentDescriptor
+        ? inspectFigPluginAdapterCapabilityState(currentDescriptor, preview.envelope.plan)
+        : { state: 'unavailable' as const, code: 'ADAPTER_UNAVAILABLE' as const }
+      if (capability.state !== 'ready') {
+        stop(slot, 'REVOKED')
+        throw new Error(capability.code)
       }
       const current = await adapter.capture(
         preview.envelope.plan.steps.map((step) => step.targetId),
@@ -454,20 +517,32 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
         preview.envelope.plan.steps,
         signal
       )
+      transactionCancellation = bindFigPluginRenameTransactionCancellation(transaction, signal)
+      transactionPhase = 'acquired'
       guard(slot)
       for (let index = 0; index < preview.envelope.plan.steps.length; index++) {
         guard(slot)
+        if (!isFigPluginRenameTransactionTransition(transactionPhase, 'applying'))
+          throw new Error('INVALID_TRANSACTION_PHASE')
+        transactionPhase = 'applying'
         dispatched = true
         await transaction.applyNext(signal)
         guard(slot)
       }
+      if (!isFigPluginRenameTransactionTransition(transactionPhase, 'committing'))
+        throw new Error('INVALID_TRANSACTION_PHASE')
+      transactionPhase = 'committing'
       const rawCommit = await transaction.commit(signal)
+      transactionPhase = 'committed'
       const commitRevision = ownIdentifier(rawCommit, 'revision')
       if (commitRevision) knownRevisions.add(commitRevision)
       const committed = revision(rawCommit)
       guard(slot)
       if (!committed || committed === preview.envelope.before.document.revision)
         throw new Error('INVALID_RECEIPT')
+      if (!isFigPluginRenameTransactionTransition(transactionPhase, 'reading'))
+        throw new Error('INVALID_TRANSACTION_PHASE')
+      transactionPhase = 'reading'
       const rawReadback = await transaction.readback(signal)
       const observedRevision = sameDocumentRevision(rawReadback, preview.envelope.before.document)
       if (observedRevision) knownRevisions.add(observedRevision)
@@ -489,61 +564,93 @@ export const createFigPluginPlanExecutor = (options: Options = {}) => {
       effect = 'applied'
     } catch {
       reason = slot.stop ?? (reason === 'DECLINED' ? reason : 'ERROR')
-      if (transaction && dispatched) {
-        slot.phase = 'recovering'
-        record(slot, 'recovering', reason)
-        const cleanup = new AbortController()
-        const timer = setTimeout(() => cleanup.abort(), 10_000)
-        timer.unref?.()
-        effect = 'unknown'
-        observations = []
-        let undone: string | undefined
-        try {
-          undone = revision(await transaction.undo(cleanup.signal))
-        } catch {
-          /* No raw adapter errors enter the receipt or audit. */
-        }
-        try {
-          const readback = observe(await transaction.readback(cleanup.signal), preview)
-          if (readback) {
-            const observedRevision = readback.snapshot.document.revision
-            const previous = knownSnapshots.get(observedRevision)
-            const contradictsKnown = previous && !same(previous, readback.snapshot)
-            const reusedUndo = undone !== undefined && knownRevisions.has(undone)
-            const staleOriginal =
-              knownRevisions.size > 1 &&
-              observedRevision === preview.envelope.before.document.revision
-            const staleRollback = reusedUndo && knownRevisions.size > 1
-            if (contradictsKnown || staleOriginal || staleRollback)
-              throw new Error('STALE_RECOVERY')
-            observations = readback.observations
-            effect =
-              undone &&
-              !reusedUndo &&
-              !cleanup.signal.aborted &&
-              readback.snapshot.document.revision === undone &&
-              readback.snapshot.targets.every(
-                (target, index) => target.name === preview.envelope.before.targets[index].name
-              )
-                ? 'rolled-back'
-                : 'partial'
+      if (transaction) {
+        if (!transactionPhase) transactionPhase = 'acquired'
+        if (isFigPluginRenameTransactionTransition(transactionPhase, 'recovering')) {
+          transactionPhase = 'recovering'
+          slot.phase = 'recovering'
+          record(slot, 'recovering', reason)
+          const cleanup = new AbortController()
+          const timer = setTimeout(() => cleanup.abort(), 10_000)
+          timer.unref?.()
+          effect = dispatched ? 'unknown' : 'not-applied'
+          observations = []
+          // A host may need an explicit cancellation for modal/non-abortable work. This is
+          // advisory only; readback below remains the source of truth for the resulting effect.
+          if (!transactionCancellation?.wasRequested()) {
+            try {
+              await transaction.cancel?.(cleanup.signal)
+            } catch {
+              /* No raw adapter errors enter the receipt or audit. */
+            }
+          } else {
+            await transactionCancellation.settled()
           }
-        } catch {
-          /* Unknown effects remain quarantined. */
+          let undone: string | undefined
+          if (dispatched) {
+            try {
+              undone = revision(await transaction.undo(cleanup.signal))
+            } catch {
+              /* No raw adapter errors enter the receipt or audit. */
+            }
+          }
+          if (dispatched && isFigPluginRenameTransactionTransition(transactionPhase, 'reading')) {
+            transactionPhase = 'reading'
+            try {
+              const readback = observe(await transaction.readback(cleanup.signal), preview)
+              if (readback) {
+                const observedRevision = readback.snapshot.document.revision
+                const previous = knownSnapshots.get(observedRevision)
+                const contradictsKnown = previous && !same(previous, readback.snapshot)
+                const reusedUndo = undone !== undefined && knownRevisions.has(undone)
+                const staleOriginal =
+                  knownRevisions.size > 1 &&
+                  observedRevision === preview.envelope.before.document.revision
+                const staleRollback = reusedUndo && knownRevisions.size > 1
+                if (contradictsKnown || staleOriginal || staleRollback)
+                  throw new Error('STALE_RECOVERY')
+                observations = readback.observations
+                effect =
+                  undone &&
+                  !reusedUndo &&
+                  !cleanup.signal.aborted &&
+                  readback.snapshot.document.revision === undone &&
+                  readback.snapshot.targets.every(
+                    (target, index) => target.name === preview.envelope.before.targets[index].name
+                  )
+                    ? 'rolled-back'
+                    : 'partial'
+              }
+            } catch {
+              /* Unknown effects remain quarantined. */
+            }
+          }
+          clearTimeout(timer)
+        } else {
+          effect = dispatched ? 'unknown' : 'not-applied'
+          if (dispatched) quarantined.add(adapter)
         }
-        clearTimeout(timer)
       }
     } finally {
+      transactionCancellation?.dispose()
       if (transaction) {
-        slot.phase = 'closing'
-        record(slot, 'closing', slot.stop ?? reason, effect)
-        try {
-          await transaction.close()
-        } catch {
+        const canClose = transactionPhase
+          ? isFigPluginRenameTransactionTransition(transactionPhase, 'closing')
+          : false
+        if (canClose) {
+          transactionPhase = 'closing'
+          slot.phase = 'closing'
+          record(slot, 'closing', slot.stop ?? reason, effect)
+        } else {
+          effect = dispatched ? 'unknown' : 'not-applied'
+          quarantined.add(adapter)
+        }
+        const closed = await closeFigPluginRenameTransaction(transaction)
+        if (!closed) {
           effect = dispatched ? 'unknown' : 'not-applied'
           reason = slot.stop ?? 'ERROR'
           quarantined.add(adapter)
-        }
+        } else if (canClose) transactionPhase = 'closed'
       }
     }
     if (effect === 'unknown' || effect === 'partial') quarantined.add(adapter)

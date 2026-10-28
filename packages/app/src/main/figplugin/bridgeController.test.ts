@@ -11,6 +11,8 @@ import type { FigPluginRuntimeDescriptor } from './centerStore'
 import { FigPluginBridgeController } from './bridgeController'
 import type { startFigPluginBridgeServer } from './bridgeServer'
 import type { FigPluginHostAdapter, FigPluginRenameSnapshot } from './hostAdapter'
+import { createFigPluginHostAdapterRegistry } from './hostAdapterRegistry'
+import type { FigPluginBridgeTransport } from './bridgeSupervisor'
 
 type Store = ConstructorParameters<typeof FigPluginBridgeController>[0]
 type Options = NonNullable<ConstructorParameters<typeof FigPluginBridgeController>[2]>
@@ -271,6 +273,22 @@ describe('main-only synthetic plan integration, never a bearer write route', () 
     expect(f.model.chat).not.toHaveBeenCalled()
   })
 
+  it('does not fall back to an opaque direct adapter when an instance epoch requires registry resolution', async () => {
+    const plan = syntheticPlan()
+    const f = make({
+      hostAdapterRegistry: createFigPluginHostAdapterRegistry(),
+      planExecution: {
+        ...plan,
+        adapterInstanceEpoch: plan.adapter.descriptor.instanceEpoch
+      }
+    })
+    expect(await f.controller.preparePlan(plan.proposal)).toEqual({
+      ok: false,
+      code: 'UNAVAILABLE'
+    })
+    expect(plan.adapter.capture).not.toHaveBeenCalled()
+  })
+
   it('rehashes package/profile authority around explicit synthetic approval without pairing or inference', async () => {
     const plan = syntheticPlan()
     const f = make({ planExecution: plan })
@@ -291,6 +309,77 @@ describe('main-only synthetic plan integration, never a bearer write route', () 
     expect(f.startServer).not.toHaveBeenCalled()
     expect(f.model.chat).not.toHaveBeenCalled()
     expect(f.controller.desktopState()).toEqual({ sessions: [], previews: [] })
+  })
+
+  it('routes a registry-selected native adapter through the same approval and readback gates', async () => {
+    const plan = syntheticPlan()
+    const nativeAdapter = {
+      ...plan.adapter,
+      descriptor: {
+        ...plan.adapter.descriptor,
+        implementationVersion: 'figma-native-1',
+        kind: 'native' as const,
+        host: 'figma' as const
+      }
+    } as FigPluginHostAdapter
+    const registry = createFigPluginHostAdapterRegistry()
+    expect(registry.register(nativeAdapter).ok).toBe(true)
+    const f = make({
+      hostAdapterRegistry: registry,
+      planExecution: {
+        ...plan,
+        adapter: nativeAdapter,
+        adapterInstanceEpoch: nativeAdapter.descriptor.instanceEpoch
+      }
+    })
+    const prepared = await f.controller.preparePlan(plan.proposal)
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    expect(prepared.preview.synthetic).toBe(false)
+    expect(prepared.preview.envelope.adapter).toMatchObject({ kind: 'native', host: 'figma' })
+    const result = await f.controller.executePlan(
+      prepared.preview.envelope.attemptId,
+      prepared.preview.payloadSha256
+    )
+    expect(result).toMatchObject({ reason: 'SUCCESS', effect: 'applied', synthetic: false })
+    await registry.dispose()
+  })
+
+  it('resolves a native adapter from the live production scope epoch without direct injection', async () => {
+    const plan = syntheticPlan()
+    const nativeAdapter = {
+      ...plan.adapter,
+      descriptor: {
+        ...plan.adapter.descriptor,
+        implementationVersion: 'figma-native-dynamic-1',
+        kind: 'native' as const,
+        host: 'figma' as const
+      }
+    } as FigPluginHostAdapter
+    const registry = createFigPluginHostAdapterRegistry()
+    expect(registry.register(nativeAdapter).ok).toBe(true)
+    const source = await plan.captureScope(new AbortController().signal)
+    const f = make({
+      hostAdapterRegistry: registry,
+      planExecution: {
+        captureScope: vi.fn(async () => ({
+          ...source,
+          adapterInstanceEpoch: nativeAdapter.descriptor.instanceEpoch
+        })),
+        confirm: plan.confirm
+      }
+    })
+    const prepared = await f.controller.preparePlan(plan.proposal)
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    expect(prepared.preview.synthetic).toBe(false)
+    expect(prepared.preview.envelope.adapter.instanceEpoch).toBe(
+      nativeAdapter.descriptor.instanceEpoch
+    )
+    await expect(
+      f.controller.executePlan(prepared.preview.envelope.attemptId, prepared.preview.payloadSha256)
+    ).resolves.toMatchObject({ reason: 'SUCCESS', effect: 'applied', synthetic: false })
+    await registry.dispose()
   })
 
   it.each(['profile', 'plugin', 'dispose'] as const)(
@@ -491,6 +580,32 @@ describe('FigPluginBridgeController proactive configuration invalidation', () =>
     expect(() => value.invalidateProfiles()).not.toThrow()
   })
 
+  it('sweeps expired checkpoint retention before exposing Bridge subscriptions', () => {
+    const cleanupExpired = vi.fn().mockReturnValue({
+      expiredRecordCount: 2,
+      retainedRecordCount: 1,
+      databasePresent: true
+    })
+    const value = make({
+      checkpoints: { cleanupExpired } as unknown as NonNullable<Options['checkpoints']>
+    })
+    expect(cleanupExpired).toHaveBeenCalledTimes(1)
+    expect(value.store.onRuntimeInvalidated).toHaveBeenCalledTimes(1)
+    expect(value.model.onProfileConfigurationChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed when startup checkpoint cleanup is unavailable', () => {
+    const cleanupExpired = vi.fn(() => {
+      throw new Error('private checkpoint details')
+    })
+    expect(() =>
+      make({
+        checkpoints: { cleanupExpired } as unknown as NonNullable<Options['checkpoints']>
+      })
+    ).toThrow(FIGPLUGIN_BRIDGE_ERRORS.CONFIGURATION_CHANGED)
+    expect(cleanupExpired).toHaveBeenCalledTimes(1)
+  })
+
   it('fails closed and detaches the store when the model subscription cannot be established', () => {
     const value = make()
     value.model.onProfileConfigurationChanged.mockImplementationOnce(() => {
@@ -661,6 +776,30 @@ describe('FigPluginBridgeController metadata and binding authority', () => {
 })
 
 describe('FigPluginBridgeController listener and revocation lifecycle', () => {
+  it('uses an explicitly injected transport while retaining the in-process default fallback', async () => {
+    const close = vi.fn<Server['close']>().mockResolvedValue(undefined)
+    const start = vi.fn(async ({ origin, runtime }: { origin: string; runtime: Runtime }) => {
+      expect(origin).toBe(descriptor().bridgeOrigin)
+      expect(runtime).toBeDefined()
+      return { origin, close }
+    })
+    const bridgeTransport: FigPluginBridgeTransport<{
+      origin: string
+      runtime: Runtime
+    }> = {
+      kind: 'child-process',
+      start
+    }
+    const value = make({ bridgeTransport })
+    await value.controller.createPairing(await value.resolve())
+    expect(start).toHaveBeenCalledOnce()
+    expect(value.startServer).not.toHaveBeenCalled()
+    expect(value.controller.bridgeLifecycle()).toMatchObject({
+      state: 'ready',
+      transport: 'child-process'
+    })
+  })
+
   it('coalesces simultaneous pairing into one exact signed origin', async () => {
     const value = make()
     const binding = await value.resolve()
@@ -839,6 +978,7 @@ describe('FigPluginBridgeController native approval and bounded read-only infere
       expectedProfileRevision: revision,
       profileScope: 'agent',
       conversationId: expect.stringMatching(/^[a-f0-9-]{36}$/),
+      correlationId: expect.stringMatching(/^[a-f0-9]{32}$/),
       temperature: 0.2,
       maxOutputTokens: 1200,
       systemPrompt: expect.stringContaining('untrusted'),

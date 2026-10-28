@@ -10,6 +10,7 @@ import type {
   FigPluginPackagePreview
 } from '@shared/figplugin/management'
 import { canonicalFigPluginJson } from '@shared/figplugin/manifest'
+import { FIGPLUGIN_AUDIT_TTL_MS } from '@shared/figplugin/planningAudit'
 import WorkshopPluginsPage from './WorkshopPluginsPage'
 
 const mocks = vi.hoisted(() => ({
@@ -28,8 +29,20 @@ const mocks = vi.hoisted(() => ({
     approveBridge: vi.fn<FigPluginCenterSvc['approveBridge']>(),
     denyBridge: vi.fn<FigPluginCenterSvc['denyBridge']>(),
     revokeBridge: vi.fn<FigPluginCenterSvc['revokeBridge']>(),
+    chooseSessionAsset: vi.fn<FigPluginCenterSvc['chooseSessionAsset']>(),
+    chooseManagedSessionAsset: vi.fn<FigPluginCenterSvc['chooseManagedSessionAsset']>(),
+    generateSessionImage: vi.fn<FigPluginCenterSvc['generateSessionImage']>(),
+    nativeImageGenerationProposals: vi.fn<FigPluginCenterSvc['nativeImageGenerationProposals']>(),
+    approveNativeImageGeneration: vi.fn<FigPluginCenterSvc['approveNativeImageGeneration']>(),
+    cancelNativeImageGeneration: vi.fn<FigPluginCenterSvc['cancelNativeImageGeneration']>(),
+    sessionImageGenerationState: vi.fn<FigPluginCenterSvc['sessionImageGenerationState']>(),
+    cancelSessionImageGeneration: vi.fn<FigPluginCenterSvc['cancelSessionImageGeneration']>(),
+    acceptSessionImageGeneration: vi.fn<FigPluginCenterSvc['acceptSessionImageGeneration']>(),
+    sessionAssets: vi.fn<FigPluginCenterSvc['sessionAssets']>(),
+    revokeSessionAsset: vi.fn<FigPluginCenterSvc['revokeSessionAsset']>(),
     planState: vi.fn<FigPluginCenterSvc['planState']>(),
     executionHistory: vi.fn<FigPluginCenterSvc['executionHistory']>(),
+    planningHistory: vi.fn<FigPluginCenterSvc['planningHistory']>(),
     listSavedCheckpoints: vi.fn<FigPluginCenterSvc['listSavedCheckpoints']>(),
     approvePlanExecution: vi.fn<FigPluginCenterSvc['approvePlanExecution']>(),
     acceptVisualBaseline: vi.fn<FigPluginCenterSvc['acceptVisualBaseline']>(),
@@ -143,6 +156,7 @@ async function configure() {
 
 beforeEach(() => {
   vi.resetAllMocks()
+  mocks.center.nativeImageGenerationProposals.mockResolvedValue({ proposals: [] })
   vi.stubGlobal(
     'fetch',
     vi.fn(() => {
@@ -194,6 +208,8 @@ describe('WorkshopPluginsPage', () => {
     expect(screen.getByText(bridgeKey('hostStatus'))).toBeInTheDocument()
     expect(screen.getByText(bridgeKey('hostGuidance'))).toBeInTheDocument()
     expect(screen.getByRole('region', { name: bridgeKey('title') })).toBeInTheDocument()
+    expect(screen.getByTestId('figplugin-planning-history')).toBeInTheDocument()
+    expect(screen.getByTestId('figplugin-history')).toBeInTheDocument()
     expect(
       screen.getByRole('option', {
         name: `${bridgeKey('pluginOption')} ${target.name} ${target.pluginId}`
@@ -204,7 +220,17 @@ describe('WorkshopPluginsPage', () => {
       'bridgeState',
       'approveBridge',
       'denyBridge',
-      'revokeBridge'
+      'revokeBridge',
+      'chooseSessionAsset',
+      'chooseManagedSessionAsset',
+      'generateSessionImage',
+      'sessionImageGenerationState',
+      'cancelSessionImageGeneration',
+      'acceptSessionImageGeneration',
+      'sessionAssets',
+      'revokeSessionAsset',
+      'planningHistory',
+      'executionHistory'
     ] as const)
       expect(mocks.center[method]).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: bridgeKey('createTicket') })).toBeDisabled()
@@ -213,6 +239,46 @@ describe('WorkshopPluginsPage', () => {
     expect(mocks.center.installPackage).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
     expect(document.querySelector('input[type="file"]')).toBeNull()
+  })
+
+  it('reads planning history independently without activating the bridge, model or execution history', async () => {
+    mocks.center.planningHistory.mockResolvedValue({
+      records: [],
+      truncated: false,
+      recordedAt: 1000,
+      retentionMs: FIGPLUGIN_AUDIT_TTL_MS,
+      maxRecords: 256,
+      maxBytes: 1048576,
+      writeFailed: false
+    })
+    await mount()
+    const panel = within(screen.getByTestId('figplugin-planning-history'))
+    fireEvent.click(panel.getByRole('button', { name: 'figplugin.planningHistory.load' }))
+    await panel.findByText('figplugin.planningHistory.empty')
+    expect(mocks.center.planningHistory).toHaveBeenCalledExactlyOnceWith({ limit: 50 })
+    for (const method of [
+      'createPairing',
+      'bridgeState',
+      'approveBridge',
+      'denyBridge',
+      'revokeBridge',
+      'chooseSessionAsset',
+      'chooseManagedSessionAsset',
+      'generateSessionImage',
+      'sessionImageGenerationState',
+      'cancelSessionImageGeneration',
+      'acceptSessionImageGeneration',
+      'sessionAssets',
+      'revokeSessionAsset',
+      'planState',
+      'approvePlanExecution',
+      'execute',
+      'executionHistory'
+    ] as const)
+      expect(mocks.center[method]).not.toHaveBeenCalled()
+    expect(mocks.profiles).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+    expect(panel.getAllByRole('button')).toHaveLength(1)
   })
 
   it('filters host and search locally and refreshes only on request', async () => {
@@ -519,6 +585,79 @@ describe('WorkshopPluginsPage', () => {
       settings: { analysisProfileId: 'missing-chat' }
     })
   })
+
+  it('offers only explicitly supported dedicated generation profiles and sends the selected reference separately', async () => {
+    const supported = {
+      id: 'generation-images',
+      model_name: 'Images route',
+      model_use: 'image' as const,
+      provider: 'openai' as const,
+      api_mode: 'images' as const,
+      call_type: 'api' as const
+    }
+    mocks.profiles.mockResolvedValue({
+      profiles: [
+        supported,
+        {
+          ...supported,
+          id: 'generation-responses',
+          model_name: 'Responses route',
+          api_mode: 'responses',
+          call_type: undefined
+        },
+        { ...supported, id: 'wrong-use', model_use: 'chat' },
+        { ...supported, id: 'wrong-provider', provider: 'gemini' },
+        { ...supported, id: 'wrong-mode', api_mode: 'chat-completions' },
+        { ...supported, id: 'ocr', is_ocr_model: true },
+        { ...supported, id: 'extension', call_type: 'cliproxyapi' },
+        { id: 'unspecified', model_name: 'Unspecified image', model_use: 'image' }
+      ]
+    })
+    await mount()
+    await configure()
+    const field = screen.getByLabelText(key('imageGenerationProfile'))
+    expect(field).toHaveValue('')
+    expect(
+      within(field)
+        .getAllByRole('option')
+        .map((option) => (option as HTMLOptionElement).value)
+    ).toEqual(['', 'generation-images', 'generation-responses'])
+    fireEvent.change(field, { target: { value: 'generation-responses' } })
+    fireEvent.click(button('save'))
+    await screen.findByText(bridgeKey('profileReferencesSaved'))
+    expect(mocks.center.configurePackage).toHaveBeenCalledExactlyOnceWith({
+      pluginId: target.pluginId,
+      expectedGeneration: target.generation,
+      settings: { ...target.settings, imageGenerationProfileId: 'generation-responses' }
+    })
+    expect(mocks.center.generateSessionImage).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])(
+    'preserves an unavailable generation reference without fallback (offline=%s)',
+    async (offline) => {
+      const configured = {
+        ...target,
+        settings: { ...target.settings, imageGenerationProfileId: 'unavailable-generation' }
+      }
+      mocks.center.listPackages.mockResolvedValue(listing([configured]))
+      if (offline) mocks.profiles.mockRejectedValue(new Error('private provider endpoint'))
+      await mount()
+      await configure()
+      expect(screen.getByLabelText(key('imageGenerationProfile'))).toHaveValue(
+        'unavailable-generation'
+      )
+      fireEvent.click(button('save'))
+      await screen.findByText(bridgeKey('profileReferencesSaved'))
+      expect(mocks.center.configurePackage).toHaveBeenCalledExactlyOnceWith({
+        pluginId: target.pluginId,
+        expectedGeneration: target.generation,
+        settings: configured.settings
+      })
+      expect(document.body).not.toHaveTextContent('private provider endpoint')
+      expect(mocks.center.generateSessionImage).not.toHaveBeenCalled()
+    }
+  )
 
   it('awaits main clipboard/reveal completion, sends no path and never falsely claims a copy', async () => {
     const copy = deferred<{ completed: boolean }>()

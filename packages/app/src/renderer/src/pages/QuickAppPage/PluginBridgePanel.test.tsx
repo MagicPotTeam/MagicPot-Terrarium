@@ -17,6 +17,7 @@ import type {
   FigPluginVisualCorrectionAuthorization
 } from '@shared/figplugin/execution'
 import type { FigPluginManagedSummary } from '@shared/figplugin/management'
+import { FIGPLUGIN_ASSET_CHUNK_BYTES } from '@shared/figplugin/hostAssets'
 import en from '@shared/locales/en-US/renderer.json'
 import zh from '@shared/locales/zh-CN/renderer.json'
 import type { ProjectRecord } from '../MainPage/projectStore'
@@ -27,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   center: {
     createPairing: vi.fn<FigPluginCenterSvc['createPairing']>(),
     bridgeState: vi.fn<FigPluginCenterSvc['bridgeState']>(),
+    nativeImageGenerationProposals: vi.fn<FigPluginCenterSvc['nativeImageGenerationProposals']>(),
     approveBridge: vi.fn<FigPluginCenterSvc['approveBridge']>(),
     denyBridge: vi.fn<FigPluginCenterSvc['denyBridge']>(),
     revokeBridge: vi.fn<FigPluginCenterSvc['revokeBridge']>(),
@@ -267,6 +269,7 @@ async function showPreview() {
 
 beforeEach(() => {
   vi.resetAllMocks()
+  mocks.center.nativeImageGenerationProposals.mockResolvedValue({ proposals: [] })
   vi.useFakeTimers()
   vi.setSystemTime(new Date('2026-04-01T00:00:00Z'))
   vi.stubGlobal(
@@ -1374,3 +1377,76 @@ it('shows the old and new document roots without silently approving a reopened P
   expect(en.figplugin.checkpoints.documentRebindWarning).toContain('layer IDs')
   expect(zh.figplugin.checkpoints.documentRebindWarning).toContain('图层编号')
 })
+
+it.each(['figma', 'photoshop'] as const)(
+  'requires distinct original-image retention review for a completed %s image task',
+  async (host) => {
+    const original = nativeExecutionPreview()
+    const asset = {
+      version: 1 as const,
+      kind: 'execution-image-asset' as const,
+      purpose: 'host-plan-execution' as const,
+      sessionId: '1'.repeat(32),
+      pluginId: target.pluginId,
+      projectId: project.id,
+      host,
+      assetId: '2'.repeat(32),
+      sha256: '3'.repeat(64),
+      mimeType: 'image/png' as const,
+      sizeBytes: 234,
+      width: 40,
+      height: 30,
+      chunkSize: FIGPLUGIN_ASSET_CHUNK_BYTES,
+      chunkCount: 1,
+      createdAt: original.createdAt - 1,
+      expiresAt: original.expiresAt
+    }
+    const execution: FigPluginExecutionPreview = {
+      ...original,
+      host,
+      risk: 'high',
+      plan: {
+        ...original.plan,
+        steps: [
+          host === 'figma'
+            ? {
+                command: 'image.fill',
+                targetId: 'node-1',
+                assetId: asset.assetId,
+                sha256: asset.sha256,
+                scaleMode: 'FIT'
+              }
+            : {
+                command: 'image.pixels',
+                targetId: 'node-1',
+                assetId: asset.assetId,
+                sha256: asset.sha256
+              }
+        ]
+      },
+      executionAssets: [asset]
+    }
+    const status = visualExecutionStatus()
+    mocks.center.planState.mockResolvedValue({
+      previews: [execution],
+      statuses: [status],
+      baselines: [],
+      correctionAuthorizations: []
+    })
+    mount([{ ...target, host }])
+    await click('refresh')
+    expect(screen.getByText(key('imageCheckpointRetention'))).toBeInTheDocument()
+    expect(screen.queryByLabelText(key('reviewVisualBaseline'))).not.toBeInTheDocument()
+    expect(button('acceptVisualBaseline')).toBeDisabled()
+    expect(mocks.center.acceptVisualBaseline).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByLabelText(key('reviewImageBaseline')))
+    expect(button('acceptVisualBaseline')).toBeEnabled()
+    await click('acceptVisualBaseline')
+    expect(mocks.center.acceptVisualBaseline).toHaveBeenCalledExactlyOnceWith({
+      executionId: execution.executionId,
+      visualEvidenceSha256: status.visualEvidenceSha256
+    })
+    expect(mocks.center.approvePlanExecution).not.toHaveBeenCalled()
+    expect(mocks.center.approveBridge).not.toHaveBeenCalled()
+  }
+)

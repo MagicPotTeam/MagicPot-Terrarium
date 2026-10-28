@@ -1,11 +1,21 @@
 import type { NativeWriteCoordinator } from './nativeWriteCoordinator'
 import type { RecoveryCheckpointStore } from './checkpointStore'
 import { randomUUID } from 'node:crypto'
-import { HOST_PLAN_SYSTEM_MESSAGE, governHostPlanResponse } from './planGovernance'
-import type { LLMProxySvc } from '@shared/api/svcLLMProxy'
+import {
+  HOST_PLAN_STRUCTURED_OUTPUT,
+  HOST_PLAN_SYSTEM_MESSAGE,
+  governHostPlanResponse
+} from './planGovernance'
+import type { ChatMessage, LLMListProfilesResp, LLMProxySvc } from '@shared/api/svcLLMProxy'
+import {
+  contextImageSummary,
+  HOST_CONTEXT_IMAGE_TOKEN_BUDGET
+} from '@shared/figplugin/hostContextImage'
+import { validateHostContextImageBytes } from './hostContextImage'
 import { types } from 'node:util'
 import { snapshotFigPluginPlanData } from '@shared/figplugin/plan'
-import type { FigPluginHostAdapter } from './hostAdapter'
+import { readFigPluginAdapterDescriptor, type FigPluginHostAdapter } from './hostAdapter'
+import type { FigPluginHostAdapterRegistry } from './hostAdapterRegistry'
 import type { FigPluginPlanScope } from './planPreview'
 import { createFigPluginPlanExecutor, type FigPluginExecutionPreview } from './planExecution'
 import {
@@ -25,9 +35,33 @@ import {
 } from '@shared/figplugin/management'
 import type { FigPluginExecutionDesktopState } from '@shared/figplugin/execution'
 import type { FigPluginExecutionAuditEvent } from './executionAudit'
+import {
+  figPluginPlanningModelMetadataSchema,
+  type FigPluginPlanningAuditEvent,
+  type FigPluginPlanningModelMetadata
+} from '@shared/figplugin/planningAudit'
 import type { FigPluginCenterStore, FigPluginRuntimeDescriptor } from './centerStore'
-import { FigPluginBridgeRuntime } from './bridgeRuntime'
+import {
+  FigPluginBridgeRuntime,
+  type FigPluginAssetSelection,
+  type FigPluginMaterializedAsset,
+  type FigPluginNativeImageGenerationReceipt,
+  type FigPluginNativeImageGenerationOutcome
+} from './bridgeRuntime'
+import type { FigPluginImageGenerationState } from '@shared/figplugin/imageGeneration'
+import type { FigPluginNativeImageGenerationDesktopKey } from '@shared/figplugin/nativeImageGeneration'
+import type {
+  FigPluginDesktopAssetTarget,
+  FigPluginDesktopAssetRevoke
+} from '@shared/figplugin/hostAssets'
 import { startFigPluginBridgeServer } from './bridgeServer'
+import {
+  createInProcessBridgeTransport,
+  FigPluginBridgeSupervisor,
+  FigPluginBridgeSupervisorError,
+  type FigPluginBridgeTransport,
+  type FigPluginBridgeSupervisorSnapshot
+} from './bridgeSupervisor'
 
 type Store = Pick<FigPluginCenterStore, 'getRuntimeDescriptor' | 'onRuntimeInvalidated'>
 type Model = Pick<LLMProxySvc, 'listProfiles' | 'chat' | 'cancelConversation'> & {
@@ -39,18 +73,39 @@ type PlanSource = {
   projectId: string
   context: FigPluginPlanScope['context']
   callId: string
+  adapterInstanceEpoch?: string
 }
-type Options = {
+type BridgeTransportInput = {
+  origin: string
+  runtime: FigPluginBridgeRuntime
+}
+export type FigPluginBridgeControllerOptions = {
   checkpoints?: RecoveryCheckpointStore
   writes?: NativeWriteCoordinator
   startServer?: typeof startFigPluginBridgeServer
+  /**
+   * Optional transport override for an explicitly provisioned Bridge
+   * implementation (for example a future child-process adapter). The
+   * default remains the in-process HTTP listener above.
+   */
+  bridgeTransport?: FigPluginBridgeTransport<BridgeTransportInput>
+  /**
+   * Main-owned native adapter registry. A plan may name an instance epoch to
+   * resolve through this registry; the direct adapter field is never used as a
+   * fallback for that path.
+   */
+  hostAdapterRegistry?: FigPluginHostAdapterRegistry
   callTimeoutMs?: number
   audit?: (event: FigPluginExecutionAuditEvent) => void
+  planningAudit?: (event: FigPluginPlanningAuditEvent) => void
   // Main-only test/synthetic foundation, not exposed by a service or the bearer transport.
-  // No native adapter is currently accepted by the independent executor descriptor contract.
+  // Native adapters are accepted only when selected by instance epoch from the main-owned
+  // registry. Direct adapter injection remains synthetic/test-only and is never a production
+  // fallback.
   planExecution?: {
-    adapter: FigPluginHostAdapter
-    captureScope: (signal: AbortSignal) => Promise<PlanSource>
+    adapter?: FigPluginHostAdapter
+    adapterInstanceEpoch?: string
+    captureScope: (signal: AbortSignal) => Promise<PlanSource | undefined>
     confirm?: (preview: FigPluginExecutionPreview) => Promise<boolean>
   }
 }
@@ -94,6 +149,34 @@ const remember = <T>(cache: Map<string, T>, key: string, value: T): void => {
 }
 const sameLimits = (left: Limits, right: Limits): boolean =>
   limitKeys.every((key) => left[key] === right[key])
+const acceptsContextImage = (profile: LLMListProfilesResp['profiles'][number]): boolean => {
+  // Only routes whose inline-image serializer is covered by this Bridge contract.
+  // Model names and an absent image-count limit are not capability declarations.
+  if (
+    profile.is_vision_model !== true ||
+    profile.provider !== 'openai' ||
+    !['responses', 'chat-completions'].includes(profile.api_mode ?? '') ||
+    !profile.attachment_transports?.includes('request-data-url')
+  )
+    return false
+  return [
+    profile.max_input_images,
+    profile.maxInputImages,
+    profile.max_images,
+    profile.maxImages
+  ].every((limit) => limit === undefined || (Number.isSafeInteger(limit) && limit >= 1))
+}
+const planningProfileMetadata = (
+  profile: LLMListProfilesResp['profiles'][number]
+): FigPluginPlanningModelMetadata => {
+  const { provider, modelName } = figPluginPlanningModelMetadataSchema.shape
+  const route = provider.safeParse(profile.provider)
+  const label = modelName.safeParse(profile.model_name)
+  return {
+    ...(route.success && route.data !== undefined ? { provider: route.data } : {}),
+    ...(label.success && label.data !== undefined ? { modelName: label.data } : {})
+  }
+}
 const snapshotLimits = (descriptor: FigPluginRuntimeDescriptor): Limits => {
   const limits = descriptor.limits
   if (
@@ -115,6 +198,10 @@ export class FigPluginBridgeController {
   readonly #runtime: FigPluginBridgeRuntime
   readonly #planExecution: PlanExecutor
   readonly #startServer: typeof startFigPluginBridgeServer
+  readonly #supervisor: FigPluginBridgeSupervisor<{
+    origin: string
+    runtime: FigPluginBridgeRuntime
+  }>
   readonly #callTimeout: number
   readonly #budgets = new Map<
     string,
@@ -122,26 +209,42 @@ export class FigPluginBridgeController {
       profileId: string
       profileRevision: string
       tokens?: number
+      contextImage: boolean
+      auditMetadata: FigPluginPlanningModelMetadata
     }
   >()
   readonly #limits = new Map<string, Limits>()
   readonly #writeEnabled = new Map<string, boolean>()
+  readonly #assetTransferEnabled = new Map<string, boolean>()
   readonly #inFlight = new Map<string, number>()
   readonly #pendingBindings = new Set<{ pluginId: string; revoked: boolean }>()
   readonly #resolvedBindings = new WeakMap<FigPluginRuntimeBinding, number>()
+  readonly #assetSelectionEpochs = new WeakMap<FigPluginAssetSelection, number>()
+  readonly #nativeGenerationEpochs = new WeakMap<FigPluginNativeImageGenerationReceipt, number>()
   #bindingEpoch = 0
   #unsubscribe?: () => void
   #unsubscribeProfiles?: () => void
-  #origin?: string
-  #server?: Server
-  #starting?: Promise<Server>
   #disposal?: Promise<void>
   #closed = false
 
-  constructor(store: Store, model: Model, options: Options = {}) {
+  constructor(store: Store, model: Model, options: FigPluginBridgeControllerOptions = {}) {
     this.#store = store
     this.#model = model
     this.#startServer = options.startServer ?? startFigPluginBridgeServer
+    this.#supervisor = new FigPluginBridgeSupervisor({
+      transport:
+        options.bridgeTransport ??
+        createInProcessBridgeTransport((input) => this.#startServer(input)),
+      onCrash: () => {
+        // A child crash starts a new transport epoch. Never let bearer
+        // sessions or in-flight calls survive into a replacement listener.
+        try {
+          this.#runtime.revokeTransport()
+        } catch {
+          // Disposal races are already fail-closed; the supervisor stays failed.
+        }
+      }
+    })
     this.#callTimeout = Number.isFinite(options.callTimeoutMs)
       ? Math.max(1, Math.min(90_000, Math.floor(options.callTimeoutMs!)))
       : 90_000
@@ -150,19 +253,57 @@ export class FigPluginBridgeController {
         await this.currentDescriptor(binding)
         return !this.#closed && this.#budgets.has(profileKey(binding)) && this.isCurrent(binding)
       },
-      invoke: (binding, preview, signal) => this.invoke(binding, preview, signal),
+      invoke: (
+        binding,
+        preview,
+        signal,
+        correlationId,
+        onProviderDispatch,
+        checkProviderDispatch
+      ) =>
+        this.invoke(
+          binding,
+          preview,
+          signal,
+          correlationId,
+          onProviderDispatch,
+          checkProviderDispatch
+        ),
       callTimeoutMs: this.#callTimeout,
       ...(options.checkpoints ? { checkpoints: options.checkpoints } : {}),
       ...(options.writes ? { writes: options.writes } : {}),
       ...(options.audit ? { audit: options.audit } : {}),
+      ...(options.planningAudit ? { planningAudit: options.planningAudit } : {}),
+      planningProfile: (binding) => ({ ...this.#budgets.get(profileKey(binding))?.auditMetadata }),
       allowNativeWrite: (binding) =>
-        this.#writeEnabled.get(bindingKey(binding)) === true && this.isCurrent(binding)
+        this.#writeEnabled.get(bindingKey(binding)) === true && this.isCurrent(binding),
+      allowAssetTransfer: (binding) =>
+        this.#assetTransferEnabled.get(bindingKey(binding)) === true && this.isCurrent(binding),
+      assetByteLimit: (binding) => this.#limits.get(bindingKey(binding))?.maxPayloadBytes ?? 0,
+      imageGenerationTimeoutMs: (binding) =>
+        this.#limits.get(bindingKey(binding))?.maxCallTimeoutMs ?? 0
     })
     const plan = options.planExecution
+    const resolvePlanAdapter = (
+      expectedHost: FigPluginRuntimeBinding['host'],
+      sourceInstanceEpoch?: string
+    ): FigPluginHostAdapter | undefined => {
+      const instanceEpoch = sourceInstanceEpoch ?? plan?.adapterInstanceEpoch
+      if (instanceEpoch !== undefined) {
+        return options.hostAdapterRegistry?.getForHost(instanceEpoch, expectedHost)
+      }
+      // A native adapter must always carry a registry-selected instance epoch;
+      // direct injection is reserved for synthetic tests and cannot be promoted
+      // to production authority by omitting the epoch.
+      const direct = plan?.adapter
+      if (readFigPluginAdapterDescriptor(direct?.descriptor)?.kind === 'native') return undefined
+      return direct
+    }
     let planBinding: FigPluginRuntimeBinding | undefined
     this.#planExecution = createFigPluginPlanExecutor(
       plan
         ? {
+            allowNativeAdapter: options.hostAdapterRegistry !== undefined,
             resolveScope: async (signal) => {
               const epoch = this.#bindingEpoch
               const check = (): void => {
@@ -181,10 +322,12 @@ export class FigPluginBridgeController {
               const binding = await this.resolveBinding(source.target, source.projectId)
               check()
               planBinding = binding
+              const adapter = resolvePlanAdapter(binding.host, source.adapterInstanceEpoch)
+              if (!adapter) return undefined
               return {
                 scope: { binding, context: source.context, callId: source.callId },
                 authorityEpoch: String(epoch),
-                adapter: plan.adapter
+                adapter
               }
             },
             isCurrent: (epoch) =>
@@ -197,6 +340,10 @@ export class FigPluginBridgeController {
         : {}
     )
     try {
+      // Expired encrypted checkpoints (and unreferenced image blobs) can outlive a
+      // stopped desktop process. Sweep them before exposing a new Bridge authority;
+      // a corrupt/unavailable store must fail closed rather than start with stale data.
+      options.checkpoints?.cleanupExpired?.()
       this.#unsubscribe = store.onRuntimeInvalidated((pluginId) => this.revokePlugin(pluginId))
       if (typeof this.#unsubscribe !== 'function') throw configurationChanged()
       this.#unsubscribeProfiles = model.onProfileConfigurationChanged(() =>
@@ -236,7 +383,8 @@ export class FigPluginBridgeController {
         matches.length !== 1 ||
         !profile ||
         (profile.model_use !== undefined &&
-          !['chat', 'agent', 'multimodal', 'default'].includes(profile.model_use)) ||
+          !['chat', 'agent', 'multimodal', 'default'].includes(profile.model_use) &&
+          !(profile.model_use === 'vision' && acceptsContextImage(profile))) ||
         profile.is_ocr_model === true ||
         !figPluginBridgeHashSchema.safeParse(profile.configurationRevision).success
       ) {
@@ -269,12 +417,19 @@ export class FigPluginBridgeController {
       remember(this.#budgets, profileKey(binding), {
         profileId: binding.profileId,
         profileRevision: binding.profileRevision,
+        contextImage: acceptsContextImage(profile),
+        auditMetadata: planningProfileMetadata(profile),
         ...(budgets.length ? { tokens: Math.min(...budgets) } : {})
       })
       remember(
         this.#writeEnabled,
         bindingKey(binding),
         descriptor.capabilities?.includes('result-transfer') === true
+      )
+      remember(
+        this.#assetTransferEnabled,
+        bindingKey(binding),
+        descriptor.capabilities?.includes('asset-transfer') === true
       )
       // The native modal holds this main-owned immutable object, not a serializable grant.
       // A fresh resolution must not revive another modal's old A->B->A authorization.
@@ -334,6 +489,130 @@ export class FigPluginBridgeController {
     return { sessions: this.#runtime.listSessions(), previews: this.#runtime.listPreviews() }
   }
 
+  nativeImageGenerationProposals() {
+    this.enter()
+    return this.#runtime.nativeImageGenerationProposals()
+  }
+
+  async claimNativeImageGeneration(input: FigPluginNativeImageGenerationDesktopKey) {
+    this.enter()
+    const epoch = this.#bindingEpoch
+    const receipt = await this.#runtime.claimNativeImageGeneration(input)
+    if (this.#closed || epoch !== this.#bindingEpoch) {
+      this.#runtime.finishNativeImageGeneration(receipt, {
+        phase: 'failed',
+        error: 'CONFIGURATION_CHANGED'
+      })
+      throw configurationChanged()
+    }
+    this.#nativeGenerationEpochs.set(receipt, epoch)
+    return receipt
+  }
+
+  isNativeImageGenerationCurrent(receipt: FigPluginNativeImageGenerationReceipt): boolean {
+    return (
+      !this.#closed &&
+      this.#nativeGenerationEpochs.get(receipt) === this.#bindingEpoch &&
+      this.#runtime.isNativeImageGenerationCurrent(receipt)
+    )
+  }
+
+  async validateNativeImageGeneration(
+    receipt: FigPluginNativeImageGenerationReceipt
+  ): Promise<void> {
+    if (!this.isNativeImageGenerationCurrent(receipt)) throw configurationChanged()
+    await this.#runtime.validateNativeImageGeneration(receipt)
+    if (!this.isNativeImageGenerationCurrent(receipt)) throw configurationChanged()
+  }
+
+  observeNativeImageGeneration(
+    receipt: FigPluginNativeImageGenerationReceipt,
+    state: FigPluginImageGenerationState
+  ): void {
+    if (this.#closed || this.#nativeGenerationEpochs.get(receipt) !== this.#bindingEpoch) {
+      this.#runtime.finishNativeImageGeneration(receipt, {
+        phase: 'failed',
+        error: 'CONFIGURATION_CHANGED'
+      })
+      return
+    }
+    this.#runtime.observeNativeImageGeneration(receipt, state)
+  }
+
+  finishNativeImageGeneration(
+    receipt: FigPluginNativeImageGenerationReceipt,
+    outcome: FigPluginNativeImageGenerationOutcome
+  ): void {
+    this.#runtime.finishNativeImageGeneration(receipt, outcome)
+  }
+
+  cancelNativeImageGeneration(input: FigPluginNativeImageGenerationDesktopKey): void {
+    this.#runtime.cancelNativeImageGeneration(input)
+  }
+
+  async beginSessionAssetSelection(target: FigPluginDesktopAssetTarget) {
+    const epoch = this.#bindingEpoch
+    const selection = await this.#runtime.beginSessionAssetSelection(target)
+    if (this.#closed || epoch !== this.#bindingEpoch) throw configurationChanged()
+    this.#assetSelectionEpochs.set(selection, epoch)
+    return selection
+  }
+
+  /** Main-only checks for a long-running Desktop generation; never a publication grant. */
+  isSessionAssetSelectionCurrent(selection: FigPluginAssetSelection): boolean {
+    if (
+      this.#closed ||
+      this.#assetSelectionEpochs.get(selection) !== this.#bindingEpoch ||
+      selection.expiresAt <= Date.now()
+    )
+      return false
+    return this.#runtime
+      .listSessions()
+      .some(
+        (session) =>
+          session.sessionId === selection.target.sessionId &&
+          session.pluginId === selection.target.pluginId &&
+          session.projectId === selection.target.projectId &&
+          session.host === selection.host
+      )
+  }
+
+  async validateSessionAssetSelection(selection: FigPluginAssetSelection): Promise<void> {
+    if (!this.isSessionAssetSelectionCurrent(selection)) throw configurationChanged()
+    // Runtime re-verifies the signed package, capability, byte ceiling and live session.
+    // This new receipt is not published and cannot refresh the original consent deadline.
+    const current = await this.#runtime.beginSessionAssetSelection(selection.target)
+    if (
+      !this.isSessionAssetSelectionCurrent(selection) ||
+      current.bindingSha256 !== selection.bindingSha256 ||
+      current.host !== selection.host ||
+      current.maxBytes !== selection.maxBytes ||
+      current.expiresAt < selection.expiresAt
+    )
+      throw configurationChanged()
+  }
+
+  publishSessionAsset(selection: FigPluginAssetSelection, asset: FigPluginMaterializedAsset) {
+    return this.#runtime.publishSessionAsset(selection, asset)
+  }
+
+  listSessionAssets(target: FigPluginDesktopAssetTarget) {
+    return this.#runtime.listSessionAssets(target)
+  }
+
+  revokeSessionAsset(request: FigPluginDesktopAssetRevoke) {
+    return this.#runtime.revokeSessionAsset(request)
+  }
+
+  /**
+   * Main-process diagnostics for the Bridge transport lifecycle. This is a
+   * state projection only; it does not expose the runtime, bearer sessions or
+   * lower-level transport errors.
+   */
+  bridgeLifecycle(): FigPluginBridgeSupervisorSnapshot {
+    return this.#supervisor.snapshot()
+  }
+
   planState(): FigPluginExecutionDesktopState {
     return {
       previews: this.#runtime.listPlanExecutions(),
@@ -389,6 +668,7 @@ export class FigPluginBridgeController {
   revokePlugin(pluginId: string): void {
     if (this.#closed) return
     this.#bindingEpoch++
+    this.#runtime.invalidateNativeImageGenerationProposals()
     this.#planExecution.invalidate()
     for (const pending of this.#pendingBindings) {
       if (pending.pluginId === pluginId) pending.revoked = true
@@ -405,18 +685,12 @@ export class FigPluginBridgeController {
     this.#budgets.clear()
     this.#limits.clear()
     this.#writeEnabled.clear()
-    const server = this.#server
-    const starting = this.#starting
-    this.#server = undefined
+    this.#assetTransferEnabled.clear()
     this.#disposal = (async () => {
-      // A listener returned after closure is closed by ensureSingleOrigin before it rejects.
-      await starting?.catch(() => undefined)
-      if (server) {
-        try {
-          await server.close()
-        } catch {
-          throw new FigPluginBridgeError('UPSTREAM_FAILED')
-        }
+      try {
+        await this.#supervisor.stop()
+      } catch {
+        throw new FigPluginBridgeError('UPSTREAM_FAILED')
       }
     })()
     return this.#disposal
@@ -442,6 +716,7 @@ export class FigPluginBridgeController {
   private revokeChangedProfiles(): void {
     if (this.#closed) return
     this.#bindingEpoch++
+    this.#runtime.invalidateNativeImageGenerationProposals()
     this.#planExecution.invalidate()
     // A metadata/native-consent operation spanning a commit must start over, even for A->B->A.
     for (const pending of this.#pendingBindings) pending.revoked = true
@@ -501,48 +776,38 @@ export class FigPluginBridgeController {
 
   private ensureSingleOrigin(origin: string): Promise<Server> {
     if (this.#closed) return Promise.reject(configurationChanged())
-    if (this.#origin !== undefined && this.#origin !== origin) {
-      return Promise.reject(configurationChanged())
-    }
-    if (this.#server) return Promise.resolve(this.#server)
-    if (this.#starting) return this.#starting
-    // Pin even failed starts to this exact signed origin; never scan or switch ports.
-    this.#origin = origin
-    this.#starting = Promise.resolve()
-      .then(() => {
+    // The supervisor pins this signed origin and serializes concurrent starts.
+    return this.#supervisor
+      .start({ origin, runtime: this.#runtime })
+      .then((server) => {
         if (this.#closed) throw configurationChanged()
-        return this.#startServer({ origin, runtime: this.#runtime })
-      })
-      .then(async (server) => {
-        if (this.#closed || server.origin !== origin) {
-          try {
-            await server.close()
-          } catch {
-            // Preserve the fixed origin/lifetime error even if transport cleanup rejects.
-          }
-          throw configurationChanged()
-        }
-        this.#server = server
         return server
       })
       .catch((error: unknown) => {
         const collision =
-          typeof error === 'object' &&
-          error !== null &&
-          'code' in error &&
-          error.code === 'EADDRINUSE'
-        throw safeError(error, collision ? 'BUSY' : 'UPSTREAM_FAILED')
+          error instanceof FigPluginBridgeSupervisorError
+            ? error.code === 'PORT_IN_USE'
+            : typeof error === 'object' &&
+              error !== null &&
+              'code' in error &&
+              error.code === 'EADDRINUSE'
+        const stopped =
+          error instanceof FigPluginBridgeSupervisorError &&
+          (error.code === 'STOPPED_DURING_START' || error.code === 'ORIGIN_MISMATCH')
+        throw safeError(
+          error,
+          stopped ? 'CONFIGURATION_CHANGED' : collision ? 'BUSY' : 'UPSTREAM_FAILED'
+        )
       })
-      .finally(() => {
-        this.#starting = undefined
-      })
-    return this.#starting
   }
 
   private async invoke(
     binding: FigPluginRuntimeBinding,
     preview: FigPluginBridgePreview,
-    signal: AbortSignal
+    signal: AbortSignal,
+    correlationId: string,
+    onProviderDispatch: () => void,
+    checkProviderDispatch: () => void
   ): Promise<{ content: string; reportedTotalTokens?: number }> {
     const limits = this.#limits.get(bindingKey(binding))
     const budget = this.#budgets.get(profileKey(binding))
@@ -593,11 +858,17 @@ export class FigPluginBridgeController {
       const planning = preview.featureId === 'plan-preview'
       if (planning && (!preview.hostContext || preview.hostContext.host !== binding.host))
         throw new FigPluginBridgeError('INVALID_REQUEST')
+      const image = preview.contextImage
+      if (image && (!planning || !budget.contextImage))
+        throw new FigPluginBridgeError('INVALID_REQUEST')
+      const imageBytes = image ? validateHostContextImageBytes(image) : undefined
       const content = JSON.stringify({
         projectId: binding.projectId,
         context: preview.context,
         prompt: preview.prompt,
-        ...(planning ? { featureId: preview.featureId, hostContext: preview.hostContext } : {})
+        ...(planning ? { featureId: preview.featureId, hostContext: preview.hostContext } : {}),
+        ...(preview.assetCatalog ? { assetCatalog: preview.assetCatalog } : {}),
+        ...(image ? { contextImage: contextImageSummary(image) } : {})
       })
       if (Buffer.byteLength(content, 'utf8') > Math.min(limits.maxPayloadBytes, 64 * 1024)) {
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
@@ -606,29 +877,68 @@ export class FigPluginBridgeController {
       // deliberately excludes system-role history entries, so embedding the plan
       // contract only in messages silently discards it on that transport.
       const systemPrompt = planning ? HOST_PLAN_SYSTEM_MESSAGE : SYSTEM_MESSAGE
-      const messages = [{ role: 'user' as const, content }]
-      const inputTokens = Math.ceil(
-        Buffer.byteLength(JSON.stringify({ systemPrompt, messages }), 'utf8') / 3
+      const textMessages: ChatMessage[] = [{ role: 'user', content }]
+      const messages: ChatMessage[] =
+        image && imageBytes
+          ? [
+              {
+                ...textMessages[0],
+                attachments: [
+                  {
+                    type: 'image',
+                    url: `data:image/png;base64,${imageBytes.toString('base64')}`,
+                    mimeType: 'image/png',
+                    sizeBytes: image.sizeBytes,
+                    sourceWidth: image.width,
+                    sourceHeight: image.height,
+                    imageDetail: 'low'
+                  }
+                ]
+              }
+            ]
+          : textMessages
+      const providerInput = JSON.stringify({ systemPrompt, messages })
+      if (
+        image &&
+        Buffer.byteLength(providerInput, 'utf8') > Math.min(limits.maxPayloadBytes, 64 * 1024)
       )
+        throw new FigPluginBridgeError('UPSTREAM_FAILED')
+      // Base64 is transport, not prompt text. Reserve image capacity separately;
+      // this admission estimate is not a provider-specific billing guarantee.
+      const inputTokens =
+        Math.ceil(
+          Buffer.byteLength(JSON.stringify({ systemPrompt, messages: textMessages }), 'utf8') / 3
+        ) + (image ? HOST_CONTEXT_IMAGE_TOKEN_BUDGET : 0)
       if (budget.tokens !== undefined && inputTokens + MAX_OUTPUT_TOKENS > budget.tokens) {
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
       }
       // No asynchronous fence between the final main-owned revision check and model dispatch.
       checkStopped()
       if (!this.isCurrent(binding)) throw configurationChanged()
-      const response = await this.#model.chat(
-        {
-          profileId: binding.profileId,
-          expectedProfileRevision: binding.profileRevision,
-          profileScope: 'agent',
-          conversationId,
-          systemPrompt,
-          messages,
-          temperature: 0.2,
-          maxOutputTokens: MAX_OUTPUT_TOKENS
-        },
-        { signal: controller.signal }
-      )
+      checkProviderDispatch()
+      checkStopped()
+      // Call synchronously, but capture even synchronous service failures in a promise.
+      const responsePromise = (async () =>
+        this.#model.chat(
+          {
+            profileId: binding.profileId,
+            expectedProfileRevision: binding.profileRevision,
+            // Preserve the Bridge-owned lineage ID through Desktop -> Provider so
+            // audit records and upstream diagnostics refer to the same operation.
+            correlationId,
+            profileScope: 'agent',
+            conversationId,
+            systemPrompt,
+            messages,
+            temperature: 0.2,
+            maxOutputTokens: MAX_OUTPUT_TOKENS,
+            ...(planning ? { structuredOutput: HOST_PLAN_STRUCTURED_OUTPUT } : {})
+          },
+          { signal: controller.signal }
+        ))()
+      // Handoff has occurred; this observation is not permission or proof of remote receipt.
+      onProviderDispatch()
+      const response = await responsePromise
       checkStopped()
       if (!this.isCurrent(binding)) throw configurationChanged()
       if (
@@ -655,7 +965,13 @@ export class FigPluginBridgeController {
       if (planning && response.finishReason !== 'stop')
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
       const resultContent = planning
-        ? JSON.stringify(governHostPlanResponse(response.content, preview.hostContext!))
+        ? JSON.stringify(
+            governHostPlanResponse(
+              response.content,
+              preview.hostContext!,
+              preview.assetCatalog?.assets
+            )
+          )
         : response.content.trim()
       if (Buffer.byteLength(resultContent, 'utf8') > Math.min(limits.maxResultBytes, 32 * 1024))
         throw new FigPluginBridgeError('UPSTREAM_FAILED')

@@ -7,8 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
 import type { LLMChatResp, LLMProxySvc } from '@shared/api/svcLLMProxy'
+import type { FigPluginPlanningAuditEvent } from '@shared/figplugin/planningAudit'
 import {
   FIGPLUGIN_BRIDGE_ERRORS,
+  FigPluginBridgeError,
   figPluginBridgeDesktopStateSchema,
   figPluginBridgePrepareResponseSchema,
   figPluginBridgeStatusResponseSchema,
@@ -24,13 +26,16 @@ import {
   FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS,
   figPluginExecutionClaimResponseSchema,
   figPluginExecutionDesktopStateSchema,
+  figPluginExecutionPreviewSchema,
   figPluginExecutionResultResponseSchema,
   figPluginExecutionStatusSchema,
+  figPluginVisualBaselineSchema,
   type FigPluginDesktopExecutionApproval,
   type FigPluginDesktopVisualBaselineAcceptance,
   type FigPluginDesktopVisualCorrectionAuthorization,
   type FigPluginDesktopVisualCorrectionAuthorizationRequest
 } from '@shared/figplugin/execution'
+import { FIGPLUGIN_ASSET_CHUNK_BYTES } from '@shared/figplugin/hostAssets'
 import { createHostPlanReadback, type HostContext, type HostPlan } from '@shared/figplugin/hostPlan'
 import { FIGPLUGIN_MANAGEMENT_ERRORS } from '@shared/figplugin/management'
 import { FigPluginBridgeController } from '../figplugin/bridgeController'
@@ -41,7 +46,11 @@ import {
   registerMagicAgentTrustedRouteBinding,
   unregisterMagicAgentTrustedRouteBinding
 } from '../magicAgentRuntime/trustedRouteBinding'
-import { disposeFigPluginBridges, FigPluginCenterSvcImpl } from './svcFigPluginCenterImpl'
+import {
+  createProductionBridgeTransport,
+  disposeFigPluginBridges,
+  FigPluginCenterSvcImpl
+} from './svcFigPluginCenterImpl'
 
 const native = vi.hoisted(() => ({
   getPath: vi.fn(),
@@ -51,10 +60,16 @@ const native = vi.hoisted(() => ({
   writeText: vi.fn(),
   showItemInFolder: vi.fn(),
   openPath: vi.fn(),
-  openExternal: vi.fn()
+  openExternal: vi.fn(),
+  isPackaged: false
 }))
 vi.mock('electron', () => ({
-  app: { getPath: native.getPath },
+  app: {
+    getPath: native.getPath,
+    get isPackaged() {
+      return native.isPackaged
+    }
+  },
   dialog: { showMessageBox: native.showMessageBox, showOpenDialog: native.showOpenDialog },
   clipboard: { writeText: native.writeText },
   shell: {
@@ -225,7 +240,11 @@ function fixture(options: { origin?: string; realHttp?: boolean } = {}) {
       // Most tests stub only the listener, retaining the real runtime supplied by the controller.
       return { origin: input.origin, close }
     })
-  const controller = new FigPluginBridgeController(store, model, { startServer })
+  const planningEvents: FigPluginPlanningAuditEvent[] = []
+  const controller = new FigPluginBridgeController(store, model, {
+    startServer,
+    planningAudit: (event) => planningEvents.push(event)
+  })
   controllers.push(controller)
   const issueTicket = controller.createPairing.bind(controller)
   const pairing = vi.spyOn(controller, 'createPairing')
@@ -234,7 +253,11 @@ function fixture(options: { origin?: string; realHttp?: boolean } = {}) {
   const deny = vi.spyOn(controller, 'deny')
   const revoke = vi.spyOn(controller, 'revokePlugin')
   const dispose = vi.spyOn(controller, 'dispose')
-  const factory = vi.fn().mockResolvedValue(controller)
+  let bridgeContext: unknown
+  const factory = vi.fn().mockImplementation(async (_store, context) => {
+    bridgeContext = context
+    return controller
+  })
   const window = makeWindow()
   let mainWindow: ReturnType<typeof makeWindow> | null = window
   registerWindow(window)
@@ -251,6 +274,9 @@ function fixture(options: { origin?: string; realHttp?: boolean } = {}) {
     model,
     window,
     factory,
+    get bridgeContext() {
+      return bridgeContext
+    },
     startServer,
     close,
     pairing,
@@ -263,6 +289,7 @@ function fixture(options: { origin?: string; realHttp?: boolean } = {}) {
     unsubscribeStore,
     unsubscribeProfiles,
     chatStarted,
+    planningEvents,
     get runtime() {
       return runtime
     },
@@ -495,6 +522,7 @@ const staleDocuments: Array<{
 
 beforeEach(() => {
   vi.resetAllMocks()
+  native.isPackaged = false
   clearMagicAgentTrustedRouteBindingsForTest()
   native.showMessageBox.mockResolvedValue(cancelled)
   native.getPath.mockImplementation(() => {
@@ -525,7 +553,58 @@ afterEach(async () => {
   }
 })
 
+describe('production Bridge transport selection', () => {
+  it('uses the fixed child transport only for packaged builds', () => {
+    expect(createProductionBridgeTransport()).toBeUndefined()
+
+    native.isPackaged = true
+    const packaged = createProductionBridgeTransport()
+    expect(packaged?.kind).toBe('child-process')
+
+    native.isPackaged = false
+    expect(createProductionBridgeTransport()).toBeUndefined()
+  })
+})
+
 describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
+  it('passes the main-owned host session coordinator into the production bridge factory', async () => {
+    const value = fixture()
+    const adapter = {
+      descriptor: {
+        contractVersion: 1 as const,
+        implementationVersion: 'figma-native-test-1',
+        instanceEpoch: '1'.repeat(32),
+        kind: 'native' as const,
+        host: 'figma' as const,
+        capabilities: ['node.rename' as const],
+        isolation: 'compare-acquire-through-readback' as const,
+        rollback: 'transaction-only' as const,
+        revision: 'all-relevant-mutations' as const
+      },
+      capture: vi.fn(),
+      beginRename: vi.fn(),
+      dispose: vi.fn(async () => {})
+    }
+    expect(
+      value.service.registerProductionHostAdapter(adapter, async () => ({
+        target: {
+          pluginId: pairRequest.pluginId,
+          expectedGeneration: pairRequest.expectedGeneration
+        },
+        projectId: pairRequest.projectId,
+        context: request().context,
+        callId: '2'.repeat(32)
+      })).ok
+    ).toBe(true)
+    native.showMessageBox.mockResolvedValueOnce(approved)
+    await value.service.createPairing(pairRequest, invocation('createPairing'))
+    expect(value.factory).toHaveBeenCalledOnce()
+    const context = value.bridgeContext as {
+      hostAdapterSessions: { list: () => readonly { key: string }[] }
+    }
+    expect(context.hostAdapterSessions.list()).toMatchObject([{ key: '1'.repeat(32) }])
+  })
+
   const methods: Array<{
     name: BridgeMethod
     call: (value: Fixture, context?: ServiceInvocationContext) => Promise<unknown>
@@ -974,8 +1053,10 @@ describe('FigPluginCenterSvcImpl per-request native approval and cancellation', 
     }
     expect(native.showMessageBox).not.toHaveBeenCalled()
     expect(value.approve).not.toHaveBeenCalled()
+    expect(value.deny).not.toHaveBeenCalled()
     expect(value.model.chat).not.toHaveBeenCalled()
     expect(await prepared.status()).toMatchObject({ status: 'awaiting-approval' })
+    expect(value.planningEvents.map((event) => event.state)).toEqual(['awaiting-approval'])
   })
 
   it.each([
@@ -1000,8 +1081,10 @@ describe('FigPluginCenterSvcImpl per-request native approval and cancellation', 
       expect(options.detail).toContain(content)
     }
     expect(value.approve).not.toHaveBeenCalled()
+    expect(value.deny).not.toHaveBeenCalled()
     expect(value.model.chat).not.toHaveBeenCalled()
     expect(await prepared.status()).toMatchObject({ status: 'awaiting-approval' })
+    expect(value.planningEvents.map((event) => event.state)).toEqual(['awaiting-approval'])
   })
 
   it.each(staleDocuments)(
@@ -1308,6 +1391,218 @@ async function completeVisualExecution(value: Fixture, evidence = visualEvidence
   return { origin, session, prepared, execution, result, visualEvidenceSha256 }
 }
 
+// Service-consent fixture only: Runtime/storage byte ownership is tested separately.
+async function imageCheckpointConsent(value: Fixture, host: 'figma' | 'photoshop' = 'figma') {
+  await ticketFor(value)
+  const at = Date.now()
+  const asset = {
+    version: 1 as const,
+    kind: 'execution-image-asset' as const,
+    purpose: 'host-plan-execution' as const,
+    sessionId: '1'.repeat(32),
+    pluginId: pairRequest.pluginId,
+    projectId: pairRequest.projectId,
+    host,
+    assetId: '2'.repeat(32),
+    sha256: '3'.repeat(64),
+    mimeType: 'image/png' as const,
+    sizeBytes: 234,
+    width: 40,
+    height: 30,
+    chunkSize: FIGPLUGIN_ASSET_CHUNK_BYTES,
+    chunkCount: 1,
+    createdAt: at - 1000,
+    expiresAt: at + 119_000
+  }
+  const step =
+    host === 'figma'
+      ? {
+          command: 'image.fill' as const,
+          targetId: '1:2',
+          assetId: asset.assetId,
+          sha256: asset.sha256,
+          scaleMode: 'FIT' as const
+        }
+      : {
+          command: 'image.pixels' as const,
+          targetId: '1:2',
+          assetId: asset.assetId,
+          sha256: asset.sha256
+        }
+  const preview = figPluginExecutionPreviewSchema.parse({
+    protocol: 1,
+    executionId: '4'.repeat(32),
+    callId: '5'.repeat(32),
+    pluginId: pairRequest.pluginId,
+    host,
+    projectId: pairRequest.projectId,
+    documentId: '7',
+    scopeId: host === 'photoshop' ? '7' : 'page',
+    captureId: '6'.repeat(32),
+    plan: { schemaVersion: 2, kind: 'host-plan', captureId: '6'.repeat(32), steps: [step] },
+    executionAssets: [asset],
+    planSha256: '7'.repeat(64),
+    contextSha256: '8'.repeat(64),
+    adapterVersion: 'synthetic-native-1',
+    rollback: host === 'figma' ? 'verified-in-place' : 'native-history',
+    visualAudit: 'hash-only',
+    risk: 'high',
+    differences: [{ targetId: '1:2', command: step.command, before: {}, after: step }],
+    state: 'completed',
+    requiresWriteApproval: true,
+    createdAt: at,
+    expiresAt: at + 60_000
+  })
+  const status = figPluginExecutionStatusSchema.parse({
+    protocol: 1,
+    executionId: preview.executionId,
+    callId: preview.callId,
+    state: 'completed',
+    completed: 1,
+    total: 1,
+    effect: 'applied',
+    updatedAt: at,
+    visualEvidence,
+    visualEvidenceSha256: '9'.repeat(64)
+  })
+  const baseline = figPluginVisualBaselineSchema.parse({
+    protocol: 1,
+    baselineId: 'a'.repeat(32),
+    sourceExecutionId: preview.executionId,
+    pluginId: preview.pluginId,
+    host,
+    projectId: preview.projectId,
+    documentId: preview.documentId,
+    scopeId: preview.scopeId,
+    captureId: preview.captureId,
+    planSha256: preview.planSha256,
+    contextSha256: preview.contextSha256,
+    visualEvidenceSha256: status.visualEvidenceSha256,
+    adapterVersion: preview.adapterVersion,
+    targets: [{ targetId: '1:2', accepted: visualEvidence[0].after }],
+    acceptedAt: at,
+    expiresAt: at + 24 * 60 * 60 * 1000,
+    correctionRoundsUsed: 0,
+    maxCorrectionRounds: 3,
+    storage: 'encrypted-local'
+  })
+  const state = {
+    previews: [preview],
+    statuses: [status],
+    baselines: [],
+    correctionAuthorizations: []
+  }
+  vi.spyOn(value.controller, 'planState').mockReturnValue(state)
+  const accept = vi.spyOn(value.controller, 'acceptVisualBaseline').mockResolvedValue(baseline)
+  native.showMessageBox.mockClear()
+  return {
+    preview,
+    status,
+    baseline,
+    state,
+    accept,
+    request: {
+      executionId: preview.executionId,
+      visualEvidenceSha256: status.visualEvidenceSha256!
+    }
+  }
+}
+
+describe('image checkpoint service consent (synthetic controller state)', () => {
+  it.each(['figma', 'photoshop'] as const)(
+    'requires independent exact original-file retention consent for %s',
+    async (host) => {
+      const value = fixture()
+      const image = await imageCheckpointConsent(value, host)
+      const modal = holdModal()
+      const accepting = value.service.acceptVisualBaseline(
+        image.request,
+        invocation('acceptVisualBaseline')
+      )
+      const options = await modal.opened
+      expectDefaultCancel(options)
+      expect(options.checkboxLabel).toContain('original image files')
+      expect(options.checkboxLabel).toContain('accepted placement or fill mode')
+      expect(options.detail).toContain('Exact original image files retained')
+      expect(options.detail).toContain('3'.repeat(64))
+      expect(options.detail).toContain('64 MiB total image storage')
+      expect(image.accept).not.toHaveBeenCalled()
+      modal.resolve(approved)
+      expect(await accepting).toEqual(image.baseline)
+      expect(image.accept).toHaveBeenCalledExactlyOnceWith(
+        image.preview.executionId,
+        image.request.visualEvidenceSha256
+      )
+      expect(value.model.chat).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([cancelled, { response: 0, checkboxChecked: false }])(
+    'retains no image checkpoint when retention is declined: %j',
+    async (decision) => {
+      const value = fixture()
+      const image = await imageCheckpointConsent(value)
+      native.showMessageBox.mockResolvedValueOnce(decision)
+      expect(
+        await value.service.acceptVisualBaseline(image.request, invocation('acceptVisualBaseline'))
+      ).toBeNull()
+      expect(image.accept).not.toHaveBeenCalled()
+      expect(value.model.chat).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(staleDocuments)(
+    'does not persist retained image bytes after pending modal invalidation: $name',
+    async ({ change, code }) => {
+      const value = fixture()
+      const image = await imageCheckpointConsent(value)
+      const modal = holdModal()
+      const rejection = rejectsSafely(
+        value.service.acceptVisualBaseline(image.request, invocation('acceptVisualBaseline')),
+        code
+      )
+      await modal.opened
+      change(value)
+      modal.resolve(approved)
+      await rejection
+      expect(image.accept).not.toHaveBeenCalled()
+      expect(value.model.chat).not.toHaveBeenCalled()
+    }
+  )
+
+  it('fails without a prompt for wrong evidence or an untrusted renderer', async () => {
+    const value = fixture()
+    const image = await imageCheckpointConsent(value)
+    await rejectsSafely(
+      value.service.acceptVisualBaseline(
+        { ...image.request, visualEvidenceSha256: UNKNOWN_HASH },
+        invocation('acceptVisualBaseline')
+      ),
+      'EXPIRED'
+    )
+    await rejectsSafely(
+      value.service.acceptVisualBaseline(
+        image.request,
+        invocation('acceptVisualBaseline', { isMainFrame: false })
+      ),
+      'PERMISSION_DENIED'
+    )
+    expect(image.accept).not.toHaveBeenCalled()
+    expect(native.showMessageBox).not.toHaveBeenCalled()
+  })
+
+  it('surfaces failed encrypted persistence rather than returning an accepted result', async () => {
+    const value = fixture()
+    const image = await imageCheckpointConsent(value)
+    image.accept.mockRejectedValueOnce(new FigPluginBridgeError('UPSTREAM_FAILED'))
+    native.showMessageBox.mockResolvedValueOnce(approved)
+    await expect(
+      value.service.acceptVisualBaseline(image.request, invocation('acceptVisualBaseline'))
+    ).rejects.toMatchObject({ code: 'UPSTREAM_FAILED' })
+    expect(value.model.chat).not.toHaveBeenCalled()
+  })
+})
+
 it('real loopback: pair -> prepare -> native desktop approval -> one mock model result -> deny/cancel/revoke', async () => {
   const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
   const pairModal = holdModal()
@@ -1374,6 +1669,7 @@ it('real loopback: pair -> prepare -> native desktop approval -> one mock model 
     expectedProfileRevision: PROFILE_REVISION,
     profileScope: 'agent',
     conversationId: expect.any(String),
+    correlationId: expect.stringMatching(/^[a-f0-9]{32}$/),
     temperature: 0.2,
     maxOutputTokens: 1200,
     systemPrompt: expect.stringContaining('Do not use tools'),
@@ -1624,7 +1920,9 @@ it('real loopback: model send and exact native write use separate approvals and 
     total: 1,
     effect: 'applied'
   })
-  expect((await post(origin, 'plan/progress', progress, session)).status).toBe(400)
+  // A byte-identical progress retry is an idempotent replay and returns the
+  // current status instead of minting a second event.
+  expect((await post(origin, 'plan/progress', progress, session)).status).toBe(200)
 
   const result = {
     protocol: 1,
@@ -1892,6 +2190,74 @@ it('real loopback: changed visual comparison requires one separate correction au
   )
   expect((await planDesktopState(value)).correctionAuthorizations).toEqual([])
   expect((await planDesktopState(value)).baselines[0]).toMatchObject({ correctionRoundsUsed: 0 })
+})
+
+it('native visual preflight: image executions cannot open an automatic correction confirmation', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  let current = await completeVisualExecution(value)
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  const baseline = await value.service.acceptVisualBaseline(
+    {
+      executionId: current.execution.executionId,
+      visualEvidenceSha256: current.visualEvidenceSha256
+    },
+    invocation('acceptVisualBaseline')
+  )
+  if (!baseline) throw new Error('Expected accepted property checkpoint')
+  current = await completeVisualExecution(
+    value,
+    [{ ...visualEvidence[0], after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) } }],
+    2
+  )
+  // Substitute only the Desktop state boundary. The real Runtime separately
+  // rejects automatic image correction; durable image recovery is a separate path.
+  const state = value.controller.planState()
+  const preview = state.previews.find((item) => item.executionId === current.execution.executionId)!
+  preview.risk = 'high'
+  preview.plan.steps = [
+    {
+      command: 'image.fill',
+      targetId: '1:2',
+      assetId: 'a'.repeat(32),
+      sha256: UNKNOWN_HASH,
+      scaleMode: 'FILL'
+    }
+  ]
+  preview.executionAssets = [
+    {
+      version: 1,
+      kind: 'execution-image-asset',
+      purpose: 'host-plan-execution',
+      sessionId: current.session.sessionId,
+      pluginId: preview.pluginId,
+      projectId: preview.projectId,
+      host: preview.host,
+      assetId: 'a'.repeat(32),
+      sha256: UNKNOWN_HASH,
+      mimeType: 'image/png',
+      sizeBytes: 1,
+      width: 1,
+      height: 1,
+      chunkSize: 24 * 1024,
+      chunkCount: 1,
+      createdAt: preview.createdAt,
+      expiresAt: preview.expiresAt
+    }
+  ]
+  vi.spyOn(value.controller, 'planState').mockReturnValue(
+    figPluginExecutionDesktopStateSchema.parse(state)
+  )
+  const dialogs = native.showMessageBox.mock.calls.length
+  const consent = value.service.authorizeVisualCorrection(
+    {
+      executionId: preview.executionId,
+      baselineId: baseline.baselineId,
+      visualEvidenceSha256: current.visualEvidenceSha256
+    },
+    invocation('authorizeVisualCorrection')
+  )
+  await rejectsSafely(consent, 'EXPIRED')
+  expect(native.showMessageBox).toHaveBeenCalledTimes(dialogs)
 })
 
 it('real loopback: correction authorization fails closed after the desktop document epoch changes', async () => {

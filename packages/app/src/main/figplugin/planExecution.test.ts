@@ -61,14 +61,20 @@ const snapshot = (): FigPluginRenameSnapshot => ({
   ]
 })
 
-// Test-only synthetic memory transaction. Never instantiated or registered by production code.
-const fixture = (confirm = vi.fn(async (_preview: FigPluginExecutionPreview) => true)) => {
+// Test-only memory transaction. Native fixtures model a registry-selected transport; no host
+// globals or IPC are faked here.
+const fixture = (
+  confirm = vi.fn(async (_preview: FigPluginExecutionPreview) => true),
+  native = false
+) => {
   let live = snapshot(),
     revision = 1
   const currentScope = scope()
   let epoch = 'epoch-1'
   const calls: string[] = []
+  const cancel = vi.fn(async (_signal: AbortSignal) => {})
   const transaction = {
+    cancel,
     applyNext: vi.fn(async (_signal: AbortSignal) => {
       calls.push('apply')
       live.targets[0].name = 'New label'
@@ -92,17 +98,30 @@ const fixture = (confirm = vi.fn(async (_preview: FigPluginExecutionPreview) => 
       calls.push('close')
     })
   }
+  const descriptor = native
+    ? ({
+        contractVersion: 1 as const,
+        implementationVersion: 'figma-native-1',
+        instanceEpoch: 'f'.repeat(32),
+        kind: 'native' as const,
+        host: 'figma' as const,
+        capabilities: ['node.rename'] as const,
+        isolation: 'compare-acquire-through-readback' as const,
+        rollback: 'transaction-only' as const,
+        revision: 'all-relevant-mutations' as const
+      } satisfies FigPluginHostAdapter['descriptor'])
+    : ({
+        contractVersion: 1 as const,
+        implementationVersion: 'synthetic-1',
+        instanceEpoch: 'f'.repeat(32),
+        kind: 'synthetic' as const,
+        capabilities: ['node.rename'] as const,
+        isolation: 'compare-acquire-through-readback' as const,
+        rollback: 'transaction-only' as const,
+        revision: 'all-relevant-mutations' as const
+      } satisfies FigPluginHostAdapter['descriptor'])
   const adapter: FigPluginHostAdapter = {
-    descriptor: {
-      contractVersion: 1,
-      implementationVersion: 'synthetic-1',
-      instanceEpoch: 'f'.repeat(32),
-      kind: 'synthetic',
-      capabilities: ['node.rename'],
-      isolation: 'compare-acquire-through-readback',
-      rollback: 'transaction-only',
-      revision: 'all-relevant-mutations'
-    },
+    descriptor,
     capture: vi.fn(async (_ids, _signal) => {
       calls.push('capture')
       return structuredClone(live)
@@ -124,7 +143,8 @@ const fixture = (confirm = vi.fn(async (_preview: FigPluginExecutionPreview) => 
   const executor = createFigPluginPlanExecutor({
     resolveScope,
     isCurrent: (value) => value === epoch,
-    confirm
+    confirm,
+    allowNativeAdapter: native
   })
   const prepare = async () => {
     const result = await executor.prepare(proposal())
@@ -150,12 +170,13 @@ const fixture = (confirm = vi.fn(async (_preview: FigPluginExecutionPreview) => 
     },
     replaceLive: (value: FigPluginRenameSnapshot) => {
       live = value
-    }
+    },
+    cancel
   }
 }
 afterEach(() => vi.useRealTimers())
 
-describe('synthetic-only exact FIGPLUGIN rename executor', () => {
+describe('exact FIGPLUGIN rename executor', () => {
   it('defaults unavailable with no adapter resolver and never upgrades an inert digest', async () => {
     const executor = createFigPluginPlanExecutor()
     expect(await executor.prepare(proposal())).toEqual({ ok: false, code: 'UNAVAILABLE' })
@@ -184,6 +205,46 @@ describe('synthetic-only exact FIGPLUGIN rename executor', () => {
     expect(JSON.parse(preview.display[0].oldName)).toBe(f.live().targets[0].name)
     expect(Object.isFrozen(preview.envelope.before.targets[0])).toBe(true)
     expect(f.calls).toEqual(['capture'])
+    f.executor.dispose()
+  })
+
+  it('executes a registry-authorized native adapter without relabeling it synthetic', async () => {
+    const f = fixture(
+      vi.fn(async () => true),
+      true
+    )
+    const preview = await f.prepare()
+    expect(preview.synthetic).toBe(false)
+    expect(preview.envelope.adapter).toMatchObject({ kind: 'native', host: 'figma' })
+    const result = await f.execute(preview)
+    expect(result).toMatchObject({ reason: 'SUCCESS', effect: 'applied', synthetic: false })
+    expect(f.transaction.applyNext).toHaveBeenCalledOnce()
+    f.executor.dispose()
+  })
+
+  it('rejects a native adapter when the registry-backed route is not enabled', async () => {
+    const f = fixture(
+      vi.fn(async () => true),
+      true
+    )
+    const executor = createFigPluginPlanExecutor({
+      resolveScope: f.resolveScope,
+      isCurrent: () => true,
+      confirm: f.confirm
+    })
+    expect(await executor.prepare(proposal())).toEqual({ ok: false, code: 'UNAVAILABLE' })
+    expect(f.adapter.capture).not.toHaveBeenCalled()
+    executor.dispose()
+  })
+
+  it('rejects a native adapter bound to a different host before capture', async () => {
+    const f = fixture(
+      vi.fn(async () => true),
+      true
+    )
+    f.currentScope.binding.host = 'photoshop'
+    expect(await f.executor.prepare(proposal())).toEqual({ ok: false, code: 'UNAVAILABLE' })
+    expect(f.adapter.capture).not.toHaveBeenCalled()
     f.executor.dispose()
   })
 
@@ -276,6 +337,49 @@ describe('synthetic-only exact FIGPLUGIN rename executor', () => {
     expect(await work).toMatchObject({ reason: 'CANCELLED', effect: 'not-applied' })
     expect(f.confirm).not.toHaveBeenCalled()
     expect(f.adapter.beginRename).not.toHaveBeenCalled()
+  })
+
+  it('settles a confirmation that is cancelled before it resolves and ignores its late result', async () => {
+    const confirmation = deferred<boolean>(),
+      entered = deferred<void>(),
+      f = fixture(
+        vi.fn(async () => {
+          entered.resolve()
+          return confirmation.promise
+        })
+      ),
+      preview = await f.prepare()
+    const work = f.execute(preview)
+    await entered.promise
+    f.executor.cancel(preview.envelope.attemptId)
+    expect(await work).toMatchObject({ reason: 'CANCELLED', effect: 'not-applied' })
+    expect(f.executor.status()).toEqual({ state: 'idle' })
+    expect(f.adapter.beginRename).not.toHaveBeenCalled()
+    confirmation.reject(new Error('PRIVATE late confirmation rejection'))
+    await Promise.resolve()
+    expect(f.executor.status()).toEqual({ state: 'idle' })
+  })
+
+  it('settles a confirmation deadline and ignores a late accepted result', async () => {
+    vi.useFakeTimers()
+    const confirmation = deferred<boolean>(),
+      entered = deferred<void>(),
+      f = fixture(
+        vi.fn(async () => {
+          entered.resolve()
+          return confirmation.promise
+        })
+      ),
+      preview = await f.prepare()
+    const work = f.execute(preview)
+    await entered.promise
+    await vi.advanceTimersByTimeAsync(30_001)
+    expect(await work).toMatchObject({ reason: 'TIMED_OUT', effect: 'not-applied' })
+    expect(f.executor.status()).toEqual({ state: 'idle' })
+    expect(f.adapter.beginRename).not.toHaveBeenCalled()
+    confirmation.resolve(true)
+    await Promise.resolve()
+    expect(f.executor.status()).toEqual({ state: 'idle' })
   })
 
   it('rechecks revocation requested synchronously inside a trusted authority guard before confirmation', async () => {
@@ -634,10 +738,13 @@ describe('synthetic-only exact FIGPLUGIN rename executor', () => {
     await entered.promise
     f.executor.cancel(preview.envelope.attemptId)
     expect(workSignal.aborted).toBe(true)
+    await vi.waitFor(() => expect(f.cancel).toHaveBeenCalledOnce())
     expect(f.executor.status()).toMatchObject({ state: 'pending', stopping: 'CANCELLED' })
     expect(await f.executor.prepare(proposal())).toEqual({ ok: false, code: 'BUSY' })
     gate.resolve()
     expect(await work).toMatchObject({ reason: 'CANCELLED', effect: 'rolled-back' })
+    expect(f.cancel).toHaveBeenCalledOnce()
+    expect(f.cancel.mock.calls[0][0].aborted).toBe(false)
     expect(f.transaction.undo.mock.calls[0][0].aborted).toBe(false)
     expect(f.transaction.commit).not.toHaveBeenCalled()
     expect(f.transaction.close).toHaveBeenCalledOnce()
@@ -792,6 +899,8 @@ describe('synthetic-only exact FIGPLUGIN rename executor', () => {
     expect(await f.execute(preview)).toMatchObject({ reason: 'CANCELLED', effect: 'not-applied' })
     expect(f.transaction.applyNext).not.toHaveBeenCalled()
     expect(f.transaction.undo).not.toHaveBeenCalled()
+    expect(f.cancel).toHaveBeenCalledOnce()
+    expect(f.cancel.mock.calls[0][0].aborted).toBe(false)
     expect(f.transaction.close).toHaveBeenCalledOnce()
     expect(await f.executor.prepare(proposal())).toEqual({ ok: false, code: 'QUARANTINED' })
   })

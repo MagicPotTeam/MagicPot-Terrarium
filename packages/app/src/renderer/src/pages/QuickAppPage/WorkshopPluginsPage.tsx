@@ -18,6 +18,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { api } from '@renderer/utils/windowUtils'
 import type { LLMListProfilesResp } from '@shared/api/svcLLMProxy'
+import { supportsFigPluginImageGenerationProfile } from '@shared/figplugin/imageGeneration'
 import {
   FIGPLUGIN_MANAGEMENT_ERRORS,
   figPluginManagedListSchema,
@@ -33,8 +34,11 @@ import type { FigPluginCapability, FigPluginHost } from '@shared/figplugin/manif
 import CustomWorkshopTabs from './components/CustomWorkshopTabs'
 import PluginBridgePanel from './PluginBridgePanel'
 import PluginExecutionHistoryPanel from './PluginExecutionHistoryPanel'
+import PluginPlanningHistoryPanel from './PluginPlanningHistoryPanel'
 
-type Profile = Pick<LLMListProfilesResp['profiles'][number], 'id' | 'model_name' | 'model_use'>
+type Profile = Pick<LLMListProfilesResp['profiles'][number], 'id' | 'model_name' | 'model_use'> & {
+  generationSupported: boolean
+}
 type DialogState =
   | { kind: 'preview'; value: FigPluginPackagePreview }
   | { kind: 'configure' | 'remove'; value: FigPluginManagedSummary }
@@ -105,6 +109,7 @@ const WorkshopPluginsPage = () => {
   const [profilesFailed, setProfilesFailed] = useState(false)
   const [analysis, setAnalysis] = useState('')
   const [background, setBackground] = useState('')
+  const [imageGeneration, setImageGeneration] = useState('')
   const [confirmName, setConfirmName] = useState('')
   const [confirmVersion, setConfirmVersion] = useState('')
   const pending = useRef(false)
@@ -256,6 +261,7 @@ const WorkshopPluginsPage = () => {
     setProfilesFailed(false)
     setAnalysis(item.settings.analysisProfileId ?? '')
     setBackground(item.settings.backgroundRemovalProfileId ?? '')
+    setImageGeneration(item.settings.imageGenerationProfileId ?? '')
     setDialog({ kind: 'configure', value: item })
     void run(async (live) => {
       try {
@@ -276,7 +282,12 @@ const WorkshopPluginsPage = () => {
             seen.add(profile.id)
             return true
           })
-          .map(({ id, model_name, model_use }) => ({ id, model_name, model_use }))
+          .map((profile) => ({
+            id: profile.id,
+            model_name: profile.model_name,
+            model_use: profile.model_use,
+            generationSupported: supportsFigPluginImageGenerationProfile(profile)
+          }))
         if (live()) setProfiles(choices)
       } catch {
         if (live()) setProfilesFailed(true)
@@ -294,7 +305,8 @@ const WorkshopPluginsPage = () => {
           expectedGeneration: target.generation,
           settings: {
             ...(analysis ? { analysisProfileId: analysis } : {}),
-            ...(background ? { backgroundRemovalProfileId: background } : {})
+            ...(background ? { backgroundRemovalProfileId: background } : {}),
+            ...(imageGeneration ? { imageGenerationProfileId: imageGeneration } : {})
           }
         })
       )
@@ -418,14 +430,16 @@ const WorkshopPluginsPage = () => {
     </Stack>
   )
   const profileField = (
-    field: 'analysis' | 'background',
+    field: 'analysis' | 'background' | 'imageGeneration',
     value: string,
     change: (value: string) => void
   ) => {
     const candidates = profiles.filter((profile) =>
       field === 'analysis'
         ? (profile.model_use ?? 'chat') === 'chat'
-        : profile.model_use === 'image'
+        : field === 'background'
+          ? profile.model_use === 'image'
+          : profile.generationSupported
     )
     const unavailable = !!value && !candidates.some((profile) => profile.id === value)
     return (
@@ -437,7 +451,9 @@ const WorkshopPluginsPage = () => {
         label={t(
           field === 'analysis'
             ? 'figplugin.center.analysisProfile'
-            : 'figplugin.center.backgroundProfile'
+            : field === 'background'
+              ? 'figplugin.center.backgroundProfile'
+              : 'figplugin.center.imageGenerationProfile'
         )}
         value={value}
         onChange={(event) => change(event.target.value)}
@@ -629,6 +645,7 @@ const WorkshopPluginsPage = () => {
             </Paper>
           ))}
           <PluginBridgePanel items={list?.items ?? []} />
+          <PluginPlanningHistoryPanel items={list?.items ?? []} />
           <PluginExecutionHistoryPanel items={list?.items ?? []} />
         </Stack>
       </Paper>
@@ -693,6 +710,10 @@ const WorkshopPluginsPage = () => {
                 )}
                 {profileField('analysis', analysis, setAnalysis)}
                 {profileField('background', background, setBackground)}
+                {profileField('imageGeneration', imageGeneration, setImageGeneration)}
+                <Typography variant="body2">
+                  {t('figplugin.center.imageGenerationProfileHelp')}
+                </Typography>
               </>
             )}
             {dialog?.kind === 'remove' && (

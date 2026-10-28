@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { createContext, Script } from 'node:vm'
 
-// Node 22 only. All host objects, transports and DOM are local fixtures, never native sessions.
+// Node 24 only. All host objects, transports and DOM are local fixtures, never native sessions.
 const root = new URL('../packages/figplugin-hosts/', import.meta.url)
 const read = (name) => readFileSync(new URL(name, root), 'utf8')
 const sources = {
@@ -312,6 +312,10 @@ function fixture(host, options = {}) {
         assert.equal(name, 'photoshop')
         return readonly({
           app,
+          // This read-only fixture intentionally exposes no notification API.
+          // Production may probe `photoshop.action` before deciding that context-image
+          // observation is unavailable; returning null keeps that probe non-mutating.
+          action: null,
           core: readonly({
             executeAsModal: async (operation) => operation({})
           })

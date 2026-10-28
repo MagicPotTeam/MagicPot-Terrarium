@@ -2,6 +2,8 @@
   const API_NAME = 'MagicPotVisualEvidenceV1'
   const MAX_DIMENSION = 512
   const MAX_BYTES = 4 * 1024 * 1024
+  const CONTEXT_IMAGE_MAX_BYTES = 24 * 1024
+  const CONTEXT_IMAGE_EDGES = Object.freeze([256, 128, 64, 32])
   const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10]
   const ROUND_CONSTANTS = Object.freeze([
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -37,9 +39,9 @@
     }
     return output
   }
-  const sha256 = (input) => {
+  const sha256Bounded = (input, maxBytes) => {
     const bytes = bytesOf(input)
-    if (bytes.byteLength > MAX_BYTES + 4096) return fail()
+    if (bytes.byteLength > maxBytes) return fail()
     const paddedLength = Math.ceil((bytes.byteLength + 9) / 64) * 64
     const message = new Uint8Array(paddedLength)
     message.set(bytes)
@@ -97,6 +99,9 @@
     }
     return Array.from(state, (value) => value.toString(16).padStart(8, '0')).join('')
   }
+  const sha256 = (input) => sha256Bounded(input, MAX_BYTES + 4096)
+  const sha256SessionAsset = (input) => sha256Bounded(input, 8 * 1024 * 1024)
+  const sha256PixelBuffer = (input) => sha256Bounded(input, 64 * 1024 * 1024)
   // Photoshop UXP does not expose the browser TextEncoder API. Keep the byte
   // contract identical (including replacement of lone UTF-16 surrogates), without
   // installing globals or weakening the existing hash/journal size limits.
@@ -207,8 +212,247 @@
     // Optional pixel decoding must not fabricate a comparison when the PNG is unsupported.
     try {
       pixelCache?.rememberPng(result, bytes, pixelEpoch)
-    } catch {}
+    } catch {
+      // Unsupported pixel decoding leaves comparison unavailable, not identical.
+    }
     return result
+  }
+  const contextImageBase64 = (bytes) => {
+    if (bytes.byteLength < 1 || bytes.byteLength > CONTEXT_IMAGE_MAX_BYTES) return fail()
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    let result = ''
+    for (let offset = 0; offset < bytes.byteLength; offset += 3) {
+      const first = bytes[offset]
+      const second = bytes[offset + 1] ?? 0
+      const third = bytes[offset + 2] ?? 0
+      result += alphabet[first >>> 2] + alphabet[((first & 3) << 4) | (second >>> 4)]
+      result += offset + 1 < bytes.byteLength ? alphabet[((second & 15) << 2) | (third >>> 6)] : '='
+      result += offset + 2 < bytes.byteLength ? alphabet[third & 63] : '='
+    }
+    return result
+  }
+  // Consent-bound planning images never enter the separate execution pixel-audit cache.
+  const captureFigmaContextImage = async (node, identity) => {
+    const captureId = identity?.captureId
+    const targetId = identity?.targetId
+    if (
+      !node ||
+      typeof node.exportAsync !== 'function' ||
+      typeof captureId !== 'string' ||
+      !/^[a-f0-9]{32}$(?![\s\S])/.test(captureId) ||
+      typeof targetId !== 'string' ||
+      targetId.length < 1 ||
+      targetId.length > 128 ||
+      targetId !== node.id ||
+      !Number.isFinite(node.width) ||
+      node.width <= 0 ||
+      !Number.isFinite(node.height) ||
+      node.height <= 0
+    )
+      return fail()
+    const sourceWidth = node.width
+    const sourceHeight = node.height
+    const dominant = sourceWidth >= sourceHeight ? 'WIDTH' : 'HEIGHT'
+    const sourceEdge = Math.max(sourceWidth, sourceHeight)
+    let previousEdge = null
+    for (const limit of CONTEXT_IMAGE_EDGES) {
+      const edge = Math.min(limit, sourceEdge)
+      if (edge === previousEdge) continue
+      previousEdge = edge
+      const bytes = bytesOf(
+        await node.exportAsync({
+          format: 'PNG',
+          constraint: { type: dominant, value: edge },
+          contentsOnly: true,
+          colorProfile: 'SRGB'
+        })
+      )
+      if (
+        node.id !== targetId ||
+        node.width !== sourceWidth ||
+        node.height !== sourceHeight ||
+        bytes.byteLength < 33 ||
+        new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(8, false) !== 13
+      )
+        return fail()
+      const size = parsePngSize(bytes)
+      if (
+        size.width > limit ||
+        size.height > limit ||
+        size.width > Math.ceil(sourceWidth) ||
+        size.height > Math.ceil(sourceHeight)
+      )
+        return fail()
+      if (bytes.byteLength > CONTEXT_IMAGE_MAX_BYTES) continue
+      return Object.freeze({
+        version: 1,
+        kind: 'host-context-image',
+        captureId,
+        targetId,
+        mimeType: 'image/png',
+        width: size.width,
+        height: size.height,
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        bytesBase64: contextImageBase64(bytes)
+      })
+    }
+    return fail()
+  }
+  const photoshopContextBounds = (bounds) => {
+    if (!bounds) return fail()
+    const left = bounds.left
+    const top = bounds.top
+    const right = bounds.right ?? left + bounds.width
+    const bottom = bounds.bottom ?? top + bounds.height
+    if (
+      ![left, top, right, bottom].every(Number.isSafeInteger) ||
+      right <= left ||
+      bottom <= top ||
+      !Number.isSafeInteger(right - left) ||
+      !Number.isSafeInteger(bottom - top) ||
+      (bounds.width !== undefined && bounds.width !== right - left) ||
+      (bounds.height !== undefined && bounds.height !== bottom - top)
+    )
+      return fail()
+    return { left, top, right, bottom }
+  }
+  const checkPhotoshopContextGeometry = (result, sourceBounds) => {
+    const level = result?.level
+    if (!Number.isInteger(level) || level < 0 || level > 30) return fail()
+    const bounds = photoshopContextBounds(result.sourceBounds)
+    const scale = 2 ** level
+    // Adobe defines the pyramid coordinate system, but not a rounding guarantee. We
+    // support only the smallest integer grid rectangle covering the fixed native ROI.
+    if (
+      bounds.left !== Math.floor(sourceBounds.left / scale) ||
+      bounds.top !== Math.floor(sourceBounds.top / scale) ||
+      bounds.right !== Math.ceil(sourceBounds.right / scale) ||
+      bounds.bottom !== Math.ceil(sourceBounds.bottom / scale)
+    )
+      return fail()
+  }
+  const capturePhotoshopContextImage = async (
+    imaging,
+    documentId,
+    layerId,
+    captureId,
+    snapshot
+  ) => {
+    const encode = globalThis.MagicPotContextPngV1?.encode
+    const historyStateId = snapshot?.historyStateId
+    const nativeBounds = snapshot?.bounds
+    const sourceBounds = photoshopContextBounds({
+      left: nativeBounds?.left,
+      top: nativeBounds?.top,
+      right: nativeBounds?.right,
+      bottom: nativeBounds?.bottom
+    })
+    if (
+      !imaging ||
+      typeof imaging.getPixels !== 'function' ||
+      typeof encode !== 'function' ||
+      !Number.isSafeInteger(documentId) ||
+      documentId <= 0 ||
+      !Number.isSafeInteger(layerId) ||
+      layerId <= 0 ||
+      !Number.isSafeInteger(historyStateId) ||
+      historyStateId <= 0 ||
+      typeof captureId !== 'string' ||
+      !/^[a-f0-9]{32}$(?![\s\S])/.test(captureId)
+    )
+      return fail()
+    const read = async (targetSize) => {
+      const expectedWidth = targetSize.width
+      const expectedHeight = targetSize.height
+      const result = await imaging.getPixels({
+        documentID: documentId,
+        layerID: layerId,
+        historyStateID: historyStateId,
+        sourceBounds: { ...sourceBounds },
+        targetSize: { width: expectedWidth, height: expectedHeight },
+        colorSpace: 'RGB',
+        colorProfile: 'sRGB IEC61966-2.1',
+        componentSize: 8,
+        applyAlpha: false
+      })
+      const imageData = result?.imageData
+      if (!imageData) return fail()
+      try {
+        const width = imageData.width
+        const height = imageData.height
+        const components = imageData.components
+        if (
+          !Number.isInteger(width) ||
+          width < 1 ||
+          width !== expectedWidth ||
+          !Number.isInteger(height) ||
+          height < 1 ||
+          height !== expectedHeight ||
+          imageData.componentSize !== 8 ||
+          imageData.colorSpace !== 'RGB' ||
+          imageData.colorProfile !== 'sRGB IEC61966-2.1' ||
+          !(
+            (components === 3 && imageData.pixelFormat === 'RGB') ||
+            (components === 4 && imageData.pixelFormat === 'RGBA')
+          ) ||
+          (imageData.hasAlpha !== undefined && imageData.hasAlpha !== (components === 4)) ||
+          (imageData.type !== undefined && imageData.type !== 'image/uncompressed') ||
+          typeof imageData.getData !== 'function' ||
+          typeof imageData.dispose !== 'function'
+        )
+          return fail()
+        checkPhotoshopContextGeometry(result, sourceBounds)
+        const data = await imageData.getData({ chunky: true })
+        if (!(data instanceof Uint8Array) || data.byteLength !== width * height * components)
+          return fail()
+        // Own the bytes before releasing the native image; do not retain an audit-cache entry.
+        return { width, height, components, data: new Uint8Array(data) }
+      } finally {
+        if (typeof imageData.dispose === 'function') imageData.dispose()
+      }
+    }
+    try {
+      // Geometry and history are pinned before any await; coarse cache bounds never
+      // determine the aspect ratio. Both target dimensions keep native allocation bounded.
+      const sourceWidth = sourceBounds.right - sourceBounds.left
+      const sourceHeight = sourceBounds.bottom - sourceBounds.top
+      const sourceEdge = Math.max(sourceWidth, sourceHeight)
+      let previousEdge = null
+      for (const limit of CONTEXT_IMAGE_EDGES) {
+        const edge = Math.min(limit, sourceEdge)
+        if (edge === previousEdge) continue
+        previousEdge = edge
+        const targetSize = {
+          width: Math.max(1, Math.round((sourceWidth / sourceEdge) * edge)),
+          height: Math.max(1, Math.round((sourceHeight / sourceEdge) * edge))
+        }
+        const pixels = await read(targetSize)
+        const bytes = encode(pixels.width, pixels.height, pixels.data, pixels.components)
+        if (bytes === undefined) continue
+        if (
+          !(bytes instanceof Uint8Array) ||
+          bytes.byteLength < 57 ||
+          bytes.byteLength > CONTEXT_IMAGE_MAX_BYTES
+        )
+          return fail()
+        return Object.freeze({
+          version: 1,
+          kind: 'host-context-image',
+          captureId,
+          targetId: String(layerId),
+          mimeType: 'image/png',
+          width: pixels.width,
+          height: pixels.height,
+          sizeBytes: bytes.byteLength,
+          sha256: sha256(bytes),
+          bytesBase64: contextImageBase64(bytes)
+        })
+      }
+    } catch {
+      return fail()
+    }
+    return fail()
   }
   const capturePhotoshopLayer = async (imaging, documentId, layerId) => {
     const pixelCache = globalThis.MagicPotPixelAuditV1
@@ -279,7 +523,9 @@
       ) {
         try {
           pixelCache?.rememberPixels(result, data, metadata.components, pixelEpoch)
-        } catch {}
+        } catch {
+          // Hash evidence remains usable when the optional pixel cache refuses this frame.
+        }
       }
       return result
     } finally {
@@ -291,10 +537,14 @@
   Object.defineProperty(globalThis, API_NAME, {
     value: Object.freeze({
       captureFigmaNode,
+      captureFigmaContextImage,
+      capturePhotoshopContextImage,
       capturePhotoshopLayer,
       combine,
       encodeUtf8,
-      sha256
+      sha256,
+      sha256SessionAsset,
+      sha256PixelBuffer
     }),
     configurable: false,
     enumerable: false,

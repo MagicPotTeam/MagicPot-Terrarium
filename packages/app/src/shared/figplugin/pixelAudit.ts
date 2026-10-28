@@ -3,6 +3,16 @@ import { z } from 'zod'
 export const FIGPLUGIN_PIXEL_POLICY = 'rgba8-exact-v1' as const
 const id = z.string().regex(/^[a-f0-9]{32}$/)
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
+const requestId = z
+  .string()
+  .min(1)
+  .max(80)
+  .regex(/^[A-Za-z0-9_-]{1,80}$(?![\s\S])/)
+const executionLineageFields = {
+  requestId: requestId.optional(),
+  runId: id.optional(),
+  correlationId: id.optional()
+}
 const targetId = z.string().min(1).max(160)
 const pixelCount = z
   .number()
@@ -77,6 +87,7 @@ export const figPluginPixelAuditRequestSchema = z
     protocol: z.literal(1),
     executionId: id,
     actionId: id,
+    ...executionLineageFields,
     ...fields
   })
   .strict()

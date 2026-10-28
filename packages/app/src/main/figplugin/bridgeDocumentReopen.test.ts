@@ -406,7 +406,9 @@ describe('explicit Photoshop document-root recovery after reopen', () => {
       await m.runtime.approvePlan(p.preview.executionId, p.preview.planSha256, true)
       await p.claim()
       m.runtime.dispose()
+      if (round < 3) f.advance(120_001)
     }
+    f.advance(120_001)
     const m = f.make(),
       s = await pair(m.runtime)
     await expect(prepare(m.runtime, s, request('404', 1, 'a'.repeat(32)))).rejects.toMatchObject({

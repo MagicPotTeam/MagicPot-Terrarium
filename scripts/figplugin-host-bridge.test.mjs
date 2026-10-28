@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { createContext, Script } from 'node:vm'
 import { buildHostBridgeReadiness } from './build-figplugin-bridge-readiness.mjs'
+import { buildHostPlanPreview } from './build-figplugin-plan-preview.mjs'
 
-// Run with Node 22.23.2: node --test scripts/figplugin-host-bridge.test.mjs
+// Run with Node 24.18.0: node --test scripts/figplugin-host-bridge.test.mjs
 // Every transport and host API below is a fixture; no account, document or endpoint is contacted.
 const root = new URL('../packages/figplugin-hosts/', import.meta.url)
 const read = (path) => readFileSync(new URL(path, root), 'utf8')
@@ -15,6 +16,7 @@ const sources = {
     html: read('photoshop-uxp/bridge/index.html')
   }
 }
+const generationValidators = (await buildHostPlanPreview()).text
 const origin = 'http://127.0.0.1:49152'
 const pluginId = 'external.review-v1'
 const sessionId = '1'.repeat(32)
@@ -246,6 +248,22 @@ function fixture(host, options = {}) {
     idleTimeoutMs: 120000,
     ...overrides
   })
+  const readinessResult = (overrides = {}) => ({
+    protocol: 1,
+    kind: 'figplugin-bridge-readiness',
+    checkedAt: clock.now,
+    bridge: { state: 'ready', code: 'bridge-reachable' },
+    configuration: { state: 'ready', code: 'configuration-current' },
+    provider: { state: 'unknown', code: 'provider-not-probed' },
+    resources: { state: 'unknown', code: 'resources-not-probed' },
+    host: {
+      state: 'ready',
+      code: 'host-paired',
+      host,
+      capabilities: { state: 'unknown', code: 'capabilities-not-probed' }
+    },
+    ...overrides
+  })
   const prepareResult = (overrides = {}) => ({
     protocol: 1,
     callId,
@@ -268,8 +286,22 @@ function fixture(host, options = {}) {
     el,
     ticket,
     pairResult,
+    readinessResult,
     prepareResult,
     statusResult,
+    generationStatus(phase = 'generating', extra = {}) {
+      const request = api.route('image-generation/prepare')[0]
+      return {
+        protocol: 1,
+        requestId: request.body.requestId,
+        proposalId: '8'.repeat(32),
+        phase,
+        createdAt: api.generationCreatedAt,
+        updatedAt: clock.now,
+        expiresAt: api.generationExpiresAt,
+        ...extra
+      }
+    },
     makeNode,
     boundedSelection,
     handlers: new Map(),
@@ -308,6 +340,13 @@ function fixture(host, options = {}) {
       api.click('share')
       await flush()
     },
+    async generate(prompt = '  A green terrarium  ', consent = true) {
+      api.input('generation-prompt', prompt)
+      el('generation-consent').checked = consent
+      el('generation-consent').fire('change')
+      api.click('generation-submit')
+      await flush()
+    },
     route(name) {
       return requests.filter((request) => request.route === name)
     },
@@ -341,12 +380,17 @@ function fixture(host, options = {}) {
   const fetch = (url, fetchOptions) => {
     assert.match(
       url,
-      /^http:\/\/(?:127\.0\.0\.1|localhost):49152\/figplugin\/v1\/(pair|prepare|status|cancel|close|probe)$/
+      /^http:\/\/(?:127\.0\.0\.1|localhost):49152\/figplugin\/v1\/(pair|readiness|prepare|status|cancel|close|probe|image-generation\/(?:prepare|status|cancel))$/
     )
-    const route = url.split('/').at(-1)
+    const route = url.slice((origin + '/figplugin/v1/').length)
     assert.equal(url, origin + '/figplugin/v1/' + route)
     const request = { url, route, options: fetchOptions, body: JSON.parse(fetchOptions.body) }
     requests.push(request)
+    if (route === 'pair') api.initialSessionIdleAt = clock.now + 120000
+    if (route === 'image-generation/prepare') {
+      api.generationCreatedAt = clock.now
+      api.generationExpiresAt = Math.min(clock.now + 120000, api.initialSessionIdleAt)
+    }
     if (api.handlers.has(route)) return api.handlers.get(route)(request)
     return Promise.resolve(
       response(
@@ -354,12 +398,38 @@ function fixture(host, options = {}) {
           ? { protocol: 1, kind: 'figplugin-bridge-probe', nonce: request.body.nonce }
           : route === 'pair'
             ? pairResult()
-            : route === 'prepare'
-              ? prepareResult()
-              : route === 'status'
-                ? statusResult()
-                : undefined,
-        { status: route === 'close' || route === 'cancel' ? 204 : 200 }
+            : route === 'readiness'
+              ? readinessResult()
+              : route === 'prepare'
+                ? prepareResult()
+                : route === 'status'
+                  ? statusResult()
+                  : route === 'image-generation/prepare'
+                    ? {
+                        protocol: 1,
+                        requestId: request.body.requestId,
+                        proposalId: '8'.repeat(32),
+                        status: 'awaiting-approval',
+                        createdAt: clock.now,
+                        expiresAt: api.generationExpiresAt
+                      }
+                    : route === 'image-generation/status'
+                      ? {
+                          protocol: 1,
+                          requestId: request.body.requestId,
+                          proposalId: request.body.proposalId,
+                          phase: 'awaiting-approval',
+                          createdAt: api.generationCreatedAt,
+                          updatedAt: clock.now,
+                          expiresAt: api.generationExpiresAt
+                        }
+                      : undefined,
+        {
+          status:
+            route === 'close' || route === 'cancel' || route === 'image-generation/cancel'
+              ? 204
+              : 200
+        }
       )
     )
   }
@@ -414,6 +484,8 @@ function fixture(host, options = {}) {
     )
     run(
       injected +
+        (options.generationHelper === false ? '' : generationValidators) +
+        '\n;\n' +
         (options.probeHelper === false ? '' : read('shared/bridge-readiness.js')) +
         '\n;\n' +
         sources.figma.code,
@@ -448,6 +520,8 @@ function fixture(host, options = {}) {
     )
     run(
       injected +
+        (options.generationHelper === false ? '' : generationValidators) +
+        '\n;\n' +
         (options.probeHelper === false ? '' : read('shared/bridge-readiness.js')) +
         '\n;\n' +
         sources.photoshop.code,
@@ -517,6 +591,46 @@ for (const host of ['figma', 'photoshop']) {
     const visible = f.visible() + JSON.stringify(f.posts)
     for (const secret of [sessionToken, sessionId, f.ticket().pairingSecret])
       assert.ok(!visible.includes(secret))
+    f.clean()
+  })
+  test(`${host}: paired host can request and render authenticated layered readiness`, async () => {
+    const f = fixture(host)
+    await f.pair()
+    assert.equal(f.route('readiness').length, 0)
+    f.click('check-readiness')
+    await flush()
+    const request = f.route('readiness')[0]
+    assert.ok(request)
+    assert.equal(request.body.protocol, 1)
+    assert.equal(request.body.hostProbe.host, host)
+    assert.match(request.body.hostProbe.adapterVersion, /^(figma-native|photoshop-uxp-native)-/)
+    assert.deepEqual(
+      Object.keys(request.body.hostProbe).sort(),
+      [
+        'adapterVersion',
+        'document',
+        'host',
+        'resources',
+        'rollback',
+        'supports',
+        'visualAudit'
+      ].sort()
+    )
+    assert.deepEqual(Object.keys(request.body.hostProbe.resources).sort(), ['fonts', 'visual'])
+    assert.equal(request.options.headers.Authorization, 'Bearer ' + sessionToken)
+    assert.equal(request.options.headers['X-Figplugin-Session'], sessionId)
+    assert.match(f.el('readiness-status').textContent, /provider-not-probed/)
+    assert.match(f.el('readiness-status').textContent, /host-paired/)
+    f.clean()
+  })
+  test(`${host}: malformed readiness response is rejected without rendering server text`, async () => {
+    const f = fixture(host)
+    f.handlers.set('readiness', () => response({ protocol: 1, evil: 'secret' }))
+    await f.pair()
+    f.click('check-readiness')
+    await flush()
+    assert.match(f.el('readiness-status').textContent, /Invalid readiness response|就绪检查失败/)
+    assert.doesNotMatch(f.el('readiness-status').textContent, /secret/)
     f.clean()
   })
   test(`${host}: ticket rejects mismatched bindings, expiry, unknown keys and malformed secrets before IO`, async () => {
@@ -1053,6 +1167,65 @@ test('Connected protocol entrypoints contain no evaluation, HTML injection, dire
   }
 })
 
+test('Photoshop native plan execution uses the shared lifecycle and readback validator', () => {
+  const code = sources.photoshop.code
+  assert.match(code, /createHostAdapterLifecycle/)
+  assert.match(
+    code,
+    /discoverCapabilities:\s*\(\) => \(\{\s*host:\s*HOST,\s*execution:\s*item\.hostContext\.execution/s
+  )
+  assert.match(
+    code,
+    /lifecycle\.run\(\{[\s\S]*?resources:\s*item\.lifecycleResources,[\s\S]*?imageRecovery:\s*item\.recovery\?\.images/s
+  )
+  assert.match(
+    code,
+    /validateHostPlanReadback\(\s*plan,\s*item\.hostContext,\s*candidate,\s*item\.lifecycleResources(?:,\s*item\.recovery\?\.images)?\s*\)/s
+  )
+  assert.match(code, /const validatedReadback = async \(\) =>/)
+  assert.match(code, /prepareResources:\s*async/)
+  assert.match(code, /execute:\s*async/)
+  assert.match(code, /readback:\s*async/)
+  assert.match(code, /lifecycle\.run\(\{[\s\S]*?runId:\s*item\.executionId/)
+  assert.match(code, /let sequence = \(meta\.lastProgressSequence \?\? 1\) \+ 1/)
+  assert.doesNotMatch(code, /let sequence = plan\.steps\.length \+ 2/)
+  assert.match(
+    code,
+    /typeof executeAsModal !== 'function'[\s\S]*?reportPreparationFailure\(item, intent\.plan, 'HOST_UNAVAILABLE'\)/
+  )
+  assert.match(
+    code,
+    /if \(modalError && !result\)[\s\S]*?reportPreparationFailure\(item, plan, 'HOST_UNAVAILABLE'\)/
+  )
+})
+
+test('Figma native plan execution uses shared lifecycle validation and readback contract', () => {
+  const code = sources.figma.code
+  assert.match(code, /function createFigmaPlanLifecycle\(planner, item\)/)
+  assert.match(code, /createHostAdapterLifecycle/)
+  assert.match(
+    code,
+    /discoverCapabilities:\s*\(\) => \(\{\s*host:\s*HOST,\s*execution:\s*item\.hostContext\.execution/s
+  )
+  assert.match(code, /captureContext: \(captureId\) =>/)
+  assert.match(
+    code,
+    /lifecycle\.run\(\{[\s\S]*?resources:\s*item\.assetMetadata,[\s\S]*?imageRecovery:\s*item\.recovery\?\.images/s
+  )
+  assert.match(code, /function createPlanReadback\(context, plan, item\)/)
+  assert.match(
+    code,
+    /validateHostPlanReadback\(\s*plan,\s*context,\s*readback,\s*item\?\.assetMetadata(?:,\s*item\?\.recovery\?\.images)?\s*\)/s
+  )
+  assert.match(code, /prepareResources:\s*async/)
+  assert.match(code, /execute:\s*async/)
+  assert.match(code, /readback:\s*async/)
+  assert.match(code, /lifecycle\.run\(\{[\s\S]*?runId:\s*item\.executionId/)
+  assert.match(code, /let sequence = \(meta\.lastProgressSequence \?\? 1\) \+ 1/)
+  assert.doesNotMatch(code, /let sequence = plan\.steps\.length \+ 2/)
+  assert.doesNotMatch(code, /lifecycleCancel/)
+})
+
 test('Figma recovery UI requires parent pairing state and sends only a bounded recovery opcode', () => {
   const f = fixture('figma')
   assert.equal(f.el('restore-task').disabled, true)
@@ -1177,6 +1350,10 @@ test('native connectivity helper is generated from the same shared source as the
   assert.equal(read('shared/bridge-readiness.js'), generated.text)
 })
 
+test('native plan validators are generated from the same shared source as the server contract', () => {
+  assert.equal(read('shared/plan-preview.js'), generationValidators)
+})
+
 for (const host of ['figma', 'photoshop']) {
   test(`${host}: explicit localhost pairs only against its signed origin and never normalizes a numeric ticket`, async () => {
     const origin = 'http://localhost:49152'
@@ -1190,4 +1367,234 @@ for (const host of ['figma', 'photoshop']) {
     assert.equal(f.el('ticket').value, '')
     f.clean()
   })
+}
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: image generation requires pairing, independent prompt consent and no selection capture`, async () => {
+    const f = fixture(host)
+    await f.generate()
+    assert.equal(f.route('image-generation/prepare').length, 0)
+    await f.pair()
+    await f.generate('A terrarium', false)
+    assert.equal(f.route('image-generation/prepare').length, 0)
+    await f.generate('   ')
+    await f.generate('x'.repeat(8193))
+    assert.equal(f.route('image-generation/prepare').length, 0)
+    await f.generate()
+    const [request] = f.route('image-generation/prepare')
+    assert.deepEqual(Object.keys(request.body).sort(), [
+      'prompt',
+      'protocol',
+      'requestId',
+      'sequence'
+    ])
+    assert.equal(request.body.prompt, 'A green terrarium')
+    assert.equal(request.body.sequence, 1)
+    assert.equal(request.options.headers.Authorization, 'Bearer ' + sessionToken)
+    assert.equal(request.options.redirect, 'error')
+    assert.equal(f.reads, 0)
+    assert.equal(f.el('generation-consent').checked, false)
+    assert.equal(f.el('generation-submit').disabled, true)
+    assert.equal(f.el('generation-cancel').disabled, false)
+    assert.equal(f.route('prepare').length, 0)
+    f.clean()
+  })
+
+  test(`${host}: active generation cannot leak a selection or be replaced by a capture/share click`, async () => {
+    const f = fixture(host)
+    await f.pair()
+    f.capture()
+    const reads = f.reads
+    await f.generate()
+    await f.generate('Second prompt')
+    f.capture()
+    f.click('plan-capture')
+    await f.share('Old selection prompt')
+    assert.equal(f.reads, reads)
+    assert.equal(f.route('image-generation/prepare').length, 1)
+    assert.equal(f.route('prepare').length, 0)
+    assert.match(f.el('generation-status').textContent, /unavailable|Awaiting/)
+    f.clean()
+  })
+
+  test(`${host}: status polls are one-flight and successful images remain desktop-only`, async () => {
+    const f = fixture(host)
+    const pending = deferred()
+    f.handlers.set('image-generation/status', () => pending.promise)
+    await f.pair()
+    await f.generate()
+    await f.clock.advance(5000)
+    assert.equal(f.route('image-generation/status').length, 1)
+    const statusRequest = f.route('image-generation/status')[0]
+    assert.deepEqual(statusRequest.body, {
+      protocol: 1,
+      requestId: f.route('image-generation/prepare')[0].body.requestId,
+      proposalId: '8'.repeat(32)
+    })
+    pending.resolve(response(f.generationStatus('accepted')))
+    await flush()
+    assert.match(f.el('generation-status').textContent, /desktop only/)
+    assert.match(f.el('generation-status').textContent, /Separately choose\/share/)
+    assert.match(f.el('generation-status').textContent, /writes need another approval/)
+    await f.clock.advance(10000)
+    assert.equal(f.route('image-generation/status').length, 1)
+    assert.equal(f.el('generation-cancel').disabled, true)
+    assert.equal(f.el('generation-submit').disabled, true)
+    assert.equal(f.reads, 0)
+    f.clean()
+  })
+
+  test(`${host}: exact known-proposal cancel stays independent of a pending status request`, async () => {
+    const f = fixture(host)
+    const pending = deferred()
+    f.handlers.set('image-generation/status', () => pending.promise)
+    await f.pair()
+    await f.generate()
+    await f.clock.advance(1000)
+    f.click('generation-cancel')
+    f.click('generation-cancel')
+    await flush()
+    assert.equal(f.route('image-generation/cancel').length, 1)
+    assert.deepEqual(f.route('image-generation/cancel')[0].body, {
+      protocol: 1,
+      requestId: f.route('image-generation/prepare')[0].body.requestId,
+      proposalId: '8'.repeat(32)
+    })
+    pending.resolve(response(f.generationStatus('accepted')))
+    await flush()
+    assert.match(f.el('generation-status').textContent, /Stopped locally/)
+    assert.equal(f.route('cancel').length, 0)
+    assert.equal(f.route('close').length, 0)
+    f.clean()
+  })
+
+  test(`${host}: cancellation during uncertain prepare closes the session once and ignores late receipt`, async () => {
+    const f = fixture(host)
+    const pending = deferred()
+    f.handlers.set('image-generation/prepare', () => pending.promise)
+    await f.pair()
+    await f.generate()
+    f.click('generation-cancel')
+    await flush()
+    const requestId = f.route('image-generation/prepare')[0].body.requestId
+    pending.resolve(
+      response({
+        protocol: 1,
+        requestId,
+        proposalId: '8'.repeat(32),
+        status: 'awaiting-approval',
+        createdAt: f.clock.now,
+        expiresAt: f.clock.now + 120000
+      })
+    )
+    await flush()
+    await f.clock.advance(5000)
+    assert.equal(f.route('close').length, 1)
+    assert.equal(f.route('image-generation/cancel').length, 0)
+    assert.equal(f.route('image-generation/status').length, 0)
+    assert.equal(f.el('generation-submit').disabled, true)
+    f.clean()
+  })
+
+  for (const fault of [
+    'wrong-request',
+    'wrong-proposal',
+    'extra-output',
+    'extended-expiry',
+    'future-update'
+  ]) {
+    test(`${host}: ${fault} status closes the session rather than displaying or adopting data`, async () => {
+      const f = fixture(host)
+      f.handlers.set('image-generation/status', () =>
+        response(
+          f.generationStatus(
+            'generating',
+            fault === 'wrong-request'
+              ? { requestId: '9'.repeat(32) }
+              : fault === 'wrong-proposal'
+                ? { proposalId: '9'.repeat(32) }
+                : fault === 'extra-output'
+                  ? { localMediaUrl: 'https://invalid.example/private-image' }
+                  : fault === 'extended-expiry'
+                    ? { expiresAt: f.generationCreatedAt + 120001 }
+                    : { updatedAt: f.clock.now + 1 }
+          )
+        )
+      )
+      await f.pair()
+      await f.generate()
+      await f.clock.advance(5000)
+      assert.equal(f.route('image-generation/status').length, 1)
+      assert.equal(f.route('close').length, 1)
+      assert.equal(f.visible().includes('invalid.example'), false)
+      assert.equal(f.reads, 0)
+      f.clean()
+    })
+  }
+
+  for (const phase of ['failed', 'declined', 'cancelled']) {
+    test(`${host}: ${phase} generation is terminal and never automatically retries`, async () => {
+      const f = fixture(host)
+      f.handlers.set('image-generation/status', () => response(f.generationStatus(phase)))
+      await f.pair()
+      await f.generate()
+      await f.clock.advance(10000)
+      assert.equal(f.route('image-generation/prepare').length, 1)
+      assert.equal(f.route('image-generation/status').length, 1)
+      assert.equal(f.el('generation-submit').disabled, true)
+      assert.equal(f.el('generation-consent').checked, false)
+      f.clean()
+    })
+  }
+
+  test(`${host}: helper absence, bounded expiry and shutdown do not open another generation route`, async () => {
+    const absent = fixture(host, { generationHelper: false })
+    await absent.pair()
+    await absent.generate()
+    assert.equal(absent.route('image-generation/prepare').length, 0)
+    absent.clean()
+    const expired = fixture(host)
+    await expired.pair()
+    await expired.generate()
+    await expired.clock.advance(121000)
+    assert.ok(expired.route('image-generation/status').length <= 120)
+    assert.equal(expired.route('image-generation/prepare').length, 1)
+    assert.equal(expired.el('generation-cancel').disabled, true)
+    expired.clean()
+    const closed = fixture(host)
+    await closed.pair()
+    await closed.generate()
+    closed.dispose()
+    await flush()
+    await closed.clock.advance(5000)
+    assert.equal(closed.route('close').length, 1)
+    assert.equal(closed.route('image-generation/status').length, 0)
+    closed.clean()
+  })
+
+  for (const finish of ['polling', 'accepted', 'cancelled']) {
+    test(`${host}: generation ${finish} never extends the original session idle deadline`, async () => {
+      const f = fixture(host)
+      await f.pair()
+      await f.clock.advance(30000)
+      if (finish === 'accepted')
+        f.handlers.set('image-generation/status', () => response(f.generationStatus('accepted')))
+      await f.generate()
+      await f.clock.advance(1000)
+      if (finish === 'cancelled') {
+        f.click('generation-cancel')
+        await flush()
+      }
+      await f.clock.advance(88999)
+      assert.equal(f.el('pair').disabled, true)
+      await f.clock.advance(1)
+      assert.equal(f.el('pair').disabled, false)
+      const polls = f.route('image-generation/status').length
+      await f.clock.advance(2000)
+      assert.equal(f.route('image-generation/status').length, polls)
+      assert.equal(f.route('image-generation/prepare').length, 1)
+      assert.equal(f.el('generation-submit').disabled, true)
+      f.clean()
+    })
+  }
 }

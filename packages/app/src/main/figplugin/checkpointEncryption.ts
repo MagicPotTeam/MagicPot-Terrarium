@@ -2,6 +2,7 @@ import fs, { constants } from 'node:fs'
 import path from 'node:path'
 import { app, safeStorage } from 'electron'
 import { FigPluginCheckpointStore, type CheckpointCodec } from './checkpointStore'
+import { createCheckpointBinaryCodec } from './checkpointBinaryCodec'
 
 /** Electron 41 on Windows can encrypt before Chromium has saved its fresh profile key.
  * Read only this app's bounded sessionData/Local State; never write it, reveal the key or invent a
@@ -75,5 +76,6 @@ export const checkpointCodec: CheckpointCodec = {
   encrypt: (text) => safeStorage.encryptString(text),
   decrypt: (data) => safeStorage.decryptString(data)
 }
+Object.assign(checkpointCodec, createCheckpointBinaryCodec(checkpointCodec))
 export const createCheckpointStore = (root: string): FigPluginCheckpointStore =>
   new FigPluginCheckpointStore(root, checkpointCodec)

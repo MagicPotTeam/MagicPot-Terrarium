@@ -1,10 +1,12 @@
-import { Unzlib } from 'fflate'
+import { Unzlib, zlibSync } from 'fflate'
 import type { FigPluginPixelTarget } from './pixelAudit'
 
 const MAX_DIMENSION = 512
 const MAX_ENCODED_BYTES = 4 * 1024 * 1024
 const MAX_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_CACHE_FRAMES = 64
+const CONTEXT_MAX_DIMENSION = 256
+const CONTEXT_MAX_BYTES = 24 * 1024
 const TTL_MS = 24 * 60 * 60 * 1000
 const fail = (): never => {
   throw new Error('PIXELS_UNAVAILABLE')
@@ -42,6 +44,98 @@ const paeth = (a: number, b: number, c: number): number => {
     z = Math.abs(p - c)
   return x <= y && x <= z ? a : y <= z ? b : c
 }
+
+/** Stateless RGB/RGBA8 encoder. Oversized output asks the native host to downscale again. */
+export function encodeContextPng(
+  width: number,
+  height: number,
+  data: Uint8Array,
+  components: number
+): Uint8Array | undefined {
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width < 1 ||
+    height < 1 ||
+    width > CONTEXT_MAX_DIMENSION ||
+    height > CONTEXT_MAX_DIMENSION ||
+    !(data instanceof Uint8Array) ||
+    ![3, 4].includes(components) ||
+    data.byteLength !== width * height * components
+  )
+    return fail()
+  const stride = width * 4
+  const rgba = new Uint8Array(stride * height)
+  for (let pixel = 0; pixel < width * height; pixel++) {
+    rgba[pixel * 4] = data[pixel * components]
+    rgba[pixel * 4 + 1] = data[pixel * components + 1]
+    rgba[pixel * 4 + 2] = data[pixel * components + 2]
+    rgba[pixel * 4 + 3] = components === 4 ? data[pixel * components + 3] : 255
+  }
+  const raw = new Uint8Array((stride + 1) * height)
+  const candidate = new Uint8Array(stride)
+  for (let y = 0; y < height; y++) {
+    let bestScore = Infinity
+    const row = y * (stride + 1)
+    for (let filter = 0; filter <= 4; filter++) {
+      let score = 0
+      for (let x = 0; x < stride; x++) {
+        const at = y * stride + x
+        const a = x >= 4 ? rgba[at - 4] : 0
+        const b = y ? rgba[at - stride] : 0
+        const c = y && x >= 4 ? rgba[at - stride - 4] : 0
+        const predictor =
+          filter === 0
+            ? 0
+            : filter === 1
+              ? a
+              : filter === 2
+                ? b
+                : filter === 3
+                  ? (a + b) >>> 1
+                  : paeth(a, b, c)
+        const value = (rgba[at] - predictor) & 255
+        candidate[x] = value
+        score += Math.min(value, 256 - value)
+      }
+      if (score < bestScore) {
+        bestScore = score
+        raw[row] = filter
+        raw.set(candidate, row + 1)
+      }
+    }
+  }
+  const compressed = zlibSync(raw, { level: 6 })
+  // Signature + IHDR + sRGB (perceptual intent) + IDAT + IEND.
+  if (compressed.byteLength + 70 > CONTEXT_MAX_BYTES) return undefined
+  const output = new Uint8Array(compressed.byteLength + 70)
+  output.set([137, 80, 78, 71, 13, 10, 26, 10])
+  const view = new DataView(output.buffer)
+  let offset = 8
+  const chunk = (type: number[], bytes: Uint8Array): void => {
+    view.setUint32(offset, bytes.byteLength, false)
+    output.set(type, offset + 4)
+    output.set(bytes, offset + 8)
+    view.setUint32(
+      offset + 8 + bytes.byteLength,
+      crc32(output.subarray(offset + 4, offset + 8 + bytes.byteLength)),
+      false
+    )
+    offset += bytes.byteLength + 12
+  }
+  const header = new Uint8Array(13)
+  const headerView = new DataView(header.buffer)
+  headerView.setUint32(0, width, false)
+  headerView.setUint32(4, height, false)
+  header[8] = 8
+  header[9] = 6
+  chunk([73, 72, 68, 82], header)
+  chunk([115, 82, 71, 66], new Uint8Array([0]))
+  chunk([73, 68, 65, 84], compressed)
+  chunk([73, 69, 78, 68], new Uint8Array(0))
+  return output
+}
+
 /** Strict, bounded PNG subset: 8-bit non-interlaced grayscale/RGB/indexed/GA/RGBA.
  * Other formats remain explicitly unavailable, never equated to identical pixels.
  */

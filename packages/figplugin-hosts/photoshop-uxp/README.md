@@ -62,12 +62,44 @@ model-send approval and separate document-write approval flow. Update both deskt
 the prepared native plugin when the contract changes. Restarting MagicPot does not replace an
 old plugin copy inside Photoshop.
 
+## Opt-in selected-layer image input
+
+The connected source also offers **Capture one layer image locally**. After pairing, select
+exactly one layer, capture it, wait for the native preview to load, review the PNG and then
+check the send consent again. Capturing or previewing does not send the image to Desktop or
+a model. **Share for desktop approval** first rechecks the image locally and submits only
+the originally previewed bytes. Model submission still requires Desktop approval, and a
+returned native plan still requires a separate write approval.
+
+The image is an sRGB, 8-bit PNG of the selected layer's `boundsNoEffects`, not a screenshot
+of the whole document or a full-fidelity PSD export. Alpha is preserved. Native downsampling
+keeps both dimensions at most 256 pixels and encoded size at most 24 KiB. Requests pin the
+document, layer, history state and exact pixel bounds; the image never enters the execution
+pixel-audit cache. Changed selection, document, history, context, failed decoding or failed
+revalidation invalidates the image and its consent. It is never silently replaced or removed
+from a request to make that request succeed.
+
+This optional path requires native `ImageBlob` PNG previews, reliable image-load dimensions,
+Imaging APIs and the required action/core notifications. Hosts missing these capabilities
+keep explicit metadata capture available; the image control reports unavailable instead of
+using browser-only canvas APIs or a JPEG substitute. Cancelling withdraws permission
+immediately, but a pending native operation must settle before another image operation starts.
+
+Supported pyramid-bound responses must be the smallest integer-grid region covering the
+fixed source rectangle at the reported level. This is a checked support boundary, not an
+Adobe guarantee about every host version's rounding. Empty, cropped, incompatible or unknown
+native responses fail closed. Automated API-shape fixtures and synthetic PNG/Provider
+transport tests do not establish real UXP preview, notification or visual-model acceptance.
+Rebuild the native artifact before testing this path; restarting Desktop alone is insufficient.
+
 ## Verification
 
 ```sh
 node scripts/build-figplugin-bridge-readiness.mjs --check
 node scripts/build-figplugin-plan-preview.mjs --check
+node scripts/build-figplugin-pixel-audit.mjs --check
 node --test scripts/figplugin-host-bridge.test.mjs scripts/prepare-figplugin-host.test.mjs
+node --test scripts/figplugin-host-planning.test.mjs scripts/figplugin-visual-evidence.test.mjs scripts/figplugin-pixel-audit.test.mjs
 ```
 
 These automated scripts use fixtures. The separate real-host acceptance records explicitly
@@ -79,6 +111,7 @@ Official references:
 - https://developer.adobe.com/photoshop/uxp/2022/guides/devtool/installation
 - https://developer.adobe.com/photoshop/uxp/2022/scripting/how-it-works/
 - https://developer.adobe.com/photoshop/uxp/2022/guides/uxp-guide/uxp-misc/manifest-v5/
+- https://developer.adobe.com/photoshop/uxp/2022/ps_reference/media/imaging/#getpixels
 
 ## Photoshop 27.5 / UXP 9.2 loopback compatibility
 

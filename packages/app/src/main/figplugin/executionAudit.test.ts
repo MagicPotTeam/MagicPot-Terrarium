@@ -8,6 +8,7 @@ import {
   FigPluginExecutionAuditStore,
   type FigPluginExecutionAuditEvent
 } from './executionAudit'
+import { figPluginExecutionAuditEventSchema } from '@shared/figplugin/executionAudit'
 
 // Verify append, fsync and reopen against the OS, not the suite-wide memfs mock.
 vi.unmock('node:fs')
@@ -42,6 +43,22 @@ afterEach(async () => {
 })
 
 describe('bounded persistent FIGPLUGIN execution audit', () => {
+  it('accepts complete lineage and rejects partially populated correlation fields', () => {
+    const complete = {
+      ...event(1, 1000),
+      correlationId: 'c'.repeat(32),
+      runId: 'd'.repeat(32),
+      sequence: 1
+    }
+    expect(figPluginExecutionAuditEventSchema.safeParse(complete).success).toBe(true)
+    expect(
+      figPluginExecutionAuditEventSchema.safeParse({
+        ...complete,
+        runId: undefined
+      }).success
+    ).toBe(false)
+  })
+
   it('retains only the newest bounded records and never stores document values', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
     roots.push(root)

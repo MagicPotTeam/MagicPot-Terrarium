@@ -1,9 +1,13 @@
 import { z } from 'zod'
 import { FigPluginDesktopBridgeOriginSchema } from './manifest'
+import { HOST_COMMANDS, HOST_EXECUTION_ROLLBACKS, HOST_VISUAL_AUDITS } from './hostPlan'
 
-// Reachability only. No credentials, capability grants, document data or Provider probe.
+// The anonymous probe is reachability-only. It carries no credentials or document data and
+// never probes a Provider; authenticated readiness diagnostics are defined separately below.
 export const FIGPLUGIN_BRIDGE_PROBE_TIMEOUT_MS = 5_000
 export const FIGPLUGIN_BRIDGE_PROBE_PATH = '/figplugin/v1/probe'
+/** Authenticated diagnostics are deliberately separate from the anonymous echo probe. */
+export const FIGPLUGIN_BRIDGE_READINESS_PATH = '/figplugin/v1/readiness'
 const nonceSchema = z
   .string()
   .length(32)
@@ -18,6 +22,101 @@ export const figPluginBridgeProbeResponseSchema = z
     nonce: nonceSchema
   })
   .strict()
+const readinessStateSchema = z.enum(['ready', 'not-ready', 'unknown'])
+const readinessCodeSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z][a-z0-9-]*$/)
+const readinessCheckSchema = z
+  .object({ state: readinessStateSchema, code: readinessCodeSchema })
+  .strict()
+const safeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
+const providerCircuitStateSchema = z.enum(['closed', 'open', 'half-open'])
+const providerOutcomeSchema = z.enum(['success', 'failure', 'unknown'])
+const providerFailureClassSchema = z.enum([
+  'upstream',
+  'timeout',
+  'cancelled',
+  'configuration',
+  'unknown'
+])
+/** Safe operational metadata; never includes provider payloads, credentials or raw errors. */
+const providerDiagnosticsSchema = z
+  .object({
+    circuitState: providerCircuitStateSchema,
+    failureCount: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    retryAt: safeInteger.optional(),
+    probeInFlight: z.boolean(),
+    lastOutcome: providerOutcomeSchema.optional(),
+    lastOutcomeAt: safeInteger.optional(),
+    lastLatencyMs: z.number().int().min(0).max(90_000).optional(),
+    lastFailureClass: providerFailureClassSchema.optional(),
+    lastCorrelationId: nonceSchema.optional(),
+    observedAt: safeInteger.optional(),
+    observedCorrelationId: nonceSchema.optional()
+  })
+  .strict()
+
+/**
+ * Read-only observations supplied by a paired native host. These values are
+ * diagnostics only: the bridge never treats them as proof of write authority.
+ * The full HostContext/HostPlan contract is still required before execution.
+ */
+export const figPluginHostReadinessProbeSchema = z
+  .object({
+    host: z.enum(['figma', 'photoshop']),
+    adapterVersion: z.string().trim().min(1).max(64),
+    supports: z
+      .array(z.enum(HOST_COMMANDS))
+      .min(1)
+      .max(HOST_COMMANDS.length)
+      .superRefine((commands, ctx) => {
+        if (new Set(commands).size !== commands.length)
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate host capabilities' })
+      }),
+    rollback: z.enum(HOST_EXECUTION_ROLLBACKS),
+    visualAudit: z.enum(HOST_VISUAL_AUDITS),
+    document: readinessCheckSchema,
+    resources: z
+      .object({
+        fonts: readinessCheckSchema,
+        visual: readinessCheckSchema
+      })
+      .strict()
+  })
+  .strict()
+export type FigPluginHostReadinessProbe = z.output<typeof figPluginHostReadinessProbeSchema>
+
+/** Protocol-only requests remain valid for older hosts and intentionally report unknown. */
+export const figPluginBridgeReadinessRequestSchema = z
+  .object({
+    protocol: z.literal(1),
+    hostProbe: figPluginHostReadinessProbeSchema.optional(),
+    includeDiagnostics: z.boolean().optional()
+  })
+  .strict()
+export type FigPluginBridgeReadinessRequest = z.output<typeof figPluginBridgeReadinessRequestSchema>
+export const figPluginBridgeReadinessResponseSchema = z
+  .object({
+    protocol: z.literal(1),
+    kind: z.literal('figplugin-bridge-readiness'),
+    checkedAt: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    bridge: readinessCheckSchema,
+    configuration: readinessCheckSchema,
+    provider: readinessCheckSchema.extend({ diagnostics: providerDiagnosticsSchema.optional() }),
+    resources: readinessCheckSchema,
+    host: readinessCheckSchema
+      .extend({
+        host: z.enum(['figma', 'photoshop']),
+        capabilities: readinessCheckSchema
+      })
+      .strict()
+  })
+  .strict()
+export type FigPluginBridgeReadinessResponse = z.output<
+  typeof figPluginBridgeReadinessResponseSchema
+>
 export type FigPluginBridgeProbeCode =
   | 'reachable'
   | 'unavailable'

@@ -1,6 +1,13 @@
 import { escapePlanningDisplay } from './hostPlan'
 import { describe, expect, it } from 'vitest'
-import { hostContextSchema, parseHostPlan, type HostContext, type HostPlan } from './hostPlan'
+import {
+  createHostPlanReadback,
+  hostContextSchema,
+  parseHostPlan,
+  validateHostPlanReadback,
+  type HostContext,
+  type HostPlan
+} from './hostPlan'
 
 const context = (): HostContext => ({
   version: 1,
@@ -85,6 +92,25 @@ describe('shared host plan data contract', () => {
     c.nodes[0].commands = []
     expect(() => parseHostPlan(JSON.stringify(plan()), c)).toThrow('UNSUPPORTED_COMMAND')
   })
+  it('rejects duplicate node capabilities instead of treating them as independent authority', () => {
+    const c = context()
+    c.nodes[0].commands = ['node.rename', 'node.rename']
+    expect(hostContextSchema.safeParse(c).success).toBe(false)
+  })
+  it('rejects duplicate adapter capabilities before planning or execution', () => {
+    const c = context()
+    c.nodes[0].type = 'FRAME'
+    c.nodes[0].commands = ['node.rename']
+    c.selectedIds = ['1:2']
+    c.execution = {
+      mode: 'native-write',
+      adapterVersion: 'fixture',
+      supports: ['node.rename', 'node.rename'],
+      rollback: 'none',
+      visualAudit: 'unavailable'
+    }
+    expect(hostContextSchema.safeParse(c).success).toBe(false)
+  })
   it('rejects plan prose and truncated JSON rather than interpreting it', () => {
     for (const text of [
       JSON.stringify(plan()) + ' Sorry',
@@ -135,6 +161,108 @@ describe('shared host plan data contract', () => {
     expect(() =>
       parseHostPlan(JSON.stringify({ ...plan(), captureId: plan().captureId + '\n' }), context())
     ).toThrow()
+  })
+  it('strictly binds requested, original, other and unknown observations to their values', () => {
+    const before = context()
+    const after = structuredClone(before)
+    after.nodes[0].name = '新图层'
+    const valid = createHostPlanReadback(before, after, plan())
+    expect(validateHostPlanReadback(plan(), before, valid)).toEqual(valid)
+
+    const requestedWrong = structuredClone(valid)
+    requestedWrong.steps[0].value = '伪造值'
+    expect(() => validateHostPlanReadback(plan(), before, requestedWrong)).toThrow(
+      'INVALID_READBACK'
+    )
+
+    const requestedMissing = structuredClone(valid)
+    delete requestedMissing.steps[0].value
+    expect(() => validateHostPlanReadback(plan(), before, requestedMissing)).toThrow(
+      'INVALID_READBACK'
+    )
+
+    const original = createHostPlanReadback(before, before, plan())
+    expect(original.steps[0].observation).toBe('original')
+    const originalWrong = structuredClone(original)
+    originalWrong.steps[0].value = '伪造原值'
+    expect(() => validateHostPlanReadback(plan(), before, originalWrong)).toThrow(
+      'INVALID_READBACK'
+    )
+
+    const otherContext = structuredClone(before)
+    otherContext.nodes[0].name = '中间值'
+    const other = createHostPlanReadback(before, otherContext, plan())
+    expect(other.steps[0].observation).toBe('other')
+    const otherRequested = structuredClone(other)
+    otherRequested.steps[0].value = '新图层'
+    expect(() => validateHostPlanReadback(plan(), before, otherRequested)).toThrow(
+      'INVALID_READBACK'
+    )
+    const otherOriginal = structuredClone(other)
+    otherOriginal.steps[0].value = '原图层'
+    expect(() => validateHostPlanReadback(plan(), before, otherOriginal)).toThrow(
+      'INVALID_READBACK'
+    )
+
+    const unknownBefore = structuredClone(before)
+    delete unknownBefore.nodes[0].text
+    const unknown = createHostPlanReadback(unknownBefore, structuredClone(unknownBefore), {
+      ...plan(),
+      steps: [{ command: 'text.content', targetId: '1:2', text: '新文字' }]
+    })
+    expect(unknown.steps[0].observation).toBe('unknown')
+    expect(
+      validateHostPlanReadback(
+        { ...plan(), steps: [{ command: 'text.content', targetId: '1:2', text: '新文字' }] },
+        unknownBefore,
+        unknown
+      )
+    ).toEqual(unknown)
+    const unknownWithValue = structuredClone(unknown)
+    unknownWithValue.steps[0].value = '不应存在'
+    expect(() =>
+      validateHostPlanReadback(
+        { ...plan(), steps: [{ command: 'text.content', targetId: '1:2', text: '新文字' }] },
+        unknownBefore,
+        unknownWithValue
+      )
+    ).toThrow('INVALID_READBACK')
+
+    const originalWithoutValue = structuredClone(unknown)
+    originalWithoutValue.steps[0].observation = 'original'
+    expect(() =>
+      validateHostPlanReadback(
+        { ...plan(), steps: [{ command: 'text.content', targetId: '1:2', text: '新文字' }] },
+        unknownBefore,
+        originalWithoutValue
+      )
+    ).toThrow('INVALID_READBACK')
+  })
+  it('compares structured values canonically rather than by object key order', () => {
+    const before = structuredClone(context())
+    before.nodes[0].type = 'FRAME'
+    before.nodes[0].commands = ['layout.flow']
+    before.nodes[0].children = []
+    const layoutPlan: HostPlan = {
+      ...plan(),
+      steps: [
+        {
+          command: 'layout.flow',
+          targetId: '1:2',
+          layout: { direction: 'HORIZONTAL', gap: 4, padding: [1, 2, 3, 4] }
+        }
+      ]
+    }
+    const after = structuredClone(before)
+    after.nodes[0].layout = {
+      padding: [1, 2, 3, 4],
+      gap: 4,
+      direction: 'HORIZONTAL'
+    }
+    const readback = createHostPlanReadback(before, after, layoutPlan)
+    expect(readback.steps[0].observation).toBe('requested')
+    readback.steps[0].value = { padding: [1, 2, 3, 4], gap: 4, direction: 'HORIZONTAL' }
+    expect(validateHostPlanReadback(layoutPlan, before, readback)).toEqual(readback)
   })
 })
 

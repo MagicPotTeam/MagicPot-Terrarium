@@ -36,6 +36,44 @@ import {
   type FigPluginExecutionHistory
 } from '../figplugin/executionAudit'
 import {
+  figPluginPlanningHistoryRequestSchema,
+  figPluginPlanningHistorySchema,
+  type FigPluginPlanningHistoryRequest,
+  type FigPluginPlanningHistory
+} from '../figplugin/planningAudit'
+import {
+  figPluginDesktopAssetTargetSchema,
+  figPluginDesktopAssetRevokeSchema,
+  figPluginSessionAssetSchema,
+  figPluginAssetListSchema,
+  type FigPluginDesktopAssetTarget,
+  type FigPluginDesktopAssetRevoke,
+  type FigPluginSessionAsset,
+  type FigPluginAssetList
+} from '../figplugin/hostAssets'
+import {
+  figPluginDesktopManagedAssetRequestSchema,
+  type FigPluginDesktopManagedAssetRequest
+} from '../figplugin/managedSessionAsset'
+import {
+  figPluginImageGenerationRequestSchema,
+  figPluginImageGenerationKeySchema,
+  figPluginImageGenerationOutputSchema,
+  figPluginImageGenerationStateSchema,
+  figPluginImageGenerationAcceptSchema,
+  type FigPluginImageGenerationRequest,
+  type FigPluginImageGenerationKey,
+  type FigPluginImageGenerationOutput,
+  type FigPluginImageGenerationState,
+  type FigPluginImageGenerationAccept
+} from '../figplugin/imageGeneration'
+import {
+  figPluginNativeImageGenerationDesktopKeySchema,
+  figPluginNativeImageGenerationDesktopStateSchema,
+  type FigPluginNativeImageGenerationDesktopKey,
+  type FigPluginNativeImageGenerationDesktopState
+} from '../figplugin/nativeImageGeneration'
+import {
   figPluginDesktopPairRequestSchema,
   figPluginDesktopPairTicketSchema,
   figPluginDesktopApprovalSchema,
@@ -82,8 +120,32 @@ export type FigPluginCenterSvc = {
   approveBridge(req: FigPluginDesktopApproval): Promise<{ completed: boolean }>
   denyBridge(req: { callId: string }): Promise<void>
   revokeBridge(req: { pluginId: string }): Promise<void>
+  chooseSessionAsset(req: FigPluginDesktopAssetTarget): Promise<FigPluginSessionAsset | null>
+  chooseManagedSessionAsset(
+    req: FigPluginDesktopManagedAssetRequest
+  ): Promise<FigPluginSessionAsset | null>
+  generateSessionImage(
+    req: FigPluginImageGenerationRequest
+  ): Promise<FigPluginImageGenerationOutput | null>
+  nativeImageGenerationProposals(
+    req: Record<string, never>
+  ): Promise<FigPluginNativeImageGenerationDesktopState>
+  approveNativeImageGeneration(
+    req: FigPluginNativeImageGenerationDesktopKey
+  ): Promise<FigPluginImageGenerationOutput | null>
+  cancelNativeImageGeneration(
+    req: FigPluginNativeImageGenerationDesktopKey
+  ): Promise<{ completed: boolean }>
+  sessionImageGenerationState(
+    req: FigPluginImageGenerationKey
+  ): Promise<FigPluginImageGenerationState | null>
+  cancelSessionImageGeneration(req: FigPluginImageGenerationKey): Promise<{ completed: boolean }>
+  acceptSessionImageGeneration(req: FigPluginImageGenerationAccept): Promise<{ completed: boolean }>
+  sessionAssets(req: FigPluginDesktopAssetTarget): Promise<FigPluginAssetList>
+  revokeSessionAsset(req: FigPluginDesktopAssetRevoke): Promise<void>
   planState(req: Record<string, never>): Promise<FigPluginExecutionDesktopState>
   executionHistory(req: FigPluginExecutionHistoryRequest): Promise<FigPluginExecutionHistory>
+  planningHistory(req: FigPluginPlanningHistoryRequest): Promise<FigPluginPlanningHistory>
   listSavedCheckpoints(req: Record<string, never>): Promise<SavedTaskCheckpoint[]>
   approvePlanExecution(req: FigPluginDesktopExecutionApproval): Promise<{ completed: boolean }>
   acceptVisualBaseline(
@@ -130,6 +192,63 @@ export const figPluginCenterSvcDef: ServiceDefSheet<FigPluginCenterSvc> = {
     request: validated(figPluginManagedTargetSchema.pick({ pluginId: true })),
     response: z.void()
   },
+  chooseSessionAsset: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginDesktopAssetTargetSchema, value),
+    response: figPluginSessionAssetSchema.nullable()
+  },
+  chooseManagedSessionAsset: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginDesktopManagedAssetRequestSchema, value),
+    response: figPluginSessionAssetSchema.nullable()
+  },
+  generateSessionImage: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginImageGenerationRequestSchema, value),
+    response: figPluginImageGenerationOutputSchema.nullable()
+  },
+  nativeImageGenerationProposals: {
+    type: 'unary',
+    request: validated(figPluginManagementEmptyRequestSchema),
+    response: figPluginNativeImageGenerationDesktopStateSchema
+  },
+  approveNativeImageGeneration: {
+    type: 'unary',
+    request: (value) =>
+      parseFigPluginBridgeValue(figPluginNativeImageGenerationDesktopKeySchema, value),
+    response: figPluginImageGenerationOutputSchema.nullable()
+  },
+  cancelNativeImageGeneration: {
+    type: 'unary',
+    request: (value) =>
+      parseFigPluginBridgeValue(figPluginNativeImageGenerationDesktopKeySchema, value),
+    response: figPluginManagedPathResultSchema
+  },
+  sessionImageGenerationState: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginImageGenerationKeySchema, value),
+    response: figPluginImageGenerationStateSchema.nullable()
+  },
+  cancelSessionImageGeneration: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginImageGenerationKeySchema, value),
+    response: figPluginManagedPathResultSchema
+  },
+  acceptSessionImageGeneration: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginImageGenerationAcceptSchema, value),
+    response: figPluginManagedPathResultSchema
+  },
+  sessionAssets: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginDesktopAssetTargetSchema, value),
+    response: figPluginAssetListSchema
+  },
+  revokeSessionAsset: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginDesktopAssetRevokeSchema, value),
+    response: z.void()
+  },
   listSavedCheckpoints: {
     type: 'unary',
     request: validated(figPluginManagementEmptyRequestSchema),
@@ -139,6 +258,11 @@ export const figPluginCenterSvcDef: ServiceDefSheet<FigPluginCenterSvc> = {
     type: 'unary',
     request: validated(figPluginExecutionHistoryRequestSchema),
     response: figPluginExecutionHistorySchema
+  },
+  planningHistory: {
+    type: 'unary',
+    request: validated(figPluginPlanningHistoryRequestSchema),
+    response: figPluginPlanningHistorySchema
   },
   planState: {
     type: 'unary',

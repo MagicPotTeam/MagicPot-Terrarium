@@ -6,6 +6,7 @@ import {
   figPluginDesktopVisualCorrectionAuthorizationRequestSchema,
   figPluginExecutionDesktopStateSchema,
   figPluginExecutionResultRequestSchema,
+  figPluginExecutionStatusRequestSchema,
   figPluginExecutionStatusSchema,
   figPluginVisualBaselineComparisonSchema,
   figPluginVisualBaselineSchema,
@@ -67,6 +68,45 @@ describe('FIGPLUGIN visual evidence contract', () => {
     ).toEqual([evidence])
   })
 
+  it('rejects result status/effect combinations that the bridge cannot represent', () => {
+    expect(() =>
+      figPluginExecutionResultRequestSchema.parse({
+        ...result,
+        status: 'failed',
+        effect: 'applied',
+        visualEvidence: undefined
+      })
+    ).toThrow(/Applied result must be completed/i)
+    expect(() =>
+      figPluginExecutionResultRequestSchema.parse({
+        ...result,
+        status: 'cancelled',
+        effect: 'applied',
+        visualEvidence: undefined
+      })
+    ).toThrow(/Applied result must be completed/i)
+    expect(() =>
+      figPluginExecutionResultRequestSchema.parse({
+        ...result,
+        status: 'completed',
+        effect: 'partial',
+        completed: 0,
+        visualEvidence: undefined
+      })
+    ).toThrow(/Completed result must be applied/i)
+  })
+
+  it('preserves conservative failure receipts even when all requested values are observed', () => {
+    expect(
+      figPluginExecutionResultRequestSchema.parse({
+        ...result,
+        status: 'failed',
+        effect: 'partial',
+        visualEvidence: undefined
+      })
+    ).toMatchObject({ status: 'failed', effect: 'partial', completed: 1, total: 1 })
+  })
+
   it('rejects a claimed changed flag that disagrees with the bounded hashes', () => {
     expect(() =>
       figPluginVisualEvidenceSchema.parse({ ...evidence, after: evidence.before, changed: true })
@@ -115,6 +155,48 @@ describe('FIGPLUGIN visual evidence contract', () => {
         visualEvidenceSha256: 'f'.repeat(64)
       })
     ).toThrow(/incomplete visual evidence status/i)
+  })
+
+  it('keeps status lineage atomic so stale responses cannot be partially correlated', () => {
+    const base = {
+      protocol: 1,
+      executionId: result.executionId,
+      callId: 'f'.repeat(32),
+      state: 'completed' as const,
+      completed: 1,
+      total: 1,
+      effect: 'applied' as const,
+      updatedAt: 1
+    }
+    expect(
+      figPluginExecutionStatusSchema.parse({
+        ...base,
+        requestId: 'request_1',
+        runId: 'a'.repeat(32),
+        correlationId: 'b'.repeat(32)
+      })
+    ).toMatchObject({ requestId: 'request_1', runId: 'a'.repeat(32) })
+    expect(() => figPluginExecutionStatusSchema.parse({ ...base, requestId: 'request_1' })).toThrow(
+      /incomplete status lineage/i
+    )
+    expect(
+      figPluginExecutionStatusRequestSchema.parse({
+        protocol: 1,
+        callId: base.callId,
+        executionId: base.executionId,
+        requestId: 'request_1',
+        runId: 'a'.repeat(32),
+        correlationId: 'b'.repeat(32)
+      })
+    ).toMatchObject({ requestId: 'request_1', runId: 'a'.repeat(32) })
+    expect(() =>
+      figPluginExecutionStatusRequestSchema.parse({
+        protocol: 1,
+        callId: base.callId,
+        executionId: base.executionId,
+        requestId: 'request_1'
+      })
+    ).toThrow(/incomplete status lineage/i)
   })
 
   it('accepts a bounded user checkpoint descriptor with a fixed correction round cap', () => {

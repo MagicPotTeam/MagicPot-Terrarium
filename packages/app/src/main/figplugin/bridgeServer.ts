@@ -7,6 +7,11 @@ import {
   figPluginTaskRecoveryPrepareRequestSchema,
   figPluginTaskRecoveryPrepareResponseSchema
 } from '@shared/figplugin/taskRecovery'
+import {
+  FIGPLUGIN_BRIDGE_READINESS_PATH,
+  figPluginBridgeReadinessRequestSchema,
+  figPluginBridgeReadinessResponseSchema
+} from '@shared/figplugin/bridgeReadiness'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
@@ -40,6 +45,33 @@ import {
 } from '@shared/figplugin/execution'
 import type { FigPluginBridgeRuntime } from './bridgeRuntime'
 import { figPluginPixelAuditRequestSchema } from '@shared/figplugin/pixelAudit'
+import {
+  FIGPLUGIN_ASSET_LIST_PATH,
+  FIGPLUGIN_ASSET_READ_PATH,
+  figPluginAssetListRequestSchema,
+  figPluginAssetListSchema,
+  figPluginAssetReadRequestSchema,
+  figPluginAssetChunkSchema
+} from '@shared/figplugin/hostAssets'
+import {
+  FIGPLUGIN_EXECUTION_ASSET_READ_PATH,
+  figPluginExecutionAssetReadRequestSchema,
+  figPluginExecutionAssetChunkSchema
+} from '@shared/figplugin/hostExecutionAssets'
+import {
+  FIGPLUGIN_NATIVE_IMAGE_GENERATION_PREPARE_PATH,
+  FIGPLUGIN_NATIVE_IMAGE_GENERATION_STATUS_PATH,
+  FIGPLUGIN_NATIVE_IMAGE_GENERATION_CANCEL_PATH,
+  figPluginImageGenerationProposalPrepareRequestSchema,
+  figPluginImageGenerationProposalPrepareResponseSchema,
+  figPluginImageGenerationProposalStatusRequestSchema,
+  figPluginImageGenerationProposalStatusSchema,
+  figPluginImageGenerationProposalCancelRequestSchema
+} from '@shared/figplugin/nativeImageGeneration'
+import {
+  createFigPluginBridgeRateLimiter,
+  type FigPluginBridgeRateLimitOptions
+} from './bridgeRateLimit'
 
 type Runtime = Pick<
   FigPluginBridgeRuntime,
@@ -55,10 +87,29 @@ type Runtime = Pick<
   | 'planProgress'
   | 'planResult'
   | 'planPixelAudit'
+  | 'readiness'
+  | 'assetList'
+  | 'assetChunk'
+  | 'planAssetChunk'
+  | 'prepareImageGeneration'
+  | 'imageGenerationStatus'
+  | 'cancelImageGeneration'
 >
-type Options = { origin: string; runtime: Runtime; requestTimeoutMs?: number }
+type Options = {
+  origin: string
+  runtime: Runtime
+  requestTimeoutMs?: number
+  rateLimit?: FigPluginBridgeRateLimitOptions
+}
 const paths = new Set([
   FIGPLUGIN_BRIDGE_PROBE_PATH,
+  FIGPLUGIN_BRIDGE_READINESS_PATH,
+  FIGPLUGIN_ASSET_LIST_PATH,
+  FIGPLUGIN_ASSET_READ_PATH,
+  FIGPLUGIN_EXECUTION_ASSET_READ_PATH,
+  FIGPLUGIN_NATIVE_IMAGE_GENERATION_PREPARE_PATH,
+  FIGPLUGIN_NATIVE_IMAGE_GENERATION_STATUS_PATH,
+  FIGPLUGIN_NATIVE_IMAGE_GENERATION_CANCEL_PATH,
   '/figplugin/v1/pair',
   '/figplugin/v1/prepare',
   '/figplugin/v1/status',
@@ -182,6 +233,56 @@ const dispatch = async (
   body: unknown
 ): Promise<string | undefined> => {
   switch (path) {
+    case FIGPLUGIN_NATIVE_IMAGE_GENERATION_PREPARE_PATH:
+      parseFigPluginBridgeValue(figPluginImageGenerationProposalPrepareRequestSchema, body)
+      return serialize(
+        figPluginImageGenerationProposalPrepareResponseSchema,
+        // Preserve raw prompt bytes for the runtime's signed input limit before trimming.
+        await runtime.prepareImageGeneration(session, token, body)
+      )
+    case FIGPLUGIN_NATIVE_IMAGE_GENERATION_STATUS_PATH:
+      return serialize(
+        figPluginImageGenerationProposalStatusSchema,
+        await runtime.imageGenerationStatus(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginImageGenerationProposalStatusRequestSchema, body)
+        )
+      )
+    case FIGPLUGIN_NATIVE_IMAGE_GENERATION_CANCEL_PATH:
+      await runtime.cancelImageGeneration(
+        session,
+        token,
+        parseFigPluginBridgeValue(figPluginImageGenerationProposalCancelRequestSchema, body)
+      )
+      return undefined
+    case FIGPLUGIN_ASSET_LIST_PATH:
+      return serialize(
+        figPluginAssetListSchema,
+        await runtime.assetList(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginAssetListRequestSchema, body)
+        )
+      )
+    case FIGPLUGIN_ASSET_READ_PATH:
+      return serialize(
+        figPluginAssetChunkSchema,
+        await runtime.assetChunk(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginAssetReadRequestSchema, body)
+        )
+      )
+    case FIGPLUGIN_EXECUTION_ASSET_READ_PATH:
+      return serialize(
+        figPluginExecutionAssetChunkSchema,
+        await runtime.planAssetChunk(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginExecutionAssetReadRequestSchema, body)
+        )
+      )
     case FIGPLUGIN_BRIDGE_PROBE_PATH: {
       const request = parseFigPluginBridgeValue(figPluginBridgeProbeRequestSchema, body)
       return serialize(figPluginBridgeProbeResponseSchema, {
@@ -189,6 +290,13 @@ const dispatch = async (
         kind: 'figplugin-bridge-probe',
         nonce: request.nonce
       })
+    }
+    case FIGPLUGIN_BRIDGE_READINESS_PATH: {
+      const request = parseFigPluginBridgeValue(figPluginBridgeReadinessRequestSchema, body)
+      return serialize(
+        figPluginBridgeReadinessResponseSchema,
+        await runtime.readiness(session, token, request)
+      )
     }
     case '/figplugin/v1/pair':
       return serialize(
@@ -299,7 +407,8 @@ const dispatch = async (
 export async function startFigPluginBridgeServer({
   origin,
   runtime,
-  requestTimeoutMs
+  requestTimeoutMs,
+  rateLimit
 }: Options): Promise<{ origin: string; close(): Promise<void> }> {
   const canonicalOrigin = parseFigPluginBridgeValue(figPluginBridgeOriginSchema, origin)
   const host = canonicalOrigin.slice('http://'.length)
@@ -307,6 +416,7 @@ export async function startFigPluginBridgeServer({
   const timeout = Number.isFinite(requestTimeoutMs)
     ? Math.max(1, Math.min(15_000, Math.floor(requestTimeoutMs!)))
     : 15_000
+  const limiter = createFigPluginBridgeRateLimiter(rateLimit)
   const sockets = new Set<Socket>()
   const active = new Set<AbortController>()
   const handlers = new Set<Promise<void>>()
@@ -416,13 +526,24 @@ export async function startFigPluginBridgeServer({
         }
         token = authorization!.slice('Bearer '.length)
       }
+      const rateKey = session
+        ? `session:${session}`
+        : `anonymous:${request.socket.remoteAddress ?? 'unknown'}:${request.url ?? ''}`
+      if (!limiter.consume(rateKey)) throw new FigPluginBridgeError('BUSY')
       if (headers.get('content-type')?.toLowerCase() !== 'application/json') invalid()
       const limit =
         request.url === FIGPLUGIN_BRIDGE_PROBE_PATH
           ? 256
-          : request.url === '/figplugin/v1/pair'
-            ? 16 * 1024
-            : 64 * 1024
+          : request.url === FIGPLUGIN_BRIDGE_READINESS_PATH ||
+              request.url === FIGPLUGIN_ASSET_LIST_PATH ||
+              request.url === FIGPLUGIN_ASSET_READ_PATH ||
+              request.url === FIGPLUGIN_EXECUTION_ASSET_READ_PATH ||
+              request.url === FIGPLUGIN_NATIVE_IMAGE_GENERATION_STATUS_PATH ||
+              request.url === FIGPLUGIN_NATIVE_IMAGE_GENERATION_CANCEL_PATH
+            ? 4096
+            : request.url === '/figplugin/v1/pair'
+              ? 16 * 1024
+              : 64 * 1024
       if (
         length !== undefined &&
         (!Number.isSafeInteger(Number(length)) || Number(length) > limit)
@@ -520,6 +641,7 @@ export async function startFigPluginBridgeServer({
         for (const controller of active) controller.abort(new FigPluginBridgeError('CANCELLED'))
         server.closeAllConnections()
         for (const socket of sockets) socket.destroy()
+        limiter.clear()
         await Promise.all([stopped, ...handlers])
       })()
     }

@@ -6,9 +6,11 @@ import {
   hostContextSchema,
   hostPlanReadbackSchema,
   hostPlanSchema,
+  HOST_COMMANDS,
   type HostPlan,
   type HostPlanReadback
 } from './hostPlan'
+import { figPluginExecutionAssetsSchema, refineExecutionAssets } from './hostExecutionAssets'
 
 export const FIGPLUGIN_EXECUTION_PROTOCOL = 1 as const
 export const FIGPLUGIN_EXECUTION_MAX_EVENTS = 32
@@ -28,14 +30,21 @@ const sha256 = z
   .length(64)
   .regex(/^[a-f0-9]{64}$/)
 const safeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
+// Optional for one protocol-1 compatibility window. New Bridge claims always
+// populate these fields; older hosts may omit them while the runtime still
+// validates any value that is supplied.
+const requestId = z
+  .string()
+  .min(1)
+  .max(80)
+  .regex(/^[A-Za-z0-9_-]{1,80}$(?![\s\S])/)
+const executionLineageFields = {
+  requestId: requestId.optional(),
+  runId: hex32.optional(),
+  correlationId: hex32.optional()
+}
 const identifier = z.string().min(1).max(160)
-const command = z.enum([
-  'node.rename',
-  'node.opacity',
-  'node.visibility',
-  'text.content',
-  'layout.flow'
-])
+const command = z.enum(HOST_COMMANDS)
 const effect = z.enum(['none', 'applied', 'rolled-back', 'partial', 'unknown'])
 const terminalStatus = z.enum(['completed', 'cancelled', 'denied', 'failed', 'expired'])
 export const figPluginExecutionStateSchema = z.enum([
@@ -293,7 +302,9 @@ export const figPluginExecutionPreviewSchema = z
     documentId: identifier,
     scopeId: identifier,
     captureId: hex32,
+    ...executionLineageFields,
     plan: hostPlanSchema,
+    executionAssets: figPluginExecutionAssetsSchema.optional(),
     planSha256: sha256,
     contextSha256: sha256,
     adapterVersion: z.string().min(1).max(64),
@@ -310,6 +321,7 @@ export const figPluginExecutionPreviewSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    refineExecutionAssets(value, ctx)
     if (
       value.recovery &&
       (value.visualCorrection ||
@@ -350,7 +362,9 @@ export const figPluginExecutionIntentSchema = z
     documentId: identifier,
     scopeId: identifier,
     captureId: hex32,
+    ...executionLineageFields,
     plan: hostPlanSchema,
+    executionAssets: figPluginExecutionAssetsSchema.optional(),
     planSha256: sha256,
     expiresAt: safeInteger,
     adapterVersion: z.string().min(1).max(64),
@@ -361,6 +375,7 @@ export const figPluginExecutionIntentSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    refineExecutionAssets(value, ctx)
     if (
       value.recovery &&
       (value.visualCorrection ||
@@ -423,6 +438,10 @@ const publicStatusFields = {
   protocol,
   executionId: hex32,
   callId: hex32,
+  // Status polling is a separate transport request from the original plan
+  // request. Keep the complete lineage on the response so a desktop can
+  // discard a stale status without guessing from executionId alone.
+  ...executionLineageFields,
   state: figPluginExecutionStateSchema,
   completed: z.number().int().min(0).max(20),
   total: z.number().int().min(1).max(20),
@@ -457,6 +476,10 @@ export const figPluginExecutionStatusSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    const lineage = [value.requestId, value.runId, value.correlationId]
+    const lineageCount = lineage.filter((field) => field !== undefined).length
+    if (lineageCount !== 0 && lineageCount !== lineage.length)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Incomplete status lineage' })
     if (
       value.pixelAudit &&
       (!value.visualBaselineComparison ||
@@ -548,6 +571,7 @@ export const figPluginExecutionProgressRequestSchema = z
     protocol,
     executionId: hex32,
     actionId: hex32,
+    ...executionLineageFields,
     sequence: z.number().int().min(1).max(1_000_000),
     phase: z.enum(['claimed', 'executing', 'readback']),
     index: z.number().int().min(0).max(19).optional(),
@@ -562,6 +586,10 @@ export const figPluginExecutionProgressRequestSchema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid completed count' })
     if (value.phase !== 'claimed' && value.index === undefined)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Progress index is required' })
+    if (value.phase === 'claimed' && value.index !== undefined)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Claimed progress has no step index' })
+    if (value.index !== undefined && value.index >= value.total)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Progress index is outside total' })
     if (value.effect === 'none' && value.completed !== 0)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'No-effect progress has changes' })
     if (value.effect === 'applied' && value.completed !== value.total)
@@ -576,6 +604,7 @@ export const figPluginExecutionResultRequestSchema = z
     protocol,
     executionId: hex32,
     actionId: hex32,
+    ...executionLineageFields,
     status: z.enum(['completed', 'cancelled', 'failed']),
     effect,
     completed: z.number().int().min(0).max(20),
@@ -599,8 +628,11 @@ export const figPluginExecutionResultRequestSchema = z
   .superRefine((value, ctx) => {
     if (value.completed > value.total)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid completed count' })
-    if (value.status === 'completed' && value.effect !== 'applied' && value.effect !== 'partial')
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Completed result has no effect' })
+    // Success and applied effect must agree before the Bridge mutates state or releases a write.
+    if (value.status === 'completed' && value.effect !== 'applied')
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Completed result must be applied' })
+    if (value.status !== 'completed' && value.effect === 'applied')
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Applied result must be completed' })
     if (value.effect === 'applied' && value.completed !== value.total)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Applied result is incomplete' })
     if (value.effect === 'rolled-back' && value.status !== 'failed' && value.status !== 'cancelled')
@@ -631,8 +663,14 @@ export type FigPluginExecutionResultResponse = z.output<
 >
 
 export const figPluginExecutionStatusRequestSchema = z
-  .object({ protocol, callId: hex32, executionId: hex32.optional() })
+  .object({ protocol, callId: hex32, executionId: hex32.optional(), ...executionLineageFields })
   .strict()
+  .superRefine((value, ctx) => {
+    const lineage = [value.requestId, value.runId, value.correlationId]
+    const lineageCount = lineage.filter((field) => field !== undefined).length
+    if (lineageCount !== 0 && lineageCount !== lineage.length)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Incomplete status lineage' })
+  })
 export type FigPluginExecutionStatusRequest = z.output<typeof figPluginExecutionStatusRequestSchema>
 
 export const figPluginDesktopExecutionApprovalSchema = z

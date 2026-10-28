@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { readFileSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -374,7 +374,12 @@ test('real process exit after a synthetic effect retains its reservation; a new 
       process.exit(73);
     }catch(e){if(e.message==='JOURNAL_REPLAY'){console.log('REPLAY_BLOCKED');process.exit(0)}console.error(e.message);process.exit(1)}})();
   `
-  const first = spawnSync(process.execPath, ['-e', bootstrap], { encoding: 'utf8', timeout: 10000 })
+  // Windows has a relatively small command-line limit. Keep the generated
+  // child program in the temporary directory instead of passing both large
+  // shared modules through `node -e`.
+  const childPath = path.join(root, 'replay-child.cjs')
+  writeFileSync(childPath, bootstrap, 'utf8')
+  const first = spawnSync(process.execPath, [childPath], { encoding: 'utf8', timeout: 10000 })
   assert.equal(first.status, 73, first.stderr)
   const effect = path.join(root, 'synthetic-effect.txt'),
     record = path.join(root, PREFIX + intent().actionId + '.json')
@@ -383,7 +388,7 @@ test('real process exit after a synthetic effect retains its reservation; a new 
     record: readFileSync(record, 'utf8'),
     modified: statSync(effect).mtimeMs
   }
-  const second = spawnSync(process.execPath, ['-e', bootstrap], {
+  const second = spawnSync(process.execPath, [childPath], {
     encoding: 'utf8',
     timeout: 10000
   })

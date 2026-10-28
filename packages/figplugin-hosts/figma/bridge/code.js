@@ -9,6 +9,34 @@
     Object.keys(value).every((key) => required.includes(key) || optional.includes(key))
   const hex = (value, size) =>
     typeof value === 'string' && value.length === size && !/[^a-f0-9]/.test(value)
+  const readExecutionLineage = (intent) => {
+    if (!intent || typeof intent !== 'object' || Array.isArray(intent)) return null
+    const requestId = intent.requestId
+    const runId = intent.runId
+    const correlationId = intent.correlationId
+    const lineageCount = [requestId, runId, correlationId].filter(
+      (field) => field !== undefined
+    ).length
+    if (lineageCount !== 0 && lineageCount !== 3) return null
+    if (
+      requestId !== undefined &&
+      (typeof requestId !== 'string' ||
+        !bounded(requestId, 80) ||
+        !/^[A-Za-z0-9_-]{1,80}$(?![\s\S])/.test(requestId))
+    )
+      return null
+    if (runId !== undefined && !hex(runId, 32)) return null
+    if (correlationId !== undefined && !hex(correlationId, 32)) return null
+    return Object.freeze({
+      ...(requestId === undefined ? {} : { requestId }),
+      ...(runId === undefined ? {} : { runId }),
+      ...(correlationId === undefined ? {} : { correlationId })
+    })
+  }
+  const executionLineageMatches = (expected, actual) =>
+    expected?.requestId === actual?.requestId &&
+    expected?.runId === actual?.runId &&
+    expected?.correlationId === actual?.correlationId
   const integer = (value) => Number.isSafeInteger(value) && value >= 0
   const bytes = (text) => {
     let size = 0
@@ -47,11 +75,17 @@
   let session = null
   let connectionProbe = null
   let pairing = false
+  let readinessPending = false
   let snapshot = null
   let planningSnapshot = null
   let planningNodes = null
+  let planningContextImage = null
+  let planningImageBinding = null
+  let pendingContextImage = null
+  let planningImageObserver = null
   let recoveryDocumentRoot = null
   let review = null
+  let generationReview = null
   let planReview = null
   let activeExecution = null
   let sequence = 0
@@ -59,15 +93,21 @@
   let disposed = false
   let pollTimer = null
   let planPollTimer = null
+  let generationPollTimer = null
   let expiryTimer = null
   let snapshotReader = null
   let snapshotInstanceEpoch = null
+  let sessionAssetCatalog = null
+  let sessionAssetCatalogBinding = null
+  let sessionAssetTask = null
+  let sessionAssetTimer = null
   let label = config
     ? 'Paste a desktop pairing ticket to connect.'
     : 'Bridge configuration is invalid.'
   const operations = new Set()
   const routes = Object.freeze({
     pair: '/figplugin/v1/pair',
+    readiness: '/figplugin/v1/readiness',
     prepare: '/figplugin/v1/prepare',
     status: '/figplugin/v1/status',
     cancel: '/figplugin/v1/cancel',
@@ -78,7 +118,13 @@
     planClaim: '/figplugin/v1/plan/claim',
     planProgress: '/figplugin/v1/plan/progress',
     planResult: '/figplugin/v1/plan/result',
-    planPixelAudit: '/figplugin/v1/plan/pixel-audit'
+    planAssetsRead: '/figplugin/v1/plan/assets/read',
+    planPixelAudit: '/figplugin/v1/plan/pixel-audit',
+    assetsList: '/figplugin/v1/assets/list',
+    assetsRead: '/figplugin/v1/assets/read',
+    generationPrepare: '/figplugin/v1/image-generation/prepare',
+    generationStatus: '/figplugin/v1/image-generation/status',
+    generationCancel: '/figplugin/v1/image-generation/cancel'
   })
   const emit = (message) => {
     if (disposed) return
@@ -119,19 +165,78 @@
     emit({ type: 'read-only-snapshot', instanceEpoch, requestId, result })
   }
   const state = (text = label) => {
+    if (sessionAssetTask && sessionAssetTask.epoch !== epoch) clearSessionAssets()
     label = text
     emit({
       type: 'state',
       label,
       paired: session !== null,
-      busy: pairing || review !== null || planReview !== null || activeExecution !== null
+      busy:
+        pairing ||
+        review !== null ||
+        generationReview !== null ||
+        planReview !== null ||
+        activeExecution !== null ||
+        pendingContextImage !== null
     })
   }
   const clearView = () => {
     emit({ type: 'preview', text: '', revision: '' })
     emit({ type: 'content', text: '' })
   }
+  function clearPlanningContextImage() {
+    if (planningImageObserver) {
+      try {
+        planningImageObserver.page.off('nodechange', planningImageObserver.callback)
+      } catch {}
+      try {
+        figma.off('stylechange', planningImageObserver.callback)
+      } catch {}
+      planningImageObserver = null
+    }
+    planningContextImage = null
+    planningImageBinding = null
+    pendingContextImage = null
+  }
+  function invalidatePlanningContextImage(text) {
+    if (!planningContextImage && !pendingContextImage && !planningImageObserver) return
+    clearPlanningContextImage()
+    snapshot = null
+    planningSnapshot = null
+    planningNodes = null
+    clearView()
+    if (text) state(text)
+  }
+  function observePlanningContextImage(binding) {
+    // dynamic-page cannot observe documentchange without loading every page.
+    const page = binding.page
+    if (
+      !page ||
+      typeof page.on !== 'function' ||
+      typeof page.off !== 'function' ||
+      typeof figma.on !== 'function' ||
+      typeof figma.off !== 'function'
+    )
+      throw new Error('CONTEXT_IMAGE_OBSERVER_UNAVAILABLE')
+    const callback = () => {
+      if (pendingContextImage === binding || planningImageBinding === binding)
+        invalidatePlanningContextImage(
+          'Document content changed. Recapture the context image before sharing.'
+        )
+    }
+    page.on('nodechange', callback)
+    try {
+      figma.on('stylechange', callback)
+    } catch {
+      try {
+        page.off('nodechange', callback)
+      } catch {}
+      throw new Error('CONTEXT_IMAGE_OBSERVER_UNAVAILABLE')
+    }
+    planningImageObserver = { page, callback }
+  }
   const stop = () => {
+    clearSessionAssets()
     if (connectionProbe) {
       connectionProbe.cancel()
       connectionProbe = null
@@ -141,10 +246,12 @@
     pollTimer = null
     clearTimeout(planPollTimer)
     planPollTimer = null
+    clearTimeout(generationPollTimer)
+    generationPollTimer = null
     for (const cancel of Array.from(operations)) cancel()
   }
   // No stream API is assumed: native Figma fetch supplies text(). The desktop also bounds bodies.
-  async function post(route, body, auth = null) {
+  async function post(route, body, auth = null, signal = null) {
     if (!config || !Object.prototype.hasOwnProperty.call(routes, route)) throw new Error('REQUEST')
     const serialized = JSON.stringify(body)
     if (!bounded(serialized, 64 * 1024)) throw new Error('REQUEST')
@@ -181,7 +288,10 @@
       timer = setTimeout(cancel, 15000)
       operations.add(cancel)
     })
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) cancel()
     const work = (async () => {
+      if (!active) throw new Error('REQUEST')
       const response = await fetch(url, options)
       if (!active || Date.now() >= deadline) throw new Error('REQUEST')
       if (response.status === 401 || response.status === 410) throw new Error('SESSION')
@@ -197,7 +307,7 @@
         (!/^[0-9]+$(?![\s\S])/.test(String(length)) || Number(length) > 128 * 1024)
       )
         throw new Error('REQUEST')
-      if (route === 'cancel' || route === 'close') {
+      if (route === 'cancel' || route === 'close' || route === 'generationCancel') {
         if (response.status !== 204) throw new Error('REQUEST')
         return null
       }
@@ -214,6 +324,172 @@
       active = false
       clearTimeout(timer)
       operations.delete(cancel)
+      signal?.removeEventListener('abort', cancel)
+    }
+  }
+  function clearSessionAssets(
+    announce = true,
+    text = 'Local desktop image preview cleared.',
+    preserveCatalog = false
+  ) {
+    clearTimeout(sessionAssetTimer)
+    sessionAssetTimer = null
+    const task = sessionAssetTask
+    sessionAssetTask = null
+    if (task) {
+      task.cancel()
+      task.data?.fill(0)
+      task.data = null
+    }
+    if (!preserveCatalog) {
+      sessionAssetCatalog = null
+      sessionAssetCatalogBinding = null
+    }
+    if (announce) emit({ type: 'session-assets-clear', text })
+  }
+  function newSessionAssetTask(nonce, asset = null) {
+    const listeners = new Set()
+    const signal = {
+      aborted: false,
+      addEventListener: (_event, callback) => listeners.add(callback),
+      removeEventListener: (_event, callback) => listeners.delete(callback)
+    }
+    const task = {
+      nonce,
+      asset,
+      epoch,
+      auth: session,
+      signal,
+      data: null,
+      nextIndex: 0,
+      cancel() {
+        signal.aborted = true
+        for (const callback of listeners) callback()
+        listeners.clear()
+      }
+    }
+    sessionAssetTask = task
+    return task
+  }
+  function currentSessionAsset(task) {
+    return (
+      !disposed &&
+      sessionAssetTask === task &&
+      task.epoch === epoch &&
+      session === task.auth &&
+      !task.signal.aborted &&
+      (!task.asset || Date.now() < task.asset.expiresAt) &&
+      live()
+    )
+  }
+  function sessionAssetIdentity(auth, projectId = auth.projectId) {
+    return {
+      sessionId: auth.sessionId,
+      pluginId: config.pluginId,
+      host: HOST,
+      ...(projectId === undefined ? {} : { projectId })
+    }
+  }
+  function armSessionAssetExpiry() {
+    clearTimeout(sessionAssetTimer)
+    if (sessionAssetCatalog?.assets.length)
+      sessionAssetTimer = setTimeout(
+        () => clearSessionAssets(true, 'Desktop image catalog expired. Refresh explicitly.'),
+        Math.max(
+          0,
+          Math.min(...sessionAssetCatalog.assets.map((asset) => asset.expiresAt)) - Date.now()
+        )
+      )
+  }
+  async function refreshSessionAssets(nonce) {
+    if (disposed || pairing || activeExecution || !live()) return
+    clearSessionAssets(false)
+    const task = newSessionAssetTask(nonce)
+    try {
+      const helper = globalThis.MagicPotPlanPreviewV1
+      if (!helper || typeof helper.validateSessionAssetCatalog !== 'function')
+        throw new Error('ASSET_UNAVAILABLE')
+      const raw = await post(
+        'assetsList',
+        { protocol: 1, purpose: 'local-preview' },
+        task.auth,
+        task.signal
+      )
+      if (!currentSessionAsset(task)) return
+      const catalog = helper.validateSessionAssetCatalog(raw, sessionAssetIdentity(task.auth))
+      if (catalog.assets.length) task.auth.projectId = catalog.assets[0].projectId
+      sessionAssetCatalog = catalog
+      sessionAssetCatalogBinding = { auth: task.auth, projectId: catalog.assets[0]?.projectId }
+      touch(task.auth)
+      emit({ type: 'session-assets-catalog', nonce, catalog })
+      armSessionAssetExpiry()
+    } catch {
+      if (sessionAssetTask === task)
+        clearSessionAssets(true, 'Desktop image catalog unavailable or revoked. Refresh to retry.')
+    }
+  }
+  async function previewSessionAsset(message) {
+    if (disposed || pairing || activeExecution || !live()) return
+    const catalog = sessionAssetCatalog
+    const asset = catalog?.assets.find(
+      (value) => value.assetId === message.assetId && value.sha256 === message.sha256
+    )
+    if (!asset) return
+    clearSessionAssets(false, 'Local desktop image preview cleared.', true)
+    const task = newSessionAssetTask(message.nonce, asset)
+    armSessionAssetExpiry()
+    try {
+      const helper = globalThis.MagicPotPlanPreviewV1
+      const visual = globalThis.MagicPotVisualEvidenceV1
+      if (!helper || !visual || typeof visual.sha256SessionAsset !== 'function')
+        throw new Error('ASSET_UNAVAILABLE')
+      task.data = await helper.readSessionAsset(asset, {
+        identity: sessionAssetIdentity(task.auth),
+        readChunk: (request) => post('assetsRead', request, task.auth, task.signal),
+        sha256: visual.sha256SessionAsset,
+        signal: task.signal,
+        isCurrent: () => currentSessionAsset(task),
+        deadline: Math.min(task.auth.expiresAt, asset.expiresAt, Date.now() + 30000)
+      })
+      if (!currentSessionAsset(task)) {
+        task.data.fill(0)
+        task.data = null
+        return
+      }
+      touch(task.auth)
+      armSessionAssetExpiry()
+      emit({ type: 'session-asset-start', nonce: task.nonce, asset })
+    } catch {
+      if (sessionAssetTask === task)
+        clearSessionAssets(
+          true,
+          'Desktop image failed integrity, expired or was revoked. Nothing applied.'
+        )
+    }
+  }
+  function sendSessionAssetChunk(message) {
+    const task = sessionAssetTask
+    if (
+      !task ||
+      task.nonce !== message.nonce ||
+      !task.asset ||
+      !task.data ||
+      !currentSessionAsset(task) ||
+      message.index !== task.nextIndex
+    )
+      return
+    const index = task.nextIndex++
+    const start = index * task.asset.chunkSize
+    // UI pulls one <=24 KiB byte slice at a time, never an 8 MiB postMessage.
+    emit({
+      type: 'session-asset-bytes',
+      nonce: task.nonce,
+      index,
+      data: Array.from(task.data.subarray(start, start + task.asset.chunkSize))
+    })
+    if (task.nextIndex === task.asset.chunkCount) {
+      task.data.fill(0)
+      task.data = null
     }
   }
   function forget(sendClose, text, disposing = false) {
@@ -224,14 +500,18 @@
     expiryTimer = null
     session = null
     pairing = false
+    readinessPending = false
     snapshot = null
     planningSnapshot = null
     planningNodes = null
+    clearPlanningContextImage()
     review = null
+    generationReview = null
     planReview = null
     sequence = 0
     clearView()
     state(text)
+    generationState('Session closed. No image was shared or applied.')
     disposed = disposing
     if (disposing) snapshotReader = null
     // One attempt; never await unload, persist credentials, or retry an uncertain result.
@@ -260,6 +540,138 @@
     if (error && error.message === 'SESSION')
       forget(false, 'Session expired or unauthorized. Pair again.')
     else state(text)
+  }
+  const readinessState = (value) =>
+    value === 'ready' || value === 'not-ready' || value === 'unknown'
+  const readinessCode = (value) =>
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 64 &&
+    /^[a-z][a-z0-9-]*$(?![\s\S])/.test(value)
+  const readinessCheck = (value) =>
+    keys(value, ['state', 'code']) && readinessState(value.state) && readinessCode(value.code)
+  function readinessOf(value) {
+    if (
+      !keys(value, [
+        'protocol',
+        'kind',
+        'checkedAt',
+        'bridge',
+        'configuration',
+        'provider',
+        'resources',
+        'host'
+      ]) ||
+      value.protocol !== 1 ||
+      value.kind !== 'figplugin-bridge-readiness' ||
+      !integer(value.checkedAt) ||
+      !readinessCheck(value.bridge) ||
+      !readinessCheck(value.configuration) ||
+      !readinessCheck(value.provider) ||
+      !readinessCheck(value.resources) ||
+      !keys(value.host, ['state', 'code', 'host', 'capabilities']) ||
+      !readinessCheck({ state: value.host.state, code: value.host.code }) ||
+      value.host.host !== HOST ||
+      !readinessCheck(value.host.capabilities)
+    )
+      return null
+    return value
+  }
+  function emitReadiness(pending, value, error) {
+    if (pending) emit({ type: 'readiness', pending: true })
+    else if (value) emit({ type: 'readiness', pending: false, value })
+    else emit({ type: 'readiness', pending: false, error: error || 'request-failed' })
+  }
+  const readinessObservation = (state, code) => ({ state, code })
+  function hostReadinessProbe() {
+    // Metadata-only checks: do not include node IDs, names, text, or document data.
+    let document = readinessObservation('not-ready', 'document-api-unavailable')
+    let fonts = readinessObservation('not-ready', 'fonts-api-unavailable')
+    let visual = readinessObservation('not-ready', 'visual-api-unavailable')
+    try {
+      const page = figma && figma.currentPage
+      const selection = page && page.selection
+      document =
+        figma && page && Array.isArray(selection)
+          ? readinessObservation('ready', 'document-open')
+          : readinessObservation('not-ready', 'document-unavailable')
+      fonts =
+        figma &&
+        Object.prototype.hasOwnProperty.call(figma, 'loadFontAsync') &&
+        typeof figma.loadFontAsync === 'function'
+          ? readinessObservation('ready', 'fonts-api-available')
+          : readinessObservation('not-ready', 'fonts-api-unavailable')
+      const helper = globalThis.MagicPotVisualEvidenceV1
+      const hasSelection = Array.isArray(selection) && selection.length > 0
+      const visualApi =
+        helper &&
+        typeof helper.captureFigmaNode === 'function' &&
+        typeof helper.combine === 'function' &&
+        hasSelection &&
+        selection.every(
+          (node) =>
+            node &&
+            typeof node.exportAsync === 'function' &&
+            typeof node.width === 'number' &&
+            Number.isFinite(node.width) &&
+            node.width > 0 &&
+            typeof node.height === 'number' &&
+            Number.isFinite(node.height) &&
+            node.height > 0
+        )
+      visual = visualApi
+        ? readinessObservation('ready', 'visual-api-available')
+        : hasSelection
+          ? readinessObservation('not-ready', 'visual-api-unavailable')
+          : readinessObservation('unknown', 'visual-selection-empty')
+    } catch {
+      document = readinessObservation('not-ready', 'document-probe-failed')
+      fonts = readinessObservation('not-ready', 'fonts-probe-failed')
+      visual = readinessObservation('not-ready', 'visual-probe-failed')
+    }
+    return {
+      hostProbe: {
+        host: HOST,
+        adapterVersion: EXECUTION_ADAPTER_VERSION,
+        supports: [
+          'node.rename',
+          'node.opacity',
+          'node.visibility',
+          'text.content',
+          'layout.flow',
+          ...(imageFillApiAvailable() ? ['image.fill'] : [])
+        ],
+        rollback: 'verified-in-place',
+        visualAudit: visual.state === 'ready' ? 'hash-only' : 'unavailable',
+        document,
+        resources: { fonts, visual }
+      }
+    }
+  }
+  async function checkReadiness() {
+    if (!config || disposed || !session || pairing || readinessPending) return
+    const auth = session
+    const own = epoch
+    readinessPending = true
+    emitReadiness(true)
+    try {
+      const value = readinessOf(
+        await post('readiness', { protocol: 1, ...hostReadinessProbe() }, auth)
+      )
+      if (!value) throw new Error('REQUEST')
+      if (disposed || own !== epoch || session !== auth) return
+      touch(auth)
+      emitReadiness(false, value)
+    } catch (error) {
+      if (disposed || own !== epoch || session !== auth) return
+      if (error && error.message === 'SESSION') {
+        emitReadiness(false, null, 'session-expired')
+        forget(false, 'Session expired or unauthorized. Pair again.')
+      } else emitReadiness(false, null, 'request-failed')
+    } finally {
+      if (session === auth) readinessPending = false
+      if (!disposed && session === auth) state()
+    }
   }
   function ticketOf(text) {
     if (!bounded(text, 4096)) throw new Error('TICKET')
@@ -331,6 +743,8 @@
       state('Pairing ticket is invalid or expired.')
       return
     }
+    invalidatePlanningContextImage()
+    clearSessionAssets()
     pairing = true
     const own = ++epoch
     state('Pairing with desktop...')
@@ -374,7 +788,13 @@
       }
     }
   }
-  function cancelReview() {
+  function cancelReview(preserveSessionAssets = false) {
+    if (generationReview) {
+      cancelImageGeneration()
+      return
+    }
+    if (!preserveSessionAssets) clearSessionAssets()
+    invalidatePlanningContextImage('Local context image cleared. Capture again before sharing.')
     if (connectionProbe) {
       stop()
       state()
@@ -432,9 +852,9 @@
       })
   }
   function capture(revision) {
-    if (activeExecution) return
+    if (activeExecution || generationReview) return
     if (pairing || activeExecution) return
-    cancelReview()
+    cancelReview(true)
     snapshot = null
     planningSnapshot = null
     clearView()
@@ -489,6 +909,169 @@
     } catch {
       return { status: 'unavailable' }
     }
+  }
+  const imageFillTypes = ['RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR', 'FRAME']
+  const imagePaintTypes = [
+    'SOLID',
+    'IMAGE',
+    'GRADIENT_LINEAR',
+    'GRADIENT_RADIAL',
+    'GRADIENT_ANGULAR',
+    'GRADIENT_DIAMOND'
+  ]
+  function imageFillApiAvailable() {
+    try {
+      const helper = globalThis.MagicPotVisualEvidenceV1
+      return (
+        typeof helper?.encodeUtf8 === 'function' &&
+        typeof helper?.sha256SessionAsset === 'function' &&
+        'createImage' in figma &&
+        'getImageByHash' in figma &&
+        typeof figma.createImage === 'function' &&
+        typeof figma.getImageByHash === 'function'
+      )
+    } catch {
+      return false
+    }
+  }
+  function fillImagesAvailable(paints) {
+    return paints.every(
+      (paint) =>
+        paint.type !== 'IMAGE' ||
+        paint.imageHash === null ||
+        (validNativeImageHash(paint.imageHash) &&
+          figma.getImageByHash(paint.imageHash)?.hash === paint.imageHash)
+    )
+  }
+  function nativeFills(node) {
+    if (
+      !imageFillApiAvailable() ||
+      !imageFillTypes.includes(node.type) ||
+      (node.fillStyleId !== undefined && node.fillStyleId !== '')
+    )
+      throw new Error('IMAGE_FILL_UNAVAILABLE')
+    let ancestor = node.parent
+    let depth = 0
+    while (ancestor && ancestor !== figma.currentPage) {
+      if (++depth > 32 || ['INSTANCE', 'COMPONENT', 'COMPONENT_SET'].includes(ancestor.type))
+        throw new Error('IMAGE_FILL_UNAVAILABLE')
+      ancestor = ancestor.parent
+    }
+    if (ancestor !== figma.currentPage) throw new Error('IMAGE_FILL_UNAVAILABLE')
+    const fills = node.fills
+    if (!Array.isArray(fills) || fills.length > 32) throw new Error('IMAGE_FILL_UNAVAILABLE')
+    let count = 0
+    const clone = (value, depth = 0) => {
+      if (++count > 4096 || depth > 8) throw new Error('IMAGE_FILL_UNAVAILABLE')
+      if (value === null || typeof value === 'boolean') return value
+      if (typeof value === 'number' && Number.isFinite(value)) return value
+      if (typeof value === 'string' && bounded(value, 32768)) return value
+      if (!value || typeof value !== 'object' || Object.getOwnPropertySymbols(value).length)
+        throw new Error('IMAGE_FILL_UNAVAILABLE')
+      if (Array.isArray(value)) {
+        if (value.length > 128) throw new Error('IMAGE_FILL_UNAVAILABLE')
+        const output = []
+        for (let index = 0; index < value.length; index++)
+          output.push(clone(value[index], depth + 1))
+        return output
+      }
+      const fields = Object.keys(value).sort()
+      if (
+        fields.length > 64 ||
+        fields.some((key) => ['__proto__', 'constructor', 'prototype'].includes(key))
+      )
+        throw new Error('IMAGE_FILL_UNAVAILABLE')
+      const output = {}
+      for (const key of fields) {
+        const field = Object.getOwnPropertyDescriptor(value, key)
+        if (!field || !Object.prototype.hasOwnProperty.call(field, 'value'))
+          throw new Error('IMAGE_FILL_UNAVAILABLE')
+        output[key] = clone(field.value, depth + 1)
+      }
+      return output
+    }
+    const paints = clone(fills)
+    if (
+      paints.some((paint) => {
+        if (!paint || !imagePaintTypes.includes(paint.type)) return true
+        const fields =
+          paint.type === 'SOLID'
+            ? ['color']
+            : paint.type === 'IMAGE'
+              ? ['imageHash', 'scaleMode', 'imageTransform', 'scalingFactor', 'rotation', 'filters']
+              : ['gradientTransform', 'gradientStops']
+        return (
+          !keys(
+            paint,
+            ['type'],
+            [...fields, 'visible', 'opacity', 'blendMode', 'boundVariables']
+          ) ||
+          (paint.boundVariables !== undefined && !keys(paint.boundVariables, []))
+        )
+      })
+    )
+      throw new Error('IMAGE_FILL_UNAVAILABLE')
+    if (!fillImagesAvailable(paints)) throw new Error('IMAGE_FILL_UNAVAILABLE')
+    const serialized = JSON.stringify(paints)
+    if (!bounded(serialized, 32768)) throw new Error('IMAGE_FILL_UNAVAILABLE')
+    const helper = globalThis.MagicPotVisualEvidenceV1
+    const data = helper.encodeUtf8(serialized)
+    try {
+      return { paints, fingerprint: helper.sha256SessionAsset(data) }
+    } finally {
+      data.fill(0)
+    }
+  }
+  function imageFillSnapshot(node) {
+    try {
+      return { status: 'available', fingerprint: nativeFills(node).fingerprint }
+    } catch {
+      return { status: 'unavailable' }
+    }
+  }
+  function approvedImagePaint(paints, nativeImageHash, scaleMode) {
+    if (paints.length !== 1) return false
+    const paint = paints[0]
+    if (
+      !keys(
+        paint,
+        ['type', 'imageHash', 'scaleMode'],
+        [
+          'visible',
+          'opacity',
+          'blendMode',
+          'rotation',
+          'filters',
+          'imageTransform',
+          'scalingFactor',
+          'boundVariables'
+        ]
+      ) ||
+      paint.type !== 'IMAGE' ||
+      paint.imageHash !== nativeImageHash ||
+      paint.scaleMode !== scaleMode ||
+      (paint.boundVariables !== undefined && !keys(paint.boundVariables, [])) ||
+      (paint.visible !== undefined && paint.visible !== true) ||
+      (paint.opacity !== undefined && paint.opacity !== 1) ||
+      (paint.blendMode !== undefined && paint.blendMode !== 'NORMAL') ||
+      (paint.rotation !== undefined && paint.rotation !== 0) ||
+      (paint.scalingFactor !== undefined && paint.scalingFactor !== 1) ||
+      (paint.imageTransform !== undefined &&
+        !samePlanValue(paint.imageTransform, [
+          [1, 0, 0],
+          [0, 1, 0]
+        ]))
+    )
+      return false
+    return (
+      paint.filters === undefined ||
+      (keys(
+        paint.filters,
+        [],
+        ['exposure', 'contrast', 'saturation', 'temperature', 'tint', 'highlights', 'shadows']
+      ) &&
+        Object.values(paint.filters).every((value) => value === 0))
+    )
   }
   function readSpatial(node) {
     const helper = globalThis.MagicPotPlanPreviewV1
@@ -600,6 +1183,7 @@
       const effectiveLocked = node.locked || ancestors.some((ancestor) => ancestor.locked)
       const parentId = ancestors[0]?.id ?? null
       const typography = type === 'TEXT' ? readTypography(node) : undefined
+      const imageFill = imageFillTypes.includes(type) ? imageFillSnapshot(node) : undefined
       const fontKey = typography && globalThis.MagicPotPlanPreviewV1.typographyFontKey(typography)
       const commands = []
       let layout = null
@@ -619,6 +1203,7 @@
         }
         layout = readLayout(node)
         if (layout) commands.push('layout.flow')
+        if (imageFill?.status === 'available') commands.push('image.fill')
       }
       const record = {
         id,
@@ -630,6 +1215,7 @@
         visible: node.visible,
         spatial: readSpatial(node),
         appearance: readAppearance(node),
+        ...(imageFill ? { imageFill } : {}),
         ...(typography ? { typography } : {}),
         ...(fontKey === undefined ? {} : { fontKey }),
         ...(typeof node.opacity === 'number' && Number.isFinite(node.opacity)
@@ -692,7 +1278,14 @@
       execution: {
         mode: 'native-write',
         adapterVersion: EXECUTION_ADAPTER_VERSION,
-        supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content', 'layout.flow'],
+        supports: [
+          'node.rename',
+          'node.opacity',
+          'node.visibility',
+          'text.content',
+          'layout.flow',
+          ...(nodes.some((node) => node.commands.includes('image.fill')) ? ['image.fill'] : [])
+        ],
         rollback: 'verified-in-place',
         visualAudit: canCaptureVisualEvidence ? 'hash-only' : 'unavailable'
       }
@@ -796,22 +1389,87 @@
       throw new Error('CONTEXT')
     return captured
   }
-  function capturePlan(revision, instanceEpoch) {
+  function currentContextImageCapture(binding) {
+    if (
+      disposed ||
+      snapshotInstanceEpoch !== binding.instanceEpoch ||
+      figma.root !== binding.root ||
+      figma.currentPage !== binding.page ||
+      binding.page.selection.length !== 1 ||
+      binding.page.selection[0] !== binding.node ||
+      binding.node.width !== binding.width ||
+      binding.node.height !== binding.height
+    )
+      return false
+    const fresh = captureFigmaHostContext(binding.revision)
+    return (
+      JSON.stringify(fresh.context) === binding.serializedContext &&
+      fresh.nodes.size === binding.nodes.size &&
+      Array.from(fresh.nodes).every(([id, node]) => binding.nodes.get(id) === node)
+    )
+  }
+  async function capturePlan(revision, instanceEpoch, includeImage = false) {
+    if (generationReview) return
     if (activeExecution) return
     if (pairing || disposed || !config || activeExecution) return
-    cancelReview()
+    if (includeImage && (review || planReview)) return
+    cancelReview(true)
     snapshot = null
     planningSnapshot = null
     planningNodes = null
+    clearPlanningContextImage()
     clearView()
+    let pending = null
     try {
       if (snapshotInstanceEpoch !== null && snapshotInstanceEpoch !== instanceEpoch)
         throw new Error('SNAPSHOT')
       snapshotInstanceEpoch = instanceEpoch
       const planner = globalThis.MagicPotPlanPreviewV1
       if (!planner) throw new Error('SNAPSHOT')
+      if (includeImage && figma.currentPage.selection.length !== 1)
+        throw new Error('SINGLE_IMAGE_TARGET')
       const captured = captureFigmaHostContext(revision)
       const full = captured.context
+      let image = null
+      if (includeImage) {
+        const helper = globalThis.MagicPotVisualEvidenceV1
+        if (full.selectedIds.length !== 1) throw new Error('SINGLE_IMAGE_TARGET')
+        if (!helper || typeof helper.captureFigmaContextImage !== 'function')
+          throw new Error('CONTEXT_IMAGE_UNAVAILABLE')
+        const node = captured.nodes.get(full.selectedIds[0])
+        pending = {
+          epoch,
+          auth: session,
+          instanceEpoch,
+          revision,
+          root: figma.root,
+          page: figma.currentPage,
+          node,
+          width: node.width,
+          height: node.height,
+          nodes: captured.nodes,
+          serializedContext: JSON.stringify(full)
+        }
+        pendingContextImage = pending
+        observePlanningContextImage(pending)
+        if (!currentContextImageCapture(pending)) throw new Error('STALE_CONTEXT_IMAGE')
+        state('Capturing one selection image locally. Nothing is sent until you explicitly share.')
+        image = await helper.captureFigmaContextImage(node, {
+          captureId: revision,
+          targetId: full.selectedIds[0]
+        })
+        // Export is asynchronous: native identity, full observed context and session must still match.
+        if (pendingContextImage !== pending) return
+        if (
+          pending.epoch !== epoch ||
+          pending.auth !== session ||
+          !currentContextImageCapture(pending)
+        )
+          throw new Error('STALE_CONTEXT_IMAGE')
+        planningContextImage = image
+        planningImageBinding = pending
+        pendingContextImage = null
+      }
       planningNodes = captured.nodes
       const selected = new Set(full.selectedIds)
       snapshot = {
@@ -826,15 +1484,34 @@
           }))
       }
       planningSnapshot = full
-      emit({ type: 'preview', text: planner.formatContext(full), revision })
+      emit({
+        type: 'preview',
+        text: planner.formatContext(full),
+        revision,
+        planning: true,
+        ...(image ? { contextImage: image } : {})
+      })
       state(
-        'Native plan context captured. Model output still requires a separate desktop write approval.'
+        image
+          ? 'Context and exact image captured locally. Review both and consent before sharing for desktop approval.'
+          : 'Native plan context captured. Model output still requires a separate desktop write approval.'
       )
-    } catch {
+    } catch (error) {
+      if (pending && pendingContextImage !== pending && planningImageBinding !== pending) return
       snapshot = null
       planningSnapshot = null
       planningNodes = null
-      state('Planning capture failed. No content was sent and no document was changed.')
+      clearPlanningContextImage()
+      clearView()
+      state(
+        error?.message === 'SINGLE_IMAGE_TARGET'
+          ? 'Image capture requires exactly one selected node. Nothing was sent or changed.'
+          : error?.message === 'CONTEXT_IMAGE_OBSERVER_UNAVAILABLE'
+            ? 'Native image-change observation is unavailable. Capture context without an image instead; nothing was sent.'
+            : includeImage
+              ? 'Image capture failed or became stale. Select one node and recapture; PNG must fit 256 px / 24 KiB. Nothing was sent.'
+              : 'Planning capture failed. No content was sent and no document was changed.'
+      )
     }
   }
   const planCommands = [
@@ -842,7 +1519,8 @@
     'node.opacity',
     'node.visibility',
     'text.content',
-    'layout.flow'
+    'layout.flow',
+    'image.fill'
   ]
   const readNodeValue = (node, command) => {
     switch (command) {
@@ -856,6 +1534,8 @@
         return node.type === 'TEXT' ? node.characters : undefined
       case 'layout.flow':
         return readNodeLayout(node)
+      case 'image.fill':
+        return { fingerprint: nativeFills(node).fingerprint }
       default:
         return undefined
     }
@@ -879,6 +1559,291 @@
     }
   }
   const samePlanValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+  // Keep the shared lifecycle contract at the native boundary. The lifecycle
+  // callbacks below are the actual Figma prepare/write/readback path; the
+  // surrounding bridge still owns the desktop receipt and visual audit.
+  function createFigmaPlanLifecycle(planner, item) {
+    if (
+      !planner ||
+      typeof planner.createHostAdapterLifecycle !== 'function' ||
+      typeof planner.validateHostPlanReadback !== 'function'
+    )
+      throw new Error('PLAN_LIFECYCLE_UNAVAILABLE')
+    const meta = {
+      failureCode: null,
+      journalBlocked: false,
+      visualEvidence: undefined,
+      // Claim is sequence 1. Keep the last step receipt so a failed plan can
+      // still append its readback without skipping unexecuted steps.
+      lastProgressSequence: 1
+    }
+    const intent = item.lifecycleIntent
+    const ownedCollectionsByRun = new Map()
+    function ownRunCollection(runId, collection) {
+      let owned = ownedCollectionsByRun.get(runId)
+      if (!owned) {
+        owned = new Set()
+        ownedCollectionsByRun.set(runId, owned)
+      }
+      owned.add(collection)
+      return collection
+    }
+    const lifecycle = planner.createHostAdapterLifecycle({
+      host: HOST,
+      adapterVersion: EXECUTION_ADAPTER_VERSION,
+      retainExecution: false,
+      // Native descriptors must negotiate capabilities before any write.
+      // Legacy shared fixtures leave this opt-in disabled for compatibility.
+      requireCapabilityDiscovery: true,
+      // Capability discovery is metadata-only and remains bound to the
+      // context captured for this exact claim. A future lifecycle.run call
+      // therefore fails closed if the host or adapter capabilities drift.
+      discoverCapabilities: () => ({
+        host: HOST,
+        execution: item.hostContext.execution
+      }),
+      // The desktop has already captured and authorized this exact context.
+      // A fallback capture must never observe a different selection.
+      captureContext: (captureId) => {
+        if (captureId !== item.hostContext.captureId) throw new Error('STALE_CONTEXT')
+        return item.hostContext
+      },
+      prepareResources: async ({ runId, context, plan, signal, deferRelease }) => {
+        if (!intent || signal.aborted) throw new Error('CANCELLED')
+        assertExecutionCurrent(item)
+        let checked = ownRunCollection(runId, precheckPlan(plan, context))
+        let visualEntries = ownRunCollection(runId, visualEntriesForIntent(checked, item, intent))
+        await prepareTextFonts(checked, item)
+        if (signal.aborted) throw new Error('CANCELLED')
+        assertExecutionCurrent(item)
+        const imageSources = ownRunCollection(
+          runId,
+          await prepareImageSources(plan, item, signal, deferRelease)
+        )
+        checked = ownRunCollection(runId, precheckPlan(plan, context))
+        visualEntries = ownRunCollection(runId, visualEntriesForIntent(checked, item, intent))
+        let beforeVisual = null
+        if (context.execution.visualAudit === 'hash-only') {
+          beforeVisual = ownRunCollection(runId, await capturePlanVisualPoints(visualEntries))
+          if (signal.aborted) throw new Error('CANCELLED')
+          assertExecutionCurrent(item)
+          checked = ownRunCollection(runId, precheckPlan(plan, context))
+          visualEntries = ownRunCollection(runId, visualEntriesForIntent(checked, item, intent))
+        }
+        await checkExecutionAuthority(item)
+        try {
+          await reserveNativeAction(item, intent)
+        } catch (error) {
+          meta.journalBlocked = String(error?.message).startsWith('JOURNAL_')
+          throw error
+        }
+        if (signal.aborted) throw new Error('CANCELLED')
+        assertExecutionCurrent(item)
+        checked = ownRunCollection(runId, precheckPlan(plan, context))
+        const imageResources = ownRunCollection(runId, new Map())
+        for (const [assetId, source] of imageSources) {
+          await checkExecutionAuthority(item)
+          if (signal.aborted) throw new Error('CANCELLED')
+          assertExecutionCurrent(item)
+          const image = figma.createImage(source.bytes)
+          const nativeImageHash = image?.hash
+          if (
+            !validNativeImageHash(nativeImageHash) ||
+            figma.getImageByHash(nativeImageHash)?.hash !== nativeImageHash
+          )
+            throw new Error('IMAGE_IMPORT_FAILED')
+          const nativeContentSha256 = await nativeImageDigest(nativeImageHash, item, signal)
+          if (signal.aborted) throw new Error('CANCELLED')
+          assertExecutionCurrent(item)
+          imageResources.set(assetId, {
+            assetId,
+            sha256: source.asset.sha256,
+            nativeImageHash,
+            nativeContentSha256
+          })
+          source.bytes.fill(0)
+        }
+        if (imageResources.size) await checkExecutionAuthority(item)
+        if (signal.aborted) throw new Error('CANCELLED')
+        assertExecutionCurrent(item)
+        checked = ownRunCollection(runId, precheckPlan(plan, context))
+        return {
+          checked,
+          visualEntries,
+          beforeVisual,
+          ...(imageResources.size ? { imageResources } : {}),
+          applied: ownRunCollection(runId, [])
+        }
+      },
+      execute: async ({ runId, context, plan, resources, signal, onProgress }) => {
+        if (!resources || signal.aborted) throw new Error('CANCELLED')
+        const applied = ownRunCollection(runId, [])
+        try {
+          for (let index = 0; index < resources.checked.length; index += 1) {
+            const entry = resources.checked[index]
+            if (signal.aborted) throw new Error('CANCELLED')
+            assertExecutionCurrent(item)
+            if (resources.imageResources?.size) await checkExecutionAuthority(item)
+            if (signal.aborted) throw new Error('CANCELLED')
+            assertExecutionCurrent(item)
+            precheckPlan({ ...plan, steps: [entry.step] }, context, false)
+            if (entry.step.command === 'image.fill') {
+              entry.imageResource = resources.imageResources.get(entry.step.assetId)
+              if (!entry.imageResource || entry.imageResource.sha256 !== entry.step.sha256)
+                throw new Error('IMAGE_IMPORT_FAILED')
+              // Record the attempted step before a setter can partially apply and throw.
+              applied.push(entry)
+              try {
+                applyPlanStep(entry.node, entry.step, entry.imageResource)
+              } finally {
+                const actual = nativeFills(entry.node)
+                if (
+                  !approvedImagePaint(
+                    actual.paints,
+                    entry.imageResource.nativeImageHash,
+                    entry.step.scaleMode
+                  )
+                )
+                  throw new Error('IMAGE_WRITE_MISMATCH')
+                entry.appliedFillsSha256 = actual.fingerprint
+                item.imageWrites.set(entry.step.targetId, {
+                  ...entry.imageResource,
+                  scaleMode: entry.step.scaleMode,
+                  fillsSha256: actual.fingerprint
+                })
+              }
+            } else applyPlanStep(entry.node, entry.step)
+            if (entry.step.command === 'text.content') {
+              entry.appliedTypography = readTypography(entry.node)
+              entry.appliedAppearance = readAppearance(entry.node)
+            }
+            if (entry.step.command !== 'image.fill') applied.push(entry)
+            const completed = index + 1
+            onProgress?.(completed, resources.checked.length)
+            await postPlanProgress(
+              item,
+              2 + index,
+              'executing',
+              index,
+              completed,
+              resources.checked.length,
+              completed === resources.checked.length ? 'applied' : 'partial'
+            )
+            meta.lastProgressSequence = 2 + index
+            assertExecutionCurrent(item)
+            if (resources.imageResources?.size) await checkExecutionAuthority(item)
+          }
+          return { ...resources, applied }
+        } catch (error) {
+          if (item.imageExecution && !signal.aborted && executionCurrent(item)) {
+            try {
+              await checkExecutionAuthority(item)
+            } catch {}
+          }
+          for (const entry of applied.reverse()) {
+            try {
+              if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
+              if (
+                entry.step.command === 'image.fill' &&
+                (signal.aborted || !executionCurrent(item))
+              )
+                throw new Error('CANCELLED')
+              rollbackPlanStep(
+                entry.node,
+                entry.contextNode,
+                entry.step,
+                entry.appliedTypography,
+                entry.appliedAppearance,
+                entry
+              )
+            } catch {}
+          }
+          if (signal.aborted || !executionCurrent(item) || String(error?.message) === 'CANCELLED')
+            throw new Error('CANCELLED')
+          meta.failureCode = 'ROLLED_BACK'
+          throw new Error('EXECUTE_FAILED')
+        }
+      },
+      readback: async ({ runId, context, plan, execution, signal }) => {
+        if (signal.aborted) throw new Error('CANCELLED')
+        assertExecutionCurrent(item)
+        await verifyImageResources(item, signal)
+        if (signal.aborted) throw new Error('CANCELLED')
+        assertExecutionCurrent(item)
+        let readback = createPlanReadback(context, plan, item)
+        const observations = readback.steps.map((step) => step.observation)
+        if (
+          observations.every((value) => value === 'requested') &&
+          context.execution.visualAudit === 'hash-only'
+        ) {
+          try {
+            const afterVisual = ownRunCollection(
+              runId,
+              await capturePlanVisualPoints(execution.visualEntries)
+            )
+            if (signal.aborted) throw new Error('CANCELLED')
+            assertExecutionCurrent(item)
+            for (const entry of execution.checked) verifyNativeNode(entry.contextNode)
+            await verifyImageResources(item, signal)
+            if (signal.aborted) throw new Error('CANCELLED')
+            assertExecutionCurrent(item)
+            readback = createPlanReadback(context, plan, item)
+            if (readback.steps.some((step) => step.observation !== 'requested'))
+              throw new Error('STALE_CONTEXT')
+            meta.visualEvidence = combinePlanVisualEvidence(
+              execution.visualEntries,
+              execution.beforeVisual,
+              afterVisual
+            )
+          } catch (error) {
+            if (String(error?.message) === 'CANCELLED') throw error
+            if (item.imageExecution && !signal.aborted && executionCurrent(item)) {
+              try {
+                await checkExecutionAuthority(item)
+              } catch {}
+            }
+            for (const entry of [...execution.applied].reverse()) {
+              try {
+                if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
+                if (
+                  entry.step.command === 'image.fill' &&
+                  (signal.aborted || !executionCurrent(item))
+                )
+                  throw new Error('CANCELLED')
+                rollbackPlanStep(
+                  entry.node,
+                  entry.contextNode,
+                  entry.step,
+                  entry.appliedTypography,
+                  entry.appliedAppearance,
+                  entry
+                )
+              } catch {}
+            }
+            meta.visualEvidence = undefined
+            meta.failureCode = 'ROLLED_BACK'
+            throw new Error('READBACK_FAILED')
+          }
+        }
+        assertExecutionCurrent(item)
+        return readback
+      },
+      releaseResources: async ({ runId }) => {
+        const owned = ownedCollectionsByRun.get(runId)
+        ownedCollectionsByRun.delete(runId)
+        if (!owned) return
+        // Include partial preparation, but never mutate host nodes or shared pixel-cache values.
+        for (const collection of owned) {
+          if (Array.isArray(collection)) collection.length = 0
+          else collection.clear()
+        }
+        owned.clear()
+      },
+      now: () => Date.now()
+    })
+    return { lifecycle, meta }
+  }
+
   function verifyNativeNode(record) {
     if (!planningNodes) throw new Error('STALE_CONTEXT')
     const node = planningNodes.get(record.id)
@@ -924,6 +1889,11 @@
           if (!native || !samePlanValue(record.typography, readTypography(native)))
             throw new Error('STALE_CONTEXT')
         }
+        if (record.imageFill?.status === 'available') {
+          const native = planningNodes && planningNodes.get(record.id)
+          if (!native || !samePlanValue(record.imageFill, imageFillSnapshot(native)))
+            throw new Error('STALE_CONTEXT')
+        }
         if (record.spatial !== undefined) {
           const native = planningNodes && planningNodes.get(record.id)
           if (!native || !samePlanValue(record.spatial, readSpatial(native)))
@@ -948,6 +1918,11 @@
         throw new Error('UNSUPPORTED_COMMAND')
       const node = verifyNativeNode(contextNode)
       if (
+        step.command === 'image.fill' &&
+        (!Array.isArray(figma.currentPage.selection) || !figma.currentPage.selection.includes(node))
+      )
+        throw new Error('STALE_CONTEXT')
+      if (
         step.command === 'text.content' &&
         (!contextNode.typography || !samePlanValue(contextNode.typography, readTypography(node)))
       )
@@ -968,13 +1943,20 @@
               ? contextNode.visible
               : step.command === 'text.content'
                 ? contextNode.text
-                : contextNode.layout
+                : step.command === 'image.fill'
+                  ? { fingerprint: contextNode.imageFill?.fingerprint }
+                  : contextNode.layout
       if (!samePlanValue(expected, baseline)) throw new Error('STALE_CONTEXT')
-      checked.push({ node, contextNode, step })
+      checked.push({
+        node,
+        contextNode,
+        step,
+        ...(step.command === 'image.fill' ? { originalFills: nativeFills(node).paints } : {})
+      })
     }
     return checked
   }
-  function applyPlanStep(node, step) {
+  function applyPlanStep(node, step, imageResource) {
     switch (step.command) {
       case 'node.rename':
         node.name = step.name
@@ -988,6 +1970,18 @@
       case 'text.content':
         if (node.type !== 'TEXT') throw new Error('UNSUPPORTED_COMMAND')
         node.characters = step.text
+        break
+      case 'image.fill':
+        node.fills = [
+          {
+            type: 'IMAGE',
+            imageHash: imageResource.nativeImageHash,
+            scaleMode: step.scaleMode,
+            visible: true,
+            opacity: 1,
+            blendMode: 'NORMAL'
+          }
+        ]
         break
       case 'layout.flow':
         node.layoutMode = step.layout.direction
@@ -1003,7 +1997,23 @@
         throw new Error('UNSUPPORTED_COMMAND')
     }
   }
-  function rollbackPlanStep(node, contextNode, step, appliedTypography, appliedAppearance) {
+  function rollbackPlanStep(node, contextNode, step, appliedTypography, appliedAppearance, entry) {
+    if (step.command === 'image.fill') {
+      if (
+        !entry?.originalFills ||
+        !entry.appliedFillsSha256 ||
+        !fillImagesAvailable(entry.originalFills) ||
+        verifyNativeNode(contextNode) !== node ||
+        figma.getImageByHash(entry.imageResource?.nativeImageHash)?.hash !==
+          entry.imageResource?.nativeImageHash ||
+        nativeFills(node).fingerprint !== entry.appliedFillsSha256
+      )
+        throw new Error('STALE_CONTEXT')
+      node.fills = entry.originalFills
+      if (nativeFills(node).fingerprint !== contextNode.imageFill.fingerprint)
+        throw new Error('ROLLBACK_FAILED')
+      return
+    }
     if (
       step.command === 'text.content' &&
       appliedAppearance !== undefined &&
@@ -1058,9 +2068,9 @@
         break
     }
   }
-  function createPlanReadback(context, plan) {
+  function createPlanReadback(context, plan, item) {
     const nodes = new Map(context.nodes.map((node) => [node.id, node]))
-    return {
+    const readback = {
       version: 1,
       kind: 'host-plan-readback',
       host: HOST,
@@ -1070,6 +2080,45 @@
       steps: plan.steps.map((step) => {
         const contextNode = nodes.get(step.targetId)
         const nativeNode = planningNodes && planningNodes.get(step.targetId)
+        if (step.command === 'image.fill') {
+          const row = { targetId: step.targetId, command: step.command, observation: 'unknown' }
+          try {
+            if (!contextNode || !nativeNode || verifyNativeNode(contextNode) !== nativeNode)
+              return row
+            const actual = nativeFills(nativeNode)
+            const fact = item?.imageWrites?.get(step.targetId)
+            const resource = fact && figma.getImageByHash(fact.nativeImageHash)
+            if (
+              fact &&
+              fact.assetId === step.assetId &&
+              fact.sha256 === step.sha256 &&
+              fact.scaleMode === step.scaleMode &&
+              actual.fingerprint === fact.fillsSha256 &&
+              resource?.hash === fact.nativeImageHash &&
+              approvedImagePaint(actual.paints, fact.nativeImageHash, step.scaleMode)
+            ) {
+              return {
+                ...row,
+                observation: 'requested',
+                value: { assetId: step.assetId, sha256: step.sha256, scaleMode: step.scaleMode },
+                imageEvidence: {
+                  kind: 'figma-image-fill',
+                  sourceSha256: fact.sha256,
+                  nativeImageHash: fact.nativeImageHash,
+                  fillsSha256: actual.fingerprint
+                }
+              }
+            }
+            return {
+              ...row,
+              observation:
+                actual.fingerprint === contextNode.imageFill?.fingerprint ? 'original' : 'other',
+              value: { fingerprint: actual.fingerprint }
+            }
+          } catch {
+            return row
+          }
+        }
         const expected = contextNode
           ? step.command === 'node.rename'
             ? contextNode.name
@@ -1112,6 +2161,18 @@
         }
       })
     }
+    const planner = globalThis.MagicPotPlanPreviewV1
+    if (!planner || typeof planner.validateHostPlanReadback !== 'function')
+      throw new Error('READBACK_UNAVAILABLE')
+    // Validate every readback at construction time, including failure and
+    // rollback paths. No result is sent to desktop before this check passes.
+    return planner.validateHostPlanReadback(
+      plan,
+      context,
+      readback,
+      item?.assetMetadata,
+      item?.recovery?.images
+    )
   }
   const getVisualEvidenceHelper = () => {
     const helper = globalThis.MagicPotVisualEvidenceV1
@@ -1200,6 +2261,7 @@
         protocol: 1,
         executionId: item.executionId,
         actionId: item.actionId,
+        ...item.lineage,
         sequence,
         phase,
         ...(index === undefined ? {} : { index }),
@@ -1216,30 +2278,40 @@
     activeExecution === item &&
     item.executionEpoch === epoch &&
     session === item.auth &&
-    Date.now() < Math.min(item.expiresAt, item.auth.expiresAt, item.auth.idleAt)
+    Date.now() < Math.min(item.expiresAt, item.auth.expiresAt, item.auth.idleAt) &&
+    item.imageAuthorityRevoked !== true
   function assertExecutionCurrent(item) {
     if (!executionCurrent(item)) throw new Error('CANCELLED')
   }
-  async function checkExecutionAuthority(item) {
+  async function checkExecutionAuthority(item, allowReadback = false) {
     assertExecutionCurrent(item)
-    const status = await post(
-      'planStatus',
-      {
-        protocol: 1,
-        callId: item.callId,
-        executionId: item.executionId
-      },
-      item.auth
-    )
-    assertExecutionCurrent(item)
-    if (
-      !status ||
-      status.protocol !== 1 ||
-      status.executionId !== item.executionId ||
-      status.callId !== item.callId ||
-      !['claimed', 'executing'].includes(status.state)
-    )
-      throw new Error('CANCELLED')
+    try {
+      const status = await post(
+        'planStatus',
+        {
+          protocol: 1,
+          callId: item.callId,
+          executionId: item.executionId,
+          ...item.lineage
+        },
+        item.auth
+      )
+      assertExecutionCurrent(item)
+      if (
+        !status ||
+        status.protocol !== 1 ||
+        status.executionId !== item.executionId ||
+        status.callId !== item.callId ||
+        !executionLineageMatches(item.lineage, status) ||
+        !(allowReadback ? ['claimed', 'executing', 'readback'] : ['claimed', 'executing']).includes(
+          status.state
+        )
+      )
+        throw new Error('CANCELLED')
+    } catch (error) {
+      if (item.imageExecution) item.imageAuthorityRevoked = true
+      throw error
+    }
   }
   let executionJournal = null
   async function reserveNativeAction(item, intent) {
@@ -1277,6 +2349,7 @@
           protocol: 1,
           executionId: item.executionId,
           actionId: item.actionId,
+          ...item.lineage,
           policy: 'rgba8-exact-v1',
           baselineId: comparison.baselineId,
           baselineEvidenceSha256: comparison.baselineEvidenceSha256,
@@ -1341,6 +2414,184 @@
       operations.delete(cancel)
     }
   }
+  const validNativeImageHash = (value) =>
+    typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(value)
+  function validatedRecoveryImages(value) {
+    const planner = globalThis.MagicPotPlanPreviewV1
+    const visual = globalThis.MagicPotVisualEvidenceV1
+    const images = planner.validateRecoveryExecutionImages(value)
+    const bytes = visual.encodeUtf8(planner.recoveryImagesManifestContent(images.manifest))
+    try {
+      if (visual.sha256SessionAsset(bytes) !== images.manifest.manifestSha256)
+        throw new Error('IMAGE_RECOVERY_UNBOUND')
+    } finally {
+      bytes.fill(0)
+    }
+    return images
+  }
+  function recoveryImageMetadata(planner, item, intent) {
+    if (!intent.recovery && !item.recovery) return undefined
+    if (item.recovery?.images !== undefined)
+      item.recovery.images = validatedRecoveryImages(item.recovery.images)
+    if (intent.recovery?.images !== undefined)
+      intent.recovery.images = validatedRecoveryImages(intent.recovery.images)
+    if (
+      !item.recovery ||
+      !intent.recovery ||
+      !samePlanValue(item.recovery, intent.recovery) ||
+      intent.visualCorrection ||
+      intent.visualTargetIds
+    )
+      throw new Error('IMAGE_RECOVERY_UNBOUND')
+    const steps = intent.plan.steps.filter((step) => step.command === 'image.fill')
+    if (!steps.length) {
+      if (item.recovery.images !== undefined || intent.executionAssets !== undefined)
+        throw new Error('IMAGE_RECOVERY_UNBOUND')
+      return undefined
+    }
+    const images = validatedRecoveryImages(item.recovery.images)
+    if (
+      !Array.isArray(intent.executionAssets) ||
+      intent.executionAssets.length !== images.manifest.assets.length
+    )
+      throw new Error('IMAGE_RECOVERY_UNBOUND')
+    const assets = intent.executionAssets.map((asset) =>
+      planner.validateExecutionAsset(asset, sessionAssetIdentity(item.auth), Date.now())
+    )
+    if (
+      new Set(assets.map((asset) => asset.assetId)).size !== assets.length ||
+      assets.some((asset) => asset.projectId !== assets[0].projectId) ||
+      images.manifest.assets.some((source) => {
+        const binding = images.assetBindings.find((entry) => entry.sourceAssetId === source.assetId)
+        const asset = assets.find((entry) => entry.assetId === binding?.assetId)
+        return (
+          !asset ||
+          ['sha256', 'mimeType', 'sizeBytes', 'width', 'height'].some(
+            (key) => asset[key] !== source[key]
+          )
+        )
+      })
+    )
+      throw new Error('IMAGE_RECOVERY_UNBOUND')
+    // This identity belongs only to the new claim, never to the local-preview catalog.
+    item.assetProjectId = assets[0].projectId
+    return assets.map((asset) => planner.executionAssetMetadata(asset))
+  }
+  async function prepareImageSources(plan, item, signal, deferRelease) {
+    const sources = new Map()
+    deferRelease(() => {
+      for (const source of sources.values()) source.bytes.fill(0)
+      sources.clear()
+    })
+    const steps = plan.steps.filter((step) => step.command === 'image.fill')
+    if (!steps.length) return sources
+    const intent = item.lifecycleIntent
+    const helper = globalThis.MagicPotPlanPreviewV1
+    const descriptors = intent.executionAssets
+    const references = new Map(steps.map((step) => [step.assetId, step.sha256]))
+    if (
+      intent.visualCorrection ||
+      intent.visualTargetIds ||
+      !Array.isArray(descriptors) ||
+      descriptors.length !== references.size ||
+      descriptors.length > 4 ||
+      new Set(descriptors.map((asset) => asset.assetId)).size !== descriptors.length ||
+      typeof helper.readExecutionAsset !== 'function' ||
+      typeof helper.executionAssetMetadata !== 'function'
+    )
+      throw new Error('IMAGE_ASSET_UNBOUND')
+    for (const asset of descriptors) {
+      const approved = item.assetMetadata?.find((metadata) => metadata.assetId === asset.assetId)
+      if (
+        references.get(asset.assetId) !== asset.sha256 ||
+        !approved ||
+        !samePlanValue(helper.executionAssetMetadata(asset), approved)
+      )
+        throw new Error('IMAGE_ASSET_UNBOUND')
+      if (signal.aborted) throw new Error('CANCELLED')
+      assertExecutionCurrent(item)
+      const data = await helper.readExecutionAsset(asset, {
+        identity: sessionAssetIdentity(item.auth, item.assetProjectId),
+        intent,
+        readChunk: (request) => post('planAssetsRead', request, item.auth, signal),
+        sha256: globalThis.MagicPotVisualEvidenceV1.sha256SessionAsset,
+        signal,
+        isCurrent: () => executionCurrent(item),
+        deadline: Math.min(item.expiresAt, asset.expiresAt, Date.now() + 30000)
+      })
+      sources.set(asset.assetId, { asset, bytes: data })
+      if (signal.aborted) throw new Error('CANCELLED')
+      assertExecutionCurrent(item)
+    }
+    return sources
+  }
+  async function nativeImageDigest(nativeImageHash, item, signal) {
+    assertExecutionCurrent(item)
+    const image = figma.getImageByHash(nativeImageHash)
+    if (!image || image.hash !== nativeImageHash) throw new Error('IMAGE_RESOURCE_CHANGED')
+    if (typeof image.getBytesAsync !== 'function') return null
+    let active = true
+    let timer
+    let cancel
+    const deadline = Math.min(item.expiresAt, Date.now() + 15000)
+    const check = () => {
+      if (!active || signal?.aborted || Date.now() >= deadline) throw new Error('CANCELLED')
+      assertExecutionCurrent(item)
+    }
+    const stopped = new Promise((_, reject) => {
+      cancel = () => {
+        active = false
+        reject(new Error('CANCELLED'))
+      }
+      timer = setTimeout(cancel, Math.max(1, deadline - Date.now()))
+      operations.add(cancel)
+      signal?.addEventListener('abort', cancel, { once: true })
+    })
+    const work = Promise.resolve()
+      .then(() => {
+        check()
+        return image.getBytesAsync()
+      })
+      .then((data) => {
+        try {
+          check()
+          if (
+            !(data instanceof Uint8Array) ||
+            !data.byteLength ||
+            data.byteLength > 8 * 1024 * 1024
+          )
+            throw new Error('IMAGE_RESOURCE_CHANGED')
+          // Native encoding may differ from the approved source. Compare native reads
+          // only with the native digest taken just after this claim's import.
+          return globalThis.MagicPotVisualEvidenceV1.sha256SessionAsset(data)
+        } finally {
+          if (data instanceof Uint8Array) data.fill(0)
+        }
+      })
+    try {
+      return await Promise.race([work, stopped])
+    } finally {
+      active = false
+      clearTimeout(timer)
+      operations.delete(cancel)
+      signal?.removeEventListener('abort', cancel)
+    }
+  }
+  async function verifyImageResources(item, signal) {
+    for (const [targetId, fact] of item.imageWrites ?? []) {
+      try {
+        const digest = await nativeImageDigest(fact.nativeImageHash, item, signal)
+        if (digest !== fact.nativeContentSha256) throw new Error('IMAGE_RESOURCE_CHANGED')
+      } catch (error) {
+        item.imageWrites.delete(targetId)
+        throw error
+      }
+      if (signal?.aborted || !executionCurrent(item)) {
+        item.imageWrites.delete(targetId)
+        throw new Error('IMAGE_RESOURCE_CHANGED')
+      }
+    }
+  }
   async function reportPreparationFailure(item, plan, errorCode) {
     if (!executionCurrent(item)) return
     try {
@@ -1352,11 +2603,12 @@
           protocol: 1,
           executionId: item.executionId,
           actionId: item.actionId,
+          ...item.lineage,
           status: 'failed',
           effect: 'none',
           completed: 0,
           total: plan.steps.length,
-          readback: createPlanReadback(item.hostContext, plan),
+          readback: createPlanReadback(item.hostContext, plan, item),
           errorCode
         },
         item.auth
@@ -1368,206 +2620,94 @@
   async function executeClaimedPlan(item, intent) {
     assertExecutionCurrent(item)
     const planner = globalThis.MagicPotPlanPreviewV1
+    let lifecycle
+    let meta
     let plan
+    item.lifecycleIntent = intent
+    item.imageWrites = new Map()
+    item.imageExecution = intent.plan?.steps?.some((step) => step.command === 'image.fill') === true
     try {
-      plan = planner.validateHostPlan(intent.plan, item.hostContext)
-    } catch {
+      const recoveryAssets = recoveryImageMetadata(planner, item, intent)
+      if (recoveryAssets) item.assetMetadata = recoveryAssets
+      const created = createFigmaPlanLifecycle(planner, item)
+      lifecycle = created.lifecycle
+      meta = created.meta
+      plan = lifecycle.validatePlan(
+        intent.plan,
+        item.hostContext,
+        item.assetMetadata,
+        item.recovery?.images
+      )
+    } catch (error) {
+      delete item.lifecycleIntent
+      // Desktop approval can race a host capability/context change. Report the
+      // failed validation through the same readback/result path as preparation
+      // failures so the Bridge releases its write reservation immediately
+      // instead of leaving a claimed execution to expire silently.
+      await reportPreparationFailure(
+        item,
+        intent.plan,
+        String(error?.message) === 'STALE_CONTEXT' ? 'STALE_CONTEXT' : 'INVALID_PLAN'
+      )
       state('Desktop plan validation failed. No document changes were made.')
       return
     }
-    let checked
-    let visualEntries
+    // Older plugin runtimes do not expose timer APIs (and some test hosts do
+    // not expose AbortController). The lifecycle still performs its own
+    // cancellation checks, so the bridge watcher is only an optional extra.
+    const abort = typeof AbortController === 'function' ? new AbortController() : null
+    const watcher =
+      typeof setInterval === 'function' && abort
+        ? setInterval(() => {
+            if (!executionCurrent(item) && !abort.signal.aborted) abort.abort()
+          }, 50)
+        : null
+    let result
     try {
-      checked = precheckPlan(plan, item.hostContext)
-      visualEntries = visualEntriesForIntent(checked, item, intent)
+      result = await lifecycle.run({
+        runId: item.executionId,
+        plan,
+        context: item.hostContext,
+        resources: item.assetMetadata,
+        imageRecovery: item.recovery?.images,
+        signal: abort?.signal
+      })
     } catch {
-      await reportPreparationFailure(item, plan, 'STALE_CONTEXT')
-      state(
-        'The document changed after capture or the correction scope was invalid. No plan steps were applied.'
-      )
-      return
+      result = undefined
+    } finally {
+      if (watcher !== null && typeof clearInterval === 'function') clearInterval(watcher)
+      delete item.lifecycleIntent
     }
-    let sequence = 2
-    try {
-      await prepareTextFonts(checked, item)
-      assertExecutionCurrent(item)
-      checked = precheckPlan(plan, item.hostContext)
-    } catch {
-      if (!executionCurrent(item)) return
-      try {
-        await postPlanProgress(item, sequence++, 'readback', 0, 0, plan.steps.length, 'none')
-        await post(
-          'planResult',
-          {
-            protocol: 1,
-            executionId: item.executionId,
-            actionId: item.actionId,
-            status: 'failed',
-            effect: 'none',
-            completed: 0,
-            total: plan.steps.length,
-            readback: createPlanReadback(item.hostContext, plan),
-            errorCode: 'HOST_UNAVAILABLE'
-          },
-          item.auth
-        )
-      } catch {}
-      state('Font preparation failed or the text context changed. No document changes were made.')
-      return
-    }
-    let beforeVisual = null
-    if (item.hostContext.execution.visualAudit === 'hash-only') {
-      try {
-        beforeVisual = await capturePlanVisualPoints(visualEntries)
-        assertExecutionCurrent(item)
-        // Exporting is asynchronous. Re-check every native target before the first write.
-        checked = precheckPlan(plan, item.hostContext)
-        visualEntries = visualEntriesForIntent(checked, item, intent)
-      } catch {
-        if (!executionCurrent(item)) return
-        const readback = createPlanReadback(item.hostContext, plan)
-        try {
-          await postPlanProgress(item, sequence++, 'readback', 0, 0, plan.steps.length, 'none')
-          await post(
-            'planResult',
-            {
-              protocol: 1,
-              executionId: item.executionId,
-              actionId: item.actionId,
-              status: 'failed',
-              effect: 'none',
-              completed: 0,
-              total: plan.steps.length,
-              readback,
-              errorCode: 'HOST_UNAVAILABLE'
-            },
-            item.auth
-          )
-        } catch {}
-        state('Visual checkpoint capture failed. No document changes were made.')
-        return
-      }
-    }
-    try {
-      await checkExecutionAuthority(item)
-      await reserveNativeAction(item, intent)
-      checked = precheckPlan(plan, item.hostContext)
-    } catch (error) {
-      if (!executionCurrent(item)) return
-      if (String(error?.message).startsWith('JOURNAL_')) {
-        // A previous crash may already have changed the document. Never claim
-        // that a replay-blocked action had no effect or fabricate a success.
-        try {
-          await post(
-            'planResult',
-            {
-              protocol: 1,
-              executionId: item.executionId,
-              actionId: item.actionId,
-              status: 'failed',
-              effect: 'unknown',
-              completed: 0,
-              total: plan.steps.length,
-              readback: createPlanReadback(item.hostContext, plan),
-              errorCode: 'QUARANTINED'
-            },
-            item.auth
-          )
-        } catch {}
-        state(
-          'Persistent action safety check blocked this write. It was not replayed. Verify the document and request a new approved plan.'
-        )
-      } else {
-        await reportPreparationFailure(item, plan, 'STALE_CONTEXT')
-        state('Execution permission ended or the document changed. No new writes were started.')
-      }
-      return
-    }
-    const applied = []
-    let effect = 'none'
-    try {
-      for (let index = 0; index < checked.length; index += 1) {
-        const entry = checked[index]
-        assertExecutionCurrent(item)
-        // Each progress receipt yields to other host edits. Revalidate this step
-        // immediately before its synchronous mutation, not only before the loop.
-        precheckPlan({ ...plan, steps: [entry.step] }, item.hostContext, false)
-        applyPlanStep(entry.node, entry.step)
-        if (entry.step.command === 'text.content') {
-          entry.appliedTypography = readTypography(entry.node)
-          entry.appliedAppearance = readAppearance(entry.node)
-        }
-        applied.push(entry)
-        const completed = index + 1
-        effect = completed === checked.length ? 'applied' : 'partial'
-        await postPlanProgress(
-          item,
-          sequence++,
-          'executing',
-          index,
-          completed,
-          checked.length,
-          effect
-        )
-        assertExecutionCurrent(item)
-        state('Applying approved plan to the document... ' + completed + '/' + checked.length)
-      }
-    } catch {
-      for (const entry of applied.reverse()) {
-        try {
-          // A delayed cleanup is still a write; it cannot outlive the original grant.
-          if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
-          rollbackPlanStep(
-            entry.node,
-            entry.contextNode,
-            entry.step,
-            entry.appliedTypography,
-            entry.appliedAppearance
-          )
-        } catch {}
-      }
-      effect = applied.length ? 'rolled-back' : 'none'
-    }
-    let readback = createPlanReadback(item.hostContext, plan)
-    let observations = readback.steps.map((step) => step.observation)
-    if (observations.every((value) => value === 'requested')) effect = 'applied'
-    else if (observations.every((value) => value === 'original')) effect = 'rolled-back'
-    else if (observations.some((value) => value === 'requested')) effect = 'partial'
-    else effect = 'unknown'
+    if (!result || result.status === 'cancelled' || result.error?.code === 'CANCELLED') return
+    if (!executionCurrent(item)) return
 
-    let visualEvidence
-    if (effect === 'applied' && item.hostContext.execution.visualAudit === 'hash-only') {
-      try {
-        const afterVisual = await capturePlanVisualPoints(visualEntries)
-        assertExecutionCurrent(item)
-        for (const entry of checked) verifyNativeNode(entry.contextNode)
-        readback = createPlanReadback(item.hostContext, plan)
-        if (readback.steps.some((step) => step.observation !== 'requested'))
-          throw new Error('STALE_CONTEXT')
-        visualEvidence = combinePlanVisualEvidence(visualEntries, beforeVisual, afterVisual)
-      } catch {
-        for (const entry of [...applied].reverse()) {
-          try {
-            // A delayed cleanup is still a write; it cannot outlive the original grant.
-            if (Date.now() >= item.expiresAt) throw new Error('EXPIRED')
-            rollbackPlanStep(
-              entry.node,
-              entry.contextNode,
-              entry.step,
-              entry.appliedTypography,
-              entry.appliedAppearance
-            )
-          } catch {}
-        }
-        visualEvidence = undefined
-        readback = createPlanReadback(item.hostContext, plan)
-        observations = readback.steps.map((step) => step.observation)
-        effect = observations.every((value) => value === 'original') ? 'rolled-back' : 'unknown'
-      }
+    let readback
+    try {
+      readback = result.readback || createPlanReadback(item.hostContext, plan, item)
+    } catch {
+      readback = createPlanReadback(item.hostContext, plan, item)
     }
+    let observations = readback.steps.map((step) => step.observation)
+    let effect = observations.every((value) => value === 'requested')
+      ? 'applied'
+      : observations.every((value) => value === 'original')
+        ? result.status === 'completed' || meta?.failureCode === 'ROLLED_BACK'
+          ? 'rolled-back'
+          : 'none'
+        : observations.some((value) => value === 'requested')
+          ? 'partial'
+          : 'unknown'
+    if (meta?.journalBlocked) {
+      effect = 'unknown'
+      meta.failureCode = 'QUARANTINED'
+    }
+    if (result.status !== 'completed' && effect === 'applied') effect = 'partial'
+    if (meta?.visualEvidence === undefined) meta.visualEvidence = undefined
     if (!executionCurrent(item)) return
     let completed = readback.steps.filter((step) => step.observation === 'requested').length
     let status = effect === 'applied' ? 'completed' : 'failed'
+    // claim uses sequence 1 and step receipts use 2..N+1; readback is N+2.
+    let sequence = (meta.lastProgressSequence ?? 1) + 1
     try {
       await postPlanProgress(
         item,
@@ -1579,11 +2719,15 @@
         effect
       )
       assertExecutionCurrent(item)
-      const latestReadback = createPlanReadback(item.hostContext, plan)
+      if (item.imageExecution) await checkExecutionAuthority(item, true)
+      await verifyImageResources(item)
+      assertExecutionCurrent(item)
+      const latestReadback = createPlanReadback(item.hostContext, plan, item)
       let unchanged = samePlanValue(latestReadback, readback)
       if (status === 'completed') {
         try {
-          for (const entry of checked) verifyNativeNode(entry.contextNode)
+          for (const record of item.hostContext.nodes)
+            if (plan.steps.some((step) => step.targetId === record.id)) verifyNativeNode(record)
         } catch {
           unchanged = false
         }
@@ -1593,50 +2737,59 @@
         completed = readback.steps.filter((step) => step.observation === 'requested').length
         status = 'failed'
         effect = 'unknown'
-        visualEvidence = undefined
-        // Do not roll back across this final yield: preserve the newer host state.
+        meta.visualEvidence = undefined
       }
-      let result = await post(
+      const errorCode =
+        result.error?.code === 'STALE_CONTEXT'
+          ? 'STALE_CONTEXT'
+          : effect === 'rolled-back'
+            ? 'ROLLED_BACK'
+            : effect === 'unknown'
+              ? 'QUARANTINED'
+              : effect === 'partial'
+                ? 'EXECUTION_FAILED'
+                : result.error?.code === 'PREPARE_FAILED'
+                  ? 'HOST_UNAVAILABLE'
+                  : undefined
+      let receipt = await post(
         'planResult',
         {
           protocol: 1,
           executionId: item.executionId,
           actionId: item.actionId,
+          ...item.lineage,
           status,
           effect,
           completed,
           total: plan.steps.length,
           readback,
-          ...(visualEvidence ? { visualEvidence } : {}),
-          ...(effect === 'rolled-back'
-            ? { errorCode: 'ROLLED_BACK' }
-            : effect === 'unknown'
-              ? { errorCode: 'QUARANTINED' }
-              : effect === 'partial'
-                ? { errorCode: 'EXECUTION_FAILED' }
-                : {})
+          ...(meta.visualEvidence ? { visualEvidence: meta.visualEvidence } : {}),
+          ...(errorCode ? { errorCode } : {})
         },
         item.auth
       )
       if (!executionCurrent(item)) return
-      result = await reportPixelAudit(item, result)
+      receipt = await reportPixelAudit(item, receipt)
       if (!executionCurrent(item)) return
-      if (result && result.status && result.status.state === 'completed') {
+      if (receipt && receipt.status && receipt.status.state === 'completed') {
         if (item.recovery) {
           state(
-            'Accepted task properties restored and read back. Check the separate visual comparison; this is not a full-document restore.'
+            item.recovery.images
+              ? 'Accepted image source and fill mode restored with a fresh native image import and identity readback. Other task properties were read back separately; this is not a full-document restore.'
+              : 'Accepted task properties restored and read back. Check the separate visual comparison; this is not a full-document restore.'
           )
         } else if (
-          result.status.visualBaselineComparison &&
-          result.status.visualBaselineComparison.exactMatch === false &&
-          result.status.pixelAudit?.outcome !== 'match'
+          !item.imageExecution &&
+          receipt.status.visualBaselineComparison &&
+          receipt.status.visualBaselineComparison.exactMatch === false &&
+          receipt.status.pixelAudit?.outcome !== 'match'
         ) {
-          beginCorrectionReview(item, result.status)
+          beginCorrectionReview(item, receipt.status)
         } else {
           state(
-            visualEvidence
-              ? result.status.visualBaselineComparison?.exactMatch === true
-                ? result.status.pixelAudit?.outcome === 'match'
+            meta.visualEvidence
+              ? receipt.status.visualBaselineComparison?.exactMatch === true
+                ? receipt.status.pixelAudit?.outcome === 'match'
                   ? 'Approved result matches the accepted checkpoint in bounded exported pixels.'
                   : 'Export hashes match; a complete pixel audit has not been confirmed.'
                 : 'Approved plan applied with bounded before/after visual checkpoints.'
@@ -1645,6 +2798,10 @@
         }
       } else if (effect === 'rolled-back')
         state('Plan failed. Applied values were rolled back and verified.')
+      else if (meta?.journalBlocked)
+        state(
+          'Persistent action safety check blocked this write. It was not replayed. Verify the document and request a new approved plan.'
+        )
       else state('Plan failed. Check MagicPot desktop for the execution receipt.')
     } catch {
       state('Execution result could not be confirmed. Check MagicPot desktop.')
@@ -1656,6 +2813,8 @@
       auth: call.auth,
       callId: call.callId,
       hostContext: call.hostContext,
+      assetMetadata: call.assetMetadata,
+      assetProjectId: call.assetProjectId,
       expiresAt: call.expiresAt,
       polls: 0,
       display: content,
@@ -1666,6 +2825,7 @@
     schedulePlan(planReview)
   }
   function beginCorrectionReview(source, status) {
+    if (source.imageExecution) return
     const comparison = status && status.visualBaselineComparison
     const targets = comparison && Array.isArray(comparison.targets) ? comparison.targets : []
     const visualTargetIds = targets.map((target) => target && target.targetId).sort()
@@ -1828,6 +2988,13 @@
         (item.executionId && status.executionId !== item.executionId)
       )
         throw new Error('REQUEST')
+      const statusLineage = readExecutionLineage(status)
+      if (
+        statusLineage === null ||
+        (item.lineage && !executionLineageMatches(item.lineage, statusLineage))
+      )
+        throw new Error('REQUEST')
+      if (!item.lineage && Object.keys(statusLineage).length > 0) item.lineage = statusLineage
       item.executionId = status.executionId
       if (status.state === 'awaiting-approval') {
         state(
@@ -1859,6 +3026,7 @@
           return
         }
         const intent = claim.intent
+        const lineage = readExecutionLineage(intent)
         if (
           !item.started &&
           intent &&
@@ -1872,6 +3040,8 @@
           intent.adapterVersion === EXECUTION_ADAPTER_VERSION &&
           hex(intent.actionId, 32) &&
           intent.captureId === item.hostContext.captureId &&
+          lineage !== null &&
+          (!item.lineage || executionLineageMatches(item.lineage, lineage)) &&
           intent.expiresAt > Date.now()
         ) {
           item.started = true
@@ -1879,10 +3049,14 @@
           activeExecution = item
           planReview = null
           item.actionId = intent.actionId
+          item.lineage = lineage
+          item.expiresAt = Math.min(item.expiresAt, intent.expiresAt)
           state('Executing the separately approved native plan...')
           try {
             await executeClaimedPlan(item, intent)
           } finally {
+            item.imageWrites?.clear()
+            delete item.imageWrites
             if (activeExecution === item) {
               activeExecution = null
               if (!disposed && session === item.auth) state()
@@ -1940,6 +3114,198 @@
         callErrors.includes(value.errorCode))
     )
   }
+  function generationState(text) {
+    emit({ type: 'image-generation-state', label: text, active: generationReview !== null })
+    state()
+  }
+  function currentGeneration(call) {
+    return (
+      !disposed &&
+      generationReview === call &&
+      !call.cancelSent &&
+      call.epoch === epoch &&
+      call.auth === session &&
+      live()
+    )
+  }
+  function cancelImageGeneration() {
+    const call = generationReview
+    if (!call || call.cancelSent) return
+    if (!call.proposalId) {
+      forget(true, 'Session closed to cancel a pending image proposal. Pair again.')
+      return
+    }
+    call.cancelSent = true
+    stop()
+    generationState(
+      'Image-generation cancellation requested. A dispatched charge cannot be undone.'
+    )
+    const own = epoch
+    void post(
+      'generationCancel',
+      {
+        protocol: 1,
+        requestId: call.requestId,
+        proposalId: call.proposalId
+      },
+      call.auth
+    )
+      .then(() => {
+        if (disposed || generationReview !== call || own !== epoch) return
+        generationReview = null
+        generationState(
+          'Stopped locally. Check desktop; an accepted image is retained. Nothing was shared or applied.'
+        )
+      })
+      .catch(() => {
+        if (!disposed && generationReview === call && own === epoch)
+          forget(true, 'Image cancellation could not be confirmed. Session closed; check desktop.')
+      })
+  }
+  function scheduleGeneration(call) {
+    if (!currentGeneration(call)) return
+    if (call.polls >= 120 || Date.now() >= call.expiresAt) {
+      cancelImageGeneration()
+      return
+    }
+    generationPollTimer = setTimeout(
+      () => void pollGeneration(call),
+      Math.min(1000, call.expiresAt - Date.now())
+    )
+  }
+  async function pollGeneration(call) {
+    if (!currentGeneration(call)) return
+    if (Date.now() >= call.expiresAt) {
+      scheduleGeneration(call)
+      return
+    }
+    call.polls += 1
+    try {
+      const result = await post(
+        'generationStatus',
+        {
+          protocol: 1,
+          requestId: call.requestId,
+          proposalId: call.proposalId
+        },
+        call.auth
+      )
+      if (!currentGeneration(call)) return
+      const value = globalThis.MagicPotPlanPreviewV1.validateNativeImageGenerationStatus(result, {
+        requestId: call.requestId,
+        proposalId: call.proposalId,
+        createdAt: call.createdAt,
+        expiresAt: call.expiresAt,
+        now: Date.now()
+      })
+      const labels = {
+        'awaiting-approval':
+          'Awaiting explicit image-generation review and model confirmation in MagicPot desktop.',
+        preparing: 'Desktop is preparing the exact approved image request.',
+        generating:
+          'The approved image model is running. Cancellation cannot undo a dispatched charge.',
+        materializing: 'Desktop is validating and storing the generated image.',
+        'awaiting-acceptance':
+          'Desktop must validate and accept the image. It has not been shared here.',
+        accepted:
+          'Image accepted in desktop only. Separately choose/share it for local preview; native writes need another approval.',
+        declined:
+          'Image generation declined. Nothing was shared or applied. A new request needs fresh consent.',
+        cancelled:
+          'Image generation cancelled. Nothing was shared or applied. A dispatched charge cannot be undone.',
+        failed:
+          'Image generation failed. Nothing was shared or applied. No automatic retry was sent.'
+      }
+      if (['accepted', 'declined', 'cancelled', 'failed'].includes(value.phase)) {
+        generationReview = null
+        clearTimeout(generationPollTimer)
+        generationPollTimer = null
+        generationState(labels[value.phase])
+      } else {
+        generationState(labels[value.phase])
+        scheduleGeneration(call)
+      }
+    } catch {
+      if (currentGeneration(call))
+        forget(
+          true,
+          'Image-generation status failed. Session closed; check desktop. No retry was sent.'
+        )
+    }
+  }
+  async function prepareImageGeneration(requestId, text) {
+    if (
+      !config ||
+      disposed ||
+      pairing ||
+      review ||
+      planReview ||
+      activeExecution ||
+      generationReview ||
+      pendingContextImage ||
+      !live()
+    ) {
+      generationState('Image generation is unavailable while another review or capture is active.')
+      return
+    }
+    const prompt = text.trim()
+    const helper = globalThis.MagicPotPlanPreviewV1
+    if (
+      !hex(requestId, 32) ||
+      !prompt ||
+      prompt.length > 8192 ||
+      sequence >= 1000000000 ||
+      !helper ||
+      typeof helper.validateNativeImageGenerationReceipt !== 'function' ||
+      typeof helper.validateNativeImageGenerationStatus !== 'function'
+    ) {
+      generationState(
+        'A bounded prompt and the image-generation validator are required. Nothing was sent.'
+      )
+      return
+    }
+    const call = {
+      epoch: ++epoch,
+      auth: session,
+      requestId,
+      proposalId: null,
+      createdAt: 0,
+      expiresAt: 0,
+      polls: 0,
+      cancelSent: false
+    }
+    generationReview = call
+    sequence += 1
+    generationState(
+      'Sending this text-only proposal for desktop review. No model call is approved yet.'
+    )
+    try {
+      const result = await post(
+        'generationPrepare',
+        { protocol: 1, requestId, sequence, prompt },
+        call.auth
+      )
+      if (!currentGeneration(call)) return
+      const value = helper.validateNativeImageGenerationReceipt(result, {
+        requestId,
+        now: Date.now(),
+        sessionExpiresAt: call.auth.expiresAt
+      })
+      call.proposalId = value.proposalId
+      call.createdAt = value.createdAt
+      call.expiresAt = value.expiresAt
+      generationState(
+        'Awaiting explicit image-generation review in MagicPot desktop. Nothing is shared or applied.'
+      )
+      scheduleGeneration(call)
+    } catch {
+      if (currentGeneration(call))
+        forget(
+          true,
+          'Image proposal could not be confirmed. Session closed; check desktop before pairing again.'
+        )
+    }
+  }
   function current(call) {
     return !disposed && review === call && call.epoch === epoch && live()
   }
@@ -1985,7 +3351,8 @@
             ? call.hostContext
               ? globalThis.MagicPotPlanPreviewV1.reviewPlanningResult(
                   result.content,
-                  call.hostContext
+                  call.hostContext,
+                  call.assetMetadata
                 )
               : result.content
             : ''
@@ -2019,6 +3386,7 @@
     }
   }
   async function restoreTask(requestId, rebindBaselineId) {
+    if (generationReview) return
     if (rebindBaselineId !== undefined && !hex(rebindBaselineId, 32)) return
     if (
       !config ||
@@ -2031,6 +3399,7 @@
       sequence >= 1000000000
     )
       return
+    invalidatePlanningContextImage()
     let captured
     try {
       captured = captureFigmaHostContext(requestId)
@@ -2103,7 +3472,7 @@
             'maxCorrectionRounds',
             'targetIds'
           ],
-          ['rebind']
+          ['rebind', 'images']
         ) ||
         (rebindBaselineId !== undefined && recovery.baselineId !== rebindBaselineId) ||
         (recovery.rebind !== undefined &&
@@ -2123,6 +3492,16 @@
         !sameIds(recovery.targetIds, [...call.hostContext.selectedIds].sort())
       )
         throw new Error('REQUEST')
+      if (recovery.images !== undefined) {
+        recovery.images = validatedRecoveryImages(recovery.images)
+        if (
+          recovery.images.manifest.targets.some(
+            (target) =>
+              target.command !== 'image.fill' || !recovery.targetIds.includes(target.targetId)
+          )
+        )
+          throw new Error('REQUEST')
+      }
       call.callId = response.callId
       review = null
       touch(call.auth)
@@ -2150,7 +3529,7 @@
     }
   }
   async function share(message) {
-    if (activeExecution) return
+    if (activeExecution || generationReview) return
     if (
       pairing ||
       activeExecution ||
@@ -2165,28 +3544,91 @@
       state('Prompt is invalid or too large.')
       return
     }
+    let assetReferences
+    let assetMetadata
+    let assetProjectId
+    if (message.assetReferences !== undefined) {
+      if (!planningSnapshot) {
+        state(
+          'Selected desktop image metadata requires a native plan context. Recapture and consent again; nothing was sent.'
+        )
+        return
+      }
+      try {
+        const binding = sessionAssetCatalogBinding
+        const helper = globalThis.MagicPotPlanPreviewV1
+        if (!binding || binding.auth !== session || !helper?.selectPlanningAssetReferences)
+          throw new Error('ASSET_UNAVAILABLE')
+        assetReferences = helper.selectPlanningAssetReferences(
+          sessionAssetCatalog,
+          message.assetReferences,
+          sessionAssetIdentity(session, binding.projectId)
+        )
+        assetProjectId = binding.projectId
+        assetMetadata = assetReferences.map((reference) => {
+          const asset = sessionAssetCatalog.assets.find(
+            (entry) => entry.assetId === reference.assetId
+          )
+          return {
+            assetId: asset.assetId,
+            sha256: asset.sha256,
+            mimeType: asset.mimeType,
+            sizeBytes: asset.sizeBytes,
+            width: asset.width,
+            height: asset.height,
+            expiresAt: asset.expiresAt
+          }
+        })
+      } catch {
+        clearSessionAssets(
+          true,
+          'Desktop image selection is stale or invalid. Refresh and consent again; nothing was sent.'
+        )
+        return
+      }
+    }
+    if (planningContextImage) {
+      try {
+        if (!planningImageBinding || !currentContextImageCapture(planningImageBinding))
+          throw new Error('STALE_CONTEXT_IMAGE')
+      } catch {
+        invalidatePlanningContextImage(
+          'The captured image is stale. Recapture and consent again before sharing.'
+        )
+        return
+      }
+    }
     const body = {
       protocol: 1,
       requestId: message.nonce,
       sequence: sequence + 1,
       prompt,
       context: snapshot,
-      ...(planningSnapshot ? { featureId: 'plan-preview', hostContext: planningSnapshot } : {})
+      ...(planningSnapshot ? { featureId: 'plan-preview', hostContext: planningSnapshot } : {}),
+      ...(assetReferences ? { assetReferences } : {}),
+      ...(planningContextImage ? { contextImage: planningContextImage } : {})
     }
     if (!bounded(JSON.stringify(body), 64 * 1024)) {
-      state('Prompt and selection metadata are too large.')
+      if (planningContextImage)
+        invalidatePlanningContextImage(
+          'Prompt, metadata and image exceed 64 KiB. Recapture with a shorter prompt or without an image; nothing was sent.'
+        )
+      else state('Prompt and selection metadata are too large.')
       return
     }
     sequence += 1
     snapshot = null
     planningSnapshot = null
+    clearPlanningContextImage()
     const call = {
       epoch: ++epoch,
       auth: session,
       callId: null,
       polls: 0,
       expiresAt: 0,
-      hostContext: body.hostContext
+      hostContext: body.hostContext,
+      assetMetadata,
+      assetProjectId
     }
     review = call
     emit({ type: 'content', text: '' })
@@ -2244,12 +3686,64 @@
       return
     }
     if (!config) return
+    if (message.type === 'image-generation-cancel' && keys(message, ['protocol', 'type'])) {
+      cancelImageGeneration()
+      return
+    }
+    if (
+      message.type === 'image-generation-prepare' &&
+      keys(message, ['protocol', 'type', 'requestId', 'prompt', 'consent']) &&
+      hex(message.requestId, 32) &&
+      message.consent === true &&
+      typeof message.prompt === 'string' &&
+      message.prompt.length <= 8192
+    ) {
+      void prepareImageGeneration(message.requestId, message.prompt)
+      return
+    }
+    if (
+      ['refresh-session-assets', 'preview-session-asset', 'session-asset-next'].includes(
+        message.type
+      )
+    ) {
+      if (
+        message.type === 'refresh-session-assets' &&
+        keys(message, ['protocol', 'type', 'nonce']) &&
+        hex(message.nonce, 32)
+      )
+        void refreshSessionAssets(message.nonce)
+      else if (
+        message.type === 'preview-session-asset' &&
+        keys(message, ['protocol', 'type', 'nonce', 'assetId', 'sha256']) &&
+        hex(message.nonce, 32) &&
+        hex(message.assetId, 32) &&
+        hex(message.sha256, 64)
+      )
+        void previewSessionAsset(message)
+      else if (
+        message.type === 'session-asset-next' &&
+        keys(message, ['protocol', 'type', 'nonce', 'index']) &&
+        hex(message.nonce, 32) &&
+        integer(message.index) &&
+        message.index < 342
+      )
+        sendSessionAssetChunk(message)
+      return
+    }
+    if (message.type === 'clear-session-assets' && keys(message, ['protocol', 'type'])) {
+      clearSessionAssets()
+      return
+    }
     if (
       message.type === 'check-connection' &&
       keys(message, ['protocol', 'type', 'nonce']) &&
       hex(message.nonce, 32)
     ) {
       void checkConnection(message.nonce)
+      return
+    }
+    if (message.type === 'readiness' && keys(message, ['protocol', 'type'])) {
+      void checkReadiness()
       return
     }
     if (
@@ -2265,12 +3759,12 @@
       return
     }
     if (
-      message.type === 'capture-plan' &&
+      ['capture-plan', 'capture-plan-image'].includes(message.type) &&
       keys(message, ['protocol', 'type', 'nonce', 'instanceEpoch']) &&
       hex(message.nonce, 32) &&
       hex(message.instanceEpoch, 32)
     ) {
-      capturePlan(message.nonce, message.instanceEpoch)
+      void capturePlan(message.nonce, message.instanceEpoch, message.type === 'capture-plan-image')
       return
     }
     if (
@@ -2288,7 +3782,11 @@
       capture(message.nonce)
     else if (
       message.type === 'share' &&
-      keys(message, ['protocol', 'type', 'nonce', 'revision', 'prompt', 'consent']) &&
+      keys(
+        message,
+        ['protocol', 'type', 'nonce', 'revision', 'prompt', 'consent'],
+        ['assetReferences']
+      ) &&
       hex(message.nonce, 32) &&
       hex(message.revision, 32) &&
       message.consent === true &&
@@ -2299,6 +3797,15 @@
   }
   figma.showUI(__html__, { width: 440, height: 700 })
   figma.ui.onmessage = receive
+  for (const event of ['selectionchange', 'currentpagechange']) {
+    try {
+      figma.on(event, () =>
+        invalidatePlanningContextImage(
+          'Selection or document changed. Recapture the context image before sharing.'
+        )
+      )
+    } catch {}
+  }
   figma.on('close', () => {
     if (!disposed) forget(true, 'Session closed.', true)
   })

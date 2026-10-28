@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 import { readFileSync } from 'node:fs'
+import Module from 'node:module'
 import { test } from 'node:test'
 import { createContext, Script } from 'node:vm'
 import { buildHostPlanPreview } from './build-figplugin-plan-preview.mjs'
@@ -47,6 +49,125 @@ const fakePixels = (label) => {
   for (const char of String(label)) marker = (marker + char.codePointAt(0)) & 0xff
   return new Uint8Array([marker, marker ^ 0x55, marker ^ 0xaa, 0xff, 1, 2, 3, 0xff])
 }
+const recoveryImagesFor = (context, planner) => {
+  const sourceAssetId = 'a'.repeat(32)
+  const sha256 = 'b'.repeat(64)
+  const manifest = {
+    version: 1,
+    sourcePlanSha256: 'c'.repeat(64),
+    assets: [
+      { assetId: sourceAssetId, sha256, mimeType: 'image/png', sizeBytes: 100, width: 2, height: 2 }
+    ],
+    targets: [
+      {
+        targetId: context.selectedIds[0],
+        assetId: sourceAssetId,
+        sha256,
+        ...(context.host === 'figma'
+          ? {
+              command: 'image.fill',
+              scaleMode: 'FIT',
+              acceptedEvidence: {
+                kind: 'figma-image-fill',
+                sourceSha256: sha256,
+                nativeImageHash: 'old-native-hash',
+                fillsSha256: 'd'.repeat(64)
+              }
+            }
+          : {
+              command: 'image.pixels',
+              pixelEncoding: 'rgba8-srgb-zero-alpha-v1',
+              acceptedEvidence: {
+                kind: 'photoshop-pixels',
+                sourceSha256: sha256,
+                pixelSha256: 'd'.repeat(64),
+                width: 2,
+                height: 2,
+                bounds: { left: 0, top: 0, right: 2, bottom: 2 }
+              }
+            })
+      }
+    ],
+    manifestSha256: 'e'.repeat(64)
+  }
+  manifest.manifestSha256 = createHash('sha256')
+    .update(planner.recoveryImagesManifestContent(manifest))
+    .digest('hex')
+  return { manifest, assetBindings: [{ sourceAssetId, assetId: 'f'.repeat(32) }] }
+}
+
+// Observe production callbacks without substituting native work or lifecycle results.
+function createNativeLifecycleObserver() {
+  const runs = []
+  return {
+    runs,
+    own(registry, runId, containers) {
+      const run = runs.find((candidate) => candidate.runId === runId)
+      if (run) run.ownershipRegistrations.push({ registry, containers })
+    },
+    api(api) {
+      return Object.freeze({
+        ...api,
+        createHostAdapterLifecycle(options) {
+          const record = { options, events: [], ownershipRegistrations: [], releaseCalls: 0 }
+          runs.push(record)
+          const lifecycle = api.createHostAdapterLifecycle({
+            ...options,
+            async prepareResources(args) {
+              record.runId = args.runId
+              record.prepareArgs = args
+              record.events.push('prepare')
+              const resources = await options.prepareResources(args)
+              record.resources = resources
+              return resources
+            },
+            async execute(args) {
+              record.executeArgs = args
+              record.events.push('execute')
+              const execution = await options.execute(args)
+              record.execution = execution
+              return execution
+            },
+            async readback(args) {
+              record.events.push('readback')
+              const readback = await options.readback(args)
+              record.readback = plain(readback)
+              return readback
+            },
+            async releaseResources(args) {
+              record.releaseCalls += 1
+              record.releaseArgs = args
+              record.events.push('release')
+              record.contextBeforeRelease = plain(record.prepareArgs.context)
+              record.ownedBeforeRelease = record.ownershipRegistrations.flatMap(({ containers }) =>
+                [...containers].map((collection) => ({
+                  collection,
+                  size: Array.isArray(collection) ? collection.length : collection.size,
+                  ...(Array.isArray(collection)
+                    ? {}
+                    : { points: [...collection.values()].map(plain) })
+                }))
+              )
+              record.publishedBeforeRelease = lifecycle.getResult(args.runId)
+              await options.releaseResources(args)
+              record.events.push('released')
+            }
+          })
+          record.lifecycle = lifecycle
+          return {
+            ...lifecycle,
+            async run(...args) {
+              const result = await lifecycle.run(...args)
+              record.result = result
+              record.events.push('terminal')
+              return result
+            }
+          }
+        }
+      })
+    }
+  }
+}
 
 function fixture(
   host,
@@ -81,7 +202,12 @@ function fixture(
     unsolicitedRebind = false,
     recoveryGate = null,
     recoveryUnchanged = false,
-    tamperRecovery = false
+    recoveryImages = undefined,
+    tamperRecovery = false,
+    figmaUi = false,
+    uxpImagePreview = true,
+    uxpNotifications = true,
+    observeLifecycle = false
   } = {}
 ) {
   let time = 1_800_000_000_000,
@@ -90,22 +216,77 @@ function fixture(
     posts = [],
     requests = [],
     elements = new Map()
+  const nativeEvents = new Map(),
+    uiEvents = new Map(),
+    uiSends = []
+  const lifecycleObserver = observeLifecycle ? createNativeLifecycleObserver() : null
+  let uiParent = null
+  const createElement = (tagName) => ({
+    tagName: tagName.toUpperCase(),
+    id: '',
+    value: '',
+    textContent: '',
+    checked: false,
+    disabled: false,
+    style: {},
+    children: [],
+    parentNode: null,
+    parentElement: null,
+    ...(tagName.toLowerCase() === 'img' ? { naturalWidth: 0, naturalHeight: 0 } : {}),
+    handlers: {},
+    removeAttribute(name) {
+      delete this[name]
+    },
+    setAttribute(name, value) {
+      this[name] = value
+    },
+    addEventListener(name, fn) {
+      this.handlers[name] = fn
+    },
+    removeEventListener(name, fn) {
+      if (this.handlers[name] === fn) delete this.handlers[name]
+    },
+    appendChild(child) {
+      this.children.push(child)
+      child.parentNode = this
+      child.parentElement = this
+      if (child.id) elements.set(child.id, child)
+      return child
+    },
+    replaceChild(child, previous) {
+      assert.ok(this.children.includes(previous), 'replace only an attached preview element')
+      this.children = this.children.filter((value) => value !== previous)
+      previous.parentNode = null
+      previous.parentElement = null
+      if (previous.id && elements.get(previous.id) === previous) elements.delete(previous.id)
+      this.appendChild(child)
+      return previous
+    }
+  })
   const element = (id) => {
-    if (!elements.has(id))
-      elements.set(id, {
-        value: '',
-        textContent: '',
-        checked: false,
-        disabled: false,
-        handlers: {},
-        addEventListener(name, fn) {
-          this.handlers[name] = fn
-        }
-      })
+    if (!elements.has(id)) {
+      const value = createElement(id === 'context-image' ? 'img' : 'div')
+      value.id = id
+      elements.set(id, value)
+      if (id === 'context-image') element('context-image-view').appendChild(value)
+    }
     return elements.get(id)
   }
   const rootNode = { id: '0:0', type: 'DOCUMENT' }
-  const page = { id: '0:1', type: 'PAGE', name: 'Owned page', parent: rootNode, selection: [] }
+  const pageEvents = new Map()
+  const page = {
+    id: '0:1',
+    type: 'PAGE',
+    name: 'Owned page',
+    parent: rootNode,
+    selection: [],
+    on(name, callback) {
+      pageEvents.set(name, callback)
+    },
+    off(name, callback) {
+      if (pageEvents.get(name) === callback) pageEvents.delete(name)
+    }
+  }
   const document = {
     id: nativeDocumentId,
     activeLayers: [],
@@ -113,7 +294,8 @@ function fixture(
     width: 320,
     height: 180,
     resolution: 300,
-    pixelAspectRatio: 1
+    pixelAspectRatio: 1,
+    activeHistoryState: { id: 17 }
   }
   const data =
     host === 'figma'
@@ -266,7 +448,122 @@ function fixture(
     page.selection.push(second)
     document.activeLayers.push(second)
   }
-  const app = Object.freeze({ activeDocument: document, documents: [document] })
+  let activeDocument = document
+  let openDocuments = [document]
+  const app = Object.freeze({
+    get activeDocument() {
+      return activeDocument
+    },
+    get documents() {
+      return openDocuments
+    }
+  })
+  const photoshopNotifications = new Map()
+  const coreNotifications = new Map()
+  const notificationRegistrations = []
+  const notificationRemovals = []
+  const coreNotificationRegistrations = []
+  const coreNotificationRemovals = []
+  const pixelRequests = []
+  const pixelReads = []
+  const pixelDisposals = []
+  const imageObjectUrls = new Map()
+  const createdImageUrls = []
+  const revokedImageUrls = []
+  class NativeImageBlob {
+    constructor(buffer, options) {
+      assert.equal(Object.prototype.toString.call(buffer), '[object ArrayBuffer]')
+      assert.deepEqual(plain(options), { type: 'image/png' })
+      this.bytes = new Uint8Array(buffer.slice(0))
+    }
+  }
+  class NativeImageURL extends URL {
+    static createObjectURL(blob) {
+      assert.ok(blob instanceof NativeImageBlob)
+      const url = 'blob:uxp-fixture/' + ++serial
+      imageObjectUrls.set(url, new Uint8Array(blob.bytes))
+      createdImageUrls.push(url)
+      return url
+    }
+    static revokeObjectURL(url) {
+      revokedImageUrls.push(url)
+      imageObjectUrls.delete(url)
+    }
+  }
+  const photoshop = {
+    app,
+    action: uxpNotifications
+      ? {
+          async addNotificationListener(events, callback) {
+            assert.ok(Array.isArray(events) && events.length > 0)
+            assert.ok(events.every((event) => typeof event === 'string'))
+            assert.equal(typeof callback, 'function')
+            notificationRegistrations.push([...events])
+            photoshopNotifications.set(callback, [...events])
+          },
+          async removeNotificationListener(events, callback) {
+            notificationRemovals.push([...events])
+            if (photoshopNotifications.has(callback))
+              assert.deepEqual(plain(events), photoshopNotifications.get(callback))
+            photoshopNotifications.delete(callback)
+          }
+        }
+      : undefined,
+    core: {
+      async executeAsModal(callback) {
+        if (modalGate) await modalGate()
+        return callback()
+      },
+      async addNotificationListener(group, events, callback) {
+        assert.ok(['UI', 'OS'].includes(group))
+        assert.ok(Array.isArray(events) && events.every((event) => typeof event === 'string'))
+        const listeners = coreNotifications.get(group) || new Map()
+        listeners.set(callback, [...events])
+        coreNotifications.set(group, listeners)
+        coreNotificationRegistrations.push({ group, events: [...events] })
+      },
+      async removeNotificationListener(group, events, callback) {
+        const listeners = coreNotifications.get(group)
+        if (listeners?.has(callback)) assert.deepEqual(plain(events), listeners.get(callback))
+        listeners?.delete(callback)
+        coreNotificationRemovals.push({ group, events: [...events] })
+      }
+    },
+    imaging: {
+      async getPixels(request) {
+        pixelRequests.push(plain(request))
+        if (visualGate) await visualGate({ node, second })
+        const layer = [node, second].find((item) => item.id === request.layerID)
+        assert.ok(layer)
+        const probe = request.targetSize?.width === 1 && request.targetSize?.height === 1
+        const width = probe ? 1 : 2
+        let disposed = false
+        return {
+          sourceBounds: { left: 0, top: 0, right: 2, bottom: 1 },
+          level: 0,
+          imageData: {
+            width,
+            height: 1,
+            components: 4,
+            componentSize: 8,
+            pixelFormat: 'RGBA',
+            colorSpace: 'RGB',
+            colorProfile: 'sRGB IEC61966-2.1',
+            async getData(options) {
+              assert.equal(disposed, false, 'native pixel data cannot be read after disposal')
+              pixelReads.push({ request: plain(request), options: plain(options) })
+              return fakePixels(layer.name).subarray(0, width * 4)
+            },
+            dispose() {
+              assert.equal(disposed, false, 'each native image resource must be disposed once')
+              disposed = true
+              pixelDisposals.push(plain(request))
+            }
+          }
+        }
+      }
+    }
+  }
   const figma = {
     root: rootNode,
     async loadFontAsync(font) {
@@ -276,13 +573,29 @@ function fixture(
     },
     ...(journalAvailable ? { clientStorage } : {}),
     currentPage: page,
-    showUI() {},
-    on() {},
-    closePlugin() {},
+    showUI() {
+      // The fixture runs the UI script separately when requested.
+    },
+    on(name, callback) {
+      if (name === 'documentchange') throw new Error('dynamic-page requires loadAllPagesAsync')
+      nativeEvents.set(name, callback)
+    },
+    off(name, callback) {
+      if (nativeEvents.get(name) === callback) nativeEvents.delete(name)
+    },
+    closePlugin() {
+      // Bridge cleanup is exercised without closing a real Figma process.
+    },
     getNodeById(id) {
       return [rootNode, page, node, second].find((item) => item.id === id) || null
     },
-    ui: { postMessage: (value) => posts.push(plain(value)) }
+    ui: {
+      postMessage(value) {
+        const message = plain(value)
+        posts.push(message)
+        uiEvents.get('message')?.({ source: uiParent, data: { pluginMessage: message } })
+      }
+    }
   }
   const origin = 'http://127.0.0.1:49152',
     pluginId = 'owned.' + host
@@ -331,9 +644,19 @@ function fixture(
   }
   const sandbox = {
     console,
+    ...(lifecycleObserver
+      ? {
+          __observeNativeLifecycleApi: (api) => lifecycleObserver.api(api),
+          __observeNativeOwnedCollections: (registry, runId, containers) =>
+            lifecycleObserver.own(registry, runId, containers)
+        }
+      : {}),
     ...(journalAvailable ? { localStorage } : {}),
     AbortController,
     ...(nativeTextEncoding ? { TextEncoder, TextDecoder } : {}),
+    ...(host === 'photoshop' && uxpImagePreview
+      ? { ImageBlob: NativeImageBlob, URL: NativeImageURL }
+      : {}),
     Uint8Array,
     Date: class extends Date {
       static now() {
@@ -389,6 +712,8 @@ function fixture(
           maxCorrectionRounds: 3,
           targetIds: [...body.hostContext.selectedIds].sort()
         }
+        if (recoveryImages !== undefined)
+          recoveryDescriptor.images = recoveryImages(body.hostContext, vm.MagicPotPlanPreviewV1)
         if (body.rebindBaselineId || unsolicitedRebind) {
           recoveryDescriptor.rebind = {
             previousIdentity: '1'.repeat(32),
@@ -718,55 +1043,100 @@ function fixture(
     __html__: '',
     require(name) {
       assert.equal(name, 'photoshop')
-      return {
-        app,
-        core: {
-          async executeAsModal(callback) {
-            if (modalGate) await modalGate()
-            return callback()
-          }
-        },
-        imaging: {
-          async getPixels(request) {
-            if (visualGate) await visualGate({ node, second })
-            const layer = [node, second].find((item) => item.id === request.layerID)
-            assert.ok(layer)
-            return {
-              imageData: {
-                width: 2,
-                height: 1,
-                components: 4,
-                componentSize: 8,
-                pixelFormat: 'RGBA',
-                colorSpace: 'RGB',
-                colorProfile: 'sRGB IEC61966-2.1',
-                async getData() {
-                  return fakePixels(layer.name)
-                },
-                dispose() {}
-              }
-            }
-          }
-        }
+      return photoshop
+    },
+    document: {
+      readyState: 'complete',
+      getElementById: element,
+      createElement,
+      addEventListener() {
+        // This fixture starts with a complete DOM, so no ready event is needed.
       }
     },
-    document: { readyState: 'complete', getElementById: element, addEventListener() {} },
-    window: { addEventListener() {} }
+    window: {
+      addEventListener(name, callback) {
+        uiEvents.set(name, callback)
+      }
+    }
   }
   const vm = createContext(sandbox)
-  new Script(
-    `globalThis.MAGICPOT_BRIDGE_CONFIG = Object.freeze(${JSON.stringify({ protocol: 1, origin, pluginId, host })});`
-  ).runInContext(vm)
-  new Script(read('shared/selection-snapshot.js')).runInContext(vm)
-  new Script(read('shared/pixel-audit.js')).runInContext(vm)
-  new Script(read('shared/visual-evidence.js')).runInContext(vm)
-  new Script(read('shared/plan-preview.js')).runInContext(vm)
-  if (journalHelper) new Script(read('shared/execution-journal.js')).runInContext(vm)
-  new Script(
-    read(host === 'figma' ? 'figma/bridge/code.js' : 'photoshop-uxp/bridge/main.js')
-  ).runInContext(vm)
+  if (lifecycleObserver) {
+    new Script(
+      `(() => {
+      const defineProperty = Object.defineProperty;
+      Object.defineProperty = function (target, name, descriptor) {
+        if (target === globalThis && name === 'MagicPotPlanPreviewV1') {
+          Object.defineProperty = defineProperty;
+          descriptor = { ...descriptor, value: globalThis.__observeNativeLifecycleApi(descriptor.value) };
+        }
+        return defineProperty(target, name, descriptor);
+      };
+      const set = Map.prototype.set;
+      Map.prototype.set = function (key, value) {
+        const result = set.call(this, key, value);
+        if (typeof key === 'string' && value instanceof Set)
+          globalThis.__observeNativeOwnedCollections(this, key, value);
+        return result;
+      };
+    })();`,
+      { filename: 'native-lifecycle-observer.fixture.js' }
+    ).runInContext(vm)
+  }
+  const configuration = `globalThis.MAGICPOT_BRIDGE_CONFIG = Object.freeze(${JSON.stringify({ protocol: 1, origin, pluginId, host })});\n`
+  if (host === 'photoshop') {
+    // Match prepare-figplugin-host.mjs ordering and UXP's module-local var bindings.
+    const source =
+      configuration +
+      [
+        read('shared/bridge-readiness.js'),
+        read('shared/selection-snapshot.js'),
+        read('shared/pixel-audit.js'),
+        read('shared/visual-evidence.js'),
+        read('shared/plan-preview.js'),
+        ...(journalHelper ? [read('shared/execution-journal.js')] : []),
+        read('photoshop-uxp/bridge/main.js')
+      ].join('\n;\n')
+    const filename = 'photoshop-uxp/bridge/main.js'
+    const module = { exports: {} }
+    const entry = new Script(Module.wrap(source), { filename }).runInContext(vm)
+    entry.call(
+      module.exports,
+      module.exports,
+      sandbox.require,
+      module,
+      filename,
+      'photoshop-uxp/bridge'
+    )
+    assert.equal(
+      vm.MagicPotPixelAuditBundle,
+      undefined,
+      'private CommonJS bundle variables are not host globals'
+    )
+  } else {
+    new Script(configuration).runInContext(vm)
+    new Script(read('shared/selection-snapshot.js')).runInContext(vm)
+    new Script(read('shared/pixel-audit.js')).runInContext(vm)
+    new Script(read('shared/visual-evidence.js')).runInContext(vm)
+    new Script(read('shared/plan-preview.js')).runInContext(vm)
+    if (journalHelper) new Script(read('shared/execution-journal.js')).runInContext(vm)
+    new Script(read('figma/bridge/code.js')).runInContext(vm)
+  }
   const send = (message) => figma.ui.onmessage({ protocol: 1, ...message })
   const click = (id) => element(id).handlers.click()
+  if (figmaUi) {
+    assert.equal(host, 'figma')
+    uiParent = {
+      postMessage(envelope, origin) {
+        assert.equal(origin, '*')
+        uiSends.push(plain(envelope.pluginMessage))
+        figma.ui.onmessage(envelope.pluginMessage)
+      }
+    }
+    vm.parent = uiParent
+    new Script(read('figma/bridge/ui.html').match(/<script>([\s\S]*?)<\/script>/)[1]).runInContext(
+      vm
+    )
+  }
   async function pair() {
     const ticket = JSON.stringify({
       ticketId: '1'.repeat(32),
@@ -785,7 +1155,8 @@ function fixture(
     await flush()
   }
   function capture() {
-    if (host === 'figma')
+    if (figmaUi) click('plan-capture')
+    else if (host === 'figma')
       send({ type: 'capture-plan', nonce: '5'.repeat(32), instanceEpoch: '6'.repeat(32) })
     else click('plan-capture')
   }
@@ -825,6 +1196,63 @@ function fixture(
     pair,
     capture,
     share,
+    captureImage: (revision = '5'.repeat(32)) =>
+      host === 'photoshop'
+        ? click('image-capture')
+        : figmaUi
+          ? click('plan-image-capture')
+          : send({ type: 'capture-plan-image', nonce: revision, instanceEpoch: '6'.repeat(32) }),
+    send,
+    click,
+    uiSends,
+    figma,
+    photoshop,
+    setActiveDocument(value, documents = value ? [value] : []) {
+      activeDocument = value
+      openDocuments = documents
+    },
+    firePhotoshopNotification(name, descriptor = {}) {
+      for (const [callback, events] of [...photoshopNotifications])
+        if (events.includes(name) || events.includes('all')) callback(name, descriptor)
+    },
+    firePhotoshopCoreNotification(group, name, descriptor = {}) {
+      for (const [callback, events] of [...(coreNotifications.get(group) || [])])
+        if (events.includes(name)) callback(name, descriptor)
+    },
+    photoshopObserverCount: () =>
+      photoshopNotifications.size +
+      [...coreNotifications.values()].reduce((count, listeners) => count + listeners.size, 0),
+    notificationRegistrations,
+    notificationRemovals,
+    coreNotificationRegistrations,
+    coreNotificationRemovals,
+    pixelRequests,
+    pixelReads,
+    pixelDisposals,
+    createdImageUrls,
+    revokedImageUrls,
+    contextImageBytes: () => {
+      const source = element('context-image').src
+      return host === 'photoshop'
+        ? Buffer.from(imageObjectUrls.get(source) || [])
+        : Buffer.from(source.split(',')[1], 'base64')
+    },
+    fireNative: (name) => nativeEvents.get(name)?.(),
+    firePage: (name, value = {}) => pageEvents.get(name)?.(value),
+    imageObserverCount: () => pageEvents.size + (nativeEvents.has('stylechange') ? 1 : 0),
+    loadContextImage: () => {
+      const image = element('context-image')
+      const png =
+        host === 'photoshop'
+          ? Buffer.from(imageObjectUrls.get(image.src) || [])
+          : Buffer.from(image.src.split(',')[1], 'base64')
+      image.naturalWidth = png.readUInt32BE(16)
+      image.naturalHeight = png.readUInt32BE(20)
+      const loaded = image.onload || image.handlers.load
+      assert.equal(typeof loaded, 'function', 'the exact image needs a native load callback')
+      loaded()
+    },
+    fireUi: (name) => uiEvents.get(name)?.(),
     restore: () =>
       host === 'figma'
         ? send({ type: 'restore-task', nonce: 'f'.repeat(32), instanceEpoch: '6'.repeat(32) })
@@ -863,6 +1291,7 @@ function fixture(
     persistedActions,
     planResult: () => planResult,
     planResults: () => planResults.map(plain),
+    lifecycleRuns: lifecycleObserver?.runs,
     close: () => {
       if (host === 'figma') send({ type: 'dispose' })
       else click('close')
@@ -875,6 +1304,1882 @@ test('generated host validator exactly matches the current shared source', async
   assert.equal(read('shared/plan-preview.js'), built.text)
   assert.match(built.text, /MIT License/)
 })
+
+test('figma: opt-in context image stays local, displays exact bytes and requires fresh image-inclusive consent', async () => {
+  const f = fixture('figma', { figmaUi: true, nativeTextEncoding: true })
+  try {
+    let exports = 0
+    const original = f.node.exportAsync
+    f.node.exportAsync = async (...args) => {
+      exports++
+      return original(...args)
+    }
+    assert.equal(f.element('context-image').src, undefined)
+    f.capture()
+    await flush()
+    assert.equal(exports, 0, 'ordinary native context capture never exports an image')
+    assert.equal(f.posts.filter((post) => post.type === 'preview').at(-1).contextImage, undefined)
+    f.captureImage()
+    await flush()
+    assert.equal(exports, 1)
+    assert.equal(
+      f.requests.length,
+      0,
+      'opt-in local capture must not contact the desktop or a provider'
+    )
+    assert.equal(f.nativeWrites.length, 0)
+    const preview = f.posts.filter((post) => post.type === 'preview').at(-1)
+    const source = 'data:image/png;base64,' + preview.contextImage.bytesBase64
+    assert.equal(f.element('context-image').src, source)
+    assert.equal(f.element('context-image-view').hidden, false)
+    assert.match(
+      f.element('context-image-details').textContent,
+      /64 x 32 px \/ \d+ bytes \/ SHA-256 [a-f0-9]{64}/
+    )
+    assert.match(
+      f.element('consent-description').textContent,
+      /AND the exact displayed selection image/
+    )
+    f.loadContextImage()
+    await f.pair()
+    assert.equal(
+      f.element('context-image-view').hidden,
+      true,
+      'session change clears previously captured bytes'
+    )
+    f.captureImage()
+    await flush()
+    const sharedPreview = f.posts.filter((post) => post.type === 'preview').at(-1)
+    f.element('prompt').value = 'Review this exact local selection image.'
+    assert.equal(f.element('consent').disabled, true)
+    f.element('consent').checked = true
+    f.click('share')
+    assert.equal(
+      f.requests.filter((request) => request.url.endsWith('/prepare')).length,
+      0,
+      'wait until the native PNG has actually decoded in the local preview'
+    )
+    f.loadContextImage()
+    assert.equal(f.element('consent').disabled, false)
+    assert.equal(
+      f.element('consent').checked,
+      false,
+      'pre-display consent must never enable image sharing'
+    )
+    assert.equal(f.element('share').disabled, true)
+    f.click('share')
+    assert.equal(f.requests.filter((request) => request.url.endsWith('/prepare')).length, 0)
+    f.element('consent').checked = true
+    f.click('share')
+    await flush()
+    const prepared = f.requests.find((request) => request.url.endsWith('/prepare')).body
+    assert.deepEqual(prepared.contextImage, sharedPreview.contextImage)
+    assert.equal(prepared.contextImage.captureId, prepared.hostContext.captureId)
+    assert.equal(prepared.contextImage.targetId, prepared.hostContext.selectedIds[0])
+    assert.equal(prepared.hostContext.contextImage, undefined)
+    assert.equal(prepared.prompt.includes(prepared.contextImage.bytesBase64), false)
+    assert.equal(prepared.prompt, 'Review this exact local selection image.')
+    assert.equal(f.element('context-image').src, undefined)
+    assert.equal(f.element('context-image-view').hidden, true)
+    assert.equal(f.nativeWrites.length, 0)
+    assert.match(f.element('status').textContent, /Awaiting explicit approval in MagicPot desktop/)
+  } finally {
+    f.close()
+  }
+})
+
+test('figma: context image rejects zero/multiple selections and failed PNGs without a shareable fallback', async () => {
+  for (const mode of ['empty', 'multiple', 'bad-png']) {
+    const f = fixture('figma')
+    try {
+      await f.pair()
+      if (mode === 'empty') f.figma.currentPage.selection = []
+      if (mode === 'multiple') f.figma.currentPage.selection = [f.node, f.second]
+      if (mode === 'bad-png') f.node.exportAsync = async () => Buffer.alloc(33)
+      f.captureImage()
+      await flush()
+      assert.equal(f.posts.filter((post) => post.type === 'preview').at(-1).revision, '')
+      assert.equal(
+        f.posts.some((post) => post.contextImage),
+        false
+      )
+      f.send({
+        type: 'share',
+        nonce: '7'.repeat(32),
+        revision: '5'.repeat(32),
+        prompt: 'Review',
+        consent: true
+      })
+      await flush()
+      assert.equal(f.requests.filter((request) => request.url.endsWith('/prepare')).length, 0)
+      assert.equal(f.nativeWrites.length, 0)
+    } finally {
+      f.close()
+    }
+  }
+})
+
+test('figma: stale asynchronous image exports cannot resurrect after recapture, cancel, close, events or native snapshot changes', async () => {
+  for (const change of [
+    'recapture',
+    'selection',
+    'selection-away-back',
+    'page',
+    'root',
+    'snapshot',
+    'dimensions',
+    'cancel',
+    'close',
+    'session-expiry',
+    'node-event',
+    'style-event'
+  ]) {
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const f = fixture('figma', { visualGate: () => gate })
+    try {
+      await f.pair()
+      f.captureImage()
+      assert.equal(f.posts.filter((post) => post.type === 'preview').at(-1).revision, '')
+      if (change === 'recapture') f.capture()
+      if (change === 'selection') f.figma.currentPage.selection = [f.second]
+      if (change === 'selection-away-back') {
+        f.figma.currentPage.selection = [f.second]
+        f.fireNative('selectionchange')
+        f.figma.currentPage.selection = [f.node]
+      }
+      if (change === 'page') f.figma.currentPage = { ...f.figma.currentPage }
+      if (change === 'root') f.figma.root = { ...f.figma.root }
+      if (change === 'snapshot') f.node.name = 'Native edit while export is pending'
+      if (change === 'dimensions') f.node.width = 63
+      if (change === 'cancel') f.cancel()
+      if (change === 'close') f.close()
+      if (change === 'session-expiry') await f.tick(120000)
+      if (change === 'node-event') {
+        f.node.cornerRadius = 10
+        f.firePage('nodechange', {
+          nodeChanges: [{ type: 'PROPERTY_CHANGE', properties: ['cornerRadius'], node: f.node }]
+        })
+      }
+      if (change === 'style-event') f.fireNative('stylechange')
+      release()
+      await flush()
+      assert.equal(
+        f.posts.some((post) => post.contextImage),
+        false,
+        change
+      )
+      assert.equal(
+        f.imageObserverCount(),
+        0,
+        'cancelled/stale captures release image observers: ' + change
+      )
+      assert.equal(
+        f.requests.filter((request) => request.url.endsWith('/prepare')).length,
+        0,
+        change
+      )
+      if (change === 'recapture') {
+        f.share()
+        await flush()
+        const prepared = f.requests.find((request) => request.url.endsWith('/prepare')).body
+        assert.equal(
+          prepared.contextImage,
+          undefined,
+          'recapture without image keeps no-image flow usable'
+        )
+      }
+    } finally {
+      release()
+      f.close()
+    }
+  }
+})
+
+test('figma: second image capture supersedes a delayed first export without attaching the old PNG', async () => {
+  const f = fixture('figma')
+  let release
+  try {
+    await f.pair()
+    let exports = 0
+    const oldPng = fakePng('old capture')
+    const newPng = fakePng('new capture')
+    f.node.exportAsync = async () =>
+      ++exports === 1
+        ? new Promise((resolve) => {
+            release = () => resolve(oldPng)
+          })
+        : newPng
+    f.captureImage('a'.repeat(32))
+    f.captureImage('b'.repeat(32))
+    await flush()
+    release()
+    await flush()
+    const previews = f.posts.filter((post) => post.contextImage)
+    assert.equal(previews.length, 1)
+    assert.equal(previews[0].contextImage.captureId, 'b'.repeat(32))
+    assert.equal(previews[0].contextImage.bytesBase64, newPng.toString('base64'))
+    f.share()
+    await flush()
+    assert.deepEqual(
+      f.requests.find((request) => request.url.endsWith('/prepare')).body.contextImage,
+      previews[0].contextImage
+    )
+  } finally {
+    release?.()
+    f.close()
+  }
+})
+
+test('figma: delayed image decode callbacks cannot clear or authorize a newer captured image', async () => {
+  const f = fixture('figma', { figmaUi: true })
+  try {
+    await f.pair()
+    f.captureImage()
+    await flush()
+    const oldLoaded = f.element('context-image').onload
+    const oldFailed = f.element('context-image').onerror
+    f.captureImage()
+    oldLoaded()
+    oldFailed()
+    await flush()
+    const preview = f.posts.filter((post) => post.contextImage).at(-1)
+    const expectedSource = 'data:image/png;base64,' + preview.contextImage.bytesBase64
+    oldLoaded()
+    oldFailed()
+    assert.equal(f.element('context-image').src, expectedSource)
+    assert.equal(f.element('consent').disabled, true)
+    assert.equal(f.element('consent').checked, false)
+    f.loadContextImage()
+    f.element('prompt').value = 'Review the newest captured image.'
+    f.element('consent').checked = true
+    oldFailed()
+    oldLoaded()
+    assert.equal(
+      f.element('consent').checked,
+      true,
+      'old callbacks must not change fresh consent either'
+    )
+    assert.equal(
+      f.uiSends.some((message) => message.type === 'cancel'),
+      false
+    )
+    f.click('share')
+    await flush()
+    const prepared = f.requests.find((request) => request.url.endsWith('/prepare')).body
+    assert.equal(prepared.contextImage.captureId, preview.contextImage.captureId)
+    assert.equal(f.imageObserverCount(), 0, 'share releases native capture observers')
+  } finally {
+    f.close()
+  }
+})
+
+test('figma: completed images invalidate on native edits before share and are cleared on UI cancel or image decode error', async () => {
+  for (const change of [
+    'snapshot',
+    'selection-event',
+    'node-event',
+    'style-event',
+    'cancel',
+    'image-decode-error'
+  ]) {
+    const f = fixture('figma', { figmaUi: true })
+    try {
+      await f.pair()
+      f.captureImage()
+      await flush()
+      f.loadContextImage()
+      f.element('prompt').value = 'Review this selection.'
+      f.element('consent').checked = true
+      if (change === 'snapshot') f.node.visible = false
+      if (change === 'selection-event') f.fireNative('selectionchange')
+      if (change === 'node-event') {
+        f.node.effects = [{ type: 'DROP_SHADOW', visible: true }]
+        f.firePage('nodechange')
+      }
+      if (change === 'style-event') f.fireNative('stylechange')
+      if (change === 'cancel') f.click('cancel')
+      if (change === 'image-decode-error') f.element('context-image').onerror()
+      f.click('share')
+      await flush()
+      assert.equal(
+        f.requests.filter((request) => request.url.endsWith('/prepare')).length,
+        0,
+        change
+      )
+      assert.equal(f.element('context-image').src, undefined, change)
+      assert.equal(f.element('context-image-view').hidden, true, change)
+      assert.equal(f.imageObserverCount(), 0, change)
+    } finally {
+      f.close()
+    }
+  }
+})
+
+test('figma: context image requires dynamic-page-safe change observation but no-image planning stays available', async () => {
+  for (const unavailable of ['page-on', 'page-off', 'global-off', 'stylechange']) {
+    const f = fixture('figma')
+    try {
+      await f.pair()
+      if (unavailable === 'page-on') f.figma.currentPage.on = undefined
+      if (unavailable === 'page-off') f.figma.currentPage.off = undefined
+      if (unavailable === 'global-off') f.figma.off = undefined
+      if (unavailable === 'stylechange') {
+        const on = f.figma.on
+        f.figma.on = (name, callback) => {
+          if (name === 'stylechange') throw new Error('Style observation unavailable')
+          on(name, callback)
+        }
+      }
+      f.node.exportAsync = async () =>
+        assert.fail('without invalidation observation no PNG may be captured')
+      f.captureImage()
+      await flush()
+      assert.equal(f.posts.filter((post) => post.type === 'preview').at(-1).revision, '')
+      assert.equal(
+        f.posts.some((post) => post.contextImage),
+        false
+      )
+      assert.equal(f.imageObserverCount(), 0)
+      f.capture()
+      f.share()
+      await flush()
+      assert.equal(
+        f.requests.find((request) => request.url.endsWith('/prepare')).body.contextImage,
+        undefined
+      )
+    } finally {
+      f.close()
+    }
+  }
+})
+
+test('figma: image prepare exceeding 64 KiB fails explicitly instead of dropping the image or sending', async () => {
+  const f = fixture('figma', { figmaUi: true })
+  try {
+    await f.pair()
+    // A valid large ancillary chunk exercises the real request-size boundary without changing pixels.
+    const source = fakePng('large bounded image')
+    const padding = pngChunk('tEXt', Buffer.from('Padding\0' + 'x'.repeat(23800)))
+    const large = Buffer.concat([source.subarray(0, 33), padding, source.subarray(33)])
+    assert.ok(large.length < 24576)
+    f.node.exportAsync = async () => large
+    f.captureImage()
+    await flush()
+    f.loadContextImage()
+    f.element('prompt').value = '中'.repeat(16384)
+    f.element('consent').checked = true
+    f.click('share')
+    await flush()
+    assert.equal(f.requests.filter((request) => request.url.endsWith('/prepare')).length, 0)
+    assert.match(f.element('status').textContent, /exceed 64 KiB/)
+    assert.equal(f.element('context-image').src, undefined)
+    assert.equal(f.element('context-image-view').hidden, true)
+    assert.equal(f.element('share').disabled, true)
+  } finally {
+    f.close()
+  }
+})
+
+// These VM fixtures exercise the UXP-facing contract, not native Photoshop acceptance.
+const photoshopImageFixture = (options) => {
+  const f = fixture('photoshop', options)
+  f.node.boundsNoEffects = { left: 0, top: 0, right: 2, bottom: 1 }
+  return f
+}
+const imageGate = () => {
+  let release
+  const promise = new Promise((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}
+const holdPhotoshopImageRead = (f, stage) => {
+  const gate = imageGate()
+  const original = f.photoshop.imaging.getPixels
+  let entered = false
+  f.photoshop.imaging.getPixels = async (request) => {
+    const result = await original(request)
+    if (stage === 'getPixels') {
+      entered = true
+      await gate.promise
+    } else {
+      const read = result.imageData.getData
+      result.imageData.getData = async (options) => {
+        entered = true
+        await gate.promise
+        return read(options)
+      }
+    }
+    return result
+  }
+  return {
+    ...gate,
+    entered: () => entered,
+    restore: () => {
+      f.photoshop.imaging.getPixels = original
+    }
+  }
+}
+const holdPhotoshopImageRemoval = (f, stage) => {
+  const gate = imageGate()
+  const api = stage === 'action' ? f.photoshop.action : f.photoshop.core
+  const original = api.removeNotificationListener
+  const callbacks = []
+  api.removeNotificationListener = async (...args) => {
+    if (stage === 'action' || args[0] === stage) {
+      callbacks.push(args.at(-1))
+      await gate.promise
+    }
+    return original(...args)
+  }
+  return { ...gate, callbacks }
+}
+const photoshopImageCallbacks = (f) => {
+  const image = f.element('context-image')
+  return {
+    load: image.handlers.load || image.onload,
+    error: image.handlers.error || image.onerror
+  }
+}
+const imagePrepareRequests = (f) => f.requests.filter((request) => request.url.endsWith('/prepare'))
+const assertPhotoshopImageCleared = (f) => {
+  assert.ok(!f.element('context-image').src, 'no revoked image may remain in the preview')
+  assert.equal(f.element('context-image-view').hidden, true)
+  assert.equal(f.element('consent').checked, false)
+  assert.equal(f.element('share').disabled, true)
+}
+
+test('photoshop: context image is an explicit local single-layer PNG and needs new consent after native load', async () => {
+  const f = photoshopImageFixture({ nativeTextEncoding: false })
+  try {
+    const encoder = Object.getOwnPropertyDescriptor(f.vm, 'MagicPotContextPngV1')
+    assert.ok(encoder, 'the production CommonJS bundle exposes the context PNG encoder explicitly')
+    assert.equal(encoder.writable, false)
+    assert.equal(encoder.configurable, false)
+    assert.equal(encoder.enumerable, false)
+    assert.equal(Object.isFrozen(encoder.value), true)
+    assert.deepEqual(Object.keys(encoder.value), ['encode'])
+    assert.equal(typeof encoder.value.encode, 'function')
+    f.capture()
+    await flush()
+    assert.equal(f.pixelRequests.length, 0, 'metadata-only capture must not read pixels')
+    f.captureImage()
+    await flush()
+    assert.equal(f.requests.length, 0, 'local image capture does not contact desktop or a model')
+    assert.equal(f.nativeWrites.length, 0)
+    assert.equal(f.pixelRequests.length, 1)
+    for (const request of f.pixelRequests)
+      assert.deepEqual(
+        { ...request, targetSize: undefined },
+        {
+          documentID: 5,
+          layerID: 7,
+          historyStateID: 17,
+          sourceBounds: { left: 0, top: 0, right: 2, bottom: 1 },
+          targetSize: undefined,
+          colorSpace: 'RGB',
+          colorProfile: 'sRGB IEC61966-2.1',
+          componentSize: 8,
+          applyAlpha: false
+        }
+      )
+    assert.deepEqual(
+      f.pixelRequests.map((request) => request.targetSize),
+      [{ width: 2, height: 1 }]
+    )
+    assert.equal(f.pixelReads.length, 1)
+    assert.deepEqual(f.pixelReads[0].options, { chunky: true })
+    assert.equal(f.pixelDisposals.length, 1)
+    assert.equal(f.element('context-image-view').hidden, false)
+    const localUrl = f.element('context-image').src
+    assert.match(localUrl, /^blob:uxp-fixture\//)
+    f.loadContextImage()
+    await f.pair()
+    assertPhotoshopImageCleared(f)
+    assert.ok(f.revokedImageUrls.includes(localUrl), 'pairing invalidates an earlier local capture')
+
+    f.captureImage()
+    await flush()
+    const source = f.element('context-image').src
+    const png = f.contextImageBytes()
+    assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10])
+    assert.equal(png.readUInt32BE(16), 2)
+    assert.equal(png.readUInt32BE(20), 1)
+    const sha256 = createHash('sha256').update(png).digest('hex')
+    assert.ok(f.element('context-image-details').textContent.includes(sha256))
+    assert.match(f.element('consent-description').textContent, /image/i)
+    f.element('prompt').value = 'Review only this exact captured layer image.'
+    assert.equal(f.element('consent').disabled, true)
+    f.element('consent').checked = true
+    f.click('share')
+    await flush()
+    assert.equal(imagePrepareRequests(f).length, 0, 'pre-load consent cannot share an image')
+    f.loadContextImage()
+    assert.equal(f.element('consent').disabled, false)
+    assert.equal(f.element('consent').checked, false, 'native load discards pre-display consent')
+    f.click('share')
+    await flush()
+    assert.equal(imagePrepareRequests(f).length, 0)
+    f.element('consent').checked = true
+    f.click('share')
+    await flush()
+    const prepared = imagePrepareRequests(f)[0].body
+    assert.equal(prepared.featureId, 'plan-preview')
+    assert.equal(prepared.contextImage.bytesBase64, png.toString('base64'))
+    assert.equal(prepared.contextImage.sha256, sha256)
+    assert.equal(prepared.contextImage.sizeBytes, png.length)
+    assert.equal(prepared.contextImage.captureId, prepared.hostContext.captureId)
+    assert.equal(prepared.contextImage.captureId, prepared.context.selectionRevision)
+    assert.equal(prepared.contextImage.targetId, '7')
+    assert.deepEqual(prepared.hostContext.selectedIds, ['7'])
+    assert.equal(prepared.hostContext.documentId, '5')
+    assert.equal(prepared.hostContext.contextImage, undefined)
+    assert.equal(
+      JSON.stringify(prepared.context).includes(prepared.contextImage.bytesBase64),
+      false
+    )
+    assert.equal(prepared.prompt, 'Review only this exact captured layer image.')
+    assert.equal(f.pixelRequests.length, 3, 'sharing re-reads the original native image locally')
+    assert.deepEqual(f.pixelRequests[2], f.pixelRequests[1])
+    assert.equal(f.pixelDisposals.length, f.pixelRequests.length)
+    assert.ok(!f.element('context-image').src)
+    assert.equal(f.element('context-image-view').hidden, true)
+    assert.ok(f.revokedImageUrls.includes(source))
+    assert.equal(f.photoshopObserverCount(), 0, 'sharing releases capture-scoped notifications')
+    assert.equal(f.nativeWrites.length, 0)
+    assert.equal(
+      f.requests.some((request) => request.url.includes('/plan/')),
+      false
+    )
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
+test('photoshop: context image failures never retain an implicit metadata-only share', async () => {
+  for (const failure of [
+    'empty-selection',
+    'multiple-selection',
+    'get-pixels-rejected',
+    'get-data-rejected',
+    'invalid-native-pixels',
+    'missing-native-history',
+    'fractional-native-bounds',
+    'missing-native-preview',
+    'native-load-error',
+    'native-load-dimensions'
+  ]) {
+    const f = photoshopImageFixture({ uxpImagePreview: failure !== 'missing-native-preview' })
+    try {
+      await f.pair()
+      f.capture()
+      if (failure === 'empty-selection') f.nativeDocument.activeLayers = []
+      if (failure === 'multiple-selection') f.nativeDocument.activeLayers = [f.node, f.second]
+      if (failure === 'missing-native-history') f.nativeDocument.activeHistoryState = null
+      if (failure === 'fractional-native-bounds') f.node.boundsNoEffects.right = 2.5
+      if (failure === 'get-pixels-rejected')
+        f.photoshop.imaging.getPixels = async () => {
+          throw new Error('PRIVATE_NATIVE_FAILURE')
+        }
+      if (failure === 'invalid-native-pixels') {
+        const original = f.photoshop.imaging.getPixels
+        f.photoshop.imaging.getPixels = async (request) => {
+          const result = await original(request)
+          result.imageData.componentSize = 16
+          return result
+        }
+      }
+      if (failure === 'get-data-rejected') {
+        const original = f.photoshop.imaging.getPixels
+        f.photoshop.imaging.getPixels = async (request) => {
+          const result = await original(request)
+          result.imageData.getData = async () => {
+            throw new Error('PRIVATE_NATIVE_FAILURE')
+          }
+          return result
+        }
+      }
+      f.captureImage()
+      await flush()
+      if (failure === 'native-load-error') photoshopImageCallbacks(f).error()
+      if (failure === 'native-load-dimensions') {
+        const image = f.element('context-image')
+        image.naturalWidth = 3
+        image.naturalHeight = 1
+        photoshopImageCallbacks(f).load()
+      }
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.equal(f.photoshopObserverCount(), 0, failure)
+      assert.equal(f.pixelDisposals.length, f.pixelRequests.length, failure)
+      f.share()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 0, failure)
+      assert.equal(f.nativeWrites.length, 0, failure)
+      assert.equal(f.element('status').textContent.includes('PRIVATE_NATIVE_FAILURE'), false)
+
+      f.nativeDocument.activeLayers = [f.node]
+      f.capture()
+      f.share()
+      await flush()
+      assert.equal(
+        imagePrepareRequests(f).length,
+        1,
+        'a separate explicit metadata recapture works'
+      )
+      assert.equal(imagePrepareRequests(f)[0].body.contextImage, undefined)
+    } finally {
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image late native loads cannot clear or authorize a newer preview', async () => {
+  const f = photoshopImageFixture()
+  try {
+    await f.pair()
+    f.captureImage()
+    await flush()
+    const previous = photoshopImageCallbacks(f)
+    const oldElement = f.element('context-image')
+    const oldUrl = f.element('context-image').src
+    f.captureImage()
+    previous.load()
+    previous.error()
+    await flush()
+    const source = f.element('context-image').src
+    const bytes = f.contextImageBytes()
+    assert.notEqual(f.element('context-image'), oldElement, 'native load events are element-scoped')
+    assert.notEqual(source, oldUrl)
+    assert.ok(f.revokedImageUrls.includes(oldUrl))
+    previous.load()
+    previous.error()
+    assert.equal(f.element('context-image').src, source)
+    assert.equal(f.element('consent').checked, false)
+    assert.equal(f.element('consent').disabled, true)
+    f.loadContextImage()
+    f.element('prompt').value = 'Review the newest explicitly loaded image.'
+    f.element('consent').checked = true
+    previous.error()
+    previous.load()
+    assert.equal(f.element('consent').checked, true)
+    assert.equal(f.element('context-image').src, source)
+    f.click('share')
+    await flush()
+    assert.equal(imagePrepareRequests(f)[0].body.contextImage.bytesBase64, bytes.toString('base64'))
+    assert.equal(f.photoshopObserverCount(), 0)
+    assert.equal(
+      f.createdImageUrls.every((url) => f.revokedImageUrls.includes(url)),
+      true
+    )
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
+test('photoshop: context image waits for all explicit native notification subscriptions before reading pixels', async () => {
+  const f = photoshopImageFixture()
+  const actionGate = imageGate()
+  const uiGate = imageGate()
+  const osGate = imageGate()
+  try {
+    const addAction = f.photoshop.action.addNotificationListener
+    f.photoshop.action.addNotificationListener = async (...args) => {
+      await addAction(...args)
+      await actionGate.promise
+    }
+    const addCore = f.photoshop.core.addNotificationListener
+    f.photoshop.core.addNotificationListener = async (...args) => {
+      await addCore(...args)
+      await (args[0] === 'UI' ? uiGate : osGate).promise
+    }
+    f.captureImage()
+    await flush()
+    assert.equal(f.pixelRequests.length, 0)
+    assert.equal(f.coreNotificationRegistrations.length, 0)
+    assert.equal(f.element('consent').disabled, true)
+    actionGate.release()
+    await flush()
+    assert.equal(f.pixelRequests.length, 0)
+    assert.deepEqual(f.coreNotificationRegistrations, [
+      { group: 'UI', events: ['panelVisibilityChanged'] }
+    ])
+    uiGate.release()
+    await flush()
+    assert.equal(f.pixelRequests.length, 0)
+    assert.deepEqual(f.coreNotificationRegistrations, [
+      { group: 'UI', events: ['panelVisibilityChanged'] },
+      { group: 'OS', events: ['activationChanged'] }
+    ])
+    osGate.release()
+    await flush()
+    assert.equal(f.pixelRequests.length, 1)
+    const events = f.notificationRegistrations.flat()
+    assert.equal(events.includes('all'), false, 'the UXP API has no assumed all-events shortcut')
+    for (const event of [
+      'select',
+      'deselect',
+      'open',
+      'close',
+      'make',
+      'delete',
+      'set',
+      'move',
+      'transform',
+      'paint',
+      'draw',
+      'stroke',
+      'undoEvent',
+      'revert',
+      'play',
+      'modalJavaScriptScopeEnter',
+      'modalJavaScriptScopeExit'
+    ])
+      assert.ok(events.includes(event), event)
+    assert.equal(f.photoshopObserverCount(), 3)
+    f.cancel()
+    await flush()
+    assertPhotoshopImageCleared(f)
+    assert.equal(f.photoshopObserverCount(), 0)
+    assert.equal(f.notificationRemovals.length, 1)
+    assert.deepEqual(f.coreNotificationRemovals, f.coreNotificationRegistrations)
+  } finally {
+    actionGate.release()
+    uiGate.release()
+    osGate.release()
+    f.close()
+    await flush()
+  }
+})
+
+test('photoshop: context image fails closed when native subscriptions are missing, rejected or not awaitable', async () => {
+  for (const failure of [
+    'missing-action',
+    'missing-core',
+    'action-rejected',
+    'UI-rejected',
+    'OS-rejected',
+    'not-awaitable'
+  ]) {
+    const f = photoshopImageFixture()
+    try {
+      await f.pair()
+      f.capture()
+      if (failure === 'missing-action') f.photoshop.action = undefined
+      if (failure === 'missing-core') f.photoshop.core.addNotificationListener = undefined
+      if (failure === 'action-rejected' || failure === 'not-awaitable') {
+        const original = f.photoshop.action.addNotificationListener
+        f.photoshop.action.addNotificationListener =
+          failure === 'not-awaitable'
+            ? (...args) => {
+                void original(...args)
+              }
+            : async (...args) => {
+                await original(...args)
+                throw new Error('PRIVATE_OBSERVER_FAILURE')
+              }
+      }
+      if (failure === 'UI-rejected' || failure === 'OS-rejected') {
+        const original = f.photoshop.core.addNotificationListener
+        f.photoshop.core.addNotificationListener = async (...args) => {
+          await original(...args)
+          if (failure === args[0] + '-rejected') throw new Error('PRIVATE_OBSERVER_FAILURE')
+        }
+      }
+      f.captureImage()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.equal(f.pixelRequests.length, 0, failure)
+      assert.equal(
+        f.photoshopObserverCount(),
+        0,
+        'partially registered observers are released: ' + failure
+      )
+      f.share()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 0, failure)
+      assert.equal(f.element('status').textContent.includes('PRIVATE_OBSERVER_FAILURE'), false)
+      f.capture()
+      f.share()
+      await flush()
+      assert.equal(
+        imagePrepareRequests(f).length,
+        1,
+        'explicit metadata recapture remains available'
+      )
+      assert.equal(imagePrepareRequests(f)[0].body.contextImage, undefined)
+    } finally {
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image removes late native subscriptions after cancellation, close or metadata recapture', async () => {
+  for (const stage of ['action', 'UI', 'OS']) {
+    for (const interruption of ['cancel', 'close', 'pagehide', 'unload', 'metadata-recapture']) {
+      const f = photoshopImageFixture()
+      const gate = imageGate()
+      try {
+        await f.pair()
+        const api = stage === 'action' ? f.photoshop.action : f.photoshop.core
+        const original = api.addNotificationListener
+        api.addNotificationListener = async (...args) => {
+          await original(...args)
+          if (stage === 'action' || args[0] === stage) await gate.promise
+        }
+        f.captureImage()
+        await flush()
+        assert.equal(f.pixelRequests.length, 0)
+        if (interruption === 'cancel') f.cancel()
+        else if (interruption === 'close') f.close()
+        else if (interruption === 'metadata-recapture') f.capture()
+        else f.fireUi(interruption)
+        gate.release()
+        await flush()
+        assertPhotoshopImageCleared(f)
+        assert.equal(f.photoshopObserverCount(), 0, stage + '/' + interruption)
+        assert.equal(
+          f.pixelRequests.length,
+          0,
+          'a late subscription must not start an old pixel read'
+        )
+        assert.equal(imagePrepareRequests(f).length, 0)
+        if (interruption === 'metadata-recapture') {
+          f.share()
+          await flush()
+          assert.equal(imagePrepareRequests(f).length, 1)
+          assert.equal(imagePrepareRequests(f)[0].body.contextImage, undefined)
+        }
+      } finally {
+        gate.release()
+        f.close()
+        await flush()
+      }
+    }
+  }
+})
+
+const photoshopImageInvalidations = [
+  [
+    'selection changed',
+    (f) => {
+      f.nativeDocument.activeLayers = [f.second]
+    }
+  ],
+  [
+    'selection away and back',
+    (f) => {
+      f.nativeDocument.activeLayers = [f.second]
+      f.firePhotoshopNotification('select')
+      f.nativeDocument.activeLayers = [f.node]
+    }
+  ],
+  ['native edit notification', (f) => f.firePhotoshopNotification('paint')],
+  [
+    'canvas changed',
+    (f) => {
+      f.nativeDocument.width += 1
+    }
+  ],
+  [
+    'layer geometry changed',
+    (f) => {
+      f.node.boundsNoEffects.right += 1
+    }
+  ],
+  [
+    'layer identity changed',
+    (f) => {
+      const replacement = { ...f.node }
+      f.nativeDocument.activeLayers = [replacement]
+      f.nativeDocument.layers = [replacement, f.second]
+    }
+  ],
+  [
+    'history changed',
+    (f) => {
+      f.nativeDocument.activeHistoryState = { id: 18 }
+    }
+  ],
+  [
+    'history unavailable',
+    (f) => {
+      f.nativeDocument.activeHistoryState = null
+    }
+  ],
+  ['document closed', (f) => f.setActiveDocument(null)],
+  [
+    'document reopened with reused id',
+    (f) => {
+      const replacement = { ...f.nativeDocument }
+      const layer = { ...f.node, document: replacement }
+      replacement.activeLayers = [layer]
+      replacement.layers = [layer]
+      f.setActiveDocument(replacement)
+    }
+  ],
+  [
+    'document switched away and back',
+    (f) => {
+      f.setActiveDocument({ ...f.nativeDocument, id: 6 })
+      f.firePhotoshopNotification('select')
+      f.setActiveDocument(f.nativeDocument)
+    }
+  ],
+  ['panel hidden', (f) => f.firePhotoshopCoreNotification('UI', 'panelVisibilityChanged')],
+  ['app deactivated', (f) => f.firePhotoshopCoreNotification('OS', 'activationChanged')],
+  ['cancel', (f) => f.cancel()],
+  ['session close', (f) => f.close()],
+  ['pagehide', (f) => f.fireUi('pagehide')],
+  ['unload', (f) => f.fireUi('unload')],
+  ['session expiry', (f) => f.tick(120001)]
+]
+
+test('photoshop: context image discards late getPixels and getData results after native identity or lifecycle invalidation', async () => {
+  for (const stage of ['getPixels', 'getData']) {
+    for (const [name, invalidate] of photoshopImageInvalidations) {
+      const f = photoshopImageFixture()
+      const gate = holdPhotoshopImageRead(f, stage)
+      try {
+        await f.pair()
+        f.captureImage()
+        await flush()
+        assert.equal(gate.entered(), true, stage + '/' + name)
+        assert.equal(f.pixelDisposals.length, 0)
+        await invalidate(f)
+        gate.release()
+        await flush()
+        assertPhotoshopImageCleared(f)
+        assert.equal(
+          f.createdImageUrls.length,
+          0,
+          'no stale pixels reach a native preview: ' + name
+        )
+        assert.equal(f.pixelDisposals.length, f.pixelRequests.length, stage + '/' + name)
+        assert.equal(f.photoshopObserverCount(), 0, stage + '/' + name)
+        f.share()
+        await flush()
+        assert.equal(imagePrepareRequests(f).length, 0, stage + '/' + name)
+        assert.equal(f.nativeWrites.length, 0)
+      } finally {
+        gate.release()
+        f.close()
+        await flush()
+      }
+    }
+  }
+})
+
+test('photoshop: context image serializes pending native reads even after cancellation until the actual read settles', async () => {
+  for (const stage of ['getPixels', 'getData']) {
+    const f = photoshopImageFixture()
+    const gate = holdPhotoshopImageRead(f, stage)
+    try {
+      await f.pair()
+      f.captureImage()
+      await flush()
+      assert.equal(gate.entered(), true)
+      for (let index = 0; index < 3; index++) f.captureImage()
+      f.share()
+      await flush()
+      assert.equal(
+        f.pixelRequests.length,
+        1,
+        'repeated image actions cannot allocate parallel native resources'
+      )
+      assert.equal(imagePrepareRequests(f).length, 0)
+      f.cancel()
+      assertPhotoshopImageCleared(f)
+      for (let index = 0; index < 3; index++) f.captureImage()
+      await flush()
+      assert.equal(
+        f.pixelRequests.length,
+        1,
+        'cancel revokes consent but does not pretend the native read settled'
+      )
+      assert.equal(f.pixelDisposals.length, 0)
+      gate.release()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.equal(f.createdImageUrls.length, 0, 'the cancelled result is cleanup-only')
+      assert.equal(f.pixelDisposals.length, 1)
+      gate.restore()
+      f.captureImage()
+      await flush()
+      const source = f.element('context-image').src
+      const bytes = f.contextImageBytes()
+      assert.ok(source)
+      f.loadContextImage()
+      f.element('prompt').value = 'Review only the newer capture.'
+      f.element('consent').checked = true
+      assert.equal(f.createdImageUrls.length, 1)
+      assert.equal(f.pixelDisposals.length, f.pixelRequests.length)
+      f.click('share')
+      await flush()
+      assert.equal(
+        imagePrepareRequests(f)[0].body.contextImage.bytesBase64,
+        bytes.toString('base64')
+      )
+      assert.equal(f.photoshopObserverCount(), 0)
+    } finally {
+      gate.release()
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image serializes pending native observer registration across repeated capture and cancel', async () => {
+  for (const stage of ['action', 'UI', 'OS']) {
+    const f = photoshopImageFixture()
+    const gate = imageGate()
+    try {
+      await f.pair()
+      const api = stage === 'action' ? f.photoshop.action : f.photoshop.core
+      const original = api.addNotificationListener
+      api.addNotificationListener = async (...args) => {
+        await original(...args)
+        if (stage === 'action' || args[0] === stage) await gate.promise
+      }
+      f.captureImage()
+      await flush()
+      const registrations = () =>
+        f.notificationRegistrations.length + f.coreNotificationRegistrations.length
+      const pendingCount = registrations()
+      assert.ok(pendingCount > 0)
+      for (let index = 0; index < 3; index++) f.captureImage()
+      await flush()
+      assert.equal(registrations(), pendingCount)
+      f.cancel()
+      for (let index = 0; index < 3; index++) f.captureImage()
+      await flush()
+      assert.equal(
+        registrations(),
+        pendingCount,
+        'cancel cannot bypass the pending native subscription: ' + stage
+      )
+      assert.equal(f.pixelRequests.length, 0)
+      gate.release()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.equal(f.photoshopObserverCount(), 0)
+      assert.equal(f.pixelRequests.length, 0)
+      f.captureImage()
+      await flush()
+      assert.equal(
+        f.pixelRequests.length,
+        1,
+        'a new explicit capture is allowed after cleanup settles'
+      )
+      f.loadContextImage()
+      f.share()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 1)
+    } finally {
+      gate.release()
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image waits for native observer removal while explicit metadata remains usable', async () => {
+  for (const stage of ['action', 'UI', 'OS']) {
+    const f = photoshopImageFixture()
+    const gate = holdPhotoshopImageRemoval(f, stage)
+    try {
+      await f.pair()
+      f.captureImage()
+      await flush()
+      const oldImageCallbacks = photoshopImageCallbacks(f)
+      const oldSource = f.element('context-image').src
+      f.loadContextImage()
+      f.cancel()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.ok(f.revokedImageUrls.includes(oldSource))
+      assert.equal(gate.callbacks.length, 1, stage)
+      assert.equal(f.photoshopObserverCount(), 1, 'one native removal has not completed')
+      assert.equal(f.element('image-capture').disabled, true)
+      const registrations = () =>
+        f.notificationRegistrations.length + f.coreNotificationRegistrations.length
+      for (let index = 0; index < 3; index++) {
+        f.captureImage()
+        f.cancel()
+      }
+      await flush()
+      assert.equal(registrations(), 3, 'pending removal cannot accumulate new registrations')
+      assert.equal(f.pixelRequests.length, 1)
+      assert.equal(gate.callbacks.length, 1, 'cleanup is requested at most once per subscription')
+      f.capture()
+      f.element('prompt').value = 'Review this separately requested metadata snapshot.'
+      f.element('consent').checked = true
+      for (const callback of gate.callbacks) callback('paint', {})
+      oldImageCallbacks.load()
+      oldImageCallbacks.error()
+      assert.equal(
+        f.element('consent').checked,
+        true,
+        'old native callbacks cannot revoke new metadata consent'
+      )
+      f.click('share')
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 1)
+      assert.equal(imagePrepareRequests(f)[0].body.contextImage, undefined)
+      f.cancel()
+      gate.release()
+      await flush()
+      assert.equal(f.photoshopObserverCount(), 0)
+      assertPhotoshopImageCleared(f)
+      f.captureImage()
+      await flush()
+      const source = f.element('context-image').src
+      const bytes = f.contextImageBytes()
+      assert.notEqual(source, oldSource)
+      f.loadContextImage()
+      f.element('consent').checked = true
+      for (const callback of gate.callbacks) callback('paint', {})
+      oldImageCallbacks.load()
+      oldImageCallbacks.error()
+      assert.equal(f.element('context-image').src, source)
+      assert.equal(f.element('consent').checked, true)
+      f.click('share')
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 2)
+      assert.equal(
+        imagePrepareRequests(f)[1].body.contextImage.bytesBase64,
+        bytes.toString('base64')
+      )
+      assert.equal(f.pixelDisposals.length, f.pixelRequests.length)
+      assert.equal(f.photoshopObserverCount(), 0)
+    } finally {
+      gate.release()
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image discards recapture when delivered native events occur before old observers finish detaching', async () => {
+  for (const stage of ['action', 'UI', 'OS']) {
+    const f = photoshopImageFixture()
+    const gate = holdPhotoshopImageRemoval(f, stage)
+    try {
+      await f.pair()
+      f.captureImage()
+      await flush()
+      const oldSource = f.element('context-image').src
+      f.loadContextImage()
+      f.captureImage()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.equal(gate.callbacks.length, 1)
+      assert.equal(f.photoshopObserverCount(), 1)
+      assert.equal(
+        f.pixelRequests.length,
+        1,
+        'recapture waits before registering or reading new pixels'
+      )
+      assert.ok(f.revokedImageUrls.includes(oldSource))
+      const notify = () => {
+        if (stage === 'action') f.firePhotoshopNotification('select')
+        else
+          f.firePhotoshopCoreNotification(
+            stage,
+            stage === 'UI' ? 'panelVisibilityChanged' : 'activationChanged'
+          )
+      }
+      f.nativeDocument.activeLayers = [f.second]
+      notify()
+      f.nativeDocument.activeLayers = [f.node]
+      notify()
+      f.captureImage()
+      await flush()
+      assert.equal(f.pixelRequests.length, 1)
+      assert.equal(f.notificationRegistrations.length + f.coreNotificationRegistrations.length, 3)
+      gate.release()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.equal(
+        f.pixelRequests.length,
+        1,
+        'restoring identical context cannot revive the event-invalidated recapture: ' + stage
+      )
+      assert.equal(f.createdImageUrls.length, 1)
+      assert.equal(f.photoshopObserverCount(), 0)
+      assert.equal(imagePrepareRequests(f).length, 0)
+
+      f.capture()
+      f.element('prompt').value = 'Review this explicitly recaptured context.'
+      f.element('consent').checked = true
+      for (const callback of gate.callbacks) callback('select', {})
+      assert.equal(
+        f.element('consent').checked,
+        true,
+        'detached callbacks do not alter metadata consent'
+      )
+      f.captureImage()
+      await flush()
+      const source = f.element('context-image').src
+      const bytes = f.contextImageBytes()
+      assert.notEqual(source, oldSource)
+      f.loadContextImage()
+      f.element('consent').checked = true
+      for (const callback of gate.callbacks) callback('select', {})
+      assert.equal(
+        f.element('context-image').src,
+        source,
+        'fully detached callbacks cannot affect a new preview'
+      )
+      assert.equal(f.element('consent').checked, true)
+      f.click('share')
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 1)
+      assert.equal(
+        imagePrepareRequests(f)[0].body.contextImage.bytesBase64,
+        bytes.toString('base64')
+      )
+      assert.equal(f.pixelDisposals.length, f.pixelRequests.length)
+      assert.equal(f.photoshopObserverCount(), 0)
+    } finally {
+      gate.release()
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image keeps late registration cleanup gated until native removal actually settles', async () => {
+  for (const stage of ['action', 'UI', 'OS']) {
+    const f = photoshopImageFixture()
+    const registrationGate = imageGate()
+    const removalGate = holdPhotoshopImageRemoval(f, stage)
+    try {
+      await f.pair()
+      const api = stage === 'action' ? f.photoshop.action : f.photoshop.core
+      const original = api.addNotificationListener
+      api.addNotificationListener = async (...args) => {
+        await original(...args)
+        if (stage === 'action' || args[0] === stage) await registrationGate.promise
+      }
+      f.captureImage()
+      await flush()
+      const registrations = () =>
+        f.notificationRegistrations.length + f.coreNotificationRegistrations.length
+      const pendingCount = registrations()
+      f.cancel()
+      registrationGate.release()
+      await flush()
+      assert.equal(removalGate.callbacks.length, 1)
+      assert.equal(f.photoshopObserverCount(), 1)
+      for (let index = 0; index < 3; index++) f.captureImage()
+      await flush()
+      assert.equal(
+        registrations(),
+        pendingCount,
+        'settled add is not sufficient while its cleanup is pending'
+      )
+      assert.equal(f.pixelRequests.length, 0)
+      removalGate.release()
+      await flush()
+      assert.equal(f.photoshopObserverCount(), 0)
+      assertPhotoshopImageCleared(f)
+      f.captureImage()
+      await flush()
+      assert.equal(f.pixelRequests.length, 1)
+      f.loadContextImage()
+      f.share()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 1)
+    } finally {
+      registrationGate.release()
+      removalGate.release()
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image permanently disables native capture on rejected or non-awaitable observer removal', async () => {
+  for (const stage of ['action', 'UI', 'OS']) {
+    for (const failure of ['rejected', 'thrown', 'not-awaitable']) {
+      const f = photoshopImageFixture()
+      const gate = imageGate()
+      const callbacks = []
+      try {
+        await f.pair()
+        const api = stage === 'action' ? f.photoshop.action : f.photoshop.core
+        const original = api.removeNotificationListener
+        api.removeNotificationListener = (...args) => {
+          if (stage !== 'action' && args[0] !== stage) return original(...args)
+          callbacks.push(args.at(-1))
+          if (failure === 'thrown') throw new Error('PRIVATE_DETACH_FAILURE')
+          if (failure === 'not-awaitable') return undefined
+          return gate.promise.then(() => {
+            throw new Error('PRIVATE_DETACH_FAILURE')
+          })
+        }
+        f.captureImage()
+        await flush()
+        f.loadContextImage()
+        f.cancel()
+        gate.release()
+        await flush()
+        assertPhotoshopImageCleared(f)
+        assert.equal(callbacks.length, 1)
+        assert.equal(f.element('image-capture').disabled, true, stage + '/' + failure)
+        assert.equal(f.element('status').textContent.includes('PRIVATE_DETACH_FAILURE'), false)
+        const registrationCount =
+          f.notificationRegistrations.length + f.coreNotificationRegistrations.length
+        for (let index = 0; index < 3; index++) f.captureImage()
+        await flush()
+        assert.equal(f.pixelRequests.length, 1)
+        assert.equal(
+          f.notificationRegistrations.length + f.coreNotificationRegistrations.length,
+          registrationCount
+        )
+        assert.equal(imagePrepareRequests(f).length, 0)
+        f.capture()
+        f.element('prompt').value = 'Review only new metadata after image observation failed.'
+        f.element('consent').checked = true
+        for (const callback of callbacks) callback('paint', {})
+        assert.equal(f.element('consent').checked, true)
+        f.click('share')
+        await flush()
+        assert.equal(
+          imagePrepareRequests(f).length,
+          1,
+          'failed native removal does not disable explicit metadata planning'
+        )
+        assert.equal(imagePrepareRequests(f)[0].body.contextImage, undefined)
+        assert.equal(f.nativeWrites.length, 0)
+      } finally {
+        gate.release()
+        f.close()
+        await flush()
+      }
+    }
+  }
+})
+
+test('photoshop: context image share verification holds the same native resource gate through cancellation', async () => {
+  for (const stage of ['getPixels', 'getData']) {
+    const f = photoshopImageFixture()
+    let gate
+    try {
+      await f.pair()
+      f.captureImage()
+      await flush()
+      f.loadContextImage()
+      gate = holdPhotoshopImageRead(f, stage)
+      f.share()
+      await flush()
+      assert.equal(gate.entered(), true)
+      for (let index = 0; index < 3; index++) {
+        f.captureImage()
+        f.click('share')
+      }
+      await flush()
+      assert.equal(f.pixelRequests.length, 2, 'capture and share cannot overlap native reads')
+      assert.equal(imagePrepareRequests(f).length, 0)
+      f.cancel()
+      assertPhotoshopImageCleared(f)
+      for (let index = 0; index < 3; index++) f.captureImage()
+      await flush()
+      assert.equal(
+        f.pixelRequests.length,
+        2,
+        'the cancelled verification remains in flight natively'
+      )
+      gate.release()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.equal(imagePrepareRequests(f).length, 0)
+      assert.equal(f.pixelDisposals.length, 2)
+      gate.restore()
+      f.captureImage()
+      await flush()
+      f.loadContextImage()
+      f.share()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 1)
+      assert.equal(f.pixelDisposals.length, f.pixelRequests.length)
+    } finally {
+      gate?.release()
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image late capture or share verification cannot replace a separately requested metadata-only plan', async () => {
+  for (const stage of ['capture', 'share-verification']) {
+    const f = photoshopImageFixture()
+    let gate
+    try {
+      await f.pair()
+      if (stage === 'share-verification') {
+        f.captureImage()
+        await flush()
+        f.loadContextImage()
+      }
+      gate = holdPhotoshopImageRead(f, 'getData')
+      if (stage === 'capture') f.captureImage()
+      else f.share()
+      await flush()
+      assert.equal(gate.entered(), true)
+      f.capture()
+      assertPhotoshopImageCleared(f)
+      f.share()
+      await flush()
+      assert.equal(
+        imagePrepareRequests(f).length,
+        1,
+        'explicit metadata share does not wait for stale native pixels'
+      )
+      const prepared = imagePrepareRequests(f)[0].body
+      assert.equal(prepared.featureId, 'plan-preview')
+      assert.equal(prepared.contextImage, undefined)
+      const revision = prepared.hostContext.captureId
+      gate.release()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 1)
+      assert.equal(imagePrepareRequests(f)[0].body.hostContext.captureId, revision)
+      assert.equal(f.element('context-image').src, undefined)
+      assert.equal(f.photoshopObserverCount(), 0)
+      assert.equal(f.pixelDisposals.length, f.pixelRequests.length)
+    } finally {
+      gate?.release()
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image invalidates loaded previews on concrete native action and lifecycle notifications', async () => {
+  const actionEvents = [
+    'select',
+    'deselect',
+    'open',
+    'close',
+    'make',
+    'delete',
+    'set',
+    'move',
+    'transform',
+    'paint',
+    'draw',
+    'stroke',
+    'undoEvent',
+    'revert',
+    'play',
+    'modalJavaScriptScopeEnter',
+    'modalJavaScriptScopeExit'
+  ]
+  for (const event of [...actionEvents, 'panelVisibilityChanged', 'activationChanged']) {
+    const f = photoshopImageFixture()
+    try {
+      await f.pair()
+      f.captureImage()
+      await flush()
+      const source = f.element('context-image').src
+      const callbacks = photoshopImageCallbacks(f)
+      f.loadContextImage()
+      f.element('consent').checked = true
+      if (event === 'panelVisibilityChanged') f.firePhotoshopCoreNotification('UI', event)
+      else if (event === 'activationChanged') f.firePhotoshopCoreNotification('OS', event)
+      else f.firePhotoshopNotification(event)
+      callbacks.load()
+      callbacks.error()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.ok(f.revokedImageUrls.includes(source), event)
+      assert.equal(f.photoshopObserverCount(), 0, event)
+      f.share()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 0, event)
+    } finally {
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image requires native decode capabilities and fails closed after its load deadline', async () => {
+  for (const failure of [
+    'missing-natural-width',
+    'missing-natural-height',
+    'missing-load-listener',
+    'timeout'
+  ]) {
+    const f = photoshopImageFixture()
+    try {
+      await f.pair()
+      if (failure === 'missing-natural-width') delete f.element('context-image').naturalWidth
+      if (failure === 'missing-natural-height') delete f.element('context-image').naturalHeight
+      if (failure === 'missing-load-listener')
+        f.element('context-image').addEventListener = undefined
+      f.captureImage()
+      await flush()
+      if (failure === 'timeout') {
+        const source = f.element('context-image').src
+        const callbacks = photoshopImageCallbacks(f)
+        assert.ok(source)
+        await f.tick(14999)
+        assert.equal(f.element('context-image').src, source)
+        await f.tick(1)
+        callbacks.load()
+        callbacks.error()
+        assert.ok(f.revokedImageUrls.includes(source))
+      }
+      assertPhotoshopImageCleared(f)
+      assert.equal(f.photoshopObserverCount(), 0, failure)
+      f.share()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 0, failure)
+    } finally {
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image share rechecks native pixels even when edits emit no notification or metadata change', async () => {
+  for (const failure of ['changed-pixels', 'native-read-rejected', 'changed-source-bounds']) {
+    const f = photoshopImageFixture()
+    try {
+      await f.pair()
+      f.captureImage()
+      await flush()
+      f.loadContextImage()
+      const source = f.element('context-image').src
+      const original = f.photoshop.imaging.getPixels
+      f.photoshop.imaging.getPixels = async (request) => {
+        if (failure === 'native-read-rejected') throw new Error('PRIVATE_RECHECK_FAILURE')
+        const result = await original(request)
+        if (failure === 'changed-source-bounds') result.sourceBounds.right += 1
+        if (failure === 'changed-pixels') {
+          const read = result.imageData.getData
+          result.imageData.getData = async (options) => {
+            const bytes = new Uint8Array(await read(options))
+            bytes[0] ^= 0xff
+            return bytes
+          }
+        }
+        return result
+      }
+      f.share()
+      await flush()
+      assertPhotoshopImageCleared(f)
+      assert.equal(imagePrepareRequests(f).length, 0, failure)
+      assert.ok(f.revokedImageUrls.includes(source))
+      assert.equal(f.photoshopObserverCount(), 0)
+      assert.equal(f.pixelDisposals.length, f.pixelRequests.length)
+      assert.equal(f.nativeWrites.length, 0)
+      assert.equal(f.element('status').textContent.includes('PRIVATE_RECHECK_FAILURE'), false)
+      f.share()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 0, 'failed recheck cannot fall back to metadata')
+    } finally {
+      f.close()
+      await flush()
+    }
+  }
+})
+
+test('photoshop: context image share recheck cannot outlive document, prompt, consent or session identity', async () => {
+  const interruptions = [
+    ...photoshopImageInvalidations,
+    [
+      'prompt edited and restored',
+      (f) => {
+        const prompt = f.element('prompt')
+        const previous = prompt.value
+        prompt.value = 'Another prompt'
+        prompt.handlers.input()
+        prompt.value = previous
+        prompt.handlers.input()
+        f.element('consent').checked = true
+        f.element('consent').handlers.change()
+      }
+    ],
+    [
+      'consent unchecked and checked again',
+      (f) => {
+        f.element('consent').checked = false
+        f.element('consent').handlers.change()
+        f.element('consent').checked = true
+        f.element('consent').handlers.change()
+      }
+    ]
+  ]
+  for (const [name, invalidate] of interruptions) {
+    const f = photoshopImageFixture()
+    let gate
+    try {
+      await f.pair()
+      f.captureImage()
+      await flush()
+      f.loadContextImage()
+      gate = holdPhotoshopImageRead(f, 'getData')
+      f.share()
+      await flush()
+      assert.equal(gate.entered(), true, name)
+      assert.equal(imagePrepareRequests(f).length, 0)
+      assert.equal(f.element('share').disabled, true)
+      f.click('share')
+      assert.equal(f.pixelRequests.length, 2, 'duplicate share must not start another verification')
+      await invalidate(f)
+      gate.release()
+      await flush()
+      assert.equal(imagePrepareRequests(f).length, 0, name)
+      assert.equal(f.pixelDisposals.length, f.pixelRequests.length, name)
+      assert.equal(f.nativeWrites.length, 0)
+    } finally {
+      gate?.release()
+      f.close()
+      await flush()
+      assert.equal(f.photoshopObserverCount(), 0)
+    }
+  }
+})
+
+test('photoshop: context image does not strip the image when the complete prepare body exceeds the transport budget', async () => {
+  const f = photoshopImageFixture()
+  try {
+    await f.pair()
+    f.captureImage()
+    await flush()
+    f.loadContextImage()
+    f.element('prompt').value = '\u0001'.repeat(12000)
+    f.element('consent').checked = true
+    f.click('share')
+    await flush()
+    assert.equal(imagePrepareRequests(f).length, 0)
+    assert.equal(f.nativeWrites.length, 0)
+    assertPhotoshopImageCleared(f)
+    assert.equal(f.photoshopObserverCount(), 0)
+    f.share()
+    await flush()
+    assert.equal(
+      imagePrepareRequests(f).length,
+      0,
+      'an oversized image request must not become metadata-only'
+    )
+  } finally {
+    f.close()
+    await flush()
+  }
+})
+
+const assertNativeLifecycleReleased = (f) => {
+  assert.equal(f.lifecycleRuns.length, 1, 'the native bridge creates the real shared lifecycle')
+  const run = f.lifecycleRuns[0]
+  assert.equal(run.options.retainExecution, false)
+  assert.equal(typeof run.options.releaseResources, 'function')
+  assert.equal(run.releaseCalls, 1)
+  assert.equal(run.publishedBeforeRelease, undefined)
+  assert.equal(run.result.stage, 'terminal')
+  assert.equal(
+    Object.hasOwn(run.result, 'execution'),
+    false,
+    'opaque execution is not retained in terminal results'
+  )
+  assert.equal(run.lifecycle.getResult(run.runId), run.result)
+  assert.deepEqual(plain(run.result.resourceCleanup), { status: 'completed', failureCount: 0 })
+  assert.deepEqual(run.events.slice(-3), ['release', 'released', 'terminal'])
+  assert.equal(
+    run.ownershipRegistrations.length,
+    1,
+    'one per-run registry owns partial and complete preparation'
+  )
+  for (const { registry, containers } of run.ownershipRegistrations) {
+    assert.equal(registry.has(run.runId), false, 'release removes the native run ownership entry')
+    assert.equal(containers.size, 0)
+  }
+  assert.ok(run.ownedBeforeRelease.length >= 4)
+  assert.ok(run.ownedBeforeRelease.some(({ size }) => size > 0))
+  for (const { collection } of run.ownedBeforeRelease)
+    assert.equal(Array.isArray(collection) ? collection.length : collection.size, 0)
+  assert.deepEqual(
+    plain(run.prepareArgs.context),
+    run.contextBeforeRelease,
+    'resource release preserves captured metadata'
+  )
+  const diagnostics = plain(run.lifecycle.diagnostics())
+  assert.equal(diagnostics.activeCount, 0)
+  assert.equal(diagnostics.runs[0].status, run.result.status)
+  assert.deepEqual(diagnostics.runs[0].resourceCleanup, { status: 'completed', failureCount: 0 })
+  const point = run.ownedBeforeRelease.flatMap(({ points = [] }) => points)[0]
+  assert.ok(point, 'native visual preparation produced a real retained pixel checkpoint')
+  const cached = f.vm.MagicPotPixelAuditV1.compare([
+    { targetId: String(f.node.id), baseline: point, current: point }
+  ])
+  assert.equal(
+    cached[0].status,
+    'compared',
+    'release does not clear the separate shared pixel cache'
+  )
+  assert.equal(cached[0].changedPixels, 0)
+  return run
+}
+
+for (const host of ['figma', 'photoshop']) {
+  test(`${host}: native lifecycle ownership releases successful execution without retaining opaque resources`, async () => {
+    const f = fixture(host, { approvePlan: true, observeLifecycle: true })
+    try {
+      await runApproved(f)
+      const run = assertNativeLifecycleReleased(f)
+      assert.deepEqual(run.events, [
+        'prepare',
+        'execute',
+        'readback',
+        'release',
+        'released',
+        'terminal'
+      ])
+      assert.equal(run.result.status, 'completed')
+      assert.equal(run.releaseArgs.status, 'completed')
+      assert.equal(run.releaseArgs.resources, run.resources)
+      assert.equal(run.releaseArgs.execution, run.execution)
+      assert.notEqual(
+        run.resources.applied,
+        run.execution.applied,
+        'native execution owns a distinct applied array'
+      )
+      assert.deepEqual(Object.keys(run.resources).sort(), [
+        'applied',
+        'beforeVisual',
+        'checked',
+        'visualEntries'
+      ])
+      assert.deepEqual(Object.keys(run.execution).sort(), [
+        'applied',
+        'beforeVisual',
+        'checked',
+        'visualEntries'
+      ])
+      for (const resource of [run.resources, run.execution]) {
+        assert.equal(resource.checked.length, 0)
+        assert.equal(resource.visualEntries.length, 0)
+        assert.equal(resource.beforeVisual.size, 0)
+        assert.equal(resource.applied.length, 0)
+      }
+      assert.deepEqual(f.nativeWrites, ['Approved new name'])
+      assert.equal(f.node.name, 'Approved new name')
+      assert.equal(f.second.name, 'Second original name')
+      const receipt = f.planResult()
+      assert.equal(receipt.status, 'completed')
+      assert.equal(receipt.effect, 'applied')
+      assert.deepEqual(receipt.readback, run.readback)
+      assert.deepEqual(plain(run.result.readback), run.readback)
+      assert.equal(receipt.readback.steps[0].observation, 'requested')
+      assert.equal(
+        receipt.visualEvidence.length,
+        1,
+        'the independent native meta summary survives resource cleanup'
+      )
+      assert.equal(receipt.visualEvidence[0].changed, true)
+      const pixelReport = f.vm.MagicPotPixelAuditV1.compare([
+        {
+          targetId: receipt.visualEvidence[0].targetId,
+          baseline: receipt.visualEvidence[0].before,
+          current: receipt.visualEvidence[0].after
+        }
+      ])
+      assert.equal(pixelReport[0].status, 'compared')
+      assert.ok(pixelReport[0].changedPixels > 0)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+
+  test(`${host}: native lifecycle ownership releases an execute failure after native rollback and preserves its receipt`, async () => {
+    const f = fixture(host, {
+      approvePlan: true,
+      twoSteps: true,
+      failSecond: true,
+      observeLifecycle: true
+    })
+    try {
+      await runApproved(f)
+      const run = assertNativeLifecycleReleased(f)
+      assert.deepEqual(run.events, ['prepare', 'execute', 'release', 'released', 'terminal'])
+      assert.equal(run.result.status, 'failed')
+      assert.equal(run.result.error.code, 'EXECUTE_FAILED')
+      assert.equal(run.releaseArgs.status, 'failed')
+      assert.equal(run.releaseArgs.resources, run.resources)
+      assert.equal(run.releaseArgs.execution, undefined)
+      assert.equal(run.resources.checked.length, 0)
+      assert.equal(run.resources.visualEntries.length, 0)
+      assert.equal(run.resources.beforeVisual.size, 0)
+      assert.equal(run.resources.applied.length, 0)
+      assert.deepEqual(f.nativeWrites, ['Approved new name', 'Original owned name'])
+      assert.equal(f.node.name, 'Original owned name')
+      assert.equal(f.second.name, 'Second original name')
+      const receipt = f.planResult()
+      assert.equal(receipt.status, 'failed')
+      assert.equal(receipt.effect, 'rolled-back', 'the native meta failure marker is not cleared')
+      assert.equal(receipt.errorCode, 'ROLLED_BACK')
+      assert.deepEqual(
+        receipt.readback.steps.map((step) => step.observation),
+        ['original', 'original']
+      )
+      assert.equal(Object.hasOwn(receipt, 'visualEvidence'), false)
+      assert.deepEqual(
+        f.requests
+          .filter((request) => request.url.endsWith('/plan/progress'))
+          .map((request) => request.body.sequence),
+        [2, 3]
+      )
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+
+  test(`${host}: native lifecycle ownership releases partial preparation even when no resource object is returned`, async () => {
+    const f = fixture(host, { approvePlan: true, journalAvailable: false, observeLifecycle: true })
+    try {
+      await runApproved(f)
+      const run = assertNativeLifecycleReleased(f)
+      assert.deepEqual(run.events, ['prepare', 'release', 'released', 'terminal'])
+      assert.equal(run.result.status, 'failed')
+      assert.equal(run.releaseArgs.status, 'failed')
+      assert.equal(run.resources, undefined)
+      assert.equal(run.releaseArgs.resources, undefined)
+      assert.equal(run.releaseArgs.execution, undefined)
+      assert.equal(run.executeArgs, undefined)
+      assert.deepEqual(f.nativeWrites, [])
+      assert.equal(f.node.name, 'Original owned name')
+      const receipt = f.planResult()
+      assert.equal(receipt.status, 'failed')
+      assert.equal(
+        receipt.effect,
+        'unknown',
+        'the native journalBlocked meta survives partial preparation cleanup'
+      )
+      assert.equal(receipt.errorCode, 'QUARANTINED')
+      assert.deepEqual(
+        receipt.readback.steps.map((step) => step.observation),
+        ['original']
+      )
+      assert.equal(f.persistedActions.size, 0)
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+}
+
 for (const host of ['figma', 'photoshop']) {
   test(`${host}: capture, explicit share and double-validated preview have zero native writes`, async () => {
     const f = fixture(host)
@@ -1049,6 +3354,15 @@ for (const host of ['figma', 'photoshop']) {
       assert.equal(result.status, 'failed')
       assert.equal(result.effect, 'rolled-back')
       assert.equal(Object.hasOwn(result, 'visualEvidence'), false)
+      // A failed plan may have fewer executing receipts than declared steps;
+      // the terminal readback must append to the actual cursor, not skip over
+      // the unexecuted step numbers.
+      assert.deepEqual(
+        f.requests
+          .filter((request) => request.url.endsWith('/plan/progress'))
+          .map((request) => request.body.sequence),
+        [2, 3]
+      )
       assert.deepEqual(
         result.readback.steps.map((step) => step.observation),
         ['original', 'original']
@@ -1600,6 +3914,66 @@ for (const host of ['figma', 'photoshop']) {
     } finally {
       f.close()
       await flush()
+    }
+  })
+  test(`${host}: validated durable image preparation still waits for a separate desktop approval`, async () => {
+    const f = fixture(host, { recoveryImages: recoveryImagesFor })
+    try {
+      await f.pair()
+      f.restore()
+      await flush()
+      await f.tick(1000)
+      assert.ok(f.requests.some((request) => request.url.endsWith('/plan/status')))
+      assert.equal(
+        f.requests.some((request) => request.url.endsWith('/plan/claim')),
+        false
+      )
+      assert.deepEqual(f.nativeWrites, [])
+    } finally {
+      f.close()
+      await flush()
+    }
+  })
+  test(`${host}: malformed prepared durable images never become a claim or native write`, async () => {
+    for (const mutate of [
+      (images) => {
+        images.manifest.manifestSha256 = '0'.repeat(64)
+      },
+      (images) => {
+        images.manifest.assets[0].sha256 = '0'.repeat(64)
+      },
+      (images) => {
+        images.assetBindings[0].assetId = images.assetBindings[0].sourceAssetId
+      },
+      (images) => {
+        images.manifest.targets[0].targetId = 'foreign-target'
+      },
+      (images) => {
+        images.localPath = 'not-a-recovery-authority'
+      }
+    ]) {
+      const f = fixture(host, {
+        approvePlan: true,
+        recoveryImages(context, planner) {
+          const images = recoveryImagesFor(context, planner)
+          mutate(images)
+          return images
+        }
+      })
+      try {
+        await f.pair()
+        f.restore()
+        await flush()
+        await f.tick(1000)
+        assert.equal(
+          f.requests.some((request) => request.url.endsWith('/plan/claim')),
+          false
+        )
+        assert.deepEqual(f.nativeWrites, [])
+      } finally {
+        f.close()
+        await flush()
+      }
     }
   })
   test(`${host}: cancellation while recovery prepare is pending discards the late preview`, async () => {

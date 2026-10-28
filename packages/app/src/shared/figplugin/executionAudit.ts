@@ -14,6 +14,20 @@ export const figPluginExecutionAuditEventSchema = z
       .string()
       .length(32)
       .regex(/^[a-f0-9]{32}$/),
+    // Explicit lineage fields keep a multi-step host run queryable without exposing
+    // prompts, node values or provider metadata. They are optional for v1 records so
+    // existing bounded history can still be read during the schema migration.
+    correlationId: z
+      .string()
+      .length(32)
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    runId: z
+      .string()
+      .length(32)
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    sequence: z.number().int().min(1).max(256).optional(),
     callId: z
       .string()
       .length(32)
@@ -138,6 +152,10 @@ export const figPluginExecutionAuditEventSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    const lineage = [value.correlationId, value.runId, value.sequence]
+    const lineageCount = lineage.filter((field) => field !== undefined).length
+    if (lineageCount !== 0 && lineageCount !== lineage.length)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Incomplete audit lineage' })
     if (
       value.pixelAudit &&
       (value.state !== 'completed' ||
@@ -323,6 +341,18 @@ export const figPluginExecutionHistoryRequestSchema = z
   .object({
     pluginId: z.string().min(1).max(128).optional(),
     projectId: z.string().min(1).max(160).optional(),
+    // Lineage filters let the desktop inspect one run or one attempt without
+    // exposing raw prompt/context values or turning history into authority.
+    correlationId: z
+      .string()
+      .length(32)
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    runId: z
+      .string()
+      .length(32)
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
     limit: z.number().int().min(1).max(FIGPLUGIN_AUDIT_MAX_RECORDS).optional()
   })
   .strict()

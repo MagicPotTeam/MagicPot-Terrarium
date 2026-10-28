@@ -59,6 +59,40 @@ describe('encrypted checkpoint persistence', () => {
     expect(() => a.consume(a.find(binding, context)!, 4)).toThrow()
     expect(b.find(binding, context)?.value.correctionRoundsUsed).toBe(3)
   })
+  it('persists a bounded crash fence, settles it idempotently, and releases it after expiry', () => {
+    const dir = root(),
+      codec = ownedCodec()
+    let now = NOW
+    const a = new FigPluginCheckpointStore(dir, codec, () => now),
+      r = record(),
+      lease = {
+        executionId: '1'.repeat(32),
+        round: 1,
+        claimedAt: NOW,
+        expiresAt: NOW + 120_000
+      }
+    a.save(r)
+    a.consume(r, 1, undefined, lease)
+    expect(a.find(binding, context)?.activeRecovery).toEqual(lease)
+    expect(() => a.consume(a.find(binding, context)!, 2)).toThrow(
+      'FIGPLUGIN_CHECKPOINT_UNAVAILABLE'
+    )
+    a.settleRecovery!('0'.repeat(32), lease.executionId)
+    expect(a.find(binding, context)?.activeRecovery).toEqual(lease)
+    a.settleRecovery!(r.value.baselineId, lease.executionId)
+    a.settleRecovery!(r.value.baselineId, lease.executionId)
+    expect(a.find(binding, context)?.activeRecovery).toBeUndefined()
+
+    a.consume(a.find(binding, context)!, 2, undefined, {
+      ...lease,
+      executionId: '2'.repeat(32),
+      round: 2,
+      claimedAt: NOW + 1,
+      expiresAt: NOW + 120_001
+    })
+    now = NOW + 120_002
+    expect(a.find(binding, context)?.activeRecovery).toBeUndefined()
+  })
   it('expiry removes data on access, does not extend TTL, and revoked entries stay removed after reopen', () => {
     const dir = root(),
       codec = ownedCodec()
@@ -76,6 +110,46 @@ describe('encrypted checkpoint persistence', () => {
     expect(
       new FigPluginCheckpointStore(dir, codec, () => now).find(binding, context)
     ).toBeUndefined()
+  })
+  it('reports and commits expired-record cleanup without exposing checkpoint contents', () => {
+    const dir = root(),
+      codec = ownedCodec()
+    let now = NOW
+    const a = new FigPluginCheckpointStore(dir, codec, () => now)
+    a.save(record())
+    const retained = record(8)
+    retained.binding.projectId = retained.value.projectId = 'retained-project'
+    a.save(retained)
+
+    now = NOW + 86400000
+    const result = a.cleanupExpired()
+    expect(result).toEqual({
+      expiredRecordCount: 2,
+      retainedRecordCount: 0,
+      databasePresent: true
+    })
+    for (const privateText of ['PRIVATE_OWNED', 'owned-document', '恢复点'])
+      expect(JSON.stringify(result)).not.toContain(privateText)
+    expect(a.listSummaries()).toEqual([])
+  })
+  it('retains live records and reports zero cleanup when no database exists', () => {
+    const dir = root(),
+      codec = ownedCodec(),
+      empty = new FigPluginCheckpointStore(dir, codec, () => NOW)
+    expect(empty.cleanupExpired()).toEqual({
+      expiredRecordCount: 0,
+      retainedRecordCount: 0,
+      databasePresent: false
+    })
+    expect(fs.readdirSync(dir)).toEqual([])
+
+    empty.save(record())
+    expect(empty.cleanupExpired()).toEqual({
+      expiredRecordCount: 0,
+      retainedRecordCount: 1,
+      databasePresent: true
+    })
+    expect(empty.find(binding, context)).toBeDefined()
   })
   it.each(['projectId', 'profileId', 'artifactSha256', 'generation'] as const)(
     'cannot recover across changed %s',
@@ -141,6 +215,7 @@ describe('encrypted checkpoint persistence', () => {
     db.close()
     const bad = fs.readFileSync(a.file)
     expect(() => a.find(binding, context)).toThrow()
+    expect(() => a.cleanupExpired()).toThrow('FIGPLUGIN_CHECKPOINT_UNAVAILABLE')
     expect(fs.readFileSync(a.file).equals(bad)).toBe(true)
     expect(() =>
       new FigPluginCheckpointStore(dir, ownedCodec(), () => NOW).find(binding, context)

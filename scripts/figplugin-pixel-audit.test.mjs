@@ -1,25 +1,30 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { deflateSync } from 'node:zlib'
+import { deflateSync, inflateSync } from 'node:zlib'
 import { test } from 'node:test'
 import vm from 'node:vm'
+import Module from 'node:module'
 import { buildHostPixelAudit } from './build-figplugin-pixel-audit.mjs'
 const source = readFileSync(
   new URL('../packages/figplugin-hosts/shared/pixel-audit.js', import.meta.url),
   'utf8'
 )
-function load(options = {}) {
+function load(options = {}, withTextEncoder = true) {
   const context = vm.createContext({
     Uint8Array,
     ArrayBuffer,
     DataView,
-    TextEncoder,
+    ...(withTextEncoder ? { TextEncoder } : {}),
     Date,
     console
   })
   vm.runInContext(source, context)
-  return { api: context.MagicPotPixelAuditBundle.createPixelAuditCache(options), context }
+  return {
+    api: context.MagicPotPixelAuditBundle.createPixelAuditCache(options),
+    encode: context.MagicPotContextPngV1.encode,
+    context
+  }
 }
 const plain = (value) => JSON.parse(JSON.stringify(value))
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex')
@@ -86,6 +91,176 @@ function png(
 function compare(api, a, b) {
   return plain(api.compare([{ targetId: 'owned', baseline: a, current: b }]))[0]
 }
+
+function decodeContextPng(bytes) {
+  const input = Buffer.from(bytes)
+  assert.deepEqual([...input.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10])
+  const chunks = []
+  let offset = 8
+  while (offset < input.length) {
+    const length = input.readUInt32BE(offset)
+    const end = offset + length + 12
+    assert.ok(end <= input.length)
+    assert.equal(input.readUInt32BE(end - 4), crc(input.subarray(offset + 4, end - 4)))
+    chunks.push({
+      type: input.toString('ascii', offset + 4, offset + 8),
+      data: input.subarray(offset + 8, end - 4)
+    })
+    offset = end
+  }
+  assert.equal(offset, input.length)
+  assert.deepEqual(
+    chunks.map(({ type }) => type),
+    ['IHDR', 'sRGB', 'IDAT', 'IEND']
+  )
+  assert.equal(chunks[0].data.length, 13)
+  assert.deepEqual([...chunks[0].data.subarray(8)], [8, 6, 0, 0, 0])
+  assert.deepEqual([...chunks[1].data], [0])
+  assert.equal(chunks[3].data.length, 0)
+  const width = chunks[0].data.readUInt32BE(0)
+  const height = chunks[0].data.readUInt32BE(4)
+  const stride = width * 4
+  const raw = inflateSync(chunks[2].data)
+  assert.equal(raw.length, (stride + 1) * height)
+  const rgba = new Uint8Array(stride * height)
+  const paeth = (a, b, c) => {
+    const p = a + b - c
+    const distances = [Math.abs(p - a), Math.abs(p - b), Math.abs(p - c)]
+    return [a, b, c][distances.indexOf(Math.min(...distances))]
+  }
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)]
+    assert.ok(filter <= 4)
+    for (let x = 0; x < stride; x++) {
+      const at = y * stride + x
+      const a = x >= 4 ? rgba[at - 4] : 0
+      const b = y ? rgba[at - stride] : 0
+      const c = y && x >= 4 ? rgba[at - stride - 4] : 0
+      rgba[at] =
+        (raw[y * (stride + 1) + x + 1] + [0, a, b, (a + b) >>> 1, paeth(a, b, c)][filter]) & 255
+    }
+  }
+  return { width, height, rgba }
+}
+
+test('CommonJS packaging exposes only a frozen public context encoder without leaking the module bundle', () => {
+  const context = vm.createContext({ Uint8Array, ArrayBuffer, DataView })
+  const module = { exports: {} }
+  const filename = 'pixel-audit-commonjs.js'
+  const execute = vm.runInContext(Module.wrap(source), context, { filename })
+  execute(
+    module.exports,
+    () => assert.fail('pixel helper must not require native or browser APIs'),
+    module,
+    filename,
+    '.'
+  )
+  assert.equal(context.MagicPotPixelAuditBundle, undefined)
+  assert.deepEqual(Object.keys(module.exports), [])
+  assert.deepEqual(Object.keys(context.MagicPotContextPngV1), ['encode'])
+  assert.equal(Object.isFrozen(context.MagicPotContextPngV1), true)
+  assert.deepEqual(Object.getOwnPropertyDescriptor(context, 'MagicPotContextPngV1'), {
+    value: context.MagicPotContextPngV1,
+    writable: false,
+    enumerable: false,
+    configurable: false
+  })
+  assert.equal(Reflect.set(context, 'MagicPotContextPngV1', {}), false)
+  assert.equal(Reflect.deleteProperty(context, 'MagicPotContextPngV1'), false)
+  assert.equal(
+    Reflect.set(context.MagicPotContextPngV1, 'encode', () => undefined),
+    false
+  )
+  assert.equal('encode' in context.MagicPotPixelAuditV1, false)
+  assert.equal('encodeContextPng' in context.MagicPotPixelAuditV1, false)
+  const rgba = new Uint8Array([11, 22, 33, 0, 44, 55, 66, 127])
+  const encoded = context.MagicPotContextPngV1.encode(2, 1, rgba, 4)
+  assert.deepEqual(decodeContextPng(encoded), { width: 2, height: 1, rgba })
+  const ref = point(encoded, 2, 1)
+  assert.equal(compare(context.MagicPotPixelAuditV1, ref, ref).status, 'unavailable')
+})
+
+test('context PNG encoder preserves exact RGB and straight alpha without browser APIs or cache entries', () => {
+  const { api, encode, context } = load({}, false)
+  for (const name of ['Buffer', 'TextEncoder', 'TextDecoder', 'OffscreenCanvas', 'document'])
+    assert.equal(typeof context[name], 'undefined')
+  for (const components of [3, 4]) {
+    const width = 17
+    const height = 13
+    const owned = Uint8Array.from(
+      { length: width * height * components + 8 },
+      (_, i) => (i * 71) & 255
+    )
+    const pixels = owned.subarray(4, -4)
+    const before = new Uint8Array(pixels)
+    const expected = Uint8Array.from({ length: width * height * 4 }, (_, i) =>
+      i % 4 === 3 && components === 3 ? 255 : pixels[Math.floor(i / 4) * components + (i % 4)]
+    )
+    if (components === 4) {
+      for (let i = 0; i < width * height; i++)
+        expected[i * 4 + 3] = pixels[i * 4 + 3] = [0, 1, 127, 254, 255][i % 5]
+      before.set(pixels)
+    }
+    const pngBytes = encode(width, height, pixels, components)
+    const decoded = decodeContextPng(pngBytes)
+    assert.deepEqual(decoded, { width, height, rgba: expected })
+    assert.deepEqual(pixels, before, 'encoding must not mutate the native copy')
+    assert.deepEqual(
+      encode(width, height, pixels, components),
+      pngBytes,
+      'encoding is deterministic'
+    )
+    const ref = point(pngBytes, width, height)
+    assert.equal(compare(api, ref, ref).status, 'unavailable', 'encoder does not remember pixels')
+    api.rememberPng(ref, pngBytes)
+    const native = point(pixels, width, height)
+    api.rememberPixels(native, pixels, components)
+    assert.equal(compare(api, ref, native).changedPixels, 0)
+  }
+})
+
+test('context PNG encoder has a fixed 256-edge / 24 KiB budget with real compression', () => {
+  const { encode } = load({}, false)
+  const gradient = Uint8Array.from({ length: 256 * 256 * 4 }, (_, i) =>
+    i % 4 === 3 ? 127 : (Math.floor(i / 4) + Math.floor(i / 1024)) & 255
+  )
+  const compressed = encode(256, 256, gradient, 4)
+  assert.ok(compressed.length <= 24576)
+  assert.deepEqual(decodeContextPng(compressed).rgba, gradient)
+  for (const edge of [256, 128, 64, 32]) {
+    let state = 12345
+    const noisy = Uint8Array.from({ length: edge * edge * 4 }, () => {
+      state ^= state << 13
+      state ^= state >>> 17
+      state ^= state << 5
+      return state & 255
+    })
+    const result = encode(edge, edge, noisy, 4)
+    if (edge > 64) assert.equal(result, undefined)
+    else {
+      assert.ok(result.length <= 24576)
+      assert.deepEqual(decodeContextPng(result).rgba, noisy)
+    }
+  }
+})
+
+test('context PNG encoder rejects invalid dimensions, layouts and byte arrays before compression', () => {
+  const { encode } = load()
+  for (const [width, height, data, components] of [
+    [0, 1, new Uint8Array(0), 4],
+    [257, 1, new Uint8Array(257 * 4), 4],
+    [1, 257, new Uint8Array(257 * 4), 4],
+    [1.5, 1, new Uint8Array(4), 4],
+    [NaN, 1, new Uint8Array(4), 4],
+    [1, Infinity, new Uint8Array(4), 4],
+    [1, 1, new Uint8Array(3), 4],
+    [1, 1, new Uint8Array(4), 3],
+    [1, 1, new Uint8Array(2), 2],
+    [1, 1, new Uint16Array(2), 4],
+    [1, 1, [1, 2, 3, 4], 4]
+  ])
+    assert.throws(() => encode(width, height, data, components), /PIXELS_UNAVAILABLE/)
+})
 
 test('generated helper matches the pinned source and contains no network, storage or evaluation', async () => {
   assert.equal((await buildHostPixelAudit()).text, source)

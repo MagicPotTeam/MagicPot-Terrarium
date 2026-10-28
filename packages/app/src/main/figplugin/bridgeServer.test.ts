@@ -11,6 +11,7 @@ import {
   type FigPluginPairResponse
 } from '@shared/figplugin/bridge'
 import { startFigPluginBridgeServer } from './bridgeServer'
+import type { FigPluginBridgeRateLimitOptions } from './bridgeRateLimit'
 
 type Runtime = Parameters<typeof startFigPluginBridgeServer>[0]['runtime']
 type Bridge = Awaited<ReturnType<typeof startFigPluginBridgeServer>>
@@ -54,7 +55,28 @@ const methods = ['redeem', 'prepare', 'status', 'cancel', 'closeSession'] as con
 const makeRuntime = () => ({
   redeem: vi.fn<Runtime['redeem']>().mockResolvedValue(session),
   prepare: vi.fn<Runtime['prepare']>().mockResolvedValue(prepared),
+  prepareImageGeneration: vi.fn<Runtime['prepareImageGeneration']>(),
+  imageGenerationStatus: vi.fn<Runtime['imageGenerationStatus']>(),
+  cancelImageGeneration: vi.fn<Runtime['cancelImageGeneration']>().mockResolvedValue(undefined),
   status: vi.fn<Runtime['status']>().mockResolvedValue({ ...call, status: 'awaiting-approval' }),
+  assetList: vi.fn<Runtime['assetList']>(),
+  assetChunk: vi.fn<Runtime['assetChunk']>(),
+  planAssetChunk: vi.fn<Runtime['planAssetChunk']>(),
+  readiness: vi.fn<Runtime['readiness']>().mockResolvedValue({
+    protocol: 1,
+    kind: 'figplugin-bridge-readiness',
+    checkedAt: 1_900_000_000_000,
+    bridge: { state: 'ready', code: 'bridge-reachable' },
+    configuration: { state: 'ready', code: 'configuration-current' },
+    provider: { state: 'unknown', code: 'provider-not-probed' },
+    resources: { state: 'unknown', code: 'resources-not-probed' },
+    host: {
+      state: 'ready',
+      code: 'host-paired',
+      host: 'figma',
+      capabilities: { state: 'unknown', code: 'capabilities-not-probed' }
+    }
+  }),
   cancel: vi.fn<Runtime['cancel']>().mockResolvedValue(undefined),
   closeSession: vi.fn<Runtime['closeSession']>(),
   planStatus: vi.fn<Runtime['planStatus']>(),
@@ -90,14 +112,15 @@ const reserve = async () => {
     close: () => new Promise<void>((resolve) => holder.close(() => resolve()))
   }
 }
-const fixture = async (requestTimeoutMs?: number) => {
+const fixture = async (requestTimeoutMs?: number, rateLimit?: FigPluginBridgeRateLimitOptions) => {
   const reservation = await reserve()
   await reservation.close()
   const runtime = makeRuntime()
   const bridge = await startFigPluginBridgeServer({
     origin: reservation.origin,
     runtime,
-    requestTimeoutMs
+    requestTimeoutMs,
+    rateLimit
   })
   bridges.push(bridge)
   return { ...bridge, runtime }
@@ -510,6 +533,17 @@ describe('opaque origin, raw Host, and credential envelopes', () => {
 })
 
 describe('bounded JSON transport and fixed errors', () => {
+  it('returns BUSY when one session exceeds its bounded request rate', async () => {
+    const { origin, runtime } = await fixture(undefined, {
+      windowMs: 10_000,
+      maxRequests: 2
+    })
+    expect((await post(origin, '/figplugin/v1/status', call)).status).toBe(200)
+    expect((await post(origin, '/figplugin/v1/status', call)).status).toBe(200)
+    expectError(await post(origin, '/figplugin/v1/status', call), 'BUSY', 429)
+    expect(runtime.status).toHaveBeenCalledTimes(2)
+  })
+
   it.each([
     { 'Content-Type': 'text/plain' },
     { 'Content-Type': 'application/json; charset=utf-8' },
@@ -1051,6 +1085,79 @@ describe('anonymous bounded bridge connectivity probe', () => {
       (await post(f.origin, '/figplugin/v1/probe', body, { Cookie: 'session=PRIVATE' })).status
     ).toBe(400)
     for (const method of Object.values(f.runtime)) expect(method).not.toHaveBeenCalled()
+  })
+})
+
+describe('authenticated layered readiness diagnostics', () => {
+  it('returns bounded readiness without changing the anonymous probe contract', async () => {
+    const f = await fixture()
+    const response = await post(f.origin, '/figplugin/v1/readiness', { protocol: 1 }, credentials)
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.text)).toEqual({
+      protocol: 1,
+      kind: 'figplugin-bridge-readiness',
+      checkedAt: 1_900_000_000_000,
+      bridge: { state: 'ready', code: 'bridge-reachable' },
+      configuration: { state: 'ready', code: 'configuration-current' },
+      provider: { state: 'unknown', code: 'provider-not-probed' },
+      resources: { state: 'unknown', code: 'resources-not-probed' },
+      host: {
+        state: 'ready',
+        code: 'host-paired',
+        host: 'figma',
+        capabilities: { state: 'unknown', code: 'capabilities-not-probed' }
+      }
+    })
+    expect(f.runtime.readiness).toHaveBeenCalledWith(session.sessionId, session.sessionToken, {
+      protocol: 1
+    })
+    expect(f.runtime.redeem).not.toHaveBeenCalled()
+  })
+
+  it('requires the paired bearer session and rejects extra readiness input', async () => {
+    const f = await fixture()
+    expect((await post(f.origin, '/figplugin/v1/readiness', { protocol: 1 }, {})).status).toBe(401)
+    expect(
+      (await post(f.origin, '/figplugin/v1/readiness', { protocol: 1, provider: true })).status
+    ).toBe(400)
+    expect(f.runtime.readiness).not.toHaveBeenCalled()
+  })
+
+  it('forwards a bounded host observation without accepting unknown fields', async () => {
+    const f = await fixture()
+    const hostProbe = {
+      host: 'figma',
+      adapterVersion: 'figma-native-1',
+      supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content', 'layout.flow'],
+      rollback: 'verified-in-place',
+      visualAudit: 'hash-only',
+      document: { state: 'ready', code: 'document-open' },
+      resources: {
+        fonts: { state: 'ready', code: 'fonts-api-available' },
+        visual: { state: 'ready', code: 'visual-api-available' }
+      }
+    } as const
+    const validResponse = await post(
+      f.origin,
+      '/figplugin/v1/readiness',
+      { protocol: 1, hostProbe },
+      credentials
+    )
+    expect(validResponse.status).toBe(200)
+    expect(f.runtime.readiness).toHaveBeenCalledWith(session.sessionId, session.sessionToken, {
+      protocol: 1,
+      hostProbe
+    })
+    expect(
+      (
+        await post(
+          f.origin,
+          '/figplugin/v1/readiness',
+          { protocol: 1, hostProbe: { ...hostProbe, untrusted: true } },
+          credentials
+        )
+      ).status
+    ).toBe(400)
   })
 })
 

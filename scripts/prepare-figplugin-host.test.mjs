@@ -162,6 +162,84 @@ function cliRejected(args, cwd) {
   assert.equal(result.stderr, CLI_ERROR)
 }
 
+test('prepared Photoshop CommonJS artifact exposes only the public context PNG encoder', async (t) => {
+  const root = temporary(t)
+  const input = options(root, 'photoshop', { bridgeOrigin: ORIGIN })
+  prepareFigPluginHost(input)
+  const code = fs.readFileSync(path.join(input.outputDir, 'main.js'), 'utf8')
+  let scheduledInitialization = false
+  const sandbox = {
+    Uint8Array,
+    ArrayBuffer,
+    DataView,
+    document: {
+      readyState: 'loading',
+      addEventListener(name, callback) {
+        assert.equal(name, 'DOMContentLoaded')
+        assert.equal(typeof callback, 'function')
+        scheduledInitialization = true
+      }
+    },
+    require(name) {
+      assert.equal(name, 'photoshop')
+      return { app: {}, core: {} }
+    },
+    fetch() {
+      assert.fail('Preparing and loading the fixture must not contact a service')
+    }
+  }
+  new Script(
+    `(function (exports, require, module) {\n${code}\n})({}, require, {exports:{}});`
+  ).runInNewContext(sandbox)
+  assert.equal(scheduledInitialization, true)
+  assert.equal(sandbox.MagicPotPixelAuditBundle, undefined)
+  assert.equal(typeof sandbox.MagicPotContextPngV1.encode, 'function')
+  assert.equal(Object.isFrozen(sandbox.MagicPotContextPngV1), true)
+  const descriptor = Object.getOwnPropertyDescriptor(sandbox, 'MagicPotContextPngV1')
+  assert.equal(descriptor.writable, false)
+  assert.equal(descriptor.configurable, false)
+  let disposed = 0
+  const bounds = { left: 0, top: 0, right: 2, bottom: 1 }
+  const image = await sandbox.MagicPotVisualEvidenceV1.capturePhotoshopContextImage(
+    {
+      async getPixels(request) {
+        assert.equal(request.documentID, 7)
+        assert.equal(request.layerID, 42)
+        assert.equal(request.historyStateID, 11)
+        assert.deepEqual(JSON.parse(JSON.stringify(request.sourceBounds)), bounds)
+        return {
+          sourceBounds: bounds,
+          level: 0,
+          imageData: {
+            width: 2,
+            height: 1,
+            components: 4,
+            componentSize: 8,
+            pixelFormat: 'RGBA',
+            colorSpace: 'RGB',
+            colorProfile: 'sRGB IEC61966-2.1',
+            getData: async () => new Uint8Array([91, 82, 73, 0, 64, 55, 46, 127]),
+            dispose() {
+              disposed += 1
+            }
+          }
+        }
+      }
+    },
+    7,
+    42,
+    'a'.repeat(32),
+    { historyStateId: 11, bounds }
+  )
+  const bytes = Buffer.from(image.bytesBase64, 'base64')
+  assert.equal(image.sha256, hash(bytes))
+  assert.equal(image.sizeBytes, bytes.length)
+  assert.equal(image.targetId, '42')
+  assert.equal(image.width, 2)
+  assert.equal(image.height, 1)
+  assert.equal(disposed, 1)
+})
+
 async function isolated(t, host = 'figma', connected = false) {
   const root = temporary(t)
   const spec = HOSTS[host]

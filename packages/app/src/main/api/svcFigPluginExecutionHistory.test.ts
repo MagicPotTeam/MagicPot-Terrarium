@@ -127,6 +127,82 @@ describe('trusted, read-only execution history', () => {
     ).toEqual({ previews: [], statuses: [], baselines: [], correctionAuthorizations: [] })
   })
 
+  it('filters one attempt or run by the bounded audit lineage fields', async () => {
+    const f = fixture()
+    const correlationId = 'd'.repeat(32)
+    const runId = 'e'.repeat(32)
+    f.audit.list.mockResolvedValue([
+      { ...record(1), at: 1001, correlationId, runId, sequence: 1 },
+      { ...record(2), at: 1001, correlationId: 'f'.repeat(32), runId, sequence: 2 },
+      { ...record(3), correlationId: 'a'.repeat(32), runId: 'a'.repeat(32), sequence: 1 }
+    ])
+    await expect(
+      f.service.executionHistory({ correlationId }, invocation())
+    ).resolves.toMatchObject({ records: [expect.objectContaining({ requestId: 'request_1' })] })
+    await expect(f.service.executionHistory({ runId }, invocation())).resolves.toMatchObject({
+      records: [
+        expect.objectContaining({ requestId: 'request_2' }),
+        expect.objectContaining({ requestId: 'request_1' })
+      ]
+    })
+  })
+
+  it('keeps equal-timestamp history order stable across append-order changes', async () => {
+    const lineage = {
+      correlationId: 'a'.repeat(32),
+      runId: 'b'.repeat(32)
+    }
+    const events = [
+      { ...record(1), at: 1000, ...lineage, sequence: 2 },
+      {
+        ...record(2),
+        at: 1000,
+        correlationId: 'c'.repeat(32),
+        runId: 'd'.repeat(32),
+        sequence: 2
+      },
+      { ...record(3), at: 1000, ...lineage, sequence: 1 }
+    ]
+    const f = fixture()
+    f.audit.list.mockResolvedValue([...events].reverse())
+    const first = await f.service.executionHistory({}, invocation())
+    f.audit.list.mockResolvedValue(events)
+    const second = await f.service.executionHistory({}, invocation())
+    expect(first.records.map((entry) => entry.requestId)).toEqual([
+      'request_1',
+      'request_2',
+      'request_3'
+    ])
+    expect(second.records.map((entry) => entry.requestId)).toEqual(
+      first.records.map((entry) => entry.requestId)
+    )
+  })
+
+  it('uses the canonical record as a final tie-breaker for duplicate lineage records', async () => {
+    const shared = {
+      ...record(1),
+      at: 1000,
+      correlationId: 'a'.repeat(32),
+      runId: 'b'.repeat(32),
+      sequence: 1
+    }
+    const completed = shared
+    const failed = {
+      ...shared,
+      state: 'failed' as const,
+      completed: 0,
+      effect: 'none' as const,
+      errorCode: 'EXECUTION_FAILED' as const
+    }
+    const f = fixture()
+    f.audit.list.mockResolvedValue([failed, completed])
+    const first = await f.service.executionHistory({}, invocation())
+    f.audit.list.mockResolvedValue([completed, failed])
+    const second = await f.service.executionHistory({}, invocation())
+    expect(first.records.map((entry) => entry.state)).toEqual(['failed', 'completed'])
+    expect(second.records.map((entry) => entry.state)).toEqual(['failed', 'completed'])
+  })
+
   it.each([
     undefined,
     { senderId: 999 },
@@ -142,17 +218,21 @@ describe('trusted, read-only execution history', () => {
     expect(f.bridge).not.toHaveBeenCalled()
   })
 
-  it.each([{ path: 'C:/PRIVATE' }, { limit: 257 }, { limit: 0 }, { sessionToken: 'PRIVATE' }])(
-    'rejects renderer-controlled paths, authority and excess budget: %j',
-    async (input) => {
-      const f = fixture()
-      await expect(f.service.executionHistory(input, invocation())).rejects.toBeDefined()
-      expect(f.audit.list).not.toHaveBeenCalled()
-      const validator = figPluginCenterSvcDef.executionHistory.request
-      if (typeof validator !== 'function') throw new Error('Expected IPC request validator')
-      expect(() => validator(input)).toThrow()
-    }
-  )
+  it.each([
+    { path: 'C:/PRIVATE' },
+    { limit: 257 },
+    { limit: 0 },
+    { sessionToken: 'PRIVATE' },
+    { runId: 'not-a-hex-id' },
+    { correlationId: 'not-a-hex-id' }
+  ])('rejects renderer-controlled paths, authority and excess budget: %j', async (input) => {
+    const f = fixture()
+    await expect(f.service.executionHistory(input, invocation())).rejects.toBeDefined()
+    expect(f.audit.list).not.toHaveBeenCalled()
+    const validator = figPluginCenterSvcDef.executionHistory.request
+    if (typeof validator !== 'function') throw new Error('Expected IPC request validator')
+    expect(() => validator(input)).toThrow()
+  })
 
   it('does not return a delayed history after a same-URL document reload', async () => {
     const f = fixture()

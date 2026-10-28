@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useId, useRef, useState } from 'react'
 import PixelAuditSummary from './PixelAuditSummary'
 import SavedTaskCheckpoints from './SavedTaskCheckpoints'
 import {
@@ -49,9 +49,26 @@ import {
   type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import { getProjectById, listProjects, PROJECTS_CHANGED_EVENT } from '../MainPage/projectStore'
+import {
+  FIGPLUGIN_ASSET_MAX_PER_SESSION,
+  figPluginAssetListSchema,
+  figPluginSessionAssetSchema,
+  type FigPluginDesktopAssetTarget,
+  type FigPluginSessionAsset
+} from '@shared/figplugin/hostAssets'
+import { figPluginDesktopManagedAssetRequestSchema } from '@shared/figplugin/managedSessionAsset'
+import {
+  figPluginNativeImageGenerationDesktopStateSchema,
+  type FigPluginNativeImageGenerationDesktopProposal
+} from '@shared/figplugin/nativeImageGeneration'
+import type { ManagedOutputSelection } from './pluginBridgeManagedAssets'
+
+const PluginBridgeManagedAssetPicker = lazy(() => import('./PluginBridgeManagedAssetPicker'))
+const PluginBridgeImageGeneration = lazy(() => import('./PluginBridgeImageGeneration'))
 
 type Live = () => boolean
 type ProjectChoice = { id: string; name: string }
+type BridgeSession = FigPluginBridgeDesktopState['sessions'][number]
 type BridgeErrorCode = keyof typeof FIGPLUGIN_BRIDGE_ERRORS | 'UNKNOWN'
 type BridgeErrorKey = `figplugin.bridge.errors.${BridgeErrorCode}`
 type BridgeNoticeKey =
@@ -68,8 +85,36 @@ type BridgeNoticeKey =
   | 'figplugin.bridge.visualCorrectionAuthorized'
   | 'figplugin.bridge.visualCorrectionDeclined'
   | 'figplugin.bridge.visualCorrectionCancelled'
+  | 'figplugin.bridge.assetAdded'
+  | 'figplugin.bridge.assetDeclined'
+  | 'figplugin.bridge.assetRevoked'
 
 const emptyState = (): FigPluginBridgeDesktopState => ({ sessions: [], previews: [] })
+const assetTarget = (session: BridgeSession): FigPluginDesktopAssetTarget => ({
+  sessionId: session.sessionId,
+  pluginId: session.pluginId,
+  projectId: session.projectId
+})
+const matchesAssetSession = (
+  asset: Pick<FigPluginSessionAsset, 'sessionId' | 'pluginId' | 'projectId' | 'host'>,
+  session: BridgeSession
+): boolean =>
+  asset.sessionId === session.sessionId &&
+  asset.pluginId === session.pluginId &&
+  asset.projectId === session.projectId &&
+  asset.host === session.host
+const revokeAssetQuietly = (asset: FigPluginSessionAsset): Promise<void> =>
+  Promise.resolve()
+    .then(() =>
+      api().svcFigPluginCenter.revokeSessionAsset({
+        sessionId: asset.sessionId,
+        pluginId: asset.pluginId,
+        projectId: asset.projectId,
+        assetId: asset.assetId,
+        sha256: asset.sha256
+      })
+    )
+    .catch(() => {})
 const emptyExecutionState = (): FigPluginExecutionDesktopState => ({
   previews: [],
   statuses: [],
@@ -89,6 +134,8 @@ const eligible = (item: FigPluginManagedSummary) =>
 const reviewKey = (call: FigPluginBridgePreview): string => canonicalFigPluginJson(call)
 const executionReviewKey = (preview: FigPluginExecutionPreview): string =>
   canonicalFigPluginJson(preview)
+const isTerminalExecution = (state: FigPluginExecutionStatus['state']): boolean =>
+  ['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(state)
 const correctionReviewKey = (status: FigPluginExecutionStatus): string =>
   status.visualEvidenceSha256 && status.visualBaselineComparison
     ? canonicalFigPluginJson({
@@ -170,6 +217,16 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   const [models, setModels] = useState<Record<string, string>>({})
   const [ticket, setTicket] = useState<FigPluginDesktopPairTicket | null>(null)
   const [state, setState] = useState(emptyState)
+  const [sessionAssets, setSessionAssets] = useState<Record<string, FigPluginSessionAsset[]>>({})
+  const [managedPickerSessionId, setManagedPickerSessionId] = useState<string | null>(null)
+  const [generationSessionId, setGenerationSessionId] = useState<string | null>(null)
+  const [generationBusy, setGenerationBusy] = useState(false)
+  const [generationProposals, setGenerationProposals] = useState<
+    FigPluginNativeImageGenerationDesktopProposal[]
+  >([])
+  const [generationProposal, setGenerationProposal] =
+    useState<FigPluginNativeImageGenerationDesktopProposal | null>(null)
+  const proposalCancellations = useRef(new Set<string>())
   const [executions, setExecutions] = useState(emptyExecutionState)
   const [reviewed, setReviewed] = useState<Record<string, string>>({})
   const [reviewedExecutions, setReviewedExecutions] = useState<Record<string, string>>({})
@@ -178,7 +235,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   const [monitorUntil, setMonitorUntil] = useState(0)
   const [busy, setBusy] = useState(false)
   const [revoking, setRevoking] = useState(false)
-  const locked = busy || revoking
+  const locked = busy || revoking || generationBusy
   const [error, setError] = useState<BridgeErrorKey | ''>('')
   const [notice, setNotice] = useState<BridgeNoticeKey | ''>('')
   const mounted = useRef(false)
@@ -205,7 +262,8 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       item.bridgeOrigin,
       item.artifactSha256,
       item.signerFingerprint,
-      item.settings.analysisProfileId
+      item.settings.analysisProfileId,
+      item.settings.imageGenerationProfileId
     ]),
     projects.map((item) => item.id)
   ])
@@ -215,6 +273,13 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   const clearView = useCallback(() => {
     setTicket(null)
     setState(emptyState())
+    setSessionAssets({})
+    setManagedPickerSessionId(null)
+    setGenerationSessionId(null)
+    setGenerationBusy(false)
+    setGenerationProposals([])
+    setGenerationProposal(null)
+    proposalCancellations.current.clear()
     setExecutions(emptyExecutionState())
     setReviewed({})
     setReviewedExecutions({})
@@ -275,9 +340,10 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   )
 
   const refresh = useCallback(async (live: Live) => {
-    const [value, executionValue] = await Promise.all([
+    const [value, executionValue, generationValue] = await Promise.all([
       api().svcFigPluginCenter.bridgeState({}),
-      api().svcFigPluginCenter.planState({})
+      api().svcFigPluginCenter.planState({}),
+      api().svcFigPluginCenter.nativeImageGenerationProposals({})
     ])
     if (!live()) return
     const next = parseFigPluginBridgeValue(figPluginBridgeDesktopStateSchema, value)
@@ -294,6 +360,32 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
     const now = Date.now()
     next.previews = next.previews.filter((call) => call.expiresAt > now)
     next.sessions = next.sessions.filter((session) => session.expiresAt > now)
+    const native = parseFigPluginBridgeValue(
+      figPluginNativeImageGenerationDesktopStateSchema,
+      generationValue
+    )
+    if (
+      new Set(native.proposals.map((proposal) => proposal.proposalId)).size !==
+        native.proposals.length ||
+      new Set(native.proposals.map((proposal) => proposal.generationRequestId)).size !==
+        native.proposals.length ||
+      native.proposals.some(
+        (proposal, index) =>
+          proposal.prompt !== generationValue.proposals[index].prompt ||
+          proposal.createdAt > now ||
+          !next.sessions.some(
+            (session) =>
+              matchesAssetSession(proposal, session) && proposal.expiresAt <= session.expiresAt
+          )
+      )
+    )
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    setGenerationProposals(
+      native.proposals.filter(
+        (proposal) =>
+          proposal.expiresAt > now && !proposalCancellations.current.has(proposal.proposalId)
+      )
+    )
     for (const entry of [...next.sessions, ...next.previews]) paired.current.add(entry.pluginId)
     setPairedIds([...paired.current])
     setTicket((previous) =>
@@ -302,6 +394,18 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         : null
     )
     setState(next)
+    setSessionAssets((previous) =>
+      Object.fromEntries(
+        next.sessions
+          .filter((session) => Object.hasOwn(previous, session.sessionId))
+          .map((session) => [
+            session.sessionId,
+            previous[session.sessionId].filter(
+              (asset) => asset.expiresAt > now && matchesAssetSession(asset, session)
+            )
+          ])
+      )
+    )
     const activeExecutionPreviews = nextExecutions.previews.filter(
       (preview) => preview.expiresAt > now
     )
@@ -423,6 +527,8 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       ...(ticket ? [ticket.expiresAt] : []),
       ...state.previews.map((call) => call.expiresAt),
       ...state.sessions.map((session) => session.expiresAt),
+      ...generationProposals.map((proposal) => proposal.expiresAt),
+      ...Object.values(sessionAssets).flatMap((assets) => assets.map((asset) => asset.expiresAt)),
       ...executions.previews.map((previewEx) => previewEx.expiresAt),
       ...executions.baselines.map((baseline) => baseline.expiresAt),
       ...executions.correctionAuthorizations.map((authorization) => authorization.expiresAt)
@@ -436,6 +542,15 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
           sessions: value.sessions.filter((session) => session.expiresAt > now),
           previews: value.previews.filter((call) => call.expiresAt > now)
         }))
+        setGenerationProposals((value) => value.filter((proposal) => proposal.expiresAt > now))
+        setSessionAssets((value) =>
+          Object.fromEntries(
+            Object.entries(value).map(([sessionId, assets]) => [
+              sessionId,
+              assets.filter((asset) => asset.expiresAt > now)
+            ])
+          )
+        )
         setExecutions((value) => ({
           previews: value.previews.filter((previewEx) => previewEx.expiresAt > now),
           statuses: value.statuses,
@@ -452,7 +567,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       Math.min(2_147_483_647, Math.max(0, Math.min(...expiries) - Date.now()))
     )
     return () => clearTimeout(timer)
-  }, [ticket, state, executions])
+  }, [ticket, state, executions, sessionAssets, generationProposals])
 
   const create = () => {
     if (pending.current || revokePending.current || !selected || !project) return
@@ -559,6 +674,212 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
     revocations.current = Promise.all([revocations.current, cancellation]).then(() => undefined)
   }
 
+  const canManageSessionAssets = (session: BridgeSession): boolean =>
+    session.expiresAt > Date.now() &&
+    projects.some((value) => value.id === session.projectId) &&
+    candidates.some(
+      (item) =>
+        item.pluginId === session.pluginId &&
+        item.host === session.host &&
+        item.capabilities.includes('asset-transfer')
+    )
+
+  const generationProfile = (session: BridgeSession) =>
+    candidates.find((item) => item.pluginId === session.pluginId && item.host === session.host)
+      ?.settings.imageGenerationProfileId
+  const cancelGenerationProposal = (proposal: FigPluginNativeImageGenerationDesktopProposal) => {
+    if (proposalCancellations.current.has(proposal.proposalId)) return
+    proposalCancellations.current.add(proposal.proposalId)
+    setGenerationProposals((items) =>
+      items.filter((item) => item.proposalId !== proposal.proposalId)
+    )
+    void api()
+      .svcFigPluginCenter.cancelNativeImageGeneration({
+        proposalId: proposal.proposalId,
+        payloadSha256: proposal.payloadSha256
+      })
+      .catch((failure: unknown) => {
+        if (mounted.current) setError(bridgeErrorKey(safeError(failure)))
+      })
+  }
+  const canGenerateSessionImage = (session: BridgeSession) =>
+    canManageSessionAssets(session) &&
+    !!generationProfile(session) &&
+    (sessionAssets[session.sessionId]?.length ?? 0) < FIGPLUGIN_ASSET_MAX_PER_SESSION
+
+  const loadSessionAssets = async (session: BridgeSession, live: Live) => {
+    const catalog = parseFigPluginBridgeValue(
+      figPluginAssetListSchema,
+      await api().svcFigPluginCenter.sessionAssets(assetTarget(session))
+    )
+    if (!live()) return
+    if (
+      catalog.sessionId !== session.sessionId ||
+      catalog.assets.some((asset) => !matchesAssetSession(asset, session))
+    )
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    if (session.expiresAt <= Date.now() || !getProjectById(session.projectId)) return
+    setSessionAssets((previous) => ({
+      ...previous,
+      [session.sessionId]: catalog.assets.filter((asset) => asset.expiresAt > Date.now())
+    }))
+  }
+
+  const chooseSessionAsset = (session: BridgeSession) => {
+    if (!canManageSessionAssets(session)) return
+    void run(async (live) => {
+      if (!getProjectById(session.projectId))
+        throw new FigPluginBridgeError('CONFIGURATION_CHANGED')
+      const value = await api().svcFigPluginCenter.chooseSessionAsset(assetTarget(session))
+      if (value === null) {
+        if (live()) setNotice('figplugin.bridge.assetDeclined')
+        return
+      }
+      const asset = parseFigPluginBridgeValue(figPluginSessionAssetSchema, value)
+      if (
+        !live() ||
+        !getProjectById(session.projectId) ||
+        session.expiresAt <= Date.now() ||
+        !matchesAssetSession(asset, session) ||
+        asset.expiresAt <= Date.now()
+      ) {
+        await revokeAssetQuietly(asset)
+        if (live()) throw new FigPluginBridgeError('CONFIGURATION_CHANGED')
+        return
+      }
+      setNotice('figplugin.bridge.assetAdded')
+      await loadSessionAssets(session, live)
+    })
+  }
+
+  const chooseManagedSessionAsset = (session: BridgeSession, selection: ManagedOutputSelection) => {
+    if (
+      !canManageSessionAssets(session) ||
+      !selection.isCurrent() ||
+      (sessionAssets[session.sessionId]?.length ?? 0) >= FIGPLUGIN_ASSET_MAX_PER_SESSION
+    )
+      return
+    void run(async (live) => {
+      const current = () =>
+        live() &&
+        selection.isCurrent() &&
+        session.expiresAt > Date.now() &&
+        !!getProjectById(session.projectId)
+      if (!current()) return
+      const request = figPluginDesktopManagedAssetRequestSchema.parse({
+        ...assetTarget(session),
+        source: { kind: 'managed-media', reference: selection.reference }
+      })
+      const value = await api().svcFigPluginCenter.chooseManagedSessionAsset(request)
+      if (value === null) {
+        if (current()) setNotice('figplugin.bridge.assetDeclined')
+        return
+      }
+      const asset = parseFigPluginBridgeValue(figPluginSessionAssetSchema, value)
+      const discard = async () => {
+        await revokeAssetQuietly(asset)
+        if (mounted.current)
+          setSessionAssets((previous) => ({
+            ...previous,
+            [asset.sessionId]: (previous[asset.sessionId] ?? []).filter(
+              (item) => item.assetId !== asset.assetId || item.sha256 !== asset.sha256
+            )
+          }))
+      }
+      if (
+        !current() ||
+        !matchesAssetSession(asset, session) ||
+        asset.expiresAt <= Date.now() ||
+        asset.sha256 !== request.source.reference.sha256 ||
+        asset.mimeType !== request.source.reference.mimeType ||
+        asset.sizeBytes !== request.source.reference.sizeBytes
+      ) {
+        await discard()
+        if (current()) throw new FigPluginBridgeError('CONFIGURATION_CHANGED')
+        return
+      }
+      try {
+        await loadSessionAssets(session, current)
+      } catch (failure) {
+        await discard()
+        throw failure
+      }
+      if (!current() || asset.expiresAt <= Date.now()) {
+        await discard()
+        return
+      }
+      setNotice('figplugin.bridge.assetAdded')
+      setManagedPickerSessionId(null)
+    })
+  }
+
+  const revokeSessionAsset = (session: BridgeSession, asset: FigPluginSessionAsset) => {
+    if (revokePending.current || !matchesAssetSession(asset, session)) return
+    const operation = Symbol()
+    revokePending.current = operation
+    setManagedPickerSessionId(null)
+    setGenerationSessionId(null)
+    const referencesAsset = (preview: FigPluginExecutionPreview) =>
+      preview.executionAssets?.some(
+        (grant) =>
+          matchesAssetSession(grant, session) &&
+          grant.assetId === asset.assetId &&
+          grant.sha256 === asset.sha256
+      )
+    const affectedExecutions = new Set(
+      executions.previews.filter(referencesAsset).map((preview) => preview.executionId)
+    )
+    setReviewedExecutions((previous) =>
+      Object.fromEntries(
+        Object.entries(previous).filter(([executionId]) => !affectedExecutions.has(executionId))
+      )
+    )
+    // Revoking remains reachable while native image consent is pending. Invalidate its
+    // late reply; main also fences that selection before removing the requested grant.
+    epoch.current += 1
+    const started = epoch.current
+    const scope = currentScope.current
+    const live = () =>
+      mounted.current && started === epoch.current && scope === currentScope.current
+    setRevoking(true)
+    setError('')
+    setNotice('')
+    void Promise.resolve()
+      .then(() =>
+        api().svcFigPluginCenter.revokeSessionAsset({
+          ...assetTarget(session),
+          assetId: asset.assetId,
+          sha256: asset.sha256
+        })
+      )
+      .then(async () => {
+        if (!live()) return
+        setSessionAssets((previous) => ({
+          ...previous,
+          [session.sessionId]: (previous[session.sessionId] ?? []).filter(
+            (value) => value.assetId !== asset.assetId || value.sha256 !== asset.sha256
+          )
+        }))
+        // Do not restore a revoked write card if the authoritative refresh fails. A
+        // failed revoke leaves its card intact, but always requires a fresh review.
+        setExecutions((previous) => ({
+          ...previous,
+          previews: previous.previews.filter((preview) => !referencesAsset(preview))
+        }))
+        setNotice('figplugin.bridge.assetRevoked')
+        await refresh(live)
+      })
+      .catch((failure: unknown) => {
+        if (live()) setError(bridgeErrorKey(safeError(failure)))
+      })
+      .finally(() => {
+        if (revokePending.current === operation) {
+          revokePending.current = null
+          if (mounted.current) setRevoking(false)
+        }
+      })
+  }
+
   const canApprove = (call: FigPluginBridgePreview) =>
     call.expiresAt > Date.now() &&
     projects.some((value) => value.id === call.projectId) &&
@@ -613,7 +934,13 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
     candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host)
 
   const decideExecution = (previewEx: FigPluginExecutionPreview, approve: boolean) => {
-    if (pending.current || revokePending.current || previewEx.expiresAt <= Date.now()) return
+    if (
+      pending.current ||
+      revokePending.current ||
+      isTerminalExecution(previewEx.state) ||
+      previewEx.expiresAt <= Date.now()
+    )
+      return
     if (
       approve &&
       (reviewedExecutions[previewEx.executionId] !== executionReviewKey(previewEx) ||
@@ -749,6 +1076,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
       baseline.adapterVersion === preview?.adapterVersion &&
       baseline.correctionRoundsUsed < baseline.maxCorrectionRounds &&
       preview?.visualAudit === 'hash-only' &&
+      preview.executionAssets === undefined &&
       preview.expiresAt > Date.now() &&
       projects.some((value) => value.id === preview.projectId) &&
       candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host) &&
@@ -756,7 +1084,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         (child) =>
           (child.visualCorrection?.baselineId === baseline.baselineId ||
             child.recovery?.baselineId === baseline.baselineId) &&
-          (!['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(child.state) ||
+          (!isTerminalExecution(child.state) ||
             (child.visualCorrectionConsumed &&
               child.visualCorrection?.sourceExecutionId === status.executionId))
       ) &&
@@ -991,7 +1319,13 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         </Typography>
         {!state.sessions.length && <Typography>{t('figplugin.bridge.noSessions')}</Typography>}
         {state.sessions.map((session) => (
-          <Paper key={session.sessionId} variant="outlined" sx={{ p: 2 }}>
+          <Paper
+            key={session.sessionId}
+            component="article"
+            aria-label={t('figplugin.bridge.sessionCard', { id: session.sessionId })}
+            variant="outlined"
+            sx={{ p: 2 }}
+          >
             <Typography>
               {t('figplugin.bridge.session', {
                 plugin: session.pluginId,
@@ -1002,6 +1336,220 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
             <Button disabled={revoking} onClick={() => revoke(session.pluginId)}>
               {t('figplugin.bridge.revoke')}
             </Button>
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              <Typography component="h4" variant="subtitle2">
+                {t('figplugin.bridge.assetsTitle')}
+              </Typography>
+              <Typography variant="body2">{t('figplugin.bridge.assetsHelp')}</Typography>
+              {!canManageSessionAssets(session) && (
+                <Typography variant="body2">{t('figplugin.bridge.assetsUnavailable')}</Typography>
+              )}
+              <Stack direction="row" gap={1} flexWrap="wrap">
+                <Button
+                  disabled={
+                    locked ||
+                    !canManageSessionAssets(session) ||
+                    (sessionAssets[session.sessionId]?.length ?? 0) >=
+                      FIGPLUGIN_ASSET_MAX_PER_SESSION
+                  }
+                  onClick={() => chooseSessionAsset(session)}
+                >
+                  {t('figplugin.bridge.chooseAsset')}
+                </Button>
+                <Button
+                  disabled={
+                    locked ||
+                    !canManageSessionAssets(session) ||
+                    (sessionAssets[session.sessionId]?.length ?? 0) >=
+                      FIGPLUGIN_ASSET_MAX_PER_SESSION
+                  }
+                  onClick={() => {
+                    if (
+                      !pending.current &&
+                      !revokePending.current &&
+                      canManageSessionAssets(session)
+                    ) {
+                      setGenerationSessionId(null)
+                      setGenerationProposal(null)
+                      setManagedPickerSessionId(session.sessionId)
+                    }
+                  }}
+                >
+                  {t('figplugin.bridge.chooseManagedAsset')}
+                </Button>
+                <Button
+                  disabled={locked || !canGenerateSessionImage(session)}
+                  onClick={() => {
+                    if (!locked && canGenerateSessionImage(session)) {
+                      setManagedPickerSessionId(null)
+                      setGenerationProposal(null)
+                      setGenerationSessionId(session.sessionId)
+                    }
+                  }}
+                >
+                  {t('figplugin.bridge.generateImage')}
+                </Button>
+                <Button
+                  disabled={locked || !canManageSessionAssets(session)}
+                  onClick={() => void run((live) => loadSessionAssets(session, live))}
+                >
+                  {t('figplugin.bridge.listAssets')}
+                </Button>
+              </Stack>
+              {!generationProfile(session) && (
+                <Typography variant="body2">
+                  {t('figplugin.bridge.generationNotConfigured')}
+                </Typography>
+              )}
+              {generationProposals
+                .filter(
+                  (proposal) =>
+                    matchesAssetSession(proposal, session) &&
+                    proposal.proposalId !== generationProposal?.proposalId
+                )
+                .map((proposal) => (
+                  <Paper
+                    key={proposal.proposalId}
+                    component="article"
+                    variant="outlined"
+                    sx={{ p: 1 }}
+                    aria-label={t('figplugin.bridge.generationProposalCard', {
+                      id: proposal.proposalId
+                    })}
+                  >
+                    <Typography component="h5">
+                      {t('figplugin.bridge.generationProposalTitle')}
+                    </Typography>
+                    <Typography sx={{ overflowWrap: 'anywhere' }}>
+                      {t('figplugin.bridge.generationProposalIdentity', {
+                        id: proposal.proposalId,
+                        hash: proposal.payloadSha256
+                      })}
+                    </Typography>
+                    <Box
+                      component="pre"
+                      sx={{
+                        whiteSpace: 'pre-wrap',
+                        overflowWrap: 'anywhere',
+                        maxHeight: 180,
+                        overflow: 'auto'
+                      }}
+                    >
+                      {proposal.prompt}
+                    </Box>
+                    <Button
+                      disabled={locked || !canGenerateSessionImage(session)}
+                      onClick={() => {
+                        if (
+                          locked ||
+                          proposal.expiresAt <= Date.now() ||
+                          !canGenerateSessionImage(session)
+                        )
+                          return
+                        setManagedPickerSessionId(null)
+                        setGenerationProposal(proposal)
+                        setGenerationSessionId(session.sessionId)
+                      }}
+                    >
+                      {t('figplugin.bridge.generationProposalOpen')}
+                    </Button>
+                    <Button onClick={() => cancelGenerationProposal(proposal)}>
+                      {t('figplugin.bridge.generationProposalDecline')}
+                    </Button>
+                  </Paper>
+                ))}
+              {generationSessionId === session.sessionId && generationProfile(session) && (
+                <Suspense
+                  fallback={<Typography>{t('figplugin.bridge.generationLoading')}</Typography>}
+                >
+                  <PluginBridgeImageGeneration
+                    key={generationProposal?.proposalId ?? session.sessionId}
+                    session={session}
+                    proposal={generationProposal ?? undefined}
+                    profileId={generationProfile(session)!}
+                    profileName={models[generationProfile(session)!]}
+                    available={
+                      canGenerateSessionImage(session) &&
+                      (!generationProposal ||
+                        (matchesAssetSession(generationProposal, session) &&
+                          generationProposal.expiresAt > Date.now()))
+                    }
+                    disabled={locked}
+                    onBusyChange={(value) => {
+                      if (mounted.current) setGenerationBusy(value)
+                    }}
+                    onClose={() => {
+                      if (generationProposal) {
+                        proposalCancellations.current.add(generationProposal.proposalId)
+                        setGenerationProposals((value) =>
+                          value.filter(
+                            (proposal) => proposal.proposalId !== generationProposal.proposalId
+                          )
+                        )
+                      }
+                      setGenerationSessionId(null)
+                      setGenerationProposal(null)
+                    }}
+                  />
+                </Suspense>
+              )}
+              {managedPickerSessionId === session.sessionId && (
+                <Suspense
+                  fallback={<Typography>{t('figplugin.bridge.managedPickerLoading')}</Typography>}
+                >
+                  <PluginBridgeManagedAssetPicker
+                    key={session.sessionId}
+                    session={session}
+                    available={canManageSessionAssets(session)}
+                    disabled={
+                      locked ||
+                      (sessionAssets[session.sessionId]?.length ?? 0) >=
+                        FIGPLUGIN_ASSET_MAX_PER_SESSION
+                    }
+                    onShare={(selection) => chooseManagedSessionAsset(session, selection)}
+                    onClose={() => setManagedPickerSessionId(null)}
+                  />
+                </Suspense>
+              )}
+              <Typography variant="body2">
+                {t(
+                  sessionAssets[session.sessionId] === undefined
+                    ? 'figplugin.bridge.assetsNotLoaded'
+                    : !sessionAssets[session.sessionId].length
+                      ? 'figplugin.bridge.noAssets'
+                      : 'figplugin.bridge.assetCount',
+                  { count: sessionAssets[session.sessionId]?.length ?? 0 }
+                )}
+              </Typography>
+              {(sessionAssets[session.sessionId] ?? []).map((asset) => (
+                <Box
+                  key={asset.assetId}
+                  component="article"
+                  aria-label={t('figplugin.bridge.assetCard', { id: asset.assetId })}
+                  sx={{ overflowWrap: 'anywhere' }}
+                >
+                  <Typography>{t('figplugin.bridge.assetId', { id: asset.assetId })}</Typography>
+                  <Typography>
+                    {t('figplugin.bridge.assetMetadata', {
+                      mime: asset.mimeType,
+                      width: asset.width,
+                      height: asset.height,
+                      bytes: asset.sizeBytes
+                    })}
+                  </Typography>
+                  <Typography>{t('figplugin.bridge.assetHash', { hash: asset.sha256 })}</Typography>
+                  <Typography>
+                    {t('figplugin.bridge.assetExpiry', {
+                      created: new Date(asset.createdAt).toLocaleString(),
+                      expires: new Date(asset.expiresAt).toLocaleString()
+                    })}
+                  </Typography>
+                  <Button disabled={revoking} onClick={() => revokeSessionAsset(session, asset)}>
+                    {t('figplugin.bridge.revokeAsset')}
+                  </Button>
+                </Box>
+              ))}
+            </Stack>
           </Paper>
         ))}
         <Typography component="h3" variant="subtitle1">
@@ -1059,6 +1607,28 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
               >
                 {JSON.stringify(call.context, null, 2)}
               </Box>
+              {call.assetCatalog && (
+                <>
+                  <Typography>{t('figplugin.bridge.planningAssets')}</Typography>
+                  <Typography variant="body2">
+                    {t('figplugin.bridge.planningAssetsHelp')}
+                  </Typography>
+                  <Box
+                    component="pre"
+                    tabIndex={0}
+                    aria-label={t('figplugin.bridge.planningAssets')}
+                    sx={{
+                      whiteSpace: 'pre-wrap',
+                      overflowWrap: 'anywhere',
+                      maxHeight: 320,
+                      overflow: 'auto',
+                      m: 0
+                    }}
+                  >
+                    {JSON.stringify(call.assetCatalog, null, 2)}
+                  </Box>
+                </>
+              )}
               <FormControlLabel
                 label={t('figplugin.bridge.review')}
                 control={
@@ -1126,6 +1696,27 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                   project: previewEx.projectId
                 })}
               </Typography>
+              <Typography>
+                {t('figplugin.bridge.executionIdentity', {
+                  execution: previewEx.executionId,
+                  call: previewEx.callId,
+                  adapter: previewEx.adapterVersion
+                })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.executionTarget', {
+                  document: previewEx.documentId,
+                  scope: previewEx.scopeId,
+                  capture: previewEx.captureId
+                })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.executionLifetime', {
+                  created: previewEx.createdAt,
+                  expiry: previewEx.expiresAt,
+                  ttl: previewEx.expiresAt - previewEx.createdAt
+                })}
+              </Typography>
               <Typography>{t('figplugin.bridge.risk', { risk: previewEx.risk })}</Typography>
               {previewEx.recovery?.rebind && (
                 <Alert severity="warning">{t('figplugin.checkpoints.rebindWarning')}</Alert>
@@ -1159,6 +1750,28 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
               <Typography>
                 {t('figplugin.bridge.visualAudit', { mode: previewEx.visualAudit })}
               </Typography>
+              {previewEx.executionAssets && (
+                <>
+                  <Alert severity="warning">
+                    {t(
+                      previewEx.host === 'figma'
+                        ? 'figplugin.bridge.imageFillWriteHelp'
+                        : 'figplugin.bridge.imagePixelsWriteHelp'
+                    )}
+                  </Alert>
+                  <Typography>{t('figplugin.bridge.executionAssetsHelp')}</Typography>
+                  <Typography>{t('figplugin.bridge.executionAssets')}</Typography>
+                  <Box
+                    component="pre"
+                    tabIndex={0}
+                    aria-label={t('figplugin.bridge.executionAssets')}
+                    sx={{ whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto', m: 0 }}
+                  >
+                    {JSON.stringify(previewEx.executionAssets, null, 2)}
+                  </Box>
+                  <Typography>{t('figplugin.bridge.imageWriteRecoveryBoundary')}</Typography>
+                </>
+              )}
               <Typography>{t('figplugin.bridge.differences')}</Typography>
               <Box
                 component="pre"
@@ -1169,7 +1782,11 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                 {JSON.stringify(previewEx.differences, null, 2)}
               </Box>
               <FormControlLabel
-                label={t('figplugin.bridge.reviewWrite')}
+                label={t(
+                  previewEx.executionAssets
+                    ? 'figplugin.bridge.reviewImageWrite'
+                    : 'figplugin.bridge.reviewWrite'
+                )}
                 control={
                   <Checkbox
                     disabled={locked || !canApproveExecution(previewEx)}
@@ -1200,7 +1817,14 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                 >
                   {t('figplugin.bridge.approveWriteOnce')}
                 </Button>
-                <Button disabled={locked} onClick={() => decideExecution(previewEx, false)}>
+                <Button
+                  disabled={
+                    locked ||
+                    isTerminalExecution(previewEx.state) ||
+                    previewEx.expiresAt <= Date.now()
+                  }
+                  onClick={() => decideExecution(previewEx, false)}
+                >
                   {t('figplugin.bridge.deny')}
                 </Button>
               </Stack>
@@ -1214,6 +1838,9 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
           <Typography>{t('figplugin.bridge.noExecutionStatuses')}</Typography>
         )}
         {executions.statuses.map((executionStatus) => {
+          const sourcePreview = executions.previews.find(
+            (preview) => preview.executionId === executionStatus.executionId
+          )
           const acceptedBaseline = executions.baselines.find(
             (baseline) => baseline.sourceExecutionId === executionStatus.executionId
           )
@@ -1354,8 +1981,17 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                     )}
                     {canAccept && evidenceHash && (
                       <>
+                        {sourcePreview?.executionAssets && (
+                          <Alert severity="warning">
+                            {t('figplugin.bridge.imageCheckpointRetention')}
+                          </Alert>
+                        )}
                         <FormControlLabel
-                          label={t('figplugin.bridge.reviewVisualBaseline')}
+                          label={t(
+                            sourcePreview?.executionAssets
+                              ? 'figplugin.bridge.reviewImageBaseline'
+                              : 'figplugin.bridge.reviewVisualBaseline'
+                          )}
                           control={
                             <Checkbox
                               disabled={locked}
@@ -1395,9 +2031,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                     )}
                   </>
                 )}
-                {!['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(
-                  executionStatus.state
-                ) && (
+                {!isTerminalExecution(executionStatus.state) && (
                   <Button
                     disabled={locked}
                     onClick={() => cancelExecution(executionStatus.executionId)}

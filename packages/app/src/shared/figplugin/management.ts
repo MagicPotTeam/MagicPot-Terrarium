@@ -17,7 +17,8 @@ const host = z.enum(FIGPLUGIN_HOSTS)
 const settings = z
   .object({
     analysisProfileId: z.string().trim().min(1).max(512).optional(),
-    backgroundRemovalProfileId: z.string().trim().min(1).max(512).optional()
+    backgroundRemovalProfileId: z.string().trim().min(1).max(512).optional(),
+    imageGenerationProfileId: z.string().trim().min(1).max(512).optional()
   })
   .strict()
 

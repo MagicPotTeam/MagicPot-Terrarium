@@ -1,5 +1,11 @@
 import { z } from 'zod'
 import { hostContextSchema, type HostContext } from './hostPlan'
+import { hostContextImageSchema, type HostContextImage } from './hostContextImage'
+import {
+  figPluginPlanningAssetReferencesSchema,
+  figPluginPlanningAssetCatalogSchema,
+  type FigPluginPlanningAssetReference
+} from './hostPlanningAssets'
 import { ServiceError } from '../api/apiUtils/serviceValidation'
 import { FIGPLUGIN_HOSTS, FigPluginIdSchema, FigPluginDesktopBridgeOriginSchema } from './manifest'
 
@@ -136,13 +142,34 @@ export type FigPluginPairResponse = z.output<typeof figPluginPairResponseSchema>
 // Planning extends data carried by the read-only model request, never its permissions.
 const planningFields = {
   featureId: z.literal('plan-preview').optional(),
-  hostContext: hostContextSchema.optional()
+  hostContext: hostContextSchema.optional(),
+  contextImage: hostContextImageSchema.optional(),
+  assetReferences: figPluginPlanningAssetReferencesSchema.optional()
 }
 const validatePlanningFields = (
-  value: { featureId?: 'plan-preview'; hostContext?: HostContext; context: FigPluginContext },
+  value: {
+    featureId?: 'plan-preview'
+    hostContext?: HostContext
+    contextImage?: HostContextImage
+    assetReferences?: FigPluginPlanningAssetReference[]
+    context: FigPluginContext
+  },
   ctx: z.RefinementCtx
 ): void => {
   const host = value.hostContext
+  if (value.assetReferences && (value.featureId !== 'plan-preview' || !host))
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Assets require host planning' })
+  if (
+    value.contextImage &&
+    (value.featureId !== 'plan-preview' ||
+      !host ||
+      value.contextImage.captureId !== host.captureId ||
+      !host.selectedIds?.includes(value.contextImage.targetId))
+  )
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Context image requires its exact selected host planning target'
+    })
   if ((value.featureId === 'plan-preview') !== Boolean(host)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Planning requires an exact context' })
     return
@@ -260,10 +287,30 @@ export const figPluginBridgePreviewSchema = z
     expiresAt: safeInteger,
     payloadSha256: figPluginBridgeHashSchema,
     estimatedInputTokens: safeInteger,
-    ...planningFields
+    ...planningFields,
+    assetCatalog: figPluginPlanningAssetCatalogSchema.optional()
   })
   .strict()
   .superRefine(validatePlanningFields)
+  .superRefine((value, ctx) => {
+    const catalog = value.assetCatalog
+    if (
+      Boolean(catalog) !== Boolean(value.assetReferences) ||
+      (catalog &&
+        (value.featureId !== 'plan-preview' ||
+          catalog.host !== value.host ||
+          catalog.host !== value.hostContext?.host ||
+          catalog.pluginId !== value.pluginId ||
+          catalog.projectId !== value.projectId ||
+          value.expiresAt > Math.min(...catalog.assets.map((asset) => asset.expiresAt)) ||
+          catalog.assets.length !== value.assetReferences!.length ||
+          catalog.assets.some((asset, index) => {
+            const reference = value.assetReferences![index]
+            return asset.assetId !== reference.assetId || asset.sha256 !== reference.sha256
+          })))
+    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Planning asset snapshot mismatch' })
+  })
 export type FigPluginBridgePreview = z.output<typeof figPluginBridgePreviewSchema>
 
 export const figPluginDesktopPairRequestSchema = z

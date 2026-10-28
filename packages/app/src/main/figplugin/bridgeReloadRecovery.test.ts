@@ -240,7 +240,9 @@ describe('explicit user-selected recovery after a native plugin reload', () => {
       await m.r.approvePlan(p.preview.executionId, p.preview.planSha256, true)
       await p.claim()
       m.r.dispose()
+      if (round < 3) f.advance(120_001)
     }
+    f.advance(120_001)
     const m = f.make(),
       s = await pair(m.r)
     await expect(prepare(m.r, s)).rejects.toMatchObject({ code: 'DENIED' })

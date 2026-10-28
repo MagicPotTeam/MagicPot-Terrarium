@@ -13,6 +13,7 @@ import {
 } from '@shared/figplugin/bridge'
 import { canonicalFigPluginJson } from '@shared/figplugin/manifest'
 import { FigPluginBridgeRuntime } from './bridgeRuntime'
+import { ProviderCircuitBreaker } from './providerCircuitBreaker'
 
 type Options = ConstructorParameters<typeof FigPluginBridgeRuntime>[0]
 type Pairing = Awaited<ReturnType<FigPluginBridgeRuntime['createPairing']>>
@@ -63,7 +64,17 @@ const make = (options: Partial<Options> = {}) => {
   const invoke = vi
     .fn<Options['invoke']>()
     .mockResolvedValue({ content: '  Plain output\n', reportedTotalTokens: 12 })
-  const runtime = new FigPluginBridgeRuntime({ validateBinding: validate, invoke, ...options })
+  const runtime = new FigPluginBridgeRuntime({
+    validateBinding: validate,
+    // The default stand-in models a service handoff, not Controller preflight.
+    invoke: (...args) => {
+      args[5]()
+      const response = (async () => invoke(...args))()
+      args[4]()
+      return response
+    },
+    ...options
+  })
   runtimes.push(runtime)
   return { runtime, validate, invoke }
 }
@@ -103,6 +114,19 @@ afterEach(() => {
 })
 
 describe('FigPluginBridgeRuntime pairing and authentication', () => {
+  it('revokes volatile tickets and bearer sessions when the transport epoch is lost', async () => {
+    const { runtime, session, prepared } = await fixture()
+    expect(runtime.listSessions()).toHaveLength(1)
+
+    runtime.revokeTransport()
+
+    expect(runtime.listSessions()).toEqual([])
+    await expect(status(runtime, session, prepared.callId)).rejects.toMatchObject(
+      errorCode('UNAUTHORIZED')
+    )
+    await expect(prepare(runtime, session)).rejects.toMatchObject(errorCode('UNAUTHORIZED'))
+  })
+
   it('issues unpredictable, exact-width tickets and sessions only after validation', async () => {
     const { runtime, validate, invoke } = make()
     const ticket = await runtime.createPairing(binding)
@@ -135,7 +159,7 @@ describe('FigPluginBridgeRuntime pairing and authentication', () => {
 
   it('clones and freezes the full native binding before awaiting validation', async () => {
     const gate = deferred<boolean>()
-    const { runtime, validate } = make()
+    const { runtime, validate, invoke } = make()
     validate.mockReturnValueOnce(gate.promise)
     const mutable = { ...binding }
     const issuing = runtime.createPairing(mutable)
@@ -320,6 +344,367 @@ describe('FigPluginBridgeRuntime pairing and authentication', () => {
 })
 
 describe('FigPluginBridgeRuntime consent and replay', () => {
+  it('reports layered readiness only after session authentication', async () => {
+    const { runtime, session } = await fixture()
+    await expect(runtime.readiness('not-a-session', session.sessionToken)).rejects.toMatchObject(
+      errorCode('UNAUTHORIZED')
+    )
+    const readiness = await runtime.readiness(session.sessionId, session.sessionToken)
+    expect(readiness).toEqual({
+      protocol: 1,
+      kind: 'figplugin-bridge-readiness',
+      checkedAt: Date.now(),
+      bridge: { state: 'ready', code: 'bridge-reachable' },
+      configuration: { state: 'ready', code: 'configuration-current' },
+      provider: { state: 'unknown', code: 'provider-not-probed' },
+      resources: { state: 'unknown', code: 'resources-not-probed' },
+      host: {
+        state: 'unknown',
+        code: 'host-not-probed',
+        host: binding.host,
+        capabilities: { state: 'unknown', code: 'capabilities-not-probed' }
+      }
+    })
+  })
+
+  it('projects a paired host probe into diagnostics without granting execution authority', async () => {
+    const { runtime, session } = await fixture()
+    const before = runtime.listPreviews()
+    const readiness = await runtime.readiness(session.sessionId, session.sessionToken, {
+      protocol: 1,
+      hostProbe: {
+        host: 'figma',
+        adapterVersion: 'figma-native-1',
+        supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content', 'layout.flow'],
+        rollback: 'verified-in-place',
+        visualAudit: 'hash-only',
+        document: { state: 'ready', code: 'document-open' },
+        resources: {
+          fonts: { state: 'ready', code: 'fonts-api-available' },
+          visual: { state: 'ready', code: 'visual-api-available' }
+        }
+      }
+    })
+    expect(readiness.resources).toEqual({ state: 'ready', code: 'resources-observed' })
+    expect(readiness.host).toEqual({
+      state: 'ready',
+      code: 'host-observed',
+      host: 'figma',
+      capabilities: { state: 'ready', code: 'capabilities-observed' }
+    })
+    // A readiness probe is never an execution request or a write authorization.
+    expect(runtime.listPreviews()).toEqual(before)
+  })
+
+  it('reports incomplete native observations as not-ready while keeping the session alive', async () => {
+    const { runtime, session } = await fixture()
+    const readiness = await runtime.readiness(session.sessionId, session.sessionToken, {
+      protocol: 1,
+      hostProbe: {
+        host: 'figma',
+        adapterVersion: 'figma-unknown-1',
+        supports: ['node.rename'],
+        rollback: 'none',
+        visualAudit: 'unavailable',
+        document: { state: 'not-ready', code: 'document-unavailable' },
+        resources: {
+          fonts: { state: 'unknown', code: 'fonts-unknown' },
+          visual: { state: 'unknown', code: 'visual-unknown' }
+        }
+      }
+    })
+    expect(readiness.resources).toEqual({ state: 'not-ready', code: 'document-unavailable' })
+    expect(readiness.host.capabilities).toEqual({
+      state: 'not-ready',
+      code: 'adapter-unrecognized'
+    })
+    await expect(
+      runtime.readiness(session.sessionId, session.sessionToken)
+    ).resolves.toHaveProperty('host.capabilities.state', 'unknown')
+  })
+
+  it('does not turn an unknown document observation into a connected host', async () => {
+    const { runtime, session } = await fixture()
+    const readiness = await runtime.readiness(session.sessionId, session.sessionToken, {
+      protocol: 1,
+      hostProbe: {
+        host: 'figma',
+        adapterVersion: 'figma-native-1',
+        supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content', 'layout.flow'],
+        rollback: 'verified-in-place',
+        visualAudit: 'hash-only',
+        document: { state: 'unknown', code: 'document-probe-pending' },
+        resources: {
+          fonts: { state: 'ready', code: 'fonts-api-available' },
+          visual: { state: 'ready', code: 'visual-api-available' }
+        }
+      }
+    })
+    expect(readiness.host).toEqual({
+      state: 'unknown',
+      code: 'document-probe-pending',
+      host: 'figma',
+      capabilities: { state: 'ready', code: 'capabilities-observed' }
+    })
+    expect(readiness.resources).toEqual({ state: 'unknown', code: 'document-probe-pending' })
+  })
+
+  it('fails closed for a native adapter major that is not negotiated', async () => {
+    const { runtime, session } = await fixture()
+    const readiness = await runtime.readiness(session.sessionId, session.sessionToken, {
+      protocol: 1,
+      hostProbe: {
+        host: 'figma',
+        adapterVersion: 'figma-native-2',
+        supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content', 'layout.flow'],
+        rollback: 'verified-in-place',
+        visualAudit: 'hash-only',
+        document: { state: 'ready', code: 'document-open' },
+        resources: {
+          fonts: { state: 'ready', code: 'fonts-api-available' },
+          visual: { state: 'ready', code: 'visual-api-available' }
+        }
+      }
+    })
+    expect(readiness.host.capabilities).toEqual({
+      state: 'not-ready',
+      code: 'adapter-version-unsupported'
+    })
+  })
+
+  it('does not accept an adapter from the other native host', async () => {
+    const { runtime, session } = await fixture()
+    const readiness = await runtime.readiness(session.sessionId, session.sessionToken, {
+      protocol: 1,
+      hostProbe: {
+        host: 'figma',
+        adapterVersion: 'photoshop-uxp-native-1',
+        supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content', 'layout.flow'],
+        rollback: 'verified-in-place',
+        visualAudit: 'hash-only',
+        document: { state: 'ready', code: 'document-open' },
+        resources: {
+          fonts: { state: 'ready', code: 'fonts-api-available' },
+          visual: { state: 'ready', code: 'visual-api-available' }
+        }
+      }
+    })
+    expect(readiness.host.capabilities).toEqual({
+      state: 'not-ready',
+      code: 'adapter-host-mismatch'
+    })
+  })
+
+  it('reports provider reachability only from an approved invocation', async () => {
+    const { runtime, session, prepared, preview } = await fixture()
+    await runtime.approve(prepared.callId, preview.payloadSha256)
+    await settle()
+    await expect(status(runtime, session, prepared.callId)).resolves.toHaveProperty(
+      'status',
+      'completed'
+    )
+    await expect(runtime.readiness(session.sessionId, session.sessionToken)).resolves.toMatchObject(
+      { provider: { state: 'ready', code: 'provider-observed' } }
+    )
+  })
+
+  it('returns bounded provider health diagnostics only when explicitly requested', async () => {
+    const { runtime, session, prepared, preview } = await fixture()
+    await runtime.approve(prepared.callId, preview.payloadSha256)
+    await settle()
+
+    const readiness = await runtime.readiness(session.sessionId, session.sessionToken, {
+      protocol: 1,
+      includeDiagnostics: true
+    })
+    expect(readiness.provider).toMatchObject({
+      state: 'ready',
+      code: 'provider-observed',
+      diagnostics: {
+        circuitState: 'closed',
+        failureCount: 0,
+        probeInFlight: false,
+        lastOutcome: 'success',
+        lastOutcomeAt: Date.now(),
+        lastLatencyMs: 0,
+        lastCorrelationId: expect.stringMatching(/^[a-f0-9]{32}$/),
+        observedAt: Date.now(),
+        observedCorrelationId: expect.stringMatching(/^[a-f0-9]{32}$/)
+      }
+    })
+    expect(readiness.provider.diagnostics?.lastCorrelationId).toBe(
+      readiness.provider.diagnostics?.observedCorrelationId
+    )
+  })
+
+  it('records an approved provider failure without exposing provider error details', async () => {
+    const { runtime, session, prepared, preview, invoke } = await fixture()
+    invoke.mockRejectedValueOnce(new FigPluginBridgeError('UPSTREAM_FAILED'))
+    await runtime.approve(prepared.callId, preview.payloadSha256)
+    await settle()
+    await expect(runtime.readiness(session.sessionId, session.sessionToken)).resolves.toMatchObject(
+      { provider: { state: 'not-ready', code: 'provider-unavailable' } }
+    )
+    await expect(
+      runtime.readiness(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        includeDiagnostics: true
+      })
+    ).resolves.toMatchObject({
+      provider: {
+        diagnostics: {
+          circuitState: 'closed',
+          lastOutcome: 'failure',
+          lastFailureClass: 'upstream',
+          lastCorrelationId: expect.stringMatching(/^[a-f0-9]{32}$/)
+        }
+      }
+    })
+  })
+
+  it('does not classify an approved invocation cancelled by the caller as provider failure', async () => {
+    const outcome = deferred<{ content: string }>()
+    const { runtime, session, prepared, preview, invoke } = await fixture()
+    invoke.mockReturnValue(outcome.promise)
+    await runtime.approve(prepared.callId, preview.payloadSha256)
+    await settle()
+    await runtime.cancel(session.sessionId, session.sessionToken, prepared.callId)
+    await expect(runtime.readiness(session.sessionId, session.sessionToken)).resolves.toMatchObject(
+      {
+        provider: { state: 'unknown' }
+      }
+    )
+    outcome.resolve({ content: 'late result' })
+    await settle()
+  })
+
+  it('expires provider observations and keeps them isolated by session and profile revision', async () => {
+    const first = await fixture()
+    await first.runtime.approve(first.prepared.callId, first.preview.payloadSha256)
+    await settle()
+    await expect(
+      first.runtime.readiness(first.session.sessionId, first.session.sessionToken)
+    ).resolves.toMatchObject({ provider: { state: 'ready' } })
+
+    await vi.advanceTimersByTimeAsync(60_001)
+    await expect(
+      first.runtime.readiness(first.session.sessionId, first.session.sessionToken)
+    ).resolves.toMatchObject({ provider: { state: 'unknown' } })
+
+    const sameProfile = await pair(first.runtime)
+    await expect(
+      first.runtime.readiness(sameProfile.sessionId, sameProfile.sessionToken)
+    ).resolves.toMatchObject({ provider: { state: 'unknown', code: 'provider-not-probed' } })
+
+    const newerProfile = await pair(first.runtime, {
+      ...binding,
+      profileRevision: 'e'.repeat(64)
+    })
+    await expect(
+      first.runtime.readiness(newerProfile.sessionId, newerProfile.sessionToken)
+    ).resolves.toMatchObject({ provider: { state: 'unknown', code: 'provider-not-probed' } })
+  })
+
+  it('uses an open circuit only to explain fresh failure evidence from the same session', async () => {
+    const circuit = new ProviderCircuitBreaker({ failureThreshold: 1, cooldownMs: 30_000 })
+    const { runtime, session, prepared, preview, invoke } = await fixture({
+      providerCircuit: circuit
+    })
+    await runtime.approve(prepared.callId, preview.payloadSha256)
+    await settle()
+
+    const failedSession = await pair(runtime)
+    const failed = await prepare(runtime, failedSession)
+    const failedPreview = runtime.listPreviews().find((value) => value.callId === failed.callId)!
+    invoke.mockRejectedValueOnce(new FigPluginBridgeError('UPSTREAM_FAILED'))
+    await runtime.approve(failed.callId, failedPreview.payloadSha256)
+    await settle()
+    const providerKey = `${binding.host}:${binding.profileId}:${binding.profileRevision}`
+    expect(circuit.snapshot(providerKey)).toMatchObject({ state: 'open', failureCount: 1 })
+    expect(
+      (await runtime.readiness(failedSession.sessionId, failedSession.sessionToken)).provider
+    ).toEqual({ state: 'not-ready', code: 'provider-circuit-open' })
+    expect((await runtime.readiness(session.sessionId, session.sessionToken)).provider).toEqual({
+      state: 'ready',
+      code: 'provider-observed'
+    })
+
+    const freshSession = await pair(runtime)
+    expect(
+      (await runtime.readiness(freshSession.sessionId, freshSession.sessionToken)).provider
+    ).toEqual({ state: 'unknown', code: 'provider-not-probed' })
+    const blocked = await prepare(runtime, freshSession)
+    const blockedPreview = runtime.listPreviews().find((value) => value.callId === blocked.callId)!
+    await runtime.approve(blocked.callId, blockedPreview.payloadSha256)
+    await settle()
+    expect(await status(runtime, freshSession, blocked.callId)).toMatchObject({
+      status: 'failed',
+      errorCode: 'UPSTREAM_FAILED'
+    })
+    expect(
+      (await runtime.readiness(freshSession.sessionId, freshSession.sessionToken)).provider
+    ).toEqual({ state: 'unknown', code: 'provider-not-probed' })
+    expect(invoke).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not renew expired failure evidence when cancelled half-open probes extend the circuit', async () => {
+    const circuit = new ProviderCircuitBreaker({ failureThreshold: 1, cooldownMs: 30_000 })
+    const { runtime, session, prepared, preview, invoke } = await fixture({
+      providerCircuit: circuit
+    })
+    const observedAt = Date.now()
+    const providerKey = `${binding.host}:${binding.profileId}:${binding.profileRevision}`
+    invoke.mockRejectedValueOnce(new FigPluginBridgeError('UPSTREAM_FAILED'))
+    await runtime.approve(prepared.callId, preview.payloadSha256)
+    await settle()
+
+    const cancelProbe = async (sequence: number) => {
+      const outcome = deferred<{ content: string }>()
+      invoke.mockReturnValueOnce(outcome.promise)
+      const probe = await prepare(runtime, session, request(sequence))
+      const probePreview = runtime.listPreviews().find((value) => value.callId === probe.callId)!
+      await runtime.approve(probe.callId, probePreview.payloadSha256)
+      await settle()
+      expect(circuit.snapshot(providerKey)).toMatchObject({
+        state: 'half-open',
+        probeInFlight: true
+      })
+      await cancel(runtime, session, probe.callId)
+      outcome.reject(new Error('Late provider error after caller cancellation'))
+      await settle()
+      expect(circuit.snapshot(providerKey)).toMatchObject({
+        state: 'open',
+        retryAt: Date.now() + 30_000,
+        failureCount: 1,
+        probeInFlight: false
+      })
+      expect(await status(runtime, session, probe.callId)).toMatchObject({
+        status: 'cancelled',
+        errorCode: 'CANCELLED'
+      })
+    }
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await cancelProbe(2)
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect((await runtime.readiness(session.sessionId, session.sessionToken)).provider).toEqual({
+      state: 'not-ready',
+      code: 'provider-circuit-open'
+    })
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(Date.now()).toBe(observedAt + 60_000)
+    await cancelProbe(3)
+    expect((await runtime.readiness(session.sessionId, session.sessionToken)).provider.state).toBe(
+      'unknown'
+    )
+    const freshSession = await pair(runtime)
+    expect(
+      (await runtime.readiness(freshSession.sessionId, freshSession.sessionToken)).provider
+    ).toEqual({ state: 'unknown', code: 'provider-not-probed' })
+    expect(invoke).toHaveBeenCalledTimes(3)
+  })
+
   it('previews canonical UTF-8 payloads including every integrity reference without secrets', async () => {
     const { runtime, validate, invoke, session, preview } = await fixture()
     const value = request()
@@ -380,6 +765,7 @@ describe('FigPluginBridgeRuntime consent and replay', () => {
       prompt: request().prompt,
       context: request().context
     })
+    expect(invoke.mock.calls[0][3]).toMatch(/^[a-f0-9]{32}$/)
     expect(JSON.stringify(invoke.mock.calls[0])).not.toMatch(
       /clientNonce|sessionToken|pairingSecret/
     )
@@ -441,6 +827,24 @@ describe('FigPluginBridgeRuntime consent and replay', () => {
     await rejected
     expect(runtime.listPreviews()).toEqual([])
     expect(runtime.listSessions()).toEqual([])
+  })
+
+  it('expires a session when async validation resolves after its deadline', async () => {
+    const { runtime, validate, invoke } = make()
+    const session = await pair(runtime)
+    const gate = deferred<boolean>()
+    validate.mockReturnValueOnce(gate.promise)
+    const preparing = prepare(runtime, session)
+
+    // Move the clock without running the cleanup timer. The in-flight validation must
+    // still observe the absolute session boundary before admitting the request.
+    vi.setSystemTime(Date.now() + 600_001)
+    gate.resolve(true)
+
+    await expect(preparing).rejects.toMatchObject(errorCode('EXPIRED'))
+    expect(runtime.listSessions()).toEqual([])
+    expect(runtime.listPreviews()).toEqual([])
+    expect(invoke).not.toHaveBeenCalled()
   })
 
   it('rechecks sequence and active-call admission after async validation', async () => {
@@ -889,6 +1293,120 @@ describe('FigPluginBridgeRuntime outcomes and lifetime races', () => {
       })
       expect(invoke).toHaveBeenCalledTimes(1)
     }
+  })
+
+  it('opens a provider circuit after classified failures and recovers with one cooldown probe', async () => {
+    const circuit = new ProviderCircuitBreaker({ failureThreshold: 2, cooldownMs: 100 })
+    const { runtime, session, prepared, invoke } = await fixture({ providerCircuit: circuit })
+    const providerKey = `${binding.host}:${binding.profileId}:${binding.profileRevision}`
+    invoke.mockRejectedValue(new FigPluginBridgeError('UPSTREAM_FAILED'))
+    const run = async (receipt: Awaited<ReturnType<typeof prepare>>) => {
+      const current = runtime.listPreviews().find((value) => value.callId === receipt.callId)
+      if (!current) throw new Error('missing preview fixture')
+      await runtime.approve(receipt.callId, current.payloadSha256)
+      await settle()
+      return status(runtime, session, receipt.callId)
+    }
+
+    expect(await run(prepared)).toMatchObject({ status: 'failed', errorCode: 'UPSTREAM_FAILED' })
+    const second = await prepare(runtime, session, request(2))
+    expect(await run(second)).toMatchObject({ status: 'failed', errorCode: 'UPSTREAM_FAILED' })
+    expect(circuit.snapshot(providerKey)).toMatchObject({ state: 'open', failureCount: 2 })
+
+    const blocked = await prepare(runtime, session, request(3))
+    expect(await run(blocked)).toMatchObject({ status: 'failed', errorCode: 'UPSTREAM_FAILED' })
+    expect(invoke).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(100)
+    invoke.mockResolvedValue({ content: 'recovered' })
+    const probe = await prepare(runtime, session, request(4))
+    expect(await run(probe)).toMatchObject({ status: 'completed', content: 'recovered' })
+    expect(circuit.snapshot(providerKey)).toMatchObject({
+      state: 'closed',
+      failureCount: 0,
+      probeInFlight: false
+    })
+    expect(invoke).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not inherit an open circuit when the bound profile revision changes', async () => {
+    const circuit = new ProviderCircuitBreaker({ failureThreshold: 1, cooldownMs: 10_000 })
+    const { runtime, invoke } = await fixture({ providerCircuit: circuit })
+    const oldSession = await pair(runtime)
+    const oldPrepared = await prepare(runtime, oldSession, request(2))
+    const oldPreview = runtime.listPreviews().find((value) => value.callId === oldPrepared.callId)
+    if (!oldPreview) throw new Error('missing old revision preview fixture')
+    invoke.mockRejectedValueOnce(new FigPluginBridgeError('UPSTREAM_FAILED'))
+    await runtime.approve(oldPrepared.callId, oldPreview.payloadSha256)
+    await settle()
+    expect(
+      circuit.snapshot(`${binding.host}:${binding.profileId}:${binding.profileRevision}`)
+    ).toMatchObject({
+      state: 'open'
+    })
+
+    const newerBinding = { ...binding, profileRevision: 'e'.repeat(64) }
+    const newSession = await pair(runtime, newerBinding)
+    const newPrepared = await prepare(runtime, newSession, request(1))
+    const newPreview = runtime.listPreviews().find((value) => value.callId === newPrepared.callId)
+    if (!newPreview) throw new Error('missing new revision preview fixture')
+    invoke.mockResolvedValueOnce({ content: 'new revision succeeds' })
+    await runtime.approve(newPrepared.callId, newPreview.payloadSha256)
+    await settle()
+    expect(await status(runtime, newSession, newPrepared.callId)).toMatchObject({
+      status: 'completed',
+      content: 'new revision succeeds'
+    })
+    expect(invoke).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['CANCELLED', 'TIMEOUT', 'CONFIGURATION_CHANGED'] as const)(
+    'does not count %s as a provider failure',
+    async (code) => {
+      const circuit = new ProviderCircuitBreaker({ failureThreshold: 1 })
+      const { runtime, session, prepared, preview, invoke } = await fixture({
+        providerCircuit: circuit
+      })
+      invoke.mockRejectedValue(new FigPluginBridgeError(code))
+      await runtime.approve(prepared.callId, preview.payloadSha256)
+      await settle()
+      expect(await status(runtime, session, prepared.callId)).toMatchObject({
+        status: code === 'CANCELLED' ? 'cancelled' : 'failed',
+        errorCode: code
+      })
+      expect(
+        circuit.snapshot(`${binding.host}:${binding.profileId}:${binding.profileRevision}`)
+      ).toMatchObject({
+        state: 'closed',
+        failureCount: 0,
+        probeInFlight: false
+      })
+    }
+  )
+
+  it('does not count a hard timeout when the provider resolves after cancellation', async () => {
+    const circuit = new ProviderCircuitBreaker({ failureThreshold: 1 })
+    const outcome = deferred<{ content: string }>()
+    const { runtime, session, prepared, preview, invoke } = await fixture({
+      providerCircuit: circuit,
+      callTimeoutMs: 5
+    })
+    invoke.mockReturnValue(outcome.promise)
+    await runtime.approve(prepared.callId, preview.payloadSha256)
+    await vi.advanceTimersByTimeAsync(5)
+    expect(await status(runtime, session, prepared.callId)).toMatchObject({
+      status: 'failed',
+      errorCode: 'TIMEOUT'
+    })
+    outcome.resolve({ content: 'late' })
+    await settle()
+    expect(
+      circuit.snapshot(`${binding.host}:${binding.profileId}:${binding.profileRevision}`)
+    ).toMatchObject({
+      state: 'closed',
+      failureCount: 0,
+      probeInFlight: false
+    })
   })
 
   it.each([undefined, 900_001, 0, 5])(

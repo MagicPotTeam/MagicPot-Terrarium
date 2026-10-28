@@ -10,6 +10,7 @@ import {
 } from '../../shared/figplugin/execution'
 import { createHostPlanReadback, type HostContext, type HostPlan } from '@shared/figplugin/hostPlan'
 import { createHostPlanningPreview } from '@shared/figplugin/hostPlanPreview'
+import { figPluginExecutionAuditEventSchema } from '@shared/figplugin/executionAudit'
 import type { FigPluginExecutionAuditEvent } from './executionAudit'
 import { FigPluginBridgeRuntime } from './bridgeRuntime'
 
@@ -61,6 +62,10 @@ const plan: HostPlan = {
   captureId,
   steps: [{ command: 'node.rename', targetId: 'node_1', name: 'New name' }]
 }
+const twoStepPlan: HostPlan = {
+  ...plan,
+  steps: [...plan.steps, { command: 'node.opacity', targetId: 'node_1', opacity: 0.5 }]
+}
 const hashOnlyContext: HostContext = {
   ...context,
   execution: {
@@ -98,16 +103,22 @@ const pairRequest = {
   clientNonce: '3'.repeat(32)
 }
 
-const fixture = (allowNativeWrite = true, hostContext: HostContext = context) => {
+const fixture = (
+  allowNativeWrite = true,
+  hostContext: HostContext = context,
+  validateBinding = async () => true,
+  hostPlan: HostPlan = plan
+) => {
   let now = 1_900_000_000_000
+  let nativeWriteAllowed = allowNativeWrite
   const audit: FigPluginExecutionAuditEvent[] = []
   const runtime = new FigPluginBridgeRuntime({
-    validateBinding: async () => true,
+    validateBinding,
     invoke: async () =>
       ({
-        content: JSON.stringify(createHostPlanningPreview(JSON.stringify(plan), hostContext))
+        content: JSON.stringify(createHostPlanningPreview(JSON.stringify(hostPlan), hostContext))
       }) as never,
-    allowNativeWrite: () => allowNativeWrite,
+    allowNativeWrite: () => nativeWriteAllowed,
     audit: (event) => audit.push(event),
     now: () => now
   })
@@ -117,17 +128,24 @@ const fixture = (allowNativeWrite = true, hostContext: HostContext = context) =>
     hostContext,
     advance: (milliseconds: number) => {
       now += milliseconds
+    },
+    setNativeWriteAllowed: (allowed: boolean) => {
+      nativeWriteAllowed = allowed
     }
   }
 }
 
-async function prepared(value: ReturnType<typeof fixture>) {
+async function paired(value: ReturnType<typeof fixture>) {
   const ticket = await value.runtime.createPairing(binding)
-  const session = await value.runtime.redeem({
+  return value.runtime.redeem({
     ...pairRequest,
     ticketId: ticket.ticketId,
     pairingSecret: ticket.pairingSecret
   })
+}
+
+async function prepared(value: ReturnType<typeof fixture>) {
+  const session = await paired(value)
   const receipt = await value.runtime.prepare(
     session.sessionId,
     session.sessionToken,
@@ -144,6 +162,136 @@ async function prepared(value: ReturnType<typeof fixture>) {
   expect(last?.status).toBe('completed')
   return { session, receipt }
 }
+
+describe.each(['awaiting-approval', 'claimed', 'readback'] as const)(
+  'ordinary %s plan lifetime audit',
+  (phase) => {
+    it.each(['close', 'revoke', 'configuration', 'expiry', 'call-expiry', 'dispose'] as const)(
+      'records one terminal event before parent cleanup (%s)',
+      async (ending) => {
+        const value = fixture()
+        try {
+          const { session, receipt } = await prepared(value)
+          const execution = value.runtime.listPlanExecutions()[0]
+          if (phase !== 'awaiting-approval') {
+            await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+            const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+              protocol: 1,
+              callId: receipt.callId
+            })
+            expect(claimed.status).toBe('ready')
+          }
+          if (phase === 'readback')
+            value.runtime.planProgress(session.sessionId, session.sessionToken, {
+              protocol: 1,
+              executionId: execution.executionId,
+              actionId: execution.executionId,
+              sequence: 2,
+              phase: 'readback',
+              index: 0,
+              completed: 0,
+              total: 1,
+              effect: 'partial',
+              at: value.audit.at(-1)!.at
+            })
+          const before = value.audit.length
+          if (ending === 'close')
+            value.runtime.closeSession(session.sessionId, session.sessionToken)
+          if (ending === 'revoke') value.runtime.revokePlugin(binding.pluginId)
+          if (ending === 'configuration') value.runtime.revokeInvalidBindings(() => false)
+          if (ending === 'call-expiry') {
+            value.advance(119_000)
+            await value.runtime.status(session.sessionId, session.sessionToken, receipt.callId)
+            value.advance(1_001)
+            expect(value.runtime.listSessions()).toHaveLength(1)
+          }
+          if (ending === 'expiry') value.advance(120_001)
+          if (ending === 'dispose') value.runtime.dispose()
+          else expect(value.runtime.listPlanExecutions()).toEqual([])
+          const terminal = value.audit.slice(before)
+          expect(terminal).toHaveLength(1)
+          const expired = ending === 'expiry' || ending === 'call-expiry'
+          expect(terminal[0]).toMatchObject({
+            executionId: execution.executionId,
+            state: expired ? 'expired' : 'cancelled',
+            errorCode: expired
+              ? 'EXPIRED'
+              : ending === 'revoke' || ending === 'configuration'
+                ? 'HOST_UNAVAILABLE'
+                : 'CANCELLED',
+            effect: phase === 'readback' ? 'partial' : 'none'
+          })
+          expect(figPluginExecutionAuditEventSchema.safeParse(terminal[0]).success).toBe(true)
+          expect(JSON.stringify(terminal)).not.toMatch(/Old name|New name/)
+          value.runtime.dispose()
+          expect(value.audit.slice(before)).toEqual(terminal)
+        } finally {
+          value.runtime.dispose()
+        }
+      }
+    )
+  }
+)
+
+it('emits bounded audit lineage for an execution', async () => {
+  const value = fixture()
+  try {
+    const { receipt } = await prepared(value)
+    const executionId = value.audit[0].executionId
+    const events = value.audit.filter((event) => event.executionId === executionId)
+    expect(events.length).toBeGreaterThan(0)
+    const correlationIds = new Set(events.map((event) => event.correlationId))
+    expect(correlationIds).toHaveLength(1)
+    const correlationId = [...correlationIds][0]
+    expect(correlationId).toMatch(/^[a-f0-9]{32}$/)
+    expect(correlationId).not.toBe(receipt.callId)
+    expect(new Set(events.map((event) => event.runId))).toEqual(new Set([executionId]))
+    expect(events.map((event) => event.sequence)).toEqual([1])
+    expect(
+      events.every((event) => figPluginExecutionAuditEventSchema.safeParse(event).success)
+    ).toBe(true)
+  } finally {
+    value.runtime.dispose()
+  }
+})
+
+it('audits idle-session expiry even before the ordinary plan preview expires', async () => {
+  let validate = () => {}
+  const value = fixture(true, context, async () => {
+    validate()
+    return true
+  })
+  try {
+    const session = await paired(value)
+    // A pending binding check can outlive the last host activity without refreshing idle TTL.
+    validate = () => value.advance(10_000)
+    const receipt = await value.runtime.prepare(
+      session.sessionId,
+      session.sessionToken,
+      prepareRequest()
+    )
+    validate = () => {}
+    const preview = value.runtime.listPreviews()[0]
+    await value.runtime.approve(receipt.callId, preview.payloadSha256)
+    for (let index = 0; index < 20 && !value.runtime.listPlanExecutions().length; index++)
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    const execution = value.runtime.listPlanExecutions()[0]
+    expect(execution).toBeDefined()
+    const before = value.audit.length
+    value.advance(110_001)
+    expect(value.runtime.listPlanExecutions()).toEqual([])
+    const terminal = value.audit.slice(before)
+    expect(terminal).toHaveLength(1)
+    expect(terminal[0]).toMatchObject({
+      executionId: execution.executionId,
+      state: 'expired',
+      errorCode: 'EXPIRED'
+    })
+    expect(terminal[0].at).toBeLessThan(execution.expiresAt)
+  } finally {
+    value.runtime.dispose()
+  }
+})
 
 async function completedVisualExecution(
   value: ReturnType<typeof fixture>,
@@ -178,6 +326,20 @@ async function completedVisualExecution(
   })
   return { session, receipt, execution, result }
 }
+
+it('does not rewrite or duplicate a verified terminal audit during parent teardown', async () => {
+  const value = fixture(true, hashOnlyContext)
+  try {
+    const { session } = await completedVisualExecution(value)
+    const before = [...value.audit]
+    expect(before.at(-1)).toMatchObject({ state: 'completed', effect: 'applied' })
+    value.runtime.closeSession(session.sessionId, session.sessionToken)
+    value.runtime.dispose()
+    expect(value.audit).toEqual(before)
+  } finally {
+    value.runtime.dispose()
+  }
+})
 
 // Use the production runtime throughout; only the model and native host observations are fixtures.
 async function correctionFixture() {
@@ -260,6 +422,448 @@ function finishCorrectionFixture(
 }
 
 describe('approved native-plan execution runtime', () => {
+  it('returns a terminal denied claim when native write authority is revoked before claim', async () => {
+    const value = fixture()
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      value.setNativeWriteAllowed(false)
+
+      const claim = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      expect(claim).toMatchObject({
+        status: 'terminal',
+        state: 'denied',
+        errorCode: 'DENIED'
+      })
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+        state: 'denied',
+        errorCode: 'DENIED'
+      })
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it.each(['status', 'progress', 'result'] as const)(
+    'blocks %s after an ordinary plan has been claimed when native write authority is revoked',
+    async (operation) => {
+      const value = fixture()
+      try {
+        const { session, receipt } = await prepared(value)
+        const execution = value.runtime.listPlanExecutions()[0]
+        await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+        const claim = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+          protocol: 1,
+          callId: receipt.callId
+        })
+        if (claim.status !== 'ready') throw new Error('not claimed')
+        value.setNativeWriteAllowed(false)
+        const lineage = {
+          requestId: claim.intent.requestId,
+          runId: claim.intent.runId,
+          correlationId: claim.intent.correlationId
+        }
+
+        if (operation === 'status') {
+          await expect(
+            value.runtime.planStatus(session.sessionId, session.sessionToken, {
+              protocol: 1,
+              callId: receipt.callId,
+              executionId: execution.executionId,
+              ...lineage
+            })
+          ).resolves.toMatchObject({ state: 'denied', errorCode: 'DENIED' })
+        } else if (operation === 'progress') {
+          expect(() =>
+            value.runtime.planProgress(session.sessionId, session.sessionToken, {
+              protocol: 1,
+              executionId: execution.executionId,
+              actionId: claim.intent.actionId,
+              ...lineage,
+              sequence: 2,
+              phase: 'executing',
+              index: 0,
+              completed: 1,
+              total: 1,
+              effect: 'applied',
+              at: value.audit.at(-1)?.at ?? 0
+            })
+          ).toThrowError(expect.objectContaining({ code: 'DENIED' }))
+        } else {
+          expect(() =>
+            value.runtime.planResult(session.sessionId, session.sessionToken, {
+              protocol: 1,
+              executionId: execution.executionId,
+              actionId: claim.intent.actionId,
+              ...lineage,
+              status: 'completed',
+              effect: 'applied',
+              completed: 1,
+              total: 1,
+              readback: createHostPlanReadback(
+                context,
+                { ...context, nodes: context.nodes.map((node) => ({ ...node, name: 'New name' })) },
+                plan
+              )
+            })
+          ).toThrowError(expect.objectContaining({ code: 'DENIED' }))
+        }
+
+        expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+          state: 'denied',
+          errorCode: 'DENIED',
+          completed: 0,
+          effect: 'none'
+        })
+      } finally {
+        value.runtime.dispose()
+      }
+    }
+  )
+
+  it('rejects impossible result status/effect pairs before changing execution state', async () => {
+    const value = fixture()
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claimed.status !== 'ready') throw new Error('not claimed')
+      const readback = createHostPlanReadback(value.hostContext, value.hostContext, plan)
+      const beforeStatus = value.runtime.listPlanStatuses()[0]
+      const beforeAuditLength = value.audit.length
+      const invalidResults = [
+        { status: 'failed' as const, effect: 'applied' as const, completed: 1 },
+        { status: 'cancelled' as const, effect: 'applied' as const, completed: 1 },
+        { status: 'completed' as const, effect: 'partial' as const, completed: 0 }
+      ]
+      for (const invalid of invalidResults)
+        expect(() =>
+          value.runtime.planResult(session.sessionId, session.sessionToken, {
+            protocol: 1,
+            executionId: execution.executionId,
+            actionId: claimed.intent.actionId,
+            ...invalid,
+            total: 1,
+            readback
+          })
+        ).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(value.runtime.listPlanStatuses()[0]).toEqual(beforeStatus)
+      expect(value.audit).toHaveLength(beforeAuditLength)
+
+      // The reservation is still held after rejected receipts: a valid no-op
+      // terminal result can settle the same claimed execution exactly once.
+      const settled = value.runtime.planResult(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        executionId: execution.executionId,
+        actionId: claimed.intent.actionId,
+        status: 'failed',
+        effect: 'none',
+        completed: 0,
+        total: 1,
+        readback
+      })
+      expect(settled.status).toMatchObject({
+        state: 'failed',
+        effect: 'none',
+        completed: 0,
+        errorCode: 'EXECUTION_FAILED'
+      })
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('normalizes omitted cancellation errors at the terminal receipt boundary', async () => {
+    const value = fixture()
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claimed.status !== 'ready') throw new Error('not claimed')
+
+      const settled = value.runtime.planResult(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        executionId: execution.executionId,
+        actionId: claimed.intent.actionId,
+        status: 'cancelled',
+        effect: 'none',
+        completed: 0,
+        total: 1,
+        readback: createHostPlanReadback(value.hostContext, value.hostContext, plan)
+      })
+      expect(settled.status).toMatchObject({
+        state: 'cancelled',
+        effect: 'none',
+        errorCode: 'CANCELLED'
+      })
+      expect(value.audit.at(-1)).toMatchObject({
+        state: 'cancelled',
+        effect: 'none',
+        errorCode: 'CANCELLED'
+      })
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('rejects progress phase regression and inconsistent executing indexes without mutating state', async () => {
+    const value = fixture()
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claimed.status !== 'ready') throw new Error('not claimed')
+      const base = {
+        protocol: 1 as const,
+        executionId: execution.executionId,
+        actionId: claimed.intent.actionId,
+        total: 1,
+        effect: 'applied' as const,
+        at: value.audit.at(-1)?.at ?? 0
+      }
+      expect(() =>
+        value.runtime.planProgress(session.sessionId, session.sessionToken, {
+          ...base,
+          sequence: 3,
+          phase: 'executing',
+          index: 0,
+          completed: 1
+        })
+      ).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+        state: 'claimed',
+        completed: 0
+      })
+      expect(() =>
+        value.runtime.planProgress(session.sessionId, session.sessionToken, {
+          ...base,
+          sequence: 2,
+          phase: 'executing',
+          index: 1,
+          completed: 1
+        })
+      ).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+        state: 'claimed',
+        completed: 0
+      })
+      const executing = {
+        ...base,
+        sequence: 2,
+        phase: 'executing',
+        index: 0,
+        completed: 1
+      } as const
+      value.runtime.planProgress(session.sessionId, session.sessionToken, executing)
+      expect(
+        value.runtime.planProgress(session.sessionId, session.sessionToken, executing)
+      ).toMatchObject({ state: 'executing', completed: 1 })
+      expect(() =>
+        value.runtime.planProgress(session.sessionId, session.sessionToken, {
+          ...executing,
+          sequence: 3,
+          effect: 'partial'
+        })
+      ).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(() =>
+        value.runtime.planProgress(session.sessionId, session.sessionToken, {
+          ...base,
+          sequence: 2,
+          phase: 'claimed',
+          completed: 0,
+          effect: 'none'
+        })
+      ).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+        state: 'executing',
+        completed: 1
+      })
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('does not downgrade an executing effect at the same completion count', async () => {
+    const value = fixture(true, context, async () => true, twoStepPlan)
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claim = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claim.status !== 'ready') throw new Error('not claimed')
+      const first = {
+        protocol: 1 as const,
+        executionId: execution.executionId,
+        actionId: claim.intent.actionId,
+        sequence: 2,
+        phase: 'executing' as const,
+        index: 0,
+        completed: 1,
+        total: 2,
+        effect: 'partial' as const,
+        at: value.audit.at(-1)?.at ?? 0
+      }
+      value.runtime.planProgress(session.sessionId, session.sessionToken, first)
+      expect(() =>
+        value.runtime.planProgress(session.sessionId, session.sessionToken, {
+          ...first,
+          sequence: 3,
+          effect: 'unknown'
+        })
+      ).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+        state: 'executing',
+        completed: 1,
+        effect: 'partial'
+      })
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('binds progress and result retries to the claimed request lineage', async () => {
+    const value = fixture()
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claim = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claim.status !== 'ready') throw new Error('not claimed')
+      expect(claim.intent).toMatchObject({
+        requestId: 'request_1',
+        runId: execution.executionId,
+        correlationId: expect.stringMatching(/^[a-f0-9]{32}$/)
+      })
+      const progress = {
+        protocol: 1 as const,
+        executionId: execution.executionId,
+        actionId: claim.intent.actionId,
+        requestId: claim.intent.requestId,
+        runId: claim.intent.runId,
+        correlationId: claim.intent.correlationId,
+        sequence: 2,
+        phase: 'executing' as const,
+        index: 0,
+        completed: 1,
+        total: 1,
+        effect: 'applied' as const,
+        at: value.audit.at(-1)?.at ?? 0
+      }
+      expect(() =>
+        value.runtime.planProgress(session.sessionId, session.sessionToken, {
+          ...progress,
+          correlationId: 'f'.repeat(32)
+        })
+      ).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({ state: 'claimed', completed: 0 })
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+        requestId: claim.intent.requestId,
+        runId: claim.intent.runId,
+        correlationId: claim.intent.correlationId
+      })
+      value.runtime.planProgress(session.sessionId, session.sessionToken, progress)
+      expect(
+        value.runtime.planProgress(session.sessionId, session.sessionToken, progress)
+      ).toMatchObject({
+        state: 'executing',
+        completed: 1
+      })
+      const result = {
+        protocol: 1 as const,
+        executionId: execution.executionId,
+        actionId: claim.intent.actionId,
+        requestId: claim.intent.requestId,
+        runId: claim.intent.runId,
+        correlationId: claim.intent.correlationId,
+        status: 'completed' as const,
+        effect: 'applied' as const,
+        completed: 1,
+        total: 1,
+        readback: createHostPlanReadback(
+          context,
+          { ...context, nodes: context.nodes.map((node) => ({ ...node, name: 'New name' })) },
+          plan
+        )
+      }
+      expect(() =>
+        value.runtime.planResult(session.sessionId, session.sessionToken, {
+          ...result,
+          runId: 'e'.repeat(32)
+        })
+      ).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({ state: 'executing' })
+      expect(
+        value.runtime.planResult(session.sessionId, session.sessionToken, result).status
+      ).toMatchObject({
+        state: 'completed',
+        effect: 'applied'
+      })
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('binds status polling to the claimed request lineage', async () => {
+    const value = fixture()
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claim = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claim.status !== 'ready') throw new Error('not claimed')
+      const lineage = {
+        requestId: claim.intent.requestId,
+        runId: claim.intent.runId,
+        correlationId: claim.intent.correlationId
+      }
+      expect(
+        await value.runtime.planStatus(session.sessionId, session.sessionToken, {
+          protocol: 1,
+          callId: receipt.callId,
+          executionId: execution.executionId,
+          ...lineage
+        })
+      ).toMatchObject({ state: 'claimed', ...lineage })
+      await expect(
+        value.runtime.planStatus(session.sessionId, session.sessionToken, {
+          protocol: 1,
+          callId: receipt.callId,
+          executionId: execution.executionId,
+          ...lineage,
+          correlationId: 'f'.repeat(32)
+        })
+      ).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({ state: 'claimed', ...lineage })
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
   it('binds write approval to the exact plan, claims once and verifies readback', async () => {
     const value = fixture()
     try {
@@ -656,6 +1260,77 @@ describe('approved native-plan execution runtime', () => {
     }
   })
 
+  it('terminalizes a prepared correction when authorization capacity evicts its ticket', async () => {
+    const value = await correctionFixture()
+    try {
+      const preparedCorrection = await prepareCorrectionFixture(value)
+      const internal = value.runtime as unknown as {
+        visualCorrectionAuthorizations: Map<
+          string,
+          {
+            value: typeof preparedCorrection.authorization
+            binding: FigPluginRuntimeBinding
+            preparedExecutionId?: string
+          }
+        >
+      }
+      // Fill the remaining slots with inert records so the next real
+      // authorization exercises the bounded-capacity eviction path.
+      for (let index = 0; index < 15; index += 1) {
+        const id = index.toString(16).padStart(32, '0')
+        internal.visualCorrectionAuthorizations.set(id, {
+          value: {
+            ...structuredClone(preparedCorrection.authorization),
+            authorizationId: id,
+            // Keep the synthetic entry attached to a live baseline so prune()
+            // does not discard it before the capacity path runs.
+            baselineId: preparedCorrection.authorization.baselineId,
+            sourceExecutionId: (index + 100).toString(16).padStart(32, '0')
+          },
+          binding
+        })
+      }
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toHaveLength(16)
+
+      value.hostContext = {
+        ...structuredClone(value.hostContext),
+        documentId: 'document_2'
+      }
+      const first = await completedVisualExecution(value)
+      const baseline = await value.runtime.acceptVisualBaseline(
+        first.execution.executionId,
+        first.result.status.visualEvidenceSha256!
+      )
+      const changed = await completedVisualExecution(value, [
+        { ...visualEvidence[0], after: { ...visualEvidence[0].after, sha256: '4'.repeat(64) } }
+      ])
+      const authorization = await value.runtime.authorizeVisualCorrection(
+        changed.execution.executionId,
+        baseline.baselineId,
+        changed.result.status.visualEvidenceSha256!
+      )
+
+      expect(authorization.round).toBe(1)
+      expect(value.runtime.listVisualCorrectionAuthorizations()).toHaveLength(16)
+      expect(value.runtime.listPlanStatuses()).toContainEqual(
+        expect.objectContaining({
+          executionId: preparedCorrection.preview.executionId,
+          state: 'cancelled',
+          errorCode: 'CANCELLED'
+        })
+      )
+      expect(value.audit).toContainEqual(
+        expect.objectContaining({
+          executionId: preparedCorrection.preview.executionId,
+          state: 'cancelled',
+          errorCode: 'CANCELLED'
+        })
+      )
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
   it('prepares, separately approves and consumes one correction round before verified execution', async () => {
     const value = fixture(true, hashOnlyContext)
     try {
@@ -971,6 +1646,50 @@ describe('approved native-plan execution runtime', () => {
         errorCode: 'QUARANTINED'
       })
       expect(JSON.stringify(value.audit)).not.toMatch(/Old name|New name/)
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('rejects a spoofed requested value instead of completing the write', async () => {
+    const value = fixture()
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claimed.status !== 'ready') throw new Error('not claimed')
+      const after: HostContext = {
+        ...structuredClone(context),
+        nodes: context.nodes.map((node) => ({ ...node, name: 'New name' }))
+      }
+      const readback = createHostPlanReadback(context, after, plan)
+      readback.steps[0].value = 'forged value'
+      expect(() =>
+        value.runtime.planResult(session.sessionId, session.sessionToken, {
+          protocol: 1,
+          executionId: execution.executionId,
+          actionId: claimed.intent.actionId,
+          status: 'completed',
+          effect: 'applied',
+          completed: 1,
+          total: 1,
+          readback
+        })
+      ).toThrow()
+      expect(value.runtime.listPlanStatuses()[0]).toMatchObject({
+        state: 'failed',
+        effect: 'unknown',
+        errorCode: 'QUARANTINED'
+      })
+      expect(value.audit.at(-1)).toMatchObject({
+        state: 'failed',
+        effect: 'unknown',
+        errorCode: 'QUARANTINED'
+      })
     } finally {
       value.runtime.dispose()
     }

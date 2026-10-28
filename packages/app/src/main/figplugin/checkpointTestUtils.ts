@@ -4,6 +4,7 @@ import { captureTaskRecoveryScope } from '@shared/figplugin/taskRecovery'
 import { canonicalFigPluginJson } from '@shared/figplugin/manifest'
 import type { FigPluginRuntimeBinding } from '@shared/figplugin/bridge'
 import type { CheckpointCodec, SavedCheckpoint } from './checkpointStore'
+import { createCheckpointBinaryCodec } from './checkpointBinaryCodec'
 export const NOW = 1_900_000_000_000
 export const hash = (value: unknown): string =>
   createHash('sha256').update(canonicalFigPluginJson(value)).digest('hex')
@@ -94,7 +95,7 @@ export function record(seed = 3): SavedCheckpoint {
 }
 /** Real authenticated encryption with an owned synthetic test key, not OS safeStorage. */
 export function ownedCodec(key: Buffer = randomBytes(32)): CheckpointCodec {
-  return {
+  const text: CheckpointCodec = {
     available: () => true,
     encrypt(text) {
       const iv = randomBytes(12),
@@ -107,4 +108,5 @@ export function ownedCodec(key: Buffer = randomBytes(32)): CheckpointCodec {
       return Buffer.concat([d.update(data.subarray(12, -16)), d.final()]).toString('utf8')
     }
   }
+  return { ...text, ...createCheckpointBinaryCodec(text) }
 }

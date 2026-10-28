@@ -14,7 +14,7 @@ const fflateLicense = fs.readFileSync(
 )
 const destination = path.join(root, 'packages/figplugin-hosts/shared/pixel-audit.js')
 
-/** Build only the bounded host-local pixel decoder and comparison functions. No native mutation API. */
+/** Build bounded host-local pixel codecs and comparison functions. No native mutation API. */
 export async function buildHostPixelAudit() {
   const result = await build({
     entryPoints: [entry],
@@ -47,7 +47,8 @@ export async function buildHostPixelAudit() {
     fflateLicense.replaceAll('*/', '* /') +
     '\n*/\n' +
     result.outputFiles[0].text +
-    '\nObject.defineProperty(globalThis,"MagicPotPixelAuditV1",{value:MagicPotPixelAuditBundle.hostPixelAudit,writable:false,configurable:false});\n'
+    '\nObject.defineProperty(globalThis,"MagicPotPixelAuditV1",{value:MagicPotPixelAuditBundle.hostPixelAudit,writable:false,configurable:false});\n' +
+    'Object.defineProperty(globalThis,"MagicPotContextPngV1",{value:Object.freeze({encode:MagicPotPixelAuditBundle.encodeContextPng}),writable:false,configurable:false});\n'
   return { text, sourceHashes, binding, destination }
 }
 
