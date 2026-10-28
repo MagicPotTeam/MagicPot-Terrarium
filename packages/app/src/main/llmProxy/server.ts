@@ -5,11 +5,23 @@ import http from 'http'
 import os from 'os'
 import fs from 'fs'
 import path from 'path'
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { publishTrustedChannelMessage } from '../magicAgentPlatform2/triggers/channelMessageEvents'
 import { isIP } from 'node:net'
 import { app } from 'electron'
 import { buildMagicPotAppCatalogSnapshot } from '@shared/app/catalog'
-import { type LLMOpenAIApiMode, type LLMProxyAccessTokenEntry } from '@shared/config/config'
+import {
+  type Config,
+  type LLMAPIProfile,
+  type LLMOpenAIApiMode,
+  type LLMProxyAccessTokenEntry
+} from '@shared/config/config'
+import {
+  isRunnableProfile,
+  resolveProfileDeployment,
+  resolveProfileModelUse,
+  resolveProfileProvider
+} from '@shared/llm'
 import { getConfig } from '../config/config'
 import { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
 import {
@@ -59,6 +71,121 @@ const CANVAS_SYNC_REMOVED_ERROR =
   'Canvas mirroring has been removed. Remote Codex can only access content explicitly attached to the current request.'
 const LEGACY_CHAT_ENDPOINTS = new Set(['/api/bot/message', '/api/bot/chat', '/api/message'])
 const DEFAULT_LLM_PROXY_BIND_HOST = '127.0.0.1'
+
+const getAllConfiguredLlmProfiles = (config: Config): LLMAPIProfile[] => [
+  ...(config.llm_config?.api_profiles || []),
+  ...(config.plugin_config?.api_profiles || [])
+]
+const buildProfileCompatibilityAlias = (profile: LLMAPIProfile) => {
+  const modelUse = resolveProfileModelUse(profile)
+  return {
+    id: profile.id,
+    profileId: profile.id,
+    profile_id: profile.id,
+    name: profile.model_name,
+    label: profile.model_name,
+    model: profile.model_name,
+    model_name: profile.model_name,
+    modelName: profile.model_name,
+    base_url: '',
+    api_key: '',
+    provider: resolveProfileProvider(profile),
+    deployment: resolveProfileDeployment(profile),
+    model_use: modelUse,
+    is_vision_model:
+      ['agent', 'multimodal', 'vision', 'ocr'].includes(modelUse) ||
+      Boolean(profile.is_vision_model),
+    is_ocr_model: modelUse === 'ocr' || Boolean(profile.is_ocr_model),
+    ...(profile.tagger_provider ? { tagger_provider: profile.tagger_provider } : {}),
+    ...(profile.tagger_endpoint?.trim() ? { tagger_endpoint: profile.tagger_endpoint.trim() } : {}),
+    ...(profile.tagger_runtime_cache_scope
+      ? { tagger_runtime_cache_scope: profile.tagger_runtime_cache_scope }
+      : {})
+  }
+}
+const buildProxyProfilesCompatibilityPayload = (
+  response: Awaited<ReturnType<LLMProxySvcImpl['listProfiles']>>
+) => {
+  const profiles = response.profiles.map((profile) => ({
+    ...profile,
+    profileId: profile.id,
+    profile_id: profile.id,
+    modelName: profile.model_name,
+    name: profile.model_name,
+    label: profile.model_name,
+    base_url: '',
+    api_key: ''
+  }))
+  return { ...response, profiles, availableProfiles: profiles, models: profiles, data: profiles }
+}
+const buildProxyStatusCompatibilityPayload = (
+  status: Awaited<ReturnType<LLMProxySvcImpl['serverStatus']>>,
+  config: Config,
+  legacyEndpoint?: string
+) => {
+  const profiles = getAllConfiguredLlmProfiles(config)
+    .filter(isRunnableProfile)
+    .map(buildProfileCompatibilityAlias)
+  return {
+    ...status,
+    ok: status.online,
+    status: status.online ? 'online' : 'offline',
+    availableProfiles: status.availableProfiles ?? profiles.length,
+    profileCount: status.availableProfiles ?? profiles.length,
+    profiles,
+    models: profiles,
+    compatibility: {
+      endpoint: '/api/status',
+      ...(legacyEndpoint ? { legacyEndpoint } : {}),
+      chatEndpoint: '/api/chat',
+      legacyChatEndpoints: Array.from(LEGACY_CHAT_ENDPOINTS),
+      profileEndpoint: '/api/profiles',
+      authHeaders: [
+        'Authorization',
+        'X-MagicPot-Proxy-Token',
+        'X-MagicPot-Bot-Secret',
+        'X-Bot-Secret'
+      ]
+    }
+  }
+}
+
+const sanitizeToolResponseValue = (
+  value: unknown,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet()
+): unknown => {
+  if (depth > 6) return '[Truncated]'
+  if (typeof value === 'bigint') return value.toString()
+  if (!value || typeof value !== 'object') return value
+  if (seen.has(value)) return '[Circular]'
+  seen.add(value)
+  if (value instanceof Error) return { name: value.name, message: value.message }
+  if (Array.isArray(value))
+    return value.map((item) => sanitizeToolResponseValue(item, depth + 1, seen))
+  const result: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (['stack', 'stackTrace', 'stacktrace'].includes(key)) continue
+    result[key] = sanitizeToolResponseValue(item, depth + 1, seen)
+  }
+  return result
+}
+const buildSafeToolResponseResult = (result: unknown): { content: string; metadata?: unknown } => {
+  if (result instanceof Error) return { content: 'Tool execution failed.' }
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    const tool = result as { content?: unknown; metadata?: unknown }
+    return {
+      content:
+        typeof tool.content === 'string'
+          ? tool.content
+          : tool.content == null
+            ? ''
+            : String(tool.content),
+      ...(tool.metadata !== undefined ? { metadata: sanitizeToolResponseValue(tool.metadata) } : {})
+    }
+  }
+  return { content: result == null ? '' : String(result) }
+}
 
 function getLlmProxyTempDir(scope?: string): string {
   const baseTempDir = resolveTestArtifactPath({
@@ -418,7 +545,7 @@ const isLocalSecretRequestAuthorized = (
   secret?: string | null
 ): boolean => {
   const normalizedSecret = cleanString(secret)
-  if (!normalizedSecret) return true
+  if (!normalizedSecret) return false
 
   const authorizationToken = getBearerToken(headers.authorization)
   if (constantTimeTokenEquals(authorizationToken, normalizedSecret)) {
@@ -1397,17 +1524,11 @@ export function startLLMProxyServer(): void {
           requesterAddress: getRequesterAddress(req)
         })
         const status = await getLLMProxySvc().serverStatus({})
-        const responseBody =
-          pathname === '/api/bot/status'
-            ? {
-                ...status,
-                compatibility: {
-                  endpoint: '/api/status',
-                  legacyEndpoint: '/api/bot/status',
-                  chatEndpoint: '/api/chat'
-                }
-              }
-            : status
+        const responseBody = buildProxyStatusCompatibilityPayload(
+          status,
+          getConfig(),
+          pathname === '/api/bot/status' ? pathname : undefined
+        )
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(responseBody))
         return
@@ -1426,7 +1547,7 @@ export function startLLMProxyServer(): void {
         })
         const profiles = await getLLMProxySvc().listProfiles({})
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(profiles))
+        res.end(JSON.stringify(buildProxyProfilesCompatibilityPayload(profiles)))
         return
       }
 
@@ -1477,6 +1598,15 @@ export function startLLMProxyServer(): void {
       }
 
       if (pathname === '/api/apps/catalog' && req.method === 'GET') {
+        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
+        if (!accessIdentity) {
+          writeUnauthorizedLlmProxyResponse(res)
+          return
+        }
+        recordLlmProxyAccessUsage(accessIdentity, {
+          activity: 'profiles',
+          requesterAddress: getRequesterAddress(req)
+        })
         const config = getConfig()
         let runtimeStatus: Awaited<ReturnType<typeof getMcpRuntimeStatus>> | null = null
         try {
@@ -1653,7 +1783,7 @@ export function startLLMProxyServer(): void {
         )
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ result }))
+        res.end(JSON.stringify({ result: buildSafeToolResponseResult(result) }))
         return
       }
 
@@ -1681,11 +1811,26 @@ export function startLLMProxyServer(): void {
         }
         const body = await readRequestBody(req)
         const parsedBody = (body ? JSON.parse(body) : {}) as unknown
-        const reqData = normalizeLegacyChatRequest(isRecord(parsedBody) ? parsedBody : {})
+        const rawRequest = isRecord(parsedBody) ? parsedBody : {}
+        const reqData = normalizeLegacyChatRequest(rawRequest)
         if (reqData.messages.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'Missing message content or messages.' }))
           return
+        }
+        const channelId = cleanUnknownString(rawRequest.channelId)
+        const messageId = cleanUnknownString(rawRequest.messageId)
+        const eventId = cleanUnknownString(rawRequest.eventId) || messageId
+        if (channelId && messageId && eventId) {
+          const content =
+            cleanUnknownString(rawRequest.message) || cleanUnknownString(rawRequest.text) || ''
+          publishTrustedChannelMessage({
+            eventId,
+            channelId,
+            messageId,
+            receivedAt: Date.now(),
+            payloadDigest: createHash('sha256').update(content, 'utf8').digest('hex')
+          })
         }
         await handleProxyChatRequest({
           req,

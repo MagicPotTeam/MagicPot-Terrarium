@@ -2,6 +2,8 @@ import fs from 'node:fs/promises'
 import net from 'node:net'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
+import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
 import { subscribeTrustedChannelMessages } from '../magicAgentPlatform2/triggers/channelMessageEvents'
@@ -47,11 +49,9 @@ type MockToolResponse = {
   metadata?: Record<string, unknown>
 }
 
-const chatMock = vi.fn(
-  async (_req?: unknown, _options?: unknown): Promise<MockChatResponse> => ({
-    content: 'chat ok'
-  })
-)
+const chatMock = vi.fn(async (_req?: unknown, _options?: unknown): Promise<MockChatResponse> => ({
+  content: 'chat ok'
+}))
 
 let rawLocalMediaPath = 'file:///tmp/reference.png'
 
@@ -86,6 +86,13 @@ vi.mock('../api/svcLLMProxyImpl', () => ({
     async chat(req: unknown): Promise<MockChatResponse> {
       chatRequestCapture = req
       return await chatMock(req)
+    }
+
+    async chatStream(req: unknown, stream: ServerStreaming<LLMChatStreamResp>): Promise<void> {
+      chatRequestCapture = req
+      const response = await chatMock(req)
+      stream.onData({ type: 'text-delta', delta: response.content, done: false })
+      stream.onData({ type: 'done', delta: '', done: true, finishReason: 'stop' })
     }
 
     async listProfiles(): Promise<{
@@ -886,7 +893,7 @@ describe('LLM proxy server legacy compatibility', () => {
     })
   })
 
-  it('returns ordinary JSON when OpenAI-compatible clients request streaming', async () => {
+  it('streams SSE when OpenAI-compatible clients request streaming', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
       method: 'POST',
       headers: {
@@ -902,26 +909,23 @@ describe('LLM proxy server legacy compatibility', () => {
         ]
       })
     })
-    const body = await response.json()
+    const body = await response.text()
 
     expect(response.status).toBe(200)
-    expect(response.headers.get('x-magicpot-stream-fallback')).toBe('non-stream-json')
-    expect(response.headers.get('access-control-expose-headers')).toContain(
-      'X-MagicPot-Stream-Fallback'
-    )
-    expect(body).toMatchObject({
-      object: 'chat.completion',
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    expect(response.headers.get('x-magicpot-stream-fallback')).toBeNull()
+    const frames = body
+      .split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => line.slice(6))
+    expect(frames.at(-1)).toBe('[DONE]')
+    const chunks = frames.slice(0, -1).map((frame) => JSON.parse(frame))
+    expect(chunks[0]).toMatchObject({
+      object: 'chat.completion.chunk',
       model: 'profile-1',
-      choices: [
-        {
-          message: {
-            role: 'assistant',
-            content: 'chat ok'
-          },
-          finish_reason: 'stop'
-        }
-      ]
+      choices: [{ delta: { content: 'chat ok' }, finish_reason: null }]
     })
+    expect(chunks.at(-1)).toMatchObject({ choices: [{ finish_reason: 'stop' }] })
     expect(chatRequestCapture).toMatchObject({
       messages: [{ role: 'user', content: 'hello' }],
       systemPrompt: 'system prompt',

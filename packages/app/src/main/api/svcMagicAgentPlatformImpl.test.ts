@@ -613,7 +613,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
         systemPrompt: 'Package prompt.',
         profileId: 'package-profile',
         maxToolIterations: 1,
-        allowedToolNames: ['session.status']
+        allowedToolNames: ['session.status', 'agent.terminal.run']
       })
     )
 
