@@ -12,7 +12,7 @@ import { selectMessagesForImageHistoryPolicy } from './imageHistory'
 type ResponsesInputContent =
   | { type: 'input_text'; text: string }
   | { type: 'output_text'; text: string }
-  | { type: 'input_image'; image_url: string }
+  | { type: 'input_image'; image_url: string; detail?: 'low' }
 
 export type OpenAIResponsesInputMessage = {
   role: 'user' | 'assistant'
@@ -798,7 +798,8 @@ export function buildOpenAIResponsesInput(
       for (const attachment of imageAttachments) {
         content.push({
           type: 'input_image',
-          image_url: assertOpenAIResponsesImageUrl(attachment.url)
+          image_url: assertOpenAIResponsesImageUrl(attachment.url),
+          ...(attachment.imageDetail === 'low' ? { detail: 'low' as const } : {})
         })
       }
 
@@ -838,7 +839,8 @@ export function buildOpenAIResponsesInput(
           },
           ...imageAttachments.map((attachment) => ({
             type: 'input_image' as const,
-            image_url: assertOpenAIResponsesImageUrl(attachment.url)
+            image_url: assertOpenAIResponsesImageUrl(attachment.url),
+            ...(attachment.imageDetail === 'low' ? { detail: 'low' as const } : {})
           }))
         ]
       })

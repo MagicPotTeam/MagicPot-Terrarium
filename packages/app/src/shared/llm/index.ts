@@ -14,6 +14,7 @@ export type {
   LLMChatParams,
   LLMChatResult,
   LLMDeltaEvent,
+  LLMStructuredOutput,
   LLMCli,
   LLMCliWithPrompt,
   OpenAIImageGenerationAction,
@@ -22,7 +23,33 @@ export type {
   OpenAIImageGenerationOutputFormat,
   OpenAIImageGenerationQuality
 } from './types'
+export type {
+  ModelInvocationContract,
+  ModelInvocationError,
+  ModelInvocationEvent,
+  ModelInvocationIdentity,
+  ModelInvocationPermission,
+  ModelInvocationRequest,
+  ModelInvocationResourceRef,
+  ModelInvocationTimeout
+} from './modelInvocationContract'
 export { normalizeLLMChatResult, parseStructuredLLMChatResult } from './types'
+export {
+  normalizeLLMStructuredOutput,
+  LLM_STRUCTURED_OUTPUT_MAX_SCHEMA_BYTES
+} from './structuredOutput'
+export {
+  MODEL_INVOCATION_DEFAULT_DEADLINE_MS,
+  MODEL_INVOCATION_SCHEMA,
+  MODEL_INVOCATION_VERSION,
+  buildModelInvocationHeaders,
+  createModelInvocationContract,
+  createModelInvocationRequest,
+  isCurrentModelInvocation,
+  normalizeModelInvocationContract,
+  normalizeModelInvocationError,
+  toModelInvocationError
+} from './modelInvocationContract'
 export type {
   ImageRequestAction,
   ImageHistoryContinuationRefs,
@@ -87,6 +114,7 @@ export {
   isCodexFastModeEnabled,
   cliFromProfile
 } from './utils'
+export { isPrivateOrLocalProviderHost, validateProviderBaseUrl } from './providerEndpointPolicy'
 export {
   isOpenAIFileSearchAttachment,
   collectOpenAIFileSearchAttachments,

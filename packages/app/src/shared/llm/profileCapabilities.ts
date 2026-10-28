@@ -4,7 +4,12 @@ import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type ProviderAttachmentTransport =
-  'file-id' | 'multipart' | 'accessible-url' | 'request-data-url'
+  | 'file-id'
+  | 'multipart'
+  | 'accessible-url'
+  | 'request-data-url'
+  /** Content-addressed binary frames consumed by the main-process LLM boundary. */
+  | 'chunked-binary-v1'
 
 export type ChatCapabilityProfile = {
   model_name?: string
@@ -77,7 +82,8 @@ const normalizeAttachmentTransport = (
   return normalized === 'file-id' ||
     normalized === 'multipart' ||
     normalized === 'accessible-url' ||
-    normalized === 'request-data-url'
+    normalized === 'request-data-url' ||
+    normalized === 'chunked-binary-v1'
     ? normalized
     : undefined
 }

@@ -252,6 +252,19 @@ describe('project comparison HTTP boundary', () => {
     await Promise.all(f.exchanges.map(expectCleanup))
   })
 
+  it('forwards a bounded correlation id without allowing arbitrary request fields', async () => {
+    const f = await fixture()
+    const correlationId = '01234567-89ab-4cde-8123-456789abcdef'
+    const response = await f.post({ ...validBody, correlationId })
+
+    expect(response.status).toBe(200)
+    expect(f.service.chat).toHaveBeenCalledWith(
+      expect.objectContaining({ correlationId }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    await expectCleanup(await f.first)
+  })
+
   it.each([
     { ...validBody, protocol: undefined },
     { ...validBody, protocol: 2 },
@@ -447,6 +460,7 @@ describe('project comparison HTTP boundary', () => {
       'PROFILE_CONFIGURATION_CHANGED'
     ],
     [new ServiceError('SECRET', { code: 'PROTOCOL_UNSUPPORTED' }), 501, 'PROTOCOL_UNSUPPORTED'],
+    [new ServiceError('SECRET', { code: 'CANCELLED' }), 499, 'CANCELLED'],
     [
       new UpstreamHttpError('SECRET', { status: 502, statusText: 'SECRET' }, 'SECRET'),
       502,

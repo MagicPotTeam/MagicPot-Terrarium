@@ -174,6 +174,7 @@ describe('LLMProxySvcImpl with the production RemoteProjectComparisonClient', ()
       profileId: remoteProfile.id,
       expectedProfileRevision: remoteRevision,
       messages,
+      correlationId: expect.any(String),
       temperature: 0.6,
       maxOutputTokens: 345
     })
@@ -268,8 +269,8 @@ describe('LLMProxySvcImpl with the production RemoteProjectComparisonClient', ()
     (operation) => {
       it.each([
         { status: 200, code: 'PROTOCOL_UNSUPPORTED' },
-        { status: 502, code: 'REMOTE_HTTP_ERROR' },
-        { status: 504, code: 'REMOTE_HTTP_ERROR' },
+        { status: 502, code: 'REMOTE_UPSTREAM_FAILED' },
+        { status: 504, code: 'TIMEOUT' },
         { status: 409, code: 'PROFILE_CONFIGURATION_CHANGED' },
         { status: 401, code: 'AUTH' }
       ])('fails closed for status $status with $code', async ({ status, code }) => {

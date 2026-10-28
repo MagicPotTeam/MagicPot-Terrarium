@@ -29,6 +29,7 @@ describe('McpClientManager', () => {
   const managers: McpClientManager[] = []
 
   afterEach(async () => {
+    vi.useRealTimers()
     while (managers.length > 0) {
       const manager = managers.pop()
       await manager?.stop()
@@ -179,8 +180,62 @@ describe('McpClientManager', () => {
     ])
   })
 
+  it('matches MCP aliases case-insensitively after assistant normalization', async () => {
+    class CaseVariantManager extends McpClientManager {
+      protected override createClient(): Client {
+        return {
+          connect: vi.fn(async () => undefined),
+          listTools: vi.fn(async () => ({
+            tools: [
+              {
+                name: 'EchoUpper',
+                description: 'Echo with a mixed-case MCP name.',
+                inputSchema: {
+                  type: 'object',
+                  properties: {}
+                }
+              }
+            ]
+          })),
+          callTool: vi.fn(async ({ name }: { name: string }) => ({
+            content: [{ type: 'text', text: name }],
+            isError: false
+          }))
+        } as unknown as Client
+      }
+
+      protected override createTransport(_config: McpExternalServerConfig) {
+        return {
+          close: vi.fn(async () => undefined)
+        } as never
+      }
+    }
+
+    const manager = new CaseVariantManager()
+    managers.push(manager)
+
+    await manager.sync(
+      createConfig([
+        {
+          id: 'case-variant',
+          enabled: true,
+          transport: 'stdio',
+          command: process.execPath,
+          toolPrefix: 'mcp.case-variant'
+        }
+      ])
+    )
+
+    await expect(manager.callToolByAlias('MCP.CASE-VARIANT.ECHOUPPER', {})).resolves.toMatchObject({
+      content: 'EchoUpper'
+    })
+  })
+
   it('treats aborted tool calls as cancellation instead of server failure', async () => {
-    const pendingCall = new Promise<never>(() => undefined)
+    let rejectCall: (reason?: unknown) => void = () => undefined
+    const pendingCall = new Promise<never>((_, reject) => {
+      rejectCall = reject
+    })
 
     class AbortAwareManager extends McpClientManager {
       protected override createClient(): Client {
@@ -230,10 +285,89 @@ describe('McpClientManager', () => {
     await expect(resultPromise).rejects.toMatchObject({
       name: 'AbortError'
     })
+
+    // A transport can reject after the caller has already cancelled. The
+    // manager must observe that rejection without turning it into an
+    // unhandled rejection or changing the connection health state.
+    rejectCall(new Error('late transport failure'))
+    await Promise.resolve()
     expect(manager.listConnections()).toEqual([
       expect.objectContaining({
         id: 'abort-aware',
         status: 'connected',
+        toolCount: 1
+      })
+    ])
+  })
+
+  it('observes late transport failures after a request timeout', async () => {
+    let rejectCall: (reason?: unknown) => void = () => undefined
+    const pendingCall = new Promise<never>((_, reject) => {
+      rejectCall = reject
+    })
+
+    class TimeoutAwareManager extends McpClientManager {
+      protected override createClient(): Client {
+        return {
+          connect: vi.fn(async () => undefined),
+          listTools: vi.fn(async () => ({
+            tools: [
+              {
+                name: 'wait',
+                description: 'Wait until the request timeout fires.',
+                inputSchema: {
+                  type: 'object',
+                  properties: {}
+                }
+              }
+            ]
+          })),
+          callTool: vi.fn(async () => pendingCall)
+        } as unknown as Client
+      }
+
+      protected override createTransport(_config: McpExternalServerConfig) {
+        return {
+          close: vi.fn(async () => undefined)
+        } as never
+      }
+    }
+
+    const manager = new TimeoutAwareManager()
+    managers.push(manager)
+
+    await manager.sync(
+      createConfig([
+        {
+          id: 'timeout-aware',
+          enabled: true,
+          transport: 'stdio',
+          command: process.execPath,
+          requestTimeoutMs: 1000
+        }
+      ])
+    )
+
+    vi.useFakeTimers()
+    const resultPromise = manager.callToolByAlias('mcp.timeout-aware.wait', {})
+    const rejection = expect(resultPromise).rejects.toThrow('timed out after 1000ms')
+    await vi.advanceTimersByTimeAsync(1000)
+    await rejection
+    expect(manager.listConnections()).toEqual([
+      expect.objectContaining({
+        id: 'timeout-aware',
+        status: 'error',
+        toolCount: 1
+      })
+    ])
+
+    // Rejecting the underlying MCP call after the timeout must be harmless.
+    rejectCall(new Error('late transport failure'))
+    await Promise.resolve()
+    expect(manager.listConnections()).toEqual([
+      expect.objectContaining({
+        id: 'timeout-aware',
+        status: 'error',
         toolCount: 1
       })
     ])

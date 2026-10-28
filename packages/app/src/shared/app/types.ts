@@ -6,13 +6,7 @@ export const MAGICPOT_CUSTOM_SKILL_APP_ID_PREFIX = 'custom-skill'
 export type MagicPotAppTransport = 'mcp' | 'http' | 'bridge' | 'local' | 'qapp'
 
 export type MagicPotAppSource =
-  | 'builtin'
-  | 'mcp-client'
-  | 'bridge'
-  | 'magicpot-core'
-  | 'qapp'
-  | 'mcp-external'
-  | 'custom-skill'
+  'builtin' | 'mcp-client' | 'bridge' | 'magicpot-core' | 'qapp' | 'mcp-external' | 'custom-skill'
 
 export type MagicPotAppStatus = 'ready' | 'disabled' | 'connecting' | 'error'
 
@@ -385,6 +379,36 @@ export const MAGICPOT_CORE_TOOL_DESCRIPTORS: ReadonlyArray<MagicPotAppToolDescri
     name: 'mcp.status',
     description: 'Describe current MCP client connections and the local MagicPot MCP server state.',
     inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'web_search',
+    description:
+      'Search the public web when current or externally verifiable information is needed. Returns bounded snippets and source URLs for citation.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['query'],
+      properties: {
+        query: { type: 'string', minLength: 1, maxLength: 512 },
+        maxResults: { type: 'integer', minimum: 1, maximum: 8 },
+        timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000 }
+      }
+    }
+  },
+  {
+    name: 'web_fetch',
+    description:
+      'Fetch a public HTTPS page after SSRF and redirect checks. Returns bounded readable text and page metadata for source verification.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['url'],
+      properties: {
+        url: { type: 'string', minLength: 1, maxLength: 4096 },
+        maxChars: { type: 'integer', minimum: 1000, maximum: 24000 },
+        timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000 }
+      }
+    }
   }
 ]
 

@@ -54,6 +54,26 @@ export interface SubagentRunRecord {
   resumedFromRunId?: string
 }
 
+/**
+ * Retention controls for completed orchestration records. Active runs are never
+ * removed by lifecycle cleanup, even when the run-count bound is exceeded.
+ */
+export type SubagentRunRetentionOptions = Readonly<{
+  now?: number
+  ttlMs?: number
+  maxRetainedRuns?: number
+}>
+
+/** Content-free counters suitable for diagnostics or a bounded audit log. */
+export type SubagentRunCleanupAudit = Readonly<{
+  scannedRunCount: number
+  activeRunCount: number
+  expiredRunCount: number
+  evictedRunCount: number
+  retainedRunCount: number
+  activeLimitExceeded: boolean
+}>
+
 type SubagentTaskDefinition = {
   id: string
   task: string
@@ -133,6 +153,20 @@ const arraysEqual = (left: string[], right: string[]): boolean =>
 
 const MAX_TASK_ATTEMPTS = 100
 const MAX_PARALLELISM = 32
+export const DEFAULT_SUBAGENT_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1_000
+export const DEFAULT_SUBAGENT_MAX_RETAINED_RUNS = 256
+
+const normalizeRetentionInteger = (
+  value: number | undefined,
+  fallback: number,
+  minimum: number
+): number => {
+  if (value === undefined) return fallback
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw new RangeError('Subagent retention values must be bounded safe integers')
+  }
+  return value
+}
 
 const normalizeBoundedInteger = (
   value: number | undefined,
@@ -192,6 +226,9 @@ class SubagentRegistry {
     validateTaskDefinitions(params.tasks)
 
     const now = Date.now()
+    // Bound historical terminal records before admitting another run. Active
+    // runs remain protected by cleanupRetainedRuns' lifecycle policy.
+    this.cleanupRetainedRuns({ now })
     const taskRecords: SubagentTaskRecord[] = params.tasks.map((task, index) => ({
       id: task.id,
       task: task.task,
@@ -258,6 +295,7 @@ class SubagentRegistry {
       }
     }
     this.runs.set(restored.runId, restored)
+    this.cleanupRetainedRuns({ now: Date.now() })
   }
 
   public getRun(runId: string): SubagentRunRecord | undefined {
@@ -438,6 +476,53 @@ class SubagentRegistry {
 
   public cleanupRun(runId: string) {
     this.runs.delete(runId)
+  }
+
+  /**
+   * Remove only terminal orchestration records that have exceeded the explicit
+   * retention policy. The registry is in-memory, so this is a deterministic
+   * bounded cleanup hook rather than a background deletion guarantee.
+   */
+  public cleanupRetainedRuns(options: SubagentRunRetentionOptions = {}): SubagentRunCleanupAudit {
+    const now = options.now ?? Date.now()
+    if (!Number.isFinite(now)) throw new RangeError('Subagent retention time must be finite')
+    const ttlMs = normalizeRetentionInteger(options.ttlMs, DEFAULT_SUBAGENT_RUN_TTL_MS, 0)
+    const maxRetainedRuns = normalizeRetentionInteger(
+      options.maxRetainedRuns,
+      DEFAULT_SUBAGENT_MAX_RETAINED_RUNS,
+      1
+    )
+
+    const runs = [...this.runs.values()]
+    const activeRuns = runs.filter((run) => run.endedAt === undefined)
+    const expired = runs.filter((run) => run.endedAt !== undefined && run.endedAt <= now - ttlMs)
+    for (const run of expired) this.runs.delete(run.runId)
+
+    const retainedTerminal = runs
+      .filter((run) => run.endedAt !== undefined && !expired.includes(run))
+      .sort((left, right) => {
+        const leftTime = left.endedAt ?? left.createdAt
+        const rightTime = right.endedAt ?? right.createdAt
+        return leftTime - rightTime || left.createdAt - right.createdAt
+      })
+    const retainedCountBeforeQuota = activeRuns.length + retainedTerminal.length
+    let evictedRunCount = 0
+    let overflow = Math.max(0, retainedCountBeforeQuota - maxRetainedRuns)
+    while (overflow > 0 && retainedTerminal.length > 0) {
+      const run = retainedTerminal.shift()!
+      this.runs.delete(run.runId)
+      evictedRunCount += 1
+      overflow -= 1
+    }
+
+    return {
+      scannedRunCount: runs.length,
+      activeRunCount: activeRuns.length,
+      expiredRunCount: expired.length,
+      evictedRunCount,
+      retainedRunCount: this.runs.size,
+      activeLimitExceeded: activeRuns.length > maxRetainedRuns
+    }
   }
 
   public getAllRuns(): SubagentRunRecord[] {

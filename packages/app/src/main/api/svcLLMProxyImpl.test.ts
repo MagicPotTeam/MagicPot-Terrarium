@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
+import { createBinaryChunkTransport } from '@shared/binaryChunkProtocol'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
 import { validateImageRequestImageDescriptors } from '@shared/llm/imageRequestContract'
@@ -17,7 +18,8 @@ import {
   createElectronRequestFetch,
   type ElectronClientRequestLike,
   LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE,
-  LLMProxySvcImpl
+  LLMProxySvcImpl,
+  materializeChunkedBinaryAttachments
 } from './svcLLMProxyImpl'
 
 const {
@@ -245,6 +247,151 @@ describe('createElectronRequestFetch', () => {
 })
 
 describe('LLMProxySvcImpl', () => {
+  it('materializes chunked binary attachments into canonical provider data URLs', async () => {
+    const payload = Uint8Array.from([0, 1, 2, 3, 4])
+    const transport = await createBinaryChunkTransport(payload, {
+      mimeType: 'application/octet-stream',
+      chunkSize: 2
+    })
+    const result = await materializeChunkedBinaryAttachments({
+      messages: [
+        {
+          role: 'user',
+          content: 'file',
+          attachments: [
+            {
+              type: 'file',
+              url: 'local-media://managed/file',
+              media: {
+                version: 1,
+                kind: 'managed',
+                relativePath: 'originals/aa/managed-file.bin'
+              },
+              binary: { transport: 'chunked-binary-v1', ...transport }
+            }
+          ]
+        }
+      ]
+    })
+
+    const attachment = result.messages[0].attachments?.[0]
+    expect(attachment).toMatchObject({
+      type: 'file',
+      mimeType: 'application/octet-stream',
+      sizeBytes: payload.byteLength,
+      url: 'data:application/octet-stream;base64,AAECAwQ='
+    })
+    expect(attachment).not.toHaveProperty('binary')
+    expect(attachment).not.toHaveProperty('media')
+  })
+
+  it('accepts out-of-order frames while preserving the assembled object', async () => {
+    const transport = await createBinaryChunkTransport(Uint8Array.from([10, 11, 12, 13]), {
+      mimeType: 'application/octet-stream',
+      chunkSize: 2
+    })
+    const result = await materializeChunkedBinaryAttachments({
+      messages: [
+        {
+          role: 'user',
+          content: '',
+          attachments: [
+            {
+              type: 'file',
+              url: '',
+              binary: {
+                transport: 'chunked-binary-v1',
+                reference: transport.reference,
+                chunks: [...transport.chunks].reverse()
+              }
+            }
+          ]
+        }
+      ]
+    })
+    expect(result.messages[0].attachments?.[0].url).toBe(
+      'data:application/octet-stream;base64,CgsMDQ=='
+    )
+  })
+
+  it('rejects malformed chunk sets and unknown binary transports at the boundary', async () => {
+    const transport = await createBinaryChunkTransport(Uint8Array.from([1, 2, 3, 4]), {
+      mimeType: 'application/octet-stream',
+      chunkSize: 2
+    })
+    await expect(
+      materializeChunkedBinaryAttachments({
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [
+              {
+                type: 'file',
+                url: '',
+                binary: {
+                  transport: 'chunked-binary-v1',
+                  reference: transport.reference,
+                  chunks: [transport.chunks[0], transport.chunks[0]]
+                }
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/invalid chunked binary payload/i)
+
+    await expect(
+      materializeChunkedBinaryAttachments({
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [
+              {
+                type: 'file',
+                url: '',
+                binary: { transport: 'unknown' }
+              } as never
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/unknown or malformed binary attachment transport/i)
+  })
+
+  it('rejects oversized chunked objects before allocating their payload', async () => {
+    await expect(
+      materializeChunkedBinaryAttachments({
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [
+              {
+                type: 'file',
+                url: '',
+                binary: {
+                  transport: 'chunked-binary-v1',
+                  reference: {
+                    version: 1,
+                    kind: 'content-addressed-binary',
+                    sha256: '0'.repeat(64),
+                    sizeBytes: 64 * 1024 * 1024 + 1,
+                    mimeType: 'application/octet-stream',
+                    chunkSize: 256 * 1024,
+                    chunkCount: 1
+                  },
+                  chunks: []
+                }
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/exceeds the 67108864 byte request limit/i)
+  })
+
   it('allows main-process LLM extensions to normalize requests and provide clients', async () => {
     const extensionChat = vi.fn().mockResolvedValue({ content: 'extension response' })
     const createCli = vi.fn().mockReturnValue({ chat: extensionChat })
@@ -283,7 +430,10 @@ describe('LLMProxySvcImpl', () => {
     expect(cliFromProfile).not.toHaveBeenCalled()
     expect(extensionChat).toHaveBeenCalledWith(
       expect.objectContaining({
-        messages: [{ role: 'user', content: 'hello' }]
+        messages: [{ role: 'user', content: 'hello' }],
+        // Stateless requests must still opt into the main-owned transient
+        // provider retry policy; a conversation id is not required for this.
+        retryCapacity: true
       })
     )
     expect(resp).toEqual({ content: 'extension response' })
@@ -461,21 +611,27 @@ describe('LLMProxySvcImpl', () => {
         id: 'quick-profile'
       })
     )
-    expect(agentChat).toHaveBeenCalledWith({
-      conversationId: undefined,
-      imageGenerationOptions: undefined,
-      imageHistoryPolicy: undefined,
-      imageRequest: undefined,
-      maxOutputTokens: undefined,
-      messages: [{ role: 'user', content: 'hello' }],
-      onDelta: expect.any(Function),
-      reasoningEffort: undefined,
-      sessionUrl: undefined,
-      signal: undefined,
-      systemPrompt: 'system prompt',
-      temperature: undefined,
-      videoGenerationOptions: undefined
-    })
+    expect(agentChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: undefined,
+        imageGenerationOptions: undefined,
+        imageHistoryPolicy: undefined,
+        imageRequest: undefined,
+        maxOutputTokens: undefined,
+        messages: [{ role: 'user', content: 'hello' }],
+        onDelta: expect.any(Function),
+        reasoningEffort: undefined,
+        retryCapacity: true,
+        sessionUrl: undefined,
+        signal: undefined,
+        systemPrompt: 'system prompt',
+        temperature: undefined,
+        videoGenerationOptions: undefined
+      })
+    )
+    expect(agentChat.mock.calls[0]?.[0]?.correlationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
     expect(resp.content).toBe('agent response')
   })
 
@@ -526,21 +682,27 @@ describe('LLMProxySvcImpl', () => {
         fetchImpl: expect.any(Function)
       })
     )
-    expect(quickChat).toHaveBeenCalledWith({
-      conversationId: undefined,
-      imageGenerationOptions: undefined,
-      imageHistoryPolicy: undefined,
-      imageRequest: undefined,
-      maxOutputTokens: undefined,
-      messages: [{ role: 'user', content: 'hello' }],
-      onDelta: expect.any(Function),
-      reasoningEffort: undefined,
-      sessionUrl: undefined,
-      signal: undefined,
-      systemPrompt: undefined,
-      temperature: undefined,
-      videoGenerationOptions: undefined
-    })
+    expect(quickChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: undefined,
+        imageGenerationOptions: undefined,
+        imageHistoryPolicy: undefined,
+        imageRequest: undefined,
+        maxOutputTokens: undefined,
+        messages: [{ role: 'user', content: 'hello' }],
+        onDelta: expect.any(Function),
+        reasoningEffort: undefined,
+        retryCapacity: true,
+        sessionUrl: undefined,
+        signal: undefined,
+        systemPrompt: undefined,
+        temperature: undefined,
+        videoGenerationOptions: undefined
+      })
+    )
+    expect(quickChat.mock.calls[0]?.[0]?.correlationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
     expect(resp.content).toBe('quick response')
   })
 
@@ -716,21 +878,26 @@ describe('LLMProxySvcImpl', () => {
       videoGenerationOptions
     })
 
-    expect(videoChat).toHaveBeenCalledWith({
-      conversationId: undefined,
-      imageGenerationOptions: undefined,
-      imageHistoryPolicy: undefined,
-      imageRequest: undefined,
-      maxOutputTokens: undefined,
-      messages: [{ role: 'user', content: 'make a video' }],
-      onDelta: expect.any(Function),
-      reasoningEffort: undefined,
-      sessionUrl: undefined,
-      signal: undefined,
-      systemPrompt: undefined,
-      temperature: undefined,
-      videoGenerationOptions
-    })
+    expect(videoChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: undefined,
+        imageGenerationOptions: undefined,
+        imageHistoryPolicy: undefined,
+        imageRequest: undefined,
+        maxOutputTokens: undefined,
+        messages: [{ role: 'user', content: 'make a video' }],
+        onDelta: expect.any(Function),
+        reasoningEffort: undefined,
+        sessionUrl: undefined,
+        signal: undefined,
+        systemPrompt: undefined,
+        temperature: undefined,
+        videoGenerationOptions
+      })
+    )
+    expect(videoChat.mock.calls[0]?.[0]?.correlationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
   })
 
   it('passes AbortSignal through to the selected LLM client', async () => {
@@ -864,6 +1031,291 @@ describe('LLMProxySvcImpl', () => {
     await expect(svc.chat(request)).resolves.toEqual({ content: 'first response' })
     await expect(svc.chat(request)).resolves.toEqual({ content: 'second response' })
     expect(agentChat).toHaveBeenCalledTimes(2)
+  })
+
+  it('reuses a cancelled chat while its provider drains without letting stale cleanup or cancel touch the new owner', async () => {
+    const resolvers: Array<(value: string) => void> = []
+    const signals: Array<AbortSignal | undefined> = []
+    const agentChat = vi.fn(({ signal }: { signal?: AbortSignal }) => {
+      signals.push(signal)
+      return new Promise<string>((resolve) => resolvers.push(resolve))
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    mockAgentProfile()
+    const svc = new LLMProxySvcImpl()
+    const request = {
+      conversationId: 'cancel-then-send',
+      profileId: 'agent-profile',
+      messages: [{ role: 'user' as const, content: 'Owned fixture' }]
+    }
+    const old = svc.chat({ ...request, cancellationId: 'first-request' }).catch((error) => error)
+    await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(1))
+    expect(await svc.cancelConversation({ ...request, cancellationId: 'first-request' })).toEqual({
+      cancelled: true
+    })
+
+    const next = svc.chat({ ...request, cancellationId: 'second-request' })
+    await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(2))
+    expect(signals[0]?.aborted).toBe(true)
+    expect(signals[1]?.aborted).toBe(false)
+    resolvers[0]('A cancelled provider completed late')
+    expect(await old).toMatchObject({ name: 'AbortError' })
+    await expect(svc.chat({ ...request, cancellationId: 'third-request' })).rejects.toMatchObject({
+      code: LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE
+    })
+    expect(await svc.cancelConversation({ ...request, cancellationId: 'first-request' })).toEqual({
+      cancelled: false
+    })
+    expect(signals[1]?.aborted).toBe(false)
+    resolvers[1]('The new request owns this response')
+    await expect(next).resolves.toEqual({ content: 'The new request owns this response' })
+  })
+
+  it.each(['success', 'failure'] as const)(
+    'releases a local stream before its %s terminal callback starts the next request',
+    async (outcome) => {
+      const agentChat = vi.fn()
+      if (outcome === 'success') agentChat.mockResolvedValueOnce('First response')
+      else agentChat.mockRejectedValueOnce(new Error('Owned provider failure'))
+      agentChat.mockResolvedValueOnce('Next response')
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+      mockAgentProfile()
+      const svc = new LLMProxySvcImpl()
+      const request = {
+        conversationId: `stream-terminal-${outcome}`,
+        profileId: 'agent-profile',
+        messages: [{ role: 'user' as const, content: 'Owned fixture' }]
+      }
+      let next: ReturnType<LLMProxySvcImpl['chat']> | undefined
+      await svc.chatStream(
+        { ...request, cancellationId: 'first-stream' },
+        {
+          onData: (event) => {
+            if (event.type === 'done') {
+              next = svc.chat({ ...request, cancellationId: 'next-request' })
+              void next.catch(() => undefined)
+            }
+          }
+        }
+      )
+      expect(next).toBeDefined()
+      await expect(next).resolves.toEqual({ content: 'Next response' })
+      expect(agentChat).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it.each([
+    ['chat', false],
+    ['chat', true],
+    ['chatStream', false],
+    ['chatStream', true]
+  ] as const)(
+    'never dispatches late cancelled %s provider tool calls (native: %s) into a successor request',
+    async (method, nativeTools) => {
+      mockAgentProfile()
+      listToolsMock.mockReturnValue([
+        { name: 'files.write', description: 'Owned fixture write', inputSchema: { type: 'object' } }
+      ])
+      const resolvers: Array<(value: unknown) => void> = []
+      const signals: Array<AbortSignal | undefined> = []
+      const agentChat = vi.fn(({ signal }: { signal?: AbortSignal }) => {
+        signals.push(signal)
+        return new Promise((resolve) => resolvers.push(resolve))
+      })
+      vi.mocked(cliFromProfile).mockReturnValue({
+        supportsNativeTools: nativeTools,
+        chat: agentChat
+      } as never)
+      const svc = new LLMProxySvcImpl()
+      const request = {
+        conversationId: `late-tool-${method}-${nativeTools}`,
+        profileId: 'agent-profile',
+        messages: [{ role: 'user' as const, content: 'Owned tool cancellation fixture' }],
+        skillRuntime: { bindings: [{ appId: 'magicpot.core', toolNames: ['files.write'] }] }
+      }
+      const oldEvents: Array<{ type: string; finishReason?: string }> = []
+      const oldRequest = { ...request, cancellationId: 'cancelled-owner' }
+      const old = (
+        method === 'chat'
+          ? svc.chat(oldRequest)
+          : svc.chatStream(oldRequest, {
+              onData: (event) => {
+                oldEvents.push(event)
+              }
+            })
+      ).catch((error: unknown) => error)
+      await vi.waitFor(() => expect(agentChat).toHaveBeenCalledOnce())
+      expect(
+        await svc.cancelConversation({
+          conversationId: request.conversationId,
+          cancellationId: 'cancelled-owner'
+        })
+      ).toEqual({ cancelled: true })
+      const next = svc.chat({ ...request, cancellationId: 'next-owner' })
+      await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(2))
+      resolvers[0](
+        nativeTools
+          ? {
+              content: '',
+              finishReason: 'tool_call',
+              toolCalls: [
+                {
+                  id: 'late-write',
+                  name: 'files.write',
+                  wireName: 'mp_tool_0',
+                  arguments: JSON.stringify({ path: 'owned-late.txt', content: 'must not run' })
+                }
+              ]
+            }
+          : {
+              content:
+                '{"toolName":"files.write","args":{"path":"owned-late.txt","content":"must not run"}}'
+            }
+      )
+      const oldResult = await old
+      if (method === 'chat') expect(oldResult).toMatchObject({ name: 'AbortError' })
+      else
+        expect(oldEvents).toEqual([
+          expect.objectContaining({ type: 'done', finishReason: 'cancelled' })
+        ])
+      expect(callToolMock).not.toHaveBeenCalled()
+      expect(signals[0]?.aborted).toBe(true)
+      expect(signals[1]?.aborted).toBe(false)
+      await expect(
+        svc.chat({ ...request, cancellationId: 'duplicate-owner' })
+      ).rejects.toMatchObject({ code: LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE })
+      expect(
+        await svc.cancelConversation({
+          conversationId: request.conversationId,
+          cancellationId: 'cancelled-owner'
+        })
+      ).toEqual({ cancelled: false })
+      expect(signals[1]?.aborted).toBe(false)
+      resolvers[1]({ content: 'Successor output' })
+      await expect(next).resolves.toEqual({ content: 'Successor output' })
+      expect(agentChat).toHaveBeenCalledTimes(2)
+      expect(callToolMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it('signals an already running tool, preserves its real completed effect, and never starts the remaining old batch after cancellation', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue([
+      { name: 'files.write', description: 'Owned fixture write', inputSchema: { type: 'object' } }
+    ])
+    let finishTool!: (value: { content: string }) => void
+    let finishNext!: (value: { content: string }) => void
+    let toolSignal: AbortSignal | undefined
+    callToolMock.mockImplementation((_route, _name, _args, options) => {
+      toolSignal = options.signal
+      return new Promise((resolve) => {
+        finishTool = resolve
+      })
+    })
+    const agentChat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: '',
+        finishReason: 'tool_call',
+        toolCalls: ['one', 'two'].map((id) => ({
+          id,
+          name: 'files.write',
+          wireName: 'mp_tool_0',
+          arguments: JSON.stringify({ path: `owned-${id}.txt`, content: id })
+        }))
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishNext = resolve
+          })
+      )
+    vi.mocked(cliFromProfile).mockReturnValue({
+      supportsNativeTools: true,
+      chat: agentChat
+    } as never)
+    const svc = new LLMProxySvcImpl()
+    const request = {
+      conversationId: 'cancel-in-flight-tool-owner',
+      profileId: 'agent-profile',
+      messages: [{ role: 'user' as const, content: 'Owned in-flight cancellation fixture' }],
+      skillRuntime: { bindings: [{ appId: 'magicpot.core', toolNames: ['files.write'] }] }
+    }
+    const old = svc
+      .chat({ ...request, cancellationId: 'old-tool-owner' })
+      .catch((error: unknown) => error)
+    await vi.waitFor(() => expect(callToolMock).toHaveBeenCalledOnce())
+    await svc.cancelConversation({
+      conversationId: request.conversationId,
+      cancellationId: 'old-tool-owner'
+    })
+    expect(toolSignal?.aborted).toBe(true)
+    const next = svc.chat({ ...request, cancellationId: 'successor-owner' })
+    await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(2))
+    // A tool that already committed can ignore cancellation; the request owner cannot recall it.
+    finishTool({ content: 'OWNED_COMMITTED_EFFECT' })
+    expect(await old).toMatchObject({
+      name: 'AbortError',
+      metadata: {
+        toolHistory: [
+          expect.objectContaining({
+            toolName: 'files.write',
+            status: 'completed',
+            content: 'OWNED_COMMITTED_EFFECT'
+          })
+        ]
+      }
+    })
+    expect(callToolMock).toHaveBeenCalledOnce()
+    await expect(svc.chat({ ...request, cancellationId: 'duplicate-owner' })).rejects.toMatchObject(
+      { code: LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE }
+    )
+    expect(
+      await svc.cancelConversation({
+        conversationId: request.conversationId,
+        cancellationId: 'old-tool-owner'
+      })
+    ).toEqual({ cancelled: false })
+    finishNext({ content: 'New owner finishes independently' })
+    await expect(next).resolves.toEqual({ content: 'New owner finishes independently' })
+    expect(agentChat).toHaveBeenCalledTimes(2)
+    expect(callToolMock).toHaveBeenCalledOnce()
+  })
+
+  it('does not replace an active owner with a pre-aborted request or a wrong cancellation identity', async () => {
+    let resolve!: (value: string) => void
+    let signal: AbortSignal | undefined
+    const agentChat = vi.fn((options: { signal?: AbortSignal }) => {
+      signal = options.signal
+      return new Promise<string>((yes) => {
+        resolve = yes
+      })
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    mockAgentProfile()
+    const svc = new LLMProxySvcImpl()
+    const request = {
+      conversationId: 'pre-aborted-owner',
+      cancellationId: 'original-owner',
+      profileId: 'agent-profile',
+      messages: [{ role: 'user' as const, content: 'Owned fixture' }]
+    }
+    const original = svc.chat(request)
+    await vi.waitFor(() => expect(agentChat).toHaveBeenCalledOnce())
+    const stopped = new AbortController()
+    stopped.abort(new DOMException('Not dispatched', 'AbortError'))
+    await expect(svc.chat(request, { signal: stopped.signal })).rejects.toMatchObject({
+      name: 'AbortError'
+    })
+    expect(
+      await svc.cancelConversation({
+        conversationId: request.conversationId,
+        cancellationId: 'unrelated-request'
+      })
+    ).toEqual({ cancelled: false })
+    expect(signal?.aborted).toBe(false)
+    resolve('Original still owns the conversation')
+    await expect(original).resolves.toEqual({ content: 'Original still owns the conversation' })
   })
 
   it.each(['chat', 'chatStream'] as const)(
@@ -1784,6 +2236,42 @@ describe('LLMProxySvcImpl', () => {
     expect(resp.content).toBe('Found 3 issues in magicpot.')
   })
 
+  it('gives a MagicAgent default binding read-only web tools without requiring a search prompt', async () => {
+    const agentChat = vi.fn().mockResolvedValue('Current answer with sources.')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    const webTools = [
+      { name: 'web_search', description: 'Search public web', inputSchema: { type: 'object' } },
+      { name: 'web_fetch', description: 'Fetch public page', inputSchema: { type: 'object' } }
+    ]
+    listToolsMock.mockImplementation((allowedToolNames?: string[] | null) =>
+      Array.isArray(allowedToolNames)
+        ? webTools.filter((tool) => allowedToolNames.includes(tool.name))
+        : webTools
+    )
+    mockAgentProfile()
+
+    const response = await new LLMProxySvcImpl().chat({
+      conversationId: 'magic-agent-default-web',
+      profileId: 'agent-profile',
+      messages: [{ role: 'user', content: 'What changed on the public project?' }],
+      skillRuntime: {
+        skillId: 'magicpot.default.chat',
+        bindings: [
+          {
+            appId: 'magicpot.default.chat',
+            source: 'magicAgentRuntime'
+          }
+        ]
+      }
+    })
+
+    expect(listToolsMock).toHaveBeenCalledWith(['web_search', 'web_fetch'])
+    expect(agentChat).toHaveBeenCalledOnce()
+    expect(agentChat.mock.calls[0]?.[0]?.systemPrompt).toContain('Tool: web_search')
+    expect(agentChat.mock.calls[0]?.[0]?.systemPrompt).toContain('Tool: web_fetch')
+    expect(response.content).toBe('Current answer with sources.')
+  })
+
   it('does not leak unbound MCP tools into normal chat tool visibility', async () => {
     const agentChat = vi.fn().mockResolvedValue('No external tools are available for this skill.')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
@@ -2057,21 +2545,27 @@ describe('LLMProxySvcImpl', () => {
       }
     })
 
-    expect(agentChat).toHaveBeenCalledWith({
-      conversationId: undefined,
-      imageGenerationOptions: undefined,
-      imageHistoryPolicy: undefined,
-      imageRequest: undefined,
-      maxOutputTokens: undefined,
-      messages: [{ role: 'user', content: 'latest question' }],
-      onDelta: expect.any(Function),
-      reasoningEffort: undefined,
-      sessionUrl: undefined,
-      signal: undefined,
-      systemPrompt: 'system prompt',
-      temperature: undefined,
-      videoGenerationOptions: undefined
-    })
+    expect(agentChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: undefined,
+        imageGenerationOptions: undefined,
+        imageHistoryPolicy: undefined,
+        imageRequest: undefined,
+        maxOutputTokens: undefined,
+        messages: [{ role: 'user', content: 'latest question' }],
+        onDelta: expect.any(Function),
+        reasoningEffort: undefined,
+        retryCapacity: true,
+        sessionUrl: undefined,
+        signal: undefined,
+        systemPrompt: 'system prompt',
+        temperature: undefined,
+        videoGenerationOptions: undefined
+      })
+    )
+    expect(agentChat.mock.calls[0]?.[0]?.correlationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
     expect(resp.content).toBe('agent response')
   })
 
@@ -2096,21 +2590,27 @@ describe('LLMProxySvcImpl', () => {
       }
     })
 
-    expect(agentChat).toHaveBeenCalledWith({
-      conversationId: undefined,
-      imageGenerationOptions: undefined,
-      imageHistoryPolicy: undefined,
-      imageRequest: undefined,
-      maxOutputTokens: undefined,
-      messages: [{ role: 'user', content: 'latest question' }],
-      onDelta: expect.any(Function),
-      reasoningEffort: undefined,
-      sessionUrl: undefined,
-      signal: undefined,
-      systemPrompt: undefined,
-      temperature: undefined,
-      videoGenerationOptions: undefined
-    })
+    expect(agentChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: undefined,
+        imageGenerationOptions: undefined,
+        imageHistoryPolicy: undefined,
+        imageRequest: undefined,
+        maxOutputTokens: undefined,
+        messages: [{ role: 'user', content: 'latest question' }],
+        onDelta: expect.any(Function),
+        reasoningEffort: undefined,
+        retryCapacity: true,
+        sessionUrl: undefined,
+        signal: undefined,
+        systemPrompt: undefined,
+        temperature: undefined,
+        videoGenerationOptions: undefined
+      })
+    )
+    expect(agentChat.mock.calls[0]?.[0]?.correlationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    )
     expect(resp.content).toBe('agent response')
   })
 
@@ -2238,8 +2738,10 @@ describe('LLMProxySvcImpl', () => {
     })
 
     const svc = new LLMProxySvcImpl()
+    const correlationId = 'a'.repeat(32)
     const resp = await svc.chat({
       profileId: 'tagger-profile',
+      correlationId,
       messages: [{ role: 'user', content: 'tag this asset' }],
       skillRuntime: {
         skillId: 'builtin-tagging',
@@ -2261,7 +2763,8 @@ describe('LLMProxySvcImpl', () => {
       method: 'POST',
       headers: {
         Authorization: 'Bearer local-key',
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-MagicPot-Correlation-Id': correlationId
       }
     })
     expect(JSON.parse(String(requestInit?.body))).toMatchObject({
@@ -2285,6 +2788,107 @@ describe('LLMProxySvcImpl', () => {
     })
     expect(resp.content).toContain('"tags"')
     expect(resp.content).toContain('"caption"')
+  })
+
+  it('applies the caller structured-output contract to Tagger Provider V2 responses', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => '{"tags":["red dragon"],"caption":"A red dragon icon."}'
+    })
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'tagger-profile',
+            model_name: 'WD14 Local',
+            base_url: 'http://127.0.0.1:7860',
+            api_key: 'local-key',
+            provider: 'openai',
+            deployment: 'local',
+            tagger_provider: 'wdtagger',
+            tagger_endpoint: 'http://127.0.0.1:7860/api',
+            tagger_runtime_cache_scope: 'profile'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId: 'tagger-profile',
+      messages: [{ role: 'user', content: 'tag this asset' }],
+      skillRuntime: {
+        skillId: 'builtin-tagging',
+        execution: { outputMode: 'text' }
+      },
+      structuredOutput: {
+        name: 'tagger_result',
+        schema: {
+          type: 'object',
+          required: ['caption'],
+          properties: { caption: { type: 'string' } }
+        }
+      }
+    })
+
+    expect(JSON.parse(resp.content)).toEqual({
+      tags: ['red dragon'],
+      caption: 'A red dragon icon.'
+    })
+  })
+
+  it('rejects Tagger Provider V2 responses that violate the caller structured-output contract', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => '{"tags":["red dragon"]}'
+    })
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'tagger-profile',
+            model_name: 'WD14 Local',
+            base_url: 'http://127.0.0.1:7860',
+            api_key: 'local-key',
+            provider: 'openai',
+            deployment: 'local',
+            tagger_provider: 'wdtagger',
+            tagger_endpoint: 'http://127.0.0.1:7860/api',
+            tagger_runtime_cache_scope: 'profile'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    await expect(
+      svc.chat({
+        profileId: 'tagger-profile',
+        messages: [{ role: 'user', content: 'tag this asset' }],
+        skillRuntime: {
+          skillId: 'builtin-tagging',
+          execution: { outputMode: 'text' }
+        },
+        structuredOutput: {
+          name: 'tagger_result',
+          schema: {
+            type: 'object',
+            required: ['caption'],
+            properties: { caption: { type: 'string' } }
+          }
+        }
+      })
+    ).rejects.toThrow('Provider output does not match the requested schema.')
   })
 
   it('preserves structured OCR payloads returned by Tagger Provider V2', async () => {
@@ -3275,8 +3879,10 @@ describe('LLMProxySvcImpl', () => {
     })
 
     const svc = new LLMProxySvcImpl()
+    const correlationId = 'b'.repeat(32)
     const resp = await svc.chat({
       profileId: 'glm-ocr-profile',
+      correlationId,
       messages: [
         {
           role: 'user',
@@ -3301,7 +3907,8 @@ describe('LLMProxySvcImpl', () => {
       method: 'POST',
       headers: {
         Authorization: 'Bearer glm-key',
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-MagicPot-Correlation-Id': correlationId
       }
     })
     expect(JSON.parse(String(requestInit?.body))).toEqual({
@@ -3334,6 +3941,120 @@ describe('LLMProxySvcImpl', () => {
         ]
       }
     })
+  })
+
+  it('applies the caller structured-output contract to BigModel OCR responses', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        model: 'GLM-OCR',
+        md_results: '{"text":"hello world"}'
+      }),
+      text: async () => ''
+    })
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'glm-ocr-profile',
+            model_name: 'GLM-OCR',
+            base_url: 'https://open.bigmodel.cn/api/paas/v4',
+            api_key: 'glm-key',
+            provider: 'openai'
+          }
+        ]
+      }
+    })
+
+    const resp = await new LLMProxySvcImpl().chat({
+      profileId: 'glm-ocr-profile',
+      messages: [
+        {
+          role: 'user',
+          content: 'read this image',
+          attachments: [
+            {
+              type: 'image',
+              url: 'data:image/png;base64,UE5H',
+              fileName: 'page.png',
+              mimeType: 'image/png'
+            }
+          ]
+        }
+      ],
+      structuredOutput: {
+        name: 'ocr_result',
+        schema: {
+          type: 'object',
+          required: ['text'],
+          properties: { text: { type: 'string' } }
+        }
+      }
+    })
+
+    expect(resp.content).toBe('{"text":"hello world"}')
+  })
+
+  it('rejects BigModel OCR responses that violate the caller structured-output contract', async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        model: 'GLM-OCR',
+        md_results: '# OCR Result\nhello world'
+      }),
+      text: async () => ''
+    })
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'glm-ocr-profile',
+            model_name: 'GLM-OCR',
+            base_url: 'https://open.bigmodel.cn/api/paas/v4',
+            api_key: 'glm-key',
+            provider: 'openai'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileId: 'glm-ocr-profile',
+        messages: [
+          {
+            role: 'user',
+            content: 'read this image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'data:image/png;base64,UE5H',
+                fileName: 'page.png',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        ],
+        structuredOutput: {
+          name: 'ocr_result',
+          schema: {
+            type: 'object',
+            required: ['text'],
+            properties: { text: { type: 'string' } }
+          }
+        }
+      })
+    ).rejects.toThrow('Provider returned invalid structured output JSON.')
   })
 
   it('prefers source attachments over the canvas snapshot for BigModel OCR', async () => {
@@ -3548,6 +4269,50 @@ describe('LLMProxySvcImpl', () => {
       })
     )
     expect(resp.content).toBe('[Generated 3D Model](https://example.com/cup.glb)')
+  })
+
+  it('applies the caller structured-output contract to Hunyuan3D responses', async () => {
+    generateFromMessagesMock.mockResolvedValue('{"modelUrl":"https://example.com/cup.glb"}')
+
+    mockHunyuanCredentials()
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId: 'hunyuan3d-pro::SubmitHunyuanTo3DRapidJob',
+      messages: [{ role: 'user', content: 'return a structured model result' }],
+      structuredOutput: {
+        name: 'hunyuan_result',
+        schema: {
+          type: 'object',
+          required: ['modelUrl'],
+          properties: { modelUrl: { type: 'string', format: 'uri' } }
+        }
+      }
+    })
+
+    expect(resp.content).toBe('{"modelUrl":"https://example.com/cup.glb"}')
+  })
+
+  it('rejects Hunyuan3D responses that violate the caller structured-output contract', async () => {
+    generateFromMessagesMock.mockResolvedValue('[Generated 3D Model](https://example.com/cup.glb)')
+
+    mockHunyuanCredentials()
+
+    const svc = new LLMProxySvcImpl()
+    await expect(
+      svc.chat({
+        profileId: 'hunyuan3d-pro::SubmitHunyuanTo3DRapidJob',
+        messages: [{ role: 'user', content: 'return a structured model result' }],
+        structuredOutput: {
+          name: 'hunyuan_result',
+          schema: {
+            type: 'object',
+            required: ['modelUrl'],
+            properties: { modelUrl: { type: 'string', format: 'uri' } }
+          }
+        }
+      })
+    ).rejects.toThrow('Provider returned invalid structured output JSON.')
   })
 
   it('trims configured Tencent credentials before constructing the Hunyuan3D client', async () => {
@@ -4593,6 +5358,32 @@ describe('native Agent tool loop', () => {
     ).rejects.toMatchObject({ name: 'AbortError' })
     expect(callToolMock).toHaveBeenCalledOnce()
     expect(chat).toHaveBeenCalledOnce()
+  })
+  it('assigns distinct internal tool ids to every member of a native batch', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue(bound)
+    const capturedToolCallIds: unknown[] = []
+    callToolMock.mockImplementation(async (_route, _name, _args, options) => {
+      capturedToolCallIds.push(options?.toolCallId)
+      return { content: 'owned' }
+    })
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: '',
+        toolCalls: [call('one', 'a.txt'), call('two', 'b.txt')],
+        finishReason: 'tool_call'
+      })
+      .mockResolvedValueOnce({ content: 'done' })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+
+    await expect(new LLMProxySvcImpl().chat(request())).resolves.toMatchObject({
+      content: 'done'
+    })
+    expect(capturedToolCallIds).toHaveLength(2)
+    expect(capturedToolCallIds[0]).toMatch(/^run-.*:tool:0$/)
+    expect(capturedToolCallIds[1]).toMatch(/^run-.*:tool:1$/)
+    expect(capturedToolCallIds[0]).not.toBe(capturedToolCallIds[1])
   })
   it('validates the full native batch before executing any member', async () => {
     mockAgentProfile()

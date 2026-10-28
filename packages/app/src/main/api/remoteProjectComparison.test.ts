@@ -247,8 +247,8 @@ describe('strict remote responses and transport failures', () => {
     [404, 'PROTOCOL_UNSUPPORTED'],
     [501, 'PROTOCOL_UNSUPPORTED'],
     [409, 'PROFILE_CONFIGURATION_CHANGED'],
-    [502, 'REMOTE_HTTP_ERROR'],
-    [504, 'REMOTE_HTTP_ERROR'],
+    [502, 'REMOTE_UPSTREAM_FAILED'],
+    [504, 'TIMEOUT'],
     [302, 'REMOTE_HTTP_ERROR'],
     [201, 'REMOTE_HTTP_ERROR']
   ])(
@@ -264,10 +264,15 @@ describe('strict remote responses and transport failures', () => {
       const error = await f.client.list(f.config).catch((error: unknown) => error)
       expect(error).toBeInstanceOf(ServiceError)
       expect(error).toMatchObject({ code, cause: undefined })
-      if (status === 502 || status === 504)
+      if (status === 502)
         expect(error).toMatchObject({
           payload: { status },
-          message: `Remote project comparison request failed (HTTP ${status}).`
+          message: 'Remote project comparison upstream failed.'
+        })
+      if (status === 504)
+        expect(error).toMatchObject({
+          payload: { status },
+          message: 'Remote project comparison request timed out.'
         })
       if (status === 409)
         expect(error).toMatchObject({
@@ -279,6 +284,39 @@ describe('strict remote responses and transport failures', () => {
       expect(f.fetch).toHaveBeenCalledOnce()
     }
   )
+
+  it.each([
+    [502, 'REMOTE_UPSTREAM_FAILED', 'Project comparison upstream failed.'],
+    [504, 'TIMEOUT', 'Project comparison request timed out.'],
+    [
+      409,
+      'PROFILE_CONFIGURATION_CHANGED',
+      'Model configuration changed; review and confirm again.'
+    ],
+    [499, 'CANCELLED', 'Project comparison request cancelled.']
+  ] as const)('retains a valid fixed error envelope on HTTP %i', async (status, code, message) => {
+    const f = fixture()
+    f.fetch.mockResolvedValue(json({ code, message }, status))
+    const error = await f.client.list(f.config).catch((error: unknown) => error)
+    expect(error).toMatchObject({ code, cause: undefined })
+    expect(JSON.stringify(error)).not.toContain('Bearer')
+    expect(f.fetch).toHaveBeenCalledOnce()
+  })
+
+  it('falls back to the HTTP classification for malformed or untrusted error envelopes', async () => {
+    const f = fixture()
+    f.fetch.mockResolvedValue(
+      json({ code: 'TIMEOUT', message: 'Bearer main-only-test-secret https://secret.invalid' }, 502)
+    )
+    const error = await f.client.list(f.config).catch((error: unknown) => error)
+    expect(error).toMatchObject({
+      code: 'REMOTE_UPSTREAM_FAILED',
+      message: 'Remote project comparison upstream failed.',
+      payload: { status: 502 },
+      cause: undefined
+    })
+    expect(JSON.stringify(error)).not.toContain('secret.invalid')
+  })
 
   it('rejects transport-followed redirects even if the transport disregards redirect:error', async () => {
     const f = fixture()
@@ -459,6 +497,20 @@ describe('main-memory consent receipts and one-shot chat', () => {
     })
     expect(String(init?.body)).not.toContain(req.expectedProfileRevision)
     expect(String(init?.body)).not.toContain('main-only-test-secret')
+  })
+
+  it('preserves a trusted correlation id across the remote comparison envelope', async () => {
+    const f = fixture()
+    const req = await issue(f)
+    const correlationId = '0123456789abcdef0123456789abcdef'
+    f.fetch.mockResolvedValue(result())
+
+    await f.client.chat(f.config, { ...req, correlationId })
+
+    expect(JSON.parse(String(f.fetch.mock.calls[1][1]?.body))).toMatchObject({
+      protocol: 1,
+      correlationId
+    })
   })
 
   it.each(['origin', 'credential', 'remoteMode', 'originSpelling'] as const)(

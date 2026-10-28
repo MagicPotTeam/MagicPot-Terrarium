@@ -42,12 +42,15 @@ import {
 import { buildOpenAIFileSearchTool, createOpenAIFileSearchSession } from './openaiFileSearch'
 import {
   OpenAIRequestControl,
+  ProviderRequestControl,
   OPENAI_CHAT_DEADLINE_MS,
   OPENAI_INTERACTIVE_IDLE_TIMEOUT_MS,
   OPENAI_IMAGE_DEADLINE_MS,
   OPENAI_JSON_MAX_BYTES,
   OPENAI_IMAGE_JSON_MAX_BYTES,
-  OPENAI_ERROR_MAX_BYTES
+  OPENAI_ERROR_MAX_BYTES,
+  PROVIDER_CHAT_DEADLINE_MS,
+  PROVIDER_JSON_MAX_BYTES
 } from './openaiRequestControl'
 import { readOpenAIStream } from './openaiStreaming'
 import {
@@ -55,6 +58,8 @@ import {
   resolveChatProfileCapabilities,
   type ChatCapabilityProfile
 } from './profileCapabilities'
+import { normalizeLLMStructuredOutput } from './structuredOutput'
+import { buildModelInvocationHeaders } from './modelInvocationContract'
 import {
   OPENCODE_ZEN_API_BASE_URL,
   resolveOpencodeZenAlias,
@@ -73,6 +78,10 @@ export type OpenAIClientOptions = {
   requireImageAttachmentLoader?: boolean
   apiMode?: OpenAIClientApiMode
   enableHostedTools?: boolean
+  /** Enable provider-hosted web search without creating hosted file-search resources. */
+  enableHostedWebSearch?: boolean
+  /** Force Responses requests to use SSE even when the caller did not provide onDelta. */
+  forceStreaming?: boolean
   /** Internal per-call override; finite, clamped by the request controller. */
   requestTimeoutMs?: number
   extraHeaders?: Record<string, string>
@@ -83,12 +92,20 @@ type GeminiClientOptions = {
   fetchImpl?: FetchImpl
   authMode?: GeminiAuthMode
   extraHeaders?: Record<string, string>
+  /** Per-call wall-clock deadline; bounded by ProviderRequestControl. */
+  requestTimeoutMs?: number
 }
 type ClaudeClientOptions = {
   fetchImpl?: FetchImpl
   authAsBearer?: boolean
   extraHeaders?: Record<string, string>
   maxTokens?: number
+  /** Per-call wall-clock deadline; bounded by ProviderRequestControl. */
+  requestTimeoutMs?: number
+}
+type ProviderClientOptions = {
+  fetchImpl?: FetchImpl
+  requestTimeoutMs?: number
 }
 
 export type FetchImpl = typeof fetch
@@ -114,6 +131,20 @@ const withOpenAIUpstreamStreamingMetadata = (
   ...(metadata || {}),
   streaming
 })
+
+const invocationHeaders = (params: Pick<LLMChatParams, 'invocation'>): Record<string, string> =>
+  params.invocation ? buildModelInvocationHeaders(params.invocation) : {}
+
+/** Unary providers still honor the shared stream contract with one safe delta. */
+const emitUnaryProviderDelta = (params: LLMChatParams, content: string): void => {
+  if (!params.onDelta || params.structuredOutput || !content) return
+  params.onDelta({
+    type: 'text-delta',
+    delta: content,
+    content,
+    finishReason: 'stop'
+  })
+}
 
 const getDefaultFetchImpl = (): FetchImpl => {
   if (typeof globalThis.fetch !== 'function') {
@@ -268,10 +299,10 @@ const buildUpstreamHttpError = (
   body: string
 ): UpstreamHttpError => new UpstreamHttpError(provider, response, body)
 
-const readOpenAIHttpError = async (
+const readProviderHttpError = async (
   provider: string,
   response: Response,
-  control: OpenAIRequestControl
+  control: ProviderRequestControl
 ): Promise<UpstreamHttpError> => {
   let body = '',
     bodyReadFailed = false,
@@ -731,7 +762,7 @@ const imageAttachmentToBlob = async (
     }
     if (control) {
       if (!response.ok) {
-        throw await readOpenAIHttpError('OpenAI reference image', response, control)
+        throw await readProviderHttpError('OpenAI reference image', response, control)
       }
       // Guarded local-media/safeRemoteDownload owns the remote byte ceiling;
       // this client must not reintroduce the legacy 8 MiB reference-image cap.
@@ -986,9 +1017,33 @@ export class OpenAIAPICli implements LLMCli {
         const alreadySet = Object.keys(headers || {}).some(
           (key) => key.toLowerCase() === 'idempotency-key'
         )
+        const nextHeaders = {
+          ...headers,
+          ...(alreadySet ? {} : { 'Idempotency-Key': requestId }),
+          ...(params.correlationId ? { 'X-MagicPot-Correlation-Id': params.correlationId } : {}),
+          ...invocationHeaders(params)
+        }
         return fetchImpl(input, {
           ...init,
-          headers: { ...headers, ...(alreadySet ? {} : { 'Idempotency-Key': requestId }) }
+          headers: nextHeaders
+        })
+      }
+      if (params.correlationId && init?.method === 'POST') {
+        const headers = init.headers as Record<string, string> | undefined
+        return fetchImpl(input, {
+          ...init,
+          headers: {
+            ...headers,
+            'X-MagicPot-Correlation-Id': params.correlationId,
+            ...invocationHeaders(params)
+          }
+        })
+      }
+      if (init?.method === 'POST' && params.invocation) {
+        const headers = init.headers as Record<string, string> | undefined
+        return fetchImpl(input, {
+          ...init,
+          headers: { ...headers, ...invocationHeaders(params) }
         })
       }
       return fetchImpl(input, init)
@@ -1118,7 +1173,8 @@ export class OpenAIAPICli implements LLMCli {
     copyOption('background', options?.background)
 
     const headers: Record<string, string> = {
-      ...(this.options?.extraHeaders || {})
+      ...(this.options?.extraHeaders || {}),
+      ...(params.correlationId ? { 'X-MagicPot-Correlation-Id': params.correlationId } : {})
     }
     if (this.apiKey.trim() && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.apiKey}`
@@ -1179,7 +1235,7 @@ export class OpenAIAPICli implements LLMCli {
     }
 
     if (!response.ok) {
-      throw await readOpenAIHttpError('OpenAI', response, control)
+      throw await readProviderHttpError('OpenAI', response, control)
     }
 
     const data = await control.json(response, OPENAI_IMAGE_JSON_MAX_BYTES)
@@ -1241,6 +1297,8 @@ export class OpenAIAPICli implements LLMCli {
       useImageGeneration && /^gpt-image-/i.test(this.modelName.trim())
         ? this.modelName.trim()
         : undefined
+    const forceStreaming = this.options?.forceStreaming === true
+    const shouldStreamResponses = Boolean(params.onDelta) || forceStreaming
     const requestBody: Record<string, unknown> = {
       // Responses image generation uses a supported mainline model at the top level;
       // the GPT Image model is selected on the image_generation tool itself.
@@ -1248,7 +1306,21 @@ export class OpenAIAPICli implements LLMCli {
       input: [...responsesInput, ...projectNativeToolTurns(params.toolTurns, 'responses')],
       instructions: params.systemPrompt?.trim() || 'You are a helpful assistant.',
       store: false,
-      ...(params.onDelta ? { stream: true } : {})
+      ...(shouldStreamResponses ? { stream: true } : {})
+    }
+    // Native JSON schema output is a provider hint only. The caller still
+    // validates the final content, and image-generation requests do not mix
+    // this text contract with the image tool.
+    const structuredOutput = normalizeLLMStructuredOutput(params.structuredOutput)
+    if (structuredOutput && !useImageGeneration) {
+      requestBody.text = {
+        format: {
+          type: 'json_schema',
+          name: structuredOutput.name,
+          strict: structuredOutput.strict ?? true,
+          schema: structuredOutput.schema
+        }
+      }
     }
     if (params.temperature !== undefined) requestBody.temperature = params.temperature
     if (useImageGeneration) {
@@ -1263,9 +1335,16 @@ export class OpenAIAPICli implements LLMCli {
           }
         })
       ]
-      requestBody.tool_choice = {
-        type: 'image_generation'
-      }
+      // CLIProxyAPI/Codex accepts the image-generation tool declaration but
+      // its Responses compatibility enum does not accept the native
+      // `{ type: "image_generation" }` tool_choice object. `auto` lets the
+      // gateway's Codex image bridge select the declared tool without making
+      // the request fail during JSON deserialization.
+      const compatibilityCallType = this.options?.callType?.trim().toLowerCase()
+      requestBody.tool_choice =
+        compatibilityCallType === 'cliproxyapi' || compatibilityCallType === 'codex'
+          ? 'auto'
+          : { type: 'image_generation' }
     }
     if (params.maxOutputTokens) {
       requestBody.max_output_tokens = params.maxOutputTokens
@@ -1294,39 +1373,41 @@ export class OpenAIAPICli implements LLMCli {
     )
 
     try {
-      if (
-        !useImageGeneration &&
-        (this.options?.enableHostedTools ?? isOfficialOpenAIBaseUrl(base))
-      ) {
-        try {
-          fileSearchSession =
-            retryContext?.fileSearchSession !== undefined
-              ? retryContext.fileSearchSession
-              : await createOpenAIFileSearchSession({
-                  apiKey: this.apiKey,
-                  baseUrl: base,
-                  messages: params.messages,
-                  signal: params.signal,
-                  fetchImpl: this.getFetchImpl()
-                })
-          if (retryContext) retryContext.fileSearchSession = fileSearchSession
-        } catch (error) {
-          // Hosted setup uses its own error normalization; restore a parent
-          // cancellation only for its explicit AbortError, not an earlier failure.
-          if (control.signal.aborted && error instanceof Error && error.name === 'AbortError') {
-            throw control.signal.reason
+      const hostedFileSearch = this.options?.enableHostedTools ?? isOfficialOpenAIBaseUrl(base)
+      const hostedWebSearch = this.options?.enableHostedWebSearch ?? hostedFileSearch
+      if (!useImageGeneration && (hostedFileSearch || hostedWebSearch)) {
+        if (hostedFileSearch) {
+          try {
+            fileSearchSession =
+              retryContext?.fileSearchSession !== undefined
+                ? retryContext.fileSearchSession
+                : await createOpenAIFileSearchSession({
+                    apiKey: this.apiKey,
+                    baseUrl: base,
+                    messages: params.messages,
+                    signal: params.signal,
+                    fetchImpl: this.getFetchImpl()
+                  })
+            if (retryContext) retryContext.fileSearchSession = fileSearchSession
+          } catch (error) {
+            // Hosted setup uses its own error normalization; restore a parent
+            // cancellation only for its explicit AbortError, not an earlier failure.
+            if (control.signal.aborted && error instanceof Error && error.name === 'AbortError') {
+              throw control.signal.reason
+            }
+            throw error
           }
-          throw error
         }
 
         requestBody.tools = [
           ...(fileSearchSession?.vectorStoreIds?.length
             ? [buildOpenAIFileSearchTool(fileSearchSession.vectorStoreIds)]
             : []),
-          buildDefaultOpenAIWebSearchTool()
+          ...(hostedWebSearch ? [buildDefaultOpenAIWebSearchTool()] : [])
         ]
         requestBody.include = buildDefaultOpenAIResponsesInclude({
-          includeFileSearchResults: Boolean(fileSearchSession?.vectorStoreIds?.length)
+          includeFileSearchResults: Boolean(fileSearchSession?.vectorStoreIds?.length),
+          includeWebSearchSources: hostedWebSearch
         })
       }
 
@@ -1344,7 +1425,8 @@ export class OpenAIAPICli implements LLMCli {
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
-        ...(this.options?.extraHeaders || {})
+        ...(this.options?.extraHeaders || {}),
+        ...(params.correlationId ? { 'X-MagicPot-Correlation-Id': params.correlationId } : {})
       }
       if (this.apiKey.trim() && !headers.Authorization) {
         headers.Authorization = `Bearer ${this.apiKey}`
@@ -1366,13 +1448,13 @@ export class OpenAIAPICli implements LLMCli {
       }
 
       if (!resp.ok) {
-        throw await readOpenAIHttpError('OpenAI', resp, control)
+        throw await readProviderHttpError('OpenAI', resp, control)
       }
 
       const isSse =
-        Boolean(params.onDelta) &&
+        shouldStreamResponses &&
         resp.headers?.get('content-type')?.toLowerCase().startsWith('text/event-stream')
-      upstreamStreamingMetadataRef.current = params.onDelta
+      upstreamStreamingMetadataRef.current = shouldStreamResponses
         ? isSse
           ? { upstreamProtocol: 'sse', upstreamIncremental: true }
           : {
@@ -1382,7 +1464,9 @@ export class OpenAIAPICli implements LLMCli {
             }
         : undefined
       const streamed = isSse
-        ? await readOpenAIStream(resp, control, 'responses', params.onDelta!)
+        ? await readOpenAIStream(resp, control, 'responses', params.onDelta ?? (() => undefined), {
+            imageGeneration: useImageGeneration
+          })
         : undefined
       const data =
         streamed?.payload ??
@@ -1449,7 +1533,8 @@ export class OpenAIAPICli implements LLMCli {
     type Role = 'system' | 'user' | 'assistant'
     type TextMessage = { role: Role; content: string }
     type VisionContent =
-      { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+      | { type: 'text'; text: string }
+      | { type: 'image_url'; image_url: { url: string; detail?: 'low' } }
     type VisionMessage = { role: 'user'; content: VisionContent[] }
     type APIMessage = TextMessage | VisionMessage
 
@@ -1472,7 +1557,10 @@ export class OpenAIAPICli implements LLMCli {
           for (const attachment of imageAttachments) {
             content.push({
               type: 'image_url',
-              image_url: { url: attachment.url }
+              image_url: {
+                url: attachment.url,
+                ...(attachment.imageDetail === 'low' ? { detail: 'low' as const } : {})
+              }
             })
           }
           apiMessages.push({ role: 'user', content })
@@ -1501,6 +1589,17 @@ export class OpenAIAPICli implements LLMCli {
           stream: Boolean(params.onDelta),
           ...(params.onDelta ? { stream_options: { include_usage: true } } : {})
         }
+    const structuredOutput = normalizeLLMStructuredOutput(params.structuredOutput)
+    if (structuredOutput && !usesImagesGenerationEndpoint) {
+      requestBody.response_format = {
+        type: 'json_schema',
+        json_schema: {
+          name: structuredOutput.name,
+          strict: structuredOutput.strict ?? true,
+          schema: structuredOutput.schema
+        }
+      }
+    }
     if (params.tools?.length && !usesImagesGenerationEndpoint) {
       requestBody.tools = buildNativeToolDefinitions(params.tools, 'chat-completions')
       requestBody.parallel_tool_calls = false
@@ -1532,7 +1631,8 @@ export class OpenAIAPICli implements LLMCli {
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      ...(this.options?.extraHeaders || {})
+      ...(this.options?.extraHeaders || {}),
+      ...(params.correlationId ? { 'X-MagicPot-Correlation-Id': params.correlationId } : {})
     }
     if (this.apiKey.trim() && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.apiKey}`
@@ -1552,7 +1652,7 @@ export class OpenAIAPICli implements LLMCli {
     }
 
     if (!resp.ok) {
-      throw await readOpenAIHttpError('OpenAI', resp, control)
+      throw await readProviderHttpError('OpenAI', resp, control)
     }
 
     const isSse =
@@ -1772,6 +1872,11 @@ export class GeminiAPICli implements LLMCli {
   }
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
+    if (params.retryCapacity) {
+      return retryModelCapacity(params, (onDelta) =>
+        this.chat({ ...params, retryCapacity: false, onDelta })
+      )
+    }
     const { messages, systemPrompt, signal } = params
     let base = normalizeGeminiBaseUrl(this.baseUrl)
 
@@ -1782,124 +1887,147 @@ export class GeminiAPICli implements LLMCli {
 
     const modelName = this.getNormalizedModelName()
     const endpoint = `${base}/models/${modelName}:generateContent`
+    const control = new ProviderRequestControl(
+      this.getFetchImpl(),
+      signal,
+      this.options.requestTimeoutMs ?? PROVIDER_CHAT_DEADLINE_MS,
+      {},
+      'Gemini'
+    )
 
     type GeminiPart = { text?: string; inlineData?: { mimeType: string; data: string } }
     type GeminiContent = { role: 'user' | 'model'; parts: GeminiPart[] }
 
-    const contents: GeminiContent[] = []
+    let callbackFailed = false
+    try {
+      const contents: GeminiContent[] = []
 
-    for (const msg of messages) {
-      const parts: GeminiPart[] = []
+      for (const msg of messages) {
+        const parts: GeminiPart[] = []
 
-      // Process image attachments
-      if (msg.attachments && msg.attachments.length > 0) {
-        const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
-        for (const attachment of imageAttachments) {
-          try {
-            const base64 = await convertImageToBase64(attachment.url, signal, this.getFetchImpl())
-            let mimeType = attachment.mimeType || 'image/jpeg'
-            if (attachment.url.startsWith('data:')) {
-              const mimeMatch = attachment.url.match(/data:([^;]+)/)
-              if (mimeMatch) {
-                mimeType = mimeMatch[1]
+        // Process image attachments
+        if (msg.attachments && msg.attachments.length > 0) {
+          const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
+          for (const attachment of imageAttachments) {
+            try {
+              const base64 = await convertImageToBase64(
+                attachment.url,
+                control.signal,
+                control.fetch
+              )
+              let mimeType = attachment.mimeType || 'image/jpeg'
+              if (attachment.url.startsWith('data:')) {
+                const mimeMatch = attachment.url.match(/data:([^;]+)/)
+                if (mimeMatch) {
+                  mimeType = mimeMatch[1]
+                }
               }
+              parts.push({
+                inlineData: {
+                  mimeType,
+                  data: base64
+                }
+              })
+            } catch (err) {
+              if (control.signal.aborted) throw control.signal.reason
+              console.error('[GeminiAPICli] Failed to process image attachment:', err)
             }
-            parts.push({
-              inlineData: {
-                mimeType,
-                data: base64
-              }
-            })
-          } catch (err) {
-            console.error('[GeminiAPICli] Failed to process image attachment:', err)
           }
+        }
+
+        // Add text content
+        if (msg.content.trim()) {
+          parts.push({ text: msg.content })
+        }
+
+        if (parts.length > 0) {
+          const role = msg.role === 'assistant' ? 'model' : 'user'
+          contents.push({ role, parts })
         }
       }
 
-      // Add text content
-      if (msg.content.trim()) {
-        parts.push({ text: msg.content })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const requestBody: Record<string, any> = {
+        contents
+      }
+      if (params.temperature !== undefined) {
+        requestBody.generationConfig = {
+          ...(requestBody.generationConfig || {}),
+          temperature: params.temperature
+        }
+      }
+      if (params.maxOutputTokens) {
+        requestBody.generationConfig = {
+          ...(requestBody.generationConfig || {}),
+          maxOutputTokens: params.maxOutputTokens
+        }
       }
 
-      if (parts.length > 0) {
-        const role = msg.role === 'assistant' ? 'model' : 'user'
-        contents.push({ role, parts })
+      if (systemPrompt) {
+        requestBody.systemInstruction = {
+          parts: [{ text: systemPrompt }]
+        }
       }
-    }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const requestBody: Record<string, any> = {
-      contents
-    }
-    if (params.temperature !== undefined) {
-      requestBody.generationConfig = {
-        ...(requestBody.generationConfig || {}),
-        temperature: params.temperature
+      const url = new URL(endpoint)
+      const authMode = this.options.authMode || 'query-key'
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(this.options.extraHeaders || {}),
+        ...(params.correlationId ? { 'X-MagicPot-Correlation-Id': params.correlationId } : {}),
+        ...invocationHeaders(params)
       }
-    }
-    if (params.maxOutputTokens) {
-      requestBody.generationConfig = {
-        ...(requestBody.generationConfig || {}),
-        maxOutputTokens: params.maxOutputTokens
+      if (authMode === 'bearer') {
+        if (this.apiKey.trim() && !headers.Authorization) {
+          headers.Authorization = `Bearer ${this.apiKey}`
+        }
+      } else if (authMode === 'x-goog-api-key') {
+        if (this.apiKey.trim() && !headers['x-goog-api-key']) {
+          headers['x-goog-api-key'] = this.apiKey
+        }
+      } else {
+        url.searchParams.set('key', this.apiKey)
       }
-    }
 
-    if (systemPrompt) {
-      requestBody.systemInstruction = {
-        parts: [{ text: systemPrompt }]
-      }
-    }
-
-    const url = new URL(endpoint)
-    const authMode = this.options.authMode || 'query-key'
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...(this.options.extraHeaders || {})
-    }
-    if (authMode === 'bearer') {
-      if (this.apiKey.trim() && !headers.Authorization) {
-        headers.Authorization = `Bearer ${this.apiKey}`
-      }
-    } else if (authMode === 'x-goog-api-key') {
-      if (this.apiKey.trim() && !headers['x-goog-api-key']) {
-        headers['x-goog-api-key'] = this.apiKey
-      }
-    } else {
-      url.searchParams.set('key', this.apiKey)
-    }
-
-    let resp: Response
-    try {
-      resp = await this.getFetchImpl()(url.toString(), {
+      const resp = await control.fetch(url.toString(), {
         method: 'POST',
         headers,
-        body: JSON.stringify(requestBody),
-        signal
+        body: JSON.stringify(requestBody)
       })
+
+      if (!resp.ok) {
+        throw await readProviderHttpError('Gemini', resp, control)
+      }
+
+      const data = (await control.json(resp, PROVIDER_JSON_MAX_BYTES)) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>
+      }
+      const content = data?.candidates?.[0]?.content?.parts
+        ?.map((part: { text?: unknown }) => (typeof part?.text === 'string' ? part.text : ''))
+        .join('')
+
+      if (typeof content !== 'string' || !content) {
+        throw new Error(`Gemini API returned empty or invalid content.`)
+      }
+      const usage = normalizeProviderTokenUsage(data)
+      const result = normalizeLLMChatResult({
+        content: content.trim(),
+        ...(usage ? { usage } : {})
+      })
+      try {
+        emitUnaryProviderDelta(params, result.content)
+      } catch (error) {
+        callbackFailed = true
+        throw error
+      }
+      return result
     } catch (error) {
-      throw buildFetchFailureError('Gemini API', url.toString(), error)
+      if (callbackFailed) throw error
+      if (control.signal.aborted) throw control.signal.reason
+      throw buildFetchFailureError('Gemini API', endpoint, error)
+    } finally {
+      control.dispose()
     }
-
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '')
-      throw buildUpstreamHttpError('Gemini', resp, text)
-    }
-
-    const data = await resp.json()
-    const content = data?.candidates?.[0]?.content?.parts
-      ?.map((part: { text?: unknown }) => (typeof part?.text === 'string' ? part.text : ''))
-      .join('')
-
-    if (typeof content !== 'string' || !content) {
-      throw new Error(
-        `Gemini API returned empty or invalid content. Response: ${JSON.stringify(data)}`
-      )
-    }
-    const usage = normalizeProviderTokenUsage(data)
-    return normalizeLLMChatResult({
-      content: content.trim(),
-      ...(usage ? { usage } : {})
-    })
   }
 }
 
@@ -1943,9 +2071,21 @@ export class ClaudeAPICli implements LLMCli {
   }
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
+    if (params.retryCapacity) {
+      return retryModelCapacity(params, (onDelta) =>
+        this.chat({ ...params, retryCapacity: false, onDelta })
+      )
+    }
     const { messages, systemPrompt, signal } = params
     const base = normalizeClaudeBaseUrl(this.baseUrl)
     const endpoint = `${base}/v1/messages`
+    const control = new ProviderRequestControl(
+      this.getFetchImpl(),
+      signal,
+      this.options.requestTimeoutMs ?? PROVIDER_CHAT_DEADLINE_MS,
+      {},
+      'Claude'
+    )
 
     type ContentBlock =
       | { type: 'text'; text: string }
@@ -1956,126 +2096,142 @@ export class ClaudeAPICli implements LLMCli {
       content: string | ContentBlock[]
     }
 
-    const claudeMessages: ClaudeMessage[] = []
+    let callbackFailed = false
+    try {
+      const claudeMessages: ClaudeMessage[] = []
 
-    const selectedMessages =
-      params.imageHistoryPolicy === undefined
-        ? messages
-        : selectImageHistoryMessages(messages, params.imageHistoryPolicy)
-    for (const msg of projectAssistantImageReferenceTurns(selectedMessages)) {
-      // Skip system messages (handled as a separate parameter in Claude API)
-      if (msg.role === 'system') continue
+      const selectedMessages =
+        params.imageHistoryPolicy === undefined
+          ? messages
+          : selectImageHistoryMessages(messages, params.imageHistoryPolicy)
+      for (const msg of projectAssistantImageReferenceTurns(selectedMessages)) {
+        // Skip system messages (handled as a separate parameter in Claude API)
+        if (msg.role === 'system') continue
 
-      if (msg.attachments && msg.attachments.length > 0) {
-        const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
-        if (imageAttachments.length > 0 && msg.role === 'user') {
-          const content: ContentBlock[] = []
+        if (msg.attachments && msg.attachments.length > 0) {
+          const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
+          if (imageAttachments.length > 0 && msg.role === 'user') {
+            const content: ContentBlock[] = []
 
-          for (const attachment of imageAttachments) {
-            try {
-              const base64 = await convertImageToBase64(attachment.url, signal, this.getFetchImpl())
-              let mediaType = attachment.mimeType || 'image/jpeg'
-              if (attachment.url.startsWith('data:')) {
-                const mimeMatch = attachment.url.match(/data:([^;]+)/)
-                if (mimeMatch) {
-                  mediaType = mimeMatch[1]
+            for (const attachment of imageAttachments) {
+              try {
+                const base64 = await convertImageToBase64(
+                  attachment.url,
+                  control.signal,
+                  control.fetch
+                )
+                let mediaType = attachment.mimeType || 'image/jpeg'
+                if (attachment.url.startsWith('data:')) {
+                  const mimeMatch = attachment.url.match(/data:([^;]+)/)
+                  if (mimeMatch) {
+                    mediaType = mimeMatch[1]
+                  }
                 }
+                content.push({
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: mediaType,
+                    data: base64
+                  }
+                })
+              } catch (err) {
+                if (control.signal.aborted) throw control.signal.reason
+                console.error('[ClaudeAPICli] Failed to process image attachment:', err)
               }
-              content.push({
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: mediaType,
-                  data: base64
-                }
-              })
-            } catch (err) {
-              console.error('[ClaudeAPICli] Failed to process image attachment:', err)
             }
-          }
 
-          if (msg.content.trim()) {
-            content.push({ type: 'text', text: msg.content })
-          }
+            if (msg.content.trim()) {
+              content.push({ type: 'text', text: msg.content })
+            }
 
-          claudeMessages.push({
-            role: msg.role as 'user' | 'assistant',
-            content
-          })
+            claudeMessages.push({
+              role: msg.role as 'user' | 'assistant',
+              content
+            })
+          } else {
+            claudeMessages.push({
+              role: msg.role as 'user' | 'assistant',
+              content: msg.content
+            })
+          }
         } else {
           claudeMessages.push({
             role: msg.role as 'user' | 'assistant',
             content: msg.content
           })
         }
-      } else {
-        claudeMessages.push({
-          role: msg.role as 'user' | 'assistant',
-          content: msg.content
-        })
       }
-    }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const requestBody: Record<string, any> = {
-      model: this.modelName,
-      max_tokens: params.maxOutputTokens || this.options.maxTokens || 4096,
-      messages: claudeMessages,
-      ...(params.temperature === undefined ? {} : { temperature: params.temperature })
-    }
-
-    if (systemPrompt) {
-      requestBody.system = systemPrompt
-    }
-
-    const authAsBearer = this.options.authAsBearer ?? isBearerClaudeEndpoint(base)
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'anthropic-version': '2023-06-01',
-      ...(this.options.extraHeaders || {})
-    }
-    if (this.apiKey.trim()) {
-      if (authAsBearer) {
-        headers.Authorization = headers.Authorization || `Bearer ${this.apiKey}`
-      } else {
-        headers['x-api-key'] = headers['x-api-key'] || this.apiKey
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const requestBody: Record<string, any> = {
+        model: this.modelName,
+        max_tokens: params.maxOutputTokens || this.options.maxTokens || 4096,
+        messages: claudeMessages,
+        ...(params.temperature === undefined ? {} : { temperature: params.temperature })
       }
-    }
 
-    let resp: Response
-    try {
-      resp = await this.getFetchImpl()(endpoint, {
+      if (systemPrompt) {
+        requestBody.system = systemPrompt
+      }
+
+      const authAsBearer = this.options.authAsBearer ?? isBearerClaudeEndpoint(base)
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        ...(this.options.extraHeaders || {}),
+        ...(params.correlationId ? { 'X-MagicPot-Correlation-Id': params.correlationId } : {}),
+        ...invocationHeaders(params)
+      }
+      if (this.apiKey.trim()) {
+        if (authAsBearer) {
+          headers.Authorization = headers.Authorization || `Bearer ${this.apiKey}`
+        } else {
+          headers['x-api-key'] = headers['x-api-key'] || this.apiKey
+        }
+      }
+
+      const resp = await control.fetch(endpoint, {
         method: 'POST',
         headers,
-        body: JSON.stringify(requestBody),
-        signal
+        body: JSON.stringify(requestBody)
       })
+
+      if (!resp.ok) {
+        throw await readProviderHttpError('Claude', resp, control)
+      }
+
+      const data = (await control.json(resp, PROVIDER_JSON_MAX_BYTES)) as {
+        content?: Array<{ text?: unknown }>
+      }
+      const contentText = Array.isArray(data?.content)
+        ? data.content
+            .map((block: { text?: unknown }) => (typeof block?.text === 'string' ? block.text : ''))
+            .join('')
+        : undefined
+
+      if (typeof contentText !== 'string' || !contentText) {
+        throw new Error(`Claude API returned empty or invalid content.`)
+      }
+      const usage = normalizeProviderTokenUsage(data)
+      const result = normalizeLLMChatResult({
+        content: contentText.trim(),
+        ...(usage ? { usage } : {})
+      })
+      try {
+        emitUnaryProviderDelta(params, result.content)
+      } catch (error) {
+        callbackFailed = true
+        throw error
+      }
+      return result
     } catch (error) {
+      if (callbackFailed) throw error
+      if (control.signal.aborted) throw control.signal.reason
       throw buildFetchFailureError('Claude API', endpoint, error)
+    } finally {
+      control.dispose()
     }
-
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '')
-      throw buildUpstreamHttpError('Claude', resp, text)
-    }
-
-    const data = await resp.json()
-    const contentText = Array.isArray(data?.content)
-      ? data.content
-          .map((block: { text?: unknown }) => (typeof block?.text === 'string' ? block.text : ''))
-          .join('')
-      : undefined
-
-    if (typeof contentText !== 'string' || !contentText) {
-      throw new Error(
-        `Claude API returned empty or invalid content. Response: ${JSON.stringify(data)}`
-      )
-    }
-    const usage = normalizeProviderTokenUsage(data)
-    return normalizeLLMChatResult({
-      content: contentText.trim(),
-      ...(usage ? { usage } : {})
-    })
   }
 }
 
@@ -2086,7 +2242,7 @@ export class OpencodeZenAPICli implements LLMCli {
     protected readonly apiKey: string,
     protected readonly baseUrl: string,
     protected readonly modelName: string,
-    protected readonly options?: { fetchImpl?: FetchImpl }
+    protected readonly options?: ProviderClientOptions
   ) {}
 
   private getBaseUrl(): string {
@@ -2129,17 +2285,20 @@ export class OpencodeZenAPICli implements LLMCli {
         return new OpenAIAPICli(this.apiKey, baseUrl, modelName, {
           apiMode: 'responses',
           enableHostedTools: false,
-          fetchImpl: this.options?.fetchImpl
+          fetchImpl: this.options?.fetchImpl,
+          requestTimeoutMs: this.options?.requestTimeoutMs
         }).chat(params)
       case 'anthropic-messages':
         return new ClaudeAPICli(this.apiKey, baseUrl, modelName, {
           authAsBearer: false,
-          fetchImpl: this.options?.fetchImpl
+          fetchImpl: this.options?.fetchImpl,
+          requestTimeoutMs: this.options?.requestTimeoutMs
         }).chat(params)
       case 'google-generative-ai':
         return new GeminiAPICli(this.apiKey, baseUrl, modelName, {
           authMode: 'x-goog-api-key',
-          fetchImpl: this.options?.fetchImpl
+          fetchImpl: this.options?.fetchImpl,
+          requestTimeoutMs: this.options?.requestTimeoutMs
         }).chat(params)
       case 'openai-completions':
       default:
@@ -2149,7 +2308,8 @@ export class OpencodeZenAPICli implements LLMCli {
           modelName,
           {
             apiMode: 'chat-completions',
-            fetchImpl: this.options?.fetchImpl
+            fetchImpl: this.options?.fetchImpl,
+            requestTimeoutMs: this.options?.requestTimeoutMs
           }
         ).chat(params)
     }
@@ -2159,17 +2319,40 @@ export class OpencodeZenAPICli implements LLMCli {
 // ==================== Ollama API Client ====================
 
 export class OllamaAPICli implements LLMCli {
+  private readonly options: ProviderClientOptions
+
   constructor(
     protected readonly apiKey: string,
     protected readonly baseUrl: string,
     protected readonly modelName: string,
-    protected readonly fetchImpl: FetchImpl = getDefaultFetchImpl()
-  ) {}
+    fetchImplOrOptions?: FetchImpl | ProviderClientOptions
+  ) {
+    this.options =
+      typeof fetchImplOrOptions === 'function'
+        ? { fetchImpl: fetchImplOrOptions }
+        : fetchImplOrOptions || {}
+  }
+
+  private getFetchImpl(): FetchImpl {
+    return this.options.fetchImpl ?? getDefaultFetchImpl()
+  }
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
+    if (params.retryCapacity) {
+      return retryModelCapacity(params, (onDelta) =>
+        this.chat({ ...params, retryCapacity: false, onDelta })
+      )
+    }
     const { messages, systemPrompt, signal } = params
     const base = normalizeOllamaBaseUrl(this.baseUrl)
     const endpoint = `${base}/api/chat`
+    const control = new ProviderRequestControl(
+      this.getFetchImpl(),
+      signal,
+      this.options.requestTimeoutMs ?? PROVIDER_CHAT_DEADLINE_MS,
+      {},
+      'Ollama'
+    )
 
     type Role = 'system' | 'user' | 'assistant'
     type OllamaMessage = {
@@ -2178,78 +2361,94 @@ export class OllamaAPICli implements LLMCli {
       images?: string[]
     }
 
-    const ollamaMessages: OllamaMessage[] = []
-    if (systemPrompt) {
-      ollamaMessages.push({ role: 'system', content: systemPrompt })
-    }
+    let callbackFailed = false
+    try {
+      const ollamaMessages: OllamaMessage[] = []
+      if (systemPrompt) {
+        ollamaMessages.push({ role: 'system', content: systemPrompt })
+      }
 
-    for (const msg of messages) {
-      const ollamaMsg: OllamaMessage = { role: msg.role, content: msg.content }
+      for (const msg of messages) {
+        const ollamaMsg: OllamaMessage = { role: msg.role, content: msg.content }
 
-      // Handle image attachments for Ollama
-      if (msg.attachments && msg.attachments.length > 0) {
-        const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
-        if (imageAttachments.length > 0) {
-          ollamaMsg.images = []
-          for (const attachment of imageAttachments) {
-            try {
-              const base64 = await convertImageToBase64(attachment.url, signal, this.fetchImpl)
-              ollamaMsg.images.push(base64)
-            } catch (err) {
-              console.error('[OllamaAPICli] Failed to process image attachment:', err)
+        // Handle image attachments for Ollama
+        if (msg.attachments && msg.attachments.length > 0) {
+          const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
+          if (imageAttachments.length > 0) {
+            ollamaMsg.images = []
+            for (const attachment of imageAttachments) {
+              try {
+                const base64 = await convertImageToBase64(
+                  attachment.url,
+                  control.signal,
+                  control.fetch
+                )
+                ollamaMsg.images.push(base64)
+              } catch (err) {
+                if (control.signal.aborted) throw control.signal.reason
+                console.error('[OllamaAPICli] Failed to process image attachment:', err)
+              }
             }
           }
         }
+
+        ollamaMessages.push(ollamaMsg)
       }
 
-      ollamaMessages.push(ollamaMsg)
-    }
-
-    const requestBody = {
-      model: this.modelName,
-      messages: ollamaMessages,
-      stream: false,
-      ...(params.maxOutputTokens || params.temperature !== undefined
-        ? {
-            options: {
-              ...(params.maxOutputTokens ? { num_predict: params.maxOutputTokens } : {}),
-              ...(params.temperature === undefined ? {} : { temperature: params.temperature })
+      const requestBody = {
+        model: this.modelName,
+        messages: ollamaMessages,
+        stream: false,
+        ...(params.maxOutputTokens || params.temperature !== undefined
+          ? {
+              options: {
+                ...(params.maxOutputTokens ? { num_predict: params.maxOutputTokens } : {}),
+                ...(params.temperature === undefined ? {} : { temperature: params.temperature })
+              }
             }
-          }
-        : {})
-    }
+          : {})
+      }
 
-    let resp: Response
-    try {
-      resp = await this.fetchImpl(endpoint, {
+      const resp = await control.fetch(endpoint, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          ...(params.correlationId ? { 'X-MagicPot-Correlation-Id': params.correlationId } : {}),
+          ...invocationHeaders(params)
         },
-        body: JSON.stringify(requestBody),
-        signal
+        body: JSON.stringify(requestBody)
       })
+
+      if (!resp.ok) {
+        throw await readProviderHttpError('Ollama', resp, control)
+      }
+
+      const data = (await control.json(resp, PROVIDER_JSON_MAX_BYTES)) as {
+        message?: { content?: unknown }
+      }
+      const content = data?.message?.content
+
+      if (typeof content !== 'string' || !content) {
+        throw new Error(`Ollama API returned empty or invalid content.`)
+      }
+      const usage = normalizeProviderTokenUsage(data)
+      const result = normalizeLLMChatResult({
+        content: content.trim(),
+        ...(usage ? { usage } : {})
+      })
+      try {
+        emitUnaryProviderDelta(params, result.content)
+      } catch (error) {
+        callbackFailed = true
+        throw error
+      }
+      return result
     } catch (error) {
+      if (callbackFailed) throw error
+      if (control.signal.aborted) throw control.signal.reason
       throw buildFetchFailureError('Ollama API', endpoint, error)
+    } finally {
+      control.dispose()
     }
-
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '')
-      throw buildUpstreamHttpError('Ollama', resp, text)
-    }
-
-    const data = await resp.json()
-    const content = data?.message?.content
-
-    if (typeof content !== 'string' || !content) {
-      throw new Error(
-        `Ollama API returned empty or invalid content. Response: ${JSON.stringify(data)}`
-      )
-    }
-    const usage = normalizeProviderTokenUsage(data)
-    return normalizeLLMChatResult({
-      content: content.trim(),
-      ...(usage ? { usage } : {})
-    })
   }
 }

@@ -57,12 +57,18 @@ export function buildNativeToolDefinitions(
       : { type: 'function', function: definition }
   })
 }
+const hasControlCharacter = (text: string): boolean =>
+  Array.from(text).some((character) => {
+    const code = character.charCodeAt(0)
+    return code <= 0x20 || code === 0x7f
+  })
+
 function validId(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     value.length > 0 &&
     value.length <= 256 &&
-    !/[\u0000-\u0020\u007f]/.test(value)
+    !hasControlCharacter(value)
   )
 }
 export function prepareNativeToolBatch(

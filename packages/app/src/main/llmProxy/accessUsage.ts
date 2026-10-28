@@ -15,6 +15,7 @@ type ProxyAccessUsageActivity =
   | 'status'
   | 'profiles'
   | 'chat'
+  | 'project-comparison'
   | 'tool-call'
   | 'openai'
   | 'qapp-list'
@@ -145,6 +146,11 @@ export const recordLlmProxyAccessUsage = (
       record.profileListRequestCount += 1
       break
     case 'chat':
+      record.chatRequestCount += 1
+      break
+    case 'project-comparison':
+      // Comparison requests are model chats, but retain a distinct activity
+      // marker so access audits can distinguish this restricted protocol.
       record.chatRequestCount += 1
       break
     case 'tool-call':

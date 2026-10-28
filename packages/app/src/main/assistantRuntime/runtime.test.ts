@@ -498,6 +498,53 @@ describe('AssistantRuntime', () => {
     expect(chat).toHaveBeenCalledTimes(2)
   })
 
+  it('serializes concurrent task-group progress read/modify/write transitions', async () => {
+    const chat = vi.fn(async (): Promise<LLMChatResp> => ({ content: 'seeded' }))
+    const runtime = createRuntime({ chatService: { chat } })
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'task-race-1' }
+
+    await runtime.handleMessage({
+      route,
+      text: 'seed task group',
+      taskGroup: { taskGroupId: 'task-race-group', status: 'running' }
+    })
+
+    const originalUpsertRun = store.upsertRun.bind(store)
+    let delayed = true
+    store.upsertRun = async (upsertRoute, run, options) => {
+      if (delayed && run.taskGroup?.taskGroupId === 'task-race-group') {
+        delayed = false
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      return originalUpsertRun(upsertRoute, run, options)
+    }
+
+    await Promise.all([
+      runtime.progressTaskGroup(route, {
+        taskGroupId: 'task-race-group',
+        label: 'first',
+        completed: 1,
+        total: 3,
+        percent: 33
+      }),
+      runtime.progressTaskGroup(route, {
+        taskGroupId: 'task-race-group',
+        label: 'second',
+        completed: 2,
+        total: 3,
+        percent: 67
+      })
+    ])
+
+    const session = await store.getSession(route)
+    expect(session?.runs.at(-1)?.taskGroup?.progress).toMatchObject({
+      label: 'second',
+      completed: 2,
+      total: 3,
+      percent: 67
+    })
+  })
+
   it('clears a session through the cleanup command and reports retention state', async () => {
     const chat = vi.fn(async (): Promise<LLMChatResp> => ({ content: 'reply' }))
     const runtime = createRuntime({ chatService: { chat } })
@@ -514,6 +561,67 @@ describe('AssistantRuntime', () => {
     expect(cleanup.reply.content).toContain('Remaining sessions: 0')
     expect(retention.sessionCount).toBe(0)
     expect(session).toBeNull()
+  })
+
+  it('prunes the exact shared workspace only after its last session is removed', async () => {
+    const chat = vi.fn(async (): Promise<LLMChatResp> => ({ content: 'ok' }))
+    const runtime = createRuntime({ chatService: { chat } })
+    const oldRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'prune-old' }
+    const retainedRoute = {
+      channel: 'generic',
+      scopeType: 'dm' as const,
+      scopeId: 'prune-retained'
+    }
+    const workspaceId = 'workspace-prune-shared'
+
+    await runtime.attachWorkspace(oldRoute, workspaceId, { accessMode: 'shared' })
+    await runtime.attachWorkspace(retainedRoute, workspaceId, { accessMode: 'shared' })
+
+    const routeWorkspace = getAssistantWorkspaceState(oldRoute, workspaceId)
+    // Persisted sessions may carry a migrated/custom workspace root. Pruning
+    // must use that durable path rather than recomputing the route default.
+    const customRoot = path.join(tempDir, 'custom-workspace-root')
+    const workspace = {
+      ...routeWorkspace,
+      rootDir: customRoot,
+      memoryDir: path.join(customRoot, 'memory'),
+      memoryFile: path.join(customRoot, 'memory', 'today.md'),
+      contextFile: path.join(customRoot, 'context.json'),
+      taskContextFile: path.join(customRoot, 'task-context.json'),
+      pinnedContextFile: path.join(customRoot, 'pinned-context.json')
+    }
+    const oldSession = await store.getSession(oldRoute)
+    if (!oldSession) throw new Error('missing old session')
+    oldSession.workspace = workspace
+    await fs.mkdir(workspace.memoryDir, { recursive: true })
+    await fs.writeFile(workspace.taskContextFile, 'custom task context')
+    const retainedWorkspace = getAssistantWorkspaceState(retainedRoute, workspaceId)
+    await fs.writeFile(retainedWorkspace.taskContextFile, 'retained task context')
+    oldSession.updatedAt = Date.now() - 24 * 60 * 60 * 1_000
+
+    const firstPrune = await runtime.cleanupSession(oldRoute, {
+      mode: 'prune',
+      olderThanDays: 0.00001
+    })
+    expect(firstPrune.prunedCount).toBe(1)
+    await expect(fs.access(workspace.taskContextFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    // The retained route still owns the shared workspace identity, so pruning
+    // the old session must not erase its route-scoped durable context.
+    await expect(fs.readFile(retainedWorkspace.taskContextFile, 'utf8')).resolves.toBe(
+      'retained task context'
+    )
+
+    const retainedSession = await store.getSession(retainedRoute)
+    if (!retainedSession) throw new Error('missing retained session')
+    retainedSession.updatedAt = Date.now() - 24 * 60 * 60 * 1_000
+    const secondPrune = await runtime.cleanupSession(retainedRoute, {
+      mode: 'prune',
+      olderThanDays: 0.00001
+    })
+    expect(secondPrune.prunedCount).toBe(1)
+    await expect(fs.access(retainedWorkspace.taskContextFile)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
   })
 
   it('records run metadata, artifacts, and tool calls for each session', async () => {
@@ -723,6 +831,85 @@ describe('AssistantRuntime', () => {
     expect(events).toEqual(
       expect.arrayContaining(['queued', 'acknowledged', 'started', 'progress', 'cancelled'])
     )
+    expect(chat).toHaveBeenCalledTimes(1)
+  })
+
+  it('persists queued cancellation as a terminal run before the queue starts it', async () => {
+    const chat = vi.fn(
+      async (_req: LLMChatReq, options?: { signal?: AbortSignal }): Promise<LLMChatResp> =>
+        await new Promise<LLMChatResp>((_resolve, reject) => {
+          options?.signal?.addEventListener(
+            'abort',
+            () => {
+              const abortError = new Error('Aborted')
+              abortError.name = 'AbortError'
+              reject(abortError)
+            },
+            { once: true }
+          )
+        })
+    )
+    const runtime = createRuntime({ chatService: { chat } })
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'queued-cancel-1' }
+
+    const activeResult = runtime.handleMessage({ route, text: 'active request' })
+    await flushQueue()
+    const queuedResult = runtime.handleMessage({ route, text: 'queued request' })
+    await flushQueue()
+
+    await runtime.cancelRoute(route)
+    const [active, queued] = await Promise.all([activeResult, queuedResult])
+    const session = await store.getSession(route)
+    const queuedRun = session?.runs.find((run) => run.runId === queued.runId)
+    const queuedCancellationEvents = session?.eventLog.filter(
+      (event) => event.runId === queued.runId && event.type === 'cancelled'
+    )
+
+    expect(active.status).toBe('cancelled')
+    expect(queued.status).toBe('cancelled')
+    expect(queuedRun).toMatchObject({
+      status: 'cancelled',
+      cancelRequested: true,
+      errorMessage: 'Cancelled before execution started.'
+    })
+    expect(queuedRun?.finishedAt).toEqual(expect.any(Number))
+    expect(queuedCancellationEvents).toHaveLength(1)
+    expect(chat).toHaveBeenCalledTimes(1)
+  })
+
+  it('serializes duplicate cancellation requests without duplicate queued terminal events', async () => {
+    const chat = vi.fn(
+      async (_req: LLMChatReq, options?: { signal?: AbortSignal }): Promise<LLMChatResp> =>
+        await new Promise<LLMChatResp>((_resolve, reject) => {
+          options?.signal?.addEventListener(
+            'abort',
+            () => {
+              const abortError = new Error('Aborted')
+              abortError.name = 'AbortError'
+              reject(abortError)
+            },
+            { once: true }
+          )
+        })
+    )
+    const runtime = createRuntime({ chatService: { chat } })
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'queued-cancel-2' }
+
+    const activeResult = runtime.handleMessage({ route, text: 'active request' })
+    await flushQueue()
+    const queuedResult = runtime.handleMessage({ route, text: 'queued request' })
+    await flushQueue()
+
+    await Promise.all([runtime.cancelRoute(route), runtime.cancelRoute(route)])
+    const [active, queued] = await Promise.all([activeResult, queuedResult])
+    const session = await store.getSession(route)
+    const queuedCancellationEvents = session?.eventLog.filter(
+      (event) => event.runId === queued.runId && event.type === 'cancelled'
+    )
+
+    expect(active.status).toBe('cancelled')
+    expect(queued.status).toBe('cancelled')
+    expect(queuedCancellationEvents).toHaveLength(1)
     expect(chat).toHaveBeenCalledTimes(1)
   })
 

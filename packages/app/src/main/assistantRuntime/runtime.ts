@@ -1,5 +1,5 @@
 ﻿import { ChatAttachment, ChatMessage, LLMProxySvc } from '@shared/api/svcLLMProxy'
-import { MAGICPOT_SESSION_STATUS_TOOL_NAME } from '@shared/app/types'
+import { MAGICPOT_SESSION_STATUS_TOOL_NAME, normalizeMagicPotToolName } from '@shared/app/types'
 import { Config } from '@shared/config/config'
 import { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
 import { getConfig } from '../config/config'
@@ -646,6 +646,13 @@ export class AssistantRuntime {
   private readonly queuedRuns = new Map<string, string[]>()
   private readonly cancelledRuns = new Set<string>()
   private readonly runAbortControllers = new Map<string, AbortController>()
+  // Task-group commands can originate from both the UI and an executing tool.
+  // Keep their read/modify/write transitions serialized without queueing behind
+  // the active chat run (which would deadlock tool-originated progress calls).
+  private readonly taskGroupQueues = new Map<string, Promise<unknown>>()
+  // Cancellation can race queued-run startup. Serialize persistence so the
+  // cancel event is emitted once and startup observes the terminal snapshot.
+  private readonly cancellationQueues = new Map<string, Promise<unknown>>()
   private readonly routeEventSubscribers = new Map<string, Set<AssistantEventListener>>()
 
   constructor(deps: AssistantRuntimeDeps = {}) {
@@ -714,6 +721,40 @@ export class AssistantRuntime {
   }
 
   private async recordTaskGroupAction(
+    route: AssistantRoute,
+    action: AssistantTaskGroupAction,
+    options?: {
+      taskGroupId?: string
+      title?: string
+      description?: string
+      label?: string
+      total?: number
+      completed?: number
+      percent?: number
+      approvedBy?: string
+      exportTarget?: string
+      exportArtifactIds?: string[]
+      workspaceRunId?: string
+      sourceRunId?: string
+    }
+  ): Promise<AssistantTaskGroupState | null> {
+    const normalizedRoute = normalizeAssistantRoute(route)
+    const sessionKey = getAssistantSessionKey(normalizedRoute)
+    const previous = this.taskGroupQueues.get(sessionKey) || Promise.resolve()
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.recordTaskGroupActionUnlocked(normalizedRoute, action, options))
+    this.taskGroupQueues.set(sessionKey, next)
+    try {
+      return await next
+    } finally {
+      if (this.taskGroupQueues.get(sessionKey) === next) {
+        this.taskGroupQueues.delete(sessionKey)
+      }
+    }
+  }
+
+  private async recordTaskGroupActionUnlocked(
     route: AssistantRoute,
     action: AssistantTaskGroupAction,
     options?: {
@@ -1037,8 +1078,7 @@ export class AssistantRuntime {
     this.taskStates.delete(getAssistantSessionKey(normalizedRoute))
   }
 
-  private async clearWorkspaceForRoute(route: AssistantRoute): Promise<void> {
-    const workspace = getAssistantWorkspaceState(route)
+  private async clearWorkspaceContext(workspace: AssistantRuntimeWorkspace): Promise<void> {
     await clearAssistantReusableContext(workspace)
   }
 
@@ -1112,41 +1152,60 @@ export class AssistantRuntime {
     this.broadcastEvents(route, [event])
   }
 
-  private async handleMessageUnlocked(
+  private async runCancellationSerial<T>(
+    route: AssistantRoute,
+    task: () => Promise<T>
+  ): Promise<T> {
+    const sessionKey = getAssistantSessionKey(normalizeAssistantRoute(route))
+    const previous = this.cancellationQueues.get(sessionKey) || Promise.resolve()
+    const next = previous.catch(() => undefined).then(task)
+    this.cancellationQueues.set(sessionKey, next)
+    try {
+      return await next
+    } finally {
+      if (this.cancellationQueues.get(sessionKey) === next) {
+        this.cancellationQueues.delete(sessionKey)
+      }
+    }
+  }
+
+  private async cancelQueuedRunBeforeExecution(
     req: AssistantInboundMessage,
     route: AssistantRoute,
     runId: string,
     queuedRun: AssistantRunRecord,
-    preparedSession: Awaited<ReturnType<AssistantRuntime['prepareSession']>>
+    workspace: Awaited<ReturnType<AssistantRuntime['prepareSession']>>['workspace'],
+    contextSnapshot: Awaited<ReturnType<AssistantRuntime['prepareSession']>>['contextSnapshot'],
+    taskGroup: AssistantTaskGroupState | undefined,
+    profileId: string | undefined,
+    executionMode: AssistantExecutionMode,
+    executionTraceLabel: string | undefined
   ): Promise<AssistantRuntimeResult> {
-    const config = this.configProvider()
-    await syncMcpClientManager(config)
-    if (!cleanString(req.text) && !(req.attachments && req.attachments.length > 0)) {
-      throw new Error('Missing inbound chat message text or attachments.')
-    }
+    return this.runCancellationSerial(route, async () => {
+      const session = await this.sessionStore.getSession(route)
+      const persistedRun = session?.runs.find((run) => run.runId === runId)
+      const persistedEvent = session?.eventLog.find(
+        (event) => event.runId === runId && event.type === 'cancelled'
+      )
+      if (persistedRun?.status === 'cancelled') {
+        const taskState = this.finishRun(getAssistantSessionKey(route), runId, 'cancelled')
+        return buildSystemReplyResult(
+          route,
+          session?.messages.length || 0,
+          'The queued task was cancelled.',
+          {
+            runId,
+            profileId,
+            executionMode,
+            executionHistorySize: 1,
+            executionTraceLabel,
+            status: 'cancelled',
+            taskState,
+            ...(persistedEvent ? { events: [persistedEvent] } : {})
+          }
+        )
+      }
 
-    if (req.resetHistory) {
-      await this.clearPersistentSessionState(route)
-    }
-
-    const { workspace, contextSnapshot } = preparedSession
-    const sessionKey = getAssistantSessionKey(route)
-    const startedState = this.startRun(sessionKey, runId)
-    const profileId = this.resolveProfileId(req, config)
-    const systemPrompt = this.resolveSystemPrompt(req, config)
-    const executionMode = queuedRun.executionMode || resolveExecutionMode(req)
-    const executionTraceLabel =
-      queuedRun.executionTraceLabel || cleanString(req.execution?.traceLabel, 120)
-    const taskGroup = resolveInboundTaskGroup(req, queuedRun)
-    if (taskGroup) {
-      this.setTaskState(sessionKey, { taskGroup })
-    }
-
-    if (req.signal?.aborted) {
-      this.cancelledRuns.add(runId)
-    }
-
-    if (this.cancelledRuns.has(runId)) {
       const cancelledAt = Date.now()
       const cancelledRun: AssistantRunRecord = {
         ...queuedRun,
@@ -1195,7 +1254,7 @@ export class AssistantRuntime {
       })
       await this.emitEvents(req, [cancelledEvent])
       this.broadcastEvents(route, [cancelledEvent])
-      const taskState = this.finishRun(sessionKey, runId, 'cancelled')
+      const taskState = this.finishRun(getAssistantSessionKey(route), runId, 'cancelled')
       return buildSystemReplyResult(route, 0, 'The queued task was cancelled.', {
         runId,
         profileId,
@@ -1206,6 +1265,56 @@ export class AssistantRuntime {
         taskState,
         events: [cancelledEvent]
       })
+    })
+  }
+
+  private async handleMessageUnlocked(
+    req: AssistantInboundMessage,
+    route: AssistantRoute,
+    runId: string,
+    queuedRun: AssistantRunRecord,
+    preparedSession: Awaited<ReturnType<AssistantRuntime['prepareSession']>>
+  ): Promise<AssistantRuntimeResult> {
+    const config = this.configProvider()
+    await syncMcpClientManager(config)
+    if (!cleanString(req.text) && !(req.attachments && req.attachments.length > 0)) {
+      throw new Error('Missing inbound chat message text or attachments.')
+    }
+
+    if (req.resetHistory) {
+      await this.clearPersistentSessionState(route)
+    }
+
+    const { workspace, contextSnapshot } = preparedSession
+    const sessionKey = getAssistantSessionKey(route)
+    const startedState = this.startRun(sessionKey, runId)
+    const profileId = this.resolveProfileId(req, config)
+    const systemPrompt = this.resolveSystemPrompt(req, config)
+    const executionMode = queuedRun.executionMode || resolveExecutionMode(req)
+    const executionTraceLabel =
+      queuedRun.executionTraceLabel || cleanString(req.execution?.traceLabel, 120)
+    const taskGroup = resolveInboundTaskGroup(req, queuedRun)
+    if (taskGroup) {
+      this.setTaskState(sessionKey, { taskGroup })
+    }
+
+    if (req.signal?.aborted) {
+      this.cancelledRuns.add(runId)
+    }
+
+    if (this.cancelledRuns.has(runId)) {
+      return this.cancelQueuedRunBeforeExecution(
+        req,
+        route,
+        runId,
+        queuedRun,
+        workspace,
+        contextSnapshot,
+        taskGroup,
+        profileId,
+        executionMode,
+        executionTraceLabel
+      )
     }
 
     const existingSession = await this.sessionStore.getSession(route)
@@ -1940,15 +2049,41 @@ export class AssistantRuntime {
         throw new Error('Cleanup prune requires olderThanDays.')
       }
 
-      const cutoff = Date.now() - Math.trunc(olderThanDays) * 24 * 60 * 60 * 1000
+      // Keep fractional days for deterministic callers and tests; truncating
+      // values below one day would turn the cutoff into "now" and prune fresh
+      // sessions that were never meant to be eligible.
+      const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000
+      // Capture the persisted workspace identity before removing sessions. A
+      // route may be attached to a shared workspace whose files are not at the
+      // route's default path; pruning must clean the exact workspace and must
+      // not clear it while another retained session still references it.
+      const sessionsBeforePrune = await this.sessionStore.listSessions()
+      const workspaceBySessionKey = new Map(
+        sessionsBeforePrune.map((session) => [session.sessionKey, session.workspace])
+      )
       const pruneResult: AssistantPruneResult = await this.sessionStore.pruneSessions(cutoff)
+      // Workspace identity can be shared while reusable context remains
+      // route-scoped. Guard cleanup by the durable root path, not just the
+      // logical workspace ID, so one route cannot erase another's context.
+      const retainedWorkspaceRoots = new Set(
+        (await this.sessionStore.listSessions()).map((session) => session.workspace.rootDir)
+      )
+      const clearedWorkspaceRoots = new Set<string>()
       await Promise.all(
         pruneResult.removedSessions.map(async (session) => {
           this.taskStates.delete(session.sessionKey)
           this.routeQueues.delete(session.sessionKey)
           this.activeRuns.delete(session.sessionKey)
           this.queuedRuns.delete(session.sessionKey)
-          await this.clearWorkspaceForRoute(session.route)
+          const workspace = workspaceBySessionKey.get(session.sessionKey)
+          if (
+            workspace &&
+            !retainedWorkspaceRoots.has(workspace.rootDir) &&
+            !clearedWorkspaceRoots.has(workspace.rootDir)
+          ) {
+            clearedWorkspaceRoots.add(workspace.rootDir)
+            await this.clearWorkspaceContext(workspace)
+          }
         })
       )
 
@@ -1977,8 +2112,13 @@ export class AssistantRuntime {
 
   async cancelRoute(route: AssistantRoute): Promise<AssistantTaskState> {
     const normalizedRoute = normalizeAssistantRoute(route)
+    return this.runCancellationSerial(normalizedRoute, () =>
+      this.cancelRouteUnlocked(normalizedRoute)
+    )
+  }
+
+  private async cancelRouteUnlocked(normalizedRoute: AssistantRoute): Promise<AssistantTaskState> {
     const sessionKey = getAssistantSessionKey(normalizedRoute)
-    const current = this.getOrCreateTaskState(sessionKey)
     const queue = this.queuedRuns.get(sessionKey) || []
     const activeRunId = this.activeRuns.get(sessionKey)
 
@@ -2002,15 +2142,63 @@ export class AssistantRuntime {
         (activeRunId && run.runId === activeRunId)
     )
 
-    await Promise.all(
-      affectedRuns.map((run) =>
-        this.sessionStore.upsertRun(normalizedRoute, {
+    for (const run of affectedRuns) {
+      if (run.status === 'queued' || run.status === 'acknowledged') {
+        const workspace = await this.resolveWorkspaceState(normalizedRoute, run.workspaceId)
+        const cancelledAt = Date.now()
+        const cancelledRun: AssistantRunRecord = {
+          ...run,
+          status: 'cancelled',
+          cancelRequested: true,
+          finishedAt: cancelledAt,
+          updatedAt: cancelledAt,
+          errorMessage: 'Cancelled before execution started.'
+        }
+        const cancelledEvent = createEvent(
+          run.runId,
+          normalizedRoute,
+          'cancelled',
+          'Run cancelled before execution started.'
+        )
+        await this.sessionStore.upsertRun(normalizedRoute, cancelledRun, {
+          workspace,
+          events: [cancelledEvent]
+        })
+        await appendAssistantMemoryLog(workspace, {
+          title: run.requestText || 'Attachment-only request',
+          requestText: run.requestText,
+          status: 'cancelled',
+          profileId: run.profileId
+        })
+        await updateAssistantTaskContext(workspace, {
+          route: normalizedRoute,
+          runId: run.runId,
+          workspaceId: run.workspaceId,
+          status: 'cancelled',
+          runOrigin: run.runOrigin,
+          updatedAt: cancelledAt,
+          parentRunId: run.parentRunId,
+          rootRunId: run.rootRunId,
+          resumeSourceRunId: run.resumeSourceRunId,
+          resumeAttempt: run.resumeAttempt,
+          resumeMode: run.resumeMode,
+          profileId: run.profileId,
+          requestText: run.requestText,
+          errorMessage: cancelledRun.errorMessage,
+          artifactIds: run.artifactIds,
+          toolCalls: run.toolCalls,
+          taskGroup: run.taskGroup,
+          artifacts: []
+        })
+        this.broadcastEvents(normalizedRoute, [cancelledEvent])
+      } else {
+        await this.sessionStore.upsertRun(normalizedRoute, {
           ...run,
           cancelRequested: true,
           updatedAt: Date.now()
         })
-      )
-    )
+      }
+    }
 
     return updated
   }
@@ -2743,8 +2931,9 @@ export class AssistantRuntime {
     if (options?.signal?.aborted)
       throw options.signal.reason || new Error('Tool invocation cancelled.')
     const normalizedRoute = normalizeAssistantRoute(route)
+    const normalizedToolName = normalizeMagicPotToolName(name)
     const workspace = await this.resolveWorkspaceState(normalizedRoute)
-    if (name.startsWith('files.') || name === 'agent.terminal.run') {
+    if (normalizedToolName.startsWith('files.') || normalizedToolName === 'agent.terminal.run') {
       await ensureAssistantWorkspaceState(normalizedRoute, workspace.workspaceId)
       if (options?.signal?.aborted)
         throw options.signal.reason || new Error('Tool invocation cancelled.')

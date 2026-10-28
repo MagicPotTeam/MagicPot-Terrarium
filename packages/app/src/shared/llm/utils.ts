@@ -29,6 +29,7 @@ import {
 } from './clients'
 import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 import { resolveOpencodeZenAlias, resolveOpencodeZenModelApi } from './opencodeZenModels'
+import { validateProviderBaseUrl } from './providerEndpointPolicy'
 
 type ProfileLike = {
   api_key?: string
@@ -550,6 +551,12 @@ export const cliFromProfile = (
     fetchImpl?: FetchImpl
     imageAttachmentLoader?: OpenAIImageAttachmentLoader
     requireImageAttachmentLoader?: boolean
+    /** Enable provider-hosted tools for Codex-compatible gateways. */
+    enableHostedTools?: boolean
+    /** Codex-compatible gateways expose web search without file-search uploads. */
+    enableHostedWebSearch?: boolean
+    /** Force Responses requests to use SSE even for unary callers. */
+    forceStreaming?: boolean
   }
 ): LLMCli | undefined => {
   if (!isRunnableProfile(profile)) {
@@ -574,6 +581,11 @@ export const cliFromProfile = (
     }
   }
 
+  // Built-in clients all use fetch directly. Validate the persisted endpoint
+  // immediately before selecting one so a malformed profile cannot become an
+  // unbounded outbound request or leak credentials over public HTTP.
+  validateProviderBaseUrl(profileWithDefaults.base_url)
+
   if (isOpencodeZenUrl(profileWithDefaults.base_url || '')) {
     return new OpencodeZenAPICli(
       profileWithDefaults.api_key,
@@ -585,26 +597,23 @@ export const cliFromProfile = (
 
   switch (resolveProfileProvider(profileWithDefaults)) {
     case 'ollama':
-      return new OllamaAPICli(
-        profile.api_key,
-        profile.base_url,
-        profile.model_name,
-        options?.fetchImpl
-      )
+      return new OllamaAPICli(profile.api_key, profile.base_url, profile.model_name, {
+        fetchImpl: options?.fetchImpl,
+        requestTimeoutMs:
+          typeof profile.request_timeout_ms === 'number' ? profile.request_timeout_ms : undefined
+      })
     case 'gemini':
-      return new GeminiAPICli(
-        profile.api_key,
-        profile.base_url,
-        profile.model_name,
-        options?.fetchImpl
-      )
+      return new GeminiAPICli(profile.api_key, profile.base_url, profile.model_name, {
+        fetchImpl: options?.fetchImpl,
+        requestTimeoutMs:
+          typeof profile.request_timeout_ms === 'number' ? profile.request_timeout_ms : undefined
+      })
     case 'claude':
-      return new ClaudeAPICli(
-        profile.api_key,
-        profile.base_url,
-        profile.model_name,
-        options?.fetchImpl
-      )
+      return new ClaudeAPICli(profile.api_key, profile.base_url, profile.model_name, {
+        fetchImpl: options?.fetchImpl,
+        requestTimeoutMs:
+          typeof profile.request_timeout_ms === 'number' ? profile.request_timeout_ms : undefined
+      })
     case 'kling':
       return new KlingVideoAPICli(
         profile.api_key,
@@ -622,15 +631,25 @@ export const cliFromProfile = (
       )
     case 'openai': {
       const modelUse = resolveProfileModelUse(profile)
+      const codexGateway = profile.call_type === 'cliproxyapi' || profile.call_type === 'codex'
       return new OpenAIAPICli(profile.api_key, profile.base_url, profile.model_name, {
         modelUse,
-        serviceTier: isCodexFastModeEnabled(profile) ? 'priority' : undefined,
+        // CLIProxyAPI/Codex mirrors Codex OAuth: Responses + SSE and priority
+        // processing are part of the gateway contract rather than user hints.
+        serviceTier: codexGateway || isCodexFastModeEnabled(profile) ? 'priority' : undefined,
         callType: profile.call_type,
-        apiMode:
-          profile.api_mode ??
-          (modelUse === 'image' && /^gpt-image-/i.test(profile.model_name.trim())
-            ? 'images'
-            : 'auto'),
+        apiMode: codexGateway
+          ? 'responses'
+          : (profile.api_mode ??
+            (modelUse === 'image' && /^gpt-image-/i.test(profile.model_name.trim())
+              ? 'images'
+              : 'auto')),
+        // Codex-compatible gateways expose web search, but do not necessarily
+        // implement OpenAI's file-upload/vector-store lifecycle. Keep those
+        // capabilities separate so search works without creating remote files.
+        enableHostedTools: options?.enableHostedTools ?? (codexGateway ? false : undefined),
+        enableHostedWebSearch: options?.enableHostedWebSearch ?? (codexGateway ? true : undefined),
+        forceStreaming: options?.forceStreaming ?? codexGateway,
         maxInputImages:
           typeof profile.max_input_images === 'number'
             ? profile.max_input_images

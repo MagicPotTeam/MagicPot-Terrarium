@@ -494,6 +494,36 @@ describe('config', () => {
     expect(configModule.getConfig().remote_llm_server_config.access_token).toBe('remote-secret')
   })
 
+  it('normalizes the proxy CORS allowlist to exact origins and drops wildcard entries', async () => {
+    const configPath = path.join(tempDir, 'config.json')
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        ...DEFAULT_CONFIG,
+        local_llm_server_config: {
+          ...DEFAULT_CONFIG.local_llm_server_config,
+          cors_allowed_origins: [
+            ' https://CLIENT.example/ ',
+            'http://localhost:5173',
+            '*',
+            'https://user:secret@example.com',
+            'not-an-origin',
+            'https://client.example/path'
+          ]
+        }
+      }),
+      'utf8'
+    )
+
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+
+    expect(configModule.getConfig().local_llm_server_config.cors_allowed_origins).toEqual([
+      'http://localhost:5173',
+      'https://client.example'
+    ])
+  })
+
   it('backfills project trace config when loading an older config file', async () => {
     const configPath = path.join(tempDir, 'config.json')
     await fs.writeFile(

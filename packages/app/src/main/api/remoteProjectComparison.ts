@@ -9,6 +9,7 @@ import {
   PROJECT_COMPARISON_PROTOCOL,
   projectComparisonChatRequestSchema,
   projectComparisonChatResponseSchema,
+  projectComparisonErrorSchema,
   projectComparisonProfilesResponseSchema
 } from '@shared/projectComparisonProtocol'
 
@@ -16,6 +17,7 @@ const RECEIPT_TTL_MS = 10 * 60 * 1000
 const MAX_RECEIPTS = 512
 const METADATA_TIMEOUT_MS = 30_000
 const REQUEST_TIMEOUT_MS = 120_000
+const MAX_ERROR_BODY_BYTES = 4 * 1024
 
 // Only errors constructed here may cross the boundary. Even a ServiceError thrown by
 // the network implementation can contain credentials, response bodies or request URLs.
@@ -35,8 +37,35 @@ const invalidRequest = (): RemoteComparisonError =>
   failure('VALIDATION_ERROR', 'Invalid project comparison request.')
 const cancelled = (): RemoteComparisonError =>
   failure('CANCELLED', 'Remote project comparison request cancelled.')
-const timedOut = (): RemoteComparisonError =>
-  failure('TIMEOUT', 'Remote project comparison request timed out.')
+const timedOut = (status?: number): RemoteComparisonError =>
+  failure('TIMEOUT', 'Remote project comparison request timed out.', status)
+
+const errorForCode = (code: string, status?: number): RemoteComparisonError => {
+  switch (code) {
+    case 'PROFILE_CONFIGURATION_CHANGED':
+      return changed()
+    case 'PROTOCOL_UNSUPPORTED':
+      return unsupported()
+    case 'TIMEOUT':
+      return timedOut(status)
+    case 'CANCELLED':
+      return cancelled()
+    case 'AUTH':
+      return failure('AUTH', 'Remote project comparison authentication failed.', status)
+    case 'VALIDATION_ERROR':
+      return invalidRequest()
+    case 'REMOTE_UPSTREAM_FAILED':
+      return failure('REMOTE_UPSTREAM_FAILED', 'Remote project comparison upstream failed.', status)
+    case 'PAYLOAD_TOO_LARGE':
+      return failure('PAYLOAD_TOO_LARGE', 'Remote project comparison request is too large.', status)
+    default:
+      return failure(
+        'REMOTE_HTTP_ERROR',
+        `Remote project comparison request failed (HTTP ${status}).`,
+        status
+      )
+  }
+}
 
 function destination(config: Config): { origin: string; configuredOrigin: string; token: string } {
   const invalid = (): RemoteComparisonError =>
@@ -219,7 +248,8 @@ export class RemoteProjectComparisonClient {
       'profileScope',
       'temperature',
       'maxOutputTokens',
-      'comparisonRouting'
+      'comparisonRouting',
+      'correlationId'
     ])
     if (
       Object.entries(req).some(([key, value]) => value !== undefined && !allowed.has(key)) ||
@@ -242,6 +272,7 @@ export class RemoteProjectComparisonClient {
       protocol: PROJECT_COMPARISON_PROTOCOL,
       profileId: receipt.profileId,
       expectedProfileRevision: receipt.remoteRevision,
+      ...(req.correlationId ? { correlationId: req.correlationId } : {}),
       messages: req.messages.map(({ role, content }) => ({ role, content })),
       temperature: req.temperature === undefined ? 0.2 : req.temperature,
       maxOutputTokens: req.maxOutputTokens === undefined ? 1200 : req.maxOutputTokens
@@ -332,15 +363,68 @@ export class RemoteProjectComparisonClient {
         checkDeadline()
         if (response.redirected) throw invalidProtocol()
         const status = response.status
-        if (status === 404 || status === 501) throw unsupported()
-        if (status === 401 || status === 403)
-          throw failure('AUTH', 'Remote project comparison authentication failed.', status)
-        if (status === 409) throw changed()
         if (status !== 200) {
           if (!Number.isInteger(status) || status < 100 || status > 599) throw invalidProtocol()
-          throw failure(
-            'REMOTE_HTTP_ERROR',
-            `Remote project comparison request failed (HTTP ${status}).`,
+          // Error envelopes are optional.  When present, consume only the tiny
+          // fixed schema and retain its allowlisted classification; never use
+          // arbitrary remote text as a local error message.
+          let remoteCode: string | undefined
+          const contentType = response.headers
+            .get('content-type')
+            ?.split(';')[0]
+            .trim()
+            .toLowerCase()
+          const length = response.headers.get('content-length')
+          if (
+            contentType === 'application/json' &&
+            (length === null ||
+              (/^\d+$/.test(length) &&
+                Number.isSafeInteger(Number(length)) &&
+                Number(length) <= MAX_ERROR_BODY_BYTES)) &&
+            response.body
+          ) {
+            reader = response.body.getReader()
+            const decoder = new TextDecoder('utf-8', { fatal: true })
+            let bytes = 0
+            let text = ''
+            try {
+              while (true) {
+                if (controller.signal.aborted) throw cancelled()
+                checkDeadline()
+                const chunk = await reader.read()
+                checkDeadline()
+                if (chunk.done) break
+                if (!(chunk.value instanceof Uint8Array)) throw new Error()
+                bytes += chunk.value.byteLength
+                if (bytes > MAX_ERROR_BODY_BYTES) break
+                text += decoder.decode(chunk.value, { stream: true })
+              }
+              if (bytes <= MAX_ERROR_BODY_BYTES) {
+                text += decoder.decode()
+                const parsed = projectComparisonErrorSchema.safeParse(JSON.parse(text))
+                if (parsed.success) remoteCode = parsed.data.code
+              }
+            } catch (error) {
+              if (error instanceof RemoteComparisonError) throw error
+              if (controller.signal.aborted) throw cancelled()
+              // Malformed/partial error bodies intentionally fall back to HTTP.
+            }
+          }
+          if (remoteCode !== undefined) throw errorForCode(remoteCode, status)
+          throw errorForCode(
+            status === 504
+              ? 'TIMEOUT'
+              : status === 502
+                ? 'REMOTE_UPSTREAM_FAILED'
+                : status === 499
+                  ? 'CANCELLED'
+                  : status === 401 || status === 403
+                    ? 'AUTH'
+                    : status === 409
+                      ? 'PROFILE_CONFIGURATION_CHANGED'
+                      : status === 404 || status === 501
+                        ? 'PROTOCOL_UNSUPPORTED'
+                        : 'REMOTE_HTTP_ERROR',
             status
           )
         }

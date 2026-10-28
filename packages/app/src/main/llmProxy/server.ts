@@ -6,6 +6,7 @@ import os from 'os'
 import fs from 'fs'
 import path from 'path'
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { isIP } from 'node:net'
 import { app } from 'electron'
 import { buildMagicPotAppCatalogSnapshot } from '@shared/app/catalog'
 import { type LLMOpenAIApiMode, type LLMProxyAccessTokenEntry } from '@shared/config/config'
@@ -115,9 +116,11 @@ const namespaceProxyConversationId = (
 }
 
 const getRequesterAddress = (req: http.IncomingMessage): string => {
-  const forwardedFor = firstHeaderValue(req.headers['x-forwarded-for'])
-  const candidate =
-    cleanString(forwardedFor?.split(',')[0]) || cleanString(req.socket.remoteAddress)
+  // The proxy does not have a configured trusted-hop list. Treating an
+  // arbitrary X-Forwarded-For value as identity lets a LAN caller choose the
+  // address bound into signed media URLs and usage records. Use the actual
+  // peer address until an explicitly trusted reverse-proxy policy exists.
+  const candidate = cleanString(req.socket.remoteAddress)
   if (!candidate) {
     return 'unknown'
   }
@@ -397,6 +400,14 @@ const getBearerToken = (header?: string | string[]): string | undefined => {
   return cleanString(match?.[1])
 }
 
+const constantTimeTokenEquals = (left: string | undefined, right: string | undefined): boolean => {
+  if (left === undefined || right === undefined) return false
+  const leftBytes = Buffer.from(left)
+  const rightBytes = Buffer.from(right)
+  if (leftBytes.byteLength !== rightBytes.byteLength) return false
+  return timingSafeEqual(leftBytes, rightBytes)
+}
+
 const getLegacyBotSecretToken = (
   headers: Record<string, string | string[] | undefined>
 ): string | undefined =>
@@ -410,11 +421,11 @@ const isLocalSecretRequestAuthorized = (
   if (!normalizedSecret) return true
 
   const authorizationToken = getBearerToken(headers.authorization)
-  if (authorizationToken === normalizedSecret) {
+  if (constantTimeTokenEquals(authorizationToken, normalizedSecret)) {
     return true
   }
 
-  return getLegacyBotSecretToken(headers) === normalizedSecret
+  return constantTimeTokenEquals(getLegacyBotSecretToken(headers), normalizedSecret)
 }
 
 const normalizeLlmProxyAccessTokenEntry = (
@@ -490,7 +501,9 @@ const resolveLlmProxyAccessIdentity = (
     return null
   }
 
-  const matched = configuredTokens.find((entry) => entry.token === requestedToken)
+  const matched = configuredTokens.find((entry) =>
+    constantTimeTokenEquals(entry.token, requestedToken)
+  )
   return matched || null
 }
 
@@ -573,7 +586,60 @@ const normalizeBindHost = (value?: string | null): string =>
 
 const isLoopbackBindHost = (host: string): boolean => {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, '')
-  return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.')
+  if (normalized === 'localhost' || normalized === '::1') {
+    return true
+  }
+  // Do not treat arbitrary hostnames such as `127.attacker.example` as
+  // loopback. A permissive prefix check could allow an unauthenticated bind
+  // to a DNS-resolved public interface.
+  return isIP(normalized) === 4 && normalized.split('.')[0] === '127'
+}
+
+/**
+ * CORS is an explicit browser trust policy, not a replacement for bearer auth. Keep origins
+ * exact (scheme/host/port) and fail closed for malformed or wildcard entries.
+ */
+const normalizeCorsAllowedOrigins = (value: unknown): Set<string> => {
+  const origins = new Set<string>()
+  if (!Array.isArray(value)) return origins
+  for (const candidate of value) {
+    if (typeof candidate !== 'string') continue
+    const raw = candidate.trim()
+    if (raw === 'null') {
+      origins.add(raw)
+      continue
+    }
+    try {
+      const parsed = new URL(raw)
+      if (
+        (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+        parsed.username ||
+        parsed.password ||
+        parsed.pathname !== '/' ||
+        parsed.search ||
+        parsed.hash
+      ) {
+        continue
+      }
+      origins.add(parsed.origin)
+    } catch {
+      // Invalid entries must not broaden the policy.
+    }
+  }
+  return origins
+}
+
+const getCorsOrigin = (
+  request: http.IncomingMessage,
+  configuredOrigins: unknown
+): string | undefined => {
+  const requestOrigin = firstHeaderValue(request.headers.origin)
+  if (!requestOrigin) return undefined
+  const allowed = normalizeCorsAllowedOrigins(configuredOrigins)
+  // Loopback is not a wildcard: local browser callers must still be explicitly listed.
+  // Remote binds likewise require an explicit allowlist, even when bearer auth is enabled.
+  if (!allowed.has(requestOrigin)) return undefined
+  return requestOrigin
 }
 
 const getMcpServerPath = () => cleanString(getConfig().mcp_config?.server?.path) || '/api/mcp'
@@ -1252,14 +1318,25 @@ export function startLLMProxyServer(): void {
   }
 
   server = http.createServer(async (req, res) => {
-    // CORS support.
-    res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    res.setHeader(
-      'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, X-MagicPot-Bot-Secret, X-Bot-Secret, X-MagicPot-Proxy-Token'
-    )
-    res.setHeader('Access-Control-Expose-Headers', 'X-MagicPot-Stream-Fallback')
+    // CORS is allowlist based. Never reflect arbitrary origins or use `*` on this
+    // authenticated LAN endpoint; a remote web page must be explicitly trusted.
+    res.setHeader('Vary', 'Origin')
+    const requestOrigin = firstHeaderValue(req.headers.origin)
+    const corsOrigin = getCorsOrigin(req, getConfig().local_llm_server_config?.cors_allowed_origins)
+    if (requestOrigin && !corsOrigin) {
+      res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ error: 'Origin is not allowed by the LLM proxy CORS policy.' }))
+      return
+    }
+    if (corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin)
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, X-MagicPot-Bot-Secret, X-Bot-Secret, X-MagicPot-Proxy-Token'
+      )
+      res.setHeader('Access-Control-Expose-Headers', 'X-MagicPot-Stream-Fallback')
+    }
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -1281,6 +1358,20 @@ export function startLLMProxyServer(): void {
           writeUnauthorizedLlmProxyResponse(res)
           return
         }
+        // Record the authenticated protocol boundary before capacity or
+        // payload handling. Pass only the de-identified identity fields;
+        // bearer credentials and request bodies must never enter usage data.
+        recordLlmProxyAccessUsage(
+          {
+            tokenId: accessIdentity.tokenId,
+            label: accessIdentity.label,
+            resourceScope: accessIdentity.resourceScope
+          },
+          {
+            activity: 'project-comparison',
+            requesterAddress: getRequesterAddress(req)
+          }
+        )
         if (activeProjectComparisons >= 16) {
           res.writeHead(429, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
           res.end(JSON.stringify({ code: 'BUSY', message: 'Project comparison capacity reached.' }))
@@ -1480,8 +1571,7 @@ export function startLLMProxyServer(): void {
 
         res.writeHead(200, {
           'Content-Type': contentType,
-          'Content-Length': stat.size,
-          'Access-Control-Allow-Origin': '*'
+          'Content-Length': stat.size
         })
         const readStream = fs.createReadStream(filePath)
         readStream.pipe(res)

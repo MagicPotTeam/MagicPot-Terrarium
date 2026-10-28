@@ -6,6 +6,10 @@ export type { ImageRequestContract } from './imageRequestContract'
 import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
 import type { LLMReasoningEffort } from './profileCapabilities'
+import type { LLMStructuredOutput } from './structuredOutput'
+export type { LLMStructuredOutput } from './structuredOutput'
+import type { BinaryChunkFrame, BinaryChunkReference } from '../binaryChunkProtocol'
+import type { ModelInvocationContract } from './modelInvocationContract'
 
 /**
  * Shared LLM types used by both main process and renderer process.
@@ -24,6 +28,8 @@ export interface ChatAttachment {
   sizeBytes?: number
   sourceWidth?: number
   sourceHeight?: number
+  /** Caller-requested image budget hint, not a guarantee of provider billing. */
+  imageDetail?: 'low'
   ocrResult?: OCRResult
   reportBundleId?: string
   reportBundleRole?: ReportBundleRole
@@ -32,6 +38,12 @@ export interface ChatAttachment {
   reportBundleLabel?: string
   /** Optional pre-discovered image count for a provider-owned report bundle; no I/O is implied. */
   reportBundleImageCount?: number
+  /** Optional content-addressed binary payload used at the main-process LLM boundary. */
+  binary?: {
+    transport: 'chunked-binary-v1'
+    reference: BinaryChunkReference
+    chunks: BinaryChunkFrame[]
+  }
 }
 
 export type ToolHistoryEntry = {
@@ -196,6 +208,8 @@ export interface VideoGenerationOptions {
 }
 
 export interface LLMChatParams {
+  /** Main-issued identifier propagated to provider requests for end-to-end diagnostics. */
+  correlationId?: string
   /** Main-selected native tools; not renderer-supplied execution authority. */
   tools?: LLMFunctionTool[]
   toolTurns?: LLMToolTurn[]
@@ -214,6 +228,10 @@ export interface LLMChatParams {
   sessionUrl?: string
   conversationId?: string
   onDelta?: (event: LLMDeltaEvent) => void
+  /** Optional provider-native JSON output hint; callers still validate the result. */
+  structuredOutput?: LLMStructuredOutput
+  /** Main-issued provider-neutral invocation metadata; never carries model input. */
+  invocation?: ModelInvocationContract
 }
 
 const LLM_CHAT_FINISH_REASONS = new Set<LLMChatFinishReason>([

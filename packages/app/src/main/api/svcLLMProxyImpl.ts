@@ -72,7 +72,13 @@ import {
   isTaggerSkillRuntime,
   getTaggerProviderDisplayLabel,
   type LLMChatResult,
-  type LLMDeltaEvent
+  type LLMDeltaEvent,
+  normalizeLLMStructuredOutput
+} from '@shared/llm'
+import {
+  createModelInvocationContract,
+  MODEL_INVOCATION_DEFAULT_DEADLINE_MS,
+  type ModelInvocationContract
 } from '@shared/llm'
 import { resolveRemoteProfileRouting } from '@shared/llm/remoteProfileRouting'
 import { getAssistantRuntime } from '../assistantRuntime/runtime'
@@ -87,6 +93,7 @@ import {
   uploadLocalHy3dModel
 } from '../llmProxy/hunyuan3dCos'
 import { validateStructuredSkillOutput } from './skillRuntimeStructuredOutput'
+import { assertStructuredOutputResult } from './structuredOutputValidation'
 import { syncMcpClientManager } from '../mcp/runtime'
 import fs from 'node:fs/promises'
 import { isLocalFileSource } from '../utils/localFileUrl'
@@ -97,6 +104,7 @@ import { safeRemoteDownload } from './safeRemoteDownload'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 import { LlmProfileRevision } from './llmProfileRevision'
 import { RemoteProjectComparisonClient } from './remoteProjectComparison'
+import { assembleBinaryChunks } from '@shared/binaryChunkProtocol'
 import {
   DEFAULT_HY3D_API_REGION,
   normalizeConfiguredSecret,
@@ -107,6 +115,20 @@ import {
 
 const isMockFetchFunction = (value: unknown): value is FetchImpl =>
   typeof value === 'function' && 'mock' in (value as unknown as { mock?: unknown })
+
+// Correlation IDs are generated at the trusted main-process boundary and then
+// carried through remote requests and provider headers. Reject caller-supplied
+// arbitrary strings so logs cannot be polluted with unbounded values.
+const CORRELATION_ID_PATTERN =
+  /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/iu
+
+const ensureCorrelationId = <T extends { correlationId?: string }>(
+  request: T
+): T & { correlationId: string } => {
+  const candidate = typeof request.correlationId === 'string' ? request.correlationId.trim() : ''
+  if (CORRELATION_ID_PATTERN.test(candidate)) return request as T & { correlationId: string }
+  return { ...request, correlationId: crypto.randomUUID() }
+}
 
 const applySkillRuntimeContextMessageLimit = (req: LLMChatReq): LLMChatReq => {
   if (!req.skillRuntime) {
@@ -426,6 +448,82 @@ const REMOTE_STREAM_MAX_EVENTS = 4096
 const REMOTE_STREAM_MAX_TEXT_BYTES = 4 * 1024 * 1024
 const REMOTE_ERROR_DETAIL_MAX_BYTES = 64 * 1024
 const REMOTE_OUTPUT_URL_MAX_LENGTH = 8192
+// Keep the request-boundary materialization below the managed-media quota so a
+// valid protocol object cannot force an unbounded provider request allocation.
+const MAX_LLM_CHUNKED_BINARY_BYTES = 64 * 1024 * 1024
+
+export const materializeChunkedBinaryAttachments = async (req: LLMChatReq): Promise<LLMChatReq> => {
+  let changed = false
+  const messages = await Promise.all(
+    req.messages.map(async (message) => {
+      if (!message.attachments?.length) return message
+      let messageChanged = false
+      const attachments = await Promise.all(
+        message.attachments.map(async (attachment) => {
+          const binary = attachment.binary
+          if (binary === undefined) return attachment
+          changed = true
+          messageChanged = true
+          if (
+            !binary ||
+            typeof binary !== 'object' ||
+            Array.isArray(binary) ||
+            binary.transport !== 'chunked-binary-v1'
+          ) {
+            throw new Error(
+              'Attachment transport error: unknown or malformed binary attachment transport.'
+            )
+          }
+          const reference = binary.reference
+          const declaredSize =
+            reference && typeof reference === 'object' && !Array.isArray(reference)
+              ? (reference as { sizeBytes?: unknown }).sizeBytes
+              : undefined
+          if (
+            typeof declaredSize !== 'number' ||
+            !Number.isSafeInteger(declaredSize) ||
+            declaredSize <= 0 ||
+            declaredSize > MAX_LLM_CHUNKED_BINARY_BYTES
+          ) {
+            throw new Error(
+              `Attachment transport error: chunked binary payload exceeds the ${MAX_LLM_CHUNKED_BINARY_BYTES} byte request limit.`
+            )
+          }
+          if (!Array.isArray(binary.chunks)) {
+            throw new Error('Attachment transport error: binary chunks must be an array.')
+          }
+          let bytes: Uint8Array
+          try {
+            bytes = await assembleBinaryChunks(reference, binary.chunks)
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            throw new Error(`Attachment transport error: invalid chunked binary payload: ${reason}`)
+          }
+          const mimeType = reference.mimeType
+          if (
+            typeof mimeType !== 'string' ||
+            (attachment.mimeType && attachment.mimeType.trim().toLowerCase() !== mimeType)
+          ) {
+            throw new Error('Attachment transport error: binary attachment MIME type mismatch.')
+          }
+          const nextAttachment = {
+            ...attachment,
+            url: `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`,
+            mimeType,
+            sizeBytes: bytes.byteLength
+          }
+          delete nextAttachment.binary
+          // A binary payload is self-contained; never leak a local media reference
+          // alongside its provider-bound data URL.
+          delete nextAttachment.media
+          return nextAttachment
+        })
+      )
+      return messageChanged ? { ...message, attachments } : message
+    })
+  )
+  return changed ? { ...req, messages } : req
+}
 
 const truncateUtf8 = (value: string, maxBytes: number): string => {
   const bytes = Buffer.from(value, 'utf8')
@@ -1212,9 +1310,21 @@ const buildToolResultMessage = (
 })
 
 const extractSkillRuntimeAllowedToolNames = (req: LLMChatReq): string[] | null => {
-  const explicitToolBindings =
-    req.skillRuntime?.bindings?.filter((binding) => Array.isArray(binding.toolNames)) || []
+  const bindings = req.skillRuntime?.bindings || []
+  const explicitToolBindings = bindings.filter((binding) => Array.isArray(binding.toolNames))
   if (!explicitToolBindings.length) {
+    // MagicAgentRuntime deliberately omits an allowlist when the agent uses its
+    // default tool surface. Keep ordinary custom skills fail-closed while
+    // giving Agent threads the built-in web tools so the model can decide when
+    // browsing is genuinely useful without a "please search" prompt.
+    if (
+      bindings.some(
+        (binding) =>
+          binding.source === 'magicAgentRuntime' || binding.source === 'assistant-runtime'
+      )
+    ) {
+      return ['web_search', 'web_fetch']
+    }
     return null
   }
 
@@ -1557,11 +1667,21 @@ const buildBigModelOcrBoxes = (payload: {
 }
 
 export class LLMProxySvcImpl implements LLMProxySvc {
-  private readonly conversationAbortControllers = new Map<string, AbortController>()
+  private readonly conversationAbortControllers = new Map<
+    string,
+    { controller: AbortController; cancellationId?: string }
+  >()
   private readonly profileRevisions = new LlmProfileRevision()
   private readonly remoteComparisons = new RemoteProjectComparisonClient((input, init) =>
     this.getFetchImpl()(input, init)
   )
+
+  private readonly retryModelCapacity: boolean
+
+  /** Main-only instance policy; never accepted from renderer requests or Provider JSON. */
+  constructor(executionPolicy: { retryModelCapacity?: false } = {}) {
+    this.retryModelCapacity = executionPolicy.retryModelCapacity !== false
+  }
 
   private getFetchImpl(): FetchImpl {
     if (isMockFetchFunction(globalThis.fetch)) {
@@ -1603,17 +1723,23 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
   private createConversationAbortContext(
     conversationId?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    cancellationId?: string
   ): {
     signal?: AbortSignal
     abort: (reason?: unknown) => void
     cleanup: () => void
   } {
-    const normalizedConversationId = String(conversationId || '').trim()
+    throwIfAborted(signal)
     if (
-      normalizedConversationId &&
-      this.conversationAbortControllers.has(normalizedConversationId)
-    ) {
+      cancellationId !== undefined &&
+      (typeof cancellationId !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(cancellationId))
+    )
+      throw new ServiceError('Invalid request cancellation identity.', { code: 'INVALID_REQUEST' })
+    const normalizedConversationId = String(conversationId || '').trim()
+    const previous = this.conversationAbortControllers.get(normalizedConversationId)
+    if (normalizedConversationId && previous && !previous.controller.signal.aborted) {
       throw createConversationRequestActiveError(normalizedConversationId)
     }
 
@@ -1626,8 +1752,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     }
 
     const controller = new AbortController()
+    const owner = { controller, cancellationId }
     if (normalizedConversationId) {
-      this.conversationAbortControllers.set(normalizedConversationId, controller)
+      // A cancelled provider may still be draining. Its revoked signal remains
+      // attached to that work, but must not block or later release a new owner.
+      // Already-started tools retain their own cooperative cancellation semantics.
+      this.conversationAbortControllers.set(normalizedConversationId, owner)
     }
 
     const abort = (reason?: unknown) => {
@@ -1658,7 +1788,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           signal.removeEventListener('abort', handleAbort)
         }
         const current = this.conversationAbortControllers.get(normalizedConversationId)
-        if (current === controller) {
+        if (current === owner) {
           this.conversationAbortControllers.delete(normalizedConversationId)
         }
       }
@@ -1898,6 +2028,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
+                ...(req.correlationId ? { 'X-MagicPot-Correlation-Id': req.correlationId } : {}),
                 Authorization: `Bearer ${profile.api_key}`
               },
               signal: options?.signal,
@@ -1978,7 +2109,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const descriptor = resolveTaggerProviderDescriptor(profile)
     const endpoint = buildTaggerEndpoint(profile)
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...(req.correlationId ? { 'X-MagicPot-Correlation-Id': req.correlationId } : {})
     }
     if (profile.api_key.trim()) {
       headers.Authorization = `Bearer ${profile.api_key}`
@@ -2035,6 +2167,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: LLMChatReq,
     options?: LLMChatOptions & Partial<ServiceInvocationContext>
   ): Promise<LLMChatResp> => {
+    req = ensureCorrelationId(req)
     const readExternalFile = getConfig().use_remote_llm
       ? undefined
       : createCanvasPathReadHandler(
@@ -2050,8 +2183,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       }
     )
     req = canvas.request
-    const abortContext = this.createConversationAbortContext(req.conversationId, options?.signal)
+    const abortContext = this.createConversationAbortContext(
+      req.conversationId,
+      options?.signal,
+      req.cancellationId
+    )
     console.log('[LLMProxy] received chat request at top-level handler', {
+      correlationId: req.correlationId,
       profileId: req.profileId,
       sessionUrl: req.sessionUrl,
       messageCount: req.messages.length,
@@ -2062,7 +2200,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       if (req.comparisonRouting === 'configured') {
         const config = structuredClone(getConfig())
         if (config.use_remote_llm) {
-          const { conversationId: _conversationId, ...remoteRequest } = req
+          const {
+            conversationId: _conversationId,
+            cancellationId: _cancellationId,
+            ...remoteRequest
+          } = req
           return await this.remoteComparisons.chat(config, remoteRequest, abortContext.signal)
         }
       }
@@ -2092,8 +2234,18 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: LLMChatReq,
     options?: ChatExecutionOptions
   ): Promise<LLMChatResp> => {
+    req = ensureCorrelationId(req)
     throwIfAborted(options?.signal)
     req = applySkillRuntimeContextMessageLimit(req)
+    // Resolve content-addressed attachment frames once at the main boundary so
+    // every provider route (including extensions and taggers) receives the same
+    // validated, provider-compatible representation.
+    req = await materializeChunkedBinaryAttachments(req)
+    // Renderer/remote callers may provide an untrusted schema. Normalize and
+    // detach it once at the main boundary before any provider-specific route.
+    if (req.structuredOutput !== undefined) {
+      req = { ...req, structuredOutput: normalizeLLMStructuredOutput(req.structuredOutput) }
+    }
     const config =
       req.expectedProfileRevision === undefined ? getConfig() : structuredClone(getConfig())
     if (req.expectedProfileRevision !== undefined) {
@@ -2116,6 +2268,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       })
       if (extensionResponse) {
         throwIfAborted(options?.signal)
+        assertStructuredOutputResult(extensionResponse, req.structuredOutput)
         return extensionResponse
       }
     }
@@ -2188,7 +2341,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         })
       }
       throwIfAborted(options?.signal)
-      return { content }
+      const response = { content }
+      // Hunyuan is a provider-specific route, but it still has to honor the
+      // same caller-declared structured-output postcondition as API routes.
+      assertStructuredOutputResult(response, req.structuredOutput)
+      return response
     }
 
     const skillRuntimeToolResp = await tryHandleSkillRuntimeToolCommand(req)
@@ -2215,6 +2372,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       })
 
       const taggerResponse = await this.chatViaTaggerProvider(req, profileForTaggerRoute, options)
+      // Tagger responses must satisfy the same caller-declared contract as
+      // every other provider route before crossing the main-process boundary.
+      assertStructuredOutputResult(taggerResponse, req.structuredOutput)
       const structuredSkillContent = validateStructuredSkillOutput(
         taggerResponse.content,
         req.skillRuntime
@@ -2307,7 +2467,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         profileId: profile.id,
         model: profile.model_name
       })
-      return await this.chatViaBigModelOcr(req, profileWithSelectedKey, options)
+      const response = await this.chatViaBigModelOcr(req, profileWithSelectedKey, options)
+      // OCR is a provider-specific route, but its response still has to honor
+      // the same caller-declared structured-output postcondition.
+      assertStructuredOutputResult(response, req.structuredOutput)
+      return response
     }
 
     const extensionContext = {
@@ -2361,6 +2525,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const effectiveMessages = stripQAppInlineImagePolicyMarker(req.messages)
 
     console.log('[LLMProxySvc] chat request:', {
+      correlationId: req.correlationId,
       profileId: profile.id,
       model: profileWithSelectedKey.model_name,
       messageCount: effectiveMessages.length
@@ -2408,6 +2573,32 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const nativeTurns: LLMToolTurn[] = []
     const executedNativeIds = new Set<string>()
     let transcriptBytes = 0
+    const normalizeInvocationToken = (value: unknown, fallback: string): string => {
+      const candidate = typeof value === 'string' ? value.trim() : ''
+      return /^[A-Za-z0-9._:-]{1,96}$/.test(candidate) ? candidate : fallback
+    }
+    const invocationSession = normalizeInvocationToken(
+      req.conversationId,
+      `session-${crypto.randomUUID()}`
+    )
+    const invocationTask = normalizeInvocationToken(req.skillRuntime?.skillId, 'chat')
+    const invocationForStep = (step: number): ModelInvocationContract =>
+      createModelInvocationContract(
+        {
+          project: 'magicpot',
+          session: invocationSession,
+          task: invocationTask,
+          requestId: `${req.correlationId}:${normalizeInvocationToken(runId, 'run')}:${step}`
+        },
+        {
+          resourceRefs: [],
+          permission: { granted: true, capabilities: ['model.invoke'], scope: 'profile' },
+          cancel: { requested: false },
+          // This is correlation metadata only. ProviderRequestControl remains
+          // the source of truth for each provider's actual deadline.
+          timeout: { deadlineMs: MODEL_INVOCATION_DEFAULT_DEADLINE_MS }
+        }
+      )
     const emitToolStatus = (toolStatus: LLMToolStatus): void => {
       if (options?.signal?.aborted) return
       options?.onDelta?.({
@@ -2436,7 +2627,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         let nextChatResult: LLMChatResult
         try {
           nextChatResult = await cli.chat({
-            ...(req.conversationId && options?.signal && !req.videoGenerationOptions
+            correlationId: req.correlationId,
+            // Every interactive model step is replay-safe until it has emitted
+            // output or executed a hosted tool. Let the client retry transient
+            // provider failures even for stateless requests (which may not have
+            // a conversationId), while keeping long-running video jobs out of
+            // the model-sampling retry path.
+            ...(!req.videoGenerationOptions && this.retryModelCapacity
               ? { retryCapacity: true }
               : {}),
             ...(nativeToolsEnabled ? { tools: availableSkillTools, toolTurns: nativeTurns } : {}),
@@ -2449,6 +2646,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             imageRequest: req.imageRequest,
             imageHistoryPolicy: req.imageHistoryPolicy,
             videoGenerationOptions: req.videoGenerationOptions,
+            structuredOutput: req.structuredOutput,
+            invocation: invocationForStep(step),
             signal: options?.signal,
             sessionUrl: continuationUrl,
             conversationId: req.conversationId,
@@ -2561,9 +2760,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             ? { responseItems: chatResult.toolResponseItems }
             : {})
         }
-        for (const requestedTool of requested) {
+        // A provider may return a native batch in one model step. Keep the
+        // internal tool identity unique for every member of that batch; using
+        // only `step` would make parallel calls share the same toolCallId and
+        // collide in status events, durable records, and cancellation tracking.
+        const batchStep = step
+        for (const [requestedIndex, requestedTool] of requested.entries()) {
           throwIfAborted(options?.signal)
-          const toolCallId = `${runId}:tool:${step}`
+          const toolCallId = `${runId}:tool:${batchStep + requestedIndex}`
           const toolOptions = {
             allowedToolNames,
             signal: options?.signal,
@@ -2679,6 +2883,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       chatResult.metadata = { ...(chatResult.metadata || {}), runId, lastStepUsage, toolHistory }
     }
 
+    // Native JSON-schema support is provider-specific; enforce the same
+    // contract locally so compatible gateways cannot silently return a plan
+    // that the caller assumed had been validated upstream.
+    assertStructuredOutputResult({ content }, req.structuredOutput)
+
     const structuredSkillContent = validateStructuredSkillOutput(content, req.skillRuntime)
     if (structuredSkillContent !== null) {
       chatResult = {
@@ -2718,10 +2927,15 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     resp: ServerStreaming<LLMChatStreamResp>,
     invocation?: ServiceInvocationContext
   ): Promise<void> => {
+    req = ensureCorrelationId(req)
+    // Normalize once at the trusted main boundary. Structured streaming is
+    // gated until its complete response satisfies this detached contract.
+    let structuredOutput = req.structuredOutput
     const streamAbortController = new AbortController()
     const abortContext = this.createConversationAbortContext(
       req.conversationId,
-      streamAbortController.signal
+      streamAbortController.signal,
+      req.cancellationId
     )
     const rendererAbortMessage = 'Streaming request aborted by the renderer.'
     const userCancellationMessage = 'Conversation cancelled by the user.'
@@ -2747,6 +2961,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const canWriteTerminal = (): boolean =>
       !streamClosed && (!abortContext.signal?.aborted || isUserCancellation())
 
+    // A rejected or cancelled structured response must not leak its unvalidated
+    // prefix through a terminal diagnostic frame.
+    const visibleStreamedText = (): string | undefined =>
+      structuredOutput ? undefined : streamedText || undefined
+    const visibleStreamContent = (): string => (structuredOutput ? '' : streamedText || '')
+
     const emitData = (data: LLMChatStreamResp): boolean => {
       if (!canWriteData()) return false
       resp.onData(data)
@@ -2756,12 +2976,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const emitCancelledTerminal = (): void => {
       if (!canWriteTerminal() || terminalStarted) return
       terminalStarted = true
+      abortContext.cleanup()
       resp.onData({
         type: 'done',
         delta: '',
         done: true,
-        fullContent: streamedText || undefined,
-        content: streamedText || '',
+        fullContent: visibleStreamedText(),
+        content: visibleStreamContent(),
         finishReason: 'cancelled'
       })
     }
@@ -2769,6 +2990,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const emitErrorTerminal = (message: string, error?: unknown): void => {
       if (!canWriteTerminal() || terminalStarted) return
       terminalStarted = true
+      abortContext.cleanup()
       const diagnostic =
         error && typeof error === 'object'
           ? (error as { status?: unknown; statusCode?: unknown; body?: unknown })
@@ -2788,8 +3010,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         type: 'error',
         delta: '',
         done: false,
-        fullContent: streamedText || undefined,
-        content: streamedText || '',
+        fullContent: visibleStreamedText(),
+        content: visibleStreamContent(),
         error: message,
         finishReason: 'error',
         ...diagnosticFields
@@ -2799,8 +3021,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           type: 'done',
           delta: '',
           done: true,
-          fullContent: streamedText || undefined,
-          content: streamedText || '',
+          fullContent: visibleStreamedText(),
+          content: visibleStreamContent(),
           error: message,
           finishReason: 'error',
           ...diagnosticFields
@@ -2822,6 +3044,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
       if (event.type === 'text-delta' && event.delta) {
         streamedText += event.delta
+        // Do not expose an unvalidated prefix of a structured response.
+        if (structuredOutput) return true
       }
 
       if (event.type === 'attachment' && event.attachment) {
@@ -2870,6 +3094,16 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           parsedOrigin.hash
         ) {
           throw new Error('only HTTP(S) origins without credentials or fragments are allowed')
+        }
+        // Access tokens are sent in the request headers below. Keep HTTP for
+        // loopback/private LAN deployments, but require TLS before sending a
+        // token to a public host so a misconfigured remote origin cannot leak
+        // credentials over the network.
+        if (
+          parsedOrigin.protocol === 'http:' &&
+          !isPrivateOrLocalRemoteFetchHost(parsedOrigin.hostname)
+        ) {
+          throw new Error('non-local remote origins must use HTTPS')
         }
         endpointOrigin = parsedOrigin.toString()
         trustedRemoteOrigin = parsedOrigin.origin
@@ -2962,7 +3196,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         }
       }
 
-      const requestBody = JSON.stringify({ ...req, stream: true })
+      const { cancellationId: _cancellationId, ...remoteRequest } = req
+      const requestBody = JSON.stringify({ ...remoteRequest, stream: true })
       if (new TextEncoder().encode(requestBody).byteLength > REMOTE_STREAM_MAX_REQUEST_BYTES) {
         throw new Error('Remote LLM streaming request exceeded the request byte limit.')
       }
@@ -2980,6 +3215,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         response = await runWithRemoteAbort(() => {
           const pendingResponse = this.getFetchImpl()(new URL(path, endpointOrigin).toString(), {
             method: 'POST',
+            // Never follow an upstream redirect: it could move the bearer and
+            // proxy-secret headers to an origin outside the configured trust
+            // boundary. The remote bridge does not use ambient credentials.
+            redirect: 'error',
+            credentials: 'omit',
+            cache: 'no-store',
             headers,
             body: requestBody,
             signal: remoteAbortController.signal
@@ -2994,6 +3235,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           )
           return pendingResponse
         })
+        if (response.redirected) {
+          // Defensive check for custom fetch implementations that ignore the
+          // redirect policy. Do not process a response that crossed origins.
+          void response.body?.cancel().catch(() => undefined)
+          throw new Error('Remote LLM streaming response was redirected.')
+        }
         if (response.ok) break
         responseBodyText = await readResponseBody(response)
         const isLastEndpoint = path === REMOTE_STREAM_ENDPOINTS.at(-1)
@@ -3074,7 +3321,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             `Remote LLM streaming response contained an unknown event type: ${safeEvent.type}`
           )
         }
-        if (safeEvent.type === 'text-delta' && safeEvent.delta) streamedText += safeEvent.delta
+        if (safeEvent.type === 'text-delta' && safeEvent.delta) {
+          streamedText += safeEvent.delta
+          // Structured responses are emitted atomically after the terminal
+          // event has been parsed and validated below.
+          if (structuredOutput) return true
+        }
         if (safeEvent.type === 'attachment' && safeEvent.attachment) {
           if (!rememberAttachment(safeEvent.attachment)) return true
         }
@@ -3082,20 +3334,52 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           lastSessionUrl = safeEvent.sessionUrl
         if (safeEvent.type === 'done') {
           if (terminalStarted || !canWriteData()) return false
+          const finalContent =
+            typeof safeEvent.fullContent === 'string' && safeEvent.fullContent
+              ? safeEvent.fullContent
+              : typeof safeEvent.content === 'string' && safeEvent.content
+                ? safeEvent.content
+                : streamedText
+          if (structuredOutput) {
+            assertStructuredOutputResult({ content: finalContent }, structuredOutput)
+            streamedText = finalContent
+          }
           terminalStarted = true
-          resp.onData({ ...safeEvent, type: 'done', done: true })
+          abortContext.cleanup()
+          resp.onData(
+            structuredOutput
+              ? {
+                  ...safeEvent,
+                  type: 'done',
+                  done: true,
+                  delta: '',
+                  fullContent: finalContent,
+                  content: finalContent
+                }
+              : { ...safeEvent, type: 'done', done: true }
+          )
           return false
         }
         if (safeEvent.type === 'error') {
           if (terminalStarted || !canWriteData()) return false
-          if (!emitData(safeEvent)) return false
+          const visibleErrorEvent = structuredOutput
+            ? {
+                ...safeEvent,
+                delta: '',
+                fullContent: undefined,
+                content: ''
+              }
+            : safeEvent
           terminalStarted = true
+          abortContext.cleanup()
+          resp.onData(visibleErrorEvent)
+          if (streamClosed || abortContext.signal?.aborted) return false
           resp.onData({
             type: 'done',
             delta: '',
             done: true,
-            fullContent: streamedText || undefined,
-            content: streamedText || '',
+            fullContent: visibleStreamedText(),
+            content: visibleStreamContent(),
             ...(safeEvent.attachments ? { attachments: safeEvent.attachments } : {}),
             ...(safeEvent.imageUrl ? { imageUrl: safeEvent.imageUrl } : {}),
             ...(safeEvent.sessionUrl ? { sessionUrl: safeEvent.sessionUrl } : {}),
@@ -3109,6 +3393,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       }
 
       const emitRemoteResponse = (result: LLMChatResp, trustedRemoteOrigin?: string): void => {
+        if (structuredOutput) {
+          // JSON fallback has no incremental terminal boundary; validate its
+          // complete content before forwarding any fallback events.
+          assertStructuredOutputResult(
+            { content: result.content || streamedText },
+            structuredOutput
+          )
+        }
         assertSafeRemoteOutputUrl(result.imageUrl, 'image', trustedRemoteOrigin)
         assertSafeRemoteSessionRef(result.sessionUrl, trustedRemoteOrigin)
         assertSafeRemoteOcrResult(result.ocrResult, 'response', trustedRemoteOrigin)
@@ -3191,8 +3483,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         }
         if (isPlainRecord(parsed) && typeof parsed.type === 'string') {
           emitRemoteEvent(parsed as unknown as LLMChatStreamResp, trustedRemoteOrigin)
+          if (!terminalStarted && !streamClosed && !abortContext.signal?.aborted) {
+            throw new Error('Remote LLM streaming response ended without a done event.')
+          }
         } else if (isPlainRecord(parsed)) {
           emitRemoteResponse(parsed as unknown as LLMChatResp, trustedRemoteOrigin)
+          if (!terminalStarted && !streamClosed && !abortContext.signal?.aborted) {
+            throw new Error('Remote LLM streaming response ended without a done event.')
+          }
         } else {
           throw new Error('Remote LLM streaming response was not an object.')
         }
@@ -3217,7 +3515,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         if (!normalizedPayload) return
         if (normalizedPayload === '[DONE]') {
           if (!terminalStarted && canWriteData()) {
+            if (structuredOutput) {
+              assertStructuredOutputResult({ content: streamedText }, structuredOutput)
+            }
             terminalStarted = true
+            abortContext.cleanup()
             resp.onData({
               type: 'done',
               delta: '',
@@ -3293,6 +3595,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         if (buffer.trim()) processChunk('\n')
         if (isSse) flushSseFrame()
         if (!sawDone && !streamClosed && !abortContext.signal?.aborted) {
+          if (structuredOutput) {
+            // Validate the aggregate before reporting an incomplete stream;
+            // no structured prefix has been emitted while it was in flight.
+            assertStructuredOutputResult({ content: streamedText }, structuredOutput)
+          }
           throw new Error('Remote LLM streaming response ended without a done event.')
         }
       } finally {
@@ -3311,6 +3618,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       resp.abortReceiver?.onAbort(closeRenderer)
       if (resp.abortReceiver?.isAborted()) closeRenderer()
       if (streamClosed) return
+      if (req.structuredOutput !== undefined) {
+        req = { ...req, structuredOutput: normalizeLLMStructuredOutput(req.structuredOutput) }
+        structuredOutput = req.structuredOutput
+      }
       if (getConfig().use_remote_llm) {
         await remoteStream()
         return
@@ -3339,11 +3650,15 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       }
       if (abortContext.signal?.aborted) return
 
+      if (structuredOutput) {
+        assertStructuredOutputResult({ content: result.content || streamedText }, structuredOutput)
+      }
+
       const firstAttachmentUrl = result.attachments?.[0]?.url || ''
       const finalFullContent =
         result.content || streamedText || result.imageUrl || firstAttachmentUrl || undefined
 
-      if (!streamedText && result.content) {
+      if (!structuredOutput && !streamedText && result.content) {
         streamedText = result.content
         if (
           !emitData({
@@ -3400,6 +3715,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         return
       }
       terminalStarted = true
+      abortContext.cleanup()
       resp.onData({
         type: 'done',
         delta: '',
@@ -3599,12 +3915,16 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       return { cancelled: false }
     }
 
-    const controller = this.conversationAbortControllers.get(conversationId)
-    if (!controller || controller.signal.aborted) {
+    const owner = this.conversationAbortControllers.get(conversationId)
+    if (
+      !owner ||
+      owner.controller.signal.aborted ||
+      (req.cancellationId !== undefined && req.cancellationId !== owner.cancellationId)
+    ) {
       return { cancelled: false }
     }
 
-    controller.abort(createAbortError('Conversation cancelled by the user.'))
+    owner.controller.abort(createAbortError('Conversation cancelled by the user.'))
     return { cancelled: true }
   }
 
@@ -3612,7 +3932,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: LLMExternalAgentStreamReq,
     resp: ServerStreaming<LLMExternalAgentStreamResp>
   ): Promise<void> => {
-    const context = this.createConversationAbortContext(req.conversationId)
+    const context = this.createConversationAbortContext(
+      req.conversationId,
+      undefined,
+      req.cancellationId
+    )
     let closed = false
     let terminal = false
     const close = (): void => {
@@ -3629,13 +3953,17 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         validate: (event) => assertSafeRemoteEventUrls(event, origin),
         emit: (event) => {
           if (closed || terminal || context.signal?.aborted) return
-          if (event.type === 'done') terminal = true
+          if (event.type === 'done') {
+            terminal = true
+            context.cleanup()
+          }
           resp.onData(event)
         }
       })
     } catch (error) {
       if (closed || terminal) return
       terminal = true
+      context.cleanup()
       const cancelled = context.signal?.aborted === true
       const partialContent =
         error &&
@@ -3663,9 +3991,15 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
   remoteFetch = async (req: LLMRemoteFetchReq): Promise<LLMRemoteFetchResp> => {
     // Register before validation/DNS so cancellation covers the entire bounded operation.
-    const abortContext = this.createConversationAbortContext(req.conversationId)
+    const abortContext = this.createConversationAbortContext(
+      req.conversationId,
+      undefined,
+      req.cancellationId
+    )
     try {
-      return await executeRemoteFetch(req, getConfig(), abortContext.signal)
+      const result = await executeRemoteFetch(req, getConfig(), abortContext.signal)
+      throwIfAborted(abortContext.signal)
+      return result
     } finally {
       abortContext.cleanup()
     }

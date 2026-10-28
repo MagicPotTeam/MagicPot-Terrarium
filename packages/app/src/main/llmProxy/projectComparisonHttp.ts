@@ -4,22 +4,30 @@ import { TextDecoder } from 'node:util'
 import type { LLMProxySvc } from '@shared/api/svcLLMProxy'
 import {
   PROJECT_COMPARISON_CHAT_PATH,
+  PROJECT_COMPARISON_ERROR_MESSAGES,
   PROJECT_COMPARISON_PROFILES_PATH,
   PROJECT_COMPARISON_PROTOCOL,
   projectComparisonChatRequestSchema,
   projectComparisonChatResponseSchema,
+  projectComparisonErrorCodeSchema,
+  projectComparisonErrorSchema,
   projectComparisonProfilesResponseSchema
 } from '@shared/projectComparisonProtocol'
 
 const MAX_BODY_BYTES = 48 * 1024
 const MAX_TIMEOUT_MS = 120_000
 const errors = {
-  VALIDATION_ERROR: [400, 'Invalid project comparison request.'],
-  PAYLOAD_TOO_LARGE: [413, 'Project comparison request is too large.'],
-  PROFILE_CONFIGURATION_CHANGED: [409, 'Model configuration changed; review and confirm again.'],
-  PROTOCOL_UNSUPPORTED: [501, 'Project comparison protocol is unavailable.'],
-  REMOTE_UPSTREAM_FAILED: [502, 'Project comparison upstream failed.'],
-  TIMEOUT: [504, 'Project comparison request timed out.']
+  VALIDATION_ERROR: [400, PROJECT_COMPARISON_ERROR_MESSAGES.VALIDATION_ERROR],
+  PAYLOAD_TOO_LARGE: [413, PROJECT_COMPARISON_ERROR_MESSAGES.PAYLOAD_TOO_LARGE],
+  PROFILE_CONFIGURATION_CHANGED: [
+    409,
+    PROJECT_COMPARISON_ERROR_MESSAGES.PROFILE_CONFIGURATION_CHANGED
+  ],
+  PROTOCOL_UNSUPPORTED: [501, PROJECT_COMPARISON_ERROR_MESSAGES.PROTOCOL_UNSUPPORTED],
+  REMOTE_UPSTREAM_FAILED: [502, PROJECT_COMPARISON_ERROR_MESSAGES.REMOTE_UPSTREAM_FAILED],
+  TIMEOUT: [504, PROJECT_COMPARISON_ERROR_MESSAGES.TIMEOUT],
+  CANCELLED: [499, PROJECT_COMPARISON_ERROR_MESSAGES.CANCELLED],
+  AUTH: [401, PROJECT_COMPARISON_ERROR_MESSAGES.AUTH]
 } as const
 
 type ErrorCode = keyof typeof errors
@@ -37,13 +45,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function errorCode(error: unknown): ErrorCode {
   if (error instanceof ComparisonHttpError) return error.code
   if (isRecord(error)) {
+    const parsedCode = projectComparisonErrorCodeSchema.safeParse(error.code)
+    if (parsedCode.success) return parsedCode.data
     // UpstreamHttpError uses statusCode, whereas other HTTP adapters use status.
     const status = typeof error.statusCode === 'number' ? error.statusCode : error.status
     if (status === 504) return 'TIMEOUT'
     if (status === 502) return 'REMOTE_UPSTREAM_FAILED'
-    if (error.code === 'PROFILE_CONFIGURATION_CHANGED') return 'PROFILE_CONFIGURATION_CHANGED'
-    if (error.code === 'PROTOCOL_UNSUPPORTED') return 'PROTOCOL_UNSUPPORTED'
-    if (error.code === 'TIMEOUT') return 'TIMEOUT'
+    if (status === 499) return 'CANCELLED'
   }
   return 'REMOTE_UPSTREAM_FAILED'
 }
@@ -265,11 +273,18 @@ export async function handleProjectComparisonHttp(
     )
     if (!parsed.success) throw new ComparisonHttpError('VALIDATION_ERROR')
     checkDeadline()
-    const { profileId, expectedProfileRevision, messages, temperature, maxOutputTokens } =
-      parsed.data
+    const {
+      profileId,
+      expectedProfileRevision,
+      correlationId,
+      messages,
+      temperature,
+      maxOutputTokens
+    } = parsed.data
     const request = {
       profileId,
       expectedProfileRevision,
+      ...(correlationId ? { correlationId } : {}),
       messages,
       temperature,
       maxOutputTokens,
@@ -289,7 +304,13 @@ export async function handleProjectComparisonHttp(
     send(200, response)
   } catch (error) {
     const code = errorCode(error)
-    send(errors[code][0], { code, message: errors[code][1] })
+    // Build the response through the shared strict schema so no provider
+    // message, payload, or URL can cross this boundary.
+    const errorResponse = projectComparisonErrorSchema.parse({
+      code,
+      message: errors[code][1]
+    })
+    send(errors[code][0], errorResponse)
   } finally {
     clearTimeout(timer)
     req.off('aborted', onDisconnect)

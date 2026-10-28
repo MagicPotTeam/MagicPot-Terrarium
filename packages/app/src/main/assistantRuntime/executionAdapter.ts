@@ -3,6 +3,7 @@ import { ChatAttachment, ChatMessage, LLMChatResp, LLMProxySvc } from '@shared/a
 import {
   createToolInvokeAction,
   createToolResultAction,
+  createAbortError,
   isJsonValue,
   JsonObject,
   ToolInvokeAction,
@@ -178,6 +179,30 @@ export type AssistantExecutionResult = {
 const cleanString = (value?: string | null): string | undefined => {
   const normalized = String(value || '').trim()
   return normalized || undefined
+}
+
+// Tool handlers are expected to honor AbortSignal, but a third-party/MCP
+// handler can still ignore it. Race the caller's cancellation against the
+// invocation so the assistant run is not held open forever, while observing
+// the late promise to avoid an unhandled rejection.
+const withToolAbort = async <T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return promise
+  if (signal.aborted) {
+    promise.catch(() => undefined)
+    throw createAbortError(signal.reason)
+  }
+
+  let onAbort: (() => void) | undefined
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(createAbortError(signal.reason))
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    return await Promise.race([promise, aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort!)
+    promise.catch(() => undefined)
+  }
 }
 
 const guessMimeTypeFromUrl = (url: string, fallback = 'application/octet-stream'): string => {
@@ -474,33 +499,36 @@ export class AssistantExecutionAdapter {
       assertAssistantToolAllowed(toolName, allowedToolNames)
       await request.cooperativeExecution?.checkpoint('tool-invocation')
       leaveTool = request.cooperativeExecution?.enter('tool-invocation')
-      const result = await invokeAssistantToolViaKernel({
-        toolRegistry: this.toolRegistry,
-        toolName,
-        args,
-        signal: request.signal,
-        context: {
-          config: request.config,
-          route: request.route,
-          sessionStore: request.sessionStore,
-          taskState: request.taskState,
-          workspaceMemoryFile: request.workspaceMemoryFile,
-          workspaceTaskContextFile: request.workspaceTaskContextFile,
-          workspaceContextFile: request.workspaceContextFile,
-          workspacePinnedContextFile: request.workspacePinnedContextFile,
-          workspaceMetaFile: request.workspaceMetaFile,
-          workspaceRootDir: request.workspaceRootDir,
-          readExternalFile: request.readExternalFile,
-          resumeRun: request.resumeRun,
-          resumeWorkflow: request.resumeWorkflow,
-          startTaskGroup: request.startTaskGroup,
-          progressTaskGroup: request.progressTaskGroup,
-          approveTaskGroup: request.approveTaskGroup,
-          exportTaskGroup: request.exportTaskGroup,
-          cancelTaskGroup: request.cancelTaskGroup,
-          resumeTaskGroup: request.resumeTaskGroup
-        }
-      })
+      const result = await withToolAbort(
+        invokeAssistantToolViaKernel({
+          toolRegistry: this.toolRegistry,
+          toolName,
+          args,
+          signal: request.signal,
+          context: {
+            config: request.config,
+            route: request.route,
+            sessionStore: request.sessionStore,
+            taskState: request.taskState,
+            workspaceMemoryFile: request.workspaceMemoryFile,
+            workspaceTaskContextFile: request.workspaceTaskContextFile,
+            workspaceContextFile: request.workspaceContextFile,
+            workspacePinnedContextFile: request.workspacePinnedContextFile,
+            workspaceMetaFile: request.workspaceMetaFile,
+            workspaceRootDir: request.workspaceRootDir,
+            readExternalFile: request.readExternalFile,
+            resumeRun: request.resumeRun,
+            resumeWorkflow: request.resumeWorkflow,
+            startTaskGroup: request.startTaskGroup,
+            progressTaskGroup: request.progressTaskGroup,
+            approveTaskGroup: request.approveTaskGroup,
+            exportTaskGroup: request.exportTaskGroup,
+            cancelTaskGroup: request.cancelTaskGroup,
+            resumeTaskGroup: request.resumeTaskGroup
+          }
+        }),
+        request.signal
+      )
       const finishedAt = Date.now()
       const resultAction = createToolResultAction({
         actionId: `${action.actionId}:result`,
@@ -687,34 +715,73 @@ export class AssistantExecutionAdapter {
     const systemPrompt = [request.systemPrompt, reusableContextPrompt].filter(Boolean).join('\n\n')
     await request.cooperativeExecution?.checkpoint('llm-inference')
     const leaveLlm = request.cooperativeExecution?.enter('llm-inference')
-    const executionPolicy = request.req.execution
-    const skillRuntime = Array.isArray(executionPolicy?.allowedToolNames)
-      ? {
-          execution: {
-            ...(executionPolicy.mode
-              ? {
-                  mode:
-                    executionPolicy.mode === 'no-history'
-                      ? ('isolated' as const)
-                      : ('inherit' as const)
-                }
-              : {}),
-            ...(executionPolicy.allowHistory === undefined
-              ? {}
-              : { allowHistory: executionPolicy.allowHistory }),
-            ...(executionPolicy.contextMessageLimit === undefined
-              ? {}
-              : { contextMessageLimit: executionPolicy.contextMessageLimit })
-          },
-          bindings: [
-            {
-              appId: 'assistant-runtime',
-              source: 'assistant-runtime',
-              toolNames: this.listTools(executionPolicy.allowedToolNames).map((tool) => tool.name)
-            }
-          ]
-        }
-      : undefined
+    const executionPolicy = request.req.execution ?? {}
+    // Every route-scoped assistant turn gets the two read-only web tools by
+    // default. An explicit allowlist (including []) remains authoritative and
+    // is never widened, so existing restricted agents keep their exact policy.
+    const defaultWebToolNames = ['web_search', 'web_fetch']
+    const requestedAllowedToolNames = executionPolicy?.allowedToolNames
+    // Keep the model-visible catalog and execution boundary identical. If no
+    // policy is supplied, passing `undefined` to callTool would otherwise
+    // permit every registered tool despite exposing only web tools above.
+    const effectiveAllowedToolNames =
+      requestedAllowedToolNames === undefined
+        ? defaultWebToolNames
+        : requestedAllowedToolNames === null
+          ? []
+          : requestedAllowedToolNames
+    const skillRuntime =
+      requestedAllowedToolNames === undefined
+        ? {
+            execution: {
+              ...(executionPolicy?.mode
+                ? {
+                    mode:
+                      executionPolicy.mode === 'no-history'
+                        ? ('isolated' as const)
+                        : ('inherit' as const)
+                  }
+                : {}),
+              ...(executionPolicy?.allowHistory === undefined
+                ? {}
+                : { allowHistory: executionPolicy.allowHistory }),
+              ...(executionPolicy?.contextMessageLimit === undefined
+                ? {}
+                : { contextMessageLimit: executionPolicy.contextMessageLimit })
+            },
+            bindings: [
+              {
+                appId: 'assistant-runtime',
+                source: 'assistant-runtime',
+                toolNames: defaultWebToolNames
+              }
+            ]
+          }
+        : {
+            execution: {
+              ...(executionPolicy?.mode
+                ? {
+                    mode:
+                      executionPolicy.mode === 'no-history'
+                        ? ('isolated' as const)
+                        : ('inherit' as const)
+                  }
+                : {}),
+              ...(executionPolicy?.allowHistory === undefined
+                ? {}
+                : { allowHistory: executionPolicy.allowHistory }),
+              ...(executionPolicy?.contextMessageLimit === undefined
+                ? {}
+                : { contextMessageLimit: executionPolicy.contextMessageLimit })
+            },
+            bindings: [
+              {
+                appId: 'assistant-runtime',
+                source: 'assistant-runtime',
+                toolNames: this.listTools(effectiveAllowedToolNames).map((tool) => tool.name)
+              }
+            ]
+          }
 
     const chatOptions = {
       signal: request.signal,
@@ -727,7 +794,7 @@ export class AssistantExecutionAdapter {
         signal?: AbortSignal
       }) =>
         this.callTool(invocation.toolName, invocation.args, request, {
-          allowedToolNames: executionPolicy?.allowedToolNames,
+          allowedToolNames: effectiveAllowedToolNames,
           signal: invocation.signal,
           runId: invocation.runId,
           toolCallId: invocation.toolCallId

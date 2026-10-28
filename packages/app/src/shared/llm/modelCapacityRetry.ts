@@ -60,7 +60,7 @@ export function modelCapacityReason(error: unknown): LLMRetryStatus['reason'] | 
     .slice(0, 131072)
   if (
     [400, 401, 403, 404, 409, 413, 422].includes(status) ||
-    /insufficient_quota|quota_exceeded|usage_limit|billing|payment_required|invalid_api_key|authentication|permission|content_policy|content_filter|safety|context_length_exceeded/.test(
+    /insufficient_quota|quota_exceeded|usage_limit|billing|payment_required|invalid_api_key|authentication|permission|content_policy|content_filter|safety|context_length_exceeded|invalid_request_error|invalid_argument|invalid_parameter|unsupported_parameter|model_not_found/.test(
       `${code} ${type}`
     ) ||
     /insufficient quota|exceeded (?:your |the )?(?:quota|usage limit)|billing|invalid api key/i.test(
@@ -214,6 +214,10 @@ export async function retryModelCapacity<T>(
       if (params.signal?.aborted) checkCancelled(params.signal)
       const reason = modelCapacityReason(error)
       if (!reason || outputStarted || callbackFailed) throw error
+      // A session reference is only valid for the attempt that produced it.
+      // If that attempt fails before any replay-unsafe output, do not leak the
+      // pending reference into a later successful attempt that emits no session.
+      pendingSession = undefined
       attempt = Math.min(Number.MAX_SAFE_INTEGER, attempt + 1)
       const localDelay = Math.min(60_000, 2_000 * 2 ** Math.min(attempt - 1, 6))
       const jittered = Math.min(

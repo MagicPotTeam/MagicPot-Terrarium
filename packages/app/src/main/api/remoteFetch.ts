@@ -247,9 +247,13 @@ export const remoteFetch = async (
     }
 
     if (!active()) return
-    // lookup() itself is not cancellable. Detach the operation from its eventual result,
-    // and consume late rejection without opening a request after completion/cancellation.
-    void resolveRemoteFetchAddress(parsedUrl.hostname).then(
+    // DNS lookup is bounded independently so cancellation/deadlines cannot
+    // leave a lookup pending before the request socket is created. The lookup
+    // implementation may still finish in the OS, but its late result is ignored.
+    void resolveRemoteFetchAddress(parsedUrl.hostname, {
+      signal,
+      timeoutMs: Math.max(1, deadline - performance.now())
+    }).then(
       (address) => {
         if (!active()) return
         resolvedAddress = address

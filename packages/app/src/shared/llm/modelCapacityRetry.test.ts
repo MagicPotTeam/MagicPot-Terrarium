@@ -111,6 +111,21 @@ describe('persistent model capacity retry', () => {
       'successful-session'
     ])
   })
+  it('does not leak a failed-attempt session when the retry has no replacement session', async () => {
+    const seen: LLMDeltaEvent[] = []
+    let calls = 0
+    const pending = retryModelCapacity({ onDelta: (e) => seen.push(e) }, async (emit) => {
+      if (++calls === 1) {
+        emit?.({ type: 'session', sessionUrl: 'failed-attempt' })
+        throw overloaded()
+      }
+      emit?.({ type: 'text-delta', delta: 'ok' })
+      return 'ok'
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    await expect(pending).resolves.toBe('ok')
+    expect(seen.filter((event) => event.type === 'session')).toEqual([])
+  })
   it('keeps cancellation local to one call and never starts a pre-cancelled request', async () => {
     const a = new AbortController()
     const waiting = vi.fn().mockRejectedValue(overloaded())

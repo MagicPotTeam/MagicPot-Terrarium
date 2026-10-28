@@ -10,12 +10,13 @@ import type {
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
 
 let currentConfig: Config
-const { chatMock, listProfilesMock, getPathMock } = vi.hoisted(() => ({
+const { chatMock, listProfilesMock, getPathMock, recordUsageMock } = vi.hoisted(() => ({
   chatMock: vi.fn<(req: LLMChatReq, options?: LLMChatOptions) => Promise<LLMChatResp>>(),
   listProfilesMock: vi.fn<(req: LLMListProfilesReq) => Promise<LLMListProfilesResp>>(),
   getPathMock: vi.fn(() => {
     throw new Error('Comparison HTTP tests must not access Electron user data')
-  })
+  }),
+  recordUsageMock: vi.fn()
 }))
 
 vi.mock('electron', () => ({ app: { getPath: getPathMock }, net: {} }))
@@ -36,7 +37,7 @@ vi.mock('../mcp/platform/httpBridge', () => ({
   handleMagicPotMcpLegacySseMessageRequest: vi.fn(),
   handleMagicPotMcpLegacySseOpenRequest: vi.fn()
 }))
-vi.mock('./accessUsage', () => ({ recordLlmProxyAccessUsage: vi.fn() }))
+vi.mock('./accessUsage', () => ({ recordLlmProxyAccessUsage: recordUsageMock }))
 
 import { getLLMProxyServerStatus, startLLMProxyServer, stopLLMProxyServer } from './server'
 
@@ -169,8 +170,66 @@ describe('actual LLM proxy server project comparison routing', () => {
       await chat.text()
       expect(listProfilesMock).not.toHaveBeenCalled()
       expect(chatMock).not.toHaveBeenCalled()
+      expect(recordUsageMock).not.toHaveBeenCalled()
     }
   )
+
+  it('does not treat a hostname with a 127 prefix as an unauthenticated loopback bind', () => {
+    stopLLMProxyServer()
+    currentConfig.local_llm_server_config = {
+      ...currentConfig.local_llm_server_config,
+      bind_host: '127.attacker.example',
+      access_token: '',
+      access_tokens: []
+    }
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    startLLMProxyServer()
+    expect(getLLMProxyServerStatus().running).toBe(false)
+    expect(error).toHaveBeenCalledWith(
+      '[LLMProxyServer] Refusing non-loopback bind on 127.attacker.example: configure at least one valid proxy access token.'
+    )
+  })
+
+  it('fails closed for browser origins unless an exact CORS origin is configured', async () => {
+    const denied = await request(profilesPath, { headers: { Origin: 'https://evil.example' } })
+    expect(denied.status).toBe(403)
+    expect(denied.headers.get('access-control-allow-origin')).toBeNull()
+    expect(listProfilesMock).not.toHaveBeenCalled()
+    expect(recordUsageMock).not.toHaveBeenCalled()
+
+    currentConfig.local_llm_server_config.cors_allowed_origins = ['https://client.example/']
+    const allowed = await request(profilesPath, {
+      headers: { Origin: 'https://client.example' }
+    })
+    expect(allowed.status).toBe(200)
+    expect(allowed.headers.get('access-control-allow-origin')).toBe('https://client.example')
+    expect(allowed.headers.get('vary')).toContain('Origin')
+  })
+
+  it('applies the same allowlist to preflight and rejects wildcard entries', async () => {
+    currentConfig.local_llm_server_config.cors_allowed_origins = ['*']
+    const denied = await request(profilesPath, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://client.example',
+        'Access-Control-Request-Method': 'GET'
+      }
+    })
+    expect(denied.status).toBe(403)
+
+    currentConfig.local_llm_server_config.cors_allowed_origins = ['https://client.example']
+    const allowed = await request(profilesPath, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://client.example',
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Headers': 'Authorization'
+      }
+    })
+    expect(allowed.status).toBe(204)
+    expect(allowed.headers.get('access-control-allow-origin')).toBe('https://client.example')
+    expect(allowed.headers.get('access-control-allow-methods')).toContain('GET')
+  })
 
   it('returns only safe protocol metadata and explicitly lists receiver-local revisions', async () => {
     const response = await request(profilesPath)
@@ -186,6 +245,30 @@ describe('actual LLM proxy server project comparison routing', () => {
       comparisonRouting: 'local'
     })
     expect(chatMock).not.toHaveBeenCalled()
+    expect(recordUsageMock).toHaveBeenCalledExactlyOnceWith(
+      {
+        tokenId: 'synthetic-client',
+        label: 'Synthetic client',
+        resourceScope: 'synthetic'
+      },
+      {
+        activity: 'project-comparison',
+        requesterAddress: expect.any(String)
+      }
+    )
+    expect(JSON.stringify(recordUsageMock.mock.calls[0])).not.toContain('proxy-secret')
+  })
+
+  it('does not bind usage identity to an untrusted forwarded-for header', async () => {
+    const response = await request(profilesPath, {
+      headers: { 'X-Forwarded-For': '203.0.113.77' }
+    })
+    expect(response.status).toBe(200)
+    await response.text()
+    const update = recordUsageMock.mock.calls[0]?.[1] as { requesterAddress?: string }
+    expect(update.requesterAddress).toBeDefined()
+    expect(update.requesterAddress).not.toBe('203.0.113.77')
+    expect(update.requesterAddress).toMatch(/127\.0\.0\.1|::1/)
   })
 
   it('routes strict text, revision and budgets with an abort signal and fresh main-owned conversation IDs', async () => {
@@ -223,6 +306,13 @@ describe('actual LLM proxy server project comparison routing', () => {
       chatMock.mock.calls[1][0].conversationId
     )
     expect(listProfilesMock).not.toHaveBeenCalled()
+    expect(recordUsageMock).toHaveBeenCalledTimes(2)
+    for (const [identity, update] of recordUsageMock.mock.calls) {
+      const serialized = JSON.stringify({ identity, update })
+      expect(update.activity).toBe('project-comparison')
+      expect(serialized).not.toContain('proxy-secret')
+      expect(serialized).not.toContain('Synthetic project A and project B.')
+    }
   })
 
   it.each([

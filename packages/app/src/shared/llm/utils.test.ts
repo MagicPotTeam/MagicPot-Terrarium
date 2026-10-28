@@ -14,6 +14,7 @@ describe('shared llm ollama compatibility', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
+    vi.useRealTimers()
   })
 
   const stableFetch = (() => Promise.reject(new Error('not used'))) as typeof fetch
@@ -166,7 +167,7 @@ describe('shared llm ollama compatibility', () => {
     expect(isRunnableProfile(profile)).toBe(true)
   })
 
-  it('uses the Responses API for CLIProxyAPI profiles without hosted-only parameters', async () => {
+  it('uses Responses SSE and provider-hosted web search for CLIProxyAPI profiles', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -199,9 +200,13 @@ describe('shared llm ollama compatibility', () => {
       expect.objectContaining({ method: 'POST' })
     )
     const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
-    expect(requestBody).toMatchObject({ model: 'gpt-5.4-mini' })
-    expect(requestBody).not.toHaveProperty('service_tier')
-    expect(requestBody).not.toHaveProperty('tools')
+    expect(requestBody).toMatchObject({
+      model: 'gpt-5.4-mini',
+      service_tier: 'priority',
+      stream: true
+    })
+    expect(requestBody.tools).toEqual([expect.objectContaining({ type: 'web_search' })])
+    expect(requestBody.include).toEqual(['web_search_call.action.sources'])
   })
 
   it('auto-detects Gemini profiles from the API address when provider stays on default', () => {
@@ -213,6 +218,58 @@ describe('shared llm ollama compatibility', () => {
     }
 
     expect(cliFromProfile(profile)).toBeInstanceOf(GeminiAPICli)
+  })
+
+  it('propagates profile request_timeout_ms to every non-OpenAI provider client', async () => {
+    vi.useFakeTimers()
+    const profiles = [
+      {
+        profile: {
+          model_name: 'gemini-2.5-flash',
+          base_url: 'https://generativelanguage.googleapis.com/v1beta',
+          api_key: 'gemini-key',
+          provider: 'gemini' as const
+        },
+        client: GeminiAPICli
+      },
+      {
+        profile: {
+          model_name: 'claude-3-7-sonnet',
+          base_url: 'https://api.anthropic.com',
+          api_key: 'claude-key',
+          provider: 'claude' as const
+        },
+        client: ClaudeAPICli
+      },
+      {
+        profile: {
+          model_name: 'llama3.2',
+          base_url: 'http://127.0.0.1:11434',
+          api_key: '',
+          provider: 'ollama' as const
+        },
+        client: OllamaAPICli
+      }
+    ] as const
+
+    for (const { profile, client } of profiles) {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockImplementation(() => new Promise<Response>(() => undefined))
+      const cli = cliFromProfile(
+        { ...profile, request_timeout_ms: 1_000 },
+        { fetchImpl: fetchMock }
+      )
+      expect(cli).toBeInstanceOf(client)
+
+      const pending = cli!.chat({ messages: [{ role: 'user', content: 'hello' }] })
+      const assertion = expect(pending).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'MODEL_REQUEST_TIMEOUT'
+      })
+      await vi.advanceTimersByTimeAsync(1_000)
+      await assertion
+    }
   })
 
   it('allows local OpenAI-compatible gateways without API keys', () => {

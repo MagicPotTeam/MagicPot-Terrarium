@@ -171,6 +171,15 @@ const runtimeChannelEventId = (
     })
   )}`
 
+const cloneAllowedToolNamesForEventIdentity = (
+  allowedToolNames: MagicAgentPlatformRunReq['allowedToolNames']
+): PolicyJsonRecord => {
+  if (allowedToolNames === undefined) return {}
+  return {
+    allowedToolNames: allowedToolNames === null ? null : [...allowedToolNames]
+  }
+}
+
 const driveEventId = (
   context: DriveTrustedDispatchContext,
   request: MagicAgentPlatformRunReq,
@@ -186,7 +195,9 @@ const driveEventId = (
       agentId,
       text: request.text,
       profileId: request.profileId ?? null,
-      allowedToolNames: request.allowedToolNames ? [...request.allowedToolNames] : null
+      // Preserve omitted, null, and [] as distinct policy inputs. They have
+      // different meanings and must not share an idempotency key.
+      ...cloneAllowedToolNamesForEventIdentity(request.allowedToolNames)
     })
   )}`
 
@@ -209,7 +220,9 @@ const triggerEventId = (
       agentId,
       text: request.text,
       profileId: request.profileId ?? null,
-      allowedToolNames: request.allowedToolNames ? [...request.allowedToolNames] : null
+      // Preserve omitted, null, and [] as distinct policy inputs. They have
+      // different meanings and must not share an idempotency key.
+      ...cloneAllowedToolNamesForEventIdentity(request.allowedToolNames)
     })
   )}`
 
@@ -413,8 +426,13 @@ const resolveRunAllowedToolNames = (
   requested: string[] | null | undefined,
   agentToolNames: string[] | null | undefined
 ): string[] => {
-  // Platform v1 is no-tools by default. A renderer-facing run must opt into a
-  // concrete allowlist; agent.toolNames can only further narrow that list.
+  // Agent runs get only the two read-only web tools when the caller omits an
+  // allowlist, unless the selected agent carries its own concrete allowlist.
+  // This keeps the common user-facing route useful without exposing
+  // filesystem, shell, git, or creative tools by default. Explicit [] and null
+  // remain a hard no-tools choice, while an agent allowlist remains exact.
+  const defaultWebToolNames = ['web_search', 'web_fetch']
+  const requestedWasOmitted = requested === undefined
   const requestedNames = Array.isArray(requested)
     ? [
         ...new Set(
@@ -423,19 +441,28 @@ const resolveRunAllowedToolNames = (
             .filter((name) => Boolean(name) && !isMagicAgentPlatformDeniedToolName(name))
         )
       ]
-    : []
-  if (!requestedNames.length) {
-    return []
+    : requestedWasOmitted && Array.isArray(agentToolNames)
+      ? [
+          ...new Set(
+            agentToolNames
+              .map((name) => normalizeMagicPotToolName(name))
+              .filter((name) => Boolean(name) && !isMagicAgentPlatformDeniedToolName(name))
+          )
+        ]
+      : requestedWasOmitted
+        ? defaultWebToolNames
+        : []
+
+  if (Array.isArray(agentToolNames)) {
+    const agentSet = new Set(
+      agentToolNames
+        .map((name) => normalizeMagicPotToolName(name))
+        .filter((name) => Boolean(name) && !isMagicAgentPlatformDeniedToolName(name))
+    )
+    return requestedNames.filter((name) => agentSet.has(name))
   }
 
-  if (!Array.isArray(agentToolNames)) {
-    return requestedNames
-  }
-
-  const agentSet = new Set(
-    agentToolNames.map((name) => normalizeMagicPotToolName(name)).filter(Boolean)
-  )
-  return requestedNames.filter((name) => agentSet.has(name))
+  return requestedNames
 }
 
 const mapMagicAgentStatusToKernelStatus = (status: string): AgentRunStatus => {

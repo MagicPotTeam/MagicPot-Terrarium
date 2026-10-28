@@ -77,21 +77,16 @@ const isCompositeModelProfileId = (profileId: string | null | undefined): boolea
 }
 
 export const isChatProfileDiscoveryCandidate = (profile: LLMAPIProfile): boolean => {
-  const isOrdinaryProfile =
-    profile.auth_mode !== 'codex_oauth' &&
-    profile.call_type !== 'codex' &&
-    profile.call_type !== 'cliproxyapi'
-
-  if (isOrdinaryProfile) {
-    return rendererHostExtensionApiV1.chat?.discoverModelNames !== undefined
-  }
-
   for (const extension of sharedHostExtensionApiV1.llmProfiles) {
     const resolved = extension.isChatProfileDiscoveryCandidate?.(profile)
     if (resolved !== undefined) return resolved
   }
 
-  return Boolean(profile.base_url?.trim())
+  const isOrdinaryProfile =
+    profile.auth_mode !== 'codex_oauth' &&
+    profile.call_type !== 'codex' &&
+    profile.call_type !== 'cliproxyapi'
+  return isOrdinaryProfile ? false : Boolean(profile.base_url?.trim())
 }
 const withProfileDisplayName = (profile: LLMAPIProfile): LLMAPIProfile =>
   profile.call_type === 'cliproxyapi' && !profile.model_name.trim()

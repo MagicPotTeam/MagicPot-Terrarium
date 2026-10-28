@@ -172,7 +172,21 @@ describe('buildMagicPotAppCatalog', () => {
         expect.objectContaining({ name: 'workspaces.list' }),
         expect.objectContaining({ name: 'workspace.inspect' }),
         expect.objectContaining({ name: 'workflow.inspect' }),
-        expect.objectContaining({ name: 'workflow.resume' })
+        expect.objectContaining({ name: 'workflow.resume' }),
+        expect.objectContaining({
+          name: 'web_search',
+          inputSchema: expect.objectContaining({
+            required: ['query'],
+            properties: expect.objectContaining({ query: expect.anything() })
+          })
+        }),
+        expect.objectContaining({
+          name: 'web_fetch',
+          inputSchema: expect.objectContaining({
+            required: ['url'],
+            properties: expect.objectContaining({ url: expect.anything() })
+          })
+        })
       ])
     )
 

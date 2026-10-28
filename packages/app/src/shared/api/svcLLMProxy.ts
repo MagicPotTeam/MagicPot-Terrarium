@@ -28,6 +28,8 @@ import type {
 } from '@shared/llm/profileCapabilities'
 import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
+import type { LLMStructuredOutput } from '@shared/llm/structuredOutput'
+import type { BinaryChunkFrame, BinaryChunkReference } from '../binaryChunkProtocol'
 
 export type { LLMToolStatus } from '@shared/llm/types'
 
@@ -44,6 +46,8 @@ export type ChatAttachment = {
   sizeBytes?: number
   sourceWidth?: number
   sourceHeight?: number
+  /** Caller-requested image budget hint, not a guarantee of provider billing. */
+  imageDetail?: 'low'
   ocrResult?: OCRResult
   finishReason?: 'stop' | 'length' | 'tool_call' | 'cancelled' | 'error'
   metadata?: Record<string, unknown>
@@ -54,6 +58,12 @@ export type ChatAttachment = {
   reportBundleLabel?: string
   /** Optional pre-discovered image count for a provider-owned report bundle; no I/O is implied. */
   reportBundleImageCount?: number
+  /** Optional content-addressed binary payload used at the main-process LLM boundary. */
+  binary?: {
+    transport: 'chunked-binary-v1'
+    reference: BinaryChunkReference
+    chunks: BinaryChunkFrame[]
+  }
 }
 
 export type ChatMessage = {
@@ -142,10 +152,16 @@ export type LLMProfileScope = 'agent' | 'qapp'
  * 聊天请求
  */
 export type LLMChatReq = {
+  /** Request-scoped cancellation ownership; never forwarded as provider authority. */
+  cancellationId?: string
+  /** Main-issued identifier used to correlate Desktop, Bridge and Provider stages. */
+  correlationId?: string
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
+  /** Main-owned provider output hint; it does not authorize host execution. */
+  structuredOutput?: LLMStructuredOutput
   temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
   imageRequest?: ImageRequestContract
@@ -293,6 +309,7 @@ export type LLMServerStatusResp = {
  * 远程 HTTP 请求代理（通过 main 进程的 net.fetch 发起，正确处理系统代理和 SSL）
  */
 export type LLMRemoteFetchReq = {
+  cancellationId?: string
   url: string
   method: 'GET' | 'POST'
   body?: string
@@ -308,6 +325,7 @@ export type LLMRemoteFetchResp = {
 }
 
 export type LLMExternalAgentStreamReq = {
+  cancellationId?: string
   url: string
   method: 'POST'
   body?: string
@@ -325,6 +343,8 @@ export type LLMExternalAgentStreamResp = LLMChatStreamResp & {
 
 export type LLMCancelConversationReq = {
   conversationId: string
+  /** When supplied, a delayed cancel cannot abort a later request in the same chat. */
+  cancellationId?: string
 }
 
 export type LLMCancelConversationResp = {

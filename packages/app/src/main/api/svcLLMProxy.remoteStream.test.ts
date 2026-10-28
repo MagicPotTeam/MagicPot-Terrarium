@@ -7,7 +7,7 @@ vi.mock('electron', () => ({
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
 import * as configModule from '../config/config'
-import { LLMProxySvcImpl } from './svcLLMProxyImpl'
+import { LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE, LLMProxySvcImpl } from './svcLLMProxyImpl'
 
 vi.mock(import('../config/config'), () => ({
   getConfig: vi.fn(),
@@ -85,6 +85,19 @@ const request = {
   ]
 }
 
+const structuredRequest = {
+  ...request,
+  structuredOutput: {
+    name: 'answer',
+    schema: {
+      type: 'object',
+      properties: { answer: { type: 'string' } },
+      required: ['answer'],
+      additionalProperties: false
+    }
+  }
+}
+
 const useRemoteOrigin = (serverOrigin: string): void => {
   vi.mocked(configModule.getConfig).mockReturnValue({
     ...remoteConfig,
@@ -106,6 +119,45 @@ afterEach(() => {
 })
 
 describe('LLMProxySvcImpl remote stream branch', () => {
+  it('rejects public HTTP origins before sending access tokens', async () => {
+    useRemoteOrigin('http://remote.example:8123')
+    const fetchMock = vi.mocked(globalThis.fetch)
+    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+
+    await new LLMProxySvcImpl().chatStream(request, { onData })
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(onData.mock.calls.map(([event]) => event.type)).toEqual(['error', 'done'])
+    expect(onData).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        error: expect.stringContaining('Remote LLM streaming server origin is invalid.')
+      })
+    )
+  })
+
+  it('rejects a redirected response even when the fetch implementation ignores redirect:error', async () => {
+    const redirected = new Response('', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    })
+    Object.defineProperty(redirected, 'redirected', { value: true })
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValueOnce(redirected)
+    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+
+    await new LLMProxySvcImpl().chatStream(request, { onData })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(onData.mock.calls.map(([event]) => event.type)).toEqual(['error', 'done'])
+    expect(onData).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        error: expect.stringContaining('Remote LLM streaming response was redirected.')
+      })
+    )
+  })
+
   it('exposes a focused contract for remote SSE/NDJSON stream forwarding and request payload', async () => {
     const fetchMock = vi.mocked(globalThis.fetch)
     fetchMock.mockResolvedValueOnce(
@@ -135,6 +187,9 @@ describe('LLMProxySvcImpl remote stream branch', () => {
     expect(url).toBe('https://remote.example/api/chat')
     expect(init).toMatchObject({
       method: 'POST',
+      redirect: 'error',
+      credentials: 'omit',
+      cache: 'no-store',
       headers: expect.objectContaining({ Authorization: 'Bearer remote-token' })
     })
     const payload = JSON.parse(String(init?.body))
@@ -161,6 +216,136 @@ describe('LLMProxySvcImpl remote stream branch', () => {
         done: true,
         usage: { promptTokens: 2, completionTokens: 1, totalTokens: 3 }
       })
+    )
+  })
+
+  it('holds structured text deltas until a valid remote terminal event', async () => {
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([
+        { type: 'text-delta', delta: '{"answer":' },
+        { type: 'text-delta', delta: '"ok"}' },
+        { type: 'done', delta: '', done: true, finishReason: 'stop' }
+      ])
+    )
+
+    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+    await new LLMProxySvcImpl().chatStream(structuredRequest, { onData })
+
+    expect(onData.mock.calls.map(([event]) => event.type)).toEqual(['done'])
+    expect(onData).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'done',
+        content: '{"answer":"ok"}',
+        fullContent: '{"answer":"ok"}'
+      })
+    )
+  })
+
+  it('turns an invalid structured remote terminal payload into an error without leaking deltas', async () => {
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([
+        { type: 'text-delta', delta: '{"wrong":true}' },
+        { type: 'done', delta: '', done: true, finishReason: 'stop' }
+      ])
+    )
+
+    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+    await new LLMProxySvcImpl().chatStream(structuredRequest, { onData })
+
+    expect(onData.mock.calls.map(([event]) => event.type)).toEqual(['error', 'done'])
+    expect(onData).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ type: 'error', content: '', fullContent: undefined })
+    )
+    expect(onData).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'done', finishReason: 'error', content: '' })
+    )
+  })
+
+  it('does not forward a remote error event content prefix for structured requests', async () => {
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([
+        {
+          type: 'error',
+          delta: '{"answer":"partial"}',
+          fullContent: '{"answer":"partial"}',
+          content: '{"answer":"partial"}',
+          done: false,
+          error: 'upstream failed'
+        }
+      ])
+    )
+
+    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+    await new LLMProxySvcImpl().chatStream(structuredRequest, { onData })
+
+    expect(onData).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        type: 'error',
+        delta: '',
+        content: '',
+        fullContent: undefined
+      })
+    )
+    expect(JSON.stringify(onData.mock.calls)).not.toContain('partial')
+  })
+
+  it('validates structured JSON fallback atomically', async () => {
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ content: '{"answer":"fallback"}' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    )
+
+    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+    await new LLMProxySvcImpl().chatStream(structuredRequest, { onData })
+
+    expect(onData.mock.calls.map(([event]) => event.type)).toEqual(['done'])
+    expect(onData).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'done', content: '{"answer":"fallback"}' })
+    )
+  })
+
+  it('rejects a JSON fallback event that is not terminal', async () => {
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ type: 'text-delta', delta: 'partial', done: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    )
+
+    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+    await new LLMProxySvcImpl().chatStream(request, { onData })
+
+    expect(onData.mock.calls.map(([event]) => event.type)).toEqual(['text-delta', 'error', 'done'])
+    expect(onData).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'done', finishReason: 'error' })
+    )
+  })
+
+  it('does not leak a nonterminal JSON fallback prefix for structured requests', async () => {
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ type: 'text-delta', delta: '{"answer":', done: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    )
+
+    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+    await new LLMProxySvcImpl().chatStream(structuredRequest, { onData })
+
+    expect(onData.mock.calls.map(([event]) => event.type)).toEqual(['error', 'done'])
+    expect(JSON.stringify(onData.mock.calls)).not.toContain('answer')
+    expect(onData).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'done', finishReason: 'error', content: '' })
     )
   })
 
@@ -718,6 +903,117 @@ describe('LLMProxySvcImpl remote stream branch', () => {
 
     expect(reader.cancel).toHaveBeenCalled()
     expect(reader.releaseLock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['done-event', 'sse-done-marker'] as const)(
+    'releases a remote stream owner before %s starts the next request',
+    async (terminal) => {
+      const fetchMock = vi.mocked(globalThis.fetch)
+      fetchMock.mockResolvedValueOnce(
+        terminal === 'done-event'
+          ? streamResponse([{ type: 'done', delta: '', done: true, content: 'First response' }])
+          : new Response(
+              'data: {"type":"text-delta","delta":"First response"}\n\ndata: [DONE]\n\n',
+              {
+                status: 200,
+                headers: { 'content-type': 'text/event-stream' }
+              }
+            )
+      )
+      fetchMock.mockResolvedValueOnce(
+        streamResponse([{ type: 'done', delta: '', done: true, content: 'Next response' }])
+      )
+      const svc = new LLMProxySvcImpl()
+      const sameChat = { ...request, conversationId: 'remote-terminal-reentry' }
+      let next: Promise<void> | undefined
+      const nextData = vi.fn()
+      await svc.chatStream(
+        { ...sameChat, cancellationId: 'first-remote' },
+        {
+          onData: (event) => {
+            if (event.type === 'done') {
+              next = svc.chatStream(
+                { ...sameChat, cancellationId: 'next-remote' },
+                { onData: nextData }
+              )
+              void next.catch(() => undefined)
+            }
+          }
+        }
+      )
+      expect(next).toBeDefined()
+      await next
+      expect(nextData).toHaveBeenCalledWith(expect.objectContaining({ content: 'Next response' }))
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      for (const [, options] of fetchMock.mock.calls) {
+        expect(JSON.parse(String(options?.body))).not.toHaveProperty('cancellationId')
+      }
+    }
+  )
+
+  it('releases ownership before a remote error callback starts its successor and keeps that successor guarded', async () => {
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([
+        {
+          type: 'error',
+          delta: '',
+          done: false,
+          error: 'Owned remote failure',
+          finishReason: 'error'
+        }
+      ])
+    )
+    const successorRead = deferred<ReadableStreamReadResult<Uint8Array>>()
+    const reader = {
+      read: vi.fn(() => successorRead.promise),
+      cancel: vi.fn().mockResolvedValue(undefined),
+      releaseLock: vi.fn()
+    }
+    fetchMock.mockResolvedValueOnce(responseWithReader(reader))
+    const svc = new LLMProxySvcImpl()
+    const sameChat = { ...request, conversationId: 'remote-error-reentry' }
+    const events: LLMChatStreamResp[] = []
+    const nextData = vi.fn()
+    let next: Promise<void> | undefined
+    await svc.chatStream(
+      { ...sameChat, cancellationId: 'old-error-owner' },
+      {
+        onData: (event) => {
+          events.push(event)
+          if (event.type === 'error') {
+            next = svc.chatStream(
+              { ...sameChat, cancellationId: 'next-error-owner' },
+              { onData: nextData }
+            )
+            void next.catch(() => undefined)
+          }
+        }
+      }
+    )
+    expect(events.map((event) => event.type)).toEqual(['error', 'done'])
+    expect(next).toBeDefined()
+    await vi.waitFor(() => expect(reader.read).toHaveBeenCalledOnce())
+    await expect(
+      svc.chatStream({ ...sameChat, cancellationId: 'duplicate-owner' }, { onData: vi.fn() })
+    ).rejects.toMatchObject({ code: LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE })
+    expect(
+      await svc.cancelConversation({
+        conversationId: sameChat.conversationId,
+        cancellationId: 'old-error-owner'
+      })
+    ).toEqual({ cancelled: false })
+    successorRead.resolve({
+      done: false,
+      value: new TextEncoder().encode(
+        'data: {"type":"done","done":true,"delta":"","content":"New remote output"}\n\n'
+      )
+    })
+    await next
+    expect(nextData).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: 'done', content: 'New remote output' })
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('does not forward raw upstream error bodies', async () => {

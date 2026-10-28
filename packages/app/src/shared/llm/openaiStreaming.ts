@@ -1,4 +1,6 @@
 import { OpenAIRequestControl, OPENAI_IMAGE_JSON_MAX_BYTES } from './openaiRequestControl'
+import { extractOpenAIResponsesOutput } from './openaiResponses'
+import { parseModelRetryAfter } from './modelCapacityRetry'
 import type { LLMChatFinishReason, LLMChatMetadata, LLMChatParams } from './types'
 
 const MAX_EVENT_BYTES = 64 * 1024 * 1024
@@ -36,6 +38,22 @@ const responseImageSource = (value: Record<string, unknown>, depth = 0): string 
 
 const isFinalResponseImageItem = (value: Record<string, unknown>): boolean =>
   isResponseImageItemType(value) && Boolean(responseImageSource(value))
+
+const hasStructuredResponseOutput = (value: Record<string, unknown> | undefined): boolean => {
+  if (!value) return false
+  const output = extractOpenAIResponsesOutput(value)
+  return (
+    Boolean(output.text) ||
+    output.images.length > 0 ||
+    Boolean(responseImageSource(value)) ||
+    (typeof value.refusal === 'string' && Boolean(value.refusal.trim())) ||
+    (Array.isArray(value.content) &&
+      value.content.some((part) => {
+        const content = record(part)
+        return content && Boolean(responseImageSource(content))
+      }))
+  )
+}
 
 const normalizeOutputIndex = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
@@ -130,13 +148,18 @@ export async function readOpenAIStream(
   response: Response,
   control: OpenAIRequestControl,
   mode: 'responses' | 'chat-completions',
-  onDelta: NonNullable<LLMChatParams['onDelta']>
+  onDelta: NonNullable<LLMChatParams['onDelta']>,
+  options?: { imageGeneration?: boolean }
 ): Promise<{ payload: Record<string, unknown>; finishReason: LLMChatFinishReason }> {
   let text = '',
     textBytes = 0,
     finish: LLMChatFinishReason | undefined
   let usage: unknown
   let hostedWorkStarted = false
+  let onlyImageProgress = true
+  let refusalReceived = false
+  let structuredOutputStarted = false
+  let replaySafeImageFailure: Error | undefined
   const completedNativeItems = new Map<number, Record<string, unknown>>()
   const imageParts: Record<string, unknown>[] = []
   const responseImageFallbacks: Array<{
@@ -202,29 +225,78 @@ export async function readOpenAIStream(
       control.check()
       const event = record(parsed)
       if (!event) throw new Error('OpenAI stream contains an invalid event.')
+      const type = typeof event.type === 'string' ? event.type : ''
+      const item = record(event.item)
+      refusalReceived ||=
+        /^response\.refusal\./.test(type) ||
+        record(event.part)?.type === 'refusal' ||
+        (Array.isArray(item?.content) &&
+          item.content.some((part) => record(part)?.type === 'refusal'))
       if (event.error || event.type === 'error' || event.type === 'response.failed') {
-        const error = record(event.error) || record(record(event.response)?.error)
+        const failedResponse = record(event.response)
+        const error = record(event.error) || record(failedResponse?.error)
         const detail = error?.message || event.message
-        throw Object.assign(
+        const terminalOutput = extractOpenAIResponsesOutput(failedResponse)
+        const hasTerminalOutput =
+          Boolean(terminalOutput.text) ||
+          terminalOutput.images.length > 0 ||
+          (failedResponse?.output !== undefined &&
+            (!Array.isArray(failedResponse.output) || failedResponse.output.length > 0))
+        // A provider-confirmed failed image request is safe to retry only while
+        // all observed work is progress, never after output or another tool call.
+        const failedImageWithoutOutput =
+          options?.imageGeneration === true &&
+          type === 'response.failed' &&
+          onlyImageProgress &&
+          failedResponse !== undefined &&
+          (failedResponse.status === undefined || failedResponse.status === 'failed') &&
+          !hasTerminalOutput
+        const streamError = Object.assign(
           new Error(
             typeof detail === 'string' ? detail : 'OpenAI stream reported a provider failure.'
           ),
           {
             providerError: error,
+            retryAfterMs: parseModelRetryAfter(response.headers),
             retryBlocked:
-              hostedWorkStarted || Boolean(text) || toolCalls.size > 0 || imageParts.length > 0
+              refusalReceived ||
+              structuredOutputStarted ||
+              hasTerminalOutput ||
+              (hostedWorkStarted && !failedImageWithoutOutput) ||
+              Boolean(text) ||
+              toolCalls.size > 0 ||
+              imageParts.length > 0 ||
+              responseImageFallbacks.length > 0
           }
         )
+        if (failedImageWithoutOutput && !streamError.retryBlocked) {
+          replaySafeImageFailure = streamError
+        }
+        throw streamError
       }
       if (
-        typeof event.type === 'string' &&
-        (/^response\.(?:image_generation_call|web_search_call|file_search_call|code_interpreter_call)\./.test(
-          event.type
-        ) ||
-          (event.type === 'response.output_item.added' &&
-            /(?:_call|tool)$/.test(String(record(event.item)?.type ?? ''))))
-      )
+        /^response\.[a-z_]*_call(?:_[a-z_]+)?\./.test(type) ||
+        ((type === 'response.output_item.added' || type === 'response.output_item.done') &&
+          /(?:_call|tool)$/.test(String(item?.type ?? '')))
+      ) {
         hostedWorkStarted = true
+        onlyImageProgress &&=
+          type === 'response.image_generation_call.in_progress' ||
+          type === 'response.image_generation_call.generating' ||
+          (type === 'response.output_item.added' &&
+            item?.type === 'image_generation_call' &&
+            item.status === 'in_progress' &&
+            !hasStructuredResponseOutput(item))
+      }
+      if (
+        type === 'response.output_text.done' ||
+        type === 'response.content_part.added' ||
+        type === 'response.content_part.done' ||
+        type === 'response.output_item.added' ||
+        type === 'response.output_item.done'
+      ) {
+        structuredOutputStarted ||= hasStructuredResponseOutput(item ?? record(event.part) ?? event)
+      }
       if (mode === 'responses') {
         if (
           event.type === 'response.output_text.delta' ||
@@ -379,7 +451,9 @@ export async function readOpenAIStream(
     // the same no-replay boundary for observed text, image and tool work.
     if (
       error instanceof Error &&
-      (hostedWorkStarted ||
+      ((hostedWorkStarted && error !== replaySafeImageFailure) ||
+        refusalReceived ||
+        structuredOutputStarted ||
         Boolean(text) ||
         toolCalls.size > 0 ||
         imageParts.length > 0 ||

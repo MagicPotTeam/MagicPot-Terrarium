@@ -66,6 +66,135 @@ describe('shared llm endpoint normalization', () => {
     }
   )
 
+  it('forces Responses SSE and priority service tier without a caller onDelta callback', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          [
+            'data: {"type":"response.output_text.delta","delta":"hello"}',
+            '',
+            'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}',
+            '',
+            ''
+          ].join('\n'),
+          { headers: { 'content-type': 'text/event-stream' } }
+        )
+      )
+    const client = new OpenAIAPICli('', 'https://proxy.example/v1', 'codex-model', {
+      apiMode: 'responses',
+      serviceTier: 'priority',
+      forceStreaming: true,
+      enableHostedTools: false,
+      fetchImpl: fetchMock
+    })
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'hello' }] })
+    ).resolves.toMatchObject({ content: 'hello' })
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(requestBody).toMatchObject({ stream: true, service_tier: 'priority' })
+  })
+
+  it('forwards a trusted correlation id to the Responses provider request', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}\n\n',
+          { headers: { 'content-type': 'text/event-stream' } }
+        )
+      )
+    const correlationId = 'a'.repeat(32)
+    const client = new OpenAIAPICli('', 'https://proxy.example/v1', 'codex-model', {
+      apiMode: 'responses',
+      forceStreaming: true,
+      enableHostedTools: false,
+      fetchImpl: fetchMock
+    })
+
+    await expect(
+      client.chat({
+        messages: [{ role: 'user', content: 'hello' }],
+        correlationId
+      })
+    ).resolves.toMatchObject({ content: 'ok' })
+
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
+      'X-MagicPot-Correlation-Id': correlationId
+    })
+  })
+
+  it('sends a strict JSON schema hint through the Responses API', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          output: [{ type: 'message', content: [{ type: 'output_text', text: '{"ok":true}' }] }]
+        }),
+        { headers: { 'content-type': 'application/json' } }
+      )
+    )
+    const client = new OpenAIAPICli('', 'https://proxy.example/v1', 'plan-model', {
+      apiMode: 'responses',
+      enableHostedTools: false,
+      fetchImpl: fetchMock
+    })
+
+    await expect(
+      client.chat({
+        messages: [{ role: 'user', content: 'plan' }],
+        structuredOutput: {
+          name: 'figplugin_host_plan',
+          strict: true,
+          schema: { type: 'object', properties: { ok: { type: 'boolean' } } }
+        }
+      })
+    ).resolves.toMatchObject({ content: '{"ok":true}' })
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(requestBody.text).toEqual({
+      format: {
+        type: 'json_schema',
+        name: 'figplugin_host_plan',
+        strict: true,
+        schema: { type: 'object', properties: { ok: { type: 'boolean' } } }
+      }
+    })
+  })
+
+  it('sends a strict JSON schema hint through Chat Completions', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }] }), {
+        headers: { 'content-type': 'application/json' }
+      })
+    )
+    const client = new OpenAIAPICli('', 'https://proxy.example/v1', 'chat-model', {
+      apiMode: 'chat-completions',
+      fetchImpl: fetchMock
+    })
+
+    await expect(
+      client.chat({
+        messages: [{ role: 'user', content: 'plan' }],
+        structuredOutput: {
+          name: 'figplugin_host_plan',
+          schema: { type: 'object', properties: { ok: { type: 'boolean' } } }
+        }
+      })
+    ).resolves.toMatchObject({ content: '{"ok":true}' })
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(requestBody.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'figplugin_host_plan',
+        strict: true,
+        schema: { type: 'object', properties: { ok: { type: 'boolean' } } }
+      }
+    })
+  })
+
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
@@ -103,6 +232,79 @@ describe('shared llm endpoint normalization', () => {
     )
     const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
     expect(requestBody.tools).toEqual([expect.objectContaining({ type: 'web_search' })])
+    expect(requestBody.include).toEqual(['web_search_call.action.sources'])
+  })
+
+  it.each([true, false] as const)(
+    'controls hosted web search for a custom Responses gateway (enabled=%s)',
+    async (enableHostedTools) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          output: [
+            {
+              type: 'message',
+              content: [{ type: 'output_text', text: 'gateway answer' }]
+            }
+          ]
+        })
+      })
+
+      const client = new OpenAIAPICli('proxy-key', 'https://proxy.example/v1', 'proxy-model', {
+        apiMode: 'responses',
+        enableHostedTools,
+        fetchImpl: fetchMock
+      })
+
+      await expect(
+        client.chat({ messages: [{ role: 'user', content: 'search the web' }] })
+      ).resolves.toMatchObject({ content: 'gateway answer' })
+
+      const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+      if (enableHostedTools) {
+        expect(requestBody.tools).toEqual([expect.objectContaining({ type: 'web_search' })])
+        expect(requestBody.include).toEqual(['web_search_call.action.sources'])
+      } else {
+        expect(requestBody).not.toHaveProperty('tools')
+        expect(requestBody).not.toHaveProperty('include')
+      }
+    }
+  )
+
+  it('can enable hosted web search without starting the hosted file-search lifecycle', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'gateway answer' }] }]
+      })
+    })
+    const client = new OpenAIAPICli('proxy-key', 'https://proxy.example/v1', 'proxy-model', {
+      apiMode: 'responses',
+      enableHostedTools: false,
+      enableHostedWebSearch: true,
+      fetchImpl: fetchMock
+    })
+
+    await expect(
+      client.chat({
+        messages: [
+          {
+            role: 'user',
+            content: 'search the web',
+            attachments: [
+              { type: 'file', url: 'data:text/plain;base64,aGVsbG8=', fileName: 'note.txt' }
+            ]
+          }
+        ]
+      })
+    ).resolves.toMatchObject({ content: 'gateway answer' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(requestBody.tools).toEqual([expect.objectContaining({ type: 'web_search' })])
+    expect(requestBody.tools).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'file_search' })])
+    )
     expect(requestBody.include).toEqual(['web_search_call.action.sources'])
   })
 
@@ -496,6 +698,40 @@ describe('shared llm endpoint normalization', () => {
       })
     ])
   })
+
+  it.each(['cliproxyapi', 'codex'] as const)(
+    'uses an auto image tool choice for %s Responses profiles',
+    async (callType) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          output: [
+            {
+              type: 'image_generation_call',
+              result: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB'
+            }
+          ]
+        })
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const client = new OpenAIAPICli('proxy-key', 'https://proxy.example/v1', 'gpt-5.6-sol', {
+        modelUse: 'image',
+        apiMode: 'responses',
+        callType,
+        reasoningProfile: { model_name: 'gpt-5.4' }
+      })
+
+      await client.chat({
+        messages: [{ role: 'user', content: 'Generate an image of a cat.' }],
+        imageGenerationOptions: { outputFormat: 'png' }
+      })
+
+      const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+      expect(requestBody.tool_choice).toBe('auto')
+      expect(requestBody.tools).toEqual([expect.objectContaining({ type: 'image_generation' })])
+    }
+  )
 
   it('forces image editing from explicit action and keeps an explicit output size', async () => {
     const fetchMock = vi.fn().mockResolvedValue({

@@ -288,6 +288,65 @@ describe('MagicAgent SDK loopback HTTP server', () => {
     expect(runAgent).toHaveBeenCalledOnce()
   })
 
+  it('fails closed when a caller attempts to bind the SDK server remotely', async () => {
+    await expect(
+      startMagicAgentSdkHttpServer({
+        token: 'secret',
+        host: '0.0.0.0' as never,
+        gateway: { dispatch: vi.fn(async () => ({ status: 200, body: {} })) }
+      })
+    ).rejects.toThrow(
+      'MagicAgent SDK HTTP server only supports loopback HTTP; remote TLS, service identity, workspace isolation, CORS, and rate limiting are not implemented.'
+    )
+
+    await expect(
+      startMagicAgentSdkHttpServer({
+        token: 'secret',
+        transport: 'https' as never,
+        gateway: { dispatch: vi.fn(async () => ({ status: 200, body: {} })) }
+      })
+    ).rejects.toThrow(
+      'MagicAgent SDK HTTP server only supports the loopback-http transport; HTTPS/TLS is not implemented.'
+    )
+
+    await expect(
+      startMagicAgentSdkHttpServer({
+        token: '',
+        gateway: { dispatch: vi.fn(async () => ({ status: 200, body: {} })) }
+      })
+    ).rejects.toThrow('MagicAgent SDK HTTP server requires a non-empty bearer token.')
+  })
+
+  it('requires transport authentication even when a custom gateway omits preflight auth', async () => {
+    const dispatch = vi.fn(async () => ({ status: 200, body: { ok: true } }))
+    server = await startMagicAgentSdkHttpServer({ token: 'secret', gateway: { dispatch } })
+    const unauthorized = await fetch(`${server.baseUrl}/v2/sdk/agent.run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}'
+    })
+    expect(unauthorized.status).toBe(401)
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('rejects browser origins instead of exposing a CORS-enabled SDK endpoint', async () => {
+    const dispatch = vi.fn(async () => ({ status: 200, body: { ok: true } }))
+    server = await startMagicAgentSdkHttpServer({ token: 'secret', gateway: { dispatch } })
+    const response = await fetch(`${server.baseUrl}/v2/sdk/agent.run`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer secret',
+        'content-type': 'application/json',
+        origin: 'https://example.invalid'
+      },
+      body: '{}'
+    })
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'origin_not_allowed' })
+    expect(response.headers.get('access-control-allow-origin')).toBeNull()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
   it('redacts acknowledgement token from HTTP error bodies', async () => {
     const token = 'claim-token-must-not-leak'
     const gateway = {

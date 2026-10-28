@@ -612,10 +612,10 @@ describe('MagicAgentPlatformSvcImpl', () => {
         agentId: 'package.demo.package.assistant',
         systemPrompt: 'Package prompt.',
         profileId: 'package-profile',
-        maxToolIterations: 1
+        maxToolIterations: 1,
+        allowedToolNames: ['session.status']
       })
     )
-    expect(runAgent.mock.calls[0]?.[0]).not.toHaveProperty('allowedToolNames')
 
     await service.runAgent({
       agentId: 'package.demo.package.assistant',

@@ -16,6 +16,13 @@ export const OPENAI_JSON_MAX_BYTES = 64 * 1024 * 1024
 export const OPENAI_IMAGE_JSON_MAX_BYTES = 128 * 1024 * 1024
 export const OPENAI_ERROR_MAX_BYTES = 64 * 1024
 
+// Non-OpenAI providers use the same bounded request lifecycle. Keep the
+// OpenAI-named constants as compatibility aliases for existing callers.
+export const PROVIDER_CHAT_DEADLINE_MS = OPENAI_CHAT_DEADLINE_MS
+export const PROVIDER_MAX_DEADLINE_MS = OPENAI_MAX_DEADLINE_MS
+export const PROVIDER_JSON_MAX_BYTES = OPENAI_JSON_MAX_BYTES
+export const PROVIDER_ERROR_MAX_BYTES = OPENAI_ERROR_MAX_BYTES
+
 const cancelBody = (response: Response): void => {
   try {
     void response.body?.cancel().catch(() => undefined)
@@ -31,7 +38,7 @@ const cancellationReason = (signal: AbortSignal): unknown => {
 }
 
 /** Per-call control, never stored on the client: concurrent chats have separate lifetimes. */
-export class OpenAIRequestControl {
+export class ProviderRequestControl {
   private readonly controller = new AbortController()
   readonly signal = this.controller.signal
   private expiresAt: number
@@ -45,13 +52,14 @@ export class OpenAIRequestControl {
   constructor(
     private readonly fetchImpl: FetchImpl,
     private readonly parent?: AbortSignal,
-    timeoutMs = OPENAI_CHAT_DEADLINE_MS,
-    private readonly options: { idleTimeout?: boolean } = {}
+    timeoutMs = PROVIDER_CHAT_DEADLINE_MS,
+    private readonly options: { idleTimeout?: boolean } = {},
+    private readonly providerName = 'Provider'
   ) {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      throw new RangeError('OpenAI request deadline must be a positive finite number.')
+      throw new RangeError(`${providerName} request deadline must be a positive finite number.`)
     }
-    const duration = Math.min(OPENAI_MAX_DEADLINE_MS, Math.max(1_000, timeoutMs))
+    const duration = Math.min(PROVIDER_MAX_DEADLINE_MS, Math.max(1_000, timeoutMs))
     this.duration = duration
     this.expiresAt = performance.now() + duration
     this.parentAbort = () => this.abort(cancellationReason(parent!))
@@ -66,7 +74,7 @@ export class OpenAIRequestControl {
     for (const response of this.responses) cancelBody(response)
   }
   private timeout(): void {
-    this.abort(new ModelRequestTimeoutError())
+    this.abort(new ModelRequestTimeoutError(`${this.providerName} request deadline exceeded.`))
   }
   /** Only actual response progress resets an interactive wait, never polling or UI activity. */
   noteProgress(): void {
@@ -80,7 +88,7 @@ export class OpenAIRequestControl {
     // Also check the monotonic clock: already-resolved promises must not starve the timer.
     if (!this.signal.aborted && performance.now() >= this.expiresAt) this.timeout()
     if (this.signal.aborted) throw cancellationReason(this.signal)
-    if (this.disposed) throw new Error('OpenAI request has already finished.')
+    if (this.disposed) throw new Error(`${this.providerName} request has already finished.`)
   }
 
   wait<T>(promise: Promise<T>, onCancel?: () => void): Promise<T> {
@@ -168,7 +176,7 @@ export class OpenAIRequestControl {
         const result = await this.wait(reader.read(), cancel)
         if (result.done) return
         if (result.value.byteLength > maxBytes - total) {
-          throw new Error(`OpenAI response body exceeds the ${maxBytes}-byte limit.`)
+          throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
         }
         total += result.value.byteLength
         if (result.value.byteLength > 0) this.noteProgress()
@@ -191,7 +199,7 @@ export class OpenAIRequestControl {
       const text = await this.wait(response.text(), () => cancelBody(response))
       const bytes = new TextEncoder().encode(text)
       if (bytes.byteLength > maxBytes && !truncate)
-        throw new Error(`OpenAI response body exceeds the ${maxBytes}-byte limit.`)
+        throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
       const result = new TextDecoder().decode(bytes.subarray(0, maxBytes))
       this.check()
       return result
@@ -220,7 +228,7 @@ export class OpenAIRequestControl {
       // prevent their internal allocation, but still enforces time and result size.
       const payload = await this.wait(response.json(), () => cancelBody(response))
       if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > maxBytes) {
-        throw new Error(`OpenAI response body exceeds the ${maxBytes}-byte limit.`)
+        throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
       }
       this.check()
       return payload
@@ -236,7 +244,7 @@ export class OpenAIRequestControl {
     if (!response.body) {
       const blob = await this.wait(response.blob(), () => cancelBody(response))
       if (blob.size > maxBytes)
-        throw new Error(`OpenAI response body exceeds the ${maxBytes}-byte limit.`)
+        throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
       this.check()
       return blob
     }
@@ -254,7 +262,7 @@ export class OpenAIRequestControl {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    const error = new Error('OpenAI request control was disposed.')
+    const error = new Error(`${this.providerName} request control was disposed.`)
     error.name = 'AbortError'
     // Settle outstanding waiters before disabling their deadline/parent signal.
     // Already-established caller/timeout reasons remain authoritative.
@@ -263,5 +271,17 @@ export class OpenAIRequestControl {
     this.parent?.removeEventListener('abort', this.parentAbort)
     this.responses.clear()
     this.readers.clear()
+  }
+}
+
+/** OpenAI compatibility wrapper retained for existing imports and tests. */
+export class OpenAIRequestControl extends ProviderRequestControl {
+  constructor(
+    fetchImpl: FetchImpl,
+    parent?: AbortSignal,
+    timeoutMs = OPENAI_CHAT_DEADLINE_MS,
+    options: { idleTimeout?: boolean } = {}
+  ) {
+    super(fetchImpl, parent, timeoutMs, options, 'OpenAI')
   }
 }

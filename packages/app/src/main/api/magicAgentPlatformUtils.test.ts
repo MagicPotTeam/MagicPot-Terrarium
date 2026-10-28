@@ -47,6 +47,14 @@ describe('magic agent platform utilities', () => {
     ).toEqual(['read.file'])
   })
 
+  it('preserves a package allowlist when the request omits allowed tools', () => {
+    expect(resolvePackageAgentAllowedToolNames(undefined, [' Read.File ', 'read.file'])).toEqual([
+      'read.file'
+    ])
+    expect(resolvePackageAgentAllowedToolNames(undefined, [])).toEqual([])
+    expect(resolvePackageAgentAllowedToolNames(undefined, null)).toBeUndefined()
+  })
+
   it('redacts local paths while preserving validation message text', () => {
     expect(redactLocalPathFragments('Failed at C:\\secret\\package.json; /tmp/package.json')).toBe(
       'Failed at [redacted path]; [redacted path]'

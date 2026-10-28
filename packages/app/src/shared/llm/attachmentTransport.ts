@@ -11,6 +11,7 @@ const ATTACHMENT_TRANSPORT_PRIORITY: readonly ProviderAttachmentTransport[] = [
   'file-id',
   'multipart',
   'accessible-url',
+  'chunked-binary-v1',
   'request-data-url'
 ]
 

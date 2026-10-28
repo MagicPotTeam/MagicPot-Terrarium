@@ -125,6 +125,103 @@ describe('AssistantExecutionAdapter tool lifecycle', () => {
     expect(bridge.invoke).toHaveBeenCalledTimes(1)
   })
 
+  it('binds read-only web tools by default while preserving explicit allowlists', async () => {
+    const chat = vi.fn().mockResolvedValue({ content: 'answer' })
+    const adapter = new AssistantExecutionAdapter({ chatService: { chat: chat as never } })
+
+    await adapter.run({
+      ...makeRequest(),
+      runId: 'default-web-tools',
+      req: { text: 'Find current public information' },
+      messages: []
+    } as never)
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skillRuntime: {
+          execution: {},
+          bindings: [
+            expect.objectContaining({
+              source: 'assistant-runtime',
+              toolNames: ['web_search', 'web_fetch']
+            })
+          ]
+        }
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('enforces the default web-tool boundary when the model requests a hidden tool', async () => {
+    bridge.invoke.mockResolvedValue({ content: 'should not execute' })
+    const chat = vi.fn(async (_request: unknown, options?: unknown) => {
+      const executeTool = (
+        options as {
+          executeTool?: (invocation: {
+            toolName: string
+            args: Record<string, unknown>
+            runId: string
+            toolCallId: string
+          }) => Promise<unknown>
+        }
+      )?.executeTool
+      if (!executeTool) throw new Error('executeTool callback missing')
+      await executeTool({
+        toolName: 'files.write',
+        args: {},
+        runId: 'default-policy-run',
+        toolCallId: 'default-policy-call'
+      })
+      return { content: 'unexpected' }
+    })
+    const adapter = new AssistantExecutionAdapter({ chatService: { chat: chat as never } })
+
+    await expect(
+      adapter.run({
+        ...makeRequest(),
+        runId: 'default-policy-run',
+        req: { text: 'Use a tool' },
+        messages: []
+      } as never)
+    ).rejects.toThrow('not bound to the current skill')
+    expect(bridge.invoke).not.toHaveBeenCalled()
+  })
+
+  it('treats an explicit null tool policy as no tools', async () => {
+    bridge.invoke.mockResolvedValue({ content: 'should not execute' })
+    const chat = vi.fn(async (_request: unknown, options?: unknown) => {
+      const executeTool = (
+        options as {
+          executeTool?: (invocation: {
+            toolName: string
+            args: Record<string, unknown>
+            runId: string
+            toolCallId: string
+          }) => Promise<unknown>
+        }
+      )?.executeTool
+      if (!executeTool) throw new Error('executeTool callback missing')
+      await executeTool({
+        toolName: 'web_search',
+        args: { query: 'blocked' },
+        runId: 'null-policy-run',
+        toolCallId: 'null-policy-call'
+      })
+      return { content: 'unexpected' }
+    })
+    const adapter = new AssistantExecutionAdapter({ chatService: { chat } })
+
+    await expect(
+      adapter.run({
+        ...makeRequest(),
+        runId: 'null-policy-run',
+        req: { text: 'No tools', execution: { allowedToolNames: null } },
+        messages: []
+      } as never)
+    ).rejects.toThrow('not bound to the current skill')
+    expect(bridge.invoke).not.toHaveBeenCalled()
+  })
+
   it('callTool preserves cooperative checkpoint and enter/leave hooks', async () => {
     bridge.invoke.mockResolvedValue({ content: 'ok' })
     const leave = vi.fn()
@@ -198,6 +295,47 @@ describe('AssistantExecutionAdapter tool lifecycle', () => {
     expect(actions.map((action) => action.type)).toEqual(['tool.invoke', 'tool.result'])
     expect((actions[1] as ToolResultAction).payload.ok).toBe(false)
     expect(bridge.invoke).not.toHaveBeenCalled()
+  })
+
+  it('stops waiting when a tool ignores cancellation and records a failed result', async () => {
+    let resolveInvocation: ((value: { content: string }) => void) | undefined
+    bridge.invoke.mockImplementation(
+      () =>
+        new Promise<{ content: string }>((resolve) => {
+          resolveInvocation = resolve
+        })
+    )
+    const actions: Array<ToolInvokeAction | ToolResultAction> = []
+    const adapter = new AssistantExecutionAdapter({
+      chatService: { chat: vi.fn() },
+      onAgentAction: (action) => {
+        actions.push(action)
+      }
+    })
+    const controller = new AbortController()
+    const pending = adapter.callTool('demo.echo', {}, makeRequest(), {
+      allowedToolNames: ['demo.echo'],
+      signal: controller.signal
+    })
+
+    await vi.waitFor(() => expect(bridge.invoke).toHaveBeenCalledTimes(1))
+    controller.abort('stop waiting')
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'stop waiting'
+    })
+    expect(actions.map((action) => action.type)).toEqual(['tool.invoke', 'tool.result'])
+    expect((actions[1] as ToolResultAction).payload).toMatchObject({
+      ok: false,
+      error: { message: 'stop waiting' }
+    })
+
+    // Resolve the ignored transport after the caller has returned. The
+    // adapter must have consumed this late settlement without changing the
+    // already-recorded cancellation outcome.
+    resolveInvocation?.({ content: 'late result' })
+    await Promise.resolve()
   })
 
   it('rejects tampered deterministic identity before observation or execution', () => {

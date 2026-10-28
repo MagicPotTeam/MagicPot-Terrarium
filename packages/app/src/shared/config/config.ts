@@ -411,6 +411,8 @@ type ConfigShape = {
     bind_host: string
     access_token: string
     access_tokens: LLMProxyAccessTokenEntry[]
+    /** Exact browser origins allowed to use the local LLM proxy via CORS. */
+    cors_allowed_origins: string[]
   }
 
   chat_config: ChatConfig
@@ -572,7 +574,8 @@ export const DEFAULT_CONFIG: Config = {
     port: 3721,
     bind_host: '0.0.0.0',
     access_token: '',
-    access_tokens: []
+    access_tokens: [],
+    cors_allowed_origins: []
   },
   chat_config: {
     enable: false,

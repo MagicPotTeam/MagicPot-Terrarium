@@ -374,7 +374,10 @@ export const safeRemoteDownload = async (
 
         let resolvedAddress: { address: string; family: 4 | 6 }
         try {
-          resolvedAddress = await resolveRemoteFetchAddress(url.hostname)
+          resolvedAddress = await resolveRemoteFetchAddress(url.hostname, {
+            signal: options.signal,
+            timeoutMs: Math.max(1, deadlineAt - Date.now())
+          })
         } catch (error) {
           if (!settled) finishReject(normalizeError(error))
           return

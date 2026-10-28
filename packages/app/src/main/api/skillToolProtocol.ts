@@ -75,7 +75,7 @@ export function parseSkillToolInvocation(
     suffix = suffix.slice(3).trimStart()
   }
   // A second frame is ambiguous. Do not select one silently or run a hidden second command.
-  if (/^[{\[]|^```|\{\s*"(?:toolName|args)"\s*:/.test(suffix))
+  if (/^(?:\{|\[)|^```|\{\s*"(?:toolName|args)"\s*:/.test(suffix))
     return { kind: 'invalid', reason: 'ambiguous' }
   let parsed: unknown
   try {
