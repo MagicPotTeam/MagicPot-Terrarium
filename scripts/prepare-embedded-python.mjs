@@ -5,6 +5,7 @@ import https from 'node:https'
 import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { installEmbeddedRequirements } from './install-embedded-requirements.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -315,17 +316,6 @@ function installRequirements(constraintsPath) {
     throw new Error(`Missing ComfyUI requirements: ${comfyRequirements}`)
   }
 
-  pip([
-    'install',
-    '--upgrade',
-    '--prefer-binary',
-    '-r',
-    comfyRequirements,
-    '-c',
-    constraintsPath,
-    ...extraIndexArgs()
-  ])
-
   const customRequirementFiles = getCustomNodeRequirementFiles()
   const manifestPath = path.join(stagingRoot, 'custom-node-requirements.json')
   fs.writeFileSync(
@@ -337,23 +327,18 @@ function installRequirements(constraintsPath) {
     )}\n`
   )
 
-  for (const requirementsFile of customRequirementFiles) {
+  const requirementFiles = [comfyRequirements, ...customRequirementFiles]
+  for (const requirementsFile of requirementFiles) {
     console.log(
-      `[prepare-embedded-python] Installing ${path.relative(stagingRoot, requirementsFile)}`
+      `[prepare-embedded-python] Resolving ${path.relative(stagingRoot, requirementsFile)}`
     )
-    pip([
-      'install',
-      '--upgrade',
-      '--prefer-binary',
-      '-r',
-      requirementsFile,
-      '-c',
-      constraintsPath,
-      ...extraIndexArgs()
-    ])
   }
-
-  pip(['check'])
+  installEmbeddedRequirements({
+    requirementFiles,
+    constraintsPath,
+    indexArgs: extraIndexArgs(),
+    pip
+  })
 }
 
 async function ensureVerifiedLlamaCppWheel() {
@@ -666,6 +651,7 @@ async function main() {
   runPhase('install-requirements', () => installRequirements(constraintsPath))
   runPhase('install-smoke-extras', installSmokeRuntimeExtras)
   runPhase('install-verified-llama-cpp', () => installVerifiedLlamaCppWheel(llamaCppWheelPath))
+  runPhase('verify-final-dependencies', () => pip(['check']))
   runPhase('prune-runtime', pruneEmbeddedRuntime)
   runPhase('remove-python-caches-before-smoke', removePythonCaches)
   runPhase('comfy-quick-test', smokeTest)
