@@ -339,24 +339,27 @@ const requestPublic = async (
 }
 
 const decodeHtmlEntities = (value: string): string =>
-  value
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&#(\d+);/g, (_match, digits) =>
-      String.fromCodePoint(Math.min(0x10ffff, Number(digits)))
-    )
-    .replace(/&#x([\da-f]+);/gi, (_match, digits) =>
-      String.fromCodePoint(Math.min(0x10ffff, Number.parseInt(digits, 16)))
-    )
+  // Decode each original entity once; a decoded ampersand must not introduce
+  // another decoding pass (for example &amp;#39; must remain &#39;).
+  value.replace(/&(?:nbsp|amp|quot|apos|#\d+|#x[\da-f]+);/gi, (entity) => {
+    const name = entity.slice(1, -1).toLowerCase()
+    const named: Readonly<Record<string, string>> = { nbsp: ' ', amp: '&', quot: '"', apos: "'" }
+    if (!name.startsWith('#')) return named[name] ?? entity
+    const code = name.startsWith('#x') ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1))
+    return Number.isInteger(code) &&
+      code > 0 &&
+      code <= 0x10ffff &&
+      !(code >= 0xd800 && code <= 0xdfff)
+      ? String.fromCodePoint(code)
+      : '\uFFFD'
+  })
 
 const stripHtml = (value: string): string =>
   decodeHtmlEntities(
     value
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, ' ')
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript\b[^>]*>/gi, ' ')
       .replace(/<[^>]+>/g, ' ')
   )
     .replace(/\s+/g, ' ')
@@ -380,7 +383,10 @@ const normalizeSearchResultUrl = (value: string): string => {
   // DuckDuckGo's HTML endpoint wraps targets in /l/?uddg=... redirects.
   // Expose the target URL as the citation while still validating it with the
   // same HTTPS/SSRF checks when it is later fetched.
-  if (parsed.hostname.endsWith('duckduckgo.com') && parsed.pathname === '/l/') {
+  if (
+    (parsed.hostname === 'duckduckgo.com' || parsed.hostname.endsWith('.duckduckgo.com')) &&
+    parsed.pathname === '/l/'
+  ) {
     const target = parsed.searchParams.get('uddg')
     if (target) parsed = validatePublicUrl(target)
   }

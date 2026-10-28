@@ -390,9 +390,9 @@ const addContentIssues = ({ relativeFile, text, issues }) => {
     'validate' + 'ChatGPT' + 'Session'
   ]
   const chatWebHosts = [
-    'chat' + 'gpt' + '.com',
-    'chat' + '.openai' + '.com',
-    'auth' + '.openai' + '.com'
+    'chat' + 'gpt' + '[.]com',
+    'chat' + '[.]openai' + '[.]com',
+    'auth' + '[.]openai' + '[.]com'
   ]
   const privateWebOriginPattern = new RegExp(
     `(?<![A-Za-z0-9])(?:https?:\\/\\/)?(?:www\\.)?(?:${chatWebHosts.join('|')})(?=[/:?#\\s"'\\x60)]|$)|\\b(?:${privateWebOriginIdentifiers.join('|')})\\b`,

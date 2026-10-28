@@ -212,7 +212,7 @@ function figmaUiFixture(violations, receive = () => {}) {
     'window',
     violations
   )
-  const scripts = [...figmaHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+  const scripts = [...figmaHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/gi)]
   assert.equal(scripts.length, 1)
   run(scripts[0][1], { document: dom.document, parent, window }, violations, 'figma/ui.html')
   return {
@@ -292,7 +292,7 @@ test('templates retain user-supplied identity placeholders and only the allowed 
     requiredPermissions: { localFileSystem: 'plugin' }
   })
   assert.equal(read(`photoshop-uxp/${photoshop.main}`), photoshopHtml)
-  const scripts = [...photoshopHtml.matchAll(/<script src="([^"]+)"><\/script>/g)]
+  const scripts = [...photoshopHtml.matchAll(/<script\s+src="([^"]+)"\s*>\s*<\/script\b[^>]*>/gi)]
   assert.equal(scripts.length, 1)
   assert.equal(scripts[0][1], 'main.js')
   assert.equal(read(`photoshop-uxp/${scripts[0][1]}`), photoshopCode)

@@ -209,7 +209,7 @@ describe('verifyFigPluginPackage', () => {
       let pem = publicKeyPem
       if (kind === 'private') pem = privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
       if (kind === 'rsa')
-        pem = generateKeyPairSync('rsa', { modulusLength: 1024 })
+        pem = generateKeyPairSync('rsa', { modulusLength: 2048 })
           .publicKey.export({ format: 'pem', type: 'spki' })
           .toString()
       if (kind === 'certificate') pem = pem.replaceAll('PUBLIC KEY', 'CERTIFICATE')

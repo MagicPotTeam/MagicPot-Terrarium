@@ -558,7 +558,7 @@ test('bounded plain JSON, no getters/toJSON hooks, opaque data, sparse arrays or
 })
 
 test('PKCS8 Ed25519 only; no key generation, malformed/oversized keys or key-bearing assets', () => {
-  const rsa = generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey
+  const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
   const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey
   const keys = [
     undefined,
@@ -1138,4 +1138,22 @@ test('v2 CLI rejects duplicate bridge keys and invalid origins, then emits the s
   assert.equal(fs.readFileSync(f.output, 'utf8'), buildFigPluginPackage(value).packageText)
   assert.equal(fs.readFileSync(f.publicOutput, 'utf8'), publicKeyPem)
   assert.equal(fs.readFileSync(f.keyPath, 'utf8'), privateKeyPem)
+})
+
+test('strict semantic versions retain alphanumeric identifiers without ambiguous backtracking', () => {
+  for (const version of [
+    '1.2.3-0',
+    '1.2.3-00alpha',
+    '1.2.3-alpha-beta.1+build.01',
+    '0.0.0-0.--.---'
+  ]) {
+    const fixture = input()
+    fixture.manifest.version = version
+    assert.equal(JSON.parse(buildFigPluginPackage(fixture).packageText).manifest.version, version)
+  }
+  for (const version of ['1.2.3-01', '1.2.3-alpha..1', `0.0.0-0.${'--.'.repeat(30)}!`]) {
+    const fixture = input()
+    fixture.manifest.version = version
+    assert.throws(() => buildFigPluginPackage(fixture))
+  }
 })

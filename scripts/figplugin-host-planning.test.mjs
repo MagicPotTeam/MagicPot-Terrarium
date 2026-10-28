@@ -1133,9 +1133,9 @@ function fixture(
       }
     }
     vm.parent = uiParent
-    new Script(read('figma/bridge/ui.html').match(/<script>([\s\S]*?)<\/script>/)[1]).runInContext(
-      vm
-    )
+    new Script(
+      read('figma/bridge/ui.html').match(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/i)[1]
+    ).runInContext(vm)
   }
   async function pair() {
     const ticket = JSON.stringify({

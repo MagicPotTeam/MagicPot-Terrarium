@@ -993,7 +993,7 @@ export function parseBoundedXml(
         if (elements > MAX_XML_ELEMENTS || depth > MAX_XML_DEPTH) fail(parserFailure('LIMIT'))
         if (
           tag.uri === XINCLUDE_NAMESPACE ||
-          Object.values(tag.ns).includes(XINCLUDE_NAMESPACE) ||
+          Object.values(tag.ns).some((namespace) => namespace === XINCLUDE_NAMESPACE) ||
           (tag.prefix === 'xi' && tag.local === 'include')
         )
           fail(parserFailure('UNSUPPORTED'))

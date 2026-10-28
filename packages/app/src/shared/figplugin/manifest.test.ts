@@ -105,6 +105,19 @@ const packageFixture = (manifest: FigPluginManifestInput) =>
   })
 
 describe('FIGPLUGIN manifest contract', () => {
+  it.each(['1.2.3-0', '1.2.3-00alpha', '1.2.3-alpha-beta.1+build.01', '0.0.0-0.--.---'])(
+    'accepts unambiguous semantic version %s',
+    (version) => {
+      expect(FigPluginVersionSchema.parse(version)).toBe(version)
+    }
+  )
+  it.each(['1.2.3-01', '1.2.3-alpha..1', `0.0.0-0.${'--.'.repeat(30)}!`])(
+    'rejects malformed semantic version %s without ambiguous backtracking',
+    (version) => {
+      expect(FigPluginVersionSchema.safeParse(version).success).toBe(false)
+    }
+  )
+
   it('rejects long untrusted versions before running the semantic-version regular expression', () => {
     const original = RegExp.prototype.test
     const tested: number[] = []

@@ -292,6 +292,40 @@ describe('create-open-candidate policy', () => {
     expect(auditOpenCandidate(candidate)).toEqual([])
   })
 
+  it('matches literal domain dots rather than arbitrary hostname characters', () => {
+    const exactHosts = [
+      'chat' + 'gpt' + '.com',
+      'chat' + '.openai' + '.com',
+      'auth' + '.openai' + '.com'
+    ]
+    for (const host of exactHosts) {
+      const candidate = makeCandidate()
+      writeFile(
+        candidate,
+        'packages/app/src/main/endpoint.ts',
+        `const endpoint = 'https://${host}/path'`
+      )
+      expect(
+        auditOpenCandidate(candidate).some(
+          (issue) => issue.rule === `${chatWebRule}-origin-reference`
+        )
+      ).toBe(true)
+    }
+    for (const host of ['chatXgptXcom', 'chatXopenaiXcom', 'authXopenaiXcom', 'auth.openaiXcom']) {
+      const candidate = makeCandidate()
+      writeFile(
+        candidate,
+        'packages/app/src/main/endpoint.ts',
+        `const endpoint = 'https://${host}/path'`
+      )
+      expect(
+        auditOpenCandidate(candidate).filter(
+          (issue) => issue.rule === `${chatWebRule}-origin-reference`
+        )
+      ).toEqual([])
+    }
+  })
+
   it('rejects private ChatGPT Web content while allowing generic OpenAI docs and public markers', () => {
     const candidate = makeCandidate()
     const webToken = 'Chat' + 'GPT' + 'Web'

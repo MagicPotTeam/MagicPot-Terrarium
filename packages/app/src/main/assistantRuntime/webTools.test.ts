@@ -2,11 +2,84 @@ import https from 'node:https'
 import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { webFetch, webSearch } from './webTools'
+import * as remoteFetchPolicy from '../api/remoteFetchPolicy'
+
+const mockWebDocument = (body: string, contentType: string) => {
+  vi.spyOn(remoteFetchPolicy, 'resolveRemoteFetchAddress').mockResolvedValue({
+    address: '1.1.1.1',
+    family: 4
+  })
+  return vi.spyOn(https, 'request').mockImplementation(((...args: unknown[]) => {
+    const onResponse = args[1] as (response: unknown) => void
+    const request = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      destroy() {
+        this.destroyed = true
+      },
+      end() {
+        const response = Object.assign(new EventEmitter(), {
+          headers: { 'content-type': contentType },
+          statusCode: 200,
+          complete: false,
+          destroyed: false,
+          destroy() {
+            this.destroyed = true
+          }
+        })
+        queueMicrotask(() => {
+          onResponse(response)
+          response.emit('data', Buffer.from(body))
+          response.complete = true
+          response.emit('end')
+        })
+      }
+    })
+    return request
+  }) as never)
+}
 
 describe('assistant web tools', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.useRealTimers()
+  })
+
+  it('extracts text without double decoding entities or retaining script/style bodies', async () => {
+    const request = mockWebDocument(
+      '<html><title>Title &amp;#39;</title><SCRIPT type="text/javascript">private-script-body</ScRiPt \t>' +
+        '<style>private-style-body</style ><noscript>private-noscript-body</noscript extra="ignored">' +
+        '<script>private-malformed-end-body</script extra="ignored"><p>&amp;#39; &#39; &#x41; &#0; &#xD800; &#1114112; &amp;amp;</p></html>',
+      'text/html'
+    )
+    const result = await webFetch('https://1.1.1.1/')
+    expect(result.title).toBe('Title &#39;')
+    expect(result.text).toBe("Title &#39; &#39; ' A \uFFFD \uFFFD \uFFFD &amp;")
+    expect(result.text).not.toContain('private-')
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    'duckduckgo.com',
+    'html.duckduckgo.com',
+    'notduckduckgo.com',
+    'duckduckgo.com.example.org'
+  ])('only unwraps search redirects on an actual DuckDuckGo host (%s)', async (host) => {
+    const target = 'https://example.org/reference'
+    const wrapper = `https://${host}/l/?uddg=${encodeURIComponent(target)}`
+    const request = mockWebDocument(
+      JSON.stringify({
+        Heading: 'Fixture result',
+        AbstractURL: wrapper,
+        AbstractText: 'Fixture text'
+      }),
+      'application/json'
+    )
+    const result = await webSearch('fixture query')
+    expect(result.results).toHaveLength(1)
+    expect(result.results[0].url).toBe(
+      host === 'duckduckgo.com' || host === 'html.duckduckgo.com' ? target : wrapper
+    )
+    expect(request).toHaveBeenCalledTimes(1)
   })
 
   it('rejects empty search queries before network access', async () => {

@@ -147,7 +147,7 @@ describe('document worker raw-string request wire', () => {
   it('rejects duplicate keys, whitespace, reordered keys, escaped keys, and trailing input', () => {
     const frame = serializeDocumentTextRequest(request('pdf'))
     expectInvalid(parseDocumentTextRequestFrame(`${frame}\n`))
-    expectInvalid(parseDocumentTextRequestFrame(frame.replace('{', '{ ')))
+    expectInvalid(parseDocumentTextRequestFrame(frame.replaceAll('{', '{ ')))
     expectInvalid(
       parseDocumentTextRequestFrame(
         `{"jobId":"${JOB_ID}","protocol":"${DOCUMENT_TEXT_PROTOCOL}","format":"pdf","bytes":"${Buffer.from(syntheticBytes('pdf')).toString('base64')}"}`
@@ -303,7 +303,7 @@ describe('document worker raw-string result wire', () => {
   it('rejects result duplicate keys, noncanonical whitespace/order, malformed JSON, and unknown keys', () => {
     const frame = serializeDocumentTextResult(success(), JOB_ID, 'pdf')
     expectInvalid(parseDocumentTextResultFrame(`${frame} `, JOB_ID, 'pdf'))
-    expectInvalid(parseDocumentTextResultFrame(frame.replace('{', '{ '), JOB_ID, 'pdf'))
+    expectInvalid(parseDocumentTextResultFrame(frame.replaceAll('{', '{ '), JOB_ID, 'pdf'))
     expectInvalid(
       parseDocumentTextResultFrame(
         `{"jobId":"${JOB_ID}","protocol":"${DOCUMENT_TEXT_PROTOCOL}","ok":true,"format":"pdf","segments":[],"truncated":false,"warnings":[]}`,

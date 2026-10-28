@@ -356,7 +356,7 @@ function fixture(
       URL: urlApi,
       window: { addEventListener: (name, callback) => uiEvents.set(name, callback) }
     })
-    const inline = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+    const inline = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/gi)]
       .map((match) => match[1])
       .join('\n')
     new Script(inline).runInContext(ui)

@@ -82,8 +82,8 @@ describe('private trusted external-image drop leases', () => {
 
   it('only grants canonical URLs in the current trusted drop', async () => {
     const subject = harness()
-    subject.drop({ 'text/plain': first.replace('%20', ' ') })
-    await expect(subject.authorizeDroppedLocalImage(first.replace('%20', ' '))).resolves.toBe('')
+    subject.drop({ 'text/plain': first.replaceAll('%20', ' ') })
+    await expect(subject.authorizeDroppedLocalImage(first.replaceAll('%20', ' '))).resolves.toBe('')
     await expect(subject.authorizeDroppedLocalImage(second)).resolves.toBe('')
     await expect(subject.authorizeDroppedLocalImage(first)).resolves.toBe(fileURLToPath(first))
     expect(subject.authorizePath).toHaveBeenCalledExactlyOnceWith(fileURLToPath(first))

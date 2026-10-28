@@ -493,7 +493,7 @@ function fixture(host, options = {}) {
       'figma/bridge/code.js'
     )
     mainReceive = ui.onmessage
-    const script = sources.figma.html.match(/<script>([\s\S]*?)<\/script>/)[1]
+    const script = sources.figma.html.match(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/i)[1]
     run(
       script,
       { document, window, parent, crypto, fetch: () => denied('UI fetch') },

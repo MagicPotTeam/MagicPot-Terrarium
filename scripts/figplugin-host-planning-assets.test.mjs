@@ -479,7 +479,9 @@ function fixture(host, { catalogFault = null } = {}) {
       window: { addEventListener: (name, callback) => uiEvents.set(name, callback) }
     })
     new Script(
-      [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]).join('\n')
+      [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/gi)]
+        .map((match) => match[1])
+        .join('\n')
     ).runInContext(ui)
   }
   const flush = async () => {

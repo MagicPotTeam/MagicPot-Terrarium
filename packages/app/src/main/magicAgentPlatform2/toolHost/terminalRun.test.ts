@@ -349,7 +349,7 @@ describe('TerminalRunToolHost caller cancellation', () => {
     const { root, authorization } = setup()
     const ready = path.join(root, 'owned-processes.json')
     const controller = new AbortController()
-    const script = `const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});require('node:fs').writeFileSync(${JSON.stringify(ready)},JSON.stringify([process.pid,child.pid]));setInterval(()=>{},1000)`
+    const script = `const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});require('node:fs').writeFileSync(process.argv[1],JSON.stringify([process.pid,child.pid]));setInterval(()=>{},1000)`
     const audit: TerminalRunAuditEvidence[] = []
     const host = new TerminalRunToolHost(authorization, {
       allowedRoots: [root],
@@ -358,7 +358,7 @@ describe('TerminalRunToolHost caller cancellation', () => {
       }
     })
     const task = host.run({
-      ...input(root, ['-e', script], authorization),
+      ...input(root, ['-e', script, ready], authorization),
       signal: controller.signal,
       timeoutMs: 2500
     })

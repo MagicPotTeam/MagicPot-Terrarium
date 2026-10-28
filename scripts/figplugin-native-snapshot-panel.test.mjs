@@ -295,7 +295,7 @@ function fixture(host, options = {}) {
       ...(options.real ? {} : { MagicPotSelectionSnapshotV1: helper })
     })
     receive = ui.onmessage
-    run(sources.figma.html.match(/<script>([\s\S]*?)<\/script>/)[1], {
+    run(sources.figma.html.match(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/i)[1], {
       document,
       window,
       parent,
