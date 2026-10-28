@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
+import { JSDOM } from 'jsdom'
 import { createContext, Script } from 'node:vm'
 
 const root = new URL('../packages/figplugin-hosts/', import.meta.url)
@@ -292,10 +293,18 @@ test('templates retain user-supplied identity placeholders and only the allowed 
     requiredPermissions: { localFileSystem: 'plugin' }
   })
   assert.equal(read(`photoshop-uxp/${photoshop.main}`), photoshopHtml)
-  const scripts = [...photoshopHtml.matchAll(/<script\s+src="([^"]+)"\s*>\s*<\/script\b[^>]*>/gi)]
-  assert.equal(scripts.length, 1)
-  assert.equal(scripts[0][1], 'main.js')
-  assert.equal(read(`photoshop-uxp/${scripts[0][1]}`), photoshopCode)
+  // Parse the artifact rather than approximate external-script tags with a
+  // filter regexp. jsdom does not execute or fetch scripts by default.
+  const dom = new JSDOM(photoshopHtml)
+  try {
+    const scripts = [...dom.window.document.querySelectorAll('script')]
+    assert.equal(scripts.length, 1)
+    assert.equal(scripts[0].getAttribute('src'), 'main.js')
+    assert.equal(scripts[0].textContent.trim(), '')
+    assert.equal(read('photoshop-uxp/main.js'), photoshopCode)
+  } finally {
+    dom.window.close()
+  }
 })
 
 test('runtime sources have no network, storage, document-write, or arbitrary-execution APIs', () => {

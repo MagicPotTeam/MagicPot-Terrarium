@@ -342,7 +342,8 @@ const buildScopedProxyMediaUrl = (
     const realSourcePath = path.resolve(fs.realpathSync(normalizedSourcePath))
     if (!realSourcePath.startsWith(realRoot + path.sep))
       throw new Error('Media source link escapes the request scope')
-    const sourceStat = fs.lstatSync(normalizedSourcePath)
+    // Inspect and copy the same canonical path that passed the scope check.
+    const sourceStat = fs.lstatSync(realSourcePath)
     if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1)
       throw new Error('Media source must be a single-link regular file')
     const extension = path.extname(realSourcePath).toLowerCase()
