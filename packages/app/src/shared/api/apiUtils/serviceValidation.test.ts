@@ -43,7 +43,7 @@ describe('serviceValidation', () => {
         issues: [
           {
             path: ['count'],
-            message: 'Expected number, received string',
+            message: 'Invalid input: expected number, received string',
             code: 'invalid_type'
           }
         ]
