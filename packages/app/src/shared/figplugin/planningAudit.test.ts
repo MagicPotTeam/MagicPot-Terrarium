@@ -218,7 +218,7 @@ describe('content-free planning audit contracts', () => {
         false
       )
     for (const modelName of [
-      'PRIVATE\nTEXT',
+      'SYNTHETIC\nTEXT',
       'x\u0000y',
       'x\u0085y',
       'x\u202ey',

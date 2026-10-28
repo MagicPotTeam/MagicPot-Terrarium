@@ -301,9 +301,9 @@ describe('legacySessionImport', () => {
 
   it('sanitizes manifest source metadata without changing plan rawFile', async () => {
     const sourceMetadata = {
-      path: '/private/source',
+      path: '/fixture-local/source',
       blob: 'private-blob',
-      nested: { cacheDir: '/private/cache', data: 'private-data', retained: true }
+      nested: { cacheDir: '/fixture-local/cache', data: 'private-data', retained: true }
     }
     await writeSource({ version: 3, sourceMetadata, sessions: [session()] })
     const plan = await createLegacySessionImportPlan({ sourcePath, createdAt: 1 })

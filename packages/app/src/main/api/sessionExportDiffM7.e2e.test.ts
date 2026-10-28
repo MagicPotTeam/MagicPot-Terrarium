@@ -86,7 +86,7 @@ describe('M7 §3.8 production session export/diff boundary', () => {
             artifactId: 'artifact-1',
             runId: 'run-1',
             kind: 'file',
-            url: 'file:///private/secret.txt?token=artifact-secret',
+            url: 'file:///fixture-local/secret.txt?token=artifact-secret',
             fileName: '<img src=x onerror=alert(1)>',
             mimeType: 'text/plain',
             sizeBytes: 7,

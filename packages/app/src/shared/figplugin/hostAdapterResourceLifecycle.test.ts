@@ -235,7 +235,7 @@ describe('shared HostAdapter resource lifecycle', () => {
     async (failure, code) => {
       const resources = nativeResources()
       const execution = nativeExecution()
-      const secret = 'private-native-error: C:/private/document.psd token=secret'
+      const secret = 'private-native-error: C:/fixture-local/document.psd token=secret'
       const events: string[] = []
       const releasePartial = vi.fn(() => {
         events.push('partial')
@@ -674,7 +674,7 @@ describe('shared HostAdapter resource lifecycle', () => {
 
   it('attempts all 256 deferred releases and the hook after failures, exposing only bounded counts', async () => {
     const order: Array<number | 'hook'> = []
-    const secret = 'sensitive-native-handle C:/private/source.fig bearer-secret'
+    const secret = 'sensitive-native-handle C:/fixture-local/source.fig bearer-secret'
     const rejectedRelease = vi.fn()
     const prepareResources = vi.fn<NonNullable<Options['prepareResources']>>(({ deferRelease }) => {
       for (let index = 0; index < 256; index += 1) {

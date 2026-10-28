@@ -518,10 +518,11 @@ const ModelPage: React.FC<ModelPageProps> = ({ compact = false }) => {
           )
         }
       } finally {
-        if (rootActionRef.current !== lock) return
-        rootActionRef.current = null
-        if (mountedRef.current && rootScopeRef.current === lock.scope) {
-          setPendingRootScope(null)
+        if (rootActionRef.current === lock) {
+          rootActionRef.current = null
+          if (mountedRef.current && rootScopeRef.current === lock.scope) {
+            setPendingRootScope(null)
+          }
         }
       }
     })()

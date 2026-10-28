@@ -145,7 +145,7 @@ describe('planning image reference and metadata-only contracts', () => {
       { host: 'photoshop' },
       { projectId: 'other-project' },
       { name: 'PRIVATE-NAME' },
-      { path: 'C:\\private\\pixel.png' }
+      { path: 'C:\\fixture-local\\pixel.png' }
     ])
       expect(() =>
         selectPlanningAssetReferences(

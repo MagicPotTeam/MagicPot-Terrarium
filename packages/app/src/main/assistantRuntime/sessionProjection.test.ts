@@ -22,14 +22,14 @@ const session = (overrides: Partial<AssistantSessionRecord> = {}): AssistantSess
   updatedAt: 50,
   workspace: {
     workspaceId: 'workspace',
-    workspaceRootDir: '/private',
-    workspaceMetaFile: '/private/meta',
-    rootDir: '/private/root',
-    memoryDir: '/private/memory',
-    memoryFile: '/private/memory.md',
-    contextFile: '/private/context',
-    taskContextFile: '/private/task',
-    pinnedContextFile: '/private/pinned'
+    workspaceRootDir: '/fixture-local',
+    workspaceMetaFile: '/fixture-local/meta',
+    rootDir: '/fixture-local/root',
+    memoryDir: '/fixture-local/memory',
+    memoryFile: '/fixture-local/memory.md',
+    contextFile: '/fixture-local/context',
+    taskContextFile: '/fixture-local/task',
+    pinnedContextFile: '/fixture-local/pinned'
   },
   messages: [
     { role: 'user', content: '<script>alert(1)</script> token=supersecret' },

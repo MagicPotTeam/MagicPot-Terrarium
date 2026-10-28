@@ -364,7 +364,10 @@ describe.each([
     for (const invalid of [
       { ...base, assetReferences: [{ ...reference(f.first), sha256: '0'.repeat(64) }] },
       { ...base, assetReferences: [reference(f.first), reference(f.first)] },
-      { ...base, assetReferences: [{ ...reference(f.first), path: 'C:\\private\\input.png' }] },
+      {
+        ...base,
+        assetReferences: [{ ...reference(f.first), path: 'C:\\fixture-local\\input.png' }]
+      },
       {
         ...base,
         assetReferences: [{ ...reference(f.first), url: 'https://example.invalid/private.png' }]

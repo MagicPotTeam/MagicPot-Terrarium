@@ -130,7 +130,6 @@ packages/launcher-dotnet/launcher-update-config.local.json
 
 # Disposable local verification artifacts (not test source)
 /validation/
-/private/codex/validation/
 /.figplugin-*/
 /.tmp-m7-tool-approval-*.sqlite3*
 /.tmp-semantic-memory-tests/
