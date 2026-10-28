@@ -518,8 +518,17 @@ vi.mock('./components/ChatComposer', () => ({
     disableClearContext?: boolean
   }) {
     const [draftValue, setDraftValue] = React.useState(inputValue)
+    const lastInputSyncRef = React.useRef({ key: inputSyncKey, value: inputValue })
 
     React.useEffect(() => {
+      // Match the real composer's controlled synchronization. An initial effect
+      // with unchanged props must not overwrite a user edit queued before it.
+      if (
+        inputSyncKey === lastInputSyncRef.current.key &&
+        inputValue === lastInputSyncRef.current.value
+      )
+        return
+      lastInputSyncRef.current = { key: inputSyncKey, value: inputValue }
       setDraftValue(inputValue)
     }, [inputSyncKey, inputValue])
 
