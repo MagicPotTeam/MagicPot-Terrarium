@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { useDispatch } from 'react-redux'
 import { useTranslation } from 'react-i18next'
 import { api } from '../../utils/windowUtils'
@@ -72,6 +72,22 @@ export function useCanvasBridgeActions({
   const [agentSendMenuItemIds, setAgentSendMenuItemIds] = useState<string[]>([])
   const [dccExportMenuAnchor, setDccExportMenuAnchor] = useState<HTMLElement | null>(null)
   const [dccExportMenuItemId, setDccExportMenuItemId] = useState<string | null>(null)
+  const agentDeliveryLifecycleRef = useRef({ canvasId, generation: 0, mounted: false })
+  const agentDeliveryTimersRef = useRef(new Set<number>())
+
+  useLayoutEffect(() => {
+    const lifecycle = agentDeliveryLifecycleRef.current
+    lifecycle.canvasId = canvasId
+    lifecycle.generation += 1
+    lifecycle.mounted = true
+    const timers = agentDeliveryTimersRef.current
+    return () => {
+      lifecycle.mounted = false
+      lifecycle.generation += 1
+      for (const timer of timers) window.clearTimeout(timer)
+      timers.clear()
+    }
+  }, [canvasId])
 
   const getActiveAgentPaneScope = useCallback(() => resolveActiveAgentScope(canvasId), [canvasId])
 
@@ -82,187 +98,225 @@ export function useCanvasBridgeActions({
       targetApp?: AgentTargetApp
     ) => {
       if (targetItems.length === 0) return
+      const generation = agentDeliveryLifecycleRef.current.generation
+      const isCurrentDelivery = () => {
+        const lifecycle = agentDeliveryLifecycleRef.current
+        return (
+          lifecycle.mounted &&
+          lifecycle.canvasId === canvasId &&
+          lifecycle.generation === generation
+        )
+      }
+      if (!isCurrentDelivery()) return
 
-      const resolvedOptions: SendCanvasItemsToAgentOptions =
-        typeof targetScopeOrOptions === 'string'
-          ? {
-              targetScope: targetScopeOrOptions,
-              targetApp
+      try {
+        const resolvedOptions: SendCanvasItemsToAgentOptions =
+          typeof targetScopeOrOptions === 'string'
+            ? {
+                targetScope: targetScopeOrOptions,
+                targetApp
+              }
+            : (targetScopeOrOptions ?? {})
+
+        const resolvedScope = resolvedOptions.targetScope ?? getActiveAgentPaneScope()
+        const resolvedTargetApp = resolvedOptions.targetApp ?? targetApp
+        const promptPrefix = resolvedOptions.promptPrefix?.trim() ?? ''
+        const includeCanvasPromptText = resolvedOptions.includeCanvasPromptText !== false
+        const includeGroupCompletionPrompt = resolvedOptions.includeGroupCompletionPrompt !== false
+
+        const supplementalImageAttachments: ChatAttachment[] = []
+        const expandedTargetItems = expandCanvasItemsForAgentSend(targetItems, items)
+        const attachmentItems = await materializeCanvasAgentAttachmentItems(expandedTargetItems)
+        if (!isCurrentDelivery()) return
+        const baseAttachments = buildCanvasAgentAttachments(attachmentItems)
+        const attachmentManifest = buildCanvasAgentAttachmentManifest(attachmentItems)
+        const supplementalPromptParts: string[] = []
+        const croppedImageItemIds = new Set(
+          expandedTargetItems.flatMap((item) =>
+            item.type === 'image' && buildCanvasImageCropSourceMetadata(item) ? [item.id] : []
+          )
+        )
+        const materializedCroppedImageItemIds = new Set(
+          attachmentItems.flatMap((item) =>
+            item.type === 'image' && croppedImageItemIds.has(item.id) ? [item.id] : []
+          )
+        )
+        const hasFailedCroppedImageAttachments =
+          croppedImageItemIds.size > 0 &&
+          Array.from(croppedImageItemIds).some(
+            (itemId) => !materializedCroppedImageItemIds.has(itemId)
+          )
+        const promptText = includeCanvasPromptText
+          ? extractPromptTextFromCanvasItems(expandedTargetItems)
+          : ''
+        const completionPrompt = includeGroupCompletionPrompt
+          ? buildCanvasAgentGroupCompletionPrompt(targetItems, items, groups)
+          : ''
+        const hasDirectImageAttachments = baseAttachments.some(
+          (attachment) => attachment.type === 'image'
+        )
+        const shouldIncludeSelectionSnapshot =
+          !hasFailedCroppedImageAttachments &&
+          (!hasDirectImageAttachments || targetItems.some((item) => item.type !== 'image'))
+
+        if (hasFailedCroppedImageAttachments) {
+          notifyError(
+            t('canvas.agent_send_cropped_image_failed', {
+              defaultValue:
+                'Failed to send the cropped image. Please try cropping again before sending it to Agent.'
+            })
+          )
+        }
+
+        if (shouldIncludeSelectionSnapshot) {
+          try {
+            const snapshot = await renderCanvasItemsImageDataUrl(expandedTargetItems, false)
+            if (!isCurrentDelivery()) return
+            if (snapshot) {
+              supplementalImageAttachments.push({
+                type: 'image',
+                url: snapshot,
+                mimeType: 'image/png',
+                fileName: 'canvas-selection.png',
+                hiddenFromChatView: true
+              })
+              supplementalPromptParts.push(
+                'Included an overview snapshot of the selected canvas content for additional layout context.'
+              )
             }
-          : (targetScopeOrOptions ?? {})
-
-      const resolvedScope = resolvedOptions.targetScope ?? getActiveAgentPaneScope()
-      const resolvedTargetApp = resolvedOptions.targetApp ?? targetApp
-      const promptPrefix = resolvedOptions.promptPrefix?.trim() ?? ''
-      const includeCanvasPromptText = resolvedOptions.includeCanvasPromptText !== false
-      const includeGroupCompletionPrompt = resolvedOptions.includeGroupCompletionPrompt !== false
-
-      const supplementalImageAttachments: ChatAttachment[] = []
-      const expandedTargetItems = expandCanvasItemsForAgentSend(targetItems, items)
-      const attachmentItems = await materializeCanvasAgentAttachmentItems(expandedTargetItems)
-      const baseAttachments = buildCanvasAgentAttachments(attachmentItems)
-      const attachmentManifest = buildCanvasAgentAttachmentManifest(attachmentItems)
-      const supplementalPromptParts: string[] = []
-      const croppedImageItemIds = new Set(
-        expandedTargetItems.flatMap((item) =>
-          item.type === 'image' && buildCanvasImageCropSourceMetadata(item) ? [item.id] : []
-        )
-      )
-      const materializedCroppedImageItemIds = new Set(
-        attachmentItems.flatMap((item) =>
-          item.type === 'image' && croppedImageItemIds.has(item.id) ? [item.id] : []
-        )
-      )
-      const hasFailedCroppedImageAttachments =
-        croppedImageItemIds.size > 0 &&
-        Array.from(croppedImageItemIds).some(
-          (itemId) => !materializedCroppedImageItemIds.has(itemId)
-        )
-      const promptText = includeCanvasPromptText
-        ? extractPromptTextFromCanvasItems(expandedTargetItems)
-        : ''
-      const completionPrompt = includeGroupCompletionPrompt
-        ? buildCanvasAgentGroupCompletionPrompt(targetItems, items, groups)
-        : ''
-      const hasDirectImageAttachments = baseAttachments.some(
-        (attachment) => attachment.type === 'image'
-      )
-      const shouldIncludeSelectionSnapshot =
-        !hasFailedCroppedImageAttachments &&
-        (!hasDirectImageAttachments || targetItems.some((item) => item.type !== 'image'))
-
-      if (hasFailedCroppedImageAttachments) {
-        notifyError(
-          t('canvas.agent_send_cropped_image_failed', {
-            defaultValue:
-              'Failed to send the cropped image. Please try cropping again before sending it to Agent.'
-          })
-        )
-      }
-
-      if (shouldIncludeSelectionSnapshot) {
-        try {
-          const snapshot = await renderCanvasItemsImageDataUrl(expandedTargetItems, false)
-          if (snapshot) {
-            supplementalImageAttachments.push({
-              type: 'image',
-              url: snapshot,
-              mimeType: 'image/png',
-              fileName: 'canvas-selection.png',
-              hiddenFromChatView: true
-            })
-            supplementalPromptParts.push(
-              'Included an overview snapshot of the selected canvas content for additional layout context.'
-            )
+          } catch (error) {
+            if (!isCurrentDelivery()) return
+            console.warn('[SendToAgent] failed to render canvas snapshot:', error)
           }
-        } catch (error) {
-          console.warn('[SendToAgent] failed to render canvas snapshot:', error)
         }
-      }
 
-      const videoItems = expandedTargetItems.filter(
-        (item): item is CanvasVideoItem => item.type === 'video'
-      )
-      for (const videoItem of videoItems) {
-        try {
-          const { firstFrameDataUrl, lastFrameDataUrl } = await extractVideoBoundaryFrameDataUrls(
-            videoItem.src
-          )
-
-          if (firstFrameDataUrl) {
-            supplementalImageAttachments.push({
-              type: 'image',
-              url: firstFrameDataUrl,
-              mimeType: 'image/png',
-              fileName: `${videoItem.fileName || 'untitled-video'}-first-frame.png`
-            })
-            supplementalPromptParts.push(
-              `Included the first frame of video "${videoItem.fileName || 'untitled-video'}".`
-            )
-          }
-
-          if (lastFrameDataUrl) {
-            supplementalImageAttachments.push({
-              type: 'image',
-              url: lastFrameDataUrl,
-              mimeType: 'image/png',
-              fileName: `${videoItem.fileName || 'untitled-video'}-last-frame.png`
-            })
-            supplementalPromptParts.push(
-              `Included the last frame of video "${videoItem.fileName || 'untitled-video'}".`
-            )
-          }
-        } catch (error) {
-          console.warn(
-            `[SendToAgent] failed to extract boundary frames for video ${videoItem.fileName}:`,
-            error
-          )
-        }
-      }
-
-      const hiddenPromptText = [
-        promptPrefix,
-        resolvedTargetApp ? getAgentTargetAppPrompt(resolvedTargetApp) : '',
-        attachmentManifest,
-        completionPrompt,
-        supplementalPromptParts.join('\n')
-      ]
-        .filter(Boolean)
-        .join('\n\n')
-      const finalPromptText = promptText.trim()
-
-      dispatch(openRightPanel())
-
-      const allAttachments: ChatAttachment[] = [...baseAttachments, ...supplementalImageAttachments]
-      const materializedAttachments = (
-        await Promise.all(
-          allAttachments.map((attachment) => materializeInternalImageDragAttachment(attachment))
+        const videoItems = expandedTargetItems.filter(
+          (item): item is CanvasVideoItem => item.type === 'video'
         )
-      ).filter(
-        (
-          attachment
-        ): attachment is Awaited<ReturnType<typeof materializeInternalImageDragAttachment>> &
-          ChatAttachment => attachment !== null
-      ) as ChatAttachment[]
-      if (materializedAttachments.length < allAttachments.length) {
+        for (const videoItem of videoItems) {
+          try {
+            const { firstFrameDataUrl, lastFrameDataUrl } = await extractVideoBoundaryFrameDataUrls(
+              videoItem.src
+            )
+            if (!isCurrentDelivery()) return
+
+            if (firstFrameDataUrl) {
+              supplementalImageAttachments.push({
+                type: 'image',
+                url: firstFrameDataUrl,
+                mimeType: 'image/png',
+                fileName: `${videoItem.fileName || 'untitled-video'}-first-frame.png`
+              })
+              supplementalPromptParts.push(
+                `Included the first frame of video "${videoItem.fileName || 'untitled-video'}".`
+              )
+            }
+
+            if (lastFrameDataUrl) {
+              supplementalImageAttachments.push({
+                type: 'image',
+                url: lastFrameDataUrl,
+                mimeType: 'image/png',
+                fileName: `${videoItem.fileName || 'untitled-video'}-last-frame.png`
+              })
+              supplementalPromptParts.push(
+                `Included the last frame of video "${videoItem.fileName || 'untitled-video'}".`
+              )
+            }
+          } catch (error) {
+            if (!isCurrentDelivery()) return
+            console.warn(
+              `[SendToAgent] failed to extract boundary frames for video ${videoItem.fileName}:`,
+              error
+            )
+          }
+        }
+
+        const hiddenPromptText = [
+          promptPrefix,
+          resolvedTargetApp ? getAgentTargetAppPrompt(resolvedTargetApp) : '',
+          attachmentManifest,
+          completionPrompt,
+          supplementalPromptParts.join('\n')
+        ]
+          .filter(Boolean)
+          .join('\n\n')
+        const finalPromptText = promptText.trim()
+
+        const allAttachments: ChatAttachment[] = [
+          ...baseAttachments,
+          ...supplementalImageAttachments
+        ]
+        const materializedAttachments = (
+          await Promise.all(
+            allAttachments.map((attachment) => materializeInternalImageDragAttachment(attachment))
+          )
+        ).filter(
+          (
+            attachment
+          ): attachment is Awaited<ReturnType<typeof materializeInternalImageDragAttachment>> &
+            ChatAttachment => attachment !== null
+        ) as ChatAttachment[]
+        if (!isCurrentDelivery()) return
+        if (materializedAttachments.length < allAttachments.length) {
+          notifyError(t('canvas.send_to_agent_failed'))
+        }
+
+        dispatch(openRightPanel())
+        if (!isCurrentDelivery()) return
+        const timer = window.setTimeout(() => {
+          agentDeliveryTimersRef.current.delete(timer)
+          if (!isCurrentDelivery()) return
+          try {
+            for (const attachment of materializedAttachments) {
+              if (!isCurrentDelivery()) return
+              window.dispatchEvent(
+                new CustomEvent('send-to-agent', {
+                  detail: { attachment, text: '', targetScope: resolvedScope }
+                })
+              )
+            }
+
+            if (!isCurrentDelivery()) return
+            if (finalPromptText) {
+              window.dispatchEvent(
+                new CustomEvent('send-to-agent', {
+                  detail: {
+                    text: finalPromptText,
+                    hiddenText: hiddenPromptText,
+                    targetScope: resolvedScope
+                  }
+                })
+              )
+            } else if (hiddenPromptText) {
+              window.dispatchEvent(
+                new CustomEvent('send-to-agent', {
+                  detail: { hiddenText: hiddenPromptText, targetScope: resolvedScope }
+                })
+              )
+            }
+
+            if (!isCurrentDelivery()) return
+            window.dispatchEvent(
+              new CustomEvent('chat:focus-composer', {
+                detail: { scope: resolvedScope }
+              })
+            )
+          } catch (error) {
+            if (!isCurrentDelivery()) return
+            console.error('[SendToAgent] failed to deliver canvas attachments:', error)
+            notifyError(t('canvas.send_to_agent_failed'))
+          }
+        }, 200)
+        agentDeliveryTimersRef.current.add(timer)
+      } catch (error) {
+        if (!isCurrentDelivery()) return
+        console.error('[SendToAgent] failed to prepare canvas attachments:', error)
         notifyError(t('canvas.send_to_agent_failed'))
       }
-
-      window.setTimeout(() => {
-        for (const attachment of materializedAttachments) {
-          window.dispatchEvent(
-            new CustomEvent('send-to-agent', {
-              detail: { attachment, text: '', targetScope: resolvedScope }
-            })
-          )
-        }
-
-        if (finalPromptText) {
-          window.dispatchEvent(
-            new CustomEvent('send-to-agent', {
-              detail: {
-                text: finalPromptText,
-                hiddenText: hiddenPromptText,
-                targetScope: resolvedScope
-              }
-            })
-          )
-        } else if (hiddenPromptText) {
-          window.dispatchEvent(
-            new CustomEvent('send-to-agent', {
-              detail: { hiddenText: hiddenPromptText, targetScope: resolvedScope }
-            })
-          )
-        }
-
-        window.dispatchEvent(
-          new CustomEvent('chat:focus-composer', {
-            detail: { scope: resolvedScope }
-          })
-        )
-      }, 200)
     },
     [
+      canvasId,
       dispatch,
       extractPromptTextFromCanvasItems,
       getActiveAgentPaneScope,

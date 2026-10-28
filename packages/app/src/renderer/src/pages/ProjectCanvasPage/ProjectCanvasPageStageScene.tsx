@@ -7,8 +7,8 @@ import {
 import { Box } from '@mui/material'
 import MaxSizeLayout from '../../components/MaxSizeLayout'
 import CanvasItemPlaceholder from './components/CanvasItemPlaceholder'
-import CanvasImageDomPreview from './components/CanvasImageDomPreview'
 import CanvasAnimatedImageDomLayer from './components/CanvasAnimatedImageDomLayer'
+import CanvasHighResolutionImageDomLayer from './components/CanvasHighResolutionImageDomLayer'
 import { CanvasTextOverlayContent, CanvasTextOverlayFrame } from './components/CanvasTextOverlay'
 import ProjectCanvasImageCropOverlay from './components/ProjectCanvasImageCropOverlay'
 import ProjectCanvasImageInteractionOverlay from './components/ProjectCanvasImageInteractionOverlay'
@@ -124,6 +124,7 @@ type CanvasAnnotationInteractionOverlayItem = CanvasRectInteractionOverlayItem
 type CanvasPlaceholderInteractionOverlayItem = CanvasRectInteractionOverlayItem
 
 const PROJECT_CANVAS_INLINE_TEXT_EDITOR_SELECTOR = '[data-project-canvas-inline-text-editor="true"]'
+const CANVAS_POINTER_BRIDGE_HANDLED_KEY = '__projectCanvasPointerBridgeHandled'
 const STAGE_MARQUEE_FALLBACK_BLOCKING_SELECTORS = [
   '[data-canvas-item-id][data-canvas-overlay]',
   '[data-project-canvas-crop-overlay="dom"]',
@@ -867,6 +868,17 @@ export default function ProjectCanvasPageStageScene(props: any) {
     }
     return visibleItems
   }, [propItems, visibleItems])
+  const interactionPaintRankById = React.useMemo(
+    () =>
+      new Map(
+        [...allCanvasItems]
+          .sort((left, right) => (left.zIndex ?? 0) - (right.zIndex ?? 0))
+          .map((item, index) => [item.id, index + 1])
+      ),
+    [allCanvasItems]
+  )
+  const [transformControlsPortal, setTransformControlsPortal] =
+    React.useState<HTMLDivElement | null>(null)
   const totalCanvasItemCount =
     typeof itemIdSet?.size === 'number' ? itemIdSet.size : allCanvasItems.length
   const totalCanvasImageItemCount = React.useMemo(
@@ -1329,15 +1341,31 @@ export default function ProjectCanvasPageStageScene(props: any) {
           item.type === 'image' &&
           imageRuntimeRouteById.get(item.id) === 'fallback-image-proxy' &&
           !animatedGifImageIdSet.has(item.id) &&
-          !canvas2DFailedImageIds.has(item.id)
+          !canvas2DFailedImageIds.has(item.id) &&
+          // Selected loaded fallbacks are drawn by their DOM interaction/placeholder
+          // owner; keep unloaded items in 2D until that owner has an image asset.
+          !(tool === 'select' && selectedIds.has(item.id) && Boolean(item.image))
       ),
-    [animatedGifImageIdSet, canvas2DFailedImageIds, imageRuntimeRouteById, visibleItems]
+    [
+      animatedGifImageIdSet,
+      canvas2DFailedImageIds,
+      imageRuntimeRouteById,
+      selectedIds,
+      tool,
+      visibleItems
+    ]
   )
   const canvas2DFallbackImageIdSet = React.useMemo(
     () => new Set(canvas2DFallbackImageItems.map((item) => item.id)),
     [canvas2DFallbackImageItems]
   )
-  const canvas2DVisualOwnerImageIdSet = canvas2DResolvedImageIds
+  const canvas2DVisualOwnerImageIdSet = React.useMemo(
+    () =>
+      new Set(
+        [...canvas2DResolvedImageIds].filter((itemId) => canvas2DFallbackImageIdSet.has(itemId))
+      ),
+    [canvas2DFallbackImageIdSet, canvas2DResolvedImageIds]
+  )
   const highResolutionDomImagePreviewItems = React.useMemo(() => {
     if (isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting) {
       return []
@@ -1451,6 +1479,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
     stageSize,
     visibleItems
   ])
+  const highResolutionDomImagePreviewIdSet = React.useMemo(
+    () => new Set(highResolutionDomImagePreviewItems.map((item) => item.id)),
+    [highResolutionDomImagePreviewItems]
+  )
   const shouldUseDenseWebglImageProxyBudget =
     webglImageItems.length > PROJECT_CANVAS_DENSE_WEBGL_IMAGE_PROXY_LIMIT ||
     webglPrimaryImageCount > PROJECT_CANVAS_DENSE_WEBGL_IMAGE_PROXY_LIMIT
@@ -1829,10 +1861,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const syncWebGLImagePreview = React.useCallback(
     (itemId: string, preview: ProjectCanvasImagePreview | null) => {
       webglImageLayerRef.current?.syncItemPreview(itemId, preview)
-      canvas2DFallbackLayerRef.current?.syncItemPreview(itemId, preview)
+      // The 2D fallback layer only owns fallback-route images. Avoid scheduling a
+      // full-canvas redraw for every WebGL drag preview frame.
+      if (canvas2DFallbackImageIdSet.has(itemId)) {
+        canvas2DFallbackLayerRef.current?.syncItemPreview(itemId, preview)
+      }
       dispatchCanvasLiveVisualBoundsChange([itemId])
     },
-    []
+    [canvas2DFallbackImageIdSet]
   )
   const handlePlaceholderRectOverlayPreviewChange = React.useCallback(
     (_itemId: string, preview: ProjectCanvasRectItemTransform | null) => {
@@ -2654,6 +2690,12 @@ export default function ProjectCanvasPageStageScene(props: any) {
         isMarqueeCapture: isMarqueeCaptureRef.current,
         isMiddleMouse: isMiddleMouseRef.current
       })
+      // The interaction hook also has a window-level pointermove fallback. Mark
+      // this event before forwarding so that fallback listener does not apply
+      // the same delta a second time.
+      ;(nativeEvent as PointerEvent & { [CANVAS_POINTER_BRIDGE_HANDLED_KEY]?: boolean })[
+        CANVAS_POINTER_BRIDGE_HANDLED_KEY
+      ] = true
       handleStageMouseMove({
         evt: nativeEvent,
         type: nativeEvent.type
@@ -2693,6 +2735,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
         isMarqueeCaptureRef.current = false
       }
 
+      // The interaction hook installs a window-level pointer-up fallback for
+      // browsers without the capture bridge. Mark this event before forwarding
+      // so that fallback can tear down without committing the same gesture a
+      // second time.
+      ;(nativeEvent as PointerEvent & { [CANVAS_POINTER_BRIDGE_HANDLED_KEY]?: boolean })[
+        CANVAS_POINTER_BRIDGE_HANDLED_KEY
+      ] = true
       handleStageMouseUp({
         evt: nativeEvent,
         type: nativeEvent.type
@@ -3299,46 +3348,11 @@ export default function ProjectCanvasPageStageScene(props: any) {
             stageScale={stageScale}
             registerViewportLayer={registerViewportLayer}
           />
-          {highResolutionDomImagePreviewItems.length > 0 && (
-            <Box
-              data-project-canvas-high-res-image-layer="dom"
-              sx={{
-                position: 'absolute',
-                inset: 0,
-                overflow: 'visible',
-                pointerEvents: 'none'
-              }}
-            >
-              <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>
-                {highResolutionDomImagePreviewItems.map((imageItem) => (
-                  <Box
-                    key={imageItem.id}
-                    data-project-canvas-high-res-image-item-id={imageItem.id}
-                    sx={{
-                      position: 'absolute',
-                      left: 0,
-                      top: 0,
-                      width: imageItem.width,
-                      height: imageItem.height,
-                      overflow: 'hidden',
-                      transform: buildCanvasImageDomTransform(imageItem),
-                      transformOrigin: '0 0',
-                      pointerEvents: 'none',
-                      zIndex: imageItem.zIndex
-                    }}
-                  >
-                    <CanvasImageDomPreview
-                      item={imageItem}
-                      previewMode="high-res-source"
-                      borderRadius="4px"
-                      stageScale={stageScale}
-                      sourceImagePreview
-                    />
-                  </Box>
-                ))}
-              </div>
-            </Box>
-          )}
+          <CanvasHighResolutionImageDomLayer
+            items={highResolutionDomImagePreviewItems}
+            stageScale={stageScale}
+            registerViewportLayer={registerViewportLayer}
+          />
           {newResultHintItems.length > 0 && (
             <Box
               data-project-canvas-new-result-hint-layer="dom"
@@ -3372,21 +3386,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
             onMouseUp={handleStageSurfaceMouseUp}
             onMouseLeave={handleStageSurfaceMouseUp}
           />
-          {hasProxyLayerElements && (
-            <Box
-              data-project-canvas-proxy-layer="dom"
-              sx={{
-                position: 'absolute',
-                inset: 0,
-                overflow: 'visible',
-                pointerEvents: 'none'
-              }}
-            >
-              <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>
-                {proxyLayerElements}
-              </div>
-            </Box>
-          )}
           {activeRegionSelectionImageItem && (
             <ProjectCanvasImageCropOverlay
               ref={cropOverlayRef}
@@ -3407,94 +3406,136 @@ export default function ProjectCanvasPageStageScene(props: any) {
               onCancel={tool === 'extract-select' ? handleExtractCancel : handleCropCancel}
             />
           )}
-          {shouldRenderImageInteractionLayer && (
-            <Box
-              data-project-canvas-image-interaction-layer="dom"
-              sx={{
-                position: 'absolute',
-                inset: 0,
-                overflow: 'visible',
-                pointerEvents: 'none'
-              }}
-            >
-              {interactiveImageOverlayItems.map((imageItem) => {
-                const isSelected = selectedIds.has(imageItem.id) && tool === 'select'
-                const imageRuntimeRoute = getImageRuntimeRoute(imageItem)
-                const suppressDomImagePreview =
-                  animatedGifImageIdSet.has(imageItem.id) ||
-                  imageRuntimeRoute === 'webgl-primary' ||
-                  (canvas2DVisualOwnerImageIdSet.has(imageItem.id) && !isSelected)
-                const shouldShowSelectionChrome = isSelected && !shouldSuppressSelectionChrome
-
-                return (
-                  <Box
-                    key={imageItem.id}
-                    data-project-canvas-image-interaction-item-id={imageItem.id}
-                    sx={{
-                      position: 'absolute',
-                      left: 0,
-                      top: 0,
-                      width: 0,
-                      height: 0,
-                      overflow: 'visible',
-                      transformOrigin: '0 0',
-                      willChange: 'transform',
-                      pointerEvents: 'none',
-                      zIndex: imageItem.zIndex
-                    }}
-                    ref={registerViewportLayer}
-                  >
-                    <ProjectCanvasImageInteractionOverlay
-                      canvasContainerRef={canvasContainerRef}
-                      item={imageItem}
-                      isSelected={shouldShowSelectionChrome}
-                      selectedCount={selectedIds.size}
-                      renderMode={imageRuntimeRoute}
-                      suppressImagePreview={suppressDomImagePreview}
-                      preferDomImagePreview={false}
-                      showTransformer={
-                        tool === 'select' &&
-                        selectedIds.size === 1 &&
-                        isSelected &&
-                        !shouldSuppressSelectionChrome
-                      }
-                      isDraggable={
-                        tool === 'select' && !imageItem.locked && !shouldSuppressSelectionChrome
-                      }
-                      allowPointerPassthrough={tool === 'hand' || shouldSuppressSelectionChrome}
-                      stagePos={stagePos}
-                      stageScale={stageScale}
-                      stagePosRef={stagePosRef}
-                      stageScaleRef={stageScaleRef}
-                      onPreviewChange={tool === 'select' ? syncWebGLImagePreview : undefined}
-                      broadcastDomPreviewSync={domPreviewSyncParentIdSet.has(imageItem.id)}
-                      onSelect={(additiveSelection) => {
-                        selectItem(imageItem.id, false, Boolean(additiveSelection))
+          {/* Share one stacking context so selection cannot cover a higher painted item. */}
+          <div
+            data-project-canvas-item-interaction-viewport="true"
+            ref={registerViewportLayer}
+            style={STAGE_VIEWPORT_LAYER_BASE_STYLE}
+          >
+            {hasProxyLayerElements && (
+              <Box
+                data-project-canvas-proxy-layer="dom"
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  overflow: 'visible',
+                  pointerEvents: 'none'
+                }}
+              >
+                {proxyLayerElements.map((element, index) => {
+                  if (!element) return null
+                  const item = proxyLayerCandidateItems[index]
+                  return (
+                    <div
+                      key={item.id}
+                      data-project-canvas-proxy-item-id={item.id}
+                      style={{
+                        position: 'absolute',
+                        left: 0,
+                        top: 0,
+                        width: 0,
+                        height: 0,
+                        overflow: 'visible',
+                        pointerEvents: 'none',
+                        zIndex: interactionPaintRankById.get(item.id)
                       }}
-                      onDragEnd={handleDragEnd}
-                      onTransformEnd={handleTransformEnd}
-                      onContextMenu={(event) => handleImageContextMenu(event, imageItem)}
-                    />
-                  </Box>
-                )
-              })}
-            </Box>
-          )}
-          {selectedSinglePlaceholderItem && selectedSinglePlaceholderOverlayItem && (
-            <Box
-              data-project-canvas-rect-interaction-layer="dom-placeholder"
-              sx={{
-                position: 'absolute',
-                inset: 0,
-                overflow: 'visible',
-                pointerEvents: 'none',
-                zIndex: selectedSinglePlaceholderOverlayItem.zIndex
-              }}
-            >
-              <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>
+                    >
+                      {element}
+                    </div>
+                  )
+                })}
+              </Box>
+            )}
+            {shouldRenderImageInteractionLayer && (
+              <Box
+                data-project-canvas-image-interaction-layer="dom"
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  overflow: 'visible',
+                  pointerEvents: 'none'
+                }}
+              >
+                {interactiveImageOverlayItems.map((imageItem) => {
+                  const isSelected = selectedIds.has(imageItem.id) && tool === 'select'
+                  const imageRuntimeRoute = getImageRuntimeRoute(imageItem)
+                  const suppressDomImagePreview =
+                    animatedGifImageIdSet.has(imageItem.id) ||
+                    imageRuntimeRoute === 'webgl-primary' ||
+                    (canvas2DVisualOwnerImageIdSet.has(imageItem.id) && !isSelected)
+                  const shouldShowSelectionChrome = isSelected && !shouldSuppressSelectionChrome
+
+                  return (
+                    <Box
+                      key={imageItem.id}
+                      data-project-canvas-image-interaction-item-id={imageItem.id}
+                      sx={{
+                        position: 'absolute',
+                        left: 0,
+                        top: 0,
+                        width: 0,
+                        height: 0,
+                        overflow: 'visible',
+                        transformOrigin: '0 0',
+                        pointerEvents: 'none',
+                        zIndex: interactionPaintRankById.get(imageItem.id)
+                      }}
+                    >
+                      <ProjectCanvasImageInteractionOverlay
+                        canvasContainerRef={canvasContainerRef}
+                        item={imageItem}
+                        transformControlsPortal={transformControlsPortal}
+                        isSelected={shouldShowSelectionChrome}
+                        selectedCount={selectedIds.size}
+                        renderMode={imageRuntimeRoute}
+                        suppressImagePreview={suppressDomImagePreview}
+                        preferDomImagePreview={false}
+                        showTransformer={
+                          tool === 'select' &&
+                          selectedIds.size === 1 &&
+                          isSelected &&
+                          !shouldSuppressSelectionChrome
+                        }
+                        isDraggable={
+                          tool === 'select' && !imageItem.locked && !shouldSuppressSelectionChrome
+                        }
+                        allowPointerPassthrough={tool === 'hand' || shouldSuppressSelectionChrome}
+                        stagePos={stagePos}
+                        stageScale={stageScale}
+                        stagePosRef={stagePosRef}
+                        stageScaleRef={stageScaleRef}
+                        onPreviewChange={tool === 'select' ? syncWebGLImagePreview : undefined}
+                        broadcastDomPreviewSync={
+                          domPreviewSyncParentIdSet.has(imageItem.id) ||
+                          highResolutionDomImagePreviewIdSet.has(imageItem.id)
+                        }
+                        onSelect={(additiveSelection) => {
+                          selectItem(imageItem.id, false, Boolean(additiveSelection))
+                        }}
+                        onDragEnd={handleDragEnd}
+                        onTransformEnd={handleTransformEnd}
+                        onContextMenu={(event) => handleImageContextMenu(event, imageItem)}
+                      />
+                    </Box>
+                  )
+                })}
+              </Box>
+            )}
+            {selectedSinglePlaceholderItem && selectedSinglePlaceholderOverlayItem && (
+              <Box
+                data-project-canvas-rect-interaction-layer="dom-placeholder"
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  overflow: 'visible',
+                  pointerEvents: 'none',
+                  zIndex: interactionPaintRankById.get(selectedSinglePlaceholderItem.id)
+                }}
+              >
                 <ProjectCanvasRectItemInteractionOverlay
                   canvasContainerRef={canvasContainerRef}
                   item={selectedSinglePlaceholderOverlayItem}
+                  transformControlsPortal={transformControlsPortal}
                   isSelected
                   showTransformer={!selectedSinglePlaceholderItem.locked}
                   isDraggable={!selectedSinglePlaceholderItem.locked}
@@ -3543,24 +3584,23 @@ export default function ProjectCanvasPageStageScene(props: any) {
                     handleImageContextMenu(event, selectedSinglePlaceholderItem)
                   }
                 />
-              </div>
-            </Box>
-          )}
-          {selectedSingleFileItem && (
-            <Box
-              data-project-canvas-rect-interaction-layer="dom-file"
-              sx={{
-                position: 'absolute',
-                inset: 0,
-                overflow: 'visible',
-                pointerEvents: 'none',
-                zIndex: selectedSingleFileItem.zIndex
-              }}
-            >
-              <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>
+              </Box>
+            )}
+            {selectedSingleFileItem && (
+              <Box
+                data-project-canvas-rect-interaction-layer="dom-file"
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  overflow: 'visible',
+                  pointerEvents: 'none',
+                  zIndex: interactionPaintRankById.get(selectedSingleFileItem.id)
+                }}
+              >
                 <ProjectCanvasRectItemInteractionOverlay
                   canvasContainerRef={canvasContainerRef}
                   item={selectedSingleFileItem}
+                  transformControlsPortal={transformControlsPortal}
                   isSelected
                   showTransformer={!selectedSingleFileItem.locked}
                   isDraggable={!selectedSingleFileItem.locked}
@@ -3591,24 +3631,23 @@ export default function ProjectCanvasPageStageScene(props: any) {
                   onDoubleClick={() => handleOpenFileDialog(selectedSingleFileItem.id)}
                   onContextMenu={(event) => handleImageContextMenu(event, selectedSingleFileItem)}
                 />
-              </div>
-            </Box>
-          )}
-          {selectedSingleTextItem && (
-            <Box
-              data-project-canvas-rect-interaction-layer="dom-text"
-              sx={{
-                position: 'absolute',
-                inset: 0,
-                overflow: 'visible',
-                pointerEvents: 'none',
-                zIndex: selectedSingleTextItem.zIndex
-              }}
-            >
-              <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>
+              </Box>
+            )}
+            {selectedSingleTextItem && (
+              <Box
+                data-project-canvas-rect-interaction-layer="dom-text"
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  overflow: 'visible',
+                  pointerEvents: 'none',
+                  zIndex: interactionPaintRankById.get(selectedSingleTextItem.id)
+                }}
+              >
                 <ProjectCanvasRectItemInteractionOverlay
                   canvasContainerRef={canvasContainerRef}
                   item={selectedSingleTextItem}
+                  transformControlsPortal={transformControlsPortal}
                   isSelected
                   showTransformer={!selectedSingleTextItem.locked}
                   isDraggable={!selectedSingleTextItem.locked}
@@ -3644,25 +3683,23 @@ export default function ProjectCanvasPageStageScene(props: any) {
                   onDoubleClick={() => openCanvasTextInlineEditor(selectedSingleTextItem)}
                   onContextMenu={(event) => handleImageContextMenu(event, selectedSingleTextItem)}
                 />
-              </div>
-            </Box>
-          )}
-          {selectedSingleAnnotationItem && (
-            <Box
-              data-project-canvas-rect-interaction-layer="dom-annotation"
-              sx={{
-                position: 'absolute',
-                inset: 0,
-                overflow: 'visible',
-                pointerEvents: 'none',
-                zIndex:
-                  selectedSingleAnnotationOverlayItem?.zIndex ?? selectedSingleAnnotationItem.zIndex
-              }}
-            >
-              <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>
+              </Box>
+            )}
+            {selectedSingleAnnotationItem && (
+              <Box
+                data-project-canvas-rect-interaction-layer="dom-annotation"
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  overflow: 'visible',
+                  pointerEvents: 'none',
+                  zIndex: interactionPaintRankById.get(selectedSingleAnnotationItem.id)
+                }}
+              >
                 <ProjectCanvasRectItemInteractionOverlay
                   canvasContainerRef={canvasContainerRef}
                   item={selectedSingleAnnotationOverlayItem ?? selectedSingleAnnotationItem}
+                  transformControlsPortal={transformControlsPortal}
                   isSelected
                   showTransformer={!selectedSingleAnnotationItem.locked}
                   isDraggable={!selectedSingleAnnotationItem.locked}
@@ -3735,9 +3772,23 @@ export default function ProjectCanvasPageStageScene(props: any) {
                     handleImageContextMenu(event, selectedSingleAnnotationItem)
                   }
                 />
-              </div>
-            </Box>
-          )}
+              </Box>
+            )}
+            <div
+              ref={setTransformControlsPortal}
+              data-project-canvas-transform-controls-layer="true"
+              style={{
+                position: 'absolute',
+                left: 0,
+                top: 0,
+                width: 0,
+                height: 0,
+                overflow: 'visible',
+                pointerEvents: 'none',
+                zIndex: interactionPaintRankById.size + 1
+              }}
+            />
+          </div>
           {tool === 'select' &&
             !isViewportInteracting &&
             !suppressSelectionChromeAfterMarquee &&

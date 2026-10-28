@@ -7,7 +7,7 @@ import { useCanvasLayerRuntime } from './useCanvasLayerRuntime'
 import { useCanvasMediaRuntime } from './useCanvasMediaRuntime'
 import { useProjectCanvasPageRuntimeState } from './useProjectCanvasPageRuntimeState'
 
-import type { CanvasTextItem } from './types'
+import type { CanvasImageItem, CanvasTextItem } from './types'
 
 const makeText = (id: string, text: string): CanvasTextItem => ({
   id,
@@ -66,6 +66,60 @@ describe('history state transitions', () => {
     act(() => result.current.handleRedo())
     expect(result.current.items).toEqual([second])
     expect(result.current.historyCount).toBe(2)
+  })
+
+  it('never attaches the other source pixels when undoing or redoing an image replacement', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState(), {
+      wrapper: StrictMode
+    })
+    const redImage = Object.assign(document.createElement('img'), {
+      src: 'blob:red',
+      rgba: new Uint8ClampedArray([255, 0, 0, 255])
+    })
+    const blueImage = Object.assign(document.createElement('img'), {
+      src: 'blob:blue',
+      rgba: new Uint8ClampedArray([0, 0, 255, 255])
+    })
+    const red: CanvasImageItem = {
+      id: 'replaced-image',
+      type: 'image',
+      src: redImage.src,
+      image: redImage,
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 80,
+      scaleX: 1,
+      scaleY: 1,
+      rotation: 0,
+      zIndex: 0,
+      locked: false
+    }
+    const blue: CanvasImageItem = { ...red, src: blueImage.src, image: blueImage }
+    const blueCopy: CanvasImageItem = { ...blue, id: 'blue-copy' }
+    act(() => result.current.setItems([red, blueCopy]))
+    act(() => result.current.setItemsWithHistory([blue, blueCopy]))
+
+    act(() => result.current.handleUndo())
+    const restoredRed = result.current.items[0] as CanvasImageItem
+    expect(restoredRed.src).toBe(redImage.src)
+    expect(restoredRed.image).toBeUndefined()
+    // The renderer may decode the restored source again, but must not display the blue asset.
+    act(() => result.current.setItems([{ ...restoredRed, image: redImage }, blueCopy]))
+    expect((result.current.items[0] as CanvasImageItem).image).toBe(redImage)
+
+    act(() => result.current.handleRedo())
+    const restoredBlue = result.current.items[0] as CanvasImageItem
+    expect(restoredBlue.src).toBe(blueImage.src)
+    expect(restoredBlue.image).toBe(blueImage)
+    expect((restoredBlue.image as typeof blueImage).rgba).toEqual(
+      new Uint8ClampedArray([0, 0, 255, 255])
+    )
+
+    act(() => result.current.restoreHistoryRevision(0))
+    const historyRed = result.current.items[0] as CanvasImageItem
+    expect(historyRed.src).toBe(redImage.src)
+    expect(historyRed.image).toBeUndefined()
   })
 
   it('restores a valid history index without mutating the original snapshot and ignores invalid indexes', () => {

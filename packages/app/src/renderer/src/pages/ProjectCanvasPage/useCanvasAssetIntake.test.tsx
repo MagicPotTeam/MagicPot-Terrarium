@@ -450,7 +450,11 @@ describe('useCanvasAssetIntake', () => {
       expect(importFile).toHaveBeenCalledWith({
         sourcePath: 'C:/incoming/hash#query?/literal%2F-%25-图像.png',
         mimeType: 'image/png',
-        originalFileName: 'path-image.png'
+        originalFileName: 'path-image.png',
+        storage: {
+          namespace: 'user-output',
+          scope: 'canvas-assets'
+        }
       })
       expect(importDataUrl).not.toHaveBeenCalled()
       const [items] = onComplete.mock.calls[0] as [CanvasItem[]]
@@ -501,7 +505,11 @@ describe('useCanvasAssetIntake', () => {
       expect(importFile).not.toHaveBeenCalled()
       expect(importDataUrl).toHaveBeenCalledWith({
         dataUrl: 'data:image/png;base64,cG5n',
-        originalFileName: 'pathless.png'
+        originalFileName: 'pathless.png',
+        storage: {
+          namespace: 'user-output',
+          scope: 'canvas-assets'
+        }
       })
       const [items] = onComplete.mock.calls[0] as [CanvasItem[]]
       const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')

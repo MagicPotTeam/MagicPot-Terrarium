@@ -96,6 +96,7 @@ import {
   configureCanvasImageObjectUrlRegistry,
   getCanvasImageObjectUrlRegistryMetrics
 } from '../canvasImageObjectUrlRegistry'
+import { withProjectCanvasWebGLTimeout } from './projectCanvasWebGLTimeout'
 import { PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } from '@shared/config/viteEnv'
 
 export { PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } from '@shared/config/viteEnv'
@@ -397,49 +398,6 @@ function isProjectCanvasCachedSourceImage(
   cached: CachedImageRecord | undefined
 ) {
   return Boolean(cached && cached.image === image)
-}
-
-function withProjectCanvasWebGLTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  message: string,
-  onTimeout?: () => void
-): Promise<T> {
-  let settled = false
-  let timedOut = false
-  const timeoutError = new Error(message)
-
-  return new Promise((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      if (settled) return
-      timedOut = true
-      onTimeout?.()
-    }, timeoutMs)
-
-    promise.then(
-      (value) => {
-        if (settled) {
-          closeCanvasImageAssetIfPossible(value)
-          return
-        }
-
-        settled = true
-        window.clearTimeout(timeoutId)
-        if (timedOut) {
-          closeCanvasImageAssetIfPossible(value)
-          reject(timeoutError)
-          return
-        }
-        resolve(value)
-      },
-      (error) => {
-        if (settled) return
-        settled = true
-        window.clearTimeout(timeoutId)
-        reject(timedOut ? timeoutError : error)
-      }
-    )
-  })
 }
 
 function getPreviewVisibilityBounds(preview: ProjectCanvasImagePreview) {
@@ -1088,6 +1046,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const pendingThumbnailLoadSrcByIdRef = useRef(new Map<string, string>())
   const thumbnailLoadRevisionByIdRef = useRef(new Map<string, string>())
   const thumbnailLoadGenerationByIdRef = useRef(new Map<string, number>())
+  // Keep generations globally unique so removed item ids can be forgotten without
+  // allowing a late callback to match a future item that reuses the same id.
+  const nextThumbnailLoadGenerationRef = useRef(1)
   const thumbnailLoadAbortByIdRef = useRef(new Map<string, AbortController>())
   const failedThumbnailLoadSrcByIdRef = useRef(new Map<string, string>())
   const failedThumbnailLoadRevisionByIdRef = useRef(new Map<string, string>())
@@ -3401,10 +3362,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
       pendingThumbnailLoadSrcByIdRef.current.set(item.id, src)
       thumbnailLoadRevisionByIdRef.current.set(item.id, sourceRevisionKey)
-      thumbnailLoadGenerationByIdRef.current.set(
-        item.id,
-        (thumbnailLoadGenerationByIdRef.current.get(item.id) ?? 0) + 1
-      )
+      thumbnailLoadGenerationByIdRef.current.set(item.id, nextThumbnailLoadGenerationRef.current++)
       insertProjectCanvasWebGLPriorityQueueEntry(thumbnailLoadQueueRef.current, {
         itemId: item.id,
         src,
@@ -3635,10 +3593,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter(
           (entry) => entry.itemId !== itemId
         )
-        thumbnailLoadGenerationByIdRef.current.set(
-          itemId,
-          (thumbnailLoadGenerationByIdRef.current.get(itemId) ?? 0) + 1
-        )
+        if (nextIds.has(itemId)) {
+          thumbnailLoadGenerationByIdRef.current.set(
+            itemId,
+            nextThumbnailLoadGenerationRef.current++
+          )
+        } else {
+          // Drop per-item state once the item is gone. A global generation keeps
+          // a late callback from matching a future item that reuses this id.
+          thumbnailLoadGenerationByIdRef.current.delete(itemId)
+        }
       }
     })
     failedThumbnailLoadSrcByIdRef.current.forEach((failedSrc, itemId) => {
@@ -3651,6 +3615,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       ) {
         failedThumbnailLoadSrcByIdRef.current.delete(itemId)
         failedThumbnailLoadRevisionByIdRef.current.delete(itemId)
+      }
+    })
+    previewStateRef.current.forEach((_preview, itemId) => {
+      if (!nextIds.has(itemId)) {
+        previewStateRef.current.delete(itemId)
+      }
+    })
+    thumbnailLoadGenerationByIdRef.current.forEach((_generation, itemId) => {
+      if (!nextIds.has(itemId)) {
+        thumbnailLoadGenerationByIdRef.current.delete(itemId)
       }
     })
     initialLoadQueueRef.current = initialLoadQueueRef.current.filter((entry) => {
@@ -3752,10 +3726,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter(
         (entry) => entry.itemId !== itemId
       )
-      thumbnailLoadGenerationByIdRef.current.set(
-        itemId,
-        (thumbnailLoadGenerationByIdRef.current.get(itemId) ?? 0) + 1
-      )
+      thumbnailLoadGenerationByIdRef.current.set(itemId, nextThumbnailLoadGenerationRef.current++)
     })
     sourceUpgradeQueueRef.current = sourceUpgradeQueueRef.current.filter((entry) => {
       const item = itemById.get(entry.itemId)
@@ -4131,6 +4102,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       destroySpriteRecord(itemId, { retainPreview: true })
       worldOrderDirty = true
       if (!nextIds.has(itemId)) {
+        // A preview belongs to the item identity. Do not retain it after the
+        // item is removed, otherwise repeated edits can grow this map forever.
+        previewStateRef.current.delete(itemId)
         deleteCachedImageRecord(imageCacheRef.current, itemId, 'removed')
         deleteCachedImageRecord(thumbnailCacheRef.current, itemId, 'removed')
         renderItemsRef.current.delete(itemId)

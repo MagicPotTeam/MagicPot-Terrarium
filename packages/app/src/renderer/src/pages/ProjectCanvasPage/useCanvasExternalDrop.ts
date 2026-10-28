@@ -23,12 +23,16 @@ type BuildCanvasDragPayloadFn = (
 type UseCanvasExternalDropOptions = {
   canvasId: string
   items: CanvasItem[]
+  selectedIds: ReadonlySet<string>
   canvasContainerRef: RefObject<HTMLDivElement | null>
   buildCanvasDragPayload: BuildCanvasDragPayloadFn
   setCanvasDragPayload: (dataTransfer: DataTransfer, payload: CanvasDragPayload) => void
   getCanvasImageDragObjectUrl: (item: CanvasImageItem) => string
   resetDraggedItemNode: (item: ExternalDropItem) => void
-  handleSendSelectionToAgent: (targetScope?: string) => Promise<void> | void
+  handleSendCanvasItemsToAgent: (
+    targetItems: CanvasItem[],
+    targetScope?: string
+  ) => Promise<void> | void
 }
 
 function isExternalDropItem(item: CanvasItem | undefined): item is ExternalDropItem {
@@ -52,12 +56,13 @@ function resolveCanvasDragPromptId(item: ExternalDropItem): string | undefined {
 export function useCanvasExternalDrop({
   canvasId,
   items,
+  selectedIds,
   canvasContainerRef,
   buildCanvasDragPayload,
   setCanvasDragPayload,
   getCanvasImageDragObjectUrl,
   resetDraggedItemNode,
-  handleSendSelectionToAgent
+  handleSendCanvasItemsToAgent
 }: UseCanvasExternalDropOptions) {
   const isPointInsideCanvas = useCallback(
     (clientX: number, clientY: number) => {
@@ -76,7 +81,8 @@ export function useCanvasExternalDrop({
   const dispatchSyntheticCanvasDrop = useCallback(
     (clientX: number, clientY: number, payload: CanvasDragPayload) => {
       const target = document.elementFromPoint(clientX, clientY)
-      if (!target || typeof DataTransfer === 'undefined') return false
+      if (!target || typeof DataTransfer === 'undefined' || typeof DragEvent === 'undefined')
+        return false
 
       const dataTransfer = new DataTransfer()
       setCanvasDragPayload(dataTransfer, payload)
@@ -92,7 +98,7 @@ export function useCanvasExternalDrop({
       )
       if (!dragOverHandled) return false
 
-      target.dispatchEvent(
+      return !target.dispatchEvent(
         new DragEvent('drop', {
           bubbles: true,
           cancelable: true,
@@ -101,7 +107,6 @@ export function useCanvasExternalDrop({
           dataTransfer
         })
       )
-      return true
     },
     [setCanvasDragPayload]
   )
@@ -129,16 +134,20 @@ export function useCanvasExternalDrop({
       const targetItem = items.find((item) => item.id === itemId)
       if (!isExternalDropItem(targetItem)) return false
 
-      const agentTargetScope = getAgentWorkspaceDropTargetScope(clientX, clientY)
-      if (agentTargetScope) {
-        resetDraggedItemNode(targetItem)
-        void handleSendSelectionToAgent(agentTargetScope)
-        return true
-      }
-
       const objectUrl =
         targetItem.type === 'image' ? getCanvasImageDragObjectUrl(targetItem) : targetItem.src
-      if (!objectUrl) return false
+      if (!objectUrl?.trim()) return false
+
+      const agentTargetScope = getAgentWorkspaceDropTargetScope(clientX, clientY)
+      if (agentTargetScope) {
+        // Unselected images are selected only after drag end, so use the dragged item directly.
+        const targetItems = selectedIds.has(targetItem.id)
+          ? items.filter((item) => selectedIds.has(item.id))
+          : [targetItem]
+        resetDraggedItemNode(targetItem)
+        void handleSendCanvasItemsToAgent(targetItems, agentTargetScope)
+        return true
+      }
 
       const handled = dispatchSyntheticCanvasDrop(
         clientX,
@@ -158,10 +167,11 @@ export function useCanvasExternalDrop({
       dispatchSyntheticCanvasDrop,
       getAgentWorkspaceDropTargetScope,
       getCanvasImageDragObjectUrl,
-      handleSendSelectionToAgent,
+      handleSendCanvasItemsToAgent,
       isPointInsideCanvas,
       items,
-      resetDraggedItemNode
+      resetDraggedItemNode,
+      selectedIds
     ]
   )
 

@@ -468,6 +468,7 @@ function buildQuickCanvasItemCacheSnapshot(item: CanvasItem) {
     return {
       ...common,
       src: item.src,
+      sourceIdentity: item.sourceIdentity?.cacheKey ?? null,
       crop: item.crop ?? null
     }
   }
@@ -630,6 +631,7 @@ export function useCanvasExportWorkflow({
   const [forceRenderAllItemsForExport, setForceRenderAllItemsForExport] = useState(false)
   const quickCanvasImageUrlCacheRef = useRef(new Map<string, string>())
   const quickCanvasImageUrlPendingRef = useRef(new Map<string, Promise<string | null>>())
+  const quickCanvasImageUrlGenerationRef = useRef(0)
 
   const disposeQuickCanvasImageUrl = useCallback((imageUrl: string) => {
     if (imageUrl.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') {
@@ -642,13 +644,14 @@ export function useCanvasExportWorkflow({
     const quickCanvasImageUrlPending = quickCanvasImageUrlPendingRef.current
 
     return () => {
+      quickCanvasImageUrlGenerationRef.current += 1
       for (const imageUrl of quickCanvasImageUrlCache.values()) {
         disposeQuickCanvasImageUrl(imageUrl)
       }
       quickCanvasImageUrlCache.clear()
       quickCanvasImageUrlPending.clear()
     }
-  }, [disposeQuickCanvasImageUrl])
+  }, [canvasId, disposeQuickCanvasImageUrl])
 
   const waitForExportPaint = useCallback(
     () =>
@@ -1179,17 +1182,18 @@ export function useCanvasExportWorkflow({
     (targetItems: CanvasItem[]) => {
       const snapshot = createRuntimeExportSnapshot(targetItems)
       return JSON.stringify({
+        canvasId,
         stagePos,
         stageScale,
         items: [...targetItems]
-          .sort((a, b) => a.zIndex - b.zIndex || a.id.localeCompare(b.id))
+          .sort((a, b) => a.zIndex - b.zIndex)
           .map((item) => ({
             item: buildQuickCanvasItemCacheSnapshot(item),
             bounds: resolveCanvasExportEntryBounds(item, snapshot)
           }))
       })
     },
-    [createRuntimeExportSnapshot, resolveCanvasExportEntryBounds, stagePos, stageScale]
+    [canvasId, createRuntimeExportSnapshot, resolveCanvasExportEntryBounds, stagePos, stageScale]
   )
 
   const rememberQuickCanvasItemsImageUrl = useCallback(
@@ -1232,145 +1236,20 @@ export function useCanvasExportWorkflow({
     [buildQuickCanvasItemsImageUrlKey]
   )
 
-  const renderQuickCanvasItemsToCanvas = useCallback(
-    (targetItems: CanvasItem[]): HTMLCanvasElement | null => {
-      const { entries, snapshot } = createCanvasExportEntries(targetItems)
-
-      const exportBounds =
-        buildCanvasExportBounds(entries) ??
-        getProjectCanvasRuntimeExportBounds(snapshot, {
-          itemIds: entries.map((entry) => entry.item.id),
-          padding: EXPORT_IMAGE_PADDING
-        })
-      if (!exportBounds) return null
-
-      const rasterConfig = resolveCanvasExportRasterConfig(
-        exportBounds.width,
-        exportBounds.height,
-        EXPORT_IMAGE_PIXEL_RATIO
-      )
-
-      const canvasContext = createHtmlCanvasContext(
-        rasterConfig.canvasWidth,
-        rasterConfig.canvasHeight
-      )
-      if (!canvasContext) return null
-      const { canvas, ctx } = canvasContext
-
-      if (rasterConfig.wasClamped) {
-        console.warn('[CanvasExport] Quick export was downscaled to stay within canvas limits', {
-          exportBounds,
-          rasterConfig
-        })
-      }
-
-      const container = canvasContainerRef.current
-      const webglCanvas = container?.querySelector(
-        '.project-canvas-webgl-layer canvas'
-      ) as HTMLCanvasElement | null
-
-      if (webglCanvas && stageScale !== 0) {
-        const visibleScale = Math.max(Math.abs(stageScale), 0.0001)
-        const sourceX = stagePos.x + exportBounds.x * visibleScale
-        const sourceY = stagePos.y + exportBounds.y * visibleScale
-        const sourceWidth = Math.max(1, exportBounds.width * visibleScale)
-        const sourceHeight = Math.max(1, exportBounds.height * visibleScale)
-        ctx.drawImage(
-          webglCanvas,
-          sourceX,
-          sourceY,
-          sourceWidth,
-          sourceHeight,
-          0,
-          0,
-          canvas.width,
-          canvas.height
-        )
-      }
-
-      for (const { item } of entries) {
-        if (item.type === 'text' || item.type === 'file' || item.type === 'annotation') {
-          drawTransformedItemSource(
-            ctx,
-            item,
-            exportBounds,
-            rasterConfig.pixelRatio,
-            (targetCtx) => {
-              if (item.type === 'text') {
-                drawCanvasTextItem(targetCtx, item)
-                return
-              }
-
-              if (item.type === 'file') {
-                drawCanvasFileItem(targetCtx, item)
-                return
-              }
-
-              drawCanvasAnnotationItem(targetCtx, item)
-            }
-          )
-          continue
-        }
-
-        if (item.type !== 'video' && item.type !== 'model3d') continue
-
-        const source = container?.querySelector(
-          item.type === 'video'
-            ? `[data-canvas-item-id="${item.id}"] video`
-            : `[data-canvas-item-id="${item.id}"] canvas`
-        ) as HTMLVideoElement | HTMLCanvasElement | null
-
-        if (!source) continue
-        if (item.type === 'video' && source instanceof HTMLVideoElement && source.readyState < 2) {
-          continue
-        }
-
-        ctx.save()
-        ctx.translate(
-          (item.x - exportBounds.x) * rasterConfig.pixelRatio,
-          (item.y - exportBounds.y) * rasterConfig.pixelRatio
-        )
-        if (item.rotation) {
-          ctx.rotate((item.rotation * Math.PI) / 180)
-        }
-        ctx.scale(
-          (item.scaleX || 1) * rasterConfig.pixelRatio,
-          (item.scaleY || 1) * rasterConfig.pixelRatio
-        )
-
-        if (item.type === 'video' && source instanceof HTMLVideoElement) {
-          const videoWidth = source.videoWidth || item.width
-          const videoHeight = source.videoHeight || item.height
-          const scale = Math.min(item.width / videoWidth, item.height / videoHeight)
-          const drawWidth = videoWidth * scale
-          const drawHeight = videoHeight * scale
-          const offsetX = (item.width - drawWidth) / 2
-          const offsetY = (item.height - drawHeight) / 2
-
-          ctx.fillStyle = '#000000'
-          ctx.fillRect(0, 0, item.width, item.height)
-          ctx.drawImage(source, offsetX, offsetY, drawWidth, drawHeight)
-        } else {
-          ctx.drawImage(source, 0, 0, item.width, item.height)
-        }
-
-        ctx.restore()
-      }
-      return canvas
-    },
-    [
-      canvasContainerRef,
-      createCanvasExportEntries,
-      drawTransformedItemSource,
-      stagePos.x,
-      stagePos.y,
-      stageScale
-    ]
-  )
-
   const prepareQuickCanvasItemsImageUrl = useCallback(
     async (targetItems: CanvasItem[]): Promise<string | null> => {
-      const cacheKey = buildQuickCanvasItemsImageUrlKey(targetItems)
+      if (targetItems.length === 0) return null
+
+      const targetSnapshot = targetItems.map((item): CanvasItem => {
+        if (item.type === 'image') {
+          return { ...item, crop: item.crop ? { ...item.crop } : undefined }
+        }
+        if (item.type === 'annotation') {
+          return { ...item, points: item.points ? [...item.points] : undefined }
+        }
+        return { ...item }
+      })
+      const cacheKey = buildQuickCanvasItemsImageUrlKey(targetSnapshot)
       const cachedImageUrl = quickCanvasImageUrlCacheRef.current.get(cacheKey)
       if (cachedImageUrl) {
         quickCanvasImageUrlCacheRef.current.delete(cacheKey)
@@ -1383,19 +1262,32 @@ export function useCanvasExportWorkflow({
         return await pendingImageUrl
       }
 
-      const nextImageUrlPromise = runWithCanvasRasterWorkLimit(async () => {
-        const canvas = renderQuickCanvasItemsToCanvas(targetItems)
-        if (!canvas) {
-          return null
-        }
+      const exportBounds = buildCanvasExportBounds(
+        createCanvasExportEntries(targetSnapshot).entries
+      )
+      if (!exportBounds) return null
 
+      const generation = quickCanvasImageUrlGenerationRef.current
+      const nextImageUrlPromise = runWithCanvasRasterWorkLimit(async () => {
+        if (generation !== quickCanvasImageUrlGenerationRef.current) return null
+
+        // Render only these sources; a viewport screenshot can include unrelated images.
+        const canvas = await renderCanvasItemsToCanvas(targetSnapshot, 'png', false, exportBounds)
         const blob = await renderCanvasBlob(canvas, 'png')
         const imageUrl =
           typeof URL.createObjectURL === 'function'
             ? URL.createObjectURL(blob)
             : ensureExportImageDataUrl(await blobToDataUri(blob))
+        if (generation !== quickCanvasImageUrlGenerationRef.current) {
+          disposeQuickCanvasImageUrl(imageUrl)
+          return null
+        }
+
         rememberQuickCanvasItemsImageUrl(cacheKey, imageUrl)
         return imageUrl
+      }).catch((error) => {
+        console.warn('[CanvasExport] Failed to prepare selection drag preview:', error)
+        return null
       })
 
       quickCanvasImageUrlPendingRef.current.set(cacheKey, nextImageUrlPromise)
@@ -1403,15 +1295,19 @@ export function useCanvasExportWorkflow({
       try {
         return await nextImageUrlPromise
       } finally {
-        quickCanvasImageUrlPendingRef.current.delete(cacheKey)
+        if (quickCanvasImageUrlPendingRef.current.get(cacheKey) === nextImageUrlPromise) {
+          quickCanvasImageUrlPendingRef.current.delete(cacheKey)
+        }
       }
     },
     [
       buildQuickCanvasItemsImageUrlKey,
+      createCanvasExportEntries,
+      disposeQuickCanvasImageUrl,
       ensureExportImageDataUrl,
       rememberQuickCanvasItemsImageUrl,
       renderCanvasBlob,
-      renderQuickCanvasItemsToCanvas
+      renderCanvasItemsToCanvas
     ]
   )
 

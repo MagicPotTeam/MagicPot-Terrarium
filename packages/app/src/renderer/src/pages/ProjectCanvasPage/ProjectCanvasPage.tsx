@@ -724,7 +724,6 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     handleDownloadCanvasItemsAsImage,
     handleOpenMediaCaptionEditor,
     handleSendCanvasItemsToAgentForGeneration,
-    handleSendSelectionToAgent,
     mediaCaptionActionLabel,
     mediaCaptionPlaceholder
   } = useCanvasSelectionActions({
@@ -1244,7 +1243,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     handleCopyCanvasItemsAsImage,
     handleDownloadCanvasItemsAsImage,
     handleSendCanvasItemsSnapshotToPhotoshop,
-    handleSendSelectionToAgent,
+    handleSendCanvasItemsToAgent,
     isChineseUi,
     isFillableAnnotationShape,
     items,

@@ -197,15 +197,6 @@ export default function CanvasSelectionActionToolbar({
         icon={<SendRoundedIcon fontSize="small" />}
       />
       <ToolbarActionButton
-        className="chat-action-button"
-        title={chatLabel}
-        onClick={(event) => {
-          event.stopPropagation()
-          onChatSelectedItems(toolbarItems)
-        }}
-        icon={<ChatBubbleOutlineIcon fontSize="small" />}
-      />
-      <ToolbarActionButton
         className="generate-action-button"
         title={generateLabel}
         onClick={(event) => {
@@ -225,6 +216,15 @@ export default function CanvasSelectionActionToolbar({
           icon={<LayersOutlinedIcon fontSize="small" />}
         />
       )}
+      <ToolbarActionButton
+        className="chat-action-button"
+        title={chatLabel}
+        onClick={(event) => {
+          event.stopPropagation()
+          onChatSelectedItems(toolbarItems)
+        }}
+        icon={<ChatBubbleOutlineIcon fontSize="small" />}
+      />
     </Box>
   )
 }

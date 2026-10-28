@@ -632,8 +632,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
     act(() => {
       const onPreviewChange = imageInteractionOverlayProps.get(item.id)?.onPreviewChange as
-        | ((itemId: string, next: ProjectCanvasImagePreview | null) => void)
-        | undefined
+        ((itemId: string, next: ProjectCanvasImagePreview | null) => void) | undefined
       onPreviewChange?.(item.id, preview)
       onPreviewChange?.(item.id, null)
     })
@@ -1080,6 +1079,11 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     )
 
     expect(screen.getByTestId(`crop-overlay-${cropItem.id}`)).toBeInTheDocument()
+    expect(
+      screen
+        .getByTestId(`crop-overlay-${cropItem.id}`)
+        .closest('[data-project-canvas-item-interaction-viewport]')
+    ).toBeNull()
 
     await waitFor(() => {
       expect(latestWebGLItems.map((item) => item.id)).toEqual([siblingItem.id])
@@ -1169,8 +1173,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         imageInteractionOverlayProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number, evt?: unknown) => void)
-          | undefined
+          ((id: string, x: number, y: number, evt?: unknown) => void) | undefined
       )?.(item.id, 220, 260, dragEvt)
     })
 
@@ -1179,8 +1182,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         imageInteractionOverlayProps.get(item.id)?.onTransformEnd as
-          | ((id: string, attrs: Partial<CanvasImageItem>) => void)
-          | undefined
+          ((id: string, attrs: Partial<CanvasImageItem>) => void) | undefined
       )?.(item.id, {
         x: 180,
         y: 210,
@@ -1374,14 +1376,12 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         canvasPlaceholderProps.get(items[0].id)?.onSelect as
-          | ((additiveSelection?: boolean) => void)
-          | undefined
+          ((additiveSelection?: boolean) => void) | undefined
       )?.(false)
     })
 
     const updateSelection = setSelectedIds.mock.calls[0]?.[0] as
-      | ((prev: Set<string>) => Set<string>)
-      | undefined
+      ((prev: Set<string>) => Set<string>) | undefined
     expect(updateSelection?.(new Set())).toEqual(new Set([items[0].id]))
   })
 
@@ -1641,12 +1641,16 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       'data-item-ids',
       `${targetItem.id},${siblingItem.id}`
     )
+    expect(
+      screen
+        .getByTestId('mock-multi-selection-transform-overlay')
+        .closest('[data-project-canvas-item-interaction-viewport]')
+    ).toBeNull()
 
     act(() => {
       ;(
         latestMultiSelectionTransformOverlayProps?.onTransformEnd as
-          | ((updates: Array<{ id: string; attrs: Partial<CanvasImageItem> }>) => void)
-          | undefined
+          ((updates: Array<{ id: string; attrs: Partial<CanvasImageItem> }>) => void) | undefined
       )?.([
         {
           id: targetItem.id,
@@ -1750,8 +1754,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         rectInteractionOverlayProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 240, 180)
     })
 
@@ -1908,8 +1911,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         rectInteractionOverlayProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 180, 210)
     })
 
@@ -1982,8 +1984,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         rectInteractionOverlayProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 180, 210)
     })
 
@@ -2065,8 +2066,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         canvasPlaceholderProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 150, 180)
     })
 
@@ -2117,8 +2117,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         canvasPlaceholderProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 188, 232)
     })
 
@@ -2204,8 +2203,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         canvasPlaceholderProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 104, 132)
     })
 
@@ -2280,8 +2278,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         canvasPlaceholderProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 188, 232)
     })
 
@@ -2388,8 +2385,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         rectInteractionOverlayProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 70, 180)
     })
 
@@ -2582,8 +2578,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         rectInteractionOverlayProps.get(item.id)?.onDragEnd as
-          | ((id: string, x: number, y: number) => void)
-          | undefined
+          ((id: string, x: number, y: number) => void) | undefined
       )?.(item.id, 140, 150)
     })
 
@@ -2803,8 +2798,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         imageInteractionOverlayProps.get(item.id)?.onPreviewChange as
-          | ((itemId: string, preview: ProjectCanvasImagePreview | null) => void)
-          | undefined
+          ((itemId: string, preview: ProjectCanvasImagePreview | null) => void) | undefined
       )?.(item.id, {
         x: 124,
         y: 156,
@@ -2891,7 +2885,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(canvasPlaceholderProps.has(item.id)).toBe(false)
   })
 
-  it('keeps the selected video DOM interaction layer on the item z-index so higher overlaps stay draggable', async () => {
+  it('keeps the selected video DOM interaction layer on its paint rank', async () => {
     const item = createVideoItem('video-selected-z-index')
     item.zIndex = 2
 
@@ -2908,10 +2902,11 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     )
 
     expect(wrapper).not.toBeNull()
-    expect(window.getComputedStyle(wrapper as HTMLElement).zIndex).toBe(String(item.zIndex))
+    expect(window.getComputedStyle(wrapper as HTMLElement).zIndex).toBe('1')
+    expect(item.zIndex).toBe(2)
   })
 
-  it('keeps each DOM image interaction wrapper on the image z-index instead of lifting the whole layer', async () => {
+  it('keeps each DOM image interaction wrapper on its paint rank without changing the item', async () => {
     const item = createImageItem('image-selected-z-index')
     item.zIndex = 4
     setMockWebGLRuntime({ loadedIds: [item.id] })
@@ -2929,8 +2924,110 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     )
 
     expect(wrapper).not.toBeNull()
-    expect(window.getComputedStyle(wrapper as HTMLElement).zIndex).toBe(String(item.zIndex))
+    expect(window.getComputedStyle(wrapper as HTMLElement).zIndex).toBe('1')
+    expect(item.zIndex).toBe(4)
   })
+
+  it.each([
+    { selectedZ: 1, unselectedZ: 8, selectedFirst: true, selectedRank: 1 },
+    { selectedZ: 8, unselectedZ: 1, selectedFirst: true, selectedRank: 2 },
+    { selectedZ: 4, unselectedZ: 4, selectedFirst: true, selectedRank: 1 },
+    { selectedZ: 4, unselectedZ: 4, selectedFirst: false, selectedRank: 2 }
+  ])(
+    'shares one viewport and preserves paint order ($selectedZ/$unselectedZ, selected first: $selectedFirst)',
+    async ({ selectedZ, unselectedZ, selectedFirst, selectedRank }) => {
+      const selected = { ...createImageItem('selected-overlap'), zIndex: selectedZ }
+      const unselected = { ...createImageItem('unselected-overlap'), zIndex: unselectedZ }
+      const items = selectedFirst ? [selected, unselected] : [unselected, selected]
+      setMockWebGLRuntime({ loadedIds: items.map((item) => item.id) })
+
+      const { rerender } = render(
+        <ProjectCanvasPageStageScene
+          {...createBaseProps(items)}
+          selectedIds={new Set([selected.id])}
+        />
+      )
+
+      await waitFor(() => {
+        expect(imageInteractionOverlayProps.has(selected.id)).toBe(true)
+        expect(canvasPlaceholderProps.has(unselected.id)).toBe(true)
+      })
+
+      const proxyWrapper = screen.getByTestId(`canvas-placeholder-${unselected.id}`).parentElement
+      const proxyLayer = document.querySelector('[data-project-canvas-proxy-layer="dom"]')
+      const selectedWrapper = document.querySelector(
+        `[data-project-canvas-image-interaction-item-id="${selected.id}"]`
+      )
+      const viewport = document.querySelector('[data-project-canvas-item-interaction-viewport]')
+      expect(viewport).not.toBeNull()
+      expect(proxyWrapper).toHaveAttribute('data-project-canvas-proxy-item-id', unselected.id)
+      expect(proxyWrapper?.parentElement).toBe(proxyLayer)
+      expect(proxyLayer?.parentElement).toBe(viewport)
+      expect(selectedWrapper?.parentElement?.parentElement).toBe(viewport)
+      expect(getComputedStyle(proxyWrapper as HTMLElement).zIndex).toBe(String(3 - selectedRank))
+      expect(getComputedStyle(selectedWrapper as HTMLElement).zIndex).toBe(String(selectedRank))
+      expect(viewport).toHaveStyle({ transform: 'translate3d(0px, 0px, 0) scale(1)' })
+      expect((proxyWrapper as HTMLElement).style.transform).toBe('')
+      expect((selectedWrapper as HTMLElement).style.transform).toBe('')
+      const controls = document.querySelector('[data-project-canvas-transform-controls-layer]')
+      expect(controls?.parentElement).toBe(viewport)
+      expect(controls).toHaveStyle({ zIndex: '3', pointerEvents: 'none' })
+      expect((controls as HTMLElement).style.transform).toBe('')
+      expect(imageInteractionOverlayProps.get(selected.id)?.transformControlsPortal).toBe(controls)
+
+      rerender(
+        <ProjectCanvasPageStageScene
+          {...createBaseProps(items)}
+          selectedIds={new Set([selected.id])}
+          stagePos={{ x: 37, y: -19 }}
+          stageScale={0.75}
+        />
+      )
+      expect(viewport).toHaveStyle({ transform: 'translate3d(37px, -19px, 0) scale(0.75)' })
+      expect((proxyWrapper as HTMLElement).style.transform).toBe('')
+      expect((selectedWrapper as HTMLElement).style.transform).toBe('')
+    }
+  )
+
+  it.each(['video', 'file', 'text', 'annotation'] as const)(
+    'keeps selected %s controls above item bodies without a second viewport transform',
+    async (kind) => {
+      const selected = {
+        ...(kind === 'video'
+          ? createVideoItem('selected-rect')
+          : kind === 'file'
+            ? createFileItem('selected-rect')
+            : kind === 'text'
+              ? createTextItem('selected-rect')
+              : createAnnotationItem('selected-rect')),
+        zIndex: 1
+      }
+      const front = { ...createImageItem('front-image'), zIndex: 8 }
+      const items = [selected, front]
+      setMockWebGLRuntime({ loadedIds: [front.id] })
+      render(
+        <ProjectCanvasPageStageScene
+          {...createBaseProps(items)}
+          selectedIds={new Set([selected.id])}
+          stagePos={{ x: 50, y: -20 }}
+          stageScale={0.5}
+        />
+      )
+
+      await waitFor(() => {
+        expect(rectInteractionOverlayProps.has(selected.id)).toBe(true)
+      })
+      const viewport = document.querySelector('[data-project-canvas-item-interaction-viewport]')
+      const controls = document.querySelector('[data-project-canvas-transform-controls-layer]')
+      const wrapper = screen.getByTestId(`rect-overlay-${selected.id}`).parentElement
+      expect(wrapper?.parentElement).toBe(viewport)
+      expect(wrapper).toHaveStyle({ zIndex: '1' })
+      expect((wrapper as HTMLElement).style.transform).toBe('')
+      expect(viewport).toHaveStyle({ transform: 'translate3d(50px, -20px, 0) scale(0.5)' })
+      expect(controls).toHaveStyle({ zIndex: '3', pointerEvents: 'none' })
+      expect(rectInteractionOverlayProps.get(selected.id)?.transformControlsPortal).toBe(controls)
+    }
+  )
 
   it('routes hand-tool left-drag events from WebGL image placeholder proxies back to the stage handlers', async () => {
     const item = createImageItem('image-hand-pan')
@@ -3465,8 +3562,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         imageInteractionOverlayProps.get(item.id)?.onPreviewChange as
-          | ((itemId: string, preview: ProjectCanvasImagePreview | null) => void)
-          | undefined
+          ((itemId: string, preview: ProjectCanvasImagePreview | null) => void) | undefined
       )?.(item.id, {
         x: 100,
         y: 140,
@@ -3491,8 +3587,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         imageInteractionOverlayProps.get(item.id)?.onTransformEnd as
-          | ((id: string, attrs: ProjectCanvasImagePreview) => void)
-          | undefined
+          ((id: string, attrs: ProjectCanvasImagePreview) => void) | undefined
       )?.(item.id, {
         x: 100,
         y: 140,
@@ -3586,8 +3681,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     act(() => {
       ;(
         cropOverlayProps.get(cropItem.id)?.onConfirm as
-          | ((updates: Partial<CanvasImageItem>) => void)
-          | undefined
+          ((updates: Partial<CanvasImageItem>) => void) | undefined
       )?.({
         x: 132,
         y: 156,
@@ -3649,8 +3743,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       act(() => {
         ;(
           cropOverlayProps.get(cropItem.id)?.onConfirm as
-            | ((updates: Partial<CanvasImageItem>) => void)
-            | undefined
+            ((updates: Partial<CanvasImageItem>) => void) | undefined
         )?.({
           x: 132,
           y: 156,

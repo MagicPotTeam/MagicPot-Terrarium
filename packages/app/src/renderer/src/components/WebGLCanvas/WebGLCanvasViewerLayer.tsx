@@ -73,6 +73,11 @@ const WebGLCanvasViewerLayer = forwardRef<
     const container = upsertContainer()
     const spriteRecords = spriteRecordsRef.current
     const nextIds = new Set(items.map((item) => item.id))
+    previewStateRef.current.forEach((_preview, itemId) => {
+      if (!nextIds.has(itemId)) {
+        previewStateRef.current.delete(itemId)
+      }
+    })
 
     spriteRecords.forEach((record, itemId) => {
       if (nextIds.has(itemId)) {
@@ -81,6 +86,7 @@ const WebGLCanvasViewerLayer = forwardRef<
       record.sprite.removeFromParent()
       record.sprite.destroy()
       spriteRecords.delete(itemId)
+      previewStateRef.current.delete(itemId)
     })
 
     items.forEach((item) => {

@@ -4,6 +4,7 @@ import {
   createCanvasHistorySnapshot,
   restoreCanvasHistorySnapshot
 } from './canvasHistory'
+import { buildCanvasSessionSourceIdentity } from './canvasThumbnailCache'
 import type { CanvasImageItem, CanvasModel3DItem, CanvasTextItem } from './types'
 
 function createImageItem(
@@ -116,10 +117,13 @@ describe('canvasHistory', () => {
     expect(modelItem.deferRender).toBe(true)
   })
 
-  it('restores runtime image references by matching item id first', () => {
+  it('prefers the same item runtime image only when its source also matches', () => {
     const sharedImage = {} as HTMLImageElement
     const snapshot = [createImageItem('image-1', 'blob:one')]
-    const referenceItems = [createImageItem('image-1', 'blob:two', sharedImage)]
+    const referenceItems = [
+      createImageItem('image-2', 'blob:one', {} as HTMLImageElement),
+      createImageItem('image-1', 'blob:one', sharedImage)
+    ]
 
     const restored = restoreCanvasHistorySnapshot(snapshot, referenceItems)
 
@@ -128,6 +132,116 @@ describe('canvasHistory', () => {
       src: 'blob:one',
       image: sharedImage
     })
+    expect((restored[0] as CanvasImageItem).image).toBe(sharedImage)
+  })
+
+  it('does not attach decoded pixels from a different source with the same item id', () => {
+    const blueImage = Object.assign(document.createElement('img'), {
+      src: 'blob:blue',
+      rgba: new Uint8ClampedArray([0, 0, 255, 255])
+    })
+    const snapshot = [createImageItem('image-1', 'blob:red')]
+    const referenceItems = [createImageItem('image-1', 'blob:blue', blueImage)]
+
+    const restored = restoreCanvasHistorySnapshot(snapshot, referenceItems)
+
+    expect(restored[0]).toBe(snapshot[0])
+    expect((restored[0] as CanvasImageItem).image).toBeUndefined()
+    expect(blueImage.rgba).toEqual(new Uint8ClampedArray([0, 0, 255, 255]))
+  })
+
+  it('uses another matching source instead of an unrelated image with the same item id', () => {
+    const redImage = Object.assign(document.createElement('img'), {
+      src: 'blob:red',
+      rgba: new Uint8ClampedArray([255, 0, 0, 255])
+    })
+    const blueImage = Object.assign(document.createElement('img'), {
+      src: 'blob:blue',
+      rgba: new Uint8ClampedArray([0, 0, 255, 255])
+    })
+    const restored = restoreCanvasHistorySnapshot(
+      [createImageItem('image-1', 'blob:red')],
+      [
+        createImageItem('image-1', 'blob:blue', blueImage),
+        createImageItem('image-2', 'blob:red', redImage)
+      ]
+    )
+
+    const image = (restored[0] as CanvasImageItem).image as typeof redImage
+    expect(image).toBe(redImage)
+    expect(image.rgba).toEqual(new Uint8ClampedArray([255, 0, 0, 255]))
+  })
+
+  it.each(['image-1', 'different-item'])('does not reuse an old source revision from %s', (id) => {
+    const previousIdentity = buildCanvasSessionSourceIdentity({ sourceKey: 'before', sizeBytes: 4 })
+    const nextIdentity = buildCanvasSessionSourceIdentity({ sourceKey: 'after', sizeBytes: 4 })
+    const snapshot = [
+      createImageItem('image-1', 'blob:shared', undefined, { sourceIdentity: previousIdentity })
+    ]
+    const referenceItems = [
+      createImageItem(id, 'blob:shared', {} as HTMLImageElement, { sourceIdentity: nextIdentity })
+    ]
+
+    const restored = restoreCanvasHistorySnapshot(snapshot, referenceItems)
+
+    expect(restored[0]).toBe(snapshot[0])
+    expect((restored[0] as CanvasImageItem).image).toBeUndefined()
+  })
+
+  it.each([true, false])(
+    'does not mix known and missing source identities: %s',
+    (snapshotHasIdentity) => {
+      const sourceIdentity = buildCanvasSessionSourceIdentity({ sourceKey: 'known', sizeBytes: 4 })
+      const snapshot = [
+        createImageItem('image-1', 'blob:shared', undefined, {
+          sourceIdentity: snapshotHasIdentity ? sourceIdentity : undefined
+        })
+      ]
+      const referenceItems = [
+        createImageItem('image-1', 'blob:shared', {} as HTMLImageElement, {
+          sourceIdentity: snapshotHasIdentity ? undefined : sourceIdentity
+        })
+      ]
+
+      const restored = restoreCanvasHistorySnapshot(snapshot, referenceItems)
+
+      expect((restored[0] as CanvasImageItem).image).toBeUndefined()
+    }
+  )
+
+  it('reuses equivalent source identities across different item ids without mutating snapshots', () => {
+    const sourceIdentity = buildCanvasSessionSourceIdentity({ sourceKey: 'known', sizeBytes: 4 })
+    const sharedImage = document.createElement('img')
+    const snapshot = [
+      createImageItem('image-2', 'blob:shared', undefined, {
+        sourceIdentity: { ...sourceIdentity }
+      })
+    ]
+    const referenceItems = [
+      createImageItem('image-1', 'blob:shared', sharedImage, { sourceIdentity })
+    ]
+
+    const restored = restoreCanvasHistorySnapshot(snapshot, referenceItems)
+
+    expect((restored[0] as CanvasImageItem).image).toBe(sharedImage)
+    expect(snapshot[0].image).toBeUndefined()
+  })
+
+  it('keeps separate matching revisions when two reference images have the same source URL', () => {
+    const firstIdentity = buildCanvasSessionSourceIdentity({ sourceKey: 'first', sizeBytes: 4 })
+    const secondIdentity = buildCanvasSessionSourceIdentity({ sourceKey: 'second', sizeBytes: 4 })
+    const secondImage = document.createElement('img')
+    const restored = restoreCanvasHistorySnapshot(
+      [createImageItem('restored', 'blob:shared', undefined, { sourceIdentity: secondIdentity })],
+      [
+        createImageItem('first', 'blob:shared', document.createElement('img'), {
+          sourceIdentity: firstIdentity
+        }),
+        createImageItem('second', 'blob:shared', secondImage, { sourceIdentity: secondIdentity })
+      ]
+    )
+
+    expect((restored[0] as CanvasImageItem).image).toBe(secondImage)
   })
 
   it('falls back to matching by src when restoring runtime image references', () => {

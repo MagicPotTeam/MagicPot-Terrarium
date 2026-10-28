@@ -424,55 +424,55 @@ export async function resolveDroppedAgentImageDataUrl(
   const quickAppImageData = resolveQuickAppImageDragData(quickAppImagePayload)
   const normalizedAgentWebUrl = normalizeRemoteAgentImageUrl(agentImageUrl)
   const droppedImageFile = resolveDroppedImageFile(dataTransfer, quickAppImageData?.fileName)
-  if (droppedImageFile) {
-    const authorizedFileUrl = await authorizeCanvasLocalMediaSourceUrl(droppedImageFile)
-    if (authorizedFileUrl) {
-      return {
-        src: authorizedFileUrl,
-        fileName: droppedImageFile.name || quickAppImageData?.fileName,
-        sizeBytes:
-          Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
-            ? droppedImageFile.size
-            : undefined,
-        sourceWidthHint: quickAppImageData?.sourceWidthHint,
-        sourceHeightHint: quickAppImageData?.sourceHeightHint,
-        sourceFile: droppedImageFile
-      }
-    }
+  const hasMatchingPayloadFile = Boolean(
+    droppedImageFile &&
+    quickAppImageData?.fileName &&
+    droppedImageFile.name.trim() === quickAppImageData.fileName.trim()
+  )
 
-    const safeFallbackSrc =
-      quickAppImageData && !/^local-media:|^file:/i.test(quickAppImageData.src)
-        ? quickAppImageData.src
-        : normalizedAgentWebUrl || ''
-    if (safeFallbackSrc) {
-      const hasUsableDroppedFileBytes =
-        Number.isFinite(droppedImageFile.size) && droppedImageFile.size > 0
-      return {
-        src: safeFallbackSrc,
-        fileName:
-          quickAppImageData?.fileName ||
-          droppedImageFile.name ||
-          getDownloadFileNameFromUrl(safeFallbackSrc, 'dropped-image.png'),
-        sizeBytes:
-          quickAppImageData?.sizeBytes ??
-          (hasUsableDroppedFileBytes ? droppedImageFile.size : undefined),
-        sourceWidthHint: quickAppImageData?.sourceWidthHint,
-        sourceHeightHint: quickAppImageData?.sourceHeightHint,
-        sourceFile: hasUsableDroppedFileBytes ? droppedImageFile : undefined
-      }
-    }
-  }
-
+  // Custom drag MIME data identifies the exact rendered image. Browsers may also
+  // expose a synthetic native File for an <img> drag; that file can be a stale
+  // preview or a different selected item, so never let it override the explicit
+  // URL/attachment payload.
   const normalizedAgentLocalCandidate = normalizeLocalMediaUrl(agentImageUrl)
   const normalizedAgentLocalUrl = /^local-media:|^file:/i.test(normalizedAgentLocalCandidate)
     ? normalizedAgentLocalCandidate
     : ''
   if (normalizedAgentLocalUrl) {
     const authorizedSrc = await resolveAuthorizedCanvasLocalMediaSourceUrl(normalizedAgentLocalUrl)
-    if (!authorizedSrc) return null
+    if (!authorizedSrc) {
+      // Legacy/native drags may expose only the File authorization bridge. Use
+      // that file only when it resolves to the exact custom URL, never merely
+      // because it is the first image in dataTransfer.files.
+      if (droppedImageFile) {
+        const authorizedFileUrl = await authorizeCanvasLocalMediaSourceUrl(droppedImageFile)
+        if (authorizedFileUrl === normalizedAgentLocalUrl) {
+          return {
+            src: authorizedFileUrl,
+            fileName: droppedImageFile.name,
+            sizeBytes:
+              Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
+                ? droppedImageFile.size
+                : undefined,
+            sourceFile: droppedImageFile
+          }
+        }
+      }
+      return null
+    }
     return {
       src: authorizedSrc,
-      fileName: getDownloadFileNameFromUrl(authorizedSrc, 'dropped-image.png')
+      fileName: getDownloadFileNameFromUrl(authorizedSrc, 'dropped-image.png'),
+      ...(droppedImageFile &&
+      (await authorizeCanvasLocalMediaSourceUrl(droppedImageFile)) === authorizedSrc
+        ? {
+            sizeBytes:
+              Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
+                ? droppedImageFile.size
+                : undefined,
+            sourceFile: droppedImageFile
+          }
+        : {})
     }
   }
   if (normalizedAgentWebUrl) {
@@ -485,7 +485,39 @@ export async function resolveDroppedAgentImageDataUrl(
   if (quickAppImageData) {
     if (/^local-media:|^file:/i.test(quickAppImageData.src)) {
       const authorizedSrc = await resolveAuthorizedCanvasLocalMediaSourceUrl(quickAppImageData.src)
-      return authorizedSrc ? { ...quickAppImageData, src: authorizedSrc } : null
+      if (authorizedSrc) return { ...quickAppImageData, src: authorizedSrc }
+
+      // A legacy drag may only expose File authorization. Require that native
+      // file to resolve to the exact local URL advertised by the payload.
+      if (droppedImageFile) {
+        const normalizedQuickAppLocalUrl = normalizeLocalMediaUrl(quickAppImageData.src)
+        const authorizedFileUrl = await authorizeCanvasLocalMediaSourceUrl(droppedImageFile)
+        if (authorizedFileUrl === normalizedQuickAppLocalUrl) {
+          return {
+            ...quickAppImageData,
+            src: authorizedFileUrl,
+            sizeBytes:
+              Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
+                ? droppedImageFile.size
+                : quickAppImageData.sizeBytes,
+            sourceFile: droppedImageFile
+          }
+        }
+      }
+      return null
+    }
+    // Keep the native bytes only for ephemeral blob/data sources, where the
+    // payload URL may disappear after the drag. Remote/local-media payloads
+    // remain authoritative and must not inherit a coincidentally named File.
+    if (hasMatchingPayloadFile && /^(blob:|data:)/i.test(quickAppImageData.src)) {
+      return {
+        ...quickAppImageData,
+        sizeBytes:
+          Number.isFinite(droppedImageFile?.size) && (droppedImageFile?.size ?? 0) >= 0
+            ? droppedImageFile?.size
+            : quickAppImageData.sizeBytes,
+        sourceFile: droppedImageFile
+      }
     }
     return quickAppImageData
   }

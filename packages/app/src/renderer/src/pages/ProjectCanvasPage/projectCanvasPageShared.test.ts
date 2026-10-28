@@ -91,6 +91,113 @@ describe('getCanvasItemBounds', () => {
 })
 
 describe('resolveDroppedAgentImageDataUrl', () => {
+  it('prefers the explicit agent URL over a mismatched native file payload', async () => {
+    const wrongFile = new File(['wrong'], 'other-image.png', { type: 'image/png' })
+    const originalElectronFile = window.electronFile
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        authorizeLocalMediaFile: vi.fn(async () => 'C:/wrong/other-image.png')
+      }
+    })
+
+    try {
+      const dataTransfer = {
+        files: [wrongFile],
+        getData: (type: string) =>
+          type === AGENT_IMAGE_DRAG_MIME ? 'https://cdn.example.com/output/desired-image.png' : ''
+      } as unknown as Pick<DataTransfer, 'getData' | 'files'>
+
+      await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+        src: 'https://cdn.example.com/output/desired-image.png',
+        fileName: 'desired-image.png'
+      })
+    } finally {
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: originalElectronFile
+      })
+    }
+  })
+
+  it('prefers the explicit quick-app attachment over a mismatched native file payload', async () => {
+    const wrongFile = new File(['wrong'], 'other-image.png', { type: 'image/png' })
+    const originalElectronFile = window.electronFile
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        authorizeLocalMediaFile: vi.fn(async () => 'C:/wrong/other-image.png')
+      }
+    })
+
+    try {
+      const dataTransfer = {
+        files: [wrongFile],
+        getData: (type: string) =>
+          type === 'application/x-qapp-image'
+            ? JSON.stringify({
+                attachments: [
+                  {
+                    type: 'image',
+                    url: 'https://cdn.example.com/output/desired-image.png',
+                    fileName: 'desired-image.png'
+                  }
+                ]
+              })
+            : ''
+      } as unknown as Pick<DataTransfer, 'getData' | 'files'>
+
+      await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+        src: 'https://cdn.example.com/output/desired-image.png',
+        fileName: 'desired-image.png'
+      })
+    } finally {
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: originalElectronFile
+      })
+    }
+  })
+
+  it('does not attach a coincidentally named native file to a remote quick-app URL', async () => {
+    const wrongFile = new File(['wrong'], 'desired-image.png', { type: 'image/png' })
+    const originalElectronFile = window.electronFile
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        authorizeLocalMediaFile: vi.fn(async () => 'C:/wrong/desired-image.png')
+      }
+    })
+
+    try {
+      const dataTransfer = {
+        files: [wrongFile],
+        getData: (type: string) =>
+          type === 'application/x-qapp-image'
+            ? JSON.stringify({
+                attachments: [
+                  {
+                    type: 'image',
+                    url: 'https://cdn.example.com/output/desired-image.png',
+                    fileName: 'desired-image.png'
+                  }
+                ]
+              })
+            : ''
+      } as unknown as Pick<DataTransfer, 'getData' | 'files'>
+
+      await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+        src: 'https://cdn.example.com/output/desired-image.png',
+        fileName: 'desired-image.png'
+      })
+    } finally {
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: originalElectronFile
+      })
+    }
+  })
+
   it('keeps remote agent image URLs on the remote loading path', async () => {
     const dataTransfer = {
       files: [],

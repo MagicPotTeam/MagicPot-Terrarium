@@ -60,6 +60,16 @@ type CachedImageRecord = {
   image: HTMLImageElement | null
 }
 
+function cancelCachedImageLoad(record: CachedImageRecord): void {
+  const image = record.image
+  if (!image) return
+  image.onload = null
+  image.onerror = null
+  if (record.status === 'loading' && image.src) {
+    image.src = ''
+  }
+}
+
 const DEFAULT_MAX_DEVICE_PIXEL_RATIO = 2
 const DEFAULT_MAX_BACKING_PIXELS = 24 * 1024 * 1024
 const DEFAULT_OVERSCAN_PX = 320
@@ -234,6 +244,11 @@ function drawCanvasImageItem({
   return true
 }
 
+// Keep fallback raster frames close to the 60 Hz DOM/WebGL viewport driver
+// while panning. A 33 ms cadence leaves the 2D layer visibly one or two
+// frames behind and is perceived as a trailing/ghost image during middle-drag.
+const INTERACTIVE_FALLBACK_FRAME_DELAY_MS = 16
+
 const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
   ProjectCanvasCanvas2DFallbackLayerHandle,
   ProjectCanvasCanvas2DFallbackLayerProps
@@ -317,7 +332,11 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
     }
 
     const { isPerformanceThrottled: throttled } = propsRef.current
-    const minFrameDelay = throttled ? 100 : viewportInteractingRef.current ? 33 : 0
+    const minFrameDelay = throttled
+      ? 100
+      : viewportInteractingRef.current
+        ? INTERACTIVE_FALLBACK_FRAME_DELAY_MS
+        : 0
     const elapsed = window.performance.now() - lastDrawAtRef.current
     const requestFrame = () => {
       throttleTimerRef.current = null
@@ -348,6 +367,10 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
       if (cached?.src === item.src) {
         return cached.status === 'loaded' ? cached.image : null
       }
+      if (cached) {
+        cancelCachedImageLoad(cached)
+        imageCacheRef.current.delete(item.id)
+      }
 
       const image = new Image()
       if (shouldUseAnonymousCrossOrigin(item.src)) {
@@ -357,10 +380,18 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
       image.draggable = false
       imageCacheRef.current.set(item.id, { src: item.src, status: 'loading', image })
       image.onload = () => {
+        const current = imageCacheRef.current.get(item.id)
+        if (current?.image !== image || current.src !== item.src) {
+          return
+        }
         imageCacheRef.current.set(item.id, { src: item.src, status: 'loaded', image })
         scheduleDraw()
       }
       image.onerror = (error) => {
+        const current = imageCacheRef.current.get(item.id)
+        if (current?.image !== image || current.src !== item.src) {
+          return
+        }
         imageCacheRef.current.set(item.id, { src: item.src, status: 'failed', image: null })
         markFailure({ itemId: item.id, src: item.src, phase: 'load', error })
         scheduleDraw()
@@ -534,6 +565,8 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
     const activeItemIds = new Set(items.map((item) => item.id))
     for (const itemId of imageCacheRef.current.keys()) {
       if (!activeItemIds.has(itemId)) {
+        const record = imageCacheRef.current.get(itemId)
+        if (record) cancelCachedImageLoad(record)
         imageCacheRef.current.delete(itemId)
       }
     }
@@ -560,6 +593,7 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
         window.clearTimeout(throttleTimerRef.current)
         throttleTimerRef.current = null
       }
+      imageCache.forEach(cancelCachedImageLoad)
       imageCache.clear()
       previewState.clear()
       failedIds.clear()

@@ -192,6 +192,110 @@ describe('useCanvasStageInteraction', () => {
     unmount()
   })
 
+  it('removes global pan listeners when the hook unmounts mid-gesture', () => {
+    const onViewportChange = vi.fn()
+    const options = createOptions({ onViewportChange })
+    const { result, unmount } = renderHook(() => useCanvasStageInteraction(options))
+
+    act(() => {
+      result.current.handleStageMouseDown({
+        evt: new MouseEvent('mousedown', { button: 1, clientX: 100, clientY: 120 }),
+        type: 'mousedown'
+      })
+    })
+
+    unmount()
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 160, clientY: 190 }))
+      window.dispatchEvent(new MouseEvent('mouseup'))
+    })
+
+    expect(options.stagePosRef.current).toEqual({ x: 0, y: 0 })
+    expect(onViewportChange).not.toHaveBeenCalled()
+    expect(options.setStagePos).not.toHaveBeenCalled()
+  })
+
+  it('does not commit a bridged pointer-up twice through the window fallback', () => {
+    const options = createOptions()
+    const { result, unmount } = renderHook(() => useCanvasStageInteraction(options))
+
+    act(() => {
+      result.current.handleStageMouseDown({
+        evt: new MouseEvent('mousedown', { button: 1, clientX: 100, clientY: 120 }),
+        type: 'mousedown'
+      })
+      result.current.handleStageMouseMove({
+        evt: new MouseEvent('mousemove', { clientX: 130, clientY: 150 }),
+        type: 'mousemove'
+      })
+    })
+
+    const bridgedPointerUp = new MouseEvent('pointerup') as MouseEvent & {
+      __projectCanvasPointerBridgeHandled?: boolean
+    }
+    bridgedPointerUp.__projectCanvasPointerBridgeHandled = true
+
+    act(() => {
+      result.current.handleStageMouseUp({ evt: bridgedPointerUp, type: 'pointerup' })
+      window.dispatchEvent(bridgedPointerUp)
+    })
+
+    expect(options.setStagePos).toHaveBeenCalledTimes(1)
+    expect(options.setIsPanning).toHaveBeenCalledTimes(2)
+    unmount()
+  })
+
+  it('does not apply the compatibility mousemove after a pointermove in the same pan', () => {
+    const options = createOptions()
+    const { result, unmount } = renderHook(() => useCanvasStageInteraction(options))
+
+    act(() => {
+      result.current.handleStageMouseDown({
+        evt: new MouseEvent('mousedown', { button: 1, clientX: 100, clientY: 120 }),
+        type: 'mousedown'
+      })
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 140, clientY: 160 }))
+      // Chromium emits this compatibility event for the same physical move.
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 180, clientY: 200 }))
+    })
+
+    expect(options.stagePosRef.current).toEqual({ x: 40, y: 40 })
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mouseup'))
+    })
+    unmount()
+  })
+
+  it('does not reapply a pointermove already forwarded by the stage capture bridge', () => {
+    const options = createOptions()
+    const { result, unmount } = renderHook(() => useCanvasStageInteraction(options))
+    const bridgedPointerMove = new MouseEvent('pointermove', {
+      clientX: 140,
+      clientY: 160
+    }) as MouseEvent & { __projectCanvasPointerBridgeHandled?: boolean }
+    bridgedPointerMove.__projectCanvasPointerBridgeHandled = true
+
+    act(() => {
+      result.current.handleStageMouseDown({
+        evt: new MouseEvent('mousedown', { button: 1, clientX: 100, clientY: 120 }),
+        type: 'mousedown'
+      })
+      // StageScene forwards the event directly, then it reaches this hook's
+      // window fallback with the same object.
+      result.current.handleStageMouseMove({ evt: bridgedPointerMove, type: 'pointermove' })
+      window.dispatchEvent(bridgedPointerMove)
+    })
+
+    expect(options.stagePosRef.current).toEqual({ x: 40, y: 40 })
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mouseup'))
+    })
+    unmount()
+  })
+
   it('does not auto-confirm extract mode when left-clicking the stage background', () => {
     const confirm = vi.fn()
     const options = createOptions({

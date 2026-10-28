@@ -1,4 +1,5 @@
 import React from 'react'
+import { createPortal } from 'react-dom'
 import { Box } from '@mui/material'
 import { buildCanvasSelectionOutlineStyles } from './projectCanvasInteractionOverlayStyles'
 import { findCanvasSelectionToolbar } from '../canvasDomOverlayLookup'
@@ -80,6 +81,7 @@ type ProjectCanvasRectItemInteractionOverlayProps = {
   isSelected: boolean
   isDraggable: boolean
   showTransformer: boolean
+  transformControlsPortal?: HTMLElement | null
   previewContent?: React.ReactNode
   allowPointerPassthrough?: boolean
   contentPointerPassthrough?: boolean
@@ -93,7 +95,7 @@ type ProjectCanvasRectItemInteractionOverlayProps = {
   stageScaleRef?: React.MutableRefObject<number>
   minWidth?: number
   minHeight?: number
-  overlayRole: string
+  overlayRole?: string
   floatingToolbarSelector?: string
   onPreviewChange?: (
     itemId: string,
@@ -829,6 +831,7 @@ const ProjectCanvasRectItemInteractionOverlay: React.FC<
   isSelected,
   isDraggable,
   showTransformer,
+  transformControlsPortal,
   previewContent,
   allowPointerPassthrough = false,
   contentPointerPassthrough = false,
@@ -842,7 +845,7 @@ const ProjectCanvasRectItemInteractionOverlay: React.FC<
   stageScaleRef,
   minWidth = DEFAULT_MIN_SIZE,
   minHeight = DEFAULT_MIN_SIZE,
-  overlayRole,
+  overlayRole = 'rect-interaction',
   floatingToolbarSelector,
   onPreviewChange,
   onDragStart,
@@ -854,6 +857,7 @@ const ProjectCanvasRectItemInteractionOverlay: React.FC<
   onHoverChange
 }) => {
   const elementRef = React.useRef<HTMLDivElement | null>(null)
+  const transformControlsRef = React.useRef<HTMLDivElement | null>(null)
   const sessionRef = React.useRef<InteractionSession | null>(null)
   const draftTransformRef = React.useRef<ProjectCanvasRectItemTransform | null>(null)
   const pendingPreviewRef = React.useRef<{
@@ -977,17 +981,16 @@ const ProjectCanvasRectItemInteractionOverlay: React.FC<
   ])
 
   const applyElementTransform = React.useCallback((transform: ProjectCanvasRectItemTransform) => {
-    const element = elementRef.current
-    if (!element) {
-      return
+    for (const element of [elementRef.current, transformControlsRef.current]) {
+      if (element) {
+        element.style.transform = buildElementTransform(transform)
+      }
     }
-
-    element.style.transform = buildElementTransform(transform)
   }, [])
 
   React.useLayoutEffect(() => {
     applyElementTransform(draftTransformRef.current ?? activeTransform)
-  }, [activeTransform, applyElementTransform])
+  }, [activeTransform, applyElementTransform, showTransformer, transformControlsPortal])
 
   const cancelPendingPreviewCommit = React.useCallback(() => {
     if (previewCommitFrameRef.current == null) {
@@ -1173,8 +1176,7 @@ const ProjectCanvasRectItemInteractionOverlay: React.FC<
       )
     const preferredPlacement =
       (toolbar.dataset.selectionToolbarPreferredPlacement as
-        | SelectionActionStackPlacement
-        | undefined) ?? 'auto'
+        SelectionActionStackPlacement | undefined) ?? 'auto'
     const toolbarPosition = resolveSelectionActionToolbarPosition(
       {
         minX: elementRect.left - containerRect.left,
@@ -1608,6 +1610,83 @@ const ProjectCanvasRectItemInteractionOverlay: React.FC<
     Math.max(4, Math.min(item.width, item.height) / 3)
   )
 
+  const transformControls = showTransformer ? (
+    <>
+      {HANDLE_POSITIONS.map(({ handle, left, top, cursor }) => (
+        <Box
+          key={handle}
+          data-canvas-rect-handle={handle}
+          onPointerDown={(event: React.PointerEvent<HTMLDivElement>) => startResize(handle, event)}
+          sx={{
+            position: 'absolute',
+            left,
+            top,
+            width: HANDLE_HIT_SIZE,
+            height: HANDLE_HIT_SIZE,
+            transform: `translate(-50%, -50%) scale(${handleScaleCompensation})`,
+            transformOrigin: 'center',
+            zIndex: 2,
+            pointerEvents: allowPointerPassthrough ? 'none' : 'auto',
+            cursor
+          }}
+        >
+          <Box
+            sx={{
+              position: 'absolute',
+              left: '50%',
+              top: '50%',
+              width: HANDLE_SIZE,
+              height: HANDLE_SIZE,
+              transform: 'translate(-50%, -50%)',
+              borderRadius: isCornerHandle(handle)
+                ? '2px'
+                : handle === 'top-center' ||
+                    handle === 'middle-left' ||
+                    handle === 'middle-right' ||
+                    handle === 'bottom-center'
+                  ? '999px'
+                  : '2px',
+              bgcolor: '#6366f1',
+              border: '1.5px solid #ffffff',
+              boxShadow: '0 2px 8px rgba(15,23,42,0.22)',
+              pointerEvents: 'none'
+            }}
+          />
+        </Box>
+      ))}
+      {CORNER_ROTATE_HOTSPOTS.map(
+        ({ handle, part, left, top, offsetX, offsetY, width, height, anchorMode }) => {
+          const compensatedOffsetX = offsetX * handleScaleCompensation
+          const compensatedOffsetY = offsetY * handleScaleCompensation
+          const compensatedWidth = width * handleScaleCompensation
+          const compensatedHeight = height * handleScaleCompensation
+          return (
+            <Box
+              key={`${handle}-rotate-${part}`}
+              data-canvas-rect-rotate-hotspot={handle}
+              data-canvas-rect-rotate-hotspot-part={part}
+              onPointerDown={startRotate}
+              sx={{
+                position: 'absolute',
+                left: toCssOffset(left, compensatedOffsetX),
+                top: toCssOffset(top, compensatedOffsetY),
+                width: compensatedWidth,
+                height: compensatedHeight,
+                transform: anchorMode === 'center' ? 'translate(-50%, -50%)' : 'none',
+                transformOrigin: 'center',
+                borderRadius: '999px',
+                bgcolor: 'transparent',
+                pointerEvents: allowPointerPassthrough ? 'none' : 'auto',
+                zIndex: 1,
+                cursor: ROTATE_CURSOR
+              }}
+            />
+          )
+        }
+      )}
+    </>
+  ) : null
+
   return (
     <Box
       sx={{
@@ -1737,84 +1816,30 @@ const ProjectCanvasRectItemInteractionOverlay: React.FC<
             )}
           </>
         )}
-        {showTransformer && (
-          <>
-            {HANDLE_POSITIONS.map(({ handle, left, top, cursor }) => (
+        {transformControlsPortal && transformControls
+          ? createPortal(
               <Box
-                key={handle}
-                data-canvas-rect-handle={handle}
-                onPointerDown={(event: React.PointerEvent<HTMLDivElement>) =>
-                  startResize(handle, event)
-                }
+                ref={transformControlsRef}
+                data-canvas-item-id={item.id}
+                data-canvas-overlay="transform-controls"
+                data-canvas-transform-controls="rect"
                 sx={{
                   position: 'absolute',
-                  left,
-                  top,
-                  width: HANDLE_HIT_SIZE,
-                  height: HANDLE_HIT_SIZE,
-                  transform: `translate(-50%, -50%) scale(${handleScaleCompensation})`,
-                  transformOrigin: 'center',
-                  zIndex: 2,
-                  pointerEvents: allowPointerPassthrough ? 'none' : 'auto',
-                  cursor
+                  left: 0,
+                  top: 0,
+                  width: item.width,
+                  height: item.height,
+                  transform: buildElementTransform(activeTransform),
+                  transformOrigin: '0 0',
+                  pointerEvents: 'none',
+                  touchAction: 'none'
                 }}
               >
-                <Box
-                  sx={{
-                    position: 'absolute',
-                    left: '50%',
-                    top: '50%',
-                    width: HANDLE_SIZE,
-                    height: HANDLE_SIZE,
-                    transform: 'translate(-50%, -50%)',
-                    borderRadius: isCornerHandle(handle)
-                      ? '2px'
-                      : handle === 'top-center' ||
-                          handle === 'middle-left' ||
-                          handle === 'middle-right' ||
-                          handle === 'bottom-center'
-                        ? '999px'
-                        : '2px',
-                    bgcolor: '#6366f1',
-                    border: '1.5px solid #ffffff',
-                    boxShadow: '0 2px 8px rgba(15,23,42,0.22)',
-                    pointerEvents: 'none'
-                  }}
-                />
-              </Box>
-            ))}
-            {CORNER_ROTATE_HOTSPOTS.map(
-              ({ handle, part, left, top, offsetX, offsetY, width, height, anchorMode }) => {
-                const compensatedOffsetX = offsetX * handleScaleCompensation
-                const compensatedOffsetY = offsetY * handleScaleCompensation
-                const compensatedWidth = width * handleScaleCompensation
-                const compensatedHeight = height * handleScaleCompensation
-                return (
-                  <Box
-                    key={`${handle}-rotate-${part}`}
-                    data-canvas-rect-rotate-hotspot={handle}
-                    data-canvas-rect-rotate-hotspot-part={part}
-                    onPointerDown={startRotate}
-                    sx={{
-                      position: 'absolute',
-                      left: toCssOffset(left, compensatedOffsetX),
-                      top: toCssOffset(top, compensatedOffsetY),
-                      width: compensatedWidth,
-                      height: compensatedHeight,
-                      transform: anchorMode === 'center' ? 'translate(-50%, -50%)' : 'none',
-                      transformOrigin: 'center',
-                      borderRadius: '999px',
-                      bgcolor: 'transparent',
-                      pointerEvents: allowPointerPassthrough ? 'none' : 'auto',
-                      zIndex: 1,
-                      cursor: ROTATE_CURSOR
-                    }}
-                  />
-                )
-              }
-            )}
-          </>
-        )}
+                {transformControls}
+              </Box>,
+              transformControlsPortal
+            )
+          : transformControls}
       </Box>
     </Box>
   )
@@ -1851,6 +1876,7 @@ function areRectInteractionOverlayPropsEqual(
     previousProps.isSelected === nextProps.isSelected &&
     previousProps.isDraggable === nextProps.isDraggable &&
     previousProps.showTransformer === nextProps.showTransformer &&
+    previousProps.transformControlsPortal === nextProps.transformControlsPortal &&
     previousProps.previewContent === nextProps.previewContent &&
     previousProps.allowPointerPassthrough === nextProps.allowPointerPassthrough &&
     previousProps.contentPointerPassthrough === nextProps.contentPointerPassthrough &&

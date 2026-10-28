@@ -105,6 +105,167 @@ function mockElementRect(
 }
 
 describe('ProjectCanvasImageInteractionOverlay', () => {
+  it('moves only transform controls into a late portal host and restores inline fallback', () => {
+    const canvasContainerRef = React.createRef<HTMLDivElement>()
+    const portalHost = document.createElement('div')
+    portalHost.style.transform = 'translate3d(37px, -19px, 0) scale(0.75)'
+    document.body.append(portalHost)
+    const props = {
+      canvasContainerRef,
+      item: createItem(),
+      isSelected: true,
+      showTransformer: true,
+      isDraggable: true,
+      stagePos: { x: 37, y: -19 },
+      stageScale: 0.75,
+      onSelect: vi.fn(),
+      onDragEnd: vi.fn(),
+      onTransformEnd: vi.fn()
+    }
+    const tree = (host: HTMLElement | null, passthrough = false) => (
+      <div data-testid="canvas-root" ref={canvasContainerRef}>
+        <ProjectCanvasImageInteractionOverlay
+          {...props}
+          transformControlsPortal={host}
+          allowPointerPassthrough={passthrough}
+        />
+      </div>
+    )
+    const { rerender, unmount } = render(tree(null))
+    try {
+      const body = document.querySelector('[data-canvas-overlay="image-interaction"]')!
+      expect(body.querySelectorAll('[data-canvas-image-handle]')).toHaveLength(4)
+      rerender(tree(portalHost))
+      const controls = portalHost.querySelector('[data-canvas-transform-controls="image"]')!
+      expect(controls).not.toBeNull()
+      expect(controls).toHaveAttribute('data-canvas-item-id', props.item.id)
+      expect(controls).toHaveAttribute('data-canvas-overlay', 'transform-controls')
+      expect(controls).toHaveStyle({
+        transform: 'translate3d(100px, 140px, 0) rotate(0deg) scale(1, 1)',
+        pointerEvents: 'none'
+      })
+      expect(body.querySelector('[data-canvas-image-handle]')).toBeNull()
+      expect(portalHost.querySelectorAll('[data-canvas-image-handle]')).toHaveLength(4)
+      expect(portalHost.querySelector('[data-canvas-overlay="image-interaction"]')).toBeNull()
+      expect(portalHost.querySelector('[data-canvas-image-handle]')).toHaveStyle({
+        pointerEvents: 'auto'
+      })
+      rerender(tree(portalHost, true))
+      expect(portalHost.querySelector('[data-canvas-image-handle]')).toHaveStyle({
+        pointerEvents: 'none'
+      })
+      rerender(tree(null))
+      expect(portalHost.querySelector('[data-canvas-image-handle]')).toBeNull()
+      expect(body.querySelectorAll('[data-canvas-image-handle]')).toHaveLength(4)
+    } finally {
+      unmount()
+      portalHost.remove()
+    }
+  })
+
+  it.each(['drag', 'resize', 'rotate'] as const)(
+    'keeps portaled controls synchronized during live %s without a React commit',
+    (kind) => {
+      const canvasContainerRef = React.createRef<HTMLDivElement>()
+      const portalHost = document.createElement('div')
+      document.body.append(portalHost)
+      const onDragEnd = vi.fn()
+      const onTransformEnd = vi.fn()
+      const { unmount } = render(
+        <div data-testid="canvas-root" ref={canvasContainerRef}>
+          <ProjectCanvasImageInteractionOverlay
+            canvasContainerRef={canvasContainerRef}
+            item={createItem()}
+            isSelected
+            showTransformer
+            isDraggable
+            stagePos={{ x: 0, y: 0 }}
+            stageScale={1}
+            transformControlsPortal={portalHost}
+            onSelect={vi.fn()}
+            onDragEnd={onDragEnd}
+            onTransformEnd={onTransformEnd}
+          />
+        </div>
+      )
+      try {
+        mockCanvasRect(screen.getByTestId('canvas-root'))
+        const body = document.querySelector<HTMLElement>(
+          '[data-canvas-overlay="image-interaction"]'
+        )!
+        const controls = portalHost.querySelector<HTMLElement>(
+          '[data-canvas-transform-controls="image"]'
+        )!
+        expect(controls).not.toBeNull()
+        const initialTransform = getComputedStyle(controls).transform
+        const target =
+          kind === 'drag'
+            ? body
+            : portalHost.querySelector(
+                kind === 'resize'
+                  ? '[data-canvas-image-handle="bottom-right"]'
+                  : '[data-canvas-image-rotate-hotspot="top-left"]'
+              )!
+        const start =
+          kind === 'rotate' ? { clientX: 210, clientY: 120 } : { clientX: 310, clientY: 280 }
+        const end =
+          kind === 'rotate' ? { clientX: 310, clientY: 220 } : { clientX: 410, clientY: 340 }
+        fireEvent.pointerDown(target, { pointerId: 89, button: 0, ...start })
+        fireEvent.pointerMove(window, { pointerId: 89, ...end })
+        expect(controls.style.transform).not.toBe(initialTransform)
+        expect(controls.style.transform).toBe(body.style.transform)
+        fireEvent.pointerUp(window, { pointerId: 89, ...end })
+        expect(kind === 'drag' ? onDragEnd : onTransformEnd).toHaveBeenCalledTimes(1)
+        expect(getComputedStyle(controls).transform).toBe(getComputedStyle(body).transform)
+      } finally {
+        unmount()
+        expect(portalHost.querySelector('[data-canvas-transform-controls]')).toBeNull()
+        portalHost.remove()
+      }
+    }
+  )
+
+  it('removes active portal controls and pointer listeners on unmount', () => {
+    const canvasContainerRef = React.createRef<HTMLDivElement>()
+    const portalHost = document.createElement('div')
+    document.body.append(portalHost)
+    const onTransformEnd = vi.fn()
+    const removeListener = vi.spyOn(window, 'removeEventListener')
+    const { unmount } = render(
+      <div data-testid="canvas-root" ref={canvasContainerRef}>
+        <ProjectCanvasImageInteractionOverlay
+          canvasContainerRef={canvasContainerRef}
+          item={createItem()}
+          isSelected
+          showTransformer
+          isDraggable
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          transformControlsPortal={portalHost}
+          onSelect={vi.fn()}
+          onDragEnd={vi.fn()}
+          onTransformEnd={onTransformEnd}
+        />
+      </div>
+    )
+    try {
+      mockCanvasRect(screen.getByTestId('canvas-root'))
+      const handle = portalHost.querySelector('[data-canvas-image-handle="bottom-right"]')
+      expect(handle).not.toBeNull()
+      fireEvent.pointerDown(handle!, { pointerId: 90, button: 0, clientX: 310, clientY: 280 })
+      unmount()
+      expect(portalHost.querySelector('[data-canvas-transform-controls]')).toBeNull()
+      expect(removeListener.mock.calls.some(([type]) => type === 'pointermove')).toBe(true)
+      fireEvent.pointerMove(window, { pointerId: 90, clientX: 410, clientY: 340 })
+      fireEvent.pointerUp(window, { pointerId: 90, clientX: 410, clientY: 340 })
+      expect(onTransformEnd).not.toHaveBeenCalled()
+    } finally {
+      unmount()
+      removeListener.mockRestore()
+      portalHost.remove()
+    }
+  })
+
   it('renders a thicker selection outline for selected images', () => {
     expect(PROJECT_CANVAS_SELECTION_OUTLINE_WIDTH).toBe(3)
     expect(buildCanvasSelectionOutlineStyles(true)).toEqual({

@@ -82,7 +82,7 @@ export function useCanvasSelectionUiActions(options: UseCanvasSelectionUiActions
     handleCopyCanvasItemsAsImage,
     handleDownloadCanvasItemsAsImage,
     handleSendCanvasItemsSnapshotToPhotoshop,
-    handleSendSelectionToAgent,
+    handleSendCanvasItemsToAgent,
     isChineseUi,
     isFillableAnnotationShape,
     items,
@@ -687,12 +687,13 @@ Return shape:
   const { tryHandleCanvasExternalDrop } = useCanvasExternalDrop({
     canvasId,
     items,
+    selectedIds,
     canvasContainerRef,
     buildCanvasDragPayload,
     setCanvasDragPayload,
     getCanvasImageDragObjectUrl,
     resetDraggedItemNode,
-    handleSendSelectionToAgent
+    handleSendCanvasItemsToAgent
   })
   tryHandleCanvasExternalDropRef.current = tryHandleCanvasExternalDrop
 
