@@ -130,10 +130,16 @@ export function deepMerge<T extends JsonValue | undefined>(a: T, b: T): T {
   }
   if (valueIsJsonDict(a) && valueIsJsonDict(b)) {
     // 字典合并，递归合并
-    const result = Object.assign({}, a) // 先复制 a 的所有属性
+    // Spread copies __proto__ as own data instead of invoking the prototype setter.
+    const result = { ...(a as JsonDict) }
     // 然后合并 b 的属性
     Object.entries(b).forEach(([k, v]) => {
-      result[k] = deepMerge(a[k], v)
+      Object.defineProperty(result, k, {
+        value: deepMerge(Object.hasOwn(a, k) ? a[k] : undefined, v),
+        enumerable: true,
+        configurable: true,
+        writable: true
+      })
     })
     return result as T
   }

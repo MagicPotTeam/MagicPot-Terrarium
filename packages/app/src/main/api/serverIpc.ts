@@ -79,7 +79,8 @@ export const createServer = (
         managedMediaCleanupScheduler?.submitSnapshot({
           complete: snapshot.complete,
           chatMediaRoot,
-          referencedMediaIds: snapshot.ids
+          referencedMediaIds: snapshot.ids,
+          referenceCounts: snapshot.referenceCounts
         })
       }
     })

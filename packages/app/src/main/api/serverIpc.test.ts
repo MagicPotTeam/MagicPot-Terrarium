@@ -116,6 +116,40 @@ describe('serverIpc createServer', () => {
     }
   })
 
+  it('registers read-only planning history and rejects a host frame through the actual IPC handler', async () => {
+    const service = createServer().svcFigPluginCenter
+    expect(service.planningHistory).toBeTypeOf('function')
+    expect(apiDef.svcFigPluginCenter.planningHistory.type).toBe('unary')
+    initServerIpc()
+    const handler = handleMock.mock.calls.find(
+      ([name]) => name === 'svcFigPluginCenter.planningHistory'
+    )?.[1]
+    expect(handler).toBeTypeOf('function')
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await expect(
+        handler(
+          {
+            sender: { id: 9876, getURL: () => 'https://www.figma.com/' },
+            senderFrame: { url: 'https://www.figma.com/', parent: null }
+          },
+          {}
+        )
+      ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' })
+      await expect(
+        handler(
+          {
+            sender: { id: 9876, getURL: () => 'https://www.figma.com/' },
+            senderFrame: { url: 'https://www.figma.com/', parent: null }
+          },
+          { path: 'PRIVATE', retry: true }
+        )
+      ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+    } finally {
+      errorLog.mockRestore()
+    }
+  })
+
   it('denies an untrusted frame through the actual registered FIGPLUGIN IPC handler', async () => {
     initServerIpc()
     const handler = handleMock.mock.calls.find(

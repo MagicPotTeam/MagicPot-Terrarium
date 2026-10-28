@@ -36,7 +36,8 @@ const normalizeSchemeUrlPath = (value: string): string | null => {
     const decodedPathname = safeDecodeURIComponent(parsed.pathname || '')
 
     if (!parsed.host) {
-      return normalizeSchemePath(decodedPathname)
+      // The URL pathname is already decoded; preserve literal percent-escape filenames.
+      return decodedPathname.replace(/^\/(?=[A-Za-z]:[\\/])/, '')
     }
 
     if (WINDOWS_DRIVE_HOST_PATTERN.test(parsed.hostname)) {

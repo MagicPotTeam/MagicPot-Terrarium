@@ -67,6 +67,73 @@ describe('VirtualLogViewport', () => {
     expect(screen.queryByText('newer')).toBeNull()
   })
 
+  it('does not snap back when a slow upward drag is still near the tail', () => {
+    const view = render(<VirtualLogViewport lines={rows} label="Test logs" />)
+    const viewport = screen.getByRole('log')
+    const bottom = rows.length * LOG_ROW_HEIGHT - height
+
+    // Native scrollbar drags emit small increments. Being within one row of the
+    // tail must not re-enable follow mode while the user is moving upward.
+    fireEvent.scroll(viewport, { target: { scrollTop: bottom - 5 } })
+    view.rerender(<VirtualLogViewport lines={[...rows, 'new tail']} label="Test logs" />)
+
+    expect(viewport.scrollTop).toBe(bottom - 5)
+  })
+
+  it.each([
+    ['horizontal', 100],
+    ['same-position', 0]
+  ])('does not resume following after a %s scroll near the tail', (_kind, scrollLeft) => {
+    const view = render(<VirtualLogViewport lines={rows} label="Test logs" />)
+    const viewport = screen.getByRole('log')
+    const bottom = rows.length * LOG_ROW_HEIGHT - height
+
+    fireEvent.scroll(viewport, { target: { scrollTop: bottom - 5 } })
+    fireEvent.scroll(viewport, { target: { scrollTop: bottom - 5, scrollLeft } })
+    view.rerender(<VirtualLogViewport lines={[...rows, 'new tail']} label="Test logs" />)
+
+    expect(viewport.scrollTop).toBe(bottom - 5)
+  })
+
+  it('resumes following when scrolling down near the tail', () => {
+    const view = render(<VirtualLogViewport lines={rows} label="Test logs" />)
+    const viewport = screen.getByRole('log')
+    const bottom = rows.length * LOG_ROW_HEIGHT - height
+
+    fireEvent.scroll(viewport, { target: { scrollTop: bottom - 40 } })
+    fireEvent.scroll(viewport, { target: { scrollTop: bottom - 10 } })
+    view.rerender(<VirtualLogViewport lines={[...rows, 'new tail']} label="Test logs" />)
+
+    expect(viewport.scrollTop).toBe(bottom + LOG_ROW_HEIGHT)
+  })
+
+  it('resumes following at the actual tail even without downward movement', () => {
+    const view = render(<VirtualLogViewport lines={rows} label="Test logs" />)
+    const viewport = screen.getByRole('log')
+    const bottom = rows.length * LOG_ROW_HEIGHT - height
+
+    fireEvent.scroll(viewport, { target: { scrollTop: bottom - 10 } })
+    height += 10
+    fireEvent.scroll(viewport, { target: { scrollTop: bottom - 10 } })
+    act(() => resize())
+    view.rerender(<VirtualLogViewport lines={[...rows, 'new tail']} label="Test logs" />)
+
+    expect(viewport.scrollTop).toBe(bottom - 10 + LOG_ROW_HEIGHT)
+  })
+
+  it('uses the latest native position when an append races with the scroll state update', () => {
+    const view = render(<VirtualLogViewport lines={rows} label="Test logs" />)
+    const viewport = screen.getByRole('log')
+
+    // Dispatch outside fireEvent/act to model a native scroll event arriving
+    // immediately before a log batch causes a render.
+    viewport.scrollTop = 4000
+    viewport.dispatchEvent(new Event('scroll', { bubbles: true }))
+    view.rerender(<VirtualLogViewport lines={[...rows, 'new tail']} label="Test logs" />)
+
+    expect(viewport.scrollTop).toBe(4000)
+  })
+
   it('measures resize, preserves reading position and cleans up the observer', () => {
     const view = render(<VirtualLogViewport lines={rows} label="Test logs" />)
     const viewport = screen.getByRole('log')

@@ -68,6 +68,25 @@ describe('BottomPanel bounded log surfaces', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('keeps ComfyUI state entries out of the shared terminal surface', () => {
+    const view = render(<BottomPanel />)
+    const response = watchAppLogs.mock.calls[0][1]
+    response.onData({
+      message: '[ComfyUI State] received (http://127.0.0.1:8188/) {"type":"status"}',
+      level: 'info',
+      timestamp: 0
+    })
+    response.onData({ message: '[LLMProxy] request started', level: 'info', timestamp: 0 })
+
+    act(() => vi.advanceTimersByTime(LOG_FLUSH_INTERVAL_MS))
+
+    const text = screen.getByRole('log', { name: 'terminal.terminal_log' }).textContent
+    expect(text).not.toContain('[ComfyUI State]')
+    expect(text).toContain('[LLMProxy] request started')
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('filters wrapped and control-separated Base64 in the terminal single-normalization path', () => {
     const view = render(<BottomPanel />)
     const response = watchAppLogs.mock.calls[0][1]

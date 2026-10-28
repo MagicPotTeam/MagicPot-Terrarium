@@ -5,6 +5,7 @@ export const LOG_ROW_HEIGHT = 20
 export const LOG_OVERSCAN = 5
 const FALLBACK_HEIGHT = 200
 const TAIL_THRESHOLD = 20
+const SCROLL_POSITION_EPSILON = 0.5
 
 interface VirtualLogViewportProps {
   /** Normalized, bounded physical rows, not raw stream entries. */
@@ -30,6 +31,9 @@ export default function VirtualLogViewport({
 }: VirtualLogViewportProps) {
   const viewportRef = useRef<HTMLDivElement>(null)
   const followTail = useRef(true)
+  // Keep the native scroll position in sync immediately. React state updates
+  // from onScroll can be deferred while a log batch is being rendered.
+  const scrollTopRef = useRef(0)
   const previous = useRef({ firstIndex, generation, tailRequest })
   const [height, setHeight] = useState(FALLBACK_HEIGHT)
   const [top, setTop] = useState(0)
@@ -71,13 +75,12 @@ export default function VirtualLogViewport({
     const removed = firstIndex - previous.current.firstIndex
     const nextTop = followTail.current
       ? maxTop
-      : Math.max(0, Math.min(maxTop, top - removed * LOG_ROW_HEIGHT))
+      : Math.max(0, Math.min(maxTop, scrollTopRef.current - removed * LOG_ROW_HEIGHT))
+    scrollTopRef.current = nextTop
     viewport.scrollTop = nextTop
     if (reset) viewport.scrollLeft = 0
     setTop(nextTop)
     previous.current = { firstIndex, generation, tailRequest }
-    // top is captured at the latest user scroll; scrolling alone must not run this effect.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lines, firstIndex, generation, tailRequest, height])
 
   const visibleCount = Math.ceil(height / LOG_ROW_HEIGHT) + 1
@@ -95,14 +98,29 @@ export default function VirtualLogViewport({
       title={`${LOG_HISTORY_NOTICE} (${MAX_LOG_LINES} rows / ${MAX_LOG_CHARACTERS} characters)`}
       onScroll={(event) => {
         const viewport = event.currentTarget
+        const previousTop = scrollTopRef.current
+        const currentTop = viewport.scrollTop
         // Layout may clamp scrollTop before ResizeObserver updates React height.
         // Read the live viewport size so that clamp does not disable follow-tail.
         const maxTop = Math.max(
           0,
           lines.length * LOG_ROW_HEIGHT - (viewport.clientHeight || height)
         )
-        followTail.current = maxTop - viewport.scrollTop <= TAIL_THRESHOLD
-        setTop(viewport.scrollTop)
+        const distanceFromTail = maxTop - currentTop
+        // Horizontal and duplicate scroll events must not resume following.
+        // Only moving down near the tail or reaching the actual tail does so.
+        if (distanceFromTail <= SCROLL_POSITION_EPSILON) {
+          followTail.current = true
+        } else if (currentTop < previousTop - SCROLL_POSITION_EPSILON) {
+          followTail.current = false
+        } else if (
+          currentTop > previousTop + SCROLL_POSITION_EPSILON &&
+          distanceFromTail <= TAIL_THRESHOLD
+        ) {
+          followTail.current = true
+        }
+        scrollTopRef.current = currentTop
+        setTop(currentTop)
       }}
       style={{
         ...style,

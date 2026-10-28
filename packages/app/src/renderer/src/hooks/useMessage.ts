@@ -50,6 +50,15 @@ type UseMessageReturn = {
 }
 
 const SUPPRESSED_SUCCESS_SNACKBAR_KEY = 'suppressed-success-snackbar'
+const SUPPRESSED_TRANSIENT_ERROR_SNACKBAR_KEY = 'suppressed-transient-error-snackbar'
+
+// Transient capacity errors are already surfaced by the chat loading status
+// while the model retry loop is active. Do not show a second red toast for the
+// same provider condition (including the exact OpenAI wording).
+const isTransientCapacityError = (message: string): boolean =>
+  /(?:our )?servers?\s+(?:are|is)\s+(?:currently\s+)?overloaded|server[_ -]overloaded|(?:selected )?model\s+is\s+(?:currently\s+)?at\s+capacity/i.test(
+    message
+  )
 
 function calculateDuration(message: string): number {
   const baseTime = 3000
@@ -94,6 +103,9 @@ export function useMessage(): UseMessageReturn {
   const notifyError = useCallback(
     (message: string, duration?: number | null) => {
       console.error('[Error]', message)
+      if (isTransientCapacityError(message)) {
+        return SUPPRESSED_TRANSIENT_ERROR_SNACKBAR_KEY
+      }
       return enqueueSnackbar(message, {
         variant: 'error',
         autoHideDuration: duration === undefined ? calculateErrorDuration(message) : duration,

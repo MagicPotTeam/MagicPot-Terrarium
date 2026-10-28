@@ -44,6 +44,38 @@ const flushPromises = async (): Promise<void> => {
   await Promise.resolve()
 }
 
+describe('QueueManager falsy item handling', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it.each([0, false, ''])('executes a valid falsy queue item: %j', async (item) => {
+    vi.useFakeTimers()
+    let available = true
+    const done = vi.fn()
+    const source: QueueSource<typeof item> = {
+      next: () => {
+        if (!available) return null
+        available = false
+        return item
+      },
+      done,
+      error: vi.fn(),
+      queueLength: () => (available ? 1 : 0)
+    }
+    const execute = vi.fn(async (value: typeof item) => value)
+    const manager = new QueueManager(source, execute, 10)
+
+    manager.start()
+    await vi.advanceTimersByTimeAsync(10)
+    await flushPromises()
+
+    expect(execute).toHaveBeenCalledExactlyOnceWith(item)
+    expect(done).toHaveBeenCalledExactlyOnceWith(item)
+    manager.stop()
+  })
+})
+
 describe('QueueManager stop/start concurrency', () => {
   afterEach(() => {
     vi.useRealTimers()
