@@ -127,3 +127,15 @@ record.json
 packages/launcher-dotnet/**/bin/
 packages/launcher-dotnet/**/obj/
 packages/launcher-dotnet/launcher-update-config.local.json
+
+# Disposable local verification artifacts (not test source)
+/validation/
+/private/codex/validation/
+/.figplugin-*/
+/.tmp-m7-tool-approval-*.sqlite3*
+/.tmp-semantic-memory-tests/
+/tmp-semantic-memory-m7-e2e/
+/config/vitest/vitest.private-temp.config.mjs
+*.before-concurrent-merge.bak
+/nul
+/.pytest_cache/
