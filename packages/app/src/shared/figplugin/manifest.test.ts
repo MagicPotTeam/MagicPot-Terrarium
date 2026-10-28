@@ -125,7 +125,9 @@ describe('FIGPLUGIN manifest contract', () => {
       this: RegExp,
       text: string
     ) {
-      tested.push(text.length)
+      // Zod 4 counts Unicode code points with a bounded linear surrogate check.
+      // Only the semantic-version matcher is prohibited before the size gate.
+      if (this.source.startsWith('^(0|[1-9]')) tested.push(text.length)
       return original.call(this, text)
     })
     try {
@@ -136,6 +138,7 @@ describe('FIGPLUGIN manifest contract', () => {
       spy.mockRestore()
     }
     expect(FigPluginVersionSchema.parse(' 1.2.3-beta.1+fixture ')).toBe('1.2.3-beta.1+fixture')
+    expect(FigPluginVersionSchema.safeParse(`1.0.0-${'😀'.repeat(128)}`).success).toBe(false)
   })
 
   it('accepts a valid versioned manifest and normalizes bounded metadata', () => {

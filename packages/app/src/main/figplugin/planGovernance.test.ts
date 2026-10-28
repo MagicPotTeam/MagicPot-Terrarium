@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { zodToJsonSchema } from 'zod-to-json-schema'
+import { z } from 'zod'
 import { HOST_PLAN_SYSTEM_MESSAGE, governHostPlanResponse } from './planGovernance'
 import { hostPlanSchema, type HostContext } from '@shared/figplugin/hostPlan'
 
@@ -34,9 +34,8 @@ const plan = () => ({
 
 describe('model plan governance (never a native executor)', () => {
   it('derives the model schema directly from the response validation schema', () => {
-    const schemaSource = hostPlanSchema as unknown as Parameters<typeof zodToJsonSchema>[0]
     const serialized = JSON.stringify(
-      zodToJsonSchema(schemaSource, { $refStrategy: 'none', target: 'jsonSchema7' })
+      z.toJSONSchema(hostPlanSchema, { target: 'draft-7', reused: 'inline', cycles: 'throw' })
     )
     expect(HOST_PLAN_SYSTEM_MESSAGE.endsWith(serialized)).toBe(true)
     const schema = JSON.parse(serialized)

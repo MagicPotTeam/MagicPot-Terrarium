@@ -519,7 +519,7 @@ export const validateFigPluginManifest = (
   return {
     ok: false,
     issues: result.error.issues.map((issue) => ({
-      path: issue.path,
+      path: issue.path.map((segment) => (typeof segment === 'symbol' ? '[symbol]' : segment)),
       message: issue.message,
       code: issue.code
     }))

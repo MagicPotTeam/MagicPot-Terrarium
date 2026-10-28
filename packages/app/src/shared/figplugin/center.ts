@@ -913,7 +913,7 @@ export const validateFigPluginCenterOperation = (
   return {
     ok: false,
     issues: result.error.issues.map((issue) => ({
-      path: issue.path,
+      path: issue.path.map((segment) => (typeof segment === 'symbol' ? '[symbol]' : segment)),
       message: issue.message,
       code: issue.code
     }))
@@ -929,7 +929,7 @@ export const validateFigPluginCenterResponse = (
   return {
     ok: false,
     issues: result.error.issues.map((issue) => ({
-      path: issue.path,
+      path: issue.path.map((segment) => (typeof segment === 'symbol' ? '[symbol]' : segment)),
       message: issue.message,
       code: issue.code
     }))

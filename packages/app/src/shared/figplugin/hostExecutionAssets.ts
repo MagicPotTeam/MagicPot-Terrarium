@@ -33,7 +33,7 @@ const purpose = z.literal('host-plan-execution')
 // execution purpose; the Bridge still owns claim/action/approval authorization.
 export const figPluginExecutionAssetSchema = z
   .object({
-    ...figPluginSessionAssetSchema.innerType().shape,
+    ...figPluginSessionAssetSchema.shape,
     kind: z.literal('execution-image-asset'),
     purpose
   })
@@ -109,7 +109,7 @@ export const figPluginExecutionAssetChunkSchema = z
     ...executionBinding,
     sessionId: id,
     assetId: id,
-    chunk: figPluginAssetChunkSchema.innerType().shape.chunk
+    chunk: figPluginAssetChunkSchema.shape.chunk
   })
   .strict()
   .superRefine((value, ctx) => {

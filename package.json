@@ -156,7 +156,7 @@
     "@hello-pangea/dnd": "^18.0.1",
     "@hono/node-server": "2.1.0",
     "@larksuiteoapi/node-sdk": "1.72.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@mui/icons-material": "^7.3.1",
     "@mui/lab": "^7.0.0-beta.16",
     "@mui/material": "^7.3.1",
@@ -182,11 +182,11 @@
     "express": "5.2.1",
     "express-rate-limit": "8.6.2",
     "gifenc": "^1.0.3",
-    "hono": "4.13.8",
+    "hono": "4.13.11",
     "i18next": "^25.5.3",
     "i18next-browser-languagedetector": "^8.2.0",
     "jose": "6.2.2",
-    "js-yaml": "5.2.3",
+    "js-yaml": "5.5.0",
     "json-schema-typed": "8.0.2",
     "jszip": "^3.10.1",
     "konva": "^9.3.22",
@@ -198,7 +198,7 @@
     "pkce-challenge": "5.0.1",
     "playwright": "^1.57.0",
     "proper-lockfile": "^4.1.2",
-    "puppeteer-core": "^25.6.0",
+    "puppeteer-core": "25.16.0",
     "raw-body": "3.0.2",
     "react-dnd": "^16.0.1",
     "react-dnd-html5-backend": "^16.0.1",
@@ -215,7 +215,7 @@
     "use-image": "^1.1.4",
     "ws": "^8.21.0",
     "yaml": "^2.8.4",
-    "zod": "3.25.76",
+    "zod": "4.6.7",
     "zod-to-json-schema": "3.25.2"
   },
   "devDependencies": {
@@ -234,7 +234,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "@vitest/coverage-v8": "^4.1.11",
     "cross-env": "^10.0.0",
-    "electron": "^41.10.3",
+    "electron": "42.11.16",
     "electron-builder": "^26.8.1",
     "electron-devtools-installer": "^4.0.0",
     "electron-vite": "^4.0.0",
@@ -270,7 +270,7 @@
       "js-yaml": "4.3.2"
     },
     "axios": {
-      ".": "1.19.0",
+      ".": "1.20.0",
       "form-data": "4.0.6"
     },
     "basic-ftp": "5.3.1",
@@ -282,7 +282,7 @@
       "ajv-formats": "3.0.1"
     },
     "cos-request": {
-      "qs": "6.16.0",
+      "qs": "6.16.1",
       "uuid": "11.1.1",
       "form-data": "2.5.6"
     },
@@ -298,21 +298,23 @@
     "eslint-plugin-react": {
       "es-iterator-helpers": "^1.2.1"
     },
-    "fast-uri": "3.1.6",
+    "fast-uri": "3.1.9",
     "fast-xml-parser": "5.7.3",
-    "follow-redirects": "1.16.0",
-    "hono": "4.13.8",
-    "ip-address": "10.4.0",
+    "follow-redirects": "1.16.1",
+    "hono": "4.13.11",
+    "ip-address": "10.7.4",
     "postcss": "8.5.26",
     "protobufjs": "7.6.5",
-    "qs": "6.16.0",
+    "qs": "6.16.1",
     "react-router": "7.18.2",
     "tencentcloud-sdk-nodejs-common": {
       "uuid": "11.1.1",
       "form-data": "3.0.5"
     },
     "nanoid": "3.3.18",
-    "body-parser": "2.3.0"
+    "body-parser": "2.4.0",
+    "proxy-addr": "2.0.8",
+    "undici": "7.30.1"
   },
   "prettier": "./config/prettier/prettier.config.cjs"
 }

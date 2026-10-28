@@ -1,15 +1,12 @@
-import { zodToJsonSchema } from 'zod-to-json-schema'
+import { z } from 'zod'
 import { hostPlanSchema } from '@shared/figplugin/hostPlan'
 
-// Generated from the same Zod object used by the response validator. This is a
-// model output contract, not an executable tool or a grant of host authority.
-// The installed converter declares zod/v3 while the application uses zod's
-// equivalent CJS declarations. Adapt only that vendor type identity; runtime
-// conversion and all response validation still use the exact hostPlanSchema.
-const modelSchemaSource = hostPlanSchema as unknown as Parameters<typeof zodToJsonSchema>[0]
-export const HOST_PLAN_JSON_SCHEMA = zodToJsonSchema(modelSchemaSource, {
-  $refStrategy: 'none',
-  target: 'jsonSchema7'
+// Generate the provider contract from the exact native Zod 4 schema used for
+// response validation. Unsupported conversion remains an error, never `{}`.
+export const HOST_PLAN_JSON_SCHEMA = z.toJSONSchema(hostPlanSchema, {
+  target: 'draft-7',
+  reused: 'inline',
+  cycles: 'throw'
 }) as Record<string, unknown>
 const modelSchemaText = JSON.stringify(HOST_PLAN_JSON_SCHEMA)
 /** Provider-native hint; the Bridge still validates and normalizes the result. */

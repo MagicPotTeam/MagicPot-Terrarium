@@ -148,7 +148,7 @@ export const figPluginExecutionAuditEventSchema = z
       .strict()
       .optional(),
     durationMs: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    errorCode: figPluginExecutionStatusSchema.innerType().shape.errorCode
+    errorCode: figPluginExecutionStatusSchema.shape.errorCode
   })
   .strict()
   .superRefine((value, ctx) => {

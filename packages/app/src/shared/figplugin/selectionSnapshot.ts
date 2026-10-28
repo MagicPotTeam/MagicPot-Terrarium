@@ -380,32 +380,14 @@ export const checkFigPluginSelectionSnapshot = (
   }
 }
 
-// Zod 3's ordinary safeParse probes input.then before a preprocess runs. This ingress
-// schema must copy via descriptors first, even for direct parse()/safeParseAsync() callers.
-class SelectionSnapshotSchema extends z.ZodType<FigPluginSelectionSnapshot, z.ZodTypeDef, unknown> {
-  safeParse(input: unknown): z.SafeParseReturnType<unknown, FigPluginSelectionSnapshot> {
+// Start from unknown without inspecting properties, then detach through own
+// data descriptors before any structural validation. This preserves the bounded
+// ingress for sync/async callers without relying on Zod's private parser API.
+export const figPluginSelectionSnapshotSchema = z
+  .unknown()
+  .transform((input, ctx): FigPluginSelectionSnapshot => {
     const result = checkFigPluginSelectionSnapshot(input)
-    return result.ok
-      ? { success: true, data: result.snapshot }
-      : {
-          success: false,
-          error: new z.ZodError([{ code: 'custom', path: [], message: result.error.code }])
-        }
-  }
-
-  async safeParseAsync(input: unknown) {
-    return this.safeParse(input)
-  }
-
-  _parse(input: z.ParseInput): z.ParseReturnType<FigPluginSelectionSnapshot> {
-    const result = this.safeParse(input.data)
-    if (result.success) return { status: 'valid', value: result.data }
-    input.parent.common.issues.push({
-      code: 'custom',
-      path: input.path,
-      message: 'INVALID_SNAPSHOT'
-    })
-    return z.INVALID
-  }
-}
-export const figPluginSelectionSnapshotSchema = new SelectionSnapshotSchema({})
+    if (result.ok) return result.snapshot
+    ctx.addIssue({ code: 'custom', message: result.error.code })
+    return z.NEVER
+  })

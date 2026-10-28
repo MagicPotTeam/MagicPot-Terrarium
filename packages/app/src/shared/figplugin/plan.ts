@@ -38,7 +38,11 @@ export const figPluginPlanSchema = z
               .max(120)
               .refine(
                 (value) =>
-                  value.trim().length > 0 && bytes(value) <= 256 && !hasUnsafeNameControl(value)
+                  // Host name budgets are UTF-16 units, not Unicode code points.
+                  value.length <= 120 &&
+                  value.trim().length > 0 &&
+                  bytes(value) <= 256 &&
+                  !hasUnsafeNameControl(value)
               )
           })
           .strict()
