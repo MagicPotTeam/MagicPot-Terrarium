@@ -87,10 +87,15 @@ class FakeIDBTransaction {
   oncomplete: (() => void) | null = null
   onerror: (() => void) | null = null
 
+  readonly completed: Promise<void>
+
   constructor(private readonly stores: StoreMap) {
-    setTimeout(() => {
-      if (!this.error) this.oncomplete?.()
-    }, 8)
+    this.completed = new Promise((resolve) => {
+      setTimeout(() => {
+        if (!this.error) this.oncomplete?.()
+        resolve()
+      }, 8)
+    })
   }
 
   objectStore(name: string): FakeIDBObjectStore {
@@ -106,7 +111,13 @@ class FakeIDBDatabase {
     contains: (name: string): boolean => this.state.stores.has(name)
   }
 
+  private readonly pendingTransactions = new Set<Promise<void>>()
+
   constructor(private readonly state: FakeIndexedDbState) {}
+
+  async waitForTransactions(): Promise<void> {
+    while (this.pendingTransactions.size) await Promise.all([...this.pendingTransactions])
+  }
 
   createObjectStore(name: string): FakeIDBObjectStore {
     if (!this.state.stores.has(name)) this.state.stores.set(name, new Map())
@@ -115,7 +126,10 @@ class FakeIDBDatabase {
 
   transaction(name: string, _mode: string): FakeIDBTransaction {
     if (!this.state.stores.has(name)) throw new Error(`Missing fake transaction store: ${name}`)
-    return new FakeIDBTransaction(this.state.stores)
+    const transaction = new FakeIDBTransaction(this.state.stores)
+    this.pendingTransactions.add(transaction.completed)
+    void transaction.completed.then(() => this.pendingTransactions.delete(transaction.completed))
+    return transaction
   }
 
   close(): void {
@@ -426,6 +440,24 @@ const waitForUiMessage = async (content: string): Promise<void> => {
   })
 }
 
+// These scenarios restore completed turns, not interrupted in-flight replies.
+// Observing the IPC call/user message is too early: the reply and its guarded
+// save may still be pending. Wait for both the actual reply and DB completion.
+const waitForPersistedReply = async (sessionId: string, content: string): Promise<void> => {
+  await waitForUiMessage(content)
+  await waitForPersistedSession(
+    PRIMARY_SCOPE,
+    (session) =>
+      session.id === sessionId &&
+      session.messages.some(
+        (message) => message.role === 'assistant' && message.content === content
+      )
+  )
+  await act(async () => {
+    await activeFakeDb?.state.database?.waitForTransactions()
+  })
+}
+
 const sendExternal = async (detail: Record<string, unknown>): Promise<void> => {
   await act(async () => {
     window.dispatchEvent(new CustomEvent('send-to-agent', { detail }))
@@ -494,6 +526,7 @@ afterEach(async () => {
   await act(async () => {
     cleanup()
   })
+  await activeFakeDb?.state.database?.waitForTransactions()
   activeFakeDb?.state.database?.close()
   activeFakeDb = undefined
   vi.unstubAllGlobals()
@@ -528,6 +561,7 @@ describe('ChatPage restored managed-agent thread persistence', () => {
     })
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(1))
     assertManagedProjection(requestPayload(0), sessionId)
+    await waitForPersistedReply(sessionId, 'managed-assistant-1')
     expect(fixture.materializeForRequest).toHaveBeenCalledTimes(1)
     expect(fixture.materializeForRequest).toHaveBeenNthCalledWith(1, {
       reference: managedReference,
@@ -555,6 +589,7 @@ describe('ChatPage restored managed-agent thread persistence', () => {
     await sendComposer('Text-only follow-up for the same canvas thread.')
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(2))
     assertManagedProjection(requestPayload(1), sessionId)
+    await waitForPersistedReply(sessionId, 'managed-assistant-2')
     expect(fixture.materializeForRequest).toHaveBeenCalledTimes(2)
     expect(fixture.materializeForRequest).toHaveBeenNthCalledWith(2, {
       reference: managedReference,
@@ -698,6 +733,7 @@ describe('ChatPage restored managed-agent thread persistence', () => {
     })
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(1))
     assertManagedProjection(requestPayload(0), sessionId)
+    await waitForPersistedReply(sessionId, 'managed-assistant-1')
     await waitForPersistedSession(
       PRIMARY_SCOPE,
       (session) =>
@@ -710,6 +746,7 @@ describe('ChatPage restored managed-agent thread persistence', () => {
     await sendComposer('Second message before restore failure.')
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(2))
     assertManagedProjection(requestPayload(1), sessionId)
+    await waitForPersistedReply(sessionId, 'managed-assistant-2')
     await waitForUiMessage('Second message before restore failure.')
 
     await act(async () => {

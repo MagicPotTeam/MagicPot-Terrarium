@@ -7,6 +7,7 @@ import PanelEnvironment from './PanelEnvironment'
 const translations: Record<string, string> = {
   'llm.proxy_mode_title': '魔壶代理模式',
   'llm.proxy_mode_desc': '魔壶代理模式说明',
+  'llm.llm_server_cors_origins_label': '浏览器允许来源（逗号分隔）',
   'environment.comfyui_title': 'ComfyUI',
   'environment.comfyui_desc': 'Unified ComfyUI endpoint',
   'environment.comfy_batch_profiles_title': 'ComfyUI Instances',
