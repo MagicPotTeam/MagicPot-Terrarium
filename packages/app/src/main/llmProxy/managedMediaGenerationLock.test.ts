@@ -84,6 +84,66 @@ describe('managed media generation recovery lock on real filesystem', () => {
     ])
   })
 
+  it('retries a changed owner snapshot without retiring a live owner or accepting partial data', async () => {
+    const identityRoot = await root()
+    const first = await acquireManagedMediaGenerationLock(identityRoot)
+    const ownerPath = path.join(first.path, `${first.owner.token}.json`)
+    const originalOpen = fs.open.bind(fs)
+    let injected = false
+    let waited = false
+    vi.spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args)
+      if (String(args[0]) === ownerPath && !injected) {
+        injected = true
+        const snapshot = await handle.stat()
+        // A concurrent unlink/rename changes inode metadata while an already
+        // opened descriptor remains readable. Simulate that deterministically
+        // on Windows too; no stale snapshot may authorize recovery.
+        const changed = Object.assign(Object.create(Object.getPrototypeOf(snapshot)), snapshot, {
+          ctimeMs: snapshot.ctimeMs + 1
+        })
+        vi.spyOn(handle, 'stat').mockResolvedValueOnce(snapshot).mockResolvedValueOnce(changed)
+      }
+      return handle
+    })
+    const second = await acquireManagedMediaGenerationLock(identityRoot, {
+      waitTimeoutMs: 2_000,
+      retryDelayMs: 1,
+      sleep: async () => {
+        waited = true
+        expect(injected).toBe(true)
+        expect(await fs.readdir(first.path)).toEqual([`${first.owner.token}.json`])
+        await first.release()
+      }
+    })
+    expect(waited).toBe(true)
+    expect(second.owner.token).not.toBe(first.owner.token)
+    await second.release()
+  })
+
+  it('retains the wait deadline when an owner record changes during a read', async () => {
+    const identityRoot = await root()
+    const first = await acquireManagedMediaGenerationLock(identityRoot)
+    const ownerPath = path.join(first.path, `${first.owner.token}.json`)
+    const originalOpen = fs.open.bind(fs)
+    vi.spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args)
+      if (String(args[0]) === ownerPath) {
+        const snapshot = await handle.stat()
+        const changed = Object.assign(Object.create(Object.getPrototypeOf(snapshot)), snapshot, {
+          ctimeMs: snapshot.ctimeMs + 1
+        })
+        vi.spyOn(handle, 'stat').mockResolvedValueOnce(snapshot).mockResolvedValueOnce(changed)
+      }
+      return handle
+    })
+    await expect(
+      acquireManagedMediaGenerationLock(identityRoot, { waitTimeoutMs: 0 })
+    ).rejects.toThrow(/Timed out/)
+    expect(await fs.readdir(first.path)).toEqual([`${first.owner.token}.json`])
+    await first.release()
+  })
+
   it('never replaces a live owner solely because its timestamp is old', async () => {
     const identityRoot = await root()
     const first = await acquireManagedMediaGenerationLock(identityRoot, {

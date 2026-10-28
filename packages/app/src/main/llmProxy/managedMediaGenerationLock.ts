@@ -144,6 +144,12 @@ async function readEntries(directory: string, maximum: number): Promise<string[]
   }
 }
 
+// A contender must discard an unstable snapshot, never interpret it as owner
+// authority. Concurrent release can change ctime on a still-open descriptor.
+// Recovery treats only this explicit race as contention and preserves its
+// monotonic wait deadline; malformed/unsafe records remain hard failures.
+class GenerationOwnerReadChangedError extends Error {}
+
 async function readRecord(directory: string, filename: string): Promise<string> {
   await validateDirectory(directory)
   const target = path.join(directory, filename)
@@ -159,12 +165,13 @@ async function readRecord(directory: string, filename: string): Promise<string> 
   try {
     const opened = await handle.stat()
     if (!sameIdentity(before, opened) || !opened.isFile() || opened.size !== before.size)
-      throw new Error('Generation owner record changed while opening')
+      throw new GenerationOwnerReadChangedError('Generation owner record changed while opening')
     const bytes = Buffer.alloc(opened.size)
     let offset = 0
     while (offset < bytes.length) {
       const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset)
-      if (!bytesRead) throw new Error('Generation owner record is truncated')
+      if (!bytesRead)
+        throw new GenerationOwnerReadChangedError('Generation owner record is truncated')
       offset += bytesRead
     }
     const after = await handle.stat()
@@ -173,7 +180,7 @@ async function readRecord(directory: string, filename: string): Promise<string> 
       opened.mtimeMs !== after.mtimeMs ||
       opened.ctimeMs !== after.ctimeMs
     )
-      throw new Error('Generation owner record changed while reading')
+      throw new GenerationOwnerReadChangedError('Generation owner record changed while reading')
     return bytes.toString('utf8')
   } finally {
     await handle.close()
@@ -293,7 +300,8 @@ async function recoverDeadLock(lockDirectory: string, policy: RecoveryPolicy): P
     const owner = await readOwner(lockDirectory, names[0])
     if (expiredDeadOwner(owner, policy)) await retireOwner(lockDirectory, owner.token)
   } catch (error) {
-    if (!hasCode(error, 'ENOENT')) throw error
+    if (!(error instanceof GenerationOwnerReadChangedError) && !hasCode(error, 'ENOENT'))
+      throw error
   }
 }
 
