@@ -97,10 +97,15 @@ class FakeIDBTransaction {
   oncomplete: (() => void) | null = null
   onerror: (() => void) | null = null
 
+  readonly completed: Promise<void>
+
   constructor(private readonly stores: StoreMap) {
-    setTimeout(() => {
-      if (!this.error) this.oncomplete?.()
-    }, 8)
+    this.completed = new Promise((resolve) => {
+      setTimeout(() => {
+        if (!this.error) this.oncomplete?.()
+        resolve()
+      }, 8)
+    })
   }
 
   objectStore(name: string): FakeIDBObjectStore {
@@ -116,7 +121,13 @@ class FakeIDBDatabase {
     contains: (name: string): boolean => this.state.stores.has(name)
   }
 
+  private readonly pendingTransactions = new Set<Promise<void>>()
+
   constructor(private readonly state: FakeIndexedDbState) {}
+
+  async waitForTransactions(): Promise<void> {
+    while (this.pendingTransactions.size) await Promise.all([...this.pendingTransactions])
+  }
 
   createObjectStore(name: string): FakeIDBObjectStore {
     if (!this.state.stores.has(name)) this.state.stores.set(name, new Map())
@@ -125,6 +136,8 @@ class FakeIDBDatabase {
 
   transaction(name: string, _mode: string): FakeIDBTransaction {
     const transaction = new FakeIDBTransaction(this.state.stores)
+    this.pendingTransactions.add(transaction.completed)
+    void transaction.completed.then(() => this.pendingTransactions.delete(transaction.completed))
     const originalObjectStore = transaction.objectStore.bind(transaction)
     transaction.objectStore = (storeName: string) => originalObjectStore(storeName)
     if (!this.state.stores.has(name)) throw new Error(`Missing fake transaction store: ${name}`)
@@ -180,6 +193,8 @@ const createFakeIndexedDb = () => {
     state
   }
 }
+
+let activeFakeIndexedDb: ReturnType<typeof createFakeIndexedDb> | undefined
 
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
@@ -378,6 +393,31 @@ const waitForPersistedSession = async (
   return found as ChatSession
 }
 
+// Remount only completed turns. Seeing an IPC invocation or user message is
+// not evidence that the asynchronous assistant reply and guarded save finished.
+const waitForPersistedReply = async (
+  scope: string,
+  sessionId: string,
+  content: string
+): Promise<void> => {
+  await waitFor(() =>
+    expect(readSessionFromUi()?.messages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: 'assistant', content })])
+    )
+  )
+  await waitForPersistedSession(
+    scope,
+    (session) =>
+      session.id === sessionId &&
+      session.messages.some(
+        (message) => message.role === 'assistant' && message.content === content
+      )
+  )
+  await act(async () => {
+    await activeFakeIndexedDb?.state.database?.waitForTransactions()
+  })
+}
+
 const allRequestMessages = (request: unknown): ChatMessage[] =>
   ((request as { messages?: ChatMessage[] }).messages || []) as ChatMessage[]
 
@@ -396,6 +436,7 @@ beforeEach(() => {
   }))
 
   const fakeIndexedDb = createFakeIndexedDb()
+  activeFakeIndexedDb = fakeIndexedDb
   vi.stubGlobal('indexedDB', fakeIndexedDb.api)
   vi.stubGlobal('crypto', globalThis.crypto)
 
@@ -419,8 +460,11 @@ beforeEach(() => {
   sessionStorage.clear()
 })
 
-afterEach(() => {
+afterEach(async () => {
   cleanup()
+  await activeFakeIndexedDb?.state.database?.waitForTransactions()
+  activeFakeIndexedDb?.state.database?.close()
+  activeFakeIndexedDb = undefined
   vi.unstubAllGlobals()
   document.body.innerHTML = ''
 })
@@ -461,6 +505,7 @@ describe('ChatPage restored agent thread persistence', () => {
       attachments: [firstAttachment]
     })
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(1))
+    await waitForPersistedReply(SCOPE, sessionId, 'assistant-1')
 
     const firstRequest = fixture.ipcChat.mock.calls[0][0]
     const firstRequestImage = imageAttachmentsInRequest(firstRequest)[0]
@@ -485,6 +530,7 @@ describe('ChatPage restored agent thread persistence', () => {
     })
     fireEvent.click(screen.getByTestId('restored-agent-composer-send'))
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(2))
+    await waitForPersistedReply(SCOPE, sessionId, 'assistant-2')
     await waitForPersistedSession(
       SCOPE,
       (session) =>
@@ -519,6 +565,7 @@ describe('ChatPage restored agent thread persistence', () => {
     })
     fireEvent.click(screen.getByTestId('restored-agent-composer-send'))
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(3))
+    await waitForPersistedReply(SCOPE, sessionId, 'assistant-3')
 
     const thirdRequest = fixture.ipcChat.mock.calls[2][0]
     const thirdRequestImages = imageAttachmentsInRequest(thirdRequest)
@@ -569,6 +616,7 @@ describe('ChatPage restored agent thread persistence', () => {
       text: 'Text-only question in another scope.'
     })
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(4))
+    await waitForPersistedReply(OTHER_SCOPE, otherSessionId, 'assistant-4')
 
     const otherRequest = fixture.ipcChat.mock.calls[3][0]
     expect(imageAttachmentsInRequest(otherRequest)).toEqual([])
