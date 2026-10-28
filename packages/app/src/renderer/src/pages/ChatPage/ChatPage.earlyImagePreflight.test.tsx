@@ -639,7 +639,24 @@ describe('video boundary discovery as the second image-limit boundary', () => {
     expect(fixture.discoverVideoFrames).toHaveBeenCalledTimes(1)
     expect(fixture.fetch).toHaveBeenCalledTimes(1)
     expect(fixture.saveImageToDir).toHaveBeenCalledTimes(1)
-    expect(fixture.batch).toHaveBeenCalled()
+    // Ordinary multimodal chat keeps all references in one request. Only
+    // explicitly per-attachment skills may probe and split attachment batches.
+    expect(fixture.batch).not.toHaveBeenCalled()
+    expect(fixture.request).toHaveBeenCalledTimes(1)
+    const sentUserMessage = fixture.request.mock.calls[0][0].messages.find(
+      (message: { role: string }) => message.role === 'user'
+    )
+    expect(sentUserMessage.attachments).toHaveLength(4)
+    expect(
+      sentUserMessage.attachments.filter(
+        (attachment: ChatAttachment) => attachment.type === 'image'
+      )
+    ).toHaveLength(3)
+    expect(
+      sentUserMessage.attachments.filter(
+        (attachment: ChatAttachment) => attachment.type === 'video'
+      )
+    ).toHaveLength(1)
     expect(fixture.readTextFile).not.toHaveBeenCalled()
     expect(fixture.notifyError).not.toHaveBeenCalled()
     expect(

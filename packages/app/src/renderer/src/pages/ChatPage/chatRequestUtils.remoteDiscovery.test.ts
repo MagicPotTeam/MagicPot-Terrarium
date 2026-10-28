@@ -5,6 +5,7 @@ import {
   type LLMAPIProfile,
   type LLMOpenAIApiMode
 } from '@shared/config/config'
+import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import type { ChatMessage } from '@shared/llm'
 import { resolveChatProfileCapabilities } from '@shared/llm'
 import { LLMProxySvcImpl } from '../../../../main/api/svcLLMProxyImpl'
@@ -112,11 +113,14 @@ const fixture = () => {
         }
       )
     })
-  const materializeForRequest = vi.fn(async () => ({
-    dataUrl: 'data:image/png;base64,aW1hZ2U=',
-    mimeType: 'image/png',
-    sizeBytes: 5
-  }))
+  const materializeForRequest = vi
+    .fn<ManagedMediaSvc['materializeForRequest']>()
+    .mockResolvedValue({
+      transport: 'request-data-url',
+      dataUrl: 'data:image/png;base64,aW1hZ2U=',
+      mimeType: 'image/png',
+      sizeBytes: 5
+    })
   vi.stubGlobal('fetch', fetchMock)
   window.api = {
     svcManagedMedia: { materializeForRequest },
@@ -226,6 +230,11 @@ describe('actual discovery record through renderer image request preparation', (
         })
       ).resolves.toBeDefined()
       expect(f.materializeForRequest).toHaveBeenCalledTimes(10)
+      expect(
+        f.materializeForRequest.mock.calls.every(
+          ([request]) => request.transport === 'request-data-url'
+        )
+      ).toBe(true)
       expect(f.fetchMock).toHaveBeenCalledTimes(1)
       const body = JSON.parse(String(f.fetchMock.mock.calls[0][1]?.body))
       expect(body).toMatchObject({

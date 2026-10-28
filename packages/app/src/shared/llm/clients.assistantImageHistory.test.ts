@@ -132,7 +132,23 @@ describe('provider projection of selected assistant image history', () => {
     for (const value of (body as FormData).values()) if (value instanceof Blob) files.push(value)
     expect(files).toHaveLength(2)
     const contents = await Promise.all(
-      files.map(async (file) => Buffer.from(await file.arrayBuffer()).toString('base64'))
+      files.map(async (file) => {
+        // Node's Blob supports arrayBuffer; jsdom's File uses FileReader.
+        // Inspect the actual multipart bytes in both environments.
+        const bytes =
+          typeof file.arrayBuffer === 'function'
+            ? await file.arrayBuffer()
+            : await new Promise<ArrayBuffer>((resolve, reject) => {
+                const reader = new FileReader()
+                reader.onerror = () => reject(reader.error)
+                reader.onload = () => {
+                  if (reader.result instanceof ArrayBuffer) resolve(reader.result)
+                  else reject(new Error('Expected binary multipart image contents'))
+                }
+                reader.readAsArrayBuffer(file)
+              })
+        return Buffer.from(bytes).toString('base64')
+      })
     )
     expect(contents).toEqual([userImage.split(',')[1], generatedImage.split(',')[1]])
     expect(input).toEqual(before)
