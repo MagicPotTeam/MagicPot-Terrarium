@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  AGENT_LOCAL_FILE_LIMITS,
   readLocalFileResponseSchema,
   agentLocalFilesSvcDef,
   type ReadLocalFileResponse
@@ -135,6 +136,13 @@ describe('local document public protocol', () => {
     expect(
       readLocalFileResponseSchema.safeParse({ ...value, document: undefined, truncated: true })
         .success
+    ).toBe(false)
+    expect(
+      readLocalFileResponseSchema.safeParse({
+        ...value,
+        sizeBytes: AGENT_LOCAL_FILE_LIMITS.fileBytes + 1,
+        document: undefined
+      }).success
     ).toBe(false)
   })
 })

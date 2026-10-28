@@ -85,6 +85,7 @@ describe('strict, safely logged public contract', () => {
     ])
     expect(LIMITS).toEqual({
       fileBytes: 1048576,
+      documentBytes: 8388608,
       returnedBytes: 65536,
       responseBytes: 262144,
       listEntries: 100,
@@ -227,6 +228,20 @@ describe('PDF bytes through the authorized single handle', () => {
     expect(validateServiceValue(response, agentLocalFilesSvcDef.read.response)).toEqual(response)
     expect(JSON.stringify(response)).not.toContain(selected)
     expect(JSON.stringify(response)).not.toContain(grant.id)
+  })
+
+  it('allows a document container above the plain-text cap while keeping extraction bounded', async () => {
+    const bytes = Buffer.alloc(LIMITS.fileBytes + 64, 0x20)
+    bytes.write('%PDF-1.7', 0, 'ascii')
+    const extract = vi.fn(async (request) => result(request.jobId))
+    grants = new LocalFileReadGrants({ extract, dispose: vi.fn() })
+    const grant = await fileGrant('large-container.pdf', bytes)
+
+    const response = await grants.read(sender, scope, params(grant.id))
+    expect(response.sizeBytes).toBe(bytes.byteLength)
+    expect(response.document?.format).toBe('pdf')
+    expect(extract).toHaveBeenCalledTimes(1)
+    expect(extract.mock.calls[0][0].bytes.byteLength).toBe(bytes.byteLength)
   })
 
   it('rechecks the open file after extraction and rejects content changed while utility was running', async () => {

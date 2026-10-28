@@ -8,6 +8,11 @@ export const CANVAS_READ_TOOL_NAMES = [
   'files.glob',
   'files.json.read'
 ] as const
+
+// The canvas Agent thread gets these read-only network tools by default. They
+// are intentionally separate from the file list so explicit file-skill
+// allowlists never inherit web access through this helper.
+export const CANVAS_WEB_TOOL_NAMES = ['web_search', 'web_fetch'] as const
 const safeId = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
 
@@ -63,7 +68,12 @@ export function withCanvasFileTools<T extends LLMChatReq>(
       .join('\n\n'),
     skillRuntime: {
       skillId: 'builtin.canvas-files',
-      bindings: [{ appId: 'magicpot.core', toolNames: [...CANVAS_READ_TOOL_NAMES] }]
+      bindings: [
+        {
+          appId: 'magicpot.core',
+          toolNames: [...CANVAS_READ_TOOL_NAMES, ...CANVAS_WEB_TOOL_NAMES]
+        }
+      ]
     }
   }
 }

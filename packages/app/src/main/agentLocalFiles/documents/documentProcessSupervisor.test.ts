@@ -12,6 +12,7 @@ import {
 import {
   checkDocumentTextResult,
   DOCUMENT_TEXT_PROTOCOL,
+  DOCUMENT_TEXT_LIMITS,
   type DocumentTextFormat,
   type DocumentTextResult
 } from './documentSchema'
@@ -153,7 +154,7 @@ describe('document process supervisor lifecycle', () => {
   it('returns LIMIT for oversized input and never starts a child', async () => {
     const start = vi.fn()
     const supervisor = createDocumentProcessSupervisor({ start })
-    const oversized = { ...request(), bytes: new Uint8Array(1024 * 1024 + 1) }
+    const oversized = { ...request(), bytes: new Uint8Array(DOCUMENT_TEXT_LIMITS.inputBytes + 1) }
     oversized.bytes[0] = 0x25
     oversized.bytes[1] = 0x50
     oversized.bytes[2] = 0x44
@@ -451,8 +452,8 @@ describe('document process supervisor lifecycle', () => {
     })
   })
 
-  it('runs the fixed Node22 fixture through injected transport and waits for ACK then exit', async () => {
-    expect(Number(process.versions.node.split('.')[0])).toBeGreaterThanOrEqual(22)
+  it('runs the fixed Node24 fixture through injected transport and waits for ACK then exit', async () => {
+    expect(Number(process.versions.node.split('.')[0])).toBe(24)
     const transport: DocumentProcessTransport & {
       child?: ChildProcess
       handlers?: DocumentProcessTransportEvents

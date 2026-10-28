@@ -215,7 +215,7 @@ describe('AgentLocalFilesPanel', () => {
     expect(preview.textContent).toBe(text.content)
     expect(preview.querySelector('script')).toBeNull()
     expect(screen.getByText(/UTF-8 text, PDF, DOCX, XLSX and PPTX, up to 64 KiB/)).toBeTruthy()
-    expect(screen.getByText(/Document input up to 1 MiB/)).toBeTruthy()
+    expect(screen.getByText(/Document input up to 8 MiB/)).toBeTruthy()
     expect(screen.getByText(/not layout or images/)).toBeTruthy()
     expect(screen.getByText('Read-only access', { exact: false })).toBeTruthy()
     expect(

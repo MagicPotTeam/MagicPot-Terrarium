@@ -3,7 +3,7 @@ import path from 'node:path'
 import { app, BrowserWindow, dialog, webContents } from 'electron'
 import type { LLMChatReq } from '@shared/api/svcLLMProxy'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
-import { AgentLocalFileError } from '@shared/api/svcAgentLocalFiles'
+import { AGENT_LOCAL_FILE_LIMITS, AgentLocalFileError } from '@shared/api/svcAgentLocalFiles'
 import { LocalFileReadGrants } from '../agentLocalFiles/readGrants'
 import { createDocumentUtilityExtractor } from '../agentLocalFiles/documents/documentUtilityProcess'
 import { authorizeMagicAgentApprovalRenderer } from '../magicAgentRuntime/trustedRouteBinding'
@@ -73,11 +73,19 @@ export function createCanvasPathReadHandler(
       throw new AgentLocalFileError('PATH_DENIED')
     // Display and authorize the same normalized local path; no pre-consent file access.
     filePath = path.resolve(filePath)
+    // The absolute-path bridge shares the grant reader's split policy: plain
+    // text remains at 1 MiB, while supported document containers may reach 8 MiB.
+    // Extension inspection is only used to choose a ceiling; the grant reader
+    // still verifies the actual file type before opening or extracting it.
+    const documentPath = /\.(?:pdf|docx|xlsx|pptx)$/i.test(filePath)
+    const byteCeiling = documentPath
+      ? AGENT_LOCAL_FILE_LIMITS.documentBytes
+      : AGENT_LOCAL_FILE_LIMITS.fileBytes
     const maxBytes = Math.max(
       1,
       Math.min(
-        1024 * 1024,
-        Math.floor(Number.isFinite(limits.maxBytes) ? limits.maxBytes! : 1024 * 1024)
+        byteCeiling,
+        Math.floor(Number.isFinite(limits.maxBytes) ? limits.maxBytes! : byteCeiling)
       )
     )
     const maxChars = Math.max(

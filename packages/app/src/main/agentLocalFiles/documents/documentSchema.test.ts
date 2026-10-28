@@ -30,7 +30,7 @@ describe('inert bytes-only document worker contracts', () => {
   it('keeps fixed policy and explicitly returns no path, grant or scope authority', () => {
     expect(Object.isFrozen(DOCUMENT_TEXT_LIMITS)).toBe(true)
     expect(DOCUMENT_TEXT_LIMITS).toMatchObject({
-      inputBytes: 1024 * 1024,
+      inputBytes: 8 * 1024 * 1024,
       envelopeBytes: 128 * 1024
     })
     const parsed = checkDocumentTextRequest(request())

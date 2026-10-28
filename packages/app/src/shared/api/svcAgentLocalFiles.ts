@@ -5,6 +5,10 @@ import { ServiceError, ServiceValidationError } from './apiUtils/serviceValidati
 
 export const AGENT_LOCAL_FILE_LIMITS = Object.freeze({
   fileBytes: 1024 * 1024,
+  // Office/PDF containers often exceed the plain-text cap because fonts and
+  // layout metadata are carried in the source archive. Extraction still
+  // returns only the bounded text/envelope below.
+  documentBytes: 8 * 1024 * 1024,
   returnedBytes: 64 * 1024,
   // Includes both content and bounded source-location metadata.
   responseBytes: 256 * 1024,
@@ -193,7 +197,11 @@ export const readLocalFileResponseSchema = z
     relativePath: boundedPath,
     content: z.string().max(AGENT_LOCAL_FILE_LIMITS.returnedBytes),
     encoding: z.literal('utf-8'),
-    sizeBytes: z.number().int().min(0).max(AGENT_LOCAL_FILE_LIMITS.fileBytes),
+    sizeBytes: z
+      .number()
+      .int()
+      .min(0)
+      .max(Math.max(AGENT_LOCAL_FILE_LIMITS.fileBytes, AGENT_LOCAL_FILE_LIMITS.documentBytes)),
     returnedBytes: z.number().int().min(0).max(AGENT_LOCAL_FILE_LIMITS.returnedBytes),
     truncated: z.boolean(),
     document: localDocumentSchema.optional()
@@ -205,7 +213,8 @@ export const readLocalFileResponseSchema = z
       return false
     // Plain text already has a strict decoded byte bound. JSON escaping can expand it
     // beyond the document envelope; preserve the existing valid 64-KiB text contract.
-    if (!value.document) return !value.truncated
+    if (!value.document)
+      return value.sizeBytes <= AGENT_LOCAL_FILE_LIMITS.fileBytes && !value.truncated
     if (utf8(JSON.stringify(value)) > AGENT_LOCAL_FILE_LIMITS.responseBytes) return false
     const { format, segments, warnings } = value.document
     if (!segments.every((segment) => wellFormedUnicode(segment.text))) return false

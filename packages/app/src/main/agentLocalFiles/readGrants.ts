@@ -243,13 +243,12 @@ export class LocalFileReadGrants {
     const scopeKey = this.owner(senderId, scope)
     const req = parseAgentLocalFileValue(readParamsSchema, params)
     const grant = this.get(senderId, scopeKey, req.grantId)
-    const maxBytes = Math.max(
-      1,
-      Math.min(
-        LIMITS.fileBytes,
-        Math.floor(Number.isFinite(limits.maxBytes) ? limits.maxBytes! : LIMITS.fileBytes)
-      )
-    )
+    const requestedMaxBytes =
+      limits.maxBytes === undefined
+        ? undefined
+        : Number.isFinite(limits.maxBytes)
+          ? Math.max(1, Math.floor(limits.maxBytes!))
+          : undefined
     return this.run(senderId, scopeKey, req.requestId, grant, async (op) => {
       const target = await this.target(grant, req.relativePath, op)
       if (!target.stat.isFile()) fail('PATH_DENIED')
@@ -258,6 +257,10 @@ export class LocalFileReadGrants {
         this.documents && ['pdf', 'docx', 'xlsx', 'pptx'].includes(extension)
           ? (extension as DocumentTextFormat)
           : undefined
+      const maxBytes = Math.min(
+        documentFormat ? LIMITS.documentBytes : LIMITS.fileBytes,
+        requestedMaxBytes ?? (documentFormat ? LIMITS.documentBytes : LIMITS.fileBytes)
+      )
       checkSize(target.stat, documentFormat !== undefined, maxBytes)
       if (!documentFormat && unsupportedExtension.test(target.path)) fail('UNSUPPORTED_FORMAT')
       if (binaryExtension.test(target.path)) fail('BINARY_FILE')

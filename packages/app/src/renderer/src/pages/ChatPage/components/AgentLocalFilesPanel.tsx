@@ -344,8 +344,9 @@ export function AgentLocalFilesPanel({
       <Typography variant="caption">
         {t('chat.local_files.text_only', {
           defaultValue:
-            'UTF-8 text, PDF, DOCX, XLSX and PPTX, up to {{limit}} KiB of extracted text. Document input up to 1 MiB. Only supported passive text is extracted, not layout or images. Reading only previews content; nothing is attached or uploaded.',
-          limit: AGENT_LOCAL_FILE_LIMITS.returnedBytes / 1024
+            'UTF-8 text, PDF, DOCX, XLSX and PPTX, up to {{limit}} KiB of extracted text. Document input up to {{documentLimit}} MiB. Only supported passive text is extracted, not layout or images. Reading only previews content; nothing is attached or uploaded.',
+          limit: AGENT_LOCAL_FILE_LIMITS.returnedBytes / 1024,
+          documentLimit: AGENT_LOCAL_FILE_LIMITS.documentBytes / 1024 / 1024
         })}
       </Typography>
       <Typography variant="caption">

@@ -180,7 +180,7 @@ describe('bytes-only ZIP/XML security core', () => {
 
   it('bounds entries and entry bytes, and has fixed policy limits', () => {
     expect(ZIP_XML_LIMITS).toMatchObject({
-      inputBytes: 1024 * 1024,
+      inputBytes: 8 * 1024 * 1024,
       entries: 256,
       entryBytes: 4 * 1024 * 1024,
       expandedBytes: 16 * 1024 * 1024

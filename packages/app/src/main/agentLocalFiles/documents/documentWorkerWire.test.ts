@@ -101,7 +101,7 @@ describe('document worker raw-string request wire', () => {
     expect(Array.from(parsed.request.bytes)).toEqual([0x25, 0x50, 0x44, 0x46, 0x2d, 0x33, 0x44])
   })
 
-  it('accepts an actual one MiB payload and enforces the exact decoded and frame budgets', () => {
+  it('accepts the maximum payload and enforces decoded and frame budgets', () => {
     const bytes = syntheticBytes('pdf', DOCUMENT_REQUEST_DECODED_BYTES)
     const frame = serializeDocumentTextRequest(request('pdf', bytes))
     expect(Buffer.byteLength(frame, 'utf8')).toBeLessThanOrEqual(DOCUMENT_REQUEST_FRAME_BYTES)
@@ -141,7 +141,7 @@ describe('document worker raw-string request wire', () => {
       })
       expectInvalid(parseDocumentTextRequestFrame(frame))
     }
-    expect(DOCUMENT_REQUEST_BASE64_CHARS).toBe(1_398_104)
+    expect(DOCUMENT_REQUEST_BASE64_CHARS).toBe(Math.ceil(DOCUMENT_REQUEST_DECODED_BYTES / 3) * 4)
   })
 
   it('rejects duplicate keys, whitespace, reordered keys, escaped keys, and trailing input', () => {

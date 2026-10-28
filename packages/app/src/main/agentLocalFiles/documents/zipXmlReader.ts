@@ -2,7 +2,7 @@ import { crc32, createInflateRaw } from 'node:zlib'
 import { TextDecoder, types } from 'node:util'
 import { SaxesParser, type SaxesAttributeNS, type SaxesTagNS, type XMLDecl } from 'saxes'
 
-const MAX_INPUT_BYTES = 1024 * 1024
+const MAX_INPUT_BYTES = 8 * 1024 * 1024
 const MAX_ENTRIES = 256
 const MAX_ENTRY_BYTES = 4 * 1024 * 1024
 const MAX_EXPANDED_BYTES = 16 * 1024 * 1024

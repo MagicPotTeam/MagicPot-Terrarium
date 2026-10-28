@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import type { LLMChatReq } from '@shared/api/svcLLMProxy'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
+import { AGENT_LOCAL_FILE_LIMITS } from '@shared/api/svcAgentLocalFiles'
 
 // Use the real filesystem for genuine temporary UTF-8 fixtures (setup otherwise maps fs to memfs).
 vi.unmock('node:fs')
@@ -154,7 +155,7 @@ function makeParent() {
 }
 
 let root = ''
-async function fixture(name: string, content = 'hello'): Promise<string> {
+async function fixture(name: string, content: string | Uint8Array = 'hello'): Promise<string> {
   const selected = path.join(root, name)
   await fs.mkdir(path.dirname(selected), { recursive: true })
   await fs.writeFile(selected, content)
@@ -430,6 +431,44 @@ describe('post-read delivery boundaries and fixed permission limits', () => {
     const read = createCanvasPathReadHandler(request(), invocation())!
     await expectCode(read(file, undefined, { maxBytes: 3 }), 'FILE_TOO_LARGE')
     expect(open).not.toHaveBeenCalled()
+  })
+
+  it('uses the larger document ceiling for an approved absolute PDF path', async () => {
+    const bytes = Buffer.alloc(AGENT_LOCAL_FILE_LIMITS.fileBytes + 64, 0x20)
+    bytes.write('%PDF-1.7', 0, 'ascii')
+    const file = await fixture('large-container.pdf', bytes)
+    const read = vi.spyOn(LocalFileReadGrants.prototype, 'read').mockResolvedValue({
+      name: path.basename(file),
+      relativePath: '',
+      content: 'extracted',
+      encoding: 'utf-8',
+      sizeBytes: bytes.length,
+      returnedBytes: Buffer.byteLength('extracted'),
+      truncated: false,
+      document: {
+        format: 'pdf',
+        sourceSha256: 'a'.repeat(64),
+        segments: [{ text: 'extracted', locator: { kind: 'pdf-item', page: 1, item: 0 } }],
+        warnings: []
+      }
+    })
+
+    await expect(handler()(file)).resolves.toHaveProperty('content')
+    expect(read.mock.calls[0][3]).toEqual({ maxBytes: AGENT_LOCAL_FILE_LIMITS.documentBytes })
+  })
+
+  it('keeps the plain-text ceiling and rejects documents above the document ceiling', async () => {
+    const text = await fixture(
+      'large.txt',
+      Buffer.alloc(AGENT_LOCAL_FILE_LIMITS.fileBytes + 1, 0x20)
+    )
+    await expectCode(handler()(text), 'FILE_TOO_LARGE')
+
+    const document = await fixture(
+      'too-large.pdf',
+      Buffer.alloc(AGENT_LOCAL_FILE_LIMITS.documentBytes + 1, 0x20)
+    )
+    await expectCode(handler()(document), 'FILE_TOO_LARGE')
   })
 
   it('enforces a smaller caller character bound without returning oversized content', async () => {

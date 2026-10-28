@@ -189,6 +189,36 @@ const assertReadableFileWithinLimit = async (fullPath: string, limit: number): P
   return stats.size
 }
 
+const readImageFileWithinByteBudget = (fullPath: string, maxBytes: number): Promise<Buffer> =>
+  runBoundedFsOp(async () => {
+    const handle = await fs.open(fullPath, 'r')
+    try {
+      const stats = await handle.stat()
+      if (!stats.isFile()) throw new Error(`Path is not a file: ${fullPath}`)
+      if (stats.size > maxBytes) {
+        throw new Error(`File exceeds the ${maxBytes}-byte full-file IPC limit`)
+      }
+
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1))
+      const chunks: Buffer[] = []
+      let totalBytes = 0
+      // One extra byte detects growth without reading an unbounded, changed file.
+      while (totalBytes <= maxBytes) {
+        const length = Math.min(chunk.byteLength, maxBytes + 1 - totalBytes)
+        const { bytesRead } = await handle.read(chunk, 0, length, totalBytes)
+        if (bytesRead === 0) break
+        totalBytes += bytesRead
+        if (totalBytes > maxBytes) {
+          throw new Error(`Image exceeds the ${maxBytes}-byte IPC limit`)
+        }
+        chunks.push(Buffer.from(chunk.subarray(0, bytesRead)))
+      }
+      return Buffer.concat(chunks, totalBytes)
+    } finally {
+      await handle.close()
+    }
+  })
+
 function normalizeExtension(value: string): string {
   const normalized = value.trim().toLowerCase()
   return normalized.startsWith('.') ? normalized : `.${normalized}`
@@ -355,12 +385,29 @@ export class FsSvcImpl implements FsSvc {
       throw new Error('Local image path is not authorized')
     }
 
+    if (
+      req.maxBytes !== undefined &&
+      (!Number.isSafeInteger(req.maxBytes) ||
+        req.maxBytes < 1 ||
+        req.maxBytes > MAX_FULL_FILE_BYTES)
+    ) {
+      throw new Error(`Invalid image maxBytes: expected 1-${MAX_FULL_FILE_BYTES}`)
+    }
+    const maxBytes = Math.min(MAX_FULL_FILE_BYTES, req.maxBytes ?? MAX_FULL_FILE_BYTES)
+
     if (!(await pathExists(fullPath))) {
       throw new Error(`File not found: ${fullPath}`)
     }
 
-    await assertReadableFileWithinLimit(fullPath, MAX_FULL_FILE_BYTES)
-    const buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
+    let buffer: Buffer
+    if (req.maxBytes !== undefined) {
+      buffer = await readImageFileWithinByteBudget(fullPath, maxBytes)
+    } else {
+      await assertReadableFileWithinLimit(fullPath, maxBytes)
+      buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
+    }
+    // A file may grow after stat; never return an oversized IPC payload.
+    requireBoundedPayload(buffer, maxBytes, 'Image')
     const filename = path.basename(fullPath)
 
     return {

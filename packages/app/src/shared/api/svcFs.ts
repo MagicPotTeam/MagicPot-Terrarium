@@ -64,6 +64,8 @@ export type SaveQAppInputImageResp = {
 
 export type ReadImageFromPathReq = {
   fullPath: string
+  /** Optional caller budget; cannot exceed the full-file IPC limit. */
+  maxBytes?: number
 }
 
 export type ReadImageFromPathResp = {
@@ -226,6 +228,26 @@ const validatePathReq =
     return { fullPath: requireNonEmptyString(req.fullPath, method, 'fullPath') } as T
   }
 
+const validateReadImageFromPathReq = (value: unknown): ReadImageFromPathReq => {
+  const method = 'readImageFromPath'
+  const req = requireRecord(value, method)
+  const fullPath = requireNonEmptyString(req.fullPath, method, 'fullPath')
+  if (req.maxBytes === undefined) return { fullPath }
+  if (
+    typeof req.maxBytes !== 'number' ||
+    !Number.isSafeInteger(req.maxBytes) ||
+    req.maxBytes < 1 ||
+    req.maxBytes > MAX_FULL_FILE_BYTES
+  ) {
+    return validationError(
+      method,
+      'maxBytes',
+      `Expected an integer between 1 and ${MAX_FULL_FILE_BYTES}`
+    )
+  }
+  return { fullPath, maxBytes: req.maxBytes }
+}
+
 const validateImageWriteReq =
   (method: string) =>
   (value: unknown): SaveImageToPathReq => {
@@ -310,7 +332,7 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
   },
   readImageFromPath: {
     type: 'unary',
-    request: validatePathReq<ReadImageFromPathReq>('readImageFromPath')
+    request: validateReadImageFromPathReq
   },
   readTextFile: {
     type: 'unary',

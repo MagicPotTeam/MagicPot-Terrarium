@@ -5,7 +5,11 @@ import {
   registerMagicAgentTrustedRouteBinding,
   clearMagicAgentTrustedRouteBindingsForTest
 } from '../magicAgentRuntime/trustedRouteBinding'
-import { CANVAS_READ_TOOL_NAMES, withCanvasFileTools } from './canvasFileTools'
+import {
+  CANVAS_READ_TOOL_NAMES,
+  CANVAS_WEB_TOOL_NAMES,
+  withCanvasFileTools
+} from './canvasFileTools'
 const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=project-a'
 const route = {
   channel: 'canvas',
@@ -41,7 +45,10 @@ describe('canvas file tools without a persistent file form', () => {
       const input = req()
       const before = JSON.stringify(input)
       const output = withCanvasFileTools(input, { ...invoke(), methodName })
-      expect(output.skillRuntime?.bindings?.[0]?.toolNames).toEqual([...CANVAS_READ_TOOL_NAMES])
+      expect(output.skillRuntime?.bindings?.[0]?.toolNames).toEqual([
+        ...CANVAS_READ_TOOL_NAMES,
+        ...CANVAS_WEB_TOOL_NAMES
+      ])
       expect(output.messages).toBe(input.messages)
       expect(JSON.stringify(input)).toBe(before)
       expect(output.systemPrompt).toContain('not file contents')
@@ -64,7 +71,10 @@ describe('canvas file tools without a persistent file form', () => {
       }
       const before = JSON.stringify(input)
       const output = withCanvasFileTools(input, { ...invoke(), methodName })
-      expect(output.skillRuntime?.bindings?.[0]?.toolNames).toEqual([...CANVAS_READ_TOOL_NAMES])
+      expect(output.skillRuntime?.bindings?.[0]?.toolNames).toEqual([
+        ...CANVAS_READ_TOOL_NAMES,
+        ...CANVAS_WEB_TOOL_NAMES
+      ])
       expect(output.imageGenerationOptions).toBe(input.imageGenerationOptions)
       expect(output.messages).toBe(input.messages)
       expect(JSON.stringify(input)).toBe(before)

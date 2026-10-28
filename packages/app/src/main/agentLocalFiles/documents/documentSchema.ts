@@ -7,7 +7,10 @@ export const DOCUMENT_TEXT_PROTOCOL = 'magicpot-document-text/v1' as const
 // Shared policy ceilings. This inert schema enforces only input/envelope/segments/locator
 // limits; ZIP/XML/PDF work budgets and deadline/heap enforcement belong to future components.
 export const DOCUMENT_TEXT_LIMITS = Object.freeze({
-  inputBytes: 1024 * 1024,
+  // Keep document ingress aligned with the document-aware local-file ceiling.
+  // This leaves room for ordinary PDFs with embedded fonts/images while the
+  // parser, result envelope and utility-process budgets remain bounded.
+  inputBytes: 8 * 1024 * 1024,
   // Bounded metadata budget, separate from the unchanged returned text limit.
   envelopeBytes: 128 * 1024,
   segments: 1024,

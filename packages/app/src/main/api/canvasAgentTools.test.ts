@@ -56,7 +56,9 @@ describe('main-owned canvas approval admission', () => {
         'files.write',
         'files.edit',
         'files.json.write',
-        'agent.terminal.run'
+        'agent.terminal.run',
+        'web_search',
+        'web_fetch'
       ])
     )
     expect(prepared.request.systemPrompt).toContain('fresh user approval')
