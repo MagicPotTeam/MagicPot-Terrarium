@@ -1,5 +1,13 @@
-import { describe, expect, it } from 'vitest'
-import { compatibleEmbeddedRequirements } from './embedded-requirements-compatibility.mjs'
+import { describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import {
+  compatibleEmbeddedRequirements,
+  createEmbeddedRequirementsInput
+} from './embedded-requirements-compatibility.mjs'
+
+vi.unmock('node:fs')
 
 describe('audited embedded requirements compatibility', () => {
   const name = 'comfyui_LLM_party/requirements_fixed.txt'
@@ -30,6 +38,32 @@ describe('audited embedded requirements compatibility', () => {
       expect(() =>
         compatibleEmbeddedRequirements(`accelerate==0.30.1\n${directive}\n`, name)
       ).toThrow('path or pip directives')
+    }
+  })
+
+  it('safely retries generation without overwriting earlier outputs or changing vendor bytes', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'magicpot-compat-retry-'))
+    try {
+      const file = path.join(root, 'vendor-requirements.txt')
+      const content = 'accelerate==0.30.1\r\nmoviepy==1.0.3\r\n'
+      fs.writeFileSync(file, content)
+      const first = createEmbeddedRequirementsInput(file, name, path.join(root, 'generated'))
+      fs.writeFileSync(first, 'interrupted or externally changed previous output')
+      const second = createEmbeddedRequirementsInput(file, name, path.join(root, 'generated'))
+      const third = createEmbeddedRequirementsInput(file, name, path.join(root, 'generated'))
+      expect(new Set([first, second, third]).size).toBe(3)
+      expect(fs.readFileSync(first, 'utf8')).toBe(
+        'interrupted or externally changed previous output'
+      )
+      expect(fs.readFileSync(second, 'utf8')).toBe('accelerate==1.15.0\nmoviepy==1.0.3\n')
+      expect(fs.readFileSync(file, 'utf8')).toBe(content)
+      fs.writeFileSync(file, 'accelerate==0.30.2\n')
+      expect(() =>
+        createEmbeddedRequirementsInput(file, name, path.join(root, 'generated'))
+      ).toThrow('compatibility pin changed')
+      expect(fs.readFileSync(second, 'utf8')).toBe('accelerate==1.15.0\nmoviepy==1.0.3\n')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
     }
   })
 

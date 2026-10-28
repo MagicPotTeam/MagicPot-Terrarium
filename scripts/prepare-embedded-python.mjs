@@ -10,7 +10,7 @@ import {
   embeddedTorchRequirements,
   installEmbeddedRequirements
 } from './install-embedded-requirements.mjs'
-import { compatibleEmbeddedRequirements } from './embedded-requirements-compatibility.mjs'
+import { createEmbeddedRequirementsInput } from './embedded-requirements-compatibility.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -335,12 +335,8 @@ function installRequirements(constraintsPath) {
   const compatibilityRoot = path.join(stagingRoot, 'runtime-requirements')
   const runtimeRequirementFiles = customRequirementFiles.map((file) => {
     const relative = path.relative(path.join(comfyDir, 'custom_nodes'), file)
-    const original = fs.readFileSync(file, 'utf8')
-    const compatible = compatibleEmbeddedRequirements(original, relative)
-    if (compatible === original) return file
-    const output = path.join(compatibilityRoot, relative)
-    fs.mkdirSync(path.dirname(output), { recursive: true })
-    fs.writeFileSync(output, compatible, { flag: 'wx' })
+    const output = createEmbeddedRequirementsInput(file, relative, compatibilityRoot)
+    if (output === file) return file
     console.log(
       `[prepare-embedded-python] Using audited Accelerate compatibility input for ${relative}; vendor file unchanged`
     )
