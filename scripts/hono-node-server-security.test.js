@@ -49,96 +49,102 @@ describe('Hono Node adapter production security', () => {
     expect(workflow).not.toContain('audit --omit=dev ||')
   })
 
-  it('separates PR refs from event and fixed release checkouts without skipping validation', () => {
-    const definition = parse(
-      fs.readFileSync(path.join(projectRoot, '.github/workflows/call-ci.yml'), 'utf8')
-    )
-    const steps = definition.jobs['test-lint-typecheck'].steps
-    const step = (name) => steps.find((entry) => entry.name === name)
-    expect(steps.some((entry) => entry.name === 'Resolve checkout ref')).toBe(false)
-    expect(step('Checkout event commit').with.ref).toBe('${{ github.sha }}')
-    expect(step('Checkout owned release candidate').with.ref).toBe('refs/heads/release/nightly')
-    expect(step('Setup Node.js').with).not.toHaveProperty('cache')
-    for (const checkout of steps.filter((entry) => entry.uses?.startsWith('actions/checkout@'))) {
-      expect(checkout.with['persist-credentials']).toBe(false)
-    }
-    const guard = step('Verify trusted checkout identity before executing repository code')
-    expect(steps.indexOf(guard)).toBeLessThan(steps.indexOf(step('Install dependencies')))
-    const head = '1234567890abcdef1234567890abcdef12345678'
-    let shell = 'bash'
-    if (process.platform === 'win32') {
-      const installedGit = spawnSync('git', ['--exec-path'], { encoding: 'utf8' })
-      expect(installedGit.status, installedGit.stderr).toBe(0)
-      let directory = installedGit.stdout.trim()
-      let found
-      while (path.dirname(directory) !== directory) {
-        found = [
-          path.join(directory, 'bin', 'bash.exe'),
-          path.join(directory, 'usr', 'bin', 'bash.exe')
-        ].find((candidate) => fs.existsSync(candidate))
-        if (found) break
-        directory = path.dirname(directory)
-      }
-      if (!found)
-        throw new Error('Installed Git for Windows must provide Bash for CI guard regression')
-      shell = found
-    }
-    const check = (overrides) => {
-      const result = spawnSync(
-        shell,
-        ['-c', 'git() { printf "%s\\n" "$TEST_CHECKOUT_SHA"; }\n' + guard.run],
-        {
-          cwd: projectRoot,
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            TEST_CHECKOUT_SHA: head,
-            GITHUB_REF: 'refs/heads/master',
-            GITHUB_EVENT_NAME: 'push',
-            GITHUB_SHA: head,
-            REQUESTED_REF: 'refs/heads/master',
-            RELEASE_CANDIDATE: 'false',
-            ...overrides
-          }
-        }
+  it.each(['tests', 'quality'])(
+    'separates PR refs from event and fixed release checkouts in %s without skipping validation',
+    (job) => {
+      const definition = parse(
+        fs.readFileSync(path.join(projectRoot, '.github/workflows/call-ci.yml'), 'utf8')
       )
-      if (result.error) throw result.error
-      return result
+      const steps = definition.jobs[job].steps
+      const step = (name) => steps.find((entry) => entry.name === name)
+      expect(steps.some((entry) => entry.name === 'Resolve checkout ref')).toBe(false)
+      expect(step('Checkout event commit').with.ref).toBe('${{ github.sha }}')
+      expect(step('Checkout owned release candidate').with.ref).toBe('refs/heads/release/nightly')
+      expect(step('Setup Node.js').with).not.toHaveProperty('cache')
+      for (const checkout of steps.filter((entry) => entry.uses?.startsWith('actions/checkout@'))) {
+        expect(checkout.with['persist-credentials']).toBe(false)
+      }
+      const guard = step('Verify trusted checkout identity before executing repository code')
+      expect(steps.indexOf(guard)).toBeLessThan(steps.indexOf(step('Install dependencies')))
+      const head = '1234567890abcdef1234567890abcdef12345678'
+      let shell = 'bash'
+      if (process.platform === 'win32') {
+        const installedGit = spawnSync('git', ['--exec-path'], { encoding: 'utf8' })
+        expect(installedGit.status, installedGit.stderr).toBe(0)
+        let directory = installedGit.stdout.trim()
+        let found
+        while (path.dirname(directory) !== directory) {
+          found = [
+            path.join(directory, 'bin', 'bash.exe'),
+            path.join(directory, 'usr', 'bin', 'bash.exe')
+          ].find((candidate) => fs.existsSync(candidate))
+          if (found) break
+          directory = path.dirname(directory)
+        }
+        if (!found)
+          throw new Error('Installed Git for Windows must provide Bash for CI guard regression')
+        shell = found
+      }
+      const check = (overrides) => {
+        const result = spawnSync(
+          shell,
+          ['-c', 'git() { printf "%s\\n" "$TEST_CHECKOUT_SHA"; }\n' + guard.run],
+          {
+            cwd: projectRoot,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              TEST_CHECKOUT_SHA: head,
+              GITHUB_REF: 'refs/heads/master',
+              GITHUB_EVENT_NAME: 'push',
+              GITHUB_SHA: head,
+              REQUESTED_REF: 'refs/heads/master',
+              RELEASE_CANDIDATE: 'false',
+              ...overrides
+            }
+          }
+        )
+        if (result.error) throw result.error
+        return result
+      }
+      expect(check({}).status).toBe(0)
+      expect(
+        check({
+          GITHUB_EVENT_NAME: 'pull_request',
+          GITHUB_REF: 'refs/pull/126/merge',
+          REQUESTED_REF: 'refs/pull/126/merge'
+        }).status
+      ).toBe(0)
+      expect(check({ REQUESTED_REF: 'refs/heads/unreviewed' }).status).not.toBe(0)
+      expect(
+        check({ RELEASE_CANDIDATE: 'true', GITHUB_EVENT_NAME: 'schedule', REQUESTED_REF: head })
+          .status
+      ).toBe(0)
+      expect(
+        check({
+          RELEASE_CANDIDATE: 'true',
+          GITHUB_EVENT_NAME: 'schedule',
+          REQUESTED_REF: '0'.repeat(40)
+        }).status
+      ).not.toBe(0)
+      expect(
+        check({
+          RELEASE_CANDIDATE: 'true',
+          GITHUB_EVENT_NAME: 'schedule',
+          REQUESTED_REF: head,
+          GITHUB_REF: 'refs/heads/unreviewed'
+        }).status
+      ).not.toBe(0)
+      const nightly = parse(
+        fs.readFileSync(
+          path.join(projectRoot, '.github/workflows/nightly-bump-version.yml'),
+          'utf8'
+        )
+      )
+      expect(nightly.jobs['candidate-ci'].with.release_candidate).toBe(true)
+      expect(nightly.jobs['candidate-ci'].with.ref).toBe('${{ needs.bump-version.outputs.ref }}')
     }
-    expect(check({}).status).toBe(0)
-    expect(
-      check({
-        GITHUB_EVENT_NAME: 'pull_request',
-        GITHUB_REF: 'refs/pull/126/merge',
-        REQUESTED_REF: 'refs/pull/126/merge'
-      }).status
-    ).toBe(0)
-    expect(check({ REQUESTED_REF: 'refs/heads/unreviewed' }).status).not.toBe(0)
-    expect(
-      check({ RELEASE_CANDIDATE: 'true', GITHUB_EVENT_NAME: 'schedule', REQUESTED_REF: head })
-        .status
-    ).toBe(0)
-    expect(
-      check({
-        RELEASE_CANDIDATE: 'true',
-        GITHUB_EVENT_NAME: 'schedule',
-        REQUESTED_REF: '0'.repeat(40)
-      }).status
-    ).not.toBe(0)
-    expect(
-      check({
-        RELEASE_CANDIDATE: 'true',
-        GITHUB_EVENT_NAME: 'schedule',
-        REQUESTED_REF: head,
-        GITHUB_REF: 'refs/heads/unreviewed'
-      }).status
-    ).not.toBe(0)
-    const nightly = parse(
-      fs.readFileSync(path.join(projectRoot, '.github/workflows/nightly-bump-version.yml'), 'utf8')
-    )
-    expect(nightly.jobs['candidate-ci'].with.release_candidate).toBe(true)
-    expect(nightly.jobs['candidate-ci'].with.ref).toBe('${{ needs.bump-version.outputs.ref }}')
-  })
+  )
 
   it('keeps both package-manager locks on the same patched adapter integrity', () => {
     const npmLock = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package-lock.json'), 'utf8'))

@@ -2846,14 +2846,24 @@ describe('ChatPage runtime workflow integration', () => {
   })
 
   it('preserves an unsendable draft when local validation rejects a normal send', async () => {
-    renderChatPage()
+    // Finish async session initialization and the composer's inputSyncKey effect
+    // before editing. A visible session alone does not flush pending effects.
+    await act(async () => {
+      renderChatPage()
+    })
     await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const sessionId = readCurrentSessionState()!.id
     const input = screen.getByTestId('chat-composer-input-mock')
     fireEvent.change(input, { target: { value: '   ' } })
-    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    expect(input).toHaveValue('   ')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    })
     expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
     expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
     expect(input).toHaveValue('   ')
+    expect(readCurrentSessionState()?.id).toBe(sessionId)
+    expect(readCurrentSessionState()?.messages).toEqual([])
   })
 
   it('clears stale persisted loading placeholders after restart', async () => {
