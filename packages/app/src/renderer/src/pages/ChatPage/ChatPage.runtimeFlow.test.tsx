@@ -1869,6 +1869,68 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
+  it('reports real tool activity while the model answer remains pending', async () => {
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let pendingInput: { onEvent: (event: unknown) => void } | undefined
+    let settle!: (value: unknown) => void
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pendingInput = input
+      return new Promise((resolve) => {
+        settle = resolve
+      })
+    })
+    let view!: ReturnType<typeof renderChatPage>
+    await act(async () => {
+      view = renderChatPage()
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'search for documentation' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(pendingInput).toBeDefined())
+    const loading = () =>
+      (
+        hoisted.chatMessageListMock.mock.calls.at(-1)?.[0] as {
+          loadingStatus?: { label: string; detail?: string; step?: number }
+        }
+      )?.loadingStatus
+    try {
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'owned-search-run',
+            toolCallId: 'owned-search-call',
+            toolName: 'web_search',
+            status: 'running'
+          }
+        })
+      })
+      await waitFor(() => expect(loading()?.detail).toBe('web_search'))
+      const runningLabel = loading()?.label
+      expect(runningLabel).toBeTruthy()
+      expect(loading()?.step).toBeUndefined()
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'owned-search-run',
+            toolCallId: 'owned-search-call',
+            toolName: 'web_search',
+            status: 'completed'
+          }
+        })
+      })
+      await waitFor(() => expect(loading()?.label).not.toBe(runningLabel))
+      expect(loading()?.detail).toBe('web_search')
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('')
+    } finally {
+      await act(async () => settle({ result: { content: 'finished' }, response: 'finished' }))
+      view.unmount()
+    }
+  })
+
   it('persists completed tool evidence before the pending model answer or cancellation', async () => {
     const checkpoint: NonNullable<ChatMessage['toolHistory']> = [
       {

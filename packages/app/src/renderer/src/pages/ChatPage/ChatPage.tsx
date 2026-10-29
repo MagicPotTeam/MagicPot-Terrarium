@@ -1,4 +1,5 @@
 import { mergeToolCheckpoint } from './chatToolCheckpoint'
+import { getChatToolLoadingStatus } from './chatToolLoadingStatus'
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
@@ -6180,6 +6181,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   () => undefined
                 )
               }
+              // Keep the visible status tied to actual tool events, not model prose.
+              hasMarkedStreamingOutput = false
+              setSessionLoadingStatus(
+                targetSessionId,
+                getChatToolLoadingStatus(event.toolStatus, t)
+              )
               const status = event.toolStatus.status
               lifecycleEvent(
                 status === 'running'
