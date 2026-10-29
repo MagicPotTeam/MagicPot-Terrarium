@@ -65,22 +65,46 @@ describe('Hono Node adapter production security', () => {
     const guard = step('Verify trusted checkout identity before executing repository code')
     expect(steps.indexOf(guard)).toBeLessThan(steps.indexOf(step('Install dependencies')))
     const head = '1234567890abcdef1234567890abcdef12345678'
-    const shell = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash'
-    const check = (overrides) =>
-      spawnSync(shell, ['-c', 'git() { printf "%s\\n" "$TEST_CHECKOUT_SHA"; }\n' + guard.run], {
-        cwd: projectRoot,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          TEST_CHECKOUT_SHA: head,
-          GITHUB_REF: 'refs/heads/master',
-          GITHUB_EVENT_NAME: 'push',
-          GITHUB_SHA: head,
-          REQUESTED_REF: 'refs/heads/master',
-          RELEASE_CANDIDATE: 'false',
-          ...overrides
+    let shell = 'bash'
+    if (process.platform === 'win32') {
+      const installedGit = spawnSync('git', ['--exec-path'], { encoding: 'utf8' })
+      expect(installedGit.status, installedGit.stderr).toBe(0)
+      let directory = installedGit.stdout.trim()
+      let found
+      while (path.dirname(directory) !== directory) {
+        found = [
+          path.join(directory, 'bin', 'bash.exe'),
+          path.join(directory, 'usr', 'bin', 'bash.exe')
+        ].find((candidate) => fs.existsSync(candidate))
+        if (found) break
+        directory = path.dirname(directory)
+      }
+      if (!found)
+        throw new Error('Installed Git for Windows must provide Bash for CI guard regression')
+      shell = found
+    }
+    const check = (overrides) => {
+      const result = spawnSync(
+        shell,
+        ['-c', 'git() { printf "%s\\n" "$TEST_CHECKOUT_SHA"; }\n' + guard.run],
+        {
+          cwd: projectRoot,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            TEST_CHECKOUT_SHA: head,
+            GITHUB_REF: 'refs/heads/master',
+            GITHUB_EVENT_NAME: 'push',
+            GITHUB_SHA: head,
+            REQUESTED_REF: 'refs/heads/master',
+            RELEASE_CANDIDATE: 'false',
+            ...overrides
+          }
         }
-      })
+      )
+      if (result.error) throw result.error
+      return result
+    }
     expect(check({}).status).toBe(0)
     expect(
       check({
