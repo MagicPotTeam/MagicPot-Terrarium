@@ -20,7 +20,80 @@ permissions:
   contents: read
 
 jobs:
-  test-lint-typecheck:
+  tests:
+    name: Tests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Collect every result; the stable gate below rejects any non-success.
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        include:
+          - group: node
+            command: npm run test:node
+          - group: web-heavy-1
+            command: npm run test:web:heavy:qapp-design && npm run test:web:heavy:custom-skill-manager && npm run test:web:heavy:panel-plugin
+          - group: web-heavy-2
+            command: npm run test:web:heavy:panel-llm && npm run test:web:heavy:chat-agent-skill && npm run test:web:heavy:image-edit-panel
+          - group: web-heavy-3
+            command: npm run test:web:heavy:image-viewer && npm run test:web:heavy:side-panel && npm run test:web:heavy:qapp-context
+          - group: web-light-1
+            command: npm run test:web:light:1
+          - group: web-light-2
+            command: npm run test:web:light:2
+          - group: web-light-3
+            command: npm run test:web:light:3
+    steps:
+      # Immutable event checkout survives a disappearing PR merge ref without
+      # executing caller-selected code in a default-branch cache context.
+      - name: Checkout event commit
+        if: ${{ !inputs.release_candidate }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Checkout owned release candidate
+        if: github.event_name != 'pull_request' && inputs.release_candidate
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/release/nightly
+          persist-credentials: false
+
+      - name: Verify trusted checkout identity before executing repository code
+        shell: bash
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          RELEASE_CANDIDATE: ${{ inputs.release_candidate }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [[ "$RELEASE_CANDIDATE" == 'true' ]]; then
+            [[ "$GITHUB_REF" == 'refs/heads/master' ]]
+            [[ "$GITHUB_EVENT_NAME" == 'schedule' || "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]
+            [[ "$REQUESTED_REF" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$actual" == "$REQUESTED_REF" ]]
+          else
+            [[ "$REQUESTED_REF" == "$GITHUB_REF" || "$REQUESTED_REF" == "$GITHUB_SHA" ]]
+            [[ "$actual" == "$GITHUB_SHA" ]]
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Test
+        run: ${{ matrix.command }}
+
+  quality:
+    name: Lint, types and security
     runs-on: ubuntu-latest
     steps:
       # Immutable event checkout survives a disappearing PR merge ref without
@@ -71,9 +144,6 @@ jobs:
       - name: FIGPLUGIN host preparation regressions
         run: node --test scripts/prepare-figplugin-host.test.mjs
 
-      - name: Test
-        run: npm run test
-
       - name: Lint
         run: npm run lint
 
@@ -85,3 +155,20 @@ jobs:
 
       - name: QA security posture
         run: npm run qa:security-posture
+
+  # Preserve the existing required-check name. A skipped/failed matrix must
+  # never turn into a successful skipped required check.
+  test-lint-typecheck:
+    if: ${{ always() }}
+    needs: [tests, quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all test groups and quality checks
+        shell: bash
+        env:
+          TESTS_RESULT: ${{ needs.tests.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+        run: |
+          set -euo pipefail
+          echo "Tests: $TESTS_RESULT; quality: $QUALITY_RESULT"
+          [[ "$TESTS_RESULT" == 'success' && "$QUALITY_RESULT" == 'success' ]]

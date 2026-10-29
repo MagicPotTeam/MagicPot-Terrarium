@@ -8,6 +8,11 @@ on:
 
 permissions: {}
 
+# New commits supersede only this PR's checks, never a release or manual run.
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     permissions:
