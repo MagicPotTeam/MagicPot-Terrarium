@@ -90,8 +90,9 @@ jobs:
           $env:PACKAGE_MODE = 'embedded'
           Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
           Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+          # Use the same entrypoint as local releases so bridge/worker assets are built.
           Invoke-NativeLogged 'electron-builder' {
-            npx electron-builder --config config/electron/electron-builder.config.js --win --x64 --publish never
+            npm run package:win -- --publish never
           }
 
           $portableRoot = Join-Path $PWD 'dist\embedded\win-unpacked\ComfyUI_windows_portable'
