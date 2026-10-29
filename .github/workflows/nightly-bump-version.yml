@@ -196,6 +196,7 @@ jobs:
     uses: ./.github/workflows/call-ci.yml
     with:
       ref: ${{ needs.bump-version.outputs.ref }}
+      release_candidate: true
 
   candidate-build:
     needs: bump-version

@@ -1,6 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { spawnSync } from 'node:child_process'
+import { parse } from 'yaml'
 import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
 import { serveStatic } from '@hono/node-server/serve-static'
@@ -45,6 +47,85 @@ describe('Hono Node adapter production security', () => {
     expect(audit).toBeLessThan(workflow.indexOf('      - name: Test\n'))
     expect(workflow).not.toContain('continue-on-error: true')
     expect(workflow).not.toContain('audit --omit=dev ||')
+  })
+
+  it('separates PR refs from event and fixed release checkouts without skipping validation', () => {
+    const definition = parse(
+      fs.readFileSync(path.join(projectRoot, '.github/workflows/call-ci.yml'), 'utf8')
+    )
+    const steps = definition.jobs['test-lint-typecheck'].steps
+    const step = (name) => steps.find((entry) => entry.name === name)
+    expect(step('Checkout pull request code').if).toBe("github.event_name == 'pull_request'")
+    expect(step('Resolve checkout ref').if).toBe("github.event_name == 'pull_request'")
+    expect(step('Checkout event commit').with).not.toHaveProperty('ref')
+    expect(step('Checkout owned release candidate').with.ref).toBe('refs/heads/release/nightly')
+    expect(step('Setup Node.js').with).not.toHaveProperty('cache')
+    for (const checkout of steps.filter((entry) => entry.uses?.startsWith('actions/checkout@'))) {
+      expect(checkout.with['persist-credentials']).toBe(false)
+    }
+    const guard = step('Verify trusted checkout identity before executing repository code')
+    expect(steps.indexOf(guard)).toBeLessThan(steps.indexOf(step('Install dependencies')))
+    const head = '1234567890abcdef1234567890abcdef12345678'
+    const shell = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash'
+    const check = (overrides) =>
+      spawnSync(shell, ['-c', 'git() { printf "%s\\n" "$TEST_CHECKOUT_SHA"; }\n' + guard.run], {
+        cwd: projectRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          TEST_CHECKOUT_SHA: head,
+          GITHUB_REF: 'refs/heads/master',
+          GITHUB_EVENT_NAME: 'push',
+          GITHUB_SHA: head,
+          REQUESTED_REF: 'refs/heads/master',
+          RELEASE_CANDIDATE: 'false',
+          ...overrides
+        }
+      })
+    expect(check({}).status).toBe(0)
+    expect(check({ REQUESTED_REF: 'refs/heads/unreviewed' }).status).not.toBe(0)
+    expect(
+      check({ RELEASE_CANDIDATE: 'true', GITHUB_EVENT_NAME: 'schedule', REQUESTED_REF: head })
+        .status
+    ).toBe(0)
+    expect(
+      check({
+        RELEASE_CANDIDATE: 'true',
+        GITHUB_EVENT_NAME: 'schedule',
+        REQUESTED_REF: '0'.repeat(40)
+      }).status
+    ).not.toBe(0)
+    expect(
+      check({
+        RELEASE_CANDIDATE: 'true',
+        GITHUB_EVENT_NAME: 'schedule',
+        REQUESTED_REF: head,
+        GITHUB_REF: 'refs/heads/unreviewed'
+      }).status
+    ).not.toBe(0)
+    const nightly = parse(
+      fs.readFileSync(path.join(projectRoot, '.github/workflows/nightly-bump-version.yml'), 'utf8')
+    )
+    expect(nightly.jobs['candidate-ci'].with.release_candidate).toBe(true)
+    expect(nightly.jobs['candidate-ci'].with.ref).toBe('${{ needs.bump-version.outputs.ref }}')
+  })
+
+  it('keeps both package-manager locks on the same patched adapter integrity', () => {
+    const npmLock = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package-lock.json'), 'utf8'))
+    const pnpm = parse(fs.readFileSync(path.join(projectRoot, 'pnpm-lock.yaml'), 'utf8'))
+    expect(pnpm.importers['.'].dependencies['@hono/node-server']).toEqual({
+      specifier: '2.1.5',
+      version: '2.1.5(hono@4.13.11)'
+    })
+    expect(pnpm.packages['@hono/node-server@2.1.5'].resolution.integrity).toBe(
+      npmLock.packages['node_modules/@hono/node-server'].integrity
+    )
+    expect(
+      pnpm.snapshots['@modelcontextprotocol/sdk@1.32.2(zod@4.6.7)'].dependencies[
+        '@hono/node-server'
+      ]
+    ).toBe('2.1.5(hono@4.13.11)')
+    expect(pnpm.packages).not.toHaveProperty('@hono/node-server@2.1.0')
   })
 
   it('pins the patched adapter in the manifest, lock and actual MCP resolution', () => {

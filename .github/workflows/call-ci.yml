@@ -7,6 +7,10 @@ on:
         description: The ref to CI
         type: string
         default: 'refs/heads/master'
+      release_candidate:
+        description: Test the repository-owned release/nightly branch at the exact ref SHA
+        type: boolean
+        default: false
       fallback_ref:
         description: Fallback ref when the primary ref is unavailable
         type: string
@@ -19,12 +23,19 @@ jobs:
   test-lint-typecheck:
     runs-on: ubuntu-latest
     steps:
+      # Only pull_request contexts may check out an arbitrary PR ref. Default-branch
+      # dispatch/schedule contexts use the event commit or a fixed owned release branch.
       - name: Resolve checkout ref
+        if: github.event_name == 'pull_request'
         id: resolve-ref
         shell: bash
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          FALLBACK_REF: ${{ inputs.fallback_ref }}
         run: |
-          ref="${{ inputs.ref }}"
-          fallback_ref="${{ inputs.fallback_ref }}"
+          set -euo pipefail
+          ref="$REQUESTED_REF"
+          fallback_ref="$FALLBACK_REF"
           resolved_ref="$ref"
 
           if [[ -n "$fallback_ref" && "$ref" =~ ^refs/pull/[0-9]+/merge$ ]]; then
@@ -37,17 +48,49 @@ jobs:
 
           echo "ref=$resolved_ref" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout code
+      - name: Checkout pull request code
+        if: github.event_name == 'pull_request'
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.resolve-ref.outputs.ref }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout event commit
+        if: github.event_name != 'pull_request' && !inputs.release_candidate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout owned release candidate
+        if: github.event_name != 'pull_request' && inputs.release_candidate
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/release/nightly
+          persist-credentials: false
+
+      - name: Verify trusted checkout identity before executing repository code
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          RELEASE_CANDIDATE: ${{ inputs.release_candidate }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [[ "$RELEASE_CANDIDATE" == 'true' ]]; then
+            [[ "$GITHUB_REF" == 'refs/heads/master' ]]
+            [[ "$GITHUB_EVENT_NAME" == 'schedule' || "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]
+            [[ "$REQUESTED_REF" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$actual" == "$REQUESTED_REF" ]]
+          else
+            [[ "$REQUESTED_REF" == "$GITHUB_REF" || "$REQUESTED_REF" == "$GITHUB_SHA" ]]
+            [[ "$actual" == "$GITHUB_SHA" ]]
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version-file: '.node-version'
-          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit
