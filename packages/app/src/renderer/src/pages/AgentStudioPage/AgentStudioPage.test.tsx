@@ -16,6 +16,7 @@ const platformApi = vi.hoisted(() => ({
   listPackages: vi.fn(),
   listGraphRuns: vi.fn(),
   inspectGraph: vi.fn(),
+  preflightGraphRun: vi.fn(),
   getGraphV2: vi.fn(),
   listPublishedGraphsV2: vi.fn(),
   listGraphV2NodeRegistry: vi.fn(),
@@ -173,6 +174,7 @@ const seedEnabled = () => {
   })
   platformApi.listGraphRuns.mockResolvedValue({ runs: [makeRun()] })
   platformApi.inspectGraph.mockResolvedValue({ graph: makeGraphDetail() })
+  platformApi.preflightGraphRun.mockResolvedValue({ preflight: { safeToRun: false, issues: [] } })
   platformApi.getGraphV2.mockResolvedValue({})
   platformApi.listPublishedGraphsV2.mockResolvedValue({ definitionsV2: [] })
   platformApi.listGraphV2NodeRegistry.mockResolvedValue({ descriptors: [] })
@@ -935,6 +937,7 @@ describe('AgentStudioPage Graph Run Center', () => {
       expect(platformApi.runGraph).toHaveBeenCalledWith(
         expect.objectContaining({
           graphId: 'graph-alpha',
+          allowedToolNames: [],
           nodeExecution: {
             mode: 'single-node',
             nodeId: 'writer',
@@ -949,6 +952,7 @@ describe('AgentStudioPage Graph Run Center', () => {
     await waitFor(() =>
       expect(platformApi.runGraph).toHaveBeenCalledWith(
         expect.objectContaining({
+          allowedToolNames: [],
           nodeExecution: { mode: 'run-from-node', nodeId: 'writer', priorRunId: 'node-run' }
         })
       )
@@ -1025,6 +1029,164 @@ describe('AgentStudioPage Graph Run Center', () => {
           allowedToolNames: ['pitch.create']
         })
       )
+    })
+  })
+
+  it('preflights the same explicit empty permission selection used by execution', async () => {
+    const detail = makeGraphDetail()
+    platformApi.getGraphV2.mockResolvedValue({
+      definitionV2: {
+        kind: 'magic-agent.graph-definition.v2-draft',
+        graphMode: 'design',
+        schemaVersion: '2.0.0',
+        graphId: detail.graphId,
+        name: detail.name,
+        description: detail.description,
+        version: detail.version,
+        tags: [],
+        nodes: [],
+        edges: [],
+        variables: [],
+        outputs: [],
+        entryNodeIds: [],
+        metadata: {},
+        legacySnapshot: detail
+      }
+    })
+    platformApi.listTools.mockResolvedValue({ tools: [] })
+    platformApi.listGraphRuns.mockResolvedValue({ runs: [] })
+    renderPage()
+    const preflight = await screen.findByRole('button', { name: 'Preflight' })
+    fireEvent.click(preflight)
+    await waitFor(() =>
+      expect(platformApi.preflightGraphRun).toHaveBeenCalledWith({
+        graphId: 'graph-alpha',
+        route: ROUTE,
+        allowedToolNames: []
+      })
+    )
+    expect(platformApi.runGraph).not.toHaveBeenCalled()
+  })
+
+  it('sends an explicit empty allowlist for an agent graph with no available tools', async () => {
+    platformApi.listTools.mockResolvedValue({ tools: [] })
+    platformApi.listGraphRuns.mockResolvedValue({ runs: [] })
+    renderPage()
+    await waitFor(() => expect(platformApi.inspectGraph).toHaveBeenCalled())
+    const runButton = screen.getByRole('button', { name: 'Run Graph' })
+    await waitFor(() => expect(runButton).toBeEnabled())
+    fireEvent.click(runButton)
+    await waitFor(() => expect(platformApi.runGraph).toHaveBeenCalled())
+    expect(platformApi.runGraph.mock.calls[0][0]).toMatchObject({
+      allowedToolNames: [],
+      metadata: { permissionSnapshot: { allowedToolNames: [] } }
+    })
+  })
+
+  it('does not restore default tools when every optional catalog tool is unchecked', async () => {
+    platformApi.listGraphs.mockResolvedValue({
+      graphs: [{ ...graphs[0], metadata: { allowedToolNames: ['pitch.create'] } }]
+    })
+    platformApi.listGraphRuns.mockResolvedValue({ runs: [] })
+    renderPage()
+    const checkbox = await screen.findByRole('checkbox', { name: 'pitch.create' })
+    await waitFor(() => expect(checkbox).toBeChecked())
+    fireEvent.click(checkbox)
+    expect(checkbox).not.toBeChecked()
+    const runButton = screen.getByRole('button', { name: 'Run Graph' })
+    await waitFor(() => expect(runButton).toBeEnabled())
+    fireEvent.click(runButton)
+    await waitFor(() => expect(platformApi.runGraph).toHaveBeenCalled())
+    expect(platformApi.runGraph.mock.calls[0][0]).toMatchObject({ allowedToolNames: [] })
+  })
+
+  it('keeps Disable all tools across inventory refresh until suggestions are explicitly restored', async () => {
+    platformApi.listGraphs.mockResolvedValue({
+      graphs: [{ ...graphs[0], metadata: { allowedToolNames: ['pitch.create'] } }]
+    })
+    platformApi.listGraphRuns.mockResolvedValue({ runs: [] })
+    renderPage()
+    const checkbox = await screen.findByRole('checkbox', { name: 'pitch.create' })
+    await waitFor(() => expect(checkbox).toBeChecked())
+    fireEvent.click(screen.getByRole('button', { name: 'Disable all tools' }))
+    expect(checkbox).not.toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Agent Studio' }))
+    await waitFor(() => expect(platformApi.listTools).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Refresh Agent Studio' })).toBeEnabled()
+    )
+    expect(screen.getByRole('checkbox', { name: 'pitch.create' })).not.toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Use suggested tools' }))
+    expect(screen.getByRole('checkbox', { name: 'pitch.create' })).toBeChecked()
+  })
+
+  it('honors an explicitly empty catalog allowlist even when read-only web tools are registered', async () => {
+    platformApi.listGraphs.mockResolvedValue({
+      graphs: [{ ...graphs[0], metadata: { allowedToolNames: [] } }]
+    })
+    platformApi.listTools.mockResolvedValue({
+      tools: [
+        {
+          name: 'web_search',
+          source: 'assistantRuntime',
+          description: 'Search',
+          inputSchema: {},
+          status: 'available'
+        },
+        {
+          name: 'web_fetch',
+          source: 'assistantRuntime',
+          description: 'Fetch',
+          inputSchema: {},
+          status: 'available'
+        }
+      ]
+    })
+    platformApi.listGraphRuns.mockResolvedValue({ runs: [] })
+    renderPage()
+    const button = screen.getByRole('button', { name: 'Run Graph' })
+    await waitFor(() => expect(button).toBeEnabled())
+    expect(screen.queryByRole('checkbox', { name: 'web_search' })).not.toBeInTheDocument()
+    fireEvent.click(button)
+    await waitFor(() => expect(platformApi.runGraph).toHaveBeenCalled())
+    expect(platformApi.runGraph.mock.calls[0][0]).toMatchObject({ allowedToolNames: [] })
+  })
+
+  it('shows only available read-only defaults for an agent graph without a catalog allowlist', async () => {
+    platformApi.listTools.mockResolvedValue({
+      tools: [
+        {
+          name: 'web_search',
+          source: 'assistantRuntime',
+          description: 'Search',
+          inputSchema: {},
+          status: 'available'
+        },
+        {
+          name: 'web_fetch',
+          source: 'assistantRuntime',
+          description: 'Fetch',
+          inputSchema: {},
+          status: 'unavailable'
+        },
+        {
+          name: 'files.write',
+          source: 'assistantRuntime',
+          description: 'Write',
+          inputSchema: {},
+          status: 'available'
+        }
+      ]
+    })
+    platformApi.listGraphRuns.mockResolvedValue({ runs: [] })
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'web_search' })).toBeChecked())
+    expect(screen.queryByRole('checkbox', { name: 'files.write' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: 'web_fetch' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Run Graph' }))
+    await waitFor(() => expect(platformApi.runGraph).toHaveBeenCalled())
+    expect(platformApi.runGraph.mock.calls[0][0]).toMatchObject({
+      allowedToolNames: ['web_search']
     })
   })
 

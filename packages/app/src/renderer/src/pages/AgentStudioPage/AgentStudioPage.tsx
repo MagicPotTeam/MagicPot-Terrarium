@@ -543,11 +543,19 @@ const AgentStudioPage: React.FC = () => {
   )
   const selectedGraphSuggestedToolNames = useMemo(() => {
     const catalogAllowed = selectedGraphCatalog.allowedToolNames
-    if (Array.isArray(catalogAllowed) && catalogAllowed.length > 0)
-      return [...catalogAllowed].sort()
-    return getAvailableToolNames(state.tools, selectedGraphRequiredToolNames)
-  }, [selectedGraphCatalog.allowedToolNames, selectedGraphRequiredToolNames, state.tools])
+    if (Array.isArray(catalogAllowed)) return getAvailableToolNames(state.tools, catalogAllowed)
+    const agentDefaults = selectedGraphDetail?.nodes.some((node) => node.kind === 'agent')
+      ? ['web_search', 'web_fetch']
+      : []
+    return getAvailableToolNames(state.tools, [...selectedGraphRequiredToolNames, ...agentDefaults])
+  }, [
+    selectedGraphCatalog.allowedToolNames,
+    selectedGraphRequiredToolNames,
+    selectedGraphDetail,
+    state.tools
+  ])
   const [allowedToolNames, setAllowedToolNames] = useState<string[]>([])
+  const explicitToolChoiceGraphRef = useRef<string | null>(null)
   const preflightMissingToolNames = useMemo(
     () =>
       selectedGraphRequiredToolNames.filter(
@@ -962,14 +970,19 @@ const AgentStudioPage: React.FC = () => {
   }, [loadGraphDetail, platformEnabled, selectedGraphId])
 
   useEffect(() => {
-    setAllowedToolNames((current) =>
-      areStringArraysEqual(current, selectedGraphSuggestedToolNames)
-        ? current
-        : selectedGraphSuggestedToolNames
-    )
-  }, [selectedGraphSuggestedToolNames])
+    setAllowedToolNames((current) => {
+      // Inventory refresh may revoke unavailable tools, but never grants tools
+      // again after the user explicitly disabled them for this graph.
+      const next =
+        explicitToolChoiceGraphRef.current === selectedGraphId
+          ? current.filter((name) => selectedGraphSuggestedToolNames.includes(name))
+          : selectedGraphSuggestedToolNames
+      return areStringArraysEqual(current, next) ? current : next
+    })
+  }, [selectedGraphSuggestedToolNames, selectedGraphId])
 
   const setToolAllowed = (toolName: string, checked: boolean) => {
+    explicitToolChoiceGraphRef.current = selectedGraphId
     setAllowedToolNames((current) => {
       const next = new Set(current)
       if (checked) {
@@ -985,6 +998,7 @@ const AgentStudioPage: React.FC = () => {
 
   const handleGraphChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     const graphId = event.target.value
+    explicitToolChoiceGraphRef.current = null
     stopActiveGraphRunWatch()
     stopActiveGraphRunAttach()
     setSelectedGraphId(graphId)
@@ -1009,7 +1023,7 @@ const AgentStudioPage: React.FC = () => {
       const response = await api().svcMagicAgentPlatform.preflightGraphRun({
         graphId: selectedGraphId,
         route: AGENT_STUDIO_ROUTE,
-        ...(allowedToolNames.length ? { allowedToolNames } : {})
+        allowedToolNames: [...allowedToolNames]
       })
       for (const issue of response.preflight.issues) {
         const nodeId = typeof issue.nodeId === 'string' ? issue.nodeId : '$graph'
@@ -1108,7 +1122,7 @@ const AgentStudioPage: React.FC = () => {
         graphId: selectedGraphId,
         input,
         route: AGENT_STUDIO_ROUTE,
-        ...(allowedToolNames.length ? { allowedToolNames } : {}),
+        allowedToolNames: [...allowedToolNames],
         ...(selectedGraphV2 ? { definitionV2: selectedGraphV2 } : {}),
         metadata: {
           source: 'agent-studio',
@@ -1163,7 +1177,7 @@ const AgentStudioPage: React.FC = () => {
         input,
         route: AGENT_STUDIO_ROUTE,
         nodeExecution,
-        ...(allowedToolNames.length ? { allowedToolNames } : {}),
+        allowedToolNames: [...allowedToolNames],
         ...(selectedGraphV2 ? { definitionV2: selectedGraphV2 } : {}),
         metadata: {
           source: 'agent-studio-node-execution',
@@ -1322,7 +1336,12 @@ const AgentStudioPage: React.FC = () => {
               MagicAgent Platform v1: agents, creative tools, graph teams, and package inventory.
             </Typography>
           </Box>
-          <Button variant="outlined" onClick={() => void loadStudio()} disabled={loading}>
+          <Button
+            aria-label="Refresh Agent Studio"
+            variant="outlined"
+            onClick={() => void loadStudio()}
+            disabled={loading}
+          >
             Refresh
           </Button>
         </Stack>
@@ -1524,12 +1543,43 @@ const AgentStudioPage: React.FC = () => {
                   {running || historyLoading ? <CircularProgress size={22} /> : null}
                 </Stack>
               </Stack>
-              {selectedGraphRequiredToolNames.length > 0 || graphDetailLoading ? (
+              {selectedGraphId ? (
                 <Box>
                   <Typography variant="subtitle2">Tool permissions</Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                    Agent Studio sends an explicit per-run tool allowlist for graphs that invoke
-                    tools.
+                    Only the selected tools are allowed for this run, including agent nodes. An
+                    empty selection disables all tools; it does not restore defaults.
+                  </Typography>
+                  <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
+                    <Button
+                      size="small"
+                      disabled={running || loading || graphDetailLoading || !platformEnabled}
+                      onClick={() => {
+                        explicitToolChoiceGraphRef.current = null
+                        setAllowedToolNames([...selectedGraphSuggestedToolNames])
+                      }}
+                    >
+                      Use suggested tools
+                    </Button>
+                    <Button
+                      size="small"
+                      disabled={running || loading || graphDetailLoading || !platformEnabled}
+                      onClick={() => {
+                        explicitToolChoiceGraphRef.current = selectedGraphId
+                        setAllowedToolNames([])
+                      }}
+                    >
+                      Disable all tools
+                    </Button>
+                  </Stack>
+                  <Typography
+                    variant="caption"
+                    role="status"
+                    aria-label="Selected tool permissions"
+                  >
+                    {allowedToolNames.length
+                      ? `${allowedToolNames.length} tools selected`
+                      : 'All tools disabled'}
                   </Typography>
                   {graphDetailLoading ? (
                     <Typography variant="body2" color="text.secondary">
