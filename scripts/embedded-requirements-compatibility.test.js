@@ -4,7 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   compatibleEmbeddedRequirements,
-  createEmbeddedRequirementsInput
+  createEmbeddedRequirementsInput,
+  validateEmbeddedAugmentationPackages
 } from './embedded-requirements-compatibility.mjs'
 
 vi.unmock('node:fs')
@@ -65,6 +66,141 @@ describe('audited embedded requirements compatibility', () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  describe('ControlNet Aux image augmentation compatibility', () => {
+    const controlnet = 'comfyui_controlnet_aux/requirements.txt'
+
+    it.each(['albumentations', 'albumentationsx'])(
+      'resolves the audited %s declaration to the existing single-owner runtime',
+      (declaration) => {
+        const original = `# dependencies\r\ntorch\r\n${declaration}\r\nrtree\r\n`
+        expect(compatibleEmbeddedRequirements(original, controlnet)).toBe(
+          '# dependencies\ntorch\nalbumentations==2.0.8\nrtree\n'
+        )
+        expect(compatibleEmbeddedRequirements(original, controlnet.replaceAll('/', '\\'))).toBe(
+          '# dependencies\ntorch\nalbumentations==2.0.8\nrtree\n'
+        )
+      }
+    )
+
+    it.each([
+      '',
+      'albumentationsx>=2.5',
+      'albumentationsx[headless]',
+      'albumentationsx; python_version >= "3.13"',
+      'albumentationsx\nalbumentations',
+      'albumentationsx\nalbumentationsx',
+      'AlbumentationsX',
+      'albumentationsx @ https://example.invalid/package.whl'
+    ])('requires review instead of silently changing upstream constraints: %s', (input) => {
+      expect(() => compatibleEmbeddedRequirements(input, controlnet)).toThrow(
+        'compatibility declaration changed'
+      )
+    })
+
+    it('does not rename dependencies belonging to other nodes or fixed-file variants', () => {
+      const original = 'albumentationsx\r\n'
+      for (const file of [
+        'other/requirements.txt',
+        'comfyui_controlnet_aux/requirements_fixed.txt'
+      ]) {
+        expect(compatibleEmbeddedRequirements(original, file)).toBe(original)
+      }
+    })
+
+    it.each(['-r nested.txt', '--index-url https://example.invalid', './local', 'C:\\local'])(
+      'refuses relocation that would change requirement semantics: %s',
+      (directive) => {
+        expect(() =>
+          compatibleEmbeddedRequirements(`albumentationsx\n${directive}`, controlnet)
+        ).toThrow('path or pip directives')
+      }
+    )
+
+    it('writes a fresh compatible input without changing the plugin checkout', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'magicpot-controlnet-compat-'))
+      try {
+        const file = path.join(root, 'requirements.txt')
+        const original = 'torch\r\nalbumentationsx\r\nrtree\r\n'
+        fs.writeFileSync(file, original)
+        const first = createEmbeddedRequirementsInput(
+          file,
+          controlnet,
+          path.join(root, 'generated')
+        )
+        const second = createEmbeddedRequirementsInput(
+          file,
+          controlnet,
+          path.join(root, 'generated')
+        )
+        expect(first).not.toBe(second)
+        expect(fs.readFileSync(first, 'utf8')).toBe('torch\nalbumentations==2.0.8\nrtree\n')
+        expect(fs.readFileSync(second, 'utf8')).toBe(fs.readFileSync(first, 'utf8'))
+        expect(fs.readFileSync(file, 'utf8')).toBe(original)
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('installed augmentation namespace guard', () => {
+    const valid = [
+      { name: 'albumentations', version: '2.0.8' },
+      { name: 'albucore', version: '0.0.24' }
+    ]
+
+    it('accepts only the tested pair and permits unrelated packages', () => {
+      expect(
+        validateEmbeddedAugmentationPackages([...valid, { name: 'numpy', version: '2.4.6' }])
+      ).toEqual({
+        albumentations: '2.0.8',
+        albucore: '0.0.24'
+      })
+    })
+
+    it.each(['albumentationsx', 'AlbumentationsX'])(
+      'rejects a shared-namespace owner even if pip check considers metadata satisfied: %s',
+      (name) => {
+        expect(() =>
+          validateEmbeddedAugmentationPackages([...valid, { name, version: '2.5.1' }])
+        ).toThrow('cannot share')
+      }
+    )
+
+    it.each([
+      { packages: [] },
+      { packages: [valid[0]] },
+      { packages: [valid[1]] },
+      { packages: [...valid, valid[0]] },
+      { packages: [{ name: 'albumentations', version: '1.4.15' }, valid[1]] },
+      { packages: [valid[0], { name: 'albucore', version: '0.2.21' }] }
+    ])(
+      'rejects missing, duplicate, or resolver-backtracked distributions: $packages',
+      ({ packages }) => {
+        expect(() => validateEmbeddedAugmentationPackages(packages)).toThrow('Expected exactly one')
+      }
+    )
+
+    it.each([null, {}, [null], [{ name: 'albumentations' }]].map((packages) => ({ packages })))(
+      'rejects malformed inventory: $packages',
+      ({ packages }) => {
+        expect(() => validateEmbeddedAugmentationPackages(packages)).toThrow('Invalid embedded')
+      }
+    )
+
+    it('runs after dependency resolution and before the existing strict ComfyUI smoke test', () => {
+      const source = fs.readFileSync(
+        new URL('./prepare-embedded-python.mjs', import.meta.url),
+        'utf8'
+      )
+      const gate = source.indexOf(
+        "runPhase('verify-augmentation-packages', verifyAugmentationPackages)"
+      )
+      expect(gate).toBeGreaterThan(source.indexOf("runPhase('verify-final-dependencies'"))
+      expect(gate).toBeLessThan(source.indexOf("runPhase('comfy-quick-test'"))
+      expect(source).toContain('validateEmbeddedAugmentationPackages(packages)')
+    })
   })
 
   it('fails closed when the audited upstream pin changes or is ambiguous', () => {

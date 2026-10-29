@@ -10,7 +10,10 @@ import {
   embeddedTorchRequirements,
   installEmbeddedRequirements
 } from './install-embedded-requirements.mjs'
-import { createEmbeddedRequirementsInput } from './embedded-requirements-compatibility.mjs'
+import {
+  createEmbeddedRequirementsInput,
+  validateEmbeddedAugmentationPackages
+} from './embedded-requirements-compatibility.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -338,7 +341,7 @@ function installRequirements(constraintsPath) {
     const output = createEmbeddedRequirementsInput(file, relative, compatibilityRoot)
     if (output === file) return file
     console.log(
-      `[prepare-embedded-python] Using audited Accelerate compatibility input for ${relative}; vendor file unchanged`
+      `[prepare-embedded-python] Using audited dependency compatibility input for ${relative}; vendor file unchanged`
     )
     return output
   })
@@ -355,6 +358,27 @@ function installRequirements(constraintsPath) {
     extraRequirements: embeddedRuntimeExtras,
     pip
   })
+}
+
+function verifyAugmentationPackages() {
+  const inventory = runCapture(pythonExe(), [
+    '-s',
+    '-c',
+    [
+      'import importlib.metadata as metadata, json',
+      'names = {"albumentations", "albumentationsx", "albucore"}',
+      'print(json.dumps([{ "name": d.metadata["Name"], "version": d.version } for d in metadata.distributions() if d.metadata.get("Name", "").lower() in names]))'
+    ].join('\n')
+  ])
+  if (inventory.status !== 0) {
+    throw new Error('Unable to inspect embedded augmentation package metadata')
+  }
+  const packages = JSON.parse(inventory.stdout)
+  fs.writeFileSync(
+    path.join(stagingRoot, 'augmentation-packages.json'),
+    `${JSON.stringify(packages, null, 2)}\n`
+  )
+  validateEmbeddedAugmentationPackages(packages)
 }
 
 async function ensureVerifiedLlamaCppWheel() {
@@ -655,6 +679,7 @@ async function main() {
   runPhase('install-requirements', () => installRequirements(constraintsPath))
   runPhase('install-verified-llama-cpp', () => installVerifiedLlamaCppWheel(llamaCppWheelPath))
   runPhase('verify-final-dependencies', () => pip(['check']))
+  runPhase('verify-augmentation-packages', verifyAugmentationPackages)
   runPhase('prune-runtime', pruneEmbeddedRuntime)
   runPhase('remove-python-caches-before-smoke', removePythonCaches)
   runPhase('comfy-quick-test', smokeTest)
