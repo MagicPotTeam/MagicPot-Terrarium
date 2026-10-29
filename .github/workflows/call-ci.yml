@@ -23,42 +23,13 @@ jobs:
   test-lint-typecheck:
     runs-on: ubuntu-latest
     steps:
-      # Only pull_request contexts may check out an arbitrary PR ref. Default-branch
-      # dispatch/schedule contexts use the event commit or a fixed owned release branch.
-      - name: Resolve checkout ref
-        if: github.event_name == 'pull_request'
-        id: resolve-ref
-        shell: bash
-        env:
-          REQUESTED_REF: ${{ inputs.ref }}
-          FALLBACK_REF: ${{ inputs.fallback_ref }}
-        run: |
-          set -euo pipefail
-          ref="$REQUESTED_REF"
-          fallback_ref="$FALLBACK_REF"
-          resolved_ref="$ref"
-
-          if [[ -n "$fallback_ref" && "$ref" =~ ^refs/pull/[0-9]+/merge$ ]]; then
-            repo_url="https://github.com/${{ github.repository }}.git"
-            if ! git ls-remote --exit-code "$repo_url" "$ref" >/dev/null 2>&1; then
-              echo "Merge ref $ref is unavailable; falling back to $fallback_ref"
-              resolved_ref="$fallback_ref"
-            fi
-          fi
-
-          echo "ref=$resolved_ref" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout pull request code
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.resolve-ref.outputs.ref }}
-          persist-credentials: false
-
+      # Immutable event checkout survives a disappearing PR merge ref without
+      # executing caller-selected code in a default-branch cache context.
       - name: Checkout event commit
-        if: github.event_name != 'pull_request' && !inputs.release_candidate
+        if: ${{ !inputs.release_candidate }}
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Checkout owned release candidate
@@ -69,7 +40,6 @@ jobs:
           persist-credentials: false
 
       - name: Verify trusted checkout identity before executing repository code
-        if: github.event_name != 'pull_request'
         shell: bash
         env:
           REQUESTED_REF: ${{ inputs.ref }}

@@ -55,9 +55,8 @@ describe('Hono Node adapter production security', () => {
     )
     const steps = definition.jobs['test-lint-typecheck'].steps
     const step = (name) => steps.find((entry) => entry.name === name)
-    expect(step('Checkout pull request code').if).toBe("github.event_name == 'pull_request'")
-    expect(step('Resolve checkout ref').if).toBe("github.event_name == 'pull_request'")
-    expect(step('Checkout event commit').with).not.toHaveProperty('ref')
+    expect(steps.some((entry) => entry.name === 'Resolve checkout ref')).toBe(false)
+    expect(step('Checkout event commit').with.ref).toBe('${{ github.sha }}')
     expect(step('Checkout owned release candidate').with.ref).toBe('refs/heads/release/nightly')
     expect(step('Setup Node.js').with).not.toHaveProperty('cache')
     for (const checkout of steps.filter((entry) => entry.uses?.startsWith('actions/checkout@'))) {
@@ -83,6 +82,13 @@ describe('Hono Node adapter production security', () => {
         }
       })
     expect(check({}).status).toBe(0)
+    expect(
+      check({
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_REF: 'refs/pull/126/merge',
+        REQUESTED_REF: 'refs/pull/126/merge'
+      }).status
+    ).toBe(0)
     expect(check({ REQUESTED_REF: 'refs/heads/unreviewed' }).status).not.toBe(0)
     expect(
       check({ RELEASE_CANDIDATE: 'true', GITHUB_EVENT_NAME: 'schedule', REQUESTED_REF: head })
