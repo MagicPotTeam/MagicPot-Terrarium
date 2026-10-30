@@ -1,3 +1,4 @@
+import ChatAgentDiagnostics from './components/ChatAgentDiagnostics'
 import { mergeToolCheckpoint } from './chatToolCheckpoint'
 import { getChatToolLoadingStatus } from './chatToolLoadingStatus'
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
@@ -7740,6 +7741,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
               ) : null}
 
               {/* 底部输入框 */}
+
+              <ChatAgentDiagnostics
+                key={`${storageScope}:${currentSessionId || 'no-session'}`}
+                request={{
+                  route,
+                  conversationId: currentSessionId || undefined,
+                  profileId: selectedProfileId || undefined,
+                  skillRuntime: serializeSkillRuntimeSpec(selectedSkillRuntime),
+                  externalAgent: isAgentSkillSelected,
+                  mediaMode: isImageGenerationSelected
+                }}
+                messages={currentSession?.messages || []}
+                running={isLoading}
+                loadingStatus={currentLoadingStatus}
+                enabled={active && Boolean(currentSession)}
+              />
 
               <ChatComposer
                 active={active}
