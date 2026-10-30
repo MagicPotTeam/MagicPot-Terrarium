@@ -485,7 +485,8 @@ describe('AgentStudioPage Graph Run Center', () => {
 
     await waitFor(() => expect(platformApi.getStatus).toHaveBeenCalledTimes(1))
 
-    expect(screen.getAllByText(FLAG_HELP).length).toBeGreaterThan(0)
+    // A recorded service call can precede its promise resolving and React committing.
+    expect((await screen.findAllByText(FLAG_HELP)).length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: 'Run Graph' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Refresh History' })).toBeDisabled()
     expect(screen.getByLabelText('Prompt')).toBeDisabled()
