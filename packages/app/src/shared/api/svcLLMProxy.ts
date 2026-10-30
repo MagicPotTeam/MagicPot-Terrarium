@@ -1,3 +1,9 @@
+import {
+  normalizeAgentDiagnosticsRequest,
+  normalizeAgentDiagnosticsResponse,
+  type AgentDiagnosticsRequest,
+  type AgentDiagnosticsResponse
+} from '../agentDiagnostics'
 import type { LLMRetryStatus } from '../llm/modelCapacityRetry'
 // LLM 代理服务 API 定义
 // 用于 AIEngine 实例之间的 LLM 请求转发
@@ -400,6 +406,8 @@ export type LLMClearHy3DCosPrefixResp = {
  * - 客户端：通过服务端转发请求，不需要本地配置 API Key
  */
 export type LLMProxySvc = {
+  inspectAgentCapabilities(req: AgentDiagnosticsRequest): Promise<AgentDiagnosticsResponse>
+
   /**
    * 发送聊天请求（非流式）
    */
@@ -445,6 +453,7 @@ export type LLMProxySvc = {
 }
 
 export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
+  inspectAgentCapabilities: { type: 'unary', request: normalizeAgentDiagnosticsRequest },
   chat: {
     type: 'unary'
   },

@@ -23,6 +23,15 @@ const FORBIDDEN_REMOTE_FETCH_HEADERS = new Set([
 ])
 const IPV4_ADDRESS_PATTERN = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 
+/** Diagnostic reason only: rejection and DNS pinning remain unchanged. */
+export class RemoteFetchAddressPolicyError extends Error {
+  readonly code = 'REMOTE_FETCH_PRIVATE_ADDRESS'
+  constructor(readonly reason: 'reserved-benchmark' | 'private-or-local') {
+    super('Remote fetch URL resolved to a private or local address.')
+    this.name = 'RemoteFetchAddressPolicyError'
+  }
+}
+
 export type RemoteFetchResolvedAddress = {
   address: string
   family: 4 | 6
@@ -286,7 +295,9 @@ export const resolveRemoteFetchAddress = async (
 
   const privateAddress = resolved.find((entry) => isPrivateOrLocalRemoteFetchHost(entry.address))
   if (privateAddress) {
-    throw new Error('Remote fetch URL resolved to a private or local address.')
+    throw new RemoteFetchAddressPolicyError(
+      /^198\.(?:18|19)\./.test(privateAddress.address) ? 'reserved-benchmark' : 'private-or-local'
+    )
   }
 
   const first = resolved[0]

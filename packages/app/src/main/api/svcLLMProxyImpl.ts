@@ -1,3 +1,6 @@
+import { inspectAgentCapabilities } from './agentDiagnostics'
+import type { AgentDiagnosticsRequest } from '@shared/agentDiagnostics'
+import { extractSkillRuntimeAllowedToolNames } from './skillRuntimeToolPolicy'
 // Main-process LLM proxy service used by chat, OCR, skill routing, and local model integrations.
 // This file centralizes provider selection and media-aware request handling.
 
@@ -82,7 +85,6 @@ import {
 } from '@shared/llm'
 import { resolveRemoteProfileRouting } from '@shared/llm/remoteProfileRouting'
 import { getAssistantRuntime } from '../assistantRuntime/runtime'
-import { normalizeAllowedToolNames } from '../assistantRuntime/toolAccess'
 import type { AssistantRoute } from '../assistantRuntime/types'
 import { buildAgentRoute, normalizeAgentRoute } from '@shared/agent'
 import { Hunyuan3DClient } from '../llmProxy/hunyuan3dClient'
@@ -1308,31 +1310,6 @@ const buildToolResultMessage = (
     result.trim() || '(empty result)'
   ].join('\n')
 })
-
-const extractSkillRuntimeAllowedToolNames = (req: LLMChatReq): string[] | null => {
-  const bindings = req.skillRuntime?.bindings || []
-  const explicitToolBindings = bindings.filter((binding) => Array.isArray(binding.toolNames))
-  if (!explicitToolBindings.length) {
-    // MagicAgentRuntime deliberately omits an allowlist when the agent uses its
-    // default tool surface. Keep ordinary custom skills fail-closed while
-    // giving Agent threads the built-in web tools so the model can decide when
-    // browsing is genuinely useful without a "please search" prompt.
-    if (
-      bindings.some(
-        (binding) =>
-          binding.source === 'magicAgentRuntime' || binding.source === 'assistant-runtime'
-      )
-    ) {
-      return ['web_search', 'web_fetch']
-    }
-    return null
-  }
-
-  return (
-    normalizeAllowedToolNames(explicitToolBindings.flatMap((binding) => binding.toolNames || [])) ||
-    []
-  )
-}
 
 const buildSkillRuntimeRoute = (req: LLMChatReq): AssistantRoute =>
   (req.route
@@ -3759,6 +3736,18 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   /** Main-only lifetime subscription. Not registered as renderer IPC or exposed to a host. */
   onProfileConfigurationChanged(listener: () => void): () => void {
     return onConfigCommitted(listener)
+  }
+
+  inspectAgentCapabilities = async (
+    req: AgentDiagnosticsRequest,
+    invocation?: ServiceInvocationContext
+  ) => {
+    const config = getConfig()
+    return inspectAgentCapabilities(req, invocation, {
+      remote: config.use_remote_llm === true,
+      terminalEnabled: config.project_trace_config?.enable_agent_terminal === true,
+      listTools: (names) => getAssistantRuntime().listTools(names)
+    })
   }
 
   listProfiles = async (req: LLMListProfilesReq): Promise<LLMListProfilesResp> => {

@@ -32,7 +32,11 @@ export function withCanvasFileTools<T extends LLMChatReq>(
     request.imageRequest ||
     request.videoGenerationOptions ||
     !invocation ||
-    !['svcLLMProxy.chat', 'svcLLMProxy.chatStream'].includes(invocation.methodName) ||
+    ![
+      'svcLLMProxy.chat',
+      'svcLLMProxy.chatStream',
+      'svcLLMProxy.inspectAgentCapabilities'
+    ].includes(invocation.methodName) ||
     request.route?.channel !== 'canvas' ||
     request.route.scopeType !== 'thread' ||
     !safeId(request.route.scopeId) ||
