@@ -1,3 +1,4 @@
+import { resolveAssistantToolReplayRunId } from './toolRecovery'
 import { createHash } from 'node:crypto'
 import { ChatAttachment, ChatMessage, LLMChatResp, LLMProxySvc } from '@shared/api/svcLLMProxy'
 import {
@@ -377,6 +378,14 @@ const toArtifactRef = (
     : {})
 })
 
+// Shared across adapters in this process; the journal remains authoritative after restart.
+const inFlightToolIdentities = new WeakMap<AssistantSessionStore, Set<string>>()
+const replayConflict = () =>
+  Object.assign(
+    new Error('The recorded tool identity does not match this request; review it before retrying.'),
+    { code: 'TOOL_REPLAY_CONFLICT' }
+  )
+
 export class AssistantExecutionAdapter {
   private readonly chatService: Pick<LLMProxySvc, 'chat'>
   private readonly toolRegistry: AssistantToolRegistry
@@ -420,6 +429,7 @@ export class AssistantExecutionAdapter {
   private async readSettledToolAction(
     request: AssistantToolExecutionContext,
     requestedAction: ToolInvokeAction,
+    descriptor: AssistantToolActionDescriptor,
     allowedToolNames?: string[] | null
   ): Promise<ToolResultAction | undefined> {
     if (typeof request.sessionStore?.getSession === 'function') {
@@ -436,12 +446,41 @@ export class AssistantExecutionAdapter {
             Boolean(value.payload) &&
             typeof value.payload === 'object'
         )
+      const sameIdentity = actions.filter(
+        (action) =>
+          action.correlationId === requestedAction.correlationId &&
+          (requestedAction.payload.toolCallId
+            ? action.payload.toolCallId === requestedAction.payload.toolCallId
+            : typeof action.payload.invocationId === 'string' &&
+              action.payload.invocationId.startsWith(
+                `${descriptor.runId}:tool:${descriptor.toolCallIndex}:`
+              ))
+      )
+      // Changed arguments on resume are a conflict, not a new authorization to write.
+      if (
+        sameIdentity.some(
+          (action) =>
+            action.payload.invocationId !== requestedAction.payload.invocationId ||
+            action.payload.toolName !== requestedAction.payload.toolName ||
+            (action.type === 'tool.invoke' &&
+              canonicalJson(action.payload.args) !== canonicalJson(requestedAction.payload.args))
+        )
+      )
+        throw replayConflict()
       const previousResult = actions.find(
         (action) =>
           action.type === 'tool.result' &&
           action.payload.invocationId === requestedAction.payload.invocationId
       ) as ToolResultAction | undefined
       if (previousResult) {
+        if (
+          previousResult.correlationId !== requestedAction.correlationId ||
+          previousResult.payload.toolName !== requestedAction.payload.toolName ||
+          previousResult.payload.toolCallId !== requestedAction.payload.toolCallId ||
+          typeof previousResult.payload.ok !== 'boolean' ||
+          !sameIdentity.some((action) => action.type === 'tool.invoke')
+        )
+          throw replayConflict()
         assertAssistantToolAllowed(requestedAction.payload.toolName, allowedToolNames)
         if (!previousResult.payload.ok) {
           throw Object.assign(
@@ -478,7 +517,47 @@ export class AssistantExecutionAdapter {
     allowedToolNames?: string[] | null
   ): Promise<{ action: ToolResultAction; result: AssistantToolCallResult }> {
     validateAssistantToolInvokeAction(action, descriptor)
-    const settledAction = await this.readSettledToolAction(request, action, allowedToolNames)
+    const identity = JSON.stringify([
+      getAssistantSessionKey(request.route),
+      descriptor.runId,
+      action.payload.toolCallId ?? descriptor.toolCallIndex
+    ])
+    let active = inFlightToolIdentities.get(request.sessionStore)
+    if (!active) {
+      active = new Set<string>()
+      inFlightToolIdentities.set(request.sessionStore, active)
+    }
+    if (active.has(identity))
+      throw Object.assign(
+        new Error('This tool invocation is already in progress; it was not started again.'),
+        { code: 'TOOL_INVOCATION_IN_PROGRESS' }
+      )
+    active.add(identity)
+    try {
+      return await this.executeClaimedToolInvokeAction(
+        action,
+        descriptor,
+        request,
+        allowedToolNames
+      )
+    } finally {
+      active.delete(identity)
+      if (!active.size) inFlightToolIdentities.delete(request.sessionStore)
+    }
+  }
+
+  private async executeClaimedToolInvokeAction(
+    action: ToolInvokeAction,
+    descriptor: AssistantToolActionDescriptor,
+    request: AssistantToolExecutionContext,
+    allowedToolNames?: string[] | null
+  ): Promise<{ action: ToolResultAction; result: AssistantToolCallResult }> {
+    const settledAction = await this.readSettledToolAction(
+      request,
+      action,
+      descriptor,
+      allowedToolNames
+    )
     if (settledAction) {
       return {
         action: settledAction,
@@ -613,7 +692,11 @@ export class AssistantExecutionAdapter {
     return execution.result
   }
   async run(request: AssistantExecutionRequest): Promise<AssistantExecutionResult> {
-    const executionRunId = request.req.resumeFromRunId || request.runId
+    const executionRunId = request.req.resumeFromRunId
+      ? await resolveAssistantToolReplayRunId(request.req.resumeFromRunId, request.route, (id) =>
+          request.sessionStore.getRun(id)
+        )
+      : request.runId
     const startedAt = Date.now()
     const executionMetadata = buildExecutionMetadata(request)
     const toolInvocation = parseToolInvocation(request.req.text)

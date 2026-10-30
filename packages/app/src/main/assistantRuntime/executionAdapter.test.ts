@@ -495,3 +495,125 @@ it('does not mistake another completed invocation for the requested tool result'
   ).toMatchObject({ content: 'second' })
   expect(bridge.invoke).toHaveBeenCalledTimes(2)
 })
+
+describe('replay identity and concurrent admission', () => {
+  const fixture = () => {
+    const journal: Array<{ metadata?: Record<string, unknown> }> = []
+    const sessionStore = {
+      getSession: async () => ({ eventLog: structuredClone(journal) }),
+      appendEvents: async (_route: unknown, events: typeof journal) => {
+        journal.push(...structuredClone(events))
+      }
+    }
+    const request = {
+      ...makeRequest(),
+      route: { channel: 'test', scopeType: 'dm', scopeId: 'replay-owned' },
+      sessionStore
+    } as unknown as ToolCallRequest
+    const options = {
+      runId: 'original-run',
+      toolCallId: 'original-run:tool:0',
+      allowedToolNames: ['demo.echo', 'demo.other']
+    }
+    return { journal, request, options }
+  }
+
+  it.each(['arguments', 'name'])(
+    'rejects a reused call identity with changed %s',
+    async (change) => {
+      const { request, options } = fixture()
+      bridge.invoke.mockReset()
+      bridge.invoke.mockResolvedValue({ content: 'already performed' })
+      const adapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+      await adapter.callTool('demo.echo', { value: 1 }, request, options)
+      await expect(
+        adapter.callTool(
+          change === 'name' ? 'demo.other' : 'demo.echo',
+          { value: change === 'arguments' ? 2 : 1 },
+          request,
+          options
+        )
+      ).rejects.toMatchObject({ code: 'TOOL_REPLAY_CONFLICT' })
+      expect(bridge.invoke).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('admits only one concurrent invocation across adapters using the same journal', async () => {
+    const { request, options, journal } = fixture()
+    bridge.invoke.mockReset()
+    bridge.invoke.mockResolvedValue({ content: 'one effect' })
+    const first = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    const second = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    const results = await Promise.allSettled([
+      first.callTool('demo.echo', { value: 1 }, request, options),
+      second.callTool('demo.echo', { value: 1 }, request, options)
+    ])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.find((result) => result.status === 'rejected')).toMatchObject({
+      reason: { code: 'TOOL_INVOCATION_IN_PROGRESS' }
+    })
+    expect(bridge.invoke).toHaveBeenCalledTimes(1)
+    expect(journal).toHaveLength(2)
+    await expect(
+      second.callTool('demo.echo', { value: 1 }, request, options)
+    ).resolves.toMatchObject({ content: 'one effect' })
+    expect(bridge.invoke).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects mismatched settled receipts rather than returning them or executing again', async () => {
+    const { request, options, journal } = fixture()
+    bridge.invoke.mockReset()
+    bridge.invoke.mockResolvedValue({ content: 'actual result' })
+    const adapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    await adapter.callTool('demo.echo', { value: 1 }, request, options)
+    const result = journal[1].metadata!.agentAction as ToolResultAction
+    result.payload.toolName = 'demo.other'
+    await expect(
+      adapter.callTool('demo.echo', { value: 1 }, request, options)
+    ).rejects.toMatchObject({ code: 'TOOL_REPLAY_CONFLICT' })
+    expect(bridge.invoke).toHaveBeenCalledTimes(1)
+  })
+
+  it('reuses the original effect across multiple failed resume attempts', async () => {
+    const { request, options } = fixture()
+    bridge.invoke.mockReset()
+    bridge.invoke.mockResolvedValue({ content: 'one durable effect' })
+    const first = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    await first.callTool('demo.echo', { value: 1 }, request, options)
+    Object.assign(request.sessionStore, {
+      getRun: async (id: string) => ({
+        runId: id,
+        route: request.route,
+        ...(id === 'middle-resume' ? { resumeSourceRunId: 'original-run' } : {})
+      })
+    })
+    const reopened = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    const execution = {
+      ...request,
+      runId: 'new-resume',
+      messages: [],
+      req: {
+        route: request.route,
+        text: '/tool demo.echo {"value":1}',
+        resumeFromRunId: 'middle-resume',
+        execution: { allowedToolNames: options.allowedToolNames }
+      }
+    }
+    await expect(reopened.run(execution)).resolves.toMatchObject({
+      reply: { content: 'one durable effect' }
+    })
+    expect(bridge.invoke).toHaveBeenCalledTimes(1)
+  })
+
+  it('still enforces current permissions before returning a cached result', async () => {
+    const { request, options } = fixture()
+    bridge.invoke.mockReset()
+    bridge.invoke.mockResolvedValue({ content: 'private result' })
+    const adapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    await adapter.callTool('demo.echo', { value: 1 }, request, options)
+    await expect(
+      adapter.callTool('demo.echo', { value: 1 }, request, { ...options, allowedToolNames: [] })
+    ).rejects.toThrow()
+    expect(bridge.invoke).toHaveBeenCalledTimes(1)
+  })
+})

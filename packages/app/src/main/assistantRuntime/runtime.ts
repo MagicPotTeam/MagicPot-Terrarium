@@ -1,4 +1,5 @@
-﻿import { ChatAttachment, ChatMessage, LLMProxySvc } from '@shared/api/svcLLMProxy'
+import { assertKnownAssistantToolOutcomes, resolveAssistantToolReplayRunId } from './toolRecovery'
+import { ChatAttachment, ChatMessage, LLMProxySvc } from '@shared/api/svcLLMProxy'
 import { MAGICPOT_SESSION_STATUS_TOOL_NAME, normalizeMagicPotToolName } from '@shared/app/types'
 import { Config } from '@shared/config/config'
 import { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
@@ -1603,12 +1604,12 @@ export class AssistantRuntime {
     }
 
     const continuationSourceRun = continueFromRunId
-      ? await this.sessionStore.getRun(continueFromRunId)
+      ? await this.getRun(continueFromRunId, route)
       : null
     if (continueFromRunId && !continuationSourceRun) {
       throw new Error(`Cannot continue from missing run: ${continueFromRunId}`)
     }
-    const resumeSourceRun = resumeFromRunId ? await this.sessionStore.getRun(resumeFromRunId) : null
+    const resumeSourceRun = resumeFromRunId ? await this.getRun(resumeFromRunId, route) : null
     if (resumeFromRunId && !resumeSourceRun) {
       throw new Error(`Cannot resume from missing run: ${resumeFromRunId}`)
     }
@@ -1617,6 +1618,15 @@ export class AssistantRuntime {
       if (!eligibility.resumable) {
         throw new Error(`Cannot resume run ${resumeSourceRun.runId}: ${eligibility.reason}`)
       }
+      const replayRunId = await resolveAssistantToolReplayRunId(
+        resumeSourceRun.runId,
+        route,
+        (id) => this.getRun(id, route)
+      )
+      const sourceSession = await this.sessionStore.getSession(route)
+      assertKnownAssistantToolOutcomes(sourceSession?.eventLog || [], replayRunId, {
+        requireRunStart: true
+      })
     }
 
     const sourceRun = resumeSourceRun || continuationSourceRun
@@ -1935,38 +1945,8 @@ export class AssistantRuntime {
       throw new Error(`Cannot resume run ${runId}: ${eligibility.reason}`)
     }
 
-    const sourceSession = await this.sessionStore.getSession(normalizedRoute)
-    const sourceToolActions = (sourceSession?.eventLog || [])
-      .filter((event) => event.runId === sourceRun.runId)
-      .map((event) => event.metadata?.agentAction)
-      .filter(
-        (value): value is { type: string; payload: Record<string, unknown> } =>
-          value !== null &&
-          typeof value === 'object' &&
-          'type' in value &&
-          'payload' in value &&
-          typeof value.type === 'string' &&
-          Boolean(value.payload) &&
-          typeof value.payload === 'object'
-      )
-    const settledToolIds = new Set(
-      sourceToolActions
-        .filter((action) => action.type === 'tool.result')
-        .map((action) => action.payload.invocationId)
-    )
-    if (
-      sourceToolActions.some(
-        (action) =>
-          action.type === 'tool.invoke' && !settledToolIds.has(action.payload.invocationId)
-      )
-    ) {
-      throw Object.assign(
-        new Error(
-          'This run has a tool with an unknown outcome; review its effects before resuming.'
-        ),
-        { code: 'TOOL_REPLAY_REQUIRES_REVIEW' }
-      )
-    }
+    // The shared inbound queue validates source ownership and unresolved effects
+    // for both this convenience method and direct synchronous/asynchronous resumes.
 
     const requestText = cleanString(sourceRun.requestText)
     if (!requestText) {

@@ -459,6 +459,20 @@ describe('AssistantRuntime', () => {
       }
     })
 
+    // Match the queue-start record that a real source run persists before execution.
+    await store.appendEvents(route, [
+      {
+        eventId: 'task-group-1-failed:queued',
+        runId: 'task-group-1-failed',
+        sessionKey: 'generic:group:task-room:thread:task-thread',
+        route,
+        type: 'queued',
+        level: 'info',
+        message: 'Message queued for chat execution.',
+        createdAt: 10
+      }
+    ])
+
     const replay = await runtime.handleCommand(route, 'task', 'replay task-group-1')
     const retry = await runtime.handleCommand(route, 'task', 'retry task-group-1')
 
@@ -1191,6 +1205,89 @@ describe('AssistantRuntime', () => {
       ])
     )
     expect((await runtime.getSession(route))?.workspace.workspaceId).toBe('workspace-resume-1')
+  })
+
+  it.each(['resumeFromRunId', 'continueFromRunId'] as const)(
+    'rejects foreign-route %s before copying its context',
+    async (reference) => {
+      const chat = vi.fn(async (): Promise<LLMChatResp> => {
+        throw new Error('failed before output')
+      })
+      const runtime = createRuntime({ chatService: { chat } })
+      const owner = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'owner' }
+      const foreign = { ...owner, scopeId: 'foreign' }
+      const source = await runtime.submitMessage({
+        route: owner,
+        text: 'PRIVATE original request',
+        workspaceId: 'owner-workspace'
+      })
+      await flushQueue(4)
+      expect((await runtime.getRun(source.runId!, owner))?.status).toBe('failed')
+      await expect(
+        runtime.handleMessage({ route: foreign, text: 'continue', [reference]: source.runId })
+      ).rejects.toThrow()
+      expect(chat).toHaveBeenCalledTimes(1)
+      expect(await runtime.listRuns(10, foreign)).toHaveLength(0)
+    }
+  )
+
+  it.each(['handleMessage', 'submitMessage'] as const)(
+    'checks unknown tool effects on direct %s recovery requests',
+    async (method) => {
+      const chat = vi.fn(async (): Promise<LLMChatResp> => {
+        throw new Error('failed before output')
+      })
+      const runtime = createRuntime({ chatService: { chat } })
+      const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'recovery-review' }
+      const source = await runtime.submitMessage({ route, text: 'original request' })
+      await flushQueue(4)
+      await store.appendEvents(route, [
+        {
+          eventId: 'pending-effect',
+          runId: source.runId!,
+          sessionKey: 'generic:dm:recovery-review',
+          route,
+          type: 'tool',
+          level: 'info',
+          message: 'Tool requested',
+          createdAt: Date.now(),
+          metadata: {
+            agentAction: {
+              type: 'tool.invoke',
+              correlationId: source.runId,
+              payload: {
+                invocationId: 'pending-effect',
+                toolName: 'files.write',
+                args: { path: 'owned.txt' }
+              }
+            }
+          }
+        }
+      ])
+      await expect(runtime[method]({ route, resumeFromRunId: source.runId })).rejects.toMatchObject(
+        { code: 'TOOL_REPLAY_REQUIRES_REVIEW' }
+      )
+      expect(chat).toHaveBeenCalledTimes(1)
+      expect(await runtime.listRuns(10, route)).toHaveLength(1)
+    }
+  )
+
+  it('requires review instead of replay when the source journal was evicted', async () => {
+    const chat = vi.fn(async (): Promise<LLMChatResp> => {
+      throw new Error('failed')
+    })
+    const runtime = createRuntime({ chatService: { chat } })
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'evicted-journal' }
+    const source = await runtime.submitMessage({ route, text: 'original request' })
+    await flushQueue(4)
+    const session = await store.getSession(route)
+    expect(session?.eventLog.some((event) => event.type === 'queued')).toBe(true)
+    session!.eventLog = []
+    await expect(runtime.resumeRun(route, source.runId!)).rejects.toMatchObject({
+      code: 'TOOL_REPLAY_REQUIRES_REVIEW'
+    })
+    expect(chat).toHaveBeenCalledTimes(1)
+    expect(await runtime.listRuns(10, route)).toHaveLength(1)
   })
 
   it('rejects resume control for completed runs', async () => {
