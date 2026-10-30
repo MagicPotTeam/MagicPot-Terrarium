@@ -1,7 +1,7 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -262,7 +262,7 @@ describe('notebook execution production composition', () => {
     expect(spawn.args.slice(0, 4)).toEqual(['-I', '-S', '-B', '-u'])
     expect(spawn.args.at(-1)).toMatch(/\.wrapper\.py$/)
     expect(spawn.options).toMatchObject({
-      cwd: t.root,
+      cwd: realpathSync.native(t.root),
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']

@@ -203,13 +203,18 @@ describe('applyLauncherRetention', () => {
     const layout = await tempLayout()
     await writeApp(layout, appManifest(builds.old, runtimes.old, '2026-01-01T00:00:00.000Z'))
     await writeRuntime(layout, runtimes.old)
+    const lockedDirectory = path.resolve(await fs.realpath(path.join(layout.apps, builds.old)))
+    let lockedRemovalAttempts = 0
     const fileSystem: LauncherRetentionFileSystem = {
       readdir: (directory) => fs.readdir(directory),
       lstat: (target) => fs.lstat(target),
       realpath: (target) => fs.realpath(target),
       readFile: (filePath, encoding) => fs.readFile(filePath, encoding),
       rm: async (target, options) => {
-        if (target === path.join(layout.apps, builds.old)) throw new Error('locked')
+        if (target === lockedDirectory) {
+          lockedRemovalAttempts += 1
+          throw new Error('locked')
+        }
         await fs.rm(target, options)
       }
     }
@@ -219,6 +224,7 @@ describe('applyLauncherRetention', () => {
       fileSystem
     })
     expect(result.pendingDeletes).toEqual([path.join(layout.apps, builds.old)])
+    expect(lockedRemovalAttempts).toBe(1)
     expect(result.errors[0].message).toBe('locked')
     expect(result.keptRuntimes).toEqual([runtimes.old])
   })

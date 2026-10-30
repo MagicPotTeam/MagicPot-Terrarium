@@ -1,9 +1,20 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync
+} from 'node:fs'
+import * as nativeFs from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-vi.unmock('node:fs')
+vi.mock('node:fs', async () => ({
+  ...(await vi.importActual<typeof import('node:fs')>('node:fs'))
+}))
 vi.unmock('node:fs/promises')
 import type { PolicyRequest, PolicyRule } from '../../../shared/magicAgentPlatform2'
 import { MagicAgentEventStore } from '../persistence/eventStore'
@@ -16,6 +27,7 @@ import {
 const roots: string[] = []
 const stores: MagicAgentEventStore[] = []
 afterEach(() => {
+  vi.restoreAllMocks()
   stores.splice(0).forEach((s) => s.close())
   roots.splice(0).forEach((r) => rmSync(r, { recursive: true, force: true }))
 })
@@ -520,11 +532,12 @@ describe('NotebookExecutionCoordinator', () => {
       expect(sqlite).not.toContain(leaked)
   })
 
-  it.each(['missing', 'symlink', 'oversize'] as const)(
+  it.each(['missing', 'symlink', 'linked-parent', 'file-symlink-stat', 'oversize'] as const)(
     'rejects %s declared artifacts without mutating the notebook',
     async (kind) => {
       const t = setup()
-      const artifact = path.join(t.root, 'artifact.bin')
+      const artifactRelative = kind === 'linked-parent' ? 'linked/artifact.bin' : 'artifact.bin'
+      const artifact = path.join(t.root, artifactRelative)
       if (kind === 'oversize') {
         writeFileSync(artifact, '')
         truncateSync(artifact, 16 * 1024 * 1024 + 1)
@@ -537,7 +550,7 @@ describe('NotebookExecutionCoordinator', () => {
         routeKey: 'r',
         sessionId: 's',
         path: 'a.ipynb',
-        artifacts: ['artifact.bin'],
+        artifacts: [artifactRelative],
         expectedSha256,
         expectedGeneration: 0
       })
@@ -548,24 +561,63 @@ describe('NotebookExecutionCoordinator', () => {
         routeKey: 'r',
         sessionId: 's',
         path: 'a.ipynb',
-        artifacts: ['artifact.bin'],
+        artifacts: [artifactRelative],
         expectedSha256,
         expectedGeneration: 0,
         ...approval(t.auth, request)
       })
-      if (kind === 'symlink') {
-        writeFileSync(path.join(t.root, 'target.bin'), 'target')
-        symlinkSync(path.join(t.root, 'target.bin'), artifact)
+      let mockedArtifactHits = 0
+      let artifactRead: ReturnType<typeof vi.spyOn> | undefined
+      if (kind === 'symlink' || kind === 'linked-parent') {
+        const targetDirectory = path.join(t.root, 'target')
+        mkdirSync(targetDirectory)
+        writeFileSync(path.join(targetDirectory, 'artifact.bin'), 'target')
+        // Windows directory junctions require no file-symlink privilege. On
+        // Linux/macOS retain the actual native file symlink rejection case.
+        const directoryLink = kind === 'linked-parent' || process.platform === 'win32'
+        symlinkSync(
+          directoryLink ? targetDirectory : path.join(targetDirectory, 'artifact.bin'),
+          kind === 'linked-parent' ? path.dirname(artifact) : artifact,
+          directoryLink ? (process.platform === 'win32' ? 'junction' : 'dir') : 'file'
+        )
+        expect(
+          nativeFs
+            .lstatSync(kind === 'linked-parent' ? path.dirname(artifact) : artifact)
+            .isSymbolicLink()
+        ).toBe(true)
+      }
+      if (kind === 'file-symlink-stat') {
+        writeFileSync(artifact, 'target')
+        const canonicalArtifact = realpathSync.native(artifact)
+        const actualLstat = nativeFs.lstatSync
+        // Model the file-symlink lstat bit only, keeping all other operations
+        // native. The real junction cases above separately cover OS traversal.
+        vi.spyOn(nativeFs, 'lstatSync').mockImplementation((value, options) => {
+          const stat = actualLstat(value, options)
+          if (path.resolve(String(value)) !== canonicalArtifact || !stat) return stat
+          mockedArtifactHits += 1
+          return Object.assign(Object.create(stat), { isSymbolicLink: () => true })
+        })
+        artifactRead = vi.spyOn(nativeFs, 'readFileSync')
       }
       t.complete()
-      expect(
-        host.status({
-          routeKey: 'r',
-          sessionId: 's',
-          path: 'a.ipynb',
-          executionId: started.executionId
-        }).state
-      ).toBe('failed')
+      const status = host.status({
+        routeKey: 'r',
+        sessionId: 's',
+        path: 'a.ipynb',
+        executionId: started.executionId
+      })
+      expect(status.state).toBe('failed')
+      if (kind === 'symlink' || kind === 'linked-parent' || kind === 'file-symlink-stat')
+        expect(status.error).toBe('Symlinks are not allowed.')
+      if (kind === 'file-symlink-stat') {
+        expect(mockedArtifactHits).toBeGreaterThan(0)
+        expect(
+          artifactRead!.mock.calls.some(
+            ([value]) => path.resolve(String(value)) === realpathSync.native(artifact)
+          )
+        ).toBe(false)
+      }
       expect(readFileSync(t.file)).toEqual(before)
     }
   )
