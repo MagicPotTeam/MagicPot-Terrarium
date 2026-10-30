@@ -1062,7 +1062,10 @@ export class OpenAIAPICli implements LLMCli {
             : OPENAI_CHAT_DEADLINE_MS),
       {
         idleTimeout: Boolean(retryContext),
-        retryConnectionErrors: Boolean(retryContext) && !imageTask
+        // Responses image edits retain one JSON body/key across pre-output retries.
+        // A compatible gateway still has to honor the key to prevent duplicate billing.
+        // Streaming image/tool progress keeps its existing no-replay boundary.
+        retryConnectionErrors: Boolean(retryContext) && (!imageTask || apiMode === 'responses')
       }
     )
     let callbackFailed = false
@@ -1121,12 +1124,16 @@ export class OpenAIAPICli implements LLMCli {
       return result
     } catch (error) {
       if (callbackFailed) throw callbackError
+      const retryReason = modelCapacityReason(error)
       if (
         error instanceof Error &&
-        ['request-timeout', 'connection-error'].includes(modelCapacityReason(error) || '') &&
-        (!modelRequestStarted || imageTask)
+        ((!modelRequestStarted &&
+          (retryReason === 'request-timeout' || retryReason === 'connection-error')) ||
+          (imageTask && retryReason === 'request-timeout') ||
+          (imageTask && apiMode !== 'responses' && retryReason === 'connection-error'))
       ) {
-        // A timed-out image submission may already have created an image upstream.
+        // Reference preparation must not be retried as a model request. Preserve
+        // unknown image-timeout protection and the non-Responses image boundary.
         Object.assign(error, { retryBlocked: true })
       }
       // Suboperations resolve cancellation at the point of failure. Re-reading

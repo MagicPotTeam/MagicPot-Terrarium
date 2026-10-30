@@ -206,7 +206,7 @@ describe('interactive connection-closed recovery', () => {
     }
   )
 
-  it.each(['images', 'responses-image'] as const)(
+  it.each(['images'] as const)(
     'does not blindly replay an uncertain %s submission',
     async (mode) => {
       const fetcher = vi.fn<typeof fetch>().mockRejectedValue(closed())

@@ -169,7 +169,7 @@ async function waitForRetry(delay: number, signal?: AbortSignal): Promise<void> 
 
 /** Retry ONE model sampling operation, never the Agent turn or its already executed tools.
  * No attempt cap for transient model connection, timeout, overload, rate-limit or server errors.
- * Connection retries remain opt-in at the text-model transport boundary.
+ * Connection retries remain opt-in at the model transport boundary.
  * Partial output or observed hosted tool execution is not replay-safe.
  * The caller owns a stable request body/idempotency key and any temporary remote resources.
  */
