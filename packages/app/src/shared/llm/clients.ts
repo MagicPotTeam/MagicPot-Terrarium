@@ -10,6 +10,7 @@
  */
 
 import { retryModelCapacity, parseModelRetryAfter, modelCapacityReason } from './modelCapacityRetry'
+import { ModelConnectionError } from './modelConnectionError'
 import type { LLMModelUse } from '@shared/config/config'
 import {
   buildNativeToolDefinitions,
@@ -342,11 +343,13 @@ const buildFetchFailureError = (label: string, endpoint: string, error: unknown)
   }
   const detail = describeFetchFailure(error)
   const sanitizedEndpoint = sanitizeEndpointForMessage(endpoint)
-  return new Error(
+  const message =
     detail && detail.toLowerCase() !== 'fetch failed'
       ? `${label} request failed for ${sanitizedEndpoint}: ${detail}`
       : `${label} request failed for ${sanitizedEndpoint}`
-  )
+  return error instanceof ModelConnectionError
+    ? new ModelConnectionError(message, error)
+    : new Error(message, { cause: error })
 }
 
 // ==================== Helper: convertImageToBase64 ====================
@@ -1057,7 +1060,10 @@ export class OpenAIAPICli implements LLMCli {
           : retryContext
             ? OPENAI_INTERACTIVE_IDLE_TIMEOUT_MS
             : OPENAI_CHAT_DEADLINE_MS),
-      { idleTimeout: Boolean(retryContext) }
+      {
+        idleTimeout: Boolean(retryContext),
+        retryConnectionErrors: Boolean(retryContext) && !imageTask
+      }
     )
     let callbackFailed = false
     let callbackError: unknown
@@ -1117,7 +1123,7 @@ export class OpenAIAPICli implements LLMCli {
       if (callbackFailed) throw callbackError
       if (
         error instanceof Error &&
-        modelCapacityReason(error) === 'request-timeout' &&
+        ['request-timeout', 'connection-error'].includes(modelCapacityReason(error) || '') &&
         (!modelRequestStarted || imageTask)
       ) {
         // A timed-out image submission may already have created an image upstream.

@@ -1,4 +1,5 @@
 import type { FetchImpl } from './clients'
+import { normalizeModelConnectionError } from './modelConnectionError'
 
 export const OPENAI_CHAT_DEADLINE_MS = 120_000
 // Interactive reasoning may be silent for minutes. Bound inactivity, not a whole live turn.
@@ -53,7 +54,7 @@ export class ProviderRequestControl {
     private readonly fetchImpl: FetchImpl,
     private readonly parent?: AbortSignal,
     timeoutMs = PROVIDER_CHAT_DEADLINE_MS,
-    private readonly options: { idleTimeout?: boolean } = {},
+    private readonly options: { idleTimeout?: boolean; retryConnectionErrors?: boolean } = {},
     private readonly providerName = 'Provider'
   ) {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -134,6 +135,10 @@ export class ProviderRequestControl {
     })
   }
 
+  private rethrowTransportError = (error: unknown): never => {
+    throw this.options.retryConnectionErrors ? normalizeModelConnectionError(error) : error
+  }
+
   /** Callers pass the same operation signal; shorter hosted-file setup has its own control. */
   fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     this.check()
@@ -142,6 +147,7 @@ export class ProviderRequestControl {
         this.check()
         return this.fetchImpl(input, { ...init, signal: this.signal })
       })
+      .catch(this.rethrowTransportError)
       .then((response) => {
         if (this.signal.aborted || this.disposed) cancelBody(response)
         else {
@@ -173,7 +179,7 @@ export class ProviderRequestControl {
     try {
       while (true) {
         this.check()
-        const result = await this.wait(reader.read(), cancel)
+        const result = await this.wait(reader.read().catch(this.rethrowTransportError), cancel)
         if (result.done) return
         if (result.value.byteLength > maxBytes - total) {
           throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
@@ -196,7 +202,9 @@ export class ProviderRequestControl {
 
   async text(response: Response, maxBytes: number, truncate = false): Promise<string> {
     if (!response.body) {
-      const text = await this.wait(response.text(), () => cancelBody(response))
+      const text = await this.wait(response.text().catch(this.rethrowTransportError), () =>
+        cancelBody(response)
+      )
       const bytes = new TextEncoder().encode(text)
       if (bytes.byteLength > maxBytes && !truncate)
         throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
@@ -226,7 +234,9 @@ export class ProviderRequestControl {
     if (!response.body) {
       // Compatibility for injected/native adapters without a WHATWG stream; cannot
       // prevent their internal allocation, but still enforces time and result size.
-      const payload = await this.wait(response.json(), () => cancelBody(response))
+      const payload = await this.wait(response.json().catch(this.rethrowTransportError), () =>
+        cancelBody(response)
+      )
       if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > maxBytes) {
         throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
       }
@@ -280,7 +290,7 @@ export class OpenAIRequestControl extends ProviderRequestControl {
     fetchImpl: FetchImpl,
     parent?: AbortSignal,
     timeoutMs = OPENAI_CHAT_DEADLINE_MS,
-    options: { idleTimeout?: boolean } = {}
+    options: { idleTimeout?: boolean; retryConnectionErrors?: boolean } = {}
   ) {
     super(fetchImpl, parent, timeoutMs, options, 'OpenAI')
   }

@@ -1,10 +1,12 @@
 import type { LLMChatParams, LLMDeltaEvent } from './types'
+import { ModelConnectionError } from './modelConnectionError'
 
 export type LLMRetryStatus = {
   attempt: number
   delayMs: number
   nextRetryAt: number
-  reason: 'server-overloaded' | 'rate-limited' | 'server-error' | 'request-timeout'
+  reason:
+    'server-overloaded' | 'rate-limited' | 'server-error' | 'request-timeout' | 'connection-error'
 }
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
@@ -75,6 +77,7 @@ export function modelCapacityReason(error: unknown): LLMRetryStatus['reason'] | 
     (Array.isArray(partial?.attachments) && partial.attachments.length > 0)
   )
     return undefined
+  if (error instanceof ModelConnectionError) return 'connection-error'
   // Only model-transport deadlines are retryable; never retry tool deadlines or user aborts.
   if (code === 'model_request_timeout' || status === 408 || status === 504) return 'request-timeout'
   if (
@@ -123,7 +126,8 @@ export function normalizeModelRetryStatus(value: unknown): LLMRetryStatus | unde
     (v.reason !== 'server-overloaded' &&
       v.reason !== 'rate-limited' &&
       v.reason !== 'server-error' &&
-      v.reason !== 'request-timeout')
+      v.reason !== 'request-timeout' &&
+      v.reason !== 'connection-error')
   )
     return undefined
   return {
@@ -164,7 +168,8 @@ async function waitForRetry(delay: number, signal?: AbortSignal): Promise<void> 
 }
 
 /** Retry ONE model sampling operation, never the Agent turn or its already executed tools.
- * No attempt cap for explicit overload, rate-limit or server-processing errors.
+ * No attempt cap for transient model connection, timeout, overload, rate-limit or server errors.
+ * Connection retries remain opt-in at the text-model transport boundary.
  * Partial output or observed hosted tool execution is not replay-safe.
  * The caller owns a stable request body/idempotency key and any temporary remote resources.
  */

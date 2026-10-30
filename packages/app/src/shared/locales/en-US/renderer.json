@@ -975,6 +975,7 @@
     "loading_tool_returned": "Tool returned; waiting for the model to continue",
     "loading_tool_cancelled": "Tool cancelled",
     "loading_tool_failed": "Tool failed",
+    "loading_connection_retry": "Connection interrupted — retrying automatically",
     "loading_timeout_retry": "Model response timed out — retrying automatically",
     "loading_auto_retry": "Model busy — retrying automatically",
     "loading_auto_retry_server_error": "Temporary server error — retrying automatically",

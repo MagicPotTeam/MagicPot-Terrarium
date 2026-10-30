@@ -1869,6 +1869,55 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
+  it('shows connection retry progress without sending a second Agent turn', async () => {
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let pendingInput: { onEvent: (event: unknown) => void } | undefined
+    let settle!: (value: unknown) => void
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pendingInput = input
+      return new Promise((resolve) => {
+        settle = resolve
+      })
+    })
+    let view!: ReturnType<typeof renderChatPage>
+    await act(async () => {
+      view = renderChatPage()
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'continue the same request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(pendingInput).toBeDefined())
+    try {
+      const retry = {
+        reason: 'connection-error',
+        attempt: 1,
+        delayMs: 2000,
+        nextRetryAt: Date.now() + 2000
+      }
+      await act(async () => {
+        pendingInput!.onEvent({ type: 'retry', retry })
+      })
+      await waitFor(() => {
+        const props = hoisted.chatMessageListMock.mock.calls.at(-1)?.[0] as {
+          isLoading?: boolean
+          loadingStatus?: ChatLoadingStatus
+        }
+        expect(props.isLoading).toBe(true)
+        expect(props.loadingStatus?.retry).toEqual(retry)
+        expect(props.loadingStatus?.label).toBe('chat.loading_connection_retry')
+      })
+      expect(hoisted.requestChatCompletionStreamMock).toHaveBeenCalledOnce()
+      expect(hoisted.notifyErrorMock).not.toHaveBeenCalled()
+    } finally {
+      await act(async () => {
+        settle({ result: { content: 'recovered' }, response: 'recovered' })
+      })
+      view.unmount()
+    }
+  })
+
   it('reports real tool activity while the model answer remains pending', async () => {
     hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
     let pendingInput: { onEvent: (event: unknown) => void } | undefined

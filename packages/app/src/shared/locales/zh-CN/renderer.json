@@ -819,6 +819,7 @@
     "loading_tool_returned": "工具已返回，等待模型继续",
     "loading_tool_cancelled": "工具已取消",
     "loading_tool_failed": "工具调用失败",
+    "loading_connection_retry": "连接中断，自动重试中",
     "loading_timeout_retry": "等待模型响应超时，自动重试中",
     "loading_auto_retry": "模型繁忙，自动重试中",
     "loading_auto_retry_server_error": "服务端暂时出错，自动重试中",
