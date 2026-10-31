@@ -14,6 +14,14 @@ import {
   createEmbeddedRequirementsInput,
   validateEmbeddedAugmentationPackages
 } from './embedded-requirements-compatibility.mjs'
+import {
+  assertEmbeddedPythonReusePolicy,
+  assertReusablePythonPaths,
+  assertReusedEmbeddedModuleFiles,
+  assertReusedEmbeddedModulePaths,
+  prepareEmbeddedPythonBase,
+  reuseEmbeddedPythonRequested
+} from './embedded-python-reuse.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -51,6 +59,7 @@ const skipTorch = process.env.EMBEDDED_SKIP_TORCH === '1'
 const skipSmoke = process.env.EMBEDDED_SKIP_SMOKE === '1'
 const strictSmoke = process.env.EMBEDDED_STRICT_SMOKE !== '0'
 const dryRun = process.env.EMBEDDED_DRY_RUN === '1'
+const reusePython = reuseEmbeddedPythonRequested(process.env.EMBEDDED_REUSE_PYTHON)
 const requirementsMode = process.env.EMBEDDED_REQUIREMENTS_MODE || 'prefer-fixed'
 const pruneRuntime = process.env.EMBEDDED_PRUNE_RUNTIME !== '0'
 const keepOnnxRuntimeGpu = process.env.EMBEDDED_KEEP_ONNXRUNTIME_GPU === '1'
@@ -616,6 +625,30 @@ function smokeTest() {
   }
 }
 
+function verifyExistingPython() {
+  assertEmbeddedPythonReusePolicy({ skipTorch, skipSmoke, strictSmoke, pruneRuntime })
+  assertReusablePythonPaths(pythonDir, pythonVersion, repoRoot)
+  assertReusedEmbeddedModuleFiles({ pythonDir, torchRequirements: embeddedTorchRequirements })
+  const result = runCapture(pythonExe(), [
+    '-s',
+    '-c',
+    [
+      'import sys, json, struct, platform, pip, torch, torchvision, torchaudio',
+      'modules = {"torch": torch, "torchvision": torchvision, "torchaudio": torchaudio}',
+      'print(json.dumps({"executable": sys.executable, "version": platform.python_version(), "implementation": platform.python_implementation(), "bits": struct.calcsize("P") * 8, "pip": pip.__file__, "cuda": torch.version.cuda, "cpuTensorSum": torch.tensor([1, 2]).sum().item(), "packages": {name: {"version": module.__version__, "file": module.__file__} for name, module in modules.items()}}))'
+    ].join('\n')
+  ])
+  if (result.status !== 0) throw new Error('Existing embedded Python import probe failed')
+  assertReusedEmbeddedModulePaths(JSON.parse(result.stdout), {
+    pythonDir,
+    pythonVersion,
+    torchRequirements: embeddedTorchRequirements
+  })
+  console.log(
+    '[prepare-embedded-python] Verified existing staged Python; all installs and checks will rerun'
+  )
+}
+
 async function main() {
   if (process.platform !== 'win32') {
     throw new Error(
@@ -667,13 +700,19 @@ async function main() {
   const pythonZipPath = path.join(cacheRoot, pythonZipName)
   const getPipPath = path.join(cacheRoot, 'get-pip.py')
 
-  await ensureDownloaded(pythonZipUrl, pythonZipPath)
-  await ensureDownloaded(getPipUrl, getPipPath)
+  if (!reusePython) {
+    await ensureDownloaded(pythonZipUrl, pythonZipPath)
+    await ensureDownloaded(getPipUrl, getPipPath)
+  }
   const llamaCppWheelPath = await ensureVerifiedLlamaCppWheel()
 
-  runPhase('extract-python', () => extractPython(pythonZipPath))
-  runPhase('configure-python-path', configureEmbeddedPythonPath)
-  runPhase('bootstrap-pip', () => bootstrapPip(getPipPath))
+  prepareEmbeddedPythonBase({
+    reuse: reusePython,
+    verify: () => runPhase('verify-existing-python', verifyExistingPython),
+    extract: () => runPhase('extract-python', () => extractPython(pythonZipPath)),
+    configure: () => runPhase('configure-python-path', configureEmbeddedPythonPath),
+    bootstrap: () => runPhase('bootstrap-pip', () => bootstrapPip(getPipPath))
+  })
   const constraintsPath = runPhase('write-constraints', writeConstraints)
   runPhase('install-torch', installTorchStack)
   runPhase('install-requirements', () => installRequirements(constraintsPath))
