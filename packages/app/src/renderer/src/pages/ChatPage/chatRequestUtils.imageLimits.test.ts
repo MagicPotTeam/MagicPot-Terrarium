@@ -122,6 +122,36 @@ const imageResponse = () => ({
   arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer
 })
 
+describe('direct request explicit image descriptor guard', () => {
+  const agent = { id: 'owned', type: 'agent' as const, category: 'owned' as const, skillName: 'Owned', prompt: 'Analyze', apiAddress: 'https://never-called.invalid', apiKey: '' }
+
+  it.each([false, true])('rejects 51 explicit images before any I/O for all local routes (stream=%s)', async (stream) => {
+    for (const route of ['responses', 'chat-completions', 'agent'] as const) {
+      const f = fixture()
+      const config = makeConfig(route === 'chat-completions' ? 'chat-completions' : 'responses')
+      const explicit = turn(51)
+      // Visibility and report metadata cannot waive an explicit descriptor.
+      explicit.attachments![0] = { ...explicit.attachments![0], hiddenFromChatView: true, reportBundleRole: 'report-image', reportBundleId: 'owned' }
+      explicit.attachments!.push({ type: 'file', url: 'data:text/plain;base64,QQ==', reportBundleRole: 'primary-report', reportBundleManifestUrl: 'local-media:///owned.json' })
+      const before = JSON.stringify(explicit)
+      await expect(request(stream, config, [explicit], route === 'agent' ? { externalAgentSkill: agent } : {})).rejects.toThrow('本次图片数量超过限制，请分批发送')
+      expect(f.fetchMock, route).not.toHaveBeenCalled()
+      expect(f.materializeForRequest, route).not.toHaveBeenCalled()
+      expect(f.chat, route).not.toHaveBeenCalled()
+      expect(f.chatStream, route).not.toHaveBeenCalled()
+      expect(f.remoteFetch, route).not.toHaveBeenCalled()
+      expect(JSON.stringify(explicit)).toBe(before)
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it.each([false, true])('continues to dispatch exactly 50 explicit inline images (stream=%s)', async (stream) => {
+    const f = fixture()
+    await expect(request(stream, makeConfig('chat-completions'), [inlineTurn(50)])).resolves.toBeDefined()
+    expect(dispatchedImages(f)).toHaveLength(50)
+  })
+})
+
 describe('default Responses image policy', () => {
   it('defaults count, decoded bytes, aggregate bytes, body bytes and pixels to unlimited', () => {
     expect(DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY.maxImages).toBe(Infinity)
@@ -337,6 +367,38 @@ describe('default Responses image policy', () => {
     }
   )
 
+  it.each([false, true])('rejects manifest-discovered current images above 50 before probe or image reads (stream=%s)', async (stream) => {
+    const f = fixture()
+    const message = turn(1)
+    const manifestUrl = 'local-media:///fixture/over-limit.manifest.json'
+    message.attachments!.push({
+      type: 'file', url: 'data:text/plain;base64,b3duZWQ=', fileName: 'report.txt',
+      reportBundleRole: 'primary-report', reportBundleManifestUrl: manifestUrl
+    })
+    f.fetchMock.mockImplementation(async url => {
+      if (url === manifestUrl) return {
+        ok: true,
+        text: async () => JSON.stringify({
+          version: 1, bundleId: 'fixture', title: 'fixture',
+          entries: Array.from({ length: 50 }, (_, i) => ({
+            role: 'report-image', fileName: `extra-${i}.png`,
+            sourceUrl: `local-media:///fixture/extra-${i}.png`
+          }))
+        })
+      }
+      if (String(url).endsWith('.png')) return imageResponse()
+      return { ok: true, text: async () => 'fixture', headers: { get: () => 'text/plain' } }
+    })
+    const original = JSON.stringify(message)
+    await expect(request(stream, makeConfig(), [message])).rejects.toThrow('本次图片数量超过限制，请分批发送')
+    expect(f.fetchMock.mock.calls.map(([url]) => url)).toEqual([manifestUrl])
+    expect(f.materializeForRequest).not.toHaveBeenCalled()
+    expect(f.chat).not.toHaveBeenCalled()
+    expect(f.chatStream).not.toHaveBeenCalled()
+    expect(f.remoteFetch).not.toHaveBeenCalled()
+    expect(JSON.stringify(message)).toBe(original)
+  })
+
   it('reapplies latest-user history after manifest expansion without resurrecting omitted images', async () => {
     const f = fixture(),
       old = turn(0),
@@ -539,6 +601,47 @@ describe('provider-declared finite Responses image limits', () => {
     ).resolves.toMatchObject({ content: 'Remote unlimited.' })
     expect(f.fetchMock).toHaveBeenCalledTimes(1)
     expect(f.chat).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('rejects cross-message bundle ID collisions before I/O (stream=%s)', async (stream) => {
+    const f = fixture()
+    const primary = (manifest: string): ChatAttachment => ({ type: 'file', url: imageDataUrl, fileName: 'report.md', reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6, reportBundleManifestUrl: manifest })
+    const reportImage: ChatAttachment = { ...image(0), reportBundleId: 'X', reportBundleRole: 'report-image' }
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'A', attachments: [primary('local-media:///a.json')] },
+      { role: 'user', content: 'B', attachments: [reportImage, primary('local-media:///b.json')] }
+    ]
+    const before = JSON.stringify(messages)
+    await expect(request(stream, finiteConfig(10), messages, { imageHistoryPolicy: 'all' })).rejects.toThrow('Too many images; the limit is 10.')
+    expect(f.fetchMock).not.toHaveBeenCalled()
+    expect(f.materializeForRequest).not.toHaveBeenCalled()
+    expect(f.chat).not.toHaveBeenCalled()
+    expect(f.chatStream).not.toHaveBeenCalled()
+    expect(f.remoteFetch).not.toHaveBeenCalled()
+    expect(JSON.stringify(messages)).toBe(before)
+  })
+
+  it('does not let system report images suppress user bundle hints, or incomplete same-message images suppress hints', () => {
+    const primary: ChatAttachment = { type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6 }
+    const reportImage: ChatAttachment = { ...image(0), reportBundleId: 'X', reportBundleRole: 'report-image' }
+    const messages: ChatMessage[] = [{ role: 'system', content: '', attachments: [reportImage] }, { role: 'user', content: '', attachments: [primary, reportImage] }]
+    expect(() => preflightChatRequestImages({ config: finiteConfig(5), messages, imageHistoryPolicy: 'all' })).toThrow('Too many images; the limit is 5.')
+  })
+
+  it('fails closed for ambiguous multiple primary manifests sharing an ID in one message', () => {
+    const primary: ChatAttachment = { type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6, reportBundleManifestUrl: 'local-media:///a.json' }
+    const messages: ChatMessage[] = [{ role: 'user', content: '', attachments: [primary, { ...primary, reportBundleManifestUrl: 'local-media:///b.json' }, { ...image(0), reportBundleId: 'X', reportBundleRole: 'report-image' }] }]
+    expect(() => preflightChatRequestImages({ config: finiteConfig(10), messages, imageHistoryPolicy: 'all' })).toThrow()
+  })
+
+  it('keeps ambiguous hints outside finite Responses preflight', () => {
+    const primary: ChatAttachment = { type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6 }
+    const messages: ChatMessage[] = [{ role: 'user', content: '', attachments: [primary, { ...primary }] }]
+    const nonResponses = finiteConfig(10)
+    nonResponses.llm_config.api_profiles[0].api_mode = 'chat-completions'
+    expect(preflightChatRequestImages({ config: nonResponses, messages, imageHistoryPolicy: 'all' })).toBeUndefined()
+    expect(preflightChatRequestImages({ config: finiteConfig(10), messages, imageHistoryPolicy: 'all', externalAgentSkill: { id: 'owned', type: 'agent', category: 'owned', skillName: 'Owned', prompt: 'Analyze', apiAddress: 'https://never-called.invalid', apiKey: '' } })).toBeUndefined()
+    expect(preflightChatRequestImages({ config: makeConfig(), messages, imageHistoryPolicy: 'all' })).toBe(Infinity)
   })
 
   it('does not double-count a report image against its primary report imageCount metadata', () => {

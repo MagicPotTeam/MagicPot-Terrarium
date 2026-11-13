@@ -1,3 +1,4 @@
+import { useLocation, useNavigate } from 'react-router-dom'
 import React, { useEffect, useState } from 'react'
 import { Box, Paper, Container, Typography, CircularProgress } from '@mui/material'
 import { SmartButton } from '@mui/icons-material'
@@ -11,7 +12,7 @@ import { QAppContextProvider, dispatchQAppFillParams } from './components/QAppCo
 import DuplicateCheckWorkspace from './duplicateCheck/DuplicateCheckWorkspace'
 import { isBuiltinDuplicateCheckQApp } from './duplicateCheck/builtin'
 import VideoGenerationWorkspace from './videoGeneration/VideoGenerationWorkspace'
-import { isBuiltinVideoGenerationQApp } from './videoGeneration/builtin'
+import { BUILTIN_VIDEO_GENERATION_QAPP_KEY, isBuiltinVideoGenerationQApp } from './videoGeneration/builtin'
 
 const STORAGE_KEY = 'qapp.currentQAppKey'
 
@@ -65,7 +66,13 @@ const EmptyState: React.FC<{ message: string }> = ({ message }) => (
 
 const QAppExecutePage: React.FC = () => {
   const { t } = useTranslation()
+  const location = useLocation(), navigate = useNavigate()
   const [currentQAppKey, setCurrentQAppKey] = useState<string>(readStoredQAppKey)
+  useEffect(() => {
+    if (location.state?.magicpotOpenVideoGeneration !== true) return
+    setCurrentQAppKey(BUILTIN_VIDEO_GENERATION_QAPP_KEY)
+    navigate(location.pathname + location.search, { replace: true, state: null })
+  }, [location.key, location.pathname, location.search, location.state, navigate])
   const isDuplicateCheckPage = isBuiltinDuplicateCheckQApp(currentQAppKey)
   const isVideoGenerationPage = isBuiltinVideoGenerationQApp(currentQAppKey)
 

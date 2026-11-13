@@ -56,6 +56,11 @@ describe('managed media reference scanner', () => {
     })
   })
 
+  it('tracks compacted-only references so retention is not mistaken for unreferenced media', async () => {
+    const id = 'a'.repeat(64)
+    expect(await scanManagedMediaReferenceIds({ ...sources(), readChatSessions: async () => [{ messages: [], compactedMessages: [{ role: 'user', attachments: [{ media: ref(id) }] }] }] })).toEqual({ ok: true, ids: [id], referenceCounts: { [id]: 1 } })
+  })
+
   it('returns an empty fail-closed result when any store read fails', async () => {
     const result = await scanManagedMediaReferenceIds({
       ...sources(),

@@ -1,4 +1,13 @@
 import type { FetchImpl } from './clients'
+import { normalizeModelConnectionError } from './modelConnectionError'
+import { ProviderRawWorkLifetime, type ProviderRawWorkRetainer } from './providerRawWork'
+
+type ProviderRequestControlOptions = {
+  idleTimeout?: boolean
+  retryConnectionErrors?: boolean
+  /** Trusted constructor-only retention; absent for ordinary clients. */
+  retainRawWork?: ProviderRawWorkRetainer
+}
 
 export const OPENAI_CHAT_DEADLINE_MS = 120_000
 // Interactive reasoning may be silent for minutes. Bound inactivity, not a whole live turn.
@@ -48,12 +57,14 @@ export class ProviderRequestControl {
   private readonly readers = new Set<() => void>()
   private readonly parentAbort: () => void
   private disposed = false
+  private readonly rawWork?: ProviderRawWorkLifetime
+  private readonly cancelledBodies = new WeakSet<Response>()
 
   constructor(
     private readonly fetchImpl: FetchImpl,
     private readonly parent?: AbortSignal,
     timeoutMs = PROVIDER_CHAT_DEADLINE_MS,
-    private readonly options: { idleTimeout?: boolean } = {},
+    private readonly options: ProviderRequestControlOptions = {},
     private readonly providerName = 'Provider'
   ) {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -63,15 +74,42 @@ export class ProviderRequestControl {
     this.duration = duration
     this.expiresAt = performance.now() + duration
     this.parentAbort = () => this.abort(cancellationReason(parent!))
+    if (options.retainRawWork) {
+      // Admission can throw, including after passive child entry. Do this before
+      // timers/listeners exist; the unstarted lifetime seals itself on failure.
+      parent?.throwIfAborted()
+      this.rawWork = new ProviderRawWorkLifetime(options.retainRawWork)
+    }
     this.timer = setTimeout(() => this.timeout(), duration)
     if (parent?.aborted) this.parentAbort()
     else parent?.addEventListener('abort', this.parentAbort, { once: true })
   }
 
+  /** New work is checked BEFORE invocation; only retained cleanup may run sealed. */
+  private operation<T>(factory: () => Promise<T>): Promise<T> {
+    if (!this.rawWork) return factory()
+    this.check()
+    return this.rawWork.invoke(factory)
+  }
+  private cleanup(factory: () => Promise<unknown>): void {
+    if (!this.rawWork) {
+      try { void factory().catch(() => undefined) } catch { /* best effort */ }
+      return
+    }
+    try { this.rawWork.cleanup(factory) } catch { /* retain poison, preserve caller cause */ }
+  }
+  private cancelResponse(response: Response): void {
+    if (!this.rawWork) { cancelBody(response); return }
+    if (this.cancelledBodies.has(response)) return
+    this.cancelledBodies.add(response)
+    // The reader's own cancel owns a locked body. Calling body.cancel on it would
+    // only create a rejected promise, not cancel any additional underlying work.
+    if (response.body && !response.body.locked) this.cleanup(() => response.body!.cancel())
+  }
   private abort(reason: unknown): void {
     if (!this.signal.aborted) this.controller.abort(reason)
     for (const cancel of this.readers) cancel()
-    for (const response of this.responses) cancelBody(response)
+    for (const response of this.responses) this.cancelResponse(response)
   }
   private timeout(): void {
     this.abort(new ModelRequestTimeoutError(`${this.providerName} request deadline exceeded.`))
@@ -89,6 +127,7 @@ export class ProviderRequestControl {
     if (!this.signal.aborted && performance.now() >= this.expiresAt) this.timeout()
     if (this.signal.aborted) throw cancellationReason(this.signal)
     if (this.disposed) throw new Error(`${this.providerName} request has already finished.`)
+    this.rawWork?.check()
   }
 
   wait<T>(promise: Promise<T>, onCancel?: () => void): Promise<T> {
@@ -134,22 +173,30 @@ export class ProviderRequestControl {
     })
   }
 
+  private rethrowTransportError = (error: unknown): never => {
+    throw this.options.retryConnectionErrors ? normalizeModelConnectionError(error) : error
+  }
+
   /** Callers pass the same operation signal; shorter hosted-file setup has its own control. */
   fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     this.check()
     const request = Promise.resolve()
       .then(() => {
         this.check()
-        return this.fetchImpl(input, { ...init, signal: this.signal })
+        return this.operation(() => this.fetchImpl(input, { ...init, signal: this.signal }))
       })
+      .catch(this.rethrowTransportError)
       .then((response) => {
-        if (this.signal.aborted || this.disposed) cancelBody(response)
+        if (this.signal.aborted || this.disposed) this.cancelResponse(response)
         else {
           this.responses.add(response)
           this.noteProgress()
         }
         return response
       })
+    // Register envelope before its first scheduled microtask. Raw-fetch settlement
+    // cannot drain ownership before this continuation has registered late cleanup.
+    this.rawWork?.track(request)
     return this.wait(request)
   }
 
@@ -162,18 +209,14 @@ export class ProviderRequestControl {
     const cancel = () => {
       if (cancelled) return
       cancelled = true
-      try {
-        void reader.cancel().catch(() => undefined)
-      } catch {
-        /* best effort */
-      }
+      this.cleanup(() => reader.cancel())
     }
     this.readers.add(cancel)
     let total = 0
     try {
       while (true) {
         this.check()
-        const result = await this.wait(reader.read(), cancel)
+        const result = await this.wait(this.operation(() => reader.read()).catch(this.rethrowTransportError), cancel)
         if (result.done) return
         if (result.value.byteLength > maxBytes - total) {
           throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
@@ -196,7 +239,9 @@ export class ProviderRequestControl {
 
   async text(response: Response, maxBytes: number, truncate = false): Promise<string> {
     if (!response.body) {
-      const text = await this.wait(response.text(), () => cancelBody(response))
+      const text = await this.wait(this.operation(() => response.text()).catch(this.rethrowTransportError), () =>
+        this.cancelResponse(response)
+      )
       const bytes = new TextEncoder().encode(text)
       if (bytes.byteLength > maxBytes && !truncate)
         throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
@@ -226,7 +271,9 @@ export class ProviderRequestControl {
     if (!response.body) {
       // Compatibility for injected/native adapters without a WHATWG stream; cannot
       // prevent their internal allocation, but still enforces time and result size.
-      const payload = await this.wait(response.json(), () => cancelBody(response))
+      const payload = await this.wait(this.operation(() => response.json()).catch(this.rethrowTransportError), () =>
+        this.cancelResponse(response)
+      )
       if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > maxBytes) {
         throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
       }
@@ -242,7 +289,7 @@ export class ProviderRequestControl {
 
   async blob(response: Response, maxBytes: number): Promise<Blob> {
     if (!response.body) {
-      const blob = await this.wait(response.blob(), () => cancelBody(response))
+      const blob = await this.wait(this.operation(() => response.blob()), () => this.cancelResponse(response))
       if (blob.size > maxBytes)
         throw new Error(`${this.providerName} response body exceeds the ${maxBytes}-byte limit.`)
       this.check()
@@ -266,11 +313,16 @@ export class ProviderRequestControl {
     error.name = 'AbortError'
     // Settle outstanding waiters before disabling their deadline/parent signal.
     // Already-established caller/timeout reasons remain authoritative.
-    this.abort(error)
-    clearTimeout(this.timer)
-    this.parent?.removeEventListener('abort', this.parentAbort)
-    this.responses.clear()
-    this.readers.clear()
+    try {
+      this.abort(error)
+    } finally {
+      clearTimeout(this.timer)
+      this.parent?.removeEventListener('abort', this.parentAbort)
+      this.responses.clear()
+      this.readers.clear()
+      // Never await drain here. Caller abort stays prompt; exact owner holds it.
+      this.rawWork?.seal()
+    }
   }
 }
 
@@ -280,7 +332,7 @@ export class OpenAIRequestControl extends ProviderRequestControl {
     fetchImpl: FetchImpl,
     parent?: AbortSignal,
     timeoutMs = OPENAI_CHAT_DEADLINE_MS,
-    options: { idleTimeout?: boolean } = {}
+    options: ProviderRequestControlOptions = {}
   ) {
     super(fetchImpl, parent, timeoutMs, options, 'OpenAI')
   }

@@ -24,6 +24,13 @@ afterEach(() => {
 })
 
 describe('QuickApp LLM workflow profile extension delegation', () => {
+  it('blocks retired profiles before slot export or provider extension overrides', () => {
+    const retired = { ...profile, call_type: ['chat', 'gpt', '-web-playwright'].join('') }
+    sharedHostExtensionApiV1.llmProfiles.push({ id: 'must-not-override-retirement', isQAppLlmProfileUsableInWorkflow: () => true, resolveQAppLlmProfileSlotValues: () => ({ modelName: 'bypass', baseUrl: 'https://api.test', apiKey: 'secret', isOllama: false }) })
+    expect(isQAppLlmProfileUsableInWorkflow(config, retired)).toBe(false)
+    expect(() => resolveQAppLlmProfileSlotValues(config, retired)).toThrow('removed')
+    expect(retired.api_key).toBe('neutral-key')
+  })
   it('uses the normal slot fallback when the public registry is empty', () => {
     sharedHostExtensionApiV1.llmProfiles.splice(0)
 

@@ -335,7 +335,7 @@ export const enrichMagicPotAppCatalogWithRuntime = (
 
     return {
       ...app,
-      status: runtimeConnection.status === 'connected' ? 'ready' : runtimeConnection.status,
+      status: runtimeConnection.status === 'connected' ? 'ready' : runtimeConnection.status === 'connecting' ? 'connecting' : runtimeConnection.status === 'disconnected' ? 'disabled' : 'error',
       capabilities: {
         ...app.capabilities,
         tools:

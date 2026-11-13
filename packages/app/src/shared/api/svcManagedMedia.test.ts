@@ -266,6 +266,26 @@ describe('svcManagedMedia contract', () => {
     ).toThrow(ServiceValidationError)
   })
 
+  it('accepts a bounded materialization request without changing legacy validation', () => {
+    for (const transport of ['request-data-url', 'chunked-binary-v1']) {
+      const request = { reference, transport, maxBytes: 64 }
+      expect(validateMaterializeManagedMediaForRequestReq(request)).toEqual(request)
+      for (const maxBytes of [0, -1, 1.5, NaN, Infinity, '64', null, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() =>
+          validateMaterializeManagedMediaForRequestReq({ ...request, maxBytes })
+        ).toThrow(ServiceValidationError)
+      }
+    }
+    expect(() =>
+      validateMaterializeManagedMediaForRequestReq({
+        reference,
+        transport: 'chunked-binary-v1',
+        maxBytes: 64,
+        other: true
+      })
+    ).toThrow(ServiceValidationError)
+  })
+
   it('registers strict request and response validators', () => {
     expect(managedMediaSvcDef.importFile).toMatchObject({
       type: 'unary',

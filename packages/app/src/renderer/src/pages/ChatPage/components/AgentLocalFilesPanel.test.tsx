@@ -67,6 +67,7 @@ function makeService() {
     setScope: vi
       .fn<AgentLocalFilesSvc['setScope']>()
       .mockImplementation(() => undefined as unknown as Promise<void>),
+    chooseSqlitePreview: vi.fn<AgentLocalFilesSvc['chooseSqlitePreview']>().mockResolvedValue(null),
     choose: vi.fn<AgentLocalFilesSvc['choose']>().mockResolvedValue(grant),
     read: vi.fn<AgentLocalFilesSvc['read']>().mockResolvedValue(text),
     list: vi.fn<AgentLocalFilesSvc['list']>().mockResolvedValue({ entries: [], truncated: false }),

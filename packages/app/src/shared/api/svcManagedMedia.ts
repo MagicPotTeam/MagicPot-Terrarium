@@ -36,8 +36,8 @@ export type EnsureManagedMediaDerivativeResp =
   | { status: 'fallbackOriginal'; reason: 'animated-gif'; localMediaUrl: string }
 
 export type MaterializeManagedMediaForRequestReq =
-  | { reference: MediaReference; transport: 'request-data-url' }
-  | { reference: MediaReference; transport: 'chunked-binary-v1' }
+  | { reference: MediaReference; transport: 'request-data-url'; maxBytes?: number }
+  | { reference: MediaReference; transport: 'chunked-binary-v1'; maxBytes?: number }
 
 export type MaterializeManagedMediaForRequestResp =
   | {
@@ -489,13 +489,14 @@ export const validateEnsureManagedMediaDerivativeResp = (
 export const validateMaterializeManagedMediaForRequestReq = (
   value: unknown
 ): MaterializeManagedMediaForRequestReq => {
-  if (!isRecord(value) || !hasExactKeys(value, ['reference', 'transport'])) {
+  if (!isRecord(value) || !hasAllowedKeys(value, ['reference', 'transport'], ['maxBytes'])) {
     throw new ServiceValidationError('svcManagedMedia.materializeForRequest request')
   }
   const reference = normalizeMediaReference(value.reference)
   if (
     !reference ||
     reference.kind !== 'managed' ||
+    ('maxBytes' in value && !isPositiveSafeInteger(value.maxBytes)) ||
     (value.transport !== 'request-data-url' && value.transport !== 'chunked-binary-v1')
   ) {
     throw new ServiceValidationError('svcManagedMedia.materializeForRequest request')
@@ -505,7 +506,8 @@ export const validateMaterializeManagedMediaForRequestReq = (
   // binary transport and makes the response shape disagree with the request.
   return {
     reference,
-    transport: value.transport as MaterializeManagedMediaForRequestReq['transport']
+    transport: value.transport as MaterializeManagedMediaForRequestReq['transport'],
+    ...(value.maxBytes !== undefined ? { maxBytes: value.maxBytes as number } : {})
   }
 }
 

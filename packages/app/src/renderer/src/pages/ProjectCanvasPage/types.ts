@@ -96,6 +96,7 @@ export interface CanvasImageItem extends CanvasItemBase {
   type: 'image'
   src: string // data URL or object URL
   fileName?: string
+  teamImageLabel?: string
   sourceFile?: Blob
   sourceUrlOwned?: boolean
   sizeBytes?: number

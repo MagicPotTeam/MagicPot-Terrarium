@@ -4,6 +4,7 @@ import type { McpTransportSnapshot } from '@shared/agent/mcpPlatform'
 import { ServerStreaming } from './apiUtils/streaming'
 import { DeepPartial } from '@shared/utils/utilTypes'
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
+import { parseStartupStorageMetadataRequest, parseStartupStorageMetadataResponse, type StartupStorageMetadataRequest, type StartupStorageMetadataResponse } from './startupStorageMetadata'
 
 export type GetConfigReq = {}
 export type GetConfigResp = {
@@ -113,7 +114,7 @@ export type GetLlmProxyAccessUsageResp = {
   usage: LlmProxyAccessUsageSnapshot[]
 }
 
-export type McpClientConnectionStatus = 'connecting' | 'connected' | 'error'
+export type McpClientConnectionStatus = 'connecting' | 'connected' | 'error' | 'closing' | 'close-unconfirmed' | 'disconnected'
 
 export type McpClientConnectionSnapshot = {
   id: string
@@ -123,9 +124,11 @@ export type McpClientConnectionSnapshot = {
   toolAliases: string[]
   transport: McpExternalServerTransport
   lastError?: string
+  /** Session-only explicit stop suppression; ordinary status/sync must not undo it. */
+  suppressed?: boolean
 }
 
-export type GetMcpStatusReq = {}
+export type GetMcpStatusReq = { passive?: boolean }
 export type GetMcpStatusResp = {
   client: {
     connections: McpClientConnectionSnapshot[]
@@ -157,6 +160,8 @@ export type GetMcpStatusResp = {
  * 全局状态服务
  */
 export type StateSvc = {
+  /** Explicit management-only read of already-published startup memory, not storage health. */
+  readStartupStorageMetadata(req: StartupStorageMetadataRequest): Promise<StartupStorageMetadataResponse>
   /**
    * 获取配置
    */
@@ -186,6 +191,11 @@ export type StateSvc = {
 }
 
 export const stateSvcDef: ServiceDefSheet<StateSvc> = {
+  readStartupStorageMetadata: {
+    type: 'unary',
+    request: parseStartupStorageMetadataRequest,
+    response: parseStartupStorageMetadataResponse
+  },
   getConfig: {
     type: 'unary'
   },

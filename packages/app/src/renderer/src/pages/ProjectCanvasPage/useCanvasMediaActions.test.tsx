@@ -1,5 +1,5 @@
 import React from 'react'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as nodePath from 'path'
 
@@ -175,6 +175,28 @@ describe('useCanvasMediaActions', () => {
         })
       })
     )
+  })
+
+  it.each(['copy', 'download'] as const)('rejects a cropped selection before %s leaves the canvas', async (action) => {
+    const notifySuccess = vi.fn()
+    const notifyError = vi.fn()
+    const renderCanvasItemsImageBytes = vi.fn().mockResolvedValue(Uint8Array.from([1, 2, 3]))
+    showSaveDialogMock.mockResolvedValue({ canceled: false, filePath: 'C:/exports/selection.png' })
+    writeImageToClipboardMock.mockResolvedValue({ success: true })
+    const { result } = renderHook(() => useCanvasMediaActions({ notifySuccess, notifyError, renderCanvasItemsImageBytes }))
+    const selected = [createImageItem(), { ...createImageItem(), id: 'cropped', crop: { x: 10, y: 20, width: 30, height: 40 } }]
+    const original = structuredClone(selected)
+    await act(async () => {
+      if (action === 'copy') await result.current.handleCopyCanvasItemsAsImage(selected)
+      else await result.current.handleDownloadCanvasItemsAsImage(selected)
+    })
+    expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.export_cropped_image_failed')
+    expect(showSaveDialogMock).not.toHaveBeenCalled()
+    expect(renderCanvasItemsImageBytes).not.toHaveBeenCalled()
+    expect(writeImageToClipboardMock).not.toHaveBeenCalled()
+    expect(saveImageToPathMock).not.toHaveBeenCalled()
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(selected).toEqual(original)
   })
 
   it('opens a save dialog for every image download and exposes png/jpg/jpeg/svg filters', async () => {

@@ -26,6 +26,24 @@ describe('CooperativeExecutionController', () => {
     expect(crossed).toBe(true)
   })
 
+  it.each([false, true])('rejects pre-aborted admission even when paused=%s', async paused => {
+    const execution = new CooperativeExecutionController(), abort = new AbortController()
+    if (paused) await execution.requestPause()
+    const reason = new Error('already stopped'); abort.abort(reason)
+    await expect(execution.checkpoint('llm-inference', abort.signal)).rejects.toBe(reason)
+    expect(execution.isPaused()).toBe(paused); expect(execution.isQuiescent()).toBe(true)
+  })
+
+  it('cancellation wins a same-tick resume before the awaiting caller can dispatch', async () => {
+    const execution = new CooperativeExecutionController(), abort = new AbortController()
+    await execution.requestPause()
+    const add = vi.spyOn(abort.signal, 'addEventListener'), remove = vi.spyOn(abort.signal, 'removeEventListener')
+    const pending = execution.checkpoint('tool-invocation', abort.signal)
+    execution.resume(); abort.abort(new Error('stopped after resume'))
+    await expect(pending).rejects.toThrow('stopped after resume')
+    expect(add).toHaveBeenCalledOnce(); expect(remove).toHaveBeenCalledOnce(); expect(execution.isQuiescent()).toBe(true)
+  })
+
   it('tracks nested operation kinds and ignores duplicate release', async () => {
     const controller = new CooperativeExecutionController()
     const leaveTurn = controller.enter('assistant-turn')

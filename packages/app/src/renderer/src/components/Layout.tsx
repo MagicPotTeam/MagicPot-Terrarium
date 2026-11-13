@@ -11,6 +11,7 @@ import { useAppDispatch, useAppSelector } from '../store'
 import {
   toggleRightPanel,
   setLastRoutePath,
+  openTab,
   closeTab,
   closeSidePanel,
   clearProjectEntrySidePanelIntent,
@@ -20,6 +21,9 @@ import {
   type TabItem
 } from '../store/slices/layoutSlice'
 import { useNavigate, useLocation } from 'react-router-dom'
+import { useExistingConversationLayout } from './useExistingConversationLayout'
+import ExistingConversationOpenStatus from './ExistingConversationOpenStatus'
+import { AGENT_MANAGEMENT_ROUTE_PATH, isAgentManagementRoute } from '../utils/agentManagementRouting'
 import {
   isProjectCanvasRoutePath,
   normalizeProjectCanvasRoutePath
@@ -62,6 +66,7 @@ export function dispatchMaxSizeLayoutRemeasure() {
 const SYSTEM_ROUTE_TAB_IDS: Record<string, string> = {
   '/': 'tab-home',
   '/settings': 'tab-settings',
+  '/agent-management': 'tab-agent-management',
   '/qappdesign': 'tab-design',
   '/target-manager': 'tab-design',
   '/custom-skill-manager': 'tab-design',
@@ -74,6 +79,7 @@ export const resolveTabIdForCurrentRoute = (
   search: string,
   openTabs: TabItem[]
 ): string | null => {
+  if (isAgentManagementRoute(pathname)) return 'tab-agent-management'
   const canonicalRoute = normalizeProjectCanvasRoutePath(currentRoute)
   const matchedTab = openTabs.find((tab) => resolveTabRoutePath(tab) === canonicalRoute)
   if (matchedTab) {
@@ -103,6 +109,7 @@ export const resolveStartupRouteTarget = (
   currentRoute: string,
   fallbackRoutePath = ''
 ): string | null => {
+  if (isAgentManagementRoute(currentRoute)) return null
   const normalizedSavedRoute = normalizeProjectCanvasRoutePath(lastRoutePath)
   const normalizedCurrentRoute = normalizeProjectCanvasRoutePath(currentRoute)
   const normalizedFallbackRoute = normalizeProjectCanvasRoutePath(fallbackRoutePath)
@@ -277,8 +284,8 @@ const Layout: React.FC = () => {
   const dispatch = useAppDispatch()
   const activeSidePanel = useAppSelector((s) => s.layout.activeSidePanel)
   const projectEntrySidePanelIntent = useAppSelector((s) => s.layout.projectEntrySidePanelIntent)
-  const bottomPanelVisible = useAppSelector((s) => s.layout.bottomPanelVisible)
-  const bottomPanelMaximized = useAppSelector((s) => s.layout.bottomPanelMaximized)
+  const bottomPanelRequested = useAppSelector((s) => s.layout.bottomPanelVisible)
+  const bottomPanelMaximizedRequested = useAppSelector((s) => s.layout.bottomPanelMaximized)
   const rightPanelVisible = useAppSelector((s) => s.layout.rightPanelVisible)
   const lastRoutePath = useAppSelector((s) => s.layout.lastRoutePath)
   const activeTabId = useAppSelector((s) => s.layout.activeTabId)
@@ -288,7 +295,18 @@ const Layout: React.FC = () => {
 
   const navigate = useNavigate()
   const location = useLocation()
+  // A saved terminal/log panel must not mount or hide this local-config overview.
+  // Keep preferences intact for the project when the user returns.
+  const managementRoute = isAgentManagementRoute(location.pathname)
+  const bottomPanelVisible = !managementRoute && bottomPanelRequested
+  const bottomPanelMaximized = !managementRoute && bottomPanelMaximizedRequested
   const currentRoute = `${location.pathname}${location.search}${location.hash}`
+  const conversationOpenLayout = useExistingConversationLayout({
+    activeTabId, openTabs, rightPanelVisible, bottomPanelVisible: bottomPanelRequested,
+    bottomPanelMaximized: bottomPanelMaximizedRequested, startupRestorePending,
+    route: currentRoute, dispatch, navigate
+  })
+  const { reconcileRouteTab } = conversationOpenLayout
 
   const hasRestoredRoute = useRef(false)
   const pendingStartupRoutePathRef = useRef(
@@ -302,6 +320,16 @@ const Layout: React.FC = () => {
   )
   useEffect(() => {
     if (hasRestoredRoute.current) {
+      return undefined
+    }
+
+    // Explicit management deep links must not navigate through the saved project.
+    // Restore its tab list first; the route-sync effect below materializes/activates
+    // the management tab after the snapshot is applied, so it cannot be overwritten.
+    if (managementRoute) {
+      hasRestoredRoute.current = true
+      pendingStartupRoutePathRef.current = null
+      if (startupRestorePending) dispatch(completeStartupRestore())
       return undefined
     }
 
@@ -371,6 +399,22 @@ const Layout: React.FC = () => {
         return
       }
 
+      if (isAgentManagementRoute(location.pathname)) {
+        if (!openTabs.some((tab) => tab.id === 'tab-agent-management')) {
+          reconcileRouteTab(currentRoute, 'tab-agent-management', () => dispatch(
+            openTab({
+              id: 'tab-agent-management',
+              label: 'Agent management',
+              routePath: AGENT_MANAGEMENT_ROUTE_PATH,
+              closable: true
+            })
+          ))
+        } else if (activeTabId !== 'tab-agent-management') {
+          reconcileRouteTab(currentRoute, 'tab-agent-management', () => dispatch(setActiveTab('tab-agent-management')))
+        }
+        return
+      }
+
       const routeTabId = resolveTabIdForCurrentRoute(
         currentRoute,
         location.pathname,
@@ -378,7 +422,7 @@ const Layout: React.FC = () => {
         openTabs
       )
       if (routeTabId && routeTabId !== activeTabId) {
-        dispatch(setActiveTab(routeTabId))
+        reconcileRouteTab(currentRoute, routeTabId, () => dispatch(setActiveTab(routeTabId)))
       }
     }, ROUTE_TAB_SYNC_DELAY_MS)
 
@@ -393,6 +437,7 @@ const Layout: React.FC = () => {
     location.search,
     navigate,
     openTabs,
+    reconcileRouteTab,
     startupRestorePending
   ])
 
@@ -589,7 +634,7 @@ const Layout: React.FC = () => {
   }, [activeSidePanel, dispatch, isProjectRoute, isProjectTab, projectEntrySidePanelIntent])
 
   const effectSidePanel = isProjectTab && isProjectRoute ? activeSidePanel : null
-  const effectRightPanelVisible = isProjectTab && isProjectRoute ? rightPanelVisible : false
+  const effectRightPanelVisible = isProjectTab && isProjectRoute && conversationOpenLayout.allowWorkspace ? rightPanelVisible : false
   const sidePanelVisible = Boolean(effectSidePanel)
   const mainAreaInsets = resolveMainAreaOverlayInsets({
     sidePanelVisible,
@@ -646,6 +691,7 @@ const Layout: React.FC = () => {
       }}
     >
       <TitleBar />
+      <ExistingConversationOpenStatus />
 
       <Box
         sx={{ display: 'flex', flexDirection: 'row', flex: 1, overflow: 'hidden', minHeight: 0 }}
@@ -765,6 +811,7 @@ const Layout: React.FC = () => {
                   key={activeTabId}
                   projectId={activeTabId}
                   projectName={openTabs.find((tab) => tab.id === activeTabId)?.label}
+                  existingConversationOpen={conversationOpenLayout.workspaceAdapter}
                 />
               </Suspense>
             </Box>

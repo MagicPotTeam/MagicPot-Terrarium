@@ -6,6 +6,12 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
+    if std::env::args_os().len() == 2
+        && std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--capabilities"))
+    {
+        println!("magicpot-command-job:atomic-job-list-empty-v2");
+        return;
+    }
     if let Err(message) = windows::run() {
         eprintln!("{message}");
         std::process::exit(1);
@@ -34,6 +40,9 @@ mod windows {
     const JOB_OBJECT_LIMIT_JOB_TIME: Dword = 0x00000004;
     const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
     const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x00020002;
+    // Windows 10+: atomically assigns the child during CreateProcessW. There is
+    // no suspended-but-unowned interval if the supervising helper is killed.
+    const PROC_THREAD_ATTRIBUTE_JOB_LIST: usize = 0x0002000d;
     const STD_INPUT_HANDLE: Dword = -10i32 as Dword;
     const STD_OUTPUT_HANDLE: Dword = -11i32 as Dword;
     const STD_ERROR_HANDLE: Dword = -12i32 as Dword;
@@ -112,6 +121,19 @@ mod windows {
         peak_job_memory: usize,
     }
 
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicAccounting {
+        total_user_time: i64,
+        total_kernel_time: i64,
+        period_user_time: i64,
+        period_kernel_time: i64,
+        page_faults: Dword,
+        total_processes: Dword,
+        active_processes: Dword,
+        terminated_processes: Dword,
+    }
+
     #[link(name = "kernel32")]
     extern "system" {
         fn CreateJobObjectW(attributes: *const SecurityAttributes, name: *const u16) -> Handle;
@@ -121,7 +143,8 @@ mod windows {
             info: *const c_void,
             length: Dword,
         ) -> Bool;
-        fn AssignProcessToJobObject(job: Handle, process: Handle) -> Bool;
+        fn TerminateJobObject(job: Handle, exit_code: Dword) -> Bool;
+        fn QueryInformationJobObject(job: Handle, class: i32, info: *mut c_void, length: Dword, returned: *mut Dword) -> Bool;
         fn CreateProcessW(
             app: *const u16,
             command: *mut u16,
@@ -160,6 +183,9 @@ mod windows {
     }
 
     pub fn run() -> Result<(), String> {
+        let completion_nonce = env::var("MAGICPOT_JOB_COMPLETION_NONCE").ok();
+        // Keep the supervisor receipt secret out of the native child environment.
+        env::remove_var("MAGICPOT_JOB_COMPLETION_NONCE");
         let mut args = env::args_os().skip(1);
         let memory = parse_optional(&mut args, "--memory-bytes")?;
         let cpu_ms = parse_optional(&mut args, "--cpu-ms")?;
@@ -215,10 +241,10 @@ mod windows {
                 GetStdHandle(STD_ERROR_HANDLE),
             ];
             let mut attribute_size = 0usize;
-            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_size);
+            InitializeProcThreadAttributeList(null_mut(), 2, 0, &mut attribute_size);
             let mut attribute_storage = vec![0u8; attribute_size];
             let attributes = attribute_storage.as_mut_ptr() as *mut c_void;
-            if InitializeProcThreadAttributeList(attributes, 1, 0, &mut attribute_size) == 0 {
+            if InitializeProcThreadAttributeList(attributes, 2, 0, &mut attribute_size) == 0 {
                 CloseHandle(job);
                 return Err(last_error("InitializeProcThreadAttributeList"));
             }
@@ -235,6 +261,23 @@ mod windows {
                 DeleteProcThreadAttributeList(attributes);
                 CloseHandle(job);
                 return Err(last_error("UpdateProcThreadAttribute"));
+            }
+
+            let jobs = [job];
+            if UpdateProcThreadAttribute(
+                attributes,
+                0,
+                PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                jobs.as_ptr() as *const c_void,
+                size_of_val(&jobs),
+                null_mut(),
+                null_mut(),
+            ) == 0
+            {
+                let error = last_error("UpdateProcThreadAttribute job list");
+                DeleteProcThreadAttributeList(attributes);
+                CloseHandle(job);
+                return Err(error);
             }
 
             let mut startup: StartupInfoExW = std::mem::zeroed();
@@ -267,15 +310,6 @@ mod windows {
                 return Err(last_error("CreateProcessW"));
             }
             DeleteProcThreadAttributeList(attributes);
-            if AssignProcessToJobObject(job, info.process) == 0 {
-                let assignment_error = last_error("AssignProcessToJobObject");
-                TerminateProcess(info.process, 1);
-                WaitForSingleObject(info.process, 5_000);
-                CloseHandle(info.thread);
-                CloseHandle(info.process);
-                CloseHandle(job);
-                return Err(assignment_error);
-            }
             if ResumeThread(info.thread) == Dword::MAX {
                 let resume_error = last_error("ResumeThread");
                 TerminateProcess(info.process, 1);
@@ -302,7 +336,36 @@ mod windows {
                 return Err(exit_code_error);
             }
             CloseHandle(info.process);
+            // Observe job accounting, not just the root-process handle or pipe EOF.
+            // Terminate remaining descendants even when the root chose to exit normally.
+            if TerminateJobObject(job, 1) == 0 {
+                let error = last_error("TerminateJobObject");
+                CloseHandle(job);
+                return Err(error);
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let mut accounting = BasicAccounting::default();
+                if QueryInformationJobObject(job, 1, &mut accounting as *mut _ as *mut c_void, size_of::<BasicAccounting>() as Dword, null_mut()) == 0 {
+                    let error = last_error("QueryInformationJobObject");
+                    CloseHandle(job);
+                    return Err(error);
+                }
+                if accounting.active_processes == 0 {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    CloseHandle(job);
+                    return Err("job termination unconfirmed".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             CloseHandle(job);
+            if let Some(nonce) = completion_nonce {
+                if nonce.len() == 64 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    eprintln!("MAGICPOT_JOB_EMPTY {nonce}");
+                }
+            }
             std::process::exit(exit_code as i32);
         }
     }

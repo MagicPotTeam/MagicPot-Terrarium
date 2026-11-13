@@ -18,7 +18,7 @@ type MediaCaptionTargetItem = CanvasImageItem | CanvasVideoItem | CanvasModel3DI
 type SendCanvasItemsToAgentFn = (
   targetItems: CanvasItem[],
   targetScopeOrOptions?: string | SendCanvasItemsToAgentOptions
-) => Promise<void> | void
+) => Promise<boolean> | boolean
 
 type UseCanvasSelectionActionsOptions = {
   items: CanvasItem[]
@@ -59,7 +59,7 @@ export function useCanvasSelectionActions({
 
   const handleSendCanvasItemsToAgentForGeneration = useCallback(
     async (targetItems: CanvasItem[], options?: SendCanvasItemsToAgentOptions) => {
-      await handleSendCanvasItemsToAgent(targetItems, options)
+      return await handleSendCanvasItemsToAgent(targetItems, options)
     },
     [handleSendCanvasItemsToAgent]
   )

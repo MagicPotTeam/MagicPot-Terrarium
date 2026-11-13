@@ -26,5 +26,7 @@ describe('createCanvasImageItemDraft', () => {
     })
 
     expect(draft.media).toBe(media)
+    expect(draft).not.toHaveProperty('teamImageLabel')
+    expect(createCanvasImageItemDraft({ id: 'team', src: 'x', x: 0, y: 0, width: 1, height: 1, zIndex: 1, teamImageLabel: '设计师·图1' }).teamImageLabel).toBe('设计师·图1')
   })
 })

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiDef } from '@shared/api'
 import { createServer, initServerIpc } from './serverIpc'
+import { parseStartupStorageMetadataRequest, parseStartupStorageMetadataResponse, startupStorageMetadataUnavailable } from '@shared/api/startupStorageMetadata'
 import { FigPluginCenterSvcImpl } from './svcFigPluginCenterImpl'
 import { AgentLocalFilesSvcImpl } from './svcAgentLocalFilesImpl'
 
@@ -14,7 +15,7 @@ const CANVAS_THUMBNAIL_METHODS = [
   'createNativeRegion'
 ] as const
 
-const { createServiceClass, handleMock, onMock } = vi.hoisted(() => {
+const { createServiceClass, handleMock, onMock, catalogDelegateFactory, platformConstructor, storageDelegateFactory, stateConstructor } = vi.hoisted(() => {
   const createServiceClass = () =>
     class {
       [methodName: string]: unknown
@@ -37,7 +38,11 @@ const { createServiceClass, handleMock, onMock } = vi.hoisted(() => {
   return {
     createServiceClass,
     handleMock: vi.fn(),
-    onMock: vi.fn()
+    onMock: vi.fn(),
+    catalogDelegateFactory: vi.fn((_getMainWindow: () => Electron.BrowserWindow | null) => vi.fn(async () => ({ status: 'unavailable', reason: 'unavailable' }))),
+    platformConstructor: vi.fn(),
+    storageDelegateFactory: vi.fn((_getMainWindow: () => Electron.BrowserWindow | null) => vi.fn(async () => ({ status: 'unavailable', reason: 'unavailable' }))),
+    stateConstructor: vi.fn()
   }
 })
 
@@ -54,7 +59,8 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('./svcAdobeBridgeImpl', () => ({ AdobeBridgeSvcImpl: createServiceClass() }))
-vi.mock('./svcStateImpl', () => ({ StateSvcImpl: createServiceClass() }))
+vi.mock('./svcStateImpl', () => ({ StateSvcImpl: vi.fn(function (deps?: unknown) { stateConstructor(deps); return new (createServiceClass())() }) }))
+vi.mock('../storageMetadata/startupStorageReadBinding', () => ({ createStartupStorageReadDelegate: storageDelegateFactory }))
 vi.mock('./svcComfyImpl', () => ({ ComfySvcImpl: createServiceClass() }))
 vi.mock('./svcComfyBatchImpl', () => ({ ComfyBatchSvcImpl: createServiceClass() }))
 vi.mock('./svcCanvasThumbnailImpl', () => ({ CanvasThumbnailSvcImpl: createServiceClass() }))
@@ -74,12 +80,15 @@ vi.mock('./svcFsImpl', () => ({ FsSvcImpl: createServiceClass() }))
 vi.mock('./svcDccBridgeImpl', () => ({ DccBridgeSvcImpl: createServiceClass() }))
 vi.mock('./svcDuplicateCheckImpl', () => ({ DuplicateCheckSvcImpl: createServiceClass() }))
 vi.mock('./svcAppUpdateImpl', () => ({ AppUpdateSvcImpl: createServiceClass() }))
-vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: createServiceClass() }))
+vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: vi.fn(function (deps?: unknown) {
+  platformConstructor(deps); return new (createServiceClass())()
+}) }))
+vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({ createInstalledCatalogReadDelegate: catalogDelegateFactory }))
 vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: createServiceClass() }))
 describe('serverIpc createServer', () => {
   beforeEach(() => {
     handleMock.mockClear()
-    onMock.mockClear()
+    onMock.mockClear(); catalogDelegateFactory.mockClear(); platformConstructor.mockClear(); storageDelegateFactory.mockClear(); stateConstructor.mockClear()
   })
 
   it('creates the remaining service registry', () => {
@@ -95,6 +104,80 @@ describe('serverIpc createServer', () => {
     expect(apiDef.svcManagedMedia.ensureDerivative.type).toBe('unary')
     expect(api.svcComfyBatch).toBeDefined()
     expect(apiDef.svcComfyBatch.start.type).toBe('unary')
+  })
+
+  it('injects only the MAIN catalog delegate made with the original authoritative window getter into the IPC-created constructor', () => {
+    const firstWindow = {} as Electron.BrowserWindow, secondWindow = {} as Electron.BrowserWindow
+    let current: Electron.BrowserWindow | null = firstWindow
+    const getMainWindow = vi.fn(() => current)
+    createServer(undefined, getMainWindow)
+    expect(catalogDelegateFactory).toHaveBeenCalledExactlyOnceWith(getMainWindow)
+    expect(getMainWindow).not.toHaveBeenCalled()
+    const delegate = catalogDelegateFactory.mock.results[0]?.value
+    expect(platformConstructor).toHaveBeenCalledExactlyOnceWith({ installedCatalogRead: delegate })
+    expect(delegate).not.toHaveBeenCalled()
+    expect(catalogDelegateFactory.mock.calls[0]?.[0]()).toBe(firstWindow)
+    current = secondWindow; expect(catalogDelegateFactory.mock.calls[0]?.[0]()).toBe(secondWindow)
+    current = null; expect(catalogDelegateFactory.mock.calls[0]?.[0]()).toBeNull()
+  })
+  it('default IPC constructor gets a null-window delegate rather than selecting or installing a window', () => {
+    createServer()
+    expect(catalogDelegateFactory).toHaveBeenCalledOnce()
+    const getter = catalogDelegateFactory.mock.calls[0]?.[0]
+    expect(getter).toBeTypeOf('function'); expect(getter!()).toBeNull()
+    expect(platformConstructor).toHaveBeenCalledExactlyOnceWith({ installedCatalogRead: catalogDelegateFactory.mock.results[0]?.value })
+  })
+  it('registers the exact strict RAW catalog unary while the mocked constructor remains only an injection observer', async () => {
+    const getter = vi.fn(() => null)
+    initServerIpc(undefined, getter)
+    expect(catalogDelegateFactory).toHaveBeenCalledExactlyOnceWith(getter)
+    expect(platformConstructor).toHaveBeenCalledExactlyOnceWith({ installedCatalogRead: catalogDelegateFactory.mock.results[0]?.value })
+    expect(apiDef.svcMagicAgentPlatform.readInstalledCatalog.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.readInstalledCatalog.ipcResult).toBeUndefined()
+    const handler = handleMock.mock.calls.find(([name]) => name === 'svcMagicAgentPlatform.readInstalledCatalog')?.[1]
+    expect(handler).toBeTypeOf('function')
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try { await expect(handler({ sender: { id: 42, getURL: () => 'file:///app/index.html#/agent-management' }, senderFrame: { url: 'file:///app/index.html#/agent-management', parent: null } }, { path: 'PRIVATE' })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' }) }
+    finally { errorLog.mockRestore() }
+    expect(catalogDelegateFactory.mock.results[0]?.value).not.toHaveBeenCalled()
+  })
+
+  it('injects an independent storage delegate with the ORIGINAL getter callable and no eager access, retaining catalog injection', () => {
+    const first = {} as Electron.BrowserWindow, second = {} as Electron.BrowserWindow
+    let current: Electron.BrowserWindow | null = first
+    const getter = vi.fn(() => current)
+    createServer(undefined, getter)
+    expect(storageDelegateFactory).toHaveBeenCalledExactlyOnceWith(getter)
+    expect(catalogDelegateFactory).toHaveBeenCalledExactlyOnceWith(getter)
+    expect(getter).not.toHaveBeenCalled()
+    const delegate = storageDelegateFactory.mock.results[0]?.value
+    expect(stateConstructor).toHaveBeenCalledExactlyOnceWith({ startupStorageRead: delegate })
+    expect(platformConstructor).toHaveBeenCalledExactlyOnceWith({ installedCatalogRead: catalogDelegateFactory.mock.results[0]?.value })
+    expect(delegate).not.toBe(catalogDelegateFactory.mock.results[0]?.value); expect(delegate).not.toHaveBeenCalled()
+    const received = storageDelegateFactory.mock.calls[0]?.[0]
+    expect(received!()).toBe(first); current = second; expect(received!()).toBe(second); current = null; expect(received!()).toBeNull()
+  })
+  it('keeps default storage IPC getter null and does not silently choose a global window', () => {
+    createServer()
+    expect(storageDelegateFactory).toHaveBeenCalledOnce()
+    expect(storageDelegateFactory.mock.calls[0]?.[0]()).toBeNull()
+    expect(stateConstructor).toHaveBeenCalledExactlyOnceWith({ startupStorageRead: storageDelegateFactory.mock.results[0]?.value })
+    expect(storageDelegateFactory.mock.results[0]?.value).not.toHaveBeenCalled()
+  })
+  it('registers canonical storage raw unary with EXACT parser identities and malformed requests deny before the observer implementation', async () => {
+    const getter = vi.fn(() => null)
+    initServerIpc(undefined, getter)
+    expect(storageDelegateFactory).toHaveBeenCalledExactlyOnceWith(getter)
+    const definition = (apiDef.svcState as unknown as Record<string, { type: unknown; request?: unknown; response?: unknown }>).readStartupStorageMetadata
+    expect(definition.type).toBe('unary'); expect(Object.hasOwn(definition, 'ipcResult')).toBe(false)
+    expect(definition.request).toBe(parseStartupStorageMetadataRequest); expect(definition.response).toBe(parseStartupStorageMetadataResponse)
+    const callback = handleMock.mock.calls.find(([name]) => name === 'svcState.readStartupStorageMetadata')?.[1]
+    expect(callback).toBeTypeOf('function')
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(callback({ sender: { id: 42, getURL: () => 'file:///app/index.html#/agent-management' }, senderFrame: { url: 'file:///app/index.html#/agent-management', parent: null } }, { path: 'PRIVATE' })).resolves.toBe(startupStorageMetadataUnavailable)
+      expect(storageDelegateFactory.mock.results[0]?.value).not.toHaveBeenCalled(); expect(log).not.toHaveBeenCalled(); expect(getter).not.toHaveBeenCalled()
+    } finally { log.mockRestore() }
   })
 
   it('registers the real manifest-only FIGPLUGIN core service without initializing storage', () => {

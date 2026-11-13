@@ -28,10 +28,51 @@ import {
 } from './terminalApprovalCoordinator'
 import { TerminalRunToolHost } from './toolHost'
 
-const POLICY_VERSION = 'assistant-terminal-v1'
+const POLICY_VERSION = 'assistant-terminal-managed-contract-v2'
 const TRUSTED_APPROVER = { kind: 'user', id: 'magicpot-desktop-user' } as const
 const PYTHON_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 const PYTHON_CPU_LIMIT_MS = 60_000
+
+/** Policy classification only, not a pane/owner/plan validator or execution entry.
+ * Requests are constructed by the original managed lifecycle after MAIN preparation.
+ * effectKinds constrains every declared effect; it does not prove effect presence,
+ * the model/tool budget, desktop actor ID or exact approved final material. */
+export const PRODUCTION_MANAGED_FIRST_RUN_POLICY_RULES: readonly PolicyRule[] = [
+  {
+    ruleId: 'managed-first-run-unsupported-denied',
+    priority: 3000,
+    effect: 'deny',
+    // Do not filter the other axes: malformed requests in this namespace must
+    // not fall through to the generic high-risk "offer approval" classification.
+    match: { actionPrefixes: ['agent.instance.managed.'] },
+    explanation: 'Unsupported managed first-run actions, origins, actors, targets or effects are denied.'
+  },
+  ...(['birth', 'start', 'stop'] as const).map((action): PolicyRule => ({
+    ruleId: `managed-first-run-${action}-requires-explicit-approval`,
+    priority: 3100,
+    effect: 'require-approval',
+    match: {
+      origins: ['internal'],
+      actions: [`agent.instance.managed.${action}`],
+      actorKinds: ['user'],
+      targetKinds: ['agent-instance'],
+      effectKinds: action === 'start' ? ['agent.lifecycle', 'network.write'] : ['agent.lifecycle']
+    },
+    constraints: { allowedToolNames: [], requireNoShell: true },
+    explanation: action === 'stop'
+      ? 'Stopping the exact original bounded owner requires a fresh desktop decision; cancellation is not rollback or proof of producer closure.'
+      : 'A new no-history, zero-tool, single-model first-run requires separate explicit birth and final-input start decisions.',
+    approvalRequirement: {
+      scopeKind: 'request',
+      scopeValue: '*',
+      maxUses: 1,
+      expiresInMs: 5 * 60_000,
+      reason: action === 'stop'
+        ? 'Stop only the reviewed original owner/run/revision. Native work may still be draining after cancellation is requested.'
+        : 'Review the complete prepared prompt, selected endpoint/model, new private storage and one-request budget. Birth does not approve model dispatch; start requires its own decision.'
+    }
+  }))
+]
 
 export const PRODUCTION_PYTHON_NOTEBOOK_POLICY_RULES: readonly PolicyRule[] = [
   {
@@ -110,6 +151,46 @@ export const PRODUCTION_PYTHON_NOTEBOOK_POLICY_RULES: readonly PolicyRule[] = [
   }
 ]
 
+export const PRODUCTION_THREAD_SHELL_POLICY_RULE: PolicyRule = {
+  ruleId: 'thread-shell-execution-requires-bounded-approval', priority: 2000, effect: 'require-approval',
+  match: { origins: ['assistant'], actions: ['shell.execute'], targetKinds: ['tool'], effectKinds: ['process.execute', 'filesystem.read', 'filesystem.write'] },
+  constraints: { requireNoShell: true, allowedToolNames: ['shell.execute'], maxTimeoutMs: 120000, maxOutputChars: 256 * 1024, metadata: { maxMemoryBytes: PYTHON_MEMORY_LIMIT_BYTES, maxCpuTimeMs: PYTHON_CPU_LIMIT_MS } },
+  explanation: 'An explicitly configured shell interpreter runs the reviewed script with fixed argv and OS resource limits; spawn shell:false does NOT make the script safe.',
+  approvalRequirement: { scopeKind: 'request', scopeValue: '*', maxUses: 1, expiresInMs: 300000, reason: 'General shell code can read/write host files, access networks, launch children, install software or change git state. Review the code, executable and cwd. This is NOT a filesystem/network security sandbox and cancellation is not rollback.' }
+}
+
+export const PRODUCTION_THREAD_MCP_POLICY_RULE: PolicyRule = {
+  ruleId: 'thread-mcp-call-requires-approval', priority: 2000, effect: 'require-approval',
+  match: { origins: ['assistant'], actions: ['mcp.thread.call'], targetKinds: ['tool'], effectKinds: ['tool.invoke'] },
+  constraints: { requireNoShell: true, allowedToolNames: ['mcp_call'] },
+  explanation: 'External MCP calls require a fresh approval bound to server, tool, arguments and connection identity.',
+  approvalRequirement: { scopeKind: 'request', scopeValue: '*', maxUses: 1, expiresInMs: 300000, reason: 'The external MCP service may read/write data or perform remote actions; cancellation cannot undo its effects.' }
+}
+
+export const PRODUCTION_THREAD_MCP_CONNECTION_POLICY_RULE: PolicyRule = {
+  ruleId: 'thread-mcp-connection-requires-approval', priority: 2000, effect: 'require-approval',
+  match: { origins: ['assistant'], actions: ['mcp.thread.connection'], targetKinds: ['tool'], effectKinds: ['tool.invoke'] },
+  constraints: { requireNoShell: true, allowedToolNames: ['mcp_connect', 'mcp_disconnect'] },
+  explanation: 'MCP lifecycle changes require exact service configuration and connection identity approval.',
+  approvalRequirement: { scopeKind: 'request', scopeValue: '*', maxUses: 1, expiresInMs: 300000, reason: 'Connecting may launch the configured local command or contact the configured remote service. Disconnecting affects all threads and explicit skills sharing this connection; remote effects and child processes may remain.' }
+}
+
+export const PRODUCTION_MEMORY_FILE_POLICY_RULE: PolicyRule = {
+  ruleId: 'thread-memory-file-write-exact-approval', priority: 2000, effect: 'require-approval',
+  match: { origins: ['assistant'], actions: ['memory.file.write'], targetKinds: ['tool'], effectKinds: ['tool.invoke'] },
+  constraints: { requireNoShell: true, allowedToolNames: ['memory_write'] },
+  explanation: 'One exact bounded memory-file mutation in the MAIN-owned route namespace; not general filesystem access.',
+  approvalRequirement: { scopeKind: 'request', scopeValue: '*', maxUses: 1, expiresInMs: 300000, reason: 'Review full content, path, namespace/marker creation, current preimage and operation identity. Saved content can be read by later model turns; interruption may leave partial effects and cancellation is not rollback.' }
+}
+
+export const PRODUCTION_AGENT_NOTE_POLICY_RULE: PolicyRule = {
+  ruleId: 'thread-notes-write-requires-approval', priority: 2000, effect: 'require-approval',
+  match: { origins: ['assistant'], actions: ['memory.note.write'], targetKinds: ['tool'], effectKinds: ['tool.invoke'] },
+  constraints: { requireNoShell: true, allowedToolNames: ['scratchpad'] },
+  explanation: 'Persistent conversation notes require a fresh desktop approval.',
+  approvalRequirement: { scopeKind: 'request', scopeValue: '*', maxUses: 1, expiresInMs: 5 * 60_000, reason: 'Save or delete a persistent conversation note. This text can later be read by the selected model.' }
+}
+
 export const PRODUCTION_FILE_WRITE_POLICY_RULE: PolicyRule = {
   ruleId: 'workspace-files-write-requires-approval',
   priority: 2000,
@@ -151,7 +232,8 @@ export type AssistantTerminalPolicyRuntime = Readonly<{
   ): Promise<TerminalApprovalReference>
   requestTerminalApprovalWithSnapshot(
     request: PolicyRequest,
-    graphContext: NonNullable<PendingTerminalApproval['graphContext']>
+    graphContext: NonNullable<PendingTerminalApproval['graphContext']>,
+    signal?: AbortSignal
   ): ReturnType<TerminalApprovalCoordinator['requestWithSnapshot']>
   listPendingTerminalApprovals(): readonly PendingTerminalApproval[]
   resolvePendingTerminalApproval(input: {
@@ -285,15 +367,51 @@ export const getAssistantTerminalPolicyRuntime = (): AssistantTerminalPolicyRunt
   const authorization = new MagicAgentPolicyAuthorizationService({
     store,
     rules: [
+      ...PRODUCTION_MANAGED_FIRST_RUN_POLICY_RULES,
       ...PRODUCTION_PYTHON_NOTEBOOK_POLICY_RULES,
       PRODUCTION_FILE_WRITE_POLICY_RULE,
+      PRODUCTION_MEMORY_FILE_POLICY_RULE,
+      PRODUCTION_AGENT_NOTE_POLICY_RULE,
+      PRODUCTION_THREAD_SHELL_POLICY_RULE,
+      PRODUCTION_THREAD_MCP_POLICY_RULE,
+      PRODUCTION_THREAD_MCP_CONNECTION_POLICY_RULE,
+      {
+        ruleId: 'creative-tools-require-trusted-approval',
+        priority: 2000,
+        effect: 'require-approval',
+        match: {
+          origins: ['assistant'],
+          actions: ['creative.invoke'],
+          targetKinds: ['tool'],
+          effectKinds: ['tool.invoke']
+        },
+        constraints: {
+          requireNoShell: true,
+          allowedToolNames: [
+            'comfyui.workflow.submit',
+            'canvas.export',
+            'image.create',
+            'video.create',
+            'asset.import',
+            'mcp.tool.call'
+          ]
+        },
+        explanation: 'Creative mutations require a one-shot approval from the desktop user.',
+        approvalRequirement: {
+          scopeKind: 'request',
+          scopeValue: '*',
+          maxUses: 1,
+          expiresInMs: 5 * 60_000,
+          reason: 'This action writes a file, submits a generation task, or invokes an MCP tool.'
+        }
+      },
       {
         ruleId: 'workspace-files-read-allowed',
         priority: 2000,
         effect: 'allow-with-constraints',
         match: {
           origins: ['assistant', 'graph'],
-          actions: ['filesystem.list', 'filesystem.read'],
+          actions: ['filesystem.list', 'filesystem.read', 'filesystem.search'],
           targetKinds: ['tool'],
           effectKinds: ['filesystem.read']
         },
@@ -305,7 +423,9 @@ export const getAssistantTerminalPolicyRuntime = (): AssistantTerminalPolicyRunt
             'files.read',
             'files.glob',
             'files.grep',
-            'files.json.read'
+            'files.json.read',
+            'files.diff',
+            'files.snapshot.list'
           ]
         },
         explanation: 'Bounded read-only file tools are allowed within the route workspace root.'
@@ -395,6 +515,7 @@ export const getAssistantTerminalPolicyRuntime = (): AssistantTerminalPolicyRunt
       }
     ],
     policyVersion: POLICY_VERSION,
+    requestContract: 'production-managed-first-run/v2',
     storeId: databasePath,
     trustedApprovers: [TRUSTED_APPROVER]
   })
@@ -424,8 +545,8 @@ export const getAssistantTerminalPolicyRuntime = (): AssistantTerminalPolicyRunt
     authorization,
     createTrustedApproval,
     requestTerminalApproval: (request, signal) => approvals.request(request, undefined, signal),
-    requestTerminalApprovalWithSnapshot: (request, graphContext) =>
-      approvals.requestWithSnapshot(request, graphContext),
+    requestTerminalApprovalWithSnapshot: (request, graphContext, signal) =>
+      approvals.requestWithSnapshot(request, graphContext, signal),
     listPendingTerminalApprovals: () => approvals.list(),
     resolvePendingTerminalApproval: (input) => approvals.resolve(input),
     shutdownTerminalApprovals: () => approvals.shutdown(),

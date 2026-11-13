@@ -57,6 +57,41 @@ export type WebFetchResponse = {
   truncated: boolean
 }
 
+export type WebSearchErrorCode =
+  | 'rate_limited'
+  | 'access_denied'
+  | 'challenge'
+  | 'timeout'
+  | 'network'
+  | 'unavailable'
+  | 'http_error'
+  | 'invalid_response'
+
+const SEARCH_ERROR_MESSAGES: Record<WebSearchErrorCode, string> = {
+  rate_limited:
+    'Search provider rate limit reached. Try again later; no search results were obtained.',
+  access_denied: 'Search provider denied access. No search results were obtained.',
+  challenge: 'Search provider requires human verification. No search results were obtained.',
+  timeout: 'Search request timed out. No search results were obtained.',
+  network: 'Search provider could not be reached. Check the network connection.',
+  unavailable: 'Search provider is temporarily unavailable. No search results were obtained.',
+  http_error: 'Search provider returned an HTTP error. No search results were obtained.',
+  invalid_response: 'Search response could not be recognized. This is not an empty search result.'
+}
+
+/** Codes survive string-only tool error boundaries; never include remote bodies or the query. */
+export class WebSearchError extends Error {
+  constructor(
+    readonly code: WebSearchErrorCode,
+    readonly status?: number
+  ) {
+    super(
+      `web_search [${code}]${status === undefined ? '' : ` HTTP ${status}`}: ${SEARCH_ERROR_MESSAGES[code]}`
+    )
+    this.name = 'WebSearchError'
+  }
+}
+
 type RequestResult = {
   status: number
   headers: Record<string, string>
@@ -338,6 +373,52 @@ const requestPublic = async (
   throw new Error('Web request failed.')
 }
 
+const requestSearch = async (
+  url: URL,
+  options: { signal?: AbortSignal; timeoutMs?: number; maxBytes: number; accept?: string }
+): Promise<RequestResult> => {
+  try {
+    return await requestPublic(url, options)
+  } catch (error) {
+    // Preserve cancellation, certificate failures and SSRF/policy errors as-is.
+    // Do not change endpoint/provider to work around a refusal or a challenge.
+    if (!(error instanceof Error) || error.name === 'AbortError') throw error
+    const code = String((error as Error & { code?: unknown }).code || '').toUpperCase()
+    if (error.name === 'TimeoutError' || code === 'ETIMEDOUT') throw new WebSearchError('timeout')
+    if (
+      [
+        'ECONNRESET',
+        'ECONNREFUSED',
+        'EAI_AGAIN',
+        'ENETUNREACH',
+        'EHOSTUNREACH',
+        'ENOTFOUND'
+      ].includes(code)
+    )
+      throw new WebSearchError('network')
+    throw error
+  }
+}
+
+const readSearchResponse = (response: RequestResult): string => {
+  const status = response.status
+  if (status === 401 || status === 403) throw new WebSearchError('access_denied', status)
+  if (status === 429) throw new WebSearchError('rate_limited', status)
+  if (status === 408 || status === 504) throw new WebSearchError('timeout', status)
+  if (status >= 500) throw new WebSearchError('unavailable', status)
+  if (status < 200 || status >= 300) throw new WebSearchError('http_error', status)
+  const body = response.body.toString('utf8')
+  // Match provider challenge markup, not arbitrary result text about CAPTCHA.
+  if (
+    /<(?:form|div)\b[^>]*(?:id=["'](?:challenge-form|img-form)["']|class=["'][^"']*anomaly-modal(?:__|[\s"'])|action=["'][^"']*\/anomaly\.js)/i.test(
+      body
+    )
+  )
+    throw new WebSearchError('challenge', status)
+  if (status !== 200 || !body.trim()) throw new WebSearchError('invalid_response', status)
+  return body
+}
+
 const decodeHtmlEntities = (value: string): string =>
   // Decode each original entity once; a decoded ampersand must not introduce
   // another decoding pass (for example &amp;#39; must remain &#39;).
@@ -426,10 +507,24 @@ const parseDuckDuckGoJson = (payload: string, maxResults: number): WebSearchItem
   try {
     value = JSON.parse(payload)
   } catch {
-    return []
+    throw new WebSearchError('invalid_response')
   }
-  if (!value || typeof value !== 'object') return []
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new WebSearchError('invalid_response')
   const record = value as Record<string, unknown>
+  if (
+    !['Heading', 'AbstractURL', 'RelatedTopics', 'Results'].some((key) =>
+      Object.hasOwn(record, key)
+    ) ||
+    ['Heading', 'AbstractURL', 'AbstractText'].some(
+      (key) => Object.hasOwn(record, key) && typeof record[key] !== 'string'
+    ) ||
+    ['RelatedTopics', 'Results'].some(
+      (key) => Object.hasOwn(record, key) && !Array.isArray(record[key])
+    ) ||
+    Object.hasOwn(record, 'error')
+  )
+    throw new WebSearchError('invalid_response')
   const results: WebSearchItem[] = []
   const add = (title: unknown, url: unknown, snippet: unknown) => {
     if (results.length >= maxResults || typeof title !== 'string' || typeof url !== 'string') return
@@ -475,22 +570,30 @@ export const webSearch = async (
   const apiUrl = validatePublicUrl(
     `https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`
   )
-  const api = await requestPublic(apiUrl, {
+  const api = await requestSearch(apiUrl, {
     signal: options.signal,
     timeoutMs: options.timeoutMs,
     maxBytes: MAX_SEARCH_RESPONSE_BYTES,
     accept: 'application/json,text/plain;q=0.8,*/*;q=0.5'
   })
-  let results = parseDuckDuckGoJson(api.body.toString('utf8'), maxResults)
+  let results = parseDuckDuckGoJson(readSearchResponse(api), maxResults)
   if (!results.length) {
     const htmlUrl = validatePublicUrl(`https://html.duckduckgo.com/html/?q=${encoded}`)
-    const html = await requestPublic(htmlUrl, {
+    const html = await requestSearch(htmlUrl, {
       signal: options.signal,
       timeoutMs: options.timeoutMs,
       maxBytes: MAX_SEARCH_RESPONSE_BYTES,
       accept: 'text/html,*/*;q=0.5'
     })
-    results = parseDuckDuckGoHtml(html.body.toString('utf8'), maxResults)
+    const body = readSearchResponse(html)
+    results = parseDuckDuckGoHtml(body, maxResults)
+    // Empty instant answers are normal; unknown HTML is not proof of zero results.
+    // Require the provider's explicit empty-result markup after the HTML fallback.
+    if (
+      !results.length &&
+      !/<[^>]+class=["'][^"']*\b(?:no-results|result--no-result)\b[^"']*["']/i.test(body)
+    )
+      throw new WebSearchError('invalid_response', html.status)
   }
   return { query: normalizedQuery, source: 'duckduckgo', results }
 }

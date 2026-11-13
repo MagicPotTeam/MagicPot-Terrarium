@@ -1,10 +1,24 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync
+} from 'node:fs'
+import * as nativeFs from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-vi.unmock('node:fs')
+vi.mock('node:fs', async () => ({
+  ...(await vi.importActual<typeof import('node:fs')>('node:fs'))
+}))
 vi.unmock('node:fs/promises')
+import { createAgentThreadToolProvider } from '../../api/agentThreadTools'
 import type { PolicyRequest, PolicyRule } from '../../../shared/magicAgentPlatform2'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { MagicAgentPolicyAuthorizationService } from '../policy'
@@ -16,6 +30,7 @@ import {
 const roots: string[] = []
 const stores: MagicAgentEventStore[] = []
 afterEach(() => {
+  vi.restoreAllMocks()
   stores.splice(0).forEach((s) => s.close())
   roots.splice(0).forEach((r) => rmSync(r, { recursive: true, force: true }))
 })
@@ -196,7 +211,120 @@ function createHost(
   })
 }
 
+async function passiveRunManual(t: ReturnType<typeof setup>) {
+  const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'passive-run', threadId: 'pane' } as const
+  const before = readFileSync(t.file), entries = readdirSync(t.root)
+  const createGrant = vi.spyOn(t.auth, 'createApprovalGrant'), authorize = vi.spyOn(t.auth, 'authorize')
+  const consume = vi.spyOn(t.auth, 'consumeExecutionPermit'), start = vi.spyOn(t.boundary, 'start'), stop = vi.spyOn(t.boundary, 'stop')
+  const provider = createAgentThreadToolProvider({ route, messages: [], assertInvocation: vi.fn(), listVisibleTools: () => [{ name: 'notebook.run', description: 'Existing admitted run', inputSchema: { type: 'object' } }] })
+  const result = JSON.parse((await provider.callTool('info', { name: 'notebook.run' }, { route, runId: 'manual', workspaceRootDir: t.root })).content)
+  expect(result.documentation).toMatchObject({ contract: 'magicpot-local-notebook-run-manual/v1', grantsPermission: false, execution: { mode: 'stateless', kernelPersistent: false, variablesPersisted: false, automaticRetry: false } })
+  expect(readFileSync(t.file)).toEqual(before); expect(readdirSync(t.root)).toEqual(entries)
+  expect(existsSync(path.join(t.root, '.magicpot'))).toBe(false)
+  for (const callback of [createGrant, authorize, consume, start, stop]) expect(callback).not.toHaveBeenCalled()
+  return result.documentation
+}
+
 describe('NotebookExecutionCoordinator', () => {
+  it('separates a passive run manual from real fixture apply and reports dispatch CAS rather than the newly stored generation/hash', async () => {
+    const t = setup(), before = readFileSync(t.file), beforeSha = sha(before)
+    const doc = await passiveRunManual(t)
+    const host = createHost(t), started = await executeCall(t, host)
+    expect(started).toMatchObject({ state: 'running', generation: 0, notebookSha256: beforeSha, executionMode: 'stateless', kernelPersistent: false, variablesPersisted: false })
+    expect(readFileSync(t.file)).toEqual(before)
+    t.complete()
+    const status = host.status({ routeKey: 'r', sessionId: 's', path: 'a.ipynb', executionId: started.executionId })
+    expect(status).toMatchObject({ state: 'completed-applied', generation: 0, notebookSha256: beforeSha, snapshotId: beforeSha })
+    expect(JSON.parse(readFileSync(t.file, 'utf8')).cells[1].outputs[0]).toMatchObject({ output_type: 'execute_result', data: { 'text/plain': '5' } })
+    expect(sha(readFileSync(t.file))).not.toBe(beforeSha)
+    expect(status.resultSha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(status.resultSha256).not.toBe(sha(readFileSync(t.file)))
+    expect(readFileSync(path.join(t.root, '.magicpot/notebook-snapshots', `${beforeSha}.ipynb`))).toEqual(before)
+    const generationFile = path.join(t.root, '.magicpot/notebook-executions', `generation-${sha('a.ipynb')}.json`)
+    expect(JSON.parse(readFileSync(generationFile, 'utf8'))).toMatchObject({ generation: 1 })
+    for (const key of ['status', 'stdout', 'stderr', 'mutation', 'writeStatus', 'businessTaskVerified', 'grantsPermission', 'untrustedData']) expect(Object.hasOwn(status, key)).toBe(false)
+    expect(doc.execution.apply).toContain('old dispatch generation')
+    await expect(executeCall(t, host, 'stale-returned-generation', status.generation)).rejects.toThrow('expectedGeneration is stale')
+  })
+  it.each(['stale-sha', 'stale-generation', 'error-protocol', 'cancelled'] as const)('preserves actual %s state after passive info without applying late/partial results', async reason => {
+    const t = setup(reason === 'error-protocol' ? `${JSON.stringify({ protocol: 'magicpot-notebook-result.v1', status: 'error', cells: [{ cellId: 'c1', executionCount: 1, stdout: 'PARTIAL_MUST_NOT_APPLY', stderr: '', displays: [] }], error: 'cell2 failed' })}\n` : undefined)
+    await passiveRunManual(t)
+    const before = readFileSync(t.file), expectedSha256 = sha(before), host = createHost(t)
+    const request = host.createPolicyRequest({ target: 'notebook.execute-all', routeKey: 'r', sessionId: 's', path: 'a.ipynb', expectedSha256, expectedGeneration: 0 })
+    const controller = new AbortController()
+    const input = { authorizationId: 'a', idempotencyKey: `manual-${reason}`, request, routeKey: 'r', sessionId: 's', path: 'a.ipynb', expectedSha256, expectedGeneration: 0, signal: controller.signal, ...approval(t.auth, request) }
+    const started = await host.executeAll(input)
+    let unchanged = before
+    if (reason === 'stale-sha') {
+      unchanged = Buffer.from(JSON.stringify(notebook(['EXTERNAL_EDIT', 'x+3'])))
+      writeFileSync(t.file, unchanged)
+    } else if (reason === 'stale-generation') {
+      writeFileSync(path.join(t.root, '.magicpot/notebook-executions', `generation-${sha('a.ipynb')}.json`), JSON.stringify({ path: 'a.ipynb', generation: 1 }))
+    }
+    if (reason === 'cancelled') {
+      // The prior idempotent execution is still running when wait begins; abort
+      // after the async call enters, so the production wait loop owns stop.
+      const waiting = host.executeAndWait(input)
+      controller.abort(Error('notebook document closed'))
+      await expect(waiting).rejects.toThrow('notebook document closed')
+    }
+    t.complete()
+    const status = host.status({ routeKey: 'r', sessionId: 's', path: 'a.ipynb', executionId: started.executionId })
+    expect(status.state).toBe(reason.startsWith('stale-') ? 'completed-not-applied' : reason === 'error-protocol' ? 'failed' : 'interrupted')
+    expect(readFileSync(t.file)).toEqual(unchanged)
+    expect(existsSync(path.join(t.root, '.magicpot/notebook-snapshots', `${expectedSha256}.ipynb`))).toBe(false)
+    if (reason === 'error-protocol') expect(status.error).toContain('cell2 failed')
+    if (reason === 'cancelled') expect(t.boundary.stop).toHaveBeenCalledOnce()
+  })
+  it('retains file-order approval exactness rather than accepting caller reordering after a passive manual', async () => {
+    const t = setup(), before = readFileSync(t.file)
+    const doc = await passiveRunManual(t), host = createHost(t)
+    const expectedSha256 = sha(before), cellIds = ['c2', 'c1']
+    const request = host.createPolicyRequest({ target: 'notebook.execute-cell', routeKey: 'r', sessionId: 's', path: 'a.ipynb', expectedSha256, expectedGeneration: 0, cellIds })
+    const input = { authorizationId: 'a', idempotencyKey: 'reversed-selection', request, routeKey: 'r', sessionId: 's', path: 'a.ipynb', expectedSha256, expectedGeneration: 0, cellIds, ...approval(t.auth, request) }
+    await expect(host.executeCell(input)).rejects.toThrow('Policy request does not match')
+    expect(readFileSync(t.file)).toEqual(before); expect(t.boundary.start).not.toHaveBeenCalled()
+    expect(t.auth.createApprovalGrant).toHaveBeenCalledOnce()
+    expect(doc.behavior.selection).toContain('after formal approval')
+  })
+  it('can report failed after output rename and generation advance when terminal audit fails, without rolling bytes back', async () => {
+    const t = setup(), before = readFileSync(t.file), beforeSha = sha(before)
+    const doc = await passiveRunManual(t)
+    const audit = vi.fn((events: readonly { type: string }[]) => {
+      if (events.some(event => event.type === 'notebook.execution.completed-applied')) throw Error('late apply audit persistence failed')
+    })
+    const host = createHost(t, { auditSink: { appendBatch: audit, getEvent: () => undefined, getLastSequence: () => undefined, getResource: () => undefined, mutateResourcesBatch: () => undefined } })
+    const started = await executeCall(t, host)
+    t.complete()
+    const status = host.status({ routeKey: 'r', sessionId: 's', path: 'a.ipynb', executionId: started.executionId })
+    expect(status).toMatchObject({ state: 'failed', generation: 0, error: 'late apply audit persistence failed' })
+    expect(readFileSync(t.file)).not.toEqual(before)
+    expect(JSON.parse(readFileSync(t.file, 'utf8')).cells[1].outputs[0]).toMatchObject({ output_type: 'execute_result', data: { 'text/plain': '5' } })
+    expect(readFileSync(path.join(t.root, '.magicpot/notebook-snapshots', `${beforeSha}.ipynb`))).toEqual(before)
+    expect(JSON.parse(readFileSync(path.join(t.root, '.magicpot/notebook-executions', `generation-${sha('a.ipynb')}.json`), 'utf8')).generation).toBe(1)
+    expect(doc.failure).toMatchObject({ automaticRetry: false, cancellationRollsBack: false, failureProvesNoMutation: false })
+    expect(doc.failure.rule).toContain('failure after target rename can leave saved outputs/generation changed')
+  })
+  it('synchronous wait applies only completed results and cancellation never applies late output', async () => {
+    for (const cancel of [false, true]) {
+      const t = setup(), host = createHost(t), controller = new AbortController()
+      const before = readFileSync(t.file), expectedSha256 = sha(before)
+      const request = host.createPolicyRequest({ target: 'notebook.execute-all', routeKey: 'r', sessionId: 's', path: 'a.ipynb', expectedSha256, expectedGeneration: 0 })
+      const stop = vi.spyOn(t.boundary, 'stop')
+      const waiting = host.executeAndWait({ authorizationId: 'a', idempotencyKey: `sync-${cancel}`, request, routeKey: 'r', sessionId: 's', path: 'a.ipynb', expectedSha256, expectedGeneration: 0, signal: controller.signal, ...approval(t.auth, request) })
+      const handled = waiting.catch((error) => error)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      if (cancel) controller.abort(new Error('document gone'))
+      else t.complete()
+      if (cancel) {
+        expect(await handled).toBeInstanceOf(Error)
+        expect(stop).toHaveBeenCalledOnce()
+        t.complete()
+        expect(readFileSync(t.file)).toEqual(before)
+      } else expect(await handled).toMatchObject({ state: 'completed-applied' })
+    }
+  })
+
   it('durably replays active and no-op interrupt receipts', async () => {
     const t = setup()
     const stop = vi.spyOn(t.boundary, 'stop')
@@ -520,11 +648,12 @@ describe('NotebookExecutionCoordinator', () => {
       expect(sqlite).not.toContain(leaked)
   })
 
-  it.each(['missing', 'symlink', 'oversize'] as const)(
+  it.each(['missing', 'symlink', 'linked-parent', 'file-symlink-stat', 'oversize'] as const)(
     'rejects %s declared artifacts without mutating the notebook',
     async (kind) => {
       const t = setup()
-      const artifact = path.join(t.root, 'artifact.bin')
+      const artifactRelative = kind === 'linked-parent' ? 'linked/artifact.bin' : 'artifact.bin'
+      const artifact = path.join(t.root, artifactRelative)
       if (kind === 'oversize') {
         writeFileSync(artifact, '')
         truncateSync(artifact, 16 * 1024 * 1024 + 1)
@@ -537,7 +666,7 @@ describe('NotebookExecutionCoordinator', () => {
         routeKey: 'r',
         sessionId: 's',
         path: 'a.ipynb',
-        artifacts: ['artifact.bin'],
+        artifacts: [artifactRelative],
         expectedSha256,
         expectedGeneration: 0
       })
@@ -548,24 +677,63 @@ describe('NotebookExecutionCoordinator', () => {
         routeKey: 'r',
         sessionId: 's',
         path: 'a.ipynb',
-        artifacts: ['artifact.bin'],
+        artifacts: [artifactRelative],
         expectedSha256,
         expectedGeneration: 0,
         ...approval(t.auth, request)
       })
-      if (kind === 'symlink') {
-        writeFileSync(path.join(t.root, 'target.bin'), 'target')
-        symlinkSync(path.join(t.root, 'target.bin'), artifact)
+      let mockedArtifactHits = 0
+      let artifactRead: ReturnType<typeof vi.spyOn> | undefined
+      if (kind === 'symlink' || kind === 'linked-parent') {
+        const targetDirectory = path.join(t.root, 'target')
+        mkdirSync(targetDirectory)
+        writeFileSync(path.join(targetDirectory, 'artifact.bin'), 'target')
+        // Windows directory junctions require no file-symlink privilege. On
+        // Linux/macOS retain the actual native file symlink rejection case.
+        const directoryLink = kind === 'linked-parent' || process.platform === 'win32'
+        symlinkSync(
+          directoryLink ? targetDirectory : path.join(targetDirectory, 'artifact.bin'),
+          kind === 'linked-parent' ? path.dirname(artifact) : artifact,
+          directoryLink ? (process.platform === 'win32' ? 'junction' : 'dir') : 'file'
+        )
+        expect(
+          nativeFs
+            .lstatSync(kind === 'linked-parent' ? path.dirname(artifact) : artifact)
+            .isSymbolicLink()
+        ).toBe(true)
+      }
+      if (kind === 'file-symlink-stat') {
+        writeFileSync(artifact, 'target')
+        const canonicalArtifact = realpathSync.native(artifact)
+        const actualLstat = nativeFs.lstatSync
+        // Model the file-symlink lstat bit only, keeping all other operations
+        // native. The real junction cases above separately cover OS traversal.
+        vi.spyOn(nativeFs, 'lstatSync').mockImplementation((value, options) => {
+          const stat = actualLstat(value, options)
+          if (path.resolve(String(value)) !== canonicalArtifact || !stat) return stat
+          mockedArtifactHits += 1
+          return Object.assign(Object.create(stat), { isSymbolicLink: () => true })
+        })
+        artifactRead = vi.spyOn(nativeFs, 'readFileSync')
       }
       t.complete()
-      expect(
-        host.status({
-          routeKey: 'r',
-          sessionId: 's',
-          path: 'a.ipynb',
-          executionId: started.executionId
-        }).state
-      ).toBe('failed')
+      const status = host.status({
+        routeKey: 'r',
+        sessionId: 's',
+        path: 'a.ipynb',
+        executionId: started.executionId
+      })
+      expect(status.state).toBe('failed')
+      if (kind === 'symlink' || kind === 'linked-parent' || kind === 'file-symlink-stat')
+        expect(status.error).toBe('Symlinks are not allowed.')
+      if (kind === 'file-symlink-stat') {
+        expect(mockedArtifactHits).toBeGreaterThan(0)
+        expect(
+          artifactRead!.mock.calls.some(
+            ([value]) => path.resolve(String(value)) === realpathSync.native(artifact)
+          )
+        ).toBe(false)
+      }
       expect(readFileSync(t.file)).toEqual(before)
     }
   )

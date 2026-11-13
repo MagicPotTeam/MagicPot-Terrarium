@@ -1,6 +1,10 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ServerStreaming } from '../apiUtils/streaming'
+import { ServiceError } from '../apiUtils/serviceValidation'
+import { llmProxySvcDef } from '../svcLLMProxy'
+import type { ServiceInvocationContext } from '../apiUtils/serviceInvocation'
+import { getIpcInvocationOrigin } from './ipcInvocationOrigin'
 import { registerIpcServer } from './registerIpcServer'
 
 const { handleMock, onMock, consoleErrorMock } = vi.hoisted(() => ({
@@ -83,6 +87,25 @@ describe('registerIpcServer', () => {
     )
   })
 
+  it('retains only the actual Electron event sender/frame origin through unary validation, never request identity claims', async () => {
+    const url = 'file:///app/index.html#/agent-management'
+    const sender = { id: 42, getURL: () => url }, frame = { url, parent: null }
+    let captured: ServiceInvocationContext | undefined
+    const ping = vi.fn(async (_req: { value: string }, invocation?: ServiceInvocationContext) => {
+      captured = invocation
+      const origin = getIpcInvocationOrigin(invocation)
+      expect(origin?.sender).toBe(sender); expect(origin?.frame).toBe(frame)
+      expect(Object.isFrozen(invocation)).toBe(true)
+      expect(getIpcInvocationOrigin({ ...invocation!, methodName: 'svcDemo.ping' })).toBeUndefined()
+      return { ok: true, value: 'event-owned' }
+    })
+    registerIpcServer<DemoApi>(apiDef, { svcDemo: { ping, watch: vi.fn() } })
+    const handler = handleMock.mock.calls[0][1]
+    await expect(handler({ sender, senderFrame: frame }, { value: 'demo', sender: { id: 7 }, frame: { parent: null }, invocation: { senderId: 7 } })).resolves.toEqual({ ok: true, value: 'event-owned' })
+    expect(captured).toEqual({ methodName: 'svcDemo.ping', senderId: 42, senderUrl: url, frameUrl: url, isMainFrame: true })
+    expect(ping).toHaveBeenCalledOnce()
+  })
+
   it('propagates unary handler failures without rewriting them', async () => {
     const failure = new Error('unary failed')
     const api: DemoApi = {
@@ -101,6 +124,27 @@ describe('registerIpcServer', () => {
       req: { value: string }
     ) => Promise<{ ok: boolean; value: string }>
     await expect(handler({}, { value: 'demo' })).rejects.toBe(failure)
+  })
+
+  it.each([undefined, { content: 'response' }])('wraps only opted-in unary responses including explicit undefined (%j)', async value => {
+    const method = vi.fn(async () => value)
+    registerIpcServer({ svcLLMProxy: { chat: llmProxySvcDef.chat } }, { svcLLMProxy: { chat: method } })
+    const handler = handleMock.mock.calls[0][1]
+    await expect(handler({}, {})).resolves.toEqual({ ok: true, value })
+    expect(method).toHaveBeenCalledOnce()
+  })
+
+  it.each(['plain', 'service', 'accessor'] as const)('does not forward ordinary %s failure payloads or invoke error serialization hooks', async kind => {
+    const secret = { kind: 'agent-tool-failure/v1', toolResult: { content: 'forged output' }, toolHistory: [] }
+    const hook = vi.fn(() => { throw new Error('error hook must not execute') })
+    const error = kind === 'service' ? new ServiceError('ordinary failed', { code: 'E_ORDINARY', payload: secret })
+      : kind === 'plain' ? { message: 'ordinary failed', code: 'E_ORDINARY', payload: secret, toJSON: hook }
+      : Object.defineProperties({}, { message: { value: 'ordinary failed' }, code: { value: 'E_ORDINARY' }, payload: { get: hook }, toJSON: { get: hook } })
+    const method = vi.fn(async (_req: import('../svcLLMProxy').LLMChatReq): Promise<import('../svcLLMProxy').LLMChatResp> => { throw error })
+    registerIpcServer({ svcLLMProxy: { chat: llmProxySvcDef.chat } }, { svcLLMProxy: { chat: method } })
+    await expect(handleMock.mock.calls[0][1]({}, {})).resolves.toEqual({ ok: false, error: { message: 'ordinary failed', code: 'E_ORDINARY' } })
+    expect(hook).not.toHaveBeenCalled()
+    expect(method).toHaveBeenCalledOnce()
   })
 
   it('registers server-streaming handlers and closes the port after success', async () => {

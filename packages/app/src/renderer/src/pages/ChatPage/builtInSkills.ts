@@ -374,7 +374,7 @@ export const isDefaultBuiltInTaggingSkill = (
   skill: CustomSkill,
   options: BuiltInSkillOptions = {}
 ): boolean => {
-  if (skill.id !== BUILT_IN_TAGGING_SKILL_ID) {
+  if (skill.id !== BUILT_IN_TAGGING_SKILL_ID || skill.procedural !== undefined) {
     return false
   }
 

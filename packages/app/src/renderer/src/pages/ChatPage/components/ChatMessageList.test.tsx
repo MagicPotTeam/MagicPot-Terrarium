@@ -121,6 +121,37 @@ const renderChatMessageList = (
   }
 ) => render(buildChatMessageList(currentSession, options))
 
+describe('ChatMessageList inline tool calls', () => {
+  it('renders a tool-only assistant message as an expandable call, not an interrupted reply', () => {
+    renderChatMessageList({
+      id: 'tool-only',
+      title: 'Tool call',
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          toolHistory: [
+            {
+              runId: 'run',
+              toolCallId: 'call',
+              toolName: 'web_fetch',
+              args: { url: 'https://example.com/docs' },
+              status: 'completed',
+              content: 'PAGE_RESULT'
+            }
+          ]
+        }
+      ]
+    })
+    expect(screen.queryByText('chat.response_interrupted')).not.toBeInTheDocument()
+    const call = screen.getByRole('button', { name: /web_fetch/ })
+    expect(call).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('PAGE_RESULT')).not.toBeInTheDocument()
+    fireEvent.click(call)
+    expect(screen.getByText('PAGE_RESULT')).toBeInTheDocument()
+  })
+})
+
 describe('ChatMessageList context compression summary', () => {
   it('renders compressed context as a collapsed expandable row', () => {
     renderChatMessageList({
@@ -1277,6 +1308,156 @@ describe('ChatMessageList text selection and reply actions', () => {
       text: 'Beta'
     })
   })
+
+  it('keeps download menu targets current through cloned and reordered duplicate sources', async () => {
+    const attachments: ChatAttachment[] = Array.from({ length: 8 }, (_, index) => ({
+      type: 'image',
+      url: 'data:image/png;base64,' + String.fromCharCode(65 + index).repeat(4096),
+      fileName: 'download-' + index + '.png'
+    }))
+    attachments[1].url = attachments[0].url
+    const before = structuredClone(attachments)
+    const onDownloadAttachment = vi.fn<OnDownloadAttachment>()
+    const makeSession = (items: ChatAttachment[]): ChatSession => {
+      const message = {
+        id: 'download-menu-message',
+        role: 'assistant' as const,
+        content: 'These image results are ready.',
+        attachments: items
+      }
+      return { id: 'download-menu-clones', title: 'Download menu clones', messages: [message] }
+    }
+    const view = renderChatMessageList(makeSession(attachments), { onDownloadAttachment })
+    fireEvent.click(screen.getByLabelText('下载回答'))
+    expect(screen.getAllByRole('menuitem', { name: /^Image: download-/ })).toHaveLength(8)
+    expect(screen.getByLabelText('Markdown (.md)')).toBeInTheDocument()
+    const distinctItem = screen.getByRole('menuitem', { name: 'Image: download-7.png' })
+    act(() => distinctItem.focus())
+
+    const cloned = attachments.map((item) => ({ ...item }))
+    view.rerender(buildChatMessageList(makeSession(cloned), { onDownloadAttachment }))
+    expect(screen.getByRole('menuitem', { name: 'Image: download-7.png' })).toBe(distinctItem)
+    expect(document.activeElement).toBe(distinctItem)
+
+    const reordered = [cloned[7], ...cloned.slice(0, 7)].map((item) => ({ ...item }))
+    view.rerender(buildChatMessageList(makeSession(reordered), { onDownloadAttachment }))
+    expect(screen.getAllByRole('menuitem', { name: /^Image: download-/ })).toHaveLength(8)
+    expect(screen.getByRole('menuitem', { name: 'Image: download-7.png' })).toBe(distinctItem)
+    expect(document.activeElement).toBe(distinctItem)
+    const firstDuplicate = screen.getByRole('menuitem', { name: 'Image: download-0.png' })
+    const secondDuplicate = screen.getByRole('menuitem', { name: 'Image: download-1.png' })
+    expect(firstDuplicate).not.toBe(secondDuplicate)
+
+    // Identical source identities match by occurrence; filenames are download metadata.
+    for (const [index, expected] of [reordered[1], reordered[2], reordered[0]].entries()) {
+      if (index) fireEvent.click(screen.getByLabelText('下载回答'))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Image: ' + expected.fileName }))
+      expect(onDownloadAttachment.mock.calls[index][0]).toBe(expected)
+      await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+    }
+    expect(onDownloadAttachment).toHaveBeenCalledTimes(3)
+    expect(attachments).toEqual(before)
+  })
+
+  it('replaces an attachment-only download target while its menu is open', async () => {
+    const original: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,' + 'A'.repeat(4096),
+      fileName: 'changing.png'
+    }
+    const replacement: ChatAttachment = {
+      ...original,
+      url: 'data:image/png;base64,' + 'B'.repeat(4096)
+    }
+    const onDownloadAttachment = vi.fn<OnDownloadAttachment>()
+    const makeSession = (item: ChatAttachment): ChatSession => {
+      const message = {
+        id: 'changing-download-message',
+        role: 'assistant' as const,
+        content: '',
+        attachments: [item]
+      }
+      return { id: 'changing-download-source', title: 'Changing source', messages: [message] }
+    }
+    const view = renderChatMessageList(makeSession(original), { onDownloadAttachment })
+    fireEvent.click(screen.getByLabelText('下载附件'))
+    const oldItem = screen.getByRole('menuitem', { name: 'Image: changing.png' })
+
+    view.rerender(buildChatMessageList(makeSession(replacement), { onDownloadAttachment }))
+    const currentItem = screen.getByRole('menuitem', { name: 'Image: changing.png' })
+    expect(currentItem).not.toBe(oldItem)
+    expect(oldItem).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Markdown (.md)')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Text (.txt)')).not.toBeInTheDocument()
+    fireEvent.click(currentItem)
+    expect(onDownloadAttachment).toHaveBeenCalledExactlyOnceWith(replacement)
+    expect(onDownloadAttachment.mock.calls[0][0]).toBe(replacement)
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+  })
+
+  it('clears download menu entries across session changes, deactivation and unmount', async () => {
+    const oldAttachment: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,QQ==',
+      fileName: 'old-thread.png'
+    }
+    const currentAttachment: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,Qg==',
+      fileName: 'current-thread.png'
+    }
+    const oldMessage = {
+      id: 'old-download-message',
+      role: 'assistant' as const,
+      content: 'Old thread response.',
+      attachments: [oldAttachment]
+    }
+    const currentMessage = {
+      id: 'current-download-message',
+      role: 'assistant' as const,
+      content: '',
+      attachments: [currentAttachment]
+    }
+    const oldSession: ChatSession = {
+      id: 'old-download-thread',
+      title: 'Old thread',
+      messages: [oldMessage]
+    }
+    const currentSession: ChatSession = {
+      id: 'current-download-thread',
+      title: 'Current thread',
+      messages: [currentMessage]
+    }
+    const onDownloadAttachment = vi.fn<OnDownloadAttachment>()
+    const view = renderChatMessageList(oldSession, { active: true, onDownloadAttachment })
+    fireEvent.click(screen.getByLabelText('下载回答'))
+    expect(screen.getByRole('menuitem', { name: 'Image: old-thread.png' })).toBeInTheDocument()
+
+    view.rerender(buildChatMessageList(currentSession, { active: true, onDownloadAttachment }))
+    expect(screen.queryByLabelText('Image: old-thread.png')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('下载附件'))
+    expect(screen.getByRole('menuitem', { name: 'Image: current-thread.png' })).toBeInTheDocument()
+    expect(onDownloadAttachment).not.toHaveBeenCalled()
+
+    view.rerender(buildChatMessageList(currentSession, { active: false, onDownloadAttachment }))
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Image: current-thread.png')).not.toBeInTheDocument()
+    )
+    view.rerender(buildChatMessageList(currentSession, { active: true, onDownloadAttachment }))
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('下载附件'))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Image: current-thread.png' }))
+    expect(onDownloadAttachment).toHaveBeenCalledExactlyOnceWith(currentAttachment)
+    expect(onDownloadAttachment.mock.calls[0][0]).toBe(currentAttachment)
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+
+    fireEvent.click(screen.getByLabelText('下载附件'))
+    expect(screen.getByRole('menuitem', { name: 'Image: current-thread.png' })).toBeInTheDocument()
+    view.unmount()
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Image: current-thread.png')).not.toBeInTheDocument()
+    expect(onDownloadAttachment).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('ChatMessageList managed image derivatives', () => {
@@ -2147,7 +2328,7 @@ describe('ChatMessageList layout', () => {
 })
 
 describe('model capacity retry countdown', () => {
-  it.each(['server-overloaded', 'server-error', 'request-timeout'] as const)(
+  it.each(['server-overloaded', 'server-error', 'request-timeout', 'connection-error'] as const)(
     'ticks down on the real message component for %s and removes the timer after completion',
     async (reason) => {
       vi.useFakeTimers()

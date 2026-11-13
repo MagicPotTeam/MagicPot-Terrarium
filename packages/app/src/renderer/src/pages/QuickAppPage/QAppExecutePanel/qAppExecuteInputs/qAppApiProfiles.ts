@@ -4,7 +4,7 @@ import {
   isConfiguredApiProfile,
   isVisionCapableApiProfile
 } from '@shared/config/apiProfileSelectors'
-import { resolveProfileModelUse } from '@shared/llm'
+import { resolveProfileModelUse, assertProfileNotRetired } from '@shared/llm'
 
 export const getQAppApiProfiles = (config: Config): LLMAPIProfile[] =>
   getSharedQAppApiProfiles(config)
@@ -22,6 +22,8 @@ export const findQAppApiProfile = (
   }
 ): LLMAPIProfile | undefined => {
   const { needVisionModel = false, profileId } = options || {}
+  const selected = profileId && getQAppApiProfiles(config).find((profile) => profile.id === profileId)
+  if (selected) assertProfileNotRetired(selected)
   const configuredProfiles = getConfiguredQAppApiProfiles(config)
 
   const matchesNeedVision = (profile: LLMAPIProfile) =>

@@ -1,13 +1,13 @@
+import { bundledCreativeDeclarations } from '@shared/magicAgentRuntime/bundledCreativeDeclarations'
 import { createAdapter, objectSchema } from './helpers'
 
 export const assetToolAdapter = createAdapter([
   {
-    name: 'asset.list',
-    category: 'asset',
-    description: 'List creative assets through a registered asset adapter.',
+    ...bundledCreativeDeclarations['asset.list'],
     inputSchema: objectSchema({
       kind: {
-        type: 'string'
+        type: 'string',
+        enum: ['image', 'video', 'audio']
       },
       limit: {
         type: 'integer',
@@ -18,20 +18,20 @@ export const assetToolAdapter = createAdapter([
     dependency: 'assetList'
   },
   {
-    name: 'asset.import',
-    category: 'asset',
-    description: 'Import an asset through a registered asset adapter.',
-    inputSchema: objectSchema({
-      path: {
-        type: 'string'
+    ...bundledCreativeDeclarations['asset.import'],
+    inputSchema: objectSchema(
+      {
+        path: {
+          type: 'string'
+        },
+        kind: {
+          type: 'string',
+          enum: ['image', 'video', 'audio']
+        }
       },
-      url: {
-        type: 'string'
-      },
-      kind: {
-        type: 'string'
-      }
-    }),
+      ['path'],
+      false
+    ),
     dependency: 'assetImport',
     permissionLevel: 'write',
     requiresConfirmation: true,

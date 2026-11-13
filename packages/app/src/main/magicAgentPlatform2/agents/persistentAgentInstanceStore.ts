@@ -1,11 +1,79 @@
+import { isProxy } from 'node:util/types'
 import type {
   MagicAgentInstanceState,
   MagicAgentInstanceStatus
 } from '../../../shared/magicAgentPlatform2/agentInstance'
 import { canonicalPolicyJson, sha256PolicyText } from '../../../shared/magicAgentPlatform2/policy'
-import type { MagicAgentEventStore, StoredResource } from '../persistence/eventStore'
+import { canonicalJson, type MagicAgentEventStore, type ResourceMutationInput, type StoredResource } from '../persistence/eventStore'
+import type { PolicyActorRef } from '../../../shared/magicAgentPlatform2/policy'
+import { hasManagedAgentInstanceEvidence, ManagedAgentOrdinaryAdmissionError } from './managedAgentInstanceIdentity'
+import { AgentInstanceOrdinaryCommitFence, AgentInstanceOrdinaryEventCommitFence, assertAgentInstanceMutationCommitFence, assertAgentInstanceOrdinaryMutationResult, assertAgentInstanceOrdinaryEventCommitFence } from './agentInstanceOrdinaryCommitFence'
+import {
+  assertAgentInstanceReplacementCommitFence,
+  type AgentInstanceReplacementCommitFence
+} from './agentInstanceReplacementCommitFence'
 
 export const MAGIC_AGENT_INSTANCE_RESOURCE_KIND = 'agent-instance' as const
+
+export type AgentLifecycleCommand = Readonly<{
+  action: 'pause' | 'resume'
+  instanceId: string
+  expectedRevision: number
+  actor: PolicyActorRef
+  idempotencyKey: string
+  grantId?: string
+  expectedGrantUseCount?: number
+}>
+
+const freezeJson = <T>(value: T): T => {
+  if (value !== null && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeJson(child)
+    Object.freeze(value)
+  }
+  return value
+}
+
+/** Capture once before authorization/await. No accessor or proxy is read. */
+export function captureAgentLifecycleCommand(
+  action: AgentLifecycleCommand['action'],
+  input: Omit<AgentLifecycleCommand, 'action'>
+): AgentLifecycleCommand {
+  if (action !== 'pause' && action !== 'resume') throw new Error('Invalid lifecycle command action.')
+  if (!input || typeof input !== 'object' || isProxy(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input)))
+    throw new Error('Lifecycle command must be a plain object.')
+  const descriptors = Object.getOwnPropertyDescriptors(input)
+  const fields: Record<string, unknown> = { action }
+  const allowed = new Set(['action', 'instanceId', 'expectedRevision', 'actor', 'idempotencyKey', 'grantId', 'expectedGrantUseCount'])
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== 'string' || !allowed.has(key)) throw new Error('Invalid lifecycle command field.')
+    const descriptor = descriptors[key]
+    if (!descriptor.enumerable || !('value' in descriptor)) throw new Error('Lifecycle command fields must be data.')
+    if (key === 'action') {
+      if (descriptor.value !== action) throw new Error('Lifecycle command action mismatch.')
+    } else if (descriptor.value !== undefined) fields[key] = descriptor.value
+  }
+  const command = JSON.parse(canonicalJson(fields)) as AgentLifecycleCommand
+  for (const key of ['instanceId', 'idempotencyKey'] as const)
+    if (typeof command[key] !== 'string' || !command[key].trim() || command[key] !== command[key].trim())
+      throw new Error(`Invalid lifecycle ${key}.`)
+  if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)
+    throw new Error('Invalid lifecycle expected revision.')
+  if (!command.actor || typeof command.actor !== 'object' || Array.isArray(command.actor))
+    throw new Error('Invalid lifecycle actor.')
+  for (const key of ['kind', 'id'] as const)
+    if (typeof command.actor[key] !== 'string' || !command.actor[key].trim() || command.actor[key] !== command.actor[key].trim())
+      throw new Error('Invalid lifecycle actor.')
+  if (command.actor.displayName !== undefined && (typeof command.actor.displayName !== 'string' || !command.actor.displayName.trim()))
+    throw new Error('Invalid lifecycle actor displayName.')
+  if (command.grantId !== undefined && (typeof command.grantId !== 'string' || !command.grantId.trim() || command.grantId !== command.grantId.trim()))
+    throw new Error('Invalid lifecycle grant id.')
+  if (command.expectedGrantUseCount !== undefined && (!Number.isSafeInteger(command.expectedGrantUseCount) || command.expectedGrantUseCount < 0))
+    throw new Error('Invalid lifecycle grant use count.')
+  return freezeJson(command)
+}
+
+const noopReceiptKey = (command: AgentLifecycleCommand): string =>
+  `agent-instance:lifecycle-noop:${sha256PolicyText(canonicalJson([command.instanceId, command.action, command.idempotencyKey]))}`
 
 export type CreateAgentInstanceInput = Readonly<{
   instance: MagicAgentInstanceState
@@ -81,8 +149,80 @@ const event = (
   revision
 })
 
+/** @internal Shared validation for inert managed-birth plans; not admission authority. */
+export const assertNewAgentInstance = assertInstance
+
+/** @internal Shared event/mutation recipe; callers must validate and capture input first. */
+export const prepareAgentInstanceCreate = (
+  input: CreateAgentInstanceInput, reservedParentId?: string,
+  captured?: Readonly<{ storedKey: string; stateDigest: string }>
+): ResourceMutationInput => ({
+  operation: 'create', kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND, id: input.instance.id,
+  state: input.instance, createdAt: input.createdAt,
+  idempotencyKey: captured?.storedKey ?? `agent-instance:${input.instance.id}:create:${input.idempotencyKey}`,
+  event: event(input.instance.id, 'agent-instance.created', input.createdAt, 0, {
+    status: 'created', ...(reservedParentId === undefined ? {} : { parentInstanceId: reservedParentId }),
+    stateDigest: captured?.stateDigest ?? sha256PolicyText(canonicalPolicyJson(input.instance as never))
+  })
+})
+
+/** @internal Data only; parent CAS does not establish tree capacity or policy approval. */
+export const prepareAgentChildReservation = (
+  parent: StoredResource<MagicAgentInstanceState>, childId: string, createdAt: number, idempotencyKey: string
+): ResourceMutationInput => ({
+  operation: 'update', kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND, id: parent.id,
+  expectedRevision: parent.revision, state: parent.state, createdAt,
+  idempotencyKey: `agent-instance:${parent.id}:reserve-child:${idempotencyKey}`,
+  event: event(parent.id, 'agent-instance.child-reserved', createdAt, parent.revision + 1, { childId })
+})
+
+/** @internal Exact default status-transition recipe, no execution permission. */
+export const prepareAgentInstanceTransition = (
+  current: StoredResource<MagicAgentInstanceState>, status: MagicAgentInstanceStatus,
+  transitionedAt: number, idempotencyKey: string,
+  captured?: Readonly<{ storedKey: string; instanceId: string; expectedRevision: number }>
+): ResourceMutationInput => ({
+  operation: 'update', kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND, id: captured?.instanceId ?? current.id,
+  expectedRevision: captured?.expectedRevision ?? current.revision, state: { ...current.state, status }, createdAt: transitionedAt,
+  idempotencyKey: captured?.storedKey ?? `agent-instance:${current.id}:transition:${idempotencyKey}`,
+  event: event(captured?.instanceId ?? current.id, 'agent-instance.status-transitioned', transitionedAt, (captured?.expectedRevision ?? current.revision) + 1,
+    { fromStatus: current.state.status, status })
+})
+
 export class PersistentAgentInstanceStore {
   constructor(private readonly eventStore: MagicAgentEventStore) {}
+
+  /** Conservative durable classification, not managed schema validation or a lease. */
+  hasManagedIdentity(instanceId: string): boolean {
+    return hasManagedAgentInstanceEvidence(this.eventStore, instanceId)
+  }
+
+  assertOrdinaryIdentity(instanceId: string): void {
+    if (this.hasManagedIdentity(instanceId)) throw new ManagedAgentOrdinaryAdmissionError()
+  }
+
+  private ordinaryResult<T extends StoredResource<MagicAgentInstanceState>>(row: T): T {
+    this.assertOrdinaryIdentity(row.id)
+    this.assertOrdinaryIdentity(row.state.id)
+    if (row.state.parentInstanceId !== undefined) this.assertOrdinaryIdentity(row.state.parentInstanceId)
+    return row
+  }
+
+  private mutateOrdinaryResource<T = MagicAgentInstanceState>(input: ResourceMutationInput, replacement?: AgentInstanceReplacementCommitFence) {
+    const fence = new AgentInstanceOrdinaryCommitFence(this.eventStore, [input], replacement)
+    assertAgentInstanceMutationCommitFence(fence, this.eventStore, [input])
+    const result = this.eventStore.mutateResource<T>(input, fence)
+    assertAgentInstanceOrdinaryMutationResult(fence, this.eventStore, [input])
+    return result
+  }
+
+  private mutateOrdinaryBatch(inputs: readonly ResourceMutationInput[]) {
+    const fence = new AgentInstanceOrdinaryCommitFence(this.eventStore, inputs)
+    assertAgentInstanceMutationCommitFence(fence, this.eventStore, inputs)
+    const result = this.eventStore.mutateResourcesBatch(inputs, fence)
+    assertAgentInstanceOrdinaryMutationResult(fence, this.eventStore, inputs)
+    return result
+  }
 
   list(): readonly StoredResource<MagicAgentInstanceState>[] {
     return this.eventStore.listResources({
@@ -105,6 +245,8 @@ export class PersistentAgentInstanceStore {
     idempotencyKey: string
   }): StoredResource<MagicAgentInstanceState> | undefined {
     const reservationKey = `agent-instance:${input.parentInstanceId}:reserve-child:${input.idempotencyKey}`
+    this.assertOrdinaryIdentity(input.parentInstanceId)
+    this.assertOrdinaryIdentity(input.child.id)
     const reservation = this.eventStore
       .listResourceMutations(MAGIC_AGENT_INSTANCE_RESOURCE_KIND, input.parentInstanceId, 1_000)
       .find((item) => item.idempotencyKey === reservationKey)
@@ -124,7 +266,8 @@ export class PersistentAgentInstanceStore {
       idempotencyKey: input.idempotencyKey
     })
     if (!child) throw new Error('Agent child reservation replay is incomplete.')
-    return child
+    this.assertOrdinaryIdentity(input.parentInstanceId)
+    return this.ordinaryResult(child)
   }
 
   reserveChild(input: {
@@ -138,6 +281,8 @@ export class PersistentAgentInstanceStore {
     child: StoredResource<MagicAgentInstanceState>
   }> {
     assertInstance(input.child)
+    this.assertOrdinaryIdentity(input.parentInstanceId)
+    this.assertOrdinaryIdentity(input.child.id)
     if (input.child.parentInstanceId !== input.parentInstanceId)
       throw new Error('Child Agent parent identity mismatch.')
     const parent = this.get(input.parentInstanceId)
@@ -145,38 +290,9 @@ export class PersistentAgentInstanceStore {
     if (parent.revision !== input.parentExpectedRevision)
       throw new Error('Parent Agent instance revision conflict.')
     if (this.get(input.child.id)) throw new Error('Agent instance already exists.')
-    const reservationKey = `agent-instance:${parent.id}:reserve-child:${input.idempotencyKey}`
-    const childKey = `agent-instance:${input.child.id}:create:${input.idempotencyKey}`
-    const results = this.eventStore.mutateResourcesBatch([
-      {
-        operation: 'update',
-        kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND,
-        id: parent.id,
-        expectedRevision: parent.revision,
-        state: parent.state,
-        createdAt: input.createdAt,
-        idempotencyKey: reservationKey,
-        event: event(
-          parent.id,
-          'agent-instance.child-reserved',
-          input.createdAt,
-          parent.revision + 1,
-          { childId: input.child.id }
-        )
-      },
-      {
-        operation: 'create',
-        kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND,
-        id: input.child.id,
-        state: input.child,
-        createdAt: input.createdAt,
-        idempotencyKey: childKey,
-        event: event(input.child.id, 'agent-instance.created', input.createdAt, 0, {
-          status: 'created',
-          parentInstanceId: parent.id,
-          stateDigest: sha256PolicyText(canonicalPolicyJson(input.child as never))
-        })
-      }
+    const results = this.mutateOrdinaryBatch([
+      prepareAgentChildReservation(parent, input.child.id, input.createdAt, input.idempotencyKey),
+      prepareAgentInstanceCreate({ instance: input.child, createdAt: input.createdAt, idempotencyKey: input.idempotencyKey }, parent.id)
     ])
     const parentResult = results[0]
     const childResult = results[1]
@@ -192,6 +308,8 @@ export class PersistentAgentInstanceStore {
   ): StoredResource<MagicAgentInstanceState> | undefined {
     const digest = sha256PolicyText(canonicalPolicyJson(input.instance as never))
     const storedKey = `agent-instance:${input.instance.id}:create:${input.idempotencyKey}`
+    this.assertOrdinaryIdentity(input.instance.id)
+    if (input.instance.parentInstanceId !== undefined) this.assertOrdinaryIdentity(input.instance.parentInstanceId)
     const replay = this.eventStore
       .listResourceMutations(MAGIC_AGENT_INSTANCE_RESOURCE_KIND, input.instance.id, 1_000)
       .find((item) => item.idempotencyKey === storedKey)
@@ -204,7 +322,7 @@ export class PersistentAgentInstanceStore {
       payload?.stateDigest !== digest
     )
       throw new Error('Agent instance create idempotency conflict.')
-    return replay.resource as StoredResource<MagicAgentInstanceState>
+    return this.ordinaryResult(replay.resource as StoredResource<MagicAgentInstanceState>)
   }
 
   create(input: CreateAgentInstanceInput): StoredResource<MagicAgentInstanceState> {
@@ -213,6 +331,8 @@ export class PersistentAgentInstanceStore {
       throw new Error('Invalid Agent instance create command.')
     const digest = sha256PolicyText(canonicalPolicyJson(input.instance as never))
     const storedKey = `agent-instance:${input.instance.id}:create:${input.idempotencyKey}`
+    this.assertOrdinaryIdentity(input.instance.id)
+    if (input.instance.parentInstanceId !== undefined) this.assertOrdinaryIdentity(input.instance.parentInstanceId)
     const replay = this.eventStore
       .listResourceMutations(MAGIC_AGENT_INSTANCE_RESOURCE_KIND, input.instance.id, 1_000)
       .find((item) => item.idempotencyKey === storedKey)
@@ -225,21 +345,12 @@ export class PersistentAgentInstanceStore {
         payload?.stateDigest !== digest
       )
         throw new Error('Agent instance create idempotency conflict.')
-      return replay.resource as StoredResource<MagicAgentInstanceState>
+      return this.ordinaryResult(replay.resource as StoredResource<MagicAgentInstanceState>)
     }
     if (this.get(input.instance.id)) throw new Error('Agent instance already exists.')
-    return this.eventStore.mutateResource<MagicAgentInstanceState>({
-      operation: 'create',
-      kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND,
-      id: input.instance.id,
-      state: input.instance,
-      createdAt: input.createdAt,
-      idempotencyKey: storedKey,
-      event: event(input.instance.id, 'agent-instance.created', input.createdAt, 0, {
-        status: 'created',
-        stateDigest: digest
-      })
-    }).resource
+    return this.mutateOrdinaryResource<MagicAgentInstanceState>(
+      prepareAgentInstanceCreate(input, undefined, { storedKey, stateDigest: digest })
+    ).resource
   }
 
   stageConfig(input: {
@@ -267,6 +378,7 @@ export class PersistentAgentInstanceStore {
     activatedAt: number
     idempotencyKey: string
   }) {
+    this.assertOrdinaryIdentity(input.id)
     const current = this.get(input.id)
     if (!current?.state.pendingConfigVersion)
       throw new Error('Agent instance has no staged config version.')
@@ -295,6 +407,7 @@ export class PersistentAgentInstanceStore {
     rolledBackAt: number
     idempotencyKey: string
   }) {
+    this.assertOrdinaryIdentity(input.id)
     const current = this.get(input.id)
     if (!current?.state.previousConfigVersion)
       throw new Error('Agent instance has no previous config version.')
@@ -336,6 +449,7 @@ export class PersistentAgentInstanceStore {
     )
       throw new Error('Invalid Agent config command.')
     const storedKey = `agent-instance:${id}:${type}:${idempotencyKey}`
+    this.assertOrdinaryIdentity(id)
     const replay = this.eventStore
       .listResourceMutations(MAGIC_AGENT_INSTANCE_RESOURCE_KIND, id, 1_000)
       .find((item) => item.idempotencyKey === storedKey)
@@ -348,12 +462,12 @@ export class PersistentAgentInstanceStore {
           sha256PolicyText(canonicalPolicyJson(payload as never))
       )
         throw new Error('Agent config idempotency conflict.')
-      return replay.resource as StoredResource<MagicAgentInstanceState>
+      return this.ordinaryResult(replay.resource as StoredResource<MagicAgentInstanceState>)
     }
     const current = this.get(id)
     if (!current) throw new Error('Agent instance not found.')
     if (current.revision !== expectedRevision) throw new Error('Agent instance revision conflict.')
-    return this.eventStore.mutateResource<MagicAgentInstanceState>({
+    return this.mutateOrdinaryResource<MagicAgentInstanceState>({
       operation: 'update',
       kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND,
       id,
@@ -365,12 +479,65 @@ export class PersistentAgentInstanceStore {
     }).resource
   }
 
+  getLifecycleNoopReplay(input: AgentLifecycleCommand): StoredResource<MagicAgentInstanceState> | undefined {
+    const command = captureAgentLifecycleCommand(input.action, input)
+    this.assertOrdinaryIdentity(command.instanceId)
+    const key = noopReceiptKey(command)
+    const receipt = this.eventStore.getEvent(`${key}:completed`)
+    if (!receipt) return undefined
+    const payload = receipt.payload as { commandDigest?: string; resultDigest?: string; result?: StoredResource<MagicAgentInstanceState> }
+    if (payload?.commandDigest !== sha256PolicyText(canonicalJson(command)))
+      throw new Error('Agent lifecycle no-op idempotency conflict.')
+    const result = payload.result
+    if (
+      receipt.type !== 'agent-instance.lifecycle-noop-completed' || receipt.envelopeKind !== 'event' ||
+      receipt.streamId !== `${key}:stream` || receipt.sequence !== 0 ||
+      receipt.extensions?.lifecycleNoopKey !== key || receipt.extensions?.instanceId !== command.instanceId ||
+      !result || result.kind !== MAGIC_AGENT_INSTANCE_RESOURCE_KIND || result.id !== command.instanceId || result.deleted !== false ||
+      !Number.isSafeInteger(result.revision) || result.revision < command.expectedRevision ||
+      !Number.isFinite(result.createdAt) || !Number.isFinite(result.updatedAt) || result.createdAt < 0 || result.updatedAt < result.createdAt || receipt.createdAt < result.updatedAt ||
+      result.state?.id !== command.instanceId || result.state.status !== (command.action === 'pause' ? 'paused' : 'running') ||
+      payload.resultDigest !== sha256PolicyText(canonicalJson(result))
+    ) throw new Error('Invalid Agent lifecycle no-op receipt.')
+    assertInstance({ ...result.state, status: 'created' })
+    const detached = freezeJson(JSON.parse(canonicalJson(result)) as StoredResource<MagicAgentInstanceState>)
+    return this.ordinaryResult(detached)
+  }
+
+  recordLifecycleNoopCompletion(input: {
+    command: AgentLifecycleCommand
+    result: StoredResource<MagicAgentInstanceState>
+    completedAt: number
+  }): StoredResource<MagicAgentInstanceState> {
+    const command = captureAgentLifecycleCommand(input.command.action, input.command)
+    const replay = this.getLifecycleNoopReplay(command)
+    if (replay) return replay
+    const current = this.get(command.instanceId)
+    if (!current || canonicalJson(current) !== canonicalJson(input.result) || current.deleted ||
+      current.state.status !== (command.action === 'pause' ? 'paused' : 'running') || current.revision < command.expectedRevision ||
+      !Number.isFinite(input.completedAt) || input.completedAt < current.updatedAt)
+      throw new Error('Invalid Agent lifecycle no-op completion.')
+    const key = noopReceiptKey(command)
+    const events = [{
+      protocolVersion: '2.0.0', id: `${key}:completed`, type: 'agent-instance.lifecycle-noop-completed',
+      createdAt: input.completedAt, envelopeKind: 'event' as const, streamId: `${key}:stream`, sequence: 0,
+      extensions: { lifecycleNoopKey: key, instanceId: current.id },
+      payload: { commandDigest: sha256PolicyText(canonicalJson(command)), resultDigest: sha256PolicyText(canonicalJson(current)), result: current }
+    }]
+    const fence = new AgentInstanceOrdinaryEventCommitFence(this.eventStore, events, command.instanceId)
+    assertAgentInstanceOrdinaryEventCommitFence(fence, this.eventStore, events)
+    this.eventStore.appendBatch(events, fence)
+    assertAgentInstanceOrdinaryEventCommitFence(fence, this.eventStore, events)
+    return this.ordinaryResult(current)
+  }
+
   getTransitionReplay(
     instanceId: string,
     status: MagicAgentInstanceStatus,
     idempotencyKey: string
   ): StoredResource<MagicAgentInstanceState> | undefined {
     const storedKey = `agent-instance:${instanceId}:transition:${idempotencyKey}`
+    this.assertOrdinaryIdentity(instanceId)
     const replay = this.eventStore
       .listResourceMutations(MAGIC_AGENT_INSTANCE_RESOURCE_KIND, instanceId, 1_000)
       .find((item) => item.idempotencyKey === storedKey)
@@ -379,14 +546,18 @@ export class PersistentAgentInstanceStore {
     const payload = committed?.payload as { status?: string } | undefined
     if (committed?.type !== 'agent-instance.status-transitioned' || payload?.status !== status)
       throw new Error('Agent instance transition idempotency conflict.')
-    return replay.resource as StoredResource<MagicAgentInstanceState>
+    return this.ordinaryResult(replay.resource as StoredResource<MagicAgentInstanceState>)
   }
 
   getReplaceReplay(instanceId: string, idempotencyKey: string) {
     const key = `agent-instance:${instanceId}:replace:${idempotencyKey}`
-    return this.eventStore
+    this.assertOrdinaryIdentity(instanceId)
+    const replay = this.eventStore
       .listResourceMutations(MAGIC_AGENT_INSTANCE_RESOURCE_KIND, instanceId, 1_000)
       .find((item) => item.idempotencyKey === key)
+    this.assertOrdinaryIdentity(instanceId)
+    if (replay) this.ordinaryResult(replay.resource as StoredResource<MagicAgentInstanceState>)
+    return replay
   }
 
   replace(input: {
@@ -397,7 +568,7 @@ export class PersistentAgentInstanceStore {
     configVersion: string
     replacedAt: number
     idempotencyKey: string
-  }) {
+  }, fence?: AgentInstanceReplacementCommitFence) {
     assertString(input.instanceId, 'Agent instance id')
     assertString(input.definitionId, 'Agent definition id')
     assertString(input.name, 'Agent instance name')
@@ -416,7 +587,7 @@ export class PersistentAgentInstanceStore {
         payload?.configVersion !== input.configVersion
       )
         throw new Error('Agent instance replace idempotency conflict.')
-      return replay.resource as StoredResource<MagicAgentInstanceState>
+      return this.ordinaryResult(replay.resource as StoredResource<MagicAgentInstanceState>)
     }
     const current = this.get(input.instanceId)
     if (!current) throw new Error('Agent instance not found.')
@@ -424,8 +595,8 @@ export class PersistentAgentInstanceStore {
       throw new Error('Agent instance revision conflict.')
     if (current.state.status === 'running' || current.state.status === 'removed')
       throw new Error('Agent instance must be quiescent before replacement.')
-    return this.eventStore.mutateResource<MagicAgentInstanceState>({
-      operation: 'update',
+    const mutation = {
+      operation: 'update' as const,
       kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND,
       id: input.instanceId,
       expectedRevision: input.expectedRevision,
@@ -455,7 +626,11 @@ export class PersistentAgentInstanceStore {
           configVersion: input.configVersion
         }
       )
-    }).resource
+    }
+    // Check after all store reads/materialization, then pass the same concrete
+    // predicate into the synchronous SQLite transaction. No callback API.
+    if (fence) assertAgentInstanceReplacementCommitFence(fence, mutation)
+    return this.mutateOrdinaryResource<MagicAgentInstanceState>(mutation, fence).resource
   }
 
   transition(input: {
@@ -475,6 +650,7 @@ export class PersistentAgentInstanceStore {
     )
       throw new Error('Invalid Agent instance transition command.')
     const storedKey = `agent-instance:${input.instanceId}:transition:${input.idempotencyKey}`
+    this.assertOrdinaryIdentity(input.instanceId)
     const replay = this.eventStore
       .listResourceMutations(MAGIC_AGENT_INSTANCE_RESOURCE_KIND, input.instanceId, 1_000)
       .find((item) => item.idempotencyKey === storedKey)
@@ -487,7 +663,7 @@ export class PersistentAgentInstanceStore {
         payload?.status !== input.status
       )
         throw new Error('Agent instance transition idempotency conflict.')
-      return replay.resource as StoredResource<MagicAgentInstanceState>
+      return this.ordinaryResult(replay.resource as StoredResource<MagicAgentInstanceState>)
     }
     const current = this.get(input.instanceId)
     if (!current) throw new Error('Agent instance not found.')
@@ -497,22 +673,10 @@ export class PersistentAgentInstanceStore {
       throw new Error(
         `Invalid Agent instance transition: ${current.state.status} -> ${input.status}.`
       )
-    return this.eventStore.mutateResource<MagicAgentInstanceState>({
-      operation: 'update',
-      kind: MAGIC_AGENT_INSTANCE_RESOURCE_KIND,
-      id: input.instanceId,
-      expectedRevision: input.expectedRevision,
-      state: { ...current.state, status: input.status },
-      createdAt: input.transitionedAt,
-      idempotencyKey: storedKey,
-      event: event(
-        input.instanceId,
-        'agent-instance.status-transitioned',
-        input.transitionedAt,
-        input.expectedRevision + 1,
-        { fromStatus: current.state.status, status: input.status }
-      )
-    }).resource
+    return this.mutateOrdinaryResource<MagicAgentInstanceState>(
+      prepareAgentInstanceTransition(current, input.status, input.transitionedAt, input.idempotencyKey,
+        { storedKey, instanceId: input.instanceId, expectedRevision: input.expectedRevision })
+    ).resource
   }
 
   start(input: Omit<Parameters<PersistentAgentInstanceStore['transition']>[0], 'status'>) {

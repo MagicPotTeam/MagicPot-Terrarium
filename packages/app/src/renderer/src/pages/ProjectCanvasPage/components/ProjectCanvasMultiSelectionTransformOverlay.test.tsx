@@ -167,6 +167,68 @@ describe('ProjectCanvasMultiSelectionTransformOverlay', () => {
     }
   })
 
+  it('does not broadcast or reset image-only selections with absent or blank labels', () => {
+    const first = createImageItem('old-image', 100, 140, 200, 120)
+    const second = { ...createImageItem('blank-image', 360, 180, 100, 80), teamImageLabel: '  ' }
+    const sync = vi.spyOn(canvasSync, 'scheduleCanvasSync')
+    const reset = vi.fn()
+    window.addEventListener('canvas-reset-old-image', reset)
+    window.addEventListener('canvas-reset-blank-image', reset)
+    const canvasContainerRef = React.createRef<HTMLDivElement>()
+    const view = render(<div data-testid="canvas-root" ref={canvasContainerRef}><ProjectCanvasMultiSelectionTransformOverlay canvasContainerRef={canvasContainerRef} items={[first, second]} stagePos={{ x: 0, y: 0 }} stageScale={1} onTransformEnd={vi.fn()} /></div>)
+    try {
+      mockCanvasRootRect(screen.getByTestId('canvas-root'))
+      const surface = document.querySelector('[data-canvas-multi-select-drag-surface="true"]')!
+      fireEvent.pointerDown(surface, { pointerId: 43, clientX: 260, clientY: 200, button: 0 })
+      fireEvent.pointerMove(window, { pointerId: 43, clientX: 308, clientY: 236 })
+      view.unmount()
+      expect(sync).not.toHaveBeenCalled()
+      expect(reset).not.toHaveBeenCalled()
+    } finally {
+      view.unmount(); sync.mockRestore()
+      window.removeEventListener('canvas-reset-old-image', reset)
+      window.removeEventListener('canvas-reset-blank-image', reset)
+    }
+  })
+
+  it('broadcasts only explicitly labelled images and existing non-image types, coalesces frames, and resets on unmount', () => {
+    const first = { ...createImageItem('labelled', 100, 140, 200, 120), teamImageLabel: '甲·图1' }
+    const plain = createImageItem('plain', 360, 180, 100, 80)
+    const empty = { ...createImageItem('empty', 500, 180, 80, 80), teamImageLabel: '  ' }
+    const text = createTextItem('text', 600, 180)
+    const file = { ...plain, id: 'file', type: 'file' } as unknown as import('../types').CanvasFileItem
+    const ids = [first.id, plain.id, empty.id, text.id, file.id]
+    const events = new Map(ids.map(id => [id, vi.fn()]))
+    const resets = new Map(ids.map(id => [id, vi.fn()]))
+    ids.forEach(id => { window.addEventListener(`canvas-sync-${id}`, events.get(id)!); window.addEventListener(`canvas-reset-${id}`, resets.get(id)!) })
+    const frames = new Map<number, FrameRequestCallback>()
+    let frame = 0
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { frames.set(++frame, callback); return frame })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id) })
+    const canvasContainerRef = React.createRef<HTMLDivElement>()
+    const view = render(<div data-testid="canvas-root" ref={canvasContainerRef}><ProjectCanvasMultiSelectionTransformOverlay canvasContainerRef={canvasContainerRef} items={[first, plain, empty, text, file]} stagePos={{ x: 0, y: 0 }} stageScale={1} onTransformEnd={vi.fn()} /></div>)
+    try {
+      mockCanvasRootRect(screen.getByTestId('canvas-root'))
+      const surface = document.querySelector('[data-canvas-multi-select-drag-surface="true"]')!
+      fireEvent.pointerDown(surface, { pointerId: 42, clientX: 260, clientY: 200, button: 0 })
+      fireEvent.pointerMove(window, { pointerId: 42, clientX: 280, clientY: 220 })
+      fireEvent.pointerMove(window, { pointerId: 42, clientX: 308, clientY: 236 })
+      expect(events.get(first.id)).not.toHaveBeenCalled()
+      act(() => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(16)) })
+      expect(events.get(first.id)).toHaveBeenCalledTimes(1)
+      expect((events.get(first.id)!.mock.calls[0][0] as CustomEvent).detail).toMatchObject({ x: 148, y: 176 })
+      expect(events.get(text.id)).toHaveBeenCalledTimes(1)
+      for (const id of [plain.id, empty.id, file.id]) expect(events.get(id)).not.toHaveBeenCalled()
+      view.unmount()
+      expect(resets.get(first.id)).toHaveBeenCalledTimes(1)
+      expect(resets.get(text.id)).toHaveBeenCalledTimes(1)
+      for (const id of [plain.id, empty.id, file.id]) expect(resets.get(id)).not.toHaveBeenCalled()
+    } finally {
+      view.unmount(); raf.mockRestore(); cancel.mockRestore()
+      ids.forEach(id => { window.removeEventListener(`canvas-sync-${id}`, events.get(id)!); window.removeEventListener(`canvas-reset-${id}`, resets.get(id)!) })
+    }
+  })
+
   it('updates drag preview imperatively without React commits during pointer moves', async () => {
     const onRender = vi.fn()
     const onTransformEnd = vi.fn()
@@ -338,6 +400,27 @@ describe('ProjectCanvasMultiSelectionTransformOverlay', () => {
         }
       }
     ])
+  })
+
+  it('does not translate its selection overlay when flushing resized labelled items', () => {
+    const first = { ...createImageItem('resize-labelled-a', 100, 140, 200, 120), teamImageLabel: '甲' }
+    const second = { ...createImageItem('resize-labelled-b', 360, 180, 100, 80), teamImageLabel: '乙' }
+    const ref = React.createRef<HTMLDivElement>()
+    const commit = vi.fn()
+    const view = render(<div data-testid="resize-canvas" ref={ref}><ProjectCanvasMultiSelectionTransformOverlay canvasContainerRef={ref} items={[first, second]} stagePos={{ x: 0, y: 0 }} stageScale={1} onTransformEnd={commit} /></div>)
+    try {
+      const root = screen.getByTestId('resize-canvas')
+      mockCanvasRootRect(root)
+      const handle = root.querySelector('[data-canvas-multi-select-handle="bottom-right"]')!
+      fireEvent.pointerDown(handle, { pointerId: 1, clientX: 470, clientY: 280 })
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 650, clientY: 340 })
+      const overlay = root.querySelector<HTMLElement>('[data-testid="project-canvas-multi-selection-transform-overlay"]')!
+      expect(overlay).not.toBeNull()
+      const before = { left: overlay.style.left, top: overlay.style.top, width: overlay.style.width, height: overlay.style.height }
+      fireEvent.pointerUp(window, { pointerId: 1, clientX: 650, clientY: 340 })
+      expect(commit).toHaveBeenCalledOnce()
+      expect({ left: overlay.style.left, top: overlay.style.top, width: overlay.style.width, height: overlay.style.height }).toEqual(before)
+    } finally { view.unmount() }
   })
 
   it('follows live preview sync while a selected item is being dragged and resets afterwards', () => {
@@ -552,6 +635,40 @@ describe('ProjectCanvasMultiSelectionTransformOverlay', () => {
         }
       }
     ])
+  })
+
+  it('resets the preview and unlocks the next interaction if the parent transform throws', () => {
+    const firstItem = { ...createImageItem('throw-image', 100, 140, 200, 120), teamImageLabel: '甲·图1' }
+    const secondItem = createImageItem('other-image', 360, 180, 100, 80)
+    const canvasContainerRef = React.createRef<HTMLDivElement>()
+    const failure = new Error('parent failed')
+    const onTransformEnd = vi.fn().mockImplementationOnce(() => { throw failure })
+    const sync = vi.fn(), reset = vi.fn(), errors: unknown[] = []
+    const onError = (event: ErrorEvent) => { errors.push(event.error); event.preventDefault() }
+    window.addEventListener(`canvas-sync-${firstItem.id}`, sync)
+    window.addEventListener(`canvas-reset-${firstItem.id}`, reset)
+    window.addEventListener('error', onError)
+    try {
+      render(<div data-testid="canvas-root" ref={canvasContainerRef}>
+        <ProjectCanvasMultiSelectionTransformOverlay canvasContainerRef={canvasContainerRef} items={[firstItem, secondItem]} stagePos={{ x: 0, y: 0 }} stageScale={1} onTransformEnd={onTransformEnd} />
+      </div>)
+      mockCanvasRootRect(screen.getByTestId('canvas-root'))
+      const surface = document.querySelector('[data-canvas-multi-select-drag-surface="true"]') as HTMLElement
+      fireEvent.pointerDown(surface, { pointerId: 81, clientX: 260, clientY: 200, button: 0 })
+      fireEvent.pointerMove(window, { pointerId: 81, clientX: 308, clientY: 236 })
+      fireEvent.pointerUp(window, { pointerId: 81, clientX: 308, clientY: 236 })
+      expect(errors).toEqual([failure])
+      expect(sync).toHaveBeenCalled()
+      expect(reset).toHaveBeenCalledTimes(1)
+      fireEvent.pointerDown(surface, { pointerId: 82, clientX: 260, clientY: 200, button: 0 })
+      fireEvent.pointerMove(window, { pointerId: 82, clientX: 290, clientY: 220 })
+      fireEvent.pointerUp(window, { pointerId: 82, clientX: 290, clientY: 220 })
+      expect(onTransformEnd).toHaveBeenCalledTimes(2)
+    } finally {
+      window.removeEventListener(`canvas-sync-${firstItem.id}`, sync)
+      window.removeEventListener(`canvas-reset-${firstItem.id}`, reset)
+      window.removeEventListener('error', onError)
+    }
   })
 
   it('emits canvas sync previews for text items while dragging a multi-selection', async () => {

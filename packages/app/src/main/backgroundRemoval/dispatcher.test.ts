@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createBackgroundRemovalDispatcher, type BackgroundRemovalTask } from './dispatcher'
 import type {
   LocalComfyCapabilityLease,
-  LocalComfyCapabilityRegistry
+  LocalComfyCapabilityRegistry,
+  LocalComfyCapabilityResult
 } from './localComfyCapability'
 
 type MutableCapabilityRegistry = {
@@ -117,6 +118,38 @@ describe('background-removal dispatcher', () => {
       status: 'unavailable',
       error: 'CANCELLED'
     })
+  })
+
+  it('revokes a lease that arrives after external cancellation', async () => {
+    let resolveAcquire!: (result: LocalComfyCapabilityResult) => void
+    const acquire = new Promise<LocalComfyCapabilityResult>((resolve) => {
+      resolveAcquire = resolve
+    })
+    capability.acquire = vi.fn(() => acquire)
+    const controller = new AbortController()
+    const read = vi.fn(async () => Buffer.from('input'))
+    const execute = vi.fn(async () => Buffer.from('output'))
+    const audit = vi.fn()
+    const dispatcher = createBackgroundRemovalDispatcher({
+      capability,
+      readManagedMedia: read,
+      execute,
+      audit
+    })
+
+    const pending = dispatcher.dispatch(task(), controller.signal)
+    expect(capability.acquire).toHaveBeenCalledTimes(1)
+    controller.abort()
+    resolveAcquire({ status: 'lease', lease: leaseFixture() })
+
+    await expect(pending).resolves.toEqual({
+      status: 'unavailable',
+      error: 'CANCELLED'
+    })
+    expect(read).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+    expect(audit).not.toHaveBeenCalledWith(expect.objectContaining({ event: 'completed' }))
+    expect(capability.revoke).toHaveBeenCalledTimes(1)
   })
 
   it('requires positive bounded deadlines', async () => {

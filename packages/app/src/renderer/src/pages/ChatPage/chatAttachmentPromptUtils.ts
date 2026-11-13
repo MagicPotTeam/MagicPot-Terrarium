@@ -32,6 +32,7 @@ type AugmentAttachmentOptions = {
   role?: ChatMessage['role']
   reportInlineCharLimit?: number
   skipAttachment?: (attachment: ChatAttachment) => boolean
+  signal?: AbortSignal
 }
 
 const getAttachmentExtension = (attachment: ChatAttachment): string => {
@@ -247,8 +248,10 @@ function buildAttachmentKey(attachment: ChatAttachment): string {
 
 export async function expandReportBundleAttachments(
   attachments: ChatAttachment[] | undefined,
-  readAttachmentText: AttachmentTextReader = readAttachmentTextFromUrl
+  readAttachmentText: AttachmentTextReader = readAttachmentTextFromUrl,
+  signal?: AbortSignal
 ): Promise<ChatAttachment[] | undefined> {
+  signal?.throwIfAborted()
   if (!attachments?.length) {
     return attachments
   }
@@ -265,8 +268,10 @@ export async function expandReportBundleAttachments(
   )
 
   for (const manifestUrl of manifestUrls) {
+    signal?.throwIfAborted()
     try {
       const manifestText = await readAttachmentText(manifestUrl)
+      signal?.throwIfAborted()
       const manifest = JSON.parse(manifestText) as ReportBundleManifest
       const bundleEntries = manifest.entries.filter((entry) => entry.role === 'report-image')
       for (const entry of bundleEntries) {
@@ -282,11 +287,76 @@ export async function expandReportBundleAttachments(
         expanded.push(attachment)
       }
     } catch (error) {
+      signal?.throwIfAborted()
       console.warn('[ChatPage] Failed to expand report bundle attachments:', manifestUrl, error)
     }
   }
 
+  signal?.throwIfAborted()
   return expanded
+}
+
+/** Strict, per-message expansion. Successful return is the only completion signal. */
+export async function expandReportBundleAttachmentsStrict(
+  attachments: ChatAttachment[] | undefined,
+  readAttachmentText: AttachmentTextReader = readAttachmentTextFromUrl
+): Promise<ChatAttachment[] | undefined> {
+  try {
+    if (!attachments) return undefined
+    if (!attachments.length) return []
+    const primaries = attachments.filter(isPrimaryReportBundleAttachment)
+    const byManifest = new Map<string, ChatAttachment[]>()
+    for (const primary of primaries) {
+      if (typeof primary.reportBundleManifestUrl !== 'string' || !primary.reportBundleManifestUrl.trim()) throw new Error()
+      const url = primary.reportBundleManifestUrl.trim()
+      const group = byManifest.get(url) ?? []
+      group.push(primary)
+      byManifest.set(url, group)
+    }
+    // Copy attachment records only; nested payloads remain borrowed to avoid duplicating large binaries.
+    const expanded = attachments.map(attachment => ({ ...attachment }))
+    const strictAttachmentKey = (attachment: ChatAttachment): string => JSON.stringify([
+      attachment.reportBundleId || '',
+      attachment.reportBundleRole || '',
+      attachment.reportBundleRefName || '',
+      attachment.type,
+      attachment.url,
+      attachment.fileName || ''
+    ])
+    const seen = new Set(expanded.map(strictAttachmentKey))
+    const bundleUrls = new Map<string, string>()
+    for (const [url, group] of byManifest) {
+      const manifest: unknown = JSON.parse(await readAttachmentText(url))
+      if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error()
+      const candidate = manifest as Record<string, unknown>
+      if (candidate.version !== 1 || typeof candidate.bundleId !== 'string' || !candidate.bundleId.trim() || !Array.isArray(candidate.entries)) throw new Error()
+      const bundleId = candidate.bundleId
+      if (group.some(primary => primary.reportBundleId !== undefined && primary.reportBundleId !== bundleId)) throw new Error()
+      if (bundleUrls.has(bundleId) && bundleUrls.get(bundleId) !== url) throw new Error()
+      bundleUrls.set(bundleId, url)
+      for (const raw of candidate.entries) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error()
+        const entry = raw as Record<string, unknown>
+        if (!['primary-report', 'report-image', 'report-ocr', 'manifest'].includes(entry.role as string)) throw new Error()
+        if (entry.role !== 'report-image') continue
+        if (typeof entry.fileName !== 'string' || !entry.fileName.trim()) throw new Error()
+        if (entry.sourceUrl !== undefined && typeof entry.sourceUrl !== 'string') throw new Error()
+        if (entry.relativePath !== undefined && typeof entry.relativePath !== 'string') throw new Error()
+        if (entry.mimeType !== undefined && typeof entry.mimeType !== 'string') throw new Error()
+        if (entry.refName !== undefined && typeof entry.refName !== 'string') throw new Error()
+        if (entry.sizeBytes !== undefined && (typeof entry.sizeBytes !== 'number' || !Number.isFinite(entry.sizeBytes) || entry.sizeBytes < 0)) throw new Error()
+        const attachment = createBundleAttachmentFromEntry(entry as ReportBundleManifestEntry, manifest as ReportBundleManifest, url)
+        if (!attachment) throw new Error()
+        const parsed = new URL(attachment.url)
+        if (!['local-media:', 'file:', 'blob:', 'data:', 'http:', 'https:'].includes(parsed.protocol)) throw new Error()
+        const key = strictAttachmentKey(attachment)
+        if (!seen.has(key)) { seen.add(key); expanded.push(attachment) }
+      }
+    }
+    return expanded
+  } catch {
+    throw new Error('Report bundle expansion failed')
+  }
 }
 
 export async function augmentMessageContentWithFileAttachments(
@@ -295,6 +365,7 @@ export async function augmentMessageContentWithFileAttachments(
   readAttachmentText: AttachmentTextReader = readAttachmentTextFromUrl,
   options: AugmentAttachmentOptions = {}
 ): Promise<string> {
+  options.signal?.throwIfAborted()
   if (!attachments?.length) {
     return content
   }
@@ -302,6 +373,7 @@ export async function augmentMessageContentWithFileAttachments(
   const additions: string[] = []
 
   for (const attachment of attachments) {
+    options.signal?.throwIfAborted()
     if (options.skipAttachment?.(attachment)) {
       continue
     }
@@ -325,6 +397,7 @@ export async function augmentMessageContentWithFileAttachments(
 
       try {
         const rawText = await readAttachmentText(attachment.url)
+        options.signal?.throwIfAborted()
         const reportInlineText = buildReportInlineText(
           rawText,
           options.reportInlineCharLimit || MAX_FILE_PREVIEW_CHARS
@@ -336,6 +409,7 @@ export async function augmentMessageContentWithFileAttachments(
           )}`
         )
       } catch (error) {
+        options.signal?.throwIfAborted()
         console.warn(
           '[ChatPage] Failed to read report bundle attachment:',
           attachment.fileName,
@@ -373,6 +447,7 @@ export async function augmentMessageContentWithFileAttachments(
 
     try {
       const rawText = await readAttachmentText(attachment.url)
+      options.signal?.throwIfAborted()
       const previewText = normalizePreviewText(rawText)
       additions.push(
         `[${heading}] ${buildAttachmentLabel(attachment)}\n${buildAttachmentSummaryBlock(
@@ -381,6 +456,7 @@ export async function augmentMessageContentWithFileAttachments(
         )}`
       )
     } catch (error) {
+      options.signal?.throwIfAborted()
       console.warn(
         '[ChatPage] Failed to read file attachment text preview:',
         attachment.fileName,
@@ -395,6 +471,7 @@ export async function augmentMessageContentWithFileAttachments(
     }
   }
 
+  options.signal?.throwIfAborted()
   if (additions.length === 0) {
     return content
   }

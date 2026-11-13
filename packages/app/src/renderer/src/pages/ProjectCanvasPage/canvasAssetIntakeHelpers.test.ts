@@ -474,6 +474,34 @@ describe('canvasAssetIntakeHelpers', () => {
     })
   })
 
+  it.each([false, true])('does not invent crop source dimensions from displayed bounds, known=%s', async (known) => {
+    const sourceIdentity = buildCanvasImageSourceIdentity({ canonicalPath: 'C:/synthetic/original.png', sizeBytes: 123, lastModifiedMs: 1 })!
+    const thumbnailSet = createCanvasThumbnailSet({
+      identity: sourceIdentity,
+      levels: ([128, 256, 512, 1024, 2048] as const).map((maxSide) => ({ maxSide, src: 'data:image/png;base64,c3ludGhldGljLXRodW1ibmFpbA==', filename: `${maxSide}.png`, mimeType: 'image/png' as const, width: 100, height: 100, sizeBytes: 10 })),
+      now: new Date('2026-05-02T00:00:00.000Z')
+    })
+    // Source dimensions are a synthetic fixture assumption; no source decode or network occurs.
+    const sourceUrl = 'data:image/png;base64,c3ludGhldGljLTIwMHgyMDA='
+    const thumbnailImage = createImage(100, 100)
+    const loadImageFromSrc = vi.fn(async (src: string) => {
+      if (src !== thumbnailSet.levels[0].src) throw new Error('unexpected original source load')
+      return { img: thumbnailImage, width: 100, height: 100 }
+    })
+    const item: CanvasImageItem = {
+      id: 'synthetic-crop', type: 'image', src: sourceUrl, sourceIdentity, thumbnailSet,
+      x: 0, y: 0, width: 100, height: 100, rotation: 0, scaleX: 1, scaleY: 1,
+      zIndex: 1, locked: false, crop: { x: 0, y: 0, width: 100, height: 100 },
+      ...(known ? { sourceWidth: 200, sourceHeight: 200 } : {})
+    }
+    const hydrated = await hydrateCanvasImageItemForCanvas({ item, loadImageFromSrc })
+    expect(loadImageFromSrc).toHaveBeenCalledOnce()
+    expect(hydrated?.image).toBe(thumbnailImage)
+    expect(hydrated?.crop).toEqual(item.crop)
+    expect(hydrated?.sourceWidth).toBe(known ? 200 : undefined)
+    expect(hydrated?.sourceHeight).toBe(known ? 200 : undefined)
+  })
+
   it('rehydrates local images from warm thumbnail cache without loading the source image', async () => {
     const sourceIdentity = buildCanvasImageSourceIdentity({
       canonicalPath: 'C:/assets/reference.png',

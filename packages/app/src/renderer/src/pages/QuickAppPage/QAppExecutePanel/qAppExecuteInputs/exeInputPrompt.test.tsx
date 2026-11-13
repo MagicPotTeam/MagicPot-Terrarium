@@ -204,6 +204,17 @@ describe('buildExeInputPrompt', () => {
     expect(ref.current?.validate(workflow)).toBe('')
   })
 
+  it('shows a plain coded IPC rejection as readable text rather than object stringification', async () => {
+    generatePromptMock.mockRejectedValueOnce({ message: 'ordinary provider failure', code: 'E_ORDINARY' })
+    const workflow = { 1: { class_type: 'CLIPTextEncode', inputs: { text: 'default prompt' } } } as any
+    const Component = buildExeInputPrompt({ label: 'Prompt', component: 'InputPrompt', slot: '$.1.inputs.text' }, workflow)
+    const { getByRole } = render(<Component ref={createRef<ExeInputRef>()} objectInfos={{} as any} config={{} as any} buildEnv={{} as any} />)
+    fireEvent.click(getByRole('button', { name: 'Translate' }))
+    await waitFor(() => expect(notifyWarningMock).toHaveBeenCalledWith('Prompt translation failed: ordinary provider failure'))
+    expect(setValueMock).not.toHaveBeenCalled()
+    expect(generatePromptMock).toHaveBeenCalledOnce()
+  })
+
   it('uses the preset prompt as editable initial input', () => {
     mockInputState = undefined
     const workflow = {

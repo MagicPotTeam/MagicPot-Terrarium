@@ -58,6 +58,90 @@ describe('config', () => {
     vi.clearAllMocks()
   })
 
+  it('persists and clears source-only GIF output opt-in, without inferring or copying the image target option', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+    const text = {
+      id: 'text',
+      model_name: 'text',
+      base_url: 'https://text.fixture/v1',
+      api_key: 'text-key',
+      codex_image_profile_id: 'image'
+    }
+    const image = {
+      id: 'image',
+      model_name: 'image',
+      base_url: 'https://image.fixture/codex',
+      api_key: 'image-key',
+      codex_image_gif_enabled: true
+    }
+    await configModule.saveConfig({ llm_config: { api_profiles: [text, image] } })
+    await configModule.initConfig()
+    expect(
+      configModule.getConfig().llm_config.api_profiles[0].codex_image_gif_enabled
+    ).toBeUndefined()
+    await configModule.saveConfig({
+      llm_config: { api_profiles: [{ ...text, codex_image_gif_enabled: true }, image] }
+    })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.api_profiles[0]).toMatchObject({
+      ...text,
+      codex_image_gif_enabled: true
+    })
+    await configModule.saveConfig({
+      llm_config: { api_profiles: [{ ...text, codex_image_gif_enabled: undefined }, image] }
+    })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.api_profiles[0]).not.toHaveProperty(
+      'codex_image_gif_enabled'
+    )
+    const saved = JSON.parse(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'))
+    expect(saved.llm_config.api_profiles[0]).not.toHaveProperty('codex_image_gif_enabled')
+    expect(saved.llm_config.api_profiles[1].codex_image_gif_enabled).toBe(true)
+  })
+
+  it('persists and explicitly clears the Agent image profile link without migrating an implicit backend', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+    const text = {
+      id: 'text-only',
+      model_name: 'fixture-text',
+      base_url: 'https://text.fixture/v1',
+      api_key: 'fixture-text-key'
+    }
+    const image = {
+      id: 'image-backend',
+      model_name: 'fixture-image-backend',
+      call_type: 'cliproxyapi',
+      base_url: 'https://image.fixture/codex',
+      api_key: 'fixture-image-key'
+    }
+    await configModule.saveConfig({ llm_config: { api_profiles: [text, image] } })
+    expect(
+      configModule.getConfig().llm_config.api_profiles[0].codex_image_profile_id
+    ).toBeUndefined()
+    await configModule.saveConfig({
+      llm_config: { api_profiles: [{ ...text, codex_image_profile_id: image.id }, image] }
+    })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.api_profiles[0]).toMatchObject({
+      id: text.id,
+      codex_image_profile_id: image.id,
+      api_key: text.api_key
+    })
+    await configModule.saveConfig({
+      llm_config: { api_profiles: [{ ...text, codex_image_profile_id: undefined }, image] }
+    })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.api_profiles[0]).not.toHaveProperty(
+      'codex_image_profile_id'
+    )
+    expect(
+      JSON.parse(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8')).llm_config
+        .api_profiles[0]
+    ).not.toHaveProperty('codex_image_profile_id')
+  })
+
   it('derives the project root for a fresh explicitly unified Data directory', async () => {
     const storageRoot = tempDir
     tempDir = path.join(storageRoot, 'Data')
@@ -157,6 +241,65 @@ describe('config', () => {
     expect(savedConfig.mcp_config.server.expose_resources).toBe(false)
   })
 
+  it('persists scoped skill deny lists and hash receipts without default registrations or bodies', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.proceduralSkillSessions).toBeUndefined()
+    const records = [
+      {
+        owner: 'a'.repeat(64),
+        revision: 1,
+        disabledIds: ['skill-one'],
+        receipts: [{ operationId: 'disable-one', digest: 'b'.repeat(64) }]
+      }
+    ]
+    await configModule.saveConfig({ llm_config: { proceduralSkillSessions: records } })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.proceduralSkillSessions).toEqual(records)
+    expect(configModule.getConfig().llm_config.proceduralSkillPackages).toBeUndefined()
+  })
+  it('persists skill-context disclosure opt-ins independently with no implicit defaults', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.proceduralSkillContext).toBeUndefined()
+    await configModule.saveConfig({
+      llm_config: { proceduralSkillContext: { index: true, paths: false } }
+    })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.proceduralSkillContext).toEqual({
+      index: true,
+      paths: false
+    })
+    expect(configModule.getConfig().llm_config.proceduralSkillPackages).toBeUndefined()
+    await configModule.saveConfig({
+      llm_config: { proceduralSkillContext: { index: false, paths: true } }
+    })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.proceduralSkillContext).toEqual({
+      index: false,
+      paths: true
+    })
+  })
+  it('persists only explicit Markdown directory registration and never populates a default package list', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.proceduralSkillPackages).toBeUndefined()
+    const entries = [
+      { id: 'explicit', directory: 'D:/user/skills', enabled: true, projectId: 'project-one' },
+      {
+        id: 'manifest',
+        directory: 'D:/user/selected-package',
+        source: 'manifest' as const,
+        enabled: false
+      }
+    ]
+    await configModule.saveConfig({ llm_config: { proceduralSkillPackages: entries } })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.proceduralSkillPackages).toEqual(entries)
+    await configModule.saveConfig({ llm_config: { proceduralSkillPackages: [] } })
+    await configModule.initConfig()
+    expect(configModule.getConfig().llm_config.proceduralSkillPackages).toEqual([])
+  })
   it('persists custom skills and reloads them from disk', async () => {
     const configModule = await loadConfigModule()
     await configModule.initConfig()
@@ -318,6 +461,58 @@ describe('config', () => {
     }
   })
 
+  it('rechecks guarded main-only commits after asynchronous temp write and never persists a revoked scope', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+    const originalWrite = fs.writeFile.bind(fs),
+      gate = Promise.withResolvers<void>()
+    let active = true
+    const guard = () => {
+      if (!active) throw new Error('scope revoked before commit')
+    }
+    const before = await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'),
+      notify = vi.fn(),
+      stop = configModule.onConfigCommitted(notify)
+    const writing = vi.spyOn(fs, 'writeFile').mockImplementationOnce(async (...args) => {
+      await originalWrite(...args)
+      await gate.promise
+    })
+    try {
+      const saving = configModule.saveConfig(
+        {
+          project_trace_config: { agent_html_storage_epoch: '11111111-1111-4111-8111-111111111111' }
+        },
+        guard
+      )
+      const rejected = expect(saving).rejects.toThrow('scope revoked')
+      await vi.waitFor(() => expect(writing).toHaveBeenCalledOnce())
+      active = false
+      gate.resolve()
+      await rejected
+      expect(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8')).toBe(before)
+      expect(configModule.getConfig().project_trace_config.agent_html_storage_epoch).toBe(
+        DEFAULT_CONFIG.project_trace_config.agent_html_storage_epoch
+      )
+      expect(notify).not.toHaveBeenCalled()
+      expect((await fs.readdir(tempDir)).filter((name) => name.endsWith('.tmp'))).toEqual([])
+      active = true
+      await configModule.saveConfig(
+        {
+          project_trace_config: { agent_html_storage_epoch: '11111111-1111-4111-8111-111111111111' }
+        },
+        guard
+      )
+      expect(
+        JSON.parse(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'))
+          .project_trace_config.agent_html_storage_epoch
+      ).toBe('11111111-1111-4111-8111-111111111111')
+      expect(notify).toHaveBeenCalledOnce()
+    } finally {
+      gate.resolve()
+      writing.mockRestore()
+      stop()
+    }
+  })
   it('writes config atomically through a temp file and rename', async () => {
     const configPath = path.join(tempDir, 'config.json')
     await fs.writeFile(configPath, JSON.stringify(DEFAULT_CONFIG, null, 2), 'utf8')
@@ -546,12 +741,24 @@ describe('config', () => {
 
     expect(configModule.getConfig().project_trace_config).toEqual({
       enable_agent_reranker: false,
-      enable_agent_terminal: false
+      enable_agent_terminal: false,
+      enable_agent_python_notebook: false,
+      enable_agent_shell: false,
+      agent_shell_kind: 'powershell',
+      agent_shell_executable: '',
+      enable_agent_html_apps: false,
+      enable_agent_html_save: false
     })
     const savedConfig = JSON.parse(await fs.readFile(configPath, 'utf8'))
     expect(savedConfig.project_trace_config).toEqual({
       enable_agent_reranker: false,
-      enable_agent_terminal: false
+      enable_agent_terminal: false,
+      enable_agent_python_notebook: false,
+      enable_agent_shell: false,
+      agent_shell_kind: 'powershell',
+      agent_shell_executable: '',
+      enable_agent_html_apps: false,
+      enable_agent_html_save: false
     })
   })
 

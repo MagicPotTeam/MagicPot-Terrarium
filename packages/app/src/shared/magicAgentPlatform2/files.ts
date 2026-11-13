@@ -62,9 +62,29 @@ export type FilesEditReplacement = Readonly<{
   expectedOccurrences: number
 }>
 
+export type FilesEditMode = 'strict' | 'partial' | 'best_effort'
+export type FilesEditStep = Readonly<{
+  index: number
+  status: 'applied' | 'unchanged' | 'failed' | 'skipped'
+  expectedOccurrences: number
+  observedOccurrences?: number
+}>
+export type FilesEditReport = Readonly<{
+  mode: FilesEditMode
+  /** Successfully evaluated steps, including no-change steps; not a count of committed writes. */
+  applied: number
+  failed: number
+  skipped: number
+  steps: readonly FilesEditStep[]
+  /** Target rename completed. Does not prove later external bytes or successful audit/journal persistence. */
+  writeStatus: 'not-written' | 'committed'
+  fileChanged: boolean
+}>
+
 export type FilesEditInput = Readonly<{
   path: string
   expectedSha256: string
+  mode?: FilesEditMode
   replacements: readonly FilesEditReplacement[]
   maxBytes?: number
   maxDiffBytes?: number
@@ -191,7 +211,7 @@ export type FilesMutationOutput = Readonly<{
 }>
 
 export type FilesWriteOutput = FilesMutationOutput
-export type FilesEditOutput = FilesMutationOutput
+export type FilesEditOutput = FilesMutationOutput & Readonly<{ report: FilesEditReport }>
 
 export type FilesTreeEntry = Readonly<{
   path: string

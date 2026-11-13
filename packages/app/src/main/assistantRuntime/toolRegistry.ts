@@ -1,4 +1,5 @@
 import { Config } from '@shared/config/config'
+import Ajv from 'ajv'
 import { AGENT_LOCAL_FILE_LIMITS } from '@shared/api/svcAgentLocalFiles'
 import type { PolicyJsonRecord } from '../../shared/magicAgentPlatform2'
 import { throwIfAborted } from '@shared/agent'
@@ -47,6 +48,8 @@ import {
 } from '@shared/magicAgentPlatform2'
 import {
   FilesToolHost,
+  FilesToolEditError,
+  FilesToolMutationError,
   GitToolHost,
   CommandJobsToolHost,
   type CommandJobsConfinementAdapter,
@@ -67,6 +70,7 @@ import {
   buildProjectTraceVerificationBundle,
   normalizeProjectTraceVerificationEvents
 } from './projectTraceTools'
+import { AssistantToolResultError, createReportedFileEditFailure } from './toolFailure'
 import { webFetch, webSearch } from './webTools'
 
 export type AssistantToolDefinition = {
@@ -86,7 +90,7 @@ export type AssistantToolCallContext = {
   workspacePinnedContext?: AssistantPinnedContext
   workspaceReusableContext?: AssistantReusableContextPack
   workspaceRootDir?: string
-  // Main-owned, per-request consent callback. Never sourced from tool arguments.
+  // Main-owned read-only desktop callback. Never sourced from tool arguments.
   readExternalFile?: CanvasPathReadHandler
   toolPolicyOrigin?: 'assistant' | 'graph'
   terminalPolicyRuntime?: AssistantTerminalPolicyRuntime
@@ -521,7 +525,8 @@ const baseDefinitions: AssistantToolDefinition[] = [
   },
   {
     name: 'files.tree',
-    description: 'List a bounded, deterministic tree within the current route workspace.',
+    description:
+      'List a bounded, deterministic directory tree. Trusted local desktop canvas chat can list any absolute local directory or drive root directly, without a per-path confirmation; this grants no write access.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -537,7 +542,7 @@ const baseDefinitions: AssistantToolDefinition[] = [
   {
     name: 'files.read',
     description:
-      'Read bounded UTF-8 text, allowlisted PNG/JPEG/GIF/WebP bytes, or conservatively extracted PDF/DOCX/XLSX/PPTX text and metadata. Regular workspace files remain capped at 1 MiB; an approved absolute local document path may be up to 8 MiB. Media type is verified by magic bytes; binary payloads are never audited.',
+      'Read bounded UTF-8 text, allowlisted PNG/JPEG/GIF/WebP bytes, or conservatively extracted PDF/DOCX/XLSX/PPTX text and metadata. Regular workspace files remain capped at 1 MiB; a local desktop absolute document path may be up to 8 MiB. Local desktop reads are available by default without a per-path confirmation. Media type is verified by magic bytes; binary payloads are never audited.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -553,7 +558,7 @@ const baseDefinitions: AssistantToolDefinition[] = [
   {
     name: 'files.glob',
     description:
-      'Match bounded workspace-relative files and directories using *, ?, and ** segments.',
+      'Match bounded files and directories using *, ?, and ** segments. In trusted local desktop chat, path may be any absolute local directory without per-path confirmation.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -593,7 +598,8 @@ const baseDefinitions: AssistantToolDefinition[] = [
   },
   {
     name: 'files.json.read',
-    description: 'Read, select, bound, and redact a UTF-8 JSON file within the workspace.',
+    description:
+      'Read, select, bound, and redact a UTF-8 JSON file. Trusted local desktop chat supports absolute local paths without per-path confirmation.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -630,7 +636,8 @@ const baseDefinitions: AssistantToolDefinition[] = [
   },
   {
     name: 'files.edit',
-    description: 'Apply ordered exact text replacements to one CAS-protected UTF-8 regular file.',
+    description:
+      'Apply ordered exact replacements to one CAS-protected UTF-8 regular file. mode defaults to strict (any match failure writes nothing); partial commits the accepted prefix and best_effort continues past match failures. Every step keeps its exact expectedOccurrences guard. Any failed step leaves the call failed even after a known partial commit; inspect its report/snapshot before retrying.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -638,6 +645,7 @@ const baseDefinitions: AssistantToolDefinition[] = [
       properties: {
         path: { type: 'string' },
         expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        mode: { type: 'string', enum: ['strict', 'partial', 'best_effort'] },
         replacements: {
           type: 'array',
           minItems: 1,
@@ -679,7 +687,7 @@ const baseDefinitions: AssistantToolDefinition[] = [
   {
     name: 'files.multi-edit',
     description:
-      'Atomically apply validated CAS edits across distinct workspace files with rollback.',
+      'Apply validated CAS edits across distinct workspace files using sequential commits and attempted rollback; not cross-file atomic isolation.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1831,6 +1839,11 @@ const baseDefinitions: AssistantToolDefinition[] = [
     }
   }
 ]
+
+const fileMutationAjv = new Ajv({ strict: false, ownProperties: true })
+const fileMutationValidators = new Map(baseDefinitions
+  .filter((tool) => ['files.edit', 'files.patch', 'files.multi-edit'].includes(tool.name))
+  .map((tool) => [tool.name, fileMutationAjv.compile(tool.inputSchema)]))
 
 const inspectRunRecord = async (
   args: Record<string, unknown>,
@@ -3076,13 +3089,20 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
 }
 
 export class AssistantToolRegistry {
-  private readonly mcpClientManager: McpClientManager
+  private readonly mcpClientManager: McpClientManager | null
 
-  constructor(mcpClientManager: McpClientManager = getMcpClientManager()) {
+  constructor(mcpClientManager: McpClientManager | null = getMcpClientManager()) {
     this.mcpClientManager = mcpClientManager
   }
 
+  /** An empty MAIN-only catalog, not a tool grant. Do not touch the global MCP
+   * manager just to construct the bounded zero-tool runtime. */
+  static createManagedTextFirstRunRegistry(): AssistantToolRegistry {
+    return new AssistantToolRegistry(null)
+  }
+
   listTools(): AssistantToolDefinition[] {
+    if (!this.mcpClientManager) return []
     const seen = new Set<string>()
     return [...baseDefinitions, ...this.mcpClientManager.listToolsSnapshot()].filter((tool) => {
       const normalizedName = normalizeMagicPotToolName(tool.name)
@@ -3105,6 +3125,7 @@ export class AssistantToolRegistry {
       toolPolicyOrigin?: 'assistant' | 'graph'
     }
   ): Promise<AssistantToolCallResult> {
+    if (!this.mcpClientManager) throw Error('Managed text first run has no tool executor.')
     throwIfAborted(context.signal)
     const normalizedName = normalizeMagicPotToolName(name)
 
@@ -3383,6 +3404,14 @@ export class AssistantToolRegistry {
       ].includes(normalizedName)
     ) {
       if (!context.workspaceRootDir) throw new Error('File tools require a route workspace root.')
+      const extendedMutation = normalizedName === 'files.edit' || normalizedName === 'files.patch' || normalizedName === 'files.multi-edit'
+      if (extendedMutation) {
+        const validate = fileMutationValidators.get(normalizedName)!
+        if (!validate(args)) throw new Error(`Invalid input for tool "${normalizedName}": ${fileMutationAjv.errorsText(validate.errors)}`)
+        // Detach exact edits/batches/patches before awaiting approval. The prompt must
+        // show all affected paths and edits, not merely a synthetic path=".".
+        args = structuredClone(args)
+      }
       if (
         normalizedName === 'files.read' &&
         typeof args.path === 'string' &&
@@ -3391,6 +3420,60 @@ export class AssistantToolRegistry {
       ) {
         return context.readExternalFile(args.path, context.signal, {
           maxBytes: typeof args.maxBytes === 'number' ? args.maxBytes : undefined,
+          maxStringLength:
+            typeof args.maxStringLength === 'number' ? args.maxStringLength : undefined,
+          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined
+        })
+      }
+      if (
+        normalizedName === 'files.tree' &&
+        typeof args.path === 'string' &&
+        path.isAbsolute(args.path) &&
+        context.readExternalFile
+      ) {
+        const definition = baseDefinitions.find((tool) => tool.name === 'files.tree')!
+        assertValidToolArgs(normalizedName, args, definition.inputSchema)
+        return context.readExternalFile(args.path, context.signal, {
+          operation: 'tree',
+          maxDepth: typeof args.maxDepth === 'number' ? args.maxDepth : undefined,
+          maxEntries: typeof args.maxEntries === 'number' ? args.maxEntries : undefined,
+          maxStringLength:
+            typeof args.maxStringLength === 'number' ? args.maxStringLength : undefined,
+          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined
+        })
+      }
+      if (
+        normalizedName === 'files.glob' &&
+        typeof args.path === 'string' &&
+        path.isAbsolute(args.path) &&
+        context.readExternalFile
+      ) {
+        const definition = baseDefinitions.find((tool) => tool.name === 'files.glob')!
+        assertValidToolArgs(normalizedName, args, definition.inputSchema)
+        return context.readExternalFile(args.path, context.signal, {
+          operation: 'glob',
+          pattern: args.pattern as string,
+          maxDepth: typeof args.maxDepth === 'number' ? args.maxDepth : undefined,
+          maxFiles: typeof args.maxFiles === 'number' ? args.maxFiles : undefined,
+          maxStringLength:
+            typeof args.maxStringLength === 'number' ? args.maxStringLength : undefined,
+          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined
+        })
+      }
+      if (
+        normalizedName === 'files.json.read' &&
+        typeof args.path === 'string' &&
+        path.isAbsolute(args.path) &&
+        context.readExternalFile
+      ) {
+        const definition = baseDefinitions.find((tool) => tool.name === 'files.json.read')!
+        assertValidToolArgs(normalizedName, args, definition.inputSchema)
+        return context.readExternalFile(args.path, context.signal, {
+          operation: 'json',
+          pointer: typeof args.pointer === 'string' ? args.pointer : undefined,
+          maxBytes: typeof args.maxBytes === 'number' ? args.maxBytes : undefined,
+          maxDepth: typeof args.maxDepth === 'number' ? args.maxDepth : undefined,
+          maxEntries: typeof args.maxEntries === 'number' ? args.maxEntries : undefined,
           maxStringLength:
             typeof args.maxStringLength === 'number' ? args.maxStringLength : undefined,
           timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined
@@ -3420,7 +3503,9 @@ export class AssistantToolRegistry {
             : normalizedName === 'files.grep'
               ? 'filesystem.search'
               : 'filesystem.read',
-        toolInput: { path: requestedPath },
+        toolInput: extendedMutation
+          ? { ...args, path: requestedPath } as PolicyJsonRecord
+          : { path: requestedPath },
         filesystem: { paths: [requestedPath], allowedRoots: [context.workspaceRootDir] }
       })
       const host = await FilesToolHost.create(runtime.authorization, {
@@ -3461,14 +3546,34 @@ export class AssistantToolRegistry {
         output = await host.grep(common as Parameters<FilesToolHost['grep']>[0])
       else if (normalizedName === 'files.write')
         output = await host.write(common as Parameters<FilesToolHost['write']>[0])
-      else if (normalizedName === 'files.edit')
-        output = await host.edit(common as Parameters<FilesToolHost['edit']>[0])
-      else if (normalizedName === 'files.patch')
+      else if (normalizedName === 'files.edit') {
+        try {
+          output = await host.edit(common as Parameters<FilesToolHost['edit']>[0])
+        } catch (error) {
+          if (!(error instanceof FilesToolEditError)) throw error
+          const failure = { message: error.message, code: error.code }
+          throw createReportedFileEditFailure(
+            failure,
+            jsonToolResult({
+              error: failure,
+              report: error.report,
+              ...(error.mutation ? { mutation: error.mutation } : {})
+            })
+          )
+        }
+      } else if (normalizedName === 'files.patch')
         output = await host.patch(common as Parameters<FilesToolHost['patch']>[0])
-      else if (normalizedName === 'files.multi-edit')
-        output = await host.multiEdit(
-          common as unknown as Parameters<FilesToolHost['multiEdit']>[0]
-        )
+      else if (normalizedName === 'files.multi-edit') {
+        try {
+          output = await host.multiEdit(common as unknown as Parameters<FilesToolHost['multiEdit']>[0])
+        } catch (error) {
+          if (!(error instanceof FilesToolMutationError)) throw error
+          const failure = { message: error.message, code: error.code }
+          // Preserve only host-reported rollback facts. Neither a failed rollback
+          // nor this receipt proves the final bytes; do not synthesize a success SHA.
+          throw new AssistantToolResultError(failure, jsonToolResult({ error: failure, rollback: error.rollback }))
+        }
+      }
       else if (normalizedName === 'files.json.write')
         output = await host.jsonWrite(common as Parameters<FilesToolHost['jsonWrite']>[0])
       else if (normalizedName === 'files.diff')

@@ -136,11 +136,25 @@ export const validateOpenAIResponsesImages = (
   return { imageCount, decodedBytes }
 }
 
+function utf8ByteLength(value: string): number {
+  let bytes = 0
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index)
+    if (unit <= 0x7f) bytes += 1
+    else if (unit <= 0x7ff) bytes += 2
+    else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < value.length && value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff) {
+      bytes += 4
+      index++
+    } else bytes += 3
+  }
+  return bytes
+}
+
 export const assertOpenAIResponsesRequestBodySize = (
   serializedBody: string,
   policy: OpenAIResponsesImagePolicy = DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY
 ): void => {
-  const bytes = new TextEncoder().encode(serializedBody).byteLength
+  const bytes = utf8ByteLength(serializedBody)
   if (bytes > policy.maxRequestBodyBytes) {
     throw new Error(
       `OpenAI Responses request body exceeds the ${policy.maxRequestBodyBytes}-byte limit.`
@@ -919,6 +933,7 @@ export function shouldUseOpenAIImageGeneration(options: {
   messages: ChatMessage[]
   modelUse?: LLMModelUse
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  disableAutomaticImageGeneration?: boolean
 }): boolean {
   if (options.modelUse === 'image') {
     return true
@@ -934,6 +949,9 @@ export function shouldUseOpenAIImageGeneration(options: {
     return true
   }
 
+  // Ordinary Agent image_gen must reach its own formal approval, not a hosted
+  // tool inferred from user text. Explicit legacy image requests remain separate.
+  if (options.disableAutomaticImageGeneration) return false
   const lastUserMessage = [...options.messages].reverse().find((message) => message.role === 'user')
 
   if (!lastUserMessage) {

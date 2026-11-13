@@ -5,6 +5,6 @@ export type SettingsTab = 'general' | 'environment' | 'llm' | 'plugin' | 'mcp' |
 
 export interface PanelProps {
   settingsValue: Config
-  saveSettings: (v: DeepPartial<Config>) => void
+  saveSettings: (v: DeepPartial<Config>) => void | Promise<void>
   onSelectTab?: (tab: SettingsTab) => void
 }

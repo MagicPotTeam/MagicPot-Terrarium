@@ -825,9 +825,7 @@ export async function hydrateCanvasImageItemForCanvas(
     return {
       ...item,
       image: thumbnailPreview.image,
-      thumbnailSet: thumbnailPreview.thumbnailSet,
-      sourceWidth: item.sourceWidth ?? item.width,
-      sourceHeight: item.sourceHeight ?? item.height
+      thumbnailSet: thumbnailPreview.thumbnailSet
     }
   }
 
@@ -841,9 +839,7 @@ export async function hydrateCanvasImageItemForCanvas(
     return placeholder
       ? {
           ...item,
-          image: placeholder,
-          sourceWidth: item.sourceWidth ?? item.width,
-          sourceHeight: item.sourceHeight ?? item.height
+          image: placeholder
         }
       : null
   }

@@ -110,6 +110,7 @@ export type NotebookExecutionJobBoundary = Readonly<{
       grantId?: string
       expectedGrantUseCount?: number
       beforeSpawn?: () => void | Promise<void>
+      signal?: AbortSignal
     }>
   ): Promise<CommandJobRecord>
   status(input: Readonly<{ jobId: string; routeKey: string; sessionId: string }>): CommandJobRecord
@@ -142,6 +143,7 @@ export type NotebookExecutionInput = Readonly<{
   maxOutputBytes?: number
   grantId?: string
   expectedGrantUseCount?: number
+  signal?: AbortSignal
 }>
 export type NotebookControlInput = Readonly<{
   authorizationId: string
@@ -165,10 +167,12 @@ export class NotebookExecutionCoordinator {
       workspaceRoot: string
       provenance: PythonProvenance
       auditSink?: NotebookExecutionAuditSink
+      namespace?: string
     }>
   ) {
     this.root = path.resolve(realpathSync.native(options.workspaceRoot))
-    this.storeDir = path.join(this.root, STORE)
+    if (options.namespace !== undefined && !/^[a-f0-9]{64}$/.test(options.namespace)) throw new NotebookToolValidationError('Invalid execution namespace.')
+    this.storeDir = path.join(this.root, STORE, ...(options.namespace ? [options.namespace] : []))
     this.provenance = options.provenance
     this.auditSink = options.auditSink
     mkdirSync(this.storeDir, { recursive: true })
@@ -194,6 +198,8 @@ export class NotebookExecutionCoordinator {
       expectedGeneration?: number
       cellIds?: readonly string[]
       artifacts?: readonly string[]
+      timeoutMs?: number
+      maxOutputBytes?: number
     }>
   ): PolicyRequest {
     const execute = input.target.startsWith('notebook.execute')
@@ -215,7 +221,9 @@ export class NotebookExecutionCoordinator {
         cellIds: [...(input.cellIds ?? [])],
         artifacts: artifactPaths,
         command: this.provenance.executable,
-        interpreterSha256: this.provenance.sha256
+        interpreterSha256: this.provenance.sha256,
+        ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+        ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {})
       },
       effects: execute
         ? [
@@ -246,6 +254,23 @@ export class NotebookExecutionCoordinator {
   }
   async executeAll(input: NotebookExecutionInput): Promise<NotebookExecutionStatus> {
     return this.execute(input)
+  }
+
+  async executeAndWait(input: NotebookExecutionInput): Promise<NotebookExecutionStatus> {
+    input.signal?.throwIfAborted()
+    const started = input.cellIds ? await this.executeCell(input) : await this.executeAll(input)
+    for (;;) {
+      if (input.signal?.aborted) {
+        const manifest = this.load(started.executionId)
+        this.own(manifest, input.routeKey, input.sessionId, input.path)
+        if (manifest.jobId) await this.jobs.stop({ jobId: manifest.jobId, routeKey: input.routeKey, sessionId: input.sessionId })
+        this.finish({ ...manifest, state: 'interrupted', error: 'Execution cancelled by its owner.' })
+        input.signal.throwIfAborted()
+      }
+      const status = this.status({ ...input, executionId: started.executionId })
+      if (!['starting', 'running'].includes(status.state)) return status
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
   }
 
   status(
@@ -339,6 +364,7 @@ export class NotebookExecutionCoordinator {
     input: NotebookExecutionInput,
     selected?: readonly string[]
   ): Promise<NotebookExecutionStatus> {
+    input.signal?.throwIfAborted()
     const requested = this.relative(input.path)
     const prior = this.byIdempotency(input.routeKey, input.sessionId, input.idempotencyKey)
     if (prior) {
@@ -438,7 +464,9 @@ export class NotebookExecutionCoordinator {
       maxOutputBytes: Math.min(input.maxOutputBytes ?? MAX_PROTOCOL_BYTES, MAX_PROTOCOL_BYTES),
       grantId: input.grantId,
       expectedGrantUseCount: input.expectedGrantUseCount,
+      signal: input.signal,
       beforeSpawn: () => {
+        input.signal?.throwIfAborted()
         const current = readFileSync(file)
         if (hash(current) !== beforeSha || this.generation(requested) !== generation)
           throw new NotebookToolValidationError('Notebook changed before spawn.')
@@ -699,7 +727,7 @@ export class NotebookExecutionCoordinator {
   ): void {
     if (!this.auditSink || artifacts.length === 0) return
     const inputs = artifacts.flatMap((artifact) => {
-      const id = hash(`${manifest.executionId} ${artifact.path}`)
+      const id = hash(`${manifest.executionId}\0${artifact.path}`)
       if (this.auditSink!.getResource('artifact', id)) return []
       const streamId = `artifact:${id}`
       const mimeType = artifactMimeType(artifact.path)
@@ -720,7 +748,7 @@ export class NotebookExecutionCoordinator {
           event: {
             protocolVersion: '2.0.0',
             envelopeKind: 'event' as const,
-            id: hash(`${streamId} created`),
+            id: hash(`${streamId}\0created`),
             type: 'notebook.artifact.registered',
             createdAt: manifest.updatedAt,
             streamId,
@@ -751,20 +779,22 @@ export class NotebookExecutionCoordinator {
   private resolveOutput(value: string): string {
     const target = path.resolve(this.root, value)
     if (!inside(this.root, target)) throw new NotebookToolValidationError('Path escapes workspace.')
-    let current = path.dirname(target)
-    while (inside(this.root, current) && current !== this.root) {
-      if (existsSync(current) && lstatSync(current).isSymbolicLink())
-        throw new NotebookToolValidationError('Symlinks are not allowed.')
-      current = path.dirname(current)
+    let current = this.root
+    for (const part of path.relative(this.root, target).split(path.sep).filter(Boolean)) {
+      current = path.join(current, part)
+      try {
+        if (lstatSync(current).isSymbolicLink()) throw new NotebookToolValidationError('Symlinks are not allowed.')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
     }
-    if (existsSync(target) && lstatSync(target).isSymbolicLink())
-      throw new NotebookToolValidationError('Symlinks are not allowed.')
     return target
   }
   private resolve(value: string): string {
     const target = path.resolve(this.root, value)
     if (!inside(this.root, target)) throw new NotebookToolValidationError('Path escapes workspace.')
-    if (lstatSync(target).isSymbolicLink())
+    const info = lstatSync(target)
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
       throw new NotebookToolValidationError('Symlinks are not allowed.')
     const real = path.resolve(realpathSync.native(target))
     if (!inside(this.root, real)) throw new NotebookToolValidationError('Symlinks are not allowed.')
@@ -822,7 +852,7 @@ export class NotebookExecutionCoordinator {
           updatedAt: m.updatedAt,
           artifactCount: artifacts.length,
           artifactBytes: artifacts.reduce((sum, artifact) => sum + artifact.size, 0),
-          artifactIds: artifacts.map((artifact) => hash(`${m.executionId} ${artifact.path}`))
+          artifactIds: artifacts.map((artifact) => hash(`${m.executionId}\0${artifact.path}`))
         }
       }
     ])
@@ -907,7 +937,8 @@ export class PythonNotebookExecutionBoundary implements NotebookExecutionJobBoun
       maxLogBytes: input.maxOutputBytes,
       grantId: input.grantId,
       expectedGrantUseCount: input.expectedGrantUseCount,
-      beforeConsume: input.beforeSpawn
+      beforeConsume: input.beforeSpawn,
+      signal: input.signal
     })
   }
   status(input: Parameters<NotebookExecutionJobBoundary['status']>[0]) {

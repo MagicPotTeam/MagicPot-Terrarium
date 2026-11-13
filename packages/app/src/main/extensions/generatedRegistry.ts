@@ -1,3 +1,4 @@
+import type { AgentThreadImageGenerator } from '../api/agentThreadImageTools'
 import type { BaseApi } from '@shared/api'
 import type { LLMChatReq, LLMChatResp, LLMListProfilesResp } from '@shared/api/svcLLMProxy'
 import type { Config, LLMAPIProfile } from '@shared/config/config'
@@ -26,6 +27,10 @@ export type MainLlmProxyExtensionContextV1 = {
 
 export type MainLlmProxyExtensionV1 = Readonly<{
   id: string
+  createThreadImageGenerator?: (
+    request: LLMChatReq,
+    options: MainLlmProxyExtensionContextV1
+  ) => AgentThreadImageGenerator | undefined
   createCli?: (
     profile: LLMAPIProfile,
     options: MainLlmProxyExtensionContextV1

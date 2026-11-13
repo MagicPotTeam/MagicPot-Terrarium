@@ -6,6 +6,7 @@ type AddImageToCanvasFn = (
   src: string,
   options?: {
     fileName?: string
+    teamImageLabel?: string
     promptId?: CanvasImageItem['promptId']
     fileItem?: CanvasImageItem['fileItem']
     media?: CanvasImageItem['media']
@@ -103,6 +104,7 @@ export function useCanvasCustomAddEvents({
         event as CustomEvent<{
           src: string
           fileName?: string
+          teamImageLabel?: string
           projectId?: string
           generationSessionId?: string
           select?: boolean
@@ -137,6 +139,7 @@ export function useCanvasCustomAddEvents({
         )
         const addedItem = await addImageToCanvas(detail.src, {
           fileName: detail.fileName || detail.fileItem?.filename,
+          ...(detail.teamImageLabel ? { teamImageLabel: detail.teamImageLabel } : {}),
           promptId: detail.promptId,
           fileItem: detail.fileItem,
           media: detail.media,

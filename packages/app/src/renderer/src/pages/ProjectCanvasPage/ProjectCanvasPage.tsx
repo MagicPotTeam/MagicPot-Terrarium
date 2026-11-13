@@ -400,6 +400,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   const lastViewportPointRef = useCanvasLastViewportPoint()
   const stageSizeRef = useRef(stageSize)
   const nextZIndex = useRef(1)
+  const restoreGenerationRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const videoInputRef = useRef<HTMLInputElement>(null)
@@ -462,12 +463,14 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     addOcrResultToCanvas,
     addTextToCanvas,
     addVideoToCanvas,
+    isCanvasSceneImporting,
     handleImportCanvasSceneFile,
     handleImportPsdFile,
     hydrateCanvasImageItemForCanvas,
     loadImageFromSrc
   } = useCanvasAssetIntake({
     canvasId,
+    restoreGenerationRef,
     dispatch,
     fitImageToCanvasSize,
     getBatchGridLayout,
@@ -868,7 +871,9 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     handleImportFiles,
     addModel3DToCanvas,
     addVideoToCanvas,
-    suspendAutoSave: isImageBatchImportActive
+    suspendAutoSave: isImageBatchImportActive,
+    restoreGenerationRef,
+    isCanvasSceneImporting
   })
 
   useEffect(() => {

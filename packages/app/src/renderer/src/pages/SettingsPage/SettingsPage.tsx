@@ -1,5 +1,5 @@
 import React, { Suspense, useCallback, useMemo, useState } from 'react'
-import { Box, CircularProgress, IconButton, Tooltip, Typography } from '@mui/material'
+import { Box, Button, CircularProgress, IconButton, Tooltip, Typography } from '@mui/material'
 import {
   Build as BuildIcon,
   Code,
@@ -10,7 +10,7 @@ import {
   SystemUpdateAlt as UpdateIcon
 } from '@mui/icons-material'
 import { useTheme } from '@mui/material/styles'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import type { resources } from '../../i18n'
 import { useTranslation } from 'react-i18next'
 import { Config, DEFAULT_CONFIG } from '@shared/config/config'
@@ -18,6 +18,8 @@ import { PACKAGE_VERSION } from '@shared/config/viteEnv'
 import type { DeepPartial } from '@shared/utils/utilTypes'
 import { lazyWithRetry } from '@renderer/utils/lazyWithRetry'
 import { useConfig } from '@renderer/hooks/useConfig'
+import { useAppDispatch } from '@renderer/store'
+import { openTab } from '@renderer/store/slices/layoutSlice'
 import PanelAbout from './PanelAbout'
 import PanelEnvironment from './PanelEnvironment'
 import PanelGeneral from './PanelGeneral'
@@ -73,6 +75,19 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
   const { t, i18n } = useTranslation()
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
   const location = useLocation()
+  const navigate = useNavigate()
+  const dispatch = useAppDispatch()
+  const openManagement = () => {
+    dispatch(
+      openTab({
+        id: 'tab-agent-management',
+        label: isChineseUi ? 'Agent 管理' : 'Agent management',
+        routePath: '/agent-management',
+        closable: true
+      })
+    )
+    navigate('/agent-management')
+  }
   const [currentTab, setCurrentTab] = useState<SettingsTab>(() => getInitialSettingsTab(location))
   const { config, isReady, updateConfig } = useConfig()
 
@@ -208,6 +223,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
           </Typography>
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <Button size="small" onClick={openManagement}>
+              {isChineseUi ? 'Agent 管理' : 'Agent management'}
+            </Button>
             <Typography sx={{ fontSize: 12, fontWeight: 500, color: settingsMetaColor }}>
               MagicPot-Terrarium {PACKAGE_VERSION}
             </Typography>

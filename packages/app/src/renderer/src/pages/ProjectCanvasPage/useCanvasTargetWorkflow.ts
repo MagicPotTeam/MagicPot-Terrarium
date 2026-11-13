@@ -138,6 +138,7 @@ import {
   type CanvasTargetArtifactType
 } from './canvasTargetArtifactGraph'
 import { createCanvasImageItemDraft, createCanvasItemId } from './canvasAssetDraftFactories'
+import { sanitizeCanvasItemForCheckContext } from './canvasTargetWorkflowAssetMetadata'
 import { hydrateCanvasImageItemForCanvas, loadImageFromSrc } from './canvasAssetIntakeHelpers'
 import { createMagicPotNativeProvenance } from './canvasProvenanceUtils'
 import { extractImageRegionLocally } from './localImageExtract'
@@ -232,6 +233,16 @@ type CanvasTargetProfileSelectOption = {
   sourceType?: 'api' | 'local'
   executionBackend?: 'llm' | 'local_model'
   localVisualModelId?: string
+}
+
+// Record the serializable scene content presented when the user opens the
+// target dialog. This detects later edits; it does not authenticate bytes
+// behind mutable URLs or prove pixel provenance.
+function canvasTargetSelectionSignature(items: CanvasItem[]): string {
+  return JSON.stringify(
+    [...items].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+      .map((item) => sanitizeCanvasItemForCheckContext(item))
+  )
 }
 
 function normalizeCanvasTargetSelectionBounds(
@@ -513,6 +524,8 @@ async function executeCanvasTargetCanvasAction(
     projectId: string
     fallbackText?: string
     generationSessionId?: string
+    evidenceMode: CanvasTargetEvidenceMode
+    authorizedSourceItemIds: ReadonlySet<string>
     semanticState?: CanvasTargetSemanticCanvasActionState
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
@@ -562,6 +575,27 @@ async function executeCanvasTargetCanvasAction(
 
   switch (action.action) {
     case 'extract_image_region':
+      // The restricted evidence modes do not authorize reading arbitrary
+      // original pixels for a model-planned extraction. Until the action can
+      // be bounded to the user's visible selection, reject it rather than
+      // creating an artifact that a later stage or chat can consume.
+      if (options.evidenceMode !== 'selected_sources') {
+        return {
+          content: 'Image extraction skipped by the current evidence policy.',
+          canvasDispatchCount: 0,
+          fallbackReason: 'Source image extraction requires selected source assets.'
+        }
+      }
+      if (options.semanticState) {
+        const sourceIds = resolveCanvasTargetSemanticCanvasActionSourceIds(action, options.semanticState)
+        if (sourceIds.some((id) => !options.authorizedSourceItemIds.has(id))) {
+          return {
+            content: 'Image extraction skipped because a source was not selected.',
+            canvasDispatchCount: 0,
+            fallbackReason: 'Source image extraction requires explicitly selected items.'
+          }
+        }
+      }
       return executeCanvasTargetExtractImageRegionAction(action, options)
     case 'add_text': {
       if (!text) {
@@ -927,7 +961,6 @@ export function useCanvasTargetWorkflow({
   setAnnotationStrokeWidth,
   setAnnotationFillOpacity,
   nextZIndexRef,
-  notifySuccess,
   notifyError,
   notifyWarning,
   notifyInfo,
@@ -980,6 +1013,7 @@ export function useCanvasTargetWorkflow({
   const [canvasTargetReport, setCanvasTargetReport] = useState<CanvasTargetReport | null>(null)
   const canvasTargetActiveRunIdRef = useRef<string | null>(null)
   const canvasTargetExternalChatRef = useRef<CanvasTargetExternalChatRun | null>(null)
+  const canvasTargetSelectionSignatureRef = useRef<string | null>(null)
   const latestItemsRef = useRef(items)
   const latestSelectedIdsRef = useRef(selectedIds)
 
@@ -1076,6 +1110,7 @@ export function useCanvasTargetWorkflow({
     setCanvasTargetContextPack(null)
     setCanvasTargetReport(null)
     setCanvasTargetTargetItemIds([])
+    canvasTargetSelectionSignatureRef.current = null
     setCanvasTargetSelectionBounds(null)
     setCanvasTargetSelectedTraceIds([])
     setSelectionRect(null)
@@ -1091,6 +1126,9 @@ export function useCanvasTargetWorkflow({
   const handleOpenCanvasTargetDialog = useCallback(
     async (targetItems: CanvasItem[], selectionBounds?: CanvasTargetSelectionBounds | null) => {
       if (targetItems.length === 0) return
+      // Capture before asynchronous dialog setup, not after the selection may
+      // already have changed under the user.
+      const openedSelectionSignature = canvasTargetSelectionSignature(targetItems)
 
       try {
         const projectTraceRef = await resolveCanvasProjectTraceProjectRef(canvasId, projectName)
@@ -1184,6 +1222,7 @@ export function useCanvasTargetWorkflow({
         setCanvasTargetReferenceTraces(traceDocuments)
         setCanvasTargetProfileOptions(profiles)
         setCanvasTargetQuickAppOptions(quickAppOptions)
+        canvasTargetSelectionSignatureRef.current = openedSelectionSignature
         setCanvasTargetTargetItemIds(targetItems.map((item) => item.id))
         setCanvasTargetSelectionBounds(normalizeCanvasTargetSelectionBounds(selectionBounds))
         setCanvasTargetTargetName('')
@@ -1448,6 +1487,43 @@ export function useCanvasTargetWorkflow({
       return
     }
 
+    const selectionIsUnchanged = () => {
+      const expectedIds = new Set(canvasTargetTargetItemIds)
+      const currentTargetItems = latestItemsRef.current.filter((item) => expectedIds.has(item.id))
+      return (
+        expectedIds.size === canvasTargetTargetItemIds.length &&
+        currentTargetItems.length === expectedIds.size &&
+        canvasTargetSelectionSignatureRef.current !== null &&
+        canvasTargetSelectionSignature(currentTargetItems) === canvasTargetSelectionSignatureRef.current
+      )
+    }
+    if (
+      normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only' &&
+      !selectionIsUnchanged()
+    ) {
+      setCanvasTargetError(
+        isChineseUi
+          ? '选区内容已更改，请重新选择后再运行目标。'
+          : 'The selection changed. Please select it again before running the target.'
+      )
+      return
+    }
+
+    // A restricted selection snapshot cannot safely re-interpret a legacy
+    // crop whose coordinate space is not authenticated against its source.
+    // Full selected_sources is a distinct, explicitly authorized contract.
+    if (
+      normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) === 'selection_region' &&
+      targetItems.some((item) => item.type === 'image' && item.crop)
+    ) {
+      setCanvasTargetError(
+        isChineseUi
+          ? '选区包含无法验证坐标的裁剪图片。请移除该裁剪图片，或明确选择完整源素材模式。'
+          : 'The selection contains a cropped image with unverified coordinates. Remove it or explicitly select the full source assets mode.'
+      )
+      return
+    }
+
     if (!selectedScheme) {
       setCanvasTargetError(isChineseUi ? '请选择目标方案。' : 'Please choose a target scheme.')
       return
@@ -1497,6 +1573,16 @@ export function useCanvasTargetWorkflow({
       if (canvasTargetActiveRunIdRef.current !== runId) {
         throw new CanvasTargetCancelledError()
       }
+      if (
+        normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only' &&
+        !selectionIsUnchanged()
+      ) {
+        throw new Error(
+          isChineseUi
+            ? '选区内容已更改，请重新选择后再运行目标。'
+            : 'The selection changed. Please select it again before running the target.'
+        )
+      }
     }
 
     setCanvasTargetDialogOpen(false)
@@ -1512,15 +1598,22 @@ export function useCanvasTargetWorkflow({
         console.warn('[CanvasTarget] Failed to persist history target.', historyError)
       }
 
+      // History persistence is asynchronous; do not begin raster work if the
+      // selection changed while it was pending.
+      ensureCanvasTargetRunActive()
       let snapshotDataUrl: string | null = null
-      try {
-        snapshotDataUrl = await renderCanvasItemsImageDataUrl(
-          targetItems,
-          false,
-          canvasTargetSelectionBounds
-        )
-      } catch (snapshotError) {
-        console.warn('[CanvasTarget] Failed to render selection snapshot.', snapshotError)
+      // Structured-only runs must not construct a visual snapshot, including
+      // for in-memory context or a possible diagnostic failure archive.
+      if (normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only') {
+        try {
+          snapshotDataUrl = await renderCanvasItemsImageDataUrl(
+            targetItems,
+            false,
+            canvasTargetSelectionBounds
+          )
+        } catch (snapshotError) {
+          console.warn('[CanvasTarget] Failed to render selection snapshot.', snapshotError)
+        }
       }
       ensureCanvasTargetRunActive()
 
@@ -1891,6 +1984,7 @@ export function useCanvasTargetWorkflow({
         return executionJournal.length - 1
       }
 
+      ensureCanvasTargetRunActive()
       const rawControlPlan: CanvasTargetControlPlan = await requestCanvasTargetControlPlan({
         scheme: selectedScheme,
         contextPack,
@@ -2270,11 +2364,34 @@ export function useCanvasTargetWorkflow({
         }
       }
 
+      // QuickApp input IDs may name originals, copies of unrelated canvas items,
+      // or stage-created media. A fresh ID is not provenance. Until complete
+      // lineage is available, only the exact selected originals in the explicit
+      // full-source mode are eligible for item-backed references.
+      const authorizedQuickAppOriginals = new Map(
+        normalizedEvidenceMode === 'selected_sources'
+          ? targetItems.map((item) => [item.id, item] as const)
+          : []
+      )
       const getCanvasItemQuickAppAttachments = (itemIds: string[]): ChatAttachment[] => {
         const itemById = new Map(runtimeCanvasItems.map((item) => [item.id, item] as const))
-        return itemIds
-          .map((itemId) => canvasItemToQuickAppAttachment(itemById.get(itemId)))
-          .filter((attachment): attachment is ChatAttachment => Boolean(attachment))
+        return itemIds.map((itemId) => {
+          const original = authorizedQuickAppOriginals.get(itemId)
+          const current = itemById.get(itemId)
+          if (!original || !current ||
+            canvasTargetSelectionSignature([original]) !== canvasTargetSelectionSignature([current])) {
+            throw new Error(isChineseUi
+              ? '快应用引用了未经授权或已更改的画布素材，已停止执行。'
+              : 'QuickApp referenced an unauthorized or changed canvas source; execution stopped.')
+          }
+          const attachment = canvasItemToQuickAppAttachment(original)
+          if (!attachment) {
+            throw new Error(isChineseUi
+              ? '快应用引用的画布素材无法解析，已停止执行。'
+              : 'QuickApp canvas source could not be resolved; execution stopped.')
+          }
+          return attachment
+        })
       }
 
       const getStageQuickAppAttachments = (stageId: string): ChatAttachment[] => {
@@ -2649,10 +2766,13 @@ export function useCanvasTargetWorkflow({
             projectId: canvasId,
             fallbackText: options?.fallbackText,
             generationSessionId: stageId,
+            evidenceMode: normalizedEvidenceMode,
+            authorizedSourceItemIds: new Set(targetItems.map((item) => item.id)),
             semanticState,
             commitSemanticResult: (result) => commitSemanticCanvasResult(stageId, result),
             resolveCanvasTargetItemBounds
           })
+          ensureCanvasTargetRunActive()
           if (!isCanvasTargetSemanticCanvasActionName(executableCanvasAction.action)) {
             const canvasAttachmentArtifactIds = registerStageAttachmentArtifacts(
               stageId,
@@ -3033,39 +3153,9 @@ export function useCanvasTargetWorkflow({
           .join('\n\n')
       })
       ensureCanvasTargetRunActive()
-      const buildFinalCanvasEvidenceAttachment = async (): Promise<ChatAttachment | null> => {
-        if (normalizedEvidenceMode === 'structured_only') return null
-        const evidenceItemIds = new Set<string>()
-        for (const item of targetItems) evidenceItemIds.add(item.id)
-        for (const itemId of runtimeSelectedIds) evidenceItemIds.add(itemId)
-        for (const itemId of lastCanvasItemIds) evidenceItemIds.add(itemId)
-        for (const itemId of lastQuickAppCanvasItemIds) evidenceItemIds.add(itemId)
-        for (const itemIds of stageCanvasItemIds.values()) {
-          for (const itemId of itemIds) evidenceItemIds.add(itemId)
-        }
-        const finalEvidenceItems = runtimeCanvasItems.filter((item) => evidenceItemIds.has(item.id))
-        if (finalEvidenceItems.length === 0) return null
-
-        try {
-          const finalEvidenceDataUrl = await renderCanvasItemsImageDataUrl(
-            finalEvidenceItems,
-            false,
-            null
-          )
-          return finalEvidenceDataUrl
-            ? {
-                type: 'image',
-                url: finalEvidenceDataUrl,
-                mimeType: 'image/png',
-                fileName: 'canvas-target-final-evidence.png'
-              }
-            : null
-        } catch (snapshotError) {
-          console.warn('[CanvasTarget] Failed to render final canvas evidence.', snapshotError)
-          return null
-        }
-      }
-
+      // The original selection is not a snapshot of the final canvas. We cannot
+      // safely build one until runtime item lineage is authenticated, so omit it
+      // instead of mislabelling stale pixels or reading unrelated originals.
       const buildSummaryStageResults = () =>
         executedStageResults.map((stage) => ({
           id: stage.id,
@@ -3081,13 +3171,7 @@ export function useCanvasTargetWorkflow({
           fallbackReason: stage.fallbackReason
         }))
 
-      const buildSummaryAttachments = async (): Promise<ChatAttachment[]> => {
-        const finalCanvasEvidenceAttachment = await buildFinalCanvasEvidenceAttachment()
-        if (finalCanvasEvidenceAttachment) {
-          registerStageAttachmentArtifacts(`${runId}-final-evidence`, 'final_evidence', [
-            finalCanvasEvidenceAttachment
-          ])
-        }
+      const buildSummaryAttachments = (): ChatAttachment[] => {
         const summaryBaseAttachments = buildCanvasTargetAttachments({
           sourceAttachments: evidenceSourceAttachments,
           snapshotAttachment: evidenceSnapshotAttachment,
@@ -3098,7 +3182,6 @@ export function useCanvasTargetWorkflow({
           executedStageResults.flatMap((stage) => stage.responseAttachments || [])
         ).slice(0, 6)
         return dedupeCanvasTargetAttachments([
-          ...(finalCanvasEvidenceAttachment ? [finalCanvasEvidenceAttachment] : []),
           ...summaryBaseAttachments,
           ...summaryUpstreamAttachments
         ])
@@ -3119,7 +3202,8 @@ export function useCanvasTargetWorkflow({
         await waitForCanvasTargetProgressPaint()
         ensureCanvasTargetRunActive()
 
-        const summaryAttachments = await buildSummaryAttachments()
+        const summaryAttachments = buildSummaryAttachments()
+        ensureCanvasTargetRunActive()
         const summaryInputCanvasVersion = runtimeCanvasVersion
         const summaryInputItemIds = Array.from(runtimeSelectedIds)
         const summaryResult = await requestCanvasTargetSummaryExecution({
@@ -3196,6 +3280,16 @@ export function useCanvasTargetWorkflow({
         }
       }
 
+      const finalAcceptanceCaveat = isChineseUi
+        ? '未发送最终画布的视觉证据，最终视觉验收尚未验证。请自行检查结果。'
+        : 'Final canvas visual evidence was not sent, so final visual acceptance is unverified. Please inspect the result.'
+      appendMessageToExternalChat({
+        scope: agentScope,
+        sessionId: agentSessionId,
+        role: 'assistant',
+        content: finalAcceptanceCaveat,
+        modelName: controlModelLabel
+      })
       const finalSummaryRun = await requestAndPublishControlSummary({
         id: runId + '-control-summary',
         label: isChineseUi ? '控制总结' : 'Control summary'
@@ -3251,11 +3345,7 @@ export function useCanvasTargetWorkflow({
             : 'The control model final acceptance says the result still needs fixes. Review the Agent feedback.'
         )
       } else if (acceptanceStatus === 'accepted') {
-        notifySuccess(
-          isChineseUi
-            ? '画布目标已完成，可查看主控模型验收结果。'
-            : 'Canvas target is complete. Review the control model acceptance result.'
-        )
+        notifyWarning(finalAcceptanceCaveat)
       } else {
         notifyWarning(
           isChineseUi
@@ -3331,7 +3421,6 @@ export function useCanvasTargetWorkflow({
     items,
     nextZIndexRef,
     notifyError,
-    notifySuccess,
     notifyWarning,
     projectName,
     renderCanvasItemsImageDataUrl,

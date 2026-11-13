@@ -50,12 +50,17 @@ export type PythonExecuteInput = Readonly<{
   maxOutputBytes?: number
   grantId?: string
   expectedGrantUseCount?: number
+  onOwned?: (record: CommandJobRecord) => void
+  onStarted?: (record: CommandJobRecord) => void
+  beforeDispatch?: () => void
+  onPoll?: () => void
+  signal?: AbortSignal
 }>
 
 export class PythonToolHost {
   private readonly root: string
   private readonly executable: string
-  private readonly provenance: PythonProvenance
+  readonly provenance: PythonProvenance
   private readonly manager: PythonJobManager
   private readonly probe: PythonProbe
 
@@ -142,6 +147,7 @@ export class PythonToolHost {
     input: PythonExecuteInput
   ): Promise<Readonly<{ job: CommandJobRecord; provenance: PythonProvenance }>> {
     const prepared = this.prepare(input)
+    input.signal?.throwIfAborted()
     this.validateRequest(input.request, 'python.background', prepared)
     const job = await this.manager.background(this.managerInput(input, prepared))
     return Object.freeze({ job, provenance: this.provenance })
@@ -157,17 +163,29 @@ export class PythonToolHost {
     }>
   > {
     const prepared = this.prepare(input)
+    input.signal?.throwIfAborted()
     this.validateRequest(input.request, 'python.run', prepared)
     const started = await this.manager.background(this.managerInput(input, prepared))
     let job: CommandJobRecord = started
+    try {
     for (;;) {
+      input.onPoll?.()
+      if (input.signal?.aborted) {
+        await this.manager.stop({ jobId: started.jobId, routeKey: input.routeKey, sessionId: input.sessionId })
+        input.signal.throwIfAborted()
+      }
       job = this.manager.status({
         jobId: started.jobId,
         routeKey: input.routeKey,
         sessionId: input.sessionId
       })
       if (TERMINAL.has(job.state)) break
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    input.onPoll?.()
+    } catch (error) {
+      await this.manager.stop({ jobId: started.jobId, routeKey: input.routeKey, sessionId: input.sessionId })
+      throw error
     }
     const stdout = this.manager.read({
       jobId: job.jobId,
@@ -188,7 +206,7 @@ export class PythonToolHost {
       stdout,
       stderr,
       provenance: this.provenance,
-      artifacts: this.captureArtifacts(prepared.artifactPaths)
+      artifacts: job.state === 'completed' ? this.captureArtifacts(prepared.artifactPaths) : []
     })
   }
 
@@ -208,7 +226,25 @@ export class PythonToolHost {
       maxLogBytes: input.maxOutputBytes,
       grantId: input.grantId,
       expectedGrantUseCount: input.expectedGrantUseCount,
-      beforeConsume: () => this.revalidateInterpreter()
+      signal: input.signal,
+      onOwned: input.onOwned,
+      onStarted: input.onStarted,
+      beforeDispatch: input.beforeDispatch,
+      beforeConsume: () => {
+        input.signal?.throwIfAborted()
+        this.revalidateInterpreter()
+        const current = this.prepare(input)
+        this.validateRequest(input.request, input.request.target.id, current)
+        if (input.code !== undefined) {
+          const script = prepared.args.at(-1)!
+          this.ensureContainedParents(path.dirname(script))
+          mkdirSync(path.dirname(script), { recursive: true })
+          this.ensureContainedParents(path.dirname(script))
+          if (!existsSync(script)) writeFileSync(script, input.code, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+          const stat = lstatSync(script)
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || sha256(readFileSync(script)) !== prepared.codeSha256) throw new TerminalRunValidationError('Inline Python script identity mismatch.')
+        }
+      }
     }
   }
 
@@ -228,10 +264,8 @@ export class PythonToolHost {
         throw new TerminalRunValidationError('Inline Python code is empty or exceeds 256 KiB.')
       codeSha256 = sha256(Buffer.from(input.code!, 'utf8'))
       const dir = path.join(this.root, '.magicpot', 'python', 'inline')
-      mkdirSync(dir, { recursive: true })
+      this.ensureContainedParents(dir)
       script = path.join(dir, `${codeSha256}.py`)
-      if (!existsSync(script))
-        writeFileSync(script, input.code!, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
     } else {
       script = this.contained(input.file!, false)
       if (path.extname(script).toLowerCase() !== '.py')
@@ -260,6 +294,7 @@ export class PythonToolHost {
     const resolved = path.resolve(this.root, value)
     if (!isInsideTerminalRoot(this.root, resolved))
       throw new TerminalRunValidationError('Path escapes the workspace.')
+    this.ensureContainedParents(resolved)
     if (allowMissing && !existsSync(resolved)) return resolved
     const canonical = path.resolve(realpathSync.native(resolved))
     if (!isInsideTerminalRoot(this.root, canonical))
@@ -294,8 +329,20 @@ export class PythonToolHost {
       )
   }
 
+  private ensureContainedParents(target: string): void {
+    if (!isInsideTerminalRoot(this.root, target)) throw new TerminalRunValidationError('Path escapes the workspace.')
+    let current = this.root
+    for (const part of path.relative(this.root, target).split(path.sep).filter(Boolean)) {
+      current = path.join(current, part)
+      if (!existsSync(current)) break
+      const info = lstatSync(current)
+      if (info.isSymbolicLink() || (info.isFile() && info.nlink !== 1) || !isInsideTerminalRoot(this.root, path.resolve(realpathSync.native(current)))) throw new TerminalRunValidationError('Linked Python paths are not allowed.')
+    }
+  }
+
   private captureArtifacts(paths: readonly string[]) {
     return paths.map((file) => {
+      this.ensureContainedParents(file)
       if (!existsSync(file))
         throw new TerminalRunValidationError(
           `Declared artifact was not created: ${path.relative(this.root, file)}`

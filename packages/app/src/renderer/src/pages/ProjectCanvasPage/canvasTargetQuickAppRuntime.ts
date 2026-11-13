@@ -69,9 +69,6 @@ const normalizeLabelKey = (value: string | undefined): string => value?.trim().t
 
 const randomSeed = () => createSecureRandomUint32()
 
-const looksLikeTransferableUrl = (value: string): boolean =>
-  /^(data|blob|https?|file|local-media):/i.test(value.trim())
-
 const getAssignmentValue = (
   assignment: CanvasTargetQuickAppInputAssignment | undefined,
   sources: CanvasTargetQuickAppSourceAttachments,
@@ -291,19 +288,6 @@ const pickAttachmentForSource = (
   }
 }
 
-const createAssignedUrlAttachment = (
-  expectedType: 'image' | 'video',
-  url: string,
-  fallbackName: string,
-  extension: string,
-  mimeType: string
-): ChatAttachment => ({
-  type: expectedType,
-  url,
-  fileName: `${fallbackName}${extension}`,
-  mimeType
-})
-
 const getResolvedAssignmentAttachments = (
   options: RunCanvasTargetQuickAppActionOptions,
   assignmentIndex: number | undefined
@@ -334,22 +318,11 @@ const resolveAssignedMediaAttachment = (
   mediaIndex: number,
   assignmentIndex: number | undefined
 ): ChatAttachment | undefined => {
-  const assignedValue = getAssignmentValue(assignment, options, options.userIntent)
-  const assignedUrl =
-    typeof assignedValue === 'string' && looksLikeTransferableUrl(assignedValue)
-      ? assignedValue.trim()
-      : undefined
-
-  if (assignedUrl) {
-    return createAssignedUrlAttachment(
-      expectedType,
-      assignedUrl,
-      expectedType === 'image'
-        ? `target-qapp-image-${mediaIndex + 1}`
-        : `target-qapp-video-${mediaIndex + 1}`,
-      expectedType === 'image' ? '.png' : '.mp4',
-      expectedType === 'image' ? 'image/png' : 'video/mp4'
-    )
+  // The model-authored value is not a capability for a media URL, even when
+  // an independently authorized item reference accompanies it. Media inputs
+  // must use a bound source/snapshot or a resolved upstream reference instead.
+  if (assignment?.value !== undefined) {
+    throw new Error('Direct QuickApp media input values are not authorized.')
   }
 
   if (hasExplicitReferenceAssignment(assignment)) {
@@ -495,6 +468,20 @@ const applyQuickAppInputs = async (
   workflow: Workflow,
   options: RunCanvasTargetQuickAppActionOptions
 ) => {
+  // Validate every media slot before starting any fetch or upload. Otherwise a
+  // forbidden later slot could fail only after an earlier upload has escaped.
+  for (const input of cfg.inputs) {
+    if (
+      (input.component === 'InputComfyImage' || input.component === 'InputComfyVideo') &&
+      hasSlot(input)
+    ) {
+      const { assignment } = resolveAssignmentForInput(input, options.action.inputAssignments)
+      if (assignment?.value !== undefined) {
+        throw new Error('Direct QuickApp media input values are not authorized.')
+      }
+    }
+  }
+
   let imageInputIndex = 0
   let videoInputIndex = 0
 

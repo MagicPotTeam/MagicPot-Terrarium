@@ -1043,6 +1043,7 @@ describe('useCanvasAssetIntake', () => {
           onComplete={onComplete}
           options={{
             fileName: 'small-warm-cache.png',
+            teamImageLabel: '设计师·图1',
             sizeBytes: 512 * 1024,
             sourceWidthHint: 640,
             sourceHeightHint: 320,
@@ -1064,6 +1065,7 @@ describe('useCanvasAssetIntake', () => {
       expect(result).toBeTruthy()
       expect(imageItem?.thumbnailSet).toEqual(thumbnailSet)
       expect(imageItem?.sourceWidth).toBe(640)
+      expect(imageItem?.teamImageLabel).toBe('设计师·图1')
       expect(imageItem?.sourceHeight).toBe(320)
       expect(imageItem?.width).toBe(640)
       expect(imageItem?.height).toBe(320)
@@ -1593,6 +1595,17 @@ describe('useCanvasAssetIntake', () => {
     expect(selectionChanges.at(-1)).toEqual(new Set())
   })
 
+  it('preserves the team label in the deferred single-image branch', async () => {
+    const onComplete = vi.fn()
+    thumbnailOverride.mockResolvedValue({ image: document.createElement('img') })
+    const sourceIdentity = buildCanvasImageSourceIdentity({ canonicalPath: 'C:/fixture/large.png', sizeBytes: 100 * 1024 * 1024, lastModifiedMs: 1 })!
+    render(<SingleImageHarness src="local-media:///C:/fixture/large.png" onComplete={onComplete} options={{ sourceIdentity, sizeBytes: 100 * 1024 * 1024, sourceWidthHint: 100, sourceHeightHint: 100, teamImageLabel: '设计师·图3' }} />)
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+    const [items, result] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem | null]
+    expect(result?.teamImageLabel).toBe('设计师·图3')
+    expect(items.find(item => item.type === 'image')).toMatchObject({ teamImageLabel: '设计师·图3' })
+  })
+
   it('uses decoded image dimensions when external source hints do not match the decoded aspect ratio', async () => {
     const originalImageCtor = window.Image
     window.Image = function MockImage() {
@@ -1619,6 +1632,7 @@ describe('useCanvasAssetIntake', () => {
           onComplete={onComplete}
           options={{
             fileName: 'qapp-result.png',
+            teamImageLabel: '设计师·图2',
             sourceWidthHint: 3136,
             sourceHeightHint: 2624
           }}
@@ -1638,6 +1652,7 @@ describe('useCanvasAssetIntake', () => {
       expect(result).toBeTruthy()
       expect(imageItem).toBeTruthy()
       expect(imageItem?.sourceWidth).toBe(3136)
+      expect(imageItem?.teamImageLabel).toBe('设计师·图2')
       expect(imageItem?.sourceHeight).toBe(1568)
       expect(imageItem?.width).toBe(3136)
       expect(imageItem?.height).toBe(1568)

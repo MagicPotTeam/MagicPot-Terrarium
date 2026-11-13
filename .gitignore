@@ -94,6 +94,8 @@ aiengineelectron-dev/
 .aiengineelectron-dev/
 
 # Generated project/cache roots when the global project root points at this repo
+# Nested acceptance builds are disposable local scratch, too.
+**/.magicpot-trash/
 Codex-Junk/
 .Codex-Junk/
 AutoSave/

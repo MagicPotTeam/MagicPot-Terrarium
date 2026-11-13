@@ -1,4 +1,5 @@
 import { AssistantRoute } from '../assistantRuntime/types'
+import { forwardReportedFileEditFailure } from '../assistantRuntime/toolFailure'
 import {
   AgentAction,
   AgentActionHandler,
@@ -507,7 +508,10 @@ export class AgentKernel {
       capabilityId: request.capabilityId || registration?.tool.capabilityId,
       source: request.source || 'kernel'
     })
-    throwIfAborted(request.signal)
+    // A settled failure can carry rollback/output evidence even if the caller
+    // stopped during dispatch. Cancellation must not erase that failed receipt;
+    // successful results still observe the original post-dispatch abort check.
+    if (result.ok !== false) throwIfAborted(request.signal)
     const finishedAt = now()
     const normalized = createAgentToolInvocationResult(
       {
@@ -520,6 +524,7 @@ export class AgentKernel {
       result
     )
 
+    forwardReportedFileEditFailure(result, normalized)
     normalized.startedAt = startedAt
     normalized.finishedAt = finishedAt
     normalized.durationMs = Math.max(0, finishedAt - startedAt)

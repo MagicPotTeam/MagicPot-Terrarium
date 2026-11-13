@@ -4,6 +4,8 @@ import type { Dirent } from 'fs'
 import path from 'path'
 import { Config } from '@shared/config/config'
 import { getBuildEnv } from '../config/buildEnv'
+import { randomUUID } from 'node:crypto'
+import { acquireMemoryFileBindingLease, memoryFileRouteIdentity, readMemoryFileBindingRecord, type MemoryFileBindingLease } from './memoryFileBinding'
 import { writeJsonFileAtomic } from '../magicAgentRuntime/graph/jsonPersistence'
 import {
   AssistantWorkspaceAccessMode,
@@ -60,6 +62,7 @@ const QUALITY_GATE_STATUSES = new Set<AssistantQualityGateState['status']>([
 ])
 
 const workspaceMetaMutationQueues = new Map<string, Promise<void>>()
+const contextSnapshotMutationQueues = new Map<string, Promise<void>>()
 const taskContextMutationQueues = new Map<string, Promise<void>>()
 
 /**
@@ -259,6 +262,25 @@ export const ensureAssistantWorkspaceState = async (
   return workspace
 }
 
+export const createManagedFirstRunWorkspace = async (
+  workspace: AssistantWorkspaceState,
+  route: AssistantRoute
+): Promise<void> => {
+  // Only the actual runtime's freshly prepared namespace uses this path. Never
+  // adopt metadata/history from an ordinary or previously used workspace.
+  await fs.mkdir(path.dirname(workspace.rootDir), { recursive: true })
+  await fs.mkdir(workspace.rootDir)
+  await fs.mkdir(workspace.memoryDir)
+  await fs.mkdir(path.dirname(workspace.workspaceRootDir), { recursive: true })
+  await fs.mkdir(workspace.workspaceRootDir)
+  const now = Date.now(), sessionKey = getAssistantSessionKey(route)
+  await writeJsonFileAtomic(workspace.workspaceMetaFile, {
+    workspaceId: workspace.workspaceId, createdAt: now, updatedAt: now,
+    status: 'active', accessMode: 'private', attachedSessionKeys: [sessionKey],
+    attachedRoutes: [route], ownerSessionKey: sessionKey, ownerRoute: route
+  } satisfies AssistantWorkspaceMeta)
+}
+
 export const buildAssistantContextSnapshot = (
   route: AssistantRoute,
   config: Config,
@@ -277,11 +299,54 @@ export const buildAssistantContextSnapshot = (
   localLLMServerEnabled: Boolean(config.local_llm_server_config?.enable_server)
 })
 
+const serializeContextMutation = async <T>(contextFile: string, operation: () => Promise<T>): Promise<T> => {
+  const absolute = path.resolve(contextFile), key = process.platform === 'win32' ? absolute.toLowerCase() : absolute
+  const previous = contextSnapshotMutationQueues.get(key) ?? Promise.resolve(), next = previous.catch(() => undefined).then(operation)
+  const tail = next.then(() => undefined, () => undefined)
+  contextSnapshotMutationQueues.set(key, tail)
+  try { return await next }
+  finally { if (contextSnapshotMutationQueues.get(key) === tail) contextSnapshotMutationQueues.delete(key) }
+}
+const withMemoryBindingLease = async <T>(workspace: { rootDir: string }, operation: (lease: MemoryFileBindingLease) => Promise<T>): Promise<T> => {
+  const lease = acquireMemoryFileBindingLease(workspace)
+  try {
+    const result = await operation(lease)
+    lease.release(); return result
+  } catch (error) {
+    try { if ((error as NodeJS.ErrnoException).code === 'TOOL_EXECUTION_OUTCOME_UNKNOWN') lease.abandon(); else lease.release() }
+    catch (cleanup) { throw Object.assign(new Error('Memory binding mutation/cleanup requires review.', { cause: new AggregateError([error, cleanup]) }), { code: 'TOOL_EXECUTION_OUTCOME_UNKNOWN' }) }
+    throw error
+  }
+}
+const invalidateMemoryBinding = (workspace: { rootDir: string }, lease: MemoryFileBindingLease): void => {
+  const prior = readMemoryFileBindingRecord(workspace)
+  lease.setRecord({ present: false, ...(prior?.routeIdentity ? { routeIdentity: prior.routeIdentity } : {}), ...(prior?.workspaceId ? { workspaceId: prior.workspaceId } : {}) })
+}
+
 export const persistAssistantContextSnapshot = async (
   workspace: AssistantWorkspaceState,
   snapshot: AssistantContextSnapshot
 ): Promise<void> => {
-  await writeJsonFileAtomic(workspace.contextFile, snapshot)
+  const captured = structuredClone(snapshot)
+  return serializeContextMutation(workspace.contextFile, async () => {
+    await fs.mkdir(workspace.rootDir, { recursive: true })
+    return withMemoryBindingLease(workspace, async lease => {
+      let prior: Partial<AssistantContextSnapshot> | undefined
+      try {
+        const stat = await fs.lstat(workspace.contextFile)
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > ASSISTANT_WORKSPACE_RETENTION.maxContextSnapshotBytes) throw new Error('Invalid MAIN workspace context binding.')
+        prior = JSON.parse(await fs.readFile(workspace.contextFile, 'utf8'))
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      const record = readMemoryFileBindingRecord(workspace), routeIdentity = memoryFileRouteIdentity(captured.route)
+      const unchanged = prior?.route && JSON.stringify(memoryFileRouteIdentity(prior.route)) === JSON.stringify(routeIdentity) && prior.workspaceId === captured.workspaceId
+      const sameRecord = record?.present && JSON.stringify(record.routeIdentity) === JSON.stringify(routeIdentity) && record.workspaceId === captured.workspaceId && record.revision === prior?.memoryBindingRevision
+      const revision = unchanged && sameRecord ? record.revision : randomUUID()
+      // Hold the cross-MAIN lease across context publication and the independent
+      // incarnation. A crash in between leaves the lease for explicit review.
+      await writeJsonFileAtomic(workspace.contextFile, { ...captured, memoryBindingRevision: revision })
+      lease.setRecord({ present: true, routeIdentity, workspaceId: captured.workspaceId }, revision)
+    })
+  })
 }
 
 export const readAssistantWorkspaceMeta = async (
@@ -1091,25 +1156,31 @@ export const readAssistantContextSnapshot = async (
 export const readAssistantContextSnapshotFromFile = async (
   contextFile: string
 ): Promise<AssistantContextSnapshot | undefined> => {
-  const raw = await readBoundedTextFile(
-    contextFile,
-    ASSISTANT_WORKSPACE_RETENTION.maxContextSnapshotBytes
-  )
-  if (!raw) return undefined
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<AssistantContextSnapshot>
-    if (
-      !isFreshEnough(Number(parsed.generatedAt), ASSISTANT_WORKSPACE_RETENTION.contextSnapshotTtlMs)
-    ) {
-      await removeExpiredOrOversizedFile(contextFile)
-      return undefined
-    }
-    return parsed as AssistantContextSnapshot
-  } catch (error) {
-    console.warn('[AssistantWorkspace] Failed to parse context snapshot:', error)
-    return undefined
+  const inspect = async (): Promise<{ kind: 'valid'; value: AssistantContextSnapshot } | { kind: 'missing' | 'malformed' | 'remove' }> => {
+    try {
+      const stat = await fs.lstat(contextFile)
+      if (!stat.isFile() || stat.isSymbolicLink()) return { kind: 'malformed' }
+      if (stat.size > ASSISTANT_WORKSPACE_RETENTION.maxContextSnapshotBytes) return { kind: 'remove' }
+      const raw = await fs.readFile(contextFile, 'utf8')
+      if (!raw.trim()) return { kind: 'malformed' }
+      let parsed: Partial<AssistantContextSnapshot>
+      try { parsed = JSON.parse(raw) } catch { return { kind: 'malformed' } }
+      return isFreshEnough(Number(parsed.generatedAt), ASSISTANT_WORKSPACE_RETENTION.contextSnapshotTtlMs) ? { kind: 'valid', value: parsed as AssistantContextSnapshot } : { kind: 'remove' }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' }; throw error }
   }
+  const observed = await inspect()
+  if (observed.kind !== 'remove') return observed.kind === 'valid' ? observed.value : undefined
+  return serializeContextMutation(contextFile, async () => {
+    const workspace = { rootDir: path.dirname(contextFile) }
+    return withMemoryBindingLease(workspace, async lease => {
+      // Never delete a fresh replacement based on the earlier unleased read.
+      const current = await inspect()
+      if (current.kind !== 'remove') return current.kind === 'valid' ? current.value : undefined
+      invalidateMemoryBinding(workspace, lease)
+      await fs.rm(contextFile, { force: true })
+      return undefined
+    })
+  })
 }
 
 export const readAssistantTaskContextFromFile = async (
@@ -1371,13 +1442,30 @@ export const readAssistantReusableContextPackFromFiles = async (files: {
 
 export const clearAssistantReusableContext = async (
   workspace: AssistantWorkspaceState
-): Promise<void> => {
+): Promise<void> => serializeContextMutation(workspace.contextFile, async () => {
+  const root = await fs.lstat(workspace.rootDir).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
+  if (!root) return
+  if (!root.isDirectory() || root.isSymbolicLink()) throw new Error('Refuse reusable-context cleanup through a replaced route directory.')
+  await withMemoryBindingLease(workspace, async lease => {
+  invalidateMemoryBinding(workspace, lease)
   await fs.rm(workspace.contextFile, { force: true })
   await fs.rm(workspace.taskContextFile, { force: true })
   await fs.rm(workspace.pinnedContextFile, { force: true })
-  await fs.rm(workspace.memoryDir, { recursive: true, force: true })
-  await fs.mkdir(workspace.memoryDir, { recursive: true })
-}
+  // Persistent agent memory has its own owner/incarnation, approval and recovery
+  // boundary. Routine context cleanup must neither traverse it nor replace its
+  // ancestors (including malformed/unowned or review-locked namespaces).
+  try {
+    const memoryStat = await fs.lstat(workspace.memoryDir)
+    if (!memoryStat.isDirectory() || memoryStat.isSymbolicLink() ||
+      (process.platform === 'win32' ? path.resolve(await fs.realpath(workspace.memoryDir)).toLowerCase() !== path.resolve(workspace.memoryDir).toLowerCase() : path.resolve(await fs.realpath(workspace.memoryDir)) !== path.resolve(workspace.memoryDir))) throw new Error(`Refuse reusable-context cleanup through a replaced memory directory: ${workspace.memoryDir}, canonical=${await fs.realpath(workspace.memoryDir)}.`)
+    const directory = await fs.opendir(workspace.memoryDir)
+    for await (const entry of directory) {
+      const reserved = process.platform === 'win32' ? entry.name.toLowerCase() === '.agent-memory-v1' : entry.name === '.agent-memory-v1'
+      if (!reserved) await fs.rm(path.join(workspace.memoryDir, entry.name), { recursive: true, force: true })
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  })
+})
 
 export const buildAssistantReusableContextPrompt = (
   pack: AssistantReusableContextPack

@@ -16,8 +16,8 @@ import { normalizeGeneratedRootDirName, unprefixGeneratedRootDirName } from '@sh
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
-import { extractMimeTypeFromSourceUrl } from './canvasImageMetadata'
 import { getElectronCanvasFilePath } from './canvasLocalFileSource'
+import { assertCanvasImportFileSize, parseCanvasImportText } from './canvasImportPreflight'
 
 const DB_NAME = 'magicpot-canvas'
 const DB_VERSION = 2 // bumped for new blob store
@@ -29,7 +29,6 @@ const PROJECT_CANVAS_FILENAME = 'project.mpcanvas'
 const AUTOSAVE_CANVAS_FILENAME = PROJECT_CANVAS_FILENAME
 const AUTOSAVE_PROJECT_LIMIT = 8
 const PROJECT_ASSET_DIRNAME = 'assets'
-const PROJECT_CROPPABLE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 // Serializable canvas items without DOM-only fields.
 type SerializableCanvasItem = Omit<CanvasItem, 'image'> & { image?: never }
@@ -112,33 +111,9 @@ function serializeItems(items: CanvasItem[]): SerializableCanvasItem[] {
       const { image, sourceFile, thumbnailSet: _thumbnailSet, sourceIdentity, ...rest } = item
       const persistedSourceIdentity =
         sourceIdentity?.kind === 'local-file' ? sourceIdentity : undefined
-      const sourceWidth =
-        typeof rest.sourceWidth === 'number' &&
-        Number.isFinite(rest.sourceWidth) &&
-        rest.sourceWidth > 0
-          ? rest.sourceWidth
-          : rest.width
-      const sourceHeight =
-        typeof rest.sourceHeight === 'number' &&
-        Number.isFinite(rest.sourceHeight) &&
-        rest.sourceHeight > 0
-          ? rest.sourceHeight
-          : rest.height
-
-      if (
-        rest.crop &&
-        rest.crop.x === 0 &&
-        rest.crop.y === 0 &&
-        rest.crop.width === sourceWidth &&
-        rest.crop.height === sourceHeight
-      ) {
-        const { crop, ...normalized } = rest
-        return {
-          ...normalized,
-          ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
-        } as SerializableCanvasItem
-      }
-
+      // Source-size hints may come from stale thumbnail or display metadata.
+      // Without pixel provenance, even a geometrical identity can be a crop.
+      // Persist it verbatim; source and crop remain separate in project mirrors.
       return {
         ...rest,
         ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
@@ -200,25 +175,15 @@ type ResolvedCanvasBinaryAsset = BlobWriteEntry & {
   projectAssetRef?: string
 }
 
-type NormalizedCanvasImageCrop = {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-type CroppedProjectImageAsset = ResolvedCanvasBinaryAsset & {
-  pixelWidth: number
-  pixelHeight: number
-}
-
 type CanvasFileStorageMode = 'embedded' | 'project'
 
 type CanvasFileRestoreOptions = {
   restoreQAppState?: boolean
   persistEmbeddedAssetsToIndexedDb?: boolean
+  requireNewEmbeddedAssets?: boolean
   canvasBaseDir?: string
   storeKey?: string
+  isCurrent?: () => boolean
 }
 
 type BlobPersistableCanvasItem =
@@ -561,188 +526,6 @@ async function resolveCanvasBinaryAssetForItem(
   )
 }
 
-function resolveCanvasImageSourceSize(
-  item: Pick<CanvasImageItem, 'sourceWidth' | 'sourceHeight' | 'width' | 'height'>
-): { width: number; height: number } {
-  const width =
-    typeof item.sourceWidth === 'number' &&
-    Number.isFinite(item.sourceWidth) &&
-    item.sourceWidth > 0
-      ? item.sourceWidth
-      : item.width
-  const height =
-    typeof item.sourceHeight === 'number' &&
-    Number.isFinite(item.sourceHeight) &&
-    item.sourceHeight > 0
-      ? item.sourceHeight
-      : item.height
-
-  return {
-    width: Math.max(0, width),
-    height: Math.max(0, height)
-  }
-}
-
-function normalizeProjectCanvasImageCrop(
-  item: Pick<CanvasImageItem, 'crop' | 'sourceWidth' | 'sourceHeight' | 'width' | 'height'>
-): NormalizedCanvasImageCrop | null {
-  if (!item.crop) {
-    return null
-  }
-
-  const { width: sourceWidth, height: sourceHeight } = resolveCanvasImageSourceSize(item)
-  if (sourceWidth <= 0 || sourceHeight <= 0) {
-    return null
-  }
-
-  const { crop } = item
-  if (
-    !Number.isFinite(crop.x) ||
-    !Number.isFinite(crop.y) ||
-    !Number.isFinite(crop.width) ||
-    !Number.isFinite(crop.height) ||
-    crop.width <= 0 ||
-    crop.height <= 0
-  ) {
-    return null
-  }
-
-  const x1 = Math.min(sourceWidth, Math.max(0, crop.x))
-  const y1 = Math.min(sourceHeight, Math.max(0, crop.y))
-  const x2 = Math.min(sourceWidth, Math.max(0, crop.x + crop.width))
-  const y2 = Math.min(sourceHeight, Math.max(0, crop.y + crop.height))
-
-  if (x2 <= x1 || y2 <= y1) {
-    return null
-  }
-
-  if (x1 === 0 && y1 === 0 && x2 === sourceWidth && y2 === sourceHeight) {
-    return null
-  }
-
-  return {
-    x: x1,
-    y: y1,
-    width: x2 - x1,
-    height: y2 - y1
-  }
-}
-
-function resolveProjectCroppedImageMimeType(
-  item: Pick<CanvasImageItem, 'fileName' | 'src'>,
-  resolvedFileName: string
-): string | null {
-  const mimeType = normalizeFileMimeType(
-    resolvedFileName,
-    extractMimeTypeFromSourceUrl(item.src),
-    'image/png'
-  ).toLowerCase()
-
-  return PROJECT_CROPPABLE_IMAGE_MIME_TYPES.has(mimeType) ? mimeType : null
-}
-
-function ensureProjectImageFileNameMatchesMimeType(fileName: string, mimeType: string): string {
-  const preferredExtension =
-    mimeType === 'image/jpeg' ? '.jpg' : mimeType === 'image/webp' ? '.webp' : '.png'
-  const trimmed = fileName.trim()
-  const fallbackBase = trimmed || 'canvas-image'
-  const currentMimeType = normalizeFileMimeType(trimmed)
-  if (currentMimeType === mimeType) {
-    return trimmed
-  }
-
-  const lastDot = fallbackBase.lastIndexOf('.')
-  const baseName = lastDot > 0 ? fallbackBase.slice(0, lastDot) : fallbackBase
-  return `${baseName}${preferredExtension}`
-}
-
-function loadImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(blob)
-    const image = new Image()
-    const cleanup = () => {
-      image.onload = null
-      image.onerror = null
-      URL.revokeObjectURL(objectUrl)
-    }
-
-    image.onload = () => {
-      cleanup()
-      resolve(image)
-    }
-    image.onerror = () => {
-      cleanup()
-      reject(new Error('Failed to decode cropped canvas image asset.'))
-    }
-    image.src = objectUrl
-  })
-}
-
-async function readBlobAsArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
-  const blobWithArrayBuffer = blob as Blob & { arrayBuffer?: () => Promise<ArrayBuffer> }
-  if (typeof blobWithArrayBuffer.arrayBuffer === 'function') {
-    return await blobWithArrayBuffer.arrayBuffer()
-  }
-
-  return await new Promise<ArrayBuffer>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result as ArrayBuffer)
-    reader.onerror = () =>
-      reject(reader.error ?? new Error('Failed to read cropped canvas blob as ArrayBuffer.'))
-    reader.readAsArrayBuffer(blob)
-  })
-}
-
-async function createProjectCroppedImageAsset(
-  sourceAsset: ResolvedCanvasBinaryAsset,
-  crop: NormalizedCanvasImageCrop,
-  mimeType: string,
-  fileName: string
-): Promise<CroppedProjectImageAsset | null> {
-  if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
-    return null
-  }
-
-  try {
-    const sourceMimeType =
-      sourceAsset.mimeType.startsWith('image/') && sourceAsset.mimeType
-        ? sourceAsset.mimeType
-        : mimeType
-    const image = await loadImageFromBlob(new Blob([sourceAsset.data], { type: sourceMimeType }))
-    const canvas = document.createElement('canvas')
-    const pixelWidth = Math.max(1, Math.round(crop.width))
-    const pixelHeight = Math.max(1, Math.round(crop.height))
-    canvas.width = pixelWidth
-    canvas.height = pixelHeight
-
-    const context = canvas.getContext('2d')
-    if (!context || typeof canvas.toBlob !== 'function') {
-      return null
-    }
-
-    context.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, pixelWidth, pixelHeight)
-
-    const croppedBlob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob((blob) => resolve(blob), mimeType)
-    })
-    if (!croppedBlob) {
-      return null
-    }
-
-    return {
-      key: sourceAsset.key,
-      fileName,
-      data: await readBlobAsArrayBuffer(croppedBlob),
-      mimeType: croppedBlob.type || mimeType,
-      pixelWidth,
-      pixelHeight
-    }
-  } catch (error) {
-    console.warn('[Canvas Storage] Failed to flatten cropped project image asset:', error)
-    return null
-  }
-}
-
 async function resolveProjectStorageRootPath(): Promise<string | null> {
   if (!window.api?.svcState || !window.path || typeof window.path.join !== 'function') {
     return null
@@ -864,12 +647,13 @@ function resolveProjectAssetCategory(
 function buildProjectAssetRef(
   assetKey: string,
   rawFileName: string,
-  itemType: BlobPersistableCanvasItem['type'] | 'texture'
+  itemType: BlobPersistableCanvasItem['type'] | 'texture',
+  snapshotId: string
 ): string {
-  return `${PROJECT_ASSET_DIRNAME}/${resolveProjectAssetCategory(itemType)}/${buildProjectAssetFileName(assetKey, rawFileName)}`
+  return `${PROJECT_ASSET_DIRNAME}/${snapshotId}/${resolveProjectAssetCategory(itemType)}/${buildProjectAssetFileName(assetKey, rawFileName)}`
 }
 
-function buildProjectAssetRefMap(items: CanvasItem[]): Map<string, string> {
+function buildProjectAssetRefMap(items: CanvasItem[], snapshotId: string): Map<string, string> {
   const refs = new Map<string, string>()
 
   for (const item of items) {
@@ -878,12 +662,12 @@ function buildProjectAssetRefMap(items: CanvasItem[]): Map<string, string> {
     }
 
     const resolvedFileName = resolveCanvasAssetFileName(item)
-    refs.set(item.id, buildProjectAssetRef(item.id, resolvedFileName, item.type))
+    refs.set(item.id, buildProjectAssetRef(item.id, resolvedFileName, item.type, snapshotId))
 
     if (item.type === 'model3d' && item.textures) {
       for (const textureName of Object.keys(item.textures)) {
         const textureKey = getModelTextureKey(item.id, textureName)
-        refs.set(textureKey, buildProjectAssetRef(textureKey, textureName, 'texture'))
+        refs.set(textureKey, buildProjectAssetRef(textureKey, textureName, 'texture', snapshotId))
       }
     }
   }
@@ -951,7 +735,7 @@ async function writeProjectAssetFiles(
   }
 
   await Promise.all(
-    assetEntries.map((entry) => {
+    assetEntries.map(async (entry) => {
       const relativeRef = entry.projectAssetRef
         ? normalizeProjectAssetRef(entry.projectAssetRef)
         : buildProjectAssetFileName(entry.key, entry.fileName)
@@ -964,11 +748,14 @@ async function writeProjectAssetFiles(
       const outputPath =
         relativeSegments.length > 0 ? window.path.join(assetDir, ...relativeSegments) : assetDir
 
-      return window.api.svcFs.saveImageToPath({
+      const receipt = await window.api.svcFs.saveImageToPath({
         image: new Uint8Array(entry.data),
         outputPath,
         filename
       })
+      if (receipt?.success !== true) {
+        throw new Error('CANVAS_PROJECT_ASSET_WRITE_UNACKNOWLEDGED')
+      }
     })
   )
 }
@@ -998,11 +785,14 @@ async function saveAutoSaveCanvasFile(
       storeKey
     )
     await writeProjectAssetFiles(assetDir, assetEntries)
-    await window.api.svcFs.writeTextFile({
+    const receipt = await window.api.svcFs.writeTextFile({
       outputPath: projectDir,
       filename: AUTOSAVE_CANVAS_FILENAME,
       content: JSON.stringify(canvasFileData)
     })
+    if (receipt?.success !== true) {
+      throw new Error('CANVAS_PROJECT_METADATA_WRITE_UNACKNOWLEDGED')
+    }
     if (typeof window.api.svcFs.pruneAutoSaveProjects === 'function') {
       void window.api.svcFs.pruneAutoSaveProjects({
         currentProjectDirName: resolveProjectStorageDirName(storeKey),
@@ -1041,11 +831,14 @@ async function saveProjectCanvasFile(
     )
 
     await writeProjectAssetFiles(location.assetDir, assetEntries)
-    await window.api.svcFs.writeTextFile({
+    const receipt = await window.api.svcFs.writeTextFile({
       outputPath: location.projectRootDir,
       filename: location.canvasFilename,
       content: JSON.stringify(canvasFileData)
     })
+    if (receipt?.success !== true) {
+      throw new Error('CANVAS_PROJECT_METADATA_WRITE_UNACKNOWLEDGED')
+    }
     return true
   } catch (error) {
     console.warn('[Canvas Storage] Failed to save project canvas file:', error)
@@ -1069,7 +862,10 @@ async function readCanvasItemsFromProjectFile(
         : undefined
     return await restoreCanvasFileData(parsed, {
       restoreQAppState: false,
-      persistEmbeddedAssetsToIndexedDb: true,
+      // A fallback is a read, not an IDB commit: writing its embedded bytes
+      // independently can overwrite a live canvas (or mix two snapshots).
+      // Restored object URLs remain usable until the ordinary explicit save.
+      persistEmbeddedAssetsToIndexedDb: false,
       canvasBaseDir
     })
   } catch (error) {
@@ -1082,70 +878,97 @@ async function readCanvasItemsFromProjectFile(
   }
 }
 
-async function loadBlobUrlMap(
-  db: IDBDatabase,
+type CanvasStoredBinary = { data: ArrayBuffer; mimeType: string }
+
+// Enqueue these reads while the metadata request's transaction is active.
+// Blob URLs are created only after the combined readonly transaction commits.
+function queueCanvasBlobSnapshotReads(
+  store: IDBObjectStore,
   storeKey: string,
-  itemIds: readonly string[]
-): Promise<Map<string, string>> {
-  if (itemIds.length === 0) return new Map()
+  itemIds: readonly string[],
+  target: Map<string, CanvasStoredBinary>
+): void {
+  for (const itemId of new Set(itemIds)) {
+    const scopedRequest = store.get(getScopedCanvasBlobKey(storeKey, itemId))
+    const legacyRequest = store.get(itemId)
+    let scopedResult: CanvasStoredBinary | undefined
+    let legacyResult: CanvasStoredBinary | undefined
+    let completed = 0
+    const finish = () => {
+      if (++completed !== 2) return
+      const result = scopedResult || legacyResult
+      if (result) target.set(itemId, result)
+    }
+    scopedRequest.onsuccess = () => {
+      scopedResult = scopedRequest.result as CanvasStoredBinary | undefined
+      finish()
+    }
+    legacyRequest.onsuccess = () => {
+      legacyResult = legacyRequest.result as CanvasStoredBinary | undefined
+      finish()
+    }
+    // Request errors abort the transaction; do not prevent their default action.
+  }
+}
 
-  const uniqueItemIds = [...new Set(itemIds)]
-  const tx = db.transaction(BLOB_STORE_NAME, 'readonly')
-  const store = tx.objectStore(BLOB_STORE_NAME)
-  const restoredEntries = await Promise.all(
-    uniqueItemIds.map(
-      (itemId) =>
-        new Promise<readonly [string, string] | null>((resolve, reject) => {
-          const scopedRequest = store.get(getScopedCanvasBlobKey(storeKey, itemId))
-          const legacyRequest = store.get(itemId)
-          let scopedResult: { data: ArrayBuffer; mimeType: string } | undefined
-          let legacyResult: { data: ArrayBuffer; mimeType: string } | undefined
-          let completedRequests = 0
-          const finish = () => {
-            completedRequests += 1
-            if (completedRequests < 2) {
-              return
-            }
-            const result = scopedResult || legacyResult
-            if (!result) {
-              resolve(null)
-              return
-            }
+async function readIndexedDbCanvasSnapshot(
+  db: IDBDatabase,
+  storeKey: string
+): Promise<{
+  persisted: CanvasPersistedData | SerializableCanvasItem[] | undefined
+  binaries: Map<string, CanvasStoredBinary>
+}> {
+  return await new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readonly')
+    const binaries = new Map<string, CanvasStoredBinary>()
+    let persisted: CanvasPersistedData | SerializableCanvasItem[] | undefined
+    tx.oncomplete = () => resolve({ persisted, binaries })
+    tx.onabort = () => rejectCanvasStorageError(reject, 'canvas snapshot read transaction', tx.error)
+    tx.onerror = () => rejectCanvasStorageError(reject, 'canvas snapshot read transaction', tx.error)
+    try {
+      const request = tx.objectStore(STORE_NAME).get(storeKey)
+      request.onsuccess = () => {
+        try {
+          persisted = request.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
+          if (persisted === undefined) return
+          const { items } = extractPersistedCanvasData(persisted)
+          const blobBackedItems = items.filter(
+            (item): item is SerializableBlobPersistableCanvasItem =>
+              isBlobPersistableCanvasItem(item) &&
+              (!item.src || hasLocallyPersistableCanvasSrc(item) || isRelativeCanvasAssetReference(item.src))
+          )
+          const keys = blobBackedItems.flatMap((item) => [
+            item.id,
+            ...(item.type === 'model3d' && item.textures
+              ? Object.keys(item.textures).map((name) => getModelTextureKey(item.id, name))
+              : [])
+          ])
+          queueCanvasBlobSnapshotReads(tx.objectStore(BLOB_STORE_NAME), storeKey, keys, binaries)
+        } catch (error) {
+          try { tx.abort() } catch { /* Already inactive. */ }
+          rejectCanvasStorageError(reject, 'canvas snapshot read transaction', error)
+        }
+      }
+    } catch (error) {
+      try { tx.abort() } catch { /* Already inactive. */ }
+      rejectCanvasStorageError(reject, 'canvas snapshot read transaction', error)
+    }
+  })
+}
 
-            const blob = new Blob([result.data], { type: result.mimeType })
-            resolve([itemId, URL.createObjectURL(blob)] as const)
-          }
-          scopedRequest.onsuccess = () => {
-            scopedResult = scopedRequest.result as
-              | { data: ArrayBuffer; mimeType: string }
-              | undefined
-            finish()
-          }
-          legacyRequest.onsuccess = () => {
-            legacyResult = legacyRequest.result as
-              | { data: ArrayBuffer; mimeType: string }
-              | undefined
-            finish()
-          }
-          scopedRequest.onerror = () =>
-            rejectCanvasStorageError(
-              reject,
-              `scoped blob load request for ${itemId}`,
-              scopedRequest.error
-            )
-          legacyRequest.onerror = () =>
-            rejectCanvasStorageError(
-              reject,
-              `legacy blob load request for ${itemId}`,
-              legacyRequest.error
-            )
-        })
-    )
-  )
-
-  return new Map(
-    restoredEntries.filter((entry): entry is readonly [string, string] => entry !== null)
-  )
+function createCanvasBlobUrlMap(
+  binaries: ReadonlyMap<string, CanvasStoredBinary>
+): Map<string, string> {
+  const urls = new Map<string, string>()
+  try {
+    for (const [key, value] of binaries) {
+      urls.set(key, URL.createObjectURL(new Blob([value.data], { type: value.mimeType })))
+    }
+    return urls
+  } catch (error) {
+    for (const url of urls.values()) URL.revokeObjectURL(url)
+    throw error
+  }
 }
 
 async function deleteBlobData(db: IDBDatabase, itemId: string): Promise<void> {
@@ -1282,8 +1105,9 @@ export async function saveCanvasItems(
   groupBranches: CanvasGroupBranch[] = [],
   figmaBinding: CanvasFigmaBinding | null = null
 ): Promise<void> {
+  let db: IDBDatabase | undefined
   try {
-    const db = await openDB()
+    db = await openDB()
 
     // 1. Persist blob-backed binary data (image / model3d / video / file).
     const blobItems = items.filter(
@@ -1344,14 +1168,6 @@ export async function saveCanvasItems(
 
     const allBlobEntries = [...persistedBlobEntries, ...persistedTextureEntries]
 
-    await saveBlobEntries(db, storeKey, allBlobEntries)
-
-    // Keep stale entries until a later successful snapshot/explicit clear. Deleting them before
-    // metadata commits creates a crash window where the previous snapshot references missing blobs.
-
-    // 3. Save canvas metadata.
-    const tx = db.transaction(STORE_NAME, 'readwrite')
-    const store = tx.objectStore(STORE_NAME)
     const locallyPersistedItemIds = new Set(
       persistedBlobEntries.map((entry) => entry.key).filter((key) => !key.includes('::tex::'))
     )
@@ -1371,16 +1187,29 @@ export async function saveCanvasItems(
       groupBranches,
       figmaBinding
     }
-    store.put(payload, storeKey)
-
+    // Commit binary entries and metadata together so an aborted write cannot
+    // pair old metadata with newly overwritten bytes.
+    const tx = db.transaction([BLOB_STORE_NAME, STORE_NAME], 'readwrite')
     await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => {
-        db.close()
-        resolve()
+      tx.oncomplete = () => resolve()
+      tx.onabort = () => {
+        rejectCanvasStorageError(reject, 'canvas snapshot save transaction', tx.error)
       }
       tx.onerror = () => {
-        db.close()
-        rejectCanvasStorageError(reject, 'canvas metadata save transaction', tx.error)
+        rejectCanvasStorageError(reject, 'canvas snapshot save transaction', tx.error)
+      }
+      try {
+        const blobStore = tx.objectStore(BLOB_STORE_NAME)
+        for (const entry of allBlobEntries) {
+          blobStore.put(
+            { data: entry.data, mimeType: entry.mimeType },
+            getScopedCanvasBlobKey(storeKey, entry.key)
+          )
+        }
+        tx.objectStore(STORE_NAME).put(payload, storeKey)
+      } catch (error) {
+        try { tx.abort() } catch { /* Already inactive. */ }
+        rejectCanvasStorageError(reject, 'canvas snapshot save transaction', error)
       }
     })
 
@@ -1396,6 +1225,8 @@ export async function saveCanvasItems(
     const normalizedError = normalizeCanvasStorageError(err, '[Canvas Storage] Save failed.')
     console.error('[Canvas Storage] 保存失败:', normalizedError)
     throw normalizedError
+  } finally {
+    db?.close()
   }
 }
 
@@ -1410,23 +1241,15 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
   groupBranches: CanvasGroupBranch[]
   figmaBinding: CanvasFigmaBinding | null
 }> {
+  let db: IDBDatabase | undefined
+  let createdUrls: Map<string, string> | undefined
   try {
-    const db = await openDB()
-    const tx = db.transaction(STORE_NAME, 'readonly')
-    const store = tx.objectStore(STORE_NAME)
-    const request = store.get(storeKey)
-
-    const persisted = await new Promise<CanvasPersistedData | SerializableCanvasItem[] | undefined>(
-      (resolve, reject) => {
-        request.onsuccess = () =>
-          resolve(request.result as CanvasPersistedData | SerializableCanvasItem[] | undefined)
-        request.onerror = () =>
-          rejectCanvasStorageError(reject, `canvas load request for ${storeKey}`, request.error)
-      }
-    )
+    db = await openDB()
+    const { persisted, binaries } = await readIndexedDbCanvasSnapshot(db, storeKey)
+    db.close()
+    db = undefined
 
     if (persisted === undefined) {
-      db.close()
       const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups: [], groupBranches: [], figmaBinding: null }
     }
@@ -1440,52 +1263,46 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
     const resolvedIndexedDbItems = await resolveIndexedDbProjectCanvasAssetUrls(storeKey, data)
 
     if (resolvedIndexedDbItems.length === 0) {
-      db.close()
       const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups, groupBranches, figmaBinding }
     }
 
-    // Restore image / model3d / video / file blob URLs.
-    const restorableBlobBackedItems = resolvedIndexedDbItems.filter(
-      (item): item is SerializableBlobPersistableCanvasItem =>
-        isBlobPersistableCanvasItem(item) && (!item.src || hasLocallyPersistableCanvasSrc(item))
-    )
-    const restoredItemBlobUrls = await loadBlobUrlMap(
-      db,
-      storeKey,
-      restorableBlobBackedItems.map((item) => item.id)
-    )
-    const restoredTextureUrls = await loadBlobUrlMap(
-      db,
-      storeKey,
-      restorableBlobBackedItems.flatMap((item) => {
-        if (item.type !== 'model3d') return []
-        const textures = (item as { textures?: Record<string, string> }).textures
-        return textures
-          ? Object.keys(textures).map((texName) => getModelTextureKey(item.id, texName))
-          : []
-      })
-    )
+    // Resolve external project paths after the transaction. Only use binary
+    // keys whose resolved item source was eligible under the legacy loader;
+    // an unresolved relative path must not acquire a stale same-ID blob.
+    const eligibleKeys = new Set<string>()
+    for (const item of resolvedIndexedDbItems) {
+      if (!isBlobPersistableCanvasItem(item) || (item.src && !hasLocallyPersistableCanvasSrc(item))) continue
+      eligibleKeys.add(item.id)
+      if (item.type === 'model3d' && item.textures) {
+        for (const name of Object.keys(item.textures)) eligibleKeys.add(getModelTextureKey(item.id, name))
+      }
+    }
+    createdUrls = createCanvasBlobUrlMap(new Map([...binaries].filter(([key]) => eligibleKeys.has(key))))
+    const restoredItems = restorePersistedCanvasItems(resolvedIndexedDbItems, createdUrls)
 
-    const restoredBlobUrls = new Map<string, string>([
-      ...restoredItemBlobUrls,
-      ...restoredTextureUrls
-    ])
-    const restoredItems = restorePersistedCanvasItems(resolvedIndexedDbItems, restoredBlobUrls)
-
-    db.close()
     if (restoredItems.length === 0 && resolvedIndexedDbItems.length > 0) {
+      for (const url of createdUrls.values()) URL.revokeObjectURL(url)
+      createdUrls = undefined
       const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups, groupBranches, figmaBinding }
     }
+    createdUrls = undefined // Ownership passes to the returned canvas items.
     return { items: restoredItems, groups, groupBranches, figmaBinding }
   } catch (err) {
+    if (createdUrls) {
+      for (const url of createdUrls.values()) URL.revokeObjectURL(url)
+    }
+    db?.close()
+    db = undefined
     console.error(
       '[Canvas Storage] 加载失败:',
       normalizeCanvasStorageError(err, '[Canvas Storage] Load failed.')
     )
     const projectSnapshot = await loadCanvasFallback(storeKey)
     return projectSnapshot ?? { items: [], groups: [], groupBranches: [], figmaBinding: null }
+  } finally {
+    db?.close()
   }
 }
 
@@ -1743,11 +1560,14 @@ async function writeCanvasExportToPath(targetPath: string, json: string): Promis
   const dirPath = window.path.dirname(targetPath)
   const outFilename = window.path.basename(targetPath)
 
-  await window.api.svcFs.saveImageToPath({
+  const receipt = await window.api.svcFs.saveImageToPath({
     image: buffer,
     outputPath: dirPath,
     filename: outFilename
   })
+  if (receipt?.success !== true) {
+    throw new Error('Native canvas save was not acknowledged.')
+  }
 }
 
 async function buildCanvasFileData(
@@ -1821,9 +1641,13 @@ async function buildProjectCanvasFileData(
   canvasFileData: CanvasFileData
   assetEntries: ResolvedCanvasBinaryAsset[]
 }> {
+  // Stage each snapshot under a fresh namespace; replacing a fixed asset path
+  // before metadata commits can change the bytes referenced by the old file.
+  // If randomness is unavailable, fail this mirror save rather than overwrite.
+  const snapshotId = `snapshot-${crypto.randomUUID()}`
   const serializedItems = serializeItems(items)
   const assetFileNames = buildCanvasAssetFileNameMap(items)
-  const projectAssetRefs = buildProjectAssetRefMap(items)
+  const projectAssetRefs = buildProjectAssetRefMap(items, snapshotId)
   const seededAssets = new Map(
     seededAssetEntries.map((entry) => [
       entry.key,
@@ -1850,78 +1674,13 @@ async function buildProjectCanvasFileData(
       const nextItem = { ...serializedItem } as SerializableBlobPersistableCanvasItem
       const resolvedFileName =
         assetFileNames.get(sourceItem.id) || resolveCanvasAssetFileName(sourceItem)
-      const projectCrop =
-        serializedItem.type === 'image' && sourceItem.type === 'image'
-          ? normalizeProjectCanvasImageCrop(sourceItem)
-          : null
-      const croppedImageMimeType =
-        serializedItem.type === 'image' && sourceItem.type === 'image' && projectCrop
-          ? resolveProjectCroppedImageMimeType(sourceItem, resolvedFileName)
-          : null
-
-      if (
-        serializedItem.type === 'image' &&
-        sourceItem.type === 'image' &&
-        projectCrop &&
-        croppedImageMimeType
-      ) {
-        const croppedFileName = ensureProjectImageFileNameMatchesMimeType(
-          resolvedFileName,
-          croppedImageMimeType
-        )
-        const croppedAssetRef = buildProjectAssetRef(
-          sourceItem.id,
-          croppedFileName,
-          sourceItem.type
-        )
-        const sourceAsset =
-          seededAssets.get(sourceItem.id) ||
-          (await resolveCanvasBinaryAssetForItem(
-            sourceItem,
-            sourceItem.id,
-            sourceItem.src,
-            croppedFileName,
-            guessMimeType(croppedFileName),
-            storeKey,
-            { allowIndexedDbFallback: true }
-          ))
-
-        if (sourceAsset) {
-          const croppedAsset = await createProjectCroppedImageAsset(
-            sourceAsset,
-            projectCrop,
-            croppedImageMimeType,
-            croppedFileName
-          )
-          if (croppedAsset) {
-            assetEntries.set(croppedAsset.key, {
-              ...croppedAsset,
-              projectAssetRef: croppedAssetRef
-            })
-            const flattenedImageItem = {
-              ...(nextItem as SerializableCanvasItem & { crop?: CanvasImageItem['crop'] })
-            }
-            delete flattenedImageItem.crop
-
-            return {
-              ...flattenedImageItem,
-              src: croppedAssetRef,
-              sourceWidth: croppedAsset.pixelWidth,
-              sourceHeight: croppedAsset.pixelHeight,
-              sizeBytes: croppedAsset.data.byteLength
-            } as SerializableCanvasItem
-          }
-        } else {
-          console.error(
-            '[Canvas Storage] Failed to resolve cropped image source asset:',
-            sourceItem.id
-          )
-        }
-      }
-
+      // Crop hints do not authenticate their coordinate system, even when a
+      // later hydration has backfilled source dimensions that match the bytes.
+      // Keep the source and crop together in the mirror instead of flattening
+      // and deleting potentially recoverable user content.
       const assetRef =
         projectAssetRefs.get(sourceItem.id) ||
-        buildProjectAssetRef(sourceItem.id, resolvedFileName, sourceItem.type)
+        buildProjectAssetRef(sourceItem.id, resolvedFileName, sourceItem.type, snapshotId)
       const assetFullPath = resolveProjectAssetFullPath(projectRootDir, assetRef)
 
       if (assetFullPath) {
@@ -1968,7 +1727,7 @@ async function buildProjectCanvasFileData(
           const textureKey = getModelTextureKey(sourceItem.id, textureName)
           const textureRef =
             projectAssetRefs.get(textureKey) ||
-            buildProjectAssetRef(textureKey, textureName, 'texture')
+            buildProjectAssetRef(textureKey, textureName, 'texture', snapshotId)
           const textureFullPath = resolveProjectAssetFullPath(projectRootDir, textureRef)
 
           if (!textureFullPath) {
@@ -2162,6 +1921,121 @@ async function validateProjectCanvasAssetRefs(
   }
 }
 
+const canvasImportAssetPersistenceError = (): Error =>
+  new Error('Unable to persist MagicPot canvas import assets without overwriting existing data')
+
+function closeCanvasImportAssetDatabase(db: IDBDatabase): void {
+  try {
+    db.close()
+  } catch {
+    // Closing must not replace a settled write outcome or inspect native diagnostics.
+  }
+}
+
+// Explicit append only. Ordinary openDB intentionally retains its separate legacy error policy.
+function openCanvasImportAssetDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    let request: IDBOpenDBRequest
+    try {
+      request = indexedDB.open(DB_NAME, DB_VERSION)
+    } catch {
+      reject(canvasImportAssetPersistenceError())
+      return
+    }
+    let upgradeFailed = false
+    request.onupgradeneeded = () => {
+      if (upgradeFailed) return
+      try {
+        const db = request.result
+        if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME)
+        if (!db.objectStoreNames.contains(BLOB_STORE_NAME)) db.createObjectStore(BLOB_STORE_NAME)
+      } catch {
+        upgradeFailed = true
+        try {
+          request.transaction?.abort()
+        } catch {
+          // Abort invocation is not the terminal open outcome; keep waiting for error/success.
+        }
+      }
+    }
+    request.onerror = () => reject(canvasImportAssetPersistenceError())
+    request.onsuccess = () => {
+      const db = request.result
+      if (upgradeFailed) {
+        closeCanvasImportAssetDatabase(db)
+        reject(canvasImportAssetPersistenceError())
+      } else {
+        resolve(db)
+      }
+    }
+  })
+}
+
+async function persistNewCanvasFileEmbeddedAssets(
+  blobs: Record<string, EmbeddedBlob> | undefined,
+  storeKey: string,
+  isCurrent?: () => boolean
+): Promise<void> {
+  if (isCurrent?.() === false || !blobs || Object.keys(blobs).length === 0) return
+  let db: IDBDatabase | undefined
+  try {
+    // Finish all decoding before acquiring a write transaction, including unused embedded keys.
+    const entries = Object.entries(blobs).map(([key, embedded]) => ({
+      key,
+      data: base64ToArrayBuffer(embedded.base64),
+      mimeType: embedded.mimeType
+    }))
+    db = await openCanvasImportAssetDatabase()
+    if (isCurrent?.() === false) return
+    const database = db
+    await new Promise<void>((resolve, reject) => {
+      let tx: IDBTransaction
+      try {
+        tx = database.transaction(BLOB_STORE_NAME, 'readwrite')
+      } catch {
+        reject(canvasImportAssetPersistenceError())
+        return
+      }
+      let failed = false
+      let abortRequested = false
+      const fail = (): void => {
+        failed = true
+        if (abortRequested) return
+        abortRequested = true
+        try {
+          tx.abort()
+        } catch {
+          // Keep ownership until a real terminal event even when abort throws.
+        }
+      }
+      tx.oncomplete = () => {
+        if (failed) reject(canvasImportAssetPersistenceError())
+        else resolve()
+      }
+      tx.onabort = () => reject(canvasImportAssetPersistenceError())
+      tx.onerror = fail
+      try {
+        const store = tx.objectStore(BLOB_STORE_NAME)
+        for (const entry of entries) {
+          const request = store.add(
+            { data: entry.data, mimeType: entry.mimeType },
+            getScopedCanvasBlobKey(storeKey, entry.key)
+          )
+          request.onerror = fail
+        }
+      } catch {
+        // Stop synchronous queueing. Request errors may arrive after other adds were queued.
+        fail()
+      }
+    })
+  } catch {
+    // Never normalize, log, inspect or retain native failures, keys or payloads.
+    throw canvasImportAssetPersistenceError()
+  } finally {
+    if (db) closeCanvasImportAssetDatabase(db)
+  }
+}
+
 async function persistCanvasFileEmbeddedAssets(
   blobs: Record<string, EmbeddedBlob> | undefined,
   storeKey: string = KEY
@@ -2185,6 +2059,10 @@ async function persistCanvasFileEmbeddedAssets(
   }
 }
 
+const emptyCanvasFileSnapshot = (): RestoredCanvasFileSnapshot => ({
+  items: [], groups: [], groupBranches: [], figmaBinding: null
+})
+
 async function restoreCanvasFileData(
   data: CanvasFileData,
   options: CanvasFileRestoreOptions = {}
@@ -2196,8 +2074,10 @@ async function restoreCanvasFileData(
   const {
     restoreQAppState = true,
     persistEmbeddedAssetsToIndexedDb = true,
+    requireNewEmbeddedAssets = false,
     canvasBaseDir,
-    storeKey = KEY
+    storeKey = KEY,
+    isCurrent
   } = options
   const storageMode = resolveCanvasFileStorageMode(data)
 
@@ -2218,14 +2098,24 @@ async function restoreCanvasFileData(
   const restoredBlobUrls = new Map<string, string>()
 
   try {
+    if (isCurrent?.() === false) return emptyCanvasFileSnapshot()
     for (const [blobKey, embedded] of Object.entries(data.blobs || {})) {
       const buffer = base64ToArrayBuffer(embedded.base64)
       const blob = new Blob([buffer], { type: embedded.mimeType })
       restoredBlobUrls.set(blobKey, URL.createObjectURL(blob))
     }
 
+    if (isCurrent?.() === false) {
+      for (const url of restoredBlobUrls.values()) URL.revokeObjectURL(url)
+      return emptyCanvasFileSnapshot()
+    }
     if (persistEmbeddedAssetsToIndexedDb) {
-      await persistCanvasFileEmbeddedAssets(data.blobs, storeKey)
+      if (requireNewEmbeddedAssets) await persistNewCanvasFileEmbeddedAssets(data.blobs, storeKey, isCurrent)
+      else await persistCanvasFileEmbeddedAssets(data.blobs, storeKey)
+    }
+    if (isCurrent?.() === false) {
+      for (const url of restoredBlobUrls.values()) URL.revokeObjectURL(url)
+      return emptyCanvasFileSnapshot()
     }
 
     if (storageMode === 'project' && !canvasBaseDir) {
@@ -2233,6 +2123,10 @@ async function restoreCanvasFileData(
     }
 
     await validateProjectCanvasAssetRefs(data.items, canvasBaseDir, storageMode)
+    if (isCurrent?.() === false) {
+      for (const url of restoredBlobUrls.values()) URL.revokeObjectURL(url)
+      return emptyCanvasFileSnapshot()
+    }
     const resolvedItems = resolveProjectCanvasAssetUrls(data.items, canvasBaseDir, storageMode)
     const restoredItems = restorePersistedCanvasItems(resolvedItems, restoredBlobUrls)
     const blobCount = data.blobs ? Object.keys(data.blobs).length : 0
@@ -2260,6 +2154,12 @@ async function restoreCanvasFileData(
   }
 }
 
+// Native acknowledgement is not a durability/readback certificate; a browser click is only a request.
+export type CanvasFileSaveOutcome =
+  | Readonly<{ status: 'native-written' }>
+  | Readonly<{ status: 'cancelled' }>
+  | Readonly<{ status: 'download-requested' }>
+
 /**
  * Export canvas items to an .mpcanvas file.
  * v6 embeds all canvas binary assets so exports stay restorable on a fresh device.
@@ -2274,7 +2174,7 @@ export async function exportCanvasFile(
   groupBranches: CanvasGroupBranch[] = [],
   updateCurrentDocumentPath: boolean = true,
   onSaveDialogOpened?: () => void
-): Promise<void> {
+): Promise<CanvasFileSaveOutcome> {
   const name =
     fileName ||
     `canvas_${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}${CANVAS_FILE_EXT}`
@@ -2298,7 +2198,7 @@ export async function exportCanvasFile(
         `[Canvas Export] Saved ${items.length} items to ${cachedTargetPath}` +
           (blobCount > 0 ? ` (${blobCount} embedded assets)` : '')
       )
-      return
+      return { status: 'native-written' }
     } catch (err) {
       clearCanvasSaveTargetPath(canvasId)
       console.error('[Canvas Export] Cached save target failed, reopening Save As flow', err)
@@ -2319,9 +2219,10 @@ export async function exportCanvasFile(
       onSaveDialogOpened?.()
       const res = await saveDialogPromise
       if (res.canceled || !res.filePath) {
-        return // User canceled.
+        return { status: 'cancelled' }
       }
       targetPath = res.filePath
+      // Preserve the existing pre-write target selection; the cache does not certify persistence.
       if (updateCurrentDocumentPath) {
         rememberCanvasSaveTargetPath(canvasId, targetPath)
       }
@@ -2334,7 +2235,7 @@ export async function exportCanvasFile(
           (blobCount > 0 ? ` (${blobCount} embedded assets)` : '')
       )
       // saveImageToPath handles arbitrary binary payloads, so no extra extension fixup is needed.
-      return
+      return { status: 'native-written' }
     } catch (err) {
       console.error('[Canvas Export] Native save failed, falling back to browser download', err)
     }
@@ -2355,6 +2256,7 @@ export async function exportCanvasFile(
     `[Canvas Export] Exported ${items.length} items to ${name}` +
       (blobCount > 0 ? ` (${blobCount} embedded assets)` : '')
   )
+  return { status: 'download-requested' }
 }
 
 /**
@@ -2370,8 +2272,8 @@ export async function exportCanvasFileAsStandalone(
   groups: CanvasGroup[] = [],
   figmaBinding: CanvasFigmaBinding | null = null,
   groupBranches: CanvasGroupBranch[] = []
-): Promise<void> {
-  await exportCanvasFile(
+): Promise<CanvasFileSaveOutcome> {
+  return await exportCanvasFile(
     items,
     fileName,
     canvasId,
@@ -2385,7 +2287,8 @@ export async function exportCanvasFileAsStandalone(
 
 export async function importCanvasFile(
   file: File,
-  targetStoreKey: string = KEY
+  targetStoreKey: string = KEY,
+  isCurrent?: () => boolean
 ): Promise<{
   items: CanvasItem[]
   groups: CanvasGroup[]
@@ -2393,8 +2296,10 @@ export async function importCanvasFile(
   qAppKey?: string
   figmaBinding: CanvasFigmaBinding | null
 }> {
+  assertCanvasImportFileSize(file.size)
   const text = await file.text()
-  const data = JSON.parse(text) as CanvasFileData
+  if (isCurrent?.() === false) return emptyCanvasFileSnapshot()
+  const data = parseCanvasImportText(text) as CanvasFileData
   const canvasFilePath = getElectronCanvasFilePath(file)
   const canvasBaseDir =
     canvasFilePath && window.path && typeof window.path.dirname === 'function'
@@ -2403,8 +2308,10 @@ export async function importCanvasFile(
   return await restoreCanvasFileData(data, {
     restoreQAppState: false,
     persistEmbeddedAssetsToIndexedDb: true,
+    requireNewEmbeddedAssets: true,
     storeKey: targetStoreKey,
-    canvasBaseDir
+    canvasBaseDir,
+    isCurrent
   })
 }
 

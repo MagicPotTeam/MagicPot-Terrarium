@@ -56,7 +56,7 @@ import { initTaskQueue, stopTaskQueue } from './queue/taskQueue'
 import { cleanupSubProcesses } from './subprocess/subprocess'
 import { disposeFigPluginBridges } from './api/svcFigPluginCenterImpl'
 import { setConsoleTransportEnabled } from './utils/loggingOverride'
-import { winController } from './winControls'
+import { getAuthoritativeMainWindow, winController } from './winControls'
 import { createCheckpointStore } from './figplugin/checkpointEncryption'
 import {
   createCheckpointCleanupScheduler,
@@ -129,7 +129,7 @@ function startBackgroundTasks(): void {
     })
     checkpointCleanupScheduler.start()
   }
-  initServerIpc(managedMediaCleanupScheduler, () => winController.getMainWindow())
+  initServerIpc(managedMediaCleanupScheduler, getAuthoritativeMainWindow)
 }
 
 function registerRuntimeServiceManager(
@@ -211,6 +211,7 @@ export async function beforeShow() {
 }
 
 export async function beforeQuit() {
+  await runLifecycleStep('Agent Docker sessions stopped', async () => { await (await import('./api/agentThreadRemoteShellHost')).closeAgentDockerSessions() })
   await runLifecycleStep('LLM server stopped', () => stopLLMProxyServer())
   const managedMediaSchedulerStopped = await runLifecycleStep(
     'Managed media cleanup scheduler stopped',

@@ -17,6 +17,9 @@ import type {
   FilesWriteInput,
   FilesWriteOutput,
   FilesEditInput,
+  FilesEditMode,
+  FilesEditReport,
+  FilesEditStep,
   FilesEditOutput,
   FilesPatchInput,
   FilesPatchOutput,
@@ -83,6 +86,11 @@ export type FilesToolAuditEvidence = Readonly<{
   snapshotId?: string
   mutationUncertain?: boolean
   truncated?: boolean
+  editMode?: FilesEditMode
+  editApplied?: number
+  editFailed?: number
+  editSkipped?: number
+  editWriteStatus?: FilesEditReport['writeStatus']
   durationMs: number
 }>
 type AuthorizedInput<T> = Readonly<{
@@ -112,6 +120,22 @@ export class FilesToolAuthorizationError extends Error {
     this.name = 'FilesToolAuthorizationError'
   }
 }
+export class FilesToolEditError extends Error {
+  readonly code = 'MAGIC_AGENT_FILES_EDIT_FAILED'
+  declare readonly mutation?: FilesMutationOutput
+  constructor(
+    readonly report: FilesEditReport,
+    mutation?: FilesMutationOutput
+  ) {
+    const first = report.steps.find((step) => step.status === 'failed')
+    super(
+      `Exact replacement occurrence expectation failed: expected ${first?.expectedOccurrences}, found ${first?.observedOccurrences}. Mode ${report.mode}; ${report.applied} evaluated, ${report.failed} failed, ${report.skipped} skipped; ${report.writeStatus}. Review the receipt before retrying.`
+    )
+    this.name = 'FilesToolEditError'
+    if (mutation) this.mutation = mutation
+  }
+}
+
 export class FilesToolMutationError extends Error {
   readonly code = 'MAGIC_AGENT_FILES_MUTATION'
   constructor(
@@ -469,12 +493,37 @@ export class FilesToolHost {
 
   async edit(call: AuthorizedInput<FilesEditInput>): Promise<FilesEditOutput> {
     validateReplacements(call.input.replacements, 'files.edit')
-    return this.mutate(
+    const mode = call.input.mode === undefined ? 'strict' : call.input.mode
+    if (!['strict', 'partial', 'best_effort'].includes(mode))
+      throw new FilesToolValidationError('files.edit mode must be strict, partial or best_effort.')
+    let evaluation: ReturnType<typeof evaluateEdit> | undefined
+    let report: FilesEditReport | undefined
+    const output = await this.mutate(
       'files.edit',
       call,
-      (before) => applyReplacements(before, call.input.replacements),
-      false
+      (before) => {
+        evaluation = evaluateEdit(
+          before,
+          call.input.replacements,
+          mode,
+          bounded(call.input.maxBytes, LIMITS.bytes, 1, LIMITS.bytes)
+        )
+        if (evaluation.report.failed && (mode === 'strict' || evaluation.after === before))
+          throw new FilesToolEditError(evaluation.report)
+        return evaluation.after
+      },
+      false,
+      (mutation) => {
+        report = {
+          ...evaluation!.report,
+          writeStatus: 'committed',
+          fileChanged: mutation.beforeSha256 !== mutation.afterSha256
+        }
+        if (report.failed) throw new FilesToolEditError(report, mutation)
+        return { ...mutation, report }
+      }
     )
+    return { ...output, report: report! }
   }
 
   async patch(call: AuthorizedInput<FilesPatchInput>): Promise<FilesPatchOutput> {
@@ -646,7 +695,13 @@ export class FilesToolHost {
       let diff = buildUnifiedDiff(call.input.path, before, after)
       const limit = bounded(call.input.maxDiffBytes, LIMITS.diffBytes, 1, LIMITS.diffBytes)
       const truncated = Buffer.byteLength(diff) > limit
-      if (truncated) diff = Buffer.from(diff).subarray(0, limit).toString('utf8')
+      // Stream decoding drops an incomplete final UTF-8 code point rather than
+      // inventing U+FFFD (whose encoded bytes can exceed the requested bound).
+      if (truncated)
+        diff = new TextDecoder('utf-8', { fatal: true }).decode(
+          Buffer.from(diff).subarray(0, limit),
+          { stream: true }
+        )
       const stats = diffStats(before, after)
       const output = {
         root,
@@ -833,7 +888,8 @@ export class FilesToolHost {
     tool: 'files.write' | 'files.edit' | 'files.patch' | 'files.json.write',
     call: AuthorizedInput<T>,
     transform: (before: string) => string,
-    allowCreate: boolean
+    allowCreate: boolean,
+    complete?: (output: FilesWriteOutput) => FilesEditOutput
   ): Promise<FilesWriteOutput> {
     const started = Date.now()
     const requestedPath = validateRelativePath(call.input.path)
@@ -947,6 +1003,8 @@ export class FilesToolHost {
         ...snapshot,
         durationMs: Date.now() - started
       }
+      const completed = complete?.(output)
+      if (completed) audit = { ...audit, ...editAudit(completed.report) }
       await this.onAudit?.({
         tool,
         authorizationId: call.authorizationId,
@@ -955,8 +1013,9 @@ export class FilesToolHost {
         durationMs: output.durationMs,
         ...audit
       })
-      return output
+      return completed ?? output
     } catch (error) {
+      if (error instanceof FilesToolEditError) audit = { ...audit, ...editAudit(error.report) }
       await this.onAudit?.({
         tool,
         authorizationId: call.authorizationId,
@@ -964,7 +1023,10 @@ export class FilesToolHost {
         outcome: isAbort(error) ? 'cancelled' : 'rejected',
         durationMs: Date.now() - started,
         ...audit,
-        ...(consumed ? { mutationUncertain: true } : {})
+        ...(consumed &&
+        !(error instanceof FilesToolEditError && error.report.writeStatus === 'committed')
+          ? { mutationUncertain: true }
+          : {})
       })
       throw error
     }
@@ -1096,31 +1158,49 @@ function applyUnifiedPatch(
   const normalizedPath = relativePath.replaceAll(String.fromCharCode(92), '/')
   if (lines[0] !== `--- a/${normalizedPath}` || lines[1] !== `+++ b/${normalizedPath}`)
     throw new FilesToolValidationError('Patch headers must bind exactly to the requested path.')
-  const match = /^@@ -1,(\d+) \+1,(\d+) @@$/.exec(lines[2] ?? '')
-  if (!match)
+  const match = /^@@ -([01])(?:,(\d+))? \+([01])(?:,(\d+))? @@$/.exec(lines[2] ?? '')
+  const beforeCount = Number(match?.[2] ?? 1)
+  const afterCount = Number(match?.[4] ?? 1)
+  // A zero-origin range denotes an empty side only; retain legacy 1,0 as
+  // well. Non-empty sides still start at line one and must cover the full file.
+  if (!match || (match[1] === '0' && beforeCount !== 0) || (match[3] === '0' && afterCount !== 0))
     throw new FilesToolValidationError('Only one complete-file unified patch hunk is supported.')
-  const before: string[] = []
-  const after: string[] = []
-  let noFinalNewline = false
-  for (const line of lines.slice(3)) {
+  type PatchLine = { content: string; noFinalNewline: boolean }
+  const before: PatchLine[] = []
+  const after: PatchLine[] = []
+  let previous: PatchLine | undefined
+  for (let index = 3; index < lines.length; index++) {
+    const line = lines[index]
     if (line === `${String.fromCharCode(92)} No newline at end of file`) {
-      noFinalNewline = true
+      if (!previous || previous.noFinalNewline || previous.content === '')
+        throw new FilesToolValidationError(
+          'Patch newline marker is orphaned, duplicated, or describes an empty line.'
+        )
+      previous.noFinalNewline = true
       continue
     }
-    if (line === '' && lines.at(-1) === '') continue
+    // Only the final split terminator is not a body line. An unmarked blank
+    // inside the hunk is invalid; an actual empty text line has a body prefix.
+    if (line === '' && index === lines.length - 1) continue
     const marker = line[0]
-    const content = line.slice(1)
-    if (marker === ' ') {
-      before.push(content)
-      after.push(content)
-    } else if (marker === '-') before.push(content)
-    else if (marker === '+') after.push(content)
-    else throw new FilesToolValidationError('Patch contains an unsupported line.')
+    if (marker !== ' ' && marker !== '-' && marker !== '+')
+      throw new FilesToolValidationError('Patch contains an unsupported line.')
+    const entry: PatchLine = { content: line.slice(1), noFinalNewline: false }
+    if (marker !== '+') before.push(entry)
+    if (marker !== '-') after.push(entry)
+    previous = entry
   }
-  if (before.length !== Number(match[1]) || after.length !== Number(match[2]))
+  if (before.length !== beforeCount || after.length !== afterCount)
     throw new FilesToolValidationError('Patch hunk line counts do not match its header.')
-  const suffix = noFinalNewline ? '' : '\n'
-  return { before: `${before.join('\n')}${suffix}`, after: `${after.join('\n')}${suffix}` }
+  if ([before, after].some((side) => side.slice(0, -1).some((line) => line.noFinalNewline)))
+    throw new FilesToolValidationError(
+      'A patch newline marker must describe the final line on its side.'
+    )
+  // Context entries are shared by the two sides, while +/- entries carry their
+  // own terminator. In particular, a zero-line side is exactly empty, not LF.
+  const text = (side: PatchLine[]) =>
+    side.map((line) => line.content + (line.noFinalNewline ? '' : '\n')).join('')
+  return { before: text(before), after: text(after) }
 }
 
 function validateRequest(request: PolicyRequest, tool: ToolName, requestedPath: string): void {
@@ -1527,6 +1607,15 @@ function selectJson(value: unknown, pointer?: string): unknown {
   }
   return current
 }
+// Pure read transforms shared by the prompt-free desktop absolute-path bridge.
+// This exports no file host, policy permit, write or execution capability.
+export {
+  validateGlob as validateFilesReadGlob,
+  globMatches as matchesFilesReadGlob,
+  selectJson as selectFilesReadJson,
+  boundJson as boundFilesReadJson
+}
+
 function boundJson(
   value: unknown,
   maxDepth: number,
@@ -1673,6 +1762,75 @@ function validateReplacements(
         'Each replacement requires non-empty exact old text and a positive occurrence expectation.'
       )
 }
+function evaluateEdit(
+  before: string,
+  replacements: FilesEditInput['replacements'],
+  mode: FilesEditMode,
+  maxBytes: number
+): { after: string; report: FilesEditReport } {
+  let after = before,
+    applied = 0,
+    failed = 0,
+    skipped = 0
+  const steps: FilesEditStep[] = []
+  for (const [index, replacement] of replacements.entries()) {
+    if (failed && mode !== 'best_effort') {
+      skipped++
+      steps.push({ index, status: 'skipped', expectedOccurrences: replacement.expectedOccurrences })
+      continue
+    }
+    const observedOccurrences = countOccurrences(after, replacement.old)
+    if (observedOccurrences !== replacement.expectedOccurrences) {
+      failed++
+      steps.push({
+        index,
+        status: 'failed',
+        expectedOccurrences: replacement.expectedOccurrences,
+        observedOccurrences
+      })
+      continue
+    }
+    // Bound every intermediate result before allocating split/join output, not
+    // just the final candidate. A budget failure is fatal in every mode.
+    const nextBytes =
+      Buffer.byteLength(after) +
+      observedOccurrences *
+        (Buffer.byteLength(replacement.new) - Buffer.byteLength(replacement.old))
+    if (!Number.isSafeInteger(nextBytes) || nextBytes > maxBytes)
+      throw new FilesToolValidationError('Result exceeds the byte limit.')
+    const next = after.split(replacement.old).join(replacement.new)
+    applied++
+    steps.push({
+      index,
+      status: next === after ? 'unchanged' : 'applied',
+      expectedOccurrences: replacement.expectedOccurrences,
+      observedOccurrences
+    })
+    after = next
+  }
+  return {
+    after,
+    report: {
+      mode,
+      applied,
+      failed,
+      skipped,
+      steps,
+      writeStatus: 'not-written',
+      fileChanged: false
+    }
+  }
+}
+function editAudit(report: FilesEditReport): Partial<FilesToolAuditEvidence> {
+  return {
+    editMode: report.mode,
+    editApplied: report.applied,
+    editFailed: report.failed,
+    editSkipped: report.skipped,
+    editWriteStatus: report.writeStatus
+  }
+}
+
 function applyReplacements(
   before: string,
   replacements: readonly { old: string; new: string; expectedOccurrences: number }[]
@@ -1853,9 +2011,18 @@ function publicManifest(manifest: SnapshotManifest) {
     bytes: manifest.bytes
   }
 }
-function diffStats(before: string, after: string): { additions: number; deletions: number } {
-  const a = before.split(/\r?\n/),
-    b = after.split(/\r?\n/)
+// Retain each LF with its logical line: empty text has zero lines, while a
+// trailing LF terminates the last line rather than fabricating another one.
+function diffLines(text: string): string[] {
+  const parts = text.split('\n')
+  const last = parts.pop()!
+  const lines = parts.map((part) => `${part}\n`)
+  if (last) lines.push(last)
+  return lines
+}
+function partitionDiffLines(before: string, after: string) {
+  const a = diffLines(before),
+    b = diffLines(after)
   let prefix = 0
   while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++
   let suffix = 0
@@ -1865,15 +2032,31 @@ function diffStats(before: string, after: string): { additions: number; deletion
     a[a.length - 1 - suffix] === b[b.length - 1 - suffix]
   )
     suffix++
+  return { a, b, prefix, suffix }
+}
+function diffStats(before: string, after: string): { additions: number; deletions: number } {
+  const { a, b, prefix, suffix } = partitionDiffLines(before, after)
   return { deletions: a.length - prefix - suffix, additions: b.length - prefix - suffix }
 }
 function buildUnifiedDiff(relative: string, before: string, after: string): string {
   if (before === after) return ''
-  const a = before.split(/\r?\n/),
-    b = after.split(/\r?\n/)
-  const lines = [`--- a/${relative}`, `+++ b/${relative}`, `@@ -1,${a.length} +1,${b.length} @@`]
-  for (const line of a) lines.push(`-${line}`)
-  for (const line of b) lines.push(`+${line}`)
+  const { a, b, prefix, suffix } = partitionDiffLines(before, after)
+  const lines = [
+    `--- a/${relative}`,
+    `+++ b/${relative}`,
+    `@@ -${a.length ? 1 : 0},${a.length} +${b.length ? 1 : 0},${b.length} @@`
+  ]
+  const append = (sign: ' ' | '-' | '+', line: string) => {
+    const terminated = line.endsWith('\n')
+    lines.push(`${sign}${terminated ? line.slice(0, -1) : line}`)
+    if (!terminated) lines.push('\\ No newline at end of file')
+  }
+  // Keep one complete-file hunk (no offset/multihunk matcher): exact shared ends
+  // are context, and counts describe the actual emitted delete/add middle.
+  for (let i = 0; i < prefix; i++) append(' ', a[i])
+  for (let i = prefix; i < a.length - suffix; i++) append('-', a[i])
+  for (let i = prefix; i < b.length - suffix; i++) append('+', b[i])
+  for (let i = a.length - suffix; i < a.length; i++) append(' ', a[i])
   return `${lines.join('\n')}\n`
 }
 async function assertUnchanged(target: string, existed: boolean, expected?: string): Promise<void> {

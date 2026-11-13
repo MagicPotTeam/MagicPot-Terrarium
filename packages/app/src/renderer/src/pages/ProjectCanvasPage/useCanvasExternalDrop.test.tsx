@@ -283,6 +283,17 @@ describe('useCanvasExternalDrop Agent attachment source', () => {
 })
 
 describe('useCanvasExternalDrop synthetic drop source', () => {
+  it('consumes a rejected crop drop and resets the dragged image without dispatching', () => {
+    const dragged = createImage('crop', { crop: { x: 0, y: 0, width: 100, height: 100 } })
+    const { result, workspace, dropTarget, buildCanvasDragPayload, setCanvasDragPayload, resetDraggedItemNode } = renderExternalDrop([dragged])
+    delete workspace.dataset.agentWorkspaceRoot
+    const dispatch = vi.spyOn(dropTarget, 'dispatchEvent')
+    buildCanvasDragPayload.mockImplementation(() => { throw new Error('CANVAS_CROP_EXPORT_UNAVAILABLE') })
+    expect(result.current.tryHandleCanvasExternalDrop(dragged.id, 150, 50)).toBe(true)
+    expect(resetDraggedItemNode).toHaveBeenCalledExactlyOnceWith(dragged)
+    expect(setCanvasDragPayload).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
   function installDragEventDoubles() {
     vi.stubGlobal('DataTransfer', class {})
     vi.stubGlobal(

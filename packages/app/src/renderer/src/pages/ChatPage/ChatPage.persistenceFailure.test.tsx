@@ -18,7 +18,8 @@ const hoisted = vi.hoisted(() => ({
   notifyWarning: vi.fn(),
   requestChatCompletion: vi.fn(),
   requestChatCompletionStream: vi.fn(),
-  supportsStreaming: vi.fn()
+  supportsStreaming: vi.fn(),
+  useRealDraftBackup: { value: false }
 }))
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -72,7 +73,10 @@ vi.mock('./hooks/useChatProfiles', () => ({
   })
 }))
 
-vi.mock('./chatStorage', () => ({
+vi.mock('./chatStorage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./chatStorage')>()
+  return {
+  ...actual,
   loadAllSessions: (...args: unknown[]) => hoisted.loadAllSessions(...args),
   saveSessionToDB: (...args: unknown[]) => hoisted.saveSessionToDB(...args),
   saveAllSessions: vi.fn(),
@@ -86,8 +90,11 @@ vi.mock('./chatStorage', () => ({
   readSessionDeleteTombstones: vi.fn(() => []),
   debouncedSaveSessions: vi.fn(),
   setSessionDeleteTombstone: vi.fn(),
-  writeSessionDraftBackup: vi.fn()
-}))
+  writeSessionDraftBackup: (...args: Parameters<typeof actual.writeSessionDraftBackup>) => {
+    if (hoisted.useRealDraftBackup.value) actual.writeSessionDraftBackup(...args)
+  }
+  }
+})
 
 vi.mock('./chatRequestUtils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./chatRequestUtils')>()
@@ -137,6 +144,7 @@ vi.mock('./components/ChatComposer', () => ({
         value={props.inputValue}
         onChange={(event) => props.onInputChange(event.target.value)}
       />
+      <output data-testid="composer-attachments">{JSON.stringify(props.pendingAttachments ?? [])}</output>
       <button type="button" data-testid="composer-send" onClick={props.onSend}>
         send
       </button>
@@ -168,6 +176,7 @@ const currentSession = (): ChatSession | null =>
 
 describe('ChatPage persistence and run identity regressions', () => {
   beforeEach(() => {
+    hoisted.useRealDraftBackup.value = false
     hoisted.config.value = createConfig()
     hoisted.ready.value = true
     hoisted.sessions.value = []
@@ -186,6 +195,150 @@ describe('ChatPage persistence and run identity regressions', () => {
     hoisted.supportsStreaming.mockReturnValue(false)
     localStorage.clear()
     sessionStorage.clear()
+  })
+
+  it('serializes transient draft attachments one at a time without changing order or metadata', async () => {
+    const attachments = [
+      { type: 'image' as const, url: 'blob:serial-first', fileName: 'first.png', mimeType: 'image/png', sizeBytes: 4 },
+      { type: 'image' as const, url: 'blob:serial-second', fileName: 'second.png', mimeType: 'image/png', sizeBytes: 5 }
+    ]
+    hoisted.sessions.value = [{ id: 'serial-draft', title: 'Draft', messages: [], draft: {
+      inputValue: 'before edit', pendingAttachments: attachments, pendingHiddenContext: '', updatedAt: 1
+    } }]
+    let releaseFirst!: () => void
+    const firstBlob = new Promise<Blob>((resolve) => {
+      releaseFirst = () => resolve(new Blob(['first'], { type: 'image/png' }))
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (input === 'blob:serial-first') return { ok: true, blob: () => firstBlob } as Response
+      if (input === 'blob:serial-second') return { ok: true, blob: async () => new Blob(['second'], { type: 'image/png' }) } as Response
+      throw new Error('Unexpected non-fixture fetch')
+    })
+    const view = renderPage()
+    try {
+      await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('before edit'))
+      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'serial edit' } })
+      fireEvent(window, new Event('blur'))
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('blob:serial-first'))
+      // Snapshot before releasing the gate; this assertion must not be retried after it opens.
+      const observedBeforeRelease = fetchMock.mock.calls.map((call) => [...call])
+      releaseFirst()
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('blob:serial-second'))
+      await waitFor(() => expect(hoisted.sessions.value.find((session) => session.id === 'serial-draft')?.draft?.inputValue).toBe('serial edit'))
+      const persisted = hoisted.sessions.value.find((session) => session.id === 'serial-draft')?.draft
+      expect(persisted?.pendingAttachments).toEqual(attachments.map((attachment) => ({
+        ...attachment, url: 'data:text/plain;base64,QQ=='
+      })))
+      expect(observedBeforeRelease).toEqual([['blob:serial-first']])
+    } finally {
+      releaseFirst()
+      const firstBeforeUnmount = fetchMock.mock.calls.filter(([url]) => url === 'blob:serial-first').length
+      const secondBeforeUnmount = fetchMock.mock.calls.filter(([url]) => url === 'blob:serial-second').length
+      view.unmount()
+      try {
+        if (fetchMock.mock.calls.filter(([url]) => url === 'blob:serial-first').length > firstBeforeUnmount) {
+          await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === 'blob:serial-second').length).toBeGreaterThan(secondBeforeUnmount))
+        }
+      } finally {
+        fetchMock.mockRestore()
+      }
+    }
+  })
+
+  it('keeps a complete draft backup when one of two blob attachments fails serialization', async () => {
+    const attachments = [
+      { type: 'image' as const, url: 'blob:fixture-good', fileName: 'good.png' },
+      { type: 'image' as const, url: 'blob:fixture-fail', fileName: 'fail.png' }
+    ]
+    hoisted.sessions.value = [{ id: 'draft-fixture', title: 'Draft', messages: [], draft: {
+      inputValue: 'before edit', pendingAttachments: attachments, pendingHiddenContext: '', updatedAt: 1
+    } }]
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      if (input === 'blob:fixture-good') return { ok: true, blob: async () => new Blob(['fixture'], { type: 'image/png' }) } as Response
+      if (input === 'blob:fixture-fail') throw new Error('synthetic blob failure')
+      throw new Error('Unexpected non-fixture fetch')
+    })
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const view = renderPage()
+    try {
+      await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('before edit'))
+      await waitFor(() => expect(JSON.parse(screen.getByTestId('composer-attachments').textContent || '[]')).toHaveLength(2))
+      const storage = await vi.importActual<typeof import('./chatStorage')>('./chatStorage')
+      const previousDraft = { inputValue: 'recoverable', pendingAttachments: attachments.map((item, index) => ({ ...item, url: `data:image/png;base64,${index ? 'Qg==' : 'QQ=='}` })), pendingHiddenContext: '', updatedAt: 1 }
+      storage.writeSessionDraftBackup('draft-fixture', 1, previousDraft, 'ui-regressions')
+      const previousBackup = storage.readSessionDraftBackup('draft-fixture', 'ui-regressions')
+      expect(previousBackup?.draft?.pendingAttachments).toHaveLength(2)
+      hoisted.useRealDraftBackup.value = true
+      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'current edit' } })
+      await waitFor(() => expect(warning).toHaveBeenCalledWith('[ChatPage] Failed to serialize draft attachment:', expect.any(Error)), { timeout: 4000 })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('blob:fixture-good'))
+      expect(screen.getByTestId('composer-input')).toHaveValue('current edit')
+      expect(JSON.parse(screen.getByTestId('composer-attachments').textContent || '[]')).toEqual(attachments)
+      const actualBackup = storage.readSessionDraftBackup('draft-fixture', 'ui-regressions')
+      expect(JSON.stringify(actualBackup)).toBe(JSON.stringify(previousBackup))
+    } finally {
+      const firstBeforeUnmount = fetchMock.mock.calls.filter(([url]) => url === 'blob:fixture-good').length
+      const warningsBeforeUnmount = warning.mock.calls.length
+      view.unmount()
+      try {
+        if (fetchMock.mock.calls.filter(([url]) => url === 'blob:fixture-good').length > firstBeforeUnmount) {
+          await waitFor(() => expect(warning.mock.calls.length).toBeGreaterThan(warningsBeforeUnmount))
+        }
+      } finally {
+        fetchMock.mockRestore()
+        warning.mockRestore()
+      }
+    }
+  })
+
+  it('does not persist a filtered draft when blur flush cannot serialize an attachment', async () => {
+    const attachments = [
+      { type: 'image' as const, url: 'blob:flush-good', fileName: 'good.png' },
+      { type: 'image' as const, url: 'blob:flush-fail', fileName: 'fail.png' }
+    ]
+    const original: ChatSession = { id: 'flush-fixture', title: 'Draft', messages: [], draft: {
+      inputValue: 'before edit', pendingAttachments: attachments, pendingHiddenContext: '', updatedAt: 1
+    } }
+    hoisted.sessions.value = [clone(original)]
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      if (input === 'blob:flush-good') return { ok: true, blob: async () => new Blob(['fixture'], { type: 'image/png' }) } as Response
+      if (input === 'blob:flush-fail') throw new Error('synthetic blob failure')
+      throw new Error('Unexpected non-fixture fetch')
+    })
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const view = renderPage()
+    try {
+      await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('before edit'))
+      await waitFor(() => expect(JSON.parse(screen.getByTestId('composer-attachments').textContent || '[]')).toEqual(attachments))
+      const storage = await vi.importActual<typeof import('./chatStorage')>('./chatStorage')
+      const previousDraft = { inputValue: 'recoverable', pendingAttachments: attachments.map((item, index) => ({ ...item, url: `data:image/png;base64,${index ? 'Qg==' : 'QQ=='}` })), pendingHiddenContext: '', updatedAt: 1 }
+      storage.writeSessionDraftBackup('flush-fixture', 1, previousDraft, 'ui-regressions')
+      const previousBackup = storage.readSessionDraftBackup('flush-fixture', 'ui-regressions')
+      expect(previousBackup?.draft?.pendingAttachments).toHaveLength(2)
+      hoisted.useRealDraftBackup.value = true
+      hoisted.saveSessionToDB.mockClear()
+      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'flush edit' } })
+      fireEvent(window, new Event('blur'))
+      await waitFor(() => expect(warning).toHaveBeenCalledWith('[ChatPage] Failed to serialize draft attachment:', expect.any(Error)))
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect.soft(screen.getByTestId('composer-input')).toHaveValue('flush edit')
+      expect.soft(JSON.parse(screen.getByTestId('composer-attachments').textContent || '[]')).toEqual(attachments)
+      const backup = storage.readSessionDraftBackup('flush-fixture', 'ui-regressions')
+      expect.soft(JSON.stringify(backup)).toBe(JSON.stringify(previousBackup))
+      expect.soft(hoisted.sessions.value.find(session => session.id === 'flush-fixture')?.draft?.pendingAttachments).toHaveLength(2)
+    } finally {
+      const firstBeforeUnmount = fetchMock.mock.calls.filter(([url]) => url === 'blob:flush-good').length
+      const warningsBeforeUnmount = warning.mock.calls.length
+      view.unmount()
+      try {
+        if (fetchMock.mock.calls.filter(([url]) => url === 'blob:flush-good').length > firstBeforeUnmount) {
+          await waitFor(() => expect(warning.mock.calls.length).toBeGreaterThan(warningsBeforeUnmount))
+        }
+      } finally {
+        fetchMock.mockRestore()
+        warning.mockRestore()
+      }
+    }
   })
 
   it('keeps the existing session and blocks auto-create when initial storage load fails', async () => {

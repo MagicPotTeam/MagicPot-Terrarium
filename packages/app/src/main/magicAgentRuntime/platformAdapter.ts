@@ -23,14 +23,20 @@ import type {
   MagicAgentPlatformToolSource
 } from '@shared/api/svcMagicAgentPlatform'
 import type { LLMProxySvc } from '@shared/api/svcLLMProxy'
+import type { Config } from '@shared/config/config'
 import { normalizeMagicPotToolName } from '@shared/app/types'
 import { normalizeAgentRoute } from '@shared/agent'
-import { getAssistantRuntime } from '../assistantRuntime/runtime'
-import type { AssistantRuntime } from '../assistantRuntime/runtime'
-import type { AssistantRoute } from '../assistantRuntime/types'
+import { AssistantRuntime, getAssistantRuntime } from '../assistantRuntime/runtime'
+import { AssistantSessionStore } from '../assistantRuntime/sessionStore'
+import { captureManagedData } from '../magicAgentPlatform2/agents/managedRuntimeSnapshot'
+import { captureManagedTextFirstRunRuntimeContext } from '../assistantRuntime/managedTextFirstRunRuntime'
+import type { ManagedTextFirstRunPlatformFacade } from './managedTextFirstRunPlatform'
+import type { AssistantRoute, AssistantRunToolProvider } from '../assistantRuntime/types'
+import { withCooperativeOperation } from '../assistantRuntime/cooperativeOperation'
 import { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
 import { getConfig } from '../config/config'
-import { getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
+import { requestCreativeToolApproval } from './creativeToolApproval'
+import { createProductionCreativeToolDependencies } from './productionCreativeDependencies'
 import { getProductionAgentInstanceLifecycle } from '../magicAgentPlatform2/agents/productionAgentInstanceLifecycleOwner'
 import { getAgentKernel, AgentKernel } from '../agentKernel'
 import { MagicAgentRegistry } from './agentRegistry'
@@ -59,11 +65,11 @@ import {
   type TriggerTrustedDispatchContext
 } from './triggerTrustedDispatchContext'
 
-import type { CooperativeExecutionGate } from '../magicAgentPlatform2/agents/cooperativeExecutionController'
+import type { CooperativeOperationGate } from '../magicAgentPlatform2/agents/cooperativeExecutionController'
 
 export type MagicAgentPlatformExecutionOptions = {
   signal?: AbortSignal
-  cooperativeExecution?: CooperativeExecutionGate
+  cooperativeExecution?: CooperativeOperationGate
 }
 
 class MagicAgentPlatformTimeoutError extends Error {
@@ -683,6 +689,60 @@ type ActionSettlement = {
 }
 
 export class MagicAgentPlatformAdapter {
+  /** Existing adapter's MAIN-only bounded route. It deliberately does not run the
+   * ordinary constructor: no singleton, kernel handlers, agent/package registry,
+   * creative tools, MCP or default runtime surface may be created by preparation.
+   * Routing identity is not production policy/owner/admission authority. */
+  static createManagedTextFirstRunAdapter(store: AssistantSessionStore): ManagedTextFirstRunPlatformFacade {
+    if (!(store instanceof AssistantSessionStore)) throw Error('Managed first-run adapter requires its explicit isolated session store.')
+    const runtime = new AssistantRuntime({ sessionStore: store, chatService: LLMProxySvcImpl.createManagedRealChatService(), managedTextFirstRun: true })
+    let pinned: { plan: Parameters<ManagedTextFirstRunPlatformFacade['start']>[0]; agentId: string; text: string } | undefined
+    const exact = (receiver: unknown): void => { if (receiver !== facade) throw Error('Exact managed first-run adapter facade required.') }
+    const facade: ManagedTextFirstRunPlatformFacade = Object.freeze({
+      prepare(this: ManagedTextFirstRunPlatformFacade, input: MagicAgentPlatformRunReq, config: Config) {
+        exact(this)
+        const req = captureManagedData(input), scopeType = req.route?.scopeType
+        if (Object.keys(req).some(key => !['agentId', 'route', 'text', 'systemPrompt', 'profileId', 'maxOutputTokens', 'temperature'].includes(key)) ||
+            typeof req.agentId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/u.test(req.agentId) || req.route?.channel !== 'generic' || (scopeType !== 'dm' && scopeType !== 'thread'))
+          throw Error('Managed first-run platform accepts only an explicit local plaintext request, exact agent identity/profile/options and no helpers or ordinary execution fields.')
+        const { agentId, ...inbound } = req
+        const prepared = runtime.prepareManagedTextFirstRun({ ...inbound, route: { ...req.route, scopeType } }, config)
+        pinned = { plan: prepared.plan, agentId, text: prepared.material.model.body.messages.at(-1)!.content }
+        return prepared
+      },
+      start(this: ManagedTextFirstRunPlatformFacade, plan: Parameters<ManagedTextFirstRunPlatformFacade['start']>[0], inputContext: Parameters<ManagedTextFirstRunPlatformFacade['start']>[1]) {
+        exact(this)
+        const prepared = pinned
+        if (!prepared || prepared.plan !== plan) throw Error('Exact prepared managed first-run platform plan required.')
+        const context = captureManagedTextFirstRunRuntimeContext(inputContext), startedAt = Date.now()
+        // Runtime burns its slot before authority guards/callouts. Never route a
+        // rejected plan to runAgent/handleMessage or re-resolve the approved input.
+        const execution = runtime.startPreparedManagedTextFirstRun(plan, context)
+        const result = execution.result.then((completed): MagicAgentPlatformRunResp => ({
+          runId: completed.runId, agentId: prepared.agentId,
+          status: completed.status === 'cancelled' ? 'aborted' : completed.status === 'failed' ? 'failed' : 'completed',
+          content: completed.reply.content,
+          messages: [{ role: 'user', content: prepared.text }, { role: 'assistant', content: completed.reply.content,
+            metadata: { source: 'assistantRuntime', sessionKey: completed.sessionKey, assistantRunId: completed.runId } }],
+          toolCalls: [],
+          events: completed.events.map(event => ({ eventId: event.eventId, runId: event.runId, agentId: prepared.agentId,
+            type: `assistantRuntime.${event.type}`, message: event.message, createdAt: event.createdAt,
+            metadata: { ...(event.metadata || {}), sessionKey: event.sessionKey } })),
+          startedAt, finishedAt: Date.now()
+        }))
+        // Observe the caller route even if its owner only awaits closed after abort.
+        // Do not convert rejection into success or wrap closed in a response race.
+        void result.catch(() => undefined)
+        return Object.freeze({ result, closed: execution.closed })
+      },
+      consumeClosure(this: ManagedTextFirstRunPlatformFacade, closure: Parameters<ManagedTextFirstRunPlatformFacade['consumeClosure']>[0], context: Parameters<ManagedTextFirstRunPlatformFacade['consumeClosure']>[1]) {
+        exact(this)
+        return runtime.consumeManagedTextFirstRunClosure(closure, context)
+      }
+    })
+    return facade
+  }
+
   private readonly assistantRuntime: Pick<
     AssistantRuntime,
     'listTools' | 'callTool' | 'handleMessage'
@@ -1406,6 +1466,56 @@ export class MagicAgentPlatformAdapter {
     }
   }
 
+  private createRunToolProvider(
+    route: AssistantRoute,
+    allowedToolNames: string[] | null | undefined,
+    turnSignal: AbortSignal
+  ): AssistantRunToolProvider | undefined {
+    const allowed = new Set(allowedToolNames || [])
+    const assistantNames = new Set(this.assistantRuntime.listTools().map((tool) => tool.name))
+    const definitions = this.listPlatformCreativeTools().filter(
+      (tool) =>
+        tool.status === 'available' && allowed.has(tool.name) && !assistantNames.has(tool.name)
+    )
+    if (!definitions.length) return undefined
+    const names = new Set(definitions.map((tool) => tool.name))
+    const sessionKey = getAgentSessionKey(route)
+    return {
+      listTools: () =>
+        definitions.map(({ name, description, inputSchema }) => ({
+          name,
+          description,
+          inputSchema
+        })),
+      callTool: async (name, args, context) => {
+        turnSignal.throwIfAborted()
+        if (!names.has(name) || getAgentSessionKey(context.route) !== sessionKey) {
+          throw new Error('Creative tool invocation is outside the authorized Agent Studio turn.')
+        }
+        context.signal?.throwIfAborted()
+        const combined = composeAbortSignals([turnSignal, context.signal])
+        try {
+          const result = await this.invokeCreativeToolViaKernel(
+            name,
+            args,
+            combined.signal,
+            route,
+            {
+              runId: context.runId,
+              toolCallId: context.toolCallId,
+              allowedToolNames: [...allowed]
+            }
+          )
+          if (!result.ok)
+            throw new Error(result.error || result.unavailableReason || 'Creative tool failed.')
+          return creativeResultToRuntimeToolResult(result)
+        } finally {
+          combined.cleanup()
+        }
+      }
+    }
+  }
+
   private async runAgentAuthorized(
     req: MagicAgentPlatformRunReq,
     options: MagicAgentPlatformExecutionOptions = {}
@@ -1426,6 +1536,11 @@ export class MagicAgentPlatformAdapter {
         ? Math.max(1, Math.floor(requestedTimeoutMs))
         : undefined
     const executionController = new AbortController()
+    const toolProvider = this.createRunToolProvider(
+      route,
+      effectiveAllowedToolNames,
+      executionController.signal
+    )
     const forwardExternalAbort = (): void => executionController.abort(options.signal?.reason)
     if (options.signal?.aborted) {
       forwardExternalAbort()
@@ -1459,32 +1574,46 @@ export class MagicAgentPlatformAdapter {
     })
 
     try {
-      const assistantPromise = this.assistantRuntime.handleMessage({
-        route,
-        text: req.text,
-        ...(req.attachments?.length ? { attachments: req.attachments } : {}),
-        ...(systemPrompt ? { systemPrompt } : {}),
-        ...(req.profileId ? { profileId: req.profileId } : {}),
-        signal: executionController.signal,
-        cooperativeExecution: options.cooperativeExecution,
-        execution: {
-          mode: req.memory?.allowHistory === false ? 'no-history' : 'inherit',
-          ...(req.memory
-            ? {
-                allowHistory: req.memory.allowHistory,
-                contextMessageLimit: req.memory.contextMessageLimit
-              }
-            : {}),
-          allowedToolNames: effectiveAllowedToolNames,
-          ...(req.maxToolIterations === undefined ? {} : { maxToolCalls: req.maxToolIterations }),
-          ...(req.maxOutputTokens === undefined ? {} : { maxOutputTokens: req.maxOutputTokens }),
-          ...(req.temperature === undefined ? {} : { temperature: req.temperature }),
-          traceLabel:
-            cleanString(req.metadata?.traceLabel) ||
-            cleanString(req.metadata?.requestedBy) ||
-            `magicagent:${agentId}`
-        }
-      })
+      const invokeAssistant = (children?: CooperativeOperationGate) =>
+        this.assistantRuntime.handleMessage({
+          route,
+          text: req.text,
+          ...(req.attachments?.length ? { attachments: req.attachments } : {}),
+          ...(systemPrompt ? { systemPrompt } : {}),
+          ...(req.profileId ? { profileId: req.profileId } : {}),
+          signal: executionController.signal,
+          cooperativeExecution: children,
+          ...(toolProvider ? { toolProvider } : {}),
+          execution: {
+            mode: req.memory?.allowHistory === false ? 'no-history' : 'inherit',
+            ...(req.memory
+              ? {
+                  allowHistory: req.memory.allowHistory,
+                  contextMessageLimit: req.memory.contextMessageLimit
+                }
+              : {}),
+            allowedToolNames: effectiveAllowedToolNames,
+            ...(req.maxToolIterations === undefined ? {} : { maxToolCalls: req.maxToolIterations }),
+            ...(req.maxOutputTokens === undefined ? {} : { maxOutputTokens: req.maxOutputTokens }),
+            ...(req.temperature === undefined ? {} : { temperature: req.temperature }),
+            traceLabel:
+              cleanString(req.metadata?.traceLabel) ||
+              cleanString(req.metadata?.requestedBy) ||
+              `magicagent:${agentId}`
+          }
+        })
+      // Hold the whole returned runtime promise, including preparation/queueing
+      // and final publication outside its inner execution adapter. The timeout
+      // race stays outside: callers return promptly, lifecycle drainage does not.
+      // Preserve direct no-gate invocation (including its pre-abort behavior).
+      const assistantPromise = options.cooperativeExecution
+        ? withCooperativeOperation(
+            options.cooperativeExecution,
+            'assistant-turn',
+            executionController.signal,
+            invokeAssistant
+          )
+        : invokeAssistant()
       const assistantResult = timeoutMs
         ? await Promise.race([
             assistantPromise,
@@ -1645,6 +1774,7 @@ export class MagicAgentPlatformAdapter {
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle)
       options.signal?.removeEventListener('abort', forwardExternalAbort)
+      executionController.abort(new Error('Agent Studio turn has ended.'))
     }
   }
 
@@ -1769,7 +1899,7 @@ export class MagicAgentPlatformAdapter {
           const result = await this.creativeToolRegistry.dispatch(
             tool.name,
             request.args,
-            this.createCreativeContext(request.signal)
+            this.createCreativeContext(request.signal, request.session.route)
           )
           return {
             ok: result.ok,
@@ -1801,7 +1931,7 @@ export class MagicAgentPlatformAdapter {
 
   private listPlatformCreativeTools(): MagicAgentCreativeToolDefinition[] {
     return this.creativeToolRegistry
-      .listTools()
+      .listTools(this.createCreativeContext())
       .filter(
         (tool) =>
           !isMagicAgentPlatformDeniedToolName(tool.name) &&
@@ -1841,12 +1971,6 @@ export class MagicAgentPlatformAdapter {
       }
     }
     const platformRoute = requirePlatformRoute(route, 'creative tool invocation')
-    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
-      route: platformRoute,
-      sessionId: getAgentSessionKey(platformRoute),
-      toolName: `creative.${name}`,
-      toolInput: args as PolicyJsonRecord
-    })
     const session = this.agentKernel.registerSession(platformRoute, { source: 'kernel' })
     const result = await this.agentKernel.invokeAuthorizedTool({
       toolName: toKernelCreativeToolName(name),
@@ -1879,7 +2003,10 @@ export class MagicAgentPlatformAdapter {
     }
   }
 
-  private createCreativeContext(signal?: AbortSignal): MagicAgentCreativeToolContext {
+  private createCreativeContext(
+    signal?: AbortSignal,
+    route?: AgentRouteLike
+  ): MagicAgentCreativeToolContext {
     let config: ReturnType<typeof getConfig> | undefined
     try {
       config = getConfig()
@@ -1891,6 +2018,14 @@ export class MagicAgentPlatformAdapter {
     return {
       ...(config ? { config } : {}),
       ...(signal ? { signal } : {}),
+      ...(route
+        ? {
+            route,
+            sessionKey: getAgentSessionKey(route),
+            authorizeMutation: (request: { toolName: string; args: Record<string, unknown> }) =>
+              requestCreativeToolApproval({ ...request, route, signal })
+          }
+        : {}),
       ...(this.creativeToolDependencies ? { dependencies: this.creativeToolDependencies } : {})
     }
   }
@@ -1921,7 +2056,9 @@ let platformAdapterSingleton: MagicAgentPlatformAdapter | null = null
 
 export const getMagicAgentPlatformAdapter = (): MagicAgentPlatformAdapter => {
   if (!platformAdapterSingleton) {
-    platformAdapterSingleton = new MagicAgentPlatformAdapter()
+    platformAdapterSingleton = new MagicAgentPlatformAdapter({
+      creativeToolDependencies: createProductionCreativeToolDependencies()
+    })
   }
   return platformAdapterSingleton
 }

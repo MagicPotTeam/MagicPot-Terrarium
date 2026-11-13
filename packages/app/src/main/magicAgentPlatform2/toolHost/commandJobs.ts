@@ -1,13 +1,18 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import {
-  appendFileSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  writeSync,
+  unlinkSync,
   existsSync,
   mkdirSync,
-  readFileSync,
-  readdirSync,
+  opendirSync,
   realpathSync,
   renameSync,
-  statSync,
   writeFileSync
 } from 'node:fs'
 import path from 'node:path'
@@ -65,6 +70,7 @@ export type CommandJobRecord = Readonly<{
   exitCode?: number | null
   signal?: NodeJS.Signals | null
   stopOutcome?: string
+  termination?: Readonly<{ controllerExitCode: number | null; controllerTimedOut: boolean; controllerFailed: boolean; childClosed: boolean; childExited: boolean; stdoutEnded: boolean; stderrEnded: boolean }>
   stdoutBytes: number
   stderrBytes: number
   logsTruncated: boolean
@@ -73,7 +79,7 @@ export type CommandJobRecord = Readonly<{
 type MutableRecord = {
   -readonly [K in keyof CommandJobRecord]: K extends 'args' ? string[] : CommandJobRecord[K]
 }
-type LiveJob = { child: ChildProcess; timer: NodeJS.Timeout; stopping: boolean }
+type LiveJob = { child: ChildProcess; timer: NodeJS.Timeout; stopping: boolean; closed: Promise<void>; confirmClosed(): void }
 
 export type CommandsBackgroundInput = Readonly<{
   authorizationId: string
@@ -92,6 +98,13 @@ export type CommandsBackgroundInput = Readonly<{
   expectedGrantUseCount?: number
   /** Revalidate trusted executable provenance after authorization and immediately before permit consumption. */
   beforeConsume?: () => void | Promise<void>
+  /** Synchronous last check after asynchronous preparation; must not start effects. */
+  beforeDispatch?: () => void
+  /** Main-owned callback after child registration, including uncertain setup failures. */
+  onOwned?: (record: CommandJobRecord) => void
+  /** OS spawn event, not merely submission or interpreter initialization. */
+  onStarted?: (record: CommandJobRecord) => void
+  signal?: AbortSignal
 }>
 
 export type CommandJobsSpawnProcess = typeof spawn
@@ -119,10 +132,16 @@ export class CommandJobsToolHost {
   private readonly allowedCommands?: ReadonlySet<string>
   private readonly environmentKeys: ReadonlySet<string>
   private readonly live = new Map<string, LiveJob>()
+  /** Launched-job state/ownership must never be reloaded from executable-writable JSON. */
+  private readonly records = new Map<string, MutableRecord>()
+  private readonly logIdentities = new Map<string, { dev: number; ino: number }>()
+  private readonly storeIdentity: { dev: number; ino: number }
+  private readonly terminations = new Map<string, Promise<void>>()
   private readonly maxConcurrentJobs: number
   private readonly spawnProcess: CommandJobsSpawnProcess
   private readonly auditSink?: CommandJobsAuditSink
   private readonly confinementAdapter?: CommandJobsConfinementAdapter
+  private readonly mandatoryResourceLimits?: Readonly<{ maxMemoryBytes: number; maxCpuTimeMs: number }>
 
   constructor(
     private readonly authorization: MagicAgentPolicyAuthorizationService,
@@ -130,18 +149,24 @@ export class CommandJobsToolHost {
       workspaceRoot: string
       allowedCommands?: readonly string[]
       allowedEnvironmentKeys?: readonly string[]
+      namespace?: string
       maxConcurrentJobs?: number
       spawnProcess?: CommandJobsSpawnProcess
       auditSink?: CommandJobsAuditSink
       confinementAdapter?: CommandJobsConfinementAdapter
+      /** Fail closed if the actual execution permit omits or weakens these caps. */
+      mandatoryResourceLimits?: Readonly<{ maxMemoryBytes: number; maxCpuTimeMs: number }>
     }>
   ) {
     this.root = canonicalTerminalDirectory(options.workspaceRoot)
-    this.storeDir = path.join(this.root, STORE_DIR)
+    if (options.namespace && !/^[a-z0-9-]{1,64}$/.test(options.namespace)) throw new TerminalRunValidationError('Invalid command storage namespace.')
+    this.storeDir = path.join(this.root, STORE_DIR, ...(options.namespace ? [options.namespace] : []))
     mkdirSync(this.storeDir, { recursive: true })
     const canonicalStore = path.resolve(realpathSync.native(this.storeDir))
     if (!isInsideTerminalRoot(this.root, canonicalStore))
       throw new TerminalRunValidationError('Command job metadata directory escapes the workspace.')
+    this.storeIdentity = lstatSync(this.storeDir)
+    this.assertStoreIdentity()
     this.allowedCommands = options.allowedCommands
       ? new Set(options.allowedCommands.map(commandKey))
       : undefined
@@ -152,10 +177,19 @@ export class CommandJobsToolHost {
     this.spawnProcess = options.spawnProcess ?? spawn
     this.auditSink = options.auditSink
     this.confinementAdapter = options.confinementAdapter
+    if (options.mandatoryResourceLimits) {
+      this.mandatoryResourceLimits = Object.freeze({
+        maxMemoryBytes: bound(options.mandatoryResourceLimits.maxMemoryBytes, 1, Number.MAX_SAFE_INTEGER, 'maxMemoryBytes'),
+        maxCpuTimeMs: bound(options.mandatoryResourceLimits.maxCpuTimeMs, 1, Number.MAX_SAFE_INTEGER, 'maxCpuTimeMs')
+      })
+    }
     this.interruptOrphanedRecords()
   }
 
   async background(input: CommandsBackgroundInput): Promise<CommandJobRecord> {
+    input.signal?.throwIfAborted()
+    this.assertStoreIdentity()
+    if (this.records.size >= 256) throw new TerminalRunValidationError('Command job session capacity reached; start no more processes before reviewing retained jobs.')
     if (input.shell !== undefined && input.shell !== false)
       throw new TerminalRunValidationError('commands.background requires shell:false.')
     if (this.live.size >= this.maxConcurrentJobs)
@@ -184,7 +218,13 @@ export class CommandJobsToolHost {
     if (authorized.status !== 'authorized')
       throw new TerminalRunAuthorizationError(authorized.status, authorized.reason)
     const constraints = authorized.permit.constraints
-    this.validateConstraints(command, cwd, constraints)
+    if (this.mandatoryResourceLimits) {
+      for (const key of ['maxMemoryBytes', 'maxCpuTimeMs'] as const) {
+        const value = numberMetadata(constraints, key)
+        if (value === undefined || value > this.mandatoryResourceLimits[key]) throw new TerminalRunValidationError(`Execution permit is missing mandatory resource cap ${key} or exceeds its maximum.`)
+      }
+    }
+    this.validateConstraints(command, cwd, input.request.target.id, constraints)
     const spawnProcess = this.resolveSpawnProcess(constraints)
     const env = this.buildEnvironment(input.env ?? {}, constraints)
     const timeoutMs = Math.min(
@@ -214,7 +254,17 @@ export class CommandJobsToolHost {
     this.persist(record)
 
     await input.beforeConsume?.()
+    input.signal?.throwIfAborted()
+    this.assertNoUncertainStop()
+    // Atomic post-await check: no permit/spawn can interleave before live.set below.
+    if (this.live.size >= this.maxConcurrentJobs) {
+      record.state = 'failed'; record.outcome = 'known'; record.finishedAt = Date.now(); record.stopOutcome = 'concurrent-job-limit-before-spawn'
+      this.persist(record)
+      throw new TerminalRunValidationError('Concurrent background job limit reached before spawn.')
+    }
     // Durable one-shot consumption is the final operation before spawn.
+    input.beforeDispatch?.()
+    input.signal?.throwIfAborted()
     this.authorization.consumeExecutionPermit({
       permit: authorized.permit,
       request: input.request,
@@ -245,80 +295,80 @@ export class CommandJobsToolHost {
     record.pid = child.pid
     record.startedAt = Date.now()
     record.state = 'running'
-    this.persist(record)
-    this.audit(record, 'started')
-    const timer = setTimeout(() => void this.terminate(record.jobId, 'timed-out'), timeoutMs)
-    this.live.set(record.jobId, { child, timer, stopping: false })
-    const stopForOutputLimit = () => void this.terminate(record.jobId, 'output-limit')
-    const outputBudget = createOutputBudget(maxLogBytes, stopForOutputLimit)
-    const stdout = createRedactedWriter(
-      this.logPath(record.jobId, 'stdout'),
-      outputBudget,
-      (count, truncated) => {
-        record.stdoutBytes = count
-        record.logsTruncated ||= truncated
-      }
-    )
-    const stderr = createRedactedWriter(
-      this.logPath(record.jobId, 'stderr'),
-      outputBudget,
-      (count, truncated) => {
-        record.stderrBytes = count
-        record.logsTruncated ||= truncated
-      }
-    )
-    child.stdout?.on('data', stdout.write)
-    child.stderr?.on('data', stderr.write)
-    let finalized = false
+    // Establish ownership BEFORE persistence, auditing or writer setup can fail.
+    const timer = setTimeout(() => { void this.terminate(record.jobId, 'timed-out').catch(() => undefined) }, timeoutMs)
+    let confirmClosed!: () => void
+    const closed = new Promise<void>((resolve) => { confirmClosed = resolve })
+    this.live.set(record.jobId, { child, timer, stopping: false, closed, confirmClosed })
+    const abort = () => { void this.stop({ jobId: record.jobId, routeKey: record.routeKey, sessionId: record.sessionId }).catch(() => undefined) }
+    input.signal?.addEventListener('abort', abort, { once: true })
+    const detachAbort = () => input.signal?.removeEventListener('abort', abort)
+    child.once('close', detachAbort)
+    let stdout: { write(chunk: Buffer | string): void; end(): void } = { write: () => undefined, end: () => undefined }
+    let stderr = stdout
+    let finalized = false, outputFailed = false
+    const saveOutcome = () => {
+      try { this.persist(record); this.audit(record, record.state) }
+      catch { record.stopOutcome = 'metadata-or-audit-write-failed'; this.records.set(record.jobId, record) }
+    }
+    const outputError = () => {
+      outputFailed = true; record.logsTruncated = true
+      void this.terminate(record.jobId, 'output-limit').catch(() => undefined)
+    }
+    child.once('spawn', () => {
+      if (finalized || this.live.get(record.jobId)?.stopping || input.signal?.aborted) return
+      try { input.onStarted?.(Object.freeze({ ...record, args: [...record.args] })) }
+      catch { outputError() }
+    })
     child.once('error', (error) => {
       if (finalized) return
-      finalized = true
-      stderr.write(Buffer.from(error.message))
-      stdout.end()
-      stderr.end()
-      clearTimeout(timer)
-      record.state = 'failed'
-      record.outcome = 'known'
-      record.stopOutcome = `spawn failed: ${error.message}`
-      record.finishedAt = Date.now()
-      this.persist(record)
-      this.audit(record, 'failed')
-      this.live.delete(record.jobId)
+      if (child.pid) { outputError(); return } // An existing child error is not exit confirmation.
+      finalized = true; detachAbort(); clearTimeout(timer)
+      try { stderr.write(Buffer.from(error.message)); stdout.end(); stderr.end() } catch { outputFailed = true }
+      record.state = 'failed'; record.outcome = 'known'; record.stopOutcome = 'spawn-failed'; record.finishedAt = Date.now()
+      this.live.get(record.jobId)?.confirmClosed(); this.live.delete(record.jobId)
+      saveOutcome()
     })
     child.once('close', (exitCode, signal) => {
       if (finalized) return
-      finalized = true
-      stdout.end()
-      stderr.end()
-      clearTimeout(timer)
+      finalized = true; clearTimeout(timer)
+      try { stdout.end(); stderr.end() } catch { outputFailed = true }
       const live = this.live.get(record.jobId)
+      live?.confirmClosed()
+      if (live?.stopping) return
       this.live.delete(record.jobId)
-      try {
-        const latest = this.load(record.jobId)
-        if (
-          latest.state === 'timed-out' ||
-          latest.state === 'stopped' ||
-          latest.stopOutcome === 'output-limit'
-        )
-          return
-        latest.state = exitCode === 0 ? 'completed' : 'failed'
-        latest.outcome = 'known'
-        latest.exitCode = exitCode
-        latest.signal = signal
-        latest.finishedAt = Date.now()
-        if (live?.stopping) latest.stopOutcome = latest.stopOutcome ?? 'process-exited-during-stop'
-        this.persist(latest)
-        this.audit(latest, latest.state)
-      } catch {
-        // A prior spawn-error handler may have finalized the record concurrently.
-      }
+      record.state = exitCode === 0 && !outputFailed ? 'completed' : 'failed'
+      record.outcome = 'known'; record.exitCode = exitCode; record.signal = signal; record.finishedAt = Date.now()
+      if (outputFailed) record.stopOutcome = 'output-storage-failed'
+      saveOutcome()
     })
-    child.unref()
-    return Object.freeze({ ...record })
+    try {
+      input.onOwned?.(Object.freeze({ ...record, args: [...record.args] }))
+      this.persist(record); this.audit(record, 'started')
+      const stopForOutputLimit = () => { void this.terminate(record.jobId, 'output-limit').catch(() => undefined) }
+      const outputBudget = createOutputBudget(maxLogBytes, stopForOutputLimit)
+      const makeWriter = (stream: 'stdout' | 'stderr') => {
+        this.assertStoreIdentity()
+        const file = this.logPath(record.jobId, stream)
+        return createRedactedWriter(file, outputBudget, (count, truncated) => {
+          if (stream === 'stdout') record.stdoutBytes = count; else record.stderrBytes = count
+          record.logsTruncated ||= truncated
+        }, (identity) => this.logIdentities.set(file, identity), () => this.assertStoreIdentity(), outputError)
+      }
+      stdout = makeWriter('stdout'); stderr = makeWriter('stderr')
+      child.stdout?.on('data', stdout.write); child.stderr?.on('data', stderr.write)
+      if (input.signal?.aborted) abort()
+      child.unref()
+      return Object.freeze({ ...record, args: [...record.args] })
+    } catch {
+      await this.terminate(record.jobId, 'stopped')
+      throw new TerminalRunValidationError('Process setup failed after spawn; termination was requested and unconfirmed state remains quarantined.')
+    }
   }
 
   status(scope: { jobId: string; routeKey: string; sessionId: string }): CommandJobRecord {
-    return Object.freeze({ ...this.scoped(scope) })
+    const record = this.scoped(scope)
+    return Object.freeze({ ...record, args: [...record.args] })
   }
 
   read(scope: {
@@ -338,15 +388,13 @@ export class CommandJobsToolHost {
     const record = this.scoped(scope)
     const cursor = bound(scope.cursor ?? 0, 0, Number.MAX_SAFE_INTEGER, 'cursor')
     const maxBytes = bound(scope.maxBytes ?? DEFAULT_READ_BYTES, 1, MAX_READ_BYTES, 'maxBytes')
+    if (scope.stream !== 'stdout' && scope.stream !== 'stderr') throw new TerminalRunValidationError('Invalid command log stream.')
+    this.assertStoreIdentity()
     const file = this.logPath(record.jobId, scope.stream)
-    const content = existsSync(file) ? readFileSync(file) : Buffer.alloc(0)
-    const end = Math.min(content.length, cursor + maxBytes)
+    const content = this.readBoundedFile(file, maxBytes, cursor, MAX_LOG_BYTES, this.logIdentities.get(file), true)
     return Object.freeze({
-      data: content.subarray(Math.min(cursor, content.length), end).toString('utf8'),
-      cursor,
-      nextCursor: end,
-      eof: end >= content.length && !this.live.has(record.jobId),
-      truncated: record.logsTruncated
+      data: content.data.toString('utf8'), cursor, nextCursor: content.end,
+      eof: content.end >= content.size && !this.live.has(record.jobId), truncated: record.logsTruncated
     })
   }
 
@@ -356,59 +404,70 @@ export class CommandJobsToolHost {
     sessionId: string
   }): Promise<CommandJobRecord> {
     const record = this.scoped(scope)
-    if (!this.live.has(record.jobId)) return Object.freeze({ ...record })
-    await this.terminate(record.jobId, 'stopped')
-    return Object.freeze({ ...this.load(record.jobId) })
+    const stopping = this.terminations.get(record.jobId)
+    if (stopping) await stopping
+    else if (this.live.has(record.jobId)) await this.terminate(record.jobId, 'stopped')
+    const latest = this.load(record.jobId)
+    return Object.freeze({ ...latest, args: [...latest.args] })
   }
 
-  private async terminate(
-    jobId: string,
-    state: 'timed-out' | 'stopped' | 'output-limit'
-  ): Promise<void> {
+  assertNoUncertainStop(): void {
+    if ([...this.live.values()].some((job) => job.stopping)) throw new TerminalRunValidationError('Prior process termination is pending or unconfirmed; no new mutation is allowed.')
+  }
+
+  private terminate(jobId: string, state: 'timed-out' | 'stopped' | 'output-limit'): Promise<void> {
+    const existing = this.terminations.get(jobId)
+    if (existing) return existing
     const live = this.live.get(jobId)
-    if (!live || live.stopping) return
+    if (!live) return Promise.resolve()
+    if (live.stopping) return Promise.resolve() // quarantined, previously unconfirmed
     live.stopping = true
     clearTimeout(live.timer)
-    const record = this.load(jobId)
-    record.state = state === 'output-limit' ? 'failed' : state
-    record.outcome = 'known'
-    if (state === 'output-limit') record.logsTruncated = true
-    record.stopOutcome =
-      state === 'timed-out'
-        ? 'runtime-limit'
-        : state === 'output-limit'
-          ? 'output-limit'
-          : 'stop-requested'
-    record.finishedAt = Date.now()
-    this.persist(record)
-    this.audit(record, record.state)
+    const operation = this.finishTermination(jobId, live, state)
+    this.terminations.set(jobId, operation)
+    void operation.finally(() => this.terminations.delete(jobId)).catch(() => undefined)
+    return operation
+  }
+
+  private async finishTermination(jobId: string, live: LiveJob, state: 'timed-out' | 'stopped' | 'output-limit'): Promise<void> {
+    let killerConfirmed = process.platform !== 'win32'
+    let controllerExitCode: number | null = null, controllerTimedOut = false, controllerFailed = false
     const pid = live.child.pid
     if (pid) {
       if (process.platform === 'win32') {
-        await new Promise<void>((resolve) => {
-          const killer = this.spawnProcess('taskkill', ['/PID', String(pid), '/T', '/F'], {
-            shell: false,
-            windowsHide: true,
-            stdio: 'ignore'
-          })
-          killer.once('close', () => resolve())
-          killer.once('error', () => resolve())
+        killerConfirmed = await new Promise<boolean>((resolve) => {
+          let killer: ChildProcess | undefined
+          const timer = setTimeout(() => { controllerTimedOut = true; killer?.kill(); resolve(false) }, 3000)
+          try {
+            const taskkill = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe')
+            killer = this.spawnProcess(taskkill, ['/PID', String(pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' })
+            killer.once('close', (code) => { controllerExitCode = code; clearTimeout(timer); resolve(code === 0) })
+            killer.once('error', () => { controllerFailed = true; clearTimeout(timer); resolve(false) })
+          } catch { controllerFailed = true; clearTimeout(timer); resolve(false) }
         })
       } else {
-        try {
-          process.kill(-pid, 'SIGTERM')
-        } catch {
-          // The process may already have exited between the live check and signal delivery.
-        }
+        try { process.kill(-pid, 'SIGTERM') } catch { /* process group may already have exited */ }
         await new Promise((resolve) => setTimeout(resolve, 250))
-        if (this.live.has(jobId))
-          try {
-            process.kill(-pid, 'SIGKILL')
-          } catch {
-            // The process group may already have exited after the graceful termination window.
-          }
+        try { process.kill(-pid, 'SIGKILL') } catch { /* no remaining group */ }
       }
     }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const closed = await Promise.race([
+      live.closed.then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 3000) })
+    ])
+    clearTimeout(timer)
+    const record = this.load(jobId)
+    record.state = state === 'output-limit' ? 'failed' : state
+    record.termination = Object.freeze({ controllerExitCode, controllerTimedOut, controllerFailed, childClosed: closed, childExited: live.child.exitCode !== null || live.child.signalCode !== null, stdoutEnded: live.child.stdout?.readableEnded ?? true, stderrEnded: live.child.stderr?.readableEnded ?? true })
+    record.outcome = closed && killerConfirmed ? 'known' : 'unknown'
+    if (state === 'output-limit') record.logsTruncated = true
+    record.stopOutcome = record.outcome === 'unknown' ? 'termination-unconfirmed' : state === 'timed-out' ? 'runtime-limit' : state === 'output-limit' ? 'output-limit' : 'stop-requested'
+    record.finishedAt = Date.now()
+    try { this.persist(record); this.audit(record, record.state) }
+    catch { record.stopOutcome += ';metadata-or-audit-write-failed'; this.records.set(record.jobId, record) }
+    // Keep an uncertain owner/slot quarantined until application restart.
+    if (record.outcome === 'known') this.live.delete(jobId)
   }
 
   private validateRequest(
@@ -424,7 +483,9 @@ export class CommandJobsToolHost {
     const pythonRequest =
       request.action === 'python.execute' &&
       (request.target.id === 'python.run' || request.target.id === 'python.background')
+    const shellRequest = request.action === 'shell.execute' && request.target.id === 'shell.execute'
     if (
+      !shellRequest &&
       !notebookRequest &&
       !pythonRequest &&
       (request.action !== 'terminal.execute' || request.target.id !== 'commands.background')
@@ -437,6 +498,7 @@ export class CommandJobsToolHost {
       throw new TerminalRunValidationError('Policy request command or arguments do not match.')
     if (request.filesystem?.cwd !== input.cwd)
       throw new TerminalRunValidationError('Policy request cwd does not match.')
+    if (shellRequest && (typeof request.input.executableSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(request.input.executableSha256) || typeof request.input.code !== 'string' || typeof request.input.codeSha256 !== 'string' || createHash('sha256').update(request.input.code).digest('hex') !== request.input.codeSha256 || request.input.explicitShell !== true)) throw new TerminalRunValidationError('Shell policy request lacks exact script and executable identity.')
     if (pythonRequest) {
       const interpreterSha256 = request.input.interpreterSha256
       const codeSha256 = request.input.codeSha256
@@ -466,7 +528,7 @@ export class CommandJobsToolHost {
     }
   }
 
-  private validateConstraints(command: string, cwd: string, constraints?: PolicyConstraints): void {
+  private validateConstraints(command: string, cwd: string, toolName: string, constraints?: PolicyConstraints): void {
     if (constraints?.readOnly)
       throw new TerminalRunValidationError(
         'Policy read-only constraint forbids background execution.'
@@ -475,15 +537,8 @@ export class CommandJobsToolHost {
       throw new TerminalRunValidationError(
         'Background execution requires no-shell policy constraints.'
       )
-    if (
-      constraints?.allowedToolNames &&
-      !constraints.allowedToolNames.includes('commands.background') &&
-      !constraints.allowedToolNames.includes('python.run') &&
-      !constraints.allowedToolNames.includes('python.background') &&
-      !constraints.allowedToolNames.includes('notebook.execute-cell') &&
-      !constraints.allowedToolNames.includes('notebook.execute-all')
-    )
-      throw new TerminalRunValidationError('Policy does not allow commands.background.')
+    if (constraints?.allowedToolNames && !constraints.allowedToolNames.includes(toolName))
+      throw new TerminalRunValidationError('Policy does not allow the exact requested process tool.')
     if (this.allowedCommands && !this.allowedCommands.has(commandKey(command)))
       throw new TerminalRunValidationError('Command is not allowed by the Tool Host.')
     const policyCommands = stringMetadata(constraints, 'allowedCommands')
@@ -497,6 +552,8 @@ export class CommandJobsToolHost {
     )
       throw new TerminalRunValidationError('cwd is outside policy allowed roots.')
   }
+
+  assertConfinement(constraints: PolicyConstraints): void { this.resolveSpawnProcess(constraints) }
 
   private resolveSpawnProcess(constraints?: PolicyConstraints): CommandJobsSpawnProcess {
     const requested =
@@ -585,26 +642,72 @@ export class CommandJobsToolHost {
     return record
   }
 
+  private assertStoreIdentity(): void {
+    let current = this.root
+    for (const part of path.relative(this.root, this.storeDir).split(path.sep)) {
+      current = path.join(current, part)
+      const stat = lstatSync(current)
+      if (!stat.isDirectory() || stat.isSymbolicLink() || commandKey(path.resolve(realpathSync.native(current))) !== commandKey(path.resolve(current))) throw new TerminalRunValidationError('Command metadata directory identity changed or is linked.')
+    }
+    const stat = lstatSync(this.storeDir)
+    if (stat.dev !== this.storeIdentity.dev || stat.ino !== this.storeIdentity.ino) throw new TerminalRunValidationError('Command metadata directory was replaced.')
+  }
+
+  private readBoundedFile(file: string, maximum: number, cursor: number, sizeLimit: number, identity?: { dev: number; ino: number }, missingOk = false) {
+    this.assertStoreIdentity()
+    let stat: ReturnType<typeof lstatSync>
+    try { stat = lstatSync(file) } catch (error) {
+      if (missingOk && !identity && (error as NodeJS.ErrnoException).code === 'ENOENT') return { data: Buffer.alloc(0), end: 0, size: 0 }
+      throw error
+    }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > sizeLimit || (identity && (identity.dev !== stat.dev || identity.ino !== stat.ino))) throw new TerminalRunValidationError('Command metadata/log is replaced, linked or exceeds its bound.')
+    const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    try {
+      const opened = fstatSync(fd)
+      if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.size > sizeLimit) throw new TerminalRunValidationError('Command metadata/log changed while opening.')
+      const from = Math.min(cursor, opened.size), buffer = Buffer.alloc(Math.min(maximum, opened.size - from))
+      let count = 0
+      while (count < buffer.length) { const read = readSync(fd, buffer, count, buffer.length - count, from + count); if (!read) break; count += read }
+      this.assertStoreIdentity()
+      const after = fstatSync(fd), current = lstatSync(file)
+      if (after.nlink !== 1 || current.isSymbolicLink() || current.dev !== after.dev || current.ino !== after.ino || after.size > sizeLimit) throw new TerminalRunValidationError('Command metadata/log changed while reading.')
+      return { data: buffer.subarray(0, count), end: from + count, size: after.size }
+    } finally { closeSync(fd) }
+  }
+
   private load(jobId: string): MutableRecord {
+    const owned = this.records.get(jobId)
+    if (owned) return owned
     const file = this.recordPath(jobId)
-    if (!existsSync(file)) throw new TerminalRunValidationError('Command job was not found.')
-    return JSON.parse(readFileSync(file, 'utf8')) as MutableRecord
+    const raw = JSON.parse(this.readBoundedFile(file, 65536, 0, 65536).data.toString('utf8')) as MutableRecord
+    if (!raw || raw.jobId !== jobId || typeof raw.routeKey !== 'string' || typeof raw.sessionId !== 'string' || !Array.isArray(raw.args) || raw.args.length > MAX_ARGS || raw.args.some((arg) => typeof arg !== 'string') || !['starting', 'running', 'completed', 'failed', 'timed-out', 'stopped', 'stopped-interrupted'].includes(raw.state)) throw new TerminalRunValidationError('Invalid persisted command record.')
+    // Persisted records are historical data only; never adopt a PID or live authority.
+    return raw
   }
 
   private persist(record: MutableRecord): void {
-    const file = this.recordPath(record.jobId)
-    const temp = `${file}.${process.pid}.tmp`
-    writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-    renameSync(temp, file)
+    if (!this.records.has(record.jobId) && this.records.size >= 256) throw new TerminalRunValidationError('Command job session capacity reached.')
+    this.records.set(record.jobId, record)
+    this.assertStoreIdentity()
+    const file = this.recordPath(record.jobId), temp = `${file}.${randomUUID()}.tmp`
+    try {
+      writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+      this.assertStoreIdentity()
+      if (existsSync(file)) { const stat = lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new TerminalRunValidationError('Linked command record rejected.') }
+      renameSync(temp, file)
+    } finally { try { unlinkSync(temp) } catch { /* rename succeeded or cleanup unavailable */ } }
   }
 
   private interruptOrphanedRecords(): void {
-    for (const name of readdirSync(this.storeDir)) {
-      if (!name.endsWith('.json')) continue
+    const directory = opendirSync(this.storeDir)
+    try {
+    for (let index = 0; index < 512; index++) {
+      const entry = directory.readSync()
+      if (!entry) break
+      const name = entry.name
+      if (!entry.isFile() || !/^[0-9a-f-]{36}\.json$/i.test(name)) continue
       try {
-        const record = JSON.parse(
-          readFileSync(path.join(this.storeDir, name), 'utf8')
-        ) as MutableRecord
+        const record = this.load(name.slice(0, -5))
         if (record.state === 'starting' || record.state === 'running') {
           record.state = 'stopped-interrupted'
           record.outcome = 'unknown'
@@ -617,12 +720,13 @@ export class CommandJobsToolHost {
         // Malformed records are never adopted or respawned.
       }
     }
+    } finally { directory.closeSync() }
   }
 
   private audit(record: CommandJobRecord, phase: string): void {
     if (!this.auditSink) return
     const streamId = `command-job:${record.jobId}`
-    const id = createHash('sha256').update(`${streamId} ${phase}`).digest('hex')
+    const id = createHash('sha256').update(`${streamId}\0${phase}`).digest('hex')
     if (this.auditSink.getEvent(id)) return
     this.auditSink.appendBatch([
       {
@@ -643,6 +747,7 @@ export class CommandJobsToolHost {
           finishedAt: record.finishedAt ?? null,
           exitCode: record.exitCode ?? null,
           signal: record.signal ?? null,
+          termination: record.termination ?? null,
           stopOutcome: record.stopOutcome ?? null,
           stdoutBytes: record.stdoutBytes,
           stderrBytes: record.stderrBytes,
@@ -696,25 +801,38 @@ function createOutputBudget(maxBytes: number, onLimit: () => void): OutputBudget
 function createRedactedWriter(
   file: string,
   budget: OutputBudget,
-  update: (bytes: number, truncated: boolean) => void
+  update: (bytes: number, truncated: boolean) => void,
+  register: (identity: { dev: number; ino: number }) => void,
+  assertDirectory: () => void,
+  onFailure: () => void
 ) {
-  let carry = ''
-  let bytes = existsSync(file) ? statSync(file).size : 0
+  assertDirectory()
+  const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+  const identity = fstatSync(fd)
+  register({ dev: identity.dev, ino: identity.ino })
+  let carry = '', bytes = 0, closed = false
   let truncated = false
   const append = (text: string) => {
-    if (!text || truncated) return
+    if (!text || truncated || closed) return
+    assertDirectory()
+    const current = lstatSync(file), opened = fstatSync(fd)
+    if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1 || current.dev !== identity.dev || current.ino !== identity.ino || opened.size !== bytes) throw new TerminalRunValidationError('Command output log was replaced or modified.')
     const redacted = Buffer.from(redactTerminalText(text), 'utf8')
     const accepted = redacted.subarray(0, budget.take(redacted.length))
-    if (accepted.length) appendFileSync(file, accepted, { mode: 0o600 })
+    let written = 0
+    while (written < accepted.length) { const count = writeSync(fd, accepted, written, accepted.length - written, bytes + written); if (!count) throw new Error('Command output write incomplete.'); written += count }
     bytes += accepted.length
     truncated ||= accepted.length < redacted.length || budget.exceeded()
     update(bytes, truncated)
   }
+  const fail = () => { truncated = true; update(bytes, true); onFailure() }
   return {
     write: (chunk: Buffer | string) => {
+      if (closed || truncated) return
+      try {
       const incoming = Buffer.from(chunk)
       budget.receive(incoming.length)
-      carry += incoming.toString('utf8')
+      carry += incoming.subarray(0, MAX_LOG_BYTES).toString('utf8')
       if (budget.exceeded()) {
         append(carry)
         carry = ''
@@ -727,11 +845,12 @@ function createRedactedWriter(
         append(carry.slice(0, split))
         carry = carry.slice(split)
       }
+      } catch { fail() }
     },
     end: () => {
-      append(carry)
-      carry = ''
-      update(bytes, truncated)
+      if (closed) return
+      try { append(carry); carry = ''; update(bytes, truncated) } catch { fail() }
+      finally { closed = true; try { closeSync(fd) } catch { /* already closed */ } }
     }
   }
 }

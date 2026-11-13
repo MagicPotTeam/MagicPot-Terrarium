@@ -24,7 +24,7 @@ export const getMcpClientManager = (): McpClientManager => {
           reason,
           metadata: { serverId }
         })
-    })
+    }, getConfig)
   }
   return mcpClientManagerSingleton
 }

@@ -136,6 +136,14 @@ export function useCanvasMediaActions({
   const handleCopyCanvasItemsAsImage = useCallback(
     async (targetItems: CanvasItem[]) => {
       if (targetItems.length === 0) return
+      // A crop's stored coordinates do not establish the version or coordinate
+      // system of its source. Do not copy a potentially different rectangle.
+      if (targetItems.some((item) => item.type === 'image' && item.crop)) {
+        notifyError(t('canvas.export_cropped_image_failed', {
+          defaultValue: 'Cannot safely export or copy cropped images yet. Removing the crop exposes the full original.'
+        }))
+        return
+      }
 
       try {
         const data = await renderCanvasItemsImageBytes(targetItems, 'png', false)
@@ -157,6 +165,12 @@ export function useCanvasMediaActions({
   const handleDownloadCanvasItemsAsImage = useCallback(
     async (targetItems: CanvasItem[], prefix = 'canvas-image') => {
       if (targetItems.length === 0) return
+      if (targetItems.some((item) => item.type === 'image' && item.crop)) {
+        notifyError(t('canvas.export_cropped_image_failed', {
+          defaultValue: 'Cannot safely export or copy cropped images yet. Removing the crop exposes the full original.'
+        }))
+        return
+      }
 
       try {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)

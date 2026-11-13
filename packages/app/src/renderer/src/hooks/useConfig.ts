@@ -14,6 +14,8 @@ import { Config, DEFAULT_CONFIG } from '@shared/config/config'
 import { BuildEnv, DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { ConfigUtils } from '@shared/config/configUtils'
 import { DeepPartial } from '@shared/utils/utilTypes'
+import { createConfigObservationController } from './configObservation'
+import { ConfigObservationProvider } from './configObservationContext'
 
 type ConfigState = {
   config: Config
@@ -28,6 +30,7 @@ const ConfigContext = createContext<ConfigState>({
 })
 
 export function ConfigProvider({ children }: { children: React.ReactNode }) {
+  const [observation] = useState(createConfigObservationController)
   const [state, setState] = useState<ConfigState>({
     config: DEFAULT_CONFIG,
     buildEnv: DEFAULT_BUILD_ENV,
@@ -55,14 +58,26 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
       if (!isCurrent()) return
 
       const [configResp, buildEnvResp] = initialized
-      setState({ config: configResp.config, buildEnv: buildEnvResp.buildEnv, isReady: true })
+      const publishObservedConfig = (config: Config): void => {
+        if (!isCurrent()) return
+        const token = observation.advance(true)
+        const ownsObservation = () => isCurrent() && observation.source.getSnapshot() === token
+        if (!ownsObservation()) return
+        // Observers may synchronously feed a newer message; an older queued update cannot win.
+        // Each accepted watch also carries initialized build/readiness if React skipped init.
+        setState((previous) => ownsObservation()
+          ? { config, buildEnv: buildEnvResp.buildEnv, isReady: true }
+          : previous)
+      }
+      publishObservedConfig(configResp.config)
+      if (!isCurrent()) return
       try {
         await api().svcState.watchConfig(
           {},
           {
             onData: (res) => {
               if (!isCurrent()) return
-              setState((prev) => ({ ...prev, config: res.config }))
+              publishObservedConfig(res.config)
             },
             abortReceiver
           }
@@ -77,11 +92,13 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       mounted = false
+      observation.advance(false) // Retire display ownership before abort callbacks can reenter.
       abortSender.abort()
     }
-  }, [])
+  }, [observation])
 
-  return createElement(ConfigContext.Provider, { value: state }, children)
+  return createElement(ConfigObservationProvider, { value: observation.source },
+    createElement(ConfigContext.Provider, { value: state }, children))
 }
 
 type UseConfigResult = ConfigState & {

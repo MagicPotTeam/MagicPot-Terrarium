@@ -51,7 +51,8 @@ describe('canvas file tools without a persistent file form', () => {
       ])
       expect(output.messages).toBe(input.messages)
       expect(JSON.stringify(input)).toBe(before)
-      expect(output.systemPrompt).toContain('not file contents')
+      expect(output.systemPrompt).toContain('reads are enabled by default')
+      expect(output.systemPrompt).toContain('Do not ask the user to authorize each path')
       expect(output.skillRuntime?.bindings?.[0]?.toolNames).not.toContain('files.write')
     }
   )

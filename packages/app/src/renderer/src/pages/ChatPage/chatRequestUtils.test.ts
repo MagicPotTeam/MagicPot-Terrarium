@@ -772,6 +772,18 @@ describe('requestChatCompletion', () => {
     })
   })
 
+  it('passes team member identity to the local chat IPC and omits it for lead requests', async () => {
+    const config = createConfig()
+    config.use_remote_llm = false
+    const chat = vi.fn().mockResolvedValue({ content: 'fixture' })
+    ;(window as typeof window & { api: unknown }).api = { svcLLMProxy: { chat } } as unknown as Window['api']
+    const teamMember = { scope: 'scope', thread: 'thread', lead: 'lead', member: 'writer' }
+    await requestChatCompletion({ config, messages, profileId: 'foo', teamMember })
+    await requestChatCompletion({ config, messages, profileId: 'foo' })
+    expect(chat.mock.calls[0][0].teamMember).toEqual(teamMember)
+    expect(chat.mock.calls[1][0]).not.toHaveProperty('teamMember')
+  })
+
   it('normalizes final-step context usage without replacing aggregate billing usage', async () => {
     const config = createConfig()
     const chat = vi.fn().mockResolvedValue({

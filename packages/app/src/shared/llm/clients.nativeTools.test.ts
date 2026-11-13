@@ -22,6 +22,43 @@ const create = (fetchImpl: typeof fetch, mode: 'responses' | 'chat-completions')
     { fetchImpl, apiMode: mode, enableHostedTools: false }
   )
 describe('native tool transport', () => {
+  it('isolated helpers disable hosted web/file tools even when client defaults enable them', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body))
+      expect(body.tools).toHaveLength(1)
+      expect(body.tools[0].type).toBe('function')
+      expect(body.max_output_tokens).toBe(2048)
+      return response({ output_text: 'checked', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'checked' }] }] })
+    })
+    const cli = new OpenAIAPICli('owned', 'https://api.openai.com/v1', 'gpt-5.4', { apiMode: 'responses', enableHostedTools: true, enableHostedWebSearch: true, fetchImpl: fetcher })
+    expect(cli.supportsIsolatedReadOnlyTurns).toBe(true)
+    expect(cli.supportsIsolatedMainToolTurns).toBe(true)
+    await cli.chat({ messages: [{ role: 'user', content: 'inspect' }], tools, disableProviderTools: true, imageGenerationOptions: { enabled: false }, maxOutputTokens: 2048, retryCapacity: false })
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
+  it('rejects isolated image requests before any upstream submission', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+    const cli = new OpenAIAPICli('owned', 'https://owned.test/v1', 'gpt-image-1', { apiMode: 'images', modelUse: 'image', fetchImpl: fetcher })
+    await expect(cli.chat({ messages: [{ role: 'user', content: 'image' }], disableProviderTools: true })).rejects.toThrow('disabled')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+  it.each(['content', 'images'] as const)('client-owned text-only policy refuses mixed native/media %s before native normalization', async field => {
+    const payload = { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'one', type: 'function', function: { name: 'mp_tool_0', arguments: '{}' } }], [field]: [{ type: 'image_url', image_url: { url: 'https://images.invalid/mixed.png' } }] }, finish_reason: 'tool_calls' }] }
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(payload))
+    const cli = new OpenAIAPICli('owned', 'https://owned.test/v1/chat/completions', 'owned-model', { apiMode: 'chat-completions', fetchImpl: fetcher, requireTextOnlyResponse: true })
+    await expect(cli.chat({ messages: [{ role: 'user', content: 'read' }], tools, retryCapacity: false })).rejects.toThrow(/text|media/i)
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
+  it.each(['length', 'content_filter'] as const)(
+    'preserves non-streaming text-parts %s status rather than completing a tool-looking reply',
+    async reason => {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response({ choices: [{ message: { role: 'assistant', content: [{ type: 'text', text: '{"toolName":"files.read","args":{"path":"a.txt"}}' }] }, finish_reason: reason }] }))
+      const result = await create(fetcher, 'chat-completions').chat({ messages: [{ role: 'user', content: 'read' }], tools, retryCapacity: false })
+      expect(result.finishReason).toBe(reason === 'length' ? 'length' : 'error')
+      expect(result.toolCalls).toBeUndefined()
+      expect(fetcher).toHaveBeenCalledOnce()
+    }
+  )
   it.each(['responses', 'chat-completions'] as const)(
     'sends native definitions and accepts a tool-only %s response',
     async (mode) => {
@@ -166,6 +203,35 @@ describe('native tool transport', () => {
         ]
       } as LLMChatParams)
       expect(result.content).toBe('done')
+    }
+  )
+  it.each(['responses', 'chat-completions'] as const)(
+    'projects a failed native result into a stateless tool-free explanation request on %s', async mode => {
+      const output = JSON.stringify({ error: { code: 'MAGIC_AGENT_FILES_EDIT_FAILED', message: 'Step did not match.' }, report: { failed: 1, writeStatus: 'committed' }, mutation: { afterSha256: 'actual-after-state' } })
+      const call = { id: 'failed-native', name: 'files.edit', wireName: 'mp_tool_3', arguments: '{"path":"a.txt"}' }
+      const item = { type: 'function_call', id: 'fc_failed', call_id: call.id, name: call.wireName, arguments: call.arguments }
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+        const body = JSON.parse(String(init?.body))
+        expect(body.tools).toBeUndefined()
+        expect(body.tool_choice).toBeUndefined()
+        expect(body.previous_response_id).toBeUndefined()
+        if (mode === 'responses') {
+          expect(body.store).toBe(false)
+          expect(body.input.slice(-2)).toEqual([item, { type: 'function_call_output', call_id: call.id, output }])
+        } else expect(body.messages.slice(-2)).toEqual([
+          { role: 'assistant', content: null, tool_calls: [{ id: call.id, type: 'function', function: { name: call.wireName, arguments: call.arguments } }] },
+          { role: 'tool', tool_call_id: call.id, content: output }
+        ])
+        return response(mode === 'responses'
+          ? { output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The tool failed; no retry.' }] }] }
+          : { choices: [{ message: { content: 'The tool failed; no retry.' }, finish_reason: 'stop' }] })
+      })
+      const cli = new OpenAIAPICli('fixture', 'https://api.openai.com/v1', 'gpt-5.4', { apiMode: mode, enableHostedTools: true, enableHostedWebSearch: true, fetchImpl: fetcher })
+      const result = await cli.chat({ messages: [{ role: 'user', content: 'Explain the reported failure only.' }],
+        toolTurns: [{ content: '', calls: [call], results: [{ callId: call.id, output }], ...(mode === 'responses' ? { responseItems: [item] } : {}) }],
+        disableProviderTools: true, disableAutomaticImageGeneration: true, imageGenerationOptions: { enabled: false }, retryCapacity: false })
+      expect(result.content).toBe('The tool failed; no retry.')
+      expect(fetcher).toHaveBeenCalledOnce()
     }
   )
   it('retains a completed SSE function item even if the final response omits output', async () => {

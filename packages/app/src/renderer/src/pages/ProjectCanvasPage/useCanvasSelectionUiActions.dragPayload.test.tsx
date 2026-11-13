@@ -5,7 +5,7 @@ import { useCanvasSelectionUiActions } from './useCanvasSelectionUiActions'
 import type { CanvasImageItem } from './types'
 
 vi.mock('../../utils/windowUtils', () => ({
-  api: () => ({})
+  api: () => window.api ?? {}
 }))
 
 const originalGetContext = HTMLCanvasElement.prototype.getContext
@@ -15,6 +15,7 @@ afterEach(() => {
   HTMLCanvasElement.prototype.getContext = originalGetContext
   HTMLCanvasElement.prototype.toDataURL = originalToDataURL
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 function createImageItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
@@ -41,7 +42,8 @@ function createImageItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageI
 
 function renderSelectionUiActions(
   items: CanvasImageItem[],
-  handleSendCanvasItemsToAgent = vi.fn()
+  handleSendCanvasItemsToAgent = vi.fn(),
+  overrides: Record<string, unknown> = {}
 ) {
   return renderHook(() =>
     useCanvasSelectionUiActions({
@@ -93,12 +95,160 @@ function renderSelectionUiActions(
       },
       tool: 'select',
       tryHandleCanvasExternalDropRef: { current: null },
-      actionMessageKeyRef: { current: null }
+      actionMessageKeyRef: { current: null },
+      ...overrides
     })
   )
 }
 
 describe('useCanvasSelectionUiActions drag payload', () => {
+  it.each([false, true])('rejects a partial crop from an unverified equal-sized canvas, mixed=%s', (mixed) => {
+    // Canvas pixels and src are distinct synthetic assets; drawing/encoding is stubbed, not decoded.
+    const image = document.createElement('canvas')
+    image.width = 100
+    image.height = 80
+    const selected = createImageItem({ image, src: 'data:image/png;base64,c3ludGhldGljLXNvdXJjZQ==', crop: { x: 10, y: 20, width: 30, height: 40 } })
+    const items = mixed ? [createImageItem({ id: 'other' }), selected] : [selected]
+    const drawImage = vi.fn()
+    HTMLCanvasElement.prototype.getContext = (() => ({ drawImage }) as unknown as CanvasRenderingContext2D) as unknown as typeof HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.toDataURL = vi.fn(() => 'data:image/png;base64,c3ludGhldGljLWNyb3A=')
+    const notifyError = vi.fn()
+    const { result } = renderSelectionUiActions(items, vi.fn(), { notifyError })
+    const setData = vi.fn()
+    const transfer = { setData, effectAllowed: 'none' } as unknown as DataTransfer
+    const dispatch = vi.fn()
+    let payload: ReturnType<typeof result.current.buildCanvasDragPayload> | undefined
+    let thrown: unknown
+    try {
+      payload = result.current.buildCanvasDragPayload(items, { objectUrl: selected.src, previewImageUrl: selected.src })
+      result.current.setCanvasDragPayload(transfer, payload)
+      dispatch(payload)
+    } catch (error) { thrown = error }
+    expect(payload).toBeUndefined()
+    expect(setData).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(notifyError).toHaveBeenCalledOnce()
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe('CANVAS_CROP_EXPORT_UNAVAILABLE')
+  })
+  it.each([true, false])('handles synthetic external drop with unknown crop=%s', (unknownCrop) => {
+    const item = createImageItem({
+      src: 'data:image/png;base64,c3ludGhldGlj',
+      ...(unknownCrop ? { sourceWidth: undefined, sourceHeight: undefined, image: undefined, width: 100, height: 100, crop: { x: 0, y: 0, width: 100, height: 100 } } : {})
+    })
+    const target = document.createElement('div')
+    const dragover = vi.fn((event: Event) => event.preventDefault())
+    const drop = vi.fn((event: Event) => event.preventDefault())
+    target.addEventListener('dragover', dragover)
+    target.addEventListener('drop', drop)
+    const previous = Object.getOwnPropertyDescriptor(document, 'elementFromPoint')
+    Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => target })
+    vi.stubGlobal('DataTransfer', class { effectAllowed = ''; setData = vi.fn() })
+    vi.stubGlobal('DragEvent', class extends MouseEvent {
+      dataTransfer: DataTransfer | null
+      constructor(type: string, init: DragEventInit) { super(type, init); this.dataTransfer = init.dataTransfer ?? null }
+    })
+    const notifyError = vi.fn()
+    try {
+      const { result } = renderSelectionUiActions([item], vi.fn(), { notifyError })
+      expect(result.current.tryHandleCanvasExternalDrop(item.id, 150, 50)).toBe(true)
+      if (unknownCrop) {
+        expect(dragover).not.toHaveBeenCalled()
+        expect(drop).not.toHaveBeenCalled()
+        expect(notifyError).toHaveBeenCalledOnce()
+      } else {
+        expect(dragover).toHaveBeenCalledOnce()
+        expect(drop).toHaveBeenCalledOnce()
+        expect(notifyError).not.toHaveBeenCalled()
+      }
+    } finally {
+      if (previous) Object.defineProperty(document, 'elementFromPoint', previous)
+      else Reflect.deleteProperty(document, 'elementFromPoint')
+    }
+  })
+  it.each([false, true])('rejects an unverified crop before any drag payload, mixed=%s', (mixed) => {
+    // Synthetic source denotes a 200x200 PNG; no Image is loaded in this synchronous path.
+    const original = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAYAAACtWK6eAAACaUlEQVR42u3TMQ0AAAjAsPk3DTYI6TEHa9XoTqNTZUpABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABIkAAESCACBBABAggAgQQYwIiQAARIIAIEEAECCACRIAAIkAAESCACBBABIgAAUSAACJAABEggAgQmRIQAQKIAAFEgAAiQAARIAIEEAECiAABRIAAIkAECCACBBABAogAAUSACBBABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABIkAAESCACBBABAggAkSAACJAABEggAgQQAQIIAJEgAAiQAARIIAIEEAEiAABRIAAIkAAESCACBABAogAAUSAACJAABEggJgSEAECiAABRIAAIkAAESACBBABAogAAUSAACJABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAABxJiACBBABAggAgQQAQKIABEggAgQQAQIIAIEEAEiQAARIIAIEEAECCACRKYERIAAIkAAESCACBBABIgAAUSAACJAABEggAgQAQKIAAFEgAAiQAARIAIEEAECiAABRIAAIkAAESACBBABAogAAUSAACJABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABAogAESCACBBABAggAgQQASJAABEggAgQQAQIIAJEgAAiQAARIIAIEEAECCCmBESAACJAABEggAgQQASIAAFEgAAiQAARIIAIEAECiAABRIAAIkAAESACBBABAogAAUSAACJAADEmIAIEEAECiAABRIAAIkAECCACBBAB8rEFA6mDSMjZmAIAAAAASUVORK5CYII='
+    const cropped = createImageItem({ src: original, sourceWidth: undefined, sourceHeight: undefined, image: undefined, width: 100, height: 100, crop: { x: 0, y: 0, width: 100, height: 100 } })
+    const items = mixed ? [cropped, createImageItem({ id: 'other', src: 'data:image/png;base64,c2FmZQ==' })] : [cropped]
+    const { result } = renderSelectionUiActions(items)
+    const setData = vi.fn()
+    const transfer = { setData, effectAllowed: 'none' } as unknown as DataTransfer
+    expect(() => {
+      const payload = result.current.buildCanvasDragPayload(items, { objectUrl: original, previewImageUrl: original })
+      result.current.setCanvasDragPayload(transfer, payload)
+    }).toThrow('CANVAS_CROP_EXPORT_UNAVAILABLE')
+    expect(setData).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('fails closed before allocating an oversized synchronous crop, mixed=%s', (mixed) => {
+    // Plain synthetic asset and fake output canvas: never allocate real image pixels.
+    // The crop starts at x=1 so it is a real crop, not the full-source fast path;
+    // normalization clips its requested 9000x9000 to 8999x9000.
+    const image = { width: 9000, height: 9000 } as unknown as CanvasImageItem['image']
+    const selected = createImageItem({ image, sourceWidth: 9000, sourceHeight: 9000, crop: { x: 1, y: 0, width: 9000, height: 9000 } })
+    const items = mixed ? [createImageItem({ id: 'other' }), selected] : [selected]
+    const notifyError = vi.fn()
+    const { result } = renderSelectionUiActions(items, vi.fn(), { notifyError })
+    const getContext = vi.fn(() => ({ drawImage: vi.fn() }))
+    const toDataURL = vi.fn(() => 'data:image/png;base64,c3ludGhldGlj')
+    const fakeCanvas = { width: 0, height: 0, getContext, toDataURL }
+    const originalCreateElement = document.createElement.bind(document)
+    const createElement = vi.spyOn(document, 'createElement').mockImplementation(((tag: string, options?: ElementCreationOptions) =>
+      tag.toLowerCase() === 'canvas' ? fakeCanvas : originalCreateElement(tag, options)) as typeof document.createElement)
+    const setData = vi.fn()
+    const transfer = { setData, effectAllowed: 'none' } as unknown as DataTransfer
+    let thrown: unknown
+    try {
+      const payload = result.current.buildCanvasDragPayload(items, { objectUrl: selected.src, previewImageUrl: selected.src })
+      result.current.setCanvasDragPayload(transfer, payload)
+    } catch (error) { thrown = error }
+    expect(createElement).not.toHaveBeenCalledWith('canvas')
+    expect(getContext).not.toHaveBeenCalled()
+    expect(toDataURL).not.toHaveBeenCalled()
+    expect(setData).not.toHaveBeenCalled()
+    expect(notifyError).toHaveBeenCalledOnce()
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe('CANVAS_CROP_EXPORT_UNAVAILABLE')
+  })
+
+  it('rejects a stale thumbnail-sized full crop before exposing the original in a drag payload', () => {
+    // The original is synthetic 200x200; image is a different 100x100 thumbnail.
+    const original = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAYAAACtWK6eAAACaUlEQVR42u3TMQ0AAAjAsPk3DTYI6TEHa9XoTqNTZUpABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABIkAAESCACBBABAggAgQQYwIiQAARIIAIEEAECCACRIAAIkAAESCACBBABIgAAUSAACJAABEggAgQmRIQAQKIAAFEgAAiQAARIAIEEAECiAABRIAAIkAECCACBBABAogAAUSACBBABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABIkAAESCACBBABAggAkSAACJAABEggAgQQAQIIAJEgAAiQAARIIAIEEAEiAABRIAAIkAAESCACBABAogAAUSAACJAABEggJgSEAECiAABRIAAIkAAESACBBABAogAAUSAACJABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAABxJiACBBABAggAgQQAQKIABEggAgQQAQIIAIEEAEiQAARIIAIEEAECCACRKYERIAAIkAAESCACBBABIgAAUSAACJAABEggAgQAQKIAAFEgAAiQAARIAIEEAECiAABRIAAIkAAESACBBABAogAAUSAACJABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABAogAESCACBBABAggAgQQASJAABEggAgQQAQIIAJEgAAiQAARIIAIEEAECCCmBESAACJAABEggAgQQASIAAFEgAAiQAARIAIEAECiAABRIAAIkAAESACBBABAogAAUSAACJAADEmIAIEEAECiAABRIAAIkAECCACBBAB8rEFA6mDSMjZmAIAAAAASUVORK5CYII='
+    const image = { width: 100, height: 100 } as unknown as CanvasImageItem['image']
+    const selected = createImageItem({ src: original, image, sourceWidth: 100, sourceHeight: 100, crop: { x: 0, y: 0, width: 100, height: 100 } })
+    const notifyError = vi.fn(), setData = vi.fn()
+    const { result } = renderSelectionUiActions([selected], vi.fn(), { notifyError })
+    const transfer = { setData, effectAllowed: 'none' } as unknown as DataTransfer
+    vi.stubGlobal('Image', class { naturalWidth = 200; naturalHeight = 200; onload: (() => void) | null = null; set src(_value: string) { queueMicrotask(() => this.onload?.()) } })
+    expect(() => {
+      const payload = result.current.buildCanvasDragPayload([selected], { objectUrl: original, previewImageUrl: original })
+      result.current.setCanvasDragPayload(transfer, payload)
+    }).toThrow('CANVAS_CROP_EXPORT_UNAVAILABLE')
+    expect(setData).not.toHaveBeenCalled()
+    expect(notifyError).toHaveBeenCalledOnce()
+  })
+
+  it('keeps an uncropped image in the drag payload', () => {
+    const item = createImageItem()
+    const { result } = renderSelectionUiActions([item])
+    const payload = result.current.buildCanvasDragPayload([item])
+    expect(payload.objectUrl).toBe(item.src)
+    expect(payload.previewImageUrl).toBe(item.src)
+    expect(payload.attachments?.[0]?.url).toBe(item.src)
+  })
+  it('keeps ordinary coded chat errors readable and restores the canvas rather than reporting success', async () => {
+    const items = [createImageItem(), createImageItem({ id: 'image-2' })], notifyError = vi.fn(), notifySuccess = vi.fn(), setItems = vi.fn()
+    const chat = vi.fn(async () => { throw { message: 'ordinary provider failure', code: 'E_ORDINARY' } })
+    vi.stubGlobal('api', { svcLLMProxy: { chat, listProfiles: vi.fn(async () => ({ profiles: [{ id: 'profile' }] })) } })
+    const { result } = renderSelectionUiActions(items, vi.fn(), { notifyError, notifySuccess, setItems })
+    await result.current.handleSmartCleanup()
+    expect(notifyError).toHaveBeenCalledWith('AI cleanup failed: ordinary provider failure')
+    expect(setItems).toHaveBeenCalledWith(items)
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalledOnce()
+  })
+
   it('uses a materialized cropped image for objectUrl when the original image is available', () => {
     const sourceCanvas = document.createElement('canvas')
     sourceCanvas.width = 100

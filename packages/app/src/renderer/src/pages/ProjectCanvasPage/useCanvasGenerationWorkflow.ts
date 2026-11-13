@@ -142,14 +142,13 @@ type UseCanvasGenerationWorkflowOptions = {
   sendCanvasItemsToAgent: (
     targetItems: CanvasItem[],
     options?: SendCanvasItemsToAgentOptions
-  ) => Promise<void>
+  ) => Promise<boolean>
 }
 
 export function useCanvasGenerationWorkflow({
   canvasId,
   projectName,
   items,
-  notifySuccess,
   notifyWarning,
   sendCanvasItemsToAgent
 }: UseCanvasGenerationWorkflowOptions) {
@@ -247,14 +246,15 @@ export function useCanvasGenerationWorkflow({
       notes: 'Default agent path used without a project model'
     })
 
-    await sendCanvasItemsToAgent(targetItems, {
+    const scheduled = await sendCanvasItemsToAgent(targetItems, {
       targetScope: generationTargetScope || undefined,
       promptPrefix,
       includeCanvasPromptText: false,
       includeGroupCompletionPrompt: false
     })
 
-    notifySuccess('已发送给默认 Agent 生成候选图')
+    if (!scheduled) return
+    notifyWarning('已安排向默认 Agent 投递，尚未确认接收')
     handleCloseGenerationTaskDialog()
   }, [
     canvasId,
@@ -263,7 +263,6 @@ export function useCanvasGenerationWorkflow({
     handleCloseGenerationTaskDialog,
     items,
     linkFollowUpTraceRecord,
-    notifySuccess,
     notifyWarning,
     projectName,
     sendCanvasItemsToAgent

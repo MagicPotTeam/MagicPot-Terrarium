@@ -1,4 +1,5 @@
 import type { Config } from '@shared/config/config'
+import type { AgentRouteLike } from '@shared/agent'
 
 export type MagicAgentCreativeToolCategory =
   | 'comfyui'
@@ -43,10 +44,18 @@ export type MagicAgentCreativeToolContext = {
   config?: Config
   signal?: AbortSignal
   dependencies?: Partial<MagicAgentCreativeToolDependencies>
+  // Main-owned route identity; never copied from model arguments or run metadata.
+  route?: AgentRouteLike
+  sessionKey?: string
+  // Constructed by the main-process caller; never taken from tool arguments or metadata.
+  authorizeMutation?: (request: {
+    toolName: string
+    args: Record<string, unknown>
+  }) => Promise<void>
 }
 
 export type MagicAgentCreativeToolAdapter = {
-  definitions(): MagicAgentCreativeToolDefinition[]
+  definitions(context?: MagicAgentCreativeToolContext): MagicAgentCreativeToolDefinition[]
   callTool(
     name: string,
     args: Record<string, unknown>,
@@ -72,6 +81,7 @@ export type MagicAgentCreativeToolDependencies = {
   videoCreate: MagicAgentCreativeToolDependency
   modelList: MagicAgentCreativeToolDependency
   modelInspect: MagicAgentCreativeToolDependency<{ path?: unknown; name?: unknown }>
+  modelStatus: MagicAgentCreativeToolDependency
   assetList: MagicAgentCreativeToolDependency
   assetImport: MagicAgentCreativeToolDependency
   projectTraceList: MagicAgentCreativeToolDependency

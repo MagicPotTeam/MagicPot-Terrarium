@@ -641,6 +641,13 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(syncItemPreviewSpy).toHaveBeenNthCalledWith(2, item.id, null)
   })
 
+  it('broadcasts DOM previews for explicitly labelled team images', async () => {
+    const item = { ...createImageItem('team-image-preview'), teamImageLabel: '文案·图1' }
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    render(<ProjectCanvasPageStageScene {...createBaseProps([item])} items={[item]} visibleItems={[item]} />)
+    await waitFor(() => expect(imageInteractionOverlayProps.get(item.id)?.broadcastDomPreviewSync).toBe(true))
+  })
+
   it('keeps the sorted WebGL item array stable across runtime route updates', async () => {
     const backItem = createImageItem('image-stable-webgl-back')
     const frontItem = createImageItem('image-stable-webgl-front')
@@ -3707,6 +3714,96 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(setSelectedIds).toHaveBeenCalledWith(new Set([cropItem.id]))
     expect(setTool).toHaveBeenCalledWith('select')
     expect(setCroppingImageId).toHaveBeenCalledWith(null)
+  })
+
+  it.each([
+    { label: 'unknown source dimensions', knownSize: false },
+    { label: 'known full source dimensions', knownSize: true }
+  ])('preserves a sibling crop unless it is a confirmed identity: $label', async ({ knownSize }) => {
+    // A's 200x200 source is represented by a synthetic data URL; this test does not decode it.
+    const sibling: CanvasImageItem = {
+      ...createImageItem('sibling'),
+      src: 'data:image/png;base64,c3ludGhldGlj', image: undefined,
+      sourceWidth: knownSize ? 200 : undefined,
+      sourceHeight: knownSize ? 200 : undefined,
+      width: 100, height: 100,
+      crop: knownSize
+        ? { x: 0, y: 0, width: 200, height: 200 }
+        : { x: 0, y: 0, width: 100, height: 100 }
+    }
+    const before = { ...sibling, crop: { ...sibling.crop! } }
+    const target = createImageItem('crop-target')
+    const setItemsWithHistory = vi.fn()
+    render(<ProjectCanvasPageStageScene {...createBaseProps([sibling, target])}
+      tool="crop-select" croppingImageId={target.id} setItemsWithHistory={setItemsWithHistory} />)
+    const confirm = cropOverlayProps.get(target.id)?.onConfirm as (updates: Partial<CanvasImageItem>) => void
+    expect(confirm).toBeTypeOf('function')
+    act(() => confirm({ width: 80, height: 60 }))
+    await waitFor(() => expect(setItemsWithHistory).toHaveBeenCalledTimes(1))
+    const updateItems = setItemsWithHistory.mock.calls[0][0] as (prev: CanvasImageItem[]) => CanvasImageItem[]
+    const [nextSibling, nextTarget] = updateItems([sibling, target])
+    if (knownSize) expect(nextSibling.crop).toBeUndefined()
+    else expect(nextSibling.crop).toEqual(before.crop)
+    expect(sibling).toEqual(before)
+    expect(nextTarget).toEqual(expect.objectContaining({ id: target.id, width: 80, height: 60 }))
+  })
+
+  it('preserves sibling crop with equal-sized thumbnail and potentially stale source hints', async () => {
+    // Synthetic identities only: thumbnail is 100x100; source is assumed 200x200. No decoding.
+    const thumbnail = document.createElement('canvas')
+    thumbnail.width = 100
+    thumbnail.height = 100
+    const sibling: CanvasImageItem = {
+      ...createImageItem('sibling-stale-hints'),
+      src: 'data:image/png;base64,c3ludGhldGljLW9yaWdpbmFsLTIwMHgyMDA=',
+      image: thumbnail, sourceWidth: 100, sourceHeight: 100, width: 100, height: 100,
+      crop: { x: 0, y: 0, width: 100, height: 100 }
+    }
+    const before = { ...sibling, crop: { ...sibling.crop! } }
+    const target = createImageItem('crop-target-stale-sibling')
+    const setItemsWithHistory = vi.fn()
+    render(<ProjectCanvasPageStageScene {...createBaseProps([sibling, target])}
+      tool="crop-select" croppingImageId={target.id} setItemsWithHistory={setItemsWithHistory} />)
+    const confirm = cropOverlayProps.get(target.id)?.onConfirm as (updates: Partial<CanvasImageItem>) => void
+    expect(confirm).toBeTypeOf('function')
+    act(() => confirm({ width: 80, height: 60 }))
+    await waitFor(() => expect(setItemsWithHistory).toHaveBeenCalledTimes(1))
+    const updateItems = setItemsWithHistory.mock.calls[0][0] as (prev: CanvasImageItem[]) => CanvasImageItem[]
+    const [nextSibling] = updateItems([sibling, target])
+    expect(nextSibling.crop).toEqual(before.crop)
+    expect(sibling).toEqual(before)
+  })
+
+  it('retains unverified preview-coordinate crops on confirmation instead of flattening source', async () => {
+    // Preview, source, and drawing are synthetic; equal source dimensions do not
+    // establish that the stored crop coordinates were measured in the source.
+    const item = { ...createImageItem('preview-coordinate-target'), sourceWidth: 200, sourceHeight: 200 }
+    const crop = { x: 20, y: 10, width: 50, height: 50 }
+    const setItemsWithHistory = vi.fn()
+    const drawImage = vi.fn()
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never)
+    const encode = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,Y3JvcA==')
+    vi.stubGlobal('Image', class {
+      naturalWidth = 200
+      naturalHeight = 200
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      set src(_value: string) { queueMicrotask(() => this.onload?.()) }
+    })
+    try {
+      render(<ProjectCanvasPageStageScene {...createBaseProps([item])} tool="crop-select"
+        croppingImageId={item.id} setItemsWithHistory={setItemsWithHistory} />)
+      const confirm = cropOverlayProps.get(item.id)?.onConfirm as (updates: Partial<CanvasImageItem>) => void
+      expect(confirm).toBeTypeOf('function')
+      await act(async () => { confirm({ width: 50, height: 50, crop }); await Promise.resolve() })
+      await waitFor(() => expect(setItemsWithHistory).toHaveBeenCalledTimes(1))
+      const update = setItemsWithHistory.mock.calls[0][0] as (prev: CanvasImageItem[]) => CanvasImageItem[]
+      const [result] = update([item])
+      expect(result).toMatchObject({ id: item.id, src: item.src, crop })
+      expect(drawImage).not.toHaveBeenCalled()
+      expect(encode).not.toHaveBeenCalled()
+      expect(item).not.toHaveProperty('crop')
+    } finally { getContext.mockRestore(); encode.mockRestore(); vi.unstubAllGlobals() }
   })
 
   it('flattens confirmed image crops into the canvas item source data', async () => {

@@ -42,6 +42,7 @@ import {
   mergeBuiltInSkills,
   stripDefaultBuiltInSkills
 } from '../ChatPage/builtInSkills'
+import { ProceduralSkillSettings } from './components/ProceduralSkillSettings'
 import CustomWorkshopTabs from './components/CustomWorkshopTabs'
 import {
   getCustomSkillsForCategory,
@@ -141,7 +142,8 @@ const sanitizeSkillEditorState = (skill: CustomSkill): CustomSkill => {
         ...normalizedSkill,
         prompt: '',
         instructions: undefined,
-        referenceAttachments: []
+        referenceAttachments: [],
+        procedural: undefined
       }
     : normalizedSkill
 }
@@ -1598,6 +1600,7 @@ const CustomSkillManagerPage: React.FC = () => {
               <option value="normal">Prompt</option>
               <option value="agent">{t('custom_workshop.skill_type_agent')}</option>
             </TextField>
+            {selectedSkill?.type === 'normal' && <ProceduralSkillSettings key={selectedSkill.id} value={selectedSkill.procedural} onChange={(procedural) => handleUpdateSelectedSkill({ procedural })} />}
             {selectedSkill?.type === 'agent' && (
               <>
                 <TextField

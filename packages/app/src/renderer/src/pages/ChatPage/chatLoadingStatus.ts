@@ -3,6 +3,8 @@ import type { LLMRetryStatus } from '@shared/llm/modelCapacityRetry'
 export type ChatLoadingStatus = {
   retry?: LLMRetryStatus
   label: string
+  /** Sanitized name for a call last observed running, with no terminal event observed for it. */
+  observedTool?: string
   detail?: string
   step?: number
   totalSteps?: number

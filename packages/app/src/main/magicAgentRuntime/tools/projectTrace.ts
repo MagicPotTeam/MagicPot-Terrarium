@@ -1,3 +1,4 @@
+import { bundledCreativeDeclarations } from '@shared/magicAgentRuntime/bundledCreativeDeclarations'
 import { createAdapter, objectSchema } from './helpers'
 
 const projectSchema = objectSchema(
@@ -21,9 +22,7 @@ const projectSchema = objectSchema(
 
 export const projectTraceToolAdapter = createAdapter([
   {
-    name: 'project.trace.list',
-    category: 'projectTrace',
-    description: 'List project trace summaries through a registered project trace adapter.',
+    ...bundledCreativeDeclarations['project.trace.list'],
     inputSchema: objectSchema(
       {
         project: projectSchema,
@@ -38,9 +37,7 @@ export const projectTraceToolAdapter = createAdapter([
     dependency: 'projectTraceList'
   },
   {
-    name: 'project.trace.read',
-    category: 'projectTrace',
-    description: 'Read one project trace document through a registered project trace adapter.',
+    ...bundledCreativeDeclarations['project.trace.read'],
     inputSchema: objectSchema(
       {
         project: projectSchema,

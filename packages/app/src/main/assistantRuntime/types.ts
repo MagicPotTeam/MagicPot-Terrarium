@@ -14,7 +14,21 @@ export type AssistantRoute = {
   senderName?: string
 }
 
-import type { CooperativeExecutionGate } from '../magicAgentPlatform2/agents/cooperativeExecutionController'
+import type { CooperativeOperationGate } from '../magicAgentPlatform2/agents/cooperativeExecutionController'
+
+/** Main-process callbacks scoped to one turn; never accepted from IPC or persisted as authority. */
+export type AssistantRunToolProvider = {
+  listTools: () => Array<{
+    name: string
+    description: string
+    inputSchema: Record<string, unknown>
+  }>
+  callTool: (
+    name: string,
+    args: Record<string, unknown>,
+    context: { route: AssistantRoute; runId: string; toolCallId?: string; signal?: AbortSignal; workspaceRootDir?: string }
+  ) => Promise<{ content: string; metadata?: Record<string, unknown> }>
+}
 
 export type AssistantInboundMessage = {
   route: AssistantRoute
@@ -31,7 +45,8 @@ export type AssistantInboundMessage = {
   resetHistory?: boolean
   taskGroup?: Partial<AssistantTaskGroupState> | null
   signal?: AbortSignal
-  cooperativeExecution?: CooperativeExecutionGate
+  cooperativeExecution?: CooperativeOperationGate
+  toolProvider?: AssistantRunToolProvider
   onEvent?: (event: AssistantRunEvent) => void | Promise<void>
 }
 
@@ -233,6 +248,8 @@ export type AssistantContextSnapshot = {
   sessionKey: string
   workspaceId: string
   route: AssistantRoute
+  /** MAIN-authored semantic mapping incarnation; refreshed only on route/workspace remapping. */
+  memoryBindingRevision?: string
   generatedAt: number
   workflowDir: string
   outputDir: string

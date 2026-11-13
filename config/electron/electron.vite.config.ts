@@ -1,9 +1,23 @@
+import { createHash } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'fs'
 import { relative, resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import type { Plugin } from 'vite'
 import viteConfig from '../vite.config.shared.mjs'
+
+const htmlBootstrapManifest = (): Plugin => ({
+  name: 'magicpot-html-bootstrap-manifest',
+  generateBundle(_options, bundle) {
+    const chunks = Object.values(bundle).filter((item) => item.type === 'chunk')
+    const entry = chunks.find((item) => item.isEntry && item.name === 'index')
+    if (!entry || Object.keys(entry.modules).some((id) => id.replaceAll('\\', '/').endsWith('/main/index.ts'))) throw new Error('HTML bootstrap must not eagerly include normal app initialization.')
+    this.emitFile({ type: 'asset', fileName: 'html-bootstrap-manifest.json', source: JSON.stringify({
+      protocol: 'magicpot-isolated-html-bootstrap/v1', entry: entry.fileName,
+      files: chunks.map((item) => ({ path: item.fileName, bytes: Buffer.byteLength(item.code), sha256: createHash('sha256').update(item.code).digest('hex') }))
+    }) })
+  }
+})
 
 const shouldAnalyzeBundle = process.env.ANALYZE_BUNDLE === 'true'
 
@@ -96,15 +110,19 @@ const generatedRuntimeWatchIgnores = [
 export default defineConfig({
   main: {
     ...viteConfig,
-    plugins: [externalizeDepsPlugin(), ...createBundleAnalyzer('main')],
+    plugins: [externalizeDepsPlugin(), htmlBootstrapManifest(), ...createBundleAnalyzer('main')],
     build: {
       watch: {
         exclude: generatedRuntimeWatchIgnores
       },
       rollupOptions: {
-        input: resolve('packages/app/src/main/index.ts'),
+        input: { index: resolve('packages/app/src/main/bootstrap.ts') },
         output: {
-          inlineDynamicImports: true
+          // Keep normal application side effects behind the conditional bootstrap import.
+          // Rollup inlining would eagerly evaluate otherwise lazy modules in the helper.
+          inlineDynamicImports: false,
+          // Existing main modules resolve assets/preload relative to out/main.
+          chunkFileNames: '[name]-[hash].js'
         }
       }
     }

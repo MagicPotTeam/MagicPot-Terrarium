@@ -65,6 +65,31 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve }
 }
 
+describe('SQLite explicit chooser boundary', () => {
+  it('cancels only the exact SQLite request and denies work after the chooser returns', async () => {
+    const f=fixture()
+    await f.service.setScope({scope,active:true},f.context('setScope'))
+    const picked=deferred<OpenDialogReturnValue>()
+    showOpenDialog.mockReturnValueOnce(picked.promise)
+    const input={scope,requestId:'sqlite-pending',table:'fixture',columns:['id'],limit:1,consentTemporarySnapshot:true as const}
+    const pending=f.service.chooseSqlitePreview(input,f.context('chooseSqlitePreview'))
+    const outcome=expect(pending).rejects.toThrow()
+    await f.service.cancel({scope,requestId:input.requestId},f.context('cancel'))
+    picked.resolve({canceled:false,filePaths:['not-opened.sqlite']})
+    await outcome
+  })
+  it('requires explicit temporary-copy consent and a live scope before chooser', async () => {
+    const f = fixture()
+    const input = { scope, requestId: 'sqlite-fixture', table: 'fixture', columns: ['id'], limit: 1, consentTemporarySnapshot: true as const }
+    await expect(f.service.chooseSqlitePreview({ ...input, consentTemporarySnapshot: false } as never, f.context('chooseSqlitePreview'))).rejects.toThrow()
+    expect(showOpenDialog).not.toHaveBeenCalled()
+    await f.service.setScope({ scope, active: true }, f.context('setScope'))
+    showOpenDialog.mockResolvedValueOnce({ canceled: true, filePaths: [] })
+    await expect(f.service.chooseSqlitePreview(input, f.context('chooseSqlitePreview'))).resolves.toBeNull()
+    expect(showOpenDialog).toHaveBeenCalledOnce()
+  })
+})
+
 function fixture() {
   const webContents = {
     id: senderId,
@@ -98,6 +123,8 @@ function fixture() {
   })
   const invoke = (method: keyof AgentLocalFilesSvc, invocation?: ServiceInvocationContext) => {
     switch (method) {
+      case 'chooseSqlitePreview':
+        return service.chooseSqlitePreview({ scope, requestId: 'sqlite-fixture', table: 'fixture', columns: ['id'], limit: 1, consentTemporarySnapshot: true }, invocation)
       case 'setScope':
         return service.setScope(requests.setScope, invocation)
       case 'choose':

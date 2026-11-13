@@ -22,8 +22,14 @@ const normalizeRelativePath = (value: string | null | undefined): string | undef
   return normalized || undefined
 }
 
-const isImageLikeFile = (file: Pick<File, 'type' | 'name'>): boolean =>
+export const isImageLikeDroppedFile = (file: Pick<File, 'type' | 'name'>): boolean =>
   file.type.startsWith('image/') || IMAGE_FILE_NAME_PATTERN.test(file.name)
+
+export const droppedImageDescriptorKey = (entry: ModelPackageFileEntry): string | undefined => {
+  if (!isImageLikeDroppedFile(entry.file)) return undefined
+  const relativePath = normalizeRelativePath(entry.path)
+  return `${relativePath || entry.file.name}:${entry.file.size}:${entry.file.lastModified}`
+}
 
 export const hasDroppedDirectory = (items: DataTransferItemList | undefined | null): boolean => {
   if (!items?.length) {
@@ -45,12 +51,12 @@ export const resolveDroppedDirectoryImageFiles = (
   const deduped = new Map<string, DroppedChatFileDescriptor>()
 
   for (const entry of entries) {
-    if (!isImageLikeFile(entry.file)) {
+    if (!isImageLikeDroppedFile(entry.file)) {
       continue
     }
 
     const relativePath = normalizeRelativePath(entry.path)
-    const dedupeKey = `${relativePath || entry.file.name}:${entry.file.size}:${entry.file.lastModified}`
+    const dedupeKey = droppedImageDescriptorKey(entry)!
     if (!deduped.has(dedupeKey)) {
       deduped.set(dedupeKey, {
         file: entry.file,

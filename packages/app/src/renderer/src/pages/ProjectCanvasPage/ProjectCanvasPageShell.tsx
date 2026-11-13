@@ -1,3 +1,4 @@
+import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import React from 'react'
 import {
   Box,
@@ -668,6 +669,7 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
           annotationItems: visibleOverlayItems.annotationItems,
           textItems: visibleOverlayItems.textItems,
           fileItems: visibleOverlayItems.fileItems,
+          teamLabelImageItems: (visibleItems as CanvasItem[]).filter((item): item is CanvasImageItem => item.type === 'image' && !!item.teamImageLabel && !isCanvasItemTransientlyHidden(item.id)),
           items,
           editingTextItemId: inlineTextEdit?.id ?? null,
           activeOcrHover,

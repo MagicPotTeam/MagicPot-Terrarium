@@ -10,9 +10,10 @@ import type {
 } from './types'
 import { isConstraintAttachedCaptionAnnotation } from './canvasAttachedCaptionUtils'
 import { loadImageFromSrc } from './canvasAssetIntakeHelpers'
-import { getCanvasImageAssetSize } from './canvasImageAssetUtils'
+import { getCanvasImageAssetSize, isCanvasImagePlaceholderAsset } from './canvasImageAssetUtils'
 import { estimateDataUrlByteSize } from './canvasImageMetadata'
 import { normalizeCanvasImageDisplayCrop } from './canvasImageDisplayUtils'
+import { assertCanvasAttachmentCropOutputSize, CanvasAgentCropBudgetError } from './canvasAgentCropBudget'
 
 export type CanvasAgentAttachment = {
   type: 'image' | 'file' | 'video' | 'model3d'
@@ -221,25 +222,8 @@ function isFullSourceCrop(
 }
 
 async function resolveCanvasImageAttachmentSourceAsset(
-  item: CanvasImageItem,
-  sourceWidth: number,
-  sourceHeight: number
+  item: CanvasImageItem
 ): Promise<{ image: CanvasImageAsset; width: number; height: number } | null> {
-  const itemImageSize = getCanvasImageAssetSize(item.image)
-  if (
-    item.image &&
-    itemImageSize.width > 0 &&
-    itemImageSize.height > 0 &&
-    Math.abs(itemImageSize.width - sourceWidth) <= 1 &&
-    Math.abs(itemImageSize.height - sourceHeight) <= 1
-  ) {
-    return {
-      image: item.image,
-      width: itemImageSize.width,
-      height: itemImageSize.height
-    }
-  }
-
   const loaded = await loadImageFromSrc(item.src)
   if (loaded.width <= 0 || loaded.height <= 0) {
     return null
@@ -273,15 +257,17 @@ function materializeCanvasImageAttachmentSourceFromAsset(
   item: CanvasImageItem,
   sourceAsset: { image: CanvasImageAsset; width: number; height: number },
   sourceWidth: number,
-  sourceHeight: number
+  sourceHeight: number,
+  allowFullSource = false
 ): MaterializedCanvasImageAttachmentSource | null {
   if (!item.crop || typeof document === 'undefined') return null
 
   const sourceCrop = normalizeCanvasImageDisplayCrop(item.crop, sourceWidth, sourceHeight)
-  if (!sourceCrop || isFullSourceCrop(sourceCrop, sourceWidth, sourceHeight)) {
+  if (!sourceCrop || (!allowFullSource && isFullSourceCrop(sourceCrop, sourceWidth, sourceHeight))) {
     return null
   }
 
+  assertCanvasAttachmentCropOutputSize(sourceCrop)
   const scaleX = sourceAsset.width / sourceWidth
   const scaleY = sourceAsset.height / sourceHeight
   const cropX = sourceCrop.x * scaleX
@@ -310,6 +296,9 @@ function materializeCanvasImageAttachmentSourceFromAsset(
   )
 
   const src = canvas.toDataURL('image/png')
+  // Browsers return the sentinel `data:,` for an unencodable/empty canvas.
+  // It must never be treated as an attachment or a valid cropped snapshot.
+  if (!/^data:image\/png;base64,.+/i.test(src)) return null
   return {
     src,
     fileName: getPngFileName(item.fileName?.trim() || inferFileNameFromUrl(item.src, item.id)),
@@ -349,9 +338,14 @@ export function buildCanvasImageCropSourceMetadata(
 export function materializeCanvasImageAttachmentSourceSync(
   item: CanvasImageItem
 ): MaterializedCanvasImageAttachmentSource | null {
-  if (!item.crop || !item.image) return null
+  if (!item.crop || !item.image || isCanvasImagePlaceholderAsset(item.image)) return null
 
-  const { sourceWidth, sourceHeight } = resolveCanvasImageAttachmentSourceSize(item)
+  const { sourceWidth: explicitWidth, sourceHeight: explicitHeight } = item
+  // Without explicit source dimensions, an in-memory image may be a thumbnail
+  // or placeholder. Its dimensions are not sufficient to establish a safe
+  // crop of the original source synchronously.
+  const sourceWidth = getPositiveNumber(explicitWidth)
+  const sourceHeight = getPositiveNumber(explicitHeight)
   if (!sourceWidth || !sourceHeight) return null
 
   const itemImageSize = getCanvasImageAssetSize(item.image)
@@ -360,8 +354,8 @@ export function materializeCanvasImageAttachmentSourceSync(
   if (
     itemImageSize.width <= 0 ||
     itemImageSize.height <= 0 ||
-    Math.abs(itemImageSize.width - sourceWidth) > 1 ||
-    Math.abs(itemImageSize.height - sourceHeight) > 1 ||
+    itemImageSize.width !== sourceWidth ||
+    itemImageSize.height !== sourceHeight ||
     !Number.isFinite(itemImageAspect) ||
     !Number.isFinite(sourceAspect) ||
     sourceAspect <= 0 ||
@@ -382,52 +376,104 @@ export function materializeCanvasImageAttachmentSourceSync(
   )
 }
 
-export async function materializeCanvasImageAttachmentSource(
-  item: CanvasImageItem
-): Promise<MaterializedCanvasImageAttachmentSource | null> {
-  if (!item.crop || typeof document === 'undefined') return null
+type CanvasImageAttachmentCropResolution =
+  | { kind: 'full' }
+  | { kind: 'cropped'; source: MaterializedCanvasImageAttachmentSource }
+  | { kind: 'failed' }
 
-  let { sourceWidth, sourceHeight } = resolveCanvasImageAttachmentSourceSize(item)
+async function resolveCanvasImageAttachmentCrop(
+  item: CanvasImageItem,
+  isCurrent: () => boolean = () => true,
+  snapshotFullSource = false
+): Promise<CanvasImageAttachmentCropResolution> {
+  if (!isCurrent() || !item.crop || typeof document === 'undefined') return { kind: 'failed' }
 
-  if (!sourceWidth || !sourceHeight) {
-    const loaded = await loadImageFromSrc(item.src)
-    sourceWidth = getPositiveNumber(loaded.width)
-    sourceHeight = getPositiveNumber(loaded.height)
+  // Display width and height are not source dimensions: after a top-left crop
+  // they can be exactly the crop dimensions. Resolve any missing source size
+  // from the original asset, never from the displayed item bounds.
+  let sourceWidth = getPositiveNumber(item.sourceWidth)
+  let sourceHeight = getPositiveNumber(item.sourceHeight)
+  if (sourceWidth && sourceHeight) {
+    const knownCrop = normalizeCanvasImageDisplayCrop(item.crop, sourceWidth, sourceHeight)
+    if (knownCrop && (snapshotFullSource || !isFullSourceCrop(knownCrop, sourceWidth, sourceHeight))) {
+      assertCanvasAttachmentCropOutputSize(knownCrop)
+    }
   }
 
-  if (!sourceWidth || !sourceHeight) return null
+  const sourceAsset = await resolveCanvasImageAttachmentSourceAsset(item)
+  if (!isCurrent()) return { kind: 'failed' }
+  if (!sourceAsset || !getPositiveNumber(sourceAsset.width) || !getPositiveNumber(sourceAsset.height)) {
+    return { kind: 'failed' }
+  }
+  // A stored hint can have been filled from a preview. If it disagrees with
+  // the source actually loaded for export, its crop coordinate system is not
+  // proven; do not scale it up or treat it as a full original.
+  if (
+    (sourceWidth && sourceWidth !== sourceAsset.width) ||
+    (sourceHeight && sourceHeight !== sourceAsset.height)
+  ) return { kind: 'failed' }
+  sourceWidth ??= getPositiveNumber(sourceAsset.width)
+  sourceHeight ??= getPositiveNumber(sourceAsset.height)
+  if (!sourceWidth || !sourceHeight) return { kind: 'failed' }
 
-  const sourceAsset = await resolveCanvasImageAttachmentSourceAsset(item, sourceWidth, sourceHeight)
-  if (!sourceAsset) return null
+  const crop = normalizeCanvasImageDisplayCrop(item.crop, sourceWidth, sourceHeight)
+  if (!crop) return { kind: 'failed' }
+  // The renderer scales crop coordinates to the loaded asset when explicit
+  // source dimensions are present. Judge the full-image case on that actual
+  // pixel extent, rather than on possibly stale display or source hints.
+  const imageCrop = normalizeCanvasImageDisplayCrop(
+    {
+      x: crop.x * sourceAsset.width / sourceWidth,
+      y: crop.y * sourceAsset.height / sourceHeight,
+      width: crop.width * sourceAsset.width / sourceWidth,
+      height: crop.height * sourceAsset.height / sourceHeight
+    },
+    sourceAsset.width,
+    sourceAsset.height
+  )
+  if (!imageCrop) return { kind: 'failed' }
+  const isFullSource = isFullSourceCrop(imageCrop, sourceAsset.width, sourceAsset.height)
+  if (isFullSource && !snapshotFullSource) return { kind: 'full' }
 
-  return materializeCanvasImageAttachmentSourceFromAsset(
+  const source = materializeCanvasImageAttachmentSourceFromAsset(
     item,
     sourceAsset,
     sourceWidth,
-    sourceHeight
+    sourceHeight,
+    isFullSource && snapshotFullSource
   )
+  return source ? { kind: 'cropped', source } : { kind: 'failed' }
+}
+
+export async function materializeCanvasImageAttachmentSource(
+  item: CanvasImageItem
+): Promise<MaterializedCanvasImageAttachmentSource | null> {
+  const result = await resolveCanvasImageAttachmentCrop(item)
+  return result.kind === 'cropped' ? result.source : null
 }
 
 export async function materializeCanvasAgentAttachmentItems(
-  items: CanvasItem[]
+  items: CanvasItem[],
+  isCurrent: () => boolean = () => true
 ): Promise<CanvasItem[]> {
   const materializedItems: CanvasItem[] = []
 
   for (const item of items) {
+    if (!isCurrent()) return []
     if (item.type !== 'image' || !item.crop) {
       materializedItems.push(item)
       continue
     }
 
-    const cropSource = buildCanvasImageCropSourceMetadata(item)
     try {
-      const source = await materializeCanvasImageAttachmentSource(item)
-      if (!source) {
-        if (!cropSource) {
-          materializedItems.push(item)
-        }
-        continue
-      }
+      // A crop that currently spans the whole image is still a crop contract:
+      // freeze those pixels rather than letting an attachment/overview reread
+      // a mutable URL after the dimensions were checked.
+      const crop = await resolveCanvasImageAttachmentCrop(item, isCurrent, true)
+      if (!isCurrent()) return []
+      // The send path must never hand a live URL back for any cropped item.
+      if (crop.kind !== 'cropped') continue
+      const source = crop.source
 
       const { crop: _crop, ...itemWithoutCrop } = item
       materializedItems.push({
@@ -441,10 +487,12 @@ export async function materializeCanvasAgentAttachmentItems(
         height: source.sourceHeight
       })
     } catch (error) {
+      // An oversized crop discovered only after image metadata was loaded must
+      // abort the whole send, even if no crop-source descriptor existed earlier.
+      if (error instanceof CanvasAgentCropBudgetError) throw error
       console.warn('[SendToAgent] failed to export cropped canvas image attachment:', error)
-      if (!cropSource) {
-        materializedItems.push(item)
-      }
+      // A crop which cannot be resolved is omitted so the send boundary can
+      // reject the entire selection. Never fall back to the original image.
     }
   }
 
@@ -452,33 +500,11 @@ export async function materializeCanvasAgentAttachmentItems(
 }
 
 export function materializeCanvasAgentAttachmentItemsSync(items: CanvasItem[]): CanvasItem[] {
-  let hasMaterializedItem = false
-  const materializedItems = items.map((item) => {
-    if (item.type !== 'image' || !item.crop) return item
-
-    try {
-      const source = materializeCanvasImageAttachmentSourceSync(item)
-      if (!source) return item
-
-      hasMaterializedItem = true
-      const { crop: _crop, ...itemWithoutCrop } = item
-      return {
-        ...itemWithoutCrop,
-        src: source.src,
-        fileName: source.fileName,
-        sizeBytes: source.sizeBytes,
-        sourceWidth: source.sourceWidth,
-        sourceHeight: source.sourceHeight,
-        width: source.sourceWidth,
-        height: source.sourceHeight
-      }
-    } catch (error) {
-      console.warn('[CanvasDrag] failed to export cropped canvas image attachment:', error)
-      return item
-    }
-  })
-
-  return hasMaterializedItem ? materializedItems : items
+  // Neither a same-sized in-memory preview nor a size hint proves that the
+  // pixels and coordinates belong to item.src. Leave every crop in place so
+  // the synchronous payload builder can reject the entire selection. An
+  // already-flattened item with no crop remains draggable as before.
+  return items
 }
 
 export function buildCanvasFileAttachment(item: CanvasFileItem): CanvasAgentAttachment {

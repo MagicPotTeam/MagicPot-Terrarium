@@ -93,6 +93,24 @@ describe('createIpcClient', () => {
     await expect(client.svcDemo.ping({ value: 'demo' })).rejects.toThrow('primitive failure')
   })
 
+  it('keeps opted-in transport failures and ordinary application errors rejected with readable messages', async () => {
+    const client = createIpcClient<TestApi>({ svcDemo: { ping: { type: 'unary', ipcResult: 'service-error' }, watch: { type: 'serverStreaming' } } })
+    invokeMock.mockRejectedValueOnce(new Error("Error invoking remote method 'svcDemo.ping': Error: native failed"))
+    await expect(client.svcDemo.ping({ value: 'demo' })).rejects.toThrow('native failed')
+    invokeMock.mockResolvedValueOnce({ ok: false, error: { message: 'ordinary failed', code: 'E_ORDINARY' } })
+    await expect(client.svcDemo.ping({ value: 'demo' })).rejects.toEqual({ message: 'ordinary failed', code: 'E_ORDINARY' })
+    invokeMock.mockResolvedValueOnce({ ok: true, value: undefined })
+    await expect(client.svcDemo.ping({ value: 'demo' })).resolves.toBeUndefined()
+    expect(invokeMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not interpret wire-looking responses on an unopted unary method', async () => {
+    const value = { ok: false, error: { message: 'data, not a transport error' } }
+    invokeMock.mockResolvedValueOnce(value)
+    await expect(createDemoClient().svcDemo.ping({ value: 'demo' })).resolves.toBe(value)
+    expect(invokeMock).toHaveBeenCalledOnce()
+  })
+
   it('streams server messages through a transferred message port', async () => {
     const channels: FakeMessageChannel[] = []
     vi.stubGlobal(

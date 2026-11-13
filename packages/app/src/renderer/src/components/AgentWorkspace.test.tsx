@@ -4,6 +4,8 @@ import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AgentWorkspace from './AgentWorkspace'
+import zhRenderer from '@shared/locales/zh-CN/renderer.json'
+import enRenderer from '@shared/locales/en-US/renderer.json'
 import {
   clearScopedActiveLoadingSessionIds,
   clearScopedExternalLoadingSessionIds,
@@ -52,6 +54,7 @@ vi.mock('react-i18next', () => ({
         return `Agent 线程 ${String(options?.index ?? '')}`.trim()
       }
       if (key === 'menu.trace') return '追踪'
+      if (key === 'agent_workspace.canvas_target') return zhRenderer.agent_workspace.canvas_target
       return key
     },
     i18n: {
@@ -126,6 +129,32 @@ describe('AgentWorkspace', () => {
     ])
   })
 
+  it('keeps the workspace heading on one line while preserving the shared controls portal', () => {
+    renderWorkspace()
+    const heading = screen.getByText('agent_workspace.title')
+    expect(getComputedStyle(heading).whiteSpace).toBe('nowrap')
+    expect(getComputedStyle(heading).textOverflow).toBe('ellipsis')
+    expect(document.getElementById('agent-workspace-skill-portal')).toBeInTheDocument()
+  })
+
+  it('opens the canvas target action with the current project id', async () => {
+    expect(zhRenderer.agent_workspace.canvas_target).toBe('画布目标')
+    expect(enRenderer.agent_workspace.canvas_target).toBe('Canvas target')
+    expect(zhRenderer.agent_workspace.check).toBe('目标')
+    expect(enRenderer.agent_workspace.check).toBe('Target')
+    const listener = vi.fn()
+    window.addEventListener('canvas:run-target-request', listener)
+    try {
+      renderWorkspace()
+      fireEvent.click(screen.getByRole('button', { name: '画布目标' }))
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({ canvasId: 'project-1' })
+      await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalled())
+    } finally {
+      window.removeEventListener('canvas:run-target-request', listener)
+    }
+  })
+
   it('mounts ChatPage immediately with the workspace shell', async () => {
     renderWorkspace()
 
@@ -140,6 +169,23 @@ describe('AgentWorkspace', () => {
       expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-1')
       expect(screen.getByText('画布执行已开始。')).toBeInTheDocument()
     })
+  })
+
+  it('keeps only the title and close button visually while retaining run-state information', async () => {
+    renderWorkspace()
+    await waitFor(() => expect(screen.getByText('画布执行已开始。')).toBeInTheDocument())
+    const row = document.querySelector('[data-agent-workspace-scope="project-1.agent-1"][role="button"]')
+    expect(row).not.toBeNull()
+    const close = row?.querySelector('[role="button"][aria-label="agent_workspace.close_thread"]')
+    expect(close).not.toBeNull()
+    expect(close).toHaveAttribute('tabindex', '0')
+    expect(row?.textContent).toContain('画布执行已开始。')
+    expect(row?.textContent).not.toContain('最新提问')
+    const statusWrapper = screen.getByTestId('agent-thread-status').parentElement!
+    expect(getComputedStyle(statusWrapper).width).toBe('1px')
+    expect(getComputedStyle(statusWrapper).height).toBe('1px')
+    expect(getComputedStyle(statusWrapper).overflow).toBe('hidden')
+    expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'read')
   })
 
   it('shows the running spinner when an external loading session is active', async () => {
@@ -452,7 +498,7 @@ describe('AgentWorkspace', () => {
     })
   })
 
-  it('uses the assistant model name instead of the latest-reply label in pane previews', async () => {
+  it('keeps pane titles and close controls without model subtitle or card portal in either selection', async () => {
     loadAllSessionsMock.mockResolvedValue([
       {
         id: 'session-model-preview',
@@ -478,8 +524,23 @@ describe('AgentWorkspace', () => {
     fireEvent.click(addButton as Element)
 
     await waitFor(() => {
-      expect(screen.getAllByText('gpt-5.5').length).toBeGreaterThan(0)
+      expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-2')
+      expect(container.querySelectorAll('[role="button"][data-agent-workspace-scope]')).toHaveLength(2)
     })
+    const rows = [...container.querySelectorAll<HTMLElement>('[role="button"][data-agent-workspace-scope]')]
+    for (const row of rows) {
+      expect(row).toHaveTextContent('Model-specific answer')
+      expect(row).not.toHaveTextContent('gpt-5.5')
+      expect(row).not.toHaveTextContent('最新回复')
+      expect(row.querySelector('[data-testid="agent-workspace-chat-controls-slot"]')).toBeNull()
+      expect(row.querySelector('[id^="agent-workspace-chat-controls-"]')).toBeNull()
+      expect(row.querySelector('[data-testid="CloseIcon"]')).not.toBeNull()
+    }
+    fireEvent.click(rows[0])
+    for (const row of rows) {
+      expect(row).not.toHaveTextContent('gpt-5.5')
+      expect(row.querySelector('[data-testid="agent-workspace-chat-controls-slot"]')).toBeNull()
+    }
   })
 
   it('does not render pane preview thumbnails for image replies', async () => {
@@ -509,7 +570,7 @@ describe('AgentWorkspace', () => {
 
     await waitFor(() => {
       expect(screen.getAllByText('对话 4').length).toBeGreaterThan(0)
-      expect(screen.getByText('最新回复')).toBeInTheDocument()
+      expect(screen.queryByText('最新回复')).not.toBeInTheDocument()
     })
     expect(screen.queryByText('图片回复')).not.toBeInTheDocument()
     expect(screen.queryByRole('img', { name: '对话 4' })).not.toBeInTheDocument()
@@ -532,6 +593,21 @@ describe('AgentWorkspace', () => {
     })
 
     window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
+  })
+
+  it.each(['Enter', ' '])('closes the focused thread with %s without activating its row', async key => {
+    const terminateScope = vi.fn()
+    window.addEventListener('chat:terminate-scope', terminateScope as EventListener)
+    try {
+      renderWorkspace()
+      const close = screen.getByRole('button', {name: 'agent_workspace.close_thread'})
+      fireEvent.keyDown(close, {key})
+      expect(terminateScope).toHaveBeenCalledTimes(1)
+      expect((terminateScope.mock.calls[0]?.[0] as CustomEvent<{scope?:string}>).detail).toEqual({scope:'project-1.agent-1'})
+      expect(screen.queryByRole('button', {name:'agent_workspace.close_thread'})).not.toBeInTheDocument()
+    } finally {
+      window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
+    }
   })
 
   it('swallows preview refresh failures from chat storage', async () => {
@@ -631,7 +707,7 @@ describe('AgentWorkspace', () => {
     renderWorkspace()
 
     const traceButton = screen.getByTestId('agent-workspace-trace-button')
-    const targetButton = screen.getByText('agent_workspace.check')
+    const targetButton = screen.getByRole('button', { name: '画布目标' })
 
     expect(
       traceButton.compareDocumentPosition(targetButton) & Node.DOCUMENT_POSITION_FOLLOWING

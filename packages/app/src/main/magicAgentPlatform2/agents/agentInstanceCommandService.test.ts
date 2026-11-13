@@ -35,6 +35,7 @@ const setup = () => {
   const store = new PersistentAgentInstanceStore(eventStore)
   const lifecycle = {
     quiesceForReplacement: vi.fn(async (instanceId: string) => store.get(instanceId)!),
+    commitReplacement: vi.fn((prepared, input) => store.replace({ ...input, expectedRevision: prepared.revision })),
     isAtSafePoint: vi.fn(() => true),
     authorizeLifecycleMutation: vi.fn(() => true),
     authorizeConfigMutation: vi.fn(() => true),

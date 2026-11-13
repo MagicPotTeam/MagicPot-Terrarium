@@ -51,6 +51,13 @@ import {
 } from '@renderer/features/projectTrace/projectTraceRuntime'
 import type { ChatMessage } from '@shared/api/svcLLMProxy'
 
+import {
+  readExistingWorkspacePanes,
+  useExistingConversationWorkspacePane,
+  useExistingConversationWorkspaceProtection,
+  type ExistingConversationWorkspaceAdapter
+} from './existingConversationWorkspace'
+
 type AgentPane = {
   id: string
   enabled: boolean
@@ -91,8 +98,6 @@ const buildActivePaneStorageKey = (projectId: string): string =>
   `agent.workspace.active.${projectId}`
 const buildThreadsCollapsedStorageKey = (projectId: string): string =>
   `agent.workspace.threadsCollapsed.${projectId}`
-const buildChatWorkspaceControlsPortalId = (scope: string): string =>
-  `agent-workspace-chat-controls-${encodeURIComponent(scope || 'default')}`
 
 const readLocalStorage = (key: string): string | null => {
   try {
@@ -449,12 +454,11 @@ const PaneStatusIndicator: React.FC<{
 
 type PaneListItemProps = {
   index: number
+  closeLabel: string
   pane: AgentPane
   paneScope: string
-  controlsPortalId: string
   preview?: PanePreview
   defaultTitle: string
-  defaultSubtitle: string
   selected: boolean
   unread: boolean
   dragging: boolean
@@ -471,12 +475,11 @@ const AGENT_THREAD_REORDER_DRAG_MIME = 'application/x-magicpot-agent-thread-reor
 
 const PaneListItem: React.FC<PaneListItemProps> = ({
   index,
+  closeLabel,
   pane,
   paneScope,
-  controlsPortalId,
   preview,
   defaultTitle,
-  defaultSubtitle,
   selected,
   unread,
   dragging,
@@ -542,7 +545,10 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     })}
   >
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, flex: 1 }}>
-      <PaneStatusIndicator status={preview?.status} unread={unread || Boolean(preview?.unread)} />
+      {/* Preserve run-state semantics without adding another visual element to the card. */}
+      <Box sx={{ position: 'absolute', width: '1px', height: '1px', p: 0, m: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>
+        <PaneStatusIndicator status={preview?.status} unread={unread || Boolean(preview?.unread)} />
+      </Box>
 
       <Box sx={{ minWidth: 0, flex: 1 }}>
         <Typography
@@ -557,44 +563,22 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
         >
           {preview?.title || defaultTitle}
         </Typography>
-        {selected ? (
-          <Box
-            id={controlsPortalId}
-            data-testid="agent-workspace-chat-controls-slot"
-            onClick={(event) => event.stopPropagation()}
-            onMouseDown={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-            onDragStart={(event) => event.stopPropagation()}
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              minHeight: 22,
-              mt: 0.15,
-              minWidth: 0,
-              maxWidth: '100%',
-              overflow: 'hidden'
-            }}
-          />
-        ) : (
-          <Typography
-            variant="caption"
-            sx={{
-              display: 'block',
-              mt: 0.15,
-              color: 'text.secondary',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap'
-            }}
-          >
-            {preview?.subtitle || defaultSubtitle}
-          </Typography>
-        )}
       </Box>
     </Box>
 
     <Box
       component="span"
+      role="button"
+      tabIndex={0}
+      aria-label={closeLabel}
+      title={closeLabel}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          event.stopPropagation()
+          onRemove(pane.id)
+        }
+      }}
       onClick={(event) => {
         event.stopPropagation()
         onRemove(pane.id)
@@ -622,19 +606,29 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
 interface AgentWorkspaceProps {
   projectId: string
   projectName?: string
+  existingConversationOpen?: ExistingConversationWorkspaceAdapter
 }
 
-const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName }) => {
+const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName, existingConversationOpen }) => {
   const { t } = useTranslation()
   const { notifyError, notifyInfo } = useMessage()
   const storageKey = buildWorkspaceStorageKey(projectId)
   const activeStorageKey = buildActivePaneStorageKey(projectId)
   const collapsedStorageKey = buildThreadsCollapsedStorageKey(projectId)
-
-  const [panes, setPanes] = useState<AgentPane[]>(() => readStoredPanes(storageKey))
-  const [activePaneId, setActivePaneId] = useState<string | null>(() =>
-    readStoredActivePaneId(activeStorageKey, getOpenPanes(readStoredPanes(storageKey)))
-  )
+  const { isProtected: isVisitGuarded, isBlocked: isVisitBlocked, hasPolicy } = useExistingConversationWorkspaceProtection(projectId, existingConversationOpen)
+  const guardedVisit = isVisitGuarded()
+  const readPanesForVisit = () => isVisitBlocked() ? [] : guardedVisit
+    ? readExistingWorkspacePanes(projectId, existingConversationOpen?.request?.handle.target)?.panes ?? []
+    : readStoredPanes(storageKey)
+  const [panes, setPanes] = useState<AgentPane[]>(readPanesForVisit)
+  const [activePaneId, setActivePaneId] = useState<string | null>(() => {
+    const enabled = getOpenPanes(readPanesForVisit())
+    const requested = existingConversationOpen?.request?.handle.target
+    if (guardedVisit && requested) return enabled.some(pane => pane.id === requested.paneId) ? requested.paneId : null
+    const remembered = readStoredActivePaneId(activeStorageKey, enabled)
+    return !guardedVisit || enabled.some(pane => pane.id === remembered) ? remembered : null
+  })
+  const explicitPaneMutationRef = useRef(false)
   const [threadsCollapsed, setThreadsCollapsed] = useState<boolean>(
     () => readLocalStorage(collapsedStorageKey) === '1'
   )
@@ -677,9 +671,39 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   const previewRefreshSequenceRef = useRef(0)
   const previewsInitializedRef = useRef(false)
   const panesObservedRunningRef = useRef<Set<string>>(new Set())
-  const openPanes = useMemo(() => getOpenPanes(panes), [panes])
+  const visitBlocked = isVisitBlocked()
+  const openPanes = useMemo(() => visitBlocked ? [] : getOpenPanes(panes), [panes, visitBlocked])
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
-  const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? openPanes[0] ?? null
+  const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? (guardedVisit ? null : openPanes[0]) ?? null
+  const openChatInput = useExistingConversationWorkspacePane({
+    adapter: existingConversationOpen,
+    projectId,
+    activePaneId,
+    panes,
+    tracePanelOpen
+  })
+  const childProtections = useMemo(() => {
+    if (!hasPolicy) return undefined
+    return new Map(openPanes.map(pane => {
+      const scope = buildAgentPaneScope(projectId, pane.id)
+      return [pane.id, Object.freeze({ storageScope: scope, isProtected: isVisitGuarded })]
+    }))
+  }, [hasPolicy, openPanes, projectId, isVisitGuarded])
+  useEffect(() => {
+    const coordinator = existingConversationOpen?.coordinator
+    const request = existingConversationOpen?.request
+    if (!coordinator || !request) return
+    const { target } = request.handle
+    const existing = readExistingWorkspacePanes(projectId, target)
+    if (!existing) {
+      coordinator.cancel(request.handle, 'membership-unavailable')
+      return
+    }
+    // Do not reconstruct persisted metadata from an enabled-only DTO, create or enable.
+    // A mounted ordinary workspace may still contain its lossy normalized array.
+    setPanes(previous => JSON.stringify(previous) === JSON.stringify(existing.panes) ? previous : existing.panes)
+    setActivePaneId(target.paneId)
+  }, [existingConversationOpen?.coordinator, existingConversationOpen?.request?.handle, projectId])
 
   useLayoutEffect(() => {
     if (!previewsInitializedRef.current) {
@@ -832,6 +856,21 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   }, [openPanes, projectId, workspaceStrings])
 
   useEffect(() => {
+    if (isVisitBlocked()) {
+      setPanes(previous => previous.length ? [] : previous)
+      setActivePaneId(null)
+      return
+    }
+    if (isVisitGuarded()) {
+      const existing = readExistingWorkspacePanes(projectId, existingConversationOpen?.request?.handle.target)
+      const next = existing?.panes ?? []
+      setPanes(prev => JSON.stringify(prev) === JSON.stringify(next) ? prev : next)
+      const requested = existingConversationOpen?.request?.handle.target.paneId
+      const remembered = readLocalStorage(activeStorageKey)
+      setActivePaneId(requested && next.some(pane => pane.id === requested && pane.enabled) ? requested :
+        remembered && next.some(pane => pane.id === remembered && pane.enabled) ? remembered : null)
+      return
+    }
     const nextPanes = readStoredPanes(storageKey)
     setPanes(nextPanes)
 
@@ -893,23 +932,28 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   }, [projectId])
 
   useEffect(() => {
+    // A guarded mount, refresh, or failed Open must not persist repaired/fallback metadata.
+    if (isVisitBlocked() || (isVisitGuarded() && !explicitPaneMutationRef.current)) return
+    explicitPaneMutationRef.current = false
     writeLocalStorage(storageKey, JSON.stringify(panes))
-  }, [panes, storageKey])
+  }, [panes, storageKey, isVisitGuarded])
 
   useEffect(() => {
+    if (isVisitGuarded()) return
     if (activePaneId && !openPanes.some((pane) => pane.id === activePaneId)) {
       setActivePaneId(openPanes[0]?.id || null)
     }
-  }, [activePaneId, openPanes])
+  }, [activePaneId, openPanes, isVisitGuarded])
 
   useEffect(() => {
+    if (isVisitGuarded() && (!activePaneId || !openPanes.some(pane => pane.id === activePaneId))) return
     if (activePaneId) {
       writeLocalStorage(activeStorageKey, activePaneId)
       return
     }
 
     removeLocalStorage(activeStorageKey)
-  }, [activePaneId, activeStorageKey])
+  }, [activePaneId, activeStorageKey, openPanes, isVisitGuarded])
 
   useEffect(() => {
     writeLocalStorage(collapsedStorageKey, threadsCollapsed ? '1' : '0')
@@ -1022,6 +1066,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   }, [openPanes, projectId, workspaceStrings])
 
   const handleRemovePane = (paneId: string) => {
+    explicitPaneMutationRef.current = true
     const remainingOpenPanes = openPanes.filter((pane) => pane.id !== paneId)
     const scope = buildAgentPaneScope(projectId, paneId)
 
@@ -1043,6 +1088,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   }
 
   const handleAddPane = () => {
+    explicitPaneMutationRef.current = true
     setPanes((prev) => {
       const nextPaneId = getNextPaneId(prev)
       setActivePaneId(nextPaneId)
@@ -1057,6 +1103,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
         return
       }
 
+      explicitPaneMutationRef.current = true
       const nextPaneId = getNextPaneId(panes)
       pendingExternalPaneRequestsRef.current.push({
         requestId: customEvent.detail?.requestId,
@@ -1078,6 +1125,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
       return
     }
 
+    explicitPaneMutationRef.current = true
     setPanes((prev) => {
       const sourceIndex = prev.findIndex((pane) => pane.id === draggingPaneId)
       const targetIndex = prev.findIndex((pane) => pane.id === targetPaneId)
@@ -1149,7 +1197,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
       >
         <Typography
           variant="caption"
-          sx={{ fontSize: 12, fontWeight: 700, color: 'text.secondary', flex: 1 }}
+          sx={{ fontSize: 12, fontWeight: 700, color: 'text.secondary', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
         >
           {t('agent_workspace.title')}
         </Typography>
@@ -1212,7 +1260,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
             '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
           }}
         >
-          {t('agent_workspace.check', { defaultValue: '目标' })}
+          {t('agent_workspace.canvas_target', { defaultValue: 'Canvas target' })}
         </Button>
 
         <Tooltip
@@ -1259,14 +1307,11 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
             <PaneListItem
               key={pane.id}
               index={index}
+              closeLabel={t('agent_workspace.close_thread')}
               pane={pane}
               paneScope={buildAgentPaneScope(projectId, pane.id)}
-              controlsPortalId={buildChatWorkspaceControlsPortalId(
-                buildAgentPaneScope(projectId, pane.id)
-              )}
               preview={panePreviews[pane.id]}
               defaultTitle={getPaneLabel(pane.id, index, workspaceStrings.paneLabel)}
-              defaultSubtitle={workspaceStrings.emptyConversation}
               selected={pane.id === activePaneId}
               unread={unreadPaneIds.has(pane.id)}
               dragging={pane.id === draggingPaneId}
@@ -1353,6 +1398,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
                 route={buildCanvasAgentRoute(projectId, pane.id)}
                 acceptExternalInput={isActivePane}
                 active={isActivePane}
+                existingConversationProtection={childProtections?.get(pane.id)}
+                existingConversationOpen={isActivePane && openChatInput?.handle.target.paneId === pane.id ? openChatInput : undefined}
               />
             </Box>
           )

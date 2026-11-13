@@ -1,4 +1,10 @@
 /* eslint-disable no-control-regex -- Reject control bytes before opening a native path chooser. */
+import { app } from 'electron'
+import { randomUUID } from 'node:crypto'
+import { mkdirSync } from 'node:fs'
+import { readExplicitlySelectedSqliteSnapshot } from '../agentLocalFiles/sqliteSelectedSnapshot'
+import { createSqlitePreviewUtility } from '../agentLocalFiles/sqlitePreviewUtility'
+import { chooseSqlitePreviewRequestSchema, sqlitePreviewResponseSchema, type ChooseSqlitePreviewRequest, type SqlitePreviewResponse } from '@shared/api/svcAgentLocalFiles'
 import * as path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { dialog, type BrowserWindow } from 'electron'
@@ -97,6 +103,41 @@ export class AgentLocalFilesSvcImpl implements AgentLocalFilesSvc {
     private readonly getMainWindow: () => BrowserWindow | null = () => null
   ) {}
 
+  private readonly sqliteRequestIds = new Map<number, { scope: AgentLocalFileScope; requestId: string }>()
+  private readonly sqliteOperations = new Map<number, AbortController>()
+  private sqliteUtility?: ReturnType<typeof createSqlitePreviewUtility>
+  chooseSqlitePreview = async (req: ChooseSqlitePreviewRequest, invocation?: ServiceInvocationContext): Promise<SqlitePreviewResponse | null> => {
+    const request = parseAgentLocalFileValue(chooseSqlitePreviewRequestSchema, req)
+    const { parent, senderId } = this.authorize('chooseSqlitePreview', invocation, request.scope)
+    if (this.sqliteOperations.size || this.sqliteUtility?.isOccupied()) throw new AgentLocalFileError('BUSY')
+    const controller = new AbortController()
+    this.sqliteOperations.set(senderId, controller)
+    this.sqliteRequestIds.set(senderId, {scope:request.scope,requestId:request.requestId})
+    const binding = this.activeScopes.get(senderId)
+    const current = () => {
+      controller.signal.throwIfAborted()
+      this.authorize('chooseSqlitePreview', invocation, request.scope)
+      if (this.activeScopes.get(senderId) !== binding) throw new AgentLocalFileError('SCOPE_CHANGED')
+    }
+    const deadline = setTimeout(() => controller.abort(), 30000)
+    try {
+      const picked = await dialog.showOpenDialog(parent, { title: 'Choose standalone SQLite preview (temporary sensitive copy; no WAL/journal)', properties: ['openFile'], filters: [{ name: 'SQLite', extensions: ['db', 'sqlite', 'sqlite3'] }] })
+      current()
+      if (picked.canceled || picked.filePaths.length !== 1) return null
+      const bytes = readExplicitlySelectedSqliteSnapshot(picked.filePaths[0], current)
+      current()
+      if (!this.sqliteUtility) {
+        const root = path.join(app.getPath('temp'), 'magicpot-sqlite-preview')
+        mkdirSync(root, { recursive: true, mode: 0o700 })
+        this.sqliteUtility = createSqlitePreviewUtility(root)
+      }
+      const result = await this.sqliteUtility.run({ version: 1, requestId: randomUUID(), snapshotBase64: bytes.toString('base64'), table: request.table, columns: request.columns, limit: request.limit }, controller.signal)
+      current()
+      const { rows, truncated, source, liveDatabaseConsistency, nativeWorkBounded } = result as { rows: SqlitePreviewResponse['rows']; truncated: boolean; source: 'supplied-standalone-snapshot'; liveDatabaseConsistency: false; nativeWorkBounded: false }
+      return parseAgentLocalFileValue(sqlitePreviewResponseSchema, { rows, truncated, source, liveDatabaseConsistency, nativeWorkBounded })
+    } catch (error) { throw safeError(error) }
+    finally { clearTimeout(deadline); if (this.sqliteOperations.get(senderId) === controller) { this.sqliteOperations.delete(senderId); this.sqliteRequestIds.delete(senderId) } }
+  }
   private authorize(
     method: keyof AgentLocalFilesSvc,
     invocation?: ServiceInvocationContext,
@@ -198,6 +239,7 @@ export class AgentLocalFilesSvcImpl implements AgentLocalFilesSvc {
   }
 
   private invalidateScope(senderId: number): void {
+    this.sqliteOperations.get(senderId)?.abort()
     this.activeScopes.delete(senderId)
     const pending = this.pendingChoosers.get(senderId)
     if (pending) pending.cancelled = true
@@ -333,6 +375,8 @@ export class AgentLocalFilesSvcImpl implements AgentLocalFilesSvc {
       if (pending && sameScope(pending.scope, scope) && pending.requestId === params.requestId) {
         pending.cancelled = true
       }
+      const sqlite = this.sqliteRequestIds.get(senderId)
+      if (sqlite && sameScope(sqlite.scope,scope) && sqlite.requestId === params.requestId) this.sqliteOperations.get(senderId)?.abort()
       this.grants.cancel(senderId, scope, params)
     } catch (error) {
       throw safeError(error)

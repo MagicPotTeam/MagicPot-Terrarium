@@ -1,3 +1,4 @@
+import { isProxy } from 'node:util/types'
 import { classifyMagicAgentConfigPrivilegeChange } from '../../../shared/magicAgentPlatform2/agentConfig'
 import type { MagicAgentConfigContent } from '../../../shared/magicAgentPlatform2/agentConfig'
 import type { MagicAgentPlatformRunReq } from '../../../shared/api/svcMagicAgentPlatform'
@@ -6,10 +7,11 @@ import type {
   MagicAgentInstanceState
 } from '../../../shared/magicAgentPlatform2/agentInstance'
 import type { PolicyActorRef } from '../../../shared/magicAgentPlatform2/policy'
-import type { StoredResource } from '../persistence/eventStore'
+import { canonicalJson, type StoredResource } from '../persistence/eventStore'
 import type { ProductionAgentInstanceLifecycleService } from './productionAgentInstanceLifecycle'
 import { PersistentAgentConfigStore } from './persistentAgentConfigStore'
 import type { PersistentAgentInstanceStore } from './persistentAgentInstanceStore'
+import { ManagedAgentOrdinaryAdmissionError } from './managedAgentInstanceIdentity'
 
 export class AgentInstanceCommandError extends Error {
   constructor(
@@ -70,6 +72,50 @@ const assertInheritedLimits = (
     throw new Error('Child Agent workspace root limit exceeds its parent.')
 }
 
+type ReplacementCommand = Readonly<Parameters<PersistentAgentInstanceStore['replace']>[0] & {
+  actor: PolicyActorRef
+  grantId?: string
+  expectedGrantUseCount?: number
+}>
+
+const captureReplacementCommand = (input: ReplacementCommand): ReplacementCommand => {
+  if (!input || typeof input !== 'object' || isProxy(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input)))
+    throw new Error('Replacement command must be a plain object.')
+  const fields: Record<string, unknown> = {}
+  const allowed = new Set(['actor', 'instanceId', 'expectedRevision', 'definitionId', 'name', 'configVersion', 'replacedAt', 'idempotencyKey', 'grantId', 'expectedGrantUseCount'])
+  const descriptors = Object.getOwnPropertyDescriptors(input)
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== 'string' || !allowed.has(key)) throw new Error('Invalid replacement command field.')
+    const descriptor = descriptors[key]
+    if (!descriptor.enumerable || !('value' in descriptor)) throw new Error('Replacement command fields must be data.')
+    if (descriptor.value !== undefined) fields[key] = descriptor.value
+  }
+  // canonicalJson rejects nested proxies/accessors without executing them; the
+  // detached actor and all command primitives are captured before policy/await.
+  const command = JSON.parse(canonicalJson(fields)) as ReplacementCommand
+  for (const key of ['instanceId', 'definitionId', 'name', 'configVersion', 'idempotencyKey'] as const)
+    if (typeof command[key] !== 'string' || !command[key].trim() || command[key] !== command[key].trim())
+      throw new Error(`Invalid replacement ${key}.`)
+  if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0 ||
+    !Number.isFinite(command.replacedAt) || command.replacedAt < 0)
+    throw new Error('Invalid replacement revision or timestamp.')
+  if (!command.actor || typeof command.actor !== 'object' || Array.isArray(command.actor) ||
+    !['kind', 'id'].every(key => typeof command.actor[key] === 'string' && command.actor[key].trim() === command.actor[key] && command.actor[key].length > 0))
+    throw new Error('Invalid replacement actor.')
+  if (command.grantId !== undefined && (typeof command.grantId !== 'string' || !command.grantId.trim() || command.grantId !== command.grantId.trim()))
+    throw new Error('Invalid replacement grant id.')
+  if (command.expectedGrantUseCount !== undefined && (!Number.isSafeInteger(command.expectedGrantUseCount) || command.expectedGrantUseCount < 0))
+    throw new Error('Invalid replacement grant use count.')
+  const freeze = (value: unknown): void => {
+    if (value && typeof value === 'object') {
+      for (const child of Object.values(value)) freeze(child)
+      Object.freeze(value)
+    }
+  }
+  freeze(command)
+  return command
+}
+
 export class AgentInstanceCommandService {
   constructor(
     private readonly store: PersistentAgentInstanceStore,
@@ -95,12 +141,19 @@ export class AgentInstanceCommandService {
   }) {
     try {
       if (!this.configStore) throw new Error('Agent config store is unavailable.')
+      const candidates = this.store.list().filter(candidate => candidate.state.definitionId === input.config.definitionId)
+      // Definition content is reusable; quarantine is exact-instance, not a
+      // definition-wide ban. Prefer the first eligible ordinary instance even
+      // when a managed sibling sorts earlier. Never replay via a managed ID.
+      const instance = candidates.find(candidate => !this.store.hasManagedIdentity(candidate.id))
+      if (!instance && candidates.length) throw new ManagedAgentOrdinaryAdmissionError()
       const replay = this.configStore.getCreateReplay(input)
-      if (replay) return replay
-      const instance = this.store
-        .list()
-        .find((candidate) => candidate.state.definitionId === input.config.definitionId)
+      if (replay) {
+        if (instance) this.store.assertOrdinaryIdentity(instance.id)
+        return replay
+      }
       if (!instance) throw new Error('Agent config definition has no managed Agent instance.')
+      this.store.assertOrdinaryIdentity(instance.id)
       const authorized = this.lifecycle.authorizeConfigMutation({
         actor: input.config.createdBy,
         action: 'create-config',
@@ -112,6 +165,7 @@ export class AgentInstanceCommandService {
           ? { expectedGrantUseCount: input.expectedGrantUseCount }
           : {})
       })
+      this.store.assertOrdinaryIdentity(instance.id)
       if (!authorized) return this.configStore.get(input.config.version)!
       return this.configStore.create(input)
     } catch (error) {
@@ -167,6 +221,8 @@ export class AgentInstanceCommandService {
     expectedGrantUseCount?: number
   }): StoredResource<MagicAgentInstanceState> {
     try {
+      this.store.assertOrdinaryIdentity(input.parentInstanceId)
+      this.store.assertOrdinaryIdentity(input.instance.id)
       const parent = this.store.get(input.parentInstanceId)
       if (!parent) throw new Error('Parent Agent instance not found.')
       if (parent.state.status === 'removed') throw new Error('Invalid Agent instance parent state.')
@@ -223,19 +279,9 @@ export class AgentInstanceCommandService {
     }
   }
 
-  async replace(input: {
-    actor: import('../../../shared/magicAgentPlatform2/policy').PolicyActorRef
-    instanceId: string
-    expectedRevision: number
-    definitionId: string
-    name: string
-    configVersion: string
-    replacedAt: number
-    idempotencyKey: string
-    grantId?: string
-    expectedGrantUseCount?: number
-  }) {
+  async replace(input: ReplacementCommand) {
     try {
+      input = captureReplacementCommand(input)
       const replay = this.store.getReplaceReplay(input.instanceId, input.idempotencyKey)
       if (replay) return this.store.replace(input)
       const instance = this.store.get(input.instanceId)
@@ -246,8 +292,8 @@ export class AgentInstanceCommandService {
       if (!this.configStore?.get(input.configVersion))
         throw new Error('Replacement Agent config content is unavailable.')
       this.lifecycle.authorizeLifecycleMutation({ ...input, action: 'replace', instance })
-      const quiescent = await this.lifecycle.quiesceForReplacement(input.instanceId)
-      return this.store.replace({ ...input, expectedRevision: quiescent.revision })
+      const quiescent = await this.lifecycle.quiesceForReplacement(input.instanceId, input.expectedRevision)
+      return this.lifecycle.commitReplacement(quiescent, input)
     } catch (error) {
       return normalize(error)
     }
@@ -264,6 +310,7 @@ export class AgentInstanceCommandService {
     expectedGrantUseCount?: number
   }) {
     try {
+      this.store.assertOrdinaryIdentity(input.instanceId)
       if (!this.lifecycle.authorizeConfigMutation({ ...input, action: 'stage-config' }))
         return this.store.get(input.instanceId)!
       return this.store.stageConfig({
@@ -288,6 +335,7 @@ export class AgentInstanceCommandService {
     expectedGrantUseCount?: number
   }) {
     try {
+      this.store.assertOrdinaryIdentity(input.instanceId)
       const instance = this.store.get(input.instanceId)
       if (!instance?.state.pendingConfigVersion)
         throw new Error('Agent instance has no staged config version.')
@@ -322,6 +370,7 @@ export class AgentInstanceCommandService {
     expectedGrantUseCount?: number
   }) {
     try {
+      this.store.assertOrdinaryIdentity(input.instanceId)
       if (!this.lifecycle.authorizeConfigMutation({ ...input, action: 'rollback-config' }))
         return this.store.get(input.instanceId)!
       return this.lifecycle.rollbackConfigAtSafePoint(input)
@@ -340,6 +389,7 @@ export class AgentInstanceCommandService {
     expectedGrantUseCount?: number
   }): Promise<void> {
     try {
+      this.store.assertOrdinaryIdentity(input.instanceId)
       const instance = this.store.get(input.instanceId)
       if (!instance) throw new Error('Agent instance not found.')
       if (instance.state.parentInstanceId) {

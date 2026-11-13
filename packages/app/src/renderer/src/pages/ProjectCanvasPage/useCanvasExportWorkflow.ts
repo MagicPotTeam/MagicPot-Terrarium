@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type Dispatch,
@@ -21,6 +22,7 @@ import {
 import { buildRasterBackedSvgMarkup, SVG_EXPORT_MIME_TYPE } from './canvasExportSvgUtils'
 import { runWithCanvasRasterWorkLimit } from './canvasRasterWorkLimiter'
 import { type ExportSubmenuPlacement, resolveExportSubmenuPlacement } from './exportMenuPlacement'
+import type { CanvasRasterLimits } from './canvasExportRasterUtils'
 import type { CanvasExportBounds } from './groupPlaybackUtils'
 import {
   getProjectCanvasRuntimeExportBounds,
@@ -75,6 +77,16 @@ type UseCanvasExportWorkflowOptions = {
   notifyError: NotifyFn
   notifyInfo?: (message: string, duration?: number | null) => import('notistack').SnackbarKey
   closeMessage?: (key?: import('notistack').SnackbarKey) => void
+}
+
+type CanvasFileSaveFeedbackOwner = Readonly<{ canvasId: string }>
+type CanvasFileSaveAttempt = {
+  owner: CanvasFileSaveFeedbackOwner
+  retired: boolean
+  progressKey: import('notistack').SnackbarKey | null
+  progressTimer: number | null
+  progressValue: number
+  closeMessage: UseCanvasExportWorkflowOptions['closeMessage']
 }
 
 function buildCanvasExportBounds(
@@ -575,55 +587,98 @@ export function useCanvasExportWorkflow({
 }: UseCanvasExportWorkflowOptions) {
   const { t } = useTranslation()
   const [exportMenuAnchor, setExportMenuAnchor] = useState<HTMLElement | null>(null)
-  const saveProgressMessageKeyRef = useRef<import('notistack').SnackbarKey | null>(null)
-  const saveProgressTimerRef = useRef<number | null>(null)
-  const saveProgressValueRef = useRef(0)
-  const canvasFileSaveInProgressRef = useRef(false)
+  const canvasFileSaveInProgressRef = useRef<CanvasFileSaveAttempt | null>(null)
+  const saveFeedbackOwnerRef = useRef<CanvasFileSaveFeedbackOwner | null>(null)
   const [isSavingCanvasFile, setIsSavingCanvasFile] = useState(false)
-  const renderCanvasFileSaveProgress = useCallback(
-    (progress: number) => {
-      if (!notifyInfo) return
-      if (saveProgressMessageKeyRef.current !== null) {
-        closeMessage?.(saveProgressMessageKeyRef.current)
+  const closeCanvasFileSaveMessage = useCallback(
+    (attempt: CanvasFileSaveAttempt, key: import('notistack').SnackbarKey) => {
+      try {
+        attempt.closeMessage?.(key)
+      } catch {
+        // Best-effort UI cleanup must never replace the actual export rejection.
       }
-      saveProgressMessageKeyRef.current = notifyInfo(
-        `Saving .mpcanvas… ${Math.max(0, Math.min(100, Math.round(progress)))}%`,
-        null
-      )
     },
-    [closeMessage, notifyInfo]
+    []
   )
-  const beginCanvasFileSaveProgress = useCallback(() => {
-    if (saveProgressTimerRef.current !== null) window.clearInterval(saveProgressTimerRef.current)
-    saveProgressValueRef.current = 5
-    renderCanvasFileSaveProgress(saveProgressValueRef.current)
-    saveProgressTimerRef.current = window.setInterval(() => {
-      saveProgressValueRef.current = Math.min(92, saveProgressValueRef.current + 3)
-      renderCanvasFileSaveProgress(saveProgressValueRef.current)
-    }, 180)
-  }, [renderCanvasFileSaveProgress])
-  const closeCanvasFileSaveProgress = useCallback(() => {
-    if (saveProgressTimerRef.current !== null) {
-      window.clearInterval(saveProgressTimerRef.current)
-      saveProgressTimerRef.current = null
+  const closeCanvasFileSaveProgress = useCallback(
+    (attempt: CanvasFileSaveAttempt) => {
+      const timer = attempt.progressTimer
+      const key = attempt.progressKey
+      // Detach both resources before any close callout can synchronously retire this attempt.
+      attempt.progressTimer = null
+      attempt.progressKey = null
+      if (timer !== null) window.clearInterval(timer)
+      if (key !== null) closeCanvasFileSaveMessage(attempt, key)
+    },
+    [closeCanvasFileSaveMessage]
+  )
+  const isCanvasFileSaveFeedbackCurrent = useCallback(
+    (attempt: CanvasFileSaveAttempt) =>
+      !attempt.retired &&
+      saveFeedbackOwnerRef.current === attempt.owner &&
+      canvasFileSaveInProgressRef.current === attempt,
+    []
+  )
+  const retireCanvasFileSaveFeedback = useCallback(
+    (owner: CanvasFileSaveFeedbackOwner) => {
+      const attempt = canvasFileSaveInProgressRef.current
+      if (attempt?.owner !== owner) return
+      attempt.retired = true
+      closeCanvasFileSaveProgress(attempt)
+    },
+    [closeCanvasFileSaveProgress]
+  )
+  useLayoutEffect(() => {
+    const owner = { canvasId }
+    saveFeedbackOwnerRef.current = owner
+    return () => {
+      if (saveFeedbackOwnerRef.current === owner) saveFeedbackOwnerRef.current = null
+      retireCanvasFileSaveFeedback(owner)
     }
-    if (saveProgressMessageKeyRef.current !== null) {
-      closeMessage?.(saveProgressMessageKeyRef.current)
-      saveProgressMessageKeyRef.current = null
-    }
-  }, [closeMessage])
-  const completeCanvasFileSaveProgress = useCallback(() => {
-    if (saveProgressTimerRef.current !== null) {
-      window.clearInterval(saveProgressTimerRef.current)
-      saveProgressTimerRef.current = null
-    }
-    renderCanvasFileSaveProgress(100)
-    window.setTimeout(() => {
-      closeCanvasFileSaveProgress()
-      notifySuccess('Saved .mpcanvas')
-    }, 250)
-  }, [closeCanvasFileSaveProgress, notifySuccess, renderCanvasFileSaveProgress])
-  useEffect(() => () => closeCanvasFileSaveProgress(), [closeCanvasFileSaveProgress])
+  }, [canvasId, retireCanvasFileSaveFeedback])
+  useEffect(() => {
+    const owner = saveFeedbackOwnerRef.current
+    // Passive replay can retire work started by a mounting effect after layout replay.
+    return () => { if (owner) retireCanvasFileSaveFeedback(owner) }
+  }, [canvasId, retireCanvasFileSaveFeedback])
+  const renderCanvasFileSaveProgress = useCallback(
+    (attempt: CanvasFileSaveAttempt, progress: number) => {
+      if (!notifyInfo || !isCanvasFileSaveFeedbackCurrent(attempt)) return
+      const previousKey = attempt.progressKey
+      attempt.progressKey = null
+      if (previousKey !== null) closeCanvasFileSaveMessage(attempt, previousKey)
+      if (!isCanvasFileSaveFeedbackCurrent(attempt)) return
+      let key: import('notistack').SnackbarKey
+      try {
+        key = notifyInfo(
+          `Saving .mpcanvas… ${Math.max(0, Math.min(100, Math.round(progress)))}%`,
+          null
+        )
+      } catch {
+        attempt.retired = true
+        closeCanvasFileSaveProgress(attempt)
+        return
+      }
+      if (isCanvasFileSaveFeedbackCurrent(attempt)) attempt.progressKey = key
+      else closeCanvasFileSaveMessage(attempt, key)
+    },
+    [closeCanvasFileSaveMessage, closeCanvasFileSaveProgress, isCanvasFileSaveFeedbackCurrent, notifyInfo]
+  )
+  const beginCanvasFileSaveProgress = useCallback(
+    (attempt: CanvasFileSaveAttempt) => {
+      if (!notifyInfo || !isCanvasFileSaveFeedbackCurrent(attempt)) return
+      attempt.progressValue = 5
+      renderCanvasFileSaveProgress(attempt, attempt.progressValue)
+      // notifyInfo may have retired ownership before returning its key.
+      if (!isCanvasFileSaveFeedbackCurrent(attempt)) return
+      attempt.progressTimer = window.setInterval(() => {
+        if (!isCanvasFileSaveFeedbackCurrent(attempt)) return
+        attempt.progressValue = Math.min(92, attempt.progressValue + 3)
+        renderCanvasFileSaveProgress(attempt, attempt.progressValue)
+      }, 180)
+    },
+    [isCanvasFileSaveFeedbackCurrent, notifyInfo, renderCanvasFileSaveProgress]
+  )
   const [exportSubmenuAnchor, setExportSubmenuAnchor] = useState<HTMLElement | null>(null)
   const [exportSubmenuPlacement, setExportSubmenuPlacement] =
     useState<ExportSubmenuPlacement>('right')
@@ -690,9 +745,21 @@ export function useCanvasExportWorkflow({
   )
 
   const renderHtmlItemToImage = useCallback(
-    async (item: CanvasHtmlItem): Promise<HTMLImageElement> => {
+    async (item: CanvasHtmlItem, limits?: CanvasRasterLimits): Promise<HTMLImageElement> => {
+      // Only bounded snapshots reduce the foreignObject's raster viewport. Keep
+      // the original coordinate system so HTML lays out at its original size.
+      // This does not bound the browser's internal HTML layout or image decoding.
+      if (limits && (!Number.isFinite(item.width) || !Number.isFinite(item.height) || item.width <= 0 || item.height <= 0)) {
+        throw new Error('Cannot render an HTML overview with invalid dimensions.')
+      }
+      const viewport = limits
+        ? resolveCanvasExportRasterConfig(item.width, item.height, 1, limits)
+        : undefined
+      const svgViewport = viewport
+        ? `width="${viewport.canvasWidth}" height="${viewport.canvasHeight}" viewBox="0 0 ${item.width} ${item.height}" preserveAspectRatio="none"`
+        : `width="${item.width}" height="${item.height}"`
       const svgMarkup = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="${item.width}" height="${item.height}">
+        <svg xmlns="http://www.w3.org/2000/svg" ${svgViewport}>
           <foreignObject width="100%" height="100%">
             <div
               xmlns="http://www.w3.org/1999/xhtml"
@@ -849,7 +916,8 @@ export function useCanvasExportWorkflow({
       item: CanvasItem,
       itemBounds: CanvasExportBounds,
       exportBounds: CanvasExportBounds,
-      pixelRatio: number
+      pixelRatio: number,
+      limits?: CanvasRasterLimits
     ) => {
       if (item.type === 'video') {
         const container = canvasContainerRef.current
@@ -890,7 +958,7 @@ export function useCanvasExportWorkflow({
       }
 
       if (item.type === 'html') {
-        const htmlImage = await renderHtmlItemToImage(item)
+        const htmlImage = await renderHtmlItemToImage(item, limits)
         drawTransformedItemSource(ctx, item, exportBounds, pixelRatio, (targetCtx) => {
           targetCtx.drawImage(htmlImage, 0, 0, item.width, item.height)
         })
@@ -1000,7 +1068,8 @@ export function useCanvasExportWorkflow({
       targetItems: CanvasItem[],
       format: RasterExportImageFormat,
       includeBackground: boolean,
-      clipBounds?: CanvasExportClipBounds | null
+      clipBounds?: CanvasExportClipBounds | null,
+      limits?: CanvasRasterLimits
     ): Promise<HTMLCanvasElement> => {
       const { entries, snapshot } = createCanvasExportEntries(targetItems)
 
@@ -1018,7 +1087,8 @@ export function useCanvasExportWorkflow({
       const rasterConfig = resolveCanvasExportRasterConfig(
         exportBounds.width,
         exportBounds.height,
-        EXPORT_IMAGE_PIXEL_RATIO
+        EXPORT_IMAGE_PIXEL_RATIO,
+        limits
       )
 
       const canvasContext = createHtmlCanvasContext(
@@ -1059,7 +1129,8 @@ export function useCanvasExportWorkflow({
           entry.item,
           entry.bounds,
           exportBounds,
-          rasterConfig.pixelRatio
+          rasterConfig.pixelRatio,
+          limits
         )
       }
 
@@ -1072,7 +1143,8 @@ export function useCanvasExportWorkflow({
     async (
       targetItems: CanvasItem[],
       includeBackground = false,
-      clipBounds?: CanvasExportClipBounds | null
+      clipBounds?: CanvasExportClipBounds | null,
+      limits?: CanvasRasterLimits
     ): Promise<string> => {
       const selectionSnapshot = await prepareExportRender()
 
@@ -1081,7 +1153,8 @@ export function useCanvasExportWorkflow({
           targetItems,
           'png',
           includeBackground,
-          clipBounds
+          clipBounds,
+          limits
         )
         return await renderCanvasDataUri(canvas, 'png')
       } finally {
@@ -1385,118 +1458,79 @@ export function useCanvasExportWorkflow({
     []
   )
 
-  const handleSaveCanvas = useCallback(
-    async (options: CanvasSaveOptions = {}) => {
-      if (canvasFileSaveInProgressRef.current) return
-      canvasFileSaveInProgressRef.current = true
+  const runCanvasFileSave = useCallback(
+    async (mode: 'save' | 'save-as' | 'standalone', options: CanvasSaveOptions = {}) => {
+      const owner = saveFeedbackOwnerRef.current
+      if (!owner || owner.canvasId !== canvasId || canvasFileSaveInProgressRef.current) return
+      const attempt: CanvasFileSaveAttempt = {
+        owner, retired: false, progressKey: null, progressTimer: null, progressValue: 0, closeMessage
+      }
+      canvasFileSaveInProgressRef.current = attempt
       setIsSavingCanvasFile(true)
       const shouldNotify = !options.suppressNotifications
-      if (shouldNotify) beginCanvasFileSaveProgress()
-      closeExportMenus()
       try {
-        await exportCanvasFile(
-          items,
-          buildCanvasFileName(),
-          canvasId,
-          false,
-          groups,
-          figmaBinding,
-          groupBranches,
-          true,
-          () => setIsSavingCanvasFile(false)
-        )
-        if (shouldNotify) completeCanvasFileSaveProgress()
-      } catch (error) {
-        if (shouldNotify) closeCanvasFileSaveProgress()
-        throw error
+        if (shouldNotify) beginCanvasFileSaveProgress(attempt)
+        closeExportMenus()
+        const outcome = mode === 'standalone'
+          ? await exportCanvasFileAsStandalone(
+              items, buildCanvasFileName(), canvasId, groups, figmaBinding, groupBranches
+            )
+          : await exportCanvasFile(
+              items, buildCanvasFileName(), canvasId, mode === 'save-as', groups,
+              figmaBinding, groupBranches
+            )
+        if (shouldNotify && isCanvasFileSaveFeedbackCurrent(attempt)) {
+          closeCanvasFileSaveProgress(attempt)
+          if (isCanvasFileSaveFeedbackCurrent(attempt)) {
+            const key = outcome.status === 'native-written'
+              ? notifySuccess('Saved .mpcanvas')
+              : outcome.status === 'download-requested'
+                ? notifyInfo?.('Download requested for .mpcanvas; check your browser to confirm completion.')
+                : undefined
+            if (key !== undefined && !isCanvasFileSaveFeedbackCurrent(attempt)) {
+              closeCanvasFileSaveMessage(attempt, key)
+            }
+          }
+        }
       } finally {
-        canvasFileSaveInProgressRef.current = false
-        setIsSavingCanvasFile(false)
+        attempt.retired = true
+        closeCanvasFileSaveProgress(attempt)
+        // Retirement is UI-only: retain the shared pending attempt until actual work settles.
+        if (canvasFileSaveInProgressRef.current === attempt) {
+          canvasFileSaveInProgressRef.current = null
+          if (saveFeedbackOwnerRef.current !== null) setIsSavingCanvasFile(false)
+        }
       }
     },
     [
-      beginCanvasFileSaveProgress,
-      buildCanvasFileName,
-      canvasId,
-      closeCanvasFileSaveProgress,
-      closeExportMenus,
-      completeCanvasFileSaveProgress,
-      figmaBinding,
-      groupBranches,
-      groups,
-      items
+      beginCanvasFileSaveProgress, buildCanvasFileName, canvasId, closeCanvasFileSaveMessage,
+      closeCanvasFileSaveProgress, closeExportMenus, closeMessage, figmaBinding, groupBranches,
+      groups, isCanvasFileSaveFeedbackCurrent, items, notifyInfo, notifySuccess
     ]
   )
-
-  const handleSaveCanvasAs = useCallback(async () => {
-    if (canvasFileSaveInProgressRef.current) return
-    canvasFileSaveInProgressRef.current = true
-    beginCanvasFileSaveProgress()
-    closeExportMenus()
-    try {
-      await exportCanvasFile(
-        items,
-        buildCanvasFileName(),
-        canvasId,
-        true,
-        groups,
-        figmaBinding,
-        groupBranches
-      )
-      completeCanvasFileSaveProgress()
-    } catch (error) {
-      closeCanvasFileSaveProgress()
-      throw error
-    } finally {
-      canvasFileSaveInProgressRef.current = false
-    }
-  }, [
-    beginCanvasFileSaveProgress,
-    buildCanvasFileName,
-    canvasId,
-    closeCanvasFileSaveProgress,
-    closeExportMenus,
-    completeCanvasFileSaveProgress,
-    figmaBinding,
-    groupBranches,
-    groups,
-    items
-  ])
-
+  const handleSaveCanvas = useCallback(
+    (options: CanvasSaveOptions = {}) => runCanvasFileSave('save', options),
+    [runCanvasFileSave]
+  )
+  const handleSaveCanvasAs = useCallback(() => runCanvasFileSave('save-as'), [runCanvasFileSave])
   const handleSaveCanvasAsFromContextMenu = useCallback(async () => {
     setExportCtxMenuPos(null)
     await handleSaveCanvasAs()
   }, [handleSaveCanvasAs])
+  const handleExportCanvasProjectFile = useCallback(
+    () => runCanvasFileSave('standalone'),
+    [runCanvasFileSave]
+  )
 
-  const handleExportCanvasProjectFile = useCallback(async () => {
-    beginCanvasFileSaveProgress()
-    closeExportMenus()
-    try {
-      await exportCanvasFileAsStandalone(
-        items,
-        buildCanvasFileName(),
-        canvasId,
-        groups,
-        figmaBinding,
-        groupBranches
-      )
-      completeCanvasFileSaveProgress()
-    } catch (error) {
-      closeCanvasFileSaveProgress()
-      throw error
-    }
-  }, [
-    beginCanvasFileSaveProgress,
-    buildCanvasFileName,
-    canvasId,
-    closeCanvasFileSaveProgress,
-    closeExportMenus,
-    completeCanvasFileSaveProgress,
-    figmaBinding,
-    groupBranches,
-    groups,
-    items
-  ])
+  const rejectUnverifiedCroppedExport = useCallback((targetItems: readonly CanvasItem[]) => {
+    // Crop coordinates do not prove which version of the source they describe.
+    // Reject the entire export before choosing a path, reading pixels or writing.
+    if (!targetItems.some((item) => item.type === 'image' && item.crop)) return false
+    notifyError(t('canvas.export_cropped_image_failed', {
+      defaultValue: 'Cannot safely export or copy cropped images yet. Removing the crop exposes the full original.'
+    }))
+    return true
+  }, [notifyError, t])
 
   const exportCanvasSceneAsImage = useCallback(
     async (
@@ -1511,6 +1545,7 @@ export function useCanvasExportWorkflow({
         notifyError(t(emptyKey))
         return
       }
+      if (rejectUnverifiedCroppedExport(targetItems)) return
 
       const outputPath = await chooseExportPath(buildExportImageFileName(scope, format), format)
       if (!outputPath) return
@@ -1539,6 +1574,7 @@ export function useCanvasExportWorkflow({
       notifyError,
       notifySuccess,
       prepareExportRender,
+      rejectUnverifiedCroppedExport,
       renderCanvasItemsToCanvas,
       restoreExportRender,
       saveCanvasToPath,
@@ -1558,6 +1594,7 @@ export function useCanvasExportWorkflow({
         notifyError(t(emptyKey))
         return
       }
+      if (rejectUnverifiedCroppedExport(targetItems)) return
 
       const outputPath = await chooseExportPath(buildExportImageFileName(scope, 'svg'), 'svg')
       if (!outputPath) return
@@ -1581,6 +1618,7 @@ export function useCanvasExportWorkflow({
       closeExportMenus,
       notifyError,
       notifySuccess,
+      rejectUnverifiedCroppedExport,
       renderCanvasItemsSvgMarkupUnlocked,
       saveSvgToPath,
       t
@@ -1599,6 +1637,7 @@ export function useCanvasExportWorkflow({
         notifyError(t(emptyKey))
         return
       }
+      if (rejectUnverifiedCroppedExport(targetItems)) return
 
       const result = await api().svcDialog.showOpenDialog({
         title: t('canvas.export_images_select_dir'),
@@ -1631,6 +1670,7 @@ export function useCanvasExportWorkflow({
       closeExportMenus,
       notifyError,
       prepareExportRender,
+      rejectUnverifiedCroppedExport,
       renderCanvasItemsToCanvas,
       restoreExportRender,
       saveCanvasToDirectory,
@@ -1646,6 +1686,7 @@ export function useCanvasExportWorkflow({
         notifyError(t(emptyKey))
         return
       }
+      if (rejectUnverifiedCroppedExport(targetItems)) return
 
       const result = await api().svcDialog.showOpenDialog({
         title: t('canvas.export_images_select_dir'),
@@ -1674,6 +1715,7 @@ export function useCanvasExportWorkflow({
       buildElementExportFileName,
       closeExportMenus,
       notifyError,
+      rejectUnverifiedCroppedExport,
       renderCanvasItemsSvgMarkupUnlocked,
       saveSvgToDirectory,
       t

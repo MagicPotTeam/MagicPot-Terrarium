@@ -194,6 +194,38 @@ describe('PanelEnvironment', () => {
     expect(screen.getByRole('heading', { name: 'Adobe 桥接' })).toBeTruthy()
   })
 
+  it('lets the user opt into scripts without changing the independent terminal flag', async () => {
+    const saveSettings = vi.fn()
+    render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={saveSettings} />)
+    const toggle = await screen.findByRole('switch', { name: 'environment.agent_scripts.enable' })
+    expect((toggle as HTMLInputElement).checked).toBe(false)
+    expect(screen.getByText('environment.agent_scripts.warning')).toBeTruthy()
+    fireEvent.click(toggle)
+    expect(saveSettings).toHaveBeenLastCalledWith({ project_trace_config: { ...DEFAULT_CONFIG.project_trace_config, enable_agent_python_notebook: true } })
+    expect(DEFAULT_CONFIG.project_trace_config.enable_agent_terminal).toBe(false)
+  })
+
+  it('keeps HTML execution opt-in independent from Python, terminal and Shell', async () => {
+    const saveSettings = vi.fn()
+    render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={saveSettings} />)
+    const toggle = await screen.findByRole('switch', { name: 'environment.agent_html.enable' })
+    expect(toggle).not.toBeChecked(); expect(screen.getByText('environment.agent_html.warning')).toBeTruthy()
+    fireEvent.click(toggle)
+    expect(saveSettings).toHaveBeenLastCalledWith({ project_trace_config: { ...DEFAULT_CONFIG.project_trace_config, enable_agent_html_apps: true } })
+    expect(DEFAULT_CONFIG.project_trace_config.enable_agent_python_notebook).toBe(false)
+    expect(DEFAULT_CONFIG.project_trace_config.enable_agent_shell).toBe(false)
+  })
+
+  it('edits the general shell configuration independently inside the actual environment panel', async () => {
+    const saveSettings = vi.fn()
+    render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={saveSettings} />)
+    const toggle = await screen.findByRole('switch', { name: 'environment.agent_shell.enable' })
+    expect(toggle).not.toBeChecked()
+    fireEvent.click(toggle)
+    expect(saveSettings).toHaveBeenLastCalledWith({ project_trace_config: { ...DEFAULT_CONFIG.project_trace_config, enable_agent_shell: true } })
+    expect(screen.getByText('environment.agent_shell.warning')).toBeTruthy()
+  })
+
   it('edits the explicit browser CORS allowlist without changing bearer tokens', async () => {
     const saveSettings = vi.fn()
     render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={saveSettings} />)

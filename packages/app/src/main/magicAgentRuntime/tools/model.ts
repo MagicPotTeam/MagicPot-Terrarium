@@ -1,10 +1,9 @@
+import { bundledCreativeDeclarations } from '@shared/magicAgentRuntime/bundledCreativeDeclarations'
 import { createAdapter, objectSchema, statusSchema } from './helpers'
 
 export const modelToolAdapter = createAdapter([
   {
-    name: 'model.list',
-    category: 'model',
-    description: 'List creative model assets through a registered model browser adapter.',
+    ...bundledCreativeDeclarations['model.list'],
     inputSchema: objectSchema({
       type: {
         type: 'string'
@@ -18,9 +17,7 @@ export const modelToolAdapter = createAdapter([
     dependency: 'modelList'
   },
   {
-    name: 'model.inspect',
-    category: 'model',
-    description: 'Inspect one model by path or name through a registered model adapter.',
+    ...bundledCreativeDeclarations['model.inspect'],
     inputSchema: objectSchema({
       path: {
         type: 'string'
@@ -32,9 +29,8 @@ export const modelToolAdapter = createAdapter([
     dependency: 'modelInspect'
   },
   {
-    name: 'model.status',
-    category: 'model',
-    description: 'Return model subsystem availability for MagicAgent.',
-    inputSchema: statusSchema
+    ...bundledCreativeDeclarations['model.status'],
+    inputSchema: statusSchema,
+    dependency: 'modelStatus'
   }
 ])

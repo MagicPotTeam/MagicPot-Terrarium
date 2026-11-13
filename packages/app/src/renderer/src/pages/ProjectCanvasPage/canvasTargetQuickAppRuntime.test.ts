@@ -87,6 +87,77 @@ describe('canvasTargetQuickAppRuntime', () => {
     vi.restoreAllMocks()
   })
 
+  it('fails closed before fetching when a media slot has both an item reference and a direct URL', async () => {
+    const fetchMock = createImageFetch({ 'blob://selected-A': [1, 2, 3], 'blob://unselected-B': [9, 8, 7] })
+    vi.stubGlobal('fetch', fetchMock)
+    const { api, uploadImage, submitWorkflow } = createQuickAppApi()
+    await expect(runCanvasTargetQuickAppAction({
+      action: { type: 'quick_app', id: 'mixed', qAppKey: 'rembg', phase: 'before_model_stages', outputTarget: 'agent', inputAssignments: [{ slot: '1.inputs.image', itemIds: ['A'], value: 'blob://unselected-B' }] },
+      api: api as never, config: {} as never, userIntent: 'fixture',
+      sourceAttachments: [{ type: 'image', url: 'blob://selected-A', fileName: 'A.png' }],
+      resolvedInputAssignmentAttachments: [[{ type: 'image', url: 'blob://selected-A', fileName: 'A.png' }]]
+    })).rejects.toThrow(/url|direct|authoriz/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(uploadImage).not.toHaveBeenCalled()
+    expect(submitWorkflow).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on an unbound direct media URL without an item reference', async () => {
+    const fetchMock = createImageFetch({ 'blob://unselected-B': [9, 8, 7] })
+    vi.stubGlobal('fetch', fetchMock)
+    const { api, uploadImage, submitWorkflow } = createQuickAppApi()
+    await expect(runCanvasTargetQuickAppAction({
+      action: { type: 'quick_app', id: 'unbound', qAppKey: 'rembg', phase: 'before_model_stages', outputTarget: 'agent', inputAssignments: [{ slot: '1.inputs.image', value: 'blob://unselected-B' }] },
+      api: api as never, config: {} as never, userIntent: 'fixture', sourceAttachments: []
+    })).rejects.toThrow(/url|direct|authoriz/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(uploadImage).not.toHaveBeenCalled()
+    expect(submitWorkflow).not.toHaveBeenCalled()
+  })
+
+  it('preflights all media slots before uploading any allowed input', async () => {
+    const fetchMock = createImageFetch({ 'blob://selected-A': [1, 2, 3], 'blob://unselected-B': [9, 8, 7] })
+    vi.stubGlobal('fetch', fetchMock)
+    const { api, uploadImage, submitWorkflow } = createQuickAppApi()
+    const originalGetConfig = api.svcQApp.getQAppCfg
+    api.svcQApp.getQAppCfg = vi.fn(async () => {
+      const result = await originalGetConfig()
+      result.cfg.inputs.push({ component: 'InputComfyImage', label: 'other', slot: '2.inputs.image' })
+      Object.assign(result.workflow, { '2': { inputs: { image: '' } } })
+      return result
+    })
+    await expect(runCanvasTargetQuickAppAction({
+      action: { type: 'quick_app', id: 'multi', qAppKey: 'rembg', phase: 'before_model_stages', outputTarget: 'agent', inputAssignments: [
+        { slot: '1.inputs.image', itemIds: ['A'] },
+        { slot: '2.inputs.image', value: 'blob://unselected-B' }
+      ] },
+      api: api as never, config: {} as never, userIntent: 'fixture',
+      sourceAttachments: [{ type: 'image', url: 'blob://selected-A', fileName: 'A.png' }],
+      resolvedInputAssignmentAttachments: [[{ type: 'image', url: 'blob://selected-A', fileName: 'A.png' }], []]
+    })).rejects.toThrow(/url|direct|authoriz/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(uploadImage).not.toHaveBeenCalled()
+    expect(submitWorkflow).not.toHaveBeenCalled()
+  })
+
+  it('rejects a direct video URL before fetching or uploading', async () => {
+    const fetchMock = createImageFetch({ 'blob://unselected-video': [9, 8, 7] })
+    vi.stubGlobal('fetch', fetchMock)
+    const { api, uploadImage, submitWorkflow } = createQuickAppApi()
+    const originalGetConfig = api.svcQApp.getQAppCfg
+    api.svcQApp.getQAppCfg = vi.fn(async () => {
+      const result = await originalGetConfig()
+      return { ...result, cfg: { ...result.cfg, inputs: [{ component: 'InputComfyVideo', label: 'video', slot: '1.inputs.image' }] } }
+    })
+    await expect(runCanvasTargetQuickAppAction({
+      action: { type: 'quick_app', id: 'video', qAppKey: 'rembg', phase: 'before_model_stages', outputTarget: 'agent', inputAssignments: [{ slot: '1.inputs.image', value: 'blob://unselected-video' }] },
+      api: api as never, config: {} as never, userIntent: 'fixture', sourceAttachments: []
+    })).rejects.toThrow(/url|direct|authoriz/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(uploadImage).not.toHaveBeenCalled()
+    expect(submitWorkflow).not.toHaveBeenCalled()
+  })
+
   it('uses resolved explicit stage media for QuickApp image input instead of the original source image', async () => {
     const fetchMock = createImageFetch({
       'blob://source-original': [1, 2, 3],

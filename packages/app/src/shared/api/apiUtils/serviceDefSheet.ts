@@ -10,6 +10,8 @@ export type Service = {
 
 export type UnaryServiceDef<REQ, RESP> = {
   type: 'unary'
+  /** Internal IPC codec only; public calls still resolve RESP or reject. */
+  ipcResult?: 'service-error'
   /** Optional runtime validation for renderer-provided requests. */
   request?: ServiceValidator<REQ>
   /** Optional runtime validation for main-process responses. */

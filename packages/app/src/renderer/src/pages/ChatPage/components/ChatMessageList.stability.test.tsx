@@ -695,6 +695,138 @@ describe('ChatMessageList render stability', () => {
     expect(screen.queryByRole('button', { name: 'Remove draft.png' })).toBeNull()
   })
 
+  it('retains a removed edit attachment after scrolling out of the virtual window and back', () => {
+    const removed: ChatAttachment = { type: 'image', url: 'removed.png', fileName: 'removed.png' }
+    const retained: ChatAttachment = { type: 'image', url: 'retained.png', fileName: 'retained.png' }
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Prompt', attachments: [removed, retained] },
+      ...Array.from({ length: 59 }, (_, index): ChatMessage => ({ role: 'assistant', content: `row ${index}` }))
+    ]
+    const onSendEditedMessage = vi.fn()
+    const buildList = makeListBuilder({ editingMessageIndex: 0, editingContent: 'Edited prompt', onSendEditedMessage })
+    render(buildList(makeSession(messages)))
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 7000 }
+    })
+    act(() => fireEvent.scroll(scroller))
+    const editorRow = getRow(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Remove removed.png' }))
+    expect(screen.queryByRole('button', { name: 'Remove removed.png' })).toBeNull()
+    act(() => { scroller.scrollTop = 5000; fireEvent.scroll(scroller) })
+    expect(getRow(0)).toBe(editorRow)
+    expect(screen.queryAllByRole('textbox')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-chat-message-index]').length).toBeLessThan(30)
+    act(() => { scroller.scrollTop = 0; fireEvent.scroll(scroller) })
+    expect(getRow(0)).toBe(editorRow)
+    expect(screen.queryByRole('button', { name: 'Remove removed.png' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage).toHaveBeenCalledWith('Edited prompt', [retained], undefined, [])
+  })
+
+  it('submits no images after the final attachment is removed and the editor is scrolled away and back', () => {
+    const attachment: ChatAttachment = { type: 'image', url: 'only.png', fileName: 'only.png' }
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Prompt', attachments: [attachment] },
+      ...Array.from({ length: 59 }, (_, index): ChatMessage => ({ role: 'assistant', content: `row ${index}` }))
+    ]
+    const onSendEditedMessage = vi.fn()
+    const buildList = makeListBuilder({ editingMessageIndex: 0, editingContent: 'Draft', onSendEditedMessage })
+    render(buildList(makeSession(messages)))
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperties(scroller, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, value: 7000 } })
+    act(() => fireEvent.scroll(scroller))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove only.png' }))
+    act(() => { scroller.scrollTop = 5000; fireEvent.scroll(scroller) })
+    act(() => { scroller.scrollTop = 0; fireEvent.scroll(scroller) })
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage).toHaveBeenCalledWith('Draft', undefined, undefined, [])
+  })
+
+  it('blocks submitting stale hidden attachments when same-slot B replaces the edited message', () => {
+    const hidden: ChatAttachment = { type: 'image', url: 'a-private.png', fileName: 'a-private.png', hiddenFromChatView: true }
+    const tail: ChatMessage[] = Array.from({ length: 59 }, (_, index): ChatMessage => ({ role: 'assistant', content: `row ${index}` }))
+    const sessionA = makeSession([{ role: 'user', content: 'A', attachments: [hidden] }, ...tail])
+    const onSendEditedMessage = vi.fn()
+    const buildList = makeListBuilder({ editingMessageIndex: 0, editingContent: 'Draft', onSendEditedMessage })
+    const view = render(buildList(sessionA))
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperties(scroller, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, value: 7000 } })
+    act(() => { scroller.scrollTop = 5000; fireEvent.scroll(scroller) })
+    view.rerender(buildList({ ...sessionA, messages: [{ role: 'user', content: 'B' }, ...tail] }))
+    act(() => { scroller.scrollTop = 0; fireEvent.scroll(scroller) })
+    expect(screen.getByRole('button', { name: 'Save & Rerun' })).toBeDisabled()
+    expect(screen.getByText('消息已发生变化，请取消编辑并重新打开。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage).not.toHaveBeenCalled()
+  })
+
+  it.each([0, 30, 59])('preserves a sparse editing row at %i and total virtual geometry during streaming', index => {
+    const messages: ChatMessage[] = Array.from({ length: 61 }, (_, row): ChatMessage =>
+      row === index ? { role: 'user', content: `Editing ${row}` } : { role: 'assistant', content: `row ${row}` }
+    )
+    const buildList = makeListBuilder({ editingMessageIndex: index, editingContent: 'Draft', isLoading: true })
+    render(buildList(makeSession(messages)))
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 7000 }
+    })
+    act(() => { scroller.scrollTop = index === 0 ? 4300 : 0; fireEvent.scroll(scroller) })
+    const editingRow = getRow(index)
+    const streamingRow = getRow(60)
+    const rows = Array.from(scroller.querySelectorAll<HTMLElement>('[data-chat-message-index]'))
+    const indices = rows.map(row => Number(row.dataset.chatMessageIndex))
+    expect(indices).toEqual([...indices].sort((a, b) => a - b))
+    expect(new Set(indices).size).toBe(indices.length)
+    expect(indices.length).toBeLessThan(30)
+    const spacerTotal = Array.from(scroller.querySelectorAll<HTMLElement>(
+      '[data-testid="chat-virtual-top-spacer"], [data-testid="chat-virtual-editing-gap"], [data-testid="chat-virtual-loading-gap"], [data-testid="chat-virtual-bottom-spacer"]'
+    )).reduce((sum, spacer) => sum + Number.parseFloat(spacer.style.height), 0)
+    expect(spacerTotal + rows.length * 112).toBe(messages.length * 112)
+    expect(screen.getAllByRole('textbox')).toHaveLength(1)
+    expect(streamingRow).toBe(getRow(60))
+    act(() => { scroller.scrollTop = index === 0 ? 0 : 6000; fireEvent.scroll(scroller) })
+    expect(getRow(index)).toBe(editingRow)
+    expect(getRow(60)).toBe(streamingRow)
+  })
+
+  it('keeps a pending edit import and receiver while its row is outside the viewport', async () => {
+    let resolveImport!: (attachments: ChatAttachment[]) => void
+    let receiver: ((attachment: ChatAttachment) => void) | null = null
+    const pending = new Promise<ChatAttachment[]>((resolve) => { resolveImport = resolve })
+    const onDropImageAttachments = vi.fn(() => pending)
+    const added: ChatAttachment = { type: 'image', url: 'added.png', fileName: 'added.png' }
+    const fromReceiver: ChatAttachment = { type: 'image', url: 'receiver.png', fileName: 'receiver.png' }
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Prompt' },
+      ...Array.from({ length: 59 }, (_, index): ChatMessage => ({ role: 'assistant', content: `row ${index}` }))
+    ]
+    const onSendEditedMessage = vi.fn()
+    const registerReceiver = vi.fn((next: typeof receiver) => { receiver = next })
+    const buildList = makeListBuilder({ editingMessageIndex: 0, editingContent: 'Draft', onSendEditedMessage, onDropImageAttachments, onRegisterEditingAttachmentReceiver: registerReceiver })
+    render(buildList(makeSession(messages)))
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperties(scroller, { clientHeight: { configurable: true, value: 400 }, scrollHeight: { configurable: true, value: 7000 } })
+    act(() => fireEvent.scroll(scroller))
+    fireEvent.drop(screen.getByTestId('edit-message-composer'), {
+      dataTransfer: { types: ['Files'], files: [new File(['x'], 'a.png', { type: 'image/png' })] }
+    })
+    const originalReceiver = receiver
+    expect(originalReceiver).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Save & Rerun' })).toBeDisabled()
+    act(() => { scroller.scrollTop = 5000; fireEvent.scroll(scroller) })
+    expect(receiver).toBe(originalReceiver)
+    act(() => receiver?.(fromReceiver))
+    await act(async () => { resolveImport([added]); await pending })
+    act(() => { scroller.scrollTop = 0; fireEvent.scroll(scroller) })
+    expect(receiver).toBe(originalReceiver)
+    expect(registerReceiver).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage).toHaveBeenCalledWith('Draft', [fromReceiver, added], undefined, [])
+  })
+
   it('retains measured virtual heights and scroll anchors across immutable streaming snapshots', () => {
     const session = makeSession(
       Array.from({ length: 60 }, (_, index) => ({

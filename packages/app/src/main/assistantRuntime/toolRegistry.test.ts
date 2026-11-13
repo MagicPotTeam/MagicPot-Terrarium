@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import fs from 'fs/promises'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -5,6 +6,7 @@ import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { AGENT_LOCAL_FILE_LIMITS } from '@shared/api/svcAgentLocalFiles'
 import { buildProjectStorageDirName } from '@shared/projectStorage'
 import type { ProjectTraceProjectRef } from '@shared/projectTrace'
+import * as configModule from '../config/config'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
 
 // This suite invokes a real child process. Validation, cwd creation and spawn must
@@ -14,6 +16,11 @@ vi.unmock('node:fs/promises')
 
 const { buildDataDirRef } = vi.hoisted(() => ({
   buildDataDirRef: { current: process.cwd() }
+}))
+
+vi.mock(import('../config/config'), async (original) => ({
+  ...(await original()),
+  getConfig: vi.fn()
 }))
 
 vi.mock('../config/buildEnv', () => ({
@@ -81,6 +88,7 @@ describe('AssistantToolRegistry', () => {
     })
 
   beforeEach(async () => {
+    vi.mocked(configModule.getConfig).mockReturnValue(structuredClone(DEFAULT_CONFIG))
     tempDir = await createNodeTestArtifactDir('chat-tool-registry')
     buildDataDirRef.current = tempDir
     store = new AssistantSessionStore(path.join(tempDir, 'chat-sessions.json'))
@@ -446,6 +454,16 @@ describe('AssistantToolRegistry', () => {
     expect(cleanup.content).toContain('"sessionCount": 0')
   })
 
+  it('session cleanup clear removes legacy context but preserves opaque persistent memory and review locks', async () => {
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'memory-tool-clear' }, workspace = getAssistantWorkspaceState(route), namespace = path.join(workspace.memoryDir, '.agent-memory-v1')
+    await store.attachWorkspace(route, workspace)
+    await fs.mkdir(namespace, { recursive: true }); await fs.writeFile(path.join(namespace, 'facts.md'), 'TOOL_CLEAR_PERSISTENT_MEMORY'); await fs.writeFile(path.join(namespace, '.writer-lock'), 'TOOL_CLEAR_UNKNOWN_REVIEW'); await fs.writeFile(workspace.memoryFile, 'legacy daily')
+    const result = await new AssistantToolRegistry().callTool('session.cleanup', { mode: 'clear' }, createToolContext(route, createTaskState(route)))
+    expect(JSON.parse(result.content)).toMatchObject({ mode: 'clear', cleared: true })
+    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe('TOOL_CLEAR_PERSISTENT_MEMORY')
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('TOOL_CLEAR_UNKNOWN_REVIEW')
+    await expect(fs.access(workspace.memoryFile)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
   it('prunes exact persisted workspace roots and keeps a shared root until its last session', async () => {
     const registry = new AssistantToolRegistry()
     const oldRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'prune-old' }
@@ -477,6 +495,8 @@ describe('AssistantToolRegistry', () => {
     await store.attachWorkspace(retainedRoute, retainedWorkspace)
     await fs.mkdir(oldWorkspace.memoryDir, { recursive: true })
     await fs.writeFile(oldWorkspace.taskContextFile, 'shared task context')
+    const namespace = path.join(oldWorkspace.memoryDir, '.agent-memory-v1')
+    await fs.mkdir(namespace); await fs.writeFile(path.join(namespace, 'facts.md'), 'SHARED_PERSISTENT_MEMORY'); await fs.writeFile(path.join(namespace, '.writer-lock'), 'SHARED_UNKNOWN_REVIEW')
     const oldSession = await store.getSession(oldRoute)
     const retainedSession = await store.getSession(retainedRoute)
     if (!oldSession || !retainedSession) throw new Error('missing prune fixture sessions')
@@ -488,6 +508,8 @@ describe('AssistantToolRegistry', () => {
       createToolContext(oldRoute, createTaskState(oldRoute))
     )
     expect(JSON.parse(first.content)).toMatchObject({ mode: 'prune', removedCount: 1 })
+    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe('SHARED_PERSISTENT_MEMORY')
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('SHARED_UNKNOWN_REVIEW')
     await expect(fs.readFile(oldWorkspace.taskContextFile, 'utf8')).resolves.toBe(
       'shared task context'
     )
@@ -499,6 +521,8 @@ describe('AssistantToolRegistry', () => {
       createToolContext(retainedRoute, createTaskState(retainedRoute))
     )
     expect(JSON.parse(second.content)).toMatchObject({ mode: 'prune', removedCount: 1 })
+    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe('SHARED_PERSISTENT_MEMORY')
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('SHARED_UNKNOWN_REVIEW')
     await expect(fs.access(oldWorkspace.taskContextFile)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -702,6 +726,379 @@ describe('AssistantToolRegistry', () => {
     await expect(
       registry.callTool('task.group.cancel', {}, createToolContext(route, taskState))
     ).rejects.toThrow('Invalid input for tool "task.group.cancel": input.taskGroupId is required.')
+  })
+
+  it.each([null, false, '', 'STRICT', 'best-effort', 0, {}, ['partial']].map((mode) => ({ mode })))(
+    'rejects files.edit invalid mode $mode before approval or writes',
+    async ({ mode }) => {
+      const registry = new AssistantToolRegistry()
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'invalid-edit-mode',
+        threadId: 'pane'
+      } as const
+      await fs.writeFile(path.join(tempDir, 'edit.txt'), 'old')
+      const terminalApproval = vi.fn()
+      await expect(
+        registry.callTool(
+          'files.edit',
+          {
+            path: 'edit.txt',
+            expectedSha256: createHash('sha256').update('old').digest('hex'),
+            mode,
+            replacements: [{ old: 'old', new: 'new', expectedOccurrences: 1 }]
+          },
+          createToolContext(route, createTaskState(route), {
+            workspaceRootDir: tempDir,
+            terminalApproval
+          })
+        )
+      ).rejects.toThrow('Invalid input for tool "files.edit"')
+      expect(terminalApproval).not.toHaveBeenCalled()
+      expect(await fs.readFile(path.join(tempDir, 'edit.txt'), 'utf8')).toBe('old')
+      await expect(fs.stat(path.join(tempDir, '.magicpot'))).rejects.toMatchObject({
+        code: 'ENOENT'
+      })
+    }
+  )
+
+  it.each(['partial', 'best_effort'] as const)(
+    'files.edit %s stays a typed failure after exact detached approval and actual partial write',
+    async (mode) => {
+      const registry = new AssistantToolRegistry()
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'same-file-mode',
+        threadId: 'pane'
+      } as const
+      const before = 'a b a\n',
+        after = mode === 'partial' ? 'A b A\n' : 'Z b Z\n'
+      await fs.writeFile(path.join(tempDir, 'edit.txt'), before)
+      const args = {
+        path: 'edit.txt',
+        expectedSha256: createHash('sha256').update(before).digest('hex'),
+        mode: mode as string,
+        replacements: [
+          { old: 'a', new: 'A', expectedOccurrences: 2 },
+          { old: 'missing', new: 'not written', expectedOccurrences: 1 },
+          { old: 'A', new: 'Z', expectedOccurrences: 2 }
+        ]
+      }
+      const expected = structuredClone(args),
+        policy = getAssistantTerminalPolicyRuntime()
+      const terminalApproval = vi.fn<NonNullable<ToolCallContext['terminalApproval']>>(
+        (request) => {
+          expect(request.input).toEqual(expected)
+          args.mode = 'strict'
+          args.replacements[2].new = 'UNAPPROVED'
+          return policy.createTrustedApproval(request)
+        }
+      )
+      const error = await registry
+        .callTool(
+          'files.edit',
+          args,
+          createToolContext(route, createTaskState(route), {
+            workspaceRootDir: tempDir,
+            terminalApproval
+          })
+        )
+        .catch((error) => error)
+      const { AssistantToolResultError } = await import('./toolFailure')
+      expect(error).toBeInstanceOf(AssistantToolResultError)
+      expect(error).toMatchObject({ code: 'MAGIC_AGENT_FILES_EDIT_FAILED' })
+      const receipt = JSON.parse(error.toolResult.content)
+      expect(receipt).toMatchObject({
+        error: { code: 'MAGIC_AGENT_FILES_EDIT_FAILED' },
+        report: { mode, failed: 1, writeStatus: 'committed', fileChanged: true },
+        mutation: {
+          beforeSha256: expected.expectedSha256,
+          afterSha256: createHash('sha256').update(after).digest('hex')
+        }
+      })
+      expect(error.toolResult.metadata).toEqual(receipt)
+      expect(await fs.readFile(path.join(tempDir, 'edit.txt'), 'utf8')).toBe(after)
+      expect(
+        await fs.readFile(
+          path.join(
+            tempDir,
+            '.magicpot',
+            'tool-host',
+            'snapshots',
+            receipt.mutation.snapshotId,
+            'content'
+          ),
+          'utf8'
+        )
+      ).toBe(before)
+      expect(terminalApproval).toHaveBeenCalledOnce()
+      expect(JSON.stringify(receipt)).not.toContain('UNAPPROVED')
+    }
+  )
+
+  it('runs files.edit with production approval bound to the exact detached ordered replacements', async () => {
+    const registry = new AssistantToolRegistry()
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'file-edit-capture',
+      threadId: 'pane'
+    } as const
+    const target = path.join(tempDir, 'edit.txt'),
+      before = 'old old\n'
+    await fs.writeFile(target, before)
+    const args = {
+      path: 'edit.txt',
+      expectedSha256: createHash('sha256').update(before).digest('hex'),
+      replacements: [
+        { old: 'old', new: 'middle', expectedOccurrences: 2 },
+        { old: 'middle', new: 'approved', expectedOccurrences: 2 }
+      ]
+    }
+    const expected = structuredClone(args),
+      policy = getAssistantTerminalPolicyRuntime(),
+      approved: unknown[] = []
+    const terminalApproval = vi.fn<NonNullable<ToolCallContext['terminalApproval']>>((request) => {
+      approved.push(structuredClone(request.input))
+      args.replacements[1].new = 'UNAPPROVED_CALLER_CHANGE'
+      return policy.createTrustedApproval(request)
+    })
+    const result = await registry.callTool(
+      'files.edit',
+      args,
+      createToolContext(route, createTaskState(route), {
+        workspaceRootDir: tempDir,
+        terminalApproval
+      })
+    )
+    expect(await fs.readFile(target, 'utf8')).toBe('approved approved\n')
+    expect(approved).toEqual([expected])
+    expect(terminalApproval).toHaveBeenCalledOnce()
+    const output = JSON.parse(result.content)
+    expect(output).toMatchObject({
+      path: 'edit.txt',
+      beforeSha256: expected.expectedSha256,
+      afterSha256: createHash('sha256').update('approved approved\n').digest('hex')
+    })
+    expect(
+      await fs.readFile(
+        path.join(tempDir, '.magicpot', 'tool-host', 'snapshots', output.snapshotId, 'content'),
+        'utf8'
+      )
+    ).toBe(before)
+    expect(JSON.stringify(output)).not.toContain('UNAPPROVED_CALLER_CHANGE')
+  })
+
+  it.each([
+    { label: 'model confirmation', extra: { confirm: true } },
+    {
+      label: 'replacement unknown property',
+      extra: {
+        replacements: [{ old: 'old', new: 'new', expectedOccurrences: 1, replaceAll: true }]
+      }
+    },
+    {
+      label: 'non-positive occurrence count',
+      extra: { replacements: [{ old: 'old', new: 'new', expectedOccurrences: 0 }] }
+    },
+    { label: 'empty replacement list', extra: { replacements: [] } },
+    { label: 'invalid SHA syntax', extra: { expectedSha256: '0'.repeat(63) } }
+  ])('rejects invalid files.edit input before approval or mutation ($label)', async ({ extra }) => {
+    const registry = new AssistantToolRegistry()
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'file-edit-invalid',
+      threadId: 'pane'
+    } as const
+    const target = path.join(tempDir, 'edit.txt')
+    await fs.writeFile(target, 'old')
+    const policy = getAssistantTerminalPolicyRuntime(),
+      terminalApproval = vi.fn<NonNullable<ToolCallContext['terminalApproval']>>((request) =>
+        policy.createTrustedApproval(request)
+      )
+    const args = {
+      path: 'edit.txt',
+      expectedSha256: createHash('sha256').update('old').digest('hex'),
+      replacements: [{ old: 'old', new: 'new', expectedOccurrences: 1 }],
+      ...extra
+    }
+    await expect(
+      registry.callTool(
+        'files.edit',
+        args,
+        createToolContext(route, createTaskState(route), {
+          workspaceRootDir: tempDir,
+          terminalApproval
+        })
+      )
+    ).rejects.toThrow('Invalid input')
+    expect(terminalApproval).not.toHaveBeenCalled()
+    expect(await fs.readFile(target, 'utf8')).toBe('old')
+    await expect(fs.stat(path.join(tempDir, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.each(['default', 'partial', 'best_effort', 'patch'] as const)(
+    'keeps files.edit mode or EOF patch=%s approval denial, pre/post approval cancellation, stale CAS and grant replay fail-closed',
+    async (mode) => {
+      const registry = new AssistantToolRegistry()
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'file-edit-boundaries',
+        threadId: 'pane'
+      } as const
+      const target = path.join(tempDir, 'edit.txt')
+      await fs.writeFile(target, 'old')
+      const policy = getAssistantTerminalPolicyRuntime(),
+        name = mode === 'patch' ? 'files.patch' : 'files.edit',
+        args =
+          mode === 'patch'
+            ? {
+                path: 'edit.txt',
+                expectedSha256: createHash('sha256').update('old').digest('hex'),
+                patch:
+                  '--- a/edit.txt\n+++ b/edit.txt\n@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n'
+              }
+            : {
+                path: 'edit.txt',
+                ...(mode === 'default' ? {} : { mode }),
+                expectedSha256: createHash('sha256').update('old').digest('hex'),
+                replacements: [{ old: 'old', new: 'new', expectedOccurrences: 1 }]
+              }
+      const context = createToolContext(route, createTaskState(route), {
+        workspaceRootDir: tempDir
+      })
+      const denied = vi.fn(() => {
+        throw Error('user denied edit')
+      })
+      await expect(
+        registry.callTool(name, args, { ...context, terminalApproval: denied })
+      ).rejects.toThrow('user denied edit')
+      const cancelled = new AbortController()
+      cancelled.abort(Error('navigated before approval'))
+      const unexpected = vi.fn<NonNullable<ToolCallContext['terminalApproval']>>((request) =>
+        policy.createTrustedApproval(request)
+      )
+      await expect(
+        registry.callTool(name, args, {
+          ...context,
+          signal: cancelled.signal,
+          terminalApproval: unexpected
+        })
+      ).rejects.toThrow('navigated before approval')
+      expect(unexpected).not.toHaveBeenCalled()
+      const afterApproval = new AbortController()
+      await expect(
+        registry.callTool(name, args, {
+          ...context,
+          signal: afterApproval.signal,
+          terminalApproval: (request) => {
+            const approved = policy.createTrustedApproval(request)
+            afterApproval.abort(Error('navigated after approval'))
+            return approved
+          }
+        })
+      ).rejects.toThrow('navigated after approval')
+      await expect(
+        registry.callTool(
+          name,
+          { ...args, expectedSha256: '0'.repeat(64) },
+          { ...context, terminalApproval: (request) => policy.createTrustedApproval(request) }
+        )
+      ).rejects.toThrow('stale')
+      expect(await fs.readFile(target, 'utf8')).toBe('old')
+      await expect(fs.stat(path.join(tempDir, '.magicpot'))).rejects.toMatchObject({
+        code: 'ENOENT'
+      })
+      let receipt: ReturnType<typeof policy.createTrustedApproval> | undefined
+      await registry.callTool(name, args, {
+        ...context,
+        terminalApproval: (request) => (receipt = policy.createTrustedApproval(request))
+      })
+      const after = mode === 'patch' ? 'new\n' : 'new'
+      expect(await fs.readFile(target, 'utf8')).toBe(after)
+      await expect(
+        registry.callTool(name, args, { ...context, terminalApproval: () => receipt! })
+      ).rejects.toThrow()
+      expect(await fs.readFile(target, 'utf8')).toBe(after)
+    }
+  )
+
+  it('runs patch and multi-edit with production approval bound to the exact detached edit inputs', async () => {
+    const registry = new AssistantToolRegistry()
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'file-upgrade',
+      threadId: 'pane'
+    } as const
+    await fs.writeFile(path.join(tempDir, 'a.txt'), 'old')
+    await fs.writeFile(path.join(tempDir, 'b.txt'), 'second\n')
+    const hash = (text: string) => createHash('sha256').update(text).digest('hex')
+    const patch = {
+      path: 'a.txt',
+      expectedSha256: hash('old'),
+      patch: '--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n'
+    }
+    const policy = getAssistantTerminalPolicyRuntime()
+    const approved: unknown[] = []
+    const context = createToolContext(route, createTaskState(route), {
+      workspaceRootDir: tempDir,
+      terminalApproval: (request) => {
+        approved.push(structuredClone(request.input))
+        patch.patch = 'changed after capture'
+        return policy.createTrustedApproval(request)
+      }
+    })
+    const patchOutput = JSON.parse((await registry.callTool('files.patch', patch, context)).content)
+    expect(await fs.readFile(path.join(tempDir, 'a.txt'), 'utf8')).toBe('new\n')
+    expect(patchOutput).toMatchObject({
+      beforeSha256: hash('old'),
+      afterSha256: hash('new\n'),
+      bytes: 4
+    })
+    expect(
+      await fs.readFile(
+        path.join(
+          tempDir,
+          '.magicpot',
+          'tool-host',
+          'snapshots',
+          patchOutput.snapshotId,
+          'content'
+        ),
+        'utf8'
+      )
+    ).toBe('old')
+    expect(approved[0]).toEqual({
+      path: 'a.txt',
+      expectedSha256: hash('old'),
+      patch: '--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n'
+    })
+    const edits = [
+      {
+        path: 'a.txt',
+        expectedSha256: hash('new\n'),
+        replacements: [{ old: 'new', new: 'final', expectedOccurrences: 1 }]
+      },
+      {
+        path: 'b.txt',
+        expectedSha256: hash('second\n'),
+        replacements: [{ old: 'second', new: 'last', expectedOccurrences: 1 }]
+      }
+    ]
+    const result = await registry.callTool('files.multi-edit', { edits }, context)
+    expect(JSON.parse(result.content).files).toHaveLength(2)
+    expect(approved[1]).toMatchObject({ edits })
+    expect(await fs.readFile(path.join(tempDir, 'a.txt'), 'utf8')).toBe('final\n')
+    expect(await fs.readFile(path.join(tempDir, 'b.txt'), 'utf8')).toBe('last\n')
+    await expect(
+      registry.callTool('files.patch', { ...patch, confirm: true }, context)
+    ).rejects.toThrow('Invalid input')
+    expect(approved).toHaveLength(2)
   })
 
   it('rejects agent terminal calls when the feature flag is disabled', async () => {

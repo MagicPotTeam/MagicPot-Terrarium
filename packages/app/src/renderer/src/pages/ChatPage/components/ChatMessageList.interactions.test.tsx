@@ -235,6 +235,162 @@ describe.each([
 )
 
 describe('ChatMessageList real edit-form interactions', () => {
+  it('removes only the clicked occurrence of a repeated visible reference after a hidden attachment', () => {
+    const base = editingSession()
+    const shared = { type: 'file' as const, url: 'local-media:///duplicate.txt', fileName: 'duplicate.txt' }
+    const hidden = { type: 'file' as const, url: 'local-media:///invisible.txt', fileName: 'invisible.txt', hiddenFromChatView: true }
+    const between = { type: 'file' as const, url: 'local-media:///between.txt', fileName: 'between.txt' }
+    const attachments = [hidden, shared, between, shared]
+    const session = { ...base, messages: base.messages.map((message, index) => index === 2 ? { ...message, attachments } : message) }
+    const { onSendEditedMessage } = renderSession(session)
+    startEditing()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove duplicate.txt' })[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage.mock.calls[0][1]).toEqual([hidden, shared, between])
+  })
+
+  it('removes only one repeated hidden image occurrence above the limit', () => {
+    const base = editingSession()
+    const hidden = { ...imageAttachment('repeated-hidden.png'), hiddenFromChatView: true }
+    const images = Array.from({ length: 49 }, (_, index) => imageAttachment(`other-${index}.png`))
+    const attachments = [hidden, ...images, hidden]
+    const session = { ...base, messages: base.messages.map((message, index) => index === 2 ? { ...message, attachments } : message) }
+    const { onSendEditedMessage } = renderSession(session)
+    startEditing()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove repeated-hidden.png' })[1])
+    expect(screen.queryByRole('button', { name: 'Remove repeated-hidden.png' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage.mock.calls[0][1]).toEqual([hidden, ...images])
+  })
+
+  it('does not remove an additional duplicate when the same rendered button fires twice in one batch', () => {
+    const base = editingSession()
+    const duplicate = { type: 'file' as const, url: 'local-media:///same.txt', fileName: 'same.txt' }
+    const attachments = [duplicate, duplicate, duplicate]
+    const session = { ...base, messages: base.messages.map((message, index) => index === 2 ? { ...message, attachments } : message) }
+    const { onSendEditedMessage } = renderSession(session)
+    startEditing()
+    const button = screen.getAllByRole('button', { name: 'Remove same.txt' })[1]
+    act(() => { fireEvent.click(button); fireEvent.click(button) })
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage.mock.calls[0][1]).toEqual([duplicate, duplicate])
+  })
+  it('reveals a hidden image only above the limit so it can be removed before rerunning', () => {
+    const base = editingSession()
+    const images = Array.from({ length: 50 }, (_, index) => imageAttachment(`visible-${index}.png`))
+    const hidden = { ...imageAttachment('overview.png'), hiddenFromChatView: true }
+    const session: ChatSession = {
+      ...base,
+      messages: base.messages.map((message, index) => index === 2
+        ? { ...message, attachments: [...images, hidden, ...message.attachments!] }
+        : message)
+    }
+    const { onSendEditedMessage, onSetEditingIndex } = renderSession(session)
+    const editor = startEditing()
+    fireEvent.change(editor, { target: { value: 'retained draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage).not.toHaveBeenCalled()
+    expect(screen.getByText('本次图片数量超过限制，请分批发送')).toBeInTheDocument()
+    expect(editor).toHaveValue('retained draft')
+    expect(onSetEditingIndex).not.toHaveBeenCalledWith(null)
+    fireEvent.click(screen.getByRole('button', { name: 'Remove overview.png' }))
+    expect(editor).toHaveValue('retained draft')
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage).toHaveBeenCalledExactlyOnceWith(
+      'retained draft', [...images, ...base.messages[2].attachments!],
+      base.messages[2].hiddenContext, base.messages.slice(0, 2)
+    )
+  })
+
+  it('keeps a hidden image hidden at the limit', () => {
+    const base = editingSession()
+    const hidden = { ...imageAttachment('overview.png'), hiddenFromChatView: true }
+    const images = Array.from({ length: 49 }, (_, index) => imageAttachment(`visible-${index}.png`))
+    const session: ChatSession = {
+      ...base,
+      messages: base.messages.map((message, index) => index === 2
+        ? { ...message, attachments: [...images, hidden, ...message.attachments!] }
+        : message)
+    }
+    const { onSendEditedMessage } = renderSession(session)
+    startEditing()
+    expect(screen.queryByRole('button', { name: 'Remove overview.png' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(onSendEditedMessage.mock.calls[0][1]).toEqual([...images, hidden, ...base.messages[2].attachments!])
+  })
+  it.each([50, 51])('preserves editing state for %i images and submits at the limit', (count) => {
+    const base = editingSession()
+    const images = Array.from({ length: count }, (_, index) => imageAttachment(`image-${index}.png`))
+    const session: ChatSession = {
+      ...base,
+      messages: base.messages.map((message, index) => index === 2
+        ? { ...message, attachments: [...images, ...message.attachments!] }
+        : message)
+    }
+    const { onSendEditedMessage } = renderSession(session)
+    const editor = startEditing()
+    fireEvent.change(editor, { target: { value: 'updated draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    if (count === 51) {
+      expect(onSendEditedMessage).not.toHaveBeenCalled()
+      expect(screen.getByText('本次图片数量超过限制，请分批发送')).toBeInTheDocument()
+      expect(editor).toHaveValue('updated draft')
+      for (const image of images) expect(screen.getByRole('button', { name: `Remove ${image.fileName}` })).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Remove image-50.png' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    }
+    expect(onSendEditedMessage).toHaveBeenCalledExactlyOnceWith(
+      'updated draft',
+      [...images.slice(0, 50), ...base.messages[2].attachments!],
+      base.messages[2].hiddenContext,
+      base.messages.slice(0, 2)
+    )
+  })
+  it('rejects 51 native images before import while preserving the edit draft and allowing cancel', () => {
+    const onDropImageAttachments = vi.fn().mockResolvedValue([])
+    renderSession(editingSession(), { onDropImageAttachments })
+    const editor = startEditing()
+    fireEvent.change(editor, { target: { value: 'kept draft' } })
+    const files = Array.from({ length: 51 }, (_, i) => new File(['x'], `${i}.png`, { type: 'image/png' }))
+    files.push(new File(['x'], 'other.pdf', { type: 'application/pdf' }))
+    fireEvent.drop(screen.getByTestId('edit-message-composer'), { dataTransfer: { types: ['Files'], files } })
+    expect(onDropImageAttachments).not.toHaveBeenCalled()
+    expect(screen.getByText('本次图片数量超过限制，请分批发送')).toBeInTheDocument()
+    expect(editor).toHaveValue('kept draft')
+    expect(screen.getByRole('button', { name: 'Remove keep.txt' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('edit-message-composer')).not.toBeInTheDocument()
+  })
+
+  it('imports exactly 50 native images in one call, excluding nonimages', async () => {
+    const onDropImageAttachments = vi.fn().mockResolvedValue([])
+    renderSession(editingSession(), { onDropImageAttachments })
+    startEditing()
+    const files = Array.from({ length: 50 }, (_, i) => new File(['x'], `${i}.png`, { type: 'image/png' }))
+    fireEvent.drop(screen.getByTestId('edit-message-composer'), { dataTransfer: { types: ['Files'], files: [...files, new File(['x'], 'other.pdf', { type: 'application/pdf' })] } })
+    expect(onDropImageAttachments).toHaveBeenCalledExactlyOnceWith(files)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save & Rerun' })).toBeEnabled())
+  })
+
+  it('leaves URL-backed drops to the parent without consuming the event', () => {
+    const onDropImageAttachments = vi.fn().mockResolvedValue([])
+    const parentDrop = vi.fn()
+    renderSession(editingSession(), { onDropImageAttachments })
+    startEditing()
+    const composer = screen.getByTestId('edit-message-composer')
+    const parent = composer.parentElement!
+    parent.addEventListener('drop', parentDrop)
+    try {
+      const files = Array.from({ length: 51 }, (_, i) => new File(['x'], `${i}.png`, { type: 'image/png' }))
+      const dataTransfer = { types: ['Files', 'text/uri-list'], files, getData: (key: string) => key === 'text/uri-list' ? 'file:///C:/fixture.png' : '' }
+      expect(fireEvent.drop(composer, { dataTransfer })).toBe(true)
+      expect(parentDrop).toHaveBeenCalledOnce()
+      expect(onDropImageAttachments).not.toHaveBeenCalled()
+      expect(screen.queryByText('本次图片数量超过限制，请分批发送')).not.toBeInTheDocument()
+    } finally { parent.removeEventListener('drop', parentDrop) }
+  })
+
   it('clears the drag highlight when a non-image file is dropped without importing it', () => {
     const onDropImageAttachments = vi.fn().mockResolvedValue([])
     renderSession(editingSession(), { onDropImageAttachments })
@@ -278,6 +434,38 @@ describe('ChatMessageList real edit-form interactions', () => {
     expect(onSendEditedMessage).toHaveBeenCalledExactlyOnceWith(
       originalText,
       [...session.messages[2].attachments!, attachment],
+      session.messages[2].hiddenContext,
+      session.messages.slice(0, 2)
+    )
+  })
+
+  it('integrates a pending eight-image batch into the real form only after import completes', async () => {
+    const imported = deferred<ChatAttachment[]>()
+    const onDropImageAttachments = vi.fn().mockReturnValue(imported.promise)
+    const session = editingSession()
+    const { onSendEditedMessage } = renderSession(session, { onDropImageAttachments })
+    startEditing()
+    const files = Array.from({ length: 8 }, (_, index) => new File(['image'], `${index}.png`, { type: 'image/png' }))
+    const attachments = files.map((file) => imageAttachment(file.name))
+    fireEvent.drop(screen.getByTestId('edit-message-composer'), { dataTransfer: { types: ['Files'], files } })
+    expect(onDropImageAttachments).toHaveBeenCalledExactlyOnceWith(files)
+    const submit = screen.getByRole('button', { name: 'Save & Rerun' })
+    expect(submit).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Remove 0.png' })).not.toBeInTheDocument()
+    fireEvent.click(submit)
+    expect(onSendEditedMessage).not.toHaveBeenCalled()
+    await act(async () => {
+      imported.resolve(attachments)
+      await imported.promise
+    })
+    expect(submit).toBeEnabled()
+    for (const attachment of attachments) {
+      expect(screen.getByRole('button', { name: `Remove ${attachment.fileName}` })).toBeInTheDocument()
+    }
+    fireEvent.click(submit)
+    expect(onSendEditedMessage).toHaveBeenCalledExactlyOnceWith(
+      originalText,
+      [...session.messages[2].attachments!, ...attachments],
       session.messages[2].hiddenContext,
       session.messages.slice(0, 2)
     )

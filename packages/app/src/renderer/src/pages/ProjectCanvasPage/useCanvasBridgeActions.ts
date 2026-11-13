@@ -9,10 +9,8 @@ import {
   buildCanvasAgentAttachments,
   buildCanvasAgentAttachmentManifest,
   buildCanvasAgentGroupCompletionPrompt,
-  buildCanvasImageCropSourceMetadata,
   expandCanvasItemsForAgentSend,
-  getCanvasBlobItemMimeType,
-  materializeCanvasAgentAttachmentItems
+  getCanvasBlobItemMimeType
 } from './canvasAgentAttachmentUtils'
 import { resolveActiveAgentScope } from './canvasPageLocalStateUtils'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
@@ -21,8 +19,27 @@ import type { CanvasGroup, CanvasItem, CanvasModel3DItem, CanvasVideoItem } from
 import { AdobeBridgeTarget } from '@shared/api/svcAdobeBridge'
 import { DccBridgeTarget } from '@shared/api/svcDccBridge'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
+import { assertExplicitUserImageCount } from '../ChatPage/chatExplicitImageCount'
+
+import { AGENT_SELECTION_RASTER_LIMITS, type CanvasRasterLimits } from './canvasExportRasterUtils'
+import type { CanvasExportBounds } from './groupPlaybackUtils'
 
 type NotifyFn = (message: string) => unknown
+
+// Mirrors ChatPage's current duplicate rule; this only covers a single
+// sender-side selection, not the destination's existing or in-flight draft.
+function hasAttachmentCollision(
+  previous: ChatAttachment[],
+  candidate: ChatAttachment
+): boolean {
+  return previous.some(
+    (item) =>
+      item.url === candidate.url ||
+      (Boolean(item.fileName) &&
+        item.fileName === candidate.fileName &&
+        item.sizeBytes === candidate.sizeBytes)
+  )
+}
 
 type UseCanvasBridgeActionsOptions = {
   canvasId: string
@@ -34,7 +51,9 @@ type UseCanvasBridgeActionsOptions = {
   extractPromptTextFromCanvasItems: (targetItems: CanvasItem[]) => string
   renderCanvasItemsImageDataUrl: (
     targetItems: CanvasItem[],
-    includeBackground?: boolean
+    includeBackground?: boolean,
+    clipBounds?: CanvasExportBounds | null,
+    limits?: CanvasRasterLimits
   ) => Promise<string>
   renderCanvasItemsSvgMarkup: (
     targetItems: CanvasItem[],
@@ -96,8 +115,8 @@ export function useCanvasBridgeActions({
       targetItems: CanvasItem[],
       targetScopeOrOptions?: string | SendCanvasItemsToAgentOptions,
       targetApp?: AgentTargetApp
-    ) => {
-      if (targetItems.length === 0) return
+    ): Promise<boolean> => {
+      if (targetItems.length === 0) return false
       const generation = agentDeliveryLifecycleRef.current.generation
       const isCurrentDelivery = () => {
         const lifecycle = agentDeliveryLifecycleRef.current
@@ -107,7 +126,7 @@ export function useCanvasBridgeActions({
           lifecycle.generation === generation
         )
       }
-      if (!isCurrentDelivery()) return
+      if (!isCurrentDelivery()) return false
 
       try {
         const resolvedOptions: SendCanvasItemsToAgentOptions =
@@ -126,26 +145,61 @@ export function useCanvasBridgeActions({
 
         const supplementalImageAttachments: ChatAttachment[] = []
         const expandedTargetItems = expandCanvasItemsForAgentSend(targetItems, items)
-        const attachmentItems = await materializeCanvasAgentAttachmentItems(expandedTargetItems)
-        if (!isCurrentDelivery()) return
+        // Count the selected image descriptors before crop export, overview
+        // rasterization, or attachment materialization. Derived video frames and
+        // overview images are not part of this explicit selection check.
+        try {
+          assertExplicitUserImageCount(expandedTargetItems)
+        } catch (error) {
+          notifyError(error instanceof Error ? error.message : String(error))
+          return false
+        }
+        // Existing crop coordinates do not carry evidence tying them to this
+        // source's pixels. Dimensions, including backfilled dimensions, cannot
+        // prove that mapping. Reject the whole selection before rasterization or
+        // delivery rather than exporting a potentially different region.
+        if (expandedTargetItems.some((item) => item.type === 'image' && item.crop)) {
+          notifyError(
+            t('canvas.agent_send_cropped_image_failed', {
+              defaultValue:
+                'Cannot send cropped canvas images safely yet. Remove the crop to send the full original, or send another uncropped image.'
+            })
+          )
+          return false
+        }
+
+        // The receiver currently collapses identical URLs or equal filename/size
+        // pairs. Reject collisions visible within this selection before creating
+        // an overview or sending any of its items; this is not a receiver ACK.
+        const selectionAttachments = buildCanvasAgentAttachments(expandedTargetItems)
+        const hasSelectionCollision = selectionAttachments.some((candidate, index) =>
+          hasAttachmentCollision(selectionAttachments.slice(0, index), candidate)
+        )
+        if (hasSelectionCollision) {
+          notifyError(t('canvas.agent_send_duplicate_selection'))
+          return false
+        }
+        const attachmentItems = expandedTargetItems
         const baseAttachments = buildCanvasAgentAttachments(attachmentItems)
         const attachmentManifest = buildCanvasAgentAttachmentManifest(attachmentItems)
+        // Check explicit attachments in order before creating an overview or
+        // loading video frames. Materialization may read an explicit blob, so a
+        // failed preparation is not a promise of zero source-side I/O.
+        const materializedAttachments: ChatAttachment[] = []
+        for (const attachment of baseAttachments) {
+          const materialized = await materializeInternalImageDragAttachment(attachment)
+          if (!isCurrentDelivery()) return false
+          if (!materialized) {
+            notifyError(t('canvas.send_to_agent_failed'))
+            return false
+          }
+          if (hasAttachmentCollision(materializedAttachments, materialized)) {
+            notifyError(t('canvas.agent_send_duplicate_selection'))
+            return false
+          }
+          materializedAttachments.push(materialized)
+        }
         const supplementalPromptParts: string[] = []
-        const croppedImageItemIds = new Set(
-          expandedTargetItems.flatMap((item) =>
-            item.type === 'image' && buildCanvasImageCropSourceMetadata(item) ? [item.id] : []
-          )
-        )
-        const materializedCroppedImageItemIds = new Set(
-          attachmentItems.flatMap((item) =>
-            item.type === 'image' && croppedImageItemIds.has(item.id) ? [item.id] : []
-          )
-        )
-        const hasFailedCroppedImageAttachments =
-          croppedImageItemIds.size > 0 &&
-          Array.from(croppedImageItemIds).some(
-            (itemId) => !materializedCroppedImageItemIds.has(itemId)
-          )
         const promptText = includeCanvasPromptText
           ? extractPromptTextFromCanvasItems(expandedTargetItems)
           : ''
@@ -156,37 +210,40 @@ export function useCanvasBridgeActions({
           (attachment) => attachment.type === 'image'
         )
         const shouldIncludeSelectionSnapshot =
-          !hasFailedCroppedImageAttachments &&
-          (!hasDirectImageAttachments || targetItems.some((item) => item.type !== 'image'))
-
-        if (hasFailedCroppedImageAttachments) {
-          notifyError(
-            t('canvas.agent_send_cropped_image_failed', {
-              defaultValue:
-                'Failed to send the cropped image. Please try cropping again before sending it to Agent.'
-            })
-          )
-        }
+          !hasDirectImageAttachments || targetItems.some((item) => item.type !== 'image')
 
         if (shouldIncludeSelectionSnapshot) {
           try {
-            const snapshot = await renderCanvasItemsImageDataUrl(expandedTargetItems, false)
-            if (!isCurrentDelivery()) return
-            if (snapshot) {
-              supplementalImageAttachments.push({
-                type: 'image',
-                url: snapshot,
-                mimeType: 'image/png',
-                fileName: 'canvas-selection.png',
-                hiddenFromChatView: true
-              })
-              supplementalPromptParts.push(
-                'Included an overview snapshot of the selected canvas content for additional layout context.'
-              )
+            const snapshot = await renderCanvasItemsImageDataUrl(
+              expandedTargetItems,
+              false,
+              undefined,
+              AGENT_SELECTION_RASTER_LIMITS
+            )
+            if (!isCurrentDelivery()) return false
+            if (!snapshot) {
+              notifyError(t('canvas.agent_send_overview_failed', {
+                defaultValue: 'Could not create the canvas overview. Select a smaller area or reduce the distance between items, then try again.'
+              }))
+              return false
             }
+            supplementalImageAttachments.push({
+              type: 'image',
+              url: snapshot,
+              mimeType: 'image/png',
+              fileName: 'canvas-selection.png',
+              hiddenFromChatView: true
+            })
+            supplementalPromptParts.push(
+              'Included an overview snapshot of the selected canvas content for additional layout context.'
+            )
           } catch (error) {
-            if (!isCurrentDelivery()) return
+            if (!isCurrentDelivery()) return false
             console.warn('[SendToAgent] failed to render canvas snapshot:', error)
+            notifyError(t('canvas.agent_send_overview_failed', {
+              defaultValue: 'Could not create the canvas overview. Select a smaller area or reduce the distance between items, then try again.'
+            }))
+            return false
           }
         }
 
@@ -198,7 +255,7 @@ export function useCanvasBridgeActions({
             const { firstFrameDataUrl, lastFrameDataUrl } = await extractVideoBoundaryFrameDataUrls(
               videoItem.src
             )
-            if (!isCurrentDelivery()) return
+            if (!isCurrentDelivery()) return false
 
             if (firstFrameDataUrl) {
               supplementalImageAttachments.push({
@@ -224,7 +281,7 @@ export function useCanvasBridgeActions({
               )
             }
           } catch (error) {
-            if (!isCurrentDelivery()) return
+            if (!isCurrentDelivery()) return false
             console.warn(
               `[SendToAgent] failed to extract boundary frames for video ${videoItem.fileName}:`,
               error
@@ -243,27 +300,22 @@ export function useCanvasBridgeActions({
           .join('\n\n')
         const finalPromptText = promptText.trim()
 
-        const allAttachments: ChatAttachment[] = [
-          ...baseAttachments,
-          ...supplementalImageAttachments
-        ]
-        const materializedAttachments = (
-          await Promise.all(
-            allAttachments.map((attachment) => materializeInternalImageDragAttachment(attachment))
-          )
-        ).filter(
-          (
-            attachment
-          ): attachment is Awaited<ReturnType<typeof materializeInternalImageDragAttachment>> &
-            ChatAttachment => attachment !== null
-        ) as ChatAttachment[]
-        if (!isCurrentDelivery()) return
-        if (materializedAttachments.length < allAttachments.length) {
-          notifyError(t('canvas.send_to_agent_failed'))
+        // Derived overview/video frames are not additional explicit selections.
+        // Keep their prior event behavior even if their pixels are identical;
+        // receiver deduplication remains a separate, unconfirmed boundary.
+        for (const attachment of supplementalImageAttachments) {
+          const materialized = await materializeInternalImageDragAttachment(attachment)
+          if (!isCurrentDelivery()) return false
+          if (!materialized) {
+            notifyError(t('canvas.send_to_agent_failed'))
+            return false
+          }
+          materializedAttachments.push(materialized)
         }
+        if (!isCurrentDelivery()) return false
 
         dispatch(openRightPanel())
-        if (!isCurrentDelivery()) return
+        if (!isCurrentDelivery()) return false
         const timer = window.setTimeout(() => {
           agentDeliveryTimersRef.current.delete(timer)
           if (!isCurrentDelivery()) return
@@ -309,10 +361,13 @@ export function useCanvasBridgeActions({
           }
         }, 200)
         agentDeliveryTimersRef.current.add(timer)
+        // Only a local timer has been scheduled. The target has not acknowledged it.
+        return true
       } catch (error) {
-        if (!isCurrentDelivery()) return
+        if (!isCurrentDelivery()) return false
         console.error('[SendToAgent] failed to prepare canvas attachments:', error)
         notifyError(t('canvas.send_to_agent_failed'))
+        return false
       }
     },
     [
@@ -352,8 +407,22 @@ export function useCanvasBridgeActions({
     setDccExportMenuItemId(null)
   }, [])
 
+  const rejectUnverifiedCroppedExport = useCallback(
+    (targetItems: CanvasItem[]) => {
+      // The crop does not identify the source version or coordinate system it
+      // was created against. Do not render or hand off any part of this batch.
+      if (!targetItems.some((item) => item.type === 'image' && item.crop)) return false
+      notifyError(t('canvas.export_cropped_image_failed', {
+        defaultValue: 'Cannot safely export or copy cropped images yet. Removing the crop exposes the full original.'
+      }))
+      return true
+    },
+    [notifyError, t]
+  )
+
   const handleSendCanvasItemsSnapshotToPhotoshop = useCallback(
     async (targetItems: CanvasItem[]) => {
+      if (rejectUnverifiedCroppedExport(targetItems)) return
       try {
         const dataUrl = await renderCanvasItemsImageDataUrl(targetItems, false)
         const fileBaseName =
@@ -384,11 +453,12 @@ export function useCanvasBridgeActions({
         )
       }
     },
-    [notifyError, notifySuccess, renderCanvasItemsImageDataUrl, t]
+    [notifyError, notifySuccess, rejectUnverifiedCroppedExport, renderCanvasItemsImageDataUrl, t]
   )
 
   const handleSendCanvasItemsSnapshotToFigma = useCallback(
     async (targetItems: CanvasItem[]) => {
+      if (rejectUnverifiedCroppedExport(targetItems)) return
       try {
         const svgMarkup = await renderCanvasItemsSvgMarkup(targetItems, false)
         const clipboardResp = await api().svcHyper.writeSvgToClipboard({
@@ -409,7 +479,7 @@ export function useCanvasBridgeActions({
         )
       }
     },
-    [notifyError, notifySuccess, renderCanvasItemsSvgMarkup, t]
+    [notifyError, notifySuccess, rejectUnverifiedCroppedExport, renderCanvasItemsSvgMarkup, t]
   )
 
   const promptForAdobeBridgeDir = useCallback(
@@ -487,6 +557,7 @@ export function useCanvasBridgeActions({
       target: AdobeBridgeTarget,
       promptText: string
     ): Promise<boolean> => {
+      if (rejectUnverifiedCroppedExport(targetItems)) return false
       try {
         const configResp = await api().svcState.getConfig({})
         const configuredTargetDir =
@@ -527,7 +598,8 @@ export function useCanvasBridgeActions({
       notifyError,
       notifySuccess,
       projectName,
-      promptForAdobeBridgeDir
+      promptForAdobeBridgeDir,
+      rejectUnverifiedCroppedExport
     ]
   )
 

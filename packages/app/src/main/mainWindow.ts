@@ -11,11 +11,13 @@ import {
   showWindowForTestPolicy
 } from './testWindowRuntime'
 import { attachRendererDiagnostics } from './rendererDiagnostics'
-import { winController } from './winControls'
+import { getAuthoritativeMainWindow, winController } from './winControls'
 import { attachWindowStatePersistence, readWindowState, type WindowState } from './windowState'
 import { normalizeAllowedExternalUrl } from './utils/externalUrl'
 import { isTrustedRendererNavigation } from './utils/rendererNavigation'
 import { authorizeScopedLocalMediaPath } from './localMediaAccess'
+import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
+import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
 import {
   registerMagicAgentTrustedRouteBinding,
   unregisterMagicAgentTrustedRouteBinding
@@ -155,52 +157,63 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     }
   })
 
-  onCreated?.(mainWindow)
-  ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
-    Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
-  ] = testUiPolicy.suppressTaskbar ? true : undefined
-
-  attachWindowStatePersistence(mainWindow, statePath)
-  winController.registerWindow(mainWindow)
-  const senderId = mainWindow.webContents.id
   const trustedRendererUrl = resolveMainWindowRendererUrl()
-  registerMagicAgentTrustedRouteBinding(senderId, undefined, {
-    trustedUrl: trustedRendererUrl,
-    trustedWebContents: mainWindow.webContents
-  })
-  mainWindow.on('closed', () => {
-    unregisterMagicAgentTrustedRouteBinding(senderId)
-  })
+  const disposeCatalogBinding = installInstalledCatalogReadBinding(mainWindow, trustedRendererUrl, () => winController.getMainWindow())
+  let disposeStorageBinding: (() => void) | undefined
+  try {
+    disposeStorageBinding = installStartupStorageReadBinding(mainWindow, trustedRendererUrl, getAuthoritativeMainWindow)
+    onCreated?.(mainWindow)
+    ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
+      Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
+    ] = testUiPolicy.suppressTaskbar ? true : undefined
 
-  mainWindow.on('ready-to-show', () => {
-    if (!testUiPolicy.suppressTaskbar && hasSavedState && state.isMaximized) {
-      mainWindow.maximize()
-    }
-    if (!testUiPolicy.hideWindow) {
-      showWindowForTestPolicy(mainWindow)
-    }
-  })
+    attachWindowStatePersistence(mainWindow, statePath)
+    winController.registerWindow(mainWindow)
+    const senderId = mainWindow.webContents.id
+    registerMagicAgentTrustedRouteBinding(senderId, undefined, {
+      trustedUrl: trustedRendererUrl,
+      trustedWebContents: mainWindow.webContents
+    })
+    mainWindow.on('closed', () => {
+      try { disposeStorageBinding?.() } finally {
+        try { disposeCatalogBinding() } finally { unregisterMagicAgentTrustedRouteBinding(senderId) }
+      }
+    })
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (isTrustedRendererNavigation(url, trustedRendererUrl)) {
-      return
-    }
+    mainWindow.on('ready-to-show', () => {
+      if (!testUiPolicy.suppressTaskbar && hasSavedState && state.isMaximized) {
+        mainWindow.maximize()
+      }
+      if (!testUiPolicy.hideWindow) {
+        showWindowForTestPolicy(mainWindow)
+      }
+    })
 
-    event.preventDefault()
-    console.warn('[App] blocked untrusted renderer navigation:', url)
-  })
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+      if (isTrustedRendererNavigation(url, trustedRendererUrl)) {
+        return
+      }
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    try {
-      shell.openExternal(normalizeAllowedExternalUrl(details.url))
-    } catch (error) {
-      console.warn('[App] blocked unsafe external URL:', details.url, error)
-    }
-    return { action: 'deny' }
-  })
+      event.preventDefault()
+      console.warn('[App] blocked untrusted renderer navigation:', url)
+    })
 
-  attachRendererDiagnostics(mainWindow)
-  loadWindowContent(mainWindow, trustedRendererUrl)
+    mainWindow.webContents.setWindowOpenHandler((details) => {
+      try {
+        shell.openExternal(normalizeAllowedExternalUrl(details.url))
+      } catch (error) {
+        console.warn('[App] blocked unsafe external URL:', details.url, error)
+      }
+      return { action: 'deny' }
+    })
 
-  return mainWindow
+    attachRendererDiagnostics(mainWindow)
+    loadWindowContent(mainWindow, trustedRendererUrl)
+
+    return mainWindow
+  } catch (error) {
+    try { disposeStorageBinding?.() } catch { /* Never skip the other independent owner. */ }
+    try { disposeCatalogBinding() } catch { /* Preserve the original setup failure, never repair authority here. */ }
+    throw error
+  }
 }

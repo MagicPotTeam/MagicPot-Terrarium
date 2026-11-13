@@ -51,6 +51,7 @@ type AuthorizedCall<T> = Readonly<{
   grantId?: string
   expectedGrantUseCount?: number
   signal?: AbortSignal
+  beforeCommit?(): void
 }>
 export type NotebookFs = Pick<
   typeof nodeFs,
@@ -135,10 +136,14 @@ export class NotebookToolHost {
       const notebooks: Array<{ path: string; bytes: number; sha256: string; cellCount: number }> =
         []
       const queue = [target]
-      while (queue.length && notebooks.length < max) {
+      let scannedEntries = 0, scannedBytes = 0, truncated = false
+      scan: while (queue.length && notebooks.length < max) {
+        call.signal?.throwIfAborted()
         const dir = queue.shift()!
         const entries = await this.fs.readdir(dir, { withFileTypes: true })
         for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+          call.signal?.throwIfAborted()
+          if (++scannedEntries > 5000) { truncated = true; break scan }
           if (entry.isSymbolicLink()) continue
           const absolute = path.join(dir, entry.name)
           if (entry.isDirectory()) {
@@ -147,7 +152,11 @@ export class NotebookToolHost {
           }
           if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.ipynb')) continue
           try {
-            const loaded = await this.load(root, absolute)
+            const candidate = await this.resolve(relativePath(root, absolute), false)
+            const stat = await this.fs.lstat(candidate.target)
+            scannedBytes += stat.size
+            if (scannedBytes > 32 * 1024 * 1024) { truncated = true; break scan }
+            const loaded = await this.load(root, candidate.target)
             notebooks.push({
               path: relativePath(root, absolute),
               bytes: loaded.buffer.length,
@@ -157,7 +166,7 @@ export class NotebookToolHost {
           } catch {
             /* invalid notebooks are not listed */
           }
-          if (notebooks.length >= max) break
+          if (notebooks.length >= max) { truncated = true; break }
         }
       }
       return {
@@ -166,7 +175,7 @@ export class NotebookToolHost {
         path: relative,
         notebooks,
         count: notebooks.length,
-        truncated: queue.length > 0
+        truncated: truncated || queue.length > 0
       }
     })
   }
@@ -271,6 +280,7 @@ export class NotebookToolHost {
     fn: (root: string, target: string, relative: string) => Promise<R>
   ): Promise<R> {
     const requested = validatePath(call.input.path ?? '.')
+    call.signal?.throwIfAborted()
     try {
       validateRequest(call.request, tool, requested, false)
       const auth = this.authorization.authorize({
@@ -285,6 +295,7 @@ export class NotebookToolHost {
         throw new NotebookToolAuthorizationError(auth.status, auth.reason)
       const { root, target } = await this.resolve(requested, tool === 'notebook.list')
       const result = await fn(root, target, relativePath(root, target))
+      call.signal?.throwIfAborted()
       await this.audit({ tool, path: requested, outcome: 'completed' })
       return result
     } catch (error) {
@@ -299,6 +310,7 @@ export class NotebookToolHost {
     edit: (doc: Notebook) => string[]
   ): Promise<Record<string, unknown>> {
     const requested = validatePath(call.input.path)
+    call.signal?.throwIfAborted()
     let evidence: {
       beforeSha256?: string
       afterSha256?: string
@@ -308,6 +320,8 @@ export class NotebookToolHost {
     } = {}
     try {
       validateRequest(call.request, 'notebook.write', requested, true)
+      if (typeof call.request.input.operation === 'string' && (call.request.input.operation !== tool.replace('notebook.', 'notebook.cell.') || stableStringify(call.request.input) !== stableStringify({ ...call.input, path: requested, operation: call.request.input.operation }))) throw new NotebookToolValidationError('Notebook mutation differs from the approved input.')
+      call.signal?.throwIfAborted()
       const auth = this.authorization.authorize({
         authorizationId: call.authorizationId,
         request: call.request,
@@ -338,6 +352,8 @@ export class NotebookToolHost {
       const current = await this.fs.readFile(target)
       if (hash(current) !== loaded.sha256)
         throw new NotebookToolValidationError('Notebook changed during mutation.')
+      call.signal?.throwIfAborted()
+      call.beforeCommit?.()
       this.authorization.consumeExecutionPermit({
         permit: auth.permit,
         request: call.request,
@@ -346,7 +362,9 @@ export class NotebookToolHost {
       })
       const snapshotId = await this.snapshot(root, loaded.buffer, loaded.sha256)
       evidence.snapshotId = snapshotId
-      await this.atomicReplace(target, afterBuffer, loaded.mode)
+      call.signal?.throwIfAborted()
+      if (hash(await this.fs.readFile(target)) !== loaded.sha256) throw new NotebookToolValidationError('Notebook changed before commit.')
+      await this.atomicReplace(target, afterBuffer, loaded.mode, call.signal, call.beforeCommit)
       await this.audit({ tool, path: requested, outcome: 'completed', ...evidence })
       return {
         ...mode,
@@ -377,7 +395,7 @@ export class NotebookToolHost {
       if (!inside(root, real) || real !== target)
         throw new NotebookToolValidationError('Symlinks are not allowed.')
       const stat = await this.fs.lstat(real)
-      if (allowDirectory ? !stat.isDirectory() : !stat.isFile())
+      if ((!allowDirectory && stat.nlink !== 1) || (allowDirectory ? !stat.isDirectory() : !stat.isFile()))
         throw new NotebookToolValidationError(
           allowDirectory ? 'Path must be a directory.' : 'Notebook must be a regular file.'
         )
@@ -394,7 +412,7 @@ export class NotebookToolHost {
     if (!inside(root, target))
       throw new NotebookToolValidationError('Notebook is outside the workspace.')
     const stat = await this.fs.lstat(target)
-    if (!stat.isFile() || stat.size > LIMITS.bytes)
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > LIMITS.bytes)
       throw new NotebookToolValidationError('Notebook must be a bounded regular file.')
     const buffer = await this.fs.readFile(target)
     if (buffer.includes(0))
@@ -419,6 +437,7 @@ export class NotebookToolHost {
   private async snapshot(root: string, content: Buffer, sha256: string) {
     const dir = path.join(root, '.magicpot', 'notebook-snapshots')
     await this.fs.mkdir(dir, { recursive: true })
+    if (await this.fs.realpath(dir) !== dir) throw new NotebookToolValidationError('Snapshot directory must not be linked.')
     const snapshotId = sha256
     const target = path.join(dir, `${snapshotId}.ipynb`)
     try {
@@ -432,7 +451,7 @@ export class NotebookToolHost {
     return snapshotId
   }
 
-  private async atomicReplace(target: string, content: Buffer, modeValue?: number) {
+  private async atomicReplace(target: string, content: Buffer, modeValue?: number, signal?: AbortSignal, beforeCommit?: () => void) {
     const temp = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.tmp`)
     let handle
     try {
@@ -442,6 +461,8 @@ export class NotebookToolHost {
       await handle.close()
       handle = undefined
       if (modeValue !== undefined) await this.fs.chmod(temp, modeValue)
+      signal?.throwIfAborted()
+      beforeCommit?.()
       await this.fs.rename(temp, target)
       const dir = await this.fs.open(path.dirname(target), 'r')
       try {
@@ -473,7 +494,7 @@ function validateNotebook(value: unknown): Notebook {
   const ids = new Set<string>()
   let outputBytes = 0
   for (const cell of doc.cells) {
-    if (!plain(cell) || !ID_RE.test(cell.id) || ids.has(cell.id))
+    if (!plain(cell) || typeof cell.id !== 'string' || !ID_RE.test(cell.id) || ids.has(cell.id))
       throw new NotebookToolValidationError('Every cell requires a unique stable id.')
     ids.add(cell.id)
     if (!['markdown', 'code', 'raw'].includes(cell.cell_type))

@@ -1,0 +1,80 @@
+import React, { createRef } from 'react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import AgentThreadScratchpadView from './AgentThreadScratchpadView'
+import type { AgentScratchpadCommandHandle } from '../agentScratchpadCommand'
+const h = vi.hoisted(() => ({ read: vi.fn() }))
+vi.mock('../../../utils/windowUtils', () => ({ api: () => ({ svcLLMProxy: { getAgentNotes: h.read } }) }))
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
+const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' } as const
+const props = { route, conversationId: 'current', storageScope: 'workspace', active: true, commandEnabled: true }
+const scope = (value = props) => JSON.stringify({ route: value.route, conversationId: value.conversationId, storageScope: value.storageScope })
+const snapshot = (value = 'VIEW_ONLY_TEXT') => ({ revision: 1, notes: [{ key: 'retained', value, updatedAt: 1 }] })
+const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(accept => { resolve = accept }); return { promise, resolve } }
+beforeEach(() => { vi.clearAllMocks(); h.read.mockReset().mockResolvedValue(snapshot()) })
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
+describe('explicit user-only current-conversation scratchpad snapshot', () => {
+  it('does not load on mount; reads one current snapshot explicitly, escapes content and never writes or injects', async () => {
+    const ref = createRef<AgentScratchpadCommandHandle>(), page = render(<AgentThreadScratchpadView ref={ref} {...props} />)
+    expect(h.read).not.toHaveBeenCalled(); expect(screen.queryByTestId('agent-scratchpad-view')).not.toBeInTheDocument()
+    h.read.mockResolvedValueOnce(snapshot('<img src=x onerror=alert(1)>'))
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    expect(await screen.findByText('retained: <img src=x onerror=alert(1)>')).toBeInTheDocument()
+    expect(document.querySelector('img,script')).toBeNull(); expect(h.read).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'current' })
+    expect(screen.getAllByRole('button')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'general.close' })); expect(screen.queryByTestId('agent-scratchpad-view')).not.toBeInTheDocument()
+    page.unmount()
+  })
+  it('refuses mismatched scope and duplicate submissions; close invalidates the old read and permits a separate explicit snapshot', async () => {
+    const pending = deferred<ReturnType<typeof snapshot>>(); h.read.mockImplementationOnce(() => pending.promise)
+    const ref = createRef<AgentScratchpadCommandHandle>(); render(<AgentThreadScratchpadView ref={ref} {...props} />)
+    act(() => expect(ref.current?.execute({ action: 'view' }, 'foreign-scope')).toBe(false))
+    expect(h.read).not.toHaveBeenCalled()
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'general.close' }))
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    await screen.findByText('retained: VIEW_ONLY_TEXT')
+    await act(async () => { pending.resolve(snapshot('OLD_CLOSED_PRIVATE')) })
+    expect(screen.queryByText(/OLD_CLOSED_PRIVATE/)).not.toBeInTheDocument(); expect(h.read).toHaveBeenCalledTimes(2)
+  })
+  it('invalidates pending data across StrictMode effect replay as well as normal scope replacement', async () => {
+    const pending = deferred<ReturnType<typeof snapshot>>(); h.read.mockImplementationOnce(() => pending.promise)
+    const ref = createRef<AgentScratchpadCommandHandle>()
+    const page = render(<React.StrictMode><AgentThreadScratchpadView ref={ref} {...props} /></React.StrictMode>)
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    fireEvent.click(screen.getByRole('button', { name: 'general.close' }))
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    await screen.findByText('retained: VIEW_ONLY_TEXT')
+    await act(async () => { pending.resolve(snapshot('STRICT_OLD_PRIVATE')) })
+    expect(screen.queryByText(/STRICT_OLD_PRIVATE/)).not.toBeInTheDocument(); expect(h.read).toHaveBeenCalledTimes(2)
+    page.unmount()
+  })
+  it.each(['inactive', 'conversation', 'storage', 'route', 'attachments-or-hidden', 'unmount'] as const)('drops late data after %s', async cause => {
+    const pending = deferred<ReturnType<typeof snapshot>>(); h.read.mockImplementationOnce(() => pending.promise)
+    const ref = createRef<AgentScratchpadCommandHandle>(), page = render(<AgentThreadScratchpadView ref={ref} {...props} />)
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    if (cause === 'unmount') page.unmount()
+    else page.rerender(<AgentThreadScratchpadView ref={ref} {...props} active={cause !== 'inactive'} conversationId={cause === 'conversation' ? 'sibling' : props.conversationId} storageScope={cause === 'storage' ? 'another-store' : props.storageScope} route={cause === 'route' ? { ...route, threadId: 'other' } : route} commandEnabled={cause !== 'attachments-or-hidden'} />)
+    await act(async () => { pending.resolve(snapshot('OLD_LATE_PRIVATE')) })
+    expect(screen.queryByText(/OLD_LATE_PRIVATE/)).not.toBeInTheDocument(); expect(screen.queryByTestId('agent-scratchpad-view')).not.toBeInTheDocument()
+  })
+  it.each(['denied', 'invalid'] as const)('reports %s as unavailable, never empty or successful notes', async cause => {
+    if (cause === 'denied') h.read.mockRejectedValueOnce(new Error('denied'))
+    else h.read.mockResolvedValueOnce({ revision: 0, notes: null })
+    const ref = createRef<AgentScratchpadCommandHandle>(); render(<AgentThreadScratchpadView ref={ref} {...props} />)
+    act(() => { ref.current?.execute({ action: 'view' }, scope()) })
+    await screen.findByText('chat.agent_scratchpad.failed')
+    expect(screen.queryByText('chat.agent_scratchpad.empty')).not.toBeInTheDocument()
+  })
+  it('marks an actual empty snapshot separately and caps displayed source to fifty lines', async () => {
+    const ref = createRef<AgentScratchpadCommandHandle>(); render(<AgentThreadScratchpadView ref={ref} {...props} />)
+    h.read.mockResolvedValueOnce({ revision: 0, notes: [] })
+    act(() => { ref.current?.execute({ action: 'view' }, scope()) })
+    await screen.findByText('chat.agent_scratchpad.empty'); fireEvent.click(screen.getByRole('button', { name: 'general.close' }))
+    h.read.mockResolvedValueOnce(snapshot(Array.from({ length: 70 }, (_, i) => `note${i}`).join('\n')))
+    act(() => { ref.current?.execute({ action: 'view' }, scope()) })
+    await screen.findByText('chat.agent_scratchpad.truncated')
+    expect(document.querySelector('pre')?.textContent?.split('\n')).toHaveLength(50); expect(document.querySelector('pre')?.textContent).not.toContain('note50')
+  })
+})

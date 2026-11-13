@@ -4,6 +4,7 @@ import {
   ServerStreamingTransport,
   ServerStreamingError
 } from '@shared/api/apiUtils/streaming'
+import { unwrapUnaryIpcResult } from '../apiUtils/unaryIpcResult'
 import { ApiDefSheet } from '../apiUtils/serviceDefSheet'
 
 function normalizeInvokeError(error: unknown): Error {
@@ -79,11 +80,11 @@ function streamingRespToPort<T>(
   return [channel.port2, promise, (error) => rejectStream?.(error)]
 }
 
-function invokeUnary<REQ, RESP>(name: string): (req: REQ) => Promise<RESP> {
+function invokeUnary<REQ, RESP>(name: string, ipcResult?: 'service-error'): (req: REQ) => Promise<RESP> {
   return async (req: REQ) => {
     // console.log(name, req)
     const startTime = Date.now()
-    return ipcRenderer
+    const response = await ipcRenderer
       .invoke(name, req)
       .then((resp) => {
         // console.log(name, 'req', req, 'resp', resp, 'time', Date.now() - startTime)
@@ -93,6 +94,9 @@ function invokeUnary<REQ, RESP>(name: string): (req: REQ) => Promise<RESP> {
         console.error(name, error)
         throw normalizeInvokeError(error)
       })
+    // Do not catch this rejection in normalizeInvokeError: it must remain plain
+    // through the preload contextBridge and be reconstructed in the renderer.
+    return ipcResult === 'service-error' ? unwrapUnaryIpcResult<RESP>(response) : response
   }
 }
 
@@ -136,7 +140,7 @@ export function createIpcClient<T extends object>(apiDef: ApiDefSheet<T>): T {
 
       // 根据方法类型调用对应的 invoke 函数
       if (methodDef.type === 'unary') {
-        result[serviceName][methodName] = invokeUnary(fullMethodName)
+        result[serviceName][methodName] = invokeUnary(fullMethodName, methodDef.ipcResult)
       } else if (methodDef.type === 'serverStreaming') {
         result[serviceName][methodName] = invokeServerStreaming(fullMethodName)
       }

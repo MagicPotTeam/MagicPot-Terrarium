@@ -41,6 +41,13 @@ import {
   STREAM_INDEX_DDL
 } from './schema'
 import { acquireEventStoreWriteLock, acquireInstanceLease, type InstanceLease } from './writeLock'
+import {
+  assertAgentInstanceMutationCommitFence,
+  assertAgentInstanceOrdinaryEventCommitFence,
+  type AgentInstanceMutationCommitFence,
+  type AgentInstanceOrdinaryEventCommitFence
+} from '../agents/agentInstanceOrdinaryCommitFence'
+import { assertManagedFirstRunCommitFence, canonicalManagedFirstRunBatch, type ManagedFirstRunCommitFence } from '../agents/managedFirstRunCommitFence'
 
 const DEFAULT_READ_LIMIT = 100
 const MAX_READ_LIMIT = 1000
@@ -193,6 +200,20 @@ export type ResourceMutationResult<T = unknown> = Readonly<{
   resource: StoredResource<T>
   inserted: boolean
 }>
+export type ManagedResourceCommitOutcome =
+  | Readonly<{ kind: 'committed'; results: readonly ResourceMutationResult[] }>
+  | Readonly<{ kind: 'rolled-back'; cause: unknown }>
+type ManagedOutcomeBinding = { store: MagicAgentEventStore; fence: ManagedFirstRunCommitFence; canonical: string }
+const managedOutcomes = new WeakMap<object, ManagedOutcomeBinding>()
+export function assertManagedResourceCommitOutcome(outcome: ManagedResourceCommitOutcome, store: MagicAgentEventStore, fence: ManagedFirstRunCommitFence, inputs: readonly ResourceMutationInput[]): void {
+  const binding = managedOutcomes.get(outcome)
+  if (!binding || binding.store !== store || binding.fence !== fence || binding.canonical !== canonicalManagedFirstRunBatch(inputs))
+    throw new Error('Untrusted managed resource commit disposition.')
+}
+const managedOutcome = (outcome: ManagedResourceCommitOutcome, binding: ManagedOutcomeBinding): ManagedResourceCommitOutcome => {
+  Object.freeze(outcome); managedOutcomes.set(outcome, binding); return outcome
+}
+
 export type StoredResourceMutation = Readonly<{
   idempotencyKey: string
   operation: 'create' | 'update' | 'delete'
@@ -403,7 +424,7 @@ export class MagicAgentEventStore {
     }
   }
 
-  appendBatch(inputs: readonly MagicAgentEvent<unknown>[]): AppendResult[] {
+  appendBatch(inputs: readonly MagicAgentEvent<unknown>[], ordinaryFence?: AgentInstanceOrdinaryEventCommitFence): AppendResult[] {
     this.assertOpen()
     this.assertNotBackingUp()
     if (!Array.isArray(inputs)) throw new TypeError('inputs must be an array.')
@@ -412,6 +433,8 @@ export class MagicAgentEventStore {
     }
     if (inputs.length === 0) return []
     const events = inputs.map(prepareEvent)
+    const preparedEvents = events.map(item => item.event)
+    if (ordinaryFence !== undefined) assertAgentInstanceOrdinaryEventCommitFence(ordinaryFence, this, preparedEvents)
     const release = this.acquireWriteLock()
     try {
       let results: AppendResult[]
@@ -420,6 +443,7 @@ export class MagicAgentEventStore {
         this.adapter.exec('BEGIN IMMEDIATE')
         results = events.map((item) => appendPreparedEvent(this.adapter, item))
         invokeCrashHook('event.before-commit')
+        if (ordinaryFence !== undefined) assertAgentInstanceOrdinaryEventCommitFence(ordinaryFence, this, preparedEvents)
         this.adapter.exec('COMMIT')
         committed = true
       } catch (error) {
@@ -490,11 +514,33 @@ export class MagicAgentEventStore {
     )
   }
 
-  mutateResource<T = unknown>(input: ResourceMutationInput): ResourceMutationResult<T> {
-    return this.mutateResourcesBatch([input])[0] as ResourceMutationResult<T>
+  mutateResource<T = unknown>(
+    input: ResourceMutationInput,
+    mutationFence?: AgentInstanceMutationCommitFence
+  ): ResourceMutationResult<T> {
+    return this.mutateResourcesBatch([input], mutationFence)[0] as ResourceMutationResult<T>
   }
 
-  mutateResourcesBatch(inputs: readonly ResourceMutationInput[]): ResourceMutationResult[] {
+  mutateResourcesBatch(
+    inputs: readonly ResourceMutationInput[],
+    mutationFence?: AgentInstanceMutationCommitFence
+  ): ResourceMutationResult[] {
+    return this.mutateResourcesTransaction(inputs, mutationFence) as ResourceMutationResult[]
+  }
+
+  /** MAIN-only managed transaction disposition. A returned rollback is positive
+   * evidence: this call owned BEGIN, COMMIT was never attempted, ROLLBACK worked.
+   * COMMIT/after-commit/readback uncertainty still throws, never infers absence. */
+  mutateManagedResourcesBatch(inputs: readonly ResourceMutationInput[], fence: ManagedFirstRunCommitFence): ManagedResourceCommitOutcome {
+    assertManagedFirstRunCommitFence(fence, this, inputs)
+    return this.mutateResourcesTransaction(inputs, fence, fence) as ManagedResourceCommitOutcome
+  }
+
+  private mutateResourcesTransaction(
+    inputs: readonly ResourceMutationInput[],
+    mutationFence?: AgentInstanceMutationCommitFence,
+    managedFence?: ManagedFirstRunCommitFence
+  ): ResourceMutationResult[] | ManagedResourceCommitOutcome {
     this.assertOpen()
     this.assertNotBackingUp()
     if (!Array.isArray(inputs)) throw new TypeError('inputs must be an array.')
@@ -505,12 +551,19 @@ export class MagicAgentEventStore {
     if (inputs.length === 0) return []
     const commands = inputs.map(prepareResourceMutation)
     validatePreparedResourceMutationBatch(commands)
+    // Concrete additional narrowing predicates only; never executable callbacks
+    // or policy/managed-admission authority. Ordinary checks bind the exact batch.
+    if (mutationFence !== undefined) assertAgentInstanceMutationCommitFence(mutationFence, this, commands)
     const release = this.acquireWriteLock()
     try {
       let results: ResourceMutationResult[]
       let committed = false
+      let began = false
+      let commitAttempted = false
+      const binding = managedFence ? { store: this, fence: managedFence, canonical: canonicalManagedFirstRunBatch(inputs) } : undefined
       try {
         this.adapter.exec('BEGIN IMMEDIATE')
+        began = true
         const replayRows = commands.map((command) =>
           this.adapter.get(
             'SELECT * FROM resource_mutations WHERE idempotency_key = ?',
@@ -526,24 +579,51 @@ export class MagicAgentEventStore {
           executePreparedResourceMutation(this.adapter, command, replayRows[index])
         )
         invokeCrashHook('resource.before-commit')
+        // A supported synchronous persistence callout may have resumed, stopped
+        // or replaced the owner. Reject inside the transaction so its staged
+        // resource, event and receipt roll back together before actual COMMIT.
+        if (mutationFence !== undefined) assertAgentInstanceMutationCommitFence(mutationFence, this, commands)
+        commitAttempted = true
         this.adapter.exec('COMMIT')
         committed = true
       } catch (error) {
-        if (!committed) {
+        let rolledBack = false
+        if (began && !committed) {
           try {
             this.adapter.exec('ROLLBACK')
+            rolledBack = true
           } catch {
-            /* preserve error */
+            /* preserve error; rollback failure is ambiguous */
           }
         }
-        throw normalizeSQLiteConflict(error)
+        const cause = normalizeSQLiteConflict(error)
+        if (binding && rolledBack && !commitAttempted)
+          return managedOutcome({ kind: 'rolled-back', cause }, binding)
+        throw cause
       }
       invokeCrashHook('resource.after-commit')
-      return results
+      return binding ? managedOutcome({ kind: 'committed', results: Object.freeze(results) }, binding) : results
     } finally {
       release?.()
     }
   }
+  /**
+   * Raw exclusion evidence, never a validity/absence certificate. Include deleted
+   * rows and historical receipt/stream presence without decoding resource state.
+   * Unsupported feature data can be quarantined; SQLite failures still propagate.
+   */
+  hasResourceEvidence(kind: ResourceKind, id: string): boolean {
+    this.assertOpen()
+    requireInputString(kind, 'kind')
+    requireInputString(id, 'id')
+    return this.adapter.get(
+      `SELECT 1 AS present FROM resources WHERE resource_kind = ? AND resource_id = ?
+       UNION ALL SELECT 1 AS present FROM resource_mutations WHERE resource_kind = ? AND resource_id = ?
+       UNION ALL SELECT 1 AS present FROM events WHERE stream_id = ? LIMIT 1`,
+      kind, id, kind, id, `${kind}:${id}:stream`
+    ) !== undefined
+  }
+
   getResource<T = unknown>(
     kind: ResourceKind,
     id: string,
@@ -626,6 +706,28 @@ export class MagicAgentEventStore {
 
   getResourceRevision(kind: ResourceKind, id: string): number | undefined {
     return this.getResource(kind, id, { includeDeleted: true })?.revision
+  }
+
+  /** Exact receipt lookup; validation is full-chain, never a bounded-list absence test. */
+  getResourceMutation(idempotencyKey: string): StoredResourceMutation | undefined {
+    this.assertOpen()
+    requireInputString(idempotencyKey, 'idempotencyKey')
+    const row = this.adapter.get(
+      'SELECT * FROM resource_mutations WHERE idempotency_key = ?', idempotencyKey
+    )
+    if (!row) return undefined
+    const kind = requireNonEmptyStoredString(row.resource_kind, 'resource kind')
+    const id = requireNonEmptyStoredString(row.resource_id, 'resource id')
+    const resource = this.adapter.get(
+      'SELECT * FROM resources WHERE resource_kind = ? AND resource_id = ?', kind, id
+    )
+    const rows = this.adapter.all(
+      'SELECT * FROM resource_mutations WHERE resource_kind = ? AND resource_id = ? ORDER BY resulting_revision ASC', kind, id
+    )
+    const receipt = validateResourceMutationChain(this.adapter, resource, rows)
+      .find(item => item.idempotencyKey === idempotencyKey)
+    if (!receipt) throw new CorruptEventStoreError('Exact resource mutation receipt is missing from its chain.')
+    return receipt
   }
 
   listResourceMutations(

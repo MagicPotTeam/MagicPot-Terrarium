@@ -88,6 +88,7 @@ describe('ActivityBar', () => {
     )
 
     expect(screen.queryByTestId('activity-bar-toolkit')).toBeNull()
+    expect(screen.queryByTestId('activity-bar-agent-studio')).not.toBeInTheDocument()
   })
 
   it('labels the home entry as project', () => {

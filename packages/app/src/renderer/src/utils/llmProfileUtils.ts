@@ -1,6 +1,6 @@
 import type { Config, LLMAPIProfile } from '@shared/config/config'
 import { getBaseProfileId, HUNYUAN_3D_PROFILE_ID } from '@renderer/pages/ChatPage/chatPageShared'
-import { isLocalBaseUrl, isRunnableProfile } from '@shared/llm'
+import { isLocalBaseUrl, isRunnableProfile, retiredProfileKind } from '@shared/llm'
 import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
 import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 export function resolveCompositeLlmProfile<
@@ -77,6 +77,7 @@ const isCompositeModelProfileId = (profileId: string | null | undefined): boolea
 }
 
 export const isChatProfileDiscoveryCandidate = (profile: LLMAPIProfile): boolean => {
+  if (retiredProfileKind(profile)) return false
   for (const extension of sharedHostExtensionApiV1.llmProfiles) {
     const resolved = extension.isChatProfileDiscoveryCandidate?.(profile)
     if (resolved !== undefined) return resolved
@@ -357,11 +358,12 @@ export const buildChatAvailableProfiles = (
   cliProxyModelsByProfileId: Readonly<Record<string, readonly string[]>> = {}
 ): LLMAPIProfile[] => {
   if (config?.use_remote_llm) {
-    return remoteProfiles
+    return remoteProfiles.filter((profile) => !retiredProfileKind(profile))
   }
 
   return (config?.llm_config?.api_profiles || [])
     .filter((profile) => {
+      if (retiredProfileKind(profile)) return false
       const isOrdinaryProfile =
         profile.auth_mode !== 'codex_oauth' &&
         profile.call_type !== 'codex' &&
@@ -384,9 +386,11 @@ export const buildChatAvailableProfiles = (
 export const resolveAvailableChatProfileId = (
   availableProfiles: Array<Pick<LLMAPIProfile, 'id'>>,
   profileId: string | null | undefined,
-  configuredProfiles: Array<Pick<LLMAPIProfile, 'id' | 'call_type' | 'auth_mode'>> = []
+  configuredProfiles: Array<Pick<LLMAPIProfile, 'id' | 'call_type' | 'auth_mode'> & Partial<Pick<LLMAPIProfile, 'provider' | 'model_name'>>> = []
 ): string | null => {
   const baseProfileId = getBaseProfileId(profileId)
+  const configured = configuredProfiles.find((profile) => profile.id === baseProfileId)
+  if (configured && retiredProfileKind(configured)) return null
   if (!baseProfileId) {
     return availableProfiles[0]?.id || null
   }

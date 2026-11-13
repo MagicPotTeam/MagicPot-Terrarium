@@ -25,6 +25,7 @@ type RuntimeItemsState = {
   history: CanvasItem[][]
   future: CanvasItem[][]
   historyRevision: number
+  selectedHistoryRevision: number | null
 }
 
 type RuntimeItemsAction =
@@ -33,6 +34,7 @@ type RuntimeItemsAction =
   | { type: 'undo' }
   | { type: 'redo' }
   | { type: 'restore'; index: number }
+  | { type: 'select-history'; updater: SetStateAction<number | null> }
 
 function resolveCanvasItemsUpdate(
   updater: CanvasItemsUpdate,
@@ -45,26 +47,45 @@ function reduceRuntimeItemsState(
   state: RuntimeItemsState,
   action: RuntimeItemsAction
 ): RuntimeItemsState {
+  if (action.type === 'select-history') {
+    const selectedHistoryRevision =
+      typeof action.updater === 'function'
+        ? action.updater(state.selectedHistoryRevision)
+        : action.updater
+    return Object.is(selectedHistoryRevision, state.selectedHistoryRevision)
+      ? state
+      : { ...state, selectedHistoryRevision }
+  }
+
   if (action.type === 'set') {
     const items = resolveCanvasItemsUpdate(action.updater, state.items)
-    return items === state.items ? state : { ...state, items }
+    // Non-history sets retain their existing selection-clear policy, even on item identity.
+    return items === state.items && state.selectedHistoryRevision === null
+      ? state
+      : { ...state, items, selectedHistoryRevision: null }
   }
 
   if (action.type === 'edit') {
+    const items = resolveCanvasItemsUpdate(action.updater, state.items)
+    // Pure identity updaters reject the whole edit: no snapshot, redo loss or selection change.
+    if (items === state.items) return state
     return {
-      items: resolveCanvasItemsUpdate(action.updater, state.items),
+      items,
       history: [
         ...state.history.slice(-CANVAS_HISTORY_LIMIT + 1),
         createCanvasHistorySnapshot(state.items)
       ],
       future: [],
-      historyRevision: state.historyRevision + 1
+      historyRevision: state.historyRevision + 1,
+      selectedHistoryRevision: null
     }
   }
 
   if (action.type === 'undo') {
     const previous = state.history.at(-1)
-    if (!previous) return state
+    if (!previous) {
+      return state.selectedHistoryRevision === null ? state : { ...state, selectedHistoryRevision: null }
+    }
     return {
       items: restoreCanvasHistorySnapshot(previous, state.items),
       history: state.history.slice(0, -1),
@@ -72,13 +93,16 @@ function reduceRuntimeItemsState(
         createCanvasHistorySnapshot(state.items),
         ...state.future.slice(0, CANVAS_HISTORY_LIMIT - 1)
       ],
-      historyRevision: state.historyRevision + 1
+      historyRevision: state.historyRevision + 1,
+      selectedHistoryRevision: null
     }
   }
 
   if (action.type === 'redo') {
     const next = state.future[0]
-    if (!next) return state
+    if (!next) {
+      return state.selectedHistoryRevision === null ? state : { ...state, selectedHistoryRevision: null }
+    }
     return {
       items: restoreCanvasHistorySnapshot(next, state.items),
       history: [
@@ -86,7 +110,8 @@ function reduceRuntimeItemsState(
         createCanvasHistorySnapshot(state.items)
       ],
       future: state.future.slice(1),
-      historyRevision: state.historyRevision + 1
+      historyRevision: state.historyRevision + 1,
+      selectedHistoryRevision: null
     }
   }
 
@@ -99,7 +124,8 @@ function reduceRuntimeItemsState(
       createCanvasHistorySnapshot(state.items),
       ...state.future.slice(0, CANVAS_HISTORY_LIMIT - 1)
     ],
-    historyRevision: state.historyRevision + 1
+    historyRevision: state.historyRevision + 1,
+    selectedHistoryRevision: state.selectedHistoryRevision
   }
 }
 
@@ -139,16 +165,19 @@ export function useProjectCanvasPageRuntimeState() {
     items: [],
     history: [],
     future: [],
-    historyRevision: 0
+    historyRevision: 0,
+    selectedHistoryRevision: null
   })
-  const { items, history, future, historyRevision } = itemsState
+  const { items, history, future, historyRevision, selectedHistoryRevision } = itemsState
   const historySnapshots = history.map((snapshot, index) => ({ index, items: snapshot })).reverse()
   const historyCount = history.length
   const [groups, setGroups] = useState<CanvasGroup[]>([])
   const [groupBranches, setGroupBranches] = useState<CanvasGroupBranch[]>([])
   const [selectedIds, setSelectedIdsState] = useState<Set<string>>(new Set())
   const selectedIdsRef = useRef(selectedIds)
-  const [selectedHistoryRevision, setSelectedHistoryRevision] = useState<number | null>(null)
+  const setSelectedHistoryRevision = useCallback((updater: SetStateAction<number | null>) => {
+    dispatchItems({ type: 'select-history', updater })
+  }, [])
   const setSelectedIds = useCallback(
     (updater: Set<string> | ((prev: Set<string>) => Set<string>)) => {
       const next =
@@ -168,9 +197,10 @@ export function useProjectCanvasPageRuntimeState() {
       if (!history[index]) return
       dispatchItems({ type: 'restore', index })
       setSelectedIds(new Set())
+      // Selection belongs to wrapper admission even if a prior queued undo removes the snapshot.
       setSelectedHistoryRevision(index)
     },
-    [history, setSelectedIds]
+    [history, setSelectedIds, setSelectedHistoryRevision]
   )
 
   const lastClickedIdRef = useRef<string | null>(null)
@@ -223,23 +253,19 @@ export function useProjectCanvasPageRuntimeState() {
   }, [stageScale])
 
   const setItems = useCallback((updater: CanvasItemsUpdate) => {
-    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'set', updater })
   }, [])
 
   const setItemsWithHistory = useCallback((updater: CanvasItemsUpdate) => {
-    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'edit', updater })
   }, [])
 
   const handleUndo = useCallback(() => {
-    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'undo' })
     setSelectedIds(new Set())
   }, [setSelectedIds])
 
   const handleRedo = useCallback(() => {
-    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'redo' })
     setSelectedIds(new Set())
   }, [setSelectedIds])

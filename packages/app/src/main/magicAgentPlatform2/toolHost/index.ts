@@ -21,6 +21,7 @@ export type {
 export {
   FilesToolAuthorizationError,
   FilesToolHost,
+  FilesToolEditError,
   FilesToolMutationError,
   FilesToolValidationError
 } from './files'

@@ -1321,6 +1321,41 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
     canvasContainer.remove()
   })
 
+  it.each([false, true])('cancels image drag only when crop payload preparation fails (failure=%s)', async (failure) => {
+    const canvasContainer = createCanvasContainer()
+    const selectedImage = createImageItem({ src: 'data:image/png;base64,c3ludGhldGlj', fileName: 'source.png' })
+    const buildCanvasDragPayload = vi.fn((): CanvasDragPayload => {
+      if (failure) throw new Error('CANVAS_CROP_EXPORT_UNAVAILABLE')
+      return { sourceCanvasId: 'canvas-1' }
+    })
+    const setCanvasDragPayload = vi.fn()
+    const stageRef = { current: { getStage: () => ({ findOne: vi.fn(() => null) }) } } as unknown as React.RefObject<KonvaStage | null>
+    try {
+      render(<ThemeProvider theme={theme}><ProjectCanvasPageSelectionOverlays
+        tool="select" selectionOverlayGroups={[]} exactSelectedGroup={null} stagePos={{ x: 0, y: 0 }}
+        stageScale={1} stageSize={{ width: 800, height: 600 }} selectedIds={new Set(['image-1'])}
+        items={[selectedImage]} stageRef={stageRef} canvasContainerRef={{ current: canvasContainer }}
+        lastClickedId="image-1" mediaCaptionActionLabel="Edit caption" legacySelectionToolbarEnabled={false}
+        groupCreateLabel="Group" handleFocusGroup={vi.fn()} buildCanvasDragPayload={buildCanvasDragPayload}
+        setCanvasDragPayload={setCanvasDragPayload} handleFlipImage={vi.fn()} handleCropImage={vi.fn()}
+        handleCopyCanvasImage={vi.fn()} handleDownloadCanvasImage={vi.fn()} handleOpenAgentSendMenu={vi.fn()}
+        handleOpenMediaCaptionEditor={vi.fn()} handleSendCanvasItemsToAgent={vi.fn()}
+        handleToggleVideoPlayback={vi.fn()} handleOpenModel3DViewer={vi.fn()} handleOpenDccExportMenu={vi.fn()}
+        handleDownloadBlobItem={vi.fn()} handleCopyCanvasItemsAsImage={vi.fn()} handleDownloadCanvasItemsAsImage={vi.fn()}
+        getQuickCanvasItemsImageUrl={vi.fn()} prepareQuickCanvasItemsImageUrl={vi.fn(async () => 'blob:fixture')}
+        handleGenerateCanvasItems={vi.fn()} handleCreateGroup={vi.fn()} Model3DIcon={() => null} ExportIcon={() => null}
+      /></ThemeProvider>)
+      await waitFor(() => expect(canvasContainer.querySelector('.canvas-image-drag-button')).toBeTruthy())
+      const event = new Event('dragstart', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', { value: { setData: vi.fn(), effectAllowed: 'all' } })
+      fireEvent(canvasContainer.querySelector('.canvas-image-drag-button')!, event)
+      expect(buildCanvasDragPayload).toHaveBeenCalledOnce()
+      expect(event.defaultPrevented).toBe(failure)
+      if (failure) expect(setCanvasDragPayload).not.toHaveBeenCalled()
+      else expect(setCanvasDragPayload).toHaveBeenCalledOnce()
+    } finally { canvasContainer.remove() }
+  })
+
   it('prepares and reuses a cached quick drag preview for text selections', async () => {
     const canvasContainer = createCanvasContainer()
 

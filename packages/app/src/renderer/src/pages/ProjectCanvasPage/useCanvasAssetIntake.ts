@@ -1,6 +1,8 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   type Dispatch,
   type MutableRefObject,
@@ -87,6 +89,7 @@ import { hideCanvasItemsTransiently, showCanvasItemsTransiently } from './canvas
 
 type UseCanvasAssetIntakeOptions = {
   canvasId?: string
+  restoreGenerationRef?: MutableRefObject<number>
   dispatch?: unknown
   fitImageToCanvasSize?: (width: number, height: number) => { width: number; height: number }
   getBatchGridLayout?: (
@@ -123,7 +126,128 @@ type UseCanvasAssetIntakeOptions = {
   onImageBatchImportProgress?: (progress: CanvasImageBatchImportProgress | null) => void
 }
 
+type CanvasSceneImportBinding = Readonly<
+  Pick<UseCanvasAssetIntakeOptions,
+    'nextZIndexRef' | 'setItemsWithHistory' | 'setGroups' | 'setGroupBranches' |
+    'setSelectedIds' | 'setTool' | 'openQuickAppPanel'> & { targetStoreArg: string | undefined }
+>
+type CanvasSceneImportEpoch = { readonly binding: CanvasSceneImportBinding; retired: boolean }
+type CanvasSceneImportCurrent = () => boolean
+
+function assertCanvasSceneImportCurrent(isCurrent: CanvasSceneImportCurrent): void {
+  if (!isCurrent()) throw new Error('Canvas import is no longer current')
+}
+
+// Preserve a throwing callout's original rejection. Only a fulfilled callout is followed by a
+// current-owner assertion; there is no catch/finally which could replace an active rejection.
+function readCanvasSceneImportCurrent<T>(isCurrent: CanvasSceneImportCurrent, read: () => T): T {
+  assertCanvasSceneImportCurrent(isCurrent)
+  const value = read()
+  assertCanvasSceneImportCurrent(isCurrent)
+  return value
+}
+
+function* iterateCanvasSceneImportCurrent<T>(
+  values: Iterable<T>, isCurrent: CanvasSceneImportCurrent
+): Generator<T, void, unknown> {
+  const method = readCanvasSceneImportCurrent(isCurrent, () => values[Symbol.iterator])
+  const iterator = readCanvasSceneImportCurrent(isCurrent, () => Reflect.apply(method, values, []) as Iterator<T>)
+  const next = readCanvasSceneImportCurrent(isCurrent, () => iterator.next)
+  for (;;) {
+    const step = readCanvasSceneImportCurrent(isCurrent, () => Reflect.apply(next, iterator, []) as IteratorResult<T>)
+    const done = readCanvasSceneImportCurrent(isCurrent, () => step.done)
+    if (done) return
+    const value = readCanvasSceneImportCurrent(isCurrent, () => step.value)
+    yield value
+    assertCanvasSceneImportCurrent(isCurrent)
+  }
+}
+
+function copyCanvasSceneImportItemCurrent(
+  item: CanvasItem, isCurrent: CanvasSceneImportCurrent
+): CanvasItem {
+  const copied = {} as CanvasItem
+  const keys = readCanvasSceneImportCurrent(isCurrent, () => Reflect.ownKeys(item))
+  for (const key of keys) {
+    const descriptor = readCanvasSceneImportCurrent(isCurrent, () => Object.getOwnPropertyDescriptor(item, key))
+    if (!descriptor?.enumerable) continue
+    const value = readCanvasSceneImportCurrent(isCurrent, () => Reflect.get(item, key))
+    // Like object spread, define own data fields (including symbols and __proto__) rather than
+    // assigning into an inherited setter. Check after EACH source read, not one bulk spread.
+    Object.defineProperty(copied, key, { value, enumerable: true, writable: true, configurable: true })
+  }
+  assertCanvasSceneImportCurrent(isCurrent)
+  return copied
+}
+
+// Evaluation-time fence only. React can reuse an already computed result at a later commit. The
+// current predicate reads private epoch state, without callouts, throwing or mutating authority.
+function appendCanvasSceneImportCurrent<T>(
+  previous: T[], appended: T[], isCurrent: CanvasSceneImportCurrent
+): T[] {
+  if (!isCurrent()) return previous
+  const next = [...previous, ...appended]
+  return isCurrent() ? next : previous
+}
+
+async function appendOwnedCanvasSceneImport(
+  binding: CanvasSceneImportBinding,
+  payload: { items: CanvasItem[]; groups: CanvasGroup[]; groupBranches?: CanvasGroupBranch[] },
+  isCurrent: CanvasSceneImportCurrent
+): Promise<CanvasItem[]> {
+  const restored: CanvasItem[] = []
+  let maxZ = readCanvasSceneImportCurrent(isCurrent, () => binding.nextZIndexRef.current)
+  for (const item of iterateCanvasSceneImportCurrent(payload.items, isCurrent)) {
+    const type = readCanvasSceneImportCurrent(isCurrent, () => item.type)
+    const src = type === 'image' ? readCanvasSceneImportCurrent(isCurrent, () => (item as CanvasImageItem).src) : undefined
+    const prepared = copyCanvasSceneImportItemCurrent(item, isCurrent)
+    prepared.zIndex = maxZ++
+    if (type === 'image' && src) {
+      assertCanvasSceneImportCurrent(isCurrent)
+      const hydrated = await hydrateCanvasImageItemForCanvas(prepared as CanvasImageItem)
+      assertCanvasSceneImportCurrent(isCurrent)
+      if (!hydrated) {
+        const id = readCanvasSceneImportCurrent(isCurrent, () => item.id)
+        const error = readCanvasSceneImportCurrent(isCurrent, () => new Error(`[Canvas] Failed to restore imported image ${id}.`))
+        throw error
+      }
+      restored.push(hydrated)
+    } else {
+      restored.push(prepared)
+    }
+  }
+
+  readCanvasSceneImportCurrent(isCurrent, () => { binding.nextZIndexRef.current = maxZ })
+  const normalized = readCanvasSceneImportCurrent(isCurrent, () => normalizeImportedCanvasGroups(payload.groups, restored))
+  const groups: CanvasGroup[] = []
+  for (const group of iterateCanvasSceneImportCurrent(normalized, isCurrent)) groups.push(group)
+
+  if (restored.length > 0) {
+    const updateItems = (previous: CanvasItem[]) => appendCanvasSceneImportCurrent(previous, restored, isCurrent)
+    readCanvasSceneImportCurrent(isCurrent, () => binding.setItemsWithHistory(updateItems))
+    const selected = new Set<string>()
+    for (const item of restored) selected.add(readCanvasSceneImportCurrent(isCurrent, () => item.id))
+    readCanvasSceneImportCurrent(isCurrent, () => binding.setSelectedIds(selected))
+    readCanvasSceneImportCurrent(isCurrent, () => binding.setTool('select'))
+  }
+  if (groups.length > 0) {
+    const updateGroups = (previous: CanvasGroup[]) => appendCanvasSceneImportCurrent(previous, groups, isCurrent)
+    readCanvasSceneImportCurrent(isCurrent, () => binding.setGroups(updateGroups))
+  }
+  // Materialize importer-owned iteration outside React updaters. This prepared array, like the
+  // item/group arrays above, cannot defer payload access until an updater is evaluated.
+  const branches: CanvasGroupBranch[] = []
+  for (const branch of iterateCanvasSceneImportCurrent(payload.groupBranches ?? [], isCurrent)) branches.push(branch)
+  if (branches.length > 0) {
+    const updateBranches = (previous: CanvasGroupBranch[]) => appendCanvasSceneImportCurrent(previous, branches, isCurrent)
+    readCanvasSceneImportCurrent(isCurrent, () => binding.setGroupBranches(updateBranches))
+  }
+  assertCanvasSceneImportCurrent(isCurrent)
+  return restored
+}
+
 type AddCanvasImageOptions = {
+  teamImageLabel?: string
   clientX?: number
   clientY?: number
   fileName?: string
@@ -854,6 +978,7 @@ async function buildDeferredCanvasImageStreamEntry({
 
 export function useCanvasAssetIntake({
   canvasId,
+  restoreGenerationRef,
   fitImageToCanvasSize: fitImageToCanvasSizeInput,
   getBatchGridLayout: getBatchGridLayoutInput,
   getCanvasPointFromClient: getCanvasPointFromClientInput,
@@ -903,6 +1028,25 @@ export function useCanvasAssetIntake({
   const intakeAbortControllerRef = useRef(new AbortController())
   const transientHiddenCanvasItemIdsRef = useRef(new Set<string>())
   const isMountedRef = useRef(true)
+  const canvasSceneImportCountRef = useRef(0)
+  const isCanvasSceneImporting = useCallback(() => canvasSceneImportCountRef.current > 0, [])
+
+  // Pure render binding: only the eight actual target-bearing identities participate. Inline
+  // count/placement helpers and ordinary item renders do not retire healthy pending imports.
+  const canvasSceneImportBinding = useMemo<CanvasSceneImportBinding>(() => Object.freeze({
+    targetStoreArg: canvasId || undefined, nextZIndexRef, setItemsWithHistory, setGroups,
+    setGroupBranches, setSelectedIds, setTool, openQuickAppPanel
+  }), [canvasId, nextZIndexRef, setItemsWithHistory, setGroups, setGroupBranches,
+    setSelectedIds, setTool, openQuickAppPanel])
+  const canvasSceneImportEpochRef = useRef<CanvasSceneImportEpoch | null>(null)
+  useLayoutEffect(() => {
+    const epoch: CanvasSceneImportEpoch = { binding: canvasSceneImportBinding, retired: false }
+    canvasSceneImportEpochRef.current = epoch
+    return () => {
+      epoch.retired = true
+      if (canvasSceneImportEpochRef.current === epoch) canvasSceneImportEpochRef.current = null
+    }
+  }, [canvasSceneImportBinding])
 
   useEffect(() => {
     const transientHiddenCanvasItemIds = transientHiddenCanvasItemIdsRef.current
@@ -1151,25 +1295,44 @@ export function useCanvasAssetIntake({
 
   const handleImportCanvasSceneFile = useCallback(
     async (file: File) => {
-      const {
-        items: imported,
-        groups: importedGroups,
-        groupBranches: importedGroupBranches,
-        qAppKey
-      } = await importCanvasFile(file, canvasId || undefined)
-      if (qAppKey) {
-        openQuickAppPanel?.()
+      const epoch = canvasSceneImportEpochRef.current
+      if (!epoch || epoch.retired || epoch.binding !== canvasSceneImportBinding) {
+        throw new Error('Canvas import is no longer current')
       }
-
-      const restored = await appendImportedCanvasPayload({
-        items: imported,
-        groups: importedGroups,
-        groupBranches: importedGroupBranches
-      })
-
-      return restored
+      const generation = restoreGenerationRef?.current
+      const generationIsCurrent = () => restoreGenerationRef?.current === generation
+      const attempt = Object.freeze({ epoch, binding: canvasSceneImportBinding,
+        targetStoreArg: canvasSceneImportBinding.targetStoreArg })
+      const isCurrent = () => canvasSceneImportEpochRef.current === attempt.epoch &&
+        !attempt.epoch.retired && attempt.epoch.binding === attempt.binding && generationIsCurrent()
+      canvasSceneImportCountRef.current += 1
+      try {
+        assertCanvasSceneImportCurrent(isCurrent)
+        const result = restoreGenerationRef
+          ? await importCanvasFile(file, attempt.targetStoreArg, generationIsCurrent)
+          : await importCanvasFile(file, attempt.targetStoreArg)
+        if (!generationIsCurrent()) return []
+        assertCanvasSceneImportCurrent(isCurrent)
+        const items = readCanvasSceneImportCurrent(isCurrent, () => result.items)
+        const groups = readCanvasSceneImportCurrent(isCurrent, () => result.groups)
+        const groupBranches = readCanvasSceneImportCurrent(isCurrent, () => result.groupBranches)
+        const qAppKey = readCanvasSceneImportCurrent(isCurrent, () => result.qAppKey)
+        if (qAppKey) readCanvasSceneImportCurrent(isCurrent, () => attempt.binding.openQuickAppPanel?.())
+        const payload = { items, groups, groupBranches }
+        assertCanvasSceneImportCurrent(isCurrent)
+        const restored = await appendOwnedCanvasSceneImport(attempt.binding, payload, isCurrent)
+        if (!generationIsCurrent()) return []
+        assertCanvasSceneImportCurrent(isCurrent)
+        return restored
+      } catch (error) {
+        // Clear invalidates this result silently; genuine current-import failures are unchanged.
+        if (!generationIsCurrent()) return []
+        throw error
+      } finally {
+        canvasSceneImportCountRef.current -= 1
+      }
     },
-    [appendImportedCanvasPayload, canvasId, openQuickAppPanel]
+    [canvasSceneImportBinding, restoreGenerationRef]
   )
 
   const handleImportPsdFile = useCallback(
@@ -1290,6 +1453,7 @@ export function useCanvasAssetIntake({
           clientX,
           clientY,
           fileName,
+          teamImageLabel,
           sizeBytes,
           hasAlpha,
           sourceFile,
@@ -1358,6 +1522,7 @@ export function useCanvasAssetIntake({
             id: createCanvasItemId('img'),
             src,
             ...(fileName ? { fileName } : {}),
+            ...(teamImageLabel ? { teamImageLabel } : {}),
             ...(sourceFile ? { sourceFile } : {}),
             ...(canvasOwnedObjectUrl ? { sourceUrlOwned: true } : {}),
             ...(typeof resolvedSizeBytes === 'number' ? { sizeBytes: resolvedSizeBytes } : {}),
@@ -1416,6 +1581,7 @@ export function useCanvasAssetIntake({
             id: createCanvasItemId('img'),
             src,
             ...(fileName ? { fileName } : {}),
+            ...(teamImageLabel ? { teamImageLabel } : {}),
             ...(sourceFile ? { sourceFile } : {}),
             ...(canvasOwnedObjectUrl ? { sourceUrlOwned: true } : {}),
             ...(typeof thumbnailFirstEntry.sizeBytes === 'number'
@@ -1504,6 +1670,7 @@ export function useCanvasAssetIntake({
           id: createCanvasItemId('img'),
           src,
           ...(fileName ? { fileName } : {}),
+          ...(teamImageLabel ? { teamImageLabel } : {}),
           ...(sourceFile ? { sourceFile } : {}),
           ...(canvasOwnedObjectUrl ? { sourceUrlOwned: true } : {}),
           ...(typeof resolvedSizeBytes === 'number' ? { sizeBytes: resolvedSizeBytes } : {}),
@@ -2785,6 +2952,7 @@ export function useCanvasAssetIntake({
   )
 
   return {
+    isCanvasSceneImporting,
     appendImportedCanvasPayload,
     addFileToCanvas,
     addHtmlToCanvas,

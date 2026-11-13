@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { ThemeProvider } from '@mui/material'
+import userEvent from '@testing-library/user-event'
+import { MenuItem, ThemeProvider } from '@mui/material'
 import { theme } from '@renderer/theme'
 import ChatComposer from './ChatComposer'
 import { useRef, useState } from 'react'
@@ -68,6 +69,46 @@ const createDataTransfer = (data: Record<string, string>) =>
   }) as unknown as DataTransfer
 
 describe('ChatComposer', () => {
+  it('offline real add menu navigates all slot items with arrows and Enter closes it', async () => {
+    const upload = vi.fn()
+    const preview = vi.fn()
+    render(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue="" onInputChange={vi.fn()} onSend={vi.fn()} onUploadFile={upload}
+          pendingAttachments={[]} uploadProgress={{}} onRemoveAttachment={vi.fn()}
+          isLoading={false} onStopGenerating={vi.fn()} disabled={false}
+          composerInputRef={{ current: null }} onPreviewImage={vi.fn()}
+          addMenuSlot={(closeMenu) => [
+            null,
+            false,
+            <MenuItem key="image">Image generation</MenuItem>,
+            [<MenuItem key="preview" onClick={() => { preview(); closeMenu() }}>Local preview</MenuItem>]
+          ]}
+        />
+      </ThemeProvider>
+    )
+    fireEvent.click(screen.getByTitle('chat.add_file'))
+    const uploadItem = await screen.findByRole('menuitem', { name: 'chat.add_file' })
+    const imageItem = screen.getByRole('menuitem', { name: 'Image generation' })
+    const previewItem = screen.getByRole('menuitem', { name: 'Local preview' })
+    await waitFor(() => expect(uploadItem).toHaveFocus())
+    fireEvent.keyDown(uploadItem, { key: 'ArrowDown' })
+    expect(imageItem).toHaveFocus()
+    fireEvent.keyDown(imageItem, { key: 'ArrowDown' })
+    expect(previewItem).toHaveFocus()
+    fireEvent.keyDown(previewItem, { key: 'ArrowUp' })
+    expect(imageItem).toHaveFocus()
+    fireEvent.keyDown(imageItem, { key: 'ArrowDown' })
+    await userEvent.keyboard('{Enter}')
+    expect(preview).toHaveBeenCalledOnce()
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+    expect(upload).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTitle('chat.add_file'))
+    expect(await screen.findByRole('menuitem', { name: 'chat.add_file' })).toBeVisible()
+    expect(upload).not.toHaveBeenCalled()
+  })
+
   const createRect = (top: number, height: number): DOMRect =>
     ({
       x: 0,
@@ -116,6 +157,29 @@ describe('ChatComposer', () => {
     expect(screen.getByTestId('chat-composer-attachments')).toBeInTheDocument()
   })
 
+  it('keeps parent Stop and offers separate explicit /btw submission while busy without widening ordinary sends', () => {
+    const onSend = vi.fn(), onStop = vi.fn()
+    const renderComposer = (text: string, enabled = true) => <ThemeProvider theme={theme}><ChatComposer inputValue={text} inputSyncKey={text} onInputChange={vi.fn()} onSend={onSend} onUploadFile={vi.fn()} pendingAttachments={[]} uploadProgress={{}} onRemoveAttachment={vi.fn()} isLoading sideCommandEnabled={enabled} onStopGenerating={onStop} disabled={false} composerInputRef={{ current: null }} onPreviewImage={vi.fn()} /></ThemeProvider>
+    const view = render(renderComposer('/btw question'))
+    fireEvent.click(screen.getByTitle('chat.agent_side.command_send')); expect(onSend).toHaveBeenCalledOnce(); expect(onStop).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTitle('chat.stop_generating')); expect(onStop).toHaveBeenCalledOnce()
+    view.rerender(renderComposer('/skill list'))
+    fireEvent.click(screen.getByTitle('chat.agent_skill_session.command_send')); expect(onSend).toHaveBeenCalledTimes(2)
+    expect(screen.getByTitle('chat.stop_generating')).toBeInTheDocument()
+    view.rerender(renderComposer('/scratchpad'))
+    fireEvent.click(screen.getByTitle('chat.agent_scratchpad.command_send')); expect(onSend).toHaveBeenCalledTimes(3)
+    expect(screen.getByTitle('chat.stop_generating')).toBeInTheDocument()
+    view.rerender(renderComposer('/pad'))
+    fireEvent.click(screen.getByTitle('chat.agent_scratchpad.command_send')); expect(onSend).toHaveBeenCalledTimes(4)
+    view.rerender(renderComposer('ordinary queued text'))
+    expect(screen.queryByTitle('chat.agent_side.command_send')).not.toBeInTheDocument()
+    view.rerender(renderComposer('/pad', false))
+    expect(screen.queryByTitle('chat.agent_scratchpad.command_send')).not.toBeInTheDocument()
+    expect(screen.getByTitle('chat.stop_generating')).toBeInTheDocument()
+    view.rerender(renderComposer('/btw question', false))
+    expect(screen.queryByTitle('chat.agent_side.command_send')).not.toBeInTheDocument()
+    expect(screen.getByTitle('chat.stop_generating')).toBeInTheDocument()
+  })
   it('renders the toolbar slot inside the bottom action bar', () => {
     render(
       <ThemeProvider theme={theme}>
@@ -162,6 +226,7 @@ describe('ChatComposer', () => {
           composerInputRef={{ current: null }}
           onPreviewImage={vi.fn()}
           statusSlot={<div data-testid="context-indicator">ctx</div>}
+          modelSelectorSlot={<button type="button">model fixture</button>}
           toolbarSlot={<div data-testid="skill-slot-content">skills</div>}
         />
       </ThemeProvider>
@@ -172,6 +237,10 @@ describe('ChatComposer', () => {
 
     expect(within(sendGroup).getByTestId('context-indicator')).toBeInTheDocument()
     expect(within(sendGroup).getByTitle('chat.send_message')).toBeInTheDocument()
+    const modelSlot = within(sendGroup).getByTestId('chat-composer-model-selector-slot')
+    expect(within(modelSlot).getByRole('button', { name: 'model fixture' })).toBeInTheDocument()
+    expect(modelSlot.previousElementSibling).toBe(within(sendGroup).getByTestId('chat-composer-status-slot'))
+    expect(modelSlot.nextElementSibling).toBe(within(sendGroup).getByTitle('chat.send_message'))
     expect(within(actionBar).getByTestId('skill-slot-content')).toBeInTheDocument()
   })
 
@@ -872,6 +941,196 @@ describe('ChatComposer', () => {
     restoreParentRect.mockRestore()
   })
 
+  it.each([false, true])(
+    'budgets image previews from the boxed panel through display:contents wrappers (loading=%s)',
+    async (isLoading) => {
+      const onPreviewImage = vi.fn()
+      const onRemoveAttachment = vi.fn()
+      render(
+        <ThemeProvider theme={theme}>
+          <div data-testid="layout-panel" style={{ height: 600, width: 360 }}>
+            <div style={{ display: 'contents' }}>
+              <div style={{ display: 'contents' }}>
+                <ChatComposer
+                  inputValue={Array.from({ length: 80 }, (_, index) => `line ${index + 1}`).join('\n')}
+                  onInputChange={vi.fn()}
+                  onSend={vi.fn()}
+                  onUploadFile={vi.fn()}
+                  pendingAttachments={[{ type: 'image', url: 'data:image/png;base64,attachment' }]}
+                  uploadProgress={{}}
+                  onRemoveAttachment={onRemoveAttachment}
+                  isLoading={isLoading}
+                  onStopGenerating={vi.fn()}
+                  disabled={false}
+                  composerInputRef={{ current: null }}
+                  onPreviewImage={onPreviewImage}
+                />
+              </div>
+            </div>
+          </div>
+        </ThemeProvider>
+      )
+      const panel = screen.getByTestId('layout-panel')
+      const root = screen.getByTestId('chat-composer-root')
+      const panelRect = vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue(createRect(0, 600))
+      const wrapperRect = vi
+        .spyOn(root.parentElement!, 'getBoundingClientRect')
+        .mockReturnValue(createRect(0, 0))
+      try {
+        fireEvent(window, new Event('resize'))
+        await waitFor(() => {
+          expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({ maxHeight: '192px' })
+          expect(screen.getByTestId('chat-composer-input')).toHaveStyle({ maxHeight: '256px' })
+        })
+        fireEvent.click(screen.getByRole('img', { name: 'Preview 1' }))
+        expect(onPreviewImage).toHaveBeenCalledWith('data:image/png;base64,attachment')
+        const tray = screen.getByTestId('chat-composer-attachments')
+        fireEvent.click(within(tray).getByRole('button'))
+        expect(onRemoveAttachment).toHaveBeenCalledWith(0)
+      } finally {
+        wrapperRect.mockRestore()
+        panelRect.mockRestore()
+      }
+    }
+  )
+
+  it('observes the boxed panel rather than a boxless composer wrapper', async () => {
+    const originalResizeObserver = globalThis.ResizeObserver
+    const observers: Array<{
+      callback: ResizeObserverCallback
+      observe: ReturnType<typeof vi.fn>
+      disconnect: ReturnType<typeof vi.fn>
+    }> = []
+    class MockResizeObserver {
+      observe = vi.fn()
+      disconnect = vi.fn()
+      unobserve = vi.fn()
+      constructor(callback: ResizeObserverCallback) {
+        observers.push({ callback, observe: this.observe, disconnect: this.disconnect })
+      }
+    }
+    globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver
+    try {
+      const view = render(
+        <div data-testid="layout-panel">
+          <div style={{ display: 'contents' }}>
+            <ControlledChatComposer initialValue="hello" />
+          </div>
+        </div>
+      )
+      const panel = screen.getByTestId('layout-panel')
+      expect(observers[0].observe).toHaveBeenCalledWith(panel)
+      const panelRect = vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue(createRect(0, 400))
+      try {
+        act(() => observers[0].callback([], {} as ResizeObserver))
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-composer-input')).toHaveStyle({ maxHeight: '260px' })
+        )
+        view.unmount()
+        expect(observers[0].disconnect).toHaveBeenCalledOnce()
+      } finally {
+        panelRect.mockRestore()
+      }
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver
+    }
+  })
+
+  it.each(['outer', 'inner'] as const)(
+    'keeps preview height across hiding, resizing and restoring the %s view wrapper',
+    async (hiddenWrapper) => {
+      const composer = (hidden: boolean, count = 1) => (
+        <ThemeProvider theme={theme}>
+          <div data-testid="layout-panel">
+            <div style={{ display: hidden && hiddenWrapper === 'outer' ? 'none' : 'contents' }}>
+              <div style={{ display: hidden && hiddenWrapper === 'inner' ? 'none' : 'contents' }}>
+                <ChatComposer
+                  inputValue="draft"
+                  onInputChange={vi.fn()}
+                  onSend={vi.fn()}
+                  onUploadFile={vi.fn()}
+                  pendingAttachments={Array.from({ length: count }, (_, index) => ({
+                    type: 'image' as const,
+                    url: `data:image/png;base64,attachment-${index}`
+                  }))}
+                  uploadProgress={{}}
+                  onRemoveAttachment={vi.fn()}
+                  isLoading={false}
+                  onStopGenerating={vi.fn()}
+                  disabled={false}
+                  composerInputRef={{ current: null }}
+                  onPreviewImage={vi.fn()}
+                />
+              </div>
+            </div>
+          </div>
+        </ThemeProvider>
+      )
+      const view = render(composer(false))
+      const panelRect = vi
+        .spyOn(screen.getByTestId('layout-panel'), 'getBoundingClientRect')
+        .mockReturnValue(createRect(0, 600))
+      try {
+        fireEvent(window, new Event('resize'))
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({ maxHeight: '192px' })
+        )
+        view.rerender(composer(true))
+        await act(async () => {
+          fireEvent(window, new Event('resize'))
+          await new Promise((resolve) => requestAnimationFrame(resolve))
+        })
+        expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({ maxHeight: '192px' })
+        view.rerender(composer(true, 2))
+        view.rerender(composer(false, 2))
+        expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({ maxHeight: '192px' })
+        expect(screen.getByTestId('chat-composer-input')).toHaveStyle({ maxHeight: '256px' })
+      } finally {
+        panelRect.mockRestore()
+      }
+    }
+  )
+
+  it('preserves the last preview budget while the whole pane has no layout height', async () => {
+    render(
+      <ThemeProvider theme={theme}>
+        <div data-testid="layout-panel">
+          <ChatComposer
+            inputValue="draft"
+            onInputChange={vi.fn()}
+            onSend={vi.fn()}
+            onUploadFile={vi.fn()}
+            pendingAttachments={[{ type: 'image', url: 'data:image/png;base64,attachment' }]}
+            uploadProgress={{}}
+            onRemoveAttachment={vi.fn()}
+            isLoading={false}
+            onStopGenerating={vi.fn()}
+            disabled={false}
+            composerInputRef={{ current: null }}
+            onPreviewImage={vi.fn()}
+          />
+        </div>
+      </ThemeProvider>
+    )
+    const panelRect = vi
+      .spyOn(screen.getByTestId('layout-panel'), 'getBoundingClientRect')
+      .mockReturnValue(createRect(0, 600))
+    try {
+      fireEvent(window, new Event('resize'))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({ maxHeight: '192px' })
+      )
+      panelRect.mockReturnValue(createRect(0, 0))
+      await act(async () => {
+        fireEvent(window, new Event('resize'))
+        await new Promise((resolve) => requestAnimationFrame(resolve))
+      })
+      expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({ maxHeight: '192px' })
+    } finally {
+      panelRect.mockRestore()
+    }
+  })
+
   it('keeps large attachment batches in a scrollable preview tray', async () => {
     render(
       <ThemeProvider theme={theme}>
@@ -946,6 +1205,26 @@ describe('ChatComposer', () => {
     const image = screen.getByRole('img')
 
     expect(image).toHaveAttribute('src', 'local-media:///C:/demo/reference.png')
+  })
+
+  it('reveals an over-limit hidden image for removal without granting a count exemption', () => {
+    const onRemoveAttachment = vi.fn()
+    const attachments = [
+      ...Array.from({ length: 50 }, (_, index) => ({ type: 'image' as const, url: `data:image/png;base64,${index}`, fileName: `image-${index}.png` })),
+      { type: 'image' as const, url: 'data:image/png;base64,HIDDEN', fileName: 'canvas-selection.png', hiddenFromChatView: true }
+    ]
+    render(<ThemeProvider theme={theme}><ChatComposer
+      inputValue="fixture" onInputChange={vi.fn()} onSend={vi.fn()} onUploadFile={vi.fn()}
+      pendingAttachments={attachments} uploadProgress={{}} onRemoveAttachment={onRemoveAttachment}
+      isLoading={false} onStopGenerating={vi.fn()} disabled={false}
+      composerInputRef={{ current: null }} onPreviewImage={vi.fn()}
+    /></ThemeProvider>)
+    const tray = screen.getByTestId('chat-composer-attachments')
+    expect(within(tray).getByRole('img', { name: 'Preview 51' })).toBeInTheDocument()
+    expect(within(tray).getByTitle('canvas-selection.png')).toBeInTheDocument()
+    const buttons = within(tray).getAllByRole('button')
+    fireEvent.click(buttons[50])
+    expect(onRemoveAttachment).toHaveBeenCalledWith(50)
   })
 
   it('keeps backend-only attachments sendable while hiding them from the composer preview', () => {

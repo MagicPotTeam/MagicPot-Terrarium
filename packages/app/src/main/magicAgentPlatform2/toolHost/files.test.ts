@@ -199,6 +199,511 @@ function readCall<TInput extends Record<string, unknown>>(
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 
+describe('same-file edit modes retain failures and exact occurrence guards', () => {
+  it.each(['partial', 'best_effort'] as const)(
+    '%s cancelling accepted transforms to the original bytes emits no mutation',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      await fs.writeFile(path.join(root, 'edit.txt'), 'a')
+      const error = await host
+        .edit(
+          mutationCall(
+            'files.edit',
+            {
+              path: 'edit.txt',
+              expectedSha256: digest('a'),
+              mode,
+              replacements: [
+                { old: 'a', new: 'A', expectedOccurrences: 1 },
+                { old: 'A', new: 'a', expectedOccurrences: 1 },
+                { old: 'absent', new: 'b', expectedOccurrences: 1 }
+              ]
+            },
+            authorization
+          )
+        )
+        .catch((error) => error)
+      expect(error).toMatchObject({
+        code: 'MAGIC_AGENT_FILES_EDIT_FAILED',
+        report: {
+          mode,
+          applied: 2,
+          failed: 1,
+          skipped: 0,
+          writeStatus: 'not-written',
+          fileChanged: false
+        }
+      })
+      expect(error).not.toHaveProperty('mutation')
+      expect(consume).not.toHaveBeenCalled()
+      expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe('a')
+      await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+
+  it.each(['strict', 'partial', 'best_effort'] as const)(
+    '%s successful no-change retains the original approved snapshot contract',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      await fs.writeFile(path.join(root, 'edit.txt'), 'a')
+      const result = await host.edit(
+        mutationCall(
+          'files.edit',
+          {
+            path: 'edit.txt',
+            expectedSha256: digest('a'),
+            mode,
+            replacements: [{ old: 'a', new: 'a', expectedOccurrences: 1 }]
+          },
+          authorization
+        )
+      )
+      expect(result).toMatchObject({
+        beforeSha256: digest('a'),
+        afterSha256: digest('a'),
+        report: {
+          mode,
+          applied: 1,
+          failed: 0,
+          skipped: 0,
+          writeStatus: 'committed',
+          fileChanged: false,
+          steps: [{ index: 0, status: 'unchanged', observedOccurrences: 1, expectedOccurrences: 1 }]
+        }
+      })
+      expect(
+        await fs.readFile(
+          path.join(root, '.magicpot', 'tool-host', 'snapshots', result.snapshotId, 'content'),
+          'utf8'
+        )
+      ).toBe('a')
+    }
+  )
+
+  it.each(['partial', 'best_effort'] as const)(
+    '%s deadline after snapshot does not commit or manufacture a match-failure receipt',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const audits: FilesToolAuditEvidence[] = []
+      const host = await createFilesHost(authorization, root, (audit) => {
+        audits.push(audit)
+      })
+      await fs.writeFile(path.join(root, 'edit.txt'), 'a')
+      const call = mutationCall(
+        'files.edit',
+        {
+          path: 'edit.txt',
+          expectedSha256: digest('a'),
+          mode,
+          timeoutMs: 10_000,
+          replacements: [
+            { old: 'a', new: 'A', expectedOccurrences: 1 },
+            { old: 'absent', new: 'b', expectedOccurrences: 1 }
+          ]
+        },
+        authorization
+      )
+      const now = Date.now(),
+        clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+      const realWrite = fs.writeFile.bind(fs)
+      const write = vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+        const result = await realWrite(...args)
+        if (String(args[0]).endsWith('manifest.json')) clock.mockReturnValue(now + 10_001)
+        return result
+      })
+      try {
+        const error = await host.edit(call).catch((error) => error)
+        expect(error).toBeInstanceOf(FilesToolValidationError)
+        expect(error.message).toBe('File tool runtime limit exceeded.')
+        expect(error).not.toHaveProperty('report')
+        expect(error).not.toHaveProperty('mutation')
+        expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe('a')
+        expect(audits.at(-1)).toMatchObject({ outcome: 'rejected', mutationUncertain: true })
+        expect(audits.at(-1)).not.toHaveProperty('editWriteStatus')
+      } finally {
+        write.mockRestore()
+        clock.mockRestore()
+      }
+    }
+  )
+
+  it.each(['strict', 'partial', 'best_effort'] as const)(
+    '%s success retains ordered buffer visibility, exact counts and unchanged steps',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const before = 'aa aa\r\n',
+        after = 'complete\r\n'
+      await fs.writeFile(path.join(root, 'edit.txt'), before)
+      const result = await host.edit(
+        mutationCall(
+          'files.edit',
+          {
+            path: 'edit.txt',
+            expectedSha256: digest(before),
+            mode,
+            replacements: [
+              { old: 'aa', new: 'x', expectedOccurrences: 2 },
+              { old: 'x x', new: 'complete', expectedOccurrences: 1 },
+              { old: 'complete', new: 'complete', expectedOccurrences: 1 }
+            ]
+          },
+          authorization
+        )
+      )
+      expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe(after)
+      expect(result).toMatchObject({
+        beforeSha256: digest(before),
+        afterSha256: digest(after),
+        report: {
+          mode,
+          applied: 3,
+          failed: 0,
+          skipped: 0,
+          writeStatus: 'committed',
+          fileChanged: true
+        }
+      })
+      expect(result.report.steps.map((step) => step.status)).toEqual([
+        'applied',
+        'applied',
+        'unchanged'
+      ])
+    }
+  )
+
+  it.each(['strict', 'partial', 'best_effort'] as const)(
+    '%s never turns stale CAS, intermediate/result size or diff budget into a partial write',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      const before = 'old old\n'
+      await fs.writeFile(path.join(root, 'edit.txt'), before)
+      const base = {
+        path: 'edit.txt',
+        expectedSha256: digest(before),
+        mode,
+        replacements: [{ old: 'old', new: 'new', expectedOccurrences: 2 }]
+      }
+      for (const invalid of [
+        { ...base, expectedSha256: '0'.repeat(64) },
+        { ...base, maxDiffBytes: 1 },
+        {
+          ...base,
+          maxBytes: Buffer.byteLength(before),
+          replacements: [
+            { old: 'old', new: 'x'.repeat(20), expectedOccurrences: 2 },
+            { old: 'x'.repeat(20), new: 'ok', expectedOccurrences: 2 }
+          ]
+        },
+        {
+          ...base,
+          replacements: [
+            ...base.replacements,
+            { old: 'not present', new: 'x', expectedOccurrences: 1 },
+            { old: 'new', new: '\0', expectedOccurrences: 2 }
+          ],
+          mode: 'best_effort' as const
+        }
+      ]) {
+        await expect(
+          host.edit(mutationCall('files.edit', invalid, authorization))
+        ).rejects.toBeInstanceOf(FilesToolValidationError)
+        expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe(before)
+        expect(consume).not.toHaveBeenCalled()
+        await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({
+          code: 'ENOENT'
+        })
+      }
+    }
+  )
+
+  it.each(['partial', 'best_effort'] as const)(
+    '%s consumes one permit once for a known partial commit and rejects its replay',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      await fs.writeFile(path.join(root, 'edit.txt'), 'a')
+      const input = {
+        path: 'edit.txt',
+        expectedSha256: digest('a'),
+        mode,
+        replacements: [
+          { old: 'a', new: 'A', expectedOccurrences: 1 },
+          { old: 'absent', new: 'b', expectedOccurrences: 1 }
+        ]
+      }
+      const call = mutationCall('files.edit', input, authorization)
+      await expect(host.edit(call)).rejects.toMatchObject({
+        code: 'MAGIC_AGENT_FILES_EDIT_FAILED',
+        report: { writeStatus: 'committed' }
+      })
+      expect(consume).toHaveBeenCalledOnce()
+      await expect(
+        host.edit({ ...call, authorizationId: 'replay', idempotencyKey: 'replay' })
+      ).rejects.toThrow()
+      expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe('A')
+      expect(consume).toHaveBeenCalledOnce()
+    }
+  )
+
+  it.each(['partial', 'best_effort'] as const)(
+    '%s cancellation after snapshot preserves original bytes without a fabricated normal edit failure',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const audits: FilesToolAuditEvidence[] = []
+      const host = await createFilesHost(authorization, root, (audit) => {
+        audits.push(audit)
+      })
+      const controller = new AbortController()
+      const before = 'a'
+      await fs.writeFile(path.join(root, 'edit.txt'), before)
+      const realWrite = fs.writeFile.bind(fs)
+      const write = vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+        const result = await realWrite(...args)
+        if (String(args[0]).endsWith('manifest.json')) controller.abort()
+        return result
+      })
+      try {
+        const error = await host
+          .edit({
+            ...mutationCall(
+              'files.edit',
+              {
+                path: 'edit.txt',
+                expectedSha256: digest(before),
+                mode,
+                replacements: [
+                  { old: 'a', new: 'A', expectedOccurrences: 1 },
+                  { old: 'absent', new: 'b', expectedOccurrences: 1 }
+                ]
+              },
+              authorization
+            ),
+            signal: controller.signal
+          })
+          .catch((error) => error)
+        expect(error).toMatchObject({ name: 'AbortError' })
+        expect(error).not.toHaveProperty('report')
+        expect(error).not.toHaveProperty('mutation')
+        expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe(before)
+        expect(audits.at(-1)).toMatchObject({ outcome: 'cancelled', mutationUncertain: true })
+        expect(audits.at(-1)).not.toHaveProperty('editWriteStatus')
+      } finally {
+        write.mockRestore()
+      }
+    }
+  )
+
+  it.each(['partial', 'best_effort'] as const)(
+    '%s rename failure remains unknown rather than a fabricated committed match-failure receipt',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const audits: FilesToolAuditEvidence[] = []
+      const host = await createFilesHost(authorization, root, (audit) => {
+        audits.push(audit)
+      })
+      await fs.writeFile(path.join(root, 'edit.txt'), 'a')
+      const rename = vi
+        .spyOn(fs, 'rename')
+        .mockRejectedValueOnce(new Error('injected edit commit failure'))
+      try {
+        const error = await host
+          .edit(
+            mutationCall(
+              'files.edit',
+              {
+                path: 'edit.txt',
+                expectedSha256: digest('a'),
+                mode,
+                replacements: [
+                  { old: 'a', new: 'A', expectedOccurrences: 1 },
+                  { old: 'absent', new: 'b', expectedOccurrences: 1 }
+                ]
+              },
+              authorization
+            )
+          )
+          .catch((error) => error)
+        expect(error.message).toContain('injected edit commit failure')
+        expect(error).not.toHaveProperty('report')
+        expect(error).not.toHaveProperty('mutation')
+        expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe('a')
+        expect(audits.at(-1)).toMatchObject({ outcome: 'rejected', mutationUncertain: true })
+        expect(readdirSync(root).filter((name) => name.endsWith('.tmp'))).toEqual([])
+      } finally {
+        rename.mockRestore()
+      }
+    }
+  )
+
+  it.each([null, false, '', 'STRICT', 'best-effort', 0, {}])(
+    'rejects invalid direct-host mode %j rather than silently enabling relaxed matching',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      await fs.writeFile(path.join(root, 'edit.txt'), 'a')
+      const input = {
+        path: 'edit.txt',
+        expectedSha256: digest('a'),
+        mode,
+        replacements: [{ old: 'a', new: 'A', expectedOccurrences: 1 }]
+      }
+      await expect(
+        host.edit(mutationCall('files.edit', input, authorization) as never)
+      ).rejects.toBeInstanceOf(FilesToolValidationError)
+      expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe('a')
+    }
+  )
+
+  it.each([
+    {
+      mode: 'strict',
+      after: 'a b a\n',
+      applied: 1,
+      skipped: 2,
+      statuses: ['applied', 'failed', 'skipped', 'skipped']
+    },
+    {
+      mode: 'partial',
+      after: 'A b A\n',
+      applied: 1,
+      skipped: 2,
+      statuses: ['applied', 'failed', 'skipped', 'skipped']
+    },
+    {
+      mode: 'best_effort',
+      after: 'Z b Z\n',
+      applied: 3,
+      skipped: 0,
+      statuses: ['applied', 'failed', 'applied', 'unchanged']
+    }
+  ] as const)(
+    'ordered $mode reports failed evaluation separately from actual commit',
+    async ({ mode, after, applied, skipped, statuses }) => {
+      const { root, authorization } = writeSetup()
+      const audits: FilesToolAuditEvidence[] = []
+      const host = await createFilesHost(authorization, root, (audit) => {
+        audits.push(audit)
+      })
+      const before = 'a b a\n',
+        target = path.join(root, 'edit.txt')
+      await fs.writeFile(target, before)
+      const input = {
+        path: 'edit.txt',
+        expectedSha256: digest(before),
+        mode,
+        replacements: [
+          { old: 'a', new: 'A', expectedOccurrences: 2 },
+          { old: 'missing', new: 'X', expectedOccurrences: 1 },
+          { old: 'A', new: 'Z', expectedOccurrences: 2 },
+          { old: 'b', new: 'b', expectedOccurrences: 1 }
+        ]
+      }
+      const error = await host
+        .edit(mutationCall('files.edit', input, authorization))
+        .catch((error) => error)
+      expect(error).toMatchObject({
+        code: 'MAGIC_AGENT_FILES_EDIT_FAILED',
+        report: {
+          mode,
+          applied,
+          failed: 1,
+          skipped,
+          writeStatus: mode === 'strict' ? 'not-written' : 'committed',
+          fileChanged: mode !== 'strict'
+        }
+      })
+      expect(error.report.steps.map((step: { status: string }) => step.status)).toEqual(statuses)
+      expect(error.report.steps[1]).toMatchObject({
+        index: 1,
+        observedOccurrences: 0,
+        expectedOccurrences: 1
+      })
+      expect(await fs.readFile(target, 'utf8')).toBe(after)
+      expect(audits.at(-1)).toMatchObject({
+        outcome: 'rejected',
+        editMode: mode,
+        editApplied: applied,
+        editFailed: 1,
+        editSkipped: skipped
+      })
+      if (mode === 'strict') {
+        expect(error).not.toHaveProperty('mutation')
+        await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({
+          code: 'ENOENT'
+        })
+      } else {
+        expect(error.mutation).toMatchObject({
+          beforeSha256: digest(before),
+          afterSha256: digest(after),
+          path: 'edit.txt'
+        })
+        expect(error.mutation.diff).toContain(after.trim())
+        expect(
+          await fs.readFile(
+            path.join(
+              root,
+              '.magicpot',
+              'tool-host',
+              'snapshots',
+              error.mutation.snapshotId,
+              'content'
+            ),
+            'utf8'
+          )
+        ).toBe(before)
+      }
+    }
+  )
+
+  it.each(['partial', 'best_effort'] as const)(
+    '%s with no accepted change never manufactures a committed receipt',
+    async (mode) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      await fs.writeFile(path.join(root, 'edit.txt'), 'old old')
+      const error = await host
+        .edit(
+          mutationCall(
+            'files.edit',
+            {
+              path: 'edit.txt',
+              expectedSha256: digest('old old'),
+              mode,
+              replacements: [{ old: 'old', new: 'new', expectedOccurrences: 1 }]
+            },
+            authorization
+          )
+        )
+        .catch((error) => error)
+      expect(error).toMatchObject({
+        code: 'MAGIC_AGENT_FILES_EDIT_FAILED',
+        report: {
+          mode,
+          applied: 0,
+          failed: 1,
+          skipped: 0,
+          writeStatus: 'not-written',
+          fileChanged: false
+        }
+      })
+      expect(error.report.steps[0]).toMatchObject({
+        observedOccurrences: 2,
+        expectedOccurrences: 1
+      })
+      expect(error).not.toHaveProperty('mutation')
+      expect(await fs.readFile(path.join(root, 'edit.txt'), 'utf8')).toBe('old old')
+      await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+})
+
 function pdfWithStream(text: string, options?: { filter?: string; metadata?: string }): Buffer {
   const stream = `BT (${text}) Tj ET`
   const data =
@@ -318,6 +823,407 @@ describe('FilesToolHost bounded media reads', () => {
 })
 
 describe('FilesToolHost writable slice', () => {
+  it.each([true, false].flatMap((oldLf) => [true, false].map((newLf) => ({ oldLf, newLf }))))(
+    'complete-file EOF marker preserves oldLF=$oldLf newLF=$newLf independently',
+    async ({ oldLf, newLf }) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const before = `old${oldLf ? '\n' : ''}`,
+        after = `new${newLf ? '\n' : ''}`
+      await fs.writeFile(path.join(root, 'eof.txt'), before)
+      const marker = '\\ No newline at end of file'
+      const patch = [
+        '--- a/eof.txt',
+        '+++ b/eof.txt',
+        '@@ -1,1 +1,1 @@',
+        '-old',
+        ...(!oldLf ? [marker] : []),
+        '+new',
+        ...(!newLf ? [marker] : []),
+        ''
+      ].join('\n')
+      const result = await host.patch(
+        mutationCall(
+          'files.patch',
+          { path: 'eof.txt', expectedSha256: digest(before), patch },
+          authorization
+        )
+      )
+      expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe(after)
+      expect(result).toMatchObject({
+        beforeSha256: digest(before),
+        afterSha256: digest(after),
+        bytes: Buffer.byteLength(after)
+      })
+      expect(
+        await fs.readFile(
+          path.join(root, '.magicpot', 'tool-host', 'snapshots', result.snapshotId, 'content'),
+          'utf8'
+        )
+      ).toBe(before)
+    }
+  )
+
+  it.each([true, false].flatMap((lf) => [true, false].map((deleting) => ({ lf, deleting }))))(
+    'complete-file EOF marker represents exact empty side deleting=$deleting LF=$lf',
+    async ({ lf, deleting }) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const text = `line${lf ? '\n' : ''}`,
+        before = deleting ? text : '',
+        after = deleting ? '' : text
+      await fs.writeFile(path.join(root, 'eof.txt'), before)
+      const patch = [
+        '--- a/eof.txt',
+        '+++ b/eof.txt',
+        `@@ -1,${deleting ? 1 : 0} +1,${deleting ? 0 : 1} @@`,
+        `${deleting ? '-' : '+'}line`,
+        ...(!lf ? ['\\ No newline at end of file'] : []),
+        ''
+      ].join('\n')
+      const result = await host.patch(
+        mutationCall(
+          'files.patch',
+          { path: 'eof.txt', expectedSha256: digest(before), patch },
+          authorization
+        )
+      )
+      expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe(after)
+      expect(result).toMatchObject({
+        beforeSha256: digest(before),
+        afterSha256: digest(after),
+        bytes: Buffer.byteLength(after)
+      })
+    }
+  )
+
+  it.each([
+    {
+      label: 'orphan',
+      before: 'old',
+      count: 1,
+      body: ['\\ No newline at end of file', '-old', '+new']
+    },
+    {
+      label: 'duplicate',
+      before: 'old',
+      count: 1,
+      body: ['-old', '\\ No newline at end of file', '\\ No newline at end of file', '+new']
+    },
+    {
+      label: 'old-side nonEOF',
+      before: 'old\ntail',
+      count: 2,
+      body: ['-old', '\\ No newline at end of file', '+new', ' tail']
+    },
+    {
+      label: 'new-side nonEOF',
+      before: 'old\ntail',
+      count: 2,
+      body: ['-old', '+new', '\\ No newline at end of file', ' tail']
+    },
+    { label: 'raw interior blank', before: 'old\n', count: 1, body: ['-old', '', '+new'] }
+  ])(
+    'complete-file EOF marker rejects $label before permit/snapshot/write',
+    async ({ before, count, body }) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      await fs.writeFile(path.join(root, 'eof.txt'), before)
+      const patch = [
+        '--- a/eof.txt',
+        '+++ b/eof.txt',
+        `@@ -1,${count} +1,${count} @@`,
+        ...body,
+        ''
+      ].join('\n')
+      await expect(
+        host.patch(
+          mutationCall(
+            'files.patch',
+            { path: 'eof.txt', expectedSha256: digest(before), patch },
+            authorization
+          )
+        )
+      ).rejects.toBeInstanceOf(FilesToolValidationError)
+      expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe(before)
+      expect(consume).not.toHaveBeenCalled()
+      await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+
+  it.each([true, false].flatMap((lf) => [true, false].map((deleting) => ({ lf, deleting }))))(
+    'complete-file EOF marker supports standard zero-origin empty range deleting=$deleting LF=$lf',
+    async ({ lf, deleting }) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const text = `line${lf ? '\n' : ''}`,
+        before = deleting ? text : '',
+        after = deleting ? '' : text
+      await fs.writeFile(path.join(root, 'eof.txt'), before)
+      const patch = [
+        '--- a/eof.txt',
+        '+++ b/eof.txt',
+        `@@ -${deleting ? '1,1' : '0,0'} +${deleting ? '0,0' : '1,1'} @@`,
+        `${deleting ? '-' : '+'}line`,
+        ...(!lf ? ['\\ No newline at end of file'] : []),
+        ''
+      ].join('\n')
+      const result = await host.patch(
+        mutationCall(
+          'files.patch',
+          { path: 'eof.txt', expectedSha256: digest(before), patch },
+          authorization
+        )
+      )
+      expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe(after)
+      expect(result).toMatchObject({
+        beforeSha256: digest(before),
+        afterSha256: digest(after),
+        bytes: Buffer.byteLength(after)
+      })
+    }
+  )
+
+  it.each([
+    {
+      label: 'old nonempty zero origin',
+      before: 'old\n',
+      header: '@@ -0,1 +1,1 @@',
+      body: ['-old', '+new']
+    },
+    {
+      label: 'new nonempty zero origin',
+      before: 'old\n',
+      header: '@@ -1,1 +0,1 @@',
+      body: ['-old', '+new']
+    },
+    {
+      label: 'out-of-range origin',
+      before: 'old\n',
+      header: '@@ -2,1 +1,1 @@',
+      body: ['-old', '+new']
+    },
+    {
+      label: 'empty non-terminated old line',
+      before: '',
+      header: '@@ -1,1 +1,1 @@',
+      body: ['-', '\\ No newline at end of file', '+new']
+    },
+    {
+      label: 'empty non-terminated new line',
+      before: 'old\n',
+      header: '@@ -1,1 +1,1 @@',
+      body: ['-old', '+', '\\ No newline at end of file']
+    }
+  ])(
+    'complete-file EOF marker rejects impossible $label before permit/write',
+    async ({ before, header, body }) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      await fs.writeFile(path.join(root, 'eof.txt'), before)
+      const patch = ['--- a/eof.txt', '+++ b/eof.txt', header, ...body, ''].join('\n')
+      await expect(
+        host.patch(
+          mutationCall(
+            'files.patch',
+            { path: 'eof.txt', expectedSha256: digest(before), patch },
+            authorization
+          )
+        )
+      ).rejects.toBeInstanceOf(FilesToolValidationError)
+      expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe(before)
+      expect(consume).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    {
+      before: 'old',
+      after: 'new\n',
+      header: '@@ -1 +1 @@',
+      body: ['-old', '\\ No newline at end of file', '+new']
+    },
+    {
+      before: 'old\n',
+      after: 'new',
+      header: '@@ -1 +1 @@',
+      body: ['-old', '+new', '\\ No newline at end of file']
+    },
+    { before: '', after: 'line\n', header: '@@ -0,0 +1 @@', body: ['+line'] },
+    { before: 'line\n', after: '', header: '@@ -1 +0,0 @@', body: ['-line'] }
+  ])(
+    'complete-file EOF marker accepts omitted single-line counts $header',
+    async ({ before, after, header, body }) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      await fs.writeFile(path.join(root, 'eof.txt'), before)
+      const patch = ['--- a/eof.txt', '+++ b/eof.txt', header, ...body, ''].join('\n')
+      const result = await host.patch(
+        mutationCall(
+          'files.patch',
+          { path: 'eof.txt', expectedSha256: digest(before), patch },
+          authorization
+        )
+      )
+      expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe(after)
+      expect(result).toMatchObject({ beforeSha256: digest(before), afterSha256: digest(after) })
+    }
+  )
+
+  it.each([
+    { label: 'result bytes', extra: { maxBytes: 3 }, message: 'Result exceeds the byte limit.' },
+    {
+      label: 'generated diff bytes',
+      extra: { maxDiffBytes: 1 },
+      message: 'Pre-write diff exceeds the byte limit.'
+    },
+    {
+      label: 'existing bytes',
+      extra: { maxBytes: 2 },
+      message: 'Existing file exceeds the byte limit.'
+    }
+  ])(
+    'complete-file EOF marker retains $label bound before permit/snapshot/write',
+    async ({ extra, message }) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      await fs.writeFile(path.join(root, 'eof.txt'), 'old')
+      const patch =
+        '--- a/eof.txt\n+++ b/eof.txt\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+longer\n'
+      await expect(
+        host.patch(
+          mutationCall(
+            'files.patch',
+            { path: 'eof.txt', expectedSha256: digest('old'), patch, ...extra },
+            authorization
+          )
+        )
+      ).rejects.toThrow(message)
+      expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe('old')
+      expect(consume).not.toHaveBeenCalled()
+      await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+
+  it.each(['pre-abort', 'staged-abort', 'deadline', 'rename', 'audit-after-commit'] as const)(
+    'complete-file EOF marker retains %s boundary without fabricated mutation receipt',
+    async (ending) => {
+      const { root, authorization } = writeSetup()
+      const audits: FilesToolAuditEvidence[] = []
+      const host = await createFilesHost(authorization, root, (audit) => {
+        audits.push(audit)
+        if (ending === 'audit-after-commit' && audit.outcome === 'completed')
+          throw Error('injected audit after commit failure')
+      })
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      const controller = new AbortController()
+      const patch =
+        '--- a/eof.txt\n+++ b/eof.txt\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n'
+      await fs.writeFile(path.join(root, 'eof.txt'), 'old')
+      const call = {
+        ...mutationCall(
+          'files.patch',
+          { path: 'eof.txt', expectedSha256: digest('old'), patch, timeoutMs: 10_000 },
+          authorization
+        ),
+        signal: controller.signal
+      }
+      // Freeze only after the real approval grant was issued; moving the clock
+      // backwards would test invalid approval time instead of the intended I/O edge.
+      const now = Date.now()
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+      const originalWrite = fs.writeFile.bind(fs),
+        originalOpen = fs.open.bind(fs),
+        originalRename = fs.rename.bind(fs)
+      const write = vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+        const result = await originalWrite(...args)
+        if (ending === 'deadline' && String(args[0]).endsWith('manifest.json'))
+          clock.mockReturnValue(now + 10_001)
+        return result
+      })
+      const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await originalOpen(...args)
+        if (ending === 'staged-abort' && String(args[0]).endsWith('.tmp'))
+          controller.abort(Error('staged patch cancelled'))
+        return handle
+      })
+      const rename = vi.spyOn(fs, 'rename').mockImplementation(async (...args) => {
+        // Host canonicalization may change the temporary root's Windows spelling.
+        // This isolated host call has only one target rename, with this exact name.
+        if (ending === 'rename' && path.basename(String(args[1])) === 'eof.txt')
+          throw Error('injected patch rename failure')
+        return originalRename(...args)
+      })
+      try {
+        if (ending === 'pre-abort') controller.abort(Error('patch cancelled before execution'))
+        const error = await host.patch(call).catch((error) => error)
+        if (ending === 'rename') expect(rename).toHaveBeenCalledOnce()
+        expect(error).toBeInstanceOf(Error)
+        const expected = {
+          'pre-abort': 'patch cancelled before execution',
+          'staged-abort': 'staged patch cancelled',
+          deadline: 'File tool runtime limit exceeded.',
+          rename: 'injected patch rename failure',
+          'audit-after-commit': 'injected audit after commit failure'
+        }[ending]
+        expect(error.message).toBe(expected)
+        expect(error).not.toHaveProperty('mutation')
+        expect(error).not.toHaveProperty('report')
+        expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe(
+          ending === 'audit-after-commit' ? 'new\n' : 'old'
+        )
+        expect((await fs.readdir(root)).filter((name) => name.endsWith('.tmp'))).toEqual([])
+        expect(consume).toHaveBeenCalledTimes(ending === 'pre-abort' ? 0 : 1)
+        if (ending === 'pre-abort')
+          await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({
+            code: 'ENOENT'
+          })
+        else {
+          expect(audits.at(-1)).toMatchObject({ tool: 'files.patch', mutationUncertain: true })
+          const snapshots = await fs.readdir(path.join(root, '.magicpot', 'tool-host', 'snapshots'))
+          expect(snapshots).toHaveLength(1)
+          expect(
+            await fs.readFile(
+              path.join(root, '.magicpot', 'tool-host', 'snapshots', snapshots[0], 'content'),
+              'utf8'
+            )
+          ).toBe('old')
+        }
+      } finally {
+        rename.mockRestore()
+        open.mockRestore()
+        write.mockRestore()
+        clock.mockRestore()
+      }
+    }
+  )
+
+  it('complete-file EOF marker on final context preserves both sides without fabricating content', async () => {
+    const { root, authorization } = writeSetup()
+    const host = await createFilesHost(authorization, root)
+    await fs.writeFile(path.join(root, 'eof.txt'), 'same')
+    const patch = [
+      '--- a/eof.txt',
+      '+++ b/eof.txt',
+      '@@ -1,1 +1,1 @@',
+      ' same',
+      '\\ No newline at end of file',
+      ''
+    ].join('\n')
+    const result = await host.patch(
+      mutationCall(
+        'files.patch',
+        { path: 'eof.txt', expectedSha256: digest('same'), patch },
+        authorization
+      )
+    )
+    expect(await fs.readFile(path.join(root, 'eof.txt'), 'utf8')).toBe('same')
+    expect(result).toMatchObject({ beforeSha256: digest('same'), afterSha256: digest('same') })
+  })
+
   it('applies an exact-path complete-file unified patch with CAS and snapshot', async () => {
     const { root, authorization } = writeSetup()
     const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
@@ -575,6 +1481,356 @@ describe('FilesToolHost writable slice', () => {
       )
     ).rejects.toThrow('byte limit')
   })
+
+  it.each([
+    ...[true, false].flatMap((oldLf) =>
+      [true, false].map((newLf) => ({
+        label: `replacement oldLF=${oldLf} newLF=${newLf}`,
+        before: `old${oldLf ? '\n' : ''}`,
+        after: `new${newLf ? '\n' : ''}`,
+        header: '@@ -1,1 +1,1 @@',
+        body: [
+          '-old',
+          ...(oldLf ? [] : ['\\ No newline at end of file']),
+          '+new',
+          ...(newLf ? [] : ['\\ No newline at end of file'])
+        ],
+        additions: 1,
+        deletions: 1
+      }))
+    ),
+    ...[true, false].flatMap((lf) =>
+      [false, true].map((deleting) => ({
+        label: `${deleting ? 'delete to' : 'populate'} empty LF=${lf}`,
+        before: deleting ? `line${lf ? '\n' : ''}` : '',
+        after: deleting ? '' : `line${lf ? '\n' : ''}`,
+        header: deleting ? '@@ -1,1 +0,0 @@' : '@@ -0,0 +1,1 @@',
+        body: [`${deleting ? '-' : '+'}line`, ...(lf ? [] : ['\\ No newline at end of file'])],
+        additions: deleting ? 0 : 1,
+        deletions: deleting ? 1 : 0
+      }))
+    ),
+    {
+      label: 'add final LF only',
+      before: 'same',
+      after: 'same\n',
+      header: '@@ -1,1 +1,1 @@',
+      body: ['-same', '\\ No newline at end of file', '+same'],
+      additions: 1,
+      deletions: 1
+    },
+    {
+      label: 'remove final LF only',
+      before: 'same\n',
+      after: 'same',
+      header: '@@ -1,1 +1,1 @@',
+      body: ['-same', '+same', '\\ No newline at end of file'],
+      additions: 1,
+      deletions: 1
+    },
+    {
+      label: 'empty to blank line',
+      before: '',
+      after: '\n',
+      header: '@@ -0,0 +1,1 @@',
+      body: ['+'],
+      additions: 1,
+      deletions: 0
+    },
+    {
+      label: 'blank line to empty',
+      before: '\n',
+      after: '',
+      header: '@@ -1,1 +0,0 @@',
+      body: ['-'],
+      additions: 0,
+      deletions: 1
+    },
+    {
+      label: 'add trailing blank line',
+      before: 'same\n',
+      after: 'same\n\n',
+      header: '@@ -1,1 +1,2 @@',
+      body: [' same', '+'],
+      additions: 1,
+      deletions: 0
+    },
+    {
+      label: 'remove trailing blank line',
+      before: 'same\n\n',
+      after: 'same\n',
+      header: '@@ -1,2 +1,1 @@',
+      body: [' same', '-'],
+      additions: 0,
+      deletions: 1
+    },
+    {
+      label: 'common prefix and nonterminated suffix',
+      before: 'head\nold\ntail',
+      after: 'head\nnew\ntail',
+      header: '@@ -1,3 +1,3 @@',
+      body: [' head', '-old', '+new', ' tail', '\\ No newline at end of file'],
+      additions: 1,
+      deletions: 1
+    },
+    {
+      label: 'blank context plus UTF8 suffix',
+      before: '\n旧\n末尾',
+      after: '\n新\n末尾',
+      header: '@@ -1,3 +1,3 @@',
+      body: [' ', '-旧', '+新', ' 末尾', '\\ No newline at end of file'],
+      additions: 1,
+      deletions: 1
+    },
+    {
+      label: 'unchanged empty',
+      before: '',
+      after: '',
+      header: '',
+      body: [],
+      additions: 0,
+      deletions: 0
+    },
+    {
+      label: 'unchanged nonterminated',
+      before: 'same',
+      after: 'same',
+      header: '',
+      body: [],
+      additions: 0,
+      deletions: 0
+    },
+    {
+      label: 'unchanged terminated',
+      before: 'same\n',
+      after: 'same\n',
+      header: '',
+      body: [],
+      additions: 0,
+      deletions: 0
+    }
+  ])(
+    'bounded LF diff receipt $label is exact with matching counts and approved patch roundtrip',
+    async ({ before, after, header, body, additions, deletions }) => {
+      const { root, authorization } = writeSetup()
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      const host = await createFilesHost(authorization, root)
+      await fs.writeFile(path.join(root, 'diff.txt'), before)
+      const expected =
+        before === after ? '' : ['--- a/diff.txt', '+++ b/diff.txt', header, ...body, ''].join('\n')
+      const output = await host.diff(readCall('files.diff', { path: 'diff.txt', text: after }))
+      expect(output).toMatchObject({
+        currentSha256: digest(before),
+        comparedSha256: digest(after),
+        diff: expected,
+        diffBytes: Buffer.byteLength(expected),
+        additions,
+        deletions,
+        truncated: false
+      })
+      expect(await fs.readFile(path.join(root, 'diff.txt'), 'utf8')).toBe(before)
+      expect(consume).toHaveBeenCalledOnce()
+      expect(consume.mock.calls[0][0]).toMatchObject({ request: { action: 'filesystem.read' } })
+      await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+      const mutation = await host.write(
+        mutationCall(
+          'files.write',
+          { path: 'diff.txt', expectedSha256: digest(before), content: after },
+          authorization
+        )
+      )
+      expect(mutation).toMatchObject({
+        beforeSha256: digest(before),
+        afterSha256: digest(after),
+        diff: expected,
+        diffBytes: Buffer.byteLength(expected),
+        additions,
+        deletions,
+        bytes: Buffer.byteLength(after)
+      })
+      expect(await fs.readFile(path.join(root, 'diff.txt'), 'utf8')).toBe(after)
+      expect(
+        await fs.readFile(
+          path.join(root, '.magicpot', 'tool-host', 'snapshots', mutation.snapshotId, 'content'),
+          'utf8'
+        )
+      ).toBe(before)
+      if (expected) {
+        const inverse = await host.diff(
+          readCall('files.diff', { path: 'diff.txt', snapshotToken: mutation.restoreToken })
+        )
+        expect(inverse).toMatchObject({
+          currentSha256: digest(after),
+          comparedSha256: digest(before),
+          additions: deletions,
+          deletions: additions,
+          truncated: false
+        })
+        await host.patch(
+          mutationCall(
+            'files.patch',
+            { path: 'diff.txt', expectedSha256: digest(after), patch: inverse.diff },
+            authorization
+          )
+        )
+        expect(await fs.readFile(path.join(root, 'diff.txt'), 'utf8')).toBe(before)
+        const replay = await host.patch(
+          mutationCall(
+            'files.patch',
+            { path: 'diff.txt', expectedSha256: digest(before), patch: output.diff },
+            authorization
+          )
+        )
+        expect(replay).toMatchObject({
+          diff: expected,
+          additions,
+          deletions,
+          beforeSha256: digest(before),
+          afterSha256: digest(after)
+        })
+        expect(await fs.readFile(path.join(root, 'diff.txt'), 'utf8')).toBe(after)
+      }
+    }
+  )
+
+  it.each([
+    { text: '新', cut: 1 },
+    { text: '新', cut: 2 },
+    { text: '😀', cut: 1 },
+    { text: '😀', cut: 2 },
+    { text: '😀', cut: 3 }
+  ])(
+    'bounded LF diff receipt truncation within $text at byte $cut stays within UTF8 bound without inventing replacement chars',
+    async ({ text, cut }) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      await fs.writeFile(path.join(root, 'diff.txt'), '')
+      const prefix = '--- a/diff.txt\n+++ b/diff.txt\n@@ -0,0 +1,1 @@\n+'
+      const maxDiffBytes = Buffer.byteLength(prefix) + cut
+      const output = await host.diff(
+        readCall('files.diff', { path: 'diff.txt', text: `${text}\n`, maxDiffBytes })
+      )
+      expect(output).toMatchObject({
+        diff: prefix,
+        diffBytes: Buffer.byteLength(prefix),
+        truncated: true,
+        additions: 1,
+        deletions: 0
+      })
+      expect(output.diffBytes).toBeLessThanOrEqual(maxDiffBytes)
+      expect(output.diff).not.toContain('\ufffd')
+      expect(await fs.readFile(path.join(root, 'diff.txt'), 'utf8')).toBe('')
+      await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+
+  it.each(['新', '😀'])(
+    'bounded LF diff receipt each byte boundary around %s is a valid exact prefix',
+    async (text) => {
+      const { root, authorization } = writeSetup()
+      const host = await createFilesHost(authorization, root)
+      await fs.writeFile(path.join(root, 'diff.txt'), '')
+      const prefix = '--- a/diff.txt\n+++ b/diff.txt\n@@ -0,0 +1,1 @@\n+'
+      const complete = `${prefix}${text}\n`,
+        encoded = Buffer.from(complete)
+      for (let limit = 1; limit <= encoded.length + 1; limit++) {
+        const output = await host.diff(
+          readCall('files.diff', { path: 'diff.txt', text: `${text}\n`, maxDiffBytes: limit })
+        )
+        const expected =
+          limit <= Buffer.byteLength(prefix)
+            ? prefix.slice(0, limit)
+            : limit < Buffer.byteLength(prefix + text)
+              ? prefix
+              : limit === Buffer.byteLength(prefix + text)
+                ? prefix + text
+                : complete
+        expect(output).toMatchObject({
+          diff: expected,
+          diffBytes: Buffer.byteLength(expected),
+          truncated: encoded.length > limit,
+          additions: 1,
+          deletions: 0
+        })
+        expect(output.diffBytes).toBeLessThanOrEqual(limit)
+        expect(encoded.subarray(0, output.diffBytes)).toEqual(Buffer.from(output.diff))
+        expect(output.diff).not.toContain('\ufffd')
+      }
+      expect(await fs.readFile(path.join(root, 'diff.txt'), 'utf8')).toBe('')
+      await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+
+  it.each(['write', 'strict', 'partial', 'best_effort', 'patch', 'json', 'multi'] as const)(
+    'bounded LF diff receipt %s marker overhead is included before any permit/snapshot/write',
+    async (kind) => {
+      const { root, authorization } = writeSetup()
+      const audits: FilesToolAuditEvidence[] = []
+      const host = await createFilesHost(authorization, root, (audit) => {
+        audits.push(audit)
+      })
+      const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+      const before = kind === 'json' ? 'null' : 'old',
+        after = kind === 'json' ? '"new"\n' : 'new\n'
+      const expectedDiff = `--- a/diff.txt\n+++ b/diff.txt\n@@ -1,1 +1,1 @@\n-${before}\n\\ No newline at end of file\n+${after}`
+      const limit = Buffer.byteLength(expectedDiff) - 1
+      await fs.writeFile(path.join(root, 'diff.txt'), before)
+      const base = { path: 'diff.txt', expectedSha256: digest(before), maxDiffBytes: limit }
+      const replacements = [{ old: before, new: after, expectedOccurrences: 1 }]
+      const pending =
+        kind === 'write'
+          ? host.write(mutationCall('files.write', { ...base, content: after }, authorization))
+          : kind === 'json'
+            ? host.jsonWrite(
+                mutationCall('files.json.write', { ...base, value: 'new' }, authorization)
+              )
+            : kind === 'multi'
+              ? host.multiEdit(
+                  mutationCall(
+                    'files.multi-edit',
+                    {
+                      maxDiffBytes: limit,
+                      edits: [
+                        { path: 'diff.txt', expectedSha256: base.expectedSha256, replacements }
+                      ]
+                    },
+                    authorization
+                  )
+                )
+              : kind === 'patch'
+                ? host.patch(
+                    mutationCall('files.patch', { ...base, patch: expectedDiff }, authorization)
+                  )
+                : host.edit(
+                    mutationCall(
+                      'files.edit',
+                      {
+                        ...base,
+                        mode: kind,
+                        replacements:
+                          kind === 'strict'
+                            ? replacements
+                            : [
+                                ...replacements,
+                                { old: 'not present', new: 'x', expectedOccurrences: 1 }
+                              ]
+                      },
+                      authorization
+                    )
+                  )
+      const error = await pending.catch((error) => error)
+      expect(error).toBeInstanceOf(FilesToolValidationError)
+      expect(error.message).toBe('Pre-write diff exceeds the byte limit.')
+      expect(error).not.toHaveProperty('mutation')
+      expect(error).not.toHaveProperty('report')
+      expect(consume).not.toHaveBeenCalled()
+      expect(await fs.readFile(path.join(root, 'diff.txt'), 'utf8')).toBe(before)
+      await expect(fs.stat(path.join(root, '.magicpot'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(
+        audits.some((audit) => audit.outcome === 'completed' || audit.mutationUncertain === true)
+      ).toBe(false)
+    }
+  )
 
   it('diffs text and snapshots within bounds, lists metadata only, and restores original/deletion safely', async () => {
     const { root, authorization } = writeSetup()

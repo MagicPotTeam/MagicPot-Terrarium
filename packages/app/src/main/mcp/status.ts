@@ -6,12 +6,13 @@ import { getMcpClientManager, syncMcpClientManager } from './runtime'
 
 export const getMcpRuntimeStatus = async (
   config: Config,
-  clientManager: Pick<McpClientManager, 'listConnections' | 'sync'> = getMcpClientManager()
+  clientManager: Pick<McpClientManager, 'listConnections' | 'sync'> = getMcpClientManager(),
+  passive = false
 ): Promise<GetMcpStatusResp> => {
-  if (clientManager === getMcpClientManager()) {
-    await syncMcpClientManager(config)
-  } else {
-    await clientManager.sync(config)
+  // Explicit settings refresh is observational; never starts an enabled service.
+  if (!passive) {
+    if (clientManager === getMcpClientManager()) await syncMcpClientManager(config)
+    else await clientManager.sync(config)
   }
 
   const connections = clientManager.listConnections()

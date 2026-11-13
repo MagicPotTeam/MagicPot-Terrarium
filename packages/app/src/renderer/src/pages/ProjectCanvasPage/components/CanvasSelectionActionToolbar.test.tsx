@@ -110,6 +110,26 @@ describe('CanvasSelectionActionToolbar', () => {
     expect(onChatSelectedItems).toHaveBeenCalledTimes(1)
   })
 
+  it.each([false, true])('prevents multi-selection drag only when callback returns false (success=%s)', success => {
+    const selectedItems = [createImageItem('image-1'), createImageItem('image-2')]
+    const onDragSelectedItems = vi.fn(() => success)
+    const { container } = render(<ThemeProvider theme={theme}><CanvasSelectionActionToolbar
+      exactSelectedGroup={null} selectedItems={selectedItems} canCreateGroupFromSelection={false}
+      selectionActionStackPosition={{ left: 12, top: 24 }} stagePos={{ x: 0, y: 0 }} stageScale={1}
+      t={createTranslate()} onDragSelectedItems={onDragSelectedItems} onCopySelectedItems={vi.fn()}
+      onDownloadSelectedItems={vi.fn()} onSendSelectedItems={vi.fn()} onChatSelectedItems={vi.fn()}
+      onGenerateSelectedItems={vi.fn()} onCreateGroupFromSelection={vi.fn()}
+    /></ThemeProvider>)
+    const toolbar = container.querySelector('.selection-action-stack') as HTMLElement
+    const dragButton = within(toolbar).getAllByRole('button')[0]
+    const event = new Event('dragstart', { bubbles: true, cancelable: true })
+    const dataTransfer = { setData: vi.fn(), effectAllowed: 'all' }
+    Object.defineProperty(event, 'dataTransfer', { value: dataTransfer })
+    fireEvent(dragButton, event)
+    expect(onDragSelectedItems).toHaveBeenCalledWith(selectedItems, dataTransfer)
+    expect(event.defaultPrevented).toBe(!success)
+  })
+
   it('keeps Agent last in the generic selection row without a group action', () => {
     const selectedItems = [createImageItem('image-1'), createImageItem('image-2')]
     const onSendSelectedItems = vi.fn()

@@ -83,6 +83,41 @@ describe('TriggerOccurrenceStore', () => {
     )
     eventStore.close()
   })
+  it('skips immutable expired max entries while dead-lettering a later ordinary entry and claiming an eligible pending one', () => {
+    const { eventStore, store } = setup()
+    try {
+      make(store, { occurrenceId: 'isolated', triggerId: 'isolated', idempotencyKey: 'isolated' })
+      store.claimNext(100, 'first', 5, 1)
+      make(store, { occurrenceId: 'ordinary', triggerId: 'disabled-ordinary', idempotencyKey: 'ordinary' })
+      store.claimNext(100, 'second', 5, 1)
+      make(store, { occurrenceId: 'pending', triggerId: 'eligible', idempotencyKey: 'pending' })
+      const before = store.get('isolated')
+      const history = eventStore.listResourceMutations('trigger-occurrence', 'isolated', 100)
+      const result = store.claimNext(106, 'third', 5, 1, (state) => state.triggerId === 'eligible', (state) => state.triggerId !== 'isolated')
+      expect(result?.id).toBe('pending')
+      expect(store.get('ordinary')?.state.status).toBe('dead-letter')
+      expect(store.get('isolated')).toEqual(before)
+      expect(eventStore.listResourceMutations('trigger-occurrence', 'isolated', 100)).toEqual(history)
+    } finally { eventStore.close() }
+  })
+  it('defaults to dead-lettering expired claims even when eligible rejects them', () => {
+    const { eventStore, store } = setup()
+    try {
+      make(store)
+      store.claimNext(100, 'first', 5, 1)
+      expect(store.claimNext(106, 'next', 5, 1, () => false)).toBeUndefined()
+      expect(store.get('occ-1')?.state.status).toBe('dead-letter')
+    } finally { eventStore.close() }
+  })
+  it('mutable is independent of eligible and does not filter ordinary pending claims', () => {
+    const { eventStore, store } = setup()
+    try {
+      make(store, { occurrenceId: 'skipped', triggerId: 'not-eligible', idempotencyKey: 'skipped' })
+      make(store, { occurrenceId: 'selected', triggerId: 'eligible', idempotencyKey: 'selected' })
+      expect(store.claimNext(100, 'worker', 5, 3, (state) => state.triggerId === 'eligible', () => false)?.id).toBe('selected')
+      expect(store.get('skipped')?.state.status).toBe('pending')
+    } finally { eventStore.close() }
+  })
   it('reopens durable occurrence state', () => {
     const { eventStore, store } = setup(true)
     make(store)

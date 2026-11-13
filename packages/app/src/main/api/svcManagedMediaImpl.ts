@@ -23,6 +23,7 @@ import {
   validateEnsureManagedMediaDerivativeResp,
   validateImportManagedMediaResp,
   validateMigrateLegacyManagedMediaResp,
+  validateMaterializeManagedMediaForRequestReq,
   validateMaterializeManagedMediaForRequestResp
 } from '@shared/api/svcManagedMedia'
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
@@ -433,7 +434,19 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
   ): Promise<Extract<MaterializeManagedMediaForRequestResp, { transport: 'chunked-binary-v1' }>>
   async materializeForRequest(
     req: MaterializeManagedMediaForRequestReq
+  ): Promise<MaterializeManagedMediaForRequestResp>
+  async materializeForRequest(
+    req: MaterializeManagedMediaForRequestReq
   ): Promise<MaterializeManagedMediaForRequestResp> {
+    // Snapshot and revalidate before the first await, including direct MAIN callers.
+    // A caller-supplied cap only restricts this materialization; it grants no access.
+    const request = validateMaterializeManagedMediaForRequestReq(req)
+    const { reference, maxBytes } = request
+    if (maxBytes !== undefined && reference.sizeBytes! > maxBytes) {
+      throw new ServiceError('Managed media exceeds the request byte limit', {
+        code: 'MANAGED_MEDIA_REQUEST_SIZE_LIMIT'
+      })
+    }
     const getMediaDir = this.dependencies.getMediaDir ?? getChatMediaDir
     const realpath = this.dependencies.realpath ?? fs.realpath
     const readMediaBytes = this.dependencies.readMediaBytes ?? readManagedMediaBytes
@@ -441,12 +454,13 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
     try {
       const mediaDir = getMediaDir()
       const authorizedRoot = await realpath(mediaDir)
-      const resolved = await resolveReference(mediaDir, req.reference, { authorizedRoot })
+      const resolved = await resolveReference(mediaDir, reference, { authorizedRoot })
       const selected: Parameters<typeof readManagedMediaBytes>[1] = resolved.metadata
       const bytes = await readMediaBytes(resolved.storeRoot ?? authorizedRoot, selected, {
-        authorizedRoot
+        authorizedRoot,
+        ...(maxBytes !== undefined ? { maxBytes } : {})
       })
-      if (req.transport === 'chunked-binary-v1') {
+      if (request.transport === 'chunked-binary-v1') {
         const transport = await createBinaryChunkTransport(bytes, {
           mimeType: selected.mimeType
         })

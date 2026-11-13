@@ -23,6 +23,8 @@ export type Task = {
   client_id: string
   created_at: number
   prompt_id: string | null
+  /** Unknown admission must not be treated as permission to submit a second task. */
+  submissionOutcome?: 'unknown' | 'admitted'
   payload: Workflow
   extra_data?: JsonDict
   cleanupAfterRun?: boolean
@@ -218,6 +220,7 @@ async function persistComfyTaskFailureArchive(task: Task, error: unknown): Promi
     runId,
     taskId: task.id,
     promptId: task.prompt_id ?? null,
+    submissionOutcome: task.submissionOutcome ?? null,
     clientId: task.client_id,
     createdAt: new Date(task.created_at).toISOString(),
     error: serializeErrorForArchive(error),
@@ -460,11 +463,17 @@ const isDefinitivelyUnreachableComfyInstance = (error: unknown): boolean => {
     if (current instanceof Error || typeof current === 'object') {
       const record = current as { code?: unknown; message?: unknown; cause?: unknown }
       const code = String(record.code || '')
-      const message = String(record.message || '')
+      // Only a transport-owned pre-connect failure proves that no POST was sent.
+      // A server response mentioning these words is not evidence of non-admission.
+      if ('status' in record || 'statusCode' in record || 'payload' in record) return false
       if (
-        /(?:ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|EAI_AGAIN|ERR_CONNECTION_REFUSED)/iu.test(
-          `${code} ${message}`
-        )
+        [
+          'ECONNREFUSED',
+          'ENOTFOUND',
+          'EHOSTUNREACH',
+          'EAI_AGAIN',
+          'ERR_CONNECTION_REFUSED'
+        ].includes(code)
       ) {
         return true
       }
@@ -476,6 +485,16 @@ const isDefinitivelyUnreachableComfyInstance = (error: unknown): boolean => {
   return false
 }
 
+class ComfySubmissionOutcomeUnknownError extends Error {
+  readonly code = 'COMFY_SUBMISSION_OUTCOME_UNKNOWN'
+  constructor(readonly promptId: string) {
+    super(
+      `ComfyUI submission outcome is unknown for prompt ${promptId}. Check the original instance queue/history before submitting again; no second task was submitted.`
+    )
+    this.name = 'ComfySubmissionOutcomeUnknownError'
+  }
+}
+
 const waitForAdmissionAfterSubmitFailure = async (
   cli: ComfyHttpCli,
   promptId: string
@@ -483,7 +502,8 @@ const waitForAdmissionAfterSubmitFailure = async (
   if (typeof cli.waitForPromptAdmission !== 'function') {
     return { admitted: false, promptId }
   }
-  return cli.waitForPromptAdmission(promptId, undefined, 5_000, COMFY_PROCESS_TRANSPORT_CLIENT_ID)
+  // This client ID is shared by many tasks, so it cannot identify this submission.
+  return cli.waitForPromptAdmission(promptId, undefined, 5_000)
 }
 
 async function executeTaskOnInstance(
@@ -506,6 +526,8 @@ async function executeTaskOnInstance(
     throw error
   }
 
+  // Retain the requested identity even if the POST response is lost.
+  task = taskSource.updateTaskPromptId(task, requestedPromptId)
   let promptId: string
   try {
     const res = await cli.prompt({
@@ -522,11 +544,19 @@ async function executeTaskOnInstance(
     if (isDefinitivelyUnreachableComfyInstance(error)) {
       throw new RetryableComfyInstanceError(error)
     }
-    const admission = await waitForAdmissionAfterSubmitFailure(cli, requestedPromptId)
-    if (admission.admitted) {
-      promptId = admission.promptId
+    // A failed/empty lookup does not prove the server did not accept the POST.
+    // Follow the exact original prompt only; never adopt another shared-client task.
+    let admission: { admitted: boolean; promptId: string } | undefined
+    try {
+      admission = await waitForAdmissionAfterSubmitFailure(cli, requestedPromptId)
+    } catch {
+      // Preserve uncertainty and stop here instead of switching instances.
+    }
+    if (admission?.admitted && admission.promptId === requestedPromptId) {
+      promptId = requestedPromptId
     } else {
-      throw new RetryableComfyInstanceError(error)
+      task.submissionOutcome = 'unknown'
+      throw new ComfySubmissionOutcomeUnknownError(requestedPromptId)
     }
   }
 
@@ -534,6 +564,7 @@ async function executeTaskOnInstance(
     `[TaskQueue] ${task.id} prompt result:`,
     summarizePromptResultForLog({ prompt_id: promptId })
   )
+  task.submissionOutcome = 'admitted'
   task.payload = promptWorkflow
   task = taskSource.updateTaskPromptId(task, promptId)
 
@@ -621,7 +652,7 @@ async function executeTask(task: Task): Promise<Task> {
     console.error(`[TaskQueue] ${task.id} unknown error:`, error)
     throw error
   } finally {
-    if (selectedCli) {
+    if (selectedCli && task.submissionOutcome !== 'unknown') {
       await cleanupComfyMemoryAfterRun(task, selectedCli)
     }
   }

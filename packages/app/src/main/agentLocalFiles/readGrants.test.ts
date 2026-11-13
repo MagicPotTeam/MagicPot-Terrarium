@@ -647,6 +647,50 @@ describe('path and directory boundaries', () => {
     await expectCode(grants.authorize(sender, scope, root, 'directory'), 'PATH_DENIED')
   })
 
+  it('keeps default-all-paths confined to the main-owned reader policy', async () => {
+    const file = await fixture('.git/config', 'SYNTHETIC_CONFIG')
+    await expectCode(grants.authorize(sender, scope, file, 'file'), 'PATH_DENIED')
+    const local = new LocalFileReadGrants(undefined, { allLocalPaths: true })
+    try {
+      const granted = await local.authorize(sender, scope, file, 'file')
+      expect((await local.read(sender, scope, params(granted.id))).content).toBe('SYNTHETIC_CONFIG')
+      const directory = await local.authorize(sender, scope, root, 'directory')
+      expect((await local.list(sender, scope, params(directory.id))).entries).toEqual([
+        { name: '.git', kind: 'directory' }
+      ])
+      await expectCode(
+        local.authorize(sender, scope, `${root}${path.sep}..${path.sep}outside.txt`, 'file'),
+        'PATH_DENIED'
+      )
+    } finally {
+      local.revokeSender(sender)
+    }
+  })
+
+  it('can authorize a local filesystem root without listing or reading it', async () => {
+    const drive = path.parse(root).root
+    const open = vi.spyOn(fs, 'open')
+    const opendir = vi.spyOn(fs, 'opendir')
+    const grant = await grants.authorize(sender, scope, drive, 'directory')
+    expect(grant.kind).toBe('directory')
+    expect(grant.name).toBeTruthy()
+    expect(grant.name).not.toMatch(/[\\/]/)
+    expect(open).not.toHaveBeenCalled()
+    expect(opendir).not.toHaveBeenCalled()
+    await expectCode(grants.read(sender, scope, params(grant.id)), 'PATH_DENIED')
+  })
+
+  it('allows a tighter scan limit but never a larger one', async () => {
+    await Promise.all(Array.from({ length: 105 }, (_, i) => fixture(`bounded-${i}.txt`)))
+    const grant = await grants.authorize(sender, scope, root, 'directory')
+    const small = await grants.list(sender, scope, params(grant.id), { maxEntries: 2 })
+    expect(small.entries).toHaveLength(2)
+    expect(small.truncated).toBe(true)
+    const big = await grants.list(sender, scope, params(grant.id), { maxEntries: 10000 })
+    expect(big.entries).toHaveLength(LIMITS.listEntries)
+    expect(big.truncated).toBe(true)
+  })
+
   it('caps directory scans at 100 entries and filters sensitive names', async () => {
     await Promise.all(Array.from({ length: 105 }, (_, i) => fixture(`visible-${i}.txt`)))
     const grant = await grants.authorize(sender, scope, root, 'directory')

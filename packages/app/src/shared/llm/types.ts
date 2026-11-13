@@ -215,6 +215,10 @@ export interface LLMChatParams {
   toolTurns?: LLMToolTurn[]
   /** Main-owned interactive Agent policy, not a permission or remote retry directive. */
   retryCapacity?: boolean
+  /** Main-owned isolated helper mode: forbid provider-hosted tools/uploads/media. */
+  disableProviderTools?: boolean
+  /** Main-owned ordinary image tool routing: suppress text-intent auto-generation only. */
+  disableAutomaticImageGeneration?: boolean
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
@@ -348,6 +352,11 @@ export const normalizeLLMChatResult = (value: string | LLMChatResult): LLMChatRe
 
 /** Common LLM client interface chat only (shared) */
 export interface LLMCli {
+  /** Explicit opt-in: fresh stateless turns, honoring disableProviderTools and cancellation. */
+  readonly supportsIsolatedReadOnlyTurns?: boolean
+  /** Independent opt-in: bounded stateless text turns, provider-hosted tools off,
+   * supplied calls returned to MAIN for validation. Grants no execution/write authority. */
+  readonly supportsIsolatedMainToolTurns?: boolean
   readonly supportsNativeTools?: boolean
   chat(params: LLMChatParams): Promise<LLMChatResult>
 }

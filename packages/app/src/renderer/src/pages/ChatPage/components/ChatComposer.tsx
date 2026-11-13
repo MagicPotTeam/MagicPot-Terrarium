@@ -3,6 +3,7 @@ import React, {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState
 } from 'react'
@@ -54,11 +55,21 @@ import {
   getDroppedLocalImageContent,
   getDroppedTextContent
 } from '@renderer/utils/droppedImageUtils'
-import {
-  getChatAttachmentRenderKeys,
-  getVisibleChatAttachmentEntries
-} from '../chatAttachmentVisibility'
+import { getVisibleChatAttachmentEntries } from '../chatAttachmentVisibility'
+import { useChatAttachmentRenderKeys } from '../useChatAttachmentRenderKeys'
 import type { MagicPotAppToolDescriptor } from '@shared/app/types'
+import { isAgentSkillCommand } from '../agentSkillCommand'
+import { isAgentScratchpadCommand } from '../agentScratchpadCommand'
+import { isAgentSideCommand } from '../agentSideCommand'
+import { DEFAULT_CHAT_IMAGE_COUNT_LIMIT } from '@shared/llm/chatImageCountLimit'
+import { normalizeMediaReference } from '@shared/mediaReference'
+import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
+import {
+  ensureCachedChatImageDerivative,
+  getChatImageDerivativeCacheKey,
+  invalidateCachedChatImageDerivative
+} from '../chatImageDerivativeScheduler'
+import { api } from '@renderer/utils/windowUtils'
 
 interface ChatComposerProps {
   inputValue: string
@@ -68,6 +79,7 @@ interface ChatComposerProps {
   pendingAttachments: ChatAttachment[]
   uploadProgress: { [key: number]: number }
   onRemoveAttachment: (index: number) => void
+  sideCommandEnabled?: boolean
   isLoading: boolean
   onStopGenerating: () => void
   disabled: boolean
@@ -117,15 +129,62 @@ const ATTACHMENT_PREVIEW_ITEM_HEIGHT = 80
 
 const ComposerImageThumbnail: React.FC<{
   src: string
+  media?: ChatAttachment['media']
   alt: string
   onPreview: () => void
-}> = ({ src, alt, onPreview }) => {
+}> = ({ src, media, alt, onPreview }) => {
   const { t } = useTranslation()
+  const managed = useMemo(() => {
+    const normalized = normalizeMediaReference(media)
+    return normalized?.kind === 'managed' && normalized.sha256
+      ? { ...normalized, kind: 'managed' as const, sha256: normalized.sha256 }
+      : undefined
+  }, [media])
+  const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc } | undefined)
+    ?.svcManagedMedia
+  const canRequestDerivative = Boolean(managed && typeof service?.ensureDerivative === 'function')
+  const cacheKey = managed ? getChatImageDerivativeCacheKey(managed, 256) : undefined
+  const [display, setDisplay] = useState<{
+    src: string
+    sourceSrc: string
+    cacheKey?: string
+    derivative?: boolean
+  } | null>(null)
   const [failed, setFailed] = useState(false)
+  const sourceCacheKey = cacheKey ?? ''
+
+  useEffect(() => {
+    if (!managed || !service || !canRequestDerivative) return
+    const controller = new AbortController()
+    void ensureCachedChatImageDerivative(service, managed, 256, {
+      priority: -256,
+      signal: controller.signal
+    }).then(
+      (result) => {
+        if (controller.signal.aborted) return
+        setFailed(false)
+        setDisplay(
+          result.status === 'ready'
+            ? { sourceSrc: src, src: result.descriptor.localMediaUrl, cacheKey, derivative: true }
+            : { sourceSrc: src, src, cacheKey }
+        )
+      },
+      () => {
+        if (controller.signal.aborted) return
+        setFailed(false)
+        setDisplay({ sourceSrc: src, src, cacheKey })
+      }
+    )
+    return () => controller.abort()
+  }, [cacheKey, canRequestDerivative, managed, service, src])
 
   useEffect(() => {
     setFailed(false)
-  }, [src])
+  }, [sourceCacheKey, src])
+
+  const current =
+    display?.sourceSrc === src && (display.cacheKey ?? '') === sourceCacheKey ? display : null
+  const displaySrc = canRequestDerivative ? current?.src : src
 
   const failureLabel = t('chat.image_load_failed_label', {
     name: alt,
@@ -156,16 +215,47 @@ const ComposerImageThumbnail: React.FC<{
     )
   }
 
+  if (!displaySrc) {
+    return (
+      <Box
+        component="button"
+        type="button"
+        aria-label={alt}
+        aria-busy="true"
+        onClick={onPreview}
+        sx={{
+          width: '100%',
+          height: '100%',
+          border: 0,
+          cursor: 'pointer',
+          bgcolor: 'action.hover',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}
+      >
+        <CircularProgress size={20} aria-hidden="true" />
+      </Box>
+    )
+  }
+
   return (
     <img
-      src={src}
+      src={displaySrc}
       alt={alt}
       width={80}
       height={ATTACHMENT_PREVIEW_ITEM_HEIGHT}
       loading="lazy"
       decoding="async"
       style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
-      onError={() => setFailed(true)}
+      onError={() => {
+        if (current?.derivative && current.cacheKey) {
+          invalidateCachedChatImageDerivative(current.cacheKey, current.src)
+          setDisplay({ sourceSrc: src, src, cacheKey })
+          return
+        }
+        setFailed(true)
+      }}
       onClick={onPreview}
     />
   )
@@ -174,6 +264,18 @@ const ATTACHMENT_PREVIEW_SCROLLBAR_GUTTER = 12
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
 const ATTACHMENT_PREVIEW_HEIGHT_RATIO = 0.32
+
+// View wrappers switch between display:contents and none, neither a layout box.
+// Measure and observe the stable boxed ancestor, even while a view is hidden.
+const getComposerLayoutParent = (root: HTMLElement): HTMLElement | null => {
+  let parent = root.parentElement
+  while (parent) {
+    const display = window.getComputedStyle(parent).display
+    if (display !== 'contents' && display !== 'none') return parent
+    parent = parent.parentElement
+  }
+  return null
+}
 
 const parseCssPixelValue = (value: unknown): number | null => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
@@ -369,6 +471,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   uploadProgress,
   onRemoveAttachment,
   isLoading,
+  sideCommandEnabled = false,
   onStopGenerating,
   disabled,
   composerInputRef,
@@ -386,8 +489,20 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   active = true
 }) => {
   const { t } = useTranslation()
-  const visiblePendingAttachmentEntries = getVisibleChatAttachmentEntries(pendingAttachments)
-  const pendingAttachmentKeys = getChatAttachmentRenderKeys(
+  // Hidden derived attachments also count at the current send boundary. If they
+  // make a draft unsendable, expose them so the user can remove them; never use
+  // the renderer's visibility flag as proof that an image is exempt from limits.
+  const overImageLimit =
+    pendingAttachments.filter((attachment) => attachment.type === 'image').length >
+    DEFAULT_CHAT_IMAGE_COUNT_LIMIT
+  const visiblePendingAttachmentEntries = overImageLimit
+    ? pendingAttachments.flatMap((attachment, originalIndex) =>
+        attachment.hiddenFromChatView === true && attachment.type !== 'image'
+          ? []
+          : [{ attachment, originalIndex }]
+      )
+    : getVisibleChatAttachmentEntries(pendingAttachments)
+  const pendingAttachmentKeys = useChatAttachmentRenderKeys(
     visiblePendingAttachmentEntries.map(({ attachment }) => attachment)
   )
   const theme = useTheme()
@@ -430,10 +545,13 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     const root = composerRootRef.current
     if (!root) return
 
-    const flexCol = root.parentElement
-    if (!flexCol) return
+    const layoutParent = getComposerLayoutParent(root)
+    if (!layoutParent) return
 
-    const parentRect = flexCol.getBoundingClientRect()
+    const parentRect = layoutParent.getBoundingClientRect()
+    // A fully hidden pane has no measurable height. Keep the last usable budget;
+    // observing its box will recalculate when it is displayed again.
+    if (parentRect.height <= 0) return
     const composerMaxHeight = Math.max(MIN_TEXTAREA_HEIGHT, parentRect.height)
     const nextAttachmentPreviewMaxHeight = visiblePendingAttachmentEntries.length
       ? Math.max(
@@ -496,7 +614,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
 
     let observer: ResizeObserver | undefined
     const root = composerRootRef.current
-    const observed = root?.parentElement
+    const observed = root ? getComposerLayoutParent(root) : null
     if (observed && typeof ResizeObserver !== 'undefined') {
       observer = new ResizeObserver(scheduleRecalcMaxHeight)
       observer.observe(observed)
@@ -696,6 +814,8 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     setAddMenuAnchorEl(null)
   }
 
+  const addMenuItems = React.Children.toArray(addMenuSlot?.(closeAddMenu))
+
   const handleUploadFileFromMenu = () => {
     closeAddMenu()
     onUploadFile()
@@ -819,6 +939,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 return (
                   <Box
                     key={pendingAttachmentKeys[idx]}
+                    title={attachment.fileName || undefined}
                     sx={{
                       position: 'relative',
                       width: 80,
@@ -832,6 +953,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     {attachment.type === 'image' ? (
                       <ComposerImageThumbnail
                         src={normalizeLocalMediaUrl(attachment.url)}
+                        media={attachment.media}
                         alt={t('chat.preview_alt_index', { index: idx + 1 })}
                         onPreview={() => onPreviewImage(attachment.url)}
                       />
@@ -952,6 +1074,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     )}
                     <IconButton
                       size="small"
+                      aria-label={t('chat.remove_attachment', { defaultValue: 'Remove attachment' })}
                       onClick={() => {
                         if (attachment.url.startsWith('blob:')) {
                           URL.revokeObjectURL(attachment.url)
@@ -1264,12 +1387,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
                   />
                 </MenuItem>
-                {addMenuSlot ? (
-                  <>
-                    <Divider sx={{ my: 0.5 }} />
-                    {addMenuSlot(closeAddMenu)}
-                  </>
-                ) : null}
+                {addMenuItems.length > 0 ? [
+                  <Divider key="add-menu-slot-divider" sx={{ my: 0.5 }} />,
+                  ...addMenuItems
+                ] : null}
               </Menu>
               {toolbarSlot ? (
                 <Box
@@ -1288,17 +1409,8 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
 
             <Box
               data-testid="chat-composer-send-group"
-              sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}
+              sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}
             >
-              {hasModelSelectorSlot ? (
-                <Box
-                  data-testid="chat-composer-model-selector-slot"
-                  sx={{ display: 'flex', alignItems: 'center', transform: 'translateY(-3px)' }}
-                >
-                  {modelSelectorSlot}
-                </Box>
-              ) : null}
-
               {statusSlot ? (
                 <Box
                   data-testid="chat-composer-status-slot"
@@ -1340,6 +1452,18 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 </Box>
               ) : null}
 
+              {hasModelSelectorSlot ? (
+                <Box
+                  data-testid="chat-composer-model-selector-slot"
+                  sx={{ display: 'flex', alignItems: 'center', minWidth: 0, transform: 'translateY(-3px)' }}
+                >
+                  {modelSelectorSlot}
+                </Box>
+              ) : null}
+              {/* Keep parent Stop available while a private command is submitted separately. */}
+              {isLoading && sideCommandEnabled && (isAgentSideCommand(localInputValue) || isAgentSkillCommand(localInputValue) || isAgentScratchpadCommand(localInputValue)) ? <IconButton
+                data-chat-side-command-btn disabled={disabled || !active} onClick={onSend}
+                title={t(isAgentScratchpadCommand(localInputValue) ? 'chat.agent_scratchpad.command_send' : isAgentSkillCommand(localInputValue) ? 'chat.agent_skill_session.command_send' : 'chat.agent_side.command_send')}><SendIcon fontSize="small" /></IconButton> : null}
               {/* 发送/停止按钮 */}
               {isLoading ? (
                 <IconButton

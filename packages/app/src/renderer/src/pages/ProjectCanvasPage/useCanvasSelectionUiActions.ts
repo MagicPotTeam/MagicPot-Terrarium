@@ -1,12 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useEffect, useMemo } from 'react'
+import { getServiceErrorMessage } from '@shared/api/apiUtils/serviceValidation'
 import { api } from '../../utils/windowUtils'
 import { cloneHy3dMediaState } from '../ChatPage/hy3d/types'
 import {
   buildCanvasAgentAttachmentManifest,
   buildCanvasAgentAttachments,
-  buildCanvasImageCropSourceMetadata,
-  CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY,
   expandCanvasItemsForAgentSend,
   materializeCanvasAgentAttachmentItemsSync
 } from './canvasAgentAttachmentUtils'
@@ -498,7 +497,7 @@ Return shape:
       console.error('[Smart Cleanup]', error)
       notifyError(
         `${isChineseUi ? 'AI \u667a\u80fd\u6574\u7406\u5931\u8d25' : 'AI cleanup failed'}: ${
-          error instanceof Error ? error.message : String(error)
+          getServiceErrorMessage(error)
         }`
       )
       setItems(backupItems)
@@ -553,49 +552,17 @@ Return shape:
     (targetItems: CanvasItem[], options?: CanvasDragPayloadBuildOptions): CanvasDragPayload => {
       const expandedTargetItems = expandCanvasItemsForAgentSend(targetItems, items)
       const attachmentSourceItems = materializeCanvasAgentAttachmentItemsSync(expandedTargetItems)
-      const dragManifestItems = attachmentSourceItems.map((item) => {
-        if (item.type !== 'image') return item
-
-        const cropSource = buildCanvasImageCropSourceMetadata(item)
-        if (!cropSource) return item
-
-        const outputWidth = Math.max(1, Math.round(cropSource.crop.width))
-        const outputHeight = Math.max(1, Math.round(cropSource.crop.height))
-        const { crop: _crop, ...itemWithoutCrop } = item
-        return {
-          ...itemWithoutCrop,
-          fileName: cropSource.fileName,
-          sourceWidth: outputWidth,
-          sourceHeight: outputHeight,
-          width: outputWidth,
-          height: outputHeight
-        } as CanvasImageItem
-      })
-      const originalImageItems = attachmentSourceItems.filter(
-        (item): item is CanvasImageItem => item.type === 'image'
-      )
-      let imageAttachmentIndex = 0
-      const attachments = buildCanvasAgentAttachments(dragManifestItems).map((attachment) => {
-        if (attachment.type !== 'image') return attachment
-
-        const sourceItem = originalImageItems[imageAttachmentIndex++]
-        const cropSource = sourceItem ? buildCanvasImageCropSourceMetadata(sourceItem) : null
-        if (!cropSource) return attachment
-
-        return {
-          ...attachment,
-          url: cropSource.url,
-          fileName: cropSource.fileName,
-          mimeType: 'image/png',
-          sizeBytes: undefined,
-          sourceWidth: Math.max(1, Math.round(cropSource.crop.width)),
-          sourceHeight: Math.max(1, Math.round(cropSource.crop.height)),
-          metadata: {
-            ...(attachment.metadata || {}),
-            [CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]: cropSource
-          }
-        }
-      })
+      // If a crop remains, synchronous materialization did not produce visible
+      // pixels. The original URL (including option fallbacks) must not enter a
+      // drag payload; abort the whole selection instead of silently dropping it.
+      if (attachmentSourceItems.some((item) => item.type === 'image' && item.crop)) {
+        notifyError(t('canvas.agent_send_cropped_image_failed', {
+          defaultValue: 'Cannot send cropped canvas images safely yet. Remove the crop to send the full original, or send another uncropped image.'
+        }))
+        throw new Error('CANVAS_CROP_EXPORT_UNAVAILABLE')
+      }
+      const dragManifestItems = attachmentSourceItems
+      const attachments = buildCanvasAgentAttachments(dragManifestItems)
       const singleDragImageItem =
         attachmentSourceItems.length === 1 && attachmentSourceItems[0]?.type === 'image'
           ? (attachmentSourceItems[0] as CanvasImageItem)
@@ -649,7 +616,7 @@ Return shape:
           : {})
       }
     },
-    [canvasId, extractPromptTextFromCanvasItems, items]
+    [canvasId, extractPromptTextFromCanvasItems, items, notifyError, t]
   )
 
   const setCanvasDragPayload = useCallback(

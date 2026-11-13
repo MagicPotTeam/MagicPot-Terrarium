@@ -19,6 +19,7 @@ import { useMessage } from '@renderer/hooks/useMessage'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { api } from '@renderer/utils/windowUtils'
 import { downloadFile, fileToDataUrl, selectFile } from '@renderer/utils/fileUtils'
+import { getServiceErrorMessage } from '@shared/api/apiUtils/serviceValidation'
 import type { ChatAttachment, LLMChatResp, LLMProfileScope } from '@shared/api/svcLLMProxy'
 import type { Config, LLMAPIProfile } from '@shared/config/config'
 import type {
@@ -166,8 +167,7 @@ const createEmptyKlingCameraSimpleControls = (): KlingCameraSimpleControlInputSt
   zoom: ''
 })
 
-const resolveErrorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error)
+const resolveErrorMessage = (error: unknown): string => getServiceErrorMessage(error)
 
 const getDataUrlMimeType = (dataUrl: string): string | undefined =>
   dataUrl.match(/^data:([^;,]+)[;,]/i)?.[1]

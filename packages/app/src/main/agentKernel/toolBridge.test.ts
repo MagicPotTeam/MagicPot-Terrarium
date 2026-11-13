@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { AssistantToolResultError } from '../assistantRuntime/toolFailure'
 import type { AssistantToolRegistry } from '../assistantRuntime/toolRegistry'
 import { getAgentKernel } from './agentKernel'
 import {
@@ -288,6 +289,49 @@ describe('toolBridge', () => {
     )
 
     invokeSpy.mockRestore()
+  })
+
+  it('preserves a reported failure body through kernel registration, event, audit and thrown gateway result', async () => {
+    vi.mocked(authorizeMagicPotMcpToolInvocation).mockReturnValue({ allowed: true, policyId: 'policy-allow' })
+    const receipt = { content: '{"applied":1,"failed":1,"afterSha256":"actual"}', metadata: { snapshotId: 'before-snapshot', applied: 1, failed: 1 } }
+    const registry = createToolRegistry(['partial.tool'])
+    registry.callTool = vi.fn(async () => { throw new AssistantToolResultError({ message: 'Second edit did not match.', code: 'EDIT_STEP_FAILED' }, receipt) })
+    const kernel = getAgentKernel()
+    const gateway = vi.spyOn(kernel, 'invokeAuthorizedTool')
+    try {
+      await expect(invokeAssistantToolViaKernel({ toolRegistry: registry, toolName: 'partial.tool', args: {}, context })).rejects.toMatchObject({
+        name: 'AssistantToolResultError', message: 'Second edit did not match.', code: 'EDIT_STEP_FAILED', toolResult: receipt
+      })
+      const result = await gateway.mock.results[0].value
+      expect(result).toMatchObject({ ok: false, ...receipt, error: { message: 'Second edit did not match.', code: 'EDIT_STEP_FAILED' } })
+      expect(kernel.listEvents().at(-1)?.metadata).toMatchObject({ ok: false, toolName: 'partial.tool' })
+      expect(appendMagicPotMcpAudit).toHaveBeenCalledWith(expect.objectContaining({ decision: 'observe', metadata: expect.objectContaining({ ok: false }) }))
+      expect(registry.callTool).toHaveBeenCalledOnce()
+    } finally { gateway.mockRestore() }
+  })
+
+  it.each([false, true])('preserves a settled failed receipt when cancellation races kernel normalization (empty=%s)', async (empty) => {
+    vi.mocked(authorizeMagicPotMcpToolInvocation).mockReturnValue({ allowed: true, policyId: 'policy-allow' })
+    const controller = new AbortController(), cancellation = new Error('cancelled after dispatch')
+    const receipt = empty ? { content: '' } : { content: 'actual failed operation output', metadata: { rollback: { attempted: true, succeeded: false } } }
+    const failure = new AssistantToolResultError({ message: 'Commit failed and rollback did not restore all files.', code: 'EDIT_FAILED' }, receipt)
+    const registry = createToolRegistry(['partial.tool'])
+    registry.callTool = vi.fn(async () => { controller.abort(cancellation); throw failure })
+    await expect(invokeAssistantToolViaKernel({ toolRegistry: registry, toolName: 'partial.tool', args: {}, context, signal: controller.signal })).rejects.toMatchObject({
+      name: 'AssistantToolResultError', message: failure.message, code: failure.code, toolResult: receipt
+    })
+    expect(getAgentKernel().listEvents().at(-1)?.metadata).toMatchObject({ ok: false, toolName: 'partial.tool' })
+    expect(registry.callTool).toHaveBeenCalledOnce()
+  })
+
+  it('still rejects a successful kernel result when cancelled during dispatch', async () => {
+    vi.mocked(authorizeMagicPotMcpToolInvocation).mockReturnValue({ allowed: true, policyId: 'policy-allow' })
+    const controller = new AbortController(), cancellation = new Error('cancelled during successful dispatch')
+    const registry = createToolRegistry(['safe.tool'])
+    registry.callTool = vi.fn(async () => { controller.abort(cancellation); return { content: 'not delivered as success' } })
+    await expect(invokeAssistantToolViaKernel({ toolRegistry: registry, toolName: 'safe.tool', args: {}, context, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError', message: cancellation.message })
+    expect(registry.callTool).toHaveBeenCalledOnce()
+    expect(getAgentKernel().listEvents().filter(event => event.type === 'tool.invoked')).toEqual([])
   })
 
   it('records observe audits when assistant tool execution fails', async () => {

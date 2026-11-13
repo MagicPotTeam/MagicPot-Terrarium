@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,7 +9,7 @@ use base64::Engine;
 use clap::Parser;
 use image::imageops::FilterType;
 use image::metadata::Orientation;
-use image::{DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader, Limits};
+use image::{DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,6 +37,13 @@ struct Cli {
     /// Read JSON request from this file instead of stdin.
     #[arg(short, long)]
     input: Option<PathBuf>,
+    /// Encode one image from stdin, writing only encoded bytes to stdout.
+    #[arg(long, conflicts_with = "input")]
+    chat_image: bool,
+    #[arg(long, requires = "chat_image", value_parser = clap::value_parser!(u32).range(1..=4_194_304))]
+    target_bytes: Option<u32>,
+    #[arg(long, requires = "chat_image", value_parser = clap::value_parser!(u32).range(1..=2000))]
+    max_edge: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,14 +280,135 @@ struct RuntimeOptions {
 }
 
 fn main() {
-    if let Err(error) = run_cli() {
+    // Chat protocol errors never echo user arguments, content or paths.
+    let chat_requested = std::env::args_os().any(|a| a == "--chat-image");
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if chat_requested { eprintln!("CHAT_IMAGE_INVALID_ARGUMENT"); std::process::exit(2); }
+            error.exit();
+        }
+    };
+    if cli.chat_image {
+        if let Err(code) = run_chat_image(cli.target_bytes.unwrap_or(512_000) as usize, cli.max_edge.unwrap_or(2000)) {
+            eprintln!("{code}");
+            std::process::exit(1);
+        }
+    } else if let Err(error) = run_cli(cli) {
         eprintln!("{error:#}");
         std::process::exit(1);
     }
 }
 
-fn run_cli() -> Result<()> {
-    let cli = Cli::parse();
+const CHAT_MAX_INPUT: u64 = 32 * 1024 * 1024;
+const CHAT_MAX_PIXELS: u64 = 40_000_000;
+const CHAT_MAX_ALLOC: u64 = 512 * 1024 * 1024;
+
+// A fixed-size PNG IHDR check before constructing a decoder. This rejects an
+// oversized/zero declared canvas without reading chunks or allocating pixel
+// buffers. It is not a PNG validator or a bound on decoder allocations: the
+// decoder must still validate this same immutable input, including CRC/chunks.
+fn preflight_chat_png_dimensions(input: &[u8]) -> std::result::Result<(), &'static str> {
+    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if !input.starts_with(SIGNATURE) { return Ok(()); }
+    if input.len() < 33 || &input[8..12] != b"\0\0\0\x0d" || &input[12..16] != b"IHDR" {
+        return Err("CHAT_IMAGE_INVALID_FORMAT");
+    }
+    let width = u32::from_be_bytes(input[16..20].try_into().map_err(|_| "CHAT_IMAGE_INVALID_FORMAT")?);
+    let height = u32::from_be_bytes(input[20..24].try_into().map_err(|_| "CHAT_IMAGE_INVALID_FORMAT")?);
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > CHAT_MAX_PIXELS {
+        return Err("CHAT_IMAGE_DIMENSIONS_LIMIT");
+    }
+    Ok(())
+}
+
+fn run_chat_image(target: usize, max_edge: u32) -> std::result::Result<(), &'static str> {
+    let mut input = Vec::new();
+    io::stdin().lock().take(CHAT_MAX_INPUT + 1).read_to_end(&mut input).map_err(|_| "CHAT_IMAGE_INPUT_ERROR")?;
+    if input.len() as u64 > CHAT_MAX_INPUT { return Err("CHAT_IMAGE_INPUT_TOO_LARGE"); }
+    let output = encode_chat_image(&input, target, max_edge)?;
+    io::stdout().lock().write_all(&output).map_err(|_| "CHAT_IMAGE_OUTPUT_ERROR")?;
+    Ok(())
+}
+
+struct ChatLimitedWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+impl Write for ChatLimitedWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if data.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "output limit"));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+}
+
+fn encode_chat_image(input: &[u8], target: usize, max_edge: u32) -> std::result::Result<Vec<u8>, &'static str> {
+    if input.len() as u64 > CHAT_MAX_INPUT { return Err("CHAT_IMAGE_INPUT_TOO_LARGE"); }
+    if target == 0 || target > 4_194_304 || max_edge == 0 || max_edge > 2000 { return Err("CHAT_IMAGE_INVALID_ARGUMENT"); }
+    preflight_chat_png_dimensions(input)?;
+    let mut reader = ImageReader::new(Cursor::new(input)).with_guessed_format().map_err(|_| "CHAT_IMAGE_INVALID_FORMAT")?;
+    if !matches!(reader.format(), Some(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Bmp)) { return Err("CHAT_IMAGE_INVALID_FORMAT"); }
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(CHAT_MAX_ALLOC);
+    limits.max_image_width = Some(40_000_000);
+    limits.max_image_height = Some(40_000_000);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().map_err(|_| "CHAT_IMAGE_DECODE_ERROR")?;
+    let (width, height) = decoder.dimensions();
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > CHAT_MAX_PIXELS { return Err("CHAT_IMAGE_DIMENSIONS_LIMIT"); }
+    let orientation = decoder.orientation().map_err(|_| "CHAT_IMAGE_DECODE_ERROR")?;
+    let mut image = DynamicImage::from_decoder(decoder).map_err(|_| "CHAT_IMAGE_DECODE_ERROR")?;
+    image.apply_orientation(orientation);
+    // Read alpha in place; no whole-image RGBA conversion or allocation.
+    let transparent = match &image {
+        DynamicImage::ImageLumaA8(buf) => buf.pixels().any(|p| p.0[1] != u8::MAX),
+        DynamicImage::ImageRgba8(buf) => buf.pixels().any(|p| p.0[3] != u8::MAX),
+        DynamicImage::ImageLumaA16(buf) => buf.pixels().any(|p| p.0[1] != u16::MAX),
+        DynamicImage::ImageRgba16(buf) => buf.pixels().any(|p| p.0[3] != u16::MAX),
+        DynamicImage::ImageRgba32F(buf) => buf.pixels().any(|p| p.0[3] < 1.0 || !p.0[3].is_finite()),
+        _ => image.color().has_alpha(), // Unknown alpha representation fails safe.
+    };
+    let (w, h) = image.dimensions();
+    if w.max(h) > max_edge { image = image.resize(max_edge, max_edge, FilterType::Lanczos3); }
+    for attempt in 0..=3 {
+        let qualities: &[u8] = if transparent { &[0] } else { &[90, 80, 70, 60] };
+        for &quality in qualities {
+            let mut output = ChatLimitedWriter { bytes: Vec::new(), limit: target, exceeded: false };
+            let result = if transparent {
+                let rgba = image.to_rgba8();
+                image::codecs::png::PngEncoder::new(&mut output).write_image(rgba.as_raw(), rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
+            } else {
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality).encode_image(&image)
+            };
+            match result {
+                Ok(()) => return Ok(output.bytes),
+                Err(_) if output.exceeded => continue,
+                Err(_) => return Err("CHAT_IMAGE_ENCODE_ERROR"),
+            }
+        }
+        if attempt < 3 {
+            let (w, h) = image.dimensions();
+            // PNG cannot lower JPEG quality to meet the byte target. Halve each
+            // edge on its bounded retries so noisy alpha images can fit without
+            // flattening transparency or raising the output byte limit.
+            let (next_w, next_h) = if transparent {
+                ((w / 2).max(1), (h / 2).max(1))
+            } else {
+                ((w.saturating_mul(4) / 5).max(1), (h.saturating_mul(4) / 5).max(1))
+            };
+            image = image.resize_exact(next_w, next_h, FilterType::Lanczos3);
+        }
+    }
+    Err("CHAT_IMAGE_TARGET_UNREACHABLE")
+}
+
+fn run_cli(cli: Cli) -> Result<()> {
     let input = read_input(cli.input.as_deref())?;
     let request: BatchRequest = serde_json::from_str(&input).context("invalid JSON request")?;
     let response = process_batch(request)?;
@@ -1065,6 +1193,43 @@ fn default_max_generated_bytes() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chat_writer_limits_bytes_and_marks_only_overflow() {
+        use super::*;
+        let mut writer = ChatLimitedWriter { bytes: Vec::new(), limit: 3, exceeded: false };
+        writer.write_all(&[1, 2, 3]).unwrap();
+        assert!(!writer.exceeded);
+        assert!(writer.write_all(&[4]).is_err());
+        assert!(writer.exceeded);
+        assert_eq!(writer.bytes, [1, 2, 3]);
+    }
+    #[test]
+    fn chat_image_protocol_encodes_alpha_and_opaque_and_enforces_limits() {
+        use super::*;
+        let make = |alpha| {
+            let image = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(4, 3, image::Rgba([12, 34, 56, alpha])));
+            let mut bytes = Cursor::new(Vec::new());
+            image.write_to(&mut bytes, ImageFormat::Png).unwrap();
+            bytes.into_inner()
+        };
+        let transparent = encode_chat_image(&make(127), 512_000, 2).unwrap();
+        assert_eq!(image::guess_format(&transparent).unwrap(), ImageFormat::Png);
+        let decoded = image::load_from_memory(&transparent).unwrap();
+        assert!(decoded.width() <= 2 && decoded.height() <= 2);
+        assert!(decoded.to_rgba8().pixels().any(|p| p.0[3] < 255));
+        let mut rgb = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 3, image::Rgb([12, 34, 56])))
+            .write_to(&mut rgb, ImageFormat::Png).unwrap();
+        let opaque = encode_chat_image(&rgb.into_inner(), 512_000, 2000).unwrap();
+        assert_eq!(image::guess_format(&opaque).unwrap(), ImageFormat::Jpeg);
+        let opaque_alpha = encode_chat_image(&make(255), 512_000, 2000).unwrap();
+        assert_eq!(image::guess_format(&opaque_alpha).unwrap(), ImageFormat::Jpeg);
+        assert_eq!(encode_chat_image(&make(255), 1, 2000).unwrap_err(), "CHAT_IMAGE_TARGET_UNREACHABLE");
+        assert_eq!(encode_chat_image(&make(127), 1, 2000).unwrap_err(), "CHAT_IMAGE_TARGET_UNREACHABLE");
+        assert_eq!(encode_chat_image(b"GIF89a", 512_000, 2000).unwrap_err(), "CHAT_IMAGE_INVALID_FORMAT");
+        assert_eq!(encode_chat_image(&make(255), 0, 2000).unwrap_err(), "CHAT_IMAGE_INVALID_ARGUMENT");
+        assert_eq!(encode_chat_image(&vec![0; CHAT_MAX_INPUT as usize + 1], 512_000, 2000).unwrap_err(), "CHAT_IMAGE_INPUT_TOO_LARGE");
+    }
     use super::*;
     use image::{ImageBuffer, Rgba};
     use tempfile::TempDir;

@@ -158,7 +158,8 @@ export class TriggerOccurrenceStore {
     owner: string,
     leaseMs: number,
     maxAttempts = 3,
-    eligible?: (state: TriggerOccurrenceState) => boolean
+    eligible?: (state: TriggerOccurrenceState) => boolean,
+    mutable?: (state: TriggerOccurrenceState) => boolean
   ): StoredResource<TriggerOccurrenceState> | undefined {
     finite(now, 'now')
     required(owner, 'owner')
@@ -170,7 +171,8 @@ export class TriggerOccurrenceStore {
       (item) =>
         item.state.status === 'claimed' &&
         (item.state.claim?.expiresAt ?? Infinity) <= now &&
-        item.state.attempt >= maxAttempts
+        item.state.attempt >= maxAttempts &&
+        (mutable === undefined || mutable(item.state))
     )
     if (expiredMax) {
       this.update(

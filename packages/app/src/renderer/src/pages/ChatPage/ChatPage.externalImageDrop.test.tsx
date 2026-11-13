@@ -22,9 +22,11 @@ const fixture = vi.hoisted(() => ({
   config: null as Config | null,
   sessions: [] as ChatSession[],
   getDroppedLocalImageFiles: vi.fn(),
+  materializeIncoming: vi.fn(),
   importDataUrl: vi.fn(),
   importFile: vi.fn(),
   fileToBlobUrl: vi.fn(),
+  capturedSubmit: null as null | (() => void),
   receiveEditingAttachment: vi.fn(),
   notifyError: vi.fn(),
   notifyWarning: vi.fn(),
@@ -91,10 +93,18 @@ vi.mock('@renderer/utils/fileUtils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@renderer/utils/fileUtils')>()),
   fileToBlobUrl: (file: File) => fixture.fileToBlobUrl(file)
 }))
-vi.mock('@renderer/utils/droppedImageUtils', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@renderer/utils/droppedImageUtils')>()),
-  getDroppedLocalImageFiles: (...args: unknown[]) => fixture.getDroppedLocalImageFiles(...args)
-}))
+vi.mock('@renderer/utils/droppedImageUtils', async (importOriginal) => {
+  const actualDroppedImageUtils = await importOriginal<typeof import('@renderer/utils/droppedImageUtils')>()
+  return {
+    ...actualDroppedImageUtils,
+    getDroppedLocalImageFiles: (...args: unknown[]) => fixture.getDroppedLocalImageFiles(...args),
+    materializeInternalImageDragAttachment: async (attachment: ChatAttachment) => {
+      return fixture.materializeIncoming.getMockImplementation()
+        ? fixture.materializeIncoming(attachment)
+        : actualDroppedImageUtils.materializeInternalImageDragAttachment(attachment)
+    }
+  }
+})
 vi.mock('./chatStorage', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./chatStorage')>()),
   loadAllSessions: async () => clone(fixture.sessions),
@@ -168,7 +178,8 @@ vi.mock('./components/ChatMessageList', () => ({
     editingContent,
     onSetEditingIndex,
     onSetEditingContent,
-    onRegisterEditingAttachmentReceiver
+    onRegisterEditingAttachmentReceiver,
+    onSendEditedMessage
   }: {
     currentSession?: ChatSession
     editingMessageIndex: number | null
@@ -178,6 +189,7 @@ vi.mock('./components/ChatMessageList', () => ({
     onRegisterEditingAttachmentReceiver: (
       receiver: ((attachment: ChatAttachment) => void) | null
     ) => void
+    onSendEditedMessage: (content: string, attachments: undefined, hiddenContext: undefined, baseMessages: ChatSession['messages']) => void
   }) {
     const sessionId = currentSession?.id
     const receiver = useMemo(
@@ -205,6 +217,7 @@ vi.mock('./components/ChatMessageList', () => ({
             Edit {index}
           </button>
         ))}
+        <button onClick={() => { fixture.capturedSubmit = () => onSendEditedMessage(editingContent, undefined, undefined, currentSession?.messages || []) }}>Capture submit</button>
         <button
           onClick={() => {
             onSetEditingIndex(null)
@@ -322,6 +335,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   fixture.config = clone(DEFAULT_CONFIG)
   fixture.config.use_remote_llm = false
+  fixture.capturedSubmit = null
   fixture.sessions = []
   fixture.getDroppedLocalImageFiles.mockResolvedValue({ files: [], failedUrls: [] })
   fixture.importDataUrl.mockImplementation(
@@ -360,6 +374,261 @@ afterEach(async () => {
 })
 
 describe('ChatPage external local image drop', () => {
+  it('rejects a multi-attachment external event if one materialization fails', async () => {
+    await renderPage([existingAttachment])
+    const incoming: ChatAttachment[] = [1, 2, 3].map((index) => ({
+      type: 'image',
+      url: `local-media:///fixture/incoming-${index}.png`,
+      fileName: `incoming-${index}.png`
+    }))
+    fixture.materializeIncoming.mockImplementation(async (attachment: ChatAttachment) =>
+      attachment.fileName === 'incoming-2.png' ? null : attachment
+    )
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', {
+        detail: { targetScope: scope, attachments: incoming, text: 'Incoming batch text' }
+      }))
+    })
+    await waitFor(() => {
+      expect(fixture.notifyError.mock.calls.length > 0 || pendingAttachments().length > 1).toBe(true)
+    })
+    expect.soft(fixture.notifyError).toHaveBeenCalled()
+    expect.soft(fixture.materializeIncoming.mock.calls.map(([attachment]) => attachment)).toEqual(incoming.slice(0, 2))
+    expect.soft(pendingAttachments()).toEqual([existingAttachment])
+    expect.soft(screen.getByTestId('composer-input')).toHaveValue(draft)
+    expect.soft(fixture.request).not.toHaveBeenCalled()
+    expect.soft(fixture.stream).not.toHaveBeenCalled()
+  })
+
+  it('does not dispatch an auto-send when an external batch image fails to materialize', async () => {
+    await renderPage([existingAttachment])
+    // A valid fake response must not manufacture an unrelated send error.
+    fixture.stream.mockResolvedValue({ response: 'fixture response', result: { content: 'fixture response' } })
+    const incoming: ChatAttachment[] = [1, 2, 3].map((index) => ({
+      type: 'image',
+      url: `local-media:///fixture/incoming-${index}.png`,
+      fileName: `incoming-${index}.png`
+    }))
+    fixture.materializeIncoming.mockImplementation(async (attachment: ChatAttachment) =>
+      attachment.fileName === 'incoming-2.png' ? null : attachment
+    )
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', {
+        detail: { targetScope: scope, autoSend: true, attachments: incoming, text: 'Incoming batch text' }
+      }))
+    })
+    await waitFor(() => {
+      expect(fixture.notifyError.mock.calls.length > 0 || fixture.request.mock.calls.length > 0 || fixture.stream.mock.calls.length > 0).toBe(true)
+    })
+    expect.soft(fixture.notifyError).toHaveBeenCalledWith('canvas.send_to_agent_failed')
+    expect.soft(fixture.materializeIncoming.mock.calls.map(([attachment]) => attachment)).toEqual(incoming.slice(0, 2))
+    expect.soft(fixture.request).not.toHaveBeenCalled()
+    expect.soft(fixture.stream).not.toHaveBeenCalled()
+    expect.soft(pendingAttachments()).toEqual([existingAttachment])
+    expect.soft(screen.getByTestId('composer-input')).toHaveValue(draft)
+  })
+
+  it('rejects the complete external batch when the second materializer rejects', async () => {
+    await renderPage([existingAttachment])
+    const incoming: ChatAttachment[] = [1, 2, 3].map(index => ({ type: 'image', url: `local-media:///fixture/reject-${index}.png`, fileName: `reject-${index}.png` }))
+    fixture.materializeIncoming.mockImplementation(async (attachment: ChatAttachment) => {
+      if (attachment.fileName === 'reject-2.png') throw new Error('synthetic materialization failure')
+      return attachment
+    })
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachments: incoming, text: 'Incoming batch text' } }))
+      })
+      await waitFor(() => expect(consoleError).toHaveBeenCalled())
+      expect(fixture.materializeIncoming.mock.calls.map(([attachment]) => attachment)).toEqual(incoming.slice(0, 2))
+      expect.soft(fixture.notifyError).toHaveBeenCalledWith('canvas.send_to_agent_failed')
+      expect.soft(pendingAttachments()).toEqual([existingAttachment])
+      expect.soft(screen.getByTestId('composer-input')).toHaveValue(draft)
+      expect.soft(fixture.request).not.toHaveBeenCalled()
+      expect.soft(fixture.stream).not.toHaveBeenCalled()
+    } finally { consoleError.mockRestore() }
+  })
+
+  it('adds a successful multi-attachment external event in order with its text', async () => {
+    await renderPage([existingAttachment])
+    const incoming: ChatAttachment[] = [1, 2, 3].map((index) => ({
+      type: 'image',
+      url: `local-media:///fixture/incoming-${index}.png`,
+      fileName: `incoming-${index}.png`
+    }))
+    fixture.materializeIncoming.mockImplementation(async (attachment: ChatAttachment) => attachment)
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', {
+        detail: { targetScope: scope, attachments: incoming, text: 'Incoming batch text' }
+      }))
+    })
+    await waitFor(() => expect(pendingAttachments()).toEqual([existingAttachment, ...incoming]))
+    await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue(`${draft}\nIncoming batch text`))
+    expect(fixture.notifyError).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { name: 'two images', detail: { attachments: [{ type: 'image', url: 'local-media:///one.png' }, { type: 'image', url: 'local-media:///two.png' }] } },
+    { name: 'image and text', detail: { attachment: { type: 'image', url: 'local-media:///one.png' }, text: 'incoming text' } },
+    { name: 'image and inline image', detail: { attachment: { type: 'image', url: 'local-media:///one.png' }, image: 'data:image/png;base64,QQ==' } },
+    { name: 'non-image', detail: { attachment: { type: 'file', url: 'local-media:///file.txt' } } },
+    { name: 'hidden context and text', detail: { hiddenText: 'private hidden fixture', text: 'incoming text' } }
+  ])('rejects $name in an active edit without partial effects', async ({ detail }) => {
+    await renderPage([existingAttachment])
+    fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
+    await waitFor(() => expect(screen.getByTestId('edit-index')).toHaveTextContent('0'))
+    fixture.materializeIncoming.mockClear(); fixture.receiveEditingAttachment.mockClear(); fixture.notifyError.mockClear()
+    const sessionBefore = structuredClone(currentSession())
+    await act(async () => { window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, ...detail } })) })
+    expect(fixture.notifyError).toHaveBeenCalledWith('canvas.agent_edit_input_unavailable')
+    expect(fixture.materializeIncoming).not.toHaveBeenCalled()
+    expect(fixture.importDataUrl).not.toHaveBeenCalled()
+    expect(fixture.receiveEditingAttachment).not.toHaveBeenCalled()
+    expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 0')
+    expect(screen.getByTestId('composer-input')).toHaveValue(draft)
+    expect(pendingAttachments()).toEqual([existingAttachment])
+    expect(currentSession()).toEqual(sessionBefore)
+  })
+
+  it('reports a null single-image edit materialization without changing edit or composer', async () => {
+    await renderPage([existingAttachment])
+    fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
+    await waitFor(() => expect(screen.getByTestId('edit-index')).toHaveTextContent('0'))
+    fixture.materializeIncoming.mockResolvedValue(null)
+    fixture.receiveEditingAttachment.mockClear(); fixture.notifyError.mockClear()
+    const sessionBefore = structuredClone(currentSession())
+    const attachment: ChatAttachment = { type: 'image', url: 'local-media:///single.png' }
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await act(async () => { window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment } })) })
+      await waitFor(() => expect(fixture.notifyError).toHaveBeenCalledWith('canvas.send_to_agent_failed'))
+      expect(fixture.materializeIncoming).toHaveBeenCalledExactlyOnceWith(attachment)
+      expect(fixture.receiveEditingAttachment).not.toHaveBeenCalled()
+      expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 0')
+      expect(screen.getByTestId('composer-input')).toHaveValue(draft)
+      expect(pendingAttachments()).toEqual([existingAttachment])
+      expect(currentSession()).toEqual(sessionBefore)
+    } finally { consoleError.mockRestore() }
+  })
+
+  it.each([false, true])('does not start later batch materialization or deliver after switching sessions (autoSend=%s)', async (autoSend) => {
+    await renderPage([existingAttachment])
+    const pending = deferred<ChatAttachment>()
+    const incoming: ChatAttachment[] = [1, 2].map(index => ({ type: 'image', url: `local-media:///fixture/deferred-${index}.png`, fileName: `deferred-${index}.png` }))
+    fixture.materializeIncoming.mockImplementation((attachment: ChatAttachment) =>
+      attachment.fileName === 'deferred-1.png' ? pending.promise : Promise.resolve(attachment)
+    )
+    try {
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, autoSend, attachments: incoming, text: 'Batch text' } }))
+      })
+      // In particular, auto-send must have entered its lazy resolver before switching.
+      await waitFor(() => expect(fixture.materializeIncoming).toHaveBeenCalledWith(incoming[0]))
+      await selectSession('session-b')
+      await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('Other session draft.'))
+      await act(async () => { pending.resolve(incoming[0]); await pending.promise })
+      expect.soft(fixture.materializeIncoming.mock.calls.map(([attachment]) => attachment)).toEqual([incoming[0]])
+      expect.soft(currentSession().id).toBe('session-b')
+      expect.soft(screen.getByTestId('composer-input')).toHaveValue('Other session draft.')
+      expect.soft(pendingAttachments()).toEqual([])
+      expect.soft(fixture.request).not.toHaveBeenCalled()
+      expect.soft(fixture.stream).not.toHaveBeenCalled()
+    } finally {
+      pending.resolve(incoming[0])
+    }
+  })
+
+  it.each([false, true])('does not apply an asynchronously resolved external attachment after switching sessions (return to origin: %s)', async (returnToOrigin) => {
+    await renderPage([existingAttachment])
+    const pending = deferred<ChatAttachment>()
+    const incoming = { type: 'image', url: 'local-media:///fixture/incoming.png', fileName: 'incoming.png' } as ChatAttachment
+    fixture.materializeIncoming.mockReturnValueOnce(pending.promise)
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment: incoming } }))
+      await Promise.resolve()
+    })
+    expect(fixture.materializeIncoming).toHaveBeenCalledWith(incoming)
+    await selectSession('session-b')
+    await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('Other session draft.'))
+    if (returnToOrigin) {
+      await selectSession('session-a')
+      await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue(draft))
+      await waitFor(() => expect(pendingAttachments()).toEqual([existingAttachment]))
+    }
+    await act(async () => { pending.resolve(incoming); await pending.promise })
+    expect(pendingAttachments()).toEqual(returnToOrigin ? [existingAttachment] : [])
+    expect(screen.getByTestId('composer-input')).toHaveValue(returnToOrigin ? draft : 'Other session draft.')
+  })
+
+  it('keeps the original destination when an external attachment resolves without a target change', async () => {
+    await renderPage([existingAttachment])
+    const pending = deferred<ChatAttachment>()
+    const incoming = { type: 'image', url: 'local-media:///fixture/incoming.png', fileName: 'incoming.png' } as ChatAttachment
+    fixture.materializeIncoming.mockReturnValueOnce(pending.promise)
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment: incoming } }))
+      await Promise.resolve()
+    })
+    await act(async () => { pending.resolve(incoming); await pending.promise })
+    await waitFor(() => expect(pendingAttachments()).toEqual([existingAttachment, incoming]))
+    expect(screen.getByTestId('composer-input')).toHaveValue(draft)
+  })
+
+  it.each([false, true])('does not move a pending composer event into an edit (reopen same edit: %s)', async (reopen) => {
+    await renderPage([existingAttachment])
+    const pending = deferred<ChatAttachment>()
+    const incoming = { type: 'image', url: 'local-media:///fixture/incoming.png', fileName: 'incoming.png' } as ChatAttachment
+    fixture.materializeIncoming.mockReturnValueOnce(pending.promise)
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment: incoming } }))
+      await Promise.resolve()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
+    if (reopen) {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel edit' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
+    }
+    await act(async () => { pending.resolve(incoming); await pending.promise })
+    expect(pendingAttachments()).toEqual([existingAttachment])
+    expect(fixture.receiveEditingAttachment).not.toHaveBeenCalled()
+  })
+
+  it('ignores a pending external attachment after unmount', async () => {
+    const view = await renderPage([existingAttachment])
+    const pending = deferred<ChatAttachment>()
+    const incoming = { type: 'image', url: 'local-media:///fixture/incoming.png', fileName: 'incoming.png' } as ChatAttachment
+    fixture.materializeIncoming.mockReturnValueOnce(pending.promise)
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment: incoming } }))
+      await Promise.resolve()
+    })
+    view.unmount()
+    await act(async () => { pending.resolve(incoming); await pending.promise })
+    expect(fixture.receiveEditingAttachment).not.toHaveBeenCalled()
+    expect(fixture.request).not.toHaveBeenCalled()
+  })
+
+  it('isolates a captured edit across A to B to A while preserving B composer', async () => {
+    await renderPage([existingAttachment])
+    fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Capture submit' }))
+    const submit = fixture.capturedSubmit!
+    await selectSession('session-a')
+    expect(screen.getByTestId('edit-index')).toHaveTextContent('0')
+    expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 0')
+    await selectSession('session-b')
+    expect(screen.getByTestId('edit-index')).toHaveTextContent('null')
+    expect(screen.getByTestId('edit-content')).toBeEmptyDOMElement()
+    await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('Other session draft.'))
+    act(() => submit())
+    expect(fixture.request).not.toHaveBeenCalled()
+    expect(fixture.stream).not.toHaveBeenCalled()
+    await selectSession('session-a')
+    expect(screen.getByTestId('edit-index')).toHaveTextContent('null')
+    expect(screen.getByTestId('edit-content')).toBeEmptyDOMElement()
+  })
+
   it.each(['text/plain', 'text/uri-list', 'text/html'])(
     'imports multiple %s images as durable attachments without replacing the draft',
     async (flavor) => {

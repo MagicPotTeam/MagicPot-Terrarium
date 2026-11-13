@@ -143,6 +143,23 @@ describe('Layout route sync helpers', () => {
     expect(resolveTabIdForCurrentRoute('/workspace', '/workspace', '', [])).toBeNull()
   })
 
+  it('maps the new management route and restores its own system tab without borrowing a project identity', () => {
+    expect(resolveTabIdForCurrentRoute('/agent-management', '/agent-management', '', [])).toBe('tab-agent-management')
+    expect(resolveTabRoutePath({ id: 'tab-agent-management' })).toBe('/agent-management')
+    expect(resolveStartupFallbackRoutePath('tab-agent-management', [])).toBe('/agent-management')
+    expect(resolveStartupRouteTarget('/', '/', '/agent-management')).toBe('/agent-management')
+    expect(resolveTabIdForCurrentRoute('/agent-studio', '/agent-studio', '', [])).toBeNull()
+  })
+  it('does not restore a stale saved project over an explicit exact management route', () => {
+    expect(resolveStartupRouteTarget('/canvas?id=tab-project-stale', '/agent-management')).toBeNull()
+  })
+  it.each(['/agent-management/', '/AGENT-MANAGEMENT', '/Agent-Management///', '/%61gent-management', '/agent%2Dmanagement///'])('recognizes router-equivalent management path %s and does not restore a stale project over an explicit management route', (pathname) => {
+    expect(resolveTabIdForCurrentRoute(pathname, pathname, '', [])).toBe('tab-agent-management')
+    expect(resolveStartupRouteTarget('/canvas?id=tab-project-stale', `${pathname}?view=local`)).toBeNull()
+  })
+  it('does not treat a nested unknown management path as the management route', () => {
+    expect(resolveTabIdForCurrentRoute('/agent-management/unknown', '/agent-management/unknown', '', [])).toBeNull()
+  })
   it('restores the saved startup route only when it differs from the current route', () => {
     expect(resolveStartupRouteTarget('/canvas?id=tab-project-42', '/')).toBe(
       '/canvas?id=tab-project-42'

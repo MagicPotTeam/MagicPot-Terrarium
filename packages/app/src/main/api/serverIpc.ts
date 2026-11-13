@@ -26,6 +26,8 @@ import { DuplicateCheckSvcImpl } from './svcDuplicateCheckImpl'
 import { registerIpcServer } from '@shared/api/createServer/registerIpcServer'
 import { createApiExtensionServices } from './extensionServices'
 import { AppUpdateSvcImpl } from './svcAppUpdateImpl'
+import { createInstalledCatalogReadDelegate } from '../magicAgentRuntime/installedCatalogReadBinding'
+import { createStartupStorageReadDelegate } from '../storageMetadata/startupStorageReadBinding'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 import { ManagedMediaSvcImpl } from './svcManagedMediaImpl'
 import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaCleanupScheduler'
@@ -47,7 +49,7 @@ export const createServer = (
 
   const baseApi: BaseApi = {
     svcAdobeBridge: new AdobeBridgeSvcImpl(),
-    svcState: new StateSvcImpl(),
+    svcState: new StateSvcImpl({ startupStorageRead: createStartupStorageReadDelegate(getMainWindow) }),
     svcHyper: new HyperSvcImpl(),
     svcComfy: new ComfySvcImpl(),
     svcComfyBatch: comfyBatch,
@@ -72,7 +74,7 @@ export const createServer = (
     svcDccBridge: new DccBridgeSvcImpl(),
     svcDuplicateCheck: new DuplicateCheckSvcImpl(),
     svcAppUpdate: new AppUpdateSvcImpl(),
-    svcMagicAgentPlatform: new MagicAgentPlatformSvcImpl(),
+    svcMagicAgentPlatform: new MagicAgentPlatformSvcImpl({ installedCatalogRead: createInstalledCatalogReadDelegate(getMainWindow) }),
     svcManagedMedia: new ManagedMediaSvcImpl({
       updateReferenceSnapshot: async (snapshot) => {
         const chatMediaRoot = await getChatMediaDir()

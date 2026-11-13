@@ -2,6 +2,7 @@
  * Shared LLM module — barrel export
  */
 
+export { retiredProfileKind, assertProfileNotRetired } from './retiredProfile'
 export type {
   ChatAttachment,
   ChatMessage,

@@ -1,3 +1,12 @@
+import { invokeManagedRealChat, isManagedRealChatService } from '../api/svcLLMProxyImpl'
+import { withCooperativeOperation } from './cooperativeOperation'
+import { invokePreparedManagedTextFirstRun, type PreparedManagedTextFirstRun } from '../llmProxy/managedTextFirstRun'
+import { assertManagedTextFirstRunGuard, type ManagedTextFirstRunRuntimeContext } from './managedTextFirstRunRuntime'
+import { createProviderRawWorkRetainer } from './providerRawWorkRetention'
+import { ManagedRuntimeRecording, type ManagedRuntimeExecution } from '../magicAgentPlatform2/agents/managedRuntimeRecording'
+import { captureManagedData } from '../magicAgentPlatform2/agents/managedRuntimeSnapshot'
+import { AssistantToolResultError, settleFileEditFailureFeedback } from './toolFailure'
+import { ASSISTANT_TOOL_OUTCOME_UNKNOWN, resolveAssistantToolReplayRunId } from './toolRecovery'
 import { createHash } from 'node:crypto'
 import { ChatAttachment, ChatMessage, LLMChatResp, LLMProxySvc } from '@shared/api/svcLLMProxy'
 import {
@@ -41,6 +50,10 @@ type AssistantExecutionAdapterDeps = {
   chatService: Pick<LLMProxySvc, 'chat'>
   toolRegistry?: AssistantToolRegistry
   onAgentAction?: (action: ToolInvokeAction | ToolResultAction) => void | Promise<void>
+  managedRecording?: ManagedRuntimeRecording
+  managedRuntime?: object
+  /** Constructor policy from the private bounded runtime, not inbound JSON. */
+  managedTextFirstRun?: true
 }
 
 export type AssistantToolActionDescriptor = {
@@ -61,7 +74,7 @@ type AssistantToolExecutionContext = Omit<
   toolCallId?: string
 }
 
-type AssistantExecutionRequest = {
+export type AssistantExecutionRequest = {
   runId: string
   route: AssistantRoute
   req: AssistantInboundMessage
@@ -89,6 +102,7 @@ type AssistantExecutionRequest = {
   workspaceMetaFile?: string
   workspaceRootDir?: string
   readExternalFile?: AssistantToolCallContext['readExternalFile']
+  toolProvider?: AssistantInboundMessage['toolProvider']
   resumeRun?: (
     route: AssistantRoute,
     runId: string,
@@ -181,29 +195,55 @@ const cleanString = (value?: string | null): string | undefined => {
   return normalized || undefined
 }
 
-// Tool handlers are expected to honor AbortSignal, but a third-party/MCP
-// handler can still ignore it. Race the caller's cancellation against the
-// invocation so the assistant run is not held open forever, while observing
-// the late promise to avoid an unhandled rejection.
-const withToolAbort = async <T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> => {
-  if (!signal) return promise
+type ToolInvocationState = {
+  started: boolean
+  settled: boolean
+  outcomeUnknown: boolean
+}
+
+// Keep the caller responsive, but do not confuse this race with the independently
+// retained invocation promise. Only this race's exact cancellation error can mark
+// an invocation unknown; an aborted signal alone must not relabel another error.
+const withToolAbort = async <T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  invocation: ToolInvocationState
+): Promise<T> => {
+  if (!signal || invocation.settled) return promise
   if (signal.aborted) {
     promise.catch(() => undefined)
+    invocation.outcomeUnknown = invocation.started && !invocation.settled
     throw createAbortError(signal.reason)
   }
 
   let onAbort: (() => void) | undefined
+  let cancellation: { error: Error; invocationPending: boolean } | undefined
   const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => reject(createAbortError(signal.reason))
+    onAbort = () => {
+      if (cancellation) return
+      cancellation = {
+        error: createAbortError(signal.reason),
+        invocationPending: invocation.started && !invocation.settled
+      }
+      reject(cancellation.error)
+    }
     signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
   })
   try {
     return await Promise.race([promise, aborted])
+  } catch (error) {
+    if (cancellation && cancellation.error === error && cancellation.invocationPending) {
+      invocation.outcomeUnknown = true
+    }
+    throw error
   } finally {
     signal.removeEventListener('abort', onAbort!)
     promise.catch(() => undefined)
   }
 }
+
+type RetainToolInvocation = (startOwner: () => Promise<void>) => void
 
 const guessMimeTypeFromUrl = (url: string, fallback = 'application/octet-stream'): string => {
   const normalized = url.toLowerCase()
@@ -377,20 +417,77 @@ const toArtifactRef = (
     : {})
 })
 
+// Shared across adapters in this process; the journal remains authoritative after restart.
+const inFlightToolIdentities = new WeakMap<AssistantSessionStore, Set<string>>()
+const replayConflict = () =>
+  Object.assign(
+    new Error('The recorded tool identity does not match this request; review it before retrying.'),
+    { code: 'TOOL_REPLAY_CONFLICT' }
+  )
+
 export class AssistantExecutionAdapter {
   private readonly chatService: Pick<LLMProxySvc, 'chat'>
   private readonly toolRegistry: AssistantToolRegistry
   private readonly onAgentAction: NonNullable<AssistantExecutionAdapterDeps['onAgentAction']>
+  readonly #managedRecording?: ManagedRuntimeRecording
+  readonly #managedRuntime?: object
+  readonly #managedTextFirstRun: boolean
 
-  constructor(deps: AssistantExecutionAdapterDeps) {
-    this.chatService = deps.chatService
-    this.toolRegistry = deps.toolRegistry || new AssistantToolRegistry()
-    this.onAgentAction = deps.onAgentAction || (() => undefined)
+  #assertManaged(managed?: ManagedRuntimeExecution): void {
+    if (this.#managedTextFirstRun) throw Error('Managed text first run requires its prepared executor; ordinary dispatch is unavailable.')
+    if (!managed && !this.#managedRecording) return
+    if (!managed || managed.coordinator !== this.#managedRecording || managed.runtime !== this.#managedRuntime)
+      throw new Error('Managed adapter requires its exact private runtime lease.')
+    managed.coordinator.assertBound(managed.runtime, managed.lease)
   }
 
-  listTools(allowedToolNames?: string[] | null) {
+  constructor(deps: AssistantExecutionAdapterDeps) {
+    if (isManagedRealChatService(deps.chatService) && !deps.managedRecording && !deps.managedTextFirstRun) throw Error('Managed real-chat adapter requires concrete recording.')
+    if (deps.managedTextFirstRun && (!isManagedRealChatService(deps.chatService) || deps.managedRecording || deps.toolRegistry || deps.onAgentAction)) throw Error('Managed text first-run adapter requires its exact bounded service, no tools or callbacks.')
+    this.#managedTextFirstRun = deps.managedTextFirstRun === true
+    this.chatService = deps.chatService
+    this.toolRegistry = this.#managedTextFirstRun ? AssistantToolRegistry.createManagedTextFirstRunRegistry() : deps.toolRegistry || new AssistantToolRegistry()
+    this.onAgentAction = deps.onAgentAction || (() => undefined)
+    this.#managedRecording = deps.managedRecording
+    this.#managedRuntime = deps.managedRuntime
+  }
+
+  /** Exact prepared one-envelope service path. It never enters ordinary run(),
+   * context preparation, catalogs, tool callbacks or helper parsing. */
+  async runPreparedManagedTextFirstRun(
+    model: PreparedManagedTextFirstRun,
+    context: ManagedTextFirstRunRuntimeContext,
+    parent: AssistantExecutionRequest['cooperativeExecution'],
+    signal: AbortSignal
+  ): Promise<LLMChatResp> {
+    if (!this.#managedTextFirstRun) throw Error('Adapter is not a prepared managed text executor.')
+    const check = () => { assertManagedTextFirstRunGuard(context.assertDispatchCurrent); signal.throwIfAborted() }
+    check()
+    return withCooperativeOperation(parent, 'llm-inference', signal, async children => {
+      check()
+      return invokePreparedManagedTextFirstRun(this.chatService, model.plan, { signal, runId: context.runId }, {
+        assertCurrent: check,
+        retainRawWork: createProviderRawWorkRetainer(children, signal, check)
+      })
+    })
+  }
+
+  listTools(
+    allowedToolNames?: string[] | null,
+    toolProvider?: AssistantInboundMessage['toolProvider']
+  ) {
+    if (this.#managedTextFirstRun) throw Error('Managed text first run does not expose an ordinary tool catalog.')
     syncAssistantToolsWithAgentKernel(this.toolRegistry)
-    return filterAssistantToolsByAllowlist(this.toolRegistry.listTools(), allowedToolNames)
+    const seen = new Set<string>()
+    const tools = [...this.toolRegistry.listTools(), ...(toolProvider?.listTools() || [])].filter(
+      (tool) => {
+        const name = tool.name.trim().toLowerCase()
+        if (seen.has(name)) return false
+        seen.add(name)
+        return true
+      }
+    )
+    return filterAssistantToolsByAllowlist(tools, allowedToolNames)
   }
 
   /** Persist intent before executing and outcome before reporting completion. */
@@ -420,6 +517,7 @@ export class AssistantExecutionAdapter {
   private async readSettledToolAction(
     request: AssistantToolExecutionContext,
     requestedAction: ToolInvokeAction,
+    descriptor: AssistantToolActionDescriptor,
     allowedToolNames?: string[] | null
   ): Promise<ToolResultAction | undefined> {
     if (typeof request.sessionStore?.getSession === 'function') {
@@ -436,20 +534,53 @@ export class AssistantExecutionAdapter {
             Boolean(value.payload) &&
             typeof value.payload === 'object'
         )
+      const sameIdentity = actions.filter(
+        (action) =>
+          action.correlationId === requestedAction.correlationId &&
+          (requestedAction.payload.toolCallId
+            ? action.payload.toolCallId === requestedAction.payload.toolCallId
+            : typeof action.payload.invocationId === 'string' &&
+              action.payload.invocationId.startsWith(
+                `${descriptor.runId}:tool:${descriptor.toolCallIndex}:`
+              ))
+      )
+      // Changed arguments on resume are a conflict, not a new authorization to write.
+      if (
+        sameIdentity.some(
+          (action) =>
+            action.payload.invocationId !== requestedAction.payload.invocationId ||
+            action.payload.toolName !== requestedAction.payload.toolName ||
+            (action.type === 'tool.invoke' &&
+              canonicalJson(action.payload.args) !== canonicalJson(requestedAction.payload.args))
+        )
+      )
+        throw replayConflict()
       const previousResult = actions.find(
         (action) =>
           action.type === 'tool.result' &&
           action.payload.invocationId === requestedAction.payload.invocationId
       ) as ToolResultAction | undefined
       if (previousResult) {
+        if (
+          previousResult.correlationId !== requestedAction.correlationId ||
+          previousResult.payload.toolName !== requestedAction.payload.toolName ||
+          previousResult.payload.toolCallId !== requestedAction.payload.toolCallId ||
+          typeof previousResult.payload.ok !== 'boolean' ||
+          !sameIdentity.some((action) => action.type === 'tool.invoke')
+        )
+          throw replayConflict()
         assertAssistantToolAllowed(requestedAction.payload.toolName, allowedToolNames)
-        if (!previousResult.payload.ok) {
+        if (previousResult.payload.error?.code === ASSISTANT_TOOL_OUTCOME_UNKNOWN) {
           throw Object.assign(
-            new Error(
-              previousResult.payload.error?.message || 'The previous tool execution failed.'
-            ),
-            { code: 'TOOL_EXECUTION_ALREADY_SETTLED' }
+            new Error('The interrupted tool outcome is unknown; review its effects before retrying.'),
+            { code: 'TOOL_REPLAY_REQUIRES_REVIEW' }
           )
+        }
+        if (!previousResult.payload.ok) {
+          const failure = { message: previousResult.payload.error?.message || 'The previous tool execution failed.', code: 'TOOL_EXECUTION_ALREADY_SETTLED' }
+          if (previousResult.payload.content !== undefined || previousResult.payload.metadata !== undefined)
+            throw new AssistantToolResultError(failure, { content: previousResult.payload.content ?? '', metadata: previousResult.payload.metadata })
+          throw Object.assign(new Error(failure.message), { code: failure.code })
         }
         return previousResult
       }
@@ -475,10 +606,110 @@ export class AssistantExecutionAdapter {
     action: ToolInvokeAction,
     descriptor: AssistantToolActionDescriptor,
     request: AssistantToolExecutionContext,
-    allowedToolNames?: string[] | null
+    allowedToolNames?: string[] | null,
+    managed?: ManagedRuntimeExecution
+  ): Promise<{ action: ToolResultAction; result: AssistantToolCallResult }> {
+    this.#assertManaged(managed)
+    if (managed) { action = captureManagedData(action); descriptor = captureManagedData(descriptor) }
+    return withCooperativeOperation(
+      request.cooperativeExecution,
+      'tool-invocation',
+      request.signal,
+      async children => {
+        // Omit is compile-time only: a full execution request may carry req and
+        // its parent gate at runtime. Do not retain it in the tool-only context.
+        const context: AssistantToolExecutionContext & { req?: unknown } = {
+          ...request,
+          cooperativeExecution: children
+        }
+        delete context.req
+        return this.executeAdmittedToolInvokeAction(
+          action, descriptor, Object.freeze(context), allowedToolNames, managed
+        )
+      }
+    )
+  }
+
+  private async executeAdmittedToolInvokeAction(
+    action: ToolInvokeAction,
+    descriptor: AssistantToolActionDescriptor,
+    request: AssistantToolExecutionContext,
+    allowedToolNames?: string[] | null,
+    managed?: ManagedRuntimeExecution
   ): Promise<{ action: ToolResultAction; result: AssistantToolCallResult }> {
     validateAssistantToolInvokeAction(action, descriptor)
-    const settledAction = await this.readSettledToolAction(request, action, allowedToolNames)
+    const identity = JSON.stringify([
+      getAssistantSessionKey(request.route),
+      descriptor.runId,
+      action.payload.toolCallId ?? descriptor.toolCallIndex
+    ])
+    let active = inFlightToolIdentities.get(request.sessionStore)
+    if (!active) {
+      active = new Set<string>()
+      inFlightToolIdentities.set(request.sessionStore, active)
+    }
+    if (active.has(identity))
+      throw Object.assign(
+        new Error('This tool invocation is already in progress; it was not started again.'),
+        { code: 'TOOL_INVOCATION_IN_PROGRESS' }
+      )
+    active.add(identity)
+    const claimed = active
+    let callerSettled = false
+    let invocationOwners = 0
+    const releaseIfDrained = (): void => {
+      if (!callerSettled || invocationOwners !== 0) return
+      claimed.delete(identity)
+      if (!claimed.size && inFlightToolIdentities.get(request.sessionStore) === claimed) {
+        inFlightToolIdentities.delete(request.sessionStore)
+      }
+    }
+    const retainInvocation: RetainToolInvocation = startOwner => {
+      // Publish the retained owner before a provider/gate can synchronously abort
+      // or re-enter. Its completion is separate from caller/journal completion.
+      invocationOwners++
+      const settled = (): void => { invocationOwners--; releaseIfDrained() }
+      let owner: Promise<void>
+      try { owner = startOwner() } catch (error) { settled(); throw error }
+      void owner.then(settled, settled)
+    }
+    try {
+      return await this.executeClaimedToolInvokeAction(
+        action,
+        descriptor,
+        request,
+        retainInvocation,
+        allowedToolNames,
+        managed
+      )
+    } finally {
+      callerSettled = true
+      releaseIfDrained()
+    }
+  }
+
+  private async executeClaimedToolInvokeAction(
+    action: ToolInvokeAction,
+    descriptor: AssistantToolActionDescriptor,
+    request: AssistantToolExecutionContext,
+    retainInvocation: RetainToolInvocation,
+    allowedToolNames?: string[] | null,
+    managed?: ManagedRuntimeExecution
+  ): Promise<{ action: ToolResultAction; result: AssistantToolCallResult }> {
+    // Mandatory ledger intent normally returns before the optional session journal,
+    // observer, provider catalog or any dispatch. Managed replay never short-cuts
+    // this through bounded session history.
+    const managedTool = managed?.coordinator.prepareTool(managed.runtime, managed.lease, {
+      invocationId: action.payload.invocationId, runtimeRunId: descriptor.runId,
+      toolName: action.payload.toolName, args: action.payload.args, route: request.route,
+      ...(descriptor.toolCallId === undefined ? {} : { toolCallId: descriptor.toolCallId })
+    })
+    const settledAction = managed ? undefined : await this.readSettledToolAction(
+      request,
+      action,
+      descriptor,
+      allowedToolNames
+    )
     if (settledAction) {
       return {
         action: settledAction,
@@ -490,45 +721,99 @@ export class AssistantExecutionAdapter {
     }
     const toolName = action.payload.toolName
     const args = action.payload.args
-    await this.recordToolAction(request, action)
-    await this.onAgentAction(action)
+    // Keep ordinary observer ordering and its dispatch-start timestamp unchanged.
+    if (!managed) { await this.recordToolAction(request, action); await this.onAgentAction(action) }
     const startedAt = Date.now()
-    let leaveTool: (() => void) | undefined
+    const invocation: ToolInvocationState = { started: false, settled: false, outcomeUnknown: false }
     let executionCompleted = false
+    let outcomeAttempted = false
+    let builtInFileEdit = false
+    const publishManagedOutcome = (receipt: Parameters<ManagedRuntimeRecording['completeTool']>[3]): 'reported-result' | 'unknown' => {
+      outcomeAttempted = true
+      return managed!.coordinator.completeTool(managed!.runtime, managed!.lease, managedTool!, receipt)
+    }
     try {
+      if (managed) { await this.recordToolAction(request, action); await this.onAgentAction(action); this.#assertManaged(managed) }
       assertAssistantToolAllowed(toolName, allowedToolNames)
-      await request.cooperativeExecution?.checkpoint('tool-invocation')
-      leaveTool = request.cooperativeExecution?.enter('tool-invocation')
-      const result = await withToolAbort(
-        invokeAssistantToolViaKernel({
-          toolRegistry: this.toolRegistry,
-          toolName,
-          args,
-          signal: request.signal,
-          context: {
-            config: request.config,
-            route: request.route,
-            sessionStore: request.sessionStore,
-            taskState: request.taskState,
-            workspaceMemoryFile: request.workspaceMemoryFile,
-            workspaceTaskContextFile: request.workspaceTaskContextFile,
-            workspaceContextFile: request.workspaceContextFile,
-            workspacePinnedContextFile: request.workspacePinnedContextFile,
-            workspaceMetaFile: request.workspaceMetaFile,
-            workspaceRootDir: request.workspaceRootDir,
-            readExternalFile: request.readExternalFile,
-            resumeRun: request.resumeRun,
-            resumeWorkflow: request.resumeWorkflow,
-            startTaskGroup: request.startTaskGroup,
-            progressTaskGroup: request.progressTaskGroup,
-            approveTaskGroup: request.approveTaskGroup,
-            exportTaskGroup: request.exportTaskGroup,
-            cancelTaskGroup: request.cancelTaskGroup,
-            resumeTaskGroup: request.resumeTaskGroup
+      request.signal?.throwIfAborted()
+      const provider = request.toolProvider
+      const usesProvider =
+        provider?.listTools().some((tool) => tool.name === toolName) &&
+        !this.toolRegistry.listTools().some((tool) => tool.name === toolName)
+      builtInFileEdit = !managed && !usesProvider && toolName === 'files.edit'
+      let resolveInvocation!: (result: AssistantToolCallResult) => void
+      let rejectInvocation!: (error: unknown) => void
+      const invocationResult = new Promise<AssistantToolCallResult>((resolve, reject) => {
+        resolveInvocation = resolve
+        rejectInvocation = reject
+      })
+      retainInvocation(() => {
+        // This exact child is registered before dispatch, while the outer tool
+        // callback is live. It can outlast the cancelled caller, but never starts
+        // from a stale scope or inherits an unrelated root. No gate reaches tool
+        // arguments/provider context. Only the promise returned HERE is retained:
+        // nested SDK/host timeout wrappers still require their own drainage proof.
+        const owner = withCooperativeOperation(
+          request.cooperativeExecution,
+          'tool-invocation',
+          request.signal,
+          async () => {
+            try {
+              request.signal?.throwIfAborted()
+              if (managed) managed.coordinator.startTool(managed.runtime, managed.lease, managedTool!)
+              invocation.started = true
+              const value = await (usesProvider
+                ? provider!.callTool(toolName, args, {
+                    route: request.route,
+                    runId: descriptor.runId,
+                    toolCallId: descriptor.toolCallId,
+                    signal: request.signal,
+                    workspaceRootDir: request.workspaceRootDir
+                  })
+                : invokeAssistantToolViaKernel({
+                    toolRegistry: this.toolRegistry,
+                    toolName,
+                    args,
+                    signal: request.signal,
+                    context: {
+                      config: request.config,
+                      route: request.route,
+                      sessionStore: request.sessionStore,
+                      taskState: request.taskState,
+                      workspaceMemoryFile: request.workspaceMemoryFile,
+                      workspaceTaskContextFile: request.workspaceTaskContextFile,
+                      workspaceContextFile: request.workspaceContextFile,
+                      workspacePinnedContextFile: request.workspacePinnedContextFile,
+                      workspaceMetaFile: request.workspaceMetaFile,
+                      workspaceRootDir: request.workspaceRootDir,
+                      readExternalFile: request.readExternalFile,
+                      resumeRun: request.resumeRun,
+                      resumeWorkflow: request.resumeWorkflow,
+                      startTaskGroup: request.startTaskGroup,
+                      progressTaskGroup: request.progressTaskGroup,
+                      approveTaskGroup: request.approveTaskGroup,
+                      exportTaskGroup: request.exportTaskGroup,
+                      cancelTaskGroup: request.cancelTaskGroup,
+                      resumeTaskGroup: request.resumeTaskGroup
+                    }
+                  }))
+              invocation.settled = true
+              resolveInvocation(value)
+            } catch (error) {
+              invocation.settled = true
+              rejectInvocation(error)
+            }
           }
-        }),
-        request.signal
-      )
+        )
+        // Admission may itself reject without invoking the callback. Both this
+        // path and a late invocation rejection remain observed after cancellation.
+        void owner.catch(rejectInvocation)
+        return owner
+      })
+      const rawResult = await withToolAbort(invocationResult, request.signal, invocation)
+      const result = managed ? captureManagedData(rawResult) : rawResult
+      if (managed && publishManagedOutcome({ started: invocation.started, failed: false, value: result }) === 'unknown')
+        throw Object.assign(new Error('Managed tool execution outcome unknown; review required.'), { code: ASSISTANT_TOOL_OUTCOME_UNKNOWN })
       const finishedAt = Date.now()
       const resultAction = createToolResultAction({
         actionId: `${action.actionId}:result`,
@@ -551,7 +836,13 @@ export class AssistantExecutionAdapter {
       await this.onAgentAction(resultAction)
       return { action: resultAction, result }
     } catch (error) {
-      if (executionCompleted) throw error
+      // A durable publication exception (including after COMMIT) is not another
+      // tool error. Never swallow it, retry or publish a second outcome.
+      if (executionCompleted || outcomeAttempted) throw error
+      const failureResult = error instanceof AssistantToolResultError ? error.toolResult : undefined
+      const managedOutcome = managed
+        ? publishManagedOutcome({ started: invocation.started, failed: true, error: toSafeError(error) })
+        : undefined
       const finishedAt = Date.now()
       const resultAction = createToolResultAction({
         actionId: `${action.actionId}:result`,
@@ -561,7 +852,12 @@ export class AssistantExecutionAdapter {
           ...(action.payload.toolCallId ? { toolCallId: action.payload.toolCallId } : {}),
           toolName,
           ok: false,
-          error: toSafeError(error),
+          ...(failureResult ? { content: failureResult.content, metadata: toJsonMetadata(failureResult.metadata) } : {}),
+          // The durable managed classification must also block journal-based
+          // recovery. Ordinary callers keep their exact cancellation semantics.
+          error: invocation.outcomeUnknown || managedOutcome === 'unknown'
+            ? { ...toSafeError(error), code: ASSISTANT_TOOL_OUTCOME_UNKNOWN }
+            : toSafeError(error),
           startedAt,
           finishedAt,
           durationMs: Math.max(0, finishedAt - startedAt)
@@ -570,12 +866,13 @@ export class AssistantExecutionAdapter {
       try {
         await this.recordToolAction(request, resultAction)
         await this.onAgentAction(resultAction)
+        if (builtInFileEdit && invocation.settled && !invocation.outcomeUnknown && !request.signal?.aborted &&
+            typeof request.sessionStore?.appendEvents === 'function' && action.payload.toolCallId)
+          settleFileEditFailureFeedback(error, { routeKey: getAssistantSessionKey(request.route), runId: descriptor.runId, toolCallId: action.payload.toolCallId })
       } catch {
         // Preserve the original execution or authorization failure.
       }
       throw error
-    } finally {
-      leaveTool?.()
     }
   }
 
@@ -591,8 +888,11 @@ export class AssistantExecutionAdapter {
       signal?: AbortSignal
       runId?: string
       toolCallId?: string
-    }
+    },
+    managed?: ManagedRuntimeExecution
   ): Promise<AssistantToolCallResult> {
+    this.#assertManaged(managed)
+    if (managed) args = captureManagedData(args)
     const descriptor: AssistantToolActionDescriptor = {
       runId: cleanString(options?.runId) || `call-tool:${crypto.randomUUID()}`,
       ...(options?.toolCallId ? { toolCallId: options.toolCallId } : {}),
@@ -602,18 +902,22 @@ export class AssistantExecutionAdapter {
       requestedAt: Date.now()
     }
     const invokeAction = buildAssistantToolInvokeAction(descriptor)
-    if (options?.signal?.aborted)
-      throw options.signal.reason || new Error('Tool invocation cancelled.')
     const execution = await this.executeToolInvokeAction(
       invokeAction,
       descriptor,
       { ...request, signal: options?.signal ?? request.signal },
-      options?.allowedToolNames
+      options?.allowedToolNames,
+      managed
     )
     return execution.result
   }
-  async run(request: AssistantExecutionRequest): Promise<AssistantExecutionResult> {
-    const executionRunId = request.req.resumeFromRunId || request.runId
+  async run(request: AssistantExecutionRequest, managed?: ManagedRuntimeExecution): Promise<AssistantExecutionResult> {
+    this.#assertManaged(managed)
+    const executionRunId = request.req.resumeFromRunId
+      ? await resolveAssistantToolReplayRunId(request.req.resumeFromRunId, request.route, (id) =>
+          request.sessionStore.getRun(id)
+        )
+      : request.runId
     const startedAt = Date.now()
     const executionMetadata = buildExecutionMetadata(request)
     const toolInvocation = parseToolInvocation(request.req.text)
@@ -651,7 +955,8 @@ export class AssistantExecutionAdapter {
           requestedAt: startedAt
         },
         request,
-        request.req.execution?.allowedToolNames
+        request.req.execution?.allowedToolNames,
+        managed
       )
       const toolResult = toolExecution.action
 
@@ -713,8 +1018,6 @@ export class AssistantExecutionAdapter {
     })
     const reusableContextPrompt = buildAssistantReusableContextPrompt(reusableContextPack)
     const systemPrompt = [request.systemPrompt, reusableContextPrompt].filter(Boolean).join('\n\n')
-    await request.cooperativeExecution?.checkpoint('llm-inference')
-    const leaveLlm = request.cooperativeExecution?.enter('llm-inference')
     const executionPolicy = request.req.execution ?? {}
     // Every route-scoped assistant turn gets the two read-only web tools by
     // default. An explicit allowlist (including []) remains authoritative and
@@ -778,48 +1081,99 @@ export class AssistantExecutionAdapter {
               {
                 appId: 'assistant-runtime',
                 source: 'assistant-runtime',
-                toolNames: this.listTools(effectiveAllowedToolNames).map((tool) => tool.name)
+                toolNames: this.listTools(effectiveAllowedToolNames, request.toolProvider).map(
+                  (tool) => tool.name
+                )
               }
             ]
           }
 
-    const chatOptions = {
-      signal: request.signal,
-      runId: executionRunId,
-      executeTool: (invocation: {
-        toolName: string
-        args: Record<string, unknown>
-        runId: string
-        toolCallId: string
-        signal?: AbortSignal
-      }) =>
-        this.callTool(invocation.toolName, invocation.args, request, {
-          allowedToolNames: effectiveAllowedToolNames,
-          signal: invocation.signal,
-          runId: invocation.runId,
-          toolCallId: invocation.toolCallId
+    const reply = await withCooperativeOperation(
+      request.cooperativeExecution,
+      'llm-inference',
+      request.signal,
+      async children => {
+        this.#assertManaged(managed)
+        // One immutable gate binding per chat invocation. A captured executeTool
+        // must never recover the live turn/root through either request path.
+        const childRequest = Object.freeze({
+          ...request,
+          req: Object.freeze({ ...request.req, cooperativeExecution: children }),
+          cooperativeExecution: children
         })
-    }
-    let reply
-    try {
-      reply = await this.chatService.chat(
-        {
-          messages: request.messages,
-          imageHistoryPolicy: 'all',
-          route: request.route,
-          ...(skillRuntime ? { skillRuntime } : {}),
-          ...(request.profileId ? { profileId: request.profileId } : {}),
-          ...(request.maxOutputTokens === undefined
-            ? {}
-            : { maxOutputTokens: request.maxOutputTokens }),
-          ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
-          ...(systemPrompt ? { systemPrompt } : {})
-        },
-        chatOptions
-      )
-    } finally {
-      leaveLlm?.()
-    }
+        const managedRealChat = isManagedRealChatService(this.chatService)
+        const chatOptions = {
+          ...(request.toolProvider || managedRealChat
+            ? {
+                additionalToolDefinitions: this.listTools(
+                  effectiveAllowedToolNames,
+                  request.toolProvider
+                )
+              }
+            : {}),
+          signal: request.signal,
+          runId: executionRunId,
+          executeTool: (invocation: {
+            toolName: string
+            args: Record<string, unknown>
+            runId: string
+            toolCallId: string
+            signal?: AbortSignal
+          }) => {
+            // This callback belongs to this exact chat, so its local signal may
+            // narrow but must not replace the chat's cancellation after dispatch.
+            // Standalone callTool keeps its existing explicit override semantics.
+            const signal = childRequest.signal && invocation.signal &&
+              childRequest.signal !== invocation.signal
+              ? AbortSignal.any([childRequest.signal, invocation.signal])
+              : invocation.signal ?? childRequest.signal
+            return this.callTool(invocation.toolName, invocation.args, childRequest, {
+              allowedToolNames: effectiveAllowedToolNames,
+              signal,
+              runId: invocation.runId,
+              toolCallId: invocation.toolCallId
+            }, managed)
+          }
+        }
+        // Catalog callbacks may revoke the owner/epoch. Check again immediately
+        // before the actual scripted chat dispatch, not only before catalog reads.
+        this.#assertManaged(managed)
+        if (managedRealChat) {
+          if (!managed) throw Error('Managed real-chat requires exact executor binding.')
+          return invokeManagedRealChat(this.chatService, {
+            messages: request.messages,
+            route: request.route,
+            skillRuntime: { bindings: skillRuntime.bindings },
+            ...(request.profileId ? { profileId: request.profileId } : {}),
+            ...(request.maxOutputTokens === undefined ? {} : { maxOutputTokens: request.maxOutputTokens }),
+            ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+            ...(systemPrompt ? { systemPrompt } : {})
+          }, chatOptions, {
+            config: request.config,
+            assertCurrent: () => this.#assertManaged(managed),
+            retainRawWork: createProviderRawWorkRetainer(children, request.signal, () => this.#assertManaged(managed))
+          })
+        }
+        return this.chatService.chat(
+          {
+            messages: request.messages,
+            imageHistoryPolicy: 'all',
+            route: request.route,
+            ...(skillRuntime ? { skillRuntime } : {}),
+            ...(request.profileId ? { profileId: request.profileId } : {}),
+            ...(request.maxOutputTokens === undefined
+              ? {}
+              : { maxOutputTokens: request.maxOutputTokens }),
+            ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+            ...(systemPrompt ? { systemPrompt } : {})
+          },
+          chatOptions
+        )
+      }
+    )
+    // A scripted chat may catch executeTool failures. It cannot turn a locally
+    // blocked/unknown recording lease into a successful runtime result.
+    managed?.coordinator.assertReturned(managed.runtime, managed.lease)
 
     const createdAt = Date.now()
     const attachments = [...(reply.attachments || [])]

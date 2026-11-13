@@ -1,10 +1,14 @@
-import type { BrowserWindow, RenderProcessGoneDetails } from 'electron'
+import { dialog, type BrowserWindow, type RenderProcessGoneDetails } from 'electron'
+import { performance } from 'node:perf_hooks'
 
 type RendererDiagnosticsOptions = {
   recoverRenderer?: (window: BrowserWindow, details: RenderProcessGoneDetails) => void
+  monotonicNow?: () => number
 }
 
 const RECOVERABLE_RENDERER_GONE_REASONS = new Set(['oom', 'crashed'])
+const RECOVERY_WINDOW_MS = 60_000
+const MAX_AUTOMATIC_RECOVERIES = 3
 
 export function shouldRecoverRendererProcess(details: RenderProcessGoneDetails): boolean {
   return RECOVERABLE_RENDERER_GONE_REASONS.has(details.reason)
@@ -12,15 +16,12 @@ export function shouldRecoverRendererProcess(details: RenderProcessGoneDetails):
 
 function reloadRenderer(window: BrowserWindow, details: RenderProcessGoneDetails): void {
   if (window.isDestroyed()) {
-    console.warn('[App] Renderer recovery skipped because the window is already destroyed', details)
+    console.warn('[App] Renderer recovery skipped because the window is already destroyed')
     return
   }
 
   if (window.webContents.isDestroyed()) {
-    console.warn(
-      '[App] Renderer recovery skipped because webContents is already destroyed',
-      details
-    )
+    console.warn('[App] Renderer recovery skipped because webContents is already destroyed')
     return
   }
 
@@ -31,8 +32,8 @@ function reloadRenderer(window: BrowserWindow, details: RenderProcessGoneDetails
 
   try {
     window.webContents.reload()
-  } catch (error) {
-    console.error('[App] Renderer recovery reload failed', error)
+  } catch {
+    console.error('[App] Renderer recovery reload failed')
   }
 }
 
@@ -41,7 +42,10 @@ export function handleRendererProcessGone(
   details: RenderProcessGoneDetails,
   options: RendererDiagnosticsOptions = {}
 ): void {
-  console.error('[App] Renderer process gone', details)
+  console.error('[App] Renderer process gone', {
+    reason: details.reason,
+    exitCode: details.exitCode
+  })
 
   if (!shouldRecoverRendererProcess(details)) {
     return
@@ -55,7 +59,65 @@ export function attachRendererDiagnostics(
   window: BrowserWindow,
   options: RendererDiagnosticsOptions = {}
 ): void {
-  let hasAttemptedRendererRecovery = false
+  const now = options.monotonicNow ?? (() => performance.now())
+  const recoverRenderer = options.recoverRenderer ?? reloadRenderer
+  let lastObservedTime = 0
+  let automaticRecoveryTimes: number[] = []
+  let recoveryPromptPending = false
+
+  const canUseWindow = () => !window.isDestroyed() && !window.webContents.isDestroyed()
+  const promptForManualRecovery = (details: RenderProcessGoneDetails) => {
+    if (recoveryPromptPending || !canUseWindow()) return
+    recoveryPromptPending = true
+    try {
+      void dialog
+        .showMessageBox(window, {
+          type: 'error',
+          title: '窗口恢复',
+          message: '窗口多次意外退出，自动恢复已暂停。',
+          detail: '未保存的更改可能无法恢复。是否尝试重新加载窗口？',
+          buttons: ['重新加载', '取消'],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true
+        })
+        .then(({ response }) => {
+          if (response === 0 && canUseWindow()) recoverRenderer(window, details)
+        })
+        .catch(() => {
+          console.error('[App] Failed to show renderer recovery prompt')
+        })
+        .finally(() => {
+          recoveryPromptPending = false
+        })
+    } catch {
+      recoveryPromptPending = false
+      console.error('[App] Failed to show renderer recovery prompt')
+    }
+  }
+
+  const recoverWithinBudget = (_window: BrowserWindow, details: RenderProcessGoneDetails) => {
+    if (!canUseWindow() || recoveryPromptPending) return
+    const observedTime = now()
+    // A faulty/backward clock must not make previous attempts disappear early.
+    lastObservedTime = Math.max(
+      lastObservedTime,
+      Number.isFinite(observedTime) ? observedTime : lastObservedTime
+    )
+    automaticRecoveryTimes = automaticRecoveryTimes.filter(
+      (attemptTime) => lastObservedTime - attemptTime < RECOVERY_WINDOW_MS
+    )
+    if (automaticRecoveryTimes.length >= MAX_AUTOMATIC_RECOVERIES) {
+      console.error('[App] Renderer automatic recovery limit reached', {
+        reason: details.reason,
+        exitCode: details.exitCode
+      })
+      promptForManualRecovery(details)
+      return
+    }
+    automaticRecoveryTimes.push(lastObservedTime)
+    recoverRenderer(window, details)
+  }
 
   window.webContents.on('did-start-loading', () => {
     console.info('[App] Renderer started loading')
@@ -67,28 +129,16 @@ export function attachRendererDiagnostics(
 
   window.webContents.on(
     'did-fail-load',
-    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    (_event, errorCode, _errorDescription, _validatedURL, isMainFrame) => {
       console.error('[App] Renderer failed to load', {
         errorCode,
-        errorDescription,
-        validatedURL,
         isMainFrame
       })
     }
   )
 
   window.webContents.on('render-process-gone', (_event, details) => {
-    if (shouldRecoverRendererProcess(details)) {
-      if (hasAttemptedRendererRecovery) {
-        console.error(
-          '[App] Renderer recovery skipped because an automatic recovery was already attempted',
-          details
-        )
-        return
-      }
-      hasAttemptedRendererRecovery = true
-    }
-    handleRendererProcessGone(window, details, options)
+    handleRendererProcessGone(window, details, { recoverRenderer: recoverWithinBudget })
   })
 
   window.webContents.on('unresponsive', () => {

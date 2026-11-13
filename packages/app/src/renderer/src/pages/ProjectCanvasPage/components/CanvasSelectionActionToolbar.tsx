@@ -36,7 +36,7 @@ type CanvasSelectionActionToolbarProps = {
   stageScale: number
   groupCreateLabel?: string
   t: CanvasTranslate
-  onDragSelectedItems: (items: CanvasItem[], dataTransfer: DataTransfer) => void
+  onDragSelectedItems: (items: CanvasItem[], dataTransfer: DataTransfer) => boolean | void
   onCopySelectedItems: (items: CanvasItem[]) => void
   onDownloadSelectedItems: (items: CanvasItem[], fileName: string) => void
   onSendSelectedItems: (anchor: HTMLElement, items: CanvasItem[]) => void
@@ -165,7 +165,9 @@ export default function CanvasSelectionActionToolbar({
         title={DRAG_TOOLTIP}
         draggable
         onDragStart={(event) => {
-          onDragSelectedItems(toolbarItems, event.dataTransfer)
+          if (onDragSelectedItems(toolbarItems, event.dataTransfer) === false) {
+            event.preventDefault()
+          }
         }}
         icon={<DragIndicatorIcon fontSize="small" />}
       />

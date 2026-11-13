@@ -30,12 +30,13 @@ export interface PersistedLayoutState {
 const SYSTEM_TAB_ROUTE_PATHS: Record<string, string> = {
   'tab-home': '/',
   'tab-settings': '/settings',
+  'tab-agent-management': '/agent-management',
   'tab-design': '/qappdesign',
   'tab-model': '/model'
 }
 
-const REMOVED_SYSTEM_TAB_IDS = new Set<string>()
-const REMOVED_SYSTEM_ROUTE_PATHS = new Set(['/automatic', '/workspace'])
+const REMOVED_SYSTEM_TAB_IDS = new Set<string>(['tab-agent-studio'])
+const REMOVED_SYSTEM_ROUTE_PATHS = new Set(['/automatic', '/workspace', '/agent-studio'])
 
 export function resolveTabRoutePath(
   tab: Pick<TabItem, 'id'> & Partial<Pick<TabItem, 'routePath'>>

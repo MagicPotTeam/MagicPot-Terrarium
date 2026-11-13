@@ -3,6 +3,7 @@ import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import { createIpcClient } from '@shared/api/createClient/createIpcClient'
 import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
+import { normalizeChatToolHistory } from './chatMessageUtils'
 import { requestChatCompletionStream } from './chatRequestUtils'
 
 vi.mock('electron', () => ({ ipcRenderer: { postMessage: vi.fn(), invoke: vi.fn() } }))
@@ -35,6 +36,48 @@ afterEach(() => {
 describe('IPC stream terminal content', () => {
   const delta: LLMChatStreamResp = { type: 'text-delta', delta: 'Keep this text', done: false }
   const done: LLMChatStreamResp = { type: 'done', delta: '', done: true, finishReason: 'stop' }
+
+  it('passes team member identity to the streaming IPC', async () => {
+    const chatStream = vi.fn(
+      async (_request: unknown, response: { onData: (chunk: LLMChatStreamResp) => void }) => {
+        response.onData({ ...done, content: 'fixture' })
+      }
+    )
+    vi.stubGlobal('api', { svcLLMProxy: { chatStream } })
+    const teamMember = { scope: 'scope', thread: 'thread', lead: 'lead', member: 'writer' }
+    const messages = [{ role: 'user' as const, content: 'fixture' }]
+    await requestChatCompletionStream({ config, messages, teamMember, onEvent: vi.fn() })
+    await requestChatCompletionStream({ config, messages, onEvent: vi.fn() })
+    expect(chatStream.mock.calls[0][0]).toMatchObject({ teamMember })
+    expect(chatStream.mock.calls[1][0]).not.toHaveProperty('teamMember')
+  })
+
+  it('retains failed tool output and rollback data through the existing stream error checkpoint', async () => {
+    const rollback = { attempted: true, succeeded: false, restoredPaths: [], failedPaths: ['a.txt'] }
+    const receipt = { error: { message: 'The second commit failed.', code: 'MAGIC_AGENT_FILES_MUTATION' }, rollback }
+    const history = [{ runId: 'owned-run', toolCallId: 'owned-call', toolName: 'files.multi-edit', args: { edits: [] }, status: 'failed', content: JSON.stringify(receipt), metadata: receipt, error: receipt.error.message }]
+    const metadata = { toolHistory: history, toolResult: { content: JSON.stringify(receipt), metadata: receipt } }
+    const result = await runStream([
+      { type: 'tool-status', delta: '', done: false, toolStatus: { runId: 'owned-run', toolCallId: 'owned-call', toolName: 'files.multi-edit', status: 'failed' }, metadata },
+      { type: 'error', delta: '', done: false, error: receipt.error.message, finishReason: 'error', metadata },
+      { type: 'done', delta: '', done: true, error: receipt.error.message, finishReason: 'error', metadata }
+    ]).catch((error: unknown) => error)
+    expect(result).toBeInstanceOf(Error)
+    expect(result).toMatchObject({ message: receipt.error.message, finishReason: 'error', metadata, partialResult: { finishReason: 'error', metadata } })
+    expect(normalizeChatToolHistory((result as { metadata: typeof metadata }).metadata.toolHistory)).toEqual(history)
+  })
+
+  it('carries image_gen managed references through the existing renderer stream contract', async () => {
+    const attachment = { type: 'image' as const, url: 'local-media:///owned/image.png', mimeType: 'image/png', fileName: 'generated-1.png', media: { version: 1 as const, kind: 'managed' as const, relativePath: 'user-output/scope/images/ab/image.png', sha256: 'a'.repeat(64), sizeBytes: 70, mimeType: 'image/png' } }
+    const metadata = { toolHistory: [{ runId: 'image-run', toolCallId: 'image-call', toolName: 'image_gen', args: { prompt: 'fixture', transparent_background: true }, status: 'completed', content: JSON.stringify({ completed: true, image_count: 1, edited_images: 0, images: [attachment] }) }] }
+    const result = await runStream([
+      { type: 'attachment', delta: '', done: false, attachment },
+      { ...done, content: 'Generated image.', attachments: [attachment], metadata }
+    ])
+    expect(result).toMatchObject({ response: 'Generated image.', result: { content: 'Generated image.', attachments: [attachment], metadata } })
+    expect(result.result.attachments).toHaveLength(1)
+    expect(normalizeChatToolHistory(result.result.metadata?.toolHistory)).toMatchObject(metadata.toolHistory)
+  })
 
   it('retains accumulated deltas when a terminal frame omits both content fields', async () => {
     await expect(runStream([delta, done])).resolves.toMatchObject({

@@ -1,4 +1,14 @@
+import type { AgentTeamMessageClaim, AgentTeamMessageIntent, AgentTeamMessageQueueScope } from './agentTeamMessage'
+import type { AgentThreadNotes, AgentArchiveQuery, ResolveAgentArchiveQueryReq } from './agentThreadMemory'
+import type { AgentGoalScope, AgentGoalScopeReq, AgentGoalShareReq, AgentGoalShare, AgentGoalMutationReq, AgentGoalMutationResult, AgentGoalView } from './agentThreadGoal'
+import type { AgentSkillScope, AgentSkillScopeReq, AgentSkillPreferenceReq, AgentSkillSessionList, AgentSkillPreferenceResult, AgentSkillShowReq, AgentSkillUserDetail } from './agentThreadSkillSession'
+import type { AgentHtmlApp, AgentHtmlReq, AgentHtmlStorageStatus, AgentHtmlSaved, AgentHtmlSaveReq, AgentHtmlSavedReq, AgentHtmlRestoreReq, AgentHtmlScope, AgentHtmlScopeReq } from './agentThreadHtml'
+import type { AgentSideStartReq, AgentSideContinueReq, AgentSideReq, AgentSideMutationReq, AgentSideSummary, AgentSideOpen } from './agentThreadSide'
+import type { AgentProcessJob, AgentProcessJobReq, AgentProcessReadReq, AgentProcessReadResult } from './agentThreadProcessJob'
+import type { AgentThreadJob, AgentThreadJobReq, AgentThreadJobReadReq } from './agentThreadJob'
 import type { LLMRetryStatus } from '../llm/modelCapacityRetry'
+import type { AgentThreadInteraction, AgentThreadInteractionScope, ResolveAgentThreadInteractionReq } from './agentThreadInteraction'
+import type { ManagedFirstRunPaneScopeReq } from './agentThreadManagedFirstRun'
 // LLM 代理服务 API 定义
 // 用于 AIEngine 实例之间的 LLM 请求转发
 
@@ -151,7 +161,14 @@ export type LLMProfileScope = 'agent' | 'qapp'
 /**
  * 聊天请求
  */
+export type LLMTeamIdentity = { scope: string; thread: string; lead: string }
+export type LLMTeamMember = LLMTeamIdentity & { member: string }
+
 export type LLMChatReq = {
+  /** Functional End check for controlled renderer; not an IPC authorization identity. */
+  teamMember?: LLMTeamMember
+  /** Controlled renderer reports a member-message hop (1 or 2); not an authorization boundary. */
+  teamMessageHop?: 1 | 2
   /** Request-scoped cancellation ownership; never forwarded as provider authority. */
   cancellationId?: string
   /** Main-issued identifier used to correlate Desktop, Bridge and Provider stages. */
@@ -171,6 +188,8 @@ export type LLMChatReq = {
   route?: AgentRouteLike
   /** 指定使用的模型配置 ID，如果不指定则使用服务端默认配置 */
   profileId?: string
+  /** Main-issued one-use data-sharing token, never provider-facing authority. */
+  goalProgressToken?: string
   /** Opaque main-issued revision for explicit consent to a model configuration snapshot. */
   expectedProfileRevision?: string
   /** Explicit comparison transport; local is for the authenticated receiving proxy, never recursive. */
@@ -233,6 +252,8 @@ export type LLMChatStreamResp = {
   ocrResult?: OCRResult
   finishReason?: 'stop' | 'length' | 'tool_call' | 'cancelled' | 'error'
   error?: string
+  /** Reserved code for a helper-branded MAIN error; this does not prove that this request exceeded its limit. */
+  errorCode?: 'PROVIDER_JSON_BUDGET_EXCEEDED'
   /** Sanitized diagnostic HTTP status from the main process, when available. */
   status?: number
   /** Bounded/redacted diagnostic body from the main process; never raw upstream content. */
@@ -403,6 +424,8 @@ export type LLMProxySvc = {
   /**
    * 发送聊天请求（非流式）
    */
+  endTeam(req: LLMTeamIdentity): Promise<{ ended: true }>
+
   chat(req: LLMChatReq, options?: LLMChatOptions): Promise<LLMChatResp>
 
   /**
@@ -435,6 +458,53 @@ export type LLMProxySvc = {
     resp: ServerStreaming<LLMExternalAgentStreamResp>
   ): Promise<void>
 
+  /** Trusted local desktop only. Claim means removed from the temporary queue, not delivered. */
+  listAgentTeamMessages(req: AgentTeamMessageQueueScope): Promise<{ intents: AgentTeamMessageIntent[] }>
+  claimAgentTeamMessage(req: AgentTeamMessageClaim): Promise<{ intent?: AgentTeamMessageIntent }>
+  /** Conversation feedback, never operation approval. */
+  getAgentNotes(req: AgentThreadInteractionScope): Promise<AgentThreadNotes>
+  listAgentArchiveQueries(req: AgentThreadInteractionScope): Promise<{ queries: AgentArchiveQuery[] }>
+  resolveAgentArchiveQuery(req: ResolveAgentArchiveQueryReq): Promise<{ ok: true }>
+  listAgentInteractions(req: AgentThreadInteractionScope): Promise<{ interactions: AgentThreadInteraction[] }>
+  resolveAgentInteraction(req: ResolveAgentThreadInteractionReq): Promise<void>
+
+  prepareAgentGoalProgress(req: AgentGoalShareReq): Promise<AgentGoalShare>
+  /** Retires an unclaimed share only; already-claimed does not cancel provider work. */
+  retireAgentGoalProgress(req: AgentGoalScope & { token: string }): Promise<{ status: 'retired' | 'already-claimed' | 'unknown' }>
+  agentGoalScopeRevision(req: AgentThreadInteractionScope): Promise<{ revision: number }>
+  setAgentGoalScope(req: AgentGoalScopeReq): Promise<{ documentToken?: string }>
+  listAgentGoals(req: AgentGoalScope): Promise<AgentGoalView>
+  mutateAgentGoal(req: AgentGoalMutationReq): Promise<AgentGoalMutationResult>
+  /** Original-pane identity DATA only; no managed execution/approval entry is exposed. */
+  managedFirstRunPaneRevision(req: AgentThreadInteractionScope): Promise<{ revision: number }>
+  setManagedFirstRunPaneScope(req: ManagedFirstRunPaneScopeReq): Promise<{ documentToken?: string }>
+  agentSkillScopeRevision(req: AgentThreadInteractionScope): Promise<{ revision: number }>
+  setAgentSkillScope(req: AgentSkillScopeReq): Promise<{ documentToken?: string }>
+  listAgentSessionSkills(req: AgentSkillScope): Promise<AgentSkillSessionList>
+  showAgentSessionSkill(req: AgentSkillShowReq): Promise<AgentSkillUserDetail>
+  setAgentSkillPreference(req: AgentSkillPreferenceReq): Promise<AgentSkillPreferenceResult>
+  setAgentHtmlScope(req: AgentHtmlScopeReq): Promise<{ documentToken?: string }>
+  saveAgentHtmlApp(req: AgentHtmlSaveReq): Promise<{ app: AgentHtmlApp; saved: AgentHtmlSaved }>
+  listSavedAgentHtmlApps(req: AgentHtmlScope): Promise<{ apps: AgentHtmlSaved[] }>
+  restoreAgentHtmlApp(req: AgentHtmlRestoreReq): Promise<{ app: AgentHtmlApp }>
+  deleteSavedAgentHtmlApp(req: AgentHtmlSavedReq): Promise<void>
+  agentHtmlStorageStatus(req: AgentHtmlScope): Promise<AgentHtmlStorageStatus>
+  initializeAgentHtmlStorage(req: AgentHtmlScope): Promise<AgentHtmlStorageStatus>
+  listAgentHtmlApps(req: AgentThreadInteractionScope): Promise<{ apps: AgentHtmlApp[] }>
+  openAgentHtmlApp(req: AgentHtmlReq): Promise<{ app: AgentHtmlApp }>
+  closeAgentHtmlApp(req: AgentHtmlReq): Promise<{ app: AgentHtmlApp }>
+  listAgentSides(req: AgentThreadInteractionScope): Promise<{ branches: AgentSideSummary[] }>
+  openAgentSide(req: AgentSideReq): Promise<AgentSideOpen>
+  startAgentSide(req: AgentSideStartReq): Promise<{ branch: AgentSideSummary }>
+  continueAgentSide(req: AgentSideContinueReq): Promise<{ branch: AgentSideSummary }>
+  stopAgentSide(req: AgentSideMutationReq): Promise<{ branch: AgentSideSummary }>
+  deleteAgentSide(req: AgentSideMutationReq): Promise<void>
+  listAgentProcesses(req: AgentThreadInteractionScope): Promise<{ jobs: AgentProcessJob[] }>
+  readAgentProcess(req: AgentProcessReadReq): Promise<AgentProcessReadResult>
+  stopAgentProcess(req: AgentProcessJobReq): Promise<{ job: AgentProcessJob }>
+  listAgentJobs(req: AgentThreadInteractionScope): Promise<{ jobs: AgentThreadJob[] }>
+  readAgentJob(req: AgentThreadJobReadReq): Promise<{ job: AgentThreadJob; text: string; nextOffset: number; totalCharacters: number; untrustedData: boolean }>
+  stopAgentJob(req: AgentThreadJobReq): Promise<{ job: AgentThreadJob }>
   cancelConversation(req: LLMCancelConversationReq): Promise<LLMCancelConversationResp>
 
   uploadHy3DModel(req: LLMUploadHy3DModelReq): Promise<LLMUploadHy3DModelResp>
@@ -445,8 +515,10 @@ export type LLMProxySvc = {
 }
 
 export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
+  endTeam: { type: 'unary' },
   chat: {
-    type: 'unary'
+    type: 'unary',
+    ipcResult: 'service-error'
   },
   chatStream: {
     type: 'serverStreaming'
@@ -463,6 +535,48 @@ export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
   externalAgentStream: {
     type: 'serverStreaming'
   },
+  prepareAgentGoalProgress: { type: 'unary' },
+  retireAgentGoalProgress: { type: 'unary' },
+  agentGoalScopeRevision: { type: 'unary' },
+  setAgentGoalScope: { type: 'unary' },
+  listAgentGoals: { type: 'unary' },
+  mutateAgentGoal: { type: 'unary' },
+  managedFirstRunPaneRevision: { type: 'unary' },
+  setManagedFirstRunPaneScope: { type: 'unary' },
+  agentSkillScopeRevision: { type: 'unary' },
+  setAgentSkillScope: { type: 'unary' },
+  listAgentSessionSkills: { type: 'unary' },
+  showAgentSessionSkill: { type: 'unary' },
+  setAgentSkillPreference: { type: 'unary' },
+  setAgentHtmlScope: { type: 'unary' },
+  saveAgentHtmlApp: { type: 'unary' },
+  listSavedAgentHtmlApps: { type: 'unary' },
+  restoreAgentHtmlApp: { type: 'unary' },
+  deleteSavedAgentHtmlApp: { type: 'unary' },
+  agentHtmlStorageStatus: { type: 'unary' },
+  initializeAgentHtmlStorage: { type: 'unary' },
+  listAgentHtmlApps: { type: 'unary' },
+  openAgentHtmlApp: { type: 'unary' },
+  closeAgentHtmlApp: { type: 'unary' },
+  listAgentSides: { type: 'unary' },
+  openAgentSide: { type: 'unary' },
+  startAgentSide: { type: 'unary' },
+  continueAgentSide: { type: 'unary' },
+  stopAgentSide: { type: 'unary' },
+  deleteAgentSide: { type: 'unary' },
+  listAgentProcesses: { type: 'unary' },
+  readAgentProcess: { type: 'unary' },
+  stopAgentProcess: { type: 'unary' },
+  listAgentJobs: { type: 'unary' },
+  readAgentJob: { type: 'unary' },
+  stopAgentJob: { type: 'unary' },
+  listAgentTeamMessages: { type: 'unary' },
+  claimAgentTeamMessage: { type: 'unary' },
+  getAgentNotes: { type: 'unary' },
+  listAgentArchiveQueries: { type: 'unary' },
+  resolveAgentArchiveQuery: { type: 'unary' },
+  listAgentInteractions: { type: 'unary' },
+  resolveAgentInteraction: { type: 'unary' },
   cancelConversation: {
     type: 'unary'
   },

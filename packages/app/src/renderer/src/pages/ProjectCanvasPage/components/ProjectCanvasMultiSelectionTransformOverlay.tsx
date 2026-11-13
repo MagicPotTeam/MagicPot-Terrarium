@@ -281,7 +281,8 @@ function buildSelectionPreviewTransform(
 }
 
 function shouldBroadcastSelectionPreview(item: CanvasItem) {
-  return item.type !== 'image' && item.type !== 'file'
+  if (item.type === 'image') return typeof item.teamImageLabel === 'string' && item.teamImageLabel.trim().length > 0
+  return item.type !== 'file'
 }
 
 const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
@@ -584,19 +585,20 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
       const session = sessionRef.current
       const nextBounds = draftBoundsRef.current
 
-      sessionRef.current = null
       draftBoundsRef.current = null
       detachWindowPointerListeners()
       clearPointerCanvasViewportRect()
       flushPreviewBoundsChange()
 
       if (!session || !nextBounds || !baseBounds) {
+        sessionRef.current = null
         emitPreviewBoundsChange(null)
         clearItemPreviewTransforms(true)
         return
       }
 
       if (event.pointerId !== session.pointerId) {
+        sessionRef.current = null
         emitPreviewBoundsChange(null)
         clearItemPreviewTransforms(true)
         return
@@ -606,41 +608,64 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
         const dx = nextBounds.x - session.startBounds.x
         const dy = nextBounds.y - session.startBounds.y
         if (Math.abs(dx) <= 0.001 && Math.abs(dy) <= 0.001) {
+          sessionRef.current = null
           emitPreviewBoundsChange(null)
           clearItemPreviewTransforms(true)
           return
         }
 
-        onTransformEnd(
-          items.map((item) => ({
-            id: item.id,
-            attrs: buildSelectionDragUpdate(item, { dx, dy })
-          }))
-        )
-        emitPreviewBoundsChange(null)
-        clearItemPreviewTransforms(false)
+        broadcastPreviewItems.forEach((item) => {
+          cancelCanvasSync(item.id)
+          window.dispatchEvent(new CustomEvent(`canvas-sync-${item.id}`, { detail: buildSelectionPreviewTransform(item, session, nextBounds) }))
+        })
+        let committed = false
+        try {
+          onTransformEnd(
+            items.map((item) => ({
+              id: item.id,
+              attrs: buildSelectionDragUpdate(item, { dx, dy })
+            }))
+          )
+          committed = true
+        } finally {
+          sessionRef.current = null
+          emitPreviewBoundsChange(null)
+          clearItemPreviewTransforms(!committed)
+        }
         return
       }
 
       const widthChanged = Math.abs(nextBounds.width - session.startBounds.width) > 0.001
       const heightChanged = Math.abs(nextBounds.height - session.startBounds.height) > 0.001
       if (!widthChanged && !heightChanged) {
+        sessionRef.current = null
         emitPreviewBoundsChange(null)
         clearItemPreviewTransforms(true)
         return
       }
 
-      onTransformEnd(
-        items.map((item) => ({
-          id: item.id,
-          attrs: buildSelectionTransformUpdate(item, session.startBounds, nextBounds)
-        }))
-      )
-      emitPreviewBoundsChange(null)
-      clearItemPreviewTransforms(false)
+      broadcastPreviewItems.forEach((item) => {
+        cancelCanvasSync(item.id)
+        window.dispatchEvent(new CustomEvent(`canvas-sync-${item.id}`, { detail: buildSelectionPreviewTransform(item, session, nextBounds) }))
+      })
+      let committed = false
+      try {
+        onTransformEnd(
+          items.map((item) => ({
+            id: item.id,
+            attrs: buildSelectionTransformUpdate(item, session.startBounds, nextBounds)
+          }))
+        )
+        committed = true
+      } finally {
+        sessionRef.current = null
+        emitPreviewBoundsChange(null)
+        clearItemPreviewTransforms(!committed)
+      }
     },
     [
       baseBounds,
+      broadcastPreviewItems,
       clearItemPreviewTransforms,
       clearPointerCanvasViewportRect,
       detachWindowPointerListeners,

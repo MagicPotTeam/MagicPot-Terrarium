@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs/promises'
+import type { BufferEncodingOption, ObjectEncodingOptions, PathLike } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import { createBinaryChunkTransport } from '@shared/binaryChunkProtocol'
@@ -7,6 +8,7 @@ import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/
 import { cliFromProfile } from '@shared/llm'
 import { validateImageRequestImageDescriptors } from '@shared/llm/imageRequestContract'
 import * as configModule from '../config/config'
+import { AssistantToolResultError } from '../assistantRuntime/toolFailure'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 import { tripoMainLlmProxyExtension } from '../extensions/tripoMainExtension'
@@ -54,6 +56,7 @@ const {
   browserWindowFromWebContentsMock: vi.fn()
 }))
 
+vi.mock('../config/buildEnv', () => ({ getBuildEnv: () => ({ pathMap: { data: process.cwd() } }) }))
 vi.mock(import('../config/config'), () => ({
   getConfig: vi.fn(),
   saveConfig: vi.fn()
@@ -112,8 +115,10 @@ vi.mock(import('../assistantRuntime/runtime'), () => ({
   )
 }))
 
+const threadMcpManagerMock = vi.hoisted(() => ({ listPinnedTools: vi.fn(), listConnections: vi.fn(), callPinnedTool: vi.fn(), connectionIdentity: vi.fn(), isConnectionSuppressed: vi.fn(), controlConnection: vi.fn() }))
 vi.mock(import('../mcp/runtime'), () => ({
-  syncMcpClientManager: vi.fn(async () => undefined)
+  syncMcpClientManager: vi.fn(async () => undefined),
+  getMcpClientManager: () => threadMcpManagerMock as unknown as import('../mcp/clientManager').McpClientManager
 }))
 
 // Minimal Electron surface: `net` is preserved for the fetch fallback; `webContents.fromId` and
@@ -285,6 +290,23 @@ describe('LLMProxySvcImpl', () => {
     expect(attachment).not.toHaveProperty('media')
   })
 
+  it('uses a direct native hash while assembling instead of WebCrypto for the source object', async () => {
+    const payload = Uint8Array.from([1, 2, 3, 4])
+    const transport = await createBinaryChunkTransport(payload, { mimeType: 'application/octet-stream', chunkSize: 2 })
+    const digest = vi.spyOn(crypto.subtle, 'digest').mockImplementation(async () => { throw new Error('unexpected WebCrypto digest') })
+    try {
+      const result = await materializeChunkedBinaryAttachments({ messages: [{ role: 'user', content: '', attachments: [{ type: 'file', url: '', binary: { transport: 'chunked-binary-v1', ...transport } }] }] })
+      expect(result.messages[0].attachments?.[0].url).toBe('data:application/octet-stream;base64,AQIDBA==')
+      expect(digest).not.toHaveBeenCalled()
+    } finally { digest.mockRestore() }
+  })
+
+  it('still rejects tampering with a canonical same-size chunk when native SHA-256 is used', async () => {
+    const transport = await createBinaryChunkTransport(Uint8Array.of(1, 2, 3, 4), { mimeType: 'image/png', chunkSize: 4 })
+    const chunks = [{ ...transport.chunks[0], bytesBase64: 'AQIDBQ==' }]
+    await expect(materializeChunkedBinaryAttachments({ messages: [{ role: 'user', content: '', attachments: [{ type: 'image', url: '', binary: { transport: 'chunked-binary-v1', reference: transport.reference, chunks } }] }] })).rejects.toThrow('content failed integrity validation')
+  })
+
   it('accepts out-of-order frames while preserving the assembled object', async () => {
     const transport = await createBinaryChunkTransport(Uint8Array.from([10, 11, 12, 13]), {
       mimeType: 'application/octet-stream',
@@ -389,7 +411,7 @@ describe('LLMProxySvcImpl', () => {
           }
         ]
       })
-    ).rejects.toThrow(/exceeds the 67108864 byte request limit/i)
+    ).rejects.toThrow(/chunked binary attachment exceeds the 67108864 byte limit/i)
   })
 
   it('allows main-process LLM extensions to normalize requests and provide clients', async () => {
@@ -1413,6 +1435,1034 @@ describe('LLMProxySvcImpl', () => {
     }
   )
 
+  it.each([
+    ['chat', false], ['chat', true], ['chatStream', false], ['chatStream', true]
+  ] as const)('connects creative tools to the local Agent %s loop (native=%s)', async (method, native) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const production = await import('../magicAgentRuntime/productionCreativeDependencies')
+    const { isCanvasApprovalToolInvocation } = await import('./canvasAgentTools')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'creative-project', threadId: 'pane' } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=creative-project'
+    trusted.registerMagicAgentTrustedRouteBinding(44, route, {
+      trustedUrl: url, trustedWebContents: { id: 44, isDestroyed: () => false }
+    })
+    const comfyStatus = vi.fn(async () => ({ connected: true, nodeTypeCount: 17 }))
+    const factory = vi.spyOn(production, 'createProductionCreativeToolDependencies').mockReturnValue({ comfyStatus })
+    try {
+      mockAgentProfile()
+      listToolsMock.mockReturnValue([])
+      let provider: Parameters<AssistantRuntime['callTool']>[3]
+      callToolMock.mockImplementation(async (r, name, args, options) => {
+        provider = options
+        expect(isCanvasApprovalToolInvocation(r, name)).toBe(true)
+        expect(options.allowedToolNames).toContain('comfyui.status')
+        return options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal })
+      })
+      const agentChat = vi.fn().mockImplementation(async (input) => {
+        if (agentChat.mock.calls.length === 1) {
+          if (native) {
+            const index = input.tools.findIndex((tool: { name: string }) => tool.name === 'comfyui.status')
+            expect(index).toBeGreaterThanOrEqual(0)
+            return { content: '', toolCalls: [{ id: 'creative-native', name: 'comfyui.status', wireName: `mp_tool_${index}`, arguments: '{}' }] }
+          }
+          expect(input.systemPrompt).toContain('comfyui.status')
+          return '{"toolName":"comfyui.status","args":{}}'
+        }
+        expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('nodeTypeCount')
+        return 'ComfyUI is connected.'
+      })
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat, supportsNativeTools: native } as never)
+      const request = { route, profileId: 'agent-profile', conversationId: 'creative-chat', messages: [{ role: 'user' as const, content: 'Check ComfyUI' }] }
+      const invocation = { methodName: `svcLLMProxy.${method}`, senderId: 44, frameUrl: url, senderUrl: url, isMainFrame: true }
+      const service = new LLMProxySvcImpl()
+      if (method === 'chat') {
+        const result = await service.chat(request, invocation)
+        expect(result.metadata?.toolHistory).toEqual([expect.objectContaining({ toolName: 'comfyui.status', status: 'completed' })])
+      } else {
+        const onData = vi.fn()
+        await service.chatStream(request, { onData }, invocation)
+        expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'tool-status', toolStatus: expect.objectContaining({ toolName: 'comfyui.status', status: 'completed' }) }))
+        expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'ComfyUI is connected.' }))
+      }
+      expect(comfyStatus).toHaveBeenCalledOnce()
+      expect(callToolMock).toHaveBeenCalledOnce()
+      expect(isCanvasApprovalToolInvocation(route, 'comfyui.status')).toBe(false)
+      await expect(provider!.toolProvider!.callTool('comfyui.status', {}, { route, runId: 'late' })).rejects.toThrow('request has ended')
+    } finally {
+      factory.mockRestore()
+      trusted.clearMagicAgentTrustedRouteBindingsForTest()
+    }
+  })
+
+  it.each(['chat', 'chatStream'] as const)('makes /tools and /tool use the same creative surface on %s', async (method) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const production = await import('../magicAgentRuntime/productionCreativeDependencies')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'commands-project', threadId: 'pane' } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=commands-project'
+    trusted.registerMagicAgentTrustedRouteBinding(45, route, { trustedUrl: url, trustedWebContents: { id: 45, isDestroyed: () => false } })
+    const factory = vi.spyOn(production, 'createProductionCreativeToolDependencies').mockReturnValue({ comfyStatus: async () => ({ connected: true }) })
+    try {
+      mockConfig({})
+      listToolsMock.mockReturnValue([])
+      const invoke = { methodName: `svcLLMProxy.${method}`, senderId: 45, frameUrl: url, senderUrl: url, isMainFrame: true }
+      const service = new LLMProxySvcImpl()
+      const send = async (content: string) => {
+        const request = { route, conversationId: 'commands-chat', messages: [{ role: 'user' as const, content }] }
+        if (method === 'chat') return (await service.chat(request, invoke)).content
+        const onData = vi.fn()
+        await service.chatStream(request, { onData }, invoke)
+        return onData.mock.calls.find(([event]) => event.type === 'done')?.[0].content
+      }
+      expect(await send('/tools')).toContain('comfyui.status')
+      expect(await send('/tools comfyui.status')).toContain('comfyui.status')
+      callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: 'explicit', signal: options.signal }))
+      expect(await send('/tool comfyui.status {}')).toContain('"connected":true')
+      expect(callToolMock).toHaveBeenCalledWith(expect.objectContaining(route), 'comfyui.status', {}, expect.objectContaining({ signal: expect.any(AbortSignal), toolProvider: expect.any(Object) }))
+      expect(cliFromProfile).not.toHaveBeenCalled()
+    } finally {
+      factory.mockRestore()
+      trusted.clearMagicAgentTrustedRouteBindingsForTest()
+    }
+  })
+
+  it.each([
+    ['chat', false], ['chat', true], ['chatStream', false], ['chatStream', true]
+  ] as const)('waits for local feedback and continues the same %s turn (native=%s)', async (method, native) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'feedback-project', threadId: 'pane' } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=feedback-project'
+    const sender = Object.assign(new EventEmitter(), { id: 46, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(46, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender)
+    browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    const scope = { route, conversationId: 'feedback-chat' }
+    const invoke = (methodName: string) => ({ methodName: `svcLLMProxy.${methodName}`, senderId: 46, frameUrl: url, senderUrl: url, isMainFrame: true })
+    const service = new LLMProxySvcImpl()
+    try {
+      mockAgentProfile()
+      listToolsMock.mockReturnValue([])
+      callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal }))
+      const agentChat = vi.fn().mockImplementation(async (input) => {
+        const index = agentChat.mock.calls.length
+        if (index === 3) {
+          expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('Blue')
+          expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('landscape')
+          return 'Your choices have been received.'
+        }
+        const name = index === 1 ? 'ask_user' : 'show_card'
+        const args = index === 1 ? { question: 'Which colour?' } : { title: 'Choose orientation', actions: [{ id: 'landscape', label: 'Landscape' }, { id: 'portrait', label: 'Portrait' }] }
+        if (native) {
+          const toolIndex = input.tools.findIndex((tool: { name: string }) => tool.name === name)
+          expect(toolIndex).toBeGreaterThanOrEqual(0)
+          return { content: '', toolCalls: [{ id: `feedback-${index}`, name, wireName: `mp_tool_${toolIndex}`, arguments: JSON.stringify(args) }] }
+        }
+        return JSON.stringify({ toolName: name, args })
+      })
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat, supportsNativeTools: native } as never)
+      const request = { ...scope, profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Ask me before choosing' }] }
+      const onData = vi.fn()
+      const completion = method === 'chat' ? service.chat(request, invoke(method)) : service.chatStream(request, { onData }, invoke(method))
+      let firstId = ''
+      await vi.waitFor(async () => {
+        const list = await service.listAgentInteractions(scope, invoke('listAgentInteractions'))
+        expect(list.interactions[0]?.prompt.kind).toBe('ask_user')
+        firstId = list.interactions[0].id
+      })
+      expect(agentChat).toHaveBeenCalledOnce()
+      if (method === 'chat') {
+        const count = sender.listenerCount('did-start-navigation')
+        await expect(service.chat(request, invoke(method))).rejects.toMatchObject({ code: LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE })
+        expect(sender.listenerCount('did-start-navigation')).toBe(count)
+      }
+      await service.resolveAgentInteraction({ ...scope, interactionId: firstId, answer: { status: 'answered', text: 'Blue' } }, invoke('resolveAgentInteraction'))
+      let secondId = ''
+      await vi.waitFor(async () => {
+        const list = await service.listAgentInteractions(scope, invoke('listAgentInteractions'))
+        expect(list.interactions[0]?.prompt.kind).toBe('show_card')
+        secondId = list.interactions[0].id
+      })
+      await expect(service.resolveAgentInteraction({ ...scope, interactionId: firstId, answer: { status: 'dismissed' } }, invoke('resolveAgentInteraction'))).rejects.toThrow('not active')
+      await service.resolveAgentInteraction({ ...scope, interactionId: secondId, answer: { status: 'answered', actionId: 'landscape' } }, invoke('resolveAgentInteraction'))
+      const result = await completion
+      if (method === 'chat') expect(result).toMatchObject({ content: 'Your choices have been received.', metadata: { toolHistory: [expect.objectContaining({ toolName: 'ask_user', status: 'completed' }), expect.objectContaining({ toolName: 'show_card', status: 'completed' })] } })
+      else expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'Your choices have been received.' }))
+      expect(callToolMock).toHaveBeenCalledTimes(2)
+      expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      expect((await service.listAgentInteractions(scope, invoke('listAgentInteractions'))).interactions).toEqual([])
+    } finally {
+      await service.cancelConversation({ conversationId: scope.conversationId }, invoke('cancelConversation'))
+      trusted.clearMagicAgentTrustedRouteBindingsForTest()
+    }
+  })
+
+  it.each(['chat', 'chatStream'].flatMap(method => [false, true].flatMap(native => [false, true].map(withInfo => ({ method, native, withInfo })))))(
+    'show_app returns typed feedback through $method (native=$native withInfo=$withInfo), never approval or a separate turn', async ({ method, native, withInfo }) => {
+      const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+      const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'display-project', threadId: 'pane' } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=display-project'
+      const sender = Object.assign(new EventEmitter(), { id: 79, isDestroyed: () => false, getURL: () => url })
+      trusted.registerMagicAgentTrustedRouteBinding(79, route, { trustedUrl: url, trustedWebContents: sender })
+      webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+      const scope = { route, conversationId: 'display-chat' }
+      const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 79, frameUrl: url, senderUrl: url, isMainFrame: true })
+      const service = new LLMProxySvcImpl()
+      try {
+        mockAgentProfile(); listToolsMock.mockReturnValue([])
+        callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal }))
+        const args = { document: { title: 'Review proposal', blocks: [{ kind: 'table', columns: ['Item'], rows: [['Model data']] }], fields: [{ kind: 'text', id: 'note', label: 'Feedback', required: true }] } }
+        const chat = vi.fn().mockImplementation(async (input) => {
+          const emit = (name: string, values: Record<string, unknown>, id: string) => {
+            if (!native) return JSON.stringify({ toolName: name, args: values })
+            const index = input.tools.findIndex((tool: { name: string }) => tool.name === name)
+            expect(index).toBeGreaterThanOrEqual(0)
+            return { content: '', toolCalls: [{ id, name, wireName: `mp_tool_${index}`, arguments: JSON.stringify(values) }] }
+          }
+          if (withInfo && chat.mock.calls.length === 1) return emit('info', { name: 'show_app' }, 'display-info')
+          const transcript = JSON.stringify(native ? input.toolTurns : input.messages)
+          if (chat.mock.calls.length === (withInfo ? 2 : 1)) {
+            if (withInfo) {
+              for (const text of ['magicpot-local-app-manual/v1', 'declarative', 'explicit Submit', 'grantsPermission']) expect(transcript).toContain(text)
+              expect(transcript).not.toContain('await kt.state.set')
+              expect((await service.listAgentInteractions(scope, invoke('listAgentInteractions'))).interactions).toEqual([])
+            }
+            return emit('show_app', args, 'display-native')
+          }
+          expect(transcript).toContain('Keep option A')
+          expect(transcript).toContain('grantsPermission')
+          return 'Feedback received, no operation executed.'
+        })
+        vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: native } as never)
+        const req = { ...scope, profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Show a proposal' }] }
+        const onData = vi.fn()
+        const completion = (method === 'chat' ? service.chat(req, invoke(method)) : service.chatStream(req, { onData }, invoke(method))).catch((error) => error)
+        let id = ''
+        await vi.waitFor(async () => { const list = await service.listAgentInteractions(scope, invoke('listAgentInteractions')); expect(list.interactions[0]?.prompt.kind).toBe('show_app'); id = list.interactions[0].id })
+        expect(chat).toHaveBeenCalledTimes(withInfo ? 2 : 1)
+        await expect(service.resolveAgentInteraction({ ...scope, interactionId: id, answer: { status: 'answered', values: { note: 'x', approved: true } } }, invoke('resolveAgentInteraction'))).rejects.toThrow('Invalid')
+        await service.resolveAgentInteraction({ ...scope, interactionId: id, answer: { status: 'answered', values: { note: 'Keep option A' } } }, invoke('resolveAgentInteraction'))
+        const result = await completion
+        if (method === 'chat') expect(result).toMatchObject({ content: 'Feedback received, no operation executed.', metadata: { toolHistory: [...(withInfo ? [expect.objectContaining({ toolName: 'info', status: 'completed' })] : []), expect.objectContaining({ toolName: 'show_app', status: 'completed' })] } })
+        else expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'Feedback received, no operation executed.' }))
+        expect(callToolMock).toHaveBeenCalledTimes(withInfo ? 2 : 1); expect(chat).toHaveBeenCalledTimes(withInfo ? 3 : 2)
+        expect((await service.listAgentInteractions(scope, invoke('listAgentInteractions'))).interactions).toEqual([])
+        expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      } finally { await service.cancelConversation({ conversationId: scope.conversationId }, invoke('cancelConversation')); trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+    }
+  )
+
+  it.each([
+    ['chat', 'ask_user', 'stop'], ['chatStream', 'ask_user', 'stop'],
+    ['chat', 'show_app', 'stop'], ['chatStream', 'show_app', 'stop'],
+    ['chat', 'show_app', 'navigation'], ['chatStream', 'show_app', 'navigation']
+  ] as const)('cancels pending %s %s on %s without issuing another model request', async (method, tool, reason) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'cancel-feedback', threadId: 'pane' } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=cancel-feedback'
+    const sender = Object.assign(new EventEmitter(), { id: 47, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(47, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender)
+    browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    const scope = { route, conversationId: 'cancel-feedback-chat' }
+    const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 47, frameUrl: url, senderUrl: url, isMainFrame: true })
+    const service = new LLMProxySvcImpl()
+    try {
+      mockAgentProfile(); listToolsMock.mockReturnValue([])
+      callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, signal: options.signal }))
+      const agentChat = vi.fn().mockResolvedValue(JSON.stringify({ toolName: tool, args: tool === 'show_app' ? { document: { title: 'Wait', blocks: [{ kind: 'text', text: 'Review me' }] } } : { question: 'Wait?' } }))
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+      const request = { ...scope, profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Ask' }] }
+      const onData = vi.fn()
+      const completion = (method === 'chat' ? service.chat(request, invoke(method)) : service.chatStream(request, { onData }, invoke(method))).catch(() => undefined)
+      await vi.waitFor(async () => expect((await service.listAgentInteractions(scope, invoke('listAgentInteractions'))).interactions).toHaveLength(1))
+      const previous = (await service.listAgentInteractions(scope, invoke('listAgentInteractions'))).interactions[0]
+      if (reason === 'navigation') sender.emit('did-start-navigation')
+      else await service.cancelConversation({ conversationId: scope.conversationId }, invoke('cancelConversation'))
+      await completion
+      await expect(service.resolveAgentInteraction({ ...scope, interactionId: previous.id, answer: { status: 'dismissed' } }, invoke('resolveAgentInteraction'))).rejects.toThrow('not active')
+      expect(agentChat).toHaveBeenCalledOnce()
+      expect((await service.listAgentInteractions(scope, invoke('listAgentInteractions'))).interactions).toEqual([])
+      expect(sender.listenerCount('did-start-navigation')).toBe(0)
+    } finally { trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it.each([['chat', true], ['chat', false], ['chatStream', true], ['chatStream', false]] as const)(
+    'delegates a read-only child inside %s without sharing continuation (native=%s)', async (method, native) => {
+      const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+      const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'child-project', threadId: 'pane' } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=child-project'
+      const sender = Object.assign(new EventEmitter(), { id: 61, isDestroyed: () => false, getURL: () => url })
+      trusted.registerMagicAgentTrustedRouteBinding(61, route, { trustedUrl: url, trustedWebContents: sender })
+      webContentsFromIdMock.mockReturnValue(sender)
+      browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+      try {
+        mockAgentProfile()
+        const readTool = { name: 'files.read', description: 'Read file', inputSchema: { type: 'object', required: ['path'], properties: { path: { type: 'string' } } } }
+        listToolsMock.mockImplementation((allowed) => allowed?.includes('files.read') ? [readTool] : [])
+        callToolMock.mockImplementation(async (r, name, args, options) => {
+          if (name === 'files.read') {
+            expect(options.toolProvider).toBeUndefined()
+            expect(options.allowedToolNames).not.toContain('files.write')
+            expect(options.allowedToolNames).not.toContain('fork')
+            expect(options.runId).toMatch(/^subagent-/)
+            return { content: 'CHILD_FILE_EVIDENCE' }
+          }
+          return options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal })
+        })
+        const child = vi.fn().mockImplementation(async (input) => {
+          expect(input.conversationId).toMatch(/^subagent-/)
+          expect(input.sessionUrl).toBeUndefined()
+          expect(input.disableProviderTools).toBe(true)
+          expect(input.retryCapacity).toBe(false)
+          if (child.mock.calls.length === 1) return native
+            ? { content: '', toolCalls: [{ id: 'child-read', name: 'files.read', wireName: 'mp_tool_0', arguments: '{"path":"notes.txt"}' }] }
+            : { content: '{"toolName":"files.read","args":{"path":"notes.txt"}}' }
+          expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('CHILD_FILE_EVIDENCE')
+          return { content: 'Child report with notes.txt evidence', sessionUrl: 'child-continuation-must-not-escape' }
+        })
+        const parent = vi.fn().mockImplementation(async (input) => {
+          expect(input.conversationId).toBe('parent-chat')
+          expect(input.sessionUrl).not.toBe('child-continuation-must-not-escape')
+          if (parent.mock.calls.length === 1) {
+            if (!native) return { content: '{"toolName":"explore","args":{"task":"Inspect notes.txt"}}' }
+            const index = input.tools.findIndex((tool: { name: string }) => tool.name === 'explore')
+            expect(index).toBeGreaterThanOrEqual(0)
+            return { content: '', toolCalls: [{ id: 'parent-delegate', name: 'explore', wireName: `mp_tool_${index}`, arguments: '{"task":"Inspect notes.txt"}' }] }
+          }
+          expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('Child report with notes.txt evidence')
+          return { content: 'Parent synthesis' }
+        })
+        vi.mocked(cliFromProfile).mockReturnValueOnce({ chat: parent, supportsNativeTools: native } as never)
+          .mockReturnValueOnce({ chat: child, supportsNativeTools: native, supportsIsolatedReadOnlyTurns: true } as never)
+        configModule.getConfig().llm_config.api_profiles[0].api_mode = 'responses'
+        const req = { route, profileId: 'agent-profile', apiMode: 'chat-completions' as const, conversationId: 'parent-chat', sessionUrl: 'parent-continuation', messages: [{ role: 'user' as const, content: 'Use explore' }] }
+        const invocation = { methodName: `svcLLMProxy.${method}`, senderId: 61, frameUrl: url, senderUrl: url, isMainFrame: true }
+        const service = new LLMProxySvcImpl()
+        if (method === 'chat') expect(await service.chat(req, invocation)).toMatchObject({ content: 'Parent synthesis', metadata: { toolHistory: [expect.objectContaining({ toolName: 'explore', status: 'completed' })] } })
+        else {
+          const onData = vi.fn(); await service.chatStream(req, { onData }, invocation)
+          expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'Parent synthesis' }))
+          expect(onData).not.toHaveBeenCalledWith(expect.objectContaining({ toolStatus: expect.objectContaining({ toolName: 'files.read' }) }))
+        }
+        expect(child).toHaveBeenCalledTimes(2)
+        expect(parent).toHaveBeenCalledTimes(2)
+        expect(vi.mocked(cliFromProfile).mock.calls[1][0]).toMatchObject({ base_url: 'https://agent.example/v1', model_name: 'Agent Model', api_mode: 'chat-completions' })
+        expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      } finally { trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+    }
+  )
+
+  it.each([['chat', true], ['chat', false], ['chatStream', true], ['chatStream', false]] as const)(
+    'discovers local helper manuals before three actual delegations in %s (native=%s)', async (method, native) => {
+      const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+      const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'helper-manual-project', threadId: 'pane' } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=helper-manual-project'
+      const sender = Object.assign(new EventEmitter(), { id: 101, isDestroyed: () => false, getURL: () => url })
+      trusted.registerMagicAgentTrustedRouteBinding(101, route, { trustedUrl: url, trustedWebContents: sender })
+      webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+      try {
+        mockAgentProfile(); listToolsMock.mockReturnValue([])
+        const calls: Array<{ name: string; args: Record<string, unknown> }> = [
+          { name: 'info', args: { kind: 'subagent' } },
+          { name: 'info', args: { kind: 'subagent', name: 'explore' } },
+          { name: 'info', args: { name: 'critic' } },
+          { name: 'info', args: { kind: 'tool', name: 'fork' } },
+          { name: 'info', args: { kind: 'subagent', name: 'fork' } },
+          ...['explore', 'critic', 'fork'].map(name => ({ name, args: { task: 'Inspect only supplied task; no side effects' } }))
+        ]
+        const manuals: Record<string, unknown>[] = [], reports: Record<string, unknown>[] = []
+        callToolMock.mockImplementation(async (r, name, args, options) => {
+          const result = await options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal })
+          const parsed = JSON.parse(result.content)
+          if (name === 'info') {
+            manuals.push(parsed); expect(cliFromProfile).toHaveBeenCalledOnce()
+            expect(parsed.grantsPermission).toBe(false)
+            if (!args.name) expect(parsed.subagents.map((helper: { name: string }) => helper.name)).toEqual(['explore', 'critic', 'summarize', 'response', 'fork'])
+            else expect(parsed.documentation).toMatchObject({ readOnly: true, advisoryOnly: true, execution: { startsOnInfo: false, providerEligibilityCheckedOnExecution: true }, limits: { delegations: 3, modelSteps: 8, toolCalls: 12 }, background: { available: true, autoWake: false, restartResume: false } })
+          } else reports.push(parsed)
+          return result
+        })
+        const child = vi.fn(async input => {
+          expect(input.conversationId).toMatch(/^subagent-/)
+          expect(input).toMatchObject({ disableProviderTools: true, retryCapacity: false, maxOutputTokens: 2048 })
+          expect(input.sessionUrl).toBeUndefined(); expect(input.tools || []).toEqual([])
+          return { content: 'Bounded child advisory report; no filesystem or supplier call' }
+        })
+        const parent = vi.fn(async input => {
+          const index = parent.mock.calls.length - 1, call = calls[index]
+          if (!call) {
+            expect(manuals).toHaveLength(5); expect(reports).toHaveLength(3)
+            for (const report of reports) expect(report).toMatchObject({ status: 'completed', advisoryOnly: true, modelSteps: 1, toolCalls: 0 })
+            expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('magicpot-local-bounded-read-only-helper')
+            return { content: 'Manuals checked; three read-only reports obtained; nothing written.' }
+          }
+          if (!native) return JSON.stringify({ toolName: call.name, args: call.args })
+          const toolIndex = input.tools.findIndex((tool: { name: string }) => tool.name === call.name)
+          expect(toolIndex).toBeGreaterThanOrEqual(0)
+          return { content: '', toolCalls: [{ id: `manual-${index}`, name: call.name, wireName: `mp_tool_${toolIndex}`, arguments: JSON.stringify(call.args) }] }
+        })
+        vi.mocked(cliFromProfile).mockReturnValueOnce({ chat: parent, supportsNativeTools: native } as never)
+          .mockReturnValue({ chat: child, supportsNativeTools: native, supportsIsolatedReadOnlyTurns: true } as never)
+        const request = { route, profileId: 'agent-profile', conversationId: 'helper-manual-chat', messages: [{ role: 'user' as const, content: 'Read the helper manuals then use three advisory helpers.' }] }
+        const invocation = { methodName: `svcLLMProxy.${method}`, senderId: 101, frameUrl: url, senderUrl: url, isMainFrame: true }
+        const service = new LLMProxySvcImpl(), onData = vi.fn()
+        if (method === 'chat') expect(await service.chat(request, invocation)).toMatchObject({ content: 'Manuals checked; three read-only reports obtained; nothing written.' })
+        else { await service.chatStream(request, { onData }, invocation); expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'Manuals checked; three read-only reports obtained; nothing written.' })) }
+        expect(parent).toHaveBeenCalledTimes(9); expect(child).toHaveBeenCalledTimes(3); expect(cliFromProfile).toHaveBeenCalledTimes(4)
+        expect(callToolMock.mock.calls.map(call => call[1])).toEqual(calls.map(call => call.name))
+        expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      } finally { trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+    }
+  )
+
+  it.each(['oauth', 'image', 'ocr', 'video', 'skill', 'remote'])('does not expose children on %s requests', async (kind) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'gated-project', threadId: 'pane' } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=gated-project'
+    const sender = Object.assign(new EventEmitter(), { id: 62, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(62, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender)
+    browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    try {
+      mockAgentProfile()
+      const config = configModule.getConfig()
+      const profile = config.llm_config.api_profiles[0]
+      if (kind === 'oauth') profile.auth_mode = 'codex_oauth'
+      if (['image', 'ocr', 'video'].includes(kind)) profile.model_use = kind as 'image' | 'ocr' | 'video'
+      if (kind === 'remote') config.use_remote_llm = true
+      listToolsMock.mockReturnValue([])
+      const response = await new LLMProxySvcImpl().chat({ route, profileId: profile.id, conversationId: 'gated-chat', messages: [{ role: 'user', content: '/tools' }], ...(kind === 'skill' || kind === 'remote' ? { skillRuntime: { bindings: [{ appId: 'restricted', toolNames: [] }] } } : {}) }, { methodName: 'svcLLMProxy.chat', senderId: 62, frameUrl: url, senderUrl: url, isMainFrame: true })
+      for (const name of ['explore', 'critic', 'fork']) expect(response.content).not.toContain(name)
+    } finally { trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it.each(['chat', 'chatStream'] as const)('rejects a retired browser profile in %s without provider calls', async (method) => {
+    mockAgentProfile()
+    const kind = ['chat', 'gpt', '-web-playwright'].join('')
+    configModule.getConfig().llm_config.api_profiles[0].call_type = kind
+    const execute = vi.fn()
+    mainHostExtensionApiV1.llmProxy.push({ id: 'test-no-fallback', handleChatRequest: execute })
+    const svc = new LLMProxySvcImpl()
+    const request = { profileId: 'agent-profile', conversationId: 'retired-profile', messages: [{ role: 'user' as const, content: 'hello' }] }
+    if (method === 'chat') await expect(svc.chat(request)).rejects.toMatchObject({ code: 'LLM_PROFILE_RETIRED' })
+    else {
+      const onData = vi.fn(); await svc.chatStream(request, { onData })
+      expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', error: expect.stringContaining('removed') }))
+    }
+    expect(execute).not.toHaveBeenCalled()
+    expect(cliFromProfile).not.toHaveBeenCalled()
+    expect(callToolMock).not.toHaveBeenCalled()
+    expect((await svc.listProfiles({})).profiles).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'agent-profile' })]))
+  })
+
+  it.each(['stop', 'navigation'])('cancels an isolated child on %s and ignores a late model tool call', async (kind) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'child-cancel', threadId: 'pane' } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=child-cancel'
+    const sender = Object.assign(new EventEmitter(), { id: 63, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(63, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender)
+    browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    let finish!: (value: unknown) => void
+    const service = new LLMProxySvcImpl()
+    try {
+      mockAgentProfile()
+      listToolsMock.mockReturnValue([{ name: 'files.read', description: 'Read text', inputSchema: { type: 'object' } }])
+      callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, signal: options.signal }))
+      const parent = vi.fn().mockResolvedValue({ content: '{"toolName":"explore","args":{"task":"Investigate"}}' })
+      const child = vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+      vi.mocked(cliFromProfile).mockReturnValueOnce({ chat: parent } as never).mockReturnValueOnce({ chat: child, supportsIsolatedReadOnlyTurns: true } as never)
+      const completion = service.chat({ route, conversationId: 'child-cancel-chat', profileId: 'agent-profile', messages: [{ role: 'user', content: 'Investigate' }] }, { methodName: 'svcLLMProxy.chat', senderId: 63, frameUrl: url, senderUrl: url, isMainFrame: true }).catch((error) => error)
+      await vi.waitFor(() => expect(child).toHaveBeenCalledOnce())
+      if (kind === 'stop') await service.cancelConversation({ conversationId: 'child-cancel-chat' }, { methodName: 'svcLLMProxy.cancelConversation', senderId: 63, frameUrl: url, senderUrl: url, isMainFrame: true })
+      else sender.emit('did-start-navigation', { isMainFrame: true })
+      expect(await completion).toBeInstanceOf(Error)
+      expect(child.mock.calls[0][0].signal.aborted).toBe(true)
+      finish({ content: '{"toolName":"files.read","args":{"path":"late.txt"}}' })
+      await Promise.resolve(); await Promise.resolve()
+      expect(callToolMock).toHaveBeenCalledOnce()
+      expect(parent).toHaveBeenCalledOnce()
+      expect(sender.listenerCount('did-start-navigation')).toBe(0)
+    } finally { await service.cancelConversation({ conversationId: 'child-cancel-chat' }, { methodName: 'svcLLMProxy.cancelConversation', senderId: 63, frameUrl: url, senderUrl: url, isMainFrame: true }); trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it.each([['chat', true], ['chat', false], ['chatStream', true], ['chatStream', false]] as const)('keeps background child alive after %s parent returns (native=%s)', async (method, native) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const { agentThreadJobs } = await import('./agentThreadJobs')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'background-project', threadId: 'pane' } as const
+    const scope = { route, conversationId: 'background-chat' }
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=background-project'
+    const sender = Object.assign(new EventEmitter(), { id: 68, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(68, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender)
+    browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 68, frameUrl: url, senderUrl: url, isMainFrame: true })
+    const service = new LLMProxySvcImpl()
+    let finish!: (value: unknown) => void
+    try {
+      mockAgentProfile()
+      listToolsMock.mockReturnValue([{ name: 'files.read', description: 'Read', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }])
+      callToolMock.mockImplementation(async (r, name, args, options) => name === 'files.read' ? { content: 'Evidence after parent ended' } : options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal }))
+      const child = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve })).mockResolvedValue({ content: 'Completed background investigation' })
+      const parent = vi.fn().mockImplementation(async (input) => {
+        if (parent.mock.calls.length > 1) return { content: 'Background started, not completed.' }
+        const args = { task: 'Inspect notes.txt', run_in_background: true }
+        if (!native) return { content: JSON.stringify({ toolName: 'explore', args }) }
+        const index = input.tools.findIndex((tool: { name: string }) => tool.name === 'explore')
+        return { content: '', toolCalls: [{ id: 'launch-background', name: 'explore', wireName: `mp_tool_${index}`, arguments: JSON.stringify(args) }] }
+      })
+      vi.mocked(cliFromProfile).mockReturnValueOnce({ chat: parent, supportsNativeTools: native } as never).mockReturnValueOnce({ chat: child, supportsNativeTools: native, supportsIsolatedReadOnlyTurns: true } as never)
+      const request = { ...scope, profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Delegate in background' }] }
+      const onData = vi.fn()
+      if (method === 'chat') expect(await service.chat(request, invoke(method))).toMatchObject({ content: 'Background started, not completed.' })
+      else await service.chatStream(request, { onData }, invoke(method))
+      await vi.waitFor(() => expect(child).toHaveBeenCalledOnce())
+      const [job] = (await service.listAgentJobs(scope, invoke('listAgentJobs'))).jobs
+      expect(job.status).toBe('running')
+      expect(parent).toHaveBeenCalledTimes(2)
+      // Subsequent normal request sees only the job metadata; no hidden parent resampling.
+      const follow = await service.chat({ ...request, messages: [{ role: 'user', content: '/tool jobs.list {}' }] }, invoke('chat'))
+      expect(follow.content).toContain(job.id)
+      finish(native ? { content: '', toolCalls: [{ id: 'read-later', name: 'files.read', wireName: 'mp_tool_0', arguments: '{"path":"notes.txt"}' }] } : { content: '{"toolName":"files.read","args":{"path":"notes.txt"}}' })
+      await vi.waitFor(async () => expect((await service.listAgentJobs(scope, invoke('listAgentJobs'))).jobs[0].status).toBe('completed'))
+      expect((await service.readAgentJob({ ...scope, jobId: job.id }, invoke('readAgentJob'))).text).toContain('Completed background investigation')
+      expect(child).toHaveBeenCalledTimes(2)
+      expect(parent).toHaveBeenCalledTimes(2)
+      expect(callToolMock.mock.calls.filter(([, name]) => name === 'files.read')).toHaveLength(1)
+      sender.emit('did-start-navigation', { isMainFrame: true })
+      expect((await service.listAgentJobs(scope, invoke('listAgentJobs'))).jobs).toEqual([])
+    } finally { agentThreadJobs.dispose(); trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it.each(['chat', 'chatStream'] as const)('revokes background work if %s parent is token-truncated', async (method) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const { agentThreadJobs } = await import('./agentThreadJobs')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'truncated-parent', threadId: 'pane' } as const
+    const scope = { route, conversationId: 'truncated-chat' }
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=truncated-parent'
+    const sender = Object.assign(new EventEmitter(), { id: 69, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(69, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 69, frameUrl: url, senderUrl: url, isMainFrame: true })
+    try {
+      mockAgentProfile(); listToolsMock.mockReturnValue([])
+      callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal }))
+      const child = vi.fn().mockResolvedValue({ content: 'Fast child report' })
+      const parent = vi.fn().mockResolvedValueOnce({ content: '{"toolName":"fork","args":{"task":"side task","run_in_background":true}}' }).mockResolvedValueOnce({ content: 'Partial parent', finishReason: 'length' })
+      vi.mocked(cliFromProfile).mockReturnValueOnce({ chat: parent } as never).mockReturnValueOnce({ chat: child, supportsIsolatedReadOnlyTurns: true } as never)
+      const service = new LLMProxySvcImpl()
+      const req = { ...scope, profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Start side task' }] }
+      if (method === 'chat') await service.chat(req, invoke(method)); else await service.chatStream(req, { onData: vi.fn() }, invoke(method))
+      const [job] = (await service.listAgentJobs(scope, invoke('listAgentJobs'))).jobs
+      expect(job.status).toBe('cancelled')
+      expect((await service.readAgentJob({ ...scope, jobId: job.id }, invoke('readAgentJob'))).text).toBe('')
+    } finally { agentThreadJobs.dispose(); trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it('binds parent cancellation to its real sender even when another sender owns a same-ID job', async () => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const { agentThreadJobs } = await import('./agentThreadJobs')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'collision-project', threadId: 'pane' } as const
+    const scope = { route, conversationId: 'colliding-conversation' }
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=collision-project'
+    const senders = [73, 74].map((id) => Object.assign(new EventEmitter(), { id, isDestroyed: () => false, getURL: () => url }))
+    for (const sender of senders) trusted.registerMagicAgentTrustedRouteBinding(sender.id, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockImplementation((id) => senders.find((sender) => sender.id === id))
+    browserWindowFromWebContentsMock.mockImplementation((sender) => ({ isDestroyed: () => false, webContents: sender }))
+    const invoke = (id: number, methodName: string) => ({ methodName: `svcLLMProxy.${methodName}`, senderId: id, isMainFrame: true, frameUrl: url, senderUrl: url })
+    const service = new LLMProxySvcImpl()
+    try {
+      mockAgentProfile(); listToolsMock.mockReturnValue([])
+      const a = agentThreadJobs.start({ request: { ...scope, messages: [] }, invocation: invoke(73, 'chat'), kind: 'fork', task: 'A retained job', execute: async () => ({ content: '{"status":"completed","content":"A result"}' }) })
+      a.release(true)
+      let parentSignal!: AbortSignal
+      const parent = vi.fn().mockImplementation((input) => { parentSignal = input.signal; return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })) })
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: parent } as never)
+      const completion = service.chat({ ...scope, profileId: 'agent-profile', messages: [{ role: 'user', content: 'B request' }] }, invoke(74, 'chat')).catch((e) => e)
+      await vi.waitFor(() => expect(parent).toHaveBeenCalledOnce())
+      await service.cancelConversation({ conversationId: scope.conversationId }, invoke(73, 'cancelConversation'))
+      expect(parentSignal.aborted).toBe(false)
+      expect(await service.cancelConversation({ conversationId: scope.conversationId })).toEqual({ cancelled: false })
+      expect(parentSignal.aborted).toBe(false)
+      expect(await service.cancelConversation({ conversationId: scope.conversationId }, invoke(74, 'cancelConversation'))).toEqual({ cancelled: true })
+      expect(await completion).toBeInstanceOf(Error)
+    } finally { agentThreadJobs.dispose(); trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it.each([['chat', true], ['chat', false], ['chatStream', true], ['chatStream', false]] as const)('advertises restored bounded search and scratchpad in %s (native=%s)', async (method, native) => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'archive-project', threadId: 'pane' } as const
+    const scope = { route, conversationId: 'archive-chat' }
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=archive-project'
+    const sender = Object.assign(new EventEmitter(), { id: 76, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(76, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 76, frameUrl: url, senderUrl: url, isMainFrame: true })
+    const service = new LLMProxySvcImpl()
+    try {
+      mockAgentProfile(); listToolsMock.mockReturnValue([])
+      const sample = vi.fn().mockImplementation(async input => {
+        if (native) expect(input.tools.map((tool: { name: string }) => tool.name)).toContain('scratchpad')
+        if (native) expect(input.tools.map((tool: { name: string }) => tool.name)).toContain('search_memory')
+        expect(input.systemPrompt || '').toContain('search_memory')
+        expect(input.systemPrompt || '').toContain('auto is local BM25')
+        expect(input.systemPrompt || '').toContain('scratchpad')
+        return { content: 'Ordinary response without recall helpers.' }
+      })
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: sample, supportsNativeTools: native } as never)
+      const req = { ...scope, profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Hello' }] }, onData = vi.fn()
+      if (method === 'chat') expect(await service.chat(req, invoke(method))).toMatchObject({ content: 'Ordinary response without recall helpers.' })
+      else await service.chatStream(req, { onData }, invoke(method))
+      expect(sample).toHaveBeenCalledOnce(); expect(callToolMock).not.toHaveBeenCalled()
+      expect(sender.listenerCount('did-start-navigation')).toBe(0)
+    } finally { await service.cancelConversation({ conversationId: scope.conversationId }, invoke('cancelConversation')); trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it('registers restored archive queries and readonly notes IPC, keeps notes mutation/counter retired and requires trusted scope', async () => {
+    const { llmProxySvcDef } = await import('@shared/api/svcLLMProxy')
+    const service = new LLMProxySvcImpl(), scope = { route: { channel: 'canvas', scopeType: 'thread', scopeId: 'removed', threadId: 'pane' }, conversationId: 'removed' } as const
+    for (const name of ['listAgentGoalDispatches', 'mutateAgentNote'] as const) {
+      expect(llmProxySvcDef).not.toHaveProperty(name)
+      await expect(service[name](scope as never)).rejects.toThrow('removed')
+    }
+    for (const name of ['listAgentArchiveQueries', 'resolveAgentArchiveQuery', 'getAgentNotes'] as const) {
+      expect(llmProxySvcDef).toHaveProperty(name, { type: 'unary' })
+      await expect(service[name](scope as never)).rejects.toThrow('access denied')
+    }
+    expect(cliFromProfile).not.toHaveBeenCalled(); expect(callToolMock).not.toHaveBeenCalled()
+  })
+
+  it.each([['chat', false], ['chat', true], ['chatStream', false], ['chatStream', true]] as const)(
+    'discovers and approves exact MCP tools through %s (native=%s) without auto-connecting', async (method, native) => {
+      const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+      const { mcpServerConfigDigest } = await import('../mcp/clientManager')
+      const { syncMcpClientManager } = await import('../mcp/runtime')
+      const { getAssistantTerminalPolicyRuntime, closeAssistantTerminalPolicyRuntime } = await import('../magicAgentPlatform2/productionRuntime')
+      const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'mcp-project', threadId: 'pane' } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=mcp-project'
+      const sender = Object.assign(new EventEmitter(), { id: 84, isDestroyed: () => false, getURL: () => url })
+      trusted.registerMagicAgentTrustedRouteBinding(84, route, { trustedUrl: url, trustedWebContents: sender })
+      webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+      const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 84, frameUrl: url, senderUrl: url, isMainFrame: true })
+      const service = new LLMProxySvcImpl()
+      try {
+        mockAgentProfile(); listToolsMock.mockReturnValue([])
+        const server = { id: 'approved-server', enabled: true, transport: 'streamable-http' as const, url: 'https://configured.example/private', headers: { Authorization: 'Bearer CONFIG_PRIVATE' }, agentThreadAccess: 'call' as const }
+        configModule.getConfig().mcp_config = { ...DEFAULT_CONFIG.mcp_config, client: { servers: [server] } }
+        threadMcpManagerMock.listPinnedTools.mockReturnValue([{ serverId: server.id, name: 'echo', alias: 'mcp.approved-server.echo', connectionId: 'connection-one', configDigest: mcpServerConfigDigest(server), toolDigest: 'a'.repeat(64), description: 'Echo data', inputSchema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] } }])
+        threadMcpManagerMock.listConnections.mockReturnValue([{ id: server.id, status: 'connected' }])
+        threadMcpManagerMock.callPinnedTool.mockImplementation(async (input) => { input.beforeDispatch(); return { content: 'MCP_COMPLETED_EVIDENCE', metadata: { isError: false } } })
+        let discoveredToken = ''
+        callToolMock.mockImplementation(async (r, name, args, options) => {
+          const output = await options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal })
+          if (name === 'mcp_list') discoveredToken = JSON.parse(output.content).token
+          return output
+        })
+        const chat = vi.fn().mockImplementation(async (input) => {
+          if (chat.mock.calls.length === 3) {
+            expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('MCP_COMPLETED_EVIDENCE')
+            expect(JSON.stringify(input)).not.toContain('CONFIG_PRIVATE')
+            return 'Remote tool returned.'
+          }
+          const name = chat.mock.calls.length === 1 ? 'mcp_list' : 'mcp_call'
+          const args = name === 'mcp_list' ? { server: server.id, tool: 'echo' } : { token: discoveredToken, arguments: { message: 'approved arguments' } }
+          if (!native) return JSON.stringify({ toolName: name, args })
+          const index = input.tools.findIndex((tool: { name: string }) => tool.name === name)
+          expect(index).toBeGreaterThanOrEqual(0)
+          return { content: '', toolCalls: [{ id: `mcp-native-${chat.mock.calls.length}`, name, wireName: `mp_tool_${index}`, arguments: JSON.stringify(args) }] }
+        })
+        vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: native } as never)
+        const req = { route, conversationId: 'mcp-chat', profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Use configured echo service' }] }
+        const onData = vi.fn()
+        const pending = (method === 'chat' ? service.chat(req, invoke(method)) : service.chatStream(req, { onData }, invoke(method))).catch((error) => error)
+        const policy = getAssistantTerminalPolicyRuntime()
+        await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+        expect(threadMcpManagerMock.callPinnedTool).not.toHaveBeenCalled()
+        const approval = policy.listPendingTerminalApprovals()[0]
+        expect(approval.request.request.input).toMatchObject({ server: server.id, tool: 'echo', arguments: { message: 'approved arguments' } })
+        expect(JSON.stringify(approval)).not.toContain('CONFIG_PRIVATE')
+        policy.resolvePendingTerminalApproval({ approvalId: approval.approvalId, expectedRevision: approval.revision, approved: true })
+        const result = await pending
+        if (method === 'chat') expect(result).toMatchObject({ content: 'Remote tool returned.' })
+        else expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'Remote tool returned.' }))
+        expect(threadMcpManagerMock.callPinnedTool).toHaveBeenCalledOnce()
+        expect(syncMcpClientManager).not.toHaveBeenCalled()
+        expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      } finally { closeAssistantTerminalPolicyRuntime(); await service.cancelConversation({ conversationId: 'mcp-chat' }, invoke('cancelConversation')); trusted.clearMagicAgentTrustedRouteBindingsForTest(); Object.values(threadMcpManagerMock).forEach((mock) => mock.mockReset()) }
+    }
+  )
+
+  it.each([['chat', false], ['chat', true], ['chatStream', false], ['chatStream', true]] as const)(
+    'discovers and loads actual local procedural skill files through %s (native=%s)', async (method, native) => {
+      const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+      const { CustomSkillFSCli } = await import('../customSkill/fs')
+      const { DEFAULT_BUILD_ENV } = await import('@shared/config/buildEnv')
+      const { createNodeTestArtifactDir } = await import('../testSupport/nodeTestArtifacts')
+      const path = await import('node:path')
+      const root = await createNodeTestArtifactDir('proxy-procedural-skill')
+      const file = path.join(root, 'customSkills', 'guide.skill.json')
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await fs.writeFile(file, JSON.stringify({ id: 'guide', skillName: 'test-first', type: 'normal', prompt: 'PHASE9_LOCAL_INSTRUCTIONS: test before editing.', apiKey: 'NEVER_EXPOSE_SKILL_SECRET', apiAddress: 'https://never-contact.invalid', scripts: ['danger.py'], bindings: [{ appId: 'anything', toolNames: ['unauthorized.tool'] }], procedural: { enabled: true, paths: ['*.ts'] } }), 'utf8')
+      const fixture = new CustomSkillFSCli(DEFAULT_CONFIG, { ...DEFAULT_BUILD_ENV, pathMap: { data: root, file: root, resources: '' } })
+      const loadActual = fixture.listProceduralSkills.bind(fixture)
+      const load = vi.spyOn(CustomSkillFSCli.prototype, 'listProceduralSkills').mockImplementation(loadActual)
+      const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'skill-project', threadId: 'pane' } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=skill-project'
+      const sender = Object.assign(new EventEmitter(), { id: 85, isDestroyed: () => false, getURL: () => url })
+      trusted.registerMagicAgentTrustedRouteBinding(85, route, { trustedUrl: url, trustedWebContents: sender })
+      webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+      const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 85, frameUrl: url, senderUrl: url, isMainFrame: true })
+      const service = new LLMProxySvcImpl()
+      try {
+        mockAgentProfile(); listToolsMock.mockReturnValue([])
+        callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal }))
+        const chat = vi.fn().mockImplementation(async (input) => {
+          expect(JSON.stringify(input)).not.toContain('NEVER_EXPOSE_SKILL_SECRET')
+          expect(JSON.stringify(input)).not.toContain('unauthorized.tool')
+          if (chat.mock.calls.length === 1) { expect(load).not.toHaveBeenCalled(); expect(JSON.stringify(input)).not.toContain('PHASE9_LOCAL_INSTRUCTIONS') }
+          if (chat.mock.calls.length === 3) {
+            expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('PHASE9_LOCAL_INSTRUCTIONS')
+            expect(JSON.stringify(input)).toContain('test the parser')
+            return 'Instructions loaded; no command executed.'
+          }
+          const name = chat.mock.calls.length === 1 ? 'info' : 'skill'
+          const args = name === 'info' ? { kind: 'skill', paths: ['src/parser.ts'] } : { name: 'guide', arguments: 'test the parser' }
+          if (!native) return JSON.stringify({ toolName: name, args })
+          const index = input.tools.findIndex((tool: { name: string }) => tool.name === name)
+          expect(index).toBeGreaterThanOrEqual(0)
+          return { content: '', toolCalls: [{ id: `skill-native-${chat.mock.calls.length}`, name, wireName: `mp_tool_${index}`, arguments: JSON.stringify(args) }] }
+        })
+        vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: native } as never)
+        const req = { route, conversationId: 'skill-chat', profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Load the test-first procedure.' }] }
+        const onData = vi.fn()
+        const result = await (method === 'chat' ? service.chat(req, invoke(method)) : service.chatStream(req, { onData }, invoke(method)))
+        if (method === 'chat') expect(result).toMatchObject({ content: 'Instructions loaded; no command executed.' })
+        else expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'Instructions loaded; no command executed.' }))
+        expect(load).toHaveBeenCalledTimes(2)
+        expect(fetchMock).not.toHaveBeenCalled()
+        expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      } finally { load.mockRestore(); await service.cancelConversation({ conversationId: 'skill-chat' }, invoke('cancelConversation')); trusted.clearMagicAgentTrustedRouteBindingsForTest(); await fs.rm(root, { recursive: true, force: true }) }
+    }
+  )
+
+  it.each([['chat', false], ['chat', true], ['chatStream', false], ['chatStream', true]] as const)(
+    'connects and disconnects a real manual MCP fixture via %s (native=%s) with separate approvals', async (method, native) => {
+      const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+      const { McpClientManager } = await import('../mcp/clientManager')
+      const { syncMcpClientManager } = await import('../mcp/runtime')
+      const { getAssistantTerminalPolicyRuntime, closeAssistantTerminalPolicyRuntime } = await import('../magicAgentPlatform2/productionRuntime')
+      const path = await import('node:path')
+      const manager = new McpClientManager()
+      const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'mcp-control-project', threadId: 'pane' } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=mcp-control-project'
+      const sender = Object.assign(new EventEmitter(), { id: 86, isDestroyed: () => false, getURL: () => url })
+      trusted.registerMagicAgentTrustedRouteBinding(86, route, { trustedUrl: url, trustedWebContents: sender })
+      webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+      const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 86, frameUrl: url, senderUrl: url, isMainFrame: true })
+      const service = new LLMProxySvcImpl()
+      try {
+        mockAgentProfile(); listToolsMock.mockReturnValue([])
+        const server = { id: 'manual', enabled: true, transport: 'stdio' as const, command: process.execPath, args: [path.resolve('scripts/mcp/echoServer.cjs')], env: { SECRET: 'CONTROL_CONFIG_SECRET' }, autoConnect: false, agentThreadAccess: 'discover' as const, agentThreadManage: true }
+        configModule.getConfig().mcp_config = { ...DEFAULT_CONFIG.mcp_config, client: { servers: [server] } }
+        threadMcpManagerMock.connectionIdentity.mockImplementation(manager.connectionIdentity.bind(manager))
+        threadMcpManagerMock.controlConnection.mockImplementation(manager.controlConnection.bind(manager))
+        threadMcpManagerMock.listConnections.mockImplementation(manager.listConnections.bind(manager))
+        threadMcpManagerMock.listPinnedTools.mockImplementation(manager.listPinnedTools.bind(manager))
+        callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal }))
+        const chat = vi.fn().mockImplementation(async (input) => {
+          expect(JSON.stringify(input)).not.toContain('CONTROL_CONFIG_SECRET')
+          if (chat.mock.calls.length === 3) {
+            expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('disconnected')
+            return 'The shared connection was closed; process-tree termination is not guaranteed.'
+          }
+          const name = chat.mock.calls.length === 1 ? 'mcp_connect' : 'mcp_disconnect', args = { server: 'manual' }
+          if (!native) return JSON.stringify({ toolName: name, args })
+          const index = input.tools.findIndex((tool: { name: string }) => tool.name === name)
+          expect(index).toBeGreaterThanOrEqual(0)
+          return { content: '', toolCalls: [{ id: `control-native-${chat.mock.calls.length}`, name, wireName: `mp_tool_${index}`, arguments: JSON.stringify(args) }] }
+        })
+        vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: native } as never)
+        const req = { route, conversationId: 'mcp-control-chat', profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Connect and then disconnect the configured manual service.' }] }
+        const onData = vi.fn(), policy = getAssistantTerminalPolicyRuntime()
+        const pending = (method === 'chat' ? service.chat(req, invoke(method)) : service.chatStream(req, { onData }, invoke(method))).catch((error) => error)
+        for (const action of ['mcp_connect', 'mcp_disconnect']) {
+          await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+          const approval = policy.listPendingTerminalApprovals()[0]
+          expect(approval.request.request.target.id).toBe(action)
+          expect(manager.connectionIdentity('manual').status).toBe(action === 'mcp_connect' ? 'absent' : 'connected')
+          policy.resolvePendingTerminalApproval({ approvalId: approval.approvalId, expectedRevision: approval.revision, approved: true })
+          await vi.waitFor(() => expect(manager.connectionIdentity('manual').status).toBe(action === 'mcp_connect' ? 'connected' : 'disconnected'))
+        }
+        const result = await pending
+        if (method === 'chat') expect(result).toMatchObject({ content: expect.stringContaining('closed') })
+        else expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: expect.stringContaining('closed') }))
+        expect(manager.connectionIdentity('manual').suppressed).toBe(true)
+        await manager.sync(configModule.getConfig()); expect(manager.listPinnedTools('manual')).toEqual([])
+        expect(syncMcpClientManager).not.toHaveBeenCalled()
+        expect(threadMcpManagerMock.controlConnection).toHaveBeenCalledTimes(2)
+        expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      } finally { await manager.stop(); closeAssistantTerminalPolicyRuntime(); await service.cancelConversation({ conversationId: 'mcp-control-chat' }, invoke('cancelConversation')); trusted.clearMagicAgentTrustedRouteBindingsForTest(); Object.values(threadMcpManagerMock).forEach((mock) => mock.mockReset()) }
+    }
+  )
+
+  it.each([['chat', false, 'text'], ['chat', true, 'text'], ['chatStream', false, 'text'], ['chatStream', true, 'text'], ['chat', false, 'structured'], ['chat', true, 'structured'], ['chatStream', false, 'structured'], ['chatStream', true, 'structured']] as const)(
+    'discovers later MCP services and remote page-two tools through local offset pages then formally approves their call via %s (native=%s, result=%s)', async (method, native, resultMode) => {
+      const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+      const { McpClientManager } = await import('../mcp/clientManager')
+      const { syncMcpClientManager } = await import('../mcp/runtime')
+      const { getAssistantTerminalPolicyRuntime, closeAssistantTerminalPolicyRuntime } = await import('../magicAgentPlatform2/productionRuntime')
+      const path = await import('node:path')
+      const manager = new McpClientManager(), route = { channel: 'canvas', scopeType: 'thread', scopeId: 'mcp-pages-project', threadId: 'pane' } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=mcp-pages-project'
+      const sender = Object.assign(new EventEmitter(), { id: 87, isDestroyed: () => false, getURL: () => url })
+      trusted.registerMagicAgentTrustedRouteBinding(87, route, { trustedUrl: url, trustedWebContents: sender })
+      webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+      const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 87, frameUrl: url, senderUrl: url, isMainFrame: true })
+      const service = new LLMProxySvcImpl(), policy = getAssistantTerminalPolicyRuntime()
+      try {
+        mockAgentProfile(); listToolsMock.mockReturnValue([])
+        const server = { id: 'paged', enabled: true, transport: 'stdio' as const, command: process.execPath, args: [path.resolve('scripts/mcp/pagedCatalogServer.cjs'), '20', resultMode], env: { SECRET: 'PAGINATION_CONFIG_SECRET' }, autoConnect: false, agentThreadAccess: 'call' as const, agentThreadManage: true }
+        const earlier = Array.from({ length: 32 }, (_, index) => ({ ...server, id: `earlier-${index}`, agentThreadAccess: 'discover' as const, agentThreadManage: false }))
+        configModule.getConfig().mcp_config = { ...DEFAULT_CONFIG.mcp_config, client: { servers: [...earlier, server, { ...server, id: 'private-service', agentThreadAccess: 'off' as const }] } }
+        for (const name of ['connectionIdentity', 'isConnectionSuppressed', 'controlConnection', 'listConnections', 'listPinnedTools', 'callPinnedTool'] as const) threadMcpManagerMock[name].mockImplementation(manager[name].bind(manager) as never)
+        let token = '', discoveryPages = 0, servicePages = 0
+        callToolMock.mockImplementation(async (r, name, args, options) => {
+          const result = await options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal })
+          expect(result.content).not.toContain('PAGINATION_CONFIG_SECRET'); expect(result.content).not.toContain('opaque-page-two')
+          if (name === 'mcp_list' && !args.server) {
+            servicePages++
+            const page = JSON.parse(result.content)
+            expect(page).toMatchObject({ connects: false, grantsPermission: false })
+            expect(page.services.map((item: { id: string }) => item.id)).toEqual(args.offset ? ['paged'] : earlier.map(item => item.id))
+            expect(page.nextOffset).toBe(args.offset ? null : 32)
+            expect(result.content).not.toContain('private-service')
+            expect(threadMcpManagerMock.controlConnection).not.toHaveBeenCalled()
+            expect(threadMcpManagerMock.callPinnedTool).not.toHaveBeenCalled()
+            expect(policy.listPendingTerminalApprovals()).toEqual([])
+          }
+          if (name === 'mcp_list' && args.server && !args.tool) {
+            discoveryPages++
+            const page = JSON.parse(result.content)
+            if (!args.offset) { expect(page.tools).toHaveLength(20); expect(page.tools.map((item: { name: string }) => item.name)).not.toContain('later'); expect(page.nextOffset).toBe(20) }
+            else { expect(page.tools.map((item: { name: string }) => item.name)).toEqual(['filler_19', 'later']); expect(page.nextOffset).toBeNull() }
+          }
+          if (name === 'mcp_call') {
+            const returned = JSON.parse(result.content)
+            expect(returned).toMatchObject({ text: resultMode === 'structured' ? '' : 'later:approved-page-two', structuredContent: { message: 'later:approved-page-two' }, structuredContentOmitted: false, untrustedData: true })
+          }
+          if (name === 'mcp_list' && args.tool === 'later') { const discovered = JSON.parse(result.content); token = discovered.token; expect(discovered).toMatchObject({ server: 'paged', tool: 'later', callable: true, requiresApproval: true }) }
+          return result
+        })
+        const steps = [
+          { name: 'mcp_list', args: () => ({}) },
+          { name: 'mcp_list', args: () => ({ offset: 32 }) },
+          { name: 'mcp_connect', args: () => ({ server: 'paged' }) },
+          { name: 'mcp_list', args: () => ({ server: 'paged' }) },
+          { name: 'mcp_list', args: () => ({ server: 'paged', offset: 20 }) },
+          { name: 'mcp_list', args: () => ({ server: 'paged', tool: 'later' }) },
+          { name: 'mcp_call', args: () => ({ token, arguments: { message: 'approved-page-two' } }) },
+          { name: 'mcp_disconnect', args: () => ({ server: 'paged' }) }
+        ]
+        const chat = vi.fn().mockImplementation(async input => {
+          expect(JSON.stringify(input)).not.toContain('PAGINATION_CONFIG_SECRET'); expect(JSON.stringify(input)).not.toContain('opaque-page-two')
+          const step = steps[chat.mock.calls.length - 1]
+          if (!step) { expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('later:approved-page-two'); return { content: 'Page-two tool called after approval, then disconnected.' } }
+          if (step.name === 'mcp_call') expect(token).not.toBe('')
+          const args = step.args()
+          if (!native) return JSON.stringify({ toolName: step.name, args })
+          const index = input.tools.findIndex((tool: { name: string }) => tool.name === step.name)
+          expect(index).toBeGreaterThanOrEqual(0)
+          return { content: '', toolCalls: [{ id: `paged-${chat.mock.calls.length}`, name: step.name, wireName: `mp_tool_${index}`, arguments: JSON.stringify(args) }] }
+        })
+        vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: native } as never)
+        const request = { route, conversationId: 'mcp-pages-chat', profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Use a later-page MCP tool with my explicit approvals.' }] }, onData = vi.fn()
+        const pending = (method === 'chat' ? service.chat(request, invoke(method)) : service.chatStream(request, { onData }, invoke(method))).catch(error => error)
+        for (const action of ['mcp_connect', 'mcp_call', 'mcp_disconnect']) {
+          await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+          const approval = policy.listPendingTerminalApprovals()[0]
+          expect(approval.request.request.target.id).toBe(action)
+          if (action === 'mcp_connect') { expect(servicePages).toBe(2); expect(manager.connectionIdentity('paged').status).toBe('absent') }
+          if (action === 'mcp_call') {
+            expect(discoveryPages).toBe(2); expect(manager.listPinnedTools('paged')).toHaveLength(22)
+            expect(threadMcpManagerMock.callPinnedTool).not.toHaveBeenCalled()
+          }
+          policy.resolvePendingTerminalApproval({ approvalId: approval.approvalId, expectedRevision: approval.revision, approved: true })
+          if (action === 'mcp_connect') await vi.waitFor(() => expect(manager.connectionIdentity('paged').status).toBe('connected'))
+          if (action === 'mcp_call') await vi.waitFor(() => expect(threadMcpManagerMock.callPinnedTool).toHaveBeenCalledOnce())
+        }
+        const result = await pending
+        if (method === 'chat') expect(result).toMatchObject({ content: 'Page-two tool called after approval, then disconnected.' })
+        else expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'Page-two tool called after approval, then disconnected.' }))
+        expect(chat).toHaveBeenCalledTimes(9); expect(manager.connectionIdentity('paged').status).toBe('disconnected')
+        expect(threadMcpManagerMock.controlConnection).toHaveBeenCalledTimes(2)
+        expect(manager.listConnections().some(item => item.id.startsWith('earlier-') || item.id === 'private-service')).toBe(false)
+        expect(threadMcpManagerMock.callPinnedTool).toHaveBeenCalledOnce(); expect(syncMcpClientManager).not.toHaveBeenCalled()
+        expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      } finally { await manager.stop(); closeAssistantTerminalPolicyRuntime(); await service.cancelConversation({ conversationId: 'mcp-pages-chat' }, invoke('cancelConversation')); trusted.clearMagicAgentTrustedRouteBindingsForTest(); Object.values(threadMcpManagerMock).forEach(mock => mock.mockReset()) }
+    }
+  )
+
+  it('thread Notebook tools connect the local request without widening independent shell permissions', async () => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const scriptHost = await import('./agentThreadScriptHost')
+    const execute = vi.spyOn(scriptHost, 'executeAgentThreadScript').mockImplementation(async (call) => {
+      call.assertLive()
+      expect(call).toMatchObject({ name: 'notebook.cell.replace', conversationId: 'script-chat', workspaceRoot: 'D:/main-owned/workspace', input: { source: 'approved replacement' } })
+      return { beforeSha256: 'a'.repeat(64), afterSha256: 'b'.repeat(64) }
+    })
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'script-project', threadId: 'pane' } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=script-project'
+    const sender = Object.assign(new EventEmitter(), { id: 78, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(78, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    const invocation = { methodName: 'svcLLMProxy.chat', senderId: 78, frameUrl: url, senderUrl: url, isMainFrame: true }
+    const service = new LLMProxySvcImpl()
+    try {
+      mockAgentProfile(); listToolsMock.mockReturnValue([])
+      callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, signal: options.signal, workspaceRootDir: 'D:/main-owned/workspace' }))
+      const req = { route, conversationId: 'script-chat', profileId: 'agent-profile', messages: [{ role: 'user' as const, content: '/tools' }] }
+      const defaults = await service.chat(req, invocation)
+      expect(defaults.content).not.toContain('python.execute')
+      expect(defaults.content).toContain('notebook.inspect')
+      configModule.getConfig().project_trace_config = { ...DEFAULT_CONFIG.project_trace_config, enable_agent_python_notebook: true }
+      const listing = await service.chat(req, invocation)
+      expect(listing.content).toContain('python.execute')
+      expect(listing.content).toContain('python.background')
+      expect(listing.content).not.toContain('shell.background')
+      const args = { path: 'a.ipynb', cellId: 'cell', source: 'approved replacement', expectedSha256: 'a'.repeat(64) }
+      const result = await service.chat({ ...req, messages: [{ role: 'user', content: `/tool notebook.cell.replace ${JSON.stringify(args)}` }] }, invocation)
+      expect(result.content).toContain('afterSha256')
+      expect(execute).toHaveBeenCalledOnce()
+      expect(cliFromProfile).not.toHaveBeenCalled()
+    } finally { execute.mockRestore(); trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it.each(([['chat', false], ['chat', true], ['chatStream', false], ['chatStream', true]] as const).flatMap(([method, native]) => [false, true].map(exactCell => [method, native, exactCell] as const)))(
+    'reads saved Notebook output summaries through the existing host via %s (native=%s, exactCell=%s)', async (method, native, exactCell) => {
+      const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+      const { getAssistantTerminalPolicyRuntime, closeAssistantTerminalPolicyRuntime } = await import('../magicAgentPlatform2/productionRuntime')
+      const { createNodeTestArtifactDir } = await import('../testSupport/nodeTestArtifacts')
+      const path = await import('node:path'), root = await createNodeTestArtifactDir('proxy-notebook-output')
+      // memfs returns POSIX realpaths on Windows. Canonicalize only this test FS
+      // adapter; keep the production host's strict symlink equality check intact.
+      const { promises: notebookFs } = await import('node:fs')
+      const { NotebookToolHost } = await import('../magicAgentPlatform2/toolHost')
+      const createNotebook = NotebookToolHost.create.bind(NotebookToolHost)
+      function realpath(requested: PathLike, options?: ObjectEncodingOptions | BufferEncoding | null): Promise<string>
+      function realpath(requested: PathLike, options: BufferEncodingOption): Promise<Buffer<ArrayBuffer>>
+      function realpath(requested: PathLike, options?: ObjectEncodingOptions | BufferEncodingOption | BufferEncoding | null): Promise<string | Buffer<ArrayBuffer>>
+      async function realpath(requested: PathLike, options?: ObjectEncodingOptions | BufferEncodingOption | BufferEncoding | null): Promise<string | Buffer<ArrayBuffer>> {
+        const canonical = path.resolve(await notebookFs.realpath(requested)), encoding = typeof options === 'string' ? options : options?.encoding
+        return encoding === 'buffer' ? Buffer.from(canonical) : Buffer.from(canonical).toString(encoding ?? 'utf8')
+      }
+      const canonicalRoot = path.resolve(await notebookFs.realpath(root))
+      expect(await realpath(root)).toBe(canonicalRoot)
+      expect(await realpath(root, { encoding: 'buffer' })).toEqual(Buffer.from(canonicalRoot))
+      expect(await realpath(root, 'buffer')).toEqual(Buffer.from(canonicalRoot))
+      const canonicalFs = vi.spyOn(NotebookToolHost, 'create').mockImplementation((authorization, options) => createNotebook(authorization, { ...options, fs: { ...notebookFs, realpath } }))
+      const file = path.join(root, 'saved.ipynb')
+      const savedCell = { id: 'saved', cell_type: 'code', source: ['print("not executed")'], metadata: {}, execution_count: 7, outputs: [
+        { output_type: 'stream', name: 'stdout', text: ['SAVED_PRINT: ', '42\n'] },
+        { output_type: 'display_data', data: { 'text/plain': 'SAVED_TABLE', 'text/html': '<script>NOTEBOOK_RICH_SECRET</script>', 'image/png': 'NOTEBOOK_BINARY_SECRET' }, metadata: {} }
+      ] }
+      const stored = JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: Array.from({ length: 27 }, (_, index) => index === 25 ? savedCell : { id: `other${index}`, cell_type: 'markdown', source: ['UNSELECTED_CELL_SOURCE'], metadata: {} }) })
+      await fs.writeFile(file, stored, 'utf8')
+      const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'notebook-project', threadId: 'pane' } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=notebook-project'
+      const sender = Object.assign(new EventEmitter(), { id: 88, isDestroyed: () => false, getURL: () => url })
+      trusted.registerMagicAgentTrustedRouteBinding(88, route, { trustedUrl: url, trustedWebContents: sender })
+      webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+      const invoke = (name: string) => ({ methodName: `svcLLMProxy.${name}`, senderId: 88, frameUrl: url, senderUrl: url, isMainFrame: true })
+      const service = new LLMProxySvcImpl()
+      try {
+        mockAgentProfile(); listToolsMock.mockReturnValue([])
+        configModule.getConfig().project_trace_config = { ...DEFAULT_CONFIG.project_trace_config, enable_agent_python_notebook: false }
+        const policy = getAssistantTerminalPolicyRuntime(), approval = vi.spyOn(policy, 'requestTerminalApproval')
+        callToolMock.mockImplementation(async (r, name, args, options) => {
+          expect(name).toBe('notebook.inspect')
+          const result = await options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal, workspaceRootDir: root })
+          const data = JSON.parse(result.content)
+          expect(data).toMatchObject({ cellCount: 27, kernelPersistent: false, untrustedData: true, cells: [{ id: 'saved', executionCount: 7, outputs: [{ text: 'SAVED_PRINT: 42\n' }, { text: 'SAVED_TABLE', richDataOmitted: true }] }] })
+          if (exactCell) expect(data).not.toHaveProperty('nextOffset')
+          else expect(data.nextOffset).toBe(26)
+          expect(result.content).not.toContain('UNSELECTED_CELL_SOURCE')
+          expect(policy.listPendingTerminalApprovals()).toEqual([])
+          return result
+        })
+        const chat = vi.fn().mockImplementation(async input => {
+          expect(JSON.stringify(input)).not.toContain('NOTEBOOK_RICH_SECRET'); expect(JSON.stringify(input)).not.toContain('NOTEBOOK_BINARY_SECRET'); expect(JSON.stringify(input)).not.toContain('UNSELECTED_CELL_SOURCE')
+          if (chat.mock.calls.length > 1) {
+            expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('SAVED_PRINT: 42')
+            expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('SAVED_TABLE')
+            return 'Read the saved output only; no code was run.'
+          }
+          const name = 'notebook.inspect', args = { path: 'saved.ipynb', includeOutputs: 'summary', ...(exactCell ? { cellId: 'saved', offset: 1000, limit: 50 } : { offset: 25, limit: 1 }) }
+          expect(JSON.stringify(input)).not.toContain('SAVED_TABLE')
+          if (!native) return JSON.stringify({ toolName: name, args })
+          const index = input.tools.findIndex((tool: { name: string }) => tool.name === name)
+          expect(index).toBeGreaterThanOrEqual(0)
+          expect(input.tools.some((tool: { name: string }) => tool.name === 'python.execute')).toBe(false)
+          return { content: '', toolCalls: [{ id: 'notebook-summary', name, wireName: `mp_tool_${index}`, arguments: JSON.stringify(args) }] }
+        })
+        vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: native } as never)
+        const req = { route, conversationId: 'notebook-output-chat', profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Read the saved output, without running code.' }] }
+        const onData = vi.fn(), result = await (method === 'chat' ? service.chat(req, invoke(method)) : service.chatStream(req, { onData }, invoke(method)))
+        if (method === 'chat') expect(result).toMatchObject({ content: 'Read the saved output only; no code was run.' })
+        else expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', content: 'Read the saved output only; no code was run.' }))
+        expect(chat).toHaveBeenCalledTimes(2); expect(callToolMock).toHaveBeenCalledOnce(); expect(approval).not.toHaveBeenCalled(); approval.mockRestore()
+        expect(await fs.readFile(file, 'utf8')).toBe(stored); expect(await fs.readdir(root)).toEqual(['saved.ipynb'])
+        expect(fetchMock).not.toHaveBeenCalled(); expect(sender.listenerCount('did-start-navigation')).toBe(0)
+      } finally { canonicalFs.mockRestore(); closeAssistantTerminalPolicyRuntime(); await service.cancelConversation({ conversationId: 'notebook-output-chat' }, invoke('cancelConversation')); trusted.clearMagicAgentTrustedRouteBindingsForTest(); await fs.rm(root, { recursive: true, force: true }) }
+    }
+  )
+
+  it.each(['scratchpad'])('rejects invalid explicit %s arguments through its owned provider without model invocation or approvals', async name => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'notes-project', threadId: 'pane' } as const
+    const scope = { route, conversationId: 'notes-chat' }, url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=notes-project'
+    const sender = Object.assign(new EventEmitter(), { id: 77, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(77, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender); browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    const invocation = { methodName: 'svcLLMProxy.chat', senderId: 77, frameUrl: url, senderUrl: url, isMainFrame: true }
+    try {
+      mockAgentProfile(); listToolsMock.mockReturnValue([])
+      const service = new LLMProxySvcImpl()
+      callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal }))
+      const { getAssistantTerminalPolicyRuntime, closeAssistantTerminalPolicyRuntime } = await import('../magicAgentPlatform2/productionRuntime')
+      try {
+        await expect(service.chat({ ...scope, profileId: 'agent-profile', messages: [{ role: 'user', content: `/tool ${name} {"action":"list","query":"old"}` }] }, invocation)).rejects.toThrow('Invalid scratchpad arguments.')
+        expect(cliFromProfile).not.toHaveBeenCalled(); expect(callToolMock).toHaveBeenCalledOnce()
+        expect(getAssistantTerminalPolicyRuntime().listPendingTerminalApprovals()).toEqual([])
+      } finally { closeAssistantTerminalPolicyRuntime() }
+    } finally { trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
+  it('keeps an encoded gateway model selection when its saved model is empty', async () => {
+    const trusted = await import('../magicAgentRuntime/trustedRouteBinding')
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'gateway-project', threadId: 'pane' } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=gateway-project'
+    const sender = Object.assign(new EventEmitter(), { id: 64, isDestroyed: () => false, getURL: () => url })
+    trusted.registerMagicAgentTrustedRouteBinding(64, route, { trustedUrl: url, trustedWebContents: sender })
+    webContentsFromIdMock.mockReturnValue(sender)
+    browserWindowFromWebContentsMock.mockReturnValue({ isDestroyed: () => false, webContents: sender })
+    const rawId = 'agent-profile::codex-model::selected-model'
+    const child = vi.fn().mockResolvedValue({ content: 'gateway child report' })
+    const parent = vi.fn().mockResolvedValueOnce({ content: '{"toolName":"fork","args":{"task":"A side question"}}' }).mockResolvedValueOnce({ content: 'parent result' })
+    const createCli = vi.fn().mockImplementation((_profile, context) => context.imageAttachmentLoader
+      ? { chat: parent }
+      : { chat: child, supportsIsolatedReadOnlyTurns: true })
+    mainHostExtensionApiV1.llmProxy.push({ id: 'codex', normalizeRequestedProfileId: (id) => id === rawId ? 'agent-profile' : undefined, createCli })
+    try {
+      mockAgentProfile(); const profile = configModule.getConfig().llm_config.api_profiles[0]
+      profile.call_type = 'cliproxyapi'; profile.model_name = ''
+      listToolsMock.mockReturnValue([])
+      callToolMock.mockImplementation(async (r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, signal: options.signal }))
+      expect(await new LLMProxySvcImpl().chat({ route, conversationId: 'gateway-chat', profileId: rawId, messages: [{ role: 'user', content: 'A side question' }] }, { methodName: 'svcLLMProxy.chat', senderId: 64, frameUrl: url, senderUrl: url, isMainFrame: true })).toMatchObject({ content: 'parent result' })
+      expect(child).toHaveBeenCalledOnce()
+      expect(createCli.mock.calls[1][1].rawProfileId).toBe(rawId)
+      expect(createCli.mock.calls[1][0].model_name).toBe('')
+    } finally { trusted.clearMagicAgentTrustedRouteBindingsForTest() }
+  })
+
   it.each(['bare-with-prose', 'fenced-with-prose'])(
     'executes a leading DOCX read %s without leaking its pre-result refusal',
     async (mode) => {
@@ -1603,6 +2653,57 @@ describe('LLMProxySvcImpl', () => {
     ).toBe(true)
   })
 
+  it.each([['chat', false], ['chat', true], ['chatStream', false], ['chatStream', true]] as const)(
+    'retains a failed tool receipt via %s native=%s without another model or batch tool call', async (method, native) => {
+      mockAgentProfile()
+      listToolsMock.mockReturnValue(['demo.partial', 'demo.later'].map(name => ({ name, description: name, inputSchema: { type: 'object' } })))
+      const receipt = { content: '{"applied":1,"failed":1,"afterSha256":"actual"}', metadata: { snapshotId: 'before-snapshot', applied: 1, failed: 1 } }
+      const failure = new AssistantToolResultError({ message: 'Second edit did not match.', code: 'EDIT_STEP_FAILED' }, receipt)
+      callToolMock.mockRejectedValue(failure)
+      const agentChat = vi.fn(async () => native ? { content: '', toolCalls: [
+        { id: 'partial', name: 'demo.partial', wireName: 'mp_tool_0', arguments: '{}' },
+        { id: 'later', name: 'demo.later', wireName: 'mp_tool_1', arguments: '{}' }
+      ] } : '{"toolName":"demo.partial","args":{}}')
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat, supportsNativeTools: native } as never)
+      const req = { profileId: 'agent-profile', conversationId: `reported-failure-${method}-${native}`, messages: [{ role: 'user' as const, content: 'Perform only the reviewed steps.' }], skillRuntime: { bindings: [{ appId: 'magicpot.core', toolNames: ['demo.partial', 'demo.later'] }] } }
+      const expectedHistory = [expect.objectContaining({ toolName: 'demo.partial', status: 'failed', content: receipt.content, metadata: expect.objectContaining(receipt.metadata), error: failure.message })]
+      const service = new LLMProxySvcImpl()
+      if (method === 'chat') await expect(service.chat(req)).rejects.toMatchObject({ message: failure.message, code: failure.code, metadata: { toolHistory: expectedHistory } })
+      else {
+        const events: import('@shared/api/svcLLMProxy').LLMChatStreamResp[] = []
+        await service.chatStream(req, { onData: event => { events.push(event) } })
+        const statuses = events.filter(event => event.type === 'tool-status')
+        expect(statuses.map(event => event.toolStatus?.status)).toEqual(['running', 'failed'])
+        expect(statuses.at(-1)?.metadata?.toolHistory).toEqual(expectedHistory)
+        const terminal = events.filter(event => event.type === 'error' || event.type === 'done')
+        expect(terminal).toEqual([
+          expect.objectContaining({ type: 'error', done: false, error: failure.message, finishReason: 'error', metadata: expect.objectContaining({ toolHistory: expectedHistory, toolResult: receipt }) }),
+          expect.objectContaining({ type: 'done', done: true, error: failure.message, finishReason: 'error', metadata: expect.objectContaining({ toolHistory: expectedHistory, toolResult: receipt }) })
+        ])
+      }
+      expect(callToolMock).toHaveBeenCalledOnce()
+      expect(callToolMock.mock.calls[0][1]).toBe('demo.partial')
+      expect(agentChat).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('projects only a typed failed tool receipt at the final unary IPC exit', async () => {
+    mockAgentProfile()
+    const receipt = { content: 'failed output', metadata: { rollback: { attempted: true, succeeded: false, restoredPaths: [], failedPaths: ['a.txt'] } } }
+    const failure = new AssistantToolResultError({ message: 'Commit failed.', code: 'EDIT_FAILED' }, receipt)
+    const history = [{ runId: 'run', toolCallId: 'call', toolName: 'files.multi-edit', args: {}, status: 'failed', content: receipt.content, metadata: receipt.metadata, error: failure.message }]
+    Object.assign(failure, { metadata: { toolHistory: history }, body: 'raw provider diagnostic must not leave MAIN', headers: { authorization: 'fixture secret' } })
+    const service = new LLMProxySvcImpl()
+    vi.spyOn(service as unknown as { chatViaAPI: () => Promise<never> }, 'chatViaAPI').mockRejectedValue(failure)
+    const request = { profileId: 'agent-profile', messages: [{ role: 'user' as const, content: 'Receipt fixture' }] }
+    await expect(service.chat(request)).rejects.toBe(failure)
+    const result = await service.chat(request, { methodName: 'svcLLMProxy.chat' }).catch((error: unknown) => error)
+    expect(result).toBeInstanceOf(Error)
+    expect(result).toMatchObject({ code: failure.code, message: failure.message, payload: { kind: 'agent-tool-failure/v1', toolResult: receipt, toolHistory: history } })
+    expect(result).not.toHaveProperty('body')
+    expect(result).not.toHaveProperty('headers')
+  })
+
   it('passes the active tool-call signal and stable run/tool ids into runtime execution', async () => {
     const agentChat = vi
       .fn()
@@ -1711,7 +2812,17 @@ describe('LLMProxySvcImpl', () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         type: 'tool-status',
-        toolStatus: expect.objectContaining({ status: 'running' })
+        toolStatus: expect.objectContaining({ status: 'running' }),
+        metadata: {
+          runId: expect.any(String),
+          toolHistory: [
+            expect.objectContaining({
+              toolName: 'session.status',
+              args: { secret: 'never-run' },
+              status: 'running'
+            })
+          ]
+        }
       })
     )
     expect(events).not.toContainEqual(
@@ -2476,7 +3587,8 @@ describe('LLMProxySvcImpl', () => {
       'session.status',
       { verbose: true },
       {
-        allowedToolNames: ['session.status']
+        allowedToolNames: ['session.status'],
+        signal: expect.any(AbortSignal)
       }
     )
     expect(listToolsMock).not.toHaveBeenCalled()
@@ -5276,6 +6388,77 @@ describe('LLMProxySvcImpl', () => {
     await expect(svc.uploadHy3DModel({})).rejects.toThrow(
       '[Hunyuan3D] Missing model file to upload.'
     )
+  })
+})
+
+describe('Agent Studio main-owned tool catalog', () => {
+  const imageTool = {
+    name: 'image.inspect',
+    description: 'Inspect a Studio image',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }
+  }
+  const studioRequest = () => ({
+    conversationId: 'studio-tool-catalog',
+    profileId: 'agent-profile',
+    messages: [{ role: 'user' as const, content: 'Inspect this image' }],
+    skillRuntime: { bindings: [{ appId: 'assistant-runtime', toolNames: ['image.inspect'] }] }
+  })
+
+  it('exposes a run-local tool schema and returns its real callback output to the model', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue([])
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: '',
+        finishReason: 'tool_call',
+        toolCalls: [
+          {
+            id: 'inspect-one',
+            name: 'image.inspect',
+            wireName: 'mp_tool_0',
+            arguments: JSON.stringify({ path: 'sample.png' })
+          }
+        ]
+      })
+      .mockResolvedValueOnce({ content: 'Image is 320 pixels wide.' })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    const executeTool = vi.fn(async () => ({ content: 'width=320' }))
+    const result = await new LLMProxySvcImpl().chat(studioRequest(), {
+      additionalToolDefinitions: [imageTool],
+      executeTool
+    })
+    expect(chat.mock.calls[0][0].tools).toEqual([imageTool])
+    expect(executeTool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: 'image.inspect',
+        args: { path: 'sample.png' }
+      })
+    )
+    expect(chat.mock.calls[1][0].toolTurns[0].results[0].output).toBe('width=320')
+    expect(result.content).toBe('Image is 320 pixels wide.')
+    expect(callToolMock).not.toHaveBeenCalled()
+  })
+
+  it('does not expose additional schemas without a matching main-owned executor', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue([])
+    const chat = vi.fn().mockResolvedValue({ content: 'No tools.' })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    await new LLMProxySvcImpl().chat(studioRequest(), { additionalToolDefinitions: [imageTool] })
+    expect(chat.mock.calls[0][0].tools).toBeUndefined()
+  })
+
+  it('filters additional schemas through the same explicit tool allowlist', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue([])
+    const chat = vi.fn().mockResolvedValue({ content: 'No tool needed.' })
+    vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
+    await new LLMProxySvcImpl().chat(studioRequest(), {
+      additionalToolDefinitions: [imageTool, { ...imageTool, name: 'image.create' }],
+      executeTool: vi.fn()
+    })
+    expect(chat.mock.calls[0][0].tools).toEqual([imageTool])
   })
 })
 

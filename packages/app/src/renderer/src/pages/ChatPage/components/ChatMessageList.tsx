@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-refresh/only-export-components */
 import React from 'react'
+import ChatToolCalls from './ChatToolCalls'
 import { isEqual } from 'es-toolkit'
 import {
   Box,
@@ -47,6 +48,9 @@ import {
   ChatAttachment
 } from '../../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import { type ChatSession } from '../chatStorage'
+import { DEFAULT_CHAT_IMAGE_COUNT_LIMIT } from '@shared/llm/chatImageCountLimit'
+import { assertExplicitUserImageCount } from '../chatExplicitImageCount'
+import { assertNoUnverifiedPrimaryReports } from '@shared/llm/unverifiedReport'
 import { normalizeLocalMediaUrl, getDownloadFileNameFromUrl } from '../chatPageShared'
 import {
   buildAssistantReplyDownloadBaseName,
@@ -56,7 +60,8 @@ import {
   resolveAssistantReplyDownloadMode,
   resolveAssistantSidecarExportEntries
 } from '../chatReplyDownloadUtils'
-import { getChatAttachmentRenderKeys, getVisibleChatAttachments } from '../chatAttachmentVisibility'
+import { getVisibleChatAttachments } from '../chatAttachmentVisibility'
+import { useChatAttachmentRenderKeys } from '../useChatAttachmentRenderKeys'
 import {
   setAgentAttachmentDragPayload,
   setAgentImageDragPayload,
@@ -822,6 +827,9 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         bottom: 0,
         loadingGap: 0,
         forcedLoadingIndex: null,
+        forcedEditingIndex: null,
+        editingGap: 0,
+        editingAfterWindow: false,
         anchorStart: 0
       }
     }
@@ -842,20 +850,38 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     end = Math.max(start + 1, end)
     const forcedLoadingIndex =
       loadingIndex !== null && (loadingIndex < start || loadingIndex >= end) ? loadingIndex : null
+    const forcedEditingIndex =
+      editingMessageIndex !== null &&
+      Number.isInteger(editingMessageIndex) &&
+      editingMessageIndex >= 0 &&
+      editingMessageIndex < messages.length &&
+      messages[editingMessageIndex]?.role === 'user' &&
+      (editingMessageIndex < start || editingMessageIndex >= end) &&
+      editingMessageIndex !== forcedLoadingIndex
+        ? editingMessageIndex
+        : null
+    const editingAfterWindow = forcedEditingIndex !== null && forcedEditingIndex >= end
+    const renderedWindowEnd = editingAfterWindow && forcedEditingIndex !== null
+      ? forcedEditingIndex + 1
+      : end
+    const lastEnd = forcedLoadingIndex !== null ? forcedLoadingIndex + 1 : renderedWindowEnd
     return {
       start,
       end,
-      top: offsets[start],
-      bottom:
-        forcedLoadingIndex === null
-          ? offsets[messages.length] - offsets[end]
-          : offsets[messages.length] - offsets[forcedLoadingIndex + 1],
-      loadingGap:
-        forcedLoadingIndex === null ? 0 : Math.max(0, offsets[forcedLoadingIndex] - offsets[end]),
+      top: forcedEditingIndex !== null && forcedEditingIndex < start ? offsets[forcedEditingIndex] : offsets[start],
+      bottom: offsets[messages.length] - offsets[lastEnd],
+      editingGap: forcedEditingIndex === null ? 0 : editingAfterWindow
+        ? offsets[forcedEditingIndex] - offsets[end]
+        : offsets[start] - offsets[forcedEditingIndex + 1],
+      editingAfterWindow,
+      loadingGap: forcedLoadingIndex === null
+        ? 0
+        : Math.max(0, offsets[forcedLoadingIndex] - offsets[renderedWindowEnd]),
       forcedLoadingIndex,
+      forcedEditingIndex,
       anchorStart
     }
-  }, [heightRevision, itemHeight, loadingIndex, messages.length, scroll, virtualized])
+  }, [editingMessageIndex, heightRevision, itemHeight, loadingIndex, messages, scroll, virtualized])
   visibleStartRef.current = virtualWindow.anchorStart
 
   React.useLayoutEffect(() => {
@@ -989,15 +1015,25 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         />
       ) : null}
       {[
+        ...(virtualWindow.forcedEditingIndex !== null && !virtualWindow.editingAfterWindow
+          ? [virtualWindow.forcedEditingIndex] : []),
         ...Array.from(
           { length: virtualWindow.end - virtualWindow.start },
           (_, offsetIndex) => offsetIndex + virtualWindow.start
         ),
+        ...(virtualWindow.forcedEditingIndex !== null && virtualWindow.editingAfterWindow
+          ? [virtualWindow.forcedEditingIndex] : []),
         ...(virtualWindow.forcedLoadingIndex === null ? [] : [virtualWindow.forcedLoadingIndex])
       ].map((index) => {
         const message = messages[index]
         return (
           <React.Fragment key={messageIdentities[index]}>
+            {virtualWindow.forcedEditingIndex !== null && virtualWindow.editingAfterWindow && index === virtualWindow.forcedEditingIndex && virtualWindow.editingGap > 0 ? (
+              <div data-testid="chat-virtual-editing-gap" style={{ height: virtualWindow.editingGap, flexShrink: 0 }} />
+            ) : null}
+            {virtualWindow.forcedEditingIndex !== null && !virtualWindow.editingAfterWindow && index === virtualWindow.start && virtualWindow.editingGap > 0 ? (
+              <div data-testid="chat-virtual-editing-gap" style={{ height: virtualWindow.editingGap, flexShrink: 0 }} />
+            ) : null}
             {index === virtualWindow.forcedLoadingIndex && virtualWindow.loadingGap > 0 ? (
               <div
                 data-testid="chat-virtual-loading-gap"
@@ -1650,9 +1686,14 @@ const UserMessageEditForm: React.FC<{
   isLight
 }) => {
   const { t } = useTranslation()
-  const [editingAttachments, setEditingAttachments] = React.useState<ChatAttachment[]>(
-    () => message.attachments ?? []
+  const nextAttachmentId = React.useRef(0)
+  const makeEditingEntry = (attachment: ChatAttachment) => ({ attachment, id: nextAttachmentId.current++ })
+  const [editingEntries, setEditingEntries] = React.useState(() =>
+    (message.attachments ?? []).map(makeEditingEntry)
   )
+  const [editingSource] = React.useState(() => structuredClone(message))
+  const sourceChanged = !isEqual(editingSource, message)
+  const editingAttachments = editingEntries.map((entry) => entry.attachment)
   const [attachmentError, setAttachmentError] = React.useState<string | null>(null)
   const [isDraggingImage, setIsDraggingImage] = React.useState(false)
   const pendingImageImportsRef = React.useRef(new Set<symbol>())
@@ -1661,13 +1702,14 @@ const UserMessageEditForm: React.FC<{
     const pendingImports = pendingImageImportsRef.current
     return () => pendingImports.clear()
   }, [])
-  const visibleAttachments = getVisibleChatAttachments(editingAttachments)
-  const imageAttachments = visibleAttachments.filter((attachment) => attachment.type === 'image')
-  const nonImageAttachments = visibleAttachments.filter((attachment) => attachment.type !== 'image')
-  const imageAttachmentKeys = getChatAttachmentRenderKeys(imageAttachments)
-  const nonImageAttachmentKeys = getChatAttachmentRenderKeys(nonImageAttachments)
-  const removeAttachment = (attachment: ChatAttachment): void => {
-    setEditingAttachments((current) => current.filter((item) => item !== attachment))
+  const overImageLimit = editingAttachments.filter((attachment) => attachment.type === 'image').length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT
+  const visibleEntries = editingEntries.filter(({ attachment }) =>
+    overImageLimit ? attachment.type === 'image' || attachment.hiddenFromChatView !== true : attachment.hiddenFromChatView !== true
+  )
+  const imageEntries = visibleEntries.filter(({ attachment }) => attachment.type === 'image')
+  const nonImageEntries = visibleEntries.filter(({ attachment }) => attachment.type !== 'image')
+  const removeAttachment = (id: number): void => {
+    setEditingEntries((current) => current.filter((entry) => entry.id !== id))
   }
   const handleImageDragOver = React.useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
@@ -1711,6 +1753,10 @@ const UserMessageEditForm: React.FC<{
 
       event.preventDefault()
       event.stopPropagation()
+      if (files.length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT) {
+        setAttachmentError('本次图片数量超过限制，请分批发送')
+        return
+      }
       setAttachmentError(null)
       const operation = Symbol('edit-image-import')
       const pendingImports = pendingImageImportsRef.current
@@ -1720,7 +1766,8 @@ const UserMessageEditForm: React.FC<{
         const attachments = await onDropImageAttachments(files)
         if (!pendingImports.has(operation)) return
         if (attachments.length > 0) {
-          setEditingAttachments((current) => [...current, ...attachments])
+          const entries = attachments.map(makeEditingEntry)
+          setEditingEntries((current) => [...current, ...entries])
         }
       } catch (error) {
         if (!pendingImports.has(operation)) return
@@ -1739,15 +1786,10 @@ const UserMessageEditForm: React.FC<{
     const receiveAttachment = (attachment: ChatAttachment) => {
       if (attachment.type !== 'image') return
       setAttachmentError(null)
-      setEditingAttachments((current) => {
-        const duplicate = current.some(
-          (item) =>
-            item.type === attachment.type &&
-            item.url === attachment.url &&
-            item.fileName === attachment.fileName
-        )
-        return duplicate ? current : [...current, attachment]
-      })
+      const entry = makeEditingEntry(attachment)
+      // Every receiver invocation represents a distinct incoming occurrence.
+      // Source URL/name equality does not establish event identity or user intent.
+      setEditingEntries((current) => [...current, entry])
     }
     onRegisterEditingAttachmentReceiver(receiveAttachment)
     return () => onRegisterEditingAttachmentReceiver(null)
@@ -1838,11 +1880,11 @@ const UserMessageEditForm: React.FC<{
   return (
     <Box sx={{ px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
       <Box sx={{ maxWidth: '85%', width: '100%' }}>
-        {imageAttachments.length > 0 ? (
+        {imageEntries.length > 0 ? (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
-            {imageAttachments.map((attachment, attachmentIndex) => (
+            {imageEntries.map(({ attachment, id }, attachmentIndex) => (
               <Box
-                key={imageAttachmentKeys[attachmentIndex]}
+                key={id}
                 sx={{ position: 'relative', width: 168, height: 128 }}
               >
                 <ChatImage
@@ -1858,7 +1900,7 @@ const UserMessageEditForm: React.FC<{
                 <IconButton
                   size="small"
                   aria-label={`Remove ${attachment.fileName || 'image'}`}
-                  onClick={() => removeAttachment(attachment)}
+                  onClick={() => removeAttachment(id)}
                   sx={{
                     position: 'absolute',
                     top: 4,
@@ -1893,11 +1935,11 @@ const UserMessageEditForm: React.FC<{
             ))}
           </Box>
         ) : null}
-        {nonImageAttachments.length > 0 ? (
+        {nonImageEntries.length > 0 ? (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
-            {nonImageAttachments.map((attachment, attachmentIndex) => (
+            {nonImageEntries.map(({ attachment, id }) => (
               <Box
-                key={nonImageAttachmentKeys[attachmentIndex]}
+                key={id}
                 sx={{
                   display: 'flex',
                   alignItems: 'center',
@@ -1920,7 +1962,7 @@ const UserMessageEditForm: React.FC<{
                 <IconButton
                   size="small"
                   aria-label={`Remove ${attachment.fileName || 'attachment'}`}
-                  onClick={() => removeAttachment(attachment)}
+                  onClick={() => removeAttachment(id)}
                   sx={{ flexShrink: 0 }}
                 >
                   <CloseIcon sx={{ fontSize: 16 }} />
@@ -1965,6 +2007,11 @@ const UserMessageEditForm: React.FC<{
             }}
           />
         </Box>
+        {sourceChanged ? (
+          <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.25 }}>
+            消息已发生变化，请取消编辑并重新打开。
+          </Typography>
+        ) : null}
         {attachmentError ? (
           <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.25 }}>
             {attachmentError}
@@ -1982,13 +2029,25 @@ const UserMessageEditForm: React.FC<{
           <Button
             variant="contained"
             size="small"
-            disabled={!editingContent.trim() || pendingImageImportCount > 0}
+            disabled={sourceChanged || !editingContent.trim() || pendingImageImportCount > 0}
             startIcon={
               pendingImageImportCount > 0 ? <CircularProgress size={12} color="inherit" /> : null
             }
             onClick={() => {
               const newContent = editingContent.trim()
-              if (!newContent || pendingImageImportsRef.current.size > 0) return
+              if (sourceChanged || !newContent || pendingImageImportsRef.current.size > 0) return
+              try {
+                assertExplicitUserImageCount(editingAttachments)
+              } catch {
+                setAttachmentError('本次图片数量超过限制，请分批发送')
+                return
+              }
+              try {
+                assertNoUnverifiedPrimaryReports([{ attachments: editingAttachments }])
+              } catch (error) {
+                setAttachmentError(error instanceof Error ? error.message : String(error))
+                return
+              }
               onSubmit(newContent, editingAttachments.length > 0 ? editingAttachments : undefined)
             }}
             sx={{ borderRadius: '18px', textTransform: 'none' }}
@@ -2027,7 +2086,7 @@ const UserMessageBubble: React.FC<{
   theme
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
-  const attachmentKeys = getChatAttachmentRenderKeys(visibleAttachments)
+  const attachmentKeys = useChatAttachmentRenderKeys(visibleAttachments)
   const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
   const userBubbleText = isLight ? '#2f235f' : '#ffffff'
 
@@ -2238,7 +2297,7 @@ const AssistantMessageBubble: React.FC<{
   theme
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
-  const attachmentKeys = getChatAttachmentRenderKeys(visibleAttachments)
+  const attachmentKeys = useChatAttachmentRenderKeys(visibleAttachments)
   const retry = isLoading ? loadingStatus?.retry : undefined
   const [retryNow, setRetryNow] = React.useState(Date.now)
   React.useEffect(() => {
@@ -2266,6 +2325,7 @@ const AssistantMessageBubble: React.FC<{
           overflowWrap: 'break-word'
         }}
       >
+        <ChatToolCalls history={message.toolHistory} live={isLoading} />
         {/* AI 附件 */}
         {visibleAttachments.length > 0 && (
           <Box sx={{ mb: message.content ? 1.5 : 0 }}>
@@ -2317,6 +2377,7 @@ const AssistantMessageBubble: React.FC<{
               downloadMode={replyDownloadMode}
               batchSidecarExportEntries={batchSidecarExportEntries}
               attachments={visibleAttachments}
+              attachmentKeys={attachmentKeys}
               active={active}
               isLight={isLight}
               onPreviewImage={onPreviewImage}
@@ -2349,6 +2410,7 @@ const AssistantMessageBubble: React.FC<{
               downloadMode={replyDownloadMode}
               batchSidecarExportEntries={batchSidecarExportEntries}
               attachments={visibleAttachments}
+              attachmentKeys={attachmentKeys}
               active={active}
               isLight={isLight}
               onPreviewImage={onPreviewImage}
@@ -2367,7 +2429,8 @@ const AssistantMessageBubble: React.FC<{
             detail={loadingDetail}
             theme={theme}
           />
-        ) : message.content !== undefined && message.content !== '' ? null : (
+        ) : message.toolHistory?.length ||
+          (message.content !== undefined && message.content !== '') ? null : (
           <Typography variant="body2" sx={{ color: 'text.disabled', fontStyle: 'italic' }}>
             {t('chat.response_interrupted')}
           </Typography>
@@ -2644,6 +2707,7 @@ const AssistantMarkdownContent: React.FC<{
   downloadMode: AssistantReplyDownloadMode
   batchSidecarExportEntries?: AssistantSidecarExportEntry[]
   attachments: ChatAttachment[]
+  attachmentKeys: readonly string[]
   active: boolean
   isLight: boolean
   onPreviewImage: (url: string) => void
@@ -2657,6 +2721,7 @@ const AssistantMarkdownContent: React.FC<{
   downloadMode,
   batchSidecarExportEntries,
   attachments,
+  attachmentKeys,
   active,
   isLight,
   onPreviewImage,
@@ -2710,7 +2775,7 @@ const AssistantMarkdownContent: React.FC<{
           }
         ]
   const attachmentDownloadOptions = attachments.map((attachment, index) => ({
-    key: `${attachment.type}:${attachment.url}:${index}`,
+    key: attachmentKeys[index],
     attachment,
     label: buildAttachmentDownloadMenuLabel(attachment, t),
     onClick: () => {

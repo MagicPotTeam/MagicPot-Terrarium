@@ -18,7 +18,7 @@ type WorkflowProbeProps = {
   sendCanvasItemsToAgent: (
     targetItems: CanvasItem[],
     options?: Record<string, unknown>
-  ) => Promise<void>
+  ) => Promise<boolean>
 }
 
 function WorkflowProbe({
@@ -131,6 +131,34 @@ function createTextItem(text = 'A neon fox courier in rainy cyberpunk Shanghai')
     locked: false
   }
 }
+
+describe('generation delivery result contract', () => {
+  it('keeps the dialog open and does not report success when send returns false', async () => {
+    const notifySuccess = vi.fn()
+    const send = vi.fn().mockResolvedValue(false)
+    render(<WorkflowProbe items={[createImageItem()]} notifySuccess={notifySuccess} notifyWarning={vi.fn()} sendCanvasItemsToAgent={send} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
+    await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' })) })
+    expect(send).toHaveBeenCalledOnce()
+    expect(screen.getByTestId('dialog-state')).toHaveTextContent('open')
+    expect(notifySuccess).not.toHaveBeenCalled()
+  })
+
+  it('describes true as scheduled, not confirmed delivery', async () => {
+    const notifySuccess = vi.fn()
+    const notifyWarning = vi.fn()
+    const send = vi.fn().mockResolvedValue(true)
+    render(<WorkflowProbe items={[createImageItem()]} notifySuccess={notifySuccess} notifyWarning={notifyWarning} sendCanvasItemsToAgent={send} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
+    await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' })) })
+    expect(send).toHaveBeenCalledOnce()
+    expect(screen.getByTestId('dialog-state')).toHaveTextContent('closed')
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(notifyWarning).toHaveBeenCalledWith('已安排向默认 Agent 投递，尚未确认接收')
+  })
+})
 
 describe('useCanvasGenerationWorkflow', () => {
   beforeEach(() => {

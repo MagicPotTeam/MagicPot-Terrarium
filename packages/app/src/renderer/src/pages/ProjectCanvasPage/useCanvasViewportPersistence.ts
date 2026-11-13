@@ -69,6 +69,8 @@ type UseCanvasViewportPersistenceOptions = {
   addModel3DToCanvas: (file: File) => Promise<unknown> | unknown
   addVideoToCanvas: (file: File) => Promise<unknown> | unknown
   suspendAutoSave?: boolean
+  restoreGenerationRef?: MutableRefObject<number>
+  isCanvasSceneImporting?: () => boolean
 }
 
 type CanvasPersistenceSnapshot = {
@@ -151,7 +153,9 @@ export function useCanvasViewportPersistence({
   handleImportFiles,
   addModel3DToCanvas,
   addVideoToCanvas,
-  suspendAutoSave = false
+  suspendAutoSave = false,
+  restoreGenerationRef: sharedRestoreGenerationRef,
+  isCanvasSceneImporting
 }: UseCanvasViewportPersistenceOptions) {
   const latestPersistedCanvasStateRef = useRef<CanvasPersistenceSnapshot>({
     canvasId,
@@ -168,7 +172,8 @@ export function useCanvasViewportPersistence({
   const lastPersistedCanvasSignatureRef = useRef<string | null>(null)
   const isRestoringRef = useRef(true)
   const activeCanvasIdRef = useRef(canvasId)
-  const restoreGenerationRef = useRef(0)
+  const localRestoreGenerationRef = useRef(0)
+  const restoreGenerationRef = sharedRestoreGenerationRef ?? localRestoreGenerationRef
   const shouldClearCanvasBeforeRestoreRef = useRef(false)
   const suspendAutoSaveRef = useRef(suspendAutoSave)
   const latestHydrateCanvasImageItemForCanvasRef = useRef(hydrateCanvasImageItemForCanvas)
@@ -304,8 +309,9 @@ export function useCanvasViewportPersistence({
   ])
 
   const openClearConfirmDialog = useCallback(() => {
+    if (isCanvasSceneImporting?.()) return
     setClearConfirmOpen(true)
-  }, [])
+  }, [isCanvasSceneImporting])
 
   const closeClearConfirmDialog = useCallback(() => {
     setClearConfirmOpen(false)
@@ -342,12 +348,12 @@ export function useCanvasViewportPersistence({
   }, [])
 
   const handleClear = useCallback(async () => {
-    clearPendingCanvasSave()
-    const clearGeneration = restoreGenerationRef.current + 1
-    restoreGenerationRef.current = clearGeneration
+    if (isCanvasSceneImporting?.()) return
+    const clearGeneration = ++restoreGenerationRef.current
     isRestoringRef.current = true
 
     try {
+      clearPendingCanvasSave()
       await waitForPendingCanvasSave(canvasId)
       if (restoreGenerationRef.current !== clearGeneration) return
       await clearCanvasItems(canvasId)
@@ -376,6 +382,8 @@ export function useCanvasViewportPersistence({
     }
   }, [
     canvasId,
+    isCanvasSceneImporting,
+    restoreGenerationRef,
     clearPendingCanvasSave,
     items,
     setFigmaBinding,
@@ -577,6 +585,7 @@ export function useCanvasViewportPersistence({
     }
   }, [
     canvasId,
+    restoreGenerationRef,
     clearPendingCanvasSave,
     setFigmaBinding,
     setGroupBranches,

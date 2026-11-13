@@ -31,7 +31,8 @@ export function isCanvasTargetPlacedItem(value: unknown): value is CanvasItem {
 export async function dispatchCanvasTargetMediaAttachmentToCanvas(
   attachment: ChatAttachment,
   projectId: string,
-  generationSessionId?: string
+  generationSessionId?: string,
+  options?: { teamImageLabel?: string }
 ): Promise<{ dispatched: boolean; placedCanvasItems: CanvasItem[] }> {
   if (!attachment.url?.trim()) {
     return {
@@ -53,6 +54,7 @@ export async function dispatchCanvasTargetMediaAttachmentToCanvas(
         detail: {
           src: attachment.url,
           fileName: attachment.fileName,
+          ...(options?.teamImageLabel ? { teamImageLabel: options.teamImageLabel } : {}),
           projectId,
           generationSessionId,
           select: false,

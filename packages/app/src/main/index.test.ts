@@ -7,6 +7,11 @@ type StartupPolicyLike = {
   windowMode: string | undefined
 }
 
+const ownerShutdown = vi.hoisted(() => vi.fn<() => Promise<void>>(async () => undefined))
+const confirmQuit = vi.hoisted(() => vi.fn(async () => true))
+vi.mock('./winControls', () => ({ winController: { confirmAppQuit: confirmQuit } }))
+vi.mock('./llmProxy/providerDispatchOwner', () => ({ shutdownProviderDispatchOwner: ownerShutdown }))
+
 const {
   appMock,
   browserWindowMock,
@@ -167,6 +172,8 @@ async function loadModule() {
 describe('main process startup window opening', () => {
   beforeEach(async () => {
     await settle()
+    ownerShutdown.mockReset().mockResolvedValue(undefined)
+    confirmQuit.mockReset().mockResolvedValue(true)
     createMainWindowMock.mockReset()
     createMainWindowMock
       .mockReturnValueOnce({ id: 'fallback-window' })
@@ -390,6 +397,7 @@ describe('main process startup window opening', () => {
 
     const firstQuit = beforeQuitHandler?.(firstEvent)
     const repeatedQuit = beforeQuitHandler?.(repeatedEvent)
+    await settle()
 
     expect(firstEvent.preventDefault).toHaveBeenCalledTimes(1)
     expect(repeatedEvent.preventDefault).toHaveBeenCalledTimes(1)
@@ -407,6 +415,32 @@ describe('main process startup window opening', () => {
     expect(cleanupSubProcessesMock).toHaveBeenCalledTimes(1)
   })
 
+  it('does not retire dispatch ownership when a normal quit is declined', async () => {
+    confirmQuit.mockResolvedValueOnce(false); await loadModule()
+    const handler = appMock.on.mock.calls.find(([event]) => event === 'before-quit')?.[1] as (event: { preventDefault(): void }) => Promise<void>
+    await handler({ preventDefault: vi.fn() })
+    expect(confirmQuit).toHaveBeenCalledOnce(); expect(ownerShutdown).not.toHaveBeenCalled(); expect(beforeQuitMock).not.toHaveBeenCalled(); expect(appMock.exit).not.toHaveBeenCalled()
+  })
+  it('retires dispatch ownership before normal quit cleanup, even if native closure remains quarantined', async () => {
+    ownerShutdown.mockRejectedValueOnce(new Error('Closure remains quarantined'))
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    await loadModule()
+    const handler = appMock.on.mock.calls.find(([event]) => event === 'before-quit')?.[1] as (event: { preventDefault(): void }) => Promise<void>
+    await handler({ preventDefault: vi.fn() })
+    expect(ownerShutdown).toHaveBeenCalledOnce(); expect(beforeQuitMock).toHaveBeenCalledOnce(); expect(appMock.exit).toHaveBeenCalledWith(0)
+    expect(ownerShutdown.mock.invocationCallOrder[0]).toBeLessThan(beforeQuitMock.mock.invocationCallOrder[0]); expect(error).toHaveBeenCalled()
+  })
+  it('waits for dispatch owner retirement before update subprocess cleanup', async () => {
+    isAppUpdateInstallInProgressMock.mockReturnValue(true)
+    let retire!: () => void
+    ownerShutdown.mockImplementationOnce(() => new Promise<void>(resolve => { retire = resolve }))
+    await loadModule()
+    const handler = appMock.on.mock.calls.find(([event]) => event === 'before-quit')?.[1] as (event: { preventDefault(): void }) => Promise<void>
+    const pending = handler({ preventDefault: vi.fn() })
+    expect(ownerShutdown).toHaveBeenCalledOnce(); expect(cleanupSubProcessesMock).not.toHaveBeenCalled()
+    retire(); await pending
+    expect(cleanupSubProcessesMock).toHaveBeenCalledOnce(); expect(appMock.quit).toHaveBeenCalledOnce()
+  })
   it('intercepts update quit until subprocess cleanup completes', async () => {
     isAppUpdateInstallInProgressMock.mockReturnValue(true)
     await loadModule()

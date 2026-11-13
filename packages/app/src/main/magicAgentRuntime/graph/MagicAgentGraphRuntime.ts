@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { withCooperativeOperation } from '../../assistantRuntime/cooperativeOperation'
 
 import {
   builtInMagicAgentGraphs,
@@ -30,7 +31,12 @@ import { getAgentSessionKey, type AgentRouteLike } from '@shared/agent'
 import type { PolicyActorRef } from '@shared/magicAgentPlatform2'
 import { normalizeMagicPotToolName } from '@shared/app/types'
 import { isMagicAgentPlatformDeniedToolName } from '../toolPolicy'
-import { CooperativeExecutionController } from '../../magicAgentPlatform2/agents/cooperativeExecutionController'
+import {
+  CooperativeExecutionController,
+  CooperativePauseSupersededError,
+  type CooperativePauseTicket,
+  type CooperativeOperationGate
+} from '../../magicAgentPlatform2/agents/cooperativeExecutionController'
 import type { MagicAgentGraphRunStore } from './graphRunStore'
 import type { MagicAgentGraphRunEventStore } from './graphRunEventStore'
 import { assertSafeMagicAgentGraphId, assertSafeMagicAgentGraphRunId } from './graphIds'
@@ -69,6 +75,7 @@ type NormalizedMagicAgentGraphRuntimePolicy = Omit<
 
 export type MagicAgentGraphRuntimeExecutionOptions = {
   signal: AbortSignal
+  cooperativeExecution?: CooperativeOperationGate
 }
 
 export type MagicAgentGraphPendingInputMutation = {
@@ -134,6 +141,7 @@ export type MagicAgentGraphFirstPartyNodeExecutionRequest = Readonly<{
   run: Readonly<MagicAgentGraphRunRecord>
   route: Readonly<AgentRouteLike>
   signal: AbortSignal
+  cooperativeExecution?: CooperativeOperationGate
 }>
 
 export type MagicAgentGraphFirstPartyNodeExecutor = (
@@ -331,6 +339,7 @@ type GraphExecutionContext = {
   signal: AbortSignal
   runDeadlineAt: number
   nodeDeadlineAt?: number
+  readonly cooperativeExecution?: CooperativeOperationGate
   nodeOutputs: Map<string, string>
   deliveredChannelIds: Set<string>
   allowedToolNames: Set<string>
@@ -917,31 +926,58 @@ export class MagicAgentGraphRuntime {
     const run = this.runs.get(normalizedRunId)
     if (!run || run.sessionKey !== cleanString(sessionKey))
       return { runId: normalizedRunId, paused: false, error: 'Run not found.' }
-    if (run.status === 'paused') return { runId: normalizedRunId, paused: true, status: 'paused' }
-    if (run.status !== 'pending' && run.status !== 'running' && run.status !== 'pausing')
+    if (run.status !== 'pending' && run.status !== 'running' && run.status !== 'pausing' && run.status !== 'paused')
       return { runId: normalizedRunId, paused: false, status: run.status }
     const cooperative = this.cooperativeControllers.get(normalizedRunId)
-    if (!cooperative)
+    const controller = this.controllers.get(normalizedRunId)
+    if (!cooperative || !controller)
       return {
         runId: normalizedRunId,
         paused: false,
         status: run.status,
         error: 'Run is not active in this process.'
       }
-    if (run.status !== 'pausing') {
-      this.markRun(run, 'pausing')
-      this.recordRunEvent(
-        run,
-        'graph.pause.requested',
-        `MagicAgentGraph pause requested: ${normalizedRunId}`
-      )
+    if (controller.signal.aborted) return { runId: normalizedRunId, paused: false, status: run.status }
+    // Establish the pause before publishing: a subscriber can synchronously
+    // resume, cancel, or request a fresh pause while an event is being delivered.
+    const acknowledgement = cooperative.requestPause()
+    try {
+      if (run.status !== 'pausing' && run.status !== 'paused') {
+        this.markRun(run, 'pausing')
+        this.recordRunEvent(
+          run,
+          'graph.pause.requested',
+          `MagicAgentGraph pause requested: ${normalizedRunId}`
+        )
+      }
+    } catch (error) {
+      // The gate must precede publication, but publication can fail synchronously.
+      // Observe its now-abandoned acknowledgement without resuming, releasing work,
+      // or replacing the original persistence error with a later supersession.
+      void acknowledgement.catch(() => undefined)
+      throw error
     }
-    await cooperative.requestPause()
-    if (this.controllers.get(normalizedRunId)?.signal.aborted)
+    let ticket: CooperativePauseTicket
+    try {
+      ticket = await acknowledgement
+    } catch (error) {
+      if (!(error instanceof CooperativePauseSupersededError)) throw error
       return { runId: normalizedRunId, paused: false, status: run.status }
-    this.markRun(run, 'paused')
-    this.recordRunEvent(run, 'graph.paused', `MagicAgentGraph run paused: ${normalizedRunId}`)
-    return { runId: normalizedRunId, paused: true, status: run.status }
+    }
+    const isCurrent = (): boolean =>
+      this.runs.get(normalizedRunId) === run &&
+      this.cooperativeControllers.get(normalizedRunId) === cooperative &&
+      this.controllers.get(normalizedRunId) === controller &&
+      !controller.signal.aborted &&
+      (run.status === 'pausing' || run.status === 'paused') &&
+      cooperative.isPauseCurrent(ticket)
+    if (!isCurrent()) return { runId: normalizedRunId, paused: false, status: run.status }
+    if (run.status !== 'paused') {
+      this.markRun(run, 'paused')
+      this.recordRunEvent(run, 'graph.paused', `MagicAgentGraph run paused: ${normalizedRunId}`)
+    }
+    // Publication itself can synchronously resume; do not return its stale success.
+    return { runId: normalizedRunId, paused: isCurrent(), status: run.status }
   }
 
   resume(runId: string, sessionKey: string, _actor?: PolicyActorRef): MagicAgentGraphResumeResult {
@@ -959,9 +995,9 @@ export class MagicAgentGraphRuntime {
         status: run.status,
         error: 'Run is not active in this process.'
       }
+    cooperative.resume()
     this.markRun(run, 'running')
     this.recordRunEvent(run, 'graph.resumed', `MagicAgentGraph run resumed: ${normalizedRunId}`)
-    cooperative.resume()
     return { runId: normalizedRunId, resumed: true, status: run.status }
   }
 
@@ -1203,7 +1239,7 @@ export class MagicAgentGraphRuntime {
     const incomingByNode = new Map<string, MagicAgentGraphChannelDefinition[]>()
     for (const channel of graph.channels)
       incomingByNode.set(channel.to, [...(incomingByNode.get(channel.to) || []), channel])
-    const context: GraphExecutionContext = {
+    const baseContext: GraphExecutionContext = {
       graph,
       request,
       route,
@@ -1229,225 +1265,254 @@ export class MagicAgentGraphRuntime {
     const entryNodeIds = new Set(graph.entryNodeIds)
     const hasEntries = entryNodeIds.size > 0
     for (const node of this.sortGraphNodes(graph)) {
-      await cooperativeController.checkpoint('graph-node', signal)
-      this.throwIfCancelled(signal)
-      if (!context.plannedNodeIds.has(node.nodeId)) {
-        await this.skipNode(
-          runRecord,
-          node,
-          'outside-objective',
-          request.nodeExecution
-            ? 'Node is outside requested execution scope.'
-            : 'Node is outside requested outputs.'
-        )
-        continue
-      }
-      if (seededNodeOutputs.has(node.nodeId) && node.nodeId !== request.nodeExecution?.nodeId) {
-        await this.skipNode(
-          runRecord,
-          node,
-          'durable-upstream-value',
-          'Using prior durable node output.'
-        )
-        continue
-      }
-      const incoming = (incomingByNode.get(node.nodeId) || []).filter((channel) =>
-        context.plannedChannelIds.has(channel.channelId)
-      )
-      const hasDeliveredInput = incoming.some((channel) =>
-        context.deliveredChannelIds.has(channel.channelId)
-      )
-      const missingRequiredChannels = incoming.filter(
-        (channel) =>
-          channel.required !== false && !context.deliveredChannelIds.has(channel.channelId)
-      )
-      if (missingRequiredChannels.length > 0) {
-        const missingChannelIds = missingRequiredChannels.map((channel) => channel.channelId)
-        const message = `Required MagicAgentGraph channel(s) did not reach node "${node.nodeId}": ${missingChannelIds.join(', ')}`
-        await this.updateNodeRun(runRecord, node, 'failed', {
-          endedAt: now(),
-          error: message,
-          metadata: { missingChannelIds }
-        })
-        this.recordRunEvent(
-          runRecord,
-          'node.failed',
-          `MagicAgentGraph node failed: ${node.nodeId}: ${message}`,
-          {
-            nodeId: node.nodeId,
-            kind: node.kind,
-            missingChannelIds
-          }
-        )
-        throw new Error(message)
-      }
-      const shouldRun =
-        node.kind === 'input' ||
-        entryNodeIds.has(node.nodeId) ||
-        node.nodeId === request.nodeExecution?.nodeId ||
-        hasDeliveredInput ||
-        (!hasEntries && incoming.length === 0)
-      if (!shouldRun) {
-        await this.skipNode(
-          runRecord,
-          node,
-          'inactive-inbound',
-          'No active inbound channel reached this node.'
-        )
-        continue
-      }
-      const input = this.collectNodeInput(node, incoming, context)
-      const nodeController = new AbortController()
-      const forwardRunAbort = (): void => nodeController.abort(signal.reason)
-      signal.addEventListener('abort', forwardRunAbort, { once: true })
-      if (signal.aborted) forwardRunAbort()
-      try {
-        const nodeStartedAt = now()
-        const nodeBudgetMs = Math.max(
-          1,
-          Math.min(this.policy.maxNodeDurationMs, runDeadlineAt - nodeStartedAt)
-        )
-        const nodeDeadlineAt = nodeStartedAt + nodeBudgetMs
-        const nodeBudget = {
-          maxNodeDurationMs: this.policy.maxNodeDurationMs,
-          effectiveNodeDurationMs: nodeBudgetMs,
-          nodeDeadlineAt,
-          runDeadlineAt
-        }
-        await this.updateNodeRun(runRecord, node, 'running', {
-          startedAt: nodeStartedAt,
-          input,
-          metadata: { runtimeBudget: nodeBudget }
-        })
-        this.recordRunEvent(
-          runRecord,
-          'node.started',
-          `MagicAgentGraph node started: ${node.nodeId}`,
-          { nodeId: node.nodeId, kind: node.kind, runtimeBudget: nodeBudget }
-        )
-        await this.recordRuntimeNode(node, context, 'running')
-        const timeoutError = new MagicAgentGraphTimeoutError(
-          nodeBudgetMs < this.policy.maxNodeDurationMs
-            ? `MagicAgentGraph run timed out after ${this.policy.maxRunDurationMs}ms while executing node "${node.nodeId}".`
-            : `MagicAgentGraph node "${node.nodeId}" timed out after ${nodeBudgetMs}ms.`,
-          nodeBudgetMs < this.policy.maxNodeDurationMs ? 'run' : 'node'
-        )
-        context.nodeDeadlineAt = nodeDeadlineAt
-        context.signal = nodeController.signal
-        const leaveNode = cooperativeController.enter('graph-node')
-        let rawOutput: string
+      await cooperativeController.run('graph-node', signal, async (children) => {
         try {
-          rawOutput = await this.awaitBounded(
-            this.executeNode(node, input, context),
-            nodeController.signal,
-            nodeBudgetMs,
-            timeoutError,
-            () => nodeController.abort(timeoutError)
+          // Never put a node capability on the shared context. A retained callback
+          // must keep this node's exact child, not read a later node's live scope.
+          const context: GraphExecutionContext = { ...baseContext, cooperativeExecution: children }
+          this.throwIfCancelled(signal)
+          if (!context.plannedNodeIds.has(node.nodeId)) {
+            await this.skipNode(
+              runRecord,
+              node,
+              'outside-objective',
+              request.nodeExecution
+                ? 'Node is outside requested execution scope.'
+                : 'Node is outside requested outputs.'
+            )
+            await this.queueRunPersistence(runRecord)
+            return
+          }
+          if (seededNodeOutputs.has(node.nodeId) && node.nodeId !== request.nodeExecution?.nodeId) {
+            await this.skipNode(
+              runRecord,
+              node,
+              'durable-upstream-value',
+              'Using prior durable node output.'
+            )
+            await this.queueRunPersistence(runRecord)
+            return
+          }
+          const incoming = (incomingByNode.get(node.nodeId) || []).filter((channel) =>
+            context.plannedChannelIds.has(channel.channelId)
           )
-        } finally {
-          leaveNode()
-        }
-        context.nodeDeadlineAt = undefined
-        context.signal = signal
-        this.throwIfCancelled(signal)
-        const outputLimit = this.limitText(
-          stringifyValue(rawOutput),
-          this.policy.maxNodeOutputChars
-        )
-        const outputMetadata = outputLimit.truncated
-          ? { outputTruncated: true, maxOutputChars: this.policy.maxNodeOutputChars }
-          : undefined
-        context.nodeOutputs.set(node.nodeId, outputLimit.text)
-        await this.updateNodeRun(runRecord, node, 'completed', {
-          endedAt: now(),
-          output: outputLimit.text,
-          ...(outputMetadata ? { metadata: outputMetadata } : {})
-        })
-        await this.recordRuntimeNode(node, context, 'completed')
-        this.recordRunEvent(
-          runRecord,
-          'node.completed',
-          `MagicAgentGraph node completed: ${node.nodeId}`,
-          { nodeId: node.nodeId, kind: node.kind, ...(outputMetadata || {}) }
-        )
-        await this.emitOutgoingChannels(node, outputLimit.text, context)
-      } catch (error) {
-        context.nodeDeadlineAt = undefined
-        context.signal = signal
-        if (error instanceof MagicAgentGraphTimeoutError && !signal.aborted) {
-          this.controllers.get(runRecord.runId)?.abort(error)
-        }
-        const message = error instanceof Error ? error.message : String(error)
-        const timeoutMetadata =
-          error instanceof MagicAgentGraphTimeoutError
-            ? { timedOut: true, timeoutScope: error.scope }
-            : {}
-        if (signal.aborted && !(error instanceof MagicAgentGraphTimeoutError)) {
-          await this.updateNodeRun(runRecord, node, 'skipped', {
-            endedAt: now(),
-            error: message,
-            metadata: {
-              ...(runRecord.nodes?.find((candidate) => candidate.nodeId === node.nodeId)
-                ?.metadata || {}),
-              reason: 'Run cancelled while node was executing.',
-              cancelled: true
-            }
-          })
-          await this.recordRuntimeNode(node, context, 'skipped')
-          this.recordRunEvent(
-            runRecord,
-            'node.skipped',
-            `MagicAgentGraph node cancelled: ${node.nodeId}`,
-            { nodeId: node.nodeId, kind: node.kind, reason: 'run-cancelled', cancelled: true }
+          const hasDeliveredInput = incoming.some((channel) =>
+            context.deliveredChannelIds.has(channel.channelId)
           )
-        } else {
-          await this.updateNodeRun(runRecord, node, 'failed', {
-            endedAt: now(),
-            error: message,
-            metadata: {
-              ...(runRecord.nodes?.find((candidate) => candidate.nodeId === node.nodeId)
-                ?.metadata || {}),
-              ...timeoutMetadata
-            }
-          })
-          await this.recordRuntimeNode(node, context, 'failed')
-          this.recordRunEvent(
-            runRecord,
-            'node.failed',
-            `MagicAgentGraph node failed: ${node.nodeId}: ${message}`,
-            { nodeId: node.nodeId, kind: node.kind, error: message, ...timeoutMetadata }
+          const missingRequiredChannels = incoming.filter(
+            (channel) =>
+              channel.required !== false && !context.deliveredChannelIds.has(channel.channelId)
           )
-        }
-        throw error
-      } finally {
-        signal.removeEventListener('abort', forwardRunAbort)
-      }
-    }
-    await cooperativeController.checkpoint('graph-node', signal)
-    runRecord.outputs = objectivePlan.outputsToBuild.map((output) =>
-      this.buildOutput(graph, output, request.input, runRecord.channels, context.nodeOutputs)
-    )
-    for (const output of runRecord.outputs)
-      this.recordRunEvent(
-        runRecord,
-        'output.created',
-        `MagicAgentGraph output created: ${output.outputId}`,
-        {
-          outputId: output.outputId,
-          nodeId: output.sourceNodeId,
-          ...(output.channelId
-            ? {
-                channelId: output.channelId,
-                channelKind: graph.channels.find(
-                  (channel) => channel.channelId === output.channelId
-                )?.kind,
-                channelCount: runRecord.channels.filter(
-                  (channel) => channel.channelId === output.channelId
-                ).length
+          if (missingRequiredChannels.length > 0) {
+            const missingChannelIds = missingRequiredChannels.map((channel) => channel.channelId)
+            const message = `Required MagicAgentGraph channel(s) did not reach node "${node.nodeId}": ${missingChannelIds.join(', ')}`
+            await this.updateNodeRun(runRecord, node, 'failed', {
+              endedAt: now(),
+              error: message,
+              metadata: { missingChannelIds }
+            })
+            this.recordRunEvent(
+              runRecord,
+              'node.failed',
+              `MagicAgentGraph node failed: ${node.nodeId}: ${message}`,
+              {
+                nodeId: node.nodeId,
+                kind: node.kind,
+                missingChannelIds
               }
-            : {})
+            )
+            throw new Error(message)
+          }
+          const shouldRun =
+            node.kind === 'input' ||
+            entryNodeIds.has(node.nodeId) ||
+            node.nodeId === request.nodeExecution?.nodeId ||
+            hasDeliveredInput ||
+            (!hasEntries && incoming.length === 0)
+          if (!shouldRun) {
+            await this.skipNode(
+              runRecord,
+              node,
+              'inactive-inbound',
+              'No active inbound channel reached this node.'
+            )
+            await this.queueRunPersistence(runRecord)
+            return
+          }
+          const input = this.collectNodeInput(node, incoming, context)
+          const nodeController = new AbortController()
+          const forwardRunAbort = (): void => nodeController.abort(signal.reason)
+          signal.addEventListener('abort', forwardRunAbort, { once: true })
+          if (signal.aborted) forwardRunAbort()
+          try {
+            const nodeStartedAt = now()
+            const nodeBudgetMs = Math.max(
+              1,
+              Math.min(this.policy.maxNodeDurationMs, runDeadlineAt - nodeStartedAt)
+            )
+            const nodeDeadlineAt = nodeStartedAt + nodeBudgetMs
+            const nodeBudget = {
+              maxNodeDurationMs: this.policy.maxNodeDurationMs,
+              effectiveNodeDurationMs: nodeBudgetMs,
+              nodeDeadlineAt,
+              runDeadlineAt
+            }
+            await this.updateNodeRun(runRecord, node, 'running', {
+              startedAt: nodeStartedAt,
+              input,
+              metadata: { runtimeBudget: nodeBudget }
+            })
+            this.recordRunEvent(
+              runRecord,
+              'node.started',
+              `MagicAgentGraph node started: ${node.nodeId}`,
+              { nodeId: node.nodeId, kind: node.kind, runtimeBudget: nodeBudget }
+            )
+            await this.recordRuntimeNode(node, context, 'running')
+            const timeoutError = new MagicAgentGraphTimeoutError(
+              nodeBudgetMs < this.policy.maxNodeDurationMs
+                ? `MagicAgentGraph run timed out after ${this.policy.maxRunDurationMs}ms while executing node "${node.nodeId}".`
+                : `MagicAgentGraph node "${node.nodeId}" timed out after ${nodeBudgetMs}ms.`,
+              nodeBudgetMs < this.policy.maxNodeDurationMs ? 'run' : 'node'
+            )
+            context.nodeDeadlineAt = nodeDeadlineAt
+            context.signal = nodeController.signal
+            const rawOutput = await this.awaitBounded(
+              this.executeNode(node, input, context),
+              nodeController.signal,
+              nodeBudgetMs,
+              timeoutError,
+              () => nodeController.abort(timeoutError)
+            )
+            context.nodeDeadlineAt = undefined
+            context.signal = signal
+            this.throwIfCancelled(signal)
+            const outputLimit = this.limitText(
+              stringifyValue(rawOutput),
+              this.policy.maxNodeOutputChars
+            )
+            const outputMetadata = outputLimit.truncated
+              ? { outputTruncated: true, maxOutputChars: this.policy.maxNodeOutputChars }
+              : undefined
+            context.nodeOutputs.set(node.nodeId, outputLimit.text)
+            await this.updateNodeRun(runRecord, node, 'completed', {
+              endedAt: now(),
+              output: outputLimit.text,
+              ...(outputMetadata ? { metadata: outputMetadata } : {})
+            })
+            await this.recordRuntimeNode(node, context, 'completed')
+            this.recordRunEvent(
+              runRecord,
+              'node.completed',
+              `MagicAgentGraph node completed: ${node.nodeId}`,
+              { nodeId: node.nodeId, kind: node.kind, ...(outputMetadata || {}) }
+            )
+            await this.emitOutgoingChannels(node, outputLimit.text, context)
+            // Await the last snapshot, hence prior queued saves' settlement too.
+            // The queue's existing swallowed failures are not transactional success.
+            await this.queueRunPersistence(runRecord)
+          } catch (error) {
+            context.nodeDeadlineAt = undefined
+            context.signal = signal
+            if (error instanceof MagicAgentGraphTimeoutError && !signal.aborted) {
+              this.controllers.get(runRecord.runId)?.abort(error)
+            }
+            const message = error instanceof Error ? error.message : String(error)
+            const timeoutMetadata =
+              error instanceof MagicAgentGraphTimeoutError
+                ? { timedOut: true, timeoutScope: error.scope }
+                : {}
+            if (signal.aborted && !(error instanceof MagicAgentGraphTimeoutError)) {
+              await this.updateNodeRun(runRecord, node, 'skipped', {
+                endedAt: now(),
+                error: message,
+                metadata: {
+                  ...(runRecord.nodes?.find((candidate) => candidate.nodeId === node.nodeId)
+                    ?.metadata || {}),
+                  reason: 'Run cancelled while node was executing.',
+                  cancelled: true
+                }
+              })
+              await this.recordRuntimeNode(node, context, 'skipped')
+              this.recordRunEvent(
+                runRecord,
+                'node.skipped',
+                `MagicAgentGraph node cancelled: ${node.nodeId}`,
+                { nodeId: node.nodeId, kind: node.kind, reason: 'run-cancelled', cancelled: true }
+              )
+            } else {
+              await this.updateNodeRun(runRecord, node, 'failed', {
+                endedAt: now(),
+                error: message,
+                metadata: {
+                  ...(runRecord.nodes?.find((candidate) => candidate.nodeId === node.nodeId)
+                    ?.metadata || {}),
+                  ...timeoutMetadata
+                }
+              })
+              await this.recordRuntimeNode(node, context, 'failed')
+              this.recordRunEvent(
+                runRecord,
+                'node.failed',
+                `MagicAgentGraph node failed: ${node.nodeId}: ${message}`,
+                { nodeId: node.nodeId, kind: node.kind, error: message, ...timeoutMetadata }
+              )
+            }
+            throw error
+          } finally {
+            signal.removeEventListener('abort', forwardRunAbort)
+          }
+        } catch (error) {
+          // Covers every exceptional exit, including skip/missing-input decisions
+          // and a failure event subscriber that queues writes before throwing.
+          // Preserve existing execution/publication error precedence; a rejection
+          // from this newly added settlement fence is secondary, never success.
+          await this.queueRunPersistence(runRecord).catch(() => undefined)
+          throw error
         }
-      )
+      })
+    }
+    // Final output publication is separate work, never a reused node child.
+    await cooperativeController.run('graph-node', signal, async () => {
+      try {
+        runRecord.outputs = objectivePlan.outputsToBuild.map((output) =>
+          this.buildOutput(
+            graph,
+            output,
+            request.input,
+            runRecord.channels,
+            baseContext.nodeOutputs
+          )
+        )
+        for (const output of runRecord.outputs)
+          this.recordRunEvent(
+            runRecord,
+            'output.created',
+            `MagicAgentGraph output created: ${output.outputId}`,
+            {
+              outputId: output.outputId,
+              nodeId: output.sourceNodeId,
+              ...(output.channelId
+                ? {
+                    channelId: output.channelId,
+                    channelKind: graph.channels.find(
+                      (channel) => channel.channelId === output.channelId
+                    )?.kind,
+                    channelCount: runRecord.channels.filter(
+                      (channel) => channel.channelId === output.channelId
+                    ).length
+                  }
+                : {})
+            }
+          )
+      } catch (error) {
+        // An earlier output event may already have queued a save. Retain ownership
+        // on synchronous publication failure too, with that failure still primary.
+        await this.queueRunPersistence(runRecord).catch(() => undefined)
+        throw error
+      }
+      await this.queueRunPersistence(runRecord)
+    })
   }
 
   private buildObjectivePlan(
@@ -1774,7 +1839,7 @@ export class MagicAgentGraphRuntime {
           }
         }
       },
-      { signal: context.signal }
+      { signal: context.signal, cooperativeExecution: context.cooperativeExecution }
     )
     if (result.status === 'timeout') {
       const remainingRunMs = context.runDeadlineAt - now()
@@ -1814,18 +1879,26 @@ export class MagicAgentGraphRuntime {
         throw new Error(
           `MagicAgentGraph first-party node "${node.nodeId}" is unconfigured in this environment.`
         )
-      const result = await this.deps.firstPartyNodeExecutor({
-        family,
-        operation,
-        config: Object.freeze({ ...familyConfig }),
-        input,
-        node,
-        graph: context.graph,
-        run: context.run,
-        route: context.route,
-        signal: context.signal
-      })
-      return stringifyValue(result)
+      return withCooperativeOperation(
+        context.cooperativeExecution,
+        'tool-invocation',
+        context.signal,
+        async (children) => {
+          const result = await this.deps.firstPartyNodeExecutor!({
+            family,
+            operation,
+            config: Object.freeze({ ...familyConfig }),
+            input,
+            node,
+            graph: context.graph,
+            run: context.run,
+            route: context.route,
+            signal: context.signal,
+            cooperativeExecution: children
+          })
+          return stringifyValue(result)
+        }
+      )
     }
     const toolName =
       normalizeMagicPotToolName(node.toolName) ||
@@ -1877,14 +1950,25 @@ export class MagicAgentGraphRuntime {
       })
     })
     const requestDigest = createHash('sha256').update(JSON.stringify(toolRequest)).digest('hex')
+    // This boundary must consume the scope even when the platform dependency
+    // does not. Capture both values now, not the mutable post-node context.signal.
+    const toolSignal = context.signal
+    const toolGate = context.cooperativeExecution
+    const invoke = () =>
+      withCooperativeOperation(toolGate, 'tool-invocation', toolSignal, async (children) =>
+        this.deps.callTool!(toolRequest, {
+          signal: toolSignal,
+          cooperativeExecution: children
+        })
+      )
     const approval = this.deps.requestToolApproval?.({
       runId: context.run.runId,
       nodeId: node.nodeId,
       toolName,
       requestDigest,
       request: toolRequest,
-      invoke: () => this.deps.callTool!(toolRequest, { signal: context.signal }),
-      signal: context.signal
+      invoke,
+      signal: toolSignal
     })
     let result: MagicAgentPlatformToolCallResp
     if (approval) {
@@ -1966,7 +2050,7 @@ export class MagicAgentGraphRuntime {
           status: 'invoked'
         }
       )
-      result = await this.deps.callTool(toolRequest, { signal: context.signal })
+      result = await invoke()
     }
     if (!result.ok)
       throw new Error(

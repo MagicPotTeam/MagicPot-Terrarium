@@ -268,7 +268,22 @@ const validate =
   (value: unknown): T =>
     parseAgentLocalFileValue(schema, value)
 
+export const chooseSqlitePreviewRequestSchema = z.object({
+  scope: agentLocalFileScopeSchema, requestId: safeId,
+  table: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/),
+  columns: z.array(z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/)).min(1).max(16).refine(value => new Set(value).size === value.length),
+  limit: z.number().int().min(1).max(100),
+  consentTemporarySnapshot: z.literal(true)
+}).strict()
+export const sqlitePreviewResponseSchema = z.object({
+  rows: z.array(z.record(z.string().max(64), z.union([z.string().max(4096), z.number().finite(), z.null()]))).max(100),
+  truncated: z.boolean(), source: z.literal('supplied-standalone-snapshot'), liveDatabaseConsistency: z.literal(false), nativeWorkBounded: z.literal(false)
+}).strict()
+export type ChooseSqlitePreviewRequest = z.infer<typeof chooseSqlitePreviewRequestSchema>
+export type SqlitePreviewResponse = z.infer<typeof sqlitePreviewResponseSchema>
+
 export type AgentLocalFilesSvc = {
+  chooseSqlitePreview(req: ChooseSqlitePreviewRequest): Promise<SqlitePreviewResponse | null>
   setScope(req: SetLocalFileScopeRequest): Promise<void>
   choose(req: ChooseLocalFileRequest): Promise<AgentLocalFileGrant | null>
   read(req: ReadLocalFileRequest): Promise<ReadLocalFileResponse>
@@ -279,6 +294,7 @@ export type AgentLocalFilesSvc = {
 
 // Core read-only file service. Main owns the native chooser and trusted sender identity.
 export const agentLocalFilesSvcDef: ServiceDefSheet<AgentLocalFilesSvc> = {
+  chooseSqlitePreview: { type: 'unary', request: validate(chooseSqlitePreviewRequestSchema), response: validate(sqlitePreviewResponseSchema.nullable()) },
   setScope: {
     type: 'unary',
     request: validate(setLocalFileScopeRequestSchema),

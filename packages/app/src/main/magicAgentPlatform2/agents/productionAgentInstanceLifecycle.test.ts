@@ -456,6 +456,261 @@ describe('ProductionAgentInstanceLifecycleService', () => {
     eventStore.close()
   })
 
+  describe('pause ticket consumers (not a general config safe point)', () => {
+    const scenario = async () => {
+      const { eventStore, store, created } = setup()
+      let execution!: import('./cooperativeExecutionController').CooperativeExecutionController
+      let runSignal!: AbortSignal
+      const service = new ProductionAgentInstanceLifecycleService(store, allowedAuthorization, async (_req, options) => {
+        execution = options.cooperativeExecution; runSignal = options.signal
+        await new Promise<void>((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+        return completedRun()
+      }, incrementingClock())
+      const actor = { kind: 'user', id: 'owner' } as const
+      await service.start({ instanceId: created.id, expectedRevision: 0, actor, request, idempotencyKey: 'ticket-start' })
+      const pause = (key: string) => service.pause({ instanceId: created.id, expectedRevision: store.get(created.id)!.revision, actor, idempotencyKey: key })
+      const resume = (key: string) => service.resume({ instanceId: created.id, expectedRevision: store.get(created.id)!.revision, actor, idempotencyKey: key })
+      const close = async () => { await service.close(); eventStore.close() }
+      return { eventStore, store, id: created.id, service, execution, runSignal, actor, pause, resume, close }
+    }
+
+    it('does not durably pause after an immediate resume of a running instance', async () => {
+      const s = await scenario()
+      try {
+        const pending = s.pause('idle-pause'), rejected = expect(pending).rejects.toMatchObject({ code: 'COOPERATIVE_PAUSE_SUPERSEDED' })
+        s.resume('withdraw-idle')
+        await rejected
+        expect(s.store.get(s.id)?.state.status).toBe('running'); expect(s.execution.isPaused()).toBe(false)
+      } finally { await s.close() }
+    })
+
+    it('withdraws an active drain without releasing the active tool ownership', async () => {
+      const s = await scenario(), leave = s.execution.enter('tool-invocation')
+      let settled = false
+      try {
+        const pending = s.pause('active-pause'), rejected = expect(pending).rejects.toMatchObject({ code: 'COOPERATIVE_PAUSE_SUPERSEDED' }).then(() => { settled = true })
+        s.resume('withdraw-active')
+        for (let i = 0; i < 12; i++) await Promise.resolve()
+        expect(settled).toBe(true); expect(s.execution.isQuiescent()).toBe(false)
+        leave(); await rejected
+        expect(s.store.get(s.id)?.state.status).toBe('running')
+      } finally { leave(); await s.close() }
+    })
+
+    it('keeps an old durable-pause continuation stale across immediate resume and re-pause', async () => {
+      const s = await scenario()
+      try {
+        const stale = s.pause('old-pause'), rejected = expect(stale).rejects.toMatchObject({ code: 'COOPERATIVE_PAUSE_SUPERSEDED' })
+        s.resume('between-pauses')
+        const fresh = s.pause('fresh-pause')
+        await rejected
+        expect((await fresh).state.status).toBe('paused')
+        expect(s.store.get(s.id)?.revision).toBe(2)
+      } finally { await s.close() }
+    })
+
+    it.each(['pause', 'replacement'])('rechecks its ticket at the %s commit after its helper resolved', async action => {
+      const s = await scenario(), requestPause = s.service.requestCooperativePause.bind(s.service)
+      vi.spyOn(s.service, 'requestCooperativePause').mockImplementation(async id => {
+        const ticket = await requestPause(id)
+        queueMicrotask(() => s.service.resumeCooperativeExecution(id))
+        return ticket
+      })
+      try {
+        const pending = action === 'pause' ? s.pause('commit-race') : s.service.quiesceForReplacement(s.id)
+        await expect(pending).rejects.toMatchObject({ code: 'COOPERATIVE_PAUSE_SUPERSEDED' })
+        expect(s.store.get(s.id)?.state.status).toBe('running'); expect(s.execution.isPaused()).toBe(false)
+      } finally { await s.close() }
+    })
+
+    it.each(['pause-pause', 'pause-replacement', 'replacement-pause'])('commits concurrent %s once after validating each current ticket', async order => {
+      const s = await scenario(), leave = s.execution.enter('llm-inference')
+      try {
+        const first = order === 'replacement-pause' ? s.service.quiesceForReplacement(s.id) : s.pause('first')
+        const second = order === 'pause-pause' || order === 'replacement-pause' ? s.pause('second') : s.service.quiesceForReplacement(s.id)
+        leave()
+        const results = await Promise.all([first, second])
+        expect(results.map(result => result.state.status)).toEqual(['paused', 'paused'])
+        expect(results[0].revision).toBe(2); expect(results[1].revision).toBe(2)
+        expect(s.store.get(s.id)?.revision).toBe(2)
+      } finally { leave(); await s.close() }
+    })
+
+    it.each(['stop', 'close'])('does not let a queued idle pause overwrite %s', async action => {
+      const s = await scenario()
+      try {
+        const pending = s.pause('late-pause'), rejected = expect(pending).rejects.toMatchObject({ code: 'COOPERATIVE_PAUSE_SUPERSEDED' })
+        const stopped = action === 'close' ? s.service.close() : s.service.stop({ instanceId: s.id, expectedRevision: 1, actor: s.actor, idempotencyKey: 'ticket-stop' })
+        await rejected; await stopped
+        expect(s.runSignal.aborted).toBe(true); expect(s.store.get(s.id)?.state.status).toBe('stopped')
+      } finally { await s.close() }
+    })
+
+    it.each(['paused', 'concurrent'])('replays a successful %s duplicate pause as historical data without another transition', async mode => {
+      const s = await scenario()
+      try {
+        let original!: Awaited<ReturnType<typeof s.pause>>
+        const duplicateInput = { instanceId: s.id, expectedRevision: mode === 'paused' ? 2 : 1, actor: s.actor, idempotencyKey: 'duplicate-receipt' }
+        if (mode === 'paused') {
+          await s.pause('first-pause')
+          original = await s.service.pause(duplicateInput)
+        } else {
+          const leave = s.execution.enter('llm-inference')
+          const first = s.pause('first-pause'), duplicate = s.service.pause(duplicateInput)
+          leave(); await first; original = await duplicate
+        }
+        expect(s.store.get(s.id)?.revision).toBe(2)
+        s.resume('after-duplicate')
+        const requestGate = vi.spyOn(s.execution, 'requestPause'), resumeGate = vi.spyOn(s.execution, 'resume')
+        expect(await s.service.pause(duplicateInput)).toEqual(original)
+        expect(requestGate).not.toHaveBeenCalled(); expect(resumeGate).not.toHaveBeenCalled()
+        expect(s.store.get(s.id)?.state.status).toBe('running'); expect(s.store.get(s.id)?.revision).toBe(3)
+        await expect(s.service.pause({ ...duplicateInput, actor: { kind: 'user', id: 'other' } })).rejects.toThrow(/idempotency conflict/i)
+      } finally { await s.close() }
+    })
+
+    it('replays a running-resume no-op without withdrawing a later independent pause', async () => {
+      const s = await scenario()
+      try {
+        const command = { instanceId: s.id, expectedRevision: 1, actor: s.actor, idempotencyKey: 'resume-noop' }
+        const receipt = s.service.resume(command)
+        expect(receipt.revision).toBe(1)
+        await s.pause('later-pause')
+        const resume = vi.spyOn(s.execution, 'resume')
+        expect(s.service.resume(command)).toEqual(receipt)
+        expect(resume).not.toHaveBeenCalled(); expect(s.execution.isPaused()).toBe(true)
+        expect(s.store.get(s.id)?.state.status).toBe('paused'); expect(s.store.get(s.id)?.revision).toBe(2)
+      } finally { await s.close() }
+    })
+
+    it('uses the original deep command snapshot after a caller mutates its input during pause drain', async () => {
+      const s = await scenario(), leave = s.execution.enter('tool-invocation')
+      const original = { instanceId: s.id, expectedRevision: 1, actor: { ...s.actor }, idempotencyKey: 'captured-original' }
+      const mutable = { ...original, actor: { kind: 'user', id: 'owner' } }
+      try {
+        const first = s.pause('first'), duplicate = s.service.pause(mutable)
+        mutable.actor.id = 'changed'; mutable.idempotencyKey = 'changed'; mutable.expectedRevision = 999
+        leave(); await first; const result = await duplicate
+        s.resume('resume-after-captured')
+        expect(await s.service.pause(original)).toEqual(result)
+        expect(s.store.get(s.id)?.state.status).toBe('running')
+      } finally { leave(); await s.close() }
+    })
+
+    it.each(['before', 'after'])('does not repair or repeat a no-op whose append failed %s commit', async side => {
+      const s = await scenario()
+      try {
+        await s.pause('initial')
+        const command = { instanceId: s.id, expectedRevision: 2, actor: s.actor, idempotencyKey: 'lost-noop' }
+        const append = s.eventStore.appendBatch.bind(s.eventStore), failure = new Error('no-op append failure')
+        const record = vi.spyOn(s.store, 'recordLifecycleNoopCompletion').mockImplementationOnce(input => {
+          vi.spyOn(s.eventStore, 'appendBatch').mockImplementationOnce(events => { if (side === 'after') append(events); throw failure })
+          return Reflect.apply(Object.getPrototypeOf(s.store).recordLifecycleNoopCompletion, s.store, [input])
+        })
+        await expect(s.service.pause(command)).rejects.toBe(failure)
+        s.resume('after-failed-receipt')
+        const requestGate = vi.spyOn(s.execution, 'requestPause')
+        if (side === 'after') expect((await s.service.pause(command)).state.status).toBe('paused')
+        else await expect(s.service.pause(command)).rejects.toThrow(/revision conflict/i)
+        expect(requestGate).not.toHaveBeenCalled(); expect(record).toHaveBeenCalledOnce()
+        expect(s.store.get(s.id)?.state.status).toBe('running')
+      } finally { await s.close() }
+    })
+
+    it.each(['stop', 'close'])('keeps an aborted active drain unacknowledged until it really leaves during %s', async action => {
+      const s = await scenario(), leave = s.execution.enter('tool-invocation')
+      try {
+        let settled = false
+        const pending = s.pause('active-abort'), rejected = expect(pending).rejects.toMatchObject({ code: 'COOPERATIVE_PAUSE_SUPERSEDED' }).then(() => { settled = true })
+        const joined = action === 'close' ? s.service.close() : s.service.stop({ instanceId: s.id, expectedRevision: 1, actor: s.actor, idempotencyKey: 'active-stop' })
+        let joinedSettled = false
+        void joined.then(() => { joinedSettled = true })
+        await Promise.resolve()
+        expect(s.runSignal.aborted).toBe(true); expect(settled).toBe(false); expect(joinedSettled).toBe(false)
+        expect(s.execution.isPaused()).toBe(true); expect(s.execution.isQuiescent()).toBe(false)
+        leave(); await rejected; await joined
+        expect(s.store.get(s.id)?.state.status).toBe('stopped')
+      } finally { leave(); await s.close() }
+    })
+
+    it.each(['before', 'after'])('reports running-resume receipt failure %s commit without undoing withdrawal or recreating a missing receipt', async side => {
+      const s = await scenario()
+      try {
+        const stale = s.pause('to-withdraw'), rejected = expect(stale).rejects.toMatchObject({ code: 'COOPERATIVE_PAUSE_SUPERSEDED' })
+        const command = { instanceId: s.id, expectedRevision: 1, actor: s.actor, idempotencyKey: 'resume-write-failed' }
+        const append = s.eventStore.appendBatch.bind(s.eventStore), failure = new Error('resume receipt failure')
+        vi.spyOn(s.store, 'recordLifecycleNoopCompletion').mockImplementationOnce(input => {
+          vi.spyOn(s.eventStore, 'appendBatch').mockImplementationOnce(events => { if (side === 'after') append(events); throw failure })
+          return Reflect.apply(Object.getPrototypeOf(s.store).recordLifecycleNoopCompletion, s.store, [input])
+        })
+        expect(() => s.service.resume(command)).toThrow(failure)
+        await rejected; expect(s.execution.isPaused()).toBe(false)
+        await s.pause('new-independent-pause')
+        const resume = vi.spyOn(s.execution, 'resume')
+        if (side === 'after') expect(s.service.resume(command).state.status).toBe('running')
+        else expect(() => s.service.resume(command)).toThrow(/revision conflict/i)
+        expect(resume).not.toHaveBeenCalled(); expect(s.execution.isPaused()).toBe(true)
+        expect(s.store.get(s.id)?.state.status).toBe('paused')
+      } finally { await s.close() }
+    })
+
+    it('does not accept an already-paused shortcut while late legacy work is active', async () => {
+      const s = await scenario()
+      try {
+        await s.pause('initial')
+        expect(() => s.execution.enter('tool-invocation')).toThrow(
+          expect.objectContaining({ code: 'COOPERATIVE_EXECUTION_PAUSED' })
+        )
+        // Synthetic pre-hardening/corrupt state, not a legal paused entry. Retain
+        // actual registration/release and all already-paused consumer assertions.
+        const leave = Reflect.apply(Reflect.get(s.execution, 'registerActive'), s.execution, [
+          'tool-invocation'
+        ]) as () => void
+        let repeated!: ReturnType<typeof s.pause>
+        try {
+          let acknowledged = false
+          repeated = s.pause('repeated').then(result => { acknowledged = true; return result })
+          for (let i = 0; i < 8; i++) await Promise.resolve()
+          expect(acknowledged).toBe(false)
+        } finally { leave() }
+        expect((await repeated).state.status).toBe('paused'); expect(s.store.get(s.id)?.revision).toBe(2)
+      } finally { await s.close() }
+    })
+  })
+
+  it('does not let a delayed pause acknowledgement target a restarted execution with the same instance id', async () => {
+    const { eventStore, store, created } = setup()
+    let finishFirst!: (value: MagicAgentPlatformRunResp) => void
+    let firstGate!: import('./cooperativeExecutionController').CooperativeExecutionController
+    let secondGate!: import('./cooperativeExecutionController').CooperativeExecutionController
+    let calls = 0
+    const service = new ProductionAgentInstanceLifecycleService(store, allowedAuthorization, (_req, options) => {
+      calls++
+      if (calls === 1) {
+        firstGate = options.cooperativeExecution
+        return new Promise<MagicAgentPlatformRunResp>(resolve => { finishFirst = resolve })
+      }
+      secondGate = options.cooperativeExecution
+      return new Promise<MagicAgentPlatformRunResp>((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+    }, incrementingClock())
+    const actor = { kind: 'user', id: 'owner' } as const
+    let release!: () => void
+    const releaseAck = new Promise<void>(resolve => { release = resolve })
+    try {
+      await service.start({ instanceId: created.id, expectedRevision: 0, actor, request, idempotencyKey: 'first' })
+      const original = firstGate.requestPause.bind(firstGate)
+      vi.spyOn(firstGate, 'requestPause').mockImplementation(async () => { const ticket = await original(); await releaseAck; return ticket })
+      const stale = service.pause({ instanceId: created.id, expectedRevision: 1, actor, idempotencyKey: 'delayed-first' })
+      const rejected = expect(stale).rejects.toMatchObject({ code: 'COOPERATIVE_PAUSE_SUPERSEDED' })
+      finishFirst(completedRun('first')); for (let i = 0; i < 12; i++) await Promise.resolve()
+      expect(store.get(created.id)?.state.status).toBe('stopped')
+      await service.start({ instanceId: created.id, expectedRevision: 2, actor, request, idempotencyKey: 'second' })
+      expect(secondGate).not.toBe(firstGate); release(); await rejected
+      expect(store.get(created.id)?.state.status).toBe('running'); expect(store.get(created.id)?.revision).toBe(3)
+      expect(secondGate.isPaused()).toBe(false)
+    } finally { release(); finishFirst?.(completedRun('cleanup')); await service.close(); eventStore.close() }
+  })
+
   it('acknowledges a cooperative safe point only after active runtime work drains', async () => {
     const { eventStore, store, created } = setup()
     let execution!: import('./cooperativeExecutionController').CooperativeExecutionController
@@ -589,6 +844,59 @@ describe('ProductionAgentInstanceLifecycleService', () => {
     finishRun()
     await vi.waitFor(() => expect(store.get(created.id)?.state.status).toBe('stopped'))
     eventStore.close()
+  })
+
+  it.each(['sequential', 'concurrent'])('preserves no-op pause replay with real approval and one-use grants for %s requests', async mode => {
+    const { eventStore, store, created, authorization } = setup()
+    let execution!: import('./cooperativeExecutionController').CooperativeExecutionController
+    const service = new ProductionAgentInstanceLifecycleService(store, authorization, async (_request, options) => {
+      execution = options.cooperativeExecution
+      await new Promise<void>((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+      return completedRun()
+    }, () => 10)
+    const actor = { kind: 'user', id: 'owner' } as const
+    const grant = (id: string, action: 'start' | 'pause' | 'resume', instance = store.get(created.id)!) => authorization.createApprovalGrant({
+      grantId: id,
+      request: createAgentInstanceLifecyclePolicyRequest({ actor, action, instance, ...(action === 'start' ? { requestDigest: createHash('sha256').update(canonicalPolicyJson(request as never)).digest('hex') } : {}) }),
+      approvedBy: { kind: 'user', id: 'approver-1' }, issuedAt: 10, expiresAt: 1010, maxUses: 1, idempotencyKey: id
+    }).grant
+    const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
+    try {
+      const startGrant = grant('start-receipt', 'start', created)
+      await service.start({ instanceId: created.id, expectedRevision: 0, actor, request, idempotencyKey: 'start-receipt', grantId: startGrant.grantId, expectedGrantUseCount: 0 })
+      const firstGrant = grant('first-receipt', 'pause')
+      const firstInput = { instanceId: created.id, expectedRevision: 1, actor, idempotencyKey: 'first-receipt', grantId: firstGrant.grantId, expectedGrantUseCount: 0 }
+      let duplicateInput: Parameters<typeof service.pause>[0]
+      let result: Awaited<ReturnType<typeof service.pause>>
+      if (mode === 'concurrent') {
+        const duplicateGrant = grant('duplicate-receipt', 'pause')
+        duplicateInput = { ...firstInput, idempotencyKey: 'duplicate-receipt', grantId: duplicateGrant.grantId }
+        const leave = execution.enter('tool-invocation')
+        const first = service.pause(firstInput), second = service.pause(duplicateInput)
+        try { leave(); await first; result = await second } finally { leave() }
+      } else {
+        await service.pause(firstInput)
+        const duplicateGrant = grant('duplicate-receipt', 'pause')
+        duplicateInput = { ...firstInput, expectedRevision: 2, idempotencyKey: 'duplicate-receipt', grantId: duplicateGrant.grantId }
+        result = await service.pause(duplicateInput)
+      }
+      expect(store.get(created.id)?.revision).toBe(2)
+      expect(consume).toHaveBeenCalledTimes(3)
+      // Immediate lost-reply retry must not hit real already-consumed authorization.
+      expect(await service.pause(duplicateInput)).toEqual(result)
+      expect(consume).toHaveBeenCalledTimes(3)
+      const resumeGrant = grant('resume-receipt', 'resume')
+      service.resume({ instanceId: created.id, expectedRevision: 2, actor, idempotencyKey: 'resume-receipt', grantId: resumeGrant.grantId, expectedGrantUseCount: 0 })
+      const authorize = vi.spyOn(authorization, 'authorize'), gate = vi.spyOn(execution, 'requestPause')
+      expect(await service.pause(duplicateInput)).toEqual(result)
+      expect(authorize).not.toHaveBeenCalled(); expect(gate).not.toHaveBeenCalled()
+      expect(consume).toHaveBeenCalledTimes(4); expect(store.get(created.id)?.state.status).toBe('running')
+      const reconstructed = new ProductionAgentInstanceLifecycleService(new PersistentAgentInstanceStore(eventStore), authorization, vi.fn(), () => 11)
+      expect(await reconstructed.pause(duplicateInput)).toEqual(result)
+      expect(authorize).not.toHaveBeenCalled(); expect(consume).toHaveBeenCalledTimes(4)
+      await expect(service.pause({ ...duplicateInput, expectedGrantUseCount: 1 })).rejects.toThrow(/idempotency conflict/i)
+      expect(consume).toHaveBeenCalledTimes(4)
+    } finally { await service.close(); eventStore.close(); vi.restoreAllMocks() }
   })
 
   it('requires separate approval grants for pause and resume', async () => {

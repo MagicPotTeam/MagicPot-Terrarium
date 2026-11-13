@@ -1,6 +1,8 @@
-import { randomUUID } from 'node:crypto'
+import type { AgentThreadInteractionScope } from '@shared/api/agentThreadInteraction'
+import { authorizeAgentThreadScope } from './agentThreadScope'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { app, BrowserWindow, dialog, webContents } from 'electron'
+import { BrowserWindow, webContents } from 'electron'
 import type { LLMChatReq } from '@shared/api/svcLLMProxy'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
 import { AGENT_LOCAL_FILE_LIMITS, AgentLocalFileError } from '@shared/api/svcAgentLocalFiles'
@@ -8,11 +10,24 @@ import { LocalFileReadGrants } from '../agentLocalFiles/readGrants'
 import { createDocumentUtilityExtractor } from '../agentLocalFiles/documents/documentUtilityProcess'
 import { authorizeMagicAgentApprovalRenderer } from '../magicAgentRuntime/trustedRouteBinding'
 import { withCanvasFileTools } from './canvasFileTools'
+import {
+  validateFilesReadGlob,
+  matchesFilesReadGlob,
+  selectFilesReadJson,
+  boundFilesReadJson
+} from '../magicAgentPlatform2/toolHost/files'
 
 export type CanvasPathReadLimits = {
   maxBytes?: number
   maxStringLength?: number
   timeoutMs?: number
+  /** Main-owned routing for read-only tools; never sourced from remote request flags. */
+  operation?: 'tree' | 'glob' | 'json'
+  pattern?: string
+  pointer?: string
+  maxFiles?: number
+  maxDepth?: number
+  maxEntries?: number
 }
 export type CanvasPathReadHandler = (
   filePath: string,
@@ -20,23 +35,25 @@ export type CanvasPathReadHandler = (
   limits?: CanvasPathReadLimits
 ) => Promise<{ content: string; metadata?: Record<string, unknown> }>
 
-// One user-consent prompt per renderer, not a persistent filesystem grant.
+// Bound concurrent local reads per renderer, not a user-confirmation gate.
 const pendingSenders = new Set<number>()
-const visible = (value: string): string =>
-  value.replace(
-    /[\p{Cc}\p{Cf}\p{Cs}]/gu,
-    (char) => `[U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}]`
-  )
 
-/** Main-only capability. Never serialized in an IPC/HTTP request or added to remote skills.
- * A path in chat is not consent: the native, default-deny prompt authorizes one exact read.
- * LocalFileReadGrants retains all credential, link, identity, type and byte-limit checks.
+/** Main-only capability for the desktop's default read-only local filesystem access.
+ * No per-path prompt or path mention is required. Renderer/route validation, OS
+ * permissions, cancellation, file identity and bounded output checks still apply.
+ * The legacy factory name is retained for existing main-process call sites.
  */
 export function createCanvasPathReadHandler(
   request: LLMChatReq,
   invocation?: ServiceInvocationContext
 ): CanvasPathReadHandler | undefined {
   if (!invocation || withCanvasFileTools(request, invocation) === request) return undefined
+  try { return createScopedCanvasPathReadHandler({ route: request.route!, conversationId: request.conversationId! }, invocation) }
+  catch { return undefined } // Legacy optional-chat callback declines stale identity; side entry remains strict.
+}
+/** Reuses bounded passive file access after exact service/scope authorization. */
+export function createScopedCanvasPathReadHandler(thread: AgentThreadInteractionScope, invocation: ServiceInvocationContext): CanvasPathReadHandler | undefined {
+  authorizeAgentThreadScope(thread, invocation, invocation.methodName.split('.').at(-1)!)
   const senderId = invocation.senderId!
   const sender = webContents.fromId(senderId)
   const parent = sender && BrowserWindow.fromWebContents(sender)
@@ -53,11 +70,10 @@ export function createCanvasPathReadHandler(
   if (originalUrl !== invocation.frameUrl || originalUrl !== invocation.senderUrl) return undefined
   const identity = { ...invocation }
   const scope = {
-    projectId: request.route!.scopeId!,
-    paneId: request.route!.threadId!,
-    sessionId: request.conversationId!
+    projectId: thread.route.scopeId!,
+    paneId: thread.route.threadId!,
+    sessionId: thread.conversationId
   }
-  const profile = visible(String(request.profileId || '').slice(0, 256))
 
   return async (filePath, signal, limits = {}) => {
     if (
@@ -71,12 +87,39 @@ export function createCanvasPathReadHandler(
       (process.platform === 'win32' && !/^[A-Za-z]:[\\/]/.test(filePath))
     )
       throw new AgentLocalFileError('PATH_DENIED')
-    // Display and authorize the same normalized local path; no pre-consent file access.
+    // All absolute local paths use the same default read-only policy.
     filePath = path.resolve(filePath)
-    // The absolute-path bridge shares the grant reader's split policy: plain
-    // text remains at 1 MiB, while supported document containers may reach 8 MiB.
-    // Extension inspection is only used to choose a ceiling; the grant reader
-    // still verifies the actual file type before opening or extracting it.
+    const glob = limits.operation === 'glob'
+    const json = limits.operation === 'json'
+    const tree = limits.operation === 'tree' || glob
+    const pattern = glob ? validateFilesReadGlob(limits.pattern || '') : undefined
+    const maxFiles = Math.max(
+      1,
+      Math.min(
+        AGENT_LOCAL_FILE_LIMITS.listEntries,
+        Math.floor(
+          Number.isFinite(limits.maxFiles) ? limits.maxFiles! : AGENT_LOCAL_FILE_LIMITS.listEntries
+        )
+      )
+    )
+    // Directory listing is deliberately smaller than workspace traversal and
+    // cannot read file bodies. These ceilings apply to the whole invocation.
+    const maxDepth = Math.max(
+      0,
+      Math.min(3, Math.floor(Number.isFinite(limits.maxDepth) ? limits.maxDepth! : glob ? 3 : 0))
+    )
+    const maxEntries = Math.max(
+      1,
+      Math.min(
+        AGENT_LOCAL_FILE_LIMITS.listEntries,
+        Math.floor(
+          Number.isFinite(limits.maxEntries)
+            ? limits.maxEntries!
+            : AGENT_LOCAL_FILE_LIMITS.listEntries
+        )
+      )
+    )
+    // Keep file/document byte limits unchanged while removing per-path prompts.
     const documentPath = /\.(?:pdf|docx|xlsx|pptx)$/i.test(filePath)
     const byteCeiling = documentPath
       ? AGENT_LOCAL_FILE_LIMITS.documentBytes
@@ -91,15 +134,20 @@ export function createCanvasPathReadHandler(
     const maxChars = Math.max(
       1,
       Math.min(
-        1024 * 1024,
-        Math.floor(Number.isFinite(limits.maxStringLength) ? limits.maxStringLength! : 1024 * 1024)
+        tree ? AGENT_LOCAL_FILE_LIMITS.returnedBytes : 1024 * 1024,
+        Math.floor(
+          Number.isFinite(limits.maxStringLength)
+            ? limits.maxStringLength!
+            : tree
+              ? AGENT_LOCAL_FILE_LIMITS.returnedBytes
+              : 1024 * 1024
+        )
       )
     )
     const timeoutMs = Math.max(
       1,
       Math.min(10_000, Math.floor(Number.isFinite(limits.timeoutMs) ? limits.timeoutMs! : 10_000))
     )
-    let readTimer: ReturnType<typeof setTimeout> | undefined
     if (pendingSenders.has(senderId)) throw new AgentLocalFileError('BUSY')
     const controller = new AbortController()
     let grants: LocalFileReadGrants | undefined
@@ -136,33 +184,79 @@ export function createCanvasPathReadHandler(
     const timer = setTimeout(() => {
       controller.abort(new AgentLocalFileError('TIMEOUT'))
       grants?.revokeSender(senderId)
-    }, 60_000)
+    }, timeoutMs)
     try {
       check()
-      const zh = app.getLocale().toLowerCase().startsWith('zh')
-      const choice = await dialog.showMessageBox(parent, {
-        type: 'question',
-        title: zh ? '允许读取此文件？' : 'Allow reading this file?',
-        message: visible(filePath),
-        detail: zh
-          ? `项目：${scope.projectId}\n线程：${scope.paneId}\n会话：${scope.sessionId}\n模型配置：${profile}\n\n文件内容会发送给当前模型并存入本对话。仅允许读取此文件一次，不授权所在目录。`
-          : `Project: ${scope.projectId}\nThread: ${scope.paneId}\nConversation: ${scope.sessionId}\nModel profile: ${profile}\n\nThe contents will be sent to the current model and saved in this conversation. Allow one read of this exact file only, not its directory.`,
-        buttons: zh ? ['拒绝', '仅本次读取'] : ['Deny', 'Read once'],
-        defaultId: 0,
-        cancelId: 0,
-        noLink: true,
-        signal: controller.signal
-      })
+      if (!tree) documents = createDocumentUtilityExtractor()
+      // This main-owned instance is never shared with the grant-based chooser IPC.
+      // Local canvas Agent tools can view ordinary local paths, including hidden
+      // project/config directories, without a filename allowlist or a prompt.
+      grants = new LocalFileReadGrants(documents, { allLocalPaths: true })
+      const grant = await grants.authorize(senderId, scope, filePath, tree ? 'directory' : 'file')
       check()
-      if (choice.response !== 1) throw new AgentLocalFileError('GRANT_DENIED')
-      readTimer = setTimeout(() => {
-        controller.abort(new AgentLocalFileError('TIMEOUT'))
-        grants?.revokeSender(senderId)
-      }, timeoutMs)
-      documents = createDocumentUtilityExtractor()
-      grants = new LocalFileReadGrants(documents)
-      const grant = await grants.authorize(senderId, scope, filePath, 'file')
-      check()
+      if (tree) {
+        const entries: Array<{ path: string; type: 'file' | 'directory' }> = []
+        const started = Date.now()
+        let truncated = false
+        let characters = filePath.length + 160
+        const walk = async (relativePath: string, depth: number): Promise<void> => {
+          check()
+          const listed = await grants!.list(
+            senderId,
+            scope,
+            {
+              grantId: grant.id,
+              requestId: randomUUID(),
+              relativePath
+            },
+            { maxEntries: maxEntries - entries.length }
+          )
+          check()
+          truncated ||= listed.truncated
+          for (const entry of listed.entries) {
+            check()
+            if (entries.length >= maxEntries) {
+              truncated = true
+              break
+            }
+            const relative = relativePath ? `${relativePath}/${entry.name}` : entry.name
+            const item = { path: relative, type: entry.kind }
+            const size = JSON.stringify(item).length + 1
+            if (characters + size > maxChars) {
+              truncated = true
+              break
+            }
+            entries.push(item)
+            characters += size
+            if (entry.kind === 'directory' && depth < maxDepth && entries.length < maxEntries) {
+              await walk(relative, depth + 1)
+            } else if (entry.kind === 'directory') truncated = true
+          }
+        }
+        await walk('', 0)
+        check()
+        grants.assertDeliveryAuthorized(senderId, scope, grant.id)
+        const results = pattern
+          ? entries.filter((entry) => matchesFilesReadGlob(pattern, entry.path))
+          : entries
+        const returned = glob ? results.slice(0, maxFiles) : results
+        const content = JSON.stringify({
+          root: filePath,
+          ...(glob ? { pattern } : { path: '.' }),
+          entries: returned,
+          entryCount: returned.length,
+          truncated: truncated || returned.length < results.length,
+          nameFiltering: false,
+          linksSkipped: true,
+          durationMs: Date.now() - started
+        })
+        if (
+          content.length > maxChars ||
+          Buffer.byteLength(content, 'utf8') > AGENT_LOCAL_FILE_LIMITS.returnedBytes
+        )
+          throw new AgentLocalFileError('TEXT_TOO_LARGE')
+        return { content, metadata: { source: 'local-directory', readOnly: true } }
+      }
       const result = await grants.read(
         senderId,
         scope,
@@ -175,14 +269,52 @@ export function createCanvasPathReadHandler(
       )
       check()
       grants.assertDeliveryAuthorized(senderId, scope, grant.id)
-      if (result.content.length > maxChars) throw new AgentLocalFileError('TEXT_TOO_LARGE')
+      if (!json && result.content.length > maxChars) throw new AgentLocalFileError('TEXT_TOO_LARGE')
+      if (json) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(result.content.replace(/^\uFEFF/, ''), (key, value) => {
+            if (['__proto__', 'prototype', 'constructor'].includes(key))
+              throw new Error('JSON prototype keys are not allowed.')
+            return value
+          })
+        } catch {
+          throw new Error('File does not contain valid safe JSON.')
+        }
+        const selected = selectFilesReadJson(parsed, limits.pointer)
+        const bounded = boundFilesReadJson(
+          selected,
+          Math.max(
+            0,
+            Math.min(12, Math.floor(Number.isFinite(limits.maxDepth) ? limits.maxDepth! : 12))
+          ),
+          Math.max(
+            1,
+            Math.min(
+              10000,
+              Math.floor(Number.isFinite(limits.maxEntries) ? limits.maxEntries! : 10000)
+            )
+          ),
+          limits.maxStringLength === undefined ? 16384 : maxChars
+        )
+        const content = JSON.stringify({
+          path: filePath,
+          pointer: limits.pointer,
+          value: bounded.value,
+          bytes: result.sizeBytes,
+          truncated: bounded.truncated,
+          sha256: createHash('sha256').update(result.content).digest('hex')
+        })
+        if (Buffer.byteLength(content, 'utf8') > AGENT_LOCAL_FILE_LIMITS.responseBytes)
+          throw new AgentLocalFileError('TEXT_TOO_LARGE')
+        return { content, metadata: { source: 'local-file', readOnly: true } }
+      }
       return {
         content: JSON.stringify(result),
-        metadata: { source: 'approved-local-file', readOnly: true }
+        metadata: { source: 'local-file', readOnly: true }
       }
     } finally {
       clearTimeout(timer)
-      clearTimeout(readTimer)
       signal?.removeEventListener('abort', abort)
       sender.removeListener('did-start-navigation', changed)
       sender.removeListener('render-process-gone', changed)

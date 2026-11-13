@@ -45,7 +45,6 @@ import {
   resolveProjectCanvasImageInteractionMode,
   type ProjectCanvasImagePreview
 } from './projectCanvasRenderBoundary'
-import { materializeCanvasImageAttachmentSource } from './canvasAgentAttachmentUtils'
 import { getCanvasItemBounds, isFillableAnnotationShape } from './projectCanvasPageShared'
 import { getCanvasThumbnailRuntimeMetrics } from './canvasThumbnailWorkerClient'
 import {
@@ -946,6 +945,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const domPreviewSyncParentIdSet = React.useMemo(() => {
     const parentIds = new Set<string>()
     for (const item of allCanvasItems) {
+      if (item.type === 'image' && typeof item.teamImageLabel === 'string' && item.teamImageLabel.trim()) {
+        parentIds.add(item.id)
+      }
       if (item.type !== 'annotation') {
         continue
       }
@@ -2090,29 +2092,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
       selectedSingleAnnotationOverlayItem
     ]
   )
-  const isImageIdentityCrop = React.useCallback((item: CanvasImageItem) => {
-    if (!item.crop) return false
-
-    const sourceWidth =
-      typeof item.sourceWidth === 'number' &&
-      Number.isFinite(item.sourceWidth) &&
-      item.sourceWidth > 0
-        ? item.sourceWidth
-        : item.width
-    const sourceHeight =
-      typeof item.sourceHeight === 'number' &&
-      Number.isFinite(item.sourceHeight) &&
-      item.sourceHeight > 0
-        ? item.sourceHeight
-        : item.height
-
-    return (
-      item.crop.x === 0 &&
-      item.crop.y === 0 &&
-      item.crop.width === sourceWidth &&
-      item.crop.height === sourceHeight
-    )
-  }, [])
   const handleCanvasContainerRef = React.useCallback(
     (node: HTMLDivElement | null) => {
       if ('current' in canvasContainerRef) {
@@ -2147,58 +2126,19 @@ export default function ProjectCanvasPageStageScene(props: any) {
     [setInlineTextEdit, setSelectedIds]
   )
   const handleCropConfirm = React.useCallback(
-    async (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {
+    (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {
       lastClickedIdRef.current = item.id
       setSelectedIds(new Set([item.id]))
-      const croppedItem = { ...item, ...updates } as CanvasImageItem
-      const flattenedCropSource = updates.crop
-        ? await materializeCanvasImageAttachmentSource(croppedItem).catch((error) => {
-            console.warn('[Canvas] Failed to flatten cropped image item:', error)
-            return null
-          })
-        : null
-
+      // Dimensions alone cannot authenticate the coordinate system of a crop.
+      // Keep the source and crop together rather than destructively flattening
+      // against possibly backfilled source-size hints.
       setItemsWithHistory((prev: CanvasItem[]) =>
-        prev.map((i) => {
-          if (i.id === item.id) {
-            if (flattenedCropSource) {
-              const {
-                crop: _crop,
-                image: _image,
-                sourceFile: _sourceFile,
-                sourceIdentity: _sourceIdentity,
-                thumbnailSet: _thumbnailSet,
-                ...itemWithoutSourcePreview
-              } = { ...i, ...updates } as CanvasImageItem
-
-              return {
-                ...itemWithoutSourcePreview,
-                src: flattenedCropSource.src,
-                fileName: flattenedCropSource.fileName,
-                sizeBytes: flattenedCropSource.sizeBytes,
-                sourceWidth: flattenedCropSource.sourceWidth,
-                sourceHeight: flattenedCropSource.sourceHeight,
-                width: flattenedCropSource.sourceWidth,
-                height: flattenedCropSource.sourceHeight
-              }
-            }
-
-            return { ...i, ...updates }
-          }
-
-          if (i.type === 'image' && isImageIdentityCrop(i as CanvasImageItem)) {
-            const { crop, ...rest } = i as CanvasImageItem
-            return rest as CanvasItem
-          }
-
-          return i
-        })
+        prev.map((i) => (i.id === item.id ? { ...i, ...updates } : i))
       )
       setTool('select')
       setCroppingImageId(null)
     },
     [
-      isImageIdentityCrop,
       lastClickedIdRef,
       setCroppingImageId,
       setItemsWithHistory,

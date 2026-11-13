@@ -83,6 +83,55 @@ const walkDroppedEntry = async (
   return nestedFiles.flat()
 }
 
+export class DroppedDirectoryLimitError extends Error {
+  constructor(readonly reason: 'nodes' | 'images') { super('Dropped directory limit exceeded') }
+}
+
+/** Sequential bounded traversal for callers that require all-or-nothing admission. */
+export async function collectDroppedDirectoryFilesBounded(
+  items: DataTransferItemList,
+  accept: (entry: ModelPackageFileEntry) => boolean,
+  maxNodes = 4096,
+  acceptOccurrence?: (entry: Readonly<{ path: string; file: File }>) => boolean
+): Promise<ModelPackageFileEntry[]> {
+  const unique = new Map<string, ModelPackageFileEntry>()
+  let nodes = 0
+  const charge = () => { if (++nodes > maxNodes) throw new DroppedDirectoryLimitError('nodes') }
+  const add = (path: string, file: File) => {
+    const normalized = normalizeEntryPath(path)
+    if (acceptOccurrence && !acceptOccurrence({ path: normalized, file })) throw new DroppedDirectoryLimitError('images')
+    if (!normalized || unique.has(normalized)) return
+    const entry = { path: normalized, file }
+    unique.set(normalized, entry)
+    if (!accept(entry)) throw new DroppedDirectoryLimitError('images')
+  }
+  const visit = async (entry: LegacyFileSystemEntry, inheritedPath?: string): Promise<void> => {
+    charge()
+    const entryPath = normalizeEntryPath(entry.fullPath || inheritedPath || entry.name)
+    if (entry.isFile) {
+      const file = await readFileEntry(entry as LegacyFileSystemFileEntry)
+      add(entryPath || file.name, file)
+      return
+    }
+    if (!entry.isDirectory) return
+    const reader = (entry as LegacyFileSystemDirectoryEntry).createReader()
+    while (true) {
+      charge()
+      const batch = await new Promise<LegacyFileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject))
+      if (!batch.length) return
+      for (const child of batch) await visit(child, `${entryPath}/${child.name}`)
+    }
+  }
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i] as DragDataTransferItem
+    if (item.kind !== 'file') { charge(); continue }
+    const entry = item.webkitGetAsEntry?.()
+    if (entry) await visit(entry)
+    else { charge(); const file = item.getAsFile(); if (file) add(file.name, file) }
+  }
+  return Array.from(unique.values())
+}
+
 export async function collectDroppedDirectoryFiles(
   items: DataTransferItemList
 ): Promise<ModelPackageFileEntry[]> {

@@ -1,3 +1,8 @@
+import type { InstalledCatalogReadDelegate } from '../magicAgentRuntime/installedCatalogReadBinding'
+import { isProxy } from 'node:util/types'
+import { getIpcInvocationOrigin } from '@shared/api/createServer/ipcInvocationOrigin'
+import { cancelInstalledCatalogPublication, INSTALLED_CATALOG_PUBLICATION_METHOD } from '@shared/api/createServer/installedCatalogPublication'
+import { installedCatalogUnavailable, parseInstalledCatalogReadRequest, parseInstalledCatalogReadResponse, type InstalledCatalogReadResponse } from '@shared/api/installedCatalog'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
@@ -22,6 +27,9 @@ import { normalizeMagicPotToolName } from '@shared/app/types'
 import { getAgentSessionKey, normalizeAgentRoute, type AgentRouteLike } from '@shared/agent'
 import type { AssistantRoute } from '../assistantRuntime/types'
 import { getAssistantRuntime, type AssistantRuntime } from '../assistantRuntime/runtime'
+import type { Config } from '@shared/config/config'
+import type { AssistantSessionStore } from '../assistantRuntime/sessionStore'
+import type { ManagedTextFirstRunPlatformFacade } from '../magicAgentRuntime/managedTextFirstRunPlatform'
 import { getAgentKernel, type AgentKernel } from '../agentKernel'
 import type {
   MagicAgentPlatformAgentDefinition,
@@ -121,6 +129,7 @@ import type {
   MagicAgentPlatformRunReq,
   MagicAgentPlatformRunResp,
   MagicAgentPlatformStatusResp,
+  MagicAgentPlatformSetEnabledReq,
   MagicAgentPlatformSvc,
   MagicAgentPlatformToolCallReq,
   MagicAgentPlatformToolCallResp,
@@ -154,7 +163,7 @@ import {
 } from './magicAgentPlatformUtils'
 import {
   getMagicAgentPlatformAdapter,
-  type MagicAgentPlatformAdapter,
+  MagicAgentPlatformAdapter,
   type MagicAgentPlatformExecutionOptions
 } from '../magicAgentRuntime/platformAdapter'
 import {
@@ -171,6 +180,8 @@ import {
   type MagicAgentGraphToolApprovalRequest
 } from '../magicAgentRuntime/graph'
 import { getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
+import { invokeApprovedGraphTool } from '../magicAgentRuntime/creativeToolApproval'
+import { saveConfig } from '../config/config'
 import { getMcpClientManager, syncMcpClientManager } from '../mcp/runtime'
 import { PublicSemanticMemoryService } from '../magicAgentPlatform2/memory/publicSemanticMemoryService'
 import type { SemanticMemoryService } from '../magicAgentPlatform2/memory/semanticMemoryService'
@@ -180,7 +191,7 @@ import {
 } from '../magicAgentRuntime/package'
 import {
   assertMagicAgentPlatformEnabled,
-  isMagicAgentPlatformEnabled,
+  getMagicAgentPlatformEnablement,
   MAGIC_AGENT_PLATFORM_ENV
 } from '../magicAgentRuntime/featureFlag'
 import {
@@ -194,6 +205,7 @@ export type MagicAgentPlatformRouteAuthorizer = (
 ) => AgentRouteLike
 
 export type MagicAgentPlatformSvcImplDeps = {
+  installedCatalogRead?: InstalledCatalogReadDelegate
   assistantRuntime?: AssistantRuntime
   adapter?: MagicAgentPlatformAdapter
   graphRuntime?: MagicAgentGraphRuntime
@@ -269,12 +281,16 @@ export const requestProductionGraphToolApproval = (
     sessionId: approvalRequest.runId,
     toolInput: (approvalRequest.request.args || {}) as PolicyJsonRecord
   })
-  const requested = policyRuntime.requestTerminalApprovalWithSnapshot(policyRequest, {
-    runId: approvalRequest.runId,
-    nodeId: approvalRequest.nodeId,
-    toolName: approvalRequest.toolName,
-    requestDigest: approvalRequest.requestDigest
-  })
+  const requested = policyRuntime.requestTerminalApprovalWithSnapshot(
+    policyRequest,
+    {
+      runId: approvalRequest.runId,
+      nodeId: approvalRequest.nodeId,
+      toolName: approvalRequest.toolName,
+      requestDigest: approvalRequest.requestDigest
+    },
+    approvalRequest.signal
+  )
   let used = false
   return {
     pending: requested.pending,
@@ -282,29 +298,41 @@ export const requestProductionGraphToolApproval = (
       invoke: async () => {
         if (used) throw new Error('Graph tool approval authorization was already used.')
         used = true
-        const authorized = policyRuntime.authorization.authorize({
-          authorizationId: reference.authorizationId!,
+        return invokeApprovedGraphTool({
           request: policyRequest,
-          evaluatedAt: Date.now(),
-          grantId: reference.grantId,
-          expectedGrantUseCount: reference.expectedGrantUseCount,
-          idempotencyKey: `graph-tool-authorize:${reference.authorizationId}`
+          reference,
+          signal: approvalRequest.signal,
+          invoke: approvalRequest.invoke
         })
-        if (authorized.status !== 'authorized')
-          throw new Error(`Graph tool approval was not authorized: ${authorized.status}`)
-        policyRuntime.authorization.consumeExecutionPermit({
-          permit: authorized.permit,
-          request: policyRequest,
-          consumedAt: Date.now(),
-          idempotencyKey: `graph-tool-consume:${reference.authorizationId}`
-        })
-        return approvalRequest.invoke()
       }
     }))
   }
 }
 
 export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
+  /** MAIN-only precursor: no ordinary service method, package resolution or
+   * adapter singleton can reach this route. Its facade is not an approval/owner
+   * capability; the production lifecycle still owes the joint durable boundary. */
+  static createManagedTextFirstRunService(store: AssistantSessionStore): ManagedTextFirstRunPlatformFacade {
+    const adapter = MagicAgentPlatformAdapter.createManagedTextFirstRunAdapter(store)
+    const exact = (receiver: unknown): void => { if (receiver !== facade) throw Error('Exact managed first-run service facade required.') }
+    const facade: ManagedTextFirstRunPlatformFacade = Object.freeze({
+      prepare(this: ManagedTextFirstRunPlatformFacade, request: MagicAgentPlatformRunReq, config: Config) {
+        exact(this)
+        return adapter.prepare(request, config)
+      },
+      start(this: ManagedTextFirstRunPlatformFacade, plan: Parameters<ManagedTextFirstRunPlatformFacade['start']>[0], context: Parameters<ManagedTextFirstRunPlatformFacade['start']>[1]) {
+        exact(this)
+        return adapter.start(plan, context)
+      },
+      consumeClosure(this: ManagedTextFirstRunPlatformFacade, closure: Parameters<ManagedTextFirstRunPlatformFacade['consumeClosure']>[0], context: Parameters<ManagedTextFirstRunPlatformFacade['consumeClosure']>[1]) {
+        exact(this)
+        return adapter.consumeClosure(closure, context)
+      }
+    })
+    return facade
+  }
+
   private readonly deps: MagicAgentPlatformSvcImplDeps
   private adapterInstance?: MagicAgentPlatformAdapter
   private graphRuntimeInstance?: MagicAgentGraphRuntime
@@ -359,6 +387,24 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
 
   constructor(deps: MagicAgentPlatformSvcImplDeps = {}) {
     this.deps = deps
+  }
+
+  /** Only the IPC-created instance receives a delegate; default/lifecycle/SDK instances remain unprivileged. */
+  readInstalledCatalog = async (req: MagicAgentPlatformEmptyReq, invocation?: ServiceInvocationContext): Promise<InstalledCatalogReadResponse> => {
+    const read = this.deps.installedCatalogRead
+    if (!read || !getIpcInvocationOrigin(invocation) || invocation?.methodName !== INSTALLED_CATALOG_PUBLICATION_METHOD) return installedCatalogUnavailable
+    try {
+      if (req && typeof req === 'object' && isProxy(req)) return installedCatalogUnavailable
+      parseInstalledCatalogReadRequest(req) // Validate without replacing the request or private invocation identity.
+    } catch { return installedCatalogUnavailable }
+    try {
+      const raw = await read(req, invocation)
+      if (raw && typeof raw === 'object' && isProxy(raw)) throw new Error('Invalid catalog data')
+      const response = parseInstalledCatalogReadResponse(raw)
+      if (response.status === 'available') return response // Capsule, not handler finally, owns terminal completion.
+    } catch { /* A private failure is never serialized into the public catalog DTO. */ }
+    cancelInstalledCatalogPublication(invocation)
+    return installedCatalogUnavailable
   }
 
   private getAdapter(): MagicAgentPlatformAdapter {
@@ -429,7 +475,7 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
               ? { systemPrompt: String(config.systemPrompt) }
               : {})
           },
-          { signal: request.signal }
+          { signal: request.signal, cooperativeExecution: request.cooperativeExecution }
         )
         if (result.status !== 'completed')
           throw new Error(result.error || `LLM run ${result.status}.`)
@@ -476,7 +522,9 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
           (typeof inputValue === 'object' && inputValue !== null
             ? inputValue
             : { input: inputValue }) as Record<string, unknown>,
-          { allowedToolNames: [toolName] }
+          // The graph-local first-party callback owns this entire tool call.
+          // AssistantRuntime.callTool has no scope option; never smuggle it in JSON.
+          { allowedToolNames: [toolName], signal: request.signal }
         )
       }
       case 'comfyui-workflow': {
@@ -484,13 +532,17 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
           {
             name: 'comfyui.workflow.submit',
             args: {
-              workflowId: String(config.workflowId || ''),
-              workflow: inputValue
+              ...(String(config.workflowId || '').trim()
+                ? { workflowId: String(config.workflowId).trim() }
+                : {}),
+              ...(typeof inputValue === 'object' && inputValue !== null
+                ? { workflow: inputValue }
+                : {})
             },
             route: request.route,
             metadata: { graphRunId: request.run.runId, nodeId: request.node.nodeId }
           },
-          { signal: request.signal }
+          { signal: request.signal, cooperativeExecution: request.cooperativeExecution }
         )
         if (!result.ok) throw new Error(result.error || result.unavailableReason || result.content)
         return result.data ?? result.content
@@ -636,10 +688,10 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformStatusResp> => {
     this.authorizeAgentStudioInvocation(invocation)
-    const enabled = isMagicAgentPlatformEnabled()
-    if (!enabled) {
+    const enablement = getMagicAgentPlatformEnablement()
+    if (!enablement.enabled) {
       return {
-        enabled: false,
+        ...enablement,
         featureFlag: MAGIC_AGENT_PLATFORM_ENV,
         platformVersion: 1,
         assistantRuntimeCompatible: true,
@@ -661,7 +713,7 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
       .then((packageAgents) => mergeAgentDefinitions(runtimeAgents, packageAgents))
       .catch(() => runtimeAgents)
     return {
-      enabled,
+      ...enablement,
       featureFlag: MAGIC_AGENT_PLATFORM_ENV,
       platformVersion: 1,
       assistantRuntimeCompatible: true,
@@ -672,6 +724,23 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
       graphCount: graphRuntime.list().length,
       ...(packages ? { packageCount: packages.length } : {})
     }
+  }
+
+  setEnabled = async (
+    req: MagicAgentPlatformSetEnabledReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformStatusResp> => {
+    if (!invocation) throw new Error('Agent Studio settings require the trusted desktop UI.')
+    authorizeMagicAgentApprovalRenderer(invocation)
+    this.authorizeAgentStudioInvocation(invocation)
+    if (typeof req.enabled !== 'boolean') throw new Error('enabled must be a boolean.')
+    if (getMagicAgentPlatformEnablement().environmentOverride !== undefined) {
+      throw new Error(
+        'Agent Studio is controlled by its environment override. Restart without the override to use the desktop setting.'
+      )
+    }
+    await saveConfig({ magic_agent_platform_config: { enabled: req.enabled } })
+    return this.getStatus({}, invocation)
   }
 
   listPendingApprovals = async (

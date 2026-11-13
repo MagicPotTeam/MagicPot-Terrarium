@@ -217,7 +217,7 @@ describe('taskQueue transport client', () => {
     }
   })
 
-  it('switches to the next instance when prompt submission fails before admission', async () => {
+  it('does not resubmit after ambiguous admission and retains the original prompt identity', async () => {
     vi.resetModules()
     const taskQueue = await import('./taskQueue')
     const firstClient = {
@@ -258,6 +258,7 @@ describe('taskQueue transport client', () => {
       created_at: Date.now(),
       prompt_id: null,
       payload: {} as Workflow,
+      cleanupAfterRun: true,
       result: null
     })
 
@@ -267,8 +268,15 @@ describe('taskQueue transport client', () => {
 
       expect(firstClient.prompt).toHaveBeenCalledTimes(1)
       expect(firstClient.waitForPromptAdmission).toHaveBeenCalledTimes(1)
-      expect(secondClient.prompt).toHaveBeenCalledTimes(1)
-      expect(taskQueue.getTask(taskId)[0]).toBe('completed')
+      expect(secondClient.prompt).not.toHaveBeenCalled()
+      expect(firstClient.freeMemory).not.toHaveBeenCalled()
+      expect(taskQueue.getTask(taskId)[0]).toBe('error')
+      expect(taskQueue.getTask(taskId)[1]).toMatchObject({
+        submissionOutcome: 'unknown',
+        prompt_id: firstClient.prompt.mock.calls[0][0].prompt_id,
+        comfyInstanceBaseUrl: 'http://first.test/'
+      })
+      expect(firstClient.waitForPromptAdmission.mock.calls[0]).toHaveLength(3)
     } finally {
       await taskQueue.stopTaskQueue()
     }
@@ -328,7 +336,7 @@ describe('taskQueue transport client', () => {
     }
   })
 
-  it('fails over on a ComfyUI server error but not on a client prompt error', async () => {
+  it('does not resubmit on an ambiguous ComfyUI server error', async () => {
     vi.resetModules()
     const taskQueue = await import('./taskQueue')
     const firstClient = {
@@ -376,8 +384,9 @@ describe('taskQueue transport client', () => {
       await vi.advanceTimersByTimeAsync(1000)
 
       expect(firstClient.prompt).toHaveBeenCalledTimes(1)
-      expect(secondClient.prompt).toHaveBeenCalledTimes(1)
-      expect(taskQueue.getTask(taskId)[0]).toBe('completed')
+      expect(secondClient.prompt).not.toHaveBeenCalled()
+      expect(taskQueue.getTask(taskId)[0]).toBe('error')
+      expect(taskQueue.getTask(taskId)[1]?.submissionOutcome).toBe('unknown')
     } finally {
       await taskQueue.stopTaskQueue()
     }
@@ -439,10 +448,9 @@ describe('taskQueue transport client', () => {
     const taskQueue = await import('./taskQueue')
     const firstClient = {
       prompt: vi.fn().mockRejectedValue(new TypeError('unknown submit result')),
-      waitForPromptAdmission: vi.fn().mockResolvedValue({
-        admitted: true,
-        promptId: 'admitted-prompt'
-      }),
+      waitForPromptAdmission: vi
+        .fn()
+        .mockImplementation(async (promptId: string) => ({ admitted: true, promptId })),
       uploadImage: vi.fn(),
       freeMemory: vi.fn()
     }
@@ -486,11 +494,88 @@ describe('taskQueue transport client', () => {
       expect(firstClient.waitForPromptAdmission).toHaveBeenCalledTimes(1)
       expect(secondClient.prompt).not.toHaveBeenCalled()
       expect(taskQueue.getTask(taskId)[0]).toBe('completed')
-      expect(taskQueue.getTask(taskId)[1]?.prompt_id).toBe('admitted-prompt')
+      expect(taskQueue.getTask(taskId)[1]?.prompt_id).toBe(
+        firstClient.prompt.mock.calls[0][0].prompt_id
+      )
     } finally {
       await taskQueue.stopTaskQueue()
     }
   })
+
+  it.each(['lookup-error', 'foreign-prompt', 'missing-lookup', 'server-message'] as const)(
+    'never treats %s as permission to submit on another instance',
+    async (mode) => {
+      vi.resetModules()
+      const taskQueue = await import('./taskQueue')
+      const firstClient = {
+        prompt: vi.fn().mockRejectedValue(
+          mode === 'server-message'
+            ? Object.assign(new Error('ECONNREFUSED in upstream processing'), {
+                name: 'ComfyPostError',
+                status: 503,
+                payload: {}
+              })
+            : new TypeError('fetch failed')
+        ),
+        waitForPromptAdmission:
+          mode === 'missing-lookup'
+            ? undefined
+            : vi.fn().mockImplementation(async () => {
+                if (mode === 'lookup-error') throw new Error('status request failed')
+                return { admitted: true, promptId: 'foreign-prompt' }
+              }),
+        uploadImage: vi.fn(),
+        freeMemory: vi.fn()
+      }
+      const secondClient = { prompt: vi.fn(), uploadImage: vi.fn(), freeMemory: vi.fn() }
+      orderedInstancesMock.mockResolvedValueOnce([
+        {
+          profile: { id: 'first', baseUrl: 'http://first.test/', enabled: true, maxConcurrency: 1 },
+          client: firstClient,
+          objectInfo: { KSampler: {} }
+        },
+        {
+          profile: {
+            id: 'second',
+            baseUrl: 'http://second.test/',
+            enabled: true,
+            maxConcurrency: 1
+          },
+          client: secondClient,
+          objectInfo: { KSampler: {} }
+        }
+      ])
+      const taskId = taskQueue.addTask({
+        id: '',
+        type: 'comfy_prompt',
+        client_id: 'logical-client',
+        created_at: Date.now(),
+        prompt_id: null,
+        payload: {} as Workflow,
+        result: null,
+        cleanupAfterRun: true
+      })
+      try {
+        await taskQueue.initTaskQueue()
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(firstClient.prompt).toHaveBeenCalledOnce()
+        expect(secondClient.prompt).not.toHaveBeenCalled()
+        expect(waitPromptIdMock).not.toHaveBeenCalled()
+        expect(firstClient.freeMemory).not.toHaveBeenCalled()
+        const [status, task] = taskQueue.getTask(taskId)
+        expect(status).toBe('error')
+        expect(task).toMatchObject({
+          submissionOutcome: 'unknown',
+          comfyInstanceBaseUrl: 'http://first.test/',
+          prompt_id: firstClient.prompt.mock.calls[0][0].prompt_id
+        })
+        if (firstClient.waitForPromptAdmission)
+          expect(firstClient.waitForPromptAdmission.mock.calls[0]).toHaveLength(3)
+      } finally {
+        await taskQueue.stopTaskQueue()
+      }
+    }
+  )
 
   it('requests ComfyUI memory cleanup after tasks that opt in', async () => {
     vi.resetModules()
