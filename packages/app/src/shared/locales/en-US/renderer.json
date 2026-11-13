@@ -1039,6 +1039,7 @@
     "attachment": "Attachment",
     "image_n": "Image {{index}}",
     "remove_attachment_named": "Remove {{name}}",
+    "remove_model_3d": "Remove 3D model",
     "search_skills": "Search skills...",
     "no_skills_found": "No skills found",
     "cancel": "Cancel",

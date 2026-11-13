@@ -866,6 +866,7 @@
     "attachment": "附件",
     "image_n": "图片 {{index}}",
     "remove_attachment_named": "移除 {{name}}",
+    "remove_model_3d": "移除 3D 模型",
     "search_skills": "搜索技能...",
     "no_skills_found": "没有找到技能",
     "cancel": "取消",
