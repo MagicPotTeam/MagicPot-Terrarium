@@ -2,7 +2,10 @@ import AgentTeamMessageActivity from './components/AgentTeamMessageActivity'
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import { reduceTeamActivity, selectTeamActivity } from './teamMessageActivityState'
-import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
+import {
+  useHelperInvocationObserver,
+  type HelperInvocationHandle
+} from './useHelperInvocationObserver'
 import { setTeamTaskStatus, validateTeamTasks } from './agentTeamTasks'
 import { prepareTeamMemberDependencySummaries } from './teamMemberDependencySummary'
 import { createTeamLiveActivity } from './teamLiveActivity'
@@ -13,8 +16,18 @@ import { AgentTeamMemberForm, AgentTeamMemberImages } from './components/AgentTe
 import AgentProcessArea, { type ProcessEntry } from './components/AgentProcessArea'
 import TeamLeadJobEntries, { type TeamLeadJobEntriesValue } from './components/TeamLeadJobEntries'
 import { useTeamImagePlacement } from './components/useTeamImagePlacement'
-import { createTeamMember, readMemberModelChoice, resolveTeamRecipient, resolveTeamRequestSettings } from './agentTeam'
-import { isReplayUserCommand, parseReplayUserCommand, planReplay, type ReplayUserCommand } from './replayUserCommand'
+import {
+  createTeamMember,
+  readMemberModelChoice,
+  resolveTeamRecipient,
+  resolveTeamRequestSettings
+} from './agentTeam'
+import {
+  isReplayUserCommand,
+  parseReplayUserCommand,
+  planReplay,
+  type ReplayUserCommand
+} from './replayUserCommand'
 import { cloneChatSessionForReplay } from './cloneChatSessionForReplay'
 import { mergeToolCheckpoint } from './chatToolCheckpoint'
 import { getChatToolLoadingStatus } from './chatToolLoadingStatus'
@@ -199,7 +212,10 @@ import {
   materializeInternalImageDragAttachment,
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
-import { collectDroppedDirectoryFilesBounded, DroppedDirectoryLimitError } from '../ProjectCanvasPage/dropDirectory'
+import {
+  collectDroppedDirectoryFilesBounded,
+  DroppedDirectoryLimitError
+} from '../ProjectCanvasPage/dropDirectory'
 import { importChatAttachment, importChatAttachmentUrl } from './chatManagedMediaAttachments'
 import {
   BUILT_IN_TAGGING_SKILL_ID,
@@ -207,7 +223,12 @@ import {
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
   mergeBuiltInSkills
 } from './builtInSkills'
-import { droppedImageDescriptorKey, hasDroppedDirectory, isImageLikeDroppedFile, resolveDroppedDirectoryImageFiles } from './chatDropFileUtils'
+import {
+  droppedImageDescriptorKey,
+  hasDroppedDirectory,
+  isImageLikeDroppedFile,
+  resolveDroppedDirectoryImageFiles
+} from './chatDropFileUtils'
 import {
   resolveTaggingSkillBootstrapProfileId,
   resolveTaggingSkillProfileId
@@ -279,20 +300,50 @@ import SessionHistoryDialog from './components/SessionHistoryDialog'
 import ChatMessageList, { type ChatPendingConfirmation } from './components/ChatMessageList'
 import AgentThreadHtmlPanel from './components/AgentThreadHtmlPanel'
 import { isAgentBasicCommand, parseAgentBasicCommand } from './agentBasicCommand'
-import { isRepairImagesCommand, parseRepairImagesCommand, scanMissingLocalImages, projectConfirmedImageContext, type ImageRepairScan, type MissingImageReference } from './repairImagesCommand'
-import { isAgentConfigurationCommand, parseAgentConfigurationCommand } from './agentConfigurationCommand'
-import { isAgentInspectionCommand, parseAgentInspectionCommand, formatAgentEnvironment } from './agentInspectionCommand'
+import {
+  isRepairImagesCommand,
+  parseRepairImagesCommand,
+  scanMissingLocalImages,
+  projectConfirmedImageContext,
+  type ImageRepairScan,
+  type MissingImageReference
+} from './repairImagesCommand'
+import {
+  isAgentConfigurationCommand,
+  parseAgentConfigurationCommand
+} from './agentConfigurationCommand'
+import {
+  isAgentInspectionCommand,
+  parseAgentInspectionCommand,
+  formatAgentEnvironment
+} from './agentInspectionCommand'
 import AgentThreadScratchpadView from './components/AgentThreadScratchpadView'
 import AgentThreadGoalEntry from './components/AgentThreadGoalEntry'
 import AgentThreadLocalReminder from './components/AgentThreadLocalReminder'
-import { isAgentScratchpadCommand, parseAgentScratchpadCommand, type AgentScratchpadCommandHandle } from './agentScratchpadCommand'
-import { isAgentSkillCommand, parseAgentSkillCommand, type AgentSkillCommandHandle } from './agentSkillCommand'
+import {
+  isAgentScratchpadCommand,
+  parseAgentScratchpadCommand,
+  type AgentScratchpadCommandHandle
+} from './agentScratchpadCommand'
+import {
+  isAgentSkillCommand,
+  parseAgentSkillCommand,
+  type AgentSkillCommandHandle
+} from './agentSkillCommand'
 import AgentThreadSkillsPanel from './components/AgentThreadSkillsPanel'
 import { useAgentArchiveResponder } from './useAgentArchiveResponder'
 import { useManagedFirstRunPane } from './useManagedFirstRunPane'
 import AgentThreadSidesPanel from './components/AgentThreadSidesPanel'
-import { isAgentSideCommand, parseAgentSideCommand, type AgentSideCommandHandle } from './agentSideCommand'
-import { AgentProcessDetails, getAgentThreadProcessScope, useAgentThreadProcesses } from './components/AgentThreadProcessesPanel'
+import {
+  isAgentSideCommand,
+  parseAgentSideCommand,
+  type AgentSideCommandHandle
+} from './agentSideCommand'
+import {
+  AgentProcessDetails,
+  getAgentThreadProcessScope,
+  useAgentThreadProcesses
+} from './components/AgentThreadProcessesPanel'
 import { AgentThreadJobRow, useAgentThreadJobs } from './components/AgentThreadJobsPanel'
 import AgentThreadInteractionPanel from './components/AgentThreadInteractionPanel'
 import ChatComposer from './components/ChatComposer'
@@ -872,8 +923,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   existingConversationOpen
 }) => {
   const queueResumeNoticeId = React.useId()
-  const teamVisibilityRef = useRef({active, epoch:0})
-  if (teamVisibilityRef.current.active !== active) teamVisibilityRef.current = {active, epoch:teamVisibilityRef.current.epoch+1}
+  const teamVisibilityRef = useRef({ active, epoch: 0 })
+  if (teamVisibilityRef.current.active !== active)
+    teamVisibilityRef.current = { active, epoch: teamVisibilityRef.current.epoch + 1 }
   const protectionRef = useRef(existingConversationProtection)
   useLayoutEffect(() => {
     protectionRef.current = existingConversationProtection
@@ -1015,7 +1067,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const previousStorageScopeRef = useRef(storageScope)
   const sessionLoadEpochRef = useRef(0)
   const helperObserver = useHelperInvocationObserver(storageScope)
-  const helperHandlesRef = useRef(new Map<string, { scope: string; loadEpoch: number; runId: number; handle: HelperInvocationHandle }>())
+  const helperHandlesRef = useRef(
+    new Map<
+      string,
+      { scope: string; loadEpoch: number; runId: number; handle: HelperInvocationHandle }
+    >()
+  )
   const sessionMutationEpochRef = useRef(0)
   // Successful local write acknowledgements can change the baseline without changing the React
   // session object. A storage read started before that acknowledgement must not replace the view.
@@ -1036,24 +1093,33 @@ const ChatPage: React.FC<ChatPageProps> = ({
     activationGenerationRef.current++
     currentReadRef.current = null
   }, [active, storageScope])
-  const getReadGeneration = useCallback(() => ({
-    scopeEpoch: sessionLoadEpochRef.current,
-    readSequence: readSequenceRef.current,
-    activationGeneration: activationGenerationRef.current
-  }), [])
+  const getReadGeneration = useCallback(
+    () => ({
+      scopeEpoch: sessionLoadEpochRef.current,
+      readSequence: readSequenceRef.current,
+      activationGeneration: activationGenerationRef.current
+    }),
+    []
+  )
   const beginSessionRead = useCallback(() => {
     readSequenceRef.current++
     currentReadRef.current = null
     if (openInputRef.current) setCommittedRead(null)
     return getReadGeneration()
   }, [getReadGeneration])
-  const isReadCurrent = useCallback((receipt: ExistingConversationReadReceipt) => {
-    const generation = getReadGeneration()
-    return currentReadRef.current === receipt && receipt.storageScope === storageScopeRef.current &&
-      receipt.generation.scopeEpoch === generation.scopeEpoch &&
-      receipt.generation.readSequence === generation.readSequence &&
-      receipt.generation.activationGeneration === generation.activationGeneration
-  }, [getReadGeneration])
+  const isReadCurrent = useCallback(
+    (receipt: ExistingConversationReadReceipt) => {
+      const generation = getReadGeneration()
+      return (
+        currentReadRef.current === receipt &&
+        receipt.storageScope === storageScopeRef.current &&
+        receipt.generation.scopeEpoch === generation.scopeEpoch &&
+        receipt.generation.readSequence === generation.readSequence &&
+        receipt.generation.activationGeneration === generation.activationGeneration
+      )
+    },
+    [getReadGeneration]
+  )
   const deletedSessionKeysRef = useRef<Set<string>>(
     new Set(
       readSessionDeleteTombstones().map(({ scope, sessionId }) => `${scope}\u0000${sessionId}`)
@@ -1073,7 +1139,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const contextTokenCalibrationByFingerprintRef = useRef<Map<string, ChatContextTokenCalibration>>(
     new Map()
   )
-  const imageRepairContextRef = useRef<{ scope: string; references: Map<ChatMessage, readonly MissingImageReference[]> } | null>(null)
+  const imageRepairContextRef = useRef<{
+    scope: string
+    references: Map<ChatMessage, readonly MissingImageReference[]>
+  } | null>(null)
   const imageRepairScanPendingRef = useRef(false)
   const autoSaveScanInitializedRef = useRef(false)
   const autoSaveScanCursorBySessionIdRef = useRef<Map<string, number>>(new Map())
@@ -1090,29 +1159,51 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const next = typeof value === 'function' ? value(previous) : value
     let teamAuthorityChanged = false
     for (const [id, epoch] of teamAuthorityEpochsRef.current) {
-      const oldSession = previous.find(session => session.id === id)
-      const newSession = next.find(session => session.id === id)
+      const oldSession = previous.find((session) => session.id === id)
+      const newSession = next.find((session) => session.id === id)
       const sameMemberModelChoice = (left: ChatSession, right: ChatSession): boolean => {
         try {
-          return Object.hasOwn(left, 'memberModelChoice') === Object.hasOwn(right, 'memberModelChoice') &&
+          return (
+            Object.hasOwn(left, 'memberModelChoice') ===
+              Object.hasOwn(right, 'memberModelChoice') &&
             readMemberModelChoice(left) === readMemberModelChoice(right)
-        } catch { return false }
+          )
+        } catch {
+          return false
+        }
       }
       if (!oldSession && !newSession) continue
-      if (!oldSession || !newSession || oldSession.profileId !== newSession.profileId || oldSession.skillId !== newSession.skillId || oldSession.teamLeadId !== newSession.teamLeadId || oldSession.teamGeneration !== newSession.teamGeneration || oldSession.teamMemberGeneration !== newSession.teamMemberGeneration || !sameMemberModelChoice(oldSession, newSession) || Boolean(oldSession.teamEnded) !== Boolean(newSession.teamEnded) || Boolean(oldSession.archived) !== Boolean(newSession.archived)) {
+      if (
+        !oldSession ||
+        !newSession ||
+        oldSession.profileId !== newSession.profileId ||
+        oldSession.skillId !== newSession.skillId ||
+        oldSession.teamLeadId !== newSession.teamLeadId ||
+        oldSession.teamGeneration !== newSession.teamGeneration ||
+        oldSession.teamMemberGeneration !== newSession.teamMemberGeneration ||
+        !sameMemberModelChoice(oldSession, newSession) ||
+        Boolean(oldSession.teamEnded) !== Boolean(newSession.teamEnded) ||
+        Boolean(oldSession.archived) !== Boolean(newSession.archived)
+      ) {
         teamAuthorityEpochsRef.current.set(id, epoch + 1)
         teamAuthorityChanged = true
       }
     }
-    if (teamAuthorityChanged) setTeamAuthorityRevision(revision => revision + 1)
+    if (teamAuthorityChanged) setTeamAuthorityRevision((revision) => revision + 1)
     if (next !== previous && !sessionPersistenceGateRef.current) {
-      const byId = new Map(previous.map(session => [session.id, session]))
+      const byId = new Map(previous.map((session) => [session.id, session]))
       for (const session of next) {
         const old = byId.get(session.id)
-        if (old !== session) chatSaveBaselineRef.current.supersedeReservations(storageScopeRef.current, session.id, session)
+        if (old !== session)
+          chatSaveBaselineRef.current.supersedeReservations(
+            storageScopeRef.current,
+            session.id,
+            session
+          )
         byId.delete(session.id)
       }
-      for (const removed of byId.values()) chatSaveBaselineRef.current.discardReservation(storageScopeRef.current, removed)
+      for (const removed of byId.values())
+        chatSaveBaselineRef.current.discardReservation(storageScopeRef.current, removed)
       sessionMutationEpochRef.current += 1
     }
     sessionsRef.current = next
@@ -1145,40 +1236,52 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [getSessionStorageKey]
   )
-  const reconcileLoadedTeamEnd = useCallback((scope: string, merged: ChatSession[], stored: ChatSession[]): ChatSession[] => {
-    const byId = new Map(stored.map(session => [session.id, session]))
-    let conflict = false
-    const result = merged.map(local => {
-      const persisted = byId.get(local.id)
-      if (!persisted || persisted === local || (persisted.teamLifecycleRevision ?? 0) <= (local.teamLifecycleRevision ?? 0)) return local
-      const key = getSessionStorageKey(scope, local.id)
-      const dirty = dirtySessionSnapshotsRef.current.has(key) || persistedSessionsRef.current.get(local.id) !== local ||
-        chatSaveBaselineRef.current.isPending(scope, local.id)
-      if (dirty && !chatSaveBaselineRef.current.hasBaseline(scope, local.id)) {
-        // A scope round-trip lost the prior lineage; never seed a fresh baseline from another scope.
-        chatSaveBaselineRef.current.freeze(scope, local.id, null)
+  const reconcileLoadedTeamEnd = useCallback(
+    (scope: string, merged: ChatSession[], stored: ChatSession[]): ChatSession[] => {
+      const byId = new Map(stored.map((session) => [session.id, session]))
+      let conflict = false
+      const result = merged.map((local) => {
+        const persisted = byId.get(local.id)
+        if (
+          !persisted ||
+          persisted === local ||
+          (persisted.teamLifecycleRevision ?? 0) <= (local.teamLifecycleRevision ?? 0)
+        )
+          return local
+        const key = getSessionStorageKey(scope, local.id)
+        const dirty =
+          dirtySessionSnapshotsRef.current.has(key) ||
+          persistedSessionsRef.current.get(local.id) !== local ||
+          chatSaveBaselineRef.current.isPending(scope, local.id)
+        if (dirty && !chatSaveBaselineRef.current.hasBaseline(scope, local.id)) {
+          // A scope round-trip lost the prior lineage; never seed a fresh baseline from another scope.
+          chatSaveBaselineRef.current.freeze(scope, local.id, null)
+        }
+        const reconciled = dirty
+          ? chatSaveBaselineRef.current.reconcileTeamEnd(scope, local, persisted)
+          : persisted
+        if (!dirty) chatSaveBaselineRef.current.fenceAndAdvance(scope, local.id, persisted)
+        if (!reconciled) {
+          setDirtySessionSnapshot(scope, local)
+          conflict = true
+          return local
+        }
+        if (dirty) dirtySessionSnapshotsRef.current.set(key, reconciled)
+        else dirtySessionSnapshotsRef.current.delete(key)
+        return reconciled
+      })
+      if (conflict) {
+        setSessionSaveError('团队状态冲突：本地更改未覆盖已保存的会话，请保留并检查。')
+        notifyWarning('团队状态冲突，已保留本地更改')
       }
-      const reconciled = dirty ? chatSaveBaselineRef.current.reconcileTeamEnd(scope, local, persisted) : persisted
-      if (!dirty) chatSaveBaselineRef.current.fenceAndAdvance(scope, local.id, persisted)
-      if (!reconciled) {
-        setDirtySessionSnapshot(scope, local)
-        conflict = true
-        return local
-      }
-      if (dirty) dirtySessionSnapshotsRef.current.set(key, reconciled)
-      else dirtySessionSnapshotsRef.current.delete(key)
-      return reconciled
-    })
-    if (conflict) {
-      setSessionSaveError('团队状态冲突：本地更改未覆盖已保存的会话，请保留并检查。')
-      notifyWarning('团队状态冲突，已保留本地更改')
-    }
-    return result
-  }, [getSessionStorageKey, notifyWarning, setDirtySessionSnapshot])
+      return result
+    },
+    [getSessionStorageKey, notifyWarning, setDirtySessionSnapshot]
+  )
   const replacePersistedSessions = useCallback(
     (scope: string, sessions: ChatSession[], preservedLocal: readonly ChatSession[] = []): void => {
       // Freeze before adopting loaded baselines for any local snapshot retained by the merge.
-      const loadedIds = new Map(sessions.map(session => [session.id, session]))
+      const loadedIds = new Map(sessions.map((session) => [session.id, session]))
       for (const local of preservedLocal) {
         const loaded = loadedIds.get(local.id)
         if (loaded && loaded !== local) setDirtySessionSnapshot(scope, local)
@@ -1207,7 +1310,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         // Completion of an older immutable payload is not proof that this object (or its
         // subsequently reconciled baseline) is clean.
         if (storageScopeRef.current === scope) {
-          const current = sessionsRef.current.find(candidate => candidate.id === session.id)
+          const current = sessionsRef.current.find((candidate) => candidate.id === session.id)
           if (current) {
             dirtySessionSnapshotsRef.current.set(key, current)
             setSessionSaveError('This thread has unsaved changes. Retry saving before closing it.')
@@ -1235,8 +1338,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const persistSessionWithBaseline = useCallback(
     async (session: ChatSession, scope: string): Promise<void> => {
       const saved = await chatSaveBaselineRef.current.persistLatest(
-        scope, session.id,
-        () => storageScopeRef.current === scope && sessionsRef.current.find(candidate => candidate.id === session.id) === session ? session : null,
+        scope,
+        session.id,
+        () =>
+          storageScopeRef.current === scope &&
+          sessionsRef.current.find((candidate) => candidate.id === session.id) === session
+            ? session
+            : null,
         () => persistedSessionsRef.current.get(session.id) ?? null,
         () => noteSessionWriteAcknowledged(scope)
       )
@@ -1253,8 +1361,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ): Promise<boolean> => {
       const requestScope = storageScope
       const requestEpoch = committedRunScopeEpochRef.current
-      const isCurrentScope = (): boolean => committedRunScopeRef.current === requestScope &&
-        committedRunScopeEpochRef.current === requestEpoch && storageScopeRef.current === requestScope
+      const isCurrentScope = (): boolean =>
+        committedRunScopeRef.current === requestScope &&
+        committedRunScopeEpochRef.current === requestEpoch &&
+        storageScopeRef.current === requestScope
       if (!isCurrentScope()) return false
       const session = sessionsRef.current.find((candidate) => candidate.id === sessionId)
       if (!session) return false
@@ -1262,10 +1372,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       try {
         const saved = await chatSaveBaselineRef.current.persistLatest(
-          requestScope, sessionId,
-          () => isCurrentScope() ? sessionsRef.current.find(candidate => candidate.id === sessionId && (retrySuperseded || candidate === session)) ?? null : null,
+          requestScope,
+          sessionId,
+          () =>
+            isCurrentScope()
+              ? (sessionsRef.current.find(
+                  (candidate) =>
+                    candidate.id === sessionId && (retrySuperseded || candidate === session)
+                ) ?? null)
+              : null,
           () => persistedSessionsRef.current.get(sessionId) ?? null,
-          () => { if (isCurrentScope()) noteSessionWriteAcknowledged(requestScope) },
+          () => {
+            if (isCurrentScope()) noteSessionWriteAcknowledged(requestScope)
+          },
           retrySuperseded
         )
         if (!saved) return false
@@ -1309,12 +1428,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const migratedSessions = await Promise.all(
         loadedSessions.map(async (loadedSession) => {
           const migrated = migrateLegacyChatMediaMessages(loadedSession.messages, dataDir)
-          const migratedCompacted = migrateLegacyChatMediaMessages(loadedSession.compactedMessages || [], dataDir)
+          const migratedCompacted = migrateLegacyChatMediaMessages(
+            loadedSession.compactedMessages || [],
+            dataDir
+          )
           const migratedReplay = migrateLegacyChatMediaMessages(
             loadedSession.contextCompression?.replayImageMessages || [],
             dataDir
           )
-          if (!migrated.changed && !migratedReplay.changed && !migratedCompacted.changed) return loadedSession
+          if (!migrated.changed && !migratedReplay.changed && !migratedCompacted.changed)
+            return loadedSession
 
           const sessionKey = `${storageScope}\u0000${loadedSession.id}`
           try {
@@ -1337,7 +1460,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
               update: (currentSession) => ({
                 ...currentSession,
                 ...(migrated.changed ? { messages: migrated.value } : {}),
-                ...(migratedCompacted.changed ? { compactedMessages: migratedCompacted.value } : {}),
+                ...(migratedCompacted.changed
+                  ? { compactedMessages: migratedCompacted.value }
+                  : {}),
                 ...(migratedReplay.changed && currentSession.contextCompression
                   ? {
                       contextCompression: {
@@ -1487,14 +1612,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
     storageScopeRef.current = storageScope
     const loadEpoch = ++sessionLoadEpochRef.current
     const initialRead = beginSessionRead()
-    const initialReadCurrent = () => !openInputRef.current || (
-      initialRead.readSequence === readSequenceRef.current &&
-      initialRead.activationGeneration === activationGenerationRef.current
-    )
+    const initialReadCurrent = () =>
+      !openInputRef.current ||
+      (initialRead.readSequence === readSequenceRef.current &&
+        initialRead.activationGeneration === activationGenerationRef.current)
     setSessionsLoaded(false)
     setSessionLoadError(null)
     sessionPersistenceGateRef.current = true
-    const persistedBaselinesBeforeLoad = scopeChanged ? new Map<string, ChatSession>() : new Map(persistedSessionsRef.current)
+    const persistedBaselinesBeforeLoad = scopeChanged
+      ? new Map<string, ChatSession>()
+      : new Map(persistedSessionsRef.current)
     persistedSessionsRef.current = new Map()
     sessionMutationEpochRef.current += 1
     const loadMutationEpoch = sessionMutationEpochRef.current
@@ -1540,7 +1667,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
           loadEpoch,
           migrationMutationEpoch
         )
-        if (loadEpoch !== sessionLoadEpochRef.current || storageScope !== storageScopeRef.current || !initialReadCurrent()) {
+        if (
+          loadEpoch !== sessionLoadEpochRef.current ||
+          storageScope !== storageScopeRef.current ||
+          !initialReadCurrent()
+        ) {
           return
         }
         // A write can finish and clear dirty while this initial read is pending, without changing
@@ -1569,9 +1700,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
           [...locallyMutatedSessionIds, ...getDirtySessionIds(storageScope)]
         )
         for (const local of merged) {
-          if (!sortedStoredSessions.some(stored => stored.id === local.id && stored !== local)) continue
-          const prior = dirtySessionSnapshotsRef.current.get(getSessionStorageKey(storageScope, local.id))
-          if (prior !== local) chatSaveBaselineRef.current.freeze(storageScope, local.id, persistedBaselinesBeforeLoad.get(local.id) ?? null)
+          if (!sortedStoredSessions.some((stored) => stored.id === local.id && stored !== local))
+            continue
+          const prior = dirtySessionSnapshotsRef.current.get(
+            getSessionStorageKey(storageScope, local.id)
+          )
+          if (prior !== local)
+            chatSaveBaselineRef.current.freeze(
+              storageScope,
+              local.id,
+              persistedBaselinesBeforeLoad.get(local.id) ?? null
+            )
         }
         merged = reconcileLoadedTeamEnd(storageScope, merged, sortedStoredSessions)
         replacePersistedSessions(storageScope, sortedStoredSessions, merged)
@@ -1585,7 +1724,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
           console.error('[ChatPage] 加载会话失败', e)
         }
       } finally {
-        if (loadEpoch === sessionLoadEpochRef.current && storedSessions !== null && initialReadCurrent()) {
+        if (
+          loadEpoch === sessionLoadEpochRef.current &&
+          storedSessions !== null &&
+          initialReadCurrent()
+        ) {
           sessionPersistenceGateRef.current = false
           openInitialLoadRecoveryRef.current = false
           setSessionsLoaded(true)
@@ -1596,10 +1739,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return () => {
       if (sessionLoadEpochRef.current === loadEpoch) sessionLoadEpochRef.current += 1
       const handles = helperHandlesRef.current
-      for (const [sessionId, entry] of handles) if (entry.scope === storageScope && entry.loadEpoch === loadEpoch) {
-        try { entry.handle.end() } catch { /* Optional observation only. */ }
-        if (helperHandlesRef.current.get(sessionId) === entry) handles.delete(sessionId)
-      }
+      for (const [sessionId, entry] of handles)
+        if (entry.scope === storageScope && entry.loadEpoch === loadEpoch) {
+          try {
+            entry.handle.end()
+          } catch {
+            /* Optional observation only. */
+          }
+          if (helperHandlesRef.current.get(sessionId) === entry) handles.delete(sessionId)
+        }
     }
   }, [
     beginSessionRead,
@@ -1615,75 +1763,90 @@ const ChatPage: React.FC<ChatPageProps> = ({
     storageScope
   ])
 
-  const refreshSessionsFromStorage = useCallback(async (): Promise<ExistingConversationReadReceipt | null> => {
-    const generation = beginSessionRead()
-    const refreshEpoch = sessionLoadEpochRef.current
-    const mutationEpoch = sessionMutationEpochRef.current
-    const currentRead = () => !openInputRef.current || (
-      generation.readSequence === readSequenceRef.current &&
-      generation.activationGeneration === activationGenerationRef.current
-    )
-    try {
-      const loadedSessions = await loadAllSessions(storageScope)
-      if (
-        refreshEpoch !== sessionLoadEpochRef.current ||
-        storageScope !== storageScopeRef.current || !currentRead()
-      ) {
+  const refreshSessionsFromStorage =
+    useCallback(async (): Promise<ExistingConversationReadReceipt | null> => {
+      const generation = beginSessionRead()
+      const refreshEpoch = sessionLoadEpochRef.current
+      const mutationEpoch = sessionMutationEpochRef.current
+      const currentRead = () =>
+        !openInputRef.current ||
+        (generation.readSequence === readSequenceRef.current &&
+          generation.activationGeneration === activationGenerationRef.current)
+      try {
+        const loadedSessions = await loadAllSessions(storageScope)
+        if (
+          refreshEpoch !== sessionLoadEpochRef.current ||
+          storageScope !== storageScopeRef.current ||
+          !currentRead()
+        ) {
+          return null
+        }
+        const migratedSessions = await migrateLoadedChatMediaSessions(
+          loadedSessions,
+          refreshEpoch,
+          mutationEpoch
+        )
+        if (
+          refreshEpoch !== sessionLoadEpochRef.current ||
+          mutationEpoch !== sessionMutationEpochRef.current ||
+          storageScope !== storageScopeRef.current ||
+          !currentRead()
+        ) {
+          return null
+        }
+        const stored = sortSessionsByRecencyDesc(migratedSessions)
+        const visibleStored = stored.filter(
+          (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
+        )
+        if (mutationEpoch !== sessionMutationEpochRef.current || !currentRead()) {
+          return null
+        }
+        let merged = mergeLoadedSessionsWithLocal(
+          visibleStored,
+          sessionsRef.current,
+          [pendingSessionIdRef.current, currentSessionIdRef.current],
+          getDirtySessionIds(storageScope)
+        )
+        merged = reconcileLoadedTeamEnd(storageScope, merged, visibleStored)
+        replacePersistedSessions(storageScope, visibleStored, merged)
+        setSessions(merged)
+        setSessionLoadError(null)
+        sessionPersistenceGateRef.current = false
+        openInitialLoadRecoveryRef.current = false
+        setSessionsLoaded(true)
+        const receipt: ExistingConversationReadReceipt = Object.freeze({
+          storageScope,
+          token: Object.freeze({}),
+          generation: Object.freeze(generation),
+          storedSessionIds: Object.freeze(visibleStored.map((session) => session.id))
+        })
+        currentReadRef.current = receipt
+        if (openInputRef.current) setCommittedRead(receipt)
+        return receipt
+      } catch (e) {
+        if (
+          refreshEpoch === sessionLoadEpochRef.current &&
+          storageScope === storageScopeRef.current &&
+          currentRead()
+        ) {
+          const message = e instanceof Error ? e.message : String(e)
+          const detail = `Failed to refresh chat sessions: ${message}`
+          setSessionLoadError(detail)
+          notifyError(detail)
+          console.warn('[ChatPage] refreshSessionsFromStorage failed:', e)
+        }
         return null
       }
-      const migratedSessions = await migrateLoadedChatMediaSessions(
-        loadedSessions,
-        refreshEpoch,
-        mutationEpoch
-      )
-      if (
-        refreshEpoch !== sessionLoadEpochRef.current ||
-        mutationEpoch !== sessionMutationEpochRef.current ||
-        storageScope !== storageScopeRef.current || !currentRead()
-      ) {
-        return null
-      }
-      const stored = sortSessionsByRecencyDesc(migratedSessions)
-      const visibleStored = stored.filter(
-        (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
-      )
-      if (mutationEpoch !== sessionMutationEpochRef.current || !currentRead()) {
-        return null
-      }
-      let merged = mergeLoadedSessionsWithLocal(
-        visibleStored,
-        sessionsRef.current,
-        [pendingSessionIdRef.current, currentSessionIdRef.current],
-        getDirtySessionIds(storageScope)
-      )
-      merged = reconcileLoadedTeamEnd(storageScope, merged, visibleStored)
-      replacePersistedSessions(storageScope, visibleStored, merged)
-      setSessions(merged)
-      setSessionLoadError(null)
-      sessionPersistenceGateRef.current = false
-      openInitialLoadRecoveryRef.current = false
-      setSessionsLoaded(true)
-      const receipt: ExistingConversationReadReceipt = Object.freeze({
-        storageScope, token: Object.freeze({}), generation: Object.freeze(generation),
-        storedSessionIds: Object.freeze(visibleStored.map((session) => session.id))
-      })
-      currentReadRef.current = receipt
-      if (openInputRef.current) setCommittedRead(receipt)
-      return receipt
-    } catch (e) {
-      if (
-        refreshEpoch === sessionLoadEpochRef.current &&
-        storageScope === storageScopeRef.current && currentRead()
-      ) {
-        const message = e instanceof Error ? e.message : String(e)
-        const detail = `Failed to refresh chat sessions: ${message}`
-        setSessionLoadError(detail)
-        notifyError(detail)
-        console.warn('[ChatPage] refreshSessionsFromStorage failed:', e)
-      }
-      return null
-    }
-  }, [beginSessionRead, getDirtySessionIds, migrateLoadedChatMediaSessions, notifyError, reconcileLoadedTeamEnd, replacePersistedSessions, setSessions, storageScope])
+    }, [
+      beginSessionRead,
+      getDirtySessionIds,
+      migrateLoadedChatMediaSessions,
+      notifyError,
+      reconcileLoadedTeamEnd,
+      replacePersistedSessions,
+      setSessions,
+      storageScope
+    ])
 
   const retrySessionLoad = useCallback(async () => {
     const requestScope = storageScope
@@ -1726,8 +1889,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const inputRemoved = hadOpenInputRef.current && !existingConversationOpen
     wasActiveRef.current = active
     hadOpenInputRef.current = !!existingConversationOpen
-    const recoverRemovedInput = inputRemoved && !sessionsLoaded && openInitialLoadRecoveryRef.current
-    if (!active || (!resumed && !recoverRemovedInput) || (!sessionsLoaded && !openInitialLoadRecoveryRef.current)) {
+    const recoverRemovedInput =
+      inputRemoved && !sessionsLoaded && openInitialLoadRecoveryRef.current
+    if (
+      !active ||
+      (!resumed && !recoverRemovedInput) ||
+      (!sessionsLoaded && !openInitialLoadRecoveryRef.current)
+    ) {
       return
     }
 
@@ -1788,7 +1956,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     new Map()
   )
   const queuedSessionSendsRef = useRef<Map<string, QueuedSessionSend[]>>(queuedSessionSends)
-  const suspendedSessionSendsByScopeRef = useRef(new Map<string, Map<string, QueuedSessionSend[]>>())
+  const suspendedSessionSendsByScopeRef = useRef(
+    new Map<string, Map<string, QueuedSessionSend[]>>()
+  )
   const queuedSessionSendIdRef = useRef(0)
   const updateQueuedSessionSends = useCallback((next: Map<string, QueuedSessionSend[]>) => {
     queuedSessionSendsRef.current = next
@@ -1823,23 +1993,44 @@ const ChatPage: React.FC<ChatPageProps> = ({
     committedRunScopeRef.current = storageScope
     committedRunScopeEpochRef.current += 1
     const oldActive = [...activeRunIdBySessionRef.current.keys()]
-    const oldOwned = new Set([...oldActive, ...sendingSessionIdsRef.current, ...queuedSessionSendsRef.current.keys()])
-    for (const id of oldOwned) sessionTerminationEpochRef.current.set(id, (sessionTerminationEpochRef.current.get(id) ?? 0) + 1)
+    const oldOwned = new Set([
+      ...oldActive,
+      ...sendingSessionIdsRef.current,
+      ...queuedSessionSendsRef.current.keys()
+    ])
+    for (const id of oldOwned)
+      sessionTerminationEpochRef.current.set(
+        id,
+        (sessionTerminationEpochRef.current.get(id) ?? 0) + 1
+      )
     for (const id of oldActive) {
       const lifecycleId = lifecycleRunIdBySessionRef.current.get(id)
-      if (lifecycleId) dispatchScopedChatRunEvent(oldScope, id, { runId: lifecycleId, status: 'interrupted', unread: false })
+      if (lifecycleId)
+        dispatchScopedChatRunEvent(oldScope, id, {
+          runId: lifecycleId,
+          status: 'interrupted',
+          unread: false
+        })
       updateScopedActiveLoadingSessionId(oldScope, id, false, false)
       updateScopedChatLoadingStatus(oldScope, id, null)
     }
     try {
       const key = scopedStorageKey(STORAGE_KEY_LOADING_IDS, oldScope)
       const saved = JSON.parse(localStorage.getItem(key) || '[]') as unknown
-      if (Array.isArray(saved)) localStorage.setItem(key, JSON.stringify(saved.filter(id => !oldActive.includes(id))))
-    } catch { /* Loading markers are best-effort; the request owner remains fenced. */ }
-    for (const [id, entry] of helperHandlesRef.current) if (entry.scope === oldScope) {
-      try { entry.handle.end() } catch { /* Observation cannot block a scope switch. */ }
-      if (helperHandlesRef.current.get(id) === entry) helperHandlesRef.current.delete(id)
+      if (Array.isArray(saved))
+        localStorage.setItem(key, JSON.stringify(saved.filter((id) => !oldActive.includes(id))))
+    } catch {
+      /* Loading markers are best-effort; the request owner remains fenced. */
     }
+    for (const [id, entry] of helperHandlesRef.current)
+      if (entry.scope === oldScope) {
+        try {
+          entry.handle.end()
+        } catch {
+          /* Observation cannot block a scope switch. */
+        }
+        if (helperHandlesRef.current.get(id) === entry) helperHandlesRef.current.delete(id)
+      }
     activeRunIdBySessionRef.current.clear()
     lifecycleRunIdBySessionRef.current.clear()
     const controllers = [...sessionAbortControllersRef.current.values()]
@@ -1853,8 +2044,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const oldQueues = queuedSessionSendsRef.current
     const suspendedQueues = new Map<string, QueuedSessionSend[]>()
     for (const [sessionId, queue] of oldQueues) {
-      const userSends = queue.filter(item => item.overrides?.composerSubmission || (!item.queueKey && !item.overrides?.onTeamRequestStarted && !item.overrides?.onTaskCompleted && !item.overrides?.resolveAttachments))
-      if (userSends.length) suspendedQueues.set(sessionId, userSends.map(item => ({ ...item, paused: true, inFlight: false, blocksFollowing: false })))
+      const userSends = queue.filter(
+        (item) =>
+          item.overrides?.composerSubmission ||
+          (!item.queueKey &&
+            !item.overrides?.onTeamRequestStarted &&
+            !item.overrides?.onTaskCompleted &&
+            !item.overrides?.resolveAttachments)
+      )
+      if (userSends.length)
+        suspendedQueues.set(
+          sessionId,
+          userSends.map((item) => ({
+            ...item,
+            paused: true,
+            inFlight: false,
+            blocksFollowing: false
+          }))
+        )
     }
     if (suspendedQueues.size) suspendedSessionSendsByScopeRef.current.set(oldScope, suspendedQueues)
     else suspendedSessionSendsByScopeRef.current.delete(oldScope)
@@ -1862,7 +2069,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
     suspendedSessionSendsByScopeRef.current.delete(storageScope)
     pendingSessionSendKeysRef.current.clear()
     updateQueuedSessionSends(restoredQueues)
-    for (const controller of [...controllers, ...compactControllers]) controller.abort('Chat storage scope changed.')
+    for (const controller of [...controllers, ...compactControllers])
+      controller.abort('Chat storage scope changed.')
   }, [storageScope, updateQueuedSessionSends])
   useEffect(() => {
     externalLoadingSessionIdsRef.current = externalLoadingSessionIds
@@ -1955,7 +2163,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
       updateExternalLoadingSessionState(sessionId, false, completed)
       const scopeEpoch = committedRunScopeEpochRef.current
       queueMicrotask(() => {
-        if (committedRunScopeRef.current === storageScope && committedRunScopeEpochRef.current === scopeEpoch) {
+        if (
+          committedRunScopeRef.current === storageScope &&
+          committedRunScopeEpochRef.current === scopeEpoch
+        ) {
           drainQueuedSessionRef.current(sessionId)
         }
       })
@@ -1972,8 +2183,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
       cancelledSessionsRef.current.add(sessionId)
       const helper = helperHandlesRef.current.get(sessionId)
       if (helper?.scope === storageScope) {
-        try { helper.handle.end() } catch { /* Observation is never allowed to block Stop. */ }
-        if (helperHandlesRef.current.get(sessionId) === helper) helperHandlesRef.current.delete(sessionId)
+        try {
+          helper.handle.end()
+        } catch {
+          /* Observation is never allowed to block Stop. */
+        }
+        if (helperHandlesRef.current.get(sessionId) === helper)
+          helperHandlesRef.current.delete(sessionId)
       }
       if (options?.dropQueued) {
         // Explicit session/scope termination must not drain work queued behind
@@ -2110,7 +2326,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return () => {
       if (intervalId) clearInterval(intervalId)
     }
-  }, [active, getDirtySessionIds, loadingIdsStorageKey, reconcileLoadedTeamEnd, replacePersistedSessions, setSessions, storageScope])
+  }, [
+    active,
+    getDirtySessionIds,
+    loadingIdsStorageKey,
+    reconcileLoadedTeamEnd,
+    replacePersistedSessions,
+    setSessions,
+    storageScope
+  ])
 
   // 校验 loading IDs：实时请求可以已经写入流式内容，controller/external run 才是权威状态。
   useEffect(() => {
@@ -2402,13 +2626,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
         attachmentDropTargetEpochRef.current === destinationEpoch &&
         currentSessionIdRef.current === destinationSessionId &&
         storageScopeRef.current === storageScope
-      const resolveAttachments = async (materializeBlobImages = true): Promise<ChatAttachment[]> => {
+      const resolveAttachments = async (
+        materializeBlobImages = true
+      ): Promise<ChatAttachment[]> => {
         const resolved: ChatAttachment[] = []
         for (const item of rawAttachments) {
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
-          const next = materializeBlobImages || !item.url.startsWith('blob:')
-            ? await materializeInternalImageDragAttachment(item)
-            : item
+          const next =
+            materializeBlobImages || !item.url.startsWith('blob:')
+              ? await materializeInternalImageDragAttachment(item)
+              : item
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           if (!next) throw new Error('External attachment could not be materialized')
           resolved.push(next)
@@ -2450,7 +2677,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           return
         }
         const isEditingReceiverCurrent = (): boolean =>
-          isDestinationCurrent() && editingAttachmentReceiverRef.current === editingAttachmentReceiver
+          isDestinationCurrent() &&
+          editingAttachmentReceiverRef.current === editingAttachmentReceiver
 
         // The editor currently exposes only a per-attachment receiver. Stage the
         // whole detail first; this is not an acknowledgement or a cross-event batch.
@@ -2529,17 +2757,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const draftPersistTimerRef = useRef<number | null>(null)
   // Retain unconfirmed composer snapshots only in this mounted instance; they are not a durable backup.
   // Keep them separately from sessions so generic autosave never persists transient Blob URLs.
-  const transientDraftsRef = useRef(new Map<string, { updatedAt: number; draft?: ChatSessionDraft }>())
+  const transientDraftsRef = useRef(
+    new Map<string, { updatedAt: number; draft?: ChatSessionDraft }>()
+  )
   const draftScopeOwnerRef = useRef(storageScope)
   if (draftScopeOwnerRef.current !== storageScope) {
     draftScopeOwnerRef.current = storageScope
     transientDraftsRef.current.clear()
   }
-  const markTransientDraftCleared = useCallback((scope: string, sessionId: string) => {
-    const key = getSessionStorageKey(scope, sessionId)
-    const nextTimestamp = Math.max(Date.now(), (transientDraftsRef.current.get(key)?.updatedAt ?? 0) + 1)
-    transientDraftsRef.current.set(key, { updatedAt: nextTimestamp })
-  }, [getSessionStorageKey])
+  const markTransientDraftCleared = useCallback(
+    (scope: string, sessionId: string) => {
+      const key = getSessionStorageKey(scope, sessionId)
+      const nextTimestamp = Math.max(
+        Date.now(),
+        (transientDraftsRef.current.get(key)?.updatedAt ?? 0) + 1
+      )
+      transientDraftsRef.current.set(key, { updatedAt: nextTimestamp })
+    },
+    [getSessionStorageKey]
+  )
 
   const buildCurrentDraftSnapshot = useCallback(
     (updatedAt: number): ChatSessionDraft | undefined =>
@@ -2641,10 +2877,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       const transientKey = getSessionStorageKey(storageScope, sessionId)
       const transientUpdatedAt = draftUpdatedAt
-      const containsTransientAttachment = normalizedSnapshot?.pendingAttachments.some(attachment => attachment.url.startsWith('blob:')) ?? false
+      const containsTransientAttachment =
+        normalizedSnapshot?.pendingAttachments.some((attachment) =>
+          attachment.url.startsWith('blob:')
+        ) ?? false
       const currentTransientDraft = transientDraftsRef.current.get(transientKey)
       // A clear marker fences older in-flight serialization by identity, not wall-clock order.
-      if (currentTransientDraft?.draft && currentTransientDraft.updatedAt > transientUpdatedAt) return
+      if (currentTransientDraft?.draft && currentTransientDraft.updatedAt > transientUpdatedAt)
+        return
       transientDraftsRef.current.set(transientKey, {
         updatedAt: transientUpdatedAt,
         draft: cloneChatSessionDraft(normalizedSnapshot)
@@ -2663,20 +2903,33 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const serializedAttachments = normalizedSnapshot
         ? await serializeDraftAttachments(normalizedSnapshot.pendingAttachments)
         : []
-      if (normalizedSnapshot && serializedAttachments.length !== normalizedSnapshot.pendingAttachments.length) {
-        if (isMountedRef.current && storageScopeRef.current === storageScope && sessionLoadEpochRef.current === draftScopeEpoch && currentSessionIdRef.current === sessionId && !isStaleCurrentComposerSnapshot(normalizedSnapshot.updatedAt)) {
+      if (
+        normalizedSnapshot &&
+        serializedAttachments.length !== normalizedSnapshot.pendingAttachments.length
+      ) {
+        if (
+          isMountedRef.current &&
+          storageScopeRef.current === storageScope &&
+          sessionLoadEpochRef.current === draftScopeEpoch &&
+          currentSessionIdRef.current === sessionId &&
+          !isStaleCurrentComposerSnapshot(normalizedSnapshot.updatedAt)
+        ) {
           notifyWarning('草稿附件无法保存，请检查会话并重新添加附件')
         }
         return
       }
       const persistedDraft = normalizedSnapshot
-        ? normalizeChatSessionDraft({ ...normalizedSnapshot, pendingAttachments: serializedAttachments })
+        ? normalizeChatSessionDraft({
+            ...normalizedSnapshot,
+            pendingAttachments: serializedAttachments
+          })
         : undefined
       if (
         storageScopeRef.current !== storageScope ||
         (isMountedRef.current && sessionLoadEpochRef.current !== draftScopeEpoch) ||
         transientDraftsRef.current.get(transientKey) !== expectedTransientDraft ||
-        hasSessionDeleteTombstone(sessionId, storageScope) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, sessionId)) ||
+        hasSessionDeleteTombstone(sessionId, storageScope) ||
+        deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, sessionId)) ||
         isStaleCurrentComposerSnapshot(draftUpdatedAt)
       ) {
         return
@@ -2691,7 +2944,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       let completedTransientDraft = expectedTransientDraft
       if (completedTransientDraft) {
-        completedTransientDraft = { updatedAt: transientUpdatedAt, draft: cloneChatSessionDraft(persistedDraft) }
+        completedTransientDraft = {
+          updatedAt: transientUpdatedAt,
+          draft: cloneChatSessionDraft(persistedDraft)
+        }
         transientDraftsRef.current.set(transientKey, completedTransientDraft)
       }
       const clearCompletedTransientDraft = () => {
@@ -2727,7 +2983,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
         index === currentSessionIndex ? updatedSession : session
       )
 
-      chatSaveBaselineRef.current.supersedeReservations(storageScope, updatedSession.id, updatedSession)
+      chatSaveBaselineRef.current.supersedeReservations(
+        storageScope,
+        updatedSession.id,
+        updatedSession
+      )
       sessionsRef.current = nextSessions
       if (!sessionPersistenceGateRef.current) {
         sessionMutationEpochRef.current += 1
@@ -2743,7 +3003,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         try {
           await persistSessionWithBaseline(updatedSession, storageScope)
         } catch (error) {
-          const stillCurrent = sessionsRef.current.find(candidate => candidate.id === sessionId)
+          const stillCurrent = sessionsRef.current.find((candidate) => candidate.id === sessionId)
           if (stillCurrent !== updatedSession) {
             clearCompletedTransientDraft()
             return
@@ -2913,7 +3173,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [reasoningEffortStorageKey])
   useEffect(() => {
     // A member's explicit profile must not become the default for new/lead sessions.
-    if (sessionsRef.current.find(session => session.id === currentSessionIdRef.current)?.teamLeadId) return
+    if (
+      sessionsRef.current.find((session) => session.id === currentSessionIdRef.current)?.teamLeadId
+    )
+      return
     try {
       if (selectedProfileId) {
         localStorage.setItem(selectedProfileStorageKey, selectedProfileId)
@@ -2926,7 +3189,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     } catch (e) {
       console.error('[ChatPage] Failed to save selectedProfileId:', e)
     }
-  }, [active, currentSessionId, hasScopedSelectedProfileStorage, selectedProfileId, selectedProfileStorageKey])
+  }, [
+    active,
+    currentSessionId,
+    hasScopedSelectedProfileStorage,
+    selectedProfileId,
+    selectedProfileStorageKey
+  ])
   useEffect(() => {
     try {
       const normalizedMap = normalizeReasoningPreferenceMap(reasoningEffortByProfileId)
@@ -3114,8 +3383,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [sessions, currentSessionId]
   )
   useAgentArchiveResponder({
-    route, session: currentSession, storageScope,
-    active: active && sessionsLoaded && storageScopeRef.current === storageScope && isLoading && !config?.use_remote_llm && !selectedCustomSkill
+    route,
+    session: currentSession,
+    storageScope,
+    active:
+      active &&
+      sessionsLoaded &&
+      storageScopeRef.current === storageScope &&
+      isLoading &&
+      !config?.use_remote_llm &&
+      !selectedCustomSkill
   })
   const currentSessionQueuedSends = currentSessionId
     ? (queuedSessionSends.get(currentSessionId) ?? [])
@@ -3233,9 +3510,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const transientDraft = currentSessionId
       ? transientDraftsRef.current.get(getSessionStorageKey(storageScope, currentSessionId))
       : undefined
-    applyDraftToComposerState(transientDraft
-      ? transientDraft.draft
-      : resolvePreferredSessionDraft(currentSessionId, currentSession?.draft, storageScope))
+    applyDraftToComposerState(
+      transientDraft
+        ? transientDraft.draft
+        : resolvePreferredSessionDraft(currentSessionId, currentSession?.draft, storageScope)
+    )
   }, [
     applyDraftToComposerState,
     currentSession?.draft,
@@ -3297,7 +3576,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     selectedReasoningProfileKey
   ])
   const isAutoContextCompressionAvailable =
-    !currentSession?.teamLeadId && !isAgentSkillSelected && selectedProfileCapabilities.supportsAutoContextCompression
+    !currentSession?.teamLeadId &&
+    !isAgentSkillSelected &&
+    selectedProfileCapabilities.supportsAutoContextCompression
   const contextCompressionPreview = useMemo(
     () =>
       buildChatContextCompressionPlan({
@@ -3328,7 +3609,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       currentSession?.sessionUrl
     ]
   )
-  const canCompressCurrentContext = Boolean(currentSession && !currentSession.teamLeadId && currentSession.messages.length > 0)
+  const canCompressCurrentContext = Boolean(
+    currentSession && !currentSession.teamLeadId && currentSession.messages.length > 0
+  )
   const emitCompactSkipped = useCallback(
     (
       sessionId: string | undefined,
@@ -3525,7 +3808,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       const compactScopeEpoch = committedRunScopeEpochRef.current
       void (async () => {
-        const isCurrentScope = (): boolean => committedRunScopeRef.current === storageScope &&
+        const isCurrentScope = (): boolean =>
+          committedRunScopeRef.current === storageScope &&
           committedRunScopeEpochRef.current === compactScopeEpoch
         try {
           const result = await requestChatCompletion({
@@ -3673,11 +3957,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
               options.sessionId,
               () => {
                 if (!isCurrentScope() || storageScopeRef.current !== storageScope) return null
-                const current = sessionsRef.current.find(session => session.id === options.sessionId)
-                return current && current.contextCompression === compacted.contextCompression ? current : null
+                const current = sessionsRef.current.find(
+                  (session) => session.id === options.sessionId
+                )
+                return current && current.contextCompression === compacted.contextCompression
+                  ? current
+                  : null
               },
               () => persistedSessionsRef.current.get(options.sessionId) ?? null,
-              () => { if (isCurrentScope()) noteSessionWriteAcknowledged(storageScope) }
+              () => {
+                if (isCurrentScope()) noteSessionWriteAcknowledged(storageScope)
+              }
             )
             if (!isCurrentScope()) return
             if (!saved) throw new Error('Compacted session changed before it could be saved')
@@ -4204,8 +4494,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useEffect(() => {
     if (!sessionsLoaded || sessionPersistenceGateRef.current) return
     const saveScopeEpoch = committedRunScopeEpochRef.current
-    const isSaveScopeCurrent = (): boolean => committedRunScopeRef.current === storageScope &&
-      committedRunScopeEpochRef.current === saveScopeEpoch && storageScopeRef.current === storageScope
+    const isSaveScopeCurrent = (): boolean =>
+      committedRunScopeRef.current === storageScope &&
+      committedRunScopeEpochRef.current === saveScopeEpoch &&
+      storageScopeRef.current === storageScope
     if (!isSaveScopeCurrent()) return
 
     const previousSessions = persistedSessionsRef.current
@@ -4213,20 +4505,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
       (session) => previousSessions.get(session.id) !== session
     )
     for (const rendered of changedSessions) {
-      if (sessionsRef.current.find(session => session.id === rendered.id) !== rendered) return
+      if (sessionsRef.current.find((session) => session.id === rendered.id) !== rendered) return
     }
     for (const session of changedSessions) {
       setDirtySessionSnapshot(storageScope, session)
     }
     debouncedSaveSessions(changedSessions, 500, storageScope, {
       owner: chatSaveBaselineRef.current,
-      saveLatest: (id, scope) => chatSaveBaselineRef.current.persistLatest(
-        scope, id,
-        () => isSaveScopeCurrent() && scope === storageScope ? sessionsRef.current.find(session => session.id === id) ?? null : null,
-        () => persistedSessionsRef.current.get(id) ?? null,
-        () => { if (isSaveScopeCurrent()) noteSessionWriteAcknowledged(scope) },
-        Boolean(sessionsRef.current.find(session => session.id === id)?.teamLeadId)
-      ),
+      saveLatest: (id, scope) =>
+        chatSaveBaselineRef.current.persistLatest(
+          scope,
+          id,
+          () =>
+            isSaveScopeCurrent() && scope === storageScope
+              ? (sessionsRef.current.find((session) => session.id === id) ?? null)
+              : null,
+          () => persistedSessionsRef.current.get(id) ?? null,
+          () => {
+            if (isSaveScopeCurrent()) noteSessionWriteAcknowledged(scope)
+          },
+          Boolean(sessionsRef.current.find((session) => session.id === id)?.teamLeadId)
+        ),
       onDiscard: (session) => chatSaveBaselineRef.current.discardReservation(storageScope, session),
       onSuccess: (savedSessions) => {
         if (!isSaveScopeCurrent()) return
@@ -4280,13 +4579,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
     const syncSessionSelection = (session: ChatSession, sessionId: string) => {
       if (session.teamLeadId) {
-        const lead = sessions.find(candidate => candidate.id === session.teamLeadId)
+        const lead = sessions.find((candidate) => candidate.id === session.teamLeadId)
         try {
           const effective = resolveTeamRequestSettings(session, lead)
           const skillSelection = normalizeRestoredSkillSelection(customSkills, effective.skillId)
           if (selectedProfileId !== effective.profileId) setSelectedProfileId(effective.profileId)
           if (selectedSkillId !== skillSelection.skillId) setSelectedSkillId(skillSelection.skillId)
-          if (selectedSkillCategory !== skillSelection.skillCategory) setSelectedSkillCategory(skillSelection.skillCategory)
+          if (selectedSkillCategory !== skillSelection.skillCategory)
+            setSelectedSkillCategory(skillSelection.skillCategory)
         } catch {
           if (selectedProfileId !== null) setSelectedProfileId(null)
           if (selectedSkillId !== null) setSelectedSkillId(null)
@@ -4337,7 +4637,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (session) {
           syncSessionSelection(session, currentSessionId)
         } else {
-          if (pendingSessionIdRef.current === currentSessionId || isExistingConversationProtected()) return
+          if (pendingSessionIdRef.current === currentSessionId || isExistingConversationProtected())
+            return
           const latestSession = sessions[0]
           if (latestSession) {
             setActiveSessionId(latestSession.id)
@@ -4360,7 +4661,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
     }
 
-    if (!sessions.find(session => session.id === currentSessionId)?.teamLeadId && availableProfiles.length > 0 && !selectedProfileId && !isAgentSkillSelected) {
+    if (
+      !sessions.find((session) => session.id === currentSessionId)?.teamLeadId &&
+      availableProfiles.length > 0 &&
+      !selectedProfileId &&
+      !isAgentSkillSelected
+    ) {
       const nextProfileId = resolveProfileIdForSkill(
         selectedSkillId,
         resolveTaggingSkillBootstrapProfileId({
@@ -4743,14 +5049,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
           // Count explicit image-like file occurrences before path deduplication.
           // Retain the existing path/descriptor guards and fail the entire batch
           // if deduplication would otherwise omit any selected occurrence.
-          const droppedEntries = await collectDroppedDirectoryFilesBounded(dataTransferItems, (entry) => {
-            const key = droppedImageDescriptorKey(entry)
-            if (key !== undefined) imageKeys.add(key)
-            return imageKeys.size <= DEFAULT_CHAT_IMAGE_COUNT_LIMIT
-          }, undefined, ({ file }) => {
-            if (isImageLikeDroppedFile(file)) imageOccurrences += 1
-            return imageOccurrences <= DEFAULT_CHAT_IMAGE_COUNT_LIMIT
-          })
+          const droppedEntries = await collectDroppedDirectoryFilesBounded(
+            dataTransferItems,
+            (entry) => {
+              const key = droppedImageDescriptorKey(entry)
+              if (key !== undefined) imageKeys.add(key)
+              return imageKeys.size <= DEFAULT_CHAT_IMAGE_COUNT_LIMIT
+            },
+            undefined,
+            ({ file }) => {
+              if (isImageLikeDroppedFile(file)) imageOccurrences += 1
+              return imageOccurrences <= DEFAULT_CHAT_IMAGE_COUNT_LIMIT
+            }
+          )
           if (!isDropTargetCurrent()) return
           const droppedDirectoryFiles = resolveDroppedDirectoryImageFiles(droppedEntries)
           if (droppedDirectoryFiles.length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT) {
@@ -4758,9 +5069,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
             return
           }
           if (droppedDirectoryFiles.length !== imageOccurrences) {
-            notifyError(t('chat.drop_folder_image_paths_conflict', {
-              defaultValue: 'Some selected images have conflicting paths. Drag them separately to avoid losing any.'
-            }))
+            notifyError(
+              t('chat.drop_folder_image_paths_conflict', {
+                defaultValue:
+                  'Some selected images have conflicting paths. Drag them separately to avoid losing any.'
+              })
+            )
             return
           }
 
@@ -4775,8 +5089,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
           // Validate this complete directory batch before building anything.
           // A later oversized item must not silently omit part of the selection.
-          const oversizedDirectoryFile = droppedDirectoryFiles.find(({ file }) =>
-            !checkFileSize(file, getChatAttachmentMaxSizeMB(getChatAttachmentTypeForFile(file)))
+          const oversizedDirectoryFile = droppedDirectoryFiles.find(
+            ({ file }) =>
+              !checkFileSize(file, getChatAttachmentMaxSizeMB(getChatAttachmentTypeForFile(file)))
           )?.file
           if (oversizedDirectoryFile) {
             const maxSizeMB = getChatAttachmentMaxSizeMB(
@@ -4811,7 +5126,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } catch (error) {
           if (!isDropTargetCurrent()) return
           if (error instanceof DroppedDirectoryLimitError) {
-            notifyError(error.reason === 'images' ? '本次图片数量超过限制，请分批发送' : '目录内容过多，请分批拖入')
+            notifyError(
+              error.reason === 'images'
+                ? '本次图片数量超过限制，请分批发送'
+                : '目录内容过多，请分批拖入'
+            )
             return
           }
           console.error('[ChatPage] Failed to process dropped directory:', error)
@@ -4827,8 +5146,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const rawDroppedFiles = Array.from(e.dataTransfer.files || [])
       // Count the known native batch even when an edit receiver owns the drop.
       // Internal, directory and URL-only protocols have separate entry paths.
-      if (!internalPayload && rawDroppedFiles.length > 0 &&
-          rawDroppedFiles.filter((file) => getChatAttachmentTypeForFile(file) === 'image').length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT) {
+      if (
+        !internalPayload &&
+        rawDroppedFiles.length > 0 &&
+        rawDroppedFiles.filter((file) => getChatAttachmentTypeForFile(file) === 'image').length >
+          DEFAULT_CHAT_IMAGE_COUNT_LIMIT
+      ) {
         notifyError('本次图片数量超过限制，请分批发送')
         return
       }
@@ -4843,11 +5166,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (oversizedNativeFile) {
         const attachmentType = getChatAttachmentTypeForFile(oversizedNativeFile)
         const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
-        const messageKey = attachmentType === 'image' ? 'chat.image_too_large' : 'chat.file_too_large'
-        notifyError(t(messageKey, {
-          name: oversizedNativeFile.name,
-          defaultValue: `${oversizedNativeFile.name} is too large. Max ${maxSizeMB}MB.`
-        }))
+        const messageKey =
+          attachmentType === 'image' ? 'chat.image_too_large' : 'chat.file_too_large'
+        notifyError(
+          t(messageKey, {
+            name: oversizedNativeFile.name,
+            defaultValue: `${oversizedNativeFile.name} is too large. Max ${maxSizeMB}MB.`
+          })
+        )
         return
       }
       let files = rawDroppedFiles
@@ -5568,7 +5894,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
     setActiveSessionId(sessionId)
     const member = sessionsRef.current.find((s) => s.id === sessionId)
-    const lead = member?.teamLeadId ? sessionsRef.current.find((s) => s.id === member.teamLeadId) : undefined
+    const lead = member?.teamLeadId
+      ? sessionsRef.current.find((s) => s.id === member.teamLeadId)
+      : undefined
     if (member?.teamLeadId) {
       try {
         const effective = resolveTeamRequestSettings(member, lead)
@@ -5594,15 +5922,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
       ((session.profileId || null) !== profileId ||
         (session.skillId || null) !== skillSelection.skillId)
     ) {
-      setSessions((previous) => previous.map((s) =>
-        s.id === sessionId
-          ? {
-              ...s,
-              profileId: profileId ?? undefined,
-              skillId: skillSelection.skillId ?? undefined
-            }
-          : s
-      ))
+      setSessions((previous) =>
+        previous.map((s) =>
+          s.id === sessionId
+            ? {
+                ...s,
+                profileId: profileId ?? undefined,
+                skillId: skillSelection.skillId ?? undefined
+              }
+            : s
+        )
+      )
     }
   }
   selectSessionRef.current = selectSession
@@ -5624,8 +5954,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id))) return true
       try {
         // Existing Open must not inherit the tolerant helper's swallowed storage errors.
-        return localStorage.getItem(`magicpot-chat-delete-tombstone:${encodeURIComponent(storageScope)}:${encodeURIComponent(id)}`) !== null
-      } catch { return true }
+        return (
+          localStorage.getItem(
+            `magicpot-chat-delete-tombstone:${encodeURIComponent(storageScope)}:${encodeURIComponent(id)}`
+          ) !== null
+        )
+      } catch {
+        return true
+      }
     },
     // Captured by the hook only at commit, never via a render-written mutable ref.
     select: selectSession
@@ -5637,23 +5973,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setSelectedProfileId(nextProfileId)
       const targetId = currentSessionIdRef.current
       if (!targetId) return
-      setSessions(previous => previous.map(session => {
-        if (session.id !== targetId) return session
-        const previousBaseProfileId = normalizeChatProfileIdForStorage(session.profileId)
-        const nextBaseProfileId = normalizeChatProfileIdForStorage(nextProfileId)
-        const profileChanged = previousBaseProfileId !== nextBaseProfileId
-        return {
-          ...session,
-          profileId: nextProfileId ?? undefined,
-          ...(profileChanged
-            ? {
-                sessionUrl: undefined,
-                sessionProfileId: undefined,
-                sessionRouteFingerprint: undefined
-              }
-            : {})
-        }
-      }))
+      setSessions((previous) =>
+        previous.map((session) => {
+          if (session.id !== targetId) return session
+          const previousBaseProfileId = normalizeChatProfileIdForStorage(session.profileId)
+          const nextBaseProfileId = normalizeChatProfileIdForStorage(nextProfileId)
+          const profileChanged = previousBaseProfileId !== nextBaseProfileId
+          return {
+            ...session,
+            profileId: nextProfileId ?? undefined,
+            ...(profileChanged
+              ? {
+                  sessionUrl: undefined,
+                  sessionProfileId: undefined,
+                  sessionRouteFingerprint: undefined
+                }
+              : {})
+          }
+        })
+      )
     },
     [resolveAvailableProfileId, setSessions]
   )
@@ -5677,118 +6015,226 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // Menu eligibility mirrors only the static selection checks; persistence below
   // still revalidates the current team, lifecycle, scope and CAS at commit time.
-  const isSelectableMemberProfile = useCallback((profileId: string): boolean =>
-    availableProfiles.some(profile => profile.id === profileId) &&
-    getBaseProfileId(profileId) !== HUNYUAN_3D_PROFILE_ID && resolveAvailableProfileId(profileId) === profileId,
-  [availableProfiles, resolveAvailableProfileId])
+  const isSelectableMemberProfile = useCallback(
+    (profileId: string): boolean =>
+      availableProfiles.some((profile) => profile.id === profileId) &&
+      getBaseProfileId(profileId) !== HUNYUAN_3D_PROFILE_ID &&
+      resolveAvailableProfileId(profileId) === profileId,
+    [availableProfiles, resolveAvailableProfileId]
+  )
 
-  const selectMemberProfile = useCallback(async (expectedMemberId: string, profileId: string): Promise<void> => {
-    const scope = storageScope
-    const memberId = currentSessionIdRef.current
-    if (memberId !== expectedMemberId) return
-    const member = sessionsRef.current.find(session => session.id === memberId)
-    const lead = member?.teamLeadId ? sessionsRef.current.find(session => session.id === member.teamLeadId) : undefined
-    if (!member || !lead || !sessionsLoaded || sessionLoadError || config.use_remote_llm || route?.channel !== 'canvas' || route.scopeType !== 'thread' || !route.threadId || !isSelectableMemberProfile(profileId)) return
-    const key = `${scope}\u0000${member.id}`
-    const leadKey = `${scope}\u0000${lead.id}`
-    const selectionEpoch = sessionSelectionEpochRef.current
-    const scopeEpoch = sessionLoadEpochRef.current
-    const visibilityEpoch = teamVisibilityRef.current.epoch
-    const endEpoch = teamEndEpochsRef.current.get(leadKey) ?? 0
-    const memberClean = () => persistedSessionsRef.current.get(member.id) === member &&
-      !dirtySessionSnapshotsRef.current.has(getSessionStorageKey(scope, member.id)) && !chatSaveBaselineRef.current.isPending(scope, member.id)
-    const leadClean = () => persistedSessionsRef.current.get(lead.id) === lead &&
-      !dirtySessionSnapshotsRef.current.has(getSessionStorageKey(scope, lead.id)) && !chatSaveBaselineRef.current.isPending(scope, lead.id)
-    const stillCurrent = () => isMountedRef.current && teamVisibilityRef.current.active && teamVisibilityRef.current.epoch === visibilityEpoch &&
-      storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch && sessionSelectionEpochRef.current === selectionEpoch &&
-      currentSessionIdRef.current === member.id && sessionsRef.current.find(session => session.id === member.id) === member &&
-      sessionsRef.current.find(session => session.id === lead.id) === lead && memberClean() && leadClean() &&
-      !loadingSessionIdsRef.current.has(member.id) && !sendingSessionIdsRef.current.has(member.id) &&
-      !externalLoadingSessionIdsRef.current.has(member.id) && !(queuedSessionSendsRef.current.get(member.id)?.length) &&
-      !teamEndPendingRef.current.has(leadKey) && !teamEndedMainRef.current.has(leadKey) &&
-      (teamEndEpochsRef.current.get(leadKey) ?? 0) === endEpoch &&
-      !hasSessionDeleteTombstone(lead.id, scope) && !hasSessionDeleteTombstone(member.id, scope)
-    if (memberModelChoicePendingRef.current.has(key) || !stillCurrent()) {
-      notifyWarning(t('chat.member_model_save_busy'))
-      return
-    }
-    memberModelChoicePendingRef.current.add(key)
-    setMemberModelChoiceRevision(revision => revision + 1)
-    try {
-      const result = await setTeamMemberModelChoiceInDB({scope, expectedLead: lead, expectedMember: member, profileId, shouldUpdate: stillCurrent})
-      noteSessionWriteAcknowledged(scope)
-      if (!stillCurrent()) {
-        if (isMountedRef.current && storageScopeRef.current === scope) void refreshSessionsFromStorage()
+  const selectMemberProfile = useCallback(
+    async (expectedMemberId: string, profileId: string): Promise<void> => {
+      const scope = storageScope
+      const memberId = currentSessionIdRef.current
+      if (memberId !== expectedMemberId) return
+      const member = sessionsRef.current.find((session) => session.id === memberId)
+      const lead = member?.teamLeadId
+        ? sessionsRef.current.find((session) => session.id === member.teamLeadId)
+        : undefined
+      if (
+        !member ||
+        !lead ||
+        !sessionsLoaded ||
+        sessionLoadError ||
+        config.use_remote_llm ||
+        route?.channel !== 'canvas' ||
+        route.scopeType !== 'thread' ||
+        !route.threadId ||
+        !isSelectableMemberProfile(profileId)
+      )
+        return
+      const key = `${scope}\u0000${member.id}`
+      const leadKey = `${scope}\u0000${lead.id}`
+      const selectionEpoch = sessionSelectionEpochRef.current
+      const scopeEpoch = sessionLoadEpochRef.current
+      const visibilityEpoch = teamVisibilityRef.current.epoch
+      const endEpoch = teamEndEpochsRef.current.get(leadKey) ?? 0
+      const memberClean = () =>
+        persistedSessionsRef.current.get(member.id) === member &&
+        !dirtySessionSnapshotsRef.current.has(getSessionStorageKey(scope, member.id)) &&
+        !chatSaveBaselineRef.current.isPending(scope, member.id)
+      const leadClean = () =>
+        persistedSessionsRef.current.get(lead.id) === lead &&
+        !dirtySessionSnapshotsRef.current.has(getSessionStorageKey(scope, lead.id)) &&
+        !chatSaveBaselineRef.current.isPending(scope, lead.id)
+      const stillCurrent = () =>
+        isMountedRef.current &&
+        teamVisibilityRef.current.active &&
+        teamVisibilityRef.current.epoch === visibilityEpoch &&
+        storageScopeRef.current === scope &&
+        sessionLoadEpochRef.current === scopeEpoch &&
+        sessionSelectionEpochRef.current === selectionEpoch &&
+        currentSessionIdRef.current === member.id &&
+        sessionsRef.current.find((session) => session.id === member.id) === member &&
+        sessionsRef.current.find((session) => session.id === lead.id) === lead &&
+        memberClean() &&
+        leadClean() &&
+        !loadingSessionIdsRef.current.has(member.id) &&
+        !sendingSessionIdsRef.current.has(member.id) &&
+        !externalLoadingSessionIdsRef.current.has(member.id) &&
+        !queuedSessionSendsRef.current.get(member.id)?.length &&
+        !teamEndPendingRef.current.has(leadKey) &&
+        !teamEndedMainRef.current.has(leadKey) &&
+        (teamEndEpochsRef.current.get(leadKey) ?? 0) === endEpoch &&
+        !hasSessionDeleteTombstone(lead.id, scope) &&
+        !hasSessionDeleteTombstone(member.id, scope)
+      if (memberModelChoicePendingRef.current.has(key) || !stillCurrent()) {
+        notifyWarning(t('chat.member_model_save_busy'))
         return
       }
-      chatSaveBaselineRef.current.fenceAndAdvance(scope, member.id, result.member)
-      persistedSessionsRef.current.set(member.id, result.member)
-      setSessions(previous => previous.map(session => session === member ? result.member : session))
-      setSelectedProfileId(profileId)
-    } catch {
-      if (isMountedRef.current && storageScopeRef.current === scope) notifyWarning(t('chat.member_model_save_failed'))
-    } finally {
-      memberModelChoicePendingRef.current.delete(key)
-      if (isMountedRef.current) setMemberModelChoiceRevision(revision => revision + 1)
-    }
-  }, [config.use_remote_llm, getSessionStorageKey, isSelectableMemberProfile, noteSessionWriteAcknowledged, notifyWarning, refreshSessionsFromStorage, route, sessionLoadError, sessionsLoaded, setSessions, storageScope, t])
+      memberModelChoicePendingRef.current.add(key)
+      setMemberModelChoiceRevision((revision) => revision + 1)
+      try {
+        const result = await setTeamMemberModelChoiceInDB({
+          scope,
+          expectedLead: lead,
+          expectedMember: member,
+          profileId,
+          shouldUpdate: stillCurrent
+        })
+        noteSessionWriteAcknowledged(scope)
+        if (!stillCurrent()) {
+          if (isMountedRef.current && storageScopeRef.current === scope)
+            void refreshSessionsFromStorage()
+          return
+        }
+        chatSaveBaselineRef.current.fenceAndAdvance(scope, member.id, result.member)
+        persistedSessionsRef.current.set(member.id, result.member)
+        setSessions((previous) =>
+          previous.map((session) => (session === member ? result.member : session))
+        )
+        setSelectedProfileId(profileId)
+      } catch {
+        if (isMountedRef.current && storageScopeRef.current === scope)
+          notifyWarning(t('chat.member_model_save_failed'))
+      } finally {
+        memberModelChoicePendingRef.current.delete(key)
+        if (isMountedRef.current) setMemberModelChoiceRevision((revision) => revision + 1)
+      }
+    },
+    [
+      config.use_remote_llm,
+      getSessionStorageKey,
+      isSelectableMemberProfile,
+      noteSessionWriteAcknowledged,
+      notifyWarning,
+      refreshSessionsFromStorage,
+      route,
+      sessionLoadError,
+      sessionsLoaded,
+      setSessions,
+      storageScope,
+      t
+    ]
+  )
 
   const selectedMemberModel = useMemo(() => {
     if (!currentSession?.teamLeadId) return undefined
-    const lead = sessions.find(session => session.id === currentSession.teamLeadId)
+    const lead = sessions.find((session) => session.id === currentSession.teamLeadId)
     try {
       const { profileId } = resolveTeamRequestSettings(currentSession, lead)
       const choice = readMemberModelChoice(currentSession)
-      const profile = availableProfiles.find(item => item.id === profileId)
-      if (!profile || getBaseProfileId(profile.id) === HUNYUAN_3D_PROFILE_ID) return { state: 'unavailable' as const }
+      const profile = availableProfiles.find((item) => item.id === profileId)
+      if (!profile || getBaseProfileId(profile.id) === HUNYUAN_3D_PROFILE_ID)
+        return { state: 'unavailable' as const }
       return {
-        state: choice ? 'selected' as const : 'inherited' as const,
+        state: choice ? ('selected' as const) : ('inherited' as const),
         label: profile.model_name,
-        pending: memberModelChoicePendingRef.current.has(`${storageScope}\u0000${currentSession.id}`),
-        disabled: config.use_remote_llm || !sessionsLoaded || Boolean(sessionLoadError) || isLoading,
-        selectableProfileIds: availableProfiles.filter(item => isSelectableMemberProfile(item.id)).map(item => item.id),
-        onSelectProfile: (id: string) => { void selectMemberProfile(currentSession.id, id) }
+        pending: memberModelChoicePendingRef.current.has(
+          `${storageScope}\u0000${currentSession.id}`
+        ),
+        disabled:
+          config.use_remote_llm || !sessionsLoaded || Boolean(sessionLoadError) || isLoading,
+        selectableProfileIds: availableProfiles
+          .filter((item) => isSelectableMemberProfile(item.id))
+          .map((item) => item.id),
+        onSelectProfile: (id: string) => {
+          void selectMemberProfile(currentSession.id, id)
+        }
       }
     } catch {
       return { state: 'unavailable' as const }
     }
-  }, [availableProfiles, config.use_remote_llm, currentSession, isLoading, isSelectableMemberProfile, memberModelChoiceRevision, selectMemberProfile, sessionLoadError, sessions, sessionsLoaded, storageScope])
+  }, [
+    availableProfiles,
+    config.use_remote_llm,
+    currentSession,
+    isLoading,
+    isSelectableMemberProfile,
+    memberModelChoiceRevision,
+    selectMemberProfile,
+    sessionLoadError,
+    sessions,
+    sessionsLoaded,
+    storageScope
+  ])
 
   const selectedMemberProfile = useMemo(() => {
     if (!currentSession?.teamLeadId || selectedMemberModel?.state === 'unavailable') return null
     try {
-      const lead = sessions.find(session => session.id === currentSession.teamLeadId)
+      const lead = sessions.find((session) => session.id === currentSession.teamLeadId)
       const { profileId } = resolveTeamRequestSettings(currentSession, lead)
-      return availableProfiles.find(profile => profile.id === profileId) ?? null
-    } catch { return null }
+      return availableProfiles.find((profile) => profile.id === profileId) ?? null
+    } catch {
+      return null
+    }
   }, [availableProfiles, currentSession, selectedMemberModel, sessions])
-  const memberProfileCapabilities = useMemo(() => resolveChatProfileCapabilities(selectedMemberProfile), [selectedMemberProfile])
-  const memberReasoningKey = selectedMemberProfile ? resolveChatReasoningPreferenceKey(selectedMemberProfile.id, selectedMemberProfile) : null
-  const memberReasoningEffort = memberReasoningKey
-    ? normalizeReasoningEffort(reasoningEffortByProfileId[memberReasoningKey], memberProfileCapabilities.reasoningEfforts) || memberProfileCapabilities.defaultReasoningEffort || null
+  const memberProfileCapabilities = useMemo(
+    () => resolveChatProfileCapabilities(selectedMemberProfile),
+    [selectedMemberProfile]
+  )
+  const memberReasoningKey = selectedMemberProfile
+    ? resolveChatReasoningPreferenceKey(selectedMemberProfile.id, selectedMemberProfile)
     : null
-  const selectMemberReasoningEffort = useCallback((effort: LLMReasoningEffort | undefined) => {
-    const expectedMemberId = currentSession?.id
-    const member = sessionsRef.current.find(session => session.id === expectedMemberId)
-    const lead = member?.teamLeadId ? sessionsRef.current.find(session => session.id === member.teamLeadId) : undefined
-    if (!active || !member || !lead || currentSessionIdRef.current !== expectedMemberId || !teamVisibilityRef.current.active || storageScopeRef.current !== storageScope ||
-      memberModelChoicePendingRef.current.has(`${storageScope}\u0000${member.id}`) ||
-      teamEndPendingRef.current.has(`${storageScope}\u0000${lead.id}`) || teamEndedMainRef.current.has(`${storageScope}\u0000${lead.id}`) ||
-      hasSessionDeleteTombstone(member.id, storageScope) || hasSessionDeleteTombstone(lead.id, storageScope)) return
-    try {
-      const { profileId } = resolveTeamRequestSettings(member, lead)
-      const profile = availableProfiles.find(item => item.id === profileId)
-      if (!profile) return
-      const capabilities = resolveChatProfileCapabilities(profile)
-      const key = resolveChatReasoningPreferenceKey(profileId, profile)
-      if (!key || (effort !== undefined && !capabilities.reasoningEfforts.includes(effort))) return
-      setReasoningEffortByProfileId(previous => {
-        const next = normalizeReasoningPreferenceMap({...previous, [key]: effort})
-        window.setTimeout(() => dispatchReasoningEffortSync(next), 0)
-        return next
-      })
-    } catch { /* A changed/invalid team cannot change an unrelated profile preference. */ }
-  }, [active, availableProfiles, currentSession?.id, storageScope])
+  const memberReasoningEffort = memberReasoningKey
+    ? normalizeReasoningEffort(
+        reasoningEffortByProfileId[memberReasoningKey],
+        memberProfileCapabilities.reasoningEfforts
+      ) ||
+      memberProfileCapabilities.defaultReasoningEffort ||
+      null
+    : null
+  const selectMemberReasoningEffort = useCallback(
+    (effort: LLMReasoningEffort | undefined) => {
+      const expectedMemberId = currentSession?.id
+      const member = sessionsRef.current.find((session) => session.id === expectedMemberId)
+      const lead = member?.teamLeadId
+        ? sessionsRef.current.find((session) => session.id === member.teamLeadId)
+        : undefined
+      if (
+        !active ||
+        !member ||
+        !lead ||
+        currentSessionIdRef.current !== expectedMemberId ||
+        !teamVisibilityRef.current.active ||
+        storageScopeRef.current !== storageScope ||
+        memberModelChoicePendingRef.current.has(`${storageScope}\u0000${member.id}`) ||
+        teamEndPendingRef.current.has(`${storageScope}\u0000${lead.id}`) ||
+        teamEndedMainRef.current.has(`${storageScope}\u0000${lead.id}`) ||
+        hasSessionDeleteTombstone(member.id, storageScope) ||
+        hasSessionDeleteTombstone(lead.id, storageScope)
+      )
+        return
+      try {
+        const { profileId } = resolveTeamRequestSettings(member, lead)
+        const profile = availableProfiles.find((item) => item.id === profileId)
+        if (!profile) return
+        const capabilities = resolveChatProfileCapabilities(profile)
+        const key = resolveChatReasoningPreferenceKey(profileId, profile)
+        if (!key || (effort !== undefined && !capabilities.reasoningEfforts.includes(effort)))
+          return
+        setReasoningEffortByProfileId((previous) => {
+          const next = normalizeReasoningPreferenceMap({ ...previous, [key]: effort })
+          window.setTimeout(() => dispatchReasoningEffortSync(next), 0)
+          return next
+        })
+      } catch {
+        /* A changed/invalid team cannot change an unrelated profile preference. */
+      }
+    },
+    [active, availableProfiles, currentSession?.id, storageScope]
+  )
 
   const chatComposerControlSlot = useMemo(
     () => (
@@ -5799,7 +6245,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         memberModel={selectedMemberModel}
         memberReasoningEffort={memberReasoningEffort}
         memberAvailableReasoningEfforts={memberProfileCapabilities.reasoningEfforts}
-        onSelectMemberReasoningEffort={currentSession?.teamLeadId ? selectMemberReasoningEffort : undefined}
+        onSelectMemberReasoningEffort={
+          currentSession?.teamLeadId ? selectMemberReasoningEffort : undefined
+        }
         isAgentSkillSelected={isAgentSkillSelected}
         selectedProfileId={selectedProfileId}
         availableProfiles={availableProfiles}
@@ -5882,7 +6330,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           persistenceMap.set(attachment.url, persistence)
         }
         const savedPath = await persistence
-        persistedAttachments.push(savedPath ? { ...attachment, url: `file://${savedPath}` } : attachment)
+        persistedAttachments.push(
+          savedPath ? { ...attachment, url: `file://${savedPath}` } : attachment
+        )
       }
 
       return persistedAttachments
@@ -5919,17 +6369,37 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [persistUserImageAttachments]
   )
 
-  const goalSharingEligibilityRef = useRef({ active, remote: config?.use_remote_llm, profileId: selectedProfileId, skillId: selectedSkillId, conversationId: currentSessionId, storageScope })
-  goalSharingEligibilityRef.current = { active, remote: config?.use_remote_llm, profileId: selectedProfileId, skillId: selectedSkillId, conversationId: currentSessionId, storageScope }
+  const goalSharingEligibilityRef = useRef({
+    active,
+    remote: config?.use_remote_llm,
+    profileId: selectedProfileId,
+    skillId: selectedSkillId,
+    conversationId: currentSessionId,
+    storageScope
+  })
+  goalSharingEligibilityRef.current = {
+    active,
+    remote: config?.use_remote_llm,
+    profileId: selectedProfileId,
+    skillId: selectedSkillId,
+    conversationId: currentSessionId,
+    storageScope
+  }
   const executeSendMessage = useCallback(
     async (overrides?: SendMessageOverrides) => {
       const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
       const cs = sessionsRef.current.find((s) => s.id === targetSessionId)
-      const savedLifecycle = targetSessionId ? persistedSessionsRef.current.get(targetSessionId) : undefined
-      const lead = cs?.teamLeadId ? sessionsRef.current.find(session => session.id === cs.teamLeadId) : undefined
+      const savedLifecycle = targetSessionId
+        ? persistedSessionsRef.current.get(targetSessionId)
+        : undefined
+      const lead = cs?.teamLeadId
+        ? sessionsRef.current.find((session) => session.id === cs.teamLeadId)
+        : undefined
       const savedLead = lead ? persistedSessionsRef.current.get(lead.id) : undefined
-      if ((cs && savedLifecycle && !sameTeamLifecycle(cs, savedLifecycle)) ||
-          (lead && savedLead && !sameTeamLifecycle(lead, savedLead))) {
+      if (
+        (cs && savedLifecycle && !sameTeamLifecycle(cs, savedLifecycle)) ||
+        (lead && savedLead && !sameTeamLifecycle(lead, savedLead))
+      ) {
         notifyWarning('团队状态冲突，请先处理未保存的会话')
         return
       }
@@ -5953,8 +6423,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // or lazy materialization. The composer may already contain derived canvas
       // images, which are conservatively counted; a visibility flag is not proof
       // of origin. History and later skill references need a separate provider cap.
-      try { assertExplicitUserImageCount(provisionalAttachments) }
-      catch (error) { notifyError(error instanceof Error ? error.message : String(error)); return }
+      try {
+        assertExplicitUserImageCount(provisionalAttachments)
+      } catch (error) {
+        notifyError(error instanceof Error ? error.message : String(error))
+        return
+      }
       if (memberModelChoicePendingRef.current.has(`${storageScope}\u0000${targetSessionId}`)) {
         notifyWarning(t('chat.member_model_save_busy'))
         return
@@ -5963,82 +6437,187 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyWarning('团队成员暂不支持远程模型')
         return
       }
-      if (cs.teamLeadId && (teamEndPendingRef.current.has(`${storageScope}\u0000${cs.teamLeadId}`) || teamEndedMainRef.current.has(`${storageScope}\u0000${cs.teamLeadId}`))) {
+      if (
+        cs.teamLeadId &&
+        (teamEndPendingRef.current.has(`${storageScope}\u0000${cs.teamLeadId}`) ||
+          teamEndedMainRef.current.has(`${storageScope}\u0000${cs.teamLeadId}`))
+      ) {
         notifyWarning('团队正在结束，请稍候')
         return
       }
       const goalProgressToken = overrides?.goalProgressToken
-      if (goalProgressToken && (config.use_remote_llm || !active || currentSessionIdRef.current !== targetSessionId || provisionalAttachments.length || msgHiddenContext || overrides?.baseMessages || overrides?.resolveAttachments || cs.sessionUrl || cs.skillId || selectedSkillId || cs.messages.some(message => message.attachments?.length || message.hiddenContext))) { notifyWarning(t('chat.agent_goal.share_unavailable')); return }
+      if (
+        goalProgressToken &&
+        (config.use_remote_llm ||
+          !active ||
+          currentSessionIdRef.current !== targetSessionId ||
+          provisionalAttachments.length ||
+          msgHiddenContext ||
+          overrides?.baseMessages ||
+          overrides?.resolveAttachments ||
+          cs.sessionUrl ||
+          cs.skillId ||
+          selectedSkillId ||
+          cs.messages.some((message) => message.attachments?.length || message.hiddenContext))
+      ) {
+        notifyWarning(t('chat.agent_goal.share_unavailable'))
+        return
+      }
 
-      const liveTeamLead = cs?.teamLeadId ? sessionsRef.current.find(session=>session.id===cs.teamLeadId) : undefined
-      if (cs.teamLeadId && !liveTeamLead) { notifyWarning('Team lead unavailable.'); return }
-      const teamMemberRequest = cs.teamLeadId && liveTeamLead && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId
-        ? { scope: storageScope, thread: route.threadId, lead: liveTeamLead.id, member: targetSessionId }
+      const liveTeamLead = cs?.teamLeadId
+        ? sessionsRef.current.find((session) => session.id === cs.teamLeadId)
         : undefined
+      if (cs.teamLeadId && !liveTeamLead) {
+        notifyWarning('Team lead unavailable.')
+        return
+      }
+      const teamMemberRequest =
+        cs.teamLeadId &&
+        liveTeamLead &&
+        route?.channel === 'canvas' &&
+        route.scopeType === 'thread' &&
+        route.threadId
+          ? {
+              scope: storageScope,
+              thread: route.threadId,
+              lead: liveTeamLead.id,
+              member: targetSessionId
+            }
+          : undefined
       if (cs.teamLeadId && !teamMemberRequest) {
         notifyWarning('团队成员只支持当前画布线程')
         return
       }
       const requestTerminationEpoch = sessionTerminationEpochRef.current.get(targetSessionId) ?? 0
       if (cs.teamLeadId) {
-        if (!teamAuthorityEpochsRef.current.has(targetSessionId)) teamAuthorityEpochsRef.current.set(targetSessionId, 0)
-        if (!teamAuthorityEpochsRef.current.has(cs.teamLeadId)) teamAuthorityEpochsRef.current.set(cs.teamLeadId, 0)
+        if (!teamAuthorityEpochsRef.current.has(targetSessionId))
+          teamAuthorityEpochsRef.current.set(targetSessionId, 0)
+        if (!teamAuthorityEpochsRef.current.has(cs.teamLeadId))
+          teamAuthorityEpochsRef.current.set(cs.teamLeadId, 0)
       }
       const memberAuthorityEpoch = teamAuthorityEpochsRef.current.get(targetSessionId) ?? 0
-      const leadAuthorityEpoch = liveTeamLead ? teamAuthorityEpochsRef.current.get(liveTeamLead.id) ?? 0 : 0
+      const leadAuthorityEpoch = liveTeamLead
+        ? (teamAuthorityEpochsRef.current.get(liveTeamLead.id) ?? 0)
+        : 0
       const teamScopeEpoch = sessionLoadEpochRef.current
-      const leadTerminationEpoch = liveTeamLead ? sessionTerminationEpochRef.current.get(liveTeamLead.id) ?? 0 : 0
+      const leadTerminationEpoch = liveTeamLead
+        ? (sessionTerminationEpochRef.current.get(liveTeamLead.id) ?? 0)
+        : 0
       const requestScopeEpoch = committedRunScopeEpochRef.current
       const isRequestScopeCurrent = (): boolean =>
-        committedRunScopeRef.current === storageScope && committedRunScopeEpochRef.current === requestScopeEpoch
+        committedRunScopeRef.current === storageScope &&
+        committedRunScopeEpochRef.current === requestScopeEpoch
       const isTeamAuthorityCurrent = (): boolean => {
-        const currentTarget = sessionsRef.current.find(session => session.id === targetSessionId)
+        const currentTarget = sessionsRef.current.find((session) => session.id === targetSessionId)
         const persistedTarget = persistedSessionsRef.current.get(targetSessionId)
-        if (!currentTarget || (persistedTarget && !sameTeamLifecycle(currentTarget, persistedTarget))) return false
+        if (
+          !currentTarget ||
+          (persistedTarget && !sameTeamLifecycle(currentTarget, persistedTarget))
+        )
+          return false
         if (!inheritedTeamSettings || !liveTeamLead) return true
-        if (!isMountedRef.current || storageScopeRef.current !== storageScope || sessionLoadEpochRef.current !== teamScopeEpoch ||
-          teamAuthorityEpochsRef.current.get(targetSessionId) !== memberAuthorityEpoch || teamAuthorityEpochsRef.current.get(liveTeamLead.id) !== leadAuthorityEpoch ||
-          (sessionTerminationEpochRef.current.get(targetSessionId) ?? 0) !== requestTerminationEpoch) return false
-        const member = sessionsRef.current.find(session => session.id === targetSessionId)
-        const lead = sessionsRef.current.find(session => session.id === liveTeamLead.id)
-        if (!member || !lead || (persistedSessionsRef.current.get(lead.id) && !sameTeamLifecycle(lead, persistedSessionsRef.current.get(lead.id)!)) ||
-          (sessionTerminationEpochRef.current.get(lead.id) ?? 0) !== leadTerminationEpoch || member.teamLeadId !== lead.id || member.archived || lead.archived ||
-          hasSessionDeleteTombstone(targetSessionId, storageScope) || hasSessionDeleteTombstone(lead.id, storageScope)) return false
+        if (
+          !isMountedRef.current ||
+          storageScopeRef.current !== storageScope ||
+          sessionLoadEpochRef.current !== teamScopeEpoch ||
+          teamAuthorityEpochsRef.current.get(targetSessionId) !== memberAuthorityEpoch ||
+          teamAuthorityEpochsRef.current.get(liveTeamLead.id) !== leadAuthorityEpoch ||
+          (sessionTerminationEpochRef.current.get(targetSessionId) ?? 0) !== requestTerminationEpoch
+        )
+          return false
+        const member = sessionsRef.current.find((session) => session.id === targetSessionId)
+        const lead = sessionsRef.current.find((session) => session.id === liveTeamLead.id)
+        if (
+          !member ||
+          !lead ||
+          (persistedSessionsRef.current.get(lead.id) &&
+            !sameTeamLifecycle(lead, persistedSessionsRef.current.get(lead.id)!)) ||
+          (sessionTerminationEpochRef.current.get(lead.id) ?? 0) !== leadTerminationEpoch ||
+          member.teamLeadId !== lead.id ||
+          member.archived ||
+          lead.archived ||
+          hasSessionDeleteTombstone(targetSessionId, storageScope) ||
+          hasSessionDeleteTombstone(lead.id, storageScope)
+        )
+          return false
         try {
           const currentSettings = resolveTeamRequestSettings(member, lead)
-          return currentSettings.skillId === inheritedTeamSettings.skillId && currentSettings.profileId === inheritedTeamSettings.profileId
-        } catch { return false }
+          return (
+            currentSettings.skillId === inheritedTeamSettings.skillId &&
+            currentSettings.profileId === inheritedTeamSettings.profileId
+          )
+        } catch {
+          return false
+        }
       }
       const isPreflightCurrent = (): boolean => {
         if (!isRequestScopeCurrent()) return false
-        if (overrides?.isComposerSubmissionCurrent && !overrides.isComposerSubmissionCurrent()) return false
+        if (overrides?.isComposerSubmissionCurrent && !overrides.isComposerSubmissionCurrent())
+          return false
         if (overrides?.isQueuedComposerCurrent && !overrides.isQueuedComposerCurrent()) return false
-        if ((sessionTerminationEpochRef.current.get(targetSessionId) ?? 0) !== requestTerminationEpoch) return false
+        if (
+          (sessionTerminationEpochRef.current.get(targetSessionId) ?? 0) !== requestTerminationEpoch
+        )
+          return false
         if (!isTeamAuthorityCurrent()) return false
         if (!goalProgressToken) return true
         const live = goalSharingEligibilityRef.current
-        return live.active && !live.remote && live.conversationId === targetSessionId && currentSessionIdRef.current === targetSessionId && live.storageScope === storageScope && !live.skillId && live.profileId === overrides?.goalProgressProfileId
+        return (
+          live.active &&
+          !live.remote &&
+          live.conversationId === targetSessionId &&
+          currentSessionIdRef.current === targetSessionId &&
+          live.storageScope === storageScope &&
+          !live.skillId &&
+          live.profileId === overrides?.goalProgressProfileId
+        )
       }
 
       let inheritedTeamSettings: ReturnType<typeof resolveTeamRequestSettings> | undefined
       if (cs.teamLeadId) {
         try {
-          if (hasSessionDeleteTombstone(cs.teamLeadId, storageScope) || hasSessionDeleteTombstone(cs.id, storageScope)) throw new Error('Deleted team session')
+          if (
+            hasSessionDeleteTombstone(cs.teamLeadId, storageScope) ||
+            hasSessionDeleteTombstone(cs.id, storageScope)
+          )
+            throw new Error('Deleted team session')
           inheritedTeamSettings = resolveTeamRequestSettings(cs, liveTeamLead)
-          if (!inheritedTeamSettings.profileId || getBaseProfileId(inheritedTeamSettings.profileId) === HUNYUAN_3D_PROFILE_ID ||
-              !availableProfiles.some(profile => profile.id === inheritedTeamSettings!.profileId) || resolveAvailableProfileId(inheritedTeamSettings.profileId) !== inheritedTeamSettings.profileId) throw new Error('Team model unavailable')
+          if (
+            !inheritedTeamSettings.profileId ||
+            getBaseProfileId(inheritedTeamSettings.profileId) === HUNYUAN_3D_PROFILE_ID ||
+            !availableProfiles.some((profile) => profile.id === inheritedTeamSettings!.profileId) ||
+            resolveAvailableProfileId(inheritedTeamSettings.profileId) !==
+              inheritedTeamSettings.profileId
+          )
+            throw new Error('Team model unavailable')
           const [storedLead, storedMember] = await Promise.all([
-            loadSessionFromDB(cs.teamLeadId, storageScope), loadSessionFromDB(cs.id, storageScope)
+            loadSessionFromDB(cs.teamLeadId, storageScope),
+            loadSessionFromDB(cs.id, storageScope)
           ])
-          if (!storedLead || !storedMember || !liveTeamLead || !sameTeamLifecycle(storedLead, liveTeamLead) ||
-            !sameTeamLifecycle(storedMember, cs)) throw new Error('Team ended')
+          if (
+            !storedLead ||
+            !storedMember ||
+            !liveTeamLead ||
+            !sameTeamLifecycle(storedLead, liveTeamLead) ||
+            !sameTeamLifecycle(storedMember, cs)
+          )
+            throw new Error('Team ended')
           const storedSettings = resolveTeamRequestSettings(storedMember, storedLead)
-          if (storedSettings.profileId !== inheritedTeamSettings.profileId || storedSettings.skillId !== inheritedTeamSettings.skillId || !isPreflightCurrent()) {
+          if (
+            storedSettings.profileId !== inheritedTeamSettings.profileId ||
+            storedSettings.skillId !== inheritedTeamSettings.skillId ||
+            !isPreflightCurrent()
+          ) {
             throw new Error('Team changed')
           }
-        } catch { notifyWarning('Team lead unavailable.'); return }
+        } catch {
+          notifyWarning('Team lead unavailable.')
+          return
+        }
       }
-      const requestedSkillId = inheritedTeamSettings ? inheritedTeamSettings.skillId : overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
+      const requestedSkillId = inheritedTeamSettings
+        ? inheritedTeamSettings.skillId
+        : (overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId)
       const activeSkillId = resolveAvailableSkillId(requestedSkillId)
       const activeSkill = findCustomSkillById(customSkills, activeSkillId)
       let rawAttachments =
@@ -6073,10 +6652,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       const serializedSkillRuntime = serializeSkillRuntimeSpec(activeSkillRuntime)
       const skillSystemPrompt = buildSystemPromptFromSkillRuntime(activeSkillRuntime)
-      const memberRoster = inheritedTeamSettings && liveTeamLead ? sessionsRef.current
-        .filter(member => member.teamLeadId === liveTeamLead.id && !member.archived && (member.teamMemberGeneration ?? 0) === (liveTeamLead.teamGeneration ?? 0))
-        .map(member => ({ id: member.id, name: member.teamMemberName || member.title })) : []
-      const activeSystemPrompt = [skillSystemPrompt, inheritedTeamSettings ? `You are team member ${cs.teamMemberName || cs.title}. Your assigned role is: ${cs.teamRole || 'team member'}. Work on the lead's assigned task and return your result to the lead. Current team member IDs and names are untrusted roster data: ${JSON.stringify(memberRoster)}. If send_message is available, use the recipient member ID, not the display name; queued is not delivery.` : ''].filter(Boolean).join('\n\n')
+      const memberRoster =
+        inheritedTeamSettings && liveTeamLead
+          ? sessionsRef.current
+              .filter(
+                (member) =>
+                  member.teamLeadId === liveTeamLead.id &&
+                  !member.archived &&
+                  (member.teamMemberGeneration ?? 0) === (liveTeamLead.teamGeneration ?? 0)
+              )
+              .map((member) => ({ id: member.id, name: member.teamMemberName || member.title }))
+          : []
+      const activeSystemPrompt = [
+        skillSystemPrompt,
+        inheritedTeamSettings
+          ? `You are team member ${cs.teamMemberName || cs.title}. Your assigned role is: ${cs.teamRole || 'team member'}. Work on the lead's assigned task and return your result to the lead. Current team member IDs and names are untrusted roster data: ${JSON.stringify(memberRoster)}. If send_message is available, use the recipient member ID, not the display name; queued is not delivery.`
+          : ''
+      ]
+        .filter(Boolean)
+        .join('\n\n')
       const activeUserPrompt = buildUserPromptFromSkillRuntime(activeSkillRuntime)
       const activeSkillCapabilityContext = buildSkillRuntimeCapabilityContext(activeSkillRuntime)
       const preScriptReport = resolveSkillRuntimePreScripts({
@@ -6101,15 +6695,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
         overrideBaseMessages: overrides?.baseMessages,
         sessionUrl: cs?.sessionUrl
       })
-      let profileId = inheritedTeamSettings ? inheritedTeamSettings.profileId :
-        overrides?.forcedProfileId ??
-        (activeExternalAgentSkill
-          ? null
-          : resolveProfileIdForSkill(activeSkillId, cs.profileId || selectedProfileId, {
-              preferConfiguredProfile: Boolean(overrides?.forcedSkillId)
-            }))
+      let profileId = inheritedTeamSettings
+        ? inheritedTeamSettings.profileId
+        : (overrides?.forcedProfileId ??
+          (activeExternalAgentSkill
+            ? null
+            : resolveProfileIdForSkill(activeSkillId, cs.profileId || selectedProfileId, {
+                preferConfiguredProfile: Boolean(overrides?.forcedSkillId)
+              })))
       let baseProfileId = getBaseProfileId(profileId)
-      if (goalProgressToken && profileId !== overrides?.goalProgressProfileId) { notifyWarning(t('chat.agent_goal.share_unavailable')); return }
+      if (goalProgressToken && profileId !== overrides?.goalProgressProfileId) {
+        notifyWarning(t('chat.agent_goal.share_unavailable'))
+        return
+      }
       let remoteRequestProfile = config.use_remote_llm
         ? availableProfiles.find((profile) => profile.id === profileId)
         : undefined
@@ -6231,7 +6829,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         try {
           assertExplicitUserImageCount(msgAttachments)
           assertNoUnverifiedPrimaryReports([{ attachments: msgAttachments }])
-        } catch (error) { notifyError(error instanceof Error ? error.message : String(error)); return }
+        } catch (error) {
+          notifyError(error instanceof Error ? error.message : String(error))
+          return
+        }
         rawAttachments =
           mergeChatAttachmentsWithSkillReferenceAttachments(
             msgAttachments,
@@ -6316,7 +6917,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ? resolveChatReasoningPreferenceKey(profileId, activeCapabilityProfile)
         : null
       const requestReasoningEffort = inheritedTeamSettings
-        ? normalizeReasoningEffort(memberReasoningKey ? reasoningEffortByProfileId[memberReasoningKey] : undefined, activeProfileCapabilities.reasoningEfforts) || activeProfileCapabilities.defaultReasoningEffort
+        ? normalizeReasoningEffort(
+            memberReasoningKey ? reasoningEffortByProfileId[memberReasoningKey] : undefined,
+            activeProfileCapabilities.reasoningEfforts
+          ) || activeProfileCapabilities.defaultReasoningEffort
         : selectedReasoningEffort
       const responseModelName =
         (activeProfile?.model_name || baseProfileId || '').trim() || undefined
@@ -6362,16 +6966,32 @@ const ChatPage: React.FC<ChatPageProps> = ({
         isImageGenerationRequest
       }).imageHistoryPolicy
       const explicitToolCommand = parseExplicitToolCommand(requestContent)
-      if (inheritedTeamSettings && explicitToolCommand) { notifyWarning('成员会话暂不支持直接运行工具'); return }
+      if (inheritedTeamSettings && explicitToolCommand) {
+        notifyWarning('成员会话暂不支持直接运行工具')
+        return
+      }
       const shouldPreserveMultiAttachmentRequest = isImageGenerationRequest
       const requestImageGenerationOptions = resolveImageGenerationOptionsForAttachments(
         imageGenerationOptions,
         rawAttachments
       )
       const useAttachmentBatching =
-        !inheritedTeamSettings && !overrides?.teamMessageHop && !shouldPreserveMultiAttachmentRequest &&
+        !inheritedTeamSettings &&
+        !overrides?.teamMessageHop &&
+        !shouldPreserveMultiAttachmentRequest &&
         shouldUseExplicitAttachmentBatching(rawAttachments, requestedSkillId, activeSkillRuntime)
-      if (goalProgressToken && (explicitToolCommand || isImageGenerationRequest || useAttachmentBatching || serializedSkillRuntime || activeExternalAgentSkill || requestImageGenerationOptions?.enabled)) { notifyWarning(t('chat.agent_goal.share_unavailable')); return }
+      if (
+        goalProgressToken &&
+        (explicitToolCommand ||
+          isImageGenerationRequest ||
+          useAttachmentBatching ||
+          serializedSkillRuntime ||
+          activeExternalAgentSkill ||
+          requestImageGenerationOptions?.enabled)
+      ) {
+        notifyWarning(t('chat.agent_goal.share_unavailable'))
+        return
+      }
 
       try {
         preflightChatRequestImages({
@@ -6485,7 +7105,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         status: 'running' | 'waiting-tool' | 'completed' | 'failed' | 'cancelled'
       ): void => {
         if (lifecycleTerminal) return
-        const currentRun = isRequestScopeCurrent() && activeRunIdBySessionRef.current.get(targetSessionId) === runId
+        const currentRun =
+          isRequestScopeCurrent() && activeRunIdBySessionRef.current.get(targetSessionId) === runId
         if (!currentRun) return
         if (status === 'completed' || status === 'failed' || status === 'cancelled') {
           lifecycleTerminal = true
@@ -6514,7 +7135,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const liveToolStarted = liveToolActivity.start(liveToolRun, Date.now())
       const publishLiveTool = (status: ChatLoadingStatus) => {
         const toolName = liveToolStarted ? liveToolActivity.read(liveToolRun)?.toolName : undefined
-        setSessionLoadingStatus(targetSessionId, toolName ? { ...status, observedTool: toolName } : status)
+        setSessionLoadingStatus(
+          targetSessionId,
+          toolName ? { ...status, observedTool: toolName } : status
+        )
       }
       const withLatestContextCompression = (
         updater: (prev: ChatSession[]) => ChatSession[]
@@ -6532,18 +7156,29 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const assertPersistedTeamAuthority = async (): Promise<void> => {
         if (!inheritedTeamSettings || !liveTeamLead) return
         const [storedLead, storedMember] = await Promise.all([
-          loadSessionFromDB(liveTeamLead.id, storageScope), loadSessionFromDB(targetSessionId, storageScope)
+          loadSessionFromDB(liveTeamLead.id, storageScope),
+          loadSessionFromDB(targetSessionId, storageScope)
         ])
         // This is a renderer-side pre-dispatch check, not an atomic MAIN/IPC admission boundary.
         let valid = false
         try {
-          const storedSettings = storedMember ? resolveTeamRequestSettings(storedMember, storedLead ?? undefined) : undefined
-          const liveMember = sessionsRef.current.find(session => session.id === targetSessionId)
-          const liveLead = sessionsRef.current.find(session => session.id === liveTeamLead.id)
-          valid = !!storedSettings && !!liveMember && !!liveLead && sameTeamLifecycle(storedMember!, liveMember) && sameTeamLifecycle(storedLead!, liveLead) &&
-            storedSettings.profileId === inheritedTeamSettings.profileId && storedSettings.skillId === inheritedTeamSettings.skillId &&
+          const storedSettings = storedMember
+            ? resolveTeamRequestSettings(storedMember, storedLead ?? undefined)
+            : undefined
+          const liveMember = sessionsRef.current.find((session) => session.id === targetSessionId)
+          const liveLead = sessionsRef.current.find((session) => session.id === liveTeamLead.id)
+          valid =
+            !!storedSettings &&
+            !!liveMember &&
+            !!liveLead &&
+            sameTeamLifecycle(storedMember!, liveMember) &&
+            sameTeamLifecycle(storedLead!, liveLead) &&
+            storedSettings.profileId === inheritedTeamSettings.profileId &&
+            storedSettings.skillId === inheritedTeamSettings.skillId &&
             (storedLead?.teamGeneration ?? 0) === (liveTeamLead.teamGeneration ?? 0)
-        } catch { /* A changed owner denies the request. */ }
+        } catch {
+          /* A changed owner denies the request. */
+        }
         if (!valid || !isPreflightCurrent()) {
           throw new Error('Team ended or changed before dispatch.')
         }
@@ -6620,16 +7255,26 @@ const ChatPage: React.FC<ChatPageProps> = ({
       )
 
       // 同步保存到 IndexedDB; the helper reports failures and notifies the user.
-      void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder', 'storage-updated', Boolean(inheritedTeamSettings)).catch(
-        () => undefined
-      )
+      void persistCurrentSessionSnapshot(
+        targetSessionId,
+        'request-placeholder',
+        'storage-updated',
+        Boolean(inheritedTeamSettings)
+      ).catch(() => undefined)
 
       let sessionSnapshotSaveFailed = false
       const persistSessionsToStorage = async (
         _updater: (prev: ChatSession[]) => ChatSession[],
         label = ''
       ): Promise<void> => {
-        if (!(await persistCurrentSessionSnapshot(targetSessionId, label, 'storage-updated', Boolean(inheritedTeamSettings))))
+        if (
+          !(await persistCurrentSessionSnapshot(
+            targetSessionId,
+            label,
+            'storage-updated',
+            Boolean(inheritedTeamSettings)
+          ))
+        )
           sessionSnapshotSaveFailed = true
       }
 
@@ -6654,7 +7299,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (activeRepairs?.references.size) sessionUrl = undefined
         const requestMessageWithRuntimeContext =
           buildRequestMessageWithRuntimeContext(requestMessage)
-        if (goalProgressToken && (requestMessageWithRuntimeContext.hiddenContext || requestHistoryMessages.some(message => message.attachments?.length || message.hiddenContext) || latestContextCompressionSummary?.summary)) throw new Error('Goal progress sharing cannot disclose or probe compressed/hidden history. Start a plain text conversation explicitly.')
+        if (
+          goalProgressToken &&
+          (requestMessageWithRuntimeContext.hiddenContext ||
+            requestHistoryMessages.some(
+              (message) => message.attachments?.length || message.hiddenContext
+            ) ||
+            latestContextCompressionSummary?.summary)
+        )
+          throw new Error(
+            'Goal progress sharing cannot disclose or probe compressed/hidden history. Start a plain text conversation explicitly.'
+          )
         const hasUsableSessionContinuation = Boolean(
           activeProfileCapabilities.supportsSessionContinuation && sessionUrl?.trim()
         )
@@ -6684,7 +7339,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         })
 
         const shouldDropSessionUrlForCompressedRequest = Boolean(
-          compressionPlan.shouldCompress && isAutoContextCompressionAvailable && !inheritedTeamSettings
+          compressionPlan.shouldCompress &&
+          isAutoContextCompressionAvailable &&
+          !inheritedTeamSettings
         )
         const imageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
           supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
@@ -6785,7 +7442,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
           estimatedTokens: estimateChatMessagesTokenBreakdown(selectedRequestMessages, calibration),
           imageHistoryPolicy,
           requestMessages,
-          sessionUrl: shouldDropSessionUrlForCompressedRequest || activeRepairs?.references.size ? undefined : sessionUrl
+          sessionUrl:
+            shouldDropSessionUrlForCompressedRequest || activeRepairs?.references.size
+              ? undefined
+              : sessionUrl
         }
       }
 
@@ -6877,7 +7537,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const dispatchCompletion = async (state: ReturnType<typeof buildRequestExecutionState>) => {
           await assertPersistedTeamAuthority()
           assertCurrentRun()
-          if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent()) throw new Error('Team message is no longer available.')
+          if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent())
+            throw new Error('Team message is no longer available.')
           const pending = requestChatCompletion({
             config,
             messages: state.requestMessages,
@@ -6892,14 +7553,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
             skillRuntime: serializedSkillRuntime,
             externalAgentSkill: activeExternalAgentSkill,
             sessionUrl: state.sessionUrl,
-            ...(teamMemberRequest ? { teamMember: teamMemberRequest, beforeLocalDispatch: async () => {
-              assertCurrentRun()
-              await assertPersistedTeamAuthority()
-              assertCurrentRun()
-              if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent()) throw new Error('Team message is no longer available.')
-            } } : {}),
-            ...(overrides?.teamMessageHop ? { teamMessageHop: overrides.teamMessageHop,
-              onLocalDispatch: overrides.onTeamRequestStarted } : {}),
+            ...(teamMemberRequest
+              ? {
+                  teamMember: teamMemberRequest,
+                  beforeLocalDispatch: async () => {
+                    assertCurrentRun()
+                    await assertPersistedTeamAuthority()
+                    assertCurrentRun()
+                    if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent())
+                      throw new Error('Team message is no longer available.')
+                  }
+                }
+              : {}),
+            ...(overrides?.teamMessageHop
+              ? {
+                  teamMessageHop: overrides.teamMessageHop,
+                  onLocalDispatch: overrides.onTeamRequestStarted
+                }
+              : {}),
             ...(goalProgressToken ? { goalProgressToken } : {}),
             conversationId: targetSessionId ?? undefined,
             isEdit: !!overrides?.baseMessages,
@@ -6913,7 +7584,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
           result = await dispatchCompletion(requestState)
         } catch (error) {
           if (!isCurrentRun()) throw staleRunError
-          if (goalProgressToken || overrides?.teamMessageHop || !requestState.sessionUrl || !isInvalidSessionContinuationError(error, true)) {
+          if (
+            goalProgressToken ||
+            overrides?.teamMessageHop ||
+            !requestState.sessionUrl ||
+            !isInvalidSessionContinuationError(error, true)
+          ) {
             throw error
           }
           requestContinuationUrl = undefined
@@ -6990,7 +7666,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         let hasMarkedStreamingOutput = false
         await assertPersistedTeamAuthority()
         assertCurrentRun()
-        if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent()) throw new Error('Team message is no longer available.')
+        if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent())
+          throw new Error('Team message is no longer available.')
         const streamedResultPromise = requestChatCompletionStream({
           config,
           messages: requestState.requestMessages,
@@ -7005,14 +7682,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
           skillRuntime: serializedSkillRuntime,
           externalAgentSkill: activeExternalAgentSkill,
           sessionUrl: requestState.sessionUrl,
-          ...(teamMemberRequest ? { teamMember: teamMemberRequest, beforeLocalDispatch: async () => {
-            assertCurrentRun()
-            await assertPersistedTeamAuthority()
-            assertCurrentRun()
-            if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent()) throw new Error('Team message is no longer available.')
-          } } : {}),
-          ...(overrides?.teamMessageHop ? { teamMessageHop: overrides.teamMessageHop,
-            onLocalDispatch: overrides.onTeamRequestStarted } : {}),
+          ...(teamMemberRequest
+            ? {
+                teamMember: teamMemberRequest,
+                beforeLocalDispatch: async () => {
+                  assertCurrentRun()
+                  await assertPersistedTeamAuthority()
+                  assertCurrentRun()
+                  if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent())
+                    throw new Error('Team message is no longer available.')
+                }
+              }
+            : {}),
+          ...(overrides?.teamMessageHop
+            ? {
+                teamMessageHop: overrides.teamMessageHop,
+                onLocalDispatch: overrides.onTeamRequestStarted
+              }
+            : {}),
           ...(goalProgressToken ? { goalProgressToken } : {}),
           conversationId: targetSessionId ?? undefined,
           isEdit: !!overrides?.baseMessages,
@@ -7046,9 +7733,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
 
             if (event.type === 'tool-status') {
-              if (isMountedRef.current && storageScopeRef.current === storageScope && sessionLoadEpochRef.current === helperScopeEpoch) {
+              if (
+                isMountedRef.current &&
+                storageScopeRef.current === storageScope &&
+                sessionLoadEpochRef.current === helperScopeEpoch
+              ) {
                 const { runId: toolRunId, toolCallId, toolName, status } = event.toolStatus
-                try { helperHandle?.observe({ type: 'tool-status', toolStatus: { runId: toolRunId, toolCallId, toolName, status } }) } catch { /* Do not break the parent stream for observation. */ }
+                try {
+                  helperHandle?.observe({
+                    type: 'tool-status',
+                    toolStatus: { runId: toolRunId, toolCallId, toolName, status }
+                  })
+                } catch {
+                  /* Do not break the parent stream for observation. */
+                }
               }
               const checkpoint = mergeToolCheckpoint(
                 streamedToolHistory,
@@ -7081,11 +7779,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
               // Keep the visible status tied to actual tool events, not model prose.
               hasMarkedStreamingOutput = false
               if (liveToolStarted) liveToolActivity.tool(liveToolRun, event.toolStatus)
-              const activeTool = liveToolStarted ? liveToolActivity.read(liveToolRun)?.toolName : undefined
+              const activeTool = liveToolStarted
+                ? liveToolActivity.read(liveToolRun)?.toolName
+                : undefined
               // A terminal event for one call must not claim all tools returned while another is active.
-              publishLiveTool(getChatToolLoadingStatus(activeTool
-                ? { ...event.toolStatus, toolName: activeTool, status: 'running' }
-                : event.toolStatus, t))
+              publishLiveTool(
+                getChatToolLoadingStatus(
+                  activeTool
+                    ? { ...event.toolStatus, toolName: activeTool, status: 'running' }
+                    : event.toolStatus,
+                  t
+                )
+              )
               if (activeTool && event.toolStatus.status !== 'running') return
               const status = event.toolStatus.status
               lifecycleEvent(
@@ -7317,8 +8022,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
       let helperHandle: HelperInvocationHandle | undefined
       try {
         if (storageScopeRef.current === storageScope && isMountedRef.current) {
-          try { helperHandle = helperObserver.begin(targetSessionId, runId) } catch { /* Optional observation only. */ }
-          if (helperHandle) helperHandlesRef.current.set(targetSessionId, { scope: storageScope, loadEpoch: helperScopeEpoch, runId, handle: helperHandle })
+          try {
+            helperHandle = helperObserver.begin(targetSessionId, runId)
+          } catch {
+            /* Optional observation only. */
+          }
+          if (helperHandle)
+            helperHandlesRef.current.set(targetSessionId, {
+              scope: storageScope,
+              loadEpoch: helperScopeEpoch,
+              runId,
+              handle: helperHandle
+            })
         }
         if (explicitToolCommand) {
           updateLoadingStatus(
@@ -7532,9 +8247,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   // A validated stream checkpoint is already part of this assistant
                   // turn. If a final result omits its history, do not erase that
                   // evidence; a history supplied by the final result stays authoritative.
-                  toolHistory: shouldStreamStandardResponse && result.metadata?.toolHistory === undefined
-                    ? streamedToolHistory
-                    : undefined,
+                  toolHistory:
+                    shouldStreamStandardResponse && result.metadata?.toolHistory === undefined
+                      ? streamedToolHistory
+                      : undefined,
                   metadata: result.metadata
                 },
                 responseModelName,
@@ -7558,7 +8274,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         lifecycleEvent('completed')
         overrides?.onTeamResponseReceived?.()
         if (!sessionSnapshotSaveFailed) overrides?.onTaskCompleted?.()
-        else if (overrides?.onTaskCompleted) notifyWarning('成员已有回复，但会话保存未确认，任务仍为进行中')
+        else if (overrides?.onTaskCompleted)
+          notifyWarning('成员已有回复，但会话保存未确认，任务仍为进行中')
         emitAgentTraceEvent(
           'success',
           `Agent response completed with ${traceResponseCount || 1} assistant message(s).`,
@@ -7707,9 +8424,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
       } finally {
         liveToolActivity.end(liveToolRun)
         liveToolActivity.dispose()
-        try { helperHandle?.end() } catch { /* Do not replace the parent request result. */ }
+        try {
+          helperHandle?.end()
+        } catch {
+          /* Do not replace the parent request result. */
+        }
         const currentHelper = helperHandlesRef.current.get(targetSessionId)
-        if (currentHelper?.scope === storageScope && currentHelper.runId === runId && currentHelper.handle === helperHandle) helperHandlesRef.current.delete(targetSessionId)
+        if (
+          currentHelper?.scope === storageScope &&
+          currentHelper.runId === runId &&
+          currentHelper.handle === helperHandle
+        )
+          helperHandlesRef.current.delete(targetSessionId)
         if (targetSessionId) {
           const wasCancelled = cancelledSessionsRef.current.has(targetSessionId)
           const isOwnedRun = isCurrentRun()
@@ -7815,7 +8541,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     async (overrides?: SendMessageOverrides): Promise<void> => {
       const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
       if (!targetSessionId || committedRunScopeRef.current !== storageScope) return
-      const target = sessionsRef.current.find(session => session.id === targetSessionId)
+      const target = sessionsRef.current.find((session) => session.id === targetSessionId)
       if (!target) return
 
       const queueKey = overrides?.queueKey
@@ -7825,7 +8551,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       let queuedOverrides = overrides
       // A drained item uses an override but no longer owns the live composer.
-      const fromComposer = !overrides || (overrides.composerSubmission === true && !overrides.isQueuedComposerCurrent)
+      const fromComposer =
+        !overrides || (overrides.composerSubmission === true && !overrides.isQueuedComposerCurrent)
       const pausedHead = queuedSessionSendsRef.current.get(targetSessionId)?.[0]
       const isBusy =
         sendingSessionIdsRef.current.has(targetSessionId) ||
@@ -7834,7 +8561,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyWarning('请先处理暂停的排队消息，再发送当前输入')
         return
       }
-      if (isBusy && overrides?.goalProgressToken) { notifyWarning(t('chat.agent_goal.share_unavailable')); return }
+      if (isBusy && overrides?.goalProgressToken) {
+        notifyWarning(t('chat.agent_goal.share_unavailable'))
+        return
+      }
       if (isBusy && !queuedOverrides) {
         queuedOverrides = {
           content: inputValueRef.current.trim(),
@@ -7850,8 +8580,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       if (isBusy) {
         // A rejected queued send must not clear the composer's only copy.
-        try { assertExplicitUserImageCount(queuedOverrides?.attachments) }
-        catch (error) { notifyError(error instanceof Error ? error.message : String(error)); return }
+        try {
+          assertExplicitUserImageCount(queuedOverrides?.attachments)
+        } catch (error) {
+          notifyError(error instanceof Error ? error.message : String(error))
+          return
+        }
         if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
         const queue = [
           ...(queuedSessionSendsRef.current.get(targetSessionId) ?? []),
@@ -7889,7 +8623,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
       try {
         await executeSendMessage(queuedOverrides)
       } finally {
-        if (committedRunScopeRef.current === storageScope && committedRunScopeEpochRef.current === sendScopeEpoch) {
+        if (
+          committedRunScopeRef.current === storageScope &&
+          committedRunScopeEpochRef.current === sendScopeEpoch
+        ) {
           sendingSessionIdsRef.current.delete(targetSessionId)
           if (queueKey) pendingSessionSendKeysRef.current.delete(queueKey)
           drainQueuedSessionRef.current(targetSessionId)
@@ -7933,17 +8670,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
     if (next.fromComposer && next.overrides) {
       const scopeEpoch = committedRunScopeEpochRef.current
       let acceptedInLocalState = false
-      const current = () => isMountedRef.current && committedRunScopeRef.current === storageScope &&
+      const current = () =>
+        isMountedRef.current &&
+        committedRunScopeRef.current === storageScope &&
         committedRunScopeEpochRef.current === scopeEpoch &&
-        Boolean(queuedSessionSendsRef.current.get(sessionId)?.some(item => item.id === next.id && item.inFlight))
-      const leasedQueue = queue.map(item => item.id === next.id ? { ...item, inFlight: true } : item)
+        Boolean(
+          queuedSessionSendsRef.current
+            .get(sessionId)
+            ?.some((item) => item.id === next.id && item.inFlight)
+        )
+      const leasedQueue = queue.map((item) =>
+        item.id === next.id ? { ...item, inFlight: true } : item
+      )
       const leased = new Map(queuedSessionSendsRef.current)
       leased.set(sessionId, leasedQueue)
       updateQueuedSessionSends(leased)
       const accepted = () => {
         if (!current()) return
         acceptedInLocalState = true
-        const remaining = (queuedSessionSendsRef.current.get(sessionId) ?? []).filter(item => item.id !== next.id)
+        const remaining = (queuedSessionSendsRef.current.get(sessionId) ?? []).filter(
+          (item) => item.id !== next.id
+        )
         const queues = new Map(queuedSessionSendsRef.current)
         if (remaining.length) queues.set(sessionId, remaining)
         else queues.delete(sessionId)
@@ -7957,13 +8704,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
         isQueuedComposerCurrent: () => acceptedInLocalState || current(),
         onQueuedComposerAccepted: accepted
       })
-        .catch(error => { console.error('[ChatPage] Failed to prepare queued message:', error) })
+        .catch((error) => {
+          console.error('[ChatPage] Failed to prepare queued message:', error)
+        })
         .finally(() => {
           if (!current()) return
           const queues = new Map(queuedSessionSendsRef.current)
-          queues.set(sessionId, (queues.get(sessionId) ?? []).map(item =>
-            item.id === next.id ? { ...item, inFlight: false, paused: true, blocksFollowing: true } : item
-          ))
+          queues.set(
+            sessionId,
+            (queues.get(sessionId) ?? []).map((item) =>
+              item.id === next.id
+                ? { ...item, inFlight: false, paused: true, blocksFollowing: true }
+                : item
+            )
+          )
           updateQueuedSessionSends(queues)
         })
       return
@@ -7996,21 +8750,35 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   const editQueuedSessionSend = useCallback(
     (sessionId: string, queuedSend: QueuedSessionSend) => {
-      const liveItem = queuedSessionSendsRef.current.get(sessionId)?.find(item => item.id === queuedSend.id)
+      const liveItem = queuedSessionSendsRef.current
+        .get(sessionId)
+        ?.find((item) => item.id === queuedSend.id)
       if (!liveItem || liveItem.inFlight) return
       const overrides = liveItem.overrides
       if (!overrides || overrides.resolveAttachments) return
-      if (inputValueRef.current.trim() || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current) {
+      if (
+        inputValueRef.current.trim() ||
+        pendingAttachmentsRef.current.length ||
+        pendingHiddenContextRef.current
+      ) {
         notifyWarning('请先处理当前输入，再编辑排队消息')
         return
       }
       setInputValue(overrides.content)
       setPendingAttachments(overrides.attachments?.map(cloneChatAttachment) ?? [])
-      setPendingHiddenContext(liveItem.originalComposerHiddenContext ?? overrides.hiddenContext ?? '')
+      setPendingHiddenContext(
+        liveItem.originalComposerHiddenContext ?? overrides.hiddenContext ?? ''
+      )
       removeQueuedSessionSend(sessionId, queuedSend.id)
       window.setTimeout(() => composerInputRef.current?.focus(), 0)
     },
-    [notifyWarning, removeQueuedSessionSend, setInputValue, setPendingAttachments, setPendingHiddenContext]
+    [
+      notifyWarning,
+      removeQueuedSessionSend,
+      setInputValue,
+      setPendingAttachments,
+      setPendingHiddenContext
+    ]
   )
 
   // 保持 sendMessageRef 与最新 sendMessage 同步，供 send-to-agent autoSend 使用
@@ -8032,29 +8800,93 @@ const ChatPage: React.FC<ChatPageProps> = ({
     route,
     conversationId: currentSessionId || undefined,
     boundaryKey: storageScope,
-    active: active && isReady && config?.use_remote_llm === false && !showNoApiWarning && sessionsLoaded && !!currentSession &&
-      !sessionLoadError && storageScopeRef.current === storageScope && !showingSide &&
-      !isSkillPickerOpen && !skillDetailsOpen && !!currentSessionId &&
+    active:
+      active &&
+      isReady &&
+      config?.use_remote_llm === false &&
+      !showNoApiWarning &&
+      sessionsLoaded &&
+      !!currentSession &&
+      !sessionLoadError &&
+      storageScopeRef.current === storageScope &&
+      !showingSide &&
+      !isSkillPickerOpen &&
+      !skillDetailsOpen &&
+      !!currentSessionId &&
       !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSessionId)) &&
       !hasSessionDeleteTombstone(currentSessionId, storageScope)
   })
   // The side owner reports visibility in its layout lifecycle, including scoped restores.
-  useEffect(() => { setSkillDetailsOpen(false) }, [active, storageScope, currentSessionId])
+  useEffect(() => {
+    setSkillDetailsOpen(false)
+  }, [active, storageScope, currentSessionId])
   const skillCommandRef = useRef<AgentSkillCommandHandle>(null)
   const sideCommandRef = useRef<AgentSideCommandHandle>(null)
-  const teamLead = currentSession?.teamLeadId ? sessions.find(session=>session.id===currentSession.teamLeadId) : currentSession
-  const teamMembers = teamLead ? sessions.filter(session=>session.teamLeadId===teamLead.id && !session.archived && (session.teamMemberGeneration ?? 0) === (teamLead.teamGeneration ?? 0)) : []
-  const teamEnabled = active && isReady && !config.use_remote_llm && route?.channel==='canvas' && route.scopeType==='thread'
-  const [teamMessageEntries, dispatchTeamActivity] = React.useReducer(reduceTeamActivity, { owner: 0, key: '', entries: [], activeKey: '', live: false, closedFor: null })
+  const teamLead = currentSession?.teamLeadId
+    ? sessions.find((session) => session.id === currentSession.teamLeadId)
+    : currentSession
+  const teamMembers = teamLead
+    ? sessions.filter(
+        (session) =>
+          session.teamLeadId === teamLead.id &&
+          !session.archived &&
+          (session.teamMemberGeneration ?? 0) === (teamLead.teamGeneration ?? 0)
+      )
+    : []
+  const teamEnabled =
+    active &&
+    isReady &&
+    !config.use_remote_llm &&
+    route?.channel === 'canvas' &&
+    route.scopeType === 'thread'
+  const [teamMessageEntries, dispatchTeamActivity] = React.useReducer(reduceTeamActivity, {
+    owner: 0,
+    key: '',
+    entries: [],
+    activeKey: '',
+    live: false,
+    closedFor: null
+  })
   const teamMessageActivityOwnerRef = useRef(0)
-  const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{ key: string; ids: readonly string[] }>({ key: '', ids: [] })
-  const teamMessageDispatcherRef = useRef<{ key: string; owner: number; dispatcher: TeamMessageDispatcher; pump: () => void; scopeEpoch: number; visibilityEpoch: number } | null>(null)
+  const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{
+    key: string
+    ids: readonly string[]
+  }>({ key: '', ids: [] })
+  const teamMessageDispatcherRef = useRef<{
+    key: string
+    owner: number
+    dispatcher: TeamMessageDispatcher
+    pump: () => void
+    scopeEpoch: number
+    visibilityEpoch: number
+  } | null>(null)
   const messageLeadId = teamLead?.id
   const messageGeneration = teamLead?.teamGeneration ?? 0
-  const messageKey = JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration])
+  const messageKey = JSON.stringify([
+    storageScope,
+    route?.channel,
+    route?.scopeType,
+    route?.scopeId,
+    route?.threadId,
+    messageLeadId,
+    messageGeneration
+  ])
   // The observer is reset for each team identity, but the process-area host stays mounted.
-  const imagePlacementKey = JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, teamEnabled, teamLead?.id, messageGeneration])
-  const teamImagePlacement = useTeamImagePlacement(route?.scopeId ?? '', teamEnabled && teamLead ? teamMembers : [], imagePlacementKey)
+  const imagePlacementKey = JSON.stringify([
+    storageScope,
+    route?.channel,
+    route?.scopeType,
+    route?.scopeId,
+    route?.threadId,
+    teamEnabled,
+    teamLead?.id,
+    messageGeneration
+  ])
+  const teamImagePlacement = useTeamImagePlacement(
+    route?.scopeId ?? '',
+    teamEnabled && teamLead ? teamMembers : [],
+    imagePlacementKey
+  )
   const teamTaskClaimsRef = useRef(new Set<string>())
   const dispatchSelectedTeamTask = async (taskId: string): Promise<void> => {
     const scope = storageScope
@@ -8063,18 +8895,38 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const teamKey = `${scope}\u0000${leadId}`
     const claimKey = `${teamKey}\u0000${taskId}`
     if (teamTaskClaimsRef.current.has(claimKey)) return
-    const lead = sessionsRef.current.find(session => session.id === leadId)
-    const task = lead?.teamTasks?.find(item => item.id === taskId)
-    const member = task && sessionsRef.current.find(session => session.id === task.ownerId)
-    const validTeam = (currentLead: ChatSession | undefined, currentMember: ChatSession | undefined): boolean =>
-      Boolean(currentLead && currentMember && !currentLead.teamLeadId && !currentLead.teamEnded && !currentLead.archived &&
-        currentMember.teamLeadId === leadId && !currentMember.archived &&
+    const lead = sessionsRef.current.find((session) => session.id === leadId)
+    const task = lead?.teamTasks?.find((item) => item.id === taskId)
+    const member = task && sessionsRef.current.find((session) => session.id === task.ownerId)
+    const validTeam = (
+      currentLead: ChatSession | undefined,
+      currentMember: ChatSession | undefined
+    ): boolean =>
+      Boolean(
+        currentLead &&
+        currentMember &&
+        !currentLead.teamLeadId &&
+        !currentLead.teamEnded &&
+        !currentLead.archived &&
+        currentMember.teamLeadId === leadId &&
+        !currentMember.archived &&
         (currentMember.teamMemberGeneration ?? 0) === (currentLead.teamGeneration ?? 0) &&
-        !hasSessionDeleteTombstone(leadId, scope) && !hasSessionDeleteTombstone(currentMember.id, scope) &&
-        !teamEndPendingRef.current.has(teamKey) && !teamEndedMainRef.current.has(teamKey))
-    if (!lead || !task || task.status !== 'pending' || !member || !validTeam(lead, member) ||
-      loadingSessionIdsRef.current.has(member.id) || sendingSessionIdsRef.current.has(member.id) ||
-      persistedSessionsRef.current.get(leadId) !== lead || chatSaveBaselineRef.current.isPending(scope, leadId)) {
+        !hasSessionDeleteTombstone(leadId, scope) &&
+        !hasSessionDeleteTombstone(currentMember.id, scope) &&
+        !teamEndPendingRef.current.has(teamKey) &&
+        !teamEndedMainRef.current.has(teamKey)
+      )
+    if (
+      !lead ||
+      !task ||
+      task.status !== 'pending' ||
+      !member ||
+      !validTeam(lead, member) ||
+      loadingSessionIdsRef.current.has(member.id) ||
+      sendingSessionIdsRef.current.has(member.id) ||
+      persistedSessionsRef.current.get(leadId) !== lead ||
+      chatSaveBaselineRef.current.isPending(scope, leadId)
+    ) {
       notifyWarning('任务不可执行：请检查负责人、依赖和已保存状态')
       return
     }
@@ -8085,56 +8937,117 @@ const ChatPage: React.FC<ChatPageProps> = ({
     try {
       const claimed = await claimTeamTaskInDB({ scope, leadId, expectedLead: lead, taskId })
       noteSessionWriteAcknowledged(scope)
-      const stillCurrent = isMountedRef.current && teamVisibilityRef.current.active && teamVisibilityRef.current.epoch === visibilityEpoch &&
-        storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch &&
+      const stillCurrent =
+        isMountedRef.current &&
+        teamVisibilityRef.current.active &&
+        teamVisibilityRef.current.epoch === visibilityEpoch &&
+        storageScopeRef.current === scope &&
+        sessionLoadEpochRef.current === scopeEpoch &&
         (teamEndEpochsRef.current.get(teamKey) ?? 0) === endEpoch &&
-        sessionsRef.current.find(session => session.id === leadId) === lead &&
-        validTeam(lead, sessionsRef.current.find(session => session.id === member.id))
+        sessionsRef.current.find((session) => session.id === leadId) === lead &&
+        validTeam(
+          lead,
+          sessionsRef.current.find((session) => session.id === member.id)
+        )
       if (!stillCurrent) {
-        if (isMountedRef.current && storageScopeRef.current === scope) void refreshSessionsFromStorage()
+        if (isMountedRef.current && storageScopeRef.current === scope)
+          void refreshSessionsFromStorage()
         notifyWarning('任务已领取但团队状态发生变化，请检查任务状态')
         return
       }
       chatSaveBaselineRef.current.fenceAndAdvance(scope, leadId, claimed)
       persistedSessionsRef.current.set(leadId, claimed)
-      setSessions(previous => previous.map(session => session === lead ? claimed : session))
+      setSessions((previous) => previous.map((session) => (session === lead ? claimed : session)))
       const complete = () => {
-        if (!isMountedRef.current || storageScopeRef.current !== scope || sessionLoadEpochRef.current !== scopeEpoch) return
-        const current = sessionsRef.current.find(session => session.id === leadId)
-        const currentTask = current?.teamTasks?.find(item => item.id === taskId)
-        if (!current || current.teamEnded || teamEndPendingRef.current.has(teamKey) || teamEndedMainRef.current.has(teamKey) ||
-          (teamEndEpochsRef.current.get(teamKey) ?? 0) !== endEpoch || currentTask?.status !== 'running' || currentTask.ownerId !== member.id ||
-          (current.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)) return
+        if (
+          !isMountedRef.current ||
+          storageScopeRef.current !== scope ||
+          sessionLoadEpochRef.current !== scopeEpoch
+        )
+          return
+        const current = sessionsRef.current.find((session) => session.id === leadId)
+        const currentTask = current?.teamTasks?.find((item) => item.id === taskId)
+        if (
+          !current ||
+          current.teamEnded ||
+          teamEndPendingRef.current.has(teamKey) ||
+          teamEndedMainRef.current.has(teamKey) ||
+          (teamEndEpochsRef.current.get(teamKey) ?? 0) !== endEpoch ||
+          currentTask?.status !== 'running' ||
+          currentTask.ownerId !== member.id ||
+          (current.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)
+        )
+          return
         let updated: ChatSession | undefined
-        chatSaveBaselineRef.current.freeze(scope, leadId, persistedSessionsRef.current.get(leadId) ?? null)
-        void chatSaveBaselineRef.current.persistLatest(scope, leadId,
-          () => storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch ? sessionsRef.current.find(session => session.id === leadId) ?? null : null,
-          () => persistedSessionsRef.current.get(leadId) ?? null,
-          () => noteSessionWriteAcknowledged(scope), true, () => {
-          if (!isMountedRef.current || storageScopeRef.current !== scope || sessionLoadEpochRef.current !== scopeEpoch ||
-            (teamEndEpochsRef.current.get(teamKey) ?? 0) !== endEpoch || teamEndPendingRef.current.has(teamKey) || teamEndedMainRef.current.has(teamKey)) return null
-          const latest = sessionsRef.current.find(session => session.id === leadId)
-          const latestTask = latest?.teamTasks?.find(item => item.id === taskId)
-          if (!latest || latest.teamEnded || (latest.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)) return null
-          if (latestTask?.status === 'done' && updated) return latest
-          if (latestTask?.status !== 'running' || latestTask.ownerId !== member.id) return null
-          updated = { ...latest, teamTasks: setTeamTaskStatus(latest.teamTasks ?? [], taskId, 'done') }
-          setSessions(previous => previous.map(session => session === latest ? updated! : session))
-          setDirtySessionSnapshot(scope, updated)
-          return updated
-        }).then(saved => {
-          if (!saved || !clearDirtySessionSnapshotIfCurrent(scope, saved)) notifyWarning('任务执行结果已返回，但任务状态保存失败')
-        }).catch(error => {
-          const detail = error instanceof Error ? error.message : String(error)
-          setSessionSaveError(`Failed to save chat session: ${detail}`)
-          notifyWarning('任务执行结果已返回，但任务状态保存失败')
-        })
+        chatSaveBaselineRef.current.freeze(
+          scope,
+          leadId,
+          persistedSessionsRef.current.get(leadId) ?? null
+        )
+        void chatSaveBaselineRef.current
+          .persistLatest(
+            scope,
+            leadId,
+            () =>
+              storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch
+                ? (sessionsRef.current.find((session) => session.id === leadId) ?? null)
+                : null,
+            () => persistedSessionsRef.current.get(leadId) ?? null,
+            () => noteSessionWriteAcknowledged(scope),
+            true,
+            () => {
+              if (
+                !isMountedRef.current ||
+                storageScopeRef.current !== scope ||
+                sessionLoadEpochRef.current !== scopeEpoch ||
+                (teamEndEpochsRef.current.get(teamKey) ?? 0) !== endEpoch ||
+                teamEndPendingRef.current.has(teamKey) ||
+                teamEndedMainRef.current.has(teamKey)
+              )
+                return null
+              const latest = sessionsRef.current.find((session) => session.id === leadId)
+              const latestTask = latest?.teamTasks?.find((item) => item.id === taskId)
+              if (
+                !latest ||
+                latest.teamEnded ||
+                (latest.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)
+              )
+                return null
+              if (latestTask?.status === 'done' && updated) return latest
+              if (latestTask?.status !== 'running' || latestTask.ownerId !== member.id) return null
+              updated = {
+                ...latest,
+                teamTasks: setTeamTaskStatus(latest.teamTasks ?? [], taskId, 'done')
+              }
+              setSessions((previous) =>
+                previous.map((session) => (session === latest ? updated! : session))
+              )
+              setDirtySessionSnapshot(scope, updated)
+              return updated
+            }
+          )
+          .then((saved) => {
+            if (!saved || !clearDirtySessionSnapshotIfCurrent(scope, saved))
+              notifyWarning('任务执行结果已返回，但任务状态保存失败')
+          })
+          .catch((error) => {
+            const detail = error instanceof Error ? error.message : String(error)
+            setSessionSaveError(`Failed to save chat session: ${detail}`)
+            notifyWarning('任务执行结果已返回，但任务状态保存失败')
+          })
       }
-      if (loadingSessionIdsRef.current.has(member.id) || sendingSessionIdsRef.current.has(member.id)) {
+      if (
+        loadingSessionIdsRef.current.has(member.id) ||
+        sendingSessionIdsRef.current.has(member.id)
+      ) {
         notifyWarning('负责人已在执行其他任务，此任务保持运行中，请检查后重试')
         return
       }
-      await sendMessage({ content: `团队任务：${task.title}`, targetSessionId: member.id, onTaskCompleted: complete })
+      await sendMessage({
+        content: `团队任务：${task.title}`,
+        targetSessionId: member.id,
+        onTaskCompleted: complete
+      })
     } catch {
       notifyWarning('无法领取任务，请刷新团队状态并重试')
     } finally {
@@ -8142,52 +9055,142 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }
   useEffect(() => {
-    if (!teamEnabled || !sessionsLoaded || sessionLoadError || !route?.threadId || !messageLeadId || teamLead?.teamEnded || teamLead?.archived) return
-    const scope = storageScope, thread = route.threadId, leadId = messageLeadId, generation = messageGeneration
+    if (
+      !teamEnabled ||
+      !sessionsLoaded ||
+      sessionLoadError ||
+      !route?.threadId ||
+      !messageLeadId ||
+      teamLead?.teamEnded ||
+      teamLead?.archived
+    )
+      return
+    const scope = storageScope,
+      thread = route.threadId,
+      leadId = messageLeadId,
+      generation = messageGeneration
     const scopeEpoch = sessionLoadEpochRef.current
     const visibilityEpoch = teamVisibilityRef.current.epoch
     const key = messageKey
     const activityOwner = ++teamMessageActivityOwnerRef.current
     dispatchTeamActivity({ type: 'begin', owner: activityOwner, key })
-    let alive = true, polling = false
+    let alive = true,
+      polling = false
     const teamKey = `${scope}\u0000${leadId}`
-    const scopeRoute = { channel: route.channel, scopeType: route.scopeType, scopeId: route.scopeId, threadId: thread }
+    const scopeRoute = {
+      channel: route.channel,
+      scopeType: route.scopeType,
+      scopeId: route.scopeId,
+      threadId: thread
+    }
     const isCurrent = () => {
-      const lead = sessionsRef.current.find(session => session.id === leadId)
-      return alive && isMountedRef.current && teamVisibilityRef.current.active && teamVisibilityRef.current.epoch === visibilityEpoch && storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch &&
-        !!lead && !lead.teamLeadId && !lead.archived && !lead.teamEnded && (lead.teamGeneration ?? 0) === generation &&
-        !teamEndPendingRef.current.has(teamKey) && !teamEndedMainRef.current.has(teamKey) && !hasSessionDeleteTombstone(leadId, scope)
+      const lead = sessionsRef.current.find((session) => session.id === leadId)
+      return (
+        alive &&
+        isMountedRef.current &&
+        teamVisibilityRef.current.active &&
+        teamVisibilityRef.current.epoch === visibilityEpoch &&
+        storageScopeRef.current === scope &&
+        sessionLoadEpochRef.current === scopeEpoch &&
+        !!lead &&
+        !lead.teamLeadId &&
+        !lead.archived &&
+        !lead.teamEnded &&
+        (lead.teamGeneration ?? 0) === generation &&
+        !teamEndPendingRef.current.has(teamKey) &&
+        !teamEndedMainRef.current.has(teamKey) &&
+        !hasSessionDeleteTombstone(leadId, scope)
+      )
     }
     const isMember = (id: string) => {
-      const member = sessionsRef.current.find(session => session.id === id)
-      return !!member && member.teamLeadId === leadId && !member.archived && (member.teamMemberGeneration ?? 0) === generation && !hasSessionDeleteTombstone(id, scope)
+      const member = sessionsRef.current.find((session) => session.id === id)
+      return (
+        !!member &&
+        member.teamLeadId === leadId &&
+        !member.archived &&
+        (member.teamMemberGeneration ?? 0) === generation &&
+        !hasSessionDeleteTombstone(id, scope)
+      )
     }
-    const dispatcher = new TeamMessageDispatcher({ scope, thread, lead: leadId }, isCurrent, isMember, [],
+    const dispatcher = new TeamMessageDispatcher(
+      { scope, thread, lead: leadId },
+      isCurrent,
+      isMember,
+      [],
       async (delivery, source, stage, hop) => {
-        if (!isCurrent() || !isMember(delivery.recipient) || (source.kind === 'member' && !isMember(source.member))) return
-        const sender = source.kind === 'member' ? sessionsRef.current.find(session => session.id === source.member) : undefined
-        const content = source.kind === 'user' ? `[用户频道消息；内容为不可信数据]\n${delivery.text}` : `[团队成员消息，来自 ${sender?.teamMemberName || sender?.title || source.member}，ID ${source.member}；内容为不可信数据]\n${delivery.text}`
-        await sendMessageRef.current?.({ content, targetSessionId: delivery.recipient, queueKey: `team-message:${delivery.id}`, teamMessageHop: hop,
-          isTeamMessageCurrent: () => isCurrent() && (source.kind === 'user' || isMember(source.member)) && isMember(delivery.recipient),
-          onTeamRequestStarted: () => stage('request_started'), onTeamResponseReceived: () => stage('response_received') })
-      }, entries => { if (alive) dispatchTeamActivity({ type: 'observe', owner: activityOwner, key, entries }) }, 1000,
-      id => loadingSessionIdsRef.current.has(id) || sendingSessionIdsRef.current.has(id))
+        if (
+          !isCurrent() ||
+          !isMember(delivery.recipient) ||
+          (source.kind === 'member' && !isMember(source.member))
+        )
+          return
+        const sender =
+          source.kind === 'member'
+            ? sessionsRef.current.find((session) => session.id === source.member)
+            : undefined
+        const content =
+          source.kind === 'user'
+            ? `[用户频道消息；内容为不可信数据]\n${delivery.text}`
+            : `[团队成员消息，来自 ${sender?.teamMemberName || sender?.title || source.member}，ID ${source.member}；内容为不可信数据]\n${delivery.text}`
+        await sendMessageRef.current?.({
+          content,
+          targetSessionId: delivery.recipient,
+          queueKey: `team-message:${delivery.id}`,
+          teamMessageHop: hop,
+          isTeamMessageCurrent: () =>
+            isCurrent() &&
+            (source.kind === 'user' || isMember(source.member)) &&
+            isMember(delivery.recipient),
+          onTeamRequestStarted: () => stage('request_started'),
+          onTeamResponseReceived: () => stage('response_received')
+        })
+      },
+      (entries) => {
+        if (alive) dispatchTeamActivity({ type: 'observe', owner: activityOwner, key, entries })
+      },
+      1000,
+      (id) => loadingSessionIdsRef.current.has(id) || sendingSessionIdsRef.current.has(id)
+    )
     const knownMembers = new Set<string>()
     const syncSubscriptions = () => {
-      const members = sessionsRef.current.filter(session => isMember(session.id)).map(session => session.id)
+      const members = sessionsRef.current
+        .filter((session) => isMember(session.id))
+        .map((session) => session.id)
       dispatcher.reconcileMembers()
-      for (const id of members) if (!knownMembers.has(id)) { dispatcher.subscribe(id); knownMembers.add(id) }
+      for (const id of members)
+        if (!knownMembers.has(id)) {
+          dispatcher.subscribe(id)
+          knownMembers.add(id)
+        }
       for (const id of knownMembers) if (!members.includes(id)) knownMembers.delete(id)
-      const ids = members.filter(id => dispatcher.isSubscribed(id))
-      setTeamMessageSubscriptions(previous => previous.key === key && previous.ids.length === ids.length && previous.ids.every((id, i) => id === ids[i]) ? previous : { key, ids })
+      const ids = members.filter((id) => dispatcher.isSubscribed(id))
+      setTeamMessageSubscriptions((previous) =>
+        previous.key === key &&
+        previous.ids.length === ids.length &&
+        previous.ids.every((id, i) => id === ids[i])
+          ? previous
+          : { key, ids }
+      )
     }
     const pump = () => {
       if (!isCurrent()) return
-      for (const member of sessionsRef.current.filter(session => isMember(session.id))) {
-        try { const work = dispatcher.pump(member.id); if (work) void work.finally(pump) } catch { /* End or membership changed. */ }
+      for (const member of sessionsRef.current.filter((session) => isMember(session.id))) {
+        try {
+          const work = dispatcher.pump(member.id)
+          if (work) void work.finally(pump)
+        } catch {
+          /* End or membership changed. */
+        }
       }
     }
-    teamMessageDispatcherRef.current = { key, owner: activityOwner, dispatcher, pump, scopeEpoch, visibilityEpoch }
+    teamMessageDispatcherRef.current = {
+      key,
+      owner: activityOwner,
+      dispatcher,
+      pump,
+      scopeEpoch,
+      visibilityEpoch
+    }
     const tick = async () => {
       if (polling || !isCurrent()) return
       polling = true
@@ -8197,134 +9200,306 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const response = await api().svcLLMProxy.listAgentTeamMessages(apiScope)
         for (const item of response.intents) {
           if (!isCurrent()) break
-          const { intent } = await api().svcLLMProxy.claimAgentTeamMessage({ ...apiScope, id: item.id })
+          const { intent } = await api().svcLLMProxy.claimAgentTeamMessage({
+            ...apiScope,
+            id: item.id
+          })
           if (!intent || !isCurrent()) continue
-          try { dispatcher.enqueue({ ...intent, source: { ...intent.source, kind: 'member' } }) } catch {
-            try { dispatcher.recordUnavailable({ ...intent, source: { ...intent.source, kind: 'member' } }, intent.recipient) } catch { /* generation or bounded log changed */ }
+          try {
+            dispatcher.enqueue({ ...intent, source: { ...intent.source, kind: 'member' } })
+          } catch {
+            try {
+              dispatcher.recordUnavailable(
+                { ...intent, source: { ...intent.source, kind: 'member' } },
+                intent.recipient
+              )
+            } catch {
+              /* generation or bounded log changed */
+            }
             notifyWarningRef.current('团队消息无法排队，请检查成员或容量')
           }
         }
-      } catch { /* IPC unavailable or document scope changed: never claim delivery. */ }
-      finally { polling = false; pump() }
+      } catch {
+        /* IPC unavailable or document scope changed: never claim delivery. */
+      } finally {
+        polling = false
+        pump()
+      }
     }
     void tick()
-    const timer = window.setInterval(() => { pump(); void tick() }, 500)
-    return () => { alive = false; window.clearInterval(timer); dispatchTeamActivity({ type: 'end', owner: activityOwner, key }); dispatcher.end(); if (teamMessageDispatcherRef.current?.dispatcher === dispatcher) teamMessageDispatcherRef.current = null }
-  }, [teamEnabled, sessionsLoaded, sessionLoadError, storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, messageKey, teamLead?.teamEnded, teamLead?.archived])
-  const reconcileTeamLifecycle = useCallback((records: ChatSession[]) => {
-    let conflict = false
-    for (const persisted of records) {
-      const local = sessionsRef.current.find(session => session.id === persisted.id)
-      if (!local || (persisted.teamLifecycleRevision ?? 0) <= (local.teamLifecycleRevision ?? 0)) continue
-      const key = getSessionStorageKey(storageScope, local.id)
-      const dirty = dirtySessionSnapshotsRef.current.has(key) || persistedSessionsRef.current.get(local.id) !== local ||
-        chatSaveBaselineRef.current.isPending(storageScope, local.id)
-      const live = sessionsRef.current.find(session => session.id === local.id)
-      if (live !== local) { conflict = true; continue }
-      const reconciled = dirty ? chatSaveBaselineRef.current.reconcileTeamEnd(storageScope, local, persisted) : persisted
-      if (!dirty) chatSaveBaselineRef.current.fenceAndAdvance(storageScope, local.id, persisted)
-      persistedSessionsRef.current.set(local.id, persisted)
-      if (!reconciled) {
-        // Keep the local snapshot and its old baseline; the storage fence rejects automatic overwrite.
-        setDirtySessionSnapshot(storageScope, local)
-        conflict = true
-        continue
+    const timer = window.setInterval(() => {
+      pump()
+      void tick()
+    }, 500)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+      dispatchTeamActivity({ type: 'end', owner: activityOwner, key })
+      dispatcher.end()
+      if (teamMessageDispatcherRef.current?.dispatcher === dispatcher)
+        teamMessageDispatcherRef.current = null
+    }
+  }, [
+    teamEnabled,
+    sessionsLoaded,
+    sessionLoadError,
+    storageScope,
+    route?.channel,
+    route?.scopeType,
+    route?.scopeId,
+    route?.threadId,
+    messageLeadId,
+    messageGeneration,
+    messageKey,
+    teamLead?.teamEnded,
+    teamLead?.archived
+  ])
+  const reconcileTeamLifecycle = useCallback(
+    (records: ChatSession[]) => {
+      let conflict = false
+      for (const persisted of records) {
+        const local = sessionsRef.current.find((session) => session.id === persisted.id)
+        if (!local || (persisted.teamLifecycleRevision ?? 0) <= (local.teamLifecycleRevision ?? 0))
+          continue
+        const key = getSessionStorageKey(storageScope, local.id)
+        const dirty =
+          dirtySessionSnapshotsRef.current.has(key) ||
+          persistedSessionsRef.current.get(local.id) !== local ||
+          chatSaveBaselineRef.current.isPending(storageScope, local.id)
+        const live = sessionsRef.current.find((session) => session.id === local.id)
+        if (live !== local) {
+          conflict = true
+          continue
+        }
+        const reconciled = dirty
+          ? chatSaveBaselineRef.current.reconcileTeamEnd(storageScope, local, persisted)
+          : persisted
+        if (!dirty) chatSaveBaselineRef.current.fenceAndAdvance(storageScope, local.id, persisted)
+        persistedSessionsRef.current.set(local.id, persisted)
+        if (!reconciled) {
+          // Keep the local snapshot and its old baseline; the storage fence rejects automatic overwrite.
+          setDirtySessionSnapshot(storageScope, local)
+          conflict = true
+          continue
+        }
+        setSessions((previous) =>
+          previous.map((session) => (session === local ? reconciled : session))
+        )
+        if (dirty) dirtySessionSnapshotsRef.current.set(key, reconciled)
+        else dirtySessionSnapshotsRef.current.delete(key)
       }
-      setSessions(previous => previous.map(session => session === local ? reconciled : session))
-      if (dirty) dirtySessionSnapshotsRef.current.set(key, reconciled)
-      else dirtySessionSnapshotsRef.current.delete(key)
-    }
-    if (conflict) {
-      setSessionSaveError('团队状态冲突：本地更改未覆盖已保存的会话，请保留并检查。')
-      notifyWarning('团队状态冲突，已保留本地更改')
-    }
-  }, [getSessionStorageKey, notifyWarning, setDirtySessionSnapshot, setSessions, storageScope])
-  const refreshTeamLifecycle = useCallback(async (leadId:string) => {
-    const refreshKey = getSessionStorageKey(storageScope, leadId)
-    const sequence = (teamLifecycleRefreshRef.current.get(refreshKey) ?? 0) + 1
-    teamLifecycleRefreshRef.current.set(refreshKey, sequence)
-    const scopeEpoch = sessionLoadEpochRef.current
-    const all = await loadAllSessions(storageScope)
-    if (!isMountedRef.current || storageScopeRef.current!==storageScope || sessionLoadEpochRef.current!==scopeEpoch ||
-        teamLifecycleRefreshRef.current.get(refreshKey)!==sequence) return
-    const lead = all.find(session=>session.id===leadId)
-    if (!lead || lead.teamLeadId || hasSessionDeleteTombstone(leadId,storageScope)) return
-    const oldMembers = all.filter(session=>session.teamLeadId===leadId && (session.teamMemberGeneration??0)!==(lead.teamGeneration??0))
-    reconcileTeamLifecycle([lead,...oldMembers])
-  }, [getSessionStorageKey, reconcileTeamLifecycle, storageScope])
+      if (conflict) {
+        setSessionSaveError('团队状态冲突：本地更改未覆盖已保存的会话，请保留并检查。')
+        notifyWarning('团队状态冲突，已保留本地更改')
+      }
+    },
+    [getSessionStorageKey, notifyWarning, setDirtySessionSnapshot, setSessions, storageScope]
+  )
+  const refreshTeamLifecycle = useCallback(
+    async (leadId: string) => {
+      const refreshKey = getSessionStorageKey(storageScope, leadId)
+      const sequence = (teamLifecycleRefreshRef.current.get(refreshKey) ?? 0) + 1
+      teamLifecycleRefreshRef.current.set(refreshKey, sequence)
+      const scopeEpoch = sessionLoadEpochRef.current
+      const all = await loadAllSessions(storageScope)
+      if (
+        !isMountedRef.current ||
+        storageScopeRef.current !== storageScope ||
+        sessionLoadEpochRef.current !== scopeEpoch ||
+        teamLifecycleRefreshRef.current.get(refreshKey) !== sequence
+      )
+        return
+      const lead = all.find((session) => session.id === leadId)
+      if (!lead || lead.teamLeadId || hasSessionDeleteTombstone(leadId, storageScope)) return
+      const oldMembers = all.filter(
+        (session) =>
+          session.teamLeadId === leadId &&
+          (session.teamMemberGeneration ?? 0) !== (lead.teamGeneration ?? 0)
+      )
+      reconcileTeamLifecycle([lead, ...oldMembers])
+    },
+    [getSessionStorageKey, reconcileTeamLifecycle, storageScope]
+  )
   useEffect(() => {
     const handler = (event: Event) => {
-      const detail=(event as CustomEvent<{scope:string;leadId:string}>).detail
-      if (detail?.scope!==storageScope || typeof detail.leadId!=='string') return
-      if (sessionsRef.current.some(session=>session.id===detail.leadId)) void refreshTeamLifecycle(detail.leadId).catch(()=>notifyWarning('团队状态刷新失败'))
+      const detail = (event as CustomEvent<{ scope: string; leadId: string }>).detail
+      if (detail?.scope !== storageScope || typeof detail.leadId !== 'string') return
+      if (sessionsRef.current.some((session) => session.id === detail.leadId))
+        void refreshTeamLifecycle(detail.leadId).catch(() => notifyWarning('团队状态刷新失败'))
     }
-    window.addEventListener('chat:team-lifecycle-ended',handler)
-    const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('magicpot-team-lifecycle') : undefined
-    if (channel) channel.onmessage=event=>handler(new CustomEvent('chat:team-lifecycle-ended',{detail:event.data}))
-    return () => { window.removeEventListener('chat:team-lifecycle-ended',handler); channel?.close() }
-  }, [storageScope,refreshTeamLifecycle,notifyWarning])
+    window.addEventListener('chat:team-lifecycle-ended', handler)
+    const channel =
+      typeof BroadcastChannel === 'function'
+        ? new BroadcastChannel('magicpot-team-lifecycle')
+        : undefined
+    if (channel)
+      channel.onmessage = (event) =>
+        handler(new CustomEvent('chat:team-lifecycle-ended', { detail: event.data }))
+    return () => {
+      window.removeEventListener('chat:team-lifecycle-ended', handler)
+      channel?.close()
+    }
+  }, [storageScope, refreshTeamLifecycle, notifyWarning])
   const [teamManagementHost, setTeamManagementHost] = useState<HTMLDivElement | null>(null)
   const [teamManagementOpenRequest, setTeamManagementOpenRequest] = useState(0)
   const [creatingTeamMember, setCreatingTeamMember] = useState(false)
   // End changes refs synchronously; also re-render to suspend/restart the observer.
   const [, setTeamEndRevision] = useState(0)
-  useEffect(() => { setCreatingTeamMember(false) }, [storageScope, messageLeadId, messageGeneration, active])
+  useEffect(() => {
+    setCreatingTeamMember(false)
+  }, [storageScope, messageLeadId, messageGeneration, active])
   const leadJobsTeamKey = teamLead ? `${storageScope}\u0000${teamLead.id}` : ''
   const leadJobsEndEpoch = teamEndEpochsRef.current.get(leadJobsTeamKey) ?? 0
   const leadJobsSelectionEpoch = sessionSelectionEpochRef.current
-  const leadJobsLeadAuthorityEpoch = teamLead ? (teamAuthorityEpochsRef.current.get(teamLead.id) ?? 0) : 0
-  const leadJobsMemberAuthorityEpoch = currentSession ? (teamAuthorityEpochsRef.current.get(currentSession.id) ?? 0) : 0
-  const teamLeadJobsKey = teamEnabled && !!route?.threadId && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope &&
-    currentSession?.teamLeadId && teamLead && !teamLead.teamLeadId && !teamLead.archived && !teamLead.teamEnded &&
-    !currentSession.archived && teamMembers.some(member => member.id === currentSession.id) &&
-    !teamEndPendingRef.current.has(leadJobsTeamKey) && !teamEndedMainRef.current.has(leadJobsTeamKey) &&
-    !hasSessionDeleteTombstone(teamLead.id, storageScope) && !hasSessionDeleteTombstone(currentSession.id, storageScope) &&
-    !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, teamLead.id)) && !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSession.id))
-      ? JSON.stringify([storageScope, route.channel, route.scopeType, route.scopeId, route.threadId, teamLead.id, currentSession.id, messageGeneration, leadJobsEndEpoch, leadJobsSelectionEpoch, leadJobsLeadAuthorityEpoch, leadJobsMemberAuthorityEpoch, sessionLoadEpochRef.current, teamVisibilityRef.current.epoch]) : null
+  const leadJobsLeadAuthorityEpoch = teamLead
+    ? (teamAuthorityEpochsRef.current.get(teamLead.id) ?? 0)
+    : 0
+  const leadJobsMemberAuthorityEpoch = currentSession
+    ? (teamAuthorityEpochsRef.current.get(currentSession.id) ?? 0)
+    : 0
+  const teamLeadJobsKey =
+    teamEnabled &&
+    !!route?.threadId &&
+    sessionsLoaded &&
+    !sessionLoadError &&
+    storageScopeRef.current === storageScope &&
+    currentSession?.teamLeadId &&
+    teamLead &&
+    !teamLead.teamLeadId &&
+    !teamLead.archived &&
+    !teamLead.teamEnded &&
+    !currentSession.archived &&
+    teamMembers.some((member) => member.id === currentSession.id) &&
+    !teamEndPendingRef.current.has(leadJobsTeamKey) &&
+    !teamEndedMainRef.current.has(leadJobsTeamKey) &&
+    !hasSessionDeleteTombstone(teamLead.id, storageScope) &&
+    !hasSessionDeleteTombstone(currentSession.id, storageScope) &&
+    !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, teamLead.id)) &&
+    !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSession.id))
+      ? JSON.stringify([
+          storageScope,
+          route.channel,
+          route.scopeType,
+          route.scopeId,
+          route.threadId,
+          teamLead.id,
+          currentSession.id,
+          messageGeneration,
+          leadJobsEndEpoch,
+          leadJobsSelectionEpoch,
+          leadJobsLeadAuthorityEpoch,
+          leadJobsMemberAuthorityEpoch,
+          sessionLoadEpochRef.current,
+          teamVisibilityRef.current.epoch
+        ])
+      : null
   const committedLeadJobsKeyRef = useRef<string | null>(null)
-  const leadJobsAuthority = teamLeadJobsKey && teamLead && currentSession ? {
-    leadId: teamLead.id, memberId: currentSession.id,
-    leadEpoch: teamAuthorityEpochsRef.current.get(teamLead.id) ?? 0,
-    memberEpoch: teamAuthorityEpochsRef.current.get(currentSession.id) ?? 0
-  } : null
+  const leadJobsAuthority =
+    teamLeadJobsKey && teamLead && currentSession
+      ? {
+          leadId: teamLead.id,
+          memberId: currentSession.id,
+          leadEpoch: teamAuthorityEpochsRef.current.get(teamLead.id) ?? 0,
+          memberEpoch: teamAuthorityEpochsRef.current.get(currentSession.id) ?? 0
+        }
+      : null
   useLayoutEffect(() => {
     if (!teamLeadJobsKey || !leadJobsAuthority) return
-    if (!teamAuthorityEpochsRef.current.has(leadJobsAuthority.leadId)) teamAuthorityEpochsRef.current.set(leadJobsAuthority.leadId, 0)
-    if (!teamAuthorityEpochsRef.current.has(leadJobsAuthority.memberId)) teamAuthorityEpochsRef.current.set(leadJobsAuthority.memberId, 0)
+    if (!teamAuthorityEpochsRef.current.has(leadJobsAuthority.leadId))
+      teamAuthorityEpochsRef.current.set(leadJobsAuthority.leadId, 0)
+    if (!teamAuthorityEpochsRef.current.has(leadJobsAuthority.memberId))
+      teamAuthorityEpochsRef.current.set(leadJobsAuthority.memberId, 0)
     committedLeadJobsKeyRef.current = teamLeadJobsKey
-    return () => { committedLeadJobsKeyRef.current = null }
+    return () => {
+      committedLeadJobsKeyRef.current = null
+    }
   }, [teamLeadJobsKey])
   const leadJobsScopeEpoch = sessionLoadEpochRef.current
   const leadJobsVisibilityEpoch = teamVisibilityRef.current.epoch
   const isLeadJobsLive = () => {
-    if (!teamLeadJobsKey || committedLeadJobsKeyRef.current !== teamLeadJobsKey || !leadJobsAuthority || !teamLead || !currentSession ||
-      !isMountedRef.current || !teamVisibilityRef.current.active || teamVisibilityRef.current.epoch !== leadJobsVisibilityEpoch ||
-      storageScopeRef.current !== storageScope || sessionLoadEpochRef.current !== leadJobsScopeEpoch || currentSessionIdRef.current !== currentSession.id ||
+    if (
+      !teamLeadJobsKey ||
+      committedLeadJobsKeyRef.current !== teamLeadJobsKey ||
+      !leadJobsAuthority ||
+      !teamLead ||
+      !currentSession ||
+      !isMountedRef.current ||
+      !teamVisibilityRef.current.active ||
+      teamVisibilityRef.current.epoch !== leadJobsVisibilityEpoch ||
+      storageScopeRef.current !== storageScope ||
+      sessionLoadEpochRef.current !== leadJobsScopeEpoch ||
+      currentSessionIdRef.current !== currentSession.id ||
       sessionSelectionEpochRef.current !== leadJobsSelectionEpoch ||
-      (teamAuthorityEpochsRef.current.get(leadJobsAuthority.leadId) ?? 0) !== leadJobsAuthority.leadEpoch ||
-      (teamAuthorityEpochsRef.current.get(leadJobsAuthority.memberId) ?? 0) !== leadJobsAuthority.memberEpoch ||
-      teamEndPendingRef.current.has(leadJobsTeamKey) || teamEndedMainRef.current.has(leadJobsTeamKey) ||
+      (teamAuthorityEpochsRef.current.get(leadJobsAuthority.leadId) ?? 0) !==
+        leadJobsAuthority.leadEpoch ||
+      (teamAuthorityEpochsRef.current.get(leadJobsAuthority.memberId) ?? 0) !==
+        leadJobsAuthority.memberEpoch ||
+      teamEndPendingRef.current.has(leadJobsTeamKey) ||
+      teamEndedMainRef.current.has(leadJobsTeamKey) ||
       (teamEndEpochsRef.current.get(leadJobsTeamKey) ?? 0) !== leadJobsEndEpoch ||
-      hasSessionDeleteTombstone(teamLead.id, storageScope) || hasSessionDeleteTombstone(currentSession.id, storageScope) ||
-      deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, teamLead.id)) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSession.id))) return false
-    const liveLead = sessionsRef.current.find(session => session.id === teamLead.id)
-    const liveMember = sessionsRef.current.find(session => session.id === currentSession.id)
-    return !!liveLead && !liveLead.teamLeadId && !liveLead.archived && !liveLead.teamEnded &&
-      !!liveMember && !liveMember.archived && liveMember.teamLeadId === liveLead.id &&
-      (liveLead.teamGeneration ?? 0) === messageGeneration && (liveMember.teamMemberGeneration ?? 0) === messageGeneration
+      hasSessionDeleteTombstone(teamLead.id, storageScope) ||
+      hasSessionDeleteTombstone(currentSession.id, storageScope) ||
+      deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, teamLead.id)) ||
+      deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSession.id))
+    )
+      return false
+    const liveLead = sessionsRef.current.find((session) => session.id === teamLead.id)
+    const liveMember = sessionsRef.current.find((session) => session.id === currentSession.id)
+    return (
+      !!liveLead &&
+      !liveLead.teamLeadId &&
+      !liveLead.archived &&
+      !liveLead.teamEnded &&
+      !!liveMember &&
+      !liveMember.archived &&
+      liveMember.teamLeadId === liveLead.id &&
+      (liveLead.teamGeneration ?? 0) === messageGeneration &&
+      (liveMember.teamMemberGeneration ?? 0) === messageGeneration
+    )
   }
-  const jobController = useAgentThreadJobs({ route, conversationId: currentSessionId || undefined, active })
+  const jobController = useAgentThreadJobs({
+    route,
+    conversationId: currentSessionId || undefined,
+    active
+  })
   const processScope = getAgentThreadProcessScope(route, currentSessionId || undefined, active)
   const processController = useAgentThreadProcesses(processScope)
   const [teamApprovalHost, setTeamApprovalHost] = useState<HTMLDivElement | null>(null)
   const approvalSurfaceRef = useRef<object | null>(null)
-  const [teamWaitingState, setTeamWaitingState] = useState<{ key: string; token: object; host: HTMLElement; ids: ReadonlySet<string> } | null>(null)
-  const approvalSurfaceKey = teamEnabled && route && teamApprovalHost && teamMembers.length && !showingSide && !isSkillPickerOpen &&
-    sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope
-    ? JSON.stringify([storageScope, route.channel, route.scopeType, route.scopeId, route.threadId, messageLeadId, messageGeneration,
-      teamMembers.map(member => [member.id, member.teamMemberName ?? member.title])]) : null
-  const teamWaiting = approvalSurfaceKey && teamWaitingState?.key === approvalSurfaceKey && teamWaitingState.host === teamApprovalHost && teamWaitingState.token === approvalSurfaceRef.current
-    ? teamWaitingState.ids : new Set<string>()
+  const [teamWaitingState, setTeamWaitingState] = useState<{
+    key: string
+    token: object
+    host: HTMLElement
+    ids: ReadonlySet<string>
+  } | null>(null)
+  const approvalSurfaceKey =
+    teamEnabled &&
+    route &&
+    teamApprovalHost &&
+    teamMembers.length &&
+    !showingSide &&
+    !isSkillPickerOpen &&
+    sessionsLoaded &&
+    !sessionLoadError &&
+    storageScopeRef.current === storageScope
+      ? JSON.stringify([
+          storageScope,
+          route.channel,
+          route.scopeType,
+          route.scopeId,
+          route.threadId,
+          messageLeadId,
+          messageGeneration,
+          teamMembers.map((member) => [member.id, member.teamMemberName ?? member.title])
+        ])
+      : null
+  const teamWaiting =
+    approvalSurfaceKey &&
+    teamWaitingState?.key === approvalSurfaceKey &&
+    teamWaitingState.host === teamApprovalHost &&
+    teamWaitingState.token === approvalSurfaceRef.current
+      ? teamWaitingState.ids
+      : new Set<string>()
   // Register at commit, and reject callbacks from a prior surface even after A→B→A.
   useLayoutEffect(() => {
     if (!approvalSurfaceKey || !route || !teamApprovalHost) return
@@ -8332,56 +9507,134 @@ const ChatPage: React.FC<ChatPageProps> = ({
     approvalSurfaceRef.current = token
     const unregister = registerTeamApprovalSurface({
       element: teamApprovalHost,
-      route: { channel: route.channel, scopeType: route.scopeType, scopeId: route.scopeId, threadId: route.threadId },
-      members: new Map(teamMembers.map(member => [member.id, member.teamMemberName ?? member.title])),
-      onWaiting: ids => { if (approvalSurfaceRef.current === token) setTeamWaitingState({ key: approvalSurfaceKey, token, host: teamApprovalHost, ids }) }
+      route: {
+        channel: route.channel,
+        scopeType: route.scopeType,
+        scopeId: route.scopeId,
+        threadId: route.threadId
+      },
+      members: new Map(
+        teamMembers.map((member) => [member.id, member.teamMemberName ?? member.title])
+      ),
+      onWaiting: (ids) => {
+        if (approvalSurfaceRef.current === token)
+          setTeamWaitingState({ key: approvalSurfaceKey, token, host: teamApprovalHost, ids })
+      }
     })
-    return () => { if (approvalSurfaceRef.current === token) approvalSurfaceRef.current = null; unregister() }
+    return () => {
+      if (approvalSurfaceRef.current === token) approvalSurfaceRef.current = null
+      unregister()
+    }
   }, [approvalSurfaceKey, teamApprovalHost])
-  const [replayView, setReplayView] = useState<{ scope: string; session: ChatSession; command: ReplayUserCommand; modelConfig: typeof config.llm_config; profileId: string | null; skillId: string | null } | null>(null)
-  useEffect(() => { setReplayView(null) }, [active, storageScope, currentSessionId])
+  const [replayView, setReplayView] = useState<{
+    scope: string
+    session: ChatSession
+    command: ReplayUserCommand
+    modelConfig: typeof config.llm_config
+    profileId: string | null
+    skillId: string | null
+  } | null>(null)
+  useEffect(() => {
+    setReplayView(null)
+  }, [active, storageScope, currentSessionId])
   const replayBusyRef = useRef(false)
-  const [basicCommandView, setBasicCommandView] = useState<{ scope: string; kind: 'jobs' | 'compact'; session: ChatSession; modelConfig: typeof config.llm_config; profileId: string | null; generation: number } | null>(null)
+  const [basicCommandView, setBasicCommandView] = useState<{
+    scope: string
+    kind: 'jobs' | 'compact'
+    session: ChatSession
+    modelConfig: typeof config.llm_config
+    profileId: string | null
+    generation: number
+  } | null>(null)
   const basicCommandGenerationRef = useRef(0)
   const [basicJobsText, setBasicJobsText] = useState('')
   const basicJobsPendingRef = useRef(false)
-  const [imageRepairView, setImageRepairView] = useState<{ scope: string; session: ChatSession; scan: ImageRepairScan; confirmed: boolean } | null>(null)
-  const [configurationView, setConfigurationView] = useState<{ scope: string; kind: 'plugin' | 'module' | 'video_gen' } | null>(null)
-  const [inspectionView, setInspectionView] = useState<{ scope: string; title: string; text: string } | null>(null)
+  const [imageRepairView, setImageRepairView] = useState<{
+    scope: string
+    session: ChatSession
+    scan: ImageRepairScan
+    confirmed: boolean
+  } | null>(null)
+  const [configurationView, setConfigurationView] = useState<{
+    scope: string
+    kind: 'plugin' | 'module' | 'video_gen'
+  } | null>(null)
+  const [inspectionView, setInspectionView] = useState<{
+    scope: string
+    title: string
+    text: string
+  } | null>(null)
   const inspectionScope = JSON.stringify({ route, conversationId: currentSessionId, storageScope })
   useEffect(() => {
     basicCommandGenerationRef.current++
-    setInspectionView(null); setConfigurationView(null); setImageRepairView(null); setBasicCommandView(null); setBasicJobsText('')
+    setInspectionView(null)
+    setConfigurationView(null)
+    setImageRepairView(null)
+    setBasicCommandView(null)
+    setBasicJobsText('')
     imageRepairContextRef.current = null
   }, [inspectionScope, active])
   const scratchpadCommandRef = useRef<AgentScratchpadCommandHandle>(null)
-  const scratchpadAvailable = active && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && !!currentSession &&
-    config?.use_remote_llm === false && !selectedCustomSkill && !showingSide && !isSkillPickerOpen && !skillDetailsOpen && !!currentSessionId &&
-    !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSessionId)) && !hasSessionDeleteTombstone(currentSessionId, storageScope)
+  const scratchpadAvailable =
+    active &&
+    sessionsLoaded &&
+    !sessionLoadError &&
+    storageScopeRef.current === storageScope &&
+    !!currentSession &&
+    config?.use_remote_llm === false &&
+    !selectedCustomSkill &&
+    !showingSide &&
+    !isSkillPickerOpen &&
+    !skillDetailsOpen &&
+    !!currentSessionId &&
+    !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSessionId)) &&
+    !hasSessionDeleteTombstone(currentSessionId, storageScope)
   const handleSendCurrentMessage = useCallback(() => {
-    if (currentSessionIdRef.current && cappedComposerSessionsRef.current.has(currentSessionIdRef.current)) return
-    const teamSettingsConflict = teamLead && persistedSessionsRef.current.get(teamLead.id)
-      ? !sameTeamLifecycle(teamLead, persistedSessionsRef.current.get(teamLead.id)!)
-      : false
-    if (teamSettingsConflict) { notifyWarning('团队状态冲突，请先处理未保存的会话'); return }
+    if (
+      currentSessionIdRef.current &&
+      cappedComposerSessionsRef.current.has(currentSessionIdRef.current)
+    )
+      return
+    const teamSettingsConflict =
+      teamLead && persistedSessionsRef.current.get(teamLead.id)
+        ? !sameTeamLifecycle(teamLead, persistedSessionsRef.current.get(teamLead.id)!)
+        : false
+    if (teamSettingsConflict) {
+      notifyWarning('团队状态冲突，请先处理未保存的会话')
+      return
+    }
     const input = inputValueRef.current
     const leadId = currentSession?.teamLeadId || currentSession?.id
     if (leadId && teamEndPendingRef.current.has(`${storageScope}\u0000${leadId}`)) {
       notifyWarning('团队正在结束，请稍候')
       return
     }
-    if (leadId && teamEndedMainRef.current.has(`${storageScope}\u0000${leadId}`) && (currentSession?.teamLeadId || /^@/.test(input))) {
+    if (
+      leadId &&
+      teamEndedMainRef.current.has(`${storageScope}\u0000${leadId}`) &&
+      (currentSession?.teamLeadId || /^@/.test(input))
+    ) {
       notifyWarning('团队已结束')
       return
     }
     if (teamEnabled && teamLead && /^@/.test(input)) {
-      if (teamLead.teamEnded || currentSession?.teamLeadId) { notifyWarning('团队已结束或当前不是组长会话'); return }
+      if (teamLead.teamEnded || currentSession?.teamLeadId) {
+        notifyWarning('团队已结束或当前不是组长会话')
+        return
+      }
       try {
         const recipient = resolveTeamRecipient(input.trim(), teamMembers)
-        if (!recipient) { notifyWarning('请输入 @成员 后接任务'); return }
+        if (!recipient) {
+          notifyWarning('请输入 @成员 后接任务')
+          return
+        }
         // A rejected team target must not consume the user's @ draft before preflight runs.
-        try { resolveTeamRequestSettings(recipient.session, teamLead) }
-        catch { notifyWarning('Team lead unavailable.'); return }
+        try {
+          resolveTeamRequestSettings(recipient.session, teamLead)
+        } catch {
+          notifyWarning('Team lead unavailable.')
+          return
+        }
         // The team @ route is text-only; never clear a lead draft while silently
         // dropping its attachments or hidden context from the member request.
         if (pendingAttachmentsRef.current.length || pendingHiddenContextRef.current.trim()) {
@@ -8397,17 +9650,30 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const hiddenContext = pendingHiddenContextRef.current
         // Do not queue an @ draft behind an active member: a local queue is not a
         // durable receipt and the target may fail its later model preflight.
-        if (sendingSessionIdsRef.current.has(recipient.session.id) || loadingSessionIdsRef.current.has(recipient.session.id)) {
+        if (
+          sendingSessionIdsRef.current.has(recipient.session.id) ||
+          loadingSessionIdsRef.current.has(recipient.session.id)
+        ) {
           notifyWarning('成员正在处理其他请求，请稍后重试。')
           return
         }
         let submissionAccepted = false
-        const isSubmissionCurrent = () => submissionAccepted || (isMountedRef.current && storageScopeRef.current === storageScope &&
-          committedRunScopeRef.current === storageScope && committedRunScopeEpochRef.current === runScopeEpoch &&
-          currentSessionIdRef.current === leadId && sessionSelectionEpochRef.current === selectionEpoch &&
-          inputValueRef.current === input && composerDraftMutationRef.current === draftMutation &&
-          pendingAttachmentsRef.current === attachments && pendingHiddenContextRef.current === hiddenContext)
-        void sendMessage({ content: text, targetSessionId: recipient.session.id, isComposerSubmissionCurrent: isSubmissionCurrent,
+        const isSubmissionCurrent = () =>
+          submissionAccepted ||
+          (isMountedRef.current &&
+            storageScopeRef.current === storageScope &&
+            committedRunScopeRef.current === storageScope &&
+            committedRunScopeEpochRef.current === runScopeEpoch &&
+            currentSessionIdRef.current === leadId &&
+            sessionSelectionEpochRef.current === selectionEpoch &&
+            inputValueRef.current === input &&
+            composerDraftMutationRef.current === draftMutation &&
+            pendingAttachmentsRef.current === attachments &&
+            pendingHiddenContextRef.current === hiddenContext)
+        void sendMessage({
+          content: text,
+          targetSessionId: recipient.session.id,
+          isComposerSubmissionCurrent: isSubmissionCurrent,
           onComposerSubmissionAccepted: () => {
             if (!isSubmissionCurrent()) return
             submissionAccepted = true
@@ -8415,8 +9681,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
             markTransientDraftCleared(storageScope, leadId)
             writeSessionDraftBackup(leadId, Date.now(), undefined, storageScope)
             setInputValue('')
-            setComposerClearVersion(version => version + 1)
-            setSessions(previous => previous.map(session => session.id === leadId ? stripSessionDraft(session) : session))
+            setComposerClearVersion((version) => version + 1)
+            setSessions((previous) =>
+              previous.map((session) =>
+                session.id === leadId ? stripSessionDraft(session) : session
+              )
+            )
           }
         }).catch((error: unknown) => {
           // Async preparation can reject before the local turn is accepted.
@@ -8424,84 +9694,243 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (!isSubmissionCurrent()) return
           notifyError(error instanceof Error ? error.message : String(error))
         })
-      } catch { notifyWarning('请选择唯一的成员名称并输入任务') }
+      } catch {
+        notifyWarning('请选择唯一的成员名称并输入任务')
+      }
       return
     }
     if (isReplayUserCommand(input)) {
       const id = currentSessionIdRef.current
-      if (!active || !isReady || !sessionsLoaded || sessionLoadError || config.use_remote_llm || !id || id !== currentSessionId || storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || loadingSessionIdsRef.current.has(id) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id)) || hasSessionDeleteTombstone(id,storageScope)) { notifyWarning(t('chat.replay_unavailable_current', { defaultValue: 'Replay unavailable for this conversation.' })); return }
+      if (
+        !active ||
+        !isReady ||
+        !sessionsLoaded ||
+        sessionLoadError ||
+        config.use_remote_llm ||
+        !id ||
+        id !== currentSessionId ||
+        storageScopeRef.current !== storageScope ||
+        pendingAttachmentsRef.current.length ||
+        pendingHiddenContextRef.current ||
+        loadingSessionIdsRef.current.has(id) ||
+        deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) ||
+        hasSessionDeleteTombstone(id, storageScope)
+      ) {
+        notifyWarning(
+          t('chat.replay_unavailable_current', {
+            defaultValue: 'Replay unavailable for this conversation.'
+          })
+        )
+        return
+      }
       try {
         const command = parseReplayUserCommand(input)!
-        const session = sessionsRef.current.find(item=>item.id===id)
+        const session = sessionsRef.current.find((item) => item.id === id)
         if (!session) return
         if (command.kind !== 'branch') planReplay(session.messages, command)
-        setReplayView({scope:inspectionScope,session,command,modelConfig:config.llm_config,profileId:selectedProfileId,skillId:selectedSkillId})
-        setInputValue(''); setComposerClearVersion(version=>version+1)
-      } catch { notifyWarning(t('chat.use_replay_commands', { defaultValue: 'Use /branch, /regen or /edit <message number> <text>. Tool/attachment replay requires the existing editor and review.' })) }
+        setReplayView({
+          scope: inspectionScope,
+          session,
+          command,
+          modelConfig: config.llm_config,
+          profileId: selectedProfileId,
+          skillId: selectedSkillId
+        })
+        setInputValue('')
+        setComposerClearVersion((version) => version + 1)
+      } catch {
+        notifyWarning(
+          t('chat.use_replay_commands', {
+            defaultValue:
+              'Use /branch, /regen or /edit <message number> <text>. Tool/attachment replay requires the existing editor and review.'
+          })
+        )
+      }
       return
     }
     if (isAgentBasicCommand(input)) {
       const id = currentSessionIdRef.current
-      const session = sessionsRef.current.find(item => item.id === id)
-      if (!active || !isReady || !sessionsLoaded || sessionLoadError || !id || id !== currentSessionId || !session ||
-        storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current ||
-        deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) {
-        notifyWarning(t('chat.command_unavailable_current', { defaultValue: 'Command unavailable for the current conversation.' })); return
+      const session = sessionsRef.current.find((item) => item.id === id)
+      if (
+        !active ||
+        !isReady ||
+        !sessionsLoaded ||
+        sessionLoadError ||
+        !id ||
+        id !== currentSessionId ||
+        !session ||
+        storageScopeRef.current !== storageScope ||
+        pendingAttachmentsRef.current.length ||
+        pendingHiddenContextRef.current ||
+        deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) ||
+        hasSessionDeleteTombstone(id, storageScope)
+      ) {
+        notifyWarning(
+          t('chat.command_unavailable_current', {
+            defaultValue: 'Command unavailable for the current conversation.'
+          })
+        )
+        return
       }
       try {
         const command = parseAgentBasicCommand(input)!
         if (command === 'status') {
-          setInspectionView({ scope: inspectionScope, title: '/status', text: JSON.stringify({
-            profileId: selectedProfileId, skillId: selectedSkillId, messages: session.messages.length,
-            running: loadingSessionIdsRef.current.has(id), remote: config.use_remote_llm,
-            compactedMessages: session.compactedMessages?.length ?? 0,
-
-          }, null, 2) })
+          setInspectionView({
+            scope: inspectionScope,
+            title: '/status',
+            text: JSON.stringify(
+              {
+                profileId: selectedProfileId,
+                skillId: selectedSkillId,
+                messages: session.messages.length,
+                running: loadingSessionIdsRef.current.has(id),
+                remote: config.use_remote_llm,
+                compactedMessages: session.compactedMessages?.length ?? 0
+              },
+              null,
+              2
+            )
+          })
         } else if (command === 'video_gen') {
           setConfigurationView({ scope: inspectionScope, kind: 'video_gen' })
         } else {
-          if (command === 'jobs' && (route?.channel !== 'canvas' || route.scopeType !== 'thread' || config.use_remote_llm)) {
-            notifyWarning(t('chat.jobs_local_only', { defaultValue: 'Jobs are available only in a local canvas thread.' })); return
+          if (
+            command === 'jobs' &&
+            (route?.channel !== 'canvas' || route.scopeType !== 'thread' || config.use_remote_llm)
+          ) {
+            notifyWarning(
+              t('chat.jobs_local_only', {
+                defaultValue: 'Jobs are available only in a local canvas thread.'
+              })
+            )
+            return
           }
           if (command === 'compact' && loadingSessionIdsRef.current.has(id)) {
-            notifyWarning(t('chat.compaction_unavailable_busy', { defaultValue: 'Compaction unavailable or conversation is busy.' })); return
+            notifyWarning(
+              t('chat.compaction_unavailable_busy', {
+                defaultValue: 'Compaction unavailable or conversation is busy.'
+              })
+            )
+            return
           }
           setBasicJobsText('')
-          setBasicCommandView({ scope: inspectionScope, kind: command, session, modelConfig: config.llm_config, profileId: selectedProfileId, generation: ++basicCommandGenerationRef.current })
+          setBasicCommandView({
+            scope: inspectionScope,
+            kind: command,
+            session,
+            modelConfig: config.llm_config,
+            profileId: selectedProfileId,
+            generation: ++basicCommandGenerationRef.current
+          })
         }
-        setInputValue(''); setComposerClearVersion(version => version + 1)
-        clearScheduledDraftPersistence(); markTransientDraftCleared(storageScope, id); writeSessionDraftBackup(id, Date.now(), undefined, storageScope)
-        setSessions(previous => previous.map(item => item.id === id ? stripSessionDraft(item) : item))
+        setInputValue('')
+        setComposerClearVersion((version) => version + 1)
+        clearScheduledDraftPersistence()
+        markTransientDraftCleared(storageScope, id)
+        writeSessionDraftBackup(id, Date.now(), undefined, storageScope)
+        setSessions((previous) =>
+          previous.map((item) => (item.id === id ? stripSessionDraft(item) : item))
+        )
         void persistCurrentSessionSnapshot(id, 'accepted-user-command').catch(() => undefined)
-      } catch { notifyWarning(t('chat.use_basic_command', { defaultValue: 'Use /status, /jobs or /compact without arguments.' })) }
+      } catch {
+        notifyWarning(
+          t('chat.use_basic_command', {
+            defaultValue: 'Use /status, /jobs or /compact without arguments.'
+          })
+        )
+      }
       return
     }
     if (isRepairImagesCommand(input)) {
       const id = currentSessionIdRef.current
-      if (imageRepairScanPendingRef.current || !active || !isReady || !sessionsLoaded || sessionLoadError || !id || id !== currentSessionId ||
-        config.use_remote_llm || storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current ||
-        loadingSessionIdsRef.current.has(id) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) {
-        notifyWarning(t('chat.image_repair_unavailable_current', { defaultValue: 'Image repair unavailable for the current conversation.' })); return
+      if (
+        imageRepairScanPendingRef.current ||
+        !active ||
+        !isReady ||
+        !sessionsLoaded ||
+        sessionLoadError ||
+        !id ||
+        id !== currentSessionId ||
+        config.use_remote_llm ||
+        storageScopeRef.current !== storageScope ||
+        pendingAttachmentsRef.current.length ||
+        pendingHiddenContextRef.current ||
+        loadingSessionIdsRef.current.has(id) ||
+        deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) ||
+        hasSessionDeleteTombstone(id, storageScope)
+      ) {
+        notifyWarning(
+          t('chat.image_repair_unavailable_current', {
+            defaultValue: 'Image repair unavailable for the current conversation.'
+          })
+        )
+        return
       }
-      try { parseRepairImagesCommand(input) } catch { notifyWarning(t('chat.use_repair_images', { defaultValue: 'Use /repair-images without arguments.' })); return }
-      const expected = sessionsRef.current.find(session => session.id === id)
+      try {
+        parseRepairImagesCommand(input)
+      } catch {
+        notifyWarning(
+          t('chat.use_repair_images', { defaultValue: 'Use /repair-images without arguments.' })
+        )
+        return
+      }
+      const expected = sessionsRef.current.find((session) => session.id === id)
       if (!expected) return
       imageRepairScanPendingRef.current = true
-      const current = () => isMountedRef.current && storageScopeRef.current === storageScope && currentSessionIdRef.current === id &&
-        sessionsRef.current.find(session => session.id === id) === expected && !loadingSessionIdsRef.current.has(id) &&
-        !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) && !hasSessionDeleteTombstone(id, storageScope)
-      void scanMissingLocalImages(expected.messages, paths => api().svcShell.fileExistsBatch(paths)).then(scan => {
-        if (current()) setImageRepairView({ scope: inspectionScope, session: expected, scan, confirmed: false })
-      }).catch(() => { if (current()) notifyWarning(t('chat.image_existence_check_unavailable', { defaultValue: 'Image existence check unavailable. No context was changed.' })) })
-        .finally(() => { imageRepairScanPendingRef.current = false })
+      const current = () =>
+        isMountedRef.current &&
+        storageScopeRef.current === storageScope &&
+        currentSessionIdRef.current === id &&
+        sessionsRef.current.find((session) => session.id === id) === expected &&
+        !loadingSessionIdsRef.current.has(id) &&
+        !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) &&
+        !hasSessionDeleteTombstone(id, storageScope)
+      void scanMissingLocalImages(expected.messages, (paths) =>
+        api().svcShell.fileExistsBatch(paths)
+      )
+        .then((scan) => {
+          if (current())
+            setImageRepairView({
+              scope: inspectionScope,
+              session: expected,
+              scan,
+              confirmed: false
+            })
+        })
+        .catch(() => {
+          if (current())
+            notifyWarning(
+              t('chat.image_existence_check_unavailable', {
+                defaultValue: 'Image existence check unavailable. No context was changed.'
+              })
+            )
+        })
+        .finally(() => {
+          imageRepairScanPendingRef.current = false
+        })
       return
     }
     if (isAgentInspectionCommand(input) || isAgentConfigurationCommand(input)) {
       const id = currentSessionIdRef.current
-      if (!active || !isReady || !sessionsLoaded || sessionLoadError || !id || id !== currentSessionId ||
-        storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current ||
-        deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) {
-        notifyWarning(t('chat.command_unavailable_current', { defaultValue: 'Command unavailable for the current conversation.' })); return
+      if (
+        !active ||
+        !isReady ||
+        !sessionsLoaded ||
+        sessionLoadError ||
+        !id ||
+        id !== currentSessionId ||
+        storageScopeRef.current !== storageScope ||
+        pendingAttachmentsRef.current.length ||
+        pendingHiddenContextRef.current ||
+        deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) ||
+        hasSessionDeleteTombstone(id, storageScope)
+      ) {
+        notifyWarning(
+          t('chat.command_unavailable_current', {
+            defaultValue: 'Command unavailable for the current conversation.'
+          })
+        )
+        return
       }
       try {
         const configuration = parseAgentConfigurationCommand(input)
@@ -8509,43 +9938,94 @@ const ChatPage: React.FC<ChatPageProps> = ({
           setConfigurationView({ scope: inspectionScope, kind: configuration })
           setInspectionView(null)
         } else {
-        const command = parseAgentInspectionCommand(input)!
-        const text = command === 'env'
-          ? formatAgentEnvironment({ conversationId: id, profileId: selectedProfileId, skillId: selectedSkillId,
-              storageScope, remote: config.use_remote_llm, route })
-          : buildSystemPromptFromSkillRuntime(selectedSkillRuntime) || t('chat.no_renderer_system_prompt', { defaultValue: '(No renderer-configured system prompt.)' })
-        setInspectionView({ scope: inspectionScope, title: `/${command}`, text: text.slice(0, 65536) })
-        setConfigurationView(null)
+          const command = parseAgentInspectionCommand(input)!
+          const text =
+            command === 'env'
+              ? formatAgentEnvironment({
+                  conversationId: id,
+                  profileId: selectedProfileId,
+                  skillId: selectedSkillId,
+                  storageScope,
+                  remote: config.use_remote_llm,
+                  route
+                })
+              : buildSystemPromptFromSkillRuntime(selectedSkillRuntime) ||
+                t('chat.no_renderer_system_prompt', {
+                  defaultValue: '(No renderer-configured system prompt.)'
+                })
+          setInspectionView({
+            scope: inspectionScope,
+            title: `/${command}`,
+            text: text.slice(0, 65536)
+          })
+          setConfigurationView(null)
         }
-        setInputValue(''); setComposerClearVersion(version => version + 1)
+        setInputValue('')
+        setComposerClearVersion((version) => version + 1)
         clearScheduledDraftPersistence()
         markTransientDraftCleared(storageScope, id)
         writeSessionDraftBackup(id, Date.now(), undefined, storageScope)
-        setSessions(previous => previous.map(session => session.id === id ? stripSessionDraft(session) : session))
+        setSessions((previous) =>
+          previous.map((session) => (session.id === id ? stripSessionDraft(session) : session))
+        )
         void persistCurrentSessionSnapshot(id, 'accepted-user-command').catch(() => undefined)
-      } catch { notifyWarning(isAgentConfigurationCommand(input)
-        ? t('chat.use_configuration_command', { defaultValue: 'Use /plugin [configure] or /module [configure]. Change switches and parameters in the existing editor.' })
-        : t('chat.use_inspection_commands', { defaultValue: 'Use /env or /system_prompt without arguments.' })) }
+      } catch {
+        notifyWarning(
+          isAgentConfigurationCommand(input)
+            ? t('chat.use_configuration_command', {
+                defaultValue:
+                  'Use /plugin [configure] or /module [configure]. Change switches and parameters in the existing editor.'
+              })
+            : t('chat.use_inspection_commands', {
+                defaultValue: 'Use /env or /system_prompt without arguments.'
+              })
+        )
+      }
       return
     }
     const scratchpadCommand = isAgentScratchpadCommand(input)
     const skillCommand = isAgentSkillCommand(input)
     if (scratchpadCommand || skillCommand || isAgentSideCommand(input)) {
-      const commandKey = scratchpadCommand ? 'chat.agent_scratchpad' : skillCommand ? 'chat.agent_skill_session' : 'chat.agent_side'
+      const commandKey = scratchpadCommand
+        ? 'chat.agent_scratchpad'
+        : skillCommand
+          ? 'chat.agent_skill_session'
+          : 'chat.agent_side'
       const id = currentSessionIdRef.current
-      if (!active || !id || id !== currentSessionId || route?.channel !== 'canvas' || route.scopeType !== 'thread' || config?.use_remote_llm ||
-        storageScopeRef.current !== storageScope || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope) ||
-        pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || scratchpadCommand && !scratchpadAvailable) {
-        notifyWarning(t(`${commandKey}.command_unavailable`)); return
+      if (
+        !active ||
+        !id ||
+        id !== currentSessionId ||
+        route?.channel !== 'canvas' ||
+        route.scopeType !== 'thread' ||
+        config?.use_remote_llm ||
+        storageScopeRef.current !== storageScope ||
+        deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) ||
+        hasSessionDeleteTombstone(id, storageScope) ||
+        pendingAttachmentsRef.current.length ||
+        pendingHiddenContextRef.current ||
+        (scratchpadCommand && !scratchpadAvailable)
+      ) {
+        notifyWarning(t(`${commandKey}.command_unavailable`))
+        return
       }
       try {
         const scope = JSON.stringify({ route, conversationId: id })
         const accepted = scratchpadCommand
-          ? scratchpadCommandRef.current?.execute(parseAgentScratchpadCommand(input)!, JSON.stringify({ route, conversationId: id, storageScope }))
-          : skillCommand ? skillCommandRef.current?.execute(parseAgentSkillCommand(input)!, scope) : sideCommandRef.current?.execute(parseAgentSideCommand(input)!, scope)
-        if (!accepted) { notifyWarning(t(`${commandKey}.command_unavailable`)); return }
+          ? scratchpadCommandRef.current?.execute(
+              parseAgentScratchpadCommand(input)!,
+              JSON.stringify({ route, conversationId: id, storageScope })
+            )
+          : skillCommand
+            ? skillCommandRef.current?.execute(parseAgentSkillCommand(input)!, scope)
+            : sideCommandRef.current?.execute(parseAgentSideCommand(input)!, scope)
+        if (!accepted) {
+          notifyWarning(t(`${commandKey}.command_unavailable`))
+          return
+        }
         if (skillCommand) setSkillDetailsOpen(true)
-        setInputValue(''); setComposerClearVersion(version => version + 1)
+        setInputValue('')
+        setComposerClearVersion((version) => version + 1)
         // An accepted user command leaves the ordinary draft pipeline immediately.
         // Otherwise a layout re-render can restore its still-persisted text before
         // the debounced empty draft runs. Preserve messages and use the existing
@@ -8553,23 +10033,72 @@ const ChatPage: React.FC<ChatPageProps> = ({
         clearScheduledDraftPersistence()
         markTransientDraftCleared(storageScope, id)
         writeSessionDraftBackup(id, Date.now(), undefined, storageScope)
-        setSessions(previous => previous.map(session => session.id === id ? stripSessionDraft(session) : session))
+        setSessions((previous) =>
+          previous.map((session) => (session.id === id ? stripSessionDraft(session) : session))
+        )
         void persistCurrentSessionSnapshot(id, 'accepted-user-command').catch(() => undefined)
-      } catch { notifyWarning(t(`${commandKey}.command_usage`)) }
+      } catch {
+        notifyWarning(t(`${commandKey}.command_usage`))
+      }
       return // Never fall back to the parent queue/model, even on an invalid command.
     }
-    const completedTeamMemberContext = teamEnabled && teamLead && !currentSession?.teamLeadId
-      ? teamMembers.flatMap(member => {
-          const result = [...member.messages].reverse().find(message => message.role === 'assistant' && Boolean(message.content?.trim()))
-          return result ? [`${member.teamMemberName || member.title}: ${result.content}`] : []
-        }).join('\n\n')
-      : ''
+    const completedTeamMemberContext =
+      teamEnabled && teamLead && !currentSession?.teamLeadId
+        ? teamMembers
+            .flatMap((member) => {
+              const result = [...member.messages]
+                .reverse()
+                .find((message) => message.role === 'assistant' && Boolean(message.content?.trim()))
+              return result ? [`${member.teamMemberName || member.title}: ${result.content}`] : []
+            })
+            .join('\n\n')
+        : ''
     if (completedTeamMemberContext && currentSessionId === teamLead?.id) {
-      void sendMessage({ content: input, attachments: pendingAttachmentsRef.current, hiddenContext: mergeHiddenContext(pendingHiddenContextRef.current, `Team member results for the lead to use in its answer:\n\n${completedTeamMemberContext}`), targetSessionId: currentSessionId, composerSubmission: true })
+      void sendMessage({
+        content: input,
+        attachments: pendingAttachmentsRef.current,
+        hiddenContext: mergeHiddenContext(
+          pendingHiddenContextRef.current,
+          `Team member results for the lead to use in its answer:\n\n${completedTeamMemberContext}`
+        ),
+        targetSessionId: currentSessionId,
+        composerSubmission: true
+      })
       return
     }
     void sendMessage()
-  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
+  }, [
+    currentSession?.teamLeadId,
+    teamEnabled,
+    teamLead,
+    teamMembers,
+    sendMessage,
+    isAutoContextCompressionAvailable,
+    inspectionScope,
+    isReady,
+    sessionsLoaded,
+    sessionLoadError,
+    selectedProfileId,
+    selectedSkillId,
+    selectedSkillRuntime,
+    config,
+    scratchpadAvailable,
+    active,
+    currentSessionId,
+    route,
+    config?.use_remote_llm,
+    storageScope,
+    notifyWarning,
+    notifyError,
+    t,
+    setInputValue,
+    clearScheduledDraftPersistence,
+    markTransientDraftCleared,
+    getSessionStorageKey,
+    setSessions,
+    persistCurrentSessionSnapshot,
+    mergeHiddenContext
+  ])
 
   const handleSendEditedMessage = useCallback(
     (
@@ -8943,7 +10472,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }
 
   const compactSkillPortal =
-    compact && active && skillPortalElement && (hasCustomSkills || route?.channel === 'canvas' && route.scopeType === 'thread' && !config?.use_remote_llm)
+    compact &&
+    active &&
+    skillPortalElement &&
+    (hasCustomSkills ||
+      (route?.channel === 'canvas' && route.scopeType === 'thread' && !config?.use_remote_llm))
       ? createPortal(
           <Button
             size="small"
@@ -9059,91 +10592,310 @@ const ChatPage: React.FC<ChatPageProps> = ({
     )
   }
 
-  const renderProcessArea = (teamImagePlace: ReturnType<typeof useTeamImagePlacement>['place'] | undefined, leadJobs: TeamLeadJobEntriesValue) => {
+  const renderProcessArea = (
+    teamImagePlace: ReturnType<typeof useTeamImagePlacement>['place'] | undefined,
+    leadJobs: TeamLeadJobEntriesValue
+  ) => {
     const activityTeamKey = messageLeadId ? `${storageScope}\u0000${messageLeadId}` : ''
     const activityOwner = teamMessageDispatcherRef.current
-    const activityGateClosed = !sessionsLoaded || !!sessionLoadError || !!teamLead?.teamEnded || !!teamLead?.archived ||
-      teamEndPendingRef.current.has(activityTeamKey) || teamEndedMainRef.current.has(activityTeamKey) ||
-      (activityOwner?.key === messageKey && (activityOwner.scopeEpoch !== sessionLoadEpochRef.current || activityOwner.visibilityEpoch !== teamVisibilityRef.current.epoch))
-    const currentTeamMessages = teamEnabled ? selectTeamActivity(teamMessageEntries, messageKey, activityGateClosed) : []
-    const hasTeamMember = (id?: string) => !!id && teamMembers.some(member => member.id === id)
-    const messageActivity = (entries: typeof currentTeamMessages) => entries.map(entry => ({
-      id: `${entry.intent.id}:${entry.recipient ?? 'none'}`,
-      sourceName: entry.intent.source.kind === 'user' ? '用户' : teamMembers.find(member => member.id === (entry.intent.source.kind === 'member' ? entry.intent.source.member : ''))?.teamMemberName || (entry.intent.source.kind === 'member' ? entry.intent.source.member : '用户'),
-      recipientName: teamMembers.find(member => member.id === entry.recipient)?.teamMemberName || entry.recipient || '频道',
-      text: entry.intent.text, status: entry.status
-    }))
-    const unassignedActivity = currentTeamMessages.filter(entry => !hasTeamMember(entry.recipient) &&
-      (entry.intent.source.kind !== 'member' || !hasTeamMember(entry.intent.source.member)))
-    const dependenciesForMember = teamEnabled && teamMembers.length
-      ? prepareTeamMemberDependencySummaries(teamLead?.teamTasks, Boolean(teamLead?.teamEnded))
-      : undefined
-    const teamEntries: ProcessEntry[] = teamEnabled ? teamMembers.map(member => {
-            const lifecycle = readScopedChatRun(storageScope, member.id)
-            const previousTool = member.messages.flatMap(message => message.toolHistory ?? []).at(-1)
-            const currentTool = loadingSessionIds.has(member.id) ? loadingStatusBySessionId[member.id]?.observedTool : undefined
-            const status: ProcessEntry['status'] = teamWaiting.has(member.id) ? 'approval'
-              : loadingSessionIds.has(member.id) ? 'running'
-                : lifecycle.status === 'completed' ? 'completed'
-                  : lifecycle.status === 'failed' ? 'failed'
-                    : lifecycle.status === 'cancelled' ? 'cancelled'
-                      : lifecycle.status === 'interrupted' || previousTool?.status === 'running' ? 'unknown' : 'idle'
-            const dependency = dependenciesForMember!(member.id, status)
-            const memberModel = (() => { try { return resolveTeamRequestSettings(member, teamLead).profileId } catch { return null } })()
-            const activity = currentTeamMessages.filter(entry => entry.recipient === member.id ||
-              (!hasTeamMember(entry.recipient) && entry.intent.source.kind === 'member' && entry.intent.source.member === member.id))
-            return {
-              id: JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, member.id]), kind: 'member', name: member.teamMemberName || member.title,
-              role: member.teamRole, status, selected: member.id === currentSessionId,
-              statusText: status === 'running' ? loadingStatusBySessionId[member.id]?.label : dependency.idleStatusText,
-              onOpen: () => selectSession(member.id),
-              onStop: () => terminateSession(member.id, { dropQueued: true }),
-              detail: <Box sx={{ pl: 4 }}>
-                <Typography variant="caption" display="block">模型：{memberModel ? config.llm_config.api_profiles.find(profile => profile.id === memberModel)?.model_name?.trim() || '设置不可用' : '设置不可用'}</Typography>
-                {dependency.detailText && dependency.detailText !== dependency.idleStatusText && <Typography variant="caption" display="block">{dependency.detailText}</Typography>}
-                {currentTool && <Typography variant="caption" display="block">工具：{currentTool}</Typography>}
-                {previousTool && <Typography variant="caption" display="block">最近工具步骤：{typeof previousTool.toolName === 'string' && /^[\p{L}\p{N}_.-]{1,80}$/u.test(previousTool.toolName) ? previousTool.toolName : '未知工具'} · {previousTool.status === 'completed' ? '完成' : previousTool.status === 'failed' ? '失败' : previousTool.status === 'cancelled' ? '已取消' : '未知'}</Typography>}
-                {teamImagePlace && <AgentTeamMemberImages member={member} placeImage={teamImagePlace}/>}
-                {activity.length > 0 && <AgentTeamMessageActivity entries={messageActivity(activity)}/>}
+    const activityGateClosed =
+      !sessionsLoaded ||
+      !!sessionLoadError ||
+      !!teamLead?.teamEnded ||
+      !!teamLead?.archived ||
+      teamEndPendingRef.current.has(activityTeamKey) ||
+      teamEndedMainRef.current.has(activityTeamKey) ||
+      (activityOwner?.key === messageKey &&
+        (activityOwner.scopeEpoch !== sessionLoadEpochRef.current ||
+          activityOwner.visibilityEpoch !== teamVisibilityRef.current.epoch))
+    const currentTeamMessages = teamEnabled
+      ? selectTeamActivity(teamMessageEntries, messageKey, activityGateClosed)
+      : []
+    const hasTeamMember = (id?: string) => !!id && teamMembers.some((member) => member.id === id)
+    const messageActivity = (entries: typeof currentTeamMessages) =>
+      entries.map((entry) => ({
+        id: `${entry.intent.id}:${entry.recipient ?? 'none'}`,
+        sourceName:
+          entry.intent.source.kind === 'user'
+            ? '用户'
+            : teamMembers.find(
+                (member) =>
+                  member.id ===
+                  (entry.intent.source.kind === 'member' ? entry.intent.source.member : '')
+              )?.teamMemberName ||
+              (entry.intent.source.kind === 'member' ? entry.intent.source.member : '用户'),
+        recipientName:
+          teamMembers.find((member) => member.id === entry.recipient)?.teamMemberName ||
+          entry.recipient ||
+          '频道',
+        text: entry.intent.text,
+        status: entry.status
+      }))
+    const unassignedActivity = currentTeamMessages.filter(
+      (entry) =>
+        !hasTeamMember(entry.recipient) &&
+        (entry.intent.source.kind !== 'member' || !hasTeamMember(entry.intent.source.member))
+    )
+    const dependenciesForMember =
+      teamEnabled && teamMembers.length
+        ? prepareTeamMemberDependencySummaries(teamLead?.teamTasks, Boolean(teamLead?.teamEnded))
+        : undefined
+    const teamEntries: ProcessEntry[] = teamEnabled
+      ? teamMembers.map((member) => {
+          const lifecycle = readScopedChatRun(storageScope, member.id)
+          const previousTool = member.messages
+            .flatMap((message) => message.toolHistory ?? [])
+            .at(-1)
+          const currentTool = loadingSessionIds.has(member.id)
+            ? loadingStatusBySessionId[member.id]?.observedTool
+            : undefined
+          const status: ProcessEntry['status'] = teamWaiting.has(member.id)
+            ? 'approval'
+            : loadingSessionIds.has(member.id)
+              ? 'running'
+              : lifecycle.status === 'completed'
+                ? 'completed'
+                : lifecycle.status === 'failed'
+                  ? 'failed'
+                  : lifecycle.status === 'cancelled'
+                    ? 'cancelled'
+                    : lifecycle.status === 'interrupted' || previousTool?.status === 'running'
+                      ? 'unknown'
+                      : 'idle'
+          const dependency = dependenciesForMember!(member.id, status)
+          const memberModel = (() => {
+            try {
+              return resolveTeamRequestSettings(member, teamLead).profileId
+            } catch {
+              return null
+            }
+          })()
+          const activity = currentTeamMessages.filter(
+            (entry) =>
+              entry.recipient === member.id ||
+              (!hasTeamMember(entry.recipient) &&
+                entry.intent.source.kind === 'member' &&
+                entry.intent.source.member === member.id)
+          )
+          return {
+            id: JSON.stringify([
+              storageScope,
+              route?.channel,
+              route?.scopeType,
+              route?.scopeId,
+              route?.threadId,
+              messageLeadId,
+              messageGeneration,
+              member.id
+            ]),
+            kind: 'member',
+            name: member.teamMemberName || member.title,
+            role: member.teamRole,
+            status,
+            selected: member.id === currentSessionId,
+            statusText:
+              status === 'running'
+                ? loadingStatusBySessionId[member.id]?.label
+                : dependency.idleStatusText,
+            onOpen: () => selectSession(member.id),
+            onStop: () => terminateSession(member.id, { dropQueued: true }),
+            detail: (
+              <Box sx={{ pl: 4 }}>
+                <Typography variant="caption" display="block">
+                  模型：
+                  {memberModel
+                    ? config.llm_config.api_profiles
+                        .find((profile) => profile.id === memberModel)
+                        ?.model_name?.trim() || '设置不可用'
+                    : '设置不可用'}
+                </Typography>
+                {dependency.detailText && dependency.detailText !== dependency.idleStatusText && (
+                  <Typography variant="caption" display="block">
+                    {dependency.detailText}
+                  </Typography>
+                )}
+                {currentTool && (
+                  <Typography variant="caption" display="block">
+                    工具：{currentTool}
+                  </Typography>
+                )}
+                {previousTool && (
+                  <Typography variant="caption" display="block">
+                    最近工具步骤：
+                    {typeof previousTool.toolName === 'string' &&
+                    /^[\p{L}\p{N}_.-]{1,80}$/u.test(previousTool.toolName)
+                      ? previousTool.toolName
+                      : '未知工具'}{' '}
+                    ·{' '}
+                    {previousTool.status === 'completed'
+                      ? '完成'
+                      : previousTool.status === 'failed'
+                        ? '失败'
+                        : previousTool.status === 'cancelled'
+                          ? '已取消'
+                          : '未知'}
+                  </Typography>
+                )}
+                {teamImagePlace && (
+                  <AgentTeamMemberImages member={member} placeImage={teamImagePlace} />
+                )}
+                {activity.length > 0 && (
+                  <AgentTeamMessageActivity entries={messageActivity(activity)} />
+                )}
               </Box>
-            }
-          }) : []
-          const observedHelpers: ProcessEntry[] = currentSessionId ? helperObserver.list(currentSessionId).map(item => ({
-            id: JSON.stringify(['tool-observation', storageScope, currentSessionId, item.parentRunId, item.runId, item.toolCallId]),
-            kind: 'job', name: item.name,
-            status: item.status === 'running' ? 'running' : item.status === 'returned' ? 'completed' : item.status,
-            statusText: item.status === 'running' ? '调用中' : item.status === 'returned' ? '调用已返回' : item.status === 'failed' ? '调用失败' : item.status === 'cancelled' ? '调用已取消' : '状态未知'
-          })) : []
-          const helperEntries: ProcessEntry[] = jobController.jobs.map(job => ({
-            id: JSON.stringify(['current-helper', jobController.scopeKey, job.id]), kind: 'job', name: job.kind,
-            status: job.status === 'running' ? 'running' : job.status === 'completed' ? 'completed' : job.status === 'cancelled' ? 'cancelled' : 'failed',
-            detail: <AgentThreadJobRow key={`${jobController.scopeKey}:${job.id}`} job={job} controller={jobController}/>,
-            onStop: () => { void jobController.stop(job.id).catch(() => notifyWarning('无法停止后台助手，请重试')) }
-          }))
-          const leadHelperEntries: ProcessEntry[] = leadJobs.entries.map(entry => ({
-            id: `lead:${entry.key}`, kind: 'job', name: entry.name,
-            status: entry.job.status === 'running' ? 'running' : entry.job.status === 'completed' ? 'completed' : entry.job.status === 'cancelled' ? 'cancelled' : 'failed',
-            detail: entry.detail,
-            onStop: () => { void entry.stop().catch(() => notifyWarning('无法停止组长后台助手，请重试')) }
-          }))
-          const processEntries: ProcessEntry[] = processController.jobs.map(job => ({
-            id: JSON.stringify(['process', processScope, job.id]), kind: 'job', name: job.kind,
-            status: job.status === 'unknown' ? 'unknown' : !job.operationSettled ? 'running' : job.status === 'completed' ? 'completed' : job.status === 'stopped' ? 'cancelled' : 'failed',
-            canStop: !job.operationSettled || job.status === 'unknown',
-            detail: processScope ? <AgentProcessDetails job={job} scope={processScope}/> : undefined,
-            onStop: () => { void processController.stop(job).catch(() => notifyWarning('无法停止后台进程，请重试')) }
-          }))
-          return <AgentProcessArea entries={[...teamEntries, ...observedHelpers, ...helperEntries, ...leadHelperEntries, ...processEntries]} showStaticWhenEmpty={unassignedActivity.length > 0 || jobController.error || processController.error || leadJobs.error} managementSlot={teamEnabled && teamLead ? <Box ref={setTeamManagementHost}/> : undefined} onStopAllMembers={teamEnabled && teamLead ? () => {
-            for (const member of teamMembers) {
-              if (loadingSessionIdsRef.current.has(member.id) || teamWaiting.has(member.id)) terminateSession(member.id, { dropQueued: true })
-            }
-          } : undefined} staticSlot={<>
-            {currentSession?.teamLeadId && teamLead && <Button size="small" onClick={() => selectSession(teamLead.id)}>← 返回组长 · {teamLead.title}</Button>}
-            {unassignedActivity.length > 0 && <details><summary>其他团队消息</summary><AgentTeamMessageActivity entries={messageActivity(unassignedActivity)}/></details>}
-            {(jobController.error || processController.error) && <Typography variant="caption" color="warning.main">当前对话后台进程状态刷新失败{((jobController.error && jobController.jobs.length > 0) || (processController.error && processController.jobs.length > 0)) ? '，部分显示的状态可能已过期。' : ''}</Typography>}
-            {leadJobs.error && <Typography variant="caption" color="warning.main">组长后台助手状态刷新失败{leadJobs.entries.length > 0 ? '，部分显示的状态可能已过期。' : ''}</Typography>}
-          </>} />
+            )
+          }
+        })
+      : []
+    const observedHelpers: ProcessEntry[] = currentSessionId
+      ? helperObserver.list(currentSessionId).map((item) => ({
+          id: JSON.stringify([
+            'tool-observation',
+            storageScope,
+            currentSessionId,
+            item.parentRunId,
+            item.runId,
+            item.toolCallId
+          ]),
+          kind: 'job',
+          name: item.name,
+          status:
+            item.status === 'running'
+              ? 'running'
+              : item.status === 'returned'
+                ? 'completed'
+                : item.status,
+          statusText:
+            item.status === 'running'
+              ? '调用中'
+              : item.status === 'returned'
+                ? '调用已返回'
+                : item.status === 'failed'
+                  ? '调用失败'
+                  : item.status === 'cancelled'
+                    ? '调用已取消'
+                    : '状态未知'
+        }))
+      : []
+    const helperEntries: ProcessEntry[] = jobController.jobs.map((job) => ({
+      id: JSON.stringify(['current-helper', jobController.scopeKey, job.id]),
+      kind: 'job',
+      name: job.kind,
+      status:
+        job.status === 'running'
+          ? 'running'
+          : job.status === 'completed'
+            ? 'completed'
+            : job.status === 'cancelled'
+              ? 'cancelled'
+              : 'failed',
+      detail: (
+        <AgentThreadJobRow
+          key={`${jobController.scopeKey}:${job.id}`}
+          job={job}
+          controller={jobController}
+        />
+      ),
+      onStop: () => {
+        void jobController.stop(job.id).catch(() => notifyWarning('无法停止后台助手，请重试'))
+      }
+    }))
+    const leadHelperEntries: ProcessEntry[] = leadJobs.entries.map((entry) => ({
+      id: `lead:${entry.key}`,
+      kind: 'job',
+      name: entry.name,
+      status:
+        entry.job.status === 'running'
+          ? 'running'
+          : entry.job.status === 'completed'
+            ? 'completed'
+            : entry.job.status === 'cancelled'
+              ? 'cancelled'
+              : 'failed',
+      detail: entry.detail,
+      onStop: () => {
+        void entry.stop().catch(() => notifyWarning('无法停止组长后台助手，请重试'))
+      }
+    }))
+    const processEntries: ProcessEntry[] = processController.jobs.map((job) => ({
+      id: JSON.stringify(['process', processScope, job.id]),
+      kind: 'job',
+      name: job.kind,
+      status:
+        job.status === 'unknown'
+          ? 'unknown'
+          : !job.operationSettled
+            ? 'running'
+            : job.status === 'completed'
+              ? 'completed'
+              : job.status === 'stopped'
+                ? 'cancelled'
+                : 'failed',
+      canStop: !job.operationSettled || job.status === 'unknown',
+      detail: processScope ? <AgentProcessDetails job={job} scope={processScope} /> : undefined,
+      onStop: () => {
+        void processController.stop(job).catch(() => notifyWarning('无法停止后台进程，请重试'))
+      }
+    }))
+    return (
+      <AgentProcessArea
+        entries={[
+          ...teamEntries,
+          ...observedHelpers,
+          ...helperEntries,
+          ...leadHelperEntries,
+          ...processEntries
+        ]}
+        showStaticWhenEmpty={
+          unassignedActivity.length > 0 ||
+          jobController.error ||
+          processController.error ||
+          leadJobs.error
         }
+        managementSlot={teamEnabled && teamLead ? <Box ref={setTeamManagementHost} /> : undefined}
+        onStopAllMembers={
+          teamEnabled && teamLead
+            ? () => {
+                for (const member of teamMembers) {
+                  if (loadingSessionIdsRef.current.has(member.id) || teamWaiting.has(member.id))
+                    terminateSession(member.id, { dropQueued: true })
+                }
+              }
+            : undefined
+        }
+        staticSlot={
+          <>
+            {currentSession?.teamLeadId && teamLead && (
+              <Button size="small" onClick={() => selectSession(teamLead.id)}>
+                ← 返回组长 · {teamLead.title}
+              </Button>
+            )}
+            {unassignedActivity.length > 0 && (
+              <details>
+                <summary>其他团队消息</summary>
+                <AgentTeamMessageActivity entries={messageActivity(unassignedActivity)} />
+              </details>
+            )}
+            {(jobController.error || processController.error) && (
+              <Typography variant="caption" color="warning.main">
+                当前对话后台进程状态刷新失败
+                {(jobController.error && jobController.jobs.length > 0) ||
+                (processController.error && processController.jobs.length > 0)
+                  ? '，部分显示的状态可能已过期。'
+                  : ''}
+              </Typography>
+            )}
+            {leadJobs.error && (
+              <Typography variant="caption" color="warning.main">
+                组长后台助手状态刷新失败
+                {leadJobs.entries.length > 0 ? '，部分显示的状态可能已过期。' : ''}
+              </Typography>
+            )}
+          </>
+        }
+      />
+    )
+  }
 
   return (
     <>
@@ -9260,21 +11012,32 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 flexWrap: 'wrap',
                 border: '1px solid',
                 borderColor: 'divider',
-                borderRadius: 2,
-                bgcolor: 'background.paper',
-                boxShadow: 1
+                borderRadius: 2.5,
+                bgcolor: 'action.hover',
+                boxShadow: '0 4px 16px rgba(0, 0, 0, 0.08)'
               }}
             >
               <Box sx={{ minWidth: 0 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.3 }}>{t('chat.team_collaboration')}</Typography>
-                <Typography variant="caption" color="text.secondary">{t('chat.team_add_first_member')}</Typography>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.3 }}>
+                  {t('chat.team_collaboration')}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {t('chat.team_add_first_member')}
+                </Typography>
               </Box>
               <Button
                 data-testid="team-create-member-button"
                 size="small"
-                variant="contained"
+                variant="outlined"
                 onClick={() => setCreatingTeamMember(true)}
-                sx={{ borderRadius: 1.5, textTransform: 'none', whiteSpace: 'nowrap', fontWeight: 700 }}
+                sx={{
+                  borderRadius: 999,
+                  px: 2,
+                  minHeight: 36,
+                  textTransform: 'none',
+                  whiteSpace: 'nowrap',
+                  fontWeight: 700
+                }}
               >
                 {t('chat.team_create_add_member')}
               </Button>
@@ -9282,284 +11045,864 @@ const ChatPage: React.FC<ChatPageProps> = ({
           )}
 
           {/* 消息列表 */}
-          {active && basicCommandView?.scope === inspectionScope && <Box data-testid="agent-basic-command-view" sx={{ p: 2 }}>
-            <Typography variant="subtitle2">/{basicCommandView.kind}</Typography>
-            {basicCommandView.kind === 'compact' ? <>
-              <Typography>{t('chat.command_compaction_notice')}</Typography>
-              <Button onClick={() => {
-                if (basicCommandGenerationRef.current !== basicCommandView.generation ||
-                  config.llm_config !== basicCommandView.modelConfig || selectedProfileId !== basicCommandView.profileId ||
-                  sessionsRef.current.find(session => session.id === basicCommandView.session.id)?.messages !== basicCommandView.session.messages ||
-                  currentSessionIdRef.current !== basicCommandView.session.id || storageScopeRef.current !== storageScope ||
-                  loadingSessionIdsRef.current.has(basicCommandView.session.id) || hasSessionDeleteTombstone(basicCommandView.session.id, storageScope)) {
-                  notifyWarning(t('chat.compaction_unavailable_or_changed')); return
+          {active && basicCommandView?.scope === inspectionScope && (
+            <Box data-testid="agent-basic-command-view" sx={{ p: 2 }}>
+              <Typography variant="subtitle2">/{basicCommandView.kind}</Typography>
+              {basicCommandView.kind === 'compact' ? (
+                <>
+                  <Typography>{t('chat.command_compaction_notice')}</Typography>
+                  <Button
+                    onClick={() => {
+                      if (
+                        basicCommandGenerationRef.current !== basicCommandView.generation ||
+                        config.llm_config !== basicCommandView.modelConfig ||
+                        selectedProfileId !== basicCommandView.profileId ||
+                        sessionsRef.current.find(
+                          (session) => session.id === basicCommandView.session.id
+                        )?.messages !== basicCommandView.session.messages ||
+                        currentSessionIdRef.current !== basicCommandView.session.id ||
+                        storageScopeRef.current !== storageScope ||
+                        loadingSessionIdsRef.current.has(basicCommandView.session.id) ||
+                        hasSessionDeleteTombstone(basicCommandView.session.id, storageScope)
+                      ) {
+                        notifyWarning(t('chat.compaction_unavailable_or_changed'))
+                        return
+                      }
+                      setBasicCommandView(null)
+                      handleCompressCurrentContext()
+                    }}
+                  >
+                    {t('chat.confirm_model_compaction')}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button
+                    onClick={() => {
+                      if (basicJobsPendingRef.current) return
+                      basicJobsPendingRef.current = true
+                      const id = basicCommandView.session.id
+                      const generation = basicCommandView.generation
+                      const ownsPanel = () =>
+                        isMountedRef.current &&
+                        basicCommandGenerationRef.current === generation &&
+                        storageScopeRef.current === storageScope &&
+                        currentSessionIdRef.current === id
+                      void api()
+                        .svcLLMProxy.listAgentJobs({ route: route!, conversationId: id })
+                        .then((result) => {
+                          if (ownsPanel())
+                            setBasicJobsText(
+                              result.jobs
+                                .map((job) => `${job.kind}: ${job.status} · ${job.id}`)
+                                .join('\n') ||
+                                t('chat.no_helper_jobs', { defaultValue: 'No helper jobs.' })
+                            )
+                        })
+                        .catch(() => {
+                          if (ownsPanel())
+                            setBasicJobsText(
+                              t('chat.jobs_refresh_failed', {
+                                defaultValue: 'Jobs refresh failed.'
+                              })
+                            )
+                        })
+                        .finally(() => {
+                          basicJobsPendingRef.current = false
+                        })
+                    }}
+                  >
+                    {t('chat.refresh_thread_jobs', { defaultValue: 'Refresh thread jobs' })}
+                  </Button>
+                  <Typography component="pre" sx={{ whiteSpace: 'pre-wrap' }}>
+                    {basicJobsText}
+                  </Typography>
+                </>
+              )}
+              <Button
+                onClick={() => {
+                  basicCommandGenerationRef.current++
+                  setBasicCommandView(null)
+                }}
+              >
+                {t('chat.close_command_panel', { defaultValue: 'Close command panel' })}
+              </Button>
+            </Box>
+          )}
+          {active && imageRepairView?.scope === inspectionScope && (
+            <Box data-testid="image-repair-view" sx={{ p: 2 }}>
+              <Typography variant="subtitle2">
+                {t('chat.repair_images_title', {
+                  defaultValue: '/repair-images — missing local image references'
+                })}
+              </Typography>
+              <Typography variant="body2">
+                {t('chat.repair_images_checked', {
+                  checked: imageRepairView.scan.checked,
+                  defaultValue: `Checked ${imageRepairView.scan.checked} references (maximum 128).`
+                })}{' '}
+                {imageRepairView.scan.limited
+                  ? t('chat.repair_images_scan_limit', { defaultValue: 'Scan limit reached.' })
+                  : ''}
+              </Typography>
+              <Box component="ul">
+                {imageRepairView.scan.missing.map((item) => (
+                  <li key={`${item.messageIndex}:${item.attachmentIndex}`}>
+                    {t('chat.repair_images_message', {
+                      message: item.messageIndex + 1,
+                      image: item.attachmentIndex + 1,
+                      defaultValue: `Message ${item.messageIndex + 1}, image ${item.attachmentIndex + 1}`
+                    })}
+                  </li>
+                ))}
+              </Box>
+              {!imageRepairView.scan.missing.length && (
+                <Typography>
+                  {t('chat.repair_images_none', {
+                    defaultValue: 'No missing local images found among checked completed messages.'
+                  })}
+                </Typography>
+              )}
+              {imageRepairView.confirmed ? (
+                <Typography>
+                  {t('chat.repair_images_confirmed', {
+                    defaultValue:
+                      'Confirmed branch-context placeholders. Original history unchanged.'
+                  })}
+                </Typography>
+              ) : (
+                <Button
+                  disabled={!imageRepairView.scan.missing.length}
+                  onClick={() => {
+                    if (
+                      sessionsRef.current.find(
+                        (session) => session.id === currentSessionIdRef.current
+                      ) !== imageRepairView.session ||
+                      loadingSessionIdsRef.current.has(imageRepairView.session.id) ||
+                      storageScopeRef.current !== storageScope ||
+                      hasSessionDeleteTombstone(imageRepairView.session.id, storageScope)
+                    ) {
+                      notifyWarning(
+                        t('chat.conversation_changed_repair', {
+                          defaultValue: 'Conversation changed. Run /repair-images again.'
+                        })
+                      )
+                      setImageRepairView(null)
+                      return
+                    }
+                    const references = new Map<ChatMessage, readonly MissingImageReference[]>()
+                    for (const item of imageRepairView.scan.missing) {
+                      const message = imageRepairView.session.messages[item.messageIndex]
+                      references.set(message, [...(references.get(message) ?? []), item])
+                    }
+                    imageRepairContextRef.current = { scope: inspectionScope, references }
+                    setImageRepairView({ ...imageRepairView, confirmed: true })
+                  }}
+                >
+                  {t('chat.confirm_branch_image_placeholders', {
+                    defaultValue: 'Confirm branch image placeholders'
+                  })}
+                </Button>
+              )}
+              <Button onClick={() => setImageRepairView(null)}>
+                {t('chat.close_image_repair', { defaultValue: 'Close image repair' })}
+              </Button>
+            </Box>
+          )}
+          {teamEnabled && teamLead && (
+            <AgentTeamMenu
+              hideTriggerWithoutHost
+              buttonHost={teamManagementHost}
+              openRequest={teamManagementOpenRequest}
+              onAddMember={() => setCreatingTeamMember(true)}
+              onDispatch={(taskId) => void dispatchSelectedTeamTask(taskId)}
+              onBroadcast={async ({ id, text }) => {
+                const current = teamMessageDispatcherRef.current
+                if (
+                  !current ||
+                  current.key !== messageKey ||
+                  !route?.threadId ||
+                  !messageLeadId ||
+                  !teamEnabled
+                )
+                  throw new Error('Team channel unavailable.')
+                // Avoid consuming the broadcast draft for a known-unavailable model setting.
+                // Actual dispatch still performs its full preflight checks.
+                const liveLead = sessionsRef.current.find((session) => session.id === messageLeadId)
+                if (!liveLead || liveLead.teamEnded || liveLead.archived)
+                  throw new Error('Team channel unavailable.')
+                if (
+                  liveLead.teamSettings &&
+                  Object.hasOwn(liveLead.teamSettings, 'memberModelSelection')
+                )
+                  throw new Error('Team model selection is unavailable.')
+                const recipients = sessionsRef.current
+                  .filter(
+                    (member) =>
+                      member.teamLeadId === messageLeadId &&
+                      !member.archived &&
+                      (member.teamMemberGeneration ?? 0) === messageGeneration
+                  )
+                  .filter((member) => current.dispatcher.isSubscribed(member.id))
+                  .map((member) => member.id)
+                if (recipients.length > 0) {
+                  // Persist the intent before starting delivery. A queued receipt is only a durable
+                  // pending snapshot; it never claims that an agent received or processed the message.
+                  const receiptTeamKey = JSON.stringify([
+                    storageScope,
+                    route.threadId,
+                    messageLeadId,
+                    messageGeneration
+                  ])
+                  const receipts = createTeamMessageReceipts({
+                    id,
+                    teamKey: receiptTeamKey,
+                    text,
+                    recipients,
+                    now: Date.now()
+                  })
+                  const updated = {
+                    ...liveLead,
+                    teamMessageReceipts: mergeTeamMessageReceipts(
+                      liveLead.teamMessageReceipts,
+                      receipts
+                    )
+                  }
+                  setSessions((previous) =>
+                    previous.map((session) => (session === liveLead ? updated : session))
+                  )
+                  await persistSessionWithBaseline(updated, storageScope)
+                  const currentAcknowledgement =
+                    isMountedRef.current &&
+                    teamVisibilityRef.current.active &&
+                    storageScopeRef.current === storageScope &&
+                    sessionsRef.current.find((session) => session.id === messageLeadId) ===
+                      updated &&
+                    chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, updated)
+                  if (
+                    !currentAcknowledgement ||
+                    !clearDirtySessionSnapshotIfCurrent(storageScope, updated)
+                  ) {
+                    throw new Error('Team receipt save was not confirmed; message was not queued.')
+                  }
                 }
-                setBasicCommandView(null); handleCompressCurrentContext()
-              }}>{t('chat.confirm_model_compaction')}</Button>
-            </> : <>
-              <Button onClick={() => {
-                if (basicJobsPendingRef.current) return
-                basicJobsPendingRef.current = true
-                const id = basicCommandView.session.id
-                const generation = basicCommandView.generation
-                const ownsPanel = () => isMountedRef.current && basicCommandGenerationRef.current === generation &&
-                  storageScopeRef.current === storageScope && currentSessionIdRef.current === id
-                void api().svcLLMProxy.listAgentJobs({ route: route!, conversationId: id }).then(result => {
-                  if (ownsPanel())
-                    setBasicJobsText(result.jobs.map(job => `${job.kind}: ${job.status} · ${job.id}`).join('\n') || t('chat.no_helper_jobs', { defaultValue: 'No helper jobs.' }))
-                }).catch(() => { if (ownsPanel()) setBasicJobsText(t('chat.jobs_refresh_failed', { defaultValue: 'Jobs refresh failed.' })) })
-                  .finally(() => { basicJobsPendingRef.current = false })
-              }}>{t('chat.refresh_thread_jobs', { defaultValue: 'Refresh thread jobs' })}</Button>
-              <Typography component="pre" sx={{ whiteSpace: 'pre-wrap' }}>{basicJobsText}</Typography>
-            </>}
-            <Button onClick={() => { basicCommandGenerationRef.current++; setBasicCommandView(null) }}>{t('chat.close_command_panel', { defaultValue: 'Close command panel' })}</Button>
-          </Box>}
-          {active && imageRepairView?.scope === inspectionScope && <Box data-testid="image-repair-view" sx={{ p: 2 }}>
-            <Typography variant="subtitle2">{t('chat.repair_images_title', { defaultValue: '/repair-images — missing local image references' })}</Typography>
-            <Typography variant="body2">{t('chat.repair_images_checked', { checked: imageRepairView.scan.checked, defaultValue: `Checked ${imageRepairView.scan.checked} references (maximum 128).` })} {imageRepairView.scan.limited ? t('chat.repair_images_scan_limit', { defaultValue: 'Scan limit reached.' }) : ''}</Typography>
-            <Box component="ul">{imageRepairView.scan.missing.map(item => <li key={`${item.messageIndex}:${item.attachmentIndex}`}>{t('chat.repair_images_message', { message: item.messageIndex + 1, image: item.attachmentIndex + 1, defaultValue: `Message ${item.messageIndex + 1}, image ${item.attachmentIndex + 1}` })}</li>)}</Box>
-            {!imageRepairView.scan.missing.length && <Typography>{t('chat.repair_images_none', { defaultValue: 'No missing local images found among checked completed messages.' })}</Typography>}
-            {imageRepairView.confirmed ? <Typography>{t('chat.repair_images_confirmed', { defaultValue: 'Confirmed branch-context placeholders. Original history unchanged.' })}</Typography> :
-              <Button disabled={!imageRepairView.scan.missing.length} onClick={() => {
-                if (sessionsRef.current.find(session => session.id === currentSessionIdRef.current) !== imageRepairView.session ||
-                  loadingSessionIdsRef.current.has(imageRepairView.session.id) || storageScopeRef.current !== storageScope ||
-                  hasSessionDeleteTombstone(imageRepairView.session.id, storageScope)) {
-                  notifyWarning(t('chat.conversation_changed_repair', { defaultValue: 'Conversation changed. Run /repair-images again.' })); setImageRepairView(null); return
-                }
-                const references = new Map<ChatMessage, readonly MissingImageReference[]>()
-                for (const item of imageRepairView.scan.missing) {
-                  const message = imageRepairView.session.messages[item.messageIndex]
-                  references.set(message, [...(references.get(message) ?? []), item])
-                }
-                imageRepairContextRef.current = { scope: inspectionScope, references }
-                setImageRepairView({ ...imageRepairView, confirmed: true })
-              }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
-            <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
-          </Box>}
-          {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost buttonHost={teamManagementHost} openRequest={teamManagementOpenRequest} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
-            const current = teamMessageDispatcherRef.current
-            if (!current || current.key !== messageKey || !route?.threadId || !messageLeadId || !teamEnabled) throw new Error('Team channel unavailable.')
-            // Avoid consuming the broadcast draft for a known-unavailable model setting.
-            // Actual dispatch still performs its full preflight checks.
-            const liveLead = sessionsRef.current.find(session => session.id === messageLeadId)
-            if (!liveLead || liveLead.teamEnded || liveLead.archived) throw new Error('Team channel unavailable.')
-            if (liveLead.teamSettings && Object.hasOwn(liveLead.teamSettings, 'memberModelSelection')) throw new Error('Team model selection is unavailable.')
-            const recipients = sessionsRef.current
-              .filter(member => member.teamLeadId === messageLeadId && !member.archived && (member.teamMemberGeneration ?? 0) === messageGeneration)
-              .filter(member => current.dispatcher.isSubscribed(member.id))
-              .map(member => member.id)
-            if (recipients.length > 0) {
-              // Persist the intent before starting delivery. A queued receipt is only a durable
-              // pending snapshot; it never claims that an agent received or processed the message.
-              const receiptTeamKey = JSON.stringify([storageScope, route.threadId, messageLeadId, messageGeneration])
-              const receipts = createTeamMessageReceipts({ id, teamKey: receiptTeamKey, text, recipients, now: Date.now() })
-              const updated = {
-                ...liveLead,
-                teamMessageReceipts: mergeTeamMessageReceipts(liveLead.teamMessageReceipts, receipts)
-              }
-              setSessions(previous => previous.map(session => session === liveLead ? updated : session))
-              await persistSessionWithBaseline(updated, storageScope)
-              const currentAcknowledgement = isMountedRef.current &&
-                teamVisibilityRef.current.active &&
-                storageScopeRef.current === storageScope &&
-                sessionsRef.current.find(session => session.id === messageLeadId) === updated &&
-                chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, updated)
-              if (!currentAcknowledgement || !clearDirtySessionSnapshotIfCurrent(storageScope, updated)) {
-                throw new Error('Team receipt save was not confirmed; message was not queued.')
-              }
-            }
-            const result = current.dispatcher.enqueueUserChannel({ id, source: { kind: 'user', scope: storageScope, thread: route.threadId, lead: messageLeadId }, text })
-            // Once enqueued, an observer or pump error must not encourage a duplicate send.
-            try { current.pump() } catch { /* The next pump can handle queued work. */ }
-            return result
-          }} subscriptions={teamMessageSubscriptions.key === messageKey ? teamMessageSubscriptions.ids : []} onSubscriptionChange={(id, subscribed) => {
-            const current = teamMessageDispatcherRef.current
-            if (!current || current.key !== messageKey) return
-            try {
-              if (subscribed) current.dispatcher.subscribe(id); else current.dispatcher.unsubscribe(id)
-              setTeamMessageSubscriptions({ key: messageKey, ids: teamMembers.filter(member => current.dispatcher.isSubscribed(member.id)).map(member => member.id) })
-            } catch { notifyWarning('频道订阅未更改') }
-          }} key={JSON.stringify([storageScope, teamLead.id, teamLead.teamGeneration ?? 0])} models={config.llm_config.api_profiles.map(profile=>({id:profile.id,name:profile.model_name}))} lead={teamLead} members={teamMembers} onEnd={()=>{
-            const teamKey = `${storageScope}\u0000${teamLead.id}`
-            const expectedLead = sessionsRef.current.find(session => session.id === teamLead.id)
-            const scopeEpoch = sessionLoadEpochRef.current
-            const visibilityEpoch = teamVisibilityRef.current.epoch
-            if (!expectedLead || expectedLead.teamLeadId || expectedLead.archived || expectedLead.teamEnded || !route?.threadId) { notifyWarning('团队已更改'); return }
-            if (teamEndPendingRef.current.has(teamKey)) return
-            teamEndPendingRef.current.add(teamKey)
-            const activityOwner = teamMessageDispatcherRef.current
-            if (activityOwner?.key === messageKey) dispatchTeamActivity({ type: 'close', owner: activityOwner.owner, key: activityOwner.key })
-            teamEndEpochsRef.current.set(teamKey, (teamEndEpochsRef.current.get(teamKey) ?? 0) + 1)
-            setTeamEndRevision(revision => revision + 1)
-            let mainEnded = teamEndedMainRef.current.has(teamKey)
-            void (async () => {
-              if (!mainEnded) {
-                await api().svcLLMProxy.endTeam({scope:storageScope,thread:route.threadId!,lead:expectedLead.id})
-                mainEnded = true
-                teamEndedMainRef.current.add(teamKey)
-              }
-              return endTeamInDB({scope:storageScope, expectedLead, shouldUpdate: () => isMountedRef.current && teamVisibilityRef.current.active && teamVisibilityRef.current.epoch===visibilityEpoch && storageScopeRef.current === storageScope && sessionLoadEpochRef.current === scopeEpoch})
-            })().then(result => {
-              noteSessionWriteAcknowledged(storageScope)
-              if (isMountedRef.current && storageScopeRef.current === storageScope && sessionLoadEpochRef.current === scopeEpoch) reconcileTeamLifecycle([result.lead,...result.members])
-              const lifecycleNotice = {scope:storageScope,leadId:result.lead.id}
-              if (typeof BroadcastChannel === 'function') {
+                const result = current.dispatcher.enqueueUserChannel({
+                  id,
+                  source: {
+                    kind: 'user',
+                    scope: storageScope,
+                    thread: route.threadId,
+                    lead: messageLeadId
+                  },
+                  text
+                })
+                // Once enqueued, an observer or pump error must not encourage a duplicate send.
                 try {
-                  const channel=new BroadcastChannel('magicpot-team-lifecycle')
-                  channel.postMessage(lifecycleNotice)
-                  channel.close()
-                } catch { /* Local reconciliation still applies if cross-window notification is unavailable. */ }
+                  current.pump()
+                } catch {
+                  /* The next pump can handle queued work. */
+                }
+                return result
+              }}
+              subscriptions={
+                teamMessageSubscriptions.key === messageKey ? teamMessageSubscriptions.ids : []
               }
-              window.dispatchEvent(new CustomEvent('chat:team-lifecycle-ended',{detail:lifecycleNotice}))
-              if (!isMountedRef.current || storageScopeRef.current !== storageScope || sessionLoadEpochRef.current !== scopeEpoch) return
-              selectSession(result.lead.id)
-            }).catch(()=>notifyWarning(mainEnded ? '团队已在主进程结束，但本地状态同步失败，请重试结束' : '无法结束团队，请重试'))
-              .finally(() => { teamEndPendingRef.current.delete(teamKey); if (isMountedRef.current) setTeamEndRevision(revision => revision + 1) })
-          }} onSave={async value=>{
-            const current=sessionsRef.current.find(session=>session.id===value.id)
-            if(!current||current!==teamLead||storageScopeRef.current!==storageScope)return false
-            const scopeEpoch = sessionLoadEpochRef.current
-            const visibilityEpoch = teamVisibilityRef.current.epoch
-            if (value.teamSettings?.defaultModel !== current.teamSettings?.defaultModel) {
-              if (currentSessionIdRef.current !== current.id) { notifyWarning('请在组长会话修改团队模型'); return false }
-              if (value.teamSettings?.defaultModel && value.teamSettings.defaultModel !== current.profileId) { notifyWarning('成员模型须与组长一致'); return false }
-              if (value.teamSettings?.defaultModel && !config.llm_config.api_profiles.some(profile => profile.id === value.teamSettings?.defaultModel)) { notifyWarning('模型ID不存在'); return false }
+              onSubscriptionChange={(id, subscribed) => {
+                const current = teamMessageDispatcherRef.current
+                if (!current || current.key !== messageKey) return
+                try {
+                  if (subscribed) current.dispatcher.subscribe(id)
+                  else current.dispatcher.unsubscribe(id)
+                  setTeamMessageSubscriptions({
+                    key: messageKey,
+                    ids: teamMembers
+                      .filter((member) => current.dispatcher.isSubscribed(member.id))
+                      .map((member) => member.id)
+                  })
+                } catch {
+                  notifyWarning('频道订阅未更改')
+                }
+              }}
+              key={JSON.stringify([storageScope, teamLead.id, teamLead.teamGeneration ?? 0])}
+              models={config.llm_config.api_profiles.map((profile) => ({
+                id: profile.id,
+                name: profile.model_name
+              }))}
+              lead={teamLead}
+              members={teamMembers}
+              onEnd={() => {
+                const teamKey = `${storageScope}\u0000${teamLead.id}`
+                const expectedLead = sessionsRef.current.find(
+                  (session) => session.id === teamLead.id
+                )
+                const scopeEpoch = sessionLoadEpochRef.current
+                const visibilityEpoch = teamVisibilityRef.current.epoch
+                if (
+                  !expectedLead ||
+                  expectedLead.teamLeadId ||
+                  expectedLead.archived ||
+                  expectedLead.teamEnded ||
+                  !route?.threadId
+                ) {
+                  notifyWarning('团队已更改')
+                  return
+                }
+                if (teamEndPendingRef.current.has(teamKey)) return
+                teamEndPendingRef.current.add(teamKey)
+                const activityOwner = teamMessageDispatcherRef.current
+                if (activityOwner?.key === messageKey)
+                  dispatchTeamActivity({
+                    type: 'close',
+                    owner: activityOwner.owner,
+                    key: activityOwner.key
+                  })
+                teamEndEpochsRef.current.set(
+                  teamKey,
+                  (teamEndEpochsRef.current.get(teamKey) ?? 0) + 1
+                )
+                setTeamEndRevision((revision) => revision + 1)
+                let mainEnded = teamEndedMainRef.current.has(teamKey)
+                void (async () => {
+                  if (!mainEnded) {
+                    await api().svcLLMProxy.endTeam({
+                      scope: storageScope,
+                      thread: route.threadId!,
+                      lead: expectedLead.id
+                    })
+                    mainEnded = true
+                    teamEndedMainRef.current.add(teamKey)
+                  }
+                  return endTeamInDB({
+                    scope: storageScope,
+                    expectedLead,
+                    shouldUpdate: () =>
+                      isMountedRef.current &&
+                      teamVisibilityRef.current.active &&
+                      teamVisibilityRef.current.epoch === visibilityEpoch &&
+                      storageScopeRef.current === storageScope &&
+                      sessionLoadEpochRef.current === scopeEpoch
+                  })
+                })()
+                  .then((result) => {
+                    noteSessionWriteAcknowledged(storageScope)
+                    if (
+                      isMountedRef.current &&
+                      storageScopeRef.current === storageScope &&
+                      sessionLoadEpochRef.current === scopeEpoch
+                    )
+                      reconcileTeamLifecycle([result.lead, ...result.members])
+                    const lifecycleNotice = { scope: storageScope, leadId: result.lead.id }
+                    if (typeof BroadcastChannel === 'function') {
+                      try {
+                        const channel = new BroadcastChannel('magicpot-team-lifecycle')
+                        channel.postMessage(lifecycleNotice)
+                        channel.close()
+                      } catch {
+                        /* Local reconciliation still applies if cross-window notification is unavailable. */
+                      }
+                    }
+                    window.dispatchEvent(
+                      new CustomEvent('chat:team-lifecycle-ended', { detail: lifecycleNotice })
+                    )
+                    if (
+                      !isMountedRef.current ||
+                      storageScopeRef.current !== storageScope ||
+                      sessionLoadEpochRef.current !== scopeEpoch
+                    )
+                      return
+                    selectSession(result.lead.id)
+                  })
+                  .catch(() =>
+                    notifyWarning(
+                      mainEnded
+                        ? '团队已在主进程结束，但本地状态同步失败，请重试结束'
+                        : '无法结束团队，请重试'
+                    )
+                  )
+                  .finally(() => {
+                    teamEndPendingRef.current.delete(teamKey)
+                    if (isMountedRef.current) setTeamEndRevision((revision) => revision + 1)
+                  })
+              }}
+              onSave={async (value) => {
+                const current = sessionsRef.current.find((session) => session.id === value.id)
+                if (!current || current !== teamLead || storageScopeRef.current !== storageScope)
+                  return false
+                const scopeEpoch = sessionLoadEpochRef.current
+                const visibilityEpoch = teamVisibilityRef.current.epoch
+                if (value.teamSettings?.defaultModel !== current.teamSettings?.defaultModel) {
+                  if (currentSessionIdRef.current !== current.id) {
+                    notifyWarning('请在组长会话修改团队模型')
+                    return false
+                  }
+                  if (
+                    value.teamSettings?.defaultModel &&
+                    value.teamSettings.defaultModel !== current.profileId
+                  ) {
+                    notifyWarning('成员模型须与组长一致')
+                    return false
+                  }
+                  if (
+                    value.teamSettings?.defaultModel &&
+                    !config.llm_config.api_profiles.some(
+                      (profile) => profile.id === value.teamSettings?.defaultModel
+                    )
+                  ) {
+                    notifyWarning('模型ID不存在')
+                    return false
+                  }
+                }
+                try {
+                  validateTeamTasks(value.teamTasks ?? [])
+                } catch {
+                  notifyWarning('任务依赖无效')
+                  return false
+                }
+                const updated = {
+                  ...current,
+                  teamTasks: value.teamTasks,
+                  teamChannel: value.teamChannel,
+                  teamSettings: value.teamSettings
+                }
+                setSessions((previous) =>
+                  previous.map((session) => (session === current ? updated : session))
+                )
+                try {
+                  await persistSessionWithBaseline(updated, storageScope)
+                  const currentAcknowledgement =
+                    isMountedRef.current &&
+                    teamVisibilityRef.current.active &&
+                    teamVisibilityRef.current.epoch === visibilityEpoch &&
+                    storageScopeRef.current === storageScope &&
+                    sessionLoadEpochRef.current === scopeEpoch &&
+                    sessionsRef.current.find((session) => session.id === updated.id) === updated &&
+                    chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, updated)
+                  return (
+                    currentAcknowledgement &&
+                    clearDirtySessionSnapshotIfCurrent(storageScope, updated)
+                  )
+                } catch {
+                  if (
+                    isMountedRef.current &&
+                    storageScopeRef.current === storageScope &&
+                    sessionLoadEpochRef.current === scopeEpoch
+                  )
+                    notifyWarning('无法保存团队设置')
+                  return false
+                }
+              }}
+            />
+          )}
+          {teamEnabled && teamLead && (
+            <AgentTeamMemberForm
+              key={imagePlacementKey}
+              placement={teamImagePlacement}
+              lead={teamLead}
+              members={teamMembers}
+              creating={creatingTeamMember}
+              onClose={() => setCreatingTeamMember(false)}
+              onCreate={async (name, role, onCommittedEmpty) => {
+                const lead = sessionsRef.current.find((session) => session.id === teamLead.id)
+                const teamKey = `${storageScope}\u0000${teamLead.id}`
+                const endEpoch = teamEndEpochsRef.current.get(teamKey) ?? 0
+                const scopeEpoch = sessionLoadEpochRef.current
+                const visibilityEpoch = teamVisibilityRef.current.epoch
+                if (
+                  !lead ||
+                  lead.teamLeadId ||
+                  lead.archived ||
+                  lead.teamEnded ||
+                  teamEndPendingRef.current.has(teamKey) ||
+                  teamEndedMainRef.current.has(teamKey) ||
+                  hasSessionDeleteTombstone(lead.id, storageScope) ||
+                  storageScopeRef.current !== storageScope ||
+                  !active
+                )
+                  throw new Error('Team scope changed')
+                const member = createTeamMember(lead, name, role, crypto.randomUUID(), Date.now())
+                const stillCurrent = () =>
+                  isMountedRef.current &&
+                  teamVisibilityRef.current.active &&
+                  teamVisibilityRef.current.epoch === visibilityEpoch &&
+                  storageScopeRef.current === storageScope &&
+                  sessionLoadEpochRef.current === scopeEpoch &&
+                  (teamEndEpochsRef.current.get(teamKey) ?? 0) === endEpoch &&
+                  sessionsRef.current.find((session) => session.id === lead.id) === lead
+                const result = await createTeamMemberInDB({
+                  scope: storageScope,
+                  expectedLead: lead,
+                  member,
+                  shouldUpdate: stillCurrent
+                })
+                noteSessionWriteAcknowledged(storageScope)
+                chatSaveBaselineRef.current.advance(storageScope, result.member.id, result.member)
+                if (!stillCurrent()) {
+                  if (isMountedRef.current && storageScopeRef.current === storageScope)
+                    void refreshSessionsFromStorage()
+                  throw new Error('Team scope changed')
+                }
+                persistedSessionsRef.current.set(result.member.id, result.member)
+                // This exact freshly committed member has empty history. Publish the creation boundary
+                // before the member can be rendered together with its first generated image.
+                if (
+                  result.member.id === member.id &&
+                  result.member.teamLeadId === lead.id &&
+                  result.member.messages.length === 0 &&
+                  !sessionsRef.current.some((session) => session.id === result.member.id)
+                ) {
+                  onCommittedEmpty(result.member.id)
+                }
+                setSessions((previous) =>
+                  previous.some((session) => session.id === result.member.id)
+                    ? previous
+                    : [...previous, result.member]
+                )
+              }}
+            />
+          )}
+          <TeamLeadJobEntries
+            route={route}
+            currentId={currentSessionId}
+            leadId={teamLead?.id}
+            activeTeamKey={teamLeadJobsKey}
+            isLive={isLeadJobsLive}
+            currentIds={new Set(jobController.jobs.map((job) => job.id))}
+          >
+            {(leadJobs) =>
+              renderProcessArea(
+                teamEnabled && teamLead ? teamImagePlacement.place : undefined,
+                leadJobs
+              )
             }
-            try { validateTeamTasks(value.teamTasks ?? []) } catch { notifyWarning('任务依赖无效'); return false }
-            const updated={...current,teamTasks:value.teamTasks,teamChannel:value.teamChannel,teamSettings:value.teamSettings}
-            setSessions(previous=>previous.map(session=>session===current?updated:session))
-            try {
-              await persistSessionWithBaseline(updated,storageScope)
-              const currentAcknowledgement = isMountedRef.current && teamVisibilityRef.current.active && teamVisibilityRef.current.epoch === visibilityEpoch &&
-                storageScopeRef.current === storageScope && sessionLoadEpochRef.current === scopeEpoch &&
-                sessionsRef.current.find(session => session.id === updated.id) === updated &&
-                chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, updated)
-              return currentAcknowledgement && clearDirtySessionSnapshotIfCurrent(storageScope, updated)
-            } catch {
-              if (isMountedRef.current && storageScopeRef.current === storageScope && sessionLoadEpochRef.current === scopeEpoch) notifyWarning('无法保存团队设置')
-              return false
-            }
-          }}/>}
-          {teamEnabled && teamLead && <AgentTeamMemberForm key={imagePlacementKey} placement={teamImagePlacement} lead={teamLead} members={teamMembers} creating={creatingTeamMember} onClose={() => setCreatingTeamMember(false)} onCreate={async(name,role,onCommittedEmpty)=>{
-              const lead=sessionsRef.current.find(session=>session.id===teamLead.id)
-              const teamKey = `${storageScope}\u0000${teamLead.id}`
-              const endEpoch = teamEndEpochsRef.current.get(teamKey) ?? 0
-              const scopeEpoch = sessionLoadEpochRef.current
-              const visibilityEpoch = teamVisibilityRef.current.epoch
-              if(!lead || lead.teamLeadId || lead.archived || lead.teamEnded || teamEndPendingRef.current.has(teamKey) || teamEndedMainRef.current.has(teamKey) || hasSessionDeleteTombstone(lead.id, storageScope) || storageScopeRef.current!==storageScope || !active)throw new Error('Team scope changed')
-              const member=createTeamMember(lead,name,role,crypto.randomUUID(),Date.now())
-              const stillCurrent = () => isMountedRef.current && teamVisibilityRef.current.active && teamVisibilityRef.current.epoch === visibilityEpoch && storageScopeRef.current === storageScope && sessionLoadEpochRef.current === scopeEpoch &&
-                (teamEndEpochsRef.current.get(teamKey) ?? 0) === endEpoch && sessionsRef.current.find(session => session.id === lead.id) === lead
-              const result = await createTeamMemberInDB({scope:storageScope,expectedLead:lead,member,shouldUpdate:stillCurrent})
-              noteSessionWriteAcknowledged(storageScope)
-              chatSaveBaselineRef.current.advance(storageScope,result.member.id,result.member)
-              if (!stillCurrent()) {
-                if (isMountedRef.current && storageScopeRef.current === storageScope) void refreshSessionsFromStorage()
-                throw new Error('Team scope changed')
-              }
-              persistedSessionsRef.current.set(result.member.id,result.member)
-              // This exact freshly committed member has empty history. Publish the creation boundary
-              // before the member can be rendered together with its first generated image.
-              if (result.member.id === member.id && result.member.teamLeadId === lead.id && result.member.messages.length === 0 && !sessionsRef.current.some(session => session.id === result.member.id)) {
-                onCommittedEmpty(result.member.id)
-              }
-              setSessions(previous=>previous.some(session=>session.id===result.member.id) ? previous : [...previous,result.member])
-            }}/>}
-          <TeamLeadJobEntries route={route} currentId={currentSessionId} leadId={teamLead?.id} activeTeamKey={teamLeadJobsKey} isLive={isLeadJobsLive} currentIds={new Set(jobController.jobs.map(job => job.id))}>{leadJobs => renderProcessArea(teamEnabled && teamLead ? teamImagePlacement.place : undefined, leadJobs)}</TeamLeadJobEntries>
+          </TeamLeadJobEntries>
           <Box sx={{ display: 'contents' }}>
-          {active && replayView?.scope === inspectionScope && <Box data-testid="replay-confirmation" sx={{p:2}}>
-            <Typography variant="subtitle2">{t('chat.confirm_replay', { kind: replayView.command.kind, defaultValue: `Confirm /${replayView.command.kind}` })}</Typography>
-            <Typography>新建对话，保留原对话。</Typography>
-            <Button onClick={() => {
-              if (replayBusyRef.current) return
-              const view = replayView
-              setReplayView(null)
-              const id = currentSessionIdRef.current
-              if (!view || !active || !isReady || !sessionsLoaded || sessionLoadError || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || id !== view.session.id || storageScopeRef.current !== storageScope || sessionsRef.current.find(item=>item.id===id) !== view.session || view.modelConfig !== config.llm_config || view.profileId !== selectedProfileId || view.skillId !== selectedSkillId || loadingSessionIdsRef.current.has(id) || config.use_remote_llm || hasSessionDeleteTombstone(id,storageScope) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id))) { notifyWarning(t('chat.conversation_settings_changed_reopen', { defaultValue: 'Conversation or settings changed. Reopen command.' })); return }
-              try {
-                const planned = view.command.kind === 'branch' ? null : planReplay(view.session.messages,view.command)
-                const copy = cloneChatSessionForReplay(view.session, planned?.baseMessages)
-                const branch = { ...copy, id: crypto.randomUUID(), title: `${copy.title} [${view.command.kind}]`, messages: copy.messages, createdAt:Date.now(), updatedAt:Date.now() }
-                delete branch.sessionUrl
-                delete branch.teamLeadId
-                delete branch.teamMemberName
-                delete branch.memberModelChoice
-                delete branch.teamMemberGeneration
-                delete branch.teamLifecycleRevision
-                delete branch.teamRole
-                delete branch.teamGeneration
-                delete branch.teamSettings
-                delete branch.teamTasks
-                delete branch.teamChannel
-                delete branch.sessionProfileId
-                delete branch.sessionRouteFingerprint
-                delete branch.draft
-                if (planned) branch.draft = { inputValue:planned.content, pendingAttachments:[], pendingHiddenContext:'', updatedAt:Date.now() }
-                replayBusyRef.current=true
-                void activateNewSession(branch).then(async()=>{
-                  if (!branch.draft || storageScopeRef.current!==storageScope || currentSessionIdRef.current!==branch.id) return
-                  const restoredDraft={...branch.draft,updatedAt:Date.now()}
-                  await persistDraftSnapshot(branch.id,restoredDraft)
-                  if (storageScopeRef.current===storageScope && currentSessionIdRef.current===branch.id) applyDraftToComposerState(restoredDraft)
-                }).catch(()=>notifyWarning(t('chat.could_not_save_branch', { defaultValue: 'Could not save branch. Original conversation remains.' }))).finally(()=>{replayBusyRef.current=false})
-              } catch { notifyWarning(t('chat.cannot_plan_replay', { defaultValue: 'Cannot plan this replay. Original conversation unchanged.' })) }
-            }}>{t('chat.create_separate_conversation', { defaultValue: 'Create separate conversation' })}</Button>
-            <Button onClick={()=>setReplayView(null)}>{t('chat.cancel_replay', { defaultValue: 'Cancel replay' })}</Button>
-          </Box>}
-          {active && configurationView?.scope === inspectionScope && <Box data-testid="agent-configuration-view" sx={{ p: 2 }}>
-            <Typography variant="subtitle2">/{configurationView.kind} — {t('chat.configuration_handoff', { defaultValue: 'configuration handoff' })}</Typography>
-            {configurationView.kind === 'video_gen' ? <>
-              <Button onClick={() => { setConfigurationView(null); navigate('/qappexecute', { state: { magicpotOpenVideoGeneration: true } }) }}>{t('chat.open_video_generation_workspace', { defaultValue: 'Open video generation workspace' })}</Button>
-            </> : configurationView.kind === 'plugin'
-              ? <Button onClick={() => navigate('/workshop/plugins', { state: null })}>{t('chat.open_plugin_center', { defaultValue: 'Open plugin center' })}</Button>
-              : <><Button onClick={() => navigate('/settings?tab=environment', { state: null })}>{t('chat.open_tool_environment_settings', { defaultValue: 'Open tool environment settings' })}</Button>
-                  <Button onClick={() => navigate('/settings?tab=mcp', { state: null })}>{t('chat.open_mcp_client_settings', { defaultValue: 'Open MCP client settings' })}</Button></>}
-            <Button onClick={() => setConfigurationView(null)}>{t('chat.close_configuration_view', { defaultValue: 'Close configuration view' })}</Button>
-          </Box>}
-          {active && inspectionView?.scope === inspectionScope && <Box data-testid="agent-inspection-view" sx={{ p: 2 }}>
-            <Button onClick={() => setInspectionView(null)}>{t('chat.close_command_view', { defaultValue: 'Close command view' })}</Button>
-            <Typography variant="subtitle2">{inspectionView.title}</Typography>
-            <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 300, overflow: 'auto' }}>{inspectionView.text}</Typography>
-          </Box>}
-          <AgentThreadLocalReminder route={route} conversationId={currentSession?.id} active={active && isReady && sessionsLoaded && storageScopeRef.current === storageScope && Boolean(currentSession && !currentSession.archived && !hasSessionDeleteTombstone(currentSession.id, storageScope))} allowCreate={!sessionLoadError} />
-          <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={active && isReady && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && Boolean(currentSession && !currentSession.archived && !hasSessionDeleteTombstone(currentSession.id, storageScope))} remote={!config || Boolean(config.use_remote_llm)} />
-          <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} />
-          <AgentThreadSkillsPanel ref={skillCommandRef} visible={isSkillPickerOpen || skillDetailsOpen} onClose={() => { setSkillDetailsOpen(false); setIsSkillPickerOpen(false) }} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
-          <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
-          <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
-            const id = currentSessionIdRef.current
-            if (!id || id !== currentSessionId || storageScopeRef.current !== storageScope || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) throw new Error('Side snapshot no longer belongs to the current conversation.')
-            return sessionsRef.current.find((session) => session.id === id)?.messages || []
-          }} />
-          </Box>
-          <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
-              <Box hidden={showingSide} sx={{ flex: 1, minWidth: 0, minHeight: 0, display: showingSide ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              {teamEnabled && <Box sx={{maxHeight:'30%',overflow:'auto',minWidth:0,display:'flex',flexDirection:'column'}}><Box ref={setTeamApprovalHost} data-testid="team-inline-approvals" sx={{px:1}}/></Box>}
-              <Box sx={{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
-              <ChatMessageList
-                active={active}
-                currentSession={currentSession}
-                isLoading={isLoading}
-                loadingStatus={currentLoadingStatus}
-                pendingConfirmation={currentPendingConfirmation}
-                editingMessageIndex={editingMessageIndex}
-                editingContent={editingContent}
-                onSetEditingIndex={setEditingMessageIndex}
-                onSetEditingContent={setEditingContent}
-                onDropImageAttachments={handleDropEditingImages}
-                onRegisterEditingAttachmentReceiver={registerEditingAttachmentReceiver}
-                onSendEditedMessage={handleSendEditedMessage}
-                onPreviewImage={imagePreview.setPreviewImage}
-                onImageContextMenu={handleImageContextMenu}
-                onDownloadAttachment={downloadAttachment}
-                onSendModelToDcc={sendModelToDcc}
-                onResolvePendingConfirmation={handleResolvePendingConfirmation}
-                chatContainerRef={chatContainerRef}
-                messagesEndRef={messagesEndRef}
+            {active && replayView?.scope === inspectionScope && (
+              <Box data-testid="replay-confirmation" sx={{ p: 2 }}>
+                <Typography variant="subtitle2">
+                  {t('chat.confirm_replay', {
+                    kind: replayView.command.kind,
+                    defaultValue: `Confirm /${replayView.command.kind}`
+                  })}
+                </Typography>
+                <Typography>新建对话，保留原对话。</Typography>
+                <Button
+                  onClick={() => {
+                    if (replayBusyRef.current) return
+                    const view = replayView
+                    setReplayView(null)
+                    const id = currentSessionIdRef.current
+                    if (
+                      !view ||
+                      !active ||
+                      !isReady ||
+                      !sessionsLoaded ||
+                      sessionLoadError ||
+                      pendingAttachmentsRef.current.length ||
+                      pendingHiddenContextRef.current ||
+                      id !== view.session.id ||
+                      storageScopeRef.current !== storageScope ||
+                      sessionsRef.current.find((item) => item.id === id) !== view.session ||
+                      view.modelConfig !== config.llm_config ||
+                      view.profileId !== selectedProfileId ||
+                      view.skillId !== selectedSkillId ||
+                      loadingSessionIdsRef.current.has(id) ||
+                      config.use_remote_llm ||
+                      hasSessionDeleteTombstone(id, storageScope) ||
+                      deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id))
+                    ) {
+                      notifyWarning(
+                        t('chat.conversation_settings_changed_reopen', {
+                          defaultValue: 'Conversation or settings changed. Reopen command.'
+                        })
+                      )
+                      return
+                    }
+                    try {
+                      const planned =
+                        view.command.kind === 'branch'
+                          ? null
+                          : planReplay(view.session.messages, view.command)
+                      const copy = cloneChatSessionForReplay(view.session, planned?.baseMessages)
+                      const branch = {
+                        ...copy,
+                        id: crypto.randomUUID(),
+                        title: `${copy.title} [${view.command.kind}]`,
+                        messages: copy.messages,
+                        createdAt: Date.now(),
+                        updatedAt: Date.now()
+                      }
+                      delete branch.sessionUrl
+                      delete branch.teamLeadId
+                      delete branch.teamMemberName
+                      delete branch.memberModelChoice
+                      delete branch.teamMemberGeneration
+                      delete branch.teamLifecycleRevision
+                      delete branch.teamRole
+                      delete branch.teamGeneration
+                      delete branch.teamSettings
+                      delete branch.teamTasks
+                      delete branch.teamChannel
+                      delete branch.sessionProfileId
+                      delete branch.sessionRouteFingerprint
+                      delete branch.draft
+                      if (planned)
+                        branch.draft = {
+                          inputValue: planned.content,
+                          pendingAttachments: [],
+                          pendingHiddenContext: '',
+                          updatedAt: Date.now()
+                        }
+                      replayBusyRef.current = true
+                      void activateNewSession(branch)
+                        .then(async () => {
+                          if (
+                            !branch.draft ||
+                            storageScopeRef.current !== storageScope ||
+                            currentSessionIdRef.current !== branch.id
+                          )
+                            return
+                          const restoredDraft = { ...branch.draft, updatedAt: Date.now() }
+                          await persistDraftSnapshot(branch.id, restoredDraft)
+                          if (
+                            storageScopeRef.current === storageScope &&
+                            currentSessionIdRef.current === branch.id
+                          )
+                            applyDraftToComposerState(restoredDraft)
+                        })
+                        .catch(() =>
+                          notifyWarning(
+                            t('chat.could_not_save_branch', {
+                              defaultValue: 'Could not save branch. Original conversation remains.'
+                            })
+                          )
+                        )
+                        .finally(() => {
+                          replayBusyRef.current = false
+                        })
+                    } catch {
+                      notifyWarning(
+                        t('chat.cannot_plan_replay', {
+                          defaultValue: 'Cannot plan this replay. Original conversation unchanged.'
+                        })
+                      )
+                    }
+                  }}
+                >
+                  {t('chat.create_separate_conversation', {
+                    defaultValue: 'Create separate conversation'
+                  })}
+                </Button>
+                <Button onClick={() => setReplayView(null)}>
+                  {t('chat.cancel_replay', { defaultValue: 'Cancel replay' })}
+                </Button>
+              </Box>
+            )}
+            {active && configurationView?.scope === inspectionScope && (
+              <Box data-testid="agent-configuration-view" sx={{ p: 2 }}>
+                <Typography variant="subtitle2">
+                  /{configurationView.kind} —{' '}
+                  {t('chat.configuration_handoff', { defaultValue: 'configuration handoff' })}
+                </Typography>
+                {configurationView.kind === 'video_gen' ? (
+                  <>
+                    <Button
+                      onClick={() => {
+                        setConfigurationView(null)
+                        navigate('/qappexecute', { state: { magicpotOpenVideoGeneration: true } })
+                      }}
+                    >
+                      {t('chat.open_video_generation_workspace', {
+                        defaultValue: 'Open video generation workspace'
+                      })}
+                    </Button>
+                  </>
+                ) : configurationView.kind === 'plugin' ? (
+                  <Button onClick={() => navigate('/workshop/plugins', { state: null })}>
+                    {t('chat.open_plugin_center', { defaultValue: 'Open plugin center' })}
+                  </Button>
+                ) : (
+                  <>
+                    <Button onClick={() => navigate('/settings?tab=environment', { state: null })}>
+                      {t('chat.open_tool_environment_settings', {
+                        defaultValue: 'Open tool environment settings'
+                      })}
+                    </Button>
+                    <Button onClick={() => navigate('/settings?tab=mcp', { state: null })}>
+                      {t('chat.open_mcp_client_settings', {
+                        defaultValue: 'Open MCP client settings'
+                      })}
+                    </Button>
+                  </>
+                )}
+                <Button onClick={() => setConfigurationView(null)}>
+                  {t('chat.close_configuration_view', { defaultValue: 'Close configuration view' })}
+                </Button>
+              </Box>
+            )}
+            {active && inspectionView?.scope === inspectionScope && (
+              <Box data-testid="agent-inspection-view" sx={{ p: 2 }}>
+                <Button onClick={() => setInspectionView(null)}>
+                  {t('chat.close_command_view', { defaultValue: 'Close command view' })}
+                </Button>
+                <Typography variant="subtitle2">{inspectionView.title}</Typography>
+                <Typography
+                  component="pre"
+                  sx={{
+                    whiteSpace: 'pre-wrap',
+                    overflowWrap: 'anywhere',
+                    maxHeight: 300,
+                    overflow: 'auto'
+                  }}
+                >
+                  {inspectionView.text}
+                </Typography>
+              </Box>
+            )}
+            <AgentThreadLocalReminder
+              route={route}
+              conversationId={currentSession?.id}
+              active={
+                active &&
+                isReady &&
+                sessionsLoaded &&
+                storageScopeRef.current === storageScope &&
+                Boolean(
+                  currentSession &&
+                  !currentSession.archived &&
+                  !hasSessionDeleteTombstone(currentSession.id, storageScope)
+                )
+              }
+              allowCreate={!sessionLoadError}
+            />
+            <AgentThreadGoalEntry
+              route={route}
+              conversationId={currentSession?.id}
+              active={
+                active &&
+                isReady &&
+                sessionsLoaded &&
+                !sessionLoadError &&
+                storageScopeRef.current === storageScope &&
+                Boolean(
+                  currentSession &&
+                  !currentSession.archived &&
+                  !hasSessionDeleteTombstone(currentSession.id, storageScope)
+                )
+              }
+              remote={!config || Boolean(config.use_remote_llm)}
+            />
+            <AgentThreadScratchpadView
+              ref={scratchpadCommandRef}
+              route={route}
+              conversationId={currentSessionId || undefined}
+              storageScope={storageScope}
+              active={scratchpadAvailable}
+              commandEnabled={!pendingAttachments.length && !pendingHiddenContext}
+            />
+            <AgentThreadSkillsPanel
+              ref={skillCommandRef}
+              visible={isSkillPickerOpen || skillDetailsOpen}
+              onClose={() => {
+                setSkillDetailsOpen(false)
+                setIsSkillPickerOpen(false)
+              }}
+              commandEnabled={!pendingAttachments.length && !pendingHiddenContext}
+              route={route}
+              conversationId={currentSessionId || undefined}
+              active={active && !config?.use_remote_llm}
+            />
+            <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
+              <AgentThreadSidesPanel
+                ref={sideCommandRef}
+                onViewChange={setShowingSide}
+                commandEnabled={
+                  !config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext
+                }
+                route={route}
+                conversationId={currentSessionId || undefined}
+                active={active && !config?.use_remote_llm}
+                profileId={selectedProfileId || undefined}
+                getMessages={() => {
+                  const id = currentSessionIdRef.current
+                  if (
+                    !id ||
+                    id !== currentSessionId ||
+                    storageScopeRef.current !== storageScope ||
+                    deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) ||
+                    hasSessionDeleteTombstone(id, storageScope)
+                  )
+                    throw new Error('Side snapshot no longer belongs to the current conversation.')
+                  return sessionsRef.current.find((session) => session.id === id)?.messages || []
+                }}
               />
+            </Box>
+            <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
+              <Box
+                hidden={showingSide}
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  minHeight: 0,
+                  display: showingSide ? 'none' : 'flex',
+                  flexDirection: 'column',
+                  overflow: 'hidden'
+                }}
+              >
+                {teamEnabled && (
+                  <Box
+                    sx={{
+                      maxHeight: '30%',
+                      overflow: 'auto',
+                      minWidth: 0,
+                      display: 'flex',
+                      flexDirection: 'column'
+                    }}
+                  >
+                    <Box
+                      ref={setTeamApprovalHost}
+                      data-testid="team-inline-approvals"
+                      sx={{ px: 1 }}
+                    />
+                  </Box>
+                )}
+                <Box
+                  sx={{
+                    flex: 1,
+                    minWidth: 0,
+                    minHeight: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden'
+                  }}
+                >
+                  <ChatMessageList
+                    active={active}
+                    currentSession={currentSession}
+                    isLoading={isLoading}
+                    loadingStatus={currentLoadingStatus}
+                    pendingConfirmation={currentPendingConfirmation}
+                    editingMessageIndex={editingMessageIndex}
+                    editingContent={editingContent}
+                    onSetEditingIndex={setEditingMessageIndex}
+                    onSetEditingContent={setEditingContent}
+                    onDropImageAttachments={handleDropEditingImages}
+                    onRegisterEditingAttachmentReceiver={registerEditingAttachmentReceiver}
+                    onSendEditedMessage={handleSendEditedMessage}
+                    onPreviewImage={imagePreview.setPreviewImage}
+                    onImageContextMenu={handleImageContextMenu}
+                    onDownloadAttachment={downloadAttachment}
+                    onSendModelToDcc={sendModelToDcc}
+                    onResolvePendingConfirmation={handleResolvePendingConfirmation}
+                    chatContainerRef={chatContainerRef}
+                    messagesEndRef={messagesEndRef}
+                  />
+                </Box>
               </Box>
-              </Box>
-              <AgentThreadHtmlPanel route={route} conversationId={currentSessionId || undefined} active={active} />
+              <AgentThreadHtmlPanel
+                route={route}
+                conversationId={currentSessionId || undefined}
+                active={active}
+              />
               <AgentThreadInteractionPanel
                 route={route}
                 conversationId={currentSessionId || undefined}
@@ -9588,12 +11931,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
                       queuedSend.overrides?.attachments?.map((item) => item.type) ??
                       []
                     const canEdit = Boolean(
-                      queuedSend.overrides && !queuedSend.overrides.resolveAttachments && !queuedSend.inFlight
+                      queuedSend.overrides &&
+                      !queuedSend.overrides.resolveAttachments &&
+                      !queuedSend.inFlight
                     )
                     const showResumeNotice = Boolean(
                       currentSessionQueuedSends.length > 1 &&
                       currentSessionQueuedSends[0]?.id === queuedSend.id &&
-                      queuedSend.paused && queuedSend.blocksFollowing
+                      queuedSend.paused &&
+                      queuedSend.blocksFollowing
                     )
                     return (
                       <Box
@@ -9647,8 +11993,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
                           </Box>
                         ) : null}
                         {queuedSend.inFlight && <Typography variant="caption">正在准备</Typography>}
-                        {queuedSend.paused && <Typography variant="caption">未发送 · 已暂停</Typography>}
-                        {showResumeNotice && <Typography id={queueResumeNoticeId} variant="caption" sx={{ flexBasis: '100%' }}>编辑或移除此项后，后续排队消息可能继续发送。</Typography>}
+                        {queuedSend.paused && (
+                          <Typography variant="caption">未发送 · 已暂停</Typography>
+                        )}
+                        {showResumeNotice && (
+                          <Typography
+                            id={queueResumeNoticeId}
+                            variant="caption"
+                            sx={{ flexBasis: '100%' }}
+                          >
+                            编辑或移除此项后，后续排队消息可能继续发送。
+                          </Typography>
+                        )}
                         {canEdit ? (
                           <Tooltip title={t('chat.queue_edit')}>
                             <IconButton
@@ -9706,67 +12062,110 @@ const ChatPage: React.FC<ChatPageProps> = ({
               {/* 底部输入框 */}
 
               <Box sx={{ display: showingSide ? 'none' : 'contents' }}>
-              <ChatComposer
-                active={active}
-                inputValue={inputValue}
-                onInputChange={handleComposerInputChange}
-                onSend={handleSendCurrentMessage}
-                onUploadFile={handleUploadFile}
-                pendingAttachments={composerPendingAttachments}
-                uploadProgress={uploadProgress}
-                onRemoveAttachment={removeAttachment}
-                isLoading={isLoading}
-                sideCommandEnabled={active && route?.channel === 'canvas' && route.scopeType === 'thread' && !config?.use_remote_llm}
-                onStopGenerating={handleStopGenerating}
-                disabled={!currentSession}
-                composerInputRef={composerInputRef}
-                onPreviewImage={imagePreview.setPreviewImage}
-                inputSyncKey={`${currentSessionId || 'no-session'}:${composerClearVersion}`}
-                selectedSkillName={
-                  selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : undefined
-                }
-                addMenuSlot={
-                  (!isAgentSkillSelected || Boolean(active && isReady && currentSessionId && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId) || Boolean(teamEnabled && teamLead && !teamMembers.length))
-                    ? (closeMenu) => [
-                        teamEnabled && teamLead && !teamMembers.length && (teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length) && <MenuItem key="team-management" onClick={() => { closeMenu(); setTeamManagementOpenRequest(value => value + 1) }}>团队管理</MenuItem>,
-                        !isAgentSkillSelected && <ChatImageGenerationSettings
-                          key="image-generation"
-                          active={active}
-                          value={imageGenerationOptions}
-                          onChange={setImageGenerationOptions}
-                          onCloseParentMenu={closeMenu}
-                          referenceImageSize={imageGenerationReferenceSize}
-                          variant="menuItem"
-                        />,
-                      ]
-                    : undefined
-                }
-                toolHelpItems={selectedSkillToolHelpItems}
-                modelSelectorSlot={chatComposerControlSlot}
-                onClearSkill={() => handleSelectSkill(null)}
-                onCompressContext={handleCompressCurrentContext}
-                disableCompressContext={!canCompressCurrentContext}
-                toolbarSlot={chatImageGenerationToolbarSlot}
-                statusSlot={contextCompressionStatusSlot}
-              />
+                <ChatComposer
+                  active={active}
+                  inputValue={inputValue}
+                  onInputChange={handleComposerInputChange}
+                  onSend={handleSendCurrentMessage}
+                  onUploadFile={handleUploadFile}
+                  pendingAttachments={composerPendingAttachments}
+                  uploadProgress={uploadProgress}
+                  onRemoveAttachment={removeAttachment}
+                  isLoading={isLoading}
+                  sideCommandEnabled={
+                    active &&
+                    route?.channel === 'canvas' &&
+                    route.scopeType === 'thread' &&
+                    !config?.use_remote_llm
+                  }
+                  onStopGenerating={handleStopGenerating}
+                  disabled={!currentSession}
+                  composerInputRef={composerInputRef}
+                  onPreviewImage={imagePreview.setPreviewImage}
+                  inputSyncKey={`${currentSessionId || 'no-session'}:${composerClearVersion}`}
+                  selectedSkillName={
+                    selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : undefined
+                  }
+                  addMenuSlot={
+                    !isAgentSkillSelected ||
+                    Boolean(
+                      active &&
+                      isReady &&
+                      currentSessionId &&
+                      !config.use_remote_llm &&
+                      route?.channel === 'canvas' &&
+                      route.scopeType === 'thread' &&
+                      route.threadId
+                    ) ||
+                    Boolean(teamEnabled && teamLead && !teamMembers.length)
+                      ? (closeMenu) => [
+                          teamEnabled &&
+                            teamLead &&
+                            !teamMembers.length &&
+                            (teamLead.teamEnded ||
+                              teamLead.teamSettings ||
+                              teamLead.teamTasks?.length ||
+                              teamLead.teamChannel?.length) && (
+                              <MenuItem
+                                key="team-management"
+                                onClick={() => {
+                                  closeMenu()
+                                  setTeamManagementOpenRequest((value) => value + 1)
+                                }}
+                              >
+                                团队管理
+                              </MenuItem>
+                            ),
+                          !isAgentSkillSelected && (
+                            <ChatImageGenerationSettings
+                              key="image-generation"
+                              active={active}
+                              value={imageGenerationOptions}
+                              onChange={setImageGenerationOptions}
+                              onCloseParentMenu={closeMenu}
+                              referenceImageSize={imageGenerationReferenceSize}
+                              variant="menuItem"
+                            />
+                          )
+                        ]
+                      : undefined
+                  }
+                  toolHelpItems={selectedSkillToolHelpItems}
+                  modelSelectorSlot={chatComposerControlSlot}
+                  onClearSkill={() => handleSelectSkill(null)}
+                  onCompressContext={handleCompressCurrentContext}
+                  disableCompressContext={!canCompressCurrentContext}
+                  toolbarSlot={chatImageGenerationToolbarSlot}
+                  statusSlot={contextCompressionStatusSlot}
+                />
               </Box>
-          </Box>
-          {isSkillPickerOpen ? (
-            <Box sx={{ flex: 1, overflowY: 'auto', p: 0, bgcolor: 'background.default' }}>
-              {(config.use_remote_llm || route?.channel !== 'canvas' || route.scopeType !== 'thread') && <Button size="small" onClick={() => setIsSkillPickerOpen(false)}>{t('general.close')}</Button>}
-              <ChatSkillPicker
-                compact={false}
-                customSkills={customSkills}
-                skillCategories={skillCategories}
-                selectedSkillCategory={selectedSkillCategory}
-                selectedSkillId={selectedSkillId}
-                skillsForSelectedCategory={skillsForSelectedCategory}
-                onSelectSkillCategory={selectSkillCategory}
-                onSelectSkill={selectSkill}
-              />
             </Box>
-          ) : null}
-          {(showingSide || isSkillPickerOpen) && isLoading && <Button size="small" onClick={handleStopGenerating}>{t('chat.stop_generating')}</Button>}
+            {isSkillPickerOpen ? (
+              <Box sx={{ flex: 1, overflowY: 'auto', p: 0, bgcolor: 'background.default' }}>
+                {(config.use_remote_llm ||
+                  route?.channel !== 'canvas' ||
+                  route.scopeType !== 'thread') && (
+                  <Button size="small" onClick={() => setIsSkillPickerOpen(false)}>
+                    {t('general.close')}
+                  </Button>
+                )}
+                <ChatSkillPicker
+                  compact={false}
+                  customSkills={customSkills}
+                  skillCategories={skillCategories}
+                  selectedSkillCategory={selectedSkillCategory}
+                  selectedSkillId={selectedSkillId}
+                  skillsForSelectedCategory={skillsForSelectedCategory}
+                  onSelectSkillCategory={selectSkillCategory}
+                  onSelectSkill={selectSkill}
+                />
+              </Box>
+            ) : null}
+            {(showingSide || isSkillPickerOpen) && isLoading && (
+              <Button size="small" onClick={handleStopGenerating}>
+                {t('chat.stop_generating')}
+              </Button>
+            )}
           </Box>
         </Box>
 
@@ -9795,7 +12194,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             handleImageContextMenu={handleImageContextMenu}
           />
         )}
-
       </Box>
       {compactSkillPortal}
     </>
