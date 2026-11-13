@@ -1029,7 +1029,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                             px: 0.5
                           }}
                         >
-                          {attachment.fileName || 'File'}
+                          {attachment.fileName || t('chat.file', { defaultValue: 'File' })}
                         </Typography>
                         <Typography
                           variant="caption"
@@ -1074,7 +1074,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     )}
                     <IconButton
                       size="small"
-                      aria-label={t('chat.remove_attachment', { defaultValue: 'Remove attachment' })}
+                      aria-label={t('chat.remove_attachment', {
+                        defaultValue: 'Remove attachment'
+                      })}
                       onClick={() => {
                         if (attachment.url.startsWith('blob:')) {
                           URL.revokeObjectURL(attachment.url)
@@ -1387,10 +1389,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
                   />
                 </MenuItem>
-                {addMenuItems.length > 0 ? [
-                  <Divider key="add-menu-slot-divider" sx={{ my: 0.5 }} />,
-                  ...addMenuItems
-                ] : null}
+                {addMenuItems.length > 0
+                  ? [<Divider key="add-menu-slot-divider" sx={{ my: 0.5 }} />, ...addMenuItems]
+                  : null}
               </Menu>
               {toolbarSlot ? (
                 <Box
@@ -1455,15 +1456,37 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               {hasModelSelectorSlot ? (
                 <Box
                   data-testid="chat-composer-model-selector-slot"
-                  sx={{ display: 'flex', alignItems: 'center', minWidth: 0, transform: 'translateY(-3px)' }}
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    minWidth: 0,
+                    transform: 'translateY(-3px)'
+                  }}
                 >
                   {modelSelectorSlot}
                 </Box>
               ) : null}
               {/* Keep parent Stop available while a private command is submitted separately. */}
-              {isLoading && sideCommandEnabled && (isAgentSideCommand(localInputValue) || isAgentSkillCommand(localInputValue) || isAgentScratchpadCommand(localInputValue)) ? <IconButton
-                data-chat-side-command-btn disabled={disabled || !active} onClick={onSend}
-                title={t(isAgentScratchpadCommand(localInputValue) ? 'chat.agent_scratchpad.command_send' : isAgentSkillCommand(localInputValue) ? 'chat.agent_skill_session.command_send' : 'chat.agent_side.command_send')}><SendIcon fontSize="small" /></IconButton> : null}
+              {isLoading &&
+              sideCommandEnabled &&
+              (isAgentSideCommand(localInputValue) ||
+                isAgentSkillCommand(localInputValue) ||
+                isAgentScratchpadCommand(localInputValue)) ? (
+                <IconButton
+                  data-chat-side-command-btn
+                  disabled={disabled || !active}
+                  onClick={onSend}
+                  title={t(
+                    isAgentScratchpadCommand(localInputValue)
+                      ? 'chat.agent_scratchpad.command_send'
+                      : isAgentSkillCommand(localInputValue)
+                        ? 'chat.agent_skill_session.command_send'
+                        : 'chat.agent_side.command_send'
+                  )}
+                >
+                  <SendIcon fontSize="small" />
+                </IconButton>
+              ) : null}
               {/* 发送/停止按钮 */}
               {isLoading ? (
                 <IconButton

@@ -1,5 +1,6 @@
 import AgentTeamMessageActivity from './components/AgentTeamMessageActivity'
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
+import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import { reduceTeamActivity, selectTeamActivity } from './teamMessageActivityState'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
 import { setTeamTaskStatus, validateTeamTasks } from './agentTeamTasks'
@@ -9335,7 +9336,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
             <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
           </Box>}
-          {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost buttonHost={teamManagementHost} openRequest={teamManagementOpenRequest} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={({ id, text }) => {
+          {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost buttonHost={teamManagementHost} openRequest={teamManagementOpenRequest} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
             const current = teamMessageDispatcherRef.current
             if (!current || current.key !== messageKey || !route?.threadId || !messageLeadId || !teamEnabled) throw new Error('Team channel unavailable.')
             // Avoid consuming the broadcast draft for a known-unavailable model setting.
@@ -9343,6 +9344,30 @@ const ChatPage: React.FC<ChatPageProps> = ({
             const liveLead = sessionsRef.current.find(session => session.id === messageLeadId)
             if (!liveLead || liveLead.teamEnded || liveLead.archived) throw new Error('Team channel unavailable.')
             if (liveLead.teamSettings && Object.hasOwn(liveLead.teamSettings, 'memberModelSelection')) throw new Error('Team model selection is unavailable.')
+            const recipients = sessionsRef.current
+              .filter(member => member.teamLeadId === messageLeadId && !member.archived && (member.teamMemberGeneration ?? 0) === messageGeneration)
+              .filter(member => current.dispatcher.isSubscribed(member.id))
+              .map(member => member.id)
+            if (recipients.length > 0) {
+              // Persist the intent before starting delivery. A queued receipt is only a durable
+              // pending snapshot; it never claims that an agent received or processed the message.
+              const receiptTeamKey = JSON.stringify([storageScope, route.threadId, messageLeadId, messageGeneration])
+              const receipts = createTeamMessageReceipts({ id, teamKey: receiptTeamKey, text, recipients, now: Date.now() })
+              const updated = {
+                ...liveLead,
+                teamMessageReceipts: mergeTeamMessageReceipts(liveLead.teamMessageReceipts, receipts)
+              }
+              setSessions(previous => previous.map(session => session === liveLead ? updated : session))
+              await persistSessionWithBaseline(updated, storageScope)
+              const currentAcknowledgement = isMountedRef.current &&
+                teamVisibilityRef.current.active &&
+                storageScopeRef.current === storageScope &&
+                sessionsRef.current.find(session => session.id === messageLeadId) === updated &&
+                chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, updated)
+              if (!currentAcknowledgement || !clearDirtySessionSnapshotIfCurrent(storageScope, updated)) {
+                throw new Error('Team receipt save was not confirmed; message was not queued.')
+              }
+            }
             const result = current.dispatcher.enqueueUserChannel({ id, source: { kind: 'user', scope: storageScope, thread: route.threadId, lead: messageLeadId }, text })
             // Once enqueued, an observer or pump error must not encourage a duplicate send.
             try { current.pump() } catch { /* The next pump can handle queued work. */ }

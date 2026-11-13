@@ -307,7 +307,7 @@ const ChatSkillPicker: React.FC<ChatSkillPickerProps> = ({
         >
           <SearchIcon sx={{ fontSize: 20, color: 'text.secondary', flexShrink: 0 }} />
           <InputBase
-            placeholder={isChineseUi ? '搜索技能...' : 'Search skills...'}
+            placeholder={t('chat.search_skills', { defaultValue: 'Search skills...' })}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             sx={{ flex: 1, fontSize: 14 }}
@@ -318,7 +318,7 @@ const ChatSkillPicker: React.FC<ChatSkillPickerProps> = ({
       {categorySections.length === 0 ? (
         <Box sx={{ textAlign: 'center', py: 8 }}>
           <Typography color="text.secondary" variant="body2">
-            {isChineseUi ? '没有找到技能' : 'No skills found'}
+            {t('chat.no_skills_found', { defaultValue: 'No skills found' })}
           </Typography>
         </Box>
       ) : (

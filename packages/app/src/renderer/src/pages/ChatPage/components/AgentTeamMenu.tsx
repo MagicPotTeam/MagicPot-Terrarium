@@ -185,6 +185,7 @@ export default function AgentTeamMenu({
   const currentModel = lead.teamSettings?.defaultModel ?? ''
   const missingModel = currentModel !== '' && !models.some(model => model.id === currentModel)
   const currentIds = new Set(tasks.map(item => item.id))
+  const durablePendingReceipts = (lead.teamMessageReceipts ?? []).filter(receipt => receipt.state === 'queued' || receipt.state === 'unknown').length
   const selected = dependencies.filter(id => currentIds.has(id))
   const closeDialog = (restoreFocus: boolean) => {
     const origin = keyboardOriginRef.current
@@ -265,6 +266,7 @@ export default function AgentTeamMenu({
       {!(lead.teamChannel?.length) && <Typography variant="caption" component="div">暂无频道记录</Typography>}
       {onSubscriptionChange && <Box role="group" aria-labelledby={subscriptionGroupLabelId}><Typography id={subscriptionGroupLabelId} variant="caption" component="div">成员频道订阅（本次会话）</Typography>{members.map(member => <FormControlLabel key={member.id} label={member.teamMemberName || member.title} control={<Checkbox size="small" disabled={draftLocked || Boolean(lead.teamEnded)} checked={subscriptions?.includes(member.id) ?? false} onChange={event => onSubscriptionChange(member.id, event.target.checked)} />} />)}</Box>}
       <Typography variant="caption" component="div">记录与广播分开；广播会调用模型</Typography>
+      {durablePendingReceipts > 0 && <Typography variant="caption" component="div">有 {durablePendingReceipts} 条广播记录待核对；重启后不会自动重发。</Typography>}
       {(lead.teamChannel?.length ?? 0) > 50 && <Typography variant="caption" component="div">此处仅显示最近 50 条频道记录。</Typography>}
       {(lead.teamChannel ?? []).slice(-50).map(item => <Typography key={item.id} variant="caption" component="div" color="text.secondary" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{unconfirmedEntry?.kind === 'channel' && unconfirmedEntry.id === item.id ? '未确认 · ' : ''}{item.senderId === 'user' ? '用户' : (members.find(member => member.id === item.senderId)?.teamMemberName ?? '原成员')} · {item.text}</Typography>)}
       <TextField size="small" label="频道消息" value={message} onChange={event => { if (!draftLocked) setMessage(event.target.value) }} inputProps={{ maxLength: 2000, readOnly: draftLocked }} />

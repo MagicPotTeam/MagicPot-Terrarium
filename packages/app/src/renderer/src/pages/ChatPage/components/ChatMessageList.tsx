@@ -861,22 +861,28 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         ? editingMessageIndex
         : null
     const editingAfterWindow = forcedEditingIndex !== null && forcedEditingIndex >= end
-    const renderedWindowEnd = editingAfterWindow && forcedEditingIndex !== null
-      ? forcedEditingIndex + 1
-      : end
+    const renderedWindowEnd =
+      editingAfterWindow && forcedEditingIndex !== null ? forcedEditingIndex + 1 : end
     const lastEnd = forcedLoadingIndex !== null ? forcedLoadingIndex + 1 : renderedWindowEnd
     return {
       start,
       end,
-      top: forcedEditingIndex !== null && forcedEditingIndex < start ? offsets[forcedEditingIndex] : offsets[start],
+      top:
+        forcedEditingIndex !== null && forcedEditingIndex < start
+          ? offsets[forcedEditingIndex]
+          : offsets[start],
       bottom: offsets[messages.length] - offsets[lastEnd],
-      editingGap: forcedEditingIndex === null ? 0 : editingAfterWindow
-        ? offsets[forcedEditingIndex] - offsets[end]
-        : offsets[start] - offsets[forcedEditingIndex + 1],
+      editingGap:
+        forcedEditingIndex === null
+          ? 0
+          : editingAfterWindow
+            ? offsets[forcedEditingIndex] - offsets[end]
+            : offsets[start] - offsets[forcedEditingIndex + 1],
       editingAfterWindow,
-      loadingGap: forcedLoadingIndex === null
-        ? 0
-        : Math.max(0, offsets[forcedLoadingIndex] - offsets[renderedWindowEnd]),
+      loadingGap:
+        forcedLoadingIndex === null
+          ? 0
+          : Math.max(0, offsets[forcedLoadingIndex] - offsets[renderedWindowEnd]),
       forcedLoadingIndex,
       forcedEditingIndex,
       anchorStart
@@ -1016,23 +1022,37 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
       ) : null}
       {[
         ...(virtualWindow.forcedEditingIndex !== null && !virtualWindow.editingAfterWindow
-          ? [virtualWindow.forcedEditingIndex] : []),
+          ? [virtualWindow.forcedEditingIndex]
+          : []),
         ...Array.from(
           { length: virtualWindow.end - virtualWindow.start },
           (_, offsetIndex) => offsetIndex + virtualWindow.start
         ),
         ...(virtualWindow.forcedEditingIndex !== null && virtualWindow.editingAfterWindow
-          ? [virtualWindow.forcedEditingIndex] : []),
+          ? [virtualWindow.forcedEditingIndex]
+          : []),
         ...(virtualWindow.forcedLoadingIndex === null ? [] : [virtualWindow.forcedLoadingIndex])
       ].map((index) => {
         const message = messages[index]
         return (
           <React.Fragment key={messageIdentities[index]}>
-            {virtualWindow.forcedEditingIndex !== null && virtualWindow.editingAfterWindow && index === virtualWindow.forcedEditingIndex && virtualWindow.editingGap > 0 ? (
-              <div data-testid="chat-virtual-editing-gap" style={{ height: virtualWindow.editingGap, flexShrink: 0 }} />
+            {virtualWindow.forcedEditingIndex !== null &&
+            virtualWindow.editingAfterWindow &&
+            index === virtualWindow.forcedEditingIndex &&
+            virtualWindow.editingGap > 0 ? (
+              <div
+                data-testid="chat-virtual-editing-gap"
+                style={{ height: virtualWindow.editingGap, flexShrink: 0 }}
+              />
             ) : null}
-            {virtualWindow.forcedEditingIndex !== null && !virtualWindow.editingAfterWindow && index === virtualWindow.start && virtualWindow.editingGap > 0 ? (
-              <div data-testid="chat-virtual-editing-gap" style={{ height: virtualWindow.editingGap, flexShrink: 0 }} />
+            {virtualWindow.forcedEditingIndex !== null &&
+            !virtualWindow.editingAfterWindow &&
+            index === virtualWindow.start &&
+            virtualWindow.editingGap > 0 ? (
+              <div
+                data-testid="chat-virtual-editing-gap"
+                style={{ height: virtualWindow.editingGap, flexShrink: 0 }}
+              />
             ) : null}
             {index === virtualWindow.forcedLoadingIndex && virtualWindow.loadingGap > 0 ? (
               <div
@@ -1691,7 +1711,10 @@ const UserMessageEditForm: React.FC<{
 }) => {
   const { t } = useTranslation()
   const nextAttachmentId = React.useRef(0)
-  const makeEditingEntry = (attachment: ChatAttachment) => ({ attachment, id: nextAttachmentId.current++ })
+  const makeEditingEntry = (attachment: ChatAttachment) => ({
+    attachment,
+    id: nextAttachmentId.current++
+  })
   const [editingEntries, setEditingEntries] = React.useState(() =>
     (message.attachments ?? []).map(makeEditingEntry)
   )
@@ -1706,9 +1729,13 @@ const UserMessageEditForm: React.FC<{
     const pendingImports = pendingImageImportsRef.current
     return () => pendingImports.clear()
   }, [])
-  const overImageLimit = editingAttachments.filter((attachment) => attachment.type === 'image').length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT
+  const overImageLimit =
+    editingAttachments.filter((attachment) => attachment.type === 'image').length >
+    DEFAULT_CHAT_IMAGE_COUNT_LIMIT
   const visibleEntries = editingEntries.filter(({ attachment }) =>
-    overImageLimit ? attachment.type === 'image' || attachment.hiddenFromChatView !== true : attachment.hiddenFromChatView !== true
+    overImageLimit
+      ? attachment.type === 'image' || attachment.hiddenFromChatView !== true
+      : attachment.hiddenFromChatView !== true
   )
   const imageEntries = visibleEntries.filter(({ attachment }) => attachment.type === 'image')
   const nonImageEntries = visibleEntries.filter(({ attachment }) => attachment.type !== 'image')
@@ -1887,10 +1914,7 @@ const UserMessageEditForm: React.FC<{
         {imageEntries.length > 0 ? (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
             {imageEntries.map(({ attachment, id }, attachmentIndex) => (
-              <Box
-                key={id}
-                sx={{ position: 'relative', width: 168, height: 128 }}
-              >
+              <Box key={id} sx={{ position: 'relative', width: 168, height: 128 }}>
                 <ChatImage
                   src={normalizeLocalMediaUrl(attachment.url)}
                   media={attachment.media}
@@ -1933,7 +1957,11 @@ const UserMessageEditForm: React.FC<{
                     whiteSpace: 'nowrap'
                   }}
                 >
-                  {attachment.fileName || `Image ${attachmentIndex + 1}`}
+                  {attachment.fileName ||
+                    t('chat.image_n', {
+                      index: attachmentIndex + 1,
+                      defaultValue: `Image ${attachmentIndex + 1}`
+                    })}
                 </Typography>
               </Box>
             ))}
@@ -1961,11 +1989,15 @@ const UserMessageEditForm: React.FC<{
                   variant="body2"
                   sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                 >
-                  {attachment.fileName || 'Attachment'}
+                  {attachment.fileName || t('chat.attachment', { defaultValue: 'Attachment' })}
                 </Typography>
                 <IconButton
                   size="small"
-                  aria-label={`Remove ${attachment.fileName || 'attachment'}`}
+                  aria-label={t('chat.remove_attachment_named', {
+                    name:
+                      attachment.fileName || t('chat.attachment', { defaultValue: 'attachment' }),
+                    defaultValue: `Remove ${attachment.fileName || 'attachment'}`
+                  })}
                   onClick={() => removeAttachment(id)}
                   sx={{ flexShrink: 0 }}
                 >

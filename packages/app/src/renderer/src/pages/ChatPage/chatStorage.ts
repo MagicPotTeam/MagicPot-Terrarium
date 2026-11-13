@@ -54,6 +54,8 @@ export interface ChatSession {
   teamSettings?: { maxMembers: number; defaultModel: string | null; autoCleanup: boolean; memberModelSelection?: { version: 1; profileId: string } }
   teamTasks?: { id: string; title: string; ownerId: string; status: 'pending' | 'running' | 'done'; dependsOn: string[] }[]
   teamChannel?: { id: string; senderId: string; text: string; createdAt: number }[]
+  /** Durable user-channel intent snapshots. Queued means persisted pending, never delivery proof. */
+  teamMessageReceipts?: import('./teamMessageReceipt').TeamMessageReceipt[]
   draft?: ChatSessionDraft
   contextCompression?: ChatContextCompressionSummary
   profileId?: string

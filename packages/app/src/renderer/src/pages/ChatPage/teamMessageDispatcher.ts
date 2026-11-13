@@ -14,7 +14,7 @@ export type TeamDispatchStatus = 'queued' | 'request_started' | 'response_receiv
 export type TeamDispatchEntry = Readonly<{ intent: TeamMessageIntent; recipient?: string; status: TeamDispatchStatus }>
 export type TeamDispatchStage = 'request_started' | 'response_received'
 
-/** Renderer-local only. New instance per generation; reload loses all state. */
+/** Delivery bookkeeping is renderer-local per generation; durable user-channel pending intents live on ChatSession. */
 export class TeamMessageDispatcher {
   private readonly service: TeamMessageService
   private readonly records: TeamDispatchEntry[] = []
