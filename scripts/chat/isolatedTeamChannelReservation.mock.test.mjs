@@ -165,6 +165,24 @@ test('verified zero permits one second-stage attempt even concurrently', async (
   assert.equal(f.events.filter(event => event === 'click').length, 2)
 })
 
+test('one-subscriber verifier runs after the real click and a failed verifier consumes the stage', async () => {
+  const f = await setup()
+  await zero(f)
+  f.events.length = 0
+  await broadcastIsolatedTeamChannel(f.page, f.identity, 'one-subscriber', undefined, async () => {
+    f.events.push('verify-one')
+    return true
+  })
+  assert.deepEqual(f.events, ['await-pane', 'click', 'verify-one'])
+
+  const failed = await setup()
+  await zero(failed)
+  failed.events.length = 0
+  await assert.rejects(broadcastIsolatedTeamChannel(failed.page, failed.identity, 'one-subscriber', undefined, async () => false), /not verified/)
+  await assert.rejects(broadcastIsolatedTeamChannel(failed.page, failed.identity, 'one-subscriber', undefined, async () => true), /already attempted/)
+  assert.deepEqual(failed.events, ['await-pane', 'click'])
+})
+
 test('identities are isolated and forged identities are rejected before UI', async () => {
   const a = await setup(), b = await setup()
   await zero(a); await zero(b)

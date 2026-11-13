@@ -273,17 +273,26 @@ export async function sendIsolatedLeadSummary(page, identity, prompt = '汇总�
 
 // Per-identity, per-module-instance only. Completion records no message content.
 const channelZeroVerified = new WeakSet()
-export async function broadcastIsolatedTeamChannel(page, identity, stage, verifyZero) {
+/**
+ * Click the real broadcast control once. Zero-subscriber verification is required;
+ * one-subscriber verification is optional and must be supplied by the caller because
+ * only the caller knows the real provider/IPC observation it can safely assert.
+ * A failed verifier still consumes the stage reservation and cannot be retried.
+ */
+export async function broadcastIsolatedTeamChannel(page, identity, stage, verifyZero, verifyOne) {
   if (stage !== 'zero-subscribers' && stage !== 'one-subscriber') throw new TypeError('Invalid channel stage.')
   reserveFlow(identity, `channel-${stage}`)
   if (stage === 'one-subscriber' && !channelZeroVerified.has(identity)) throw new Error('Zero-subscriber stage not verified.')
   if (stage === 'zero-subscribers' && typeof verifyZero !== 'function') throw new TypeError('Zero-subscriber verification is required.')
+  if (stage === 'one-subscriber' && verifyOne !== undefined && typeof verifyOne !== 'function') throw new TypeError('One-subscriber verification must be a function when supplied.')
   await waitForIsolatedTeamPane(page, identity)
   const dialog = page.getByRole('dialog', { name: '团队管理', exact: true })
   await dialog.getByRole('button', { name: '广播给订阅成员', exact: true }).click({ timeout: TIMEOUT })
   if (stage === 'zero-subscribers') {
     if (await verifyZero() !== true) throw new Error('Zero-subscriber stage not verified.')
     channelZeroVerified.add(identity)
+  } else if (verifyOne !== undefined && await verifyOne() !== true) {
+    throw new Error('One-subscriber stage not verified.')
   }
 }
 
@@ -440,4 +449,4 @@ export async function approveIsolatedWriter(page, identity, expected) {
   return { writerId: pending.writerId, approvalId: pending.approvalId, revision: pending.revision, notesRevision: 1, assistantText: '文案结果' }
 }
 
-// TODO: channel actions remain unimplemented.
+// Channel actions click the real UI; durable delivery remains caller-verified because queue state alone is not delivery.
