@@ -945,7 +945,9 @@ const ComfyUIPanel: React.FC = () => {
                 '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.3 } }
               }}
             />
-            <span style={{ fontSize: 11, color: '#4ade80' }}>Running</span>
+            <span style={{ fontSize: 11, color: '#4ade80' }}>
+              {t('terminal.running', { defaultValue: 'Running' })}
+            </span>
             {state.pid !== 0 && (
               <span style={{ fontSize: 11, color: consolePalette.toolbarIcon }}>
                 PID:{state.pid}

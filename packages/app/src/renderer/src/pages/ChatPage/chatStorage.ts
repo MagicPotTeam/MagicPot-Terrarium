@@ -16,6 +16,7 @@ import { normalizeChatProfileIdForStorage } from './chatPageShared'
 import type { ChatContextCompressionSummary } from './chatContextCompression'
 import { CHAT_ATTACHMENT_STORAGE } from './chatManagedMediaAttachments'
 import { readMemberModelChoice, resolveMemberModelSelection } from './agentTeam'
+import { markTeamMessageReceiptsUnknown } from './teamMessageReceipt'
 
 export interface ChatSessionDraft {
   inputValue: string
@@ -670,6 +671,38 @@ function normalizeSession(session: ChatSession | LegacyChatSession, scope?: stri
   }
 }
 
+function recoverQueuedTeamMessageReceipts(session: ChatSession): ChatSession {
+  const receipts = session.teamMessageReceipts
+  if (!receipts?.some((receipt) => receipt.state === 'queued')) return session
+
+  const teamKeys = [...new Set(receipts.filter((receipt) => receipt.state === 'queued').map((receipt) => receipt.teamKey))]
+  const now = Date.now()
+  const recoveredReceipts = teamKeys.reduce(
+    (current, teamKey) => markTeamMessageReceiptsUnknown(current, teamKey, now),
+    receipts
+  )
+  return { ...session, teamMessageReceipts: recoveredReceipts }
+}
+
+async function persistRecoveredTeamMessageReceipts(
+  session: ChatSession,
+  scope: string
+): Promise<ChatSession> {
+  const recovered = recoverQueuedTeamMessageReceipts(session)
+  if (recovered === session) return session
+
+  try {
+    await saveSessionToDB(recovered, scope, { expectedSession: session })
+    return recovered
+  } catch (error) {
+    if (error instanceof ChatSessionSaveConflictError || error instanceof ChatSessionSaveSupersededError) {
+      console.warn('[ChatStorage] Skipped stale team receipt recovery after a concurrent session update.')
+      return session
+    }
+    throw error
+  }
+}
+
 function createStoredSession(
   session: ChatSession | LegacyChatSession,
   scope?: string
@@ -926,9 +959,9 @@ export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]>
     throw storageError
   }
 
-  // Listing stays cheap. Legacy media is migrated only when its session is opened, preserving
-  // the original record until the replacement has been atomically persisted.
-  return sessions
+  // A process restart cannot prove whether a queued channel intent was sent. Mark it unknown
+  // and persist that review state before exposing the recovered snapshot to the UI.
+  return Promise.all(sessions.map((session) => persistRecoveredTeamMessageReceipts(session, targetScope)))
 }
 
 /** Load a single session by ID without scanning the whole store. */
@@ -955,7 +988,7 @@ async function loadSessionRawFromDB(
           return
         }
 
-        resolve(normalizeSession(session, targetScope))
+        void persistRecoveredTeamMessageReceipts(normalizeSession(session, targetScope), targetScope).then(resolve, reject)
       }
       request.onerror = () =>
         reject(createStorageError(request.error, 'IndexedDB failed to load the chat session.'))

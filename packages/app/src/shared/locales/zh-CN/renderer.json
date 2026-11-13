@@ -30,6 +30,7 @@
     "custom_app": "自定义快应用",
     "custom_workshop": "自定义工坊",
     "chat": "API",
+    "agent": "智能体",
     "settings": "设置",
     "terminal": "终端",
     "comfyui": "ComfyUI",
@@ -365,6 +366,7 @@
   },
   "terminal": {
     "title_ready": "终端就绪，输入命令开始...",
+    "running": "运行中",
     "btn_start": "启动",
     "btn_stop": "停止",
     "btn_scroll_bottom": "滚动到底部",
@@ -1423,7 +1425,11 @@
   "image": {
     "loading": "正在加载图像...",
     "load_failed": "加载失败",
-    "no_data": "无图像数据"
+    "no_data": "无图像数据",
+    "delete": "删除",
+    "select_save_directory": "选择图片保存目录",
+    "save_success": "图片下载成功",
+    "save_failed": "保存失败：{{error}}"
   },
   "input": {
     "image": {

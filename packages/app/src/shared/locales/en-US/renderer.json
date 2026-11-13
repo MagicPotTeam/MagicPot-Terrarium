@@ -30,6 +30,7 @@
     "custom_app": "Custom App",
     "custom_workshop": "Custom Workshop",
     "chat": "API",
+    "agent": "Agent",
     "settings": "Settings",
     "terminal": "Terminal",
     "comfyui": "ComfyUI",
@@ -538,6 +539,7 @@
   },
   "terminal": {
     "title_ready": "Terminal is ready. Run a command to start...",
+    "running": "Running",
     "btn_start": "Start",
     "btn_stop": "Stop",
     "btn_scroll_bottom": "Scroll to Bottom",
@@ -1698,7 +1700,11 @@
   "image": {
     "loading": "Loading image...",
     "load_failed": "Load failed",
-    "no_data": "No image data"
+    "no_data": "No image data",
+    "delete": "Delete",
+    "select_save_directory": "Select image save directory",
+    "save_success": "Image downloaded successfully",
+    "save_failed": "Save failed: {{error}}"
   },
   "input": {
     "image": {

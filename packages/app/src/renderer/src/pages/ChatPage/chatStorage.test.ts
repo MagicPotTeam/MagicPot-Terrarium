@@ -320,6 +320,89 @@ describe('chatStorage', () => {
     expect(final?.teamSettings).toEqual(teamSettings)
   })
 
+  it('marks queued channel receipts unknown and persists recovery on load', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const scope = 'fixture-receipt-recovery'
+    const lead: import('./chatStorage').ChatSession = {
+      id: 'receipt-recovery-lead',
+      title: 'Lead',
+      messages: [],
+      teamMessageReceipts: [
+        {
+          version: 1,
+          id: 'message-1',
+          recipientId: 'member-1',
+          teamKey: 'team-key',
+          text: 'hello',
+          state: 'queued',
+          createdAt: 1,
+          updatedAt: 1
+        },
+        {
+          version: 1,
+          id: 'message-2',
+          recipientId: 'member-1',
+          teamKey: 'team-key',
+          text: 'already confirmed',
+          state: 'acknowledged',
+          createdAt: 2,
+          updatedAt: 2
+        }
+      ]
+    }
+
+    await storage.saveSessionToDB(lead, scope, { expectedSession: null })
+    expect(fakeIndexedDb.state.putCount).toBe(1)
+
+    const recovered = await storage.loadSessionFromDB(lead.id, scope)
+    expect(recovered?.teamMessageReceipts).toEqual([
+      expect.objectContaining({ id: 'message-1', state: 'unknown' }),
+      expect.objectContaining({ id: 'message-2', state: 'acknowledged' })
+    ])
+    expect(fakeIndexedDb.state.putCount).toBe(2)
+
+    const secondLoad = await storage.loadSessionFromDB(lead.id, scope)
+    expect(secondLoad?.teamMessageReceipts).toEqual(recovered?.teamMessageReceipts)
+    expect(fakeIndexedDb.state.putCount).toBe(2)
+  })
+
+  it('recovers queued channel receipts when listing all sessions', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const scope = 'fixture-receipt-list-recovery'
+    const lead: import('./chatStorage').ChatSession = {
+      id: 'receipt-list-recovery-lead',
+      title: 'Lead',
+      messages: [],
+      teamMessageReceipts: [{
+        version: 1,
+        id: 'message-list-1',
+        recipientId: 'member-1',
+        teamKey: 'team-key',
+        text: 'hello from list',
+        state: 'queued',
+        createdAt: 1,
+        updatedAt: 1
+      }]
+    }
+
+    await storage.saveSessionToDB(lead, scope, { expectedSession: null })
+    const loaded = await storage.loadAllSessions(scope)
+
+    expect(loaded).toEqual([
+      expect.objectContaining({
+        id: lead.id,
+        teamMessageReceipts: [expect.objectContaining({ id: 'message-list-1', state: 'unknown' })]
+      })
+    ])
+    expect(fakeIndexedDb.state.putCount).toBe(2)
+  })
+
   it.each([
     { name: 'present undefined marker', after: { memberModelSelection: undefined } },
     { name: 'future version marker', after: { memberModelSelection: { version: 7, profileId: 'fixture' } } }

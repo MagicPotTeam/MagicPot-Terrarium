@@ -32,7 +32,7 @@ export default function ImageViewer({ imageUrl, onDelete }: ImageViewerProps) {
 
       if (!downloadDir) {
         const result2 = await api().svcDialog.showOpenDialog({
-          title: 'Select image save directory',
+          title: t('image.select_save_directory', { defaultValue: 'Select image save directory' }),
           properties: ['openDirectory']
         })
         if (result2.canceled || !result2.filePaths?.length) return
@@ -46,12 +46,15 @@ export default function ImageViewer({ imageUrl, onDelete }: ImageViewerProps) {
       const arrayBuffer = await blob.arrayBuffer()
       const data = new Uint8Array(arrayBuffer)
       await api().svcHyper.saveImageToDir({ data, fileName, dir: downloadDir })
-      notifySuccess(
-        t('quickapp.results.download_success', { defaultValue: 'Image downloaded successfully' })
-      )
+      notifySuccess(t('image.save_success', { defaultValue: 'Image downloaded successfully' }))
     } catch (error) {
       console.error('Failed to save image:', error)
-      notifyError('Save failed: ' + (error instanceof Error ? error.message : String(error)))
+      notifyError(
+        t('image.save_failed', {
+          error: error instanceof Error ? error.message : String(error),
+          defaultValue: 'Save failed: {{error}}'
+        })
+      )
     }
   }
 
@@ -128,7 +131,7 @@ export default function ImageViewer({ imageUrl, onDelete }: ImageViewerProps) {
           onDownload={handleDownloadImage}
         />
         {onDelete ? (
-          <Tooltip title="Delete">
+          <Tooltip title={t('image.delete', { defaultValue: 'Delete' })}>
             <IconButton onClick={onDelete} sx={{ color: 'error.main' }}>
               <DeleteOutline />
             </IconButton>
