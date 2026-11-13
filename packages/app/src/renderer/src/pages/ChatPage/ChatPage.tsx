@@ -8846,6 +8846,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifySuccess(
           [
             t('chat.model_sent_to_dcc_success', {
+              fileName: attachment.fileName || 'model',
+              target: target === 'unity' ? 'Unity' : 'Unreal',
               defaultValue: `Sent ${attachment.fileName || 'model'} to ${
                 target === 'unity' ? 'Unity' : 'Unreal'
               }`
@@ -8861,6 +8863,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyError(String(error))
         notifyWarning(
           t('chat.model_sent_to_dcc_failed', {
+            error: error instanceof Error ? error.message : String(error),
+            target: target === 'unity' ? 'Unity' : 'Unreal',
             defaultValue:
               error instanceof Error
                 ? error.message

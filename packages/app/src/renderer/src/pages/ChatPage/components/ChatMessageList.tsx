@@ -1639,19 +1639,23 @@ const buildAttachmentDownloadMenuLabel = (
   switch (attachment.type) {
     case 'image':
       return t('chat.download_image_option', {
+        fileName,
         defaultValue: `Image: ${fileName}`
       })
     case 'video':
       return t('chat.download_video_option', {
+        fileName,
         defaultValue: `Video: ${fileName}`
       })
     case 'model3d':
       return t('chat.download_model_option', {
+        fileName,
         defaultValue: `3D model: ${fileName}`
       })
     case 'file':
     default:
       return t('chat.download_file_option', {
+        fileName,
         defaultValue: `File: ${fileName}`
       })
   }
@@ -2782,6 +2786,7 @@ const AssistantMarkdownContent: React.FC<{
       onDownloadAttachment(attachment)
       notifySuccess(
         t('chat.attachment_downloaded', {
+          fileName: getAttachmentDownloadFileName(attachment),
           defaultValue: `${getAttachmentDownloadFileName(attachment)} downloaded`
         })
       )
@@ -2802,9 +2807,11 @@ const AssistantMarkdownContent: React.FC<{
     notifySuccess(
       isSidecarDownload && extension === '.txt'
         ? t('chat.sidecar_exported', {
+            fileName,
             defaultValue: `${fileName} exported as sidecar`
           })
         : t('chat.reply_downloaded', {
+            fileName,
             defaultValue: `${fileName} downloaded`
           })
     )
@@ -2821,9 +2828,11 @@ const AssistantMarkdownContent: React.FC<{
     notifySuccess(
       extension === '.txt'
         ? t('chat.sidecar_batch_exported', {
+            count: batchSidecarExportEntries?.length || 0,
             defaultValue: `${batchSidecarExportEntries?.length || 0} sidecar files exported`
           })
         : t('chat.sidecar_markdown_batch_exported', {
+            count: batchSidecarExportEntries?.length || 0,
             defaultValue: `${batchSidecarExportEntries?.length || 0} markdown records exported`
           })
     )
