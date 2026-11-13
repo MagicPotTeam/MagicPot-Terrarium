@@ -193,19 +193,21 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
     assert.equal(await writerBox.isChecked(), false)
     assert.equal(await input.inputValue(), marker)
     report.stage = 'designer-broadcast'
-    await broadcastIsolatedTeamChannel(page, identity, 'one-subscriber')
-    const deadline = Date.now() + 90_000
     let observed
-    while (Date.now() < deadline) {
-      const counts = mock.observations()
-      if (counts.channel > 1 || counts.error || counts.design || counts.summary || counts['scratchpad-call'] || counts['scratchpad-result']) throw Error('Unexpected provider observations')
-      observed = await readMembers(page, identity, ids)
-      if (counts.channel === 1 && observed[0].userMatches === 1 && observed[0].assistantMatches === 1) break
-      await sleep(200)
-    }
-    assert.equal(mock.observations().channel, 1)
-    assert(observed && observed[0].userMatches === 1 && observed[0].assistantMatches === 1, 'Designer IDB messages not observed')
-    assert.equal(observed[1].markerMessages, 0, 'Unsubscribed writer contains marker')
+    await broadcastIsolatedTeamChannel(page, identity, 'one-subscriber', undefined, async () => {
+      const deadline = Date.now() + 90_000
+      while (Date.now() < deadline) {
+        const counts = mock.observations()
+        if (counts.channel > 1 || counts.error || counts.design || counts.summary || counts['scratchpad-call'] || counts['scratchpad-result']) throw Error('Unexpected provider observations')
+        observed = await readMembers(page, identity, ids)
+        if (counts.channel === 1 && observed[0].userMatches === 1 && observed[0].assistantMatches === 1) break
+        await sleep(200)
+      }
+      assert.equal(mock.observations().channel, 1)
+      assert(observed && observed[0].userMatches === 1 && observed[0].assistantMatches === 1, 'Designer IDB messages not observed')
+      assert.equal(observed[1].markerMessages, 0, 'Unsubscribed writer contains marker')
+      return true
+    })
     report.idbObservation = observed
     report.provider = mock.observations()
     report.stage = 'ui-activity'
