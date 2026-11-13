@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Box, Button } from '@mui/material'
 import type { AgentRouteLike } from '@shared/agent'
 import AgentThreadGoalRecordsHost from './AgentThreadGoalRecordsHost'
@@ -24,8 +25,13 @@ function GoalEntryScope({ route, conversationId, active, remote }: {
   remote: boolean
 }) {
   const [open, setOpen] = useState(false)
+  const { t } = useTranslation()
+  const translate = (key: string, fallback: string) => {
+    const value = t(key, { defaultValue: fallback })
+    return value === key ? fallback : value
+  }
   return <Box sx={{ px: 1, maxHeight: '50%', overflowY: 'auto', flexShrink: 0 }}>
-    <Button size="small" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? 'Close goals' : 'Goals'}</Button>
+    <Button size="small" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? translate('chat.goal_close', 'Close goals') : translate('chat.goal_open', 'Goals')}</Button>
     {open ? <AgentThreadGoalRecordsHost route={route} conversationId={conversationId} active={active} remote={remote} /> : null}
   </Box>
 }

@@ -60,6 +60,10 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   onSelectReasoningEffort
 }) => {
   const { t } = useTranslation()
+  const translate = (key: string, fallback: string) => {
+    const value = t(key, { defaultValue: fallback })
+    return value === key ? fallback : value
+  }
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null)
   const [reasoningAnchorEl, setReasoningAnchorEl] = useState<null | HTMLElement>(null)
 
@@ -82,7 +86,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   }, [active, Boolean(memberModel), memberModel?.state, memberModel?.disabled, memberModel?.pending])
 
   const selectedProfile = availableProfiles.find((profile) => profile.id === selectedProfileId)
-  const displayLabel = selectedProfile ? selectedProfile.model_name : 'No model'
+  const displayLabel = selectedProfile ? selectedProfile.model_name : translate('chat.model_none', 'No model')
   // Legacy preferences/remote clients may still send Ultra; never render it as an option.
   const reasoningEfforts = Array.from(
     new Set(
@@ -97,7 +101,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   )
   const displayReasoningLabel = normalizedSelectedEffort
     ? getReasoningEffortLabel(normalizedSelectedEffort)
-    : 'Default'
+    : translate('chat.reasoning_default', 'Default')
   const buildSelectorButtonSx = (theme: Theme) =>
     compact
       ? {
@@ -177,10 +181,10 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
       <Button disabled={!canSelect} aria-busy={memberModel.pending || undefined} size="small" aria-label={label} onClick={handleOpen} sx={{ minWidth: 0, maxWidth: 200, borderRadius: 999, textTransform: 'none' }}>
         <Box component="span" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{label}</Box><ExpandMoreIcon data-testid="member-model-arrow" sx={{ flexShrink: 0, fontSize: 15, ml: 0.25 }} />
       </Button>
-      {showReasoning ? <Button size="small" disabled={!canReason} aria-label="Reasoning effort" onClick={handleOpenReasoning} sx={(theme) => buildReasoningButtonSx(theme)}>{displayReasoningLabel}<ExpandMoreIcon sx={{ fontSize: 15, flexShrink: 0 }} /></Button> : null}
+      {showReasoning ? <Button size="small" disabled={!canReason} aria-label={translate('chat.reasoning_label', 'Reasoning effort')} onClick={handleOpenReasoning} sx={(theme) => buildReasoningButtonSx(theme)}>{displayReasoningLabel}<ExpandMoreIcon sx={{ fontSize: 15, flexShrink: 0 }} /></Button> : null}
       </Box>
       <Menu anchorEl={reasoningAnchorEl} open={Boolean(reasoningAnchorEl) && canReason && showReasoning} onClose={handleCloseReasoning}>
-        {[undefined, ...reasoningEfforts].map((effort) => <MenuItem key={effort ?? 'default'} selected={effort === normalizedSelectedEffort} onClick={() => { if (canReason) onSelectMemberReasoningEffort?.(effort); handleCloseReasoning() }}>{effort ? getReasoningEffortLabel(effort) : 'Default'}</MenuItem>)}
+        {[undefined, ...reasoningEfforts].map((effort) => <MenuItem key={effort ?? 'default'} selected={effort === normalizedSelectedEffort} onClick={() => { if (canReason) onSelectMemberReasoningEffort?.(effort); handleCloseReasoning() }}>{effort ? getReasoningEffortLabel(effort) : translate('chat.reasoning_default', 'Default')}</MenuItem>)}
       </Menu>
       <Menu anchorEl={anchorEl} open={Boolean(anchorEl) && canSelect} onClose={handleClose}>
         {selectableMemberProfiles.map((profile) => <MenuItem key={profile.id} onClick={() => {
@@ -234,7 +238,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           <Button
             size="small"
             onClick={handleOpenReasoning}
-            aria-label="Reasoning effort"
+            aria-label={translate('chat.reasoning_label', 'Reasoning effort')}
             sx={(theme) => buildReasoningButtonSx(theme)}
           >
             <Typography
@@ -281,7 +285,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             {'\u9009\u62e9\u6a21\u578b'}
           </Typography>
         </Box>
-        {availableProfiles.length === 0 && <MenuItem disabled>No model</MenuItem>}
+        {availableProfiles.length === 0 && <MenuItem disabled>{translate('chat.model_none', 'No model')}</MenuItem>}
         {availableProfiles.map((profile) => {
           const isSelected = profile.id === selectedProfileId
           return (
@@ -342,7 +346,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
       >
         <Box sx={{ px: 2, py: 1 }}>
           <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600 }}>
-            Reasoning Effort
+            {translate('chat.reasoning_label', 'Reasoning effort')}
           </Typography>
         </Box>
         {[undefined, ...reasoningEfforts].map((effort) => {
@@ -372,7 +376,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 {isSelected ? <BoltIcon sx={{ fontSize: 16 }} /> : <Box sx={{ width: 16 }} />}
-                {effort ? getReasoningEffortLabel(effort) : 'Default'}
+                {effort ? getReasoningEffortLabel(effort) : translate('chat.reasoning_default', 'Default')}
               </Box>
               {isSelected && <CheckIcon sx={{ fontSize: 16 }} />}
             </MenuItem>

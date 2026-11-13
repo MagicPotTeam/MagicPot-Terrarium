@@ -1,5 +1,6 @@
 // Partial synthetic channel acceptance. Never use an existing or personal profile.
-// Seeding is fixture preparation, not UI team creation; no restart durability claim.
+// Seeding is fixture preparation, not UI team creation; one controlled relaunch only
+// verifies persistence of observed rows, never reliable delivery or restart replay.
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import { constants } from 'node:fs'
@@ -130,7 +131,7 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
   assert(inside(runRoot, await fs.realpath(mainEntry)))
   await fs.mkdir(path.join(runRoot, 'evidence'))
   const workerPath = path.join(runRoot, 'bin/canvas-thumbnail-sidecar.exe')
-  const report = { status: 'running', stage: 'prepare', scope: 'synthetic-channel-only', limitations: ['Lead is seeded; member creation is UI.', 'Mock matches last user text part, not the entire request.', 'UI activity and live IDB reads are separate observations, not proof of restart durability.', 'No claim of real model execution or system-wide network isolation.'] }
+  const report = { status: 'running', stage: 'prepare', scope: 'synthetic-channel-only', limitations: ['Lead is seeded; member creation is UI.', 'Mock matches last user text part, not the entire request.', 'The relaunch check verifies persisted session rows only; it does not prove reliable delivery, durable receipts, in-flight replay or restart recovery of a pending request.', 'No claim of real model execution or system-wide network isolation.'] }
   let app, page, mock, outcome
   try {
     for (const dir of ['bin', 'cwd', 'storage', 'home', 'appdata', 'localappdata', 'temp', 'storage/Data', 'storage/Projects']) await fs.mkdir(path.join(runRoot, dir))
@@ -217,10 +218,53 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
     await activity.waitFor({ state: 'visible', timeout: 30_000 })
     report.uiObservation = { responseActivityVisible: true }
     await page.screenshot({ path: path.join(runRoot, 'evidence/channel-activity.png') })
+
+    // A controlled close/relaunch proves that the observed channel rows survive a
+    // real Electron restart. It deliberately does not claim delivery recovery or
+    // replay of an in-flight request.
+    report.stage = 'restart-persisted-rows'
+    const firstProcess = app.process()
+    const closeResult = await bounded(() => app.close(), 15_000)
+    assert.equal(closeResult.status, 'ok', 'Initial Electron close was not observed')
+    const exitResult = await bounded(() => new Promise(resolve => {
+      if (firstProcess.exitCode !== null || firstProcess.signalCode !== null) return resolve()
+      firstProcess.once('exit', resolve)
+    }), 15_000)
+    assert.equal(exitResult.status, 'ok', 'Initial Electron process exit was not observed')
+    assert.equal(firstProcess.signalCode, null, 'Initial Electron restart close used a signal')
+    assert.equal(firstProcess.exitCode, 0, 'Initial Electron restart close failed')
+
+    app = await electron.launch({
+      executablePath: require('electron'),
+      args: [appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'],
+      cwd: path.join(runRoot, 'cwd'),
+      env: isolatedImageEnvironment(runRoot, base, runId),
+      timeout: 90_000
+    })
+    page = await app.firstWindow({ timeout: 90_000 })
+    page.setDefaultTimeout(30_000)
+    await page.waitForFunction(() => Boolean(window.api?.svcState && document.querySelector('#root')?.childElementCount), undefined, { timeout: 90_000 })
+    const restartedRuntime = await assertIsolatedRuntime(app, page, runRoot, mock.baseURL)
+    assert.equal(restartedRuntime.guard.blockedRequestCount, 0)
+    assert.deepEqual(restartedRuntime.guard.renderProcessGone, [])
+    assert.deepEqual(restartedRuntime.guard.pathErrors, [])
+    const afterRestart = await readMembers(page, identity, ids)
+    assert(afterRestart[0].userMatches === 1 && afterRestart[0].assistantMatches === 1, 'Persisted designer channel rows were not restored after restart')
+    assert.equal(afterRestart[1].markerMessages, 0, 'Restart restored an unsubscribed writer marker')
+    assert.deepEqual(mock.observations(), { ...zero, channel: 1 })
+    report.restartObservation = {
+      firstExitCode: firstProcess.exitCode,
+      firstSignalCode: firstProcess.signalCode,
+      runtime: restartedRuntime,
+      idb: afterRestart,
+      provider: mock.observations()
+    }
+    await page.screenshot({ path: path.join(runRoot, 'evidence/channel-after-restart.png') })
+
     const final = await assertIsolatedRuntime(app, page, runRoot, mock.baseURL)
     assert.equal(final.guard.blockedRequestCount, 0); assert.deepEqual(final.guard.renderProcessGone, []); assert.deepEqual(final.guard.pathErrors, [])
     assert.deepEqual(mock.observations(), { ...zero, channel: 1 })
-    report.status = 'partial-passed'; report.stage = 'observed'
+    report.status = 'partial-passed'; report.stage = 'observed-and-restarted'
   } catch (error) { report.status = 'failed'; report.error = String(error.message) }
   finally {
     outcome = await finalizeChannelRun({ report, app, mock, writeResult: data => fs.writeFile(path.join(runRoot, 'evidence/result.json'), data, { flag: 'wx' }) })

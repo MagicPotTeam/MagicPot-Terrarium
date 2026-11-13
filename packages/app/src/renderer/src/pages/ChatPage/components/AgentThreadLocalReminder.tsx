@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Box, Button, TextField, Typography } from '@mui/material'
 import type { AgentRouteLike } from '@shared/agent'
 
@@ -46,6 +47,12 @@ function ReminderScope({
   const toggleId = useId()
   const panelId = useId()
   const toggleRef = useRef<HTMLButtonElement>(null)
+  const { t } = useTranslation()
+  const translate = (key: string, fallback: string, values: Record<string, string | number> = {}) => {
+    const value = t(key, { ...values, defaultValue: fallback })
+    const resolved = value === key ? fallback : value
+    return resolved.replace(/{{(\w+)}}/g, (_, name: string) => String(values[name] ?? `{{${name}}}`))
+  }
   const [open, setOpen] = useState(false)
   const [note, setNote] = useState('')
   const [minutes, setMinutes] = useState('')
@@ -87,7 +94,7 @@ function ReminderScope({
         aria-controls={panelId}
         onClick={() => setOpen((value) => !value)}
       >
-        Local reminder
+        {translate('chat.reminder_open', 'Local reminder')}
       </Button>
       {open && (
         <Box
@@ -97,17 +104,14 @@ function ReminderScope({
           sx={{ display: 'grid', gap: 1, width: '100%', boxSizing: 'border-box' }}
         >
           <Typography>
-            Only while this conversation stays open and active. In-page only; no system notification
-            or background wake. Switching panes or conversations, reloading, or closing the app
-            cancels it. Delivery may be delayed. No model runs and this reminder has no provider
-            fees.
+            {translate('chat.reminder_notice', 'Only while this conversation stays open and active. In-page only; no system notification or background wake. Switching panes or conversations, reloading, or closing the app cancels it. Delivery may be delayed. No model runs and this reminder has no provider fees.')}
           </Typography>
           <Typography>
-            Target: thread {threadId}, conversation {conversationId}
+            {translate('chat.reminder_target', 'Target: thread {{threadId}}, conversation {{conversationId}}', { threadId, conversationId })}
           </Typography>
           <TextField
             disabled={Boolean(reminder) || !allowCreate}
-            label="Reminder note"
+            label={translate('chat.reminder_note', 'Reminder note')}
             value={note}
             onChange={(event) => setNote(event.target.value)}
             inputProps={{ maxLength: 200 }}
@@ -115,7 +119,7 @@ function ReminderScope({
           />
           <TextField
             disabled={Boolean(reminder) || !allowCreate}
-            label="Minutes from now"
+            label={translate('chat.reminder_minutes', 'Minutes from now')}
             type="number"
             value={minutes}
             onChange={(event) => setMinutes(event.target.value)}
@@ -123,12 +127,11 @@ function ReminderScope({
             size="small"
           />
           <Typography>
-            One reminder at a time. Cancel or dismiss it before creating another.
+            {translate('chat.reminder_single', 'One reminder at a time. Cancel or dismiss it before creating another.')}
           </Typography>
           {!allowCreate && (
             <Typography>
-              New reminders are unavailable while chat storage reports an error. Existing reminders
-              remain in this page.
+              {translate('chat.reminder_storage_error', 'New reminders are unavailable while chat storage reports an error. Existing reminders remain in this page.')}
             </Typography>
           )}
           <Button
@@ -140,16 +143,16 @@ function ReminderScope({
               }
             }}
           >
-            Confirm local reminder
+            {translate('chat.reminder_confirm', 'Confirm local reminder')}
           </Button>
           {reminder && (
             <Box>
               <Box role={due ? 'alert' : undefined}>
                 {due ? (
-                  <Typography>Reminder: {reminder.note}</Typography>
+                  <Typography>{translate('chat.reminder_due', 'Reminder: {{note}}', { note: reminder.note })}</Typography>
                 ) : (
                   <Typography role="status">
-                    Reminder scheduled: {reminder.note} ·{' '}
+                    {translate('chat.reminder_scheduled', 'Reminder scheduled: {{note}} ·', { note: reminder.note })}{' '}
                     <time dateTime={new Date(reminder.dueAt).toISOString()}>
                       {new Date(reminder.dueAt).toLocaleString()}
                     </time>
@@ -157,7 +160,7 @@ function ReminderScope({
                 )}
               </Box>
               <Button onClick={clearReminder}>
-                {due ? 'Dismiss and continue manually' : 'Cancel reminder'}
+                {due ? translate('chat.reminder_dismiss', 'Dismiss and continue manually') : translate('chat.reminder_cancel', 'Cancel reminder')}
               </Button>
             </Box>
           )}
@@ -165,8 +168,8 @@ function ReminderScope({
       )}
       {!open && reminder && due && (
         <Box role="alert">
-          <Typography>Reminder: {reminder.note}</Typography>
-          <Button onClick={clearReminder}>Dismiss and continue manually</Button>
+          <Typography>{translate('chat.reminder_due', 'Reminder: {{note}}', { note: reminder.note })}</Typography>
+          <Button onClick={clearReminder}>{translate('chat.reminder_dismiss', 'Dismiss and continue manually')}</Button>
         </Box>
       )}
     </Box>
