@@ -8428,7 +8428,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
     if (isReplayUserCommand(input)) {
       const id = currentSessionIdRef.current
-      if (!active || !isReady || !sessionsLoaded || sessionLoadError || config.use_remote_llm || !id || id !== currentSessionId || storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || loadingSessionIdsRef.current.has(id) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id)) || hasSessionDeleteTombstone(id,storageScope)) { notifyWarning('Replay unavailable for this conversation.'); return }
+      if (!active || !isReady || !sessionsLoaded || sessionLoadError || config.use_remote_llm || !id || id !== currentSessionId || storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || loadingSessionIdsRef.current.has(id) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id)) || hasSessionDeleteTombstone(id,storageScope)) { notifyWarning(t('chat.replay_unavailable_current', { defaultValue: 'Replay unavailable for this conversation.' })); return }
       try {
         const command = parseReplayUserCommand(input)!
         const session = sessionsRef.current.find(item=>item.id===id)
@@ -8436,7 +8436,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (command.kind !== 'branch') planReplay(session.messages, command)
         setReplayView({scope:inspectionScope,session,command,modelConfig:config.llm_config,profileId:selectedProfileId,skillId:selectedSkillId})
         setInputValue(''); setComposerClearVersion(version=>version+1)
-      } catch { notifyWarning('Use /branch, /regen or /edit <message number> <text>. Tool/attachment replay requires the existing editor and review.') }
+      } catch { notifyWarning(t('chat.use_replay_commands', { defaultValue: 'Use /branch, /regen or /edit <message number> <text>. Tool/attachment replay requires the existing editor and review.' })) }
       return
     }
     if (isAgentBasicCommand(input)) {
@@ -8445,7 +8445,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (!active || !isReady || !sessionsLoaded || sessionLoadError || !id || id !== currentSessionId || !session ||
         storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current ||
         deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) {
-        notifyWarning('Command unavailable for the current conversation.'); return
+        notifyWarning(t('chat.command_unavailable_current', { defaultValue: 'Command unavailable for the current conversation.' })); return
       }
       try {
         const command = parseAgentBasicCommand(input)!
@@ -8460,10 +8460,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
           setConfigurationView({ scope: inspectionScope, kind: 'video_gen' })
         } else {
           if (command === 'jobs' && (route?.channel !== 'canvas' || route.scopeType !== 'thread' || config.use_remote_llm)) {
-            notifyWarning('Jobs are available only in a local canvas thread.'); return
+            notifyWarning(t('chat.jobs_local_only', { defaultValue: 'Jobs are available only in a local canvas thread.' })); return
           }
           if (command === 'compact' && loadingSessionIdsRef.current.has(id)) {
-            notifyWarning('Compaction unavailable or conversation is busy.'); return
+            notifyWarning(t('chat.compaction_unavailable_busy', { defaultValue: 'Compaction unavailable or conversation is busy.' })); return
           }
           setBasicJobsText('')
           setBasicCommandView({ scope: inspectionScope, kind: command, session, modelConfig: config.llm_config, profileId: selectedProfileId, generation: ++basicCommandGenerationRef.current })
@@ -8472,7 +8472,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         clearScheduledDraftPersistence(); markTransientDraftCleared(storageScope, id); writeSessionDraftBackup(id, Date.now(), undefined, storageScope)
         setSessions(previous => previous.map(item => item.id === id ? stripSessionDraft(item) : item))
         void persistCurrentSessionSnapshot(id, 'accepted-user-command').catch(() => undefined)
-      } catch { notifyWarning('Use /status, /jobs or /compact without arguments.') }
+      } catch { notifyWarning(t('chat.use_basic_command', { defaultValue: 'Use /status, /jobs or /compact without arguments.' })) }
       return
     }
     if (isRepairImagesCommand(input)) {
@@ -8480,9 +8480,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (imageRepairScanPendingRef.current || !active || !isReady || !sessionsLoaded || sessionLoadError || !id || id !== currentSessionId ||
         config.use_remote_llm || storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current ||
         loadingSessionIdsRef.current.has(id) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) {
-        notifyWarning('Image repair unavailable for the current conversation.'); return
+        notifyWarning(t('chat.image_repair_unavailable_current', { defaultValue: 'Image repair unavailable for the current conversation.' })); return
       }
-      try { parseRepairImagesCommand(input) } catch { notifyWarning('Use /repair-images without arguments.'); return }
+      try { parseRepairImagesCommand(input) } catch { notifyWarning(t('chat.use_repair_images', { defaultValue: 'Use /repair-images without arguments.' })); return }
       const expected = sessionsRef.current.find(session => session.id === id)
       if (!expected) return
       imageRepairScanPendingRef.current = true
@@ -8491,7 +8491,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) && !hasSessionDeleteTombstone(id, storageScope)
       void scanMissingLocalImages(expected.messages, paths => api().svcShell.fileExistsBatch(paths)).then(scan => {
         if (current()) setImageRepairView({ scope: inspectionScope, session: expected, scan, confirmed: false })
-      }).catch(() => { if (current()) notifyWarning('Image existence check unavailable. No context was changed.') })
+      }).catch(() => { if (current()) notifyWarning(t('chat.image_existence_check_unavailable', { defaultValue: 'Image existence check unavailable. No context was changed.' })) })
         .finally(() => { imageRepairScanPendingRef.current = false })
       return
     }
@@ -8500,7 +8500,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (!active || !isReady || !sessionsLoaded || sessionLoadError || !id || id !== currentSessionId ||
         storageScopeRef.current !== storageScope || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current ||
         deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) {
-        notifyWarning('Command unavailable for the current conversation.'); return
+        notifyWarning(t('chat.command_unavailable_current', { defaultValue: 'Command unavailable for the current conversation.' })); return
       }
       try {
         const configuration = parseAgentConfigurationCommand(input)
@@ -8512,7 +8512,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const text = command === 'env'
           ? formatAgentEnvironment({ conversationId: id, profileId: selectedProfileId, skillId: selectedSkillId,
               storageScope, remote: config.use_remote_llm, route })
-          : buildSystemPromptFromSkillRuntime(selectedSkillRuntime) || '(No renderer-configured system prompt.)'
+          : buildSystemPromptFromSkillRuntime(selectedSkillRuntime) || t('chat.no_renderer_system_prompt', { defaultValue: '(No renderer-configured system prompt.)' })
         setInspectionView({ scope: inspectionScope, title: `/${command}`, text: text.slice(0, 65536) })
         setConfigurationView(null)
         }
@@ -8523,8 +8523,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         setSessions(previous => previous.map(session => session.id === id ? stripSessionDraft(session) : session))
         void persistCurrentSessionSnapshot(id, 'accepted-user-command').catch(() => undefined)
       } catch { notifyWarning(isAgentConfigurationCommand(input)
-        ? 'Use /plugin [configure] or /module [configure]. Change switches and parameters in the existing editor.'
-        : 'Use /env or /system_prompt without arguments.') }
+        ? t('chat.use_configuration_command', { defaultValue: 'Use /plugin [configure] or /module [configure]. Change switches and parameters in the existing editor.' })
+        : t('chat.use_inspection_commands', { defaultValue: 'Use /env or /system_prompt without arguments.' })) }
       return
     }
     const scratchpadCommand = isAgentScratchpadCommand(input)
@@ -9301,25 +9301,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   storageScopeRef.current === storageScope && currentSessionIdRef.current === id
                 void api().svcLLMProxy.listAgentJobs({ route: route!, conversationId: id }).then(result => {
                   if (ownsPanel())
-                    setBasicJobsText(result.jobs.map(job => `${job.kind}: ${job.status} · ${job.id}`).join('\n') || 'No helper jobs.')
-                }).catch(() => { if (ownsPanel()) setBasicJobsText('Jobs refresh failed.') })
+                    setBasicJobsText(result.jobs.map(job => `${job.kind}: ${job.status} · ${job.id}`).join('\n') || t('chat.no_helper_jobs', { defaultValue: 'No helper jobs.' }))
+                }).catch(() => { if (ownsPanel()) setBasicJobsText(t('chat.jobs_refresh_failed', { defaultValue: 'Jobs refresh failed.' })) })
                   .finally(() => { basicJobsPendingRef.current = false })
-              }}>Refresh thread jobs</Button>
+              }}>{t('chat.refresh_thread_jobs', { defaultValue: 'Refresh thread jobs' })}</Button>
               <Typography component="pre" sx={{ whiteSpace: 'pre-wrap' }}>{basicJobsText}</Typography>
             </>}
-            <Button onClick={() => { basicCommandGenerationRef.current++; setBasicCommandView(null) }}>Close command panel</Button>
+            <Button onClick={() => { basicCommandGenerationRef.current++; setBasicCommandView(null) }}>{t('chat.close_command_panel', { defaultValue: 'Close command panel' })}</Button>
           </Box>}
           {active && imageRepairView?.scope === inspectionScope && <Box data-testid="image-repair-view" sx={{ p: 2 }}>
-            <Typography variant="subtitle2">/repair-images — missing local image references</Typography>
-            <Typography variant="body2">Checked {imageRepairView.scan.checked} references (maximum 128). {imageRepairView.scan.limited ? 'Scan limit reached.' : ''}</Typography>
-            <Box component="ul">{imageRepairView.scan.missing.map(item => <li key={`${item.messageIndex}:${item.attachmentIndex}`}>Message {item.messageIndex + 1}, image {item.attachmentIndex + 1}</li>)}</Box>
-            {!imageRepairView.scan.missing.length && <Typography>No missing local images found among checked completed messages.</Typography>}
-            {imageRepairView.confirmed ? <Typography>Confirmed branch-context placeholders. Original history unchanged.</Typography> :
+            <Typography variant="subtitle2">{t('chat.repair_images_title', { defaultValue: '/repair-images — missing local image references' })}</Typography>
+            <Typography variant="body2">{t('chat.repair_images_checked', { checked: imageRepairView.scan.checked, defaultValue: `Checked ${imageRepairView.scan.checked} references (maximum 128).` })} {imageRepairView.scan.limited ? t('chat.repair_images_scan_limit', { defaultValue: 'Scan limit reached.' }) : ''}</Typography>
+            <Box component="ul">{imageRepairView.scan.missing.map(item => <li key={`${item.messageIndex}:${item.attachmentIndex}`}>{t('chat.repair_images_message', { message: item.messageIndex + 1, image: item.attachmentIndex + 1, defaultValue: `Message ${item.messageIndex + 1}, image ${item.attachmentIndex + 1}` })}</li>)}</Box>
+            {!imageRepairView.scan.missing.length && <Typography>{t('chat.repair_images_none', { defaultValue: 'No missing local images found among checked completed messages.' })}</Typography>}
+            {imageRepairView.confirmed ? <Typography>{t('chat.repair_images_confirmed', { defaultValue: 'Confirmed branch-context placeholders. Original history unchanged.' })}</Typography> :
               <Button disabled={!imageRepairView.scan.missing.length} onClick={() => {
                 if (sessionsRef.current.find(session => session.id === currentSessionIdRef.current) !== imageRepairView.session ||
                   loadingSessionIdsRef.current.has(imageRepairView.session.id) || storageScopeRef.current !== storageScope ||
                   hasSessionDeleteTombstone(imageRepairView.session.id, storageScope)) {
-                  notifyWarning('Conversation changed. Run /repair-images again.'); setImageRepairView(null); return
+                  notifyWarning(t('chat.conversation_changed_repair', { defaultValue: 'Conversation changed. Run /repair-images again.' })); setImageRepairView(null); return
                 }
                 const references = new Map<ChatMessage, readonly MissingImageReference[]>()
                 for (const item of imageRepairView.scan.missing) {
@@ -9328,8 +9328,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 }
                 imageRepairContextRef.current = { scope: inspectionScope, references }
                 setImageRepairView({ ...imageRepairView, confirmed: true })
-              }}>Confirm branch image placeholders</Button>}
-            <Button onClick={() => setImageRepairView(null)}>Close image repair</Button>
+              }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
+            <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
           </Box>}
           {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost buttonHost={teamManagementHost} openRequest={teamManagementOpenRequest} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={({ id, text }) => {
             const current = teamMessageDispatcherRef.current
@@ -9439,14 +9439,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
           <TeamLeadJobEntries route={route} currentId={currentSessionId} leadId={teamLead?.id} activeTeamKey={teamLeadJobsKey} isLive={isLeadJobsLive} currentIds={new Set(jobController.jobs.map(job => job.id))}>{leadJobs => renderProcessArea(teamEnabled && teamLead ? teamImagePlacement.place : undefined, leadJobs)}</TeamLeadJobEntries>
           <Box sx={{ display: 'contents' }}>
           {active && replayView?.scope === inspectionScope && <Box data-testid="replay-confirmation" sx={{p:2}}>
-            <Typography variant="subtitle2">Confirm /{replayView.command.kind}</Typography>
+            <Typography variant="subtitle2">{t('chat.confirm_replay', { kind: replayView.command.kind, defaultValue: `Confirm /${replayView.command.kind}` })}</Typography>
             <Typography>新建对话，保留原对话。</Typography>
             <Button onClick={() => {
               if (replayBusyRef.current) return
               const view = replayView
               setReplayView(null)
               const id = currentSessionIdRef.current
-              if (!view || !active || !isReady || !sessionsLoaded || sessionLoadError || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || id !== view.session.id || storageScopeRef.current !== storageScope || sessionsRef.current.find(item=>item.id===id) !== view.session || view.modelConfig !== config.llm_config || view.profileId !== selectedProfileId || view.skillId !== selectedSkillId || loadingSessionIdsRef.current.has(id) || config.use_remote_llm || hasSessionDeleteTombstone(id,storageScope) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id))) { notifyWarning('Conversation or settings changed. Reopen command.'); return }
+              if (!view || !active || !isReady || !sessionsLoaded || sessionLoadError || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || id !== view.session.id || storageScopeRef.current !== storageScope || sessionsRef.current.find(item=>item.id===id) !== view.session || view.modelConfig !== config.llm_config || view.profileId !== selectedProfileId || view.skillId !== selectedSkillId || loadingSessionIdsRef.current.has(id) || config.use_remote_llm || hasSessionDeleteTombstone(id,storageScope) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id))) { notifyWarning(t('chat.conversation_settings_changed_reopen', { defaultValue: 'Conversation or settings changed. Reopen command.' })); return }
               try {
                 const planned = view.command.kind === 'branch' ? null : planReplay(view.session.messages,view.command)
                 const copy = cloneChatSessionForReplay(view.session, planned?.baseMessages)
@@ -9472,23 +9472,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   const restoredDraft={...branch.draft,updatedAt:Date.now()}
                   await persistDraftSnapshot(branch.id,restoredDraft)
                   if (storageScopeRef.current===storageScope && currentSessionIdRef.current===branch.id) applyDraftToComposerState(restoredDraft)
-                }).catch(()=>notifyWarning('Could not save branch. Original conversation remains.')).finally(()=>{replayBusyRef.current=false})
-              } catch { notifyWarning('Cannot plan this replay. Original conversation unchanged.') }
-            }}>Create separate conversation</Button>
-            <Button onClick={()=>setReplayView(null)}>Cancel replay</Button>
+                }).catch(()=>notifyWarning(t('chat.could_not_save_branch', { defaultValue: 'Could not save branch. Original conversation remains.' }))).finally(()=>{replayBusyRef.current=false})
+              } catch { notifyWarning(t('chat.cannot_plan_replay', { defaultValue: 'Cannot plan this replay. Original conversation unchanged.' })) }
+            }}>{t('chat.create_separate_conversation', { defaultValue: 'Create separate conversation' })}</Button>
+            <Button onClick={()=>setReplayView(null)}>{t('chat.cancel_replay', { defaultValue: 'Cancel replay' })}</Button>
           </Box>}
           {active && configurationView?.scope === inspectionScope && <Box data-testid="agent-configuration-view" sx={{ p: 2 }}>
-            <Typography variant="subtitle2">/{configurationView.kind} — configuration handoff</Typography>
+            <Typography variant="subtitle2">/{configurationView.kind} — {t('chat.configuration_handoff', { defaultValue: 'configuration handoff' })}</Typography>
             {configurationView.kind === 'video_gen' ? <>
-              <Button onClick={() => { setConfigurationView(null); navigate('/qappexecute', { state: { magicpotOpenVideoGeneration: true } }) }}>Open video generation workspace</Button>
+              <Button onClick={() => { setConfigurationView(null); navigate('/qappexecute', { state: { magicpotOpenVideoGeneration: true } }) }}>{t('chat.open_video_generation_workspace', { defaultValue: 'Open video generation workspace' })}</Button>
             </> : configurationView.kind === 'plugin'
-              ? <Button onClick={() => navigate('/workshop/plugins', { state: null })}>Open plugin center</Button>
-              : <><Button onClick={() => navigate('/settings?tab=environment', { state: null })}>Open tool environment settings</Button>
-                  <Button onClick={() => navigate('/settings?tab=mcp', { state: null })}>Open MCP client settings</Button></>}
-            <Button onClick={() => setConfigurationView(null)}>Close configuration view</Button>
+              ? <Button onClick={() => navigate('/workshop/plugins', { state: null })}>{t('chat.open_plugin_center', { defaultValue: 'Open plugin center' })}</Button>
+              : <><Button onClick={() => navigate('/settings?tab=environment', { state: null })}>{t('chat.open_tool_environment_settings', { defaultValue: 'Open tool environment settings' })}</Button>
+                  <Button onClick={() => navigate('/settings?tab=mcp', { state: null })}>{t('chat.open_mcp_client_settings', { defaultValue: 'Open MCP client settings' })}</Button></>}
+            <Button onClick={() => setConfigurationView(null)}>{t('chat.close_configuration_view', { defaultValue: 'Close configuration view' })}</Button>
           </Box>}
           {active && inspectionView?.scope === inspectionScope && <Box data-testid="agent-inspection-view" sx={{ p: 2 }}>
-            <Button onClick={() => setInspectionView(null)}>Close command view</Button>
+            <Button onClick={() => setInspectionView(null)}>{t('chat.close_command_view', { defaultValue: 'Close command view' })}</Button>
             <Typography variant="subtitle2">{inspectionView.title}</Typography>
             <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 300, overflow: 'auto' }}>{inspectionView.text}</Typography>
           </Box>}
