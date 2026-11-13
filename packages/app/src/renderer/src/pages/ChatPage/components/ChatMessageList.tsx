@@ -3005,7 +3005,7 @@ const AssistantMarkdownContent: React.FC<{
                 fileName: getDownloadFileNameFromUrl(url, 'video.mp4')
               })
             }}
-            title="Download or reveal the file"
+            title={t('chat.download_attachment', { defaultValue: 'Download attachment' })}
           >
             <DownloadIcon fontSize="small" />
           </IconButton>

@@ -9284,17 +9284,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
           {active && basicCommandView?.scope === inspectionScope && <Box data-testid="agent-basic-command-view" sx={{ p: 2 }}>
             <Typography variant="subtitle2">/{basicCommandView.kind}</Typography>
             {basicCommandView.kind === 'compact' ? <>
-              <Typography>Compaction may send conversation text to the selected model and incur usage. Original retained history uses the existing compaction path. Confirm to request compaction; no tool replay is authorized.</Typography>
+              <Typography>{t('chat.command_compaction_notice')}</Typography>
               <Button onClick={() => {
                 if (basicCommandGenerationRef.current !== basicCommandView.generation ||
                   config.llm_config !== basicCommandView.modelConfig || selectedProfileId !== basicCommandView.profileId ||
                   sessionsRef.current.find(session => session.id === basicCommandView.session.id)?.messages !== basicCommandView.session.messages ||
                   currentSessionIdRef.current !== basicCommandView.session.id || storageScopeRef.current !== storageScope ||
                   loadingSessionIdsRef.current.has(basicCommandView.session.id) || hasSessionDeleteTombstone(basicCommandView.session.id, storageScope)) {
-                  notifyWarning('Compaction unavailable or conversation changed.'); return
+                  notifyWarning(t('chat.compaction_unavailable_or_changed')); return
                 }
                 setBasicCommandView(null); handleCompressCurrentContext()
-              }}>Confirm model compaction</Button>
+              }}>{t('chat.confirm_model_compaction')}</Button>
             </> : <>
               <Button onClick={() => {
                 if (basicJobsPendingRef.current) return
