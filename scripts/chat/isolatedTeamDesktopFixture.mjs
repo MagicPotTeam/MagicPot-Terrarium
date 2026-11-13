@@ -134,9 +134,8 @@ async function createMember(page, identity, name) {
   const pane = await waitForIsolatedTeamPane(page, identity)
   const process = pane.getByRole('region', { name: '进程区', exact: true })
   if (name === '设计师') {
-    // Select the actual localized control, not MUI's development-only icon test id.
-    await pane.locator('[data-testid="chat-composer-left-controls"]').getByRole('button', { name: '添加文件', exact: true }).click({ timeout: TIMEOUT })
-    await page.getByRole('menuitem', { name: '组建团队 / 添加成员', exact: true }).click({ timeout: TIMEOUT })
+    // Team creation belongs to the conversation header, above the message list.
+    await pane.locator('[data-testid="team-create-member-button"]').click({ timeout: TIMEOUT })
   } else {
     await process.getByRole('button', { name: '打开 设计师', exact: true }).waitFor({ state: 'visible', timeout: TIMEOUT })
     await process.getByRole('button', { name: '团队管理', exact: true }).click({ timeout: TIMEOUT })
