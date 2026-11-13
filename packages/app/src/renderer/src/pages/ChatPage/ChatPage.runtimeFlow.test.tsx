@@ -1323,44 +1323,6 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
-  it('offline local preview menu keeps image settings and scoped explicit access', async () => {
-    const fetchGuard = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network forbidden'))
-    const route = { channel: 'canvas' as const, scopeType: 'thread' as const, scopeId: 'preview-project', threadId: 'preview-pane' }
-    try {
-      renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
-      const sessionId = readCurrentSessionState()!.id
-      fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
-      expect(screen.getByTestId('chat-image-generation-settings-menu-item')).toBeVisible()
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Open local file and SQLite preview' }))
-      expect(screen.queryByTestId('test-add-menu')).not.toBeInTheDocument()
-      expect(await screen.findByRole('region', { name: 'Local files' })).toBeVisible()
-      expect(hoisted.agentLocalFilesService.setScope).toHaveBeenCalledWith(expect.objectContaining({ active: true, scope: { projectId: 'preview-project', paneId: 'preview-pane', sessionId } }))
-      expect(hoisted.agentLocalFilesService.choose).not.toHaveBeenCalled()
-      expect(hoisted.agentLocalFilesService.read).not.toHaveBeenCalled()
-      fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Close local file preview' }))
-      expect(screen.queryByRole('region', { name: 'Local files' })).not.toBeInTheDocument()
-      expect(hoisted.agentLocalFilesService.choose).not.toHaveBeenCalled()
-      expect(fetchGuard).not.toHaveBeenCalled()
-    } finally { fetchGuard.mockRestore() }
-  })
-
-  it.each(['remote', 'inactive', 'no-route'] as const)('offline local preview menu is unavailable for %s', async mode => {
-    const fetchGuard = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network forbidden'))
-    try {
-      if (mode === 'remote') hoisted.currentConfig.value!.use_remote_llm = true
-      const route = mode === 'no-route' ? undefined : { channel: 'canvas' as const, scopeType: 'thread' as const, scopeId: 'preview-project', threadId: 'preview-pane' }
-      renderWithProviders(<ChatPage compact active={mode !== 'inactive'} storageScope="runtime-flow" route={route} />)
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
-      fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
-      expect(screen.queryByRole('menuitem', { name: 'Open local file and SQLite preview' })).not.toBeInTheDocument()
-      expect(hoisted.agentLocalFilesService.setScope).not.toHaveBeenCalled()
-      expect(hoisted.agentLocalFilesService.choose).not.toHaveBeenCalled()
-      expect(fetchGuard).not.toHaveBeenCalled()
-    } finally { fetchGuard.mockRestore() }
-  })
-
   it('offline team activity shows the lead profile model name', async () => {
     const fetchGuard = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network forbidden'))
     try {
@@ -1405,7 +1367,7 @@ describe('ChatPage runtime workflow integration', () => {
     expect(within(area).queryByText('模型：组长模型')).not.toBeInTheDocument()
   })
 
-  it('offline process area creates members from the add menu and keeps navigation and management available', async () => {
+  it('offline process area creates members from the conversation header and keeps navigation and management available', async () => {
     const fetchGuard = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network forbidden'))
     try {
       const lead: ChatSession = { id: 'process-area-lead', title: 'Lead', messages: [], profileId: 'base-model' }
@@ -1415,8 +1377,9 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
       expect(screen.queryByRole('button', { name: '团队管理' })).not.toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
-      fireEvent.click(screen.getByRole('menuitem', { name: '组建团队 / 添加成员' }))
+      expect(screen.getByTestId('team-conversation-actions')).toBeVisible()
+      expect(screen.queryByRole('menuitem', { name: '组建团队 / 添加成员' })).not.toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('team-create-member-button'))
       fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Alice' } })
       fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Alice' } })
       fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
@@ -4937,8 +4900,7 @@ describe('ChatPage runtime workflow integration', () => {
       const lead = readCurrentSessionState()!.id
       for (const [name, role, count] of [[designerName, '设计师', '1'], [writerName, '文案', '2']] as const) {
         if (count === '1') {
-          fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
-          fireEvent.click(screen.getByRole('menuitem', { name: '组建团队 / 添加成员' }))
+          fireEvent.click(screen.getByTestId('team-create-member-button'))
         } else {
           await openTeamManagement()
           fireEvent.click(screen.getByRole('button', { name: '组建团队 / 添加成员' }))
@@ -5146,8 +5108,7 @@ describe('ChatPage runtime workflow integration', () => {
     renderChatPage({ team: true })
     await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
     const lead = readCurrentSessionState()!.id
-    fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: '组建团队 / 添加成员' }))
+    fireEvent.click(screen.getByTestId('team-create-member-button'))
     fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'writer' } })
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'write notes' } })
     fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
@@ -5167,8 +5128,7 @@ describe('ChatPage runtime workflow integration', () => {
     renderChatPage({team:true})
     await waitFor(()=>expect(readCurrentSessionState()?.profileId).toBe('base-model'))
     const lead=readCurrentSessionState()!.id
-    fireEvent.click(screen.getByRole('button',{name:'open-add-menu'}))
-    fireEvent.click(screen.getByRole('menuitem',{name:'组建团队 / 添加成员'}))
+    fireEvent.click(screen.getByTestId('team-create-member-button'))
     fireEvent.change(screen.getByLabelText('成员名'),{target:{value:'writer'}})
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'),{target:{value:'write notes'}})
     fireEvent.click(screen.getByRole('button',{name:'确认创建成员'}))
@@ -6516,8 +6476,7 @@ describe('ChatPage runtime workflow integration', () => {
     let release!:()=>void
     hoisted.saveSessionToDBGate.value=new Promise(resolve=>{release=resolve})
     try {
-      fireEvent.click(screen.getByRole('button',{name:'open-add-menu'}))
-      fireEvent.click(screen.getByRole('menuitem',{name:'组建团队 / 添加成员'}))
+      fireEvent.click(screen.getByTestId('team-create-member-button'))
       fireEvent.change(screen.getByLabelText('成员名'),{target:{value:'waiting'}})
       fireEvent.change(screen.getByLabelText('角色 / 当前任务'),{target:{value:'do work'}})
       fireEvent.click(screen.getByRole('button',{name:'确认创建成员'}))
@@ -6589,8 +6548,7 @@ describe('ChatPage runtime workflow integration', () => {
     create.mockRejectedValueOnce(new Error('Team changed'))
     renderChatPage({team:true})
     await waitFor(()=>expect(readCurrentSessionState()?.id).toBe(lead.id))
-    fireEvent.click(screen.getByRole('button',{name:'open-add-menu'}))
-    fireEvent.click(screen.getByRole('menuitem',{name:'组建团队 / 添加成员'}))
+    fireEvent.click(screen.getByTestId('team-create-member-button'))
     fireEvent.change(screen.getByLabelText('成员名'),{target:{value:'waiting'}})
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'),{target:{value:'do work'}})
     fireEvent.click(screen.getByRole('button',{name:'确认创建成员'}))

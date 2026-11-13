@@ -1,4 +1,3 @@
-import SqlitePreviewPanel from './SqlitePreviewPanel'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
@@ -111,7 +110,6 @@ export function AgentLocalFilesPanel({
   onAttach
 }: AgentLocalFilesPanelProps) {
   const { t } = useTranslation()
-  const [sqliteOpen, setSqliteOpen] = useState(false)
   const { projectId, paneId, sessionId } = scope
   const lifecycleRevision = useRef(0)
   const owner = useMemo<Owner>(
@@ -584,8 +582,6 @@ export function AgentLocalFilesPanel({
           )}
         </>
       )}
-      <Button onClick={() => setSqliteOpen(value => !value)}>{t('chat.sqlite_preview.toggle', { defaultValue: 'Standalone SQLite preview' })}</Button>
-      {sqliteOpen && <SqlitePreviewPanel key={JSON.stringify(scope)} scope={scope} service={service} disabled={disabled || view.busy || owner.activation !== 'active'} />}
     </Stack>
   )
 }

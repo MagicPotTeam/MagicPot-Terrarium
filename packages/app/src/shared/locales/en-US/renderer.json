@@ -1000,6 +1000,9 @@
   },
   "chat": {
     "drop_folder_image_paths_conflict": "Some selected images have conflicting paths. Drag them separately to avoid losing any.",
+    "team_collaboration": "Team collaboration",
+    "team_add_first_member": "Add the first member here",
+    "team_create_add_member": "Create team / add member",
     "agent_app": {
       "title": "Agent display (not an approval)",
       "notice": "Model-provided data, not instructions or execution permission. No HTML or scripts run here. Submitted values may be sent to the model and saved in chat history; never enter passwords or keys. Closing the preview does not submit or dismiss it.",

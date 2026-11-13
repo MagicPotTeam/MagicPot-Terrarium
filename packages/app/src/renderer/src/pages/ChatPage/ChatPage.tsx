@@ -13,7 +13,6 @@ import AgentProcessArea, { type ProcessEntry } from './components/AgentProcessAr
 import TeamLeadJobEntries, { type TeamLeadJobEntriesValue } from './components/TeamLeadJobEntries'
 import { useTeamImagePlacement } from './components/useTeamImagePlacement'
 import { createTeamMember, readMemberModelChoice, resolveTeamRecipient, resolveTeamRequestSettings } from './agentTeam'
-import AgentLocalFilesPanel from './components/AgentLocalFilesPanel'
 import { isReplayUserCommand, parseReplayUserCommand, planReplay, type ReplayUserCommand } from './replayUserCommand'
 import { cloneChatSessionForReplay } from './cloneChatSessionForReplay'
 import { mergeToolCheckpoint } from './chatToolCheckpoint'
@@ -8338,8 +8337,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     })
     return () => { if (approvalSurfaceRef.current === token) approvalSurfaceRef.current = null; unregister() }
   }, [approvalSurfaceKey, teamApprovalHost])
-  const [localPreviewOpen, setLocalPreviewOpen] = useState(false)
-  useEffect(() => { setLocalPreviewOpen(false) }, [active, storageScope, currentSessionId])
   const [replayView, setReplayView] = useState<{ scope: string; session: ChatSession; command: ReplayUserCommand; modelConfig: typeof config.llm_config; profileId: string | null; skillId: string | null } | null>(null)
   useEffect(() => { setReplayView(null) }, [active, storageScope, currentSessionId])
   const replayBusyRef = useRef(false)
@@ -9242,6 +9239,43 @@ const ChatPage: React.FC<ChatPageProps> = ({
             />
           )}
 
+          {/* 对话级团队操作：团队入口放在消息区上方，避免和输入框工具混在一起。 */}
+          {active && teamEnabled && teamLead && teamMembers.length === 0 && !teamLead.teamEnded && (
+            <Box
+              data-testid="team-conversation-actions"
+              sx={{
+                mx: { xs: 1, sm: 2 },
+                my: 1,
+                px: 1.5,
+                py: 1,
+                display: 'flex',
+                alignItems: { xs: 'flex-start', sm: 'center' },
+                justifyContent: 'space-between',
+                gap: 1,
+                flexWrap: 'wrap',
+                border: '1px solid',
+                borderColor: 'divider',
+                borderRadius: 2,
+                bgcolor: 'background.paper',
+                boxShadow: 1
+              }}
+            >
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.3 }}>{t('chat.team_collaboration')}</Typography>
+                <Typography variant="caption" color="text.secondary">{t('chat.team_add_first_member')}</Typography>
+              </Box>
+              <Button
+                data-testid="team-create-member-button"
+                size="small"
+                variant="contained"
+                onClick={() => setCreatingTeamMember(true)}
+                sx={{ borderRadius: 1.5, textTransform: 'none', whiteSpace: 'nowrap', fontWeight: 700 }}
+              >
+                {t('chat.team_create_add_member')}
+              </Button>
+            </Box>
+          )}
+
           {/* 消息列表 */}
           {active && basicCommandView?.scope === inspectionScope && <Box data-testid="agent-basic-command-view" sx={{ p: 2 }}>
             <Typography variant="subtitle2">/{basicCommandView.kind}</Typography>
@@ -9404,9 +9438,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }}/>}
           <TeamLeadJobEntries route={route} currentId={currentSessionId} leadId={teamLead?.id} activeTeamKey={teamLeadJobsKey} isLive={isLeadJobsLive} currentIds={new Set(jobController.jobs.map(job => job.id))}>{leadJobs => renderProcessArea(teamEnabled && teamLead ? teamImagePlacement.place : undefined, leadJobs)}</TeamLeadJobEntries>
           <Box sx={{ display: 'contents' }}>
-          {active && isReady && currentSessionId && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId && localPreviewOpen && <Box sx={{p:1}}>
-            <AgentLocalFilesPanel key={`${storageScope}:${currentSessionId}`} scope={{projectId:route.scopeId,paneId:route.threadId,sessionId:currentSessionId}} service={api().svcAgentLocalFiles} disabled={loadingSessionIds.has(currentSessionId)} onAttach={()=>false}/>
-          </Box>}
           {active && replayView?.scope === inspectionScope && <Box data-testid="replay-confirmation" sx={{p:2}}>
             <Typography variant="subtitle2">Confirm /{replayView.command.kind}</Typography>
             <Typography>新建对话，保留原对话。</Typography>
@@ -9668,7 +9699,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 addMenuSlot={
                   (!isAgentSkillSelected || Boolean(active && isReady && currentSessionId && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId) || Boolean(teamEnabled && teamLead && !teamMembers.length))
                     ? (closeMenu) => [
-                        teamEnabled && teamLead && !teamMembers.length && !teamLead.teamEnded && <MenuItem key="create-team" onClick={() => { closeMenu(); setCreatingTeamMember(true) }}>组建团队 / 添加成员</MenuItem>,
                         teamEnabled && teamLead && !teamMembers.length && (teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length) && <MenuItem key="team-management" onClick={() => { closeMenu(); setTeamManagementOpenRequest(value => value + 1) }}>团队管理</MenuItem>,
                         !isAgentSkillSelected && <ChatImageGenerationSettings
                           key="image-generation"
@@ -9679,9 +9709,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
                           referenceImageSize={imageGenerationReferenceSize}
                           variant="menuItem"
                         />,
-                        active && isReady && currentSessionId && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId && <MenuItem key="local-preview" onClick={() => { closeMenu(); setLocalPreviewOpen(value => !value) }}>
-                          {localPreviewOpen ? t('chat.local_files.close_preview', { defaultValue: 'Close local file preview' }) : t('chat.local_files.open_preview', { defaultValue: 'Open local file and SQLite preview' })}
-                        </MenuItem>
                       ]
                     : undefined
                 }

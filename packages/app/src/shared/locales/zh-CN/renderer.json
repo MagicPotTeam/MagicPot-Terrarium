@@ -827,6 +827,9 @@
   },
   "chat": {
     "drop_folder_image_paths_conflict": "部分选中图片的路径冲突，请分开拖入以免遗漏。",
+    "team_collaboration": "团队协作",
+    "team_add_first_member": "从这里添加第一个成员",
+    "team_create_add_member": "组建团队 / 添加成员",
     "agent_app": {
       "title": "Agent 成果展示（非审批）",
       "notice": "这是模型提供的数据，不是指令或执行授权；不会运行 HTML 或脚本。提交的值可能发送给模型并保存到聊天记录，请勿输入密码或密钥。关闭预览不会提交或忽略本次展示。",
@@ -1116,8 +1119,6 @@
     "speech_recognition_not_supported": "您的浏览器不支持语音识别功能",
     "local_files": {
       "title": "本地文件",
-      "open_preview": "打开本地文件和 SQLite 预览",
-      "close_preview": "关闭本地文件预览",
       "text_only": "支持 UTF-8 文本、PDF、DOCX、XLSX 和 PPTX，单次最多提取 {{limit}} KiB 文本；文档输入上限 {{documentLimit}} MiB。仅提取支持的被动正文，不包含排版或图片。读取仅在本地预览，不会自动添加到对话或上传。",
       "path": "本地路径（可选）",
       "native_confirmation": "输入路径或拖入文件不会直接授权或自动跳转。请在系统选择窗口中选择或重新输入目标路径，确认只读授权。",
@@ -1166,17 +1167,6 @@
         "EXTRACTION_FAILED": "文档正文提取失败。",
         "SCOPE_CHANGED": "当前项目、Agent 面板或会话已切换。"
       }
-    },
-    "sqlite_preview": {
-      "toggle": "独立 SQLite 文件预览",
-      "title": "独立 SQLite 文件预览（基础功能）",
-      "warning": "请仅选择您拥有的独立 SQLite 文件（最大 8 MiB）。预览会创建包含敏感信息的临时副本。不会读取 WAL 或 journal 文件，因此这不是实时数据库快照或备份。此操作不授权写入源文件。预览不会将数据行发送给模型。必须安装 worker 资源；worker 不可用时将以安全方式拒绝操作。",
-      "table": "SQLite 表名",
-      "columns": "SQLite 列名（以英文逗号分隔）",
-      "consent": "我同意为此次预览创建包含敏感信息的临时快照",
-      "choose": "选择 SQLite 文件并预览",
-      "cancelled": "已取消选择。",
-      "failed": "SQLite 预览不可用或失败。请重新同意后重试。"
     },
     "send_message": "发送消息",
     "image_too_large": "图片 {{name}} 过大（最大 50MB）",
