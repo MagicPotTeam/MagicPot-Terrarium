@@ -2024,7 +2024,7 @@ const UserMessageEditForm: React.FC<{
             onClick={onCancel}
             sx={{ borderRadius: '18px', textTransform: 'none' }}
           >
-            {t('common.cancel', { defaultValue: 'Cancel' })}
+            {t('chat.cancel', { defaultValue: 'Cancel' })}
           </Button>
           <Button
             variant="contained"

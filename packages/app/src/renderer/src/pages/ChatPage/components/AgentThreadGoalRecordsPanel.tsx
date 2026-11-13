@@ -1,4 +1,5 @@
 import React, { useId, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Alert, Box, Button, TextField, Typography } from '@mui/material'
 import {
   AGENT_GOAL_LIMITS,
@@ -43,6 +44,13 @@ export default function AgentThreadGoalRecordsPanel({
   createResetVersion = 0,
   reportAck
 }: AgentThreadGoalRecordsPanelProps) {
+  const { t } = useTranslation()
+  const translate = (key: string, fallback: string, values: Record<string, string | number> = {}) => {
+    const value = t(key, { ...values, defaultValue: fallback })
+    const resolved = value === key ? fallback : value
+    return resolved.replace(/{{(\w+)}}/g, (_, name: string) => String(values[name] ?? `{{${name}}}`))
+  }
+  const statusLabel = (status: string) => translate(`chat.agent_goal.status_${status}`, status)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const headingId = useId()
   const consumed = React.useRef(0)
@@ -84,14 +92,14 @@ export default function AgentThreadGoalRecordsPanel({
       sx={{ mx: 2, mb: 1, p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}
     >
       <Typography id={headingId} variant="subtitle2">
-        Thread goals
+        {translate('chat.agent_goal.panel_title', 'Thread goals')}
       </Typography>
       <Typography variant="caption">
-        Manual records only. Activating a goal does not run a model or grant permissions.
+        {translate('chat.agent_goal.panel_notice', 'Manual records only. Activating a goal does not run a model or grant permissions.')}
       </Typography>
       {error ? <Alert severity="error">{error}</Alert> : null}
-      {!view && !error ? <Typography>Goals unavailable.</Typography> : null}
-      {view && view.goals.length === 0 ? <Typography>No goals yet.</Typography> : null}
+      {!view && !error ? <Typography>{translate('chat.agent_goal.unavailable', 'Goals unavailable.')}</Typography> : null}
+      {view && view.goals.length === 0 ? <Typography>{translate('chat.agent_goal.no_goals', 'No goals yet.')}</Typography> : null}
       {view?.goals.map((goal) => {
         const label = disambiguateAll
           ? `${goal.title} · ${goal.id}`
@@ -116,29 +124,29 @@ export default function AgentThreadGoalRecordsPanel({
             <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
               {goal.spec.objective}
             </Typography>
-            <Typography variant="caption">Status: {goal.status}</Typography>
+            <Typography variant="caption">{translate('chat.agent_goal.status', `Status: ${goal.status}`, { status: statusLabel(goal.status) })}</Typography>
             {goal.progress ? (
               <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                Progress: {goal.progress.summary}
+                {translate('chat.agent_goal.progress', `Progress: ${goal.progress.summary}`, { summary: goal.progress.summary })}
               </Typography>
             ) : null}
             {proposal ? (
               <Box sx={{ mt: 1 }}>
-                <Typography variant="body2">Proposed outcome: {proposal.outcome}</Typography>
+                <Typography variant="body2">{translate('chat.agent_goal.proposed_outcome', `Proposed outcome: ${proposal.outcome}`, { outcome: statusLabel(proposal.outcome) })}</Typography>
                 <Typography variant="caption">
                   {['completed', 'failed'].includes(goal.status)
-                    ? 'This is the proposal retained after confirmation. Proposal and evidence are unverified.'
+                    ? translate('chat.agent_goal.proposal_retained', 'This is the proposal retained after confirmation. Proposal and evidence are unverified.')
                     : decisionAvailable
-                      ? 'Proposal and evidence are unverified. Confirm changes the goal status; reject removes only this proposal. Neither action runs a model.'
-                      : 'Proposal and evidence are unverified.'}
+                      ? translate('chat.agent_goal.proposal_decision', 'Proposal and evidence are unverified. Confirm changes the goal status; reject removes only this proposal. Neither action runs a model.')
+                      : translate('chat.agent_goal.proposal_unverified', 'Proposal and evidence are unverified.')}
                 </Typography>
                 {['active', 'waiting', 'blocked'].includes(goal.status) ? (
                   <Typography variant="caption" display="block">
-                    Pausing this goal removes its current proposal.
+                    {translate('chat.agent_goal.pause_proposal_notice', 'Pausing this goal removes its current proposal.')}
                   </Typography>
                 ) : goal.status === 'paused' ? (
                   <Typography variant="caption" display="block">
-                    Activating this goal removes its current proposal.
+                    {translate('chat.agent_goal.activate_proposal_notice', 'Activating this goal removes its current proposal.')}
                   </Typography>
                 ) : null}
                 <Typography
@@ -164,7 +172,7 @@ export default function AgentThreadGoalRecordsPanel({
                         onDecision({ action: 'confirm', goalId, revision, generation, proposal })
                       }
                     >
-                      Confirm {proposal.outcome} for {label}
+                      {translate('chat.agent_goal.confirm_outcome_for', `Confirm ${proposal.outcome} for ${label}`, { outcome: statusLabel(proposal.outcome), label })}
                     </Button>
                     <Button
                       size="small"
@@ -179,7 +187,7 @@ export default function AgentThreadGoalRecordsPanel({
                         })
                       }
                     >
-                      Reject proposal for {label}
+                      {translate('chat.agent_goal.reject_proposal_for', `Reject proposal for ${label}`, { label })}
                     </Button>
                   </Box>
                 ) : null}
@@ -192,7 +200,7 @@ export default function AgentThreadGoalRecordsPanel({
                   disabled={pending}
                   onClick={() => onControl({ goalId: goal.id, status: 'active' })}
                 >
-                  Activate {label}
+                  {translate('chat.agent_goal.activate_for', `Activate ${label}`, { label })}
                 </Button>
               ) : null}
               {['active', 'waiting', 'blocked'].includes(goal.status) ? (
@@ -201,7 +209,7 @@ export default function AgentThreadGoalRecordsPanel({
                   disabled={pending}
                   onClick={() => onControl({ goalId: goal.id, status: 'paused' })}
                 >
-                  Pause {label}
+                  {translate('chat.agent_goal.pause_for', `Pause ${label}`, { label })}
                 </Button>
               ) : null}
             </Box>
@@ -216,10 +224,10 @@ export default function AgentThreadGoalRecordsPanel({
                 }}
               >
                 <Typography variant="caption">
-                  Saving replaces the current progress summary.
+                  {translate('chat.agent_goal.report_notice', 'Saving replaces the current progress summary.')}
                 </Typography>
                 <TextField
-                  label={`Progress for ${label}`}
+                  label={translate('chat.agent_goal.progress_for', `Progress for ${label}`, { label })}
                   value={drafts[goal.id] ?? ''}
                   onChange={(event) =>
                     setDrafts((current) => ({ ...current, [goal.id]: event.target.value }))
@@ -233,7 +241,7 @@ export default function AgentThreadGoalRecordsPanel({
                   type="submit"
                   disabled={pending || !validReportSummary(drafts[goal.id] ?? '')}
                 >
-                  Save progress for {label}
+                  {translate('chat.agent_goal.save_progress_for', `Save progress for ${label}`, { label })}
                 </Button>
               </Box>
             ) : null}
@@ -254,6 +262,12 @@ function CreateGoalForm({
   pending,
   onCreate
 }: Pick<AgentThreadGoalRecordsPanelProps, 'view' | 'pending' | 'onCreate'>) {
+  const { t } = useTranslation()
+  const translate = (key: string, fallback: string, values: Record<string, string | number> = {}) => {
+    const value = t(key, { ...values, defaultValue: fallback })
+    const resolved = value === key ? fallback : value
+    return resolved.replace(/{{(\w+)}}/g, (_, name: string) => String(values[name] ?? `{{${name}}}`))
+  }
   const [title, setTitle] = useState('')
   const [objective, setObjective] = useState('')
   const canCreate = Boolean(
@@ -286,7 +300,7 @@ function CreateGoalForm({
       sx={{ display: 'flex', flexDirection: 'column', gap: 1, mt: 1 }}
     >
       <TextField
-        label="Goal title"
+        label={translate('chat.agent_goal.goal_title_label', 'Goal title')}
         value={title}
         onChange={(event) => setTitle(event.target.value)}
         disabled={pending || !view}
@@ -294,7 +308,7 @@ function CreateGoalForm({
         size="small"
       />
       <TextField
-        label="Objective"
+        label={translate('chat.agent_goal.objective_label', 'Objective')}
         value={objective}
         onChange={(event) => setObjective(event.target.value)}
         disabled={pending || !view}
@@ -304,11 +318,11 @@ function CreateGoalForm({
       />
       {view && view.goals.length >= AGENT_GOAL_LIMITS.goals ? (
         <Typography variant="caption">
-          Goal limit reached ({AGENT_GOAL_LIMITS.goals}). This interface cannot delete goals yet.
+          {translate('chat.agent_goal.goal_limit_reached', `Goal limit reached (${AGENT_GOAL_LIMITS.goals}). This interface cannot delete goals yet.`, { count: AGENT_GOAL_LIMITS.goals })}
         </Typography>
       ) : null}
       <Button type="submit" disabled={!canCreate}>
-        Create draft
+        {translate('chat.agent_goal.create_draft', 'Create draft')}
       </Button>
     </Box>
   )

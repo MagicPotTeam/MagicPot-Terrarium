@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { AgentRouteLike } from '@shared/agent'
 import { AGENT_GOAL_LIMITS } from '@shared/api/agentThreadGoal'
 import type { AgentGoalView } from '@shared/api/agentThreadGoal'
@@ -23,10 +24,15 @@ export default function AgentThreadGoalRecordsHost({ route, conversationId, acti
   return scope ? <GoalBinding key={key} scope={scope} /> : null
 }
 function GoalBinding({ scope }: { scope: Scope }) {
+  const { t } = useTranslation()
+  const translate = (key: string, fallback: string) => {
+    const value = t(key, { defaultValue: fallback })
+    return value === key ? fallback : value
+  }
   const identity = useRef(Symbol('goal-owner')).current
   const [view, setView] = useState<AgentGoalView | null>(null)
   const [pending, setPending] = useState(true)
-  const [error, setError] = useState<string | null>(() => uncertainScopes.has(JSON.stringify(scope)) ? 'Result unknown. Review the refreshed goals before continuing.' : null)
+  const [error, setError] = useState<string | null>(() => uncertainScopes.has(JSON.stringify(scope)) ? translate('chat.agent_goal.result_unknown', 'Result unknown. Review the refreshed goals before continuing.') : null)
   const scopeKey = JSON.stringify(scope)
   const [unknown, setUnknown] = useState(() => uncertainScopes.has(scopeKey))
   const [formVersion, setFormVersion] = useState(0)
@@ -45,7 +51,7 @@ function GoalBinding({ scope }: { scope: Scope }) {
       timer = setTimeout(() => { timer = undefined; cancelDelay = undefined; resolve() }, 1000)
     })
     s.live = true
-    if (owner && owner !== identity) { setPending(false); setError('Another goal panel is active.'); return () => { s.live = false } }
+    if (owner && owner !== identity) { setPending(false); setError(translate('chat.agent_goal.another_active', 'Another goal panel is active.')); return () => { s.live = false } }
     owner = identity
     enqueue(async () => {
       if (!isCurrent()) return
@@ -67,7 +73,7 @@ function GoalBinding({ scope }: { scope: Scope }) {
         }
         if (!isCurrent() || !data) return
         s.view = data; setView(data); setPending(false)
-      } catch { if (isCurrent()) { setPending(false); setError('Goals unavailable.') } }
+      } catch { if (isCurrent()) { setPending(false); setError(translate('chat.agent_goal.unavailable', 'Goals unavailable.')) } }
     })
     return () => {
       generation.current++; s.live = false; s.bound = undefined; s.view = null
@@ -117,10 +123,10 @@ function GoalBinding({ scope }: { scope: Scope }) {
         if (kind === 'report' && 'summary' in intent) setReportAck({ sequence: ++reportSequence.current, goalId, summary: intent.summary })
       } catch {
         if (!isCurrent()) return
-        s.uncertain = true; setUnknown(true); setError('Result unknown. Review the refreshed goals before continuing.')
-        try { const refreshed = await service().listAgentGoals(bound); if (isCurrent()) { s.view = refreshed; setView(refreshed) } } catch { if (isCurrent()) { s.view = null; setView(null); setError('Result unknown. Refresh unavailable; reopen to review.') } }
+        s.uncertain = true; setUnknown(true); setError(translate('chat.agent_goal.result_unknown', 'Result unknown. Review the refreshed goals before continuing.'))
+        try { const refreshed = await service().listAgentGoals(bound); if (isCurrent()) { s.view = refreshed; setView(refreshed) } } catch { if (isCurrent()) { s.view = null; setView(null); setError(translate('chat.agent_goal.refresh_unavailable', 'Result unknown. Refresh unavailable; reopen to review.')) } }
       } finally { if (pendingMutations.get(scopeKey) === pendingMutation) pendingMutations.delete(scopeKey); settle(); if (isCurrent()) { s.lock = false; setPending(false) } }
     })()
   }
-  return <><AgentThreadGoalRecordsPanel createResetVersion={formVersion} reportAck={reportAck} view={view} pending={pending || unknown} error={error} onCreate={intent => mutate(intent, 'create')} onControl={intent => mutate(intent, 'control')} onReport={intent => mutate(intent, 'report')} onDecision={intent => mutate(intent, 'decision')} />{!view && !pending && error ? <button type="button" onClick={() => { setPending(true); setError(unknown ? 'Result unknown. Review the refreshed goals before continuing.' : null); setLoadVersion(version => version + 1) }}>Retry loading goals</button> : null}{unknown && !pending && view ? <button type="button" onClick={acknowledge}>I reviewed the goals</button> : null}</>
+  return <><AgentThreadGoalRecordsPanel createResetVersion={formVersion} reportAck={reportAck} view={view} pending={pending || unknown} error={error} onCreate={intent => mutate(intent, 'create')} onControl={intent => mutate(intent, 'control')} onReport={intent => mutate(intent, 'report')} onDecision={intent => mutate(intent, 'decision')} />{!view && !pending && error ? <button type="button" onClick={() => { setPending(true); setError(unknown ? translate('chat.agent_goal.result_unknown', 'Result unknown. Review the refreshed goals before continuing.') : null); setLoadVersion(version => version + 1) }}>{translate('chat.agent_goal.retry_loading', 'Retry loading goals')}</button> : null}{unknown && !pending && view ? <button type="button" onClick={acknowledge}>{translate('chat.agent_goal.reviewed_goals', 'I reviewed the goals')}</button> : null}</>
 }

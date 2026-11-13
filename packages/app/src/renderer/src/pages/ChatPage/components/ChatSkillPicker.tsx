@@ -54,6 +54,8 @@ const ChatSkillPicker: React.FC<ChatSkillPickerProps> = ({
   const compactSkillTitle = copy('技能', 'Skill')
   const compactCategoryReset = copy('默认', 'Default')
   const compactSkillReset = copy('不使用', 'Off')
+  const skillTypeAgentLabel = t('chat.skill_type_agent', { defaultValue: 'Agent' })
+  const skillTypePromptLabel = t('chat.skill_type_prompt', { defaultValue: 'Prompt' })
 
   const allSkills = React.useMemo(() => customSkills || [], [customSkills])
 
@@ -253,7 +255,7 @@ const ChatSkillPicker: React.FC<ChatSkillPickerProps> = ({
                   <MenuItem key={skill.id} value={skill.id}>
                     {getCustomSkillName(skill)}
                     <Chip
-                      label={skill.type === 'agent' ? 'Agent' : 'Prompt'}
+                      label={skill.type === 'agent' ? skillTypeAgentLabel : skillTypePromptLabel}
                       size="small"
                       color={getSkillTypeBadgeColor(skill.type)}
                       sx={{ ml: 1, height: 16, fontSize: 10 }}
@@ -402,14 +404,14 @@ const ChatSkillPicker: React.FC<ChatSkillPickerProps> = ({
                         {skill.type === 'agent' ? (
                           <Chip
                             size="small"
-                            label="Agent"
+                            label={skillTypeAgentLabel}
                             color={isSelected ? 'primary' : 'default'}
                             sx={{ height: 20, fontSize: 11, fontWeight: 700, px: 0.5 }}
                           />
                         ) : (
                           <Chip
                             size="small"
-                            label="Prompt"
+                            label={skillTypePromptLabel}
                             variant={isSelected ? 'filled' : 'outlined'}
                             color={isSelected ? 'primary' : 'default'}
                             sx={{ height: 20, fontSize: 11, fontWeight: 700, px: 0.5 }}
