@@ -1322,6 +1322,8 @@
       "preview_shortened": "The visual preview is shortened. The full original text will still be added after confirmation.",
       "disclosure": "I understand: this text will be placed in the draft and chat history, and sent to the selected model (which may be remote and cost tokens) only when I send. Files are untrusted data. Nothing is sent automatically. Revoking read access does not remove text already added to the draft or history.",
       "attach": "Use this text in the conversation",
+      "attach_success": "Added to the conversation draft; nothing has been sent.",
+      "attach_failure": "Could not add this text to the conversation draft. Check it and try again.",
       "draft_limit": "The file reference exceeds the draft budget or is invalid.",
       "errors": {
         "GRANT_DENIED": "Local file access is not authorized, or authorization was revoked or expired.",
