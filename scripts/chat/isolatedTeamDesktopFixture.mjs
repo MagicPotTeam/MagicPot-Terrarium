@@ -207,6 +207,70 @@ function reserveFlow(identity, key) {
   attempts.add(key)
 }
 
+/**
+ * Send a lead request through the real composer after proving both UI-created
+ * members have an assistant result. ChatPage adds the member results to the
+ * lead request's hidden context; this helper only observes that production
+ * path and never writes synthetic member messages or calls a provider itself.
+ */
+export async function sendIsolatedLeadSummary(page, identity, prompt = '汇总团队结果', expectedOutput = '团队汇总：设计结果和文案结果') {
+  if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 4000) throw new TypeError('Lead summary prompt must be non-empty and bounded.')
+  if (typeof expectedOutput !== 'string' || !expectedOutput.trim()) throw new TypeError('Lead summary output must be non-empty.')
+  reserveFlow(identity, 'lead-summary')
+  await waitForIsolatedTeamPane(page, identity)
+  const members = await page.evaluate(async ({ scope, leadId }) => {
+    const request = indexedDB.open('magicpot-chat', 2)
+    const db = await new Promise((resolve, reject) => {
+      request.onupgradeneeded = () => request.transaction.abort()
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error || new Error('Session database unavailable.'))
+      request.onblocked = () => reject(new Error('Session database blocked.'))
+    })
+    try {
+      const rows = await new Promise((resolve, reject) => {
+        const tx = db.transaction('sessions-v2', 'readonly')
+        const get = tx.objectStore('sessions-v2').getAll()
+        let value
+        get.onsuccess = () => { value = get.result }
+        tx.oncomplete = () => resolve(value)
+        tx.onabort = () => reject(tx.error || new Error('Session read aborted.'))
+        tx.onerror = () => reject(tx.error)
+      })
+      const members = rows.filter(row => row.storageScope === scope && row.teamLeadId === leadId && !row.archived)
+      if (members.length !== 2 || members.some(member => !Array.isArray(member.messages))) throw new Error('Expected two active team members.')
+      const results = members.map(member => ({ id: member.id, name: member.teamMemberName || member.title, messageCount: member.messages.length, assistantText: [...member.messages].reverse().find(message => message.role === 'assistant' && typeof message.content === 'string' && message.content.trim())?.content ?? '' }))
+      if (results.some(member => !member.assistantText.trim())) throw new Error('Both team members must have an assistant result before lead summary.')
+      return results
+    } finally { db.close() }
+  }, { scope: identity.scope, leadId: identity.sessionId })
+  const baseline = await page.evaluate(async ({ scope, leadId }) => {
+    const request = indexedDB.open('magicpot-chat', 2)
+    const db = await new Promise((resolve, reject) => {
+      request.onupgradeneeded = () => request.transaction.abort()
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error || new Error('Session database unavailable.'))
+      request.onblocked = () => reject(new Error('Session database blocked.'))
+    })
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction('sessions-v2', 'readonly')
+        const get = tx.objectStore('sessions-v2').get(`${scope}\u0000${leadId}`)
+        let value
+        get.onsuccess = () => { value = get.result }
+        tx.oncomplete = () => resolve(Array.isArray(value?.messages) ? value.messages.length : 0)
+        tx.onabort = () => reject(tx.error || new Error('Session read aborted.'))
+        tx.onerror = () => reject(tx.error)
+      })
+    } finally { db.close() }
+  }, { scope: identity.scope, leadId: identity.sessionId })
+  const pane = await waitForIsolatedTeamPane(page, identity)
+  const input = pane.locator('[data-testid="chat-composer-input"]')
+  await input.fill(prompt)
+  await pane.locator('[data-chat-send-btn]').click({ timeout: TIMEOUT })
+  await waitForAssistant(page, identity, identity.sessionId, expectedOutput, false, baseline)
+  return { leadId: identity.sessionId, prompt, assistantText: expectedOutput, memberResults: members.map(({ id, name, assistantText }) => ({ id, name, assistantText })) }
+}
+
 // Per-identity, per-module-instance only. Completion records no message content.
 const channelZeroVerified = new WeakSet()
 export async function broadcastIsolatedTeamChannel(page, identity, stage, verifyZero) {
@@ -231,8 +295,8 @@ async function sendOnce(page, identity, key, text) {
   await pane.locator('[data-chat-send-btn]').click({ timeout: TIMEOUT })
 }
 
-async function waitForAssistant(page, identity, memberId, text, requireImage) {
-  await page.waitForFunction(async ({ scope, leadId, memberId, text, requireImage }) => {
+async function waitForAssistant(page, identity, memberId, text, requireImage, minimumMessageCount = 0) {
+  await page.waitForFunction(async ({ scope, leadId, memberId, text, requireImage, minimumMessageCount }) => {
     const req = indexedDB.open('magicpot-chat', 2)
     const db = await new Promise((resolve, reject) => {
       req.onupgradeneeded = () => req.transaction.abort()
@@ -252,9 +316,10 @@ async function waitForAssistant(page, identity, memberId, text, requireImage) {
       })
       return row?.storageScope === scope && (memberId === leadId || row.teamLeadId === leadId) &&
         Array.isArray(row.messages) && row.messages.some(message => message.role === 'assistant' && message.content === text &&
-          (!requireImage || message.attachments?.some(attachment => attachment.type === 'image')))
+          (!requireImage || message.attachments?.some(attachment => attachment.type === 'image'))) &&
+        row.messages.length > minimumMessageCount
     } finally { db.close() }
-  }, { scope: identity.scope, leadId: identity.sessionId, memberId, text, requireImage }, { timeout: TIMEOUT })
+  }, { scope: identity.scope, leadId: identity.sessionId, memberId, text, requireImage, minimumMessageCount }, { timeout: TIMEOUT })
 }
 
 /** Send once, then independently observe the real stored result and canvas label. */
@@ -375,4 +440,4 @@ export async function approveIsolatedWriter(page, identity, expected) {
   return { writerId: pending.writerId, approvalId: pending.approvalId, revision: pending.revision, notesRevision: 1, assistantText: '文案结果' }
 }
 
-// TODO: lead summary and channel actions remain unimplemented.
+// TODO: channel actions remain unimplemented.
