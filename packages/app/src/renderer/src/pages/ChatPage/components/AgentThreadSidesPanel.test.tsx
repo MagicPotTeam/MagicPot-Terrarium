@@ -15,9 +15,9 @@ const messages = [{ role: 'user' as const, content: 'PARENT_VISIBLE', hiddenCont
 const commandRef = createRef<AgentSideCommandHandle>()
 const renderPanel = () => render(<AgentThreadSidesPanel ref={commandRef} route={route} conversationId="chat" active profileId="profile" getMessages={() => messages} />)
 /** Stands in for AgentWorkspace's open thread list: the host the sub-rows render into. */
-function WithThreadList({ onOpenSubRowChange }: { onOpenSubRowChange?(title: string | null): void }) {
+function WithThreadList({ onOpenSubRowChange, conversationId = 'chat' }: { onOpenSubRowChange?(title: string | null): void; conversationId?: string }) {
   const [host, setHost] = React.useState<HTMLElement | null>(null)
-  return <><div data-testid="thread-sub-rows" ref={setHost} /><AgentThreadSidesPanel ref={commandRef} route={route} conversationId="chat" active profileId="profile" getMessages={() => messages} subRowsHost={host} onOpenSubRowChange={onOpenSubRowChange} /></>
+  return <><div data-testid="thread-sub-rows" ref={setHost} /><AgentThreadSidesPanel ref={commandRef} route={route} conversationId={conversationId} active profileId="profile" getMessages={() => messages} subRowsHost={host} onOpenSubRowChange={onOpenSubRowChange} /></>
 }
 beforeEach(() => { vi.useFakeTimers(); Object.values(mocks).forEach((m) => m.mockReset()); mocks.listAgentSides.mockResolvedValue({ branches: [] }); mocks.openAgentSide.mockResolvedValue(detail); mocks.startAgentSide.mockResolvedValue({ branch }); mocks.continueAgentSide.mockResolvedValue({ branch }); mocks.stopAgentSide.mockResolvedValue({ branch }); mocks.deleteAgentSide.mockResolvedValue(undefined) })
 afterEach(() => { cleanup(); vi.useRealTimers() })
@@ -59,6 +59,91 @@ describe('user-only private side panel', () => {
     expect(onOpenSubRowChange).toHaveBeenLastCalledWith(null)
     expect(screen.queryByRole('region', { name: 'chat.agent_side.title' })).not.toBeInTheDocument()
     expect(mocks.startAgentSide).not.toHaveBeenCalled()
+  })
+  it('reads the side list once while only the thread list shows it, however long that stays open', async () => {
+    mocks.listAgentSides.mockResolvedValue({ branches: [branch] })
+    render(<WithThreadList />)
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
+    expect(mocks.listAgentSides).toHaveBeenCalledWith({ route, conversationId: 'chat' })
+    await act(async () => vi.advanceTimersByTimeAsync(10_000))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
+    expect(mocks.openAgentSide).not.toHaveBeenCalled()
+    expect(within(screen.getByTestId('thread-sub-rows')).getAllByRole('button').map(row => row.textContent)).toEqual(['chat.agent_side.main', 'Private branch'])
+  })
+  it('keeps an open side conversation current and reads the list once more when its view closes', async () => {
+    mocks.listAgentSides.mockResolvedValue({ branches: [branch] })
+    render(<WithThreadList />)
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    const [main, first] = within(screen.getByTestId('thread-sub-rows')).getAllByRole('button')
+    await act(async () => fireEvent.click(first))
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    // 1 for the list, 1 when the side opened, 2 while it stayed open for 3 s.
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(4)
+    expect(mocks.openAgentSide.mock.calls.length).toBeGreaterThanOrEqual(3)
+    await act(async () => fireEvent.click(main))
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(5)
+    const detailReads = mocks.openAgentSide.mock.calls.length
+    await act(async () => vi.advanceTimersByTimeAsync(10_000))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(5)
+    expect(mocks.openAgentSide).toHaveBeenCalledTimes(detailReads)
+  })
+  it('reads the list again after a side is created and after one is deleted, then stops', async () => {
+    render(<WithThreadList />)
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('thread-sub-rows')).toBeEmptyDOMElement()
+
+    mocks.listAgentSides.mockResolvedValue({ branches: [branch] })
+    await act(async () => { commandRef.current!.execute({ action: 'start', question: 'NEW_SIDE' }) })
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(mocks.startAgentSide).toHaveBeenCalledOnce()
+    const afterCreate = mocks.listAgentSides.mock.calls.length
+    expect(afterCreate).toBeGreaterThan(1)
+    expect(within(screen.getByTestId('thread-sub-rows')).getAllByRole('button').map(row => row.textContent)).toEqual(['chat.agent_side.main', 'Private branch'])
+
+    mocks.listAgentSides.mockResolvedValue({ branches: [] })
+    fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.delete' }))
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.confirm_delete' })))
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(mocks.deleteAgentSide).toHaveBeenCalledOnce()
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(afterCreate + 1)
+    expect(screen.getByTestId('thread-sub-rows')).toBeEmptyDOMElement()
+    // The new-side form is still open, but no side conversation is: nothing to keep current.
+    expect(screen.getByLabelText('chat.agent_side.question')).toBeVisible()
+    await act(async () => vi.advanceTimersByTimeAsync(10_000))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(afterCreate + 1)
+  })
+  it('stops asking after a storage-unavailable failure until the conversation changes', async () => {
+    mocks.listAgentSides.mockRejectedValue(new Error("Error invoking remote method 'svcLLMProxy.listAgentSides': Error: Encrypted side-conversation storage is unavailable."))
+    const view = render(<WithThreadList />)
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
+    await act(async () => vi.advanceTimersByTimeAsync(10_000))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
+    // Opening and closing the side view would read again; here it must not.
+    await openPanel()
+    expect(screen.getByRole('alert')).toHaveTextContent('chat.agent_side.error')
+    fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.back_main' }))
+    await act(async () => vi.advanceTimersByTimeAsync(10_000))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
+
+    view.rerender(<WithThreadList conversationId="other" />)
+    await act(async () => vi.advanceTimersByTimeAsync(10_000))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(2)
+    expect(mocks.listAgentSides).toHaveBeenLastCalledWith({ route, conversationId: 'other' })
+  })
+  it('does not retry another kind of failure on a timer, but asks again the next time the list is shown', async () => {
+    mocks.listAgentSides.mockRejectedValueOnce(new Error('IPC timeout'))
+    render(<WithThreadList />)
+    await act(async () => vi.advanceTimersByTimeAsync(10_000))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
+    mocks.listAgentSides.mockResolvedValue({ branches: [branch] })
+    await openPanel()
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(2)
+    expect(within(screen.getByTestId('thread-sub-rows')).getAllByRole('button').map(row => row.textContent)).toEqual(['chat.agent_side.main', 'Private branch'])
   })
   it('shows no sub-rows for a conversation without side conversations', async () => {
     render(<WithThreadList />)

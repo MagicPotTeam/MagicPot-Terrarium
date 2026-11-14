@@ -29,26 +29,36 @@ function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, 
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; generation.current++ } }, [])
   const acceptDetail = (next: AgentSideOpen) => setDetail((previous) => previous?.branch.id === next.branch.id && (previous.branch.revision > next.branch.revision || previous.branch.revision === next.branch.revision && !previous.branch.busy && next.branch.busy) ? previous : next)
   const select = (id: string) => { setConfirmNewAttempt(false); setRevisionConflict(false); generation.current++; selectedRef.current = id; setSelected(id); setDetail(undefined); setText(''); pending.current = undefined; setConfirmDelete(false) }
-  // The branch list is read only while something shows it: the open side view, or the rows this
-  // conversation contributes to the thread list while that list is open.
+  // The branch list is read when something starts to show it (the thread list opens, a side view
+  // opens or closes, another side is selected, created or deleted) and not on a timer: the thread
+  // list can stay open forever. Only an open side conversation is kept current by polling.
   const listVisible = Boolean(subRowsHost)
+  // Without encrypted storage every read fails the same way; this conversation stops asking.
+  const storageUnavailable = useRef(false)
   useEffect(() => {
-    if (!open && !listVisible) return
+    if ((!open && !listVisible) || storageUnavailable.current) return
     let closed = false, timer: ReturnType<typeof setTimeout> | undefined
-    const poll = async () => {
+    const read = async () => {
       const token = generation.current, id = selectedRef.current
+      let again = open && !!id
       try {
         const service = api().svcLLMProxy
         const result = await service.listAgentSides(JSON.parse(scope))
-        if (!closed && alive.current && token === generation.current) setBranches(Array.isArray(result?.branches) ? result.branches : [])
-        if (open && id && !closed && alive.current && token === generation.current) {
+        if (closed || !alive.current) return
+        // An action in between made this answer stale; ask once more instead of dropping the list.
+        if (token !== generation.current) { again = true; return }
+        setBranches(Array.isArray(result?.branches) ? result.branches : [])
+        if (open && id) {
           const opened = await service.openAgentSide({ ...JSON.parse(scope), branchId: id })
           if (!closed && alive.current && generation.current === token && selectedRef.current === id) acceptDetail(opened)
         }
-      } catch { if (!closed && alive.current) setError(true) }
-      finally { if (!closed) timer = setTimeout(() => void poll(), 1500) }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('storage is unavailable')) { storageUnavailable.current = true; again = false }
+        if (!closed && alive.current) setError(true)
+      }
+      finally { if (!closed && again) timer = setTimeout(() => void read(), 1500) }
     }
-    void poll()
+    void read()
     return () => { closed = true; clearTimeout(timer) }
   }, [scope, open, listVisible, selected])
   const send = async () => {
