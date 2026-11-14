@@ -83,12 +83,12 @@ describe('AgentProcessArea', () => {
     render(<AgentProcessArea entries={[
       { id: 'writer', kind: 'member', name: 'writer', status: 'running', onOpen: vi.fn(), onStop: vi.fn() },
       { id: 'designer', kind: 'member', name: 'designer', status: 'running', onOpen: vi.fn(), onStop: vi.fn() }
-    ]} onStopAll={vi.fn()} />)
+    ]} onStopAllMembers={vi.fn()} />)
     const hiddenNodes = [
       ...screen.getAllByRole('status'),
       ...Array.from(document.querySelectorAll<HTMLElement>('span[id]')).filter(node => getComputedStyle(node).position === 'absolute')
     ]
-    expect(hiddenNodes.length).toBeGreaterThanOrEqual(2)
+    expect(hiddenNodes.length).toBeGreaterThanOrEqual(5)
     for (const node of hiddenNodes) {
       expect(node).toHaveStyle({ position: 'absolute', width: '1px', height: '1px', overflow: 'hidden' })
     }
