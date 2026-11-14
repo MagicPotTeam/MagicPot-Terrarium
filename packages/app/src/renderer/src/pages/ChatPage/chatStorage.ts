@@ -448,6 +448,77 @@ function normalizeScope(scope?: string): string {
   return scope || 'default'
 }
 
+const scopeRevisions = new Map<string, number>()
+
+/**
+ * Change marker of one scope's stored conversations. It moves after every committed write this
+ * module makes to the scope (save, compare-and-update, team transaction, delete, bulk replace,
+ * localStorage migration), and every writer of the store in this window goes through this
+ * module. A reader that kept the revision it started from can skip a re-read while the value is
+ * the same. It is in-memory only: a write from outside this module is not seen.
+ */
+export function getChatScopeRevision(scope = 'default'): number {
+  return scopeRevisions.get(normalizeScope(scope)) ?? 0
+}
+
+/** What the thread list needs from a stored conversation; never its messages. */
+export interface ChatSessionPreviewSummary {
+  id: string
+  title: string
+  teamLeadId?: string
+  archived?: boolean
+  createdAt?: number
+}
+
+/**
+ * Summaries of the scopes that loadSessionPreviewSummaries has read, by primary key. A writer
+ * that knows exactly which records it stored or deleted keeps the entry current; any other
+ * write to the scope drops the entry, so the next reader goes back to the store.
+ */
+const scopeSummaryIndexes = new Map<string, Map<IDBValidKey, ChatSessionPreviewSummary>>()
+const MAX_SCOPE_SUMMARY_INDEXES = 64
+
+function summarizeStoredSession(record: StoredChatSession): ChatSessionPreviewSummary {
+  return {
+    id: record.id,
+    title: record.title,
+    ...(record.teamLeadId !== undefined ? { teamLeadId: record.teamLeadId } : {}),
+    ...(record.archived !== undefined ? { archived: record.archived } : {}),
+    ...(record.createdAt !== undefined ? { createdAt: record.createdAt } : {})
+  }
+}
+
+/** The index in the order of an unranged scan followed by the stable creation-order sort. */
+function listScopeSummaries(
+  index: ReadonlyMap<IDBValidKey, ChatSessionPreviewSummary>
+): ChatSessionPreviewSummary[] {
+  const summaries = [...index]
+    .sort(([a], [b]) => indexedDB.cmp(a, b))
+    .map(([, summary]) => summary)
+  summaries.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+  return summaries
+}
+
+/**
+ * Called when a write transaction on a scope has committed. `write` lists everything the
+ * transaction stored and deleted; without it the scope's summary index is dropped.
+ */
+function noteScopeWritten(
+  scope: string,
+  write?: { put?: readonly StoredChatSession[]; deleted?: readonly IDBValidKey[] }
+): void {
+  const targetScope = normalizeScope(scope)
+  scopeRevisions.set(targetScope, (scopeRevisions.get(targetScope) ?? 0) + 1)
+  const index = scopeSummaryIndexes.get(targetScope)
+  if (!index) return
+  if (!write) {
+    scopeSummaryIndexes.delete(targetScope)
+    return
+  }
+  for (const key of write.deleted ?? []) index.delete(key)
+  for (const record of write.put ?? []) index.set(record.storageKey, summarizeStoredSession(record))
+}
+
 const isChatAttachmentType = (value: unknown): value is ChatAttachment['type'] =>
   value === 'image' || value === 'video' || value === 'model3d' || value === 'file'
 
@@ -842,6 +913,8 @@ function closeCachedDb(): void {
   const previous = dbInstance
   dbInstance = null
   dbInitPromise = null
+  // Nothing derived from the failed connection is trusted afterwards.
+  scopeSummaryIndexes.clear()
   try {
     previous?.close()
   } catch {
@@ -1066,6 +1139,94 @@ export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]>
   return Promise.all(sessions.map((session) => persistRecoveredTeamMessageReceipts(session, targetScope)))
 }
 
+/**
+ * The conversations of one scope reduced to ChatSessionPreviewSummary, in the order of
+ * loadAllSessions (creation order). Read-only: unlike loadAllSessions it does not normalise or
+ * repair the stored records.
+ *
+ * The first call for a scope walks only the scope's key range with a cursor, one record at a
+ * time, so no conversation of another scope is deserialised and no message array is kept. Later
+ * calls are answered from the summaries the writers of this module keep current, without
+ * touching the store; `fresh` forces the walk (a check against a writer this module cannot see).
+ */
+export async function loadSessionPreviewSummaries(
+  scope = 'default',
+  options: { fresh?: boolean } = {}
+): Promise<ChatSessionPreviewSummary[]> {
+  const targetScope = normalizeScope(scope)
+  const current = options.fresh ? undefined : scopeSummaryIndexes.get(targetScope)
+  if (current) return listScopeSummaries(current)
+  try {
+    const db = await openDB()
+    const strayKeys = await loadStrayKeys(db)
+    // A write that commits after this point may or may not be in what the cursor returns.
+    const revision = getChatScopeRevision(targetScope)
+    const index = await new Promise<Map<IDBValidKey, ChatSessionPreviewSummary>>(
+      (resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly')
+        const store = tx.objectStore(STORE_NAME)
+        const found = new Map<IDBValidKey, ChatSessionPreviewSummary>()
+        let failed = false
+        const fail = (error: DOMException | null): void => {
+          if (failed) return
+          failed = true
+          reject(createStorageError(error, 'IndexedDB failed to load chat session summaries.'))
+        }
+        const keep = (key: IDBValidKey, record: StoredChatSession | undefined): void => {
+          if (!record || normalizeScope(record.storageScope) !== targetScope) return
+          found.set(key, summarizeStoredSession(record))
+        }
+        const readStrayKeys = (): void => {
+          let pending = strayKeys.length
+          if (pending === 0) {
+            resolve(found)
+            return
+          }
+          for (const key of strayKeys) {
+            const strayRequest = store.get(key)
+            strayRequest.onerror = () => fail(strayRequest.error)
+            strayRequest.onsuccess = () => {
+              if (failed) return
+              keep(key, strayRequest.result as StoredChatSession | undefined)
+              pending -= 1
+              if (pending === 0) resolve(found)
+            }
+          }
+        }
+        const cursorRequest = store.openCursor(scopeKeyRange(targetScope))
+        cursorRequest.onerror = () => fail(cursorRequest.error)
+        cursorRequest.onsuccess = () => {
+          const cursor = cursorRequest.result
+          if (!cursor) {
+            readStrayKeys()
+            return
+          }
+          keep(cursor.primaryKey, cursor.value as StoredChatSession)
+          cursor.continue()
+        }
+      }
+    )
+    // Keep the result for later calls only when no write to the scope committed meanwhile;
+    // otherwise an index the writers already keep current must not be replaced by this one.
+    if (getChatScopeRevision(targetScope) === revision) {
+      scopeSummaryIndexes.delete(targetScope)
+      scopeSummaryIndexes.set(targetScope, index)
+      if (scopeSummaryIndexes.size > MAX_SCOPE_SUMMARY_INDEXES) {
+        const oldest = scopeSummaryIndexes.keys().next().value
+        if (oldest !== undefined) scopeSummaryIndexes.delete(oldest)
+      }
+    }
+    return listScopeSummaries(index)
+  } catch (error) {
+    const storageError = createStorageError(
+      error,
+      'IndexedDB failed to load chat session summaries.'
+    )
+    await handleStorageFailure(storageError, 'loadSessionPreviewSummaries failed')
+    throw storageError
+  }
+}
+
 /** Load a single session by ID without scanning the whole store. */
 async function loadSessionRawFromDB(
   sessionId: string,
@@ -1135,6 +1296,7 @@ export async function compareAndUpdateSessionInDB(
         const store = tx.objectStore(STORE_NAME)
         const request = store.get(createSessionStorageKey(sessionId, targetScope))
         let updatedSession: ChatSession | null = null
+        let written: StoredChatSession | undefined
         let failed = false
         const fail = (error: Error): void => {
           if (failed) return
@@ -1162,7 +1324,8 @@ export async function compareAndUpdateSessionInDB(
               updatedSession = null
               return
             }
-            store.put(createStoredSession(updatedSession, targetScope))
+            written = createStoredSession(updatedSession, targetScope)
+            store.put(written)
           } catch (error) {
             fail(createStorageError(error, 'IndexedDB failed to compare the chat session.'))
           }
@@ -1170,6 +1333,7 @@ export async function compareAndUpdateSessionInDB(
         request.onerror = () =>
           fail(createStorageError(request.error, 'IndexedDB failed to compare the chat session.'))
         tx.oncomplete = () => {
+          noteScopeWritten(targetScope, { put: written ? [written] : [] })
           if (!failed) resolve(updatedSession)
         }
         tx.onerror = () =>
@@ -1270,8 +1434,10 @@ export async function saveSessionToDB(
           }
           reject(error)
         }
+        let written: StoredChatSession | undefined
         const write = (): void => {
-          store.put(createStoredSession(session, targetScope))
+          written = createStoredSession(session, targetScope)
+          store.put(written)
         }
 
         const request = store.get(createSessionStorageKey(session.id, targetScope))
@@ -1332,6 +1498,7 @@ export async function saveSessionToDB(
           fail(createStorageError(request.error, 'IndexedDB failed to compare the chat session.'))
 
         tx.oncomplete = () => {
+          noteScopeWritten(targetScope, { put: written ? [written] : [] })
           if (failed) return
           if (conflict) reject(conflict)
           else resolve()
@@ -1385,7 +1552,10 @@ export async function saveAllSessions(sessions: ChatSession[], scope = 'default'
           createStorageError(error, 'IndexedDB failed to read existing chat sessions.')
         )
       )
-      tx.oncomplete = () => resolve()
+      tx.oncomplete = () => {
+        noteScopeWritten(targetScope)
+        resolve()
+      }
       tx.onerror = () =>
         reject(createStorageError(tx.error, 'IndexedDB failed to save chat sessions.'))
     })
@@ -1436,7 +1606,7 @@ export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { 
         } catch (error) { abort(createStorageError(error, 'Member model choice failed')) }
       }
       requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Member model choice failed')))
-      tx.oncomplete = () => result ? resolve(result) : reject(new Error('Member model choice failed'))
+      tx.oncomplete = () => { noteScopeWritten(targetScope); if (result) resolve(result); else reject(new Error('Member model choice failed')) }
       tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Member model choice failed'))
       tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Member model choice aborted'))
     })
@@ -1476,7 +1646,7 @@ export async function createTeamMemberInDB(input: TeamMutationInput & { member: 
       } catch (error) { abort(createStorageError(error, 'Team creation failed')) }
     }
     requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Team creation failed')))
-    tx.oncomplete = () => result ? resolve(result) : reject(new Error('Team creation failed'))
+    tx.oncomplete = () => { noteScopeWritten(targetScope); if (result) resolve(result); else reject(new Error('Team creation failed')) }
     tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Team creation failed'))
     tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Team creation aborted'))
   })
@@ -1516,7 +1686,7 @@ export async function endTeamInDB(input: TeamMutationInput): Promise<{lead: Chat
       } catch (error) { abort(createStorageError(error, 'Team end failed')) }
     }
     requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Team end failed')))
-    tx.oncomplete = () => result ? resolve(result) : reject(new Error('Team end failed'))
+    tx.oncomplete = () => { noteScopeWritten(targetScope); if (result) resolve(result); else reject(new Error('Team end failed')) }
     tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Team end failed'))
     tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Team end aborted'))
   })
@@ -1531,8 +1701,12 @@ export async function deleteSessionFromDB(sessionId: string, scope = 'default'):
       await new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readwrite')
         const store = tx.objectStore(STORE_NAME)
-        store.delete(createSessionStorageKey(sessionId, scope))
-        tx.oncomplete = () => resolve()
+        const deletedKey = createSessionStorageKey(sessionId, scope)
+        store.delete(deletedKey)
+        tx.oncomplete = () => {
+          noteScopeWritten(scope, { deleted: [deletedKey] })
+          resolve()
+        }
         tx.onerror = () =>
           reject(createStorageError(tx.error, 'IndexedDB failed to delete the chat session.'))
       })
@@ -1579,7 +1753,10 @@ export async function migrateFromLocalStorage(): Promise<ChatSession[] | null> {
               createStorageError(request.error, 'IndexedDB migration failed to read a session.')
             )
         }
-        tx.oncomplete = () => resolve()
+        tx.oncomplete = () => {
+          noteScopeWritten('default')
+          resolve()
+        }
         tx.onerror = () => reject(createStorageError(tx.error, 'IndexedDB migration failed.'))
       })
       localStorage.removeItem(STORAGE_KEY)

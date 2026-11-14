@@ -932,15 +932,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useMessage()
   const notifyWarningRef = useRef(notifyWarning)
   notifyWarningRef.current = notifyWarning
+  // Identifies the events this mounted page emits; see handlePreviewRefresh.
+  const [previewRefreshSource] = useState<object>(() => ({}))
   const emitPreviewRefresh = useCallback(
     (reason: ChatPreviewRefreshReason = 'storage-updated') => {
       window.dispatchEvent(
         new CustomEvent('chat:preview-refresh', {
-          detail: { scope: storageScope, reason }
+          detail: { scope: storageScope, reason, source: previewRefreshSource }
         })
       )
     },
-    [storageScope]
+    [previewRefreshSource, storageScope]
   )
   const emitChatActivity = useCallback(
     (type: ChatContextCompactActivityType, detail: Record<string, unknown> = {}) => {
@@ -1751,8 +1753,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   useEffect(() => {
     const handlePreviewRefresh = (event: Event): void => {
-      const detail = (event as CustomEvent<{ scope?: string; reason?: ChatPreviewRefreshReason }>)
-        .detail
+      const detail = (
+        event as CustomEvent<{ scope?: string; reason?: ChatPreviewRefreshReason; source?: object }>
+      ).detail
 
       if (detail?.scope) {
         if (detail.scope !== storageScope) return
@@ -1764,12 +1767,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
+      // This page emits 'storage-updated' only after it has saved a conversation from its own
+      // state, so storage holds what is already on screen: reading the whole scope back would
+      // only replace it with a copy. The event is for the thread list and for another page on
+      // this scope. A page that has not loaded its list yet, or is in the middle of opening an
+      // existing conversation, still takes the read.
+      if (
+        detail?.source === previewRefreshSource &&
+        !sessionPersistenceGateRef.current &&
+        !openInputRef.current
+      ) {
+        return
+      }
+
       void refreshSessionsFromStorage()
     }
 
     window.addEventListener('chat:preview-refresh', handlePreviewRefresh)
     return () => window.removeEventListener('chat:preview-refresh', handlePreviewRefresh)
-  }, [active, refreshSessionsFromStorage, storageScope])
+  }, [active, previewRefreshSource, refreshSessionsFromStorage, storageScope])
 
   const setActiveSessionId = useCallback(
     (sessionId: string | null) => {

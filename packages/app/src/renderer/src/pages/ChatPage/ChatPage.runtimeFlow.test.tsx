@@ -2891,6 +2891,42 @@ describe('ChatPage runtime workflow integration', () => {
     void release
   })
 
+  it('does not read its scope back after its own save but still does for another writer', async () => {
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalled())
+    const storageUpdates: Array<{ source?: object }> = []
+    const onRefresh = (event: Event): void => {
+      const detail = (event as CustomEvent<{ scope?: string; reason?: string; source?: object }>).detail
+      if (detail?.scope === 'runtime-flow' && detail.reason === 'storage-updated') storageUpdates.push(detail)
+    }
+    window.addEventListener('chat:preview-refresh', onRefresh)
+    try {
+      hoisted.loadAllSessionsMock.mockClear()
+      await dispatchNewSession({ title: 'Saved by this page' })
+      // The save still announces itself (the thread list listens), tagged with its sender.
+      await waitFor(() => expect(storageUpdates).toHaveLength(1))
+      expect(storageUpdates[0].source).toBeTruthy()
+      expect(hoisted.storedSessions.value.some((session) => session.title === 'Saved by this page')).toBe(true)
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(hoisted.loadAllSessionsMock).not.toHaveBeenCalled()
+      expect(readCurrentSessionState()?.title).toBe('Saved by this page')
+
+      // The same event from any other sender of this scope is still answered with a read.
+      await act(async () => window.dispatchEvent(new CustomEvent('chat:preview-refresh', {
+        detail: { scope: 'runtime-flow', reason: 'storage-updated', source: {} }
+      })))
+      await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(1))
+      await act(async () => window.dispatchEvent(new CustomEvent('chat:preview-refresh', {
+        detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+      })))
+      await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(2))
+      expect(hoisted.loadAllSessionsMock).toHaveBeenCalledWith('runtime-flow')
+    } finally {
+      window.removeEventListener('chat:preview-refresh', onRefresh)
+    }
+  })
+
   it('does not reload deleted sessions back into the body for preview-only refreshes', async () => {
     const deletedSession: ChatSession = {
       id: 'deleted-preview-only-session',

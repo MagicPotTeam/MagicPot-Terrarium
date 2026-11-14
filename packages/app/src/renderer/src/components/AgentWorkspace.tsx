@@ -24,7 +24,11 @@ import {
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import ChatPage, { type ChatPageWorkspaceMenu } from '@renderer/pages/ChatPage/ChatPage'
-import { loadAllSessions, type ChatSession } from '@renderer/pages/ChatPage/chatStorage'
+import {
+  getChatScopeRevision,
+  loadSessionPreviewSummaries,
+  type ChatSessionPreviewSummary
+} from '@renderer/pages/ChatPage/chatStorage'
 import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLocaleUtils'
 import {
   CHAT_SESSION_LOADING_STATE_EVENT,
@@ -79,6 +83,12 @@ type PanePreview = {
 }
 
 const PREVIEW_POLL_INTERVAL_MS = 4000
+/**
+ * How often a pane's summaries are read from the chat store itself although no write to the
+ * pane's scope was reported. Every write of this window moves the scope revision and is shown
+ * by the next refresh; this interval only bounds a change the revision cannot see.
+ */
+const PREVIEW_STORAGE_RECHECK_MS = 60_000
 const PREVIEW_REFRESH_EVENTS = [
   'chat:newSession',
   'chat:switchSession',
@@ -193,9 +203,9 @@ const recallPanePreviews = (projectId: string, panes: AgentPane[]): Record<strin
  * so opening a member or receiving a reply never renames the thread.
  */
 const resolvePaneRootSession = (
-  sessions: ChatSession[],
+  sessions: ChatSessionPreviewSummary[],
   currentSessionId: string | null
-): ChatSession | undefined => {
+): ChatSessionPreviewSummary | undefined => {
   const current = currentSessionId
     ? sessions.find((session) => session.id === currentSessionId)
     : undefined
@@ -257,7 +267,7 @@ const readLatestPaneRunState = (scope: string): ChatSessionRunState | undefined 
 }
 
 const buildPanePreview = (
-  sessions: ChatSession[],
+  sessions: ChatSessionPreviewSummary[],
   running: boolean,
   runState?: ChatSessionRunState,
   currentSessionId: string | null = null
@@ -273,12 +283,56 @@ const buildPanePreview = (
   }
 }
 
+type PaneSummaryCache = Map<
+  string,
+  {
+    revision: number
+    /** When the summaries were last taken from the store itself. */
+    verifiedAt: number
+    summaries: Promise<ChatSessionPreviewSummary[]>
+  }
+>
+
+/**
+ * The stored conversations of a pane, reduced to what the thread list shows. Nothing is asked of
+ * the chat storage while the scope was not written since the last answer, and refreshes that
+ * arrive while a read is running share it. After a write the storage answers from the summaries
+ * it keeps current; once per recheck interval it is told to walk the store again. The run state
+ * is not part of this and is read fresh on every refresh.
+ */
+const loadPaneSummaries = (
+  scope: string,
+  cache: PaneSummaryCache
+): Promise<ChatSessionPreviewSummary[]> => {
+  // Take the revision before reading: a write that lands during the read leaves the entry
+  // behind the store's revision, so the next refresh asks again.
+  const revision = getChatScopeRevision(scope)
+  const cached = cache.get(scope)
+  const now = Date.now()
+  const recheck = cached !== undefined && now - cached.verifiedAt >= PREVIEW_STORAGE_RECHECK_MS
+  if (cached && cached.revision === revision && !recheck) return cached.summaries
+  const entry = {
+    revision,
+    verifiedAt: cached && !recheck ? cached.verifiedAt : now,
+    summaries: recheck
+      ? loadSessionPreviewSummaries(scope, { fresh: true })
+      : loadSessionPreviewSummaries(scope)
+  }
+  cache.set(scope, entry)
+  entry.summaries.catch(() => {
+    // A failed read leaves nothing to reuse; the caller falls back to the previous preview.
+    if (cache.get(scope) === entry) cache.delete(scope)
+  })
+  return entry.summaries
+}
+
 const loadPanePreview = async (
   pane: AgentPane,
-  projectId: string
+  projectId: string,
+  summaryCache: PaneSummaryCache
 ): Promise<readonly [string, PanePreview]> => {
   const scope = buildAgentPaneScope(projectId, pane.id)
-  const sessions = await loadAllSessions(scope)
+  const sessions = await loadPaneSummaries(scope, summaryCache)
   const runState = readLatestPaneRunState(scope)
   return [
     pane.id,
@@ -289,10 +343,11 @@ const loadPanePreview = async (
 const loadPanePreviewWithFallback = async (
   pane: AgentPane,
   projectId: string,
-  previousPreviews: Record<string, PanePreview>
+  previousPreviews: Record<string, PanePreview>,
+  summaryCache: PaneSummaryCache
 ): Promise<readonly [string, PanePreview]> => {
   try {
-    return await loadPanePreview(pane, projectId)
+    return await loadPanePreview(pane, projectId, summaryCache)
   } catch (error) {
     console.error('[AgentWorkspace] Failed to load pane preview', pane.id, error)
     const previous = previousPreviews[pane.id]
@@ -309,10 +364,13 @@ const loadPanePreviewWithFallback = async (
 const loadPreviewMap = async (
   panes: AgentPane[],
   projectId: string,
-  previousPreviews: Record<string, PanePreview>
+  previousPreviews: Record<string, PanePreview>,
+  summaryCache: PaneSummaryCache
 ): Promise<Record<string, PanePreview>> => {
   const entries = await Promise.all(
-    panes.map((pane) => loadPanePreviewWithFallback(pane, projectId, previousPreviews))
+    panes.map((pane) =>
+      loadPanePreviewWithFallback(pane, projectId, previousPreviews, summaryCache)
+    )
   )
 
   return Object.fromEntries(entries) as Record<string, PanePreview>
@@ -609,6 +667,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   })
   const pendingExternalPaneRequestsRef = useRef<Array<{ requestId?: string; paneId: string }>>([])
   const previewRefreshSequenceRef = useRef(0)
+  // Belongs to this mounted workspace: a remount asks the chat storage for every pane again.
+  const [paneSummaryCache] = useState<PaneSummaryCache>(() => new Map())
   const visitBlocked = isVisitBlocked()
   const openPanes = useMemo(() => visitBlocked ? [] : getOpenPanes(panes), [panes, visitBlocked])
   const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? (guardedVisit ? null : openPanes[0]) ?? null
@@ -912,7 +972,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           const [paneId, preview] = await loadPanePreviewWithFallback(
             targetPane,
             projectId,
-            panePreviewsRef.current
+            panePreviewsRef.current,
+            paneSummaryCache
           )
           if (cancelled || sequence !== previewRefreshSequenceRef.current) return
           rememberPaneTitle(targetScope, preview.title)
@@ -925,7 +986,12 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           return
         }
 
-        const nextPreviews = await loadPreviewMap(openPanes, projectId, panePreviewsRef.current)
+        const nextPreviews = await loadPreviewMap(
+          openPanes,
+          projectId,
+          panePreviewsRef.current,
+          paneSummaryCache
+        )
         if (cancelled || sequence !== previewRefreshSequenceRef.current) return
         for (const [paneId, preview] of Object.entries(nextPreviews)) {
           rememberPaneTitle(buildAgentPaneScope(projectId, paneId), preview.title)
@@ -973,7 +1039,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         window.removeEventListener(eventName, triggerRefresh as EventListener)
       }
     }
-  }, [openPanes, projectId])
+  }, [openPanes, paneSummaryCache, projectId])
 
   const handleRemovePane = (paneId: string) => {
     explicitPaneMutationRef.current = true

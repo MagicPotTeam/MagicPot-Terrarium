@@ -114,10 +114,15 @@ vi.mock('@renderer/features/projectTrace/ProjectTraceManagerPanel', () => ({
   )
 }))
 
+// The thread list reads a pane's stored conversations as summaries (this mock, named for the
+// reader it replaced) and reads again only when the scope revision of the chat store moves.
 const loadAllSessionsMock = vi.fn()
+const scopeRevisionMock = vi.fn<(scope?: string) => number>()
+let autoScopeRevision = 0
 
 vi.mock('@renderer/pages/ChatPage/chatStorage', () => ({
-  loadAllSessions: (...args: unknown[]) => loadAllSessionsMock(...args)
+  loadSessionPreviewSummaries: (...args: unknown[]) => loadAllSessionsMock(...args),
+  getChatScopeRevision: (scope?: string) => scopeRevisionMock(scope)
 }))
 
 const THREAD_LIST_STATE_KEY = 'agent.workspace.threadsCollapsed.project-1'
@@ -190,6 +195,9 @@ describe('AgentWorkspace', () => {
     mockSubRowLabels.current = {}
     chatPageMock.mockClear()
     chatPageUnmountMock.mockClear()
+    // A new revision on every call: every refresh reads the store, unless a test pins it.
+    scopeRevisionMock.mockReset()
+    scopeRevisionMock.mockImplementation(() => ++autoScopeRevision)
     loadAllSessionsMock.mockReset()
     loadAllSessionsMock.mockResolvedValue([
       {
@@ -1500,6 +1508,175 @@ describe('AgentWorkspace', () => {
       expect(enRenderer.agent_workspace.close_thread).toBe('Close this thread')
       expect(zhRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')
       expect(enRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')
+    })
+  })
+
+  describe('reads of the chat store for the thread list', () => {
+    const FIRST = 'project-1.agent-1'
+    const SECOND = 'project-1.agent-2'
+    let revisions: Record<string, number>
+    let titles: Record<string, string>
+
+    const shownTitles = () =>
+      screen.getAllByTestId('agent-thread-title').map((title) => title.textContent)
+    const settle = () =>
+      act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+    beforeEach(() => {
+      storePanes(2)
+      revisions = {}
+      titles = { [FIRST]: 'First thread', [SECOND]: 'Second thread' }
+      scopeRevisionMock.mockImplementation((scope = 'default') => revisions[scope] ?? 0)
+      loadAllSessionsMock.mockImplementation((scope: string) =>
+        Promise.resolve([{ id: `${scope}-session`, title: titles[scope], createdAt: 1 }])
+      )
+    })
+
+    it('reads a pane once and again only after its scope was written', async () => {
+      const intervalSpy = vi.spyOn(window, 'setInterval')
+      try {
+        renderWorkspaceWithThreadList()
+        await waitFor(() => expect(shownTitles()).toEqual(['First thread', 'Second thread']))
+        expect(loadAllSessionsMock.mock.calls.map(([scope]) => scope).sort()).toEqual([FIRST, SECOND])
+        loadAllSessionsMock.mockClear()
+
+        // Every kind of refresh while nothing was saved, including the 4 second poll.
+        const pollTicks = intervalSpy.mock.calls
+          .filter(([, delay]) => delay === 4000)
+          .map(([tick]) => tick as () => void)
+        expect(pollTicks.length).toBeGreaterThan(0)
+        act(() => {
+          pollTicks.at(-1)!()
+          window.dispatchEvent(new CustomEvent('chat:preview-refresh'))
+          window.dispatchEvent(
+            new CustomEvent('chat:preview-refresh', {
+              detail: { scope: FIRST, reason: 'preview-only' }
+            })
+          )
+          window.dispatchEvent(new CustomEvent('send-to-agent'))
+          window.dispatchEvent(new Event('storage'))
+        })
+        await settle()
+        expect(loadAllSessionsMock).not.toHaveBeenCalled()
+        expect(shownTitles()).toEqual(['First thread', 'Second thread'])
+
+        // The run state does not come from the chat store and is still followed.
+        act(() => {
+          startScopedChatRun(SECOND, `${SECOND}-session`, 'run-while-cached')
+        })
+        await waitFor(() =>
+          expect(within(getThreadRows()[1]).getByRole('progressbar')).toBeInTheDocument()
+        )
+        act(() => {
+          dispatchScopedChatRunEvent(SECOND, `${SECOND}-session`, {
+            runId: 'run-while-cached',
+            status: 'completed'
+          })
+        })
+        await waitFor(() =>
+          expect(within(getThreadRows()[1]).queryByRole('progressbar')).not.toBeInTheDocument()
+        )
+        expect(loadAllSessionsMock).not.toHaveBeenCalled()
+
+        // The second pane saves: its scope revision moves and its own event asks for a refresh.
+        titles[SECOND] = 'Renamed thread'
+        revisions[SECOND] = 1
+        act(() => {
+          window.dispatchEvent(
+            new CustomEvent('chat:preview-refresh', {
+              detail: { scope: SECOND, reason: 'storage-updated' }
+            })
+          )
+        })
+        await waitFor(() => expect(shownTitles()).toEqual(['First thread', 'Renamed thread']))
+        expect(loadAllSessionsMock.mock.calls).toEqual([[SECOND]])
+
+        // A save in the first pane is picked up by the next poll tick without any event.
+        loadAllSessionsMock.mockClear()
+        titles[FIRST] = 'First thread, renamed'
+        revisions[FIRST] = 1
+        act(() => pollTicks.at(-1)!())
+        await waitFor(() =>
+          expect(shownTitles()).toEqual(['First thread, renamed', 'Renamed thread'])
+        )
+        expect(loadAllSessionsMock.mock.calls).toEqual([[FIRST]])
+      } finally {
+        intervalSpy.mockRestore()
+      }
+    })
+
+    it('reads again when a save lands while a read is still running', async () => {
+      let releaseStaleRead!: () => void
+      loadAllSessionsMock.mockImplementation((scope: string) => {
+        const snapshot = [{ id: `${scope}-session`, title: titles[scope], createdAt: 1 }]
+        if (scope !== SECOND || releaseStaleRead !== undefined) return Promise.resolve(snapshot)
+        return new Promise((resolve) => {
+          releaseStaleRead = () => resolve(snapshot)
+        })
+      })
+      renderWorkspaceWithThreadList()
+      await waitFor(() => expect(releaseStaleRead).toBeDefined())
+
+      // The read took its snapshot before this save; its result must not be trusted afterwards.
+      titles[SECOND] = 'Saved during the read'
+      revisions[SECOND] = 1
+      await act(async () => releaseStaleRead())
+      await waitFor(() => expect(shownTitles()).toEqual(['First thread', 'Second thread']))
+
+      act(() => {
+        window.dispatchEvent(new CustomEvent('chat:preview-refresh', { detail: { scope: SECOND } }))
+      })
+      await waitFor(() => expect(shownTitles()).toEqual(['First thread', 'Saved during the read']))
+    })
+
+    it('does not keep a failed read and rechecks an unchanged scope after the safety interval', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const realNow = Date.now.bind(Date)
+      let clockOffset = 0
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffset)
+      try {
+        loadAllSessionsMock.mockRejectedValueOnce(new DOMException('Broken record', 'NotReadableError'))
+        loadAllSessionsMock.mockRejectedValueOnce(new DOMException('Broken record', 'NotReadableError'))
+        renderWorkspaceWithThreadList()
+        await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalledTimes(2))
+        await settle()
+
+        // Same revision, but the failed reads left nothing to reuse.
+        act(() => {
+          window.dispatchEvent(new CustomEvent('chat:preview-refresh'))
+        })
+        await waitFor(() => expect(shownTitles()).toEqual(['First thread', 'Second thread']))
+        expect(loadAllSessionsMock).toHaveBeenCalledTimes(4)
+
+        // A change the revision cannot see (a writer outside the chat storage module).
+        loadAllSessionsMock.mockClear()
+        titles[FIRST] = 'Changed behind the marker'
+        act(() => {
+          window.dispatchEvent(new CustomEvent('chat:preview-refresh'))
+        })
+        await settle()
+        expect(loadAllSessionsMock).not.toHaveBeenCalled()
+        clockOffset = 60_001
+        act(() => {
+          window.dispatchEvent(new CustomEvent('chat:preview-refresh'))
+        })
+        await waitFor(() =>
+          expect(shownTitles()).toEqual(['Changed behind the marker', 'Second thread'])
+        )
+        // Each pane is read from the store itself, not from summaries kept in memory.
+        expect(
+          [...loadAllSessionsMock.mock.calls].sort(([a], [b]) => String(a).localeCompare(String(b)))
+        ).toEqual([
+          [FIRST, { fresh: true }],
+          [SECOND, { fresh: true }]
+        ])
+      } finally {
+        nowSpy.mockRestore()
+        consoleError.mockRestore()
+      }
     })
   })
 })

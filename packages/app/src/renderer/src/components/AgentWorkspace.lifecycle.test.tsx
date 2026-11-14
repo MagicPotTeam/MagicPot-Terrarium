@@ -20,7 +20,8 @@ const SESSION_ID = 'same-session-id'
 
 const fixture = vi.hoisted(() => ({
   chatPageMock: vi.fn(),
-  loadAllSessionsMock: vi.fn()
+  loadAllSessionsMock: vi.fn(),
+  scopeRevision: 0
 }))
 
 vi.mock('react-i18next', () => ({
@@ -47,7 +48,9 @@ vi.mock('@renderer/pages/ChatPage/ChatPage', () => ({
 }))
 
 vi.mock('@renderer/pages/ChatPage/chatStorage', () => ({
-  loadAllSessions: (...args: unknown[]) => fixture.loadAllSessionsMock(...args)
+  // The thread list reads summaries; a new revision on every call means every refresh reads.
+  loadSessionPreviewSummaries: (...args: unknown[]) => fixture.loadAllSessionsMock(...args),
+  getChatScopeRevision: () => ++fixture.scopeRevision
 }))
 
 vi.mock('@renderer/hooks/useMessage', () => ({

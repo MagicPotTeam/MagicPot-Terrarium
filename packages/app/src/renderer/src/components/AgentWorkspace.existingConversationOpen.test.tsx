@@ -9,12 +9,12 @@ import type { ExistingConversationOpenInput } from '@renderer/pages/ChatPage/use
 import { readExistingWorkspacePanes, type ExistingConversationWorkspaceAdapter } from './existingConversationWorkspace'
 import { PROJECTS_STORAGE_KEY } from '@renderer/pages/MainPage/projectStore'
 
-const f = vi.hoisted(() => ({ load: vi.fn(async () => []), children: [] as Child[] }))
+const f = vi.hoisted(() => ({ load: vi.fn(async () => []), children: [] as Child[], scopeRevision: 0 }))
 type Child = { storageScope: string; active: boolean; acceptExternalInput: boolean; workspaceMenu?: { onToggleTrace: () => void }; existingConversationProtection?: ExistingConversationProtection; existingConversationOpen?: ExistingConversationOpenInput }
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'en', resolvedLanguage: 'en' } }) }))
 vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifyError: vi.fn(), notifyInfo: vi.fn() }) }))
 vi.mock('@renderer/pages/ChatPage/ChatPage', () => ({ default: (props: Child) => { f.children.push(props); return <div data-testid={props.storageScope} data-active={String(props.active)} data-guard={String(props.existingConversationProtection?.isProtected() ?? false)} data-open={String(!!props.existingConversationOpen)} /> } }))
-vi.mock('@renderer/pages/ChatPage/chatStorage', () => ({ loadAllSessions: () => f.load() }))
+vi.mock('@renderer/pages/ChatPage/chatStorage', () => ({ loadSessionPreviewSummaries: () => f.load(), getChatScopeRevision: () => ++f.scopeRevision }))
 vi.mock('@renderer/features/projectTrace/projectTraceCapture', () => ({ finalizeActiveProjectTraceCapture: vi.fn() }))
 vi.mock('@renderer/features/projectTrace/ProjectTraceManagerPanel', () => ({ default: () => null }))
 const projectId = 'tab-project-p', storageKey = `agent.workspace.${projectId}`, scope = `${projectId}.agent-2`
