@@ -1,9 +1,11 @@
 import React, {
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState
 } from 'react'
@@ -70,6 +72,15 @@ import {
   invalidateCachedChatImageDerivative
 } from '../chatImageDerivativeScheduler'
 import { api } from '@renderer/utils/windowUtils'
+import type { ComposerCommand } from '../composerCommandCatalog'
+import {
+  applyComposerSuggestion,
+  getComposerSuggestionOptionId,
+  resolveComposerSuggestions,
+  type ComposerMentionMember,
+  type ComposerSuggestionItem
+} from '../composerSuggestions'
+import ComposerSuggestionPopup from './ComposerSuggestionPopup'
 
 interface ChatComposerProps {
   inputValue: string
@@ -96,7 +107,14 @@ interface ChatComposerProps {
   disableCompressContext?: boolean
   toolHelpItems?: MagicPotAppToolDescriptor[]
   active?: boolean
+  /** Slash commands this conversation handles; none means no "/" suggestions. */
+  suggestionCommands?: readonly ComposerCommand[]
+  /** Team members reachable with "@name"; only a lead conversation passes them. */
+  mentionMembers?: readonly ComposerMentionMember[]
 }
+
+const NO_SUGGESTION_COMMANDS: readonly ComposerCommand[] = []
+const NO_MENTION_MEMBERS: readonly ComposerMentionMember[] = []
 
 const renderFileAttachmentIcon = (attachment: ChatAttachment) => {
   const kind = detectDisplayFileKind(attachment.fileName, attachment.mimeType)
@@ -486,7 +504,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   onCompressContext,
   disableCompressContext = false,
   toolHelpItems = [],
-  active = true
+  active = true,
+  suggestionCommands = NO_SUGGESTION_COMMANDS,
+  mentionMembers = NO_MENTION_MEMBERS
 }) => {
   const { t } = useTranslation()
   // Hidden derived attachments also count at the current send boundary. If they
@@ -523,18 +543,58 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     undefined
   )
   const [attachmentPreviewOverflowing, setAttachmentPreviewOverflowing] = useState(false)
+  const suggestionListId = useId()
+  // Focus and caret live in refs: a render on every focus or caret move would re-apply the last
+  // recorded selection (see the layout effect below) to drafts that have nothing to suggest.
+  const isInputFocusedRef = useRef(false)
+  // Collapsed caret offset; null = end of the text, -1 = a range is selected.
+  const caretPositionRef = useRef<number | null>(null)
+  const [, refreshSuggestions] = useReducer((tick: number) => tick + 1, 0)
+  const [dismissedSuggestionValue, setDismissedSuggestionValue] = useState<string | null>(null)
+  const [suggestionCursor, setSuggestionCursor] = useState<{ key: string | null; index: number }>({
+    key: null,
+    index: 0
+  })
 
   useEffect(() => {
     const syncKeyChanged = inputSyncKey !== lastInputSyncRef.current.key
     const valueChanged = inputValue !== lastInputSyncRef.current.value
     if (!syncKeyChanged && !valueChanged) return
 
+    const replacedFromOutside = inputValue !== committedInputValueRef.current
     lastInputSyncRef.current = { key: inputSyncKey, value: inputValue }
     committedInputValueRef.current = inputValue
     if (isComposingInputRef.current && !syncKeyChanged) return
 
     setLocalInputValue(inputValue)
+    if (replacedFromOutside) caretPositionRef.current = null
   }, [inputSyncKey, inputValue])
+
+  const canSuggestFor = (value: string) =>
+    (value.startsWith('/') && suggestionCommands.length > 0) ||
+    (value.startsWith('@') && mentionMembers.length > 0)
+  const suggestions =
+    active &&
+    !disabled &&
+    isInputFocusedRef.current &&
+    localInputValue !== dismissedSuggestionValue &&
+    canSuggestFor(localInputValue)
+      ? resolveComposerSuggestions(
+          localInputValue,
+          caretPositionRef.current ?? localInputValue.length,
+          suggestionCommands,
+          mentionMembers
+        )
+      : null
+  // A list that closes or changes its query starts again at the first option.
+  const suggestionKey = suggestions?.key ?? null
+  if (suggestionCursor.key !== suggestionKey) {
+    setSuggestionCursor({ key: suggestionKey, index: 0 })
+  }
+  const activeSuggestionIndex =
+    suggestions && suggestionCursor.key === suggestionKey
+      ? Math.min(suggestionCursor.index, suggestions.items.length - 1)
+      : 0
 
   useEffect(() => {
     if (active) return
@@ -677,7 +737,26 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   const handleInputSelectionChange = (
     event: React.SyntheticEvent<HTMLInputElement | HTMLTextAreaElement>
   ) => {
-    latestInputSelectionRef.current = readInputSelectionSnapshot(event.currentTarget)
+    const selection = readInputSelectionSnapshot(event.currentTarget)
+    latestInputSelectionRef.current = selection
+    const caret = selection.start === selection.end ? selection.start : -1
+    const caretMoved = caret !== caretPositionRef.current
+    caretPositionRef.current = caret
+    // Only an "@member" token depends on where the caret is.
+    if (caretMoved && isInputFocusedRef.current && selection.value.startsWith('@')) {
+      if (canSuggestFor(selection.value)) refreshSuggestions()
+    }
+  }
+
+  const handleInputFocus = (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    isInputFocusedRef.current = true
+    handleInputSelectionChange(event)
+    if (canSuggestFor(event.currentTarget.value)) refreshSuggestions()
+  }
+
+  const handleInputBlur = (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    isInputFocusedRef.current = false
+    if (canSuggestFor(event.currentTarget.value)) refreshSuggestions()
   }
 
   const handleBeforeInput = (event: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -702,6 +781,8 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     latestInputSelectionRef.current = nextSelection
     pendingInputSelectionRef.current = nextSelection
     setLocalInputValue(nextValue)
+    caretPositionRef.current = nextSelection.start === nextSelection.end ? nextSelection.start : -1
+    setDismissedSuggestionValue(null)
     onInputChange(nextValue)
   }
 
@@ -717,10 +798,29 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     const previousValue = committedInputValueRef.current
     committedInputValueRef.current = nextValue
     setLocalInputValue(nextValue)
-    latestInputSelectionRef.current = readInputSelectionSnapshot(event.currentTarget)
+    handleInputSelectionChange(event)
     if (nextValue !== previousValue) {
       onInputChange(nextValue)
     }
+  }
+
+  const acceptSuggestion = (item: ComposerSuggestionItem) => {
+    if (!suggestions) return
+    const next = applyComposerSuggestion(localInputValue, suggestions, item)
+    const nextSelection: InputSelectionSnapshot = {
+      value: next.value,
+      start: next.caret,
+      end: next.caret,
+      direction: 'none'
+    }
+    committedInputValueRef.current = next.value
+    latestInputSelectionRef.current = nextSelection
+    pendingInputSelectionRef.current = nextSelection
+    setLocalInputValue(next.value)
+    caretPositionRef.current = next.caret
+    // The completed text must not reopen the list; the next edit does.
+    setDismissedSuggestionValue(next.value)
+    if (next.value !== localInputValue) onInputChange(next.value)
   }
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
@@ -729,6 +829,30 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
       isComposingInputRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229
 
     if (isImeComposing) return
+
+    if (suggestions) {
+      const unmodified = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
+      const item = suggestions.items[activeSuggestionIndex]
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        setDismissedSuggestionValue(localInputValue)
+        return
+      }
+      if (unmodified && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        event.preventDefault()
+        const count = suggestions.items.length
+        const step = event.key === 'ArrowDown' ? 1 : count - 1
+        setSuggestionCursor({ key: suggestions.key, index: (activeSuggestionIndex + step) % count })
+        return
+      }
+      // A command typed in full still runs on Enter, exactly as without the list.
+      if (unmodified && (event.key === 'Tab' || (event.key === 'Enter' && !item.typedInFull))) {
+        event.preventDefault()
+        acceptSuggestion(item)
+        return
+      }
+    }
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
@@ -784,6 +908,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     latestInputSelectionRef.current = nextSelection
     pendingInputSelectionRef.current = nextSelection
     setLocalInputValue(nextValue)
+    caretPositionRef.current = nextSelectionPosition
     onInputChange(nextValue)
 
     const restoreDropSelection = () => {
@@ -806,6 +931,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     const nextValue = buildToolCommandDraft(tool)
     committedInputValueRef.current = nextValue
     setLocalInputValue(nextValue)
+    caretPositionRef.current = null
     onInputChange(nextValue)
     composerInputRef.current?.focus()
   }
@@ -890,7 +1016,16 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
         width: '100%'
       }}
     >
-      <Box sx={{ width: '100%', px: 1.5, pb: 2 }}>
+      <Box sx={{ position: 'relative', width: '100%', px: 1.5, pb: 2 }}>
+        {suggestions ? (
+          <ComposerSuggestionPopup
+            id={suggestionListId}
+            suggestions={suggestions}
+            activeIndex={activeSuggestionIndex}
+            onActiveIndexChange={(index) => setSuggestionCursor({ key: suggestions.key, index })}
+            onAccept={acceptSuggestion}
+          />
+        ) : null}
         <Box
           sx={(theme) => ({
             display: 'flex',
@@ -1169,7 +1304,20 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               inputProps={{
                 'data-testid': 'chat-composer-input',
                 rows: 1,
-                onFocus: handleInputSelectionChange,
+                ...(suggestions
+                  ? {
+                      'aria-haspopup': 'listbox',
+                      'aria-autocomplete': 'list',
+                      'aria-expanded': true,
+                      'aria-controls': suggestionListId,
+                      'aria-activedescendant': getComposerSuggestionOptionId(
+                        suggestionListId,
+                        activeSuggestionIndex
+                      )
+                    }
+                  : null),
+                onFocus: handleInputFocus,
+                onBlur: handleInputBlur,
                 onBeforeInput: handleBeforeInput,
                 onKeyUp: handleInputSelectionChange,
                 onMouseUp: handleInputSelectionChange,
