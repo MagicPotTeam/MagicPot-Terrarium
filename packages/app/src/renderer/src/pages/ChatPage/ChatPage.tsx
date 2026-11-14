@@ -41,6 +41,8 @@ import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import AdsClickOutlinedIcon from '@mui/icons-material/AdsClickOutlined'
 import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined'
 import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined'
+import PersonAddAltOutlinedIcon from '@mui/icons-material/PersonAddAltOutlined'
+import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined'
 import { useTranslation } from 'react-i18next'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useRuntimeMcpStatus } from '@renderer/hooks/useRuntimeMcpStatus'
@@ -8062,6 +8064,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const teamLead = currentSession?.teamLeadId ? sessions.find(session=>session.id===currentSession.teamLeadId) : currentSession
   const teamMembers = teamLead ? sessions.filter(session=>session.teamLeadId===teamLead.id && !session.archived && (session.teamMemberGeneration ?? 0) === (teamLead.teamGeneration ?? 0)) : []
   const teamEnabled = active && isReady && !config.use_remote_llm && route?.channel==='canvas' && route.scopeType==='thread'
+  // The thread has a team to manage: members, or a lead that still carries team records.
+  const threadHasTeam = Boolean(teamLead && (teamMembers.length > 0 || teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length))
   const [teamMessageEntries, dispatchTeamActivity] = React.useReducer(reduceTeamActivity, { owner: 0, key: '', entries: [], activeKey: '', live: false, closedFor: null })
   const teamMessageActivityOwnerRef = useRef(0)
   const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{ key: string; ids: readonly string[] }>({ key: '', ids: [] })
@@ -8280,7 +8284,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     if (channel) channel.onmessage=event=>handler(new CustomEvent('chat:team-lifecycle-ended',{detail:event.data}))
     return () => { window.removeEventListener('chat:team-lifecycle-ended',handler); channel?.close() }
   }, [storageScope,refreshTeamLifecycle,notifyWarning])
-  const [teamManagementHost, setTeamManagementHost] = useState<HTMLDivElement | null>(null)
   const [teamManagementOpenRequest, setTeamManagementOpenRequest] = useState(0)
   const [creatingTeamMember, setCreatingTeamMember] = useState(false)
   // End changes refs synchronously; also re-render to suspend/restart the observer.
@@ -9226,7 +9229,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             detail: processScope ? <AgentProcessDetails job={job} scope={processScope}/> : undefined,
             onStop: () => { void processController.stop(job).catch(() => notifyWarning('无法停止后台进程，请重试')) }
           }))
-          return <AgentProcessArea entries={[...teamEntries, ...observedHelpers, ...helperEntries, ...leadHelperEntries, ...processEntries]} showStaticWhenEmpty={unassignedActivity.length > 0 || jobController.error || processController.error || leadJobs.error} managementSlot={teamEnabled && teamLead ? <Box ref={setTeamManagementHost}/> : undefined} onStopAllMembers={teamEnabled && teamLead ? () => {
+          return <AgentProcessArea entries={[...teamEntries, ...observedHelpers, ...helperEntries, ...leadHelperEntries, ...processEntries]} showStaticWhenEmpty={unassignedActivity.length > 0 || jobController.error || processController.error || leadJobs.error} onStopAllMembers={teamEnabled && teamLead ? () => {
             for (const member of teamMembers) {
               if (loadingSessionIdsRef.current.has(member.id) || teamWaiting.has(member.id)) terminateSession(member.id, { dropQueued: true })
             }
@@ -9337,43 +9340,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             />
           )}
 
-          {/* 对话级团队操作：团队入口放在消息区上方，避免和输入框工具混在一起。 */}
-          {active && teamEnabled && teamLead && teamMembers.length === 0 && !teamLead.teamEnded && (
-            <Box
-              data-testid="team-conversation-actions"
-              sx={{
-                mx: { xs: 1, sm: 2 },
-                my: 1,
-                px: 1.5,
-                py: 1,
-                display: 'flex',
-                alignItems: { xs: 'flex-start', sm: 'center' },
-                justifyContent: 'space-between',
-                gap: 1,
-                flexWrap: 'wrap',
-                border: '1px solid',
-                borderColor: 'divider',
-                borderRadius: 2.5,
-                bgcolor: 'action.hover',
-                boxShadow: '0 4px 16px rgba(0, 0, 0, 0.08)'
-              }}
-            >
-              <Box sx={{ minWidth: 0 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.3 }}>{t('chat.team_collaboration')}</Typography>
-                <Typography variant="caption" color="text.secondary">{t('chat.team_add_first_member')}</Typography>
-              </Box>
-              <Button
-                data-testid="team-create-member-button"
-                size="small"
-                variant="outlined"
-                onClick={() => setCreatingTeamMember(true)}
-                sx={{ borderRadius: 999, px: 2, minHeight: 36, textTransform: 'none', whiteSpace: 'nowrap', fontWeight: 700 }}
-              >
-                {t('chat.team_create_add_member')}
-              </Button>
-            </Box>
-          )}
-
           {/* 消息列表 */}
           {active && basicCommandView?.scope === inspectionScope && <Box data-testid="agent-basic-command-view" sx={{ p: 2 }}>
             <Typography variant="subtitle2">/{basicCommandView.kind}</Typography>
@@ -9429,7 +9395,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
             <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
           </Box>}
-          {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost buttonHost={teamManagementHost} openRequest={teamManagementOpenRequest} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
+          {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost openRequest={teamManagementOpenRequest} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
             const current = teamMessageDispatcherRef.current
             if (!current || current.key !== messageKey || !route?.threadId || !messageLeadId || !teamEnabled) throw new Error('Team channel unavailable.')
             // Avoid consuming the broadcast draft for a known-unavailable model setting.
@@ -9818,9 +9784,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : undefined
                 }
                 addMenuSlot={
-                  (!isAgentSkillSelected || Boolean(workspaceMenu) || Boolean(active && isReady && currentSessionId && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId) || Boolean(teamEnabled && teamLead && !teamMembers.length))
+                  (!isAgentSkillSelected || Boolean(workspaceMenu) || Boolean(active && isReady && currentSessionId && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId) || Boolean(teamEnabled && teamLead))
                     ? (closeMenu) => [
-                        teamEnabled && teamLead && !teamMembers.length && (teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length) && <MenuItem key="team-management" onClick={() => { closeMenu(); setTeamManagementOpenRequest(value => value + 1) }}>团队管理</MenuItem>,
                         !isAgentSkillSelected && <ChatImageGenerationSettings
                           key="image-generation"
                           active={active}
@@ -9873,6 +9838,42 @@ const ChatPage: React.FC<ChatPageProps> = ({
                                   ? 'agent_workspace.trace_stop'
                                   : 'agent_workspace.trace_start'
                               )}
+                              primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
+                            />
+                          </MenuItem>
+                        ),
+                        teamEnabled && teamLead && !teamLead.teamEnded && (
+                          <MenuItem
+                            key="team-add-member"
+                            data-testid="chat-composer-menu-add-member"
+                            onClick={() => {
+                              closeMenu()
+                              setCreatingTeamMember(true)
+                            }}
+                          >
+                            <ListItemIcon>
+                              <PersonAddAltOutlinedIcon fontSize="small" />
+                            </ListItemIcon>
+                            <ListItemText
+                              primary={t('chat.team_menu_add_member')}
+                              primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
+                            />
+                          </MenuItem>
+                        ),
+                        teamEnabled && teamLead && threadHasTeam && (
+                          <MenuItem
+                            key="team-management"
+                            data-testid="chat-composer-menu-team"
+                            onClick={() => {
+                              closeMenu()
+                              setTeamManagementOpenRequest((value) => value + 1)
+                            }}
+                          >
+                            <ListItemIcon>
+                              <GroupsOutlinedIcon fontSize="small" />
+                            </ListItemIcon>
+                            <ListItemText
+                              primary={t('chat.team_menu_manage')}
                               primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
                             />
                           </MenuItem>

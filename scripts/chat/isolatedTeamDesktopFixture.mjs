@@ -123,6 +123,18 @@ export async function inspectIsolatedTeamPane(page, identity) {
   })
 }
 
+/**
+ * Opens the composer "+" menu of the isolated pane and picks one entry by its test id
+ * ('chat-composer-menu-add-member' or 'chat-composer-menu-team'). The menu renders in a
+ * page-level layer, so the entry is located on the page, not inside the pane.
+ */
+export async function chooseIsolatedComposerMenuEntry(page, identity, entryTestId) {
+  if (entryTestId !== 'chat-composer-menu-add-member' && entryTestId !== 'chat-composer-menu-team') throw new TypeError('Unknown composer menu entry.')
+  const pane = await waitForIsolatedTeamPane(page, identity)
+  await pane.locator('[data-testid="chat-composer-add-menu-button"]').click({ timeout: TIMEOUT })
+  await page.locator(`[role="menu"] [data-testid="${entryTestId}"]`).click({ timeout: TIMEOUT })
+}
+
 async function createMember(page, identity, name) {
   validateIdentity(identity)
   let attempts = memberAttempts.get(identity)
@@ -133,16 +145,11 @@ async function createMember(page, identity, name) {
   attempts.add(name)
   const pane = await waitForIsolatedTeamPane(page, identity)
   const process = pane.getByRole('region', { name: '进程区', exact: true })
-  if (name === '设计师') {
-    // Team creation belongs to the conversation header, above the message list.
-    await pane.locator('[data-testid="team-create-member-button"]').click({ timeout: TIMEOUT })
-  } else {
+  // Every member is added from the composer "+" menu of the lead conversation.
+  if (name !== '设计师') {
     await process.getByRole('button', { name: '打开 设计师', exact: true }).waitFor({ state: 'visible', timeout: TIMEOUT })
-    await process.getByRole('button', { name: '团队管理', exact: true }).click({ timeout: TIMEOUT })
-    const management = page.getByRole('dialog', { name: '团队管理', exact: true })
-    await management.waitFor({ state: 'visible', timeout: TIMEOUT })
-    await management.getByRole('button', { name: '组建团队 / 添加成员', exact: true }).click({ timeout: TIMEOUT })
   }
+  await chooseIsolatedComposerMenuEntry(page, identity, 'chat-composer-menu-add-member')
   const form = page.getByRole('dialog', { name: '创建成员', exact: true })
   await form.waitFor({ state: 'visible', timeout: TIMEOUT })
   await form.getByLabel('成员名', { exact: true }).fill(name)

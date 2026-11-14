@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { _electron as electron } from 'playwright'
 import { isolatedImageEnvironment, fixtureConfig, assertIsolatedRuntime } from './isolatedImageDesktopAcceptance.mjs'
 import { startSyntheticTeamResponsesMock } from './syntheticTeamResponsesMock.mjs'
-import { seedIsolatedTeamLead, createIsolatedDesigner, createIsolatedWriter, verifyIsolatedTeamMembers, waitForIsolatedTeamPane, broadcastIsolatedTeamChannel } from './isolatedTeamDesktopFixture.mjs'
+import { seedIsolatedTeamLead, createIsolatedDesigner, createIsolatedWriter, verifyIsolatedTeamMembers, waitForIsolatedTeamPane, broadcastIsolatedTeamChannel, chooseIsolatedComposerMenuEntry } from './isolatedTeamDesktopFixture.mjs'
 
 const require = createRequire(import.meta.url)
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -159,7 +159,7 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
     assert(before.every(row => row.messageCount === 0))
     const pane = await waitForIsolatedTeamPane(page, identity)
     const process = pane.getByRole('region', { name: '进程区', exact: true })
-    await process.getByRole('button', { name: '团队管理', exact: true }).click()
+    await chooseIsolatedComposerMenuEntry(page, identity, 'chat-composer-menu-team')
     const dialog = page.getByRole('dialog', { name: '团队管理', exact: true })
     await dialog.waitFor({ state: 'visible' })
     const designerBox = dialog.getByRole('checkbox', { name: '设计师', exact: true })

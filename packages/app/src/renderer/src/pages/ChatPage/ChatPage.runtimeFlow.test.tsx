@@ -932,6 +932,14 @@ const createExpiredContinuationError = (): Error & { status: number; body: strin
   return error
 }
 
+/** Picks one entry of the composer "+" menu; the mock composer renders the real addMenuSlot. */
+const chooseAddMenuEntry = (
+  testId: 'chat-composer-menu-add-member' | 'chat-composer-menu-team'
+): void => {
+  fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
+  fireEvent.click(screen.getByTestId(testId))
+}
+
 const renderChatPage = (
   storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean; team?: boolean } = 'runtime-flow'
 ) => {
@@ -1377,9 +1385,12 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
       expect(screen.queryByRole('button', { name: '团队管理' })).not.toBeInTheDocument()
-      expect(screen.getByTestId('team-conversation-actions')).toBeVisible()
-      expect(screen.queryByRole('menuitem', { name: '组建团队 / 添加成员' })).not.toBeInTheDocument()
-      fireEvent.click(screen.getByTestId('team-create-member-button'))
+      // No banner above the transcript: a lead without a team offers only "add member" in the "+" menu.
+      expect(screen.queryByTestId('team-conversation-actions')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
+      expect(screen.getByTestId('chat-composer-menu-add-member')).toBeInTheDocument()
+      expect(screen.queryByTestId('chat-composer-menu-team')).not.toBeInTheDocument()
+      chooseAddMenuEntry('chat-composer-menu-add-member')
       fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Alice' } })
       fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Alice' } })
       fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
@@ -1387,7 +1398,7 @@ describe('ChatPage runtime workflow integration', () => {
       const alice = await within(area).findByRole('button', { name: '打开 Alice' })
       expect(alice).toHaveTextContent('Alice')
       expect(alice.textContent?.match(/Alice/g)).toHaveLength(1)
-      fireEvent.click(within(area).getByRole('button', { name: '团队管理' }))
+      chooseAddMenuEntry('chat-composer-menu-team')
       fireEvent.click(screen.getByRole('button', { name: '组建团队 / 添加成员' }))
       fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Bob' } })
       fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Writer' } })
@@ -1666,7 +1677,7 @@ describe('ChatPage runtime workflow integration', () => {
     const view = renderChatPage({ team: true })
     try {
       await screen.findByRole('button', { name: '展开 组长 · explore 详情' })
-      fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
+      chooseAddMenuEntry('chat-composer-menu-team')
       fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
       await waitFor(() => expect(rejectEnd).toBeDefined())
       const count = hoisted.listAgentJobsMock.mock.calls.filter(([arg]) => arg.conversationId === lead.id).length
@@ -1697,7 +1708,7 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(await screen.findByRole('button', { name: '展开 组长 · explore 详情' }))
       fireEvent.click(screen.getByRole('button', { name: 'chat.agent_jobs.read' }))
       await waitFor(() => expect(finishRead).toBeDefined())
-      fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
+      chooseAddMenuEntry('chat-composer-menu-team')
       fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
       await waitFor(() => expect(rejectEnd).toBeDefined())
       await act(async () => finishRead({ job, text: 'STALE LEAD OUTPUT', nextOffset: 17, totalCharacters: 17 }))
@@ -4900,7 +4911,7 @@ describe('ChatPage runtime workflow integration', () => {
       const lead = readCurrentSessionState()!.id
       for (const [name, role, count] of [[designerName, '设计师', '1'], [writerName, '文案', '2']] as const) {
         if (count === '1') {
-          fireEvent.click(screen.getByTestId('team-create-member-button'))
+          chooseAddMenuEntry('chat-composer-menu-add-member')
         } else {
           await openTeamManagement()
           fireEvent.click(screen.getByRole('button', { name: '组建团队 / 添加成员' }))
@@ -5108,7 +5119,7 @@ describe('ChatPage runtime workflow integration', () => {
     renderChatPage({ team: true })
     await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
     const lead = readCurrentSessionState()!.id
-    fireEvent.click(screen.getByTestId('team-create-member-button'))
+    chooseAddMenuEntry('chat-composer-menu-add-member')
     fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'writer' } })
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'write notes' } })
     fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
@@ -5128,7 +5139,7 @@ describe('ChatPage runtime workflow integration', () => {
     renderChatPage({team:true})
     await waitFor(()=>expect(readCurrentSessionState()?.profileId).toBe('base-model'))
     const lead=readCurrentSessionState()!.id
-    fireEvent.click(screen.getByTestId('team-create-member-button'))
+    chooseAddMenuEntry('chat-composer-menu-add-member')
     fireEvent.change(screen.getByLabelText('成员名'),{target:{value:'writer'}})
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'),{target:{value:'write notes'}})
     fireEvent.click(screen.getByRole('button',{name:'确认创建成员'}))
@@ -5149,12 +5160,8 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()).toBeDefined())
     const current = readCurrentSessionState()
     const hasMembers = !current?.teamEnded && hoisted.storedSessions.value.some(session => session.teamLeadId === current?.id && !session.archived)
-    const processButton = hasMembers ? await screen.findByRole('button', { name: '团队管理' }) : screen.queryByRole('button', { name: '团队管理' })
-    if (processButton) fireEvent.click(processButton)
-    else {
-      fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
-      fireEvent.click(await screen.findByRole('menuitem', { name: '团队管理' }))
-    }
+    fireEvent.click(screen.getByRole('button', { name: 'open-add-menu' }))
+    fireEvent.click(hasMembers ? await screen.findByTestId('chat-composer-menu-team') : screen.getByTestId('chat-composer-menu-team'))
     await screen.findByRole('dialog', { name: '团队管理' })
   }
 
@@ -5513,7 +5520,7 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.requestChatCompletionMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
     renderChatPage({team:true})
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
+    chooseAddMenuEntry('chat-composer-menu-team')
     expect(screen.getByRole('button',{name:'执行 制作海报'})).toBeDisabled()
     fireEvent.click(screen.getByRole('button',{name:'执行 准备素材'}))
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
@@ -5601,7 +5608,7 @@ describe('ChatPage runtime workflow integration', () => {
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID,'runtime-flow'),lead.id)
     renderChatPage({team:true})
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
+    chooseAddMenuEntry('chat-composer-menu-team')
     fireEvent.change(screen.getByLabelText('任务'),{target:{value:'刚添加的任务'}})
     fireEvent.mouseDown(screen.getByLabelText('负责人'))
     fireEvent.click(await screen.findByRole('option',{name:'designer'}))
@@ -6391,7 +6398,7 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.requestChatCompletionMock.mockRejectedValueOnce(new Error('fixture failure'))
     renderChatPage({team:true})
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
+    chooseAddMenuEntry('chat-composer-menu-team')
     fireEvent.click(screen.getByRole('button',{name:'执行 失败任务'}))
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===member.id)?.messages.some(message=>String(message.content).includes('fixture failure'))).toBe(true))
@@ -6407,7 +6414,7 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.requestChatCompletionMock.mockResolvedValueOnce({content:'结果已返回但未保存'})
     renderChatPage({team:true})
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
+    chooseAddMenuEntry('chat-composer-menu-team')
     fireEvent.click(screen.getByRole('button',{name:'执行 需保存结果'}))
     await waitFor(() => expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('成员已有回复，但会话保存未确认，任务仍为进行中'))
     expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0].status).toBe('running')
@@ -6476,7 +6483,7 @@ describe('ChatPage runtime workflow integration', () => {
     let release!:()=>void
     hoisted.saveSessionToDBGate.value=new Promise(resolve=>{release=resolve})
     try {
-      fireEvent.click(screen.getByTestId('team-create-member-button'))
+      chooseAddMenuEntry('chat-composer-menu-add-member')
       fireEvent.change(screen.getByLabelText('成员名'),{target:{value:'waiting'}})
       fireEvent.change(screen.getByLabelText('角色 / 当前任务'),{target:{value:'do work'}})
       fireEvent.click(screen.getByRole('button',{name:'确认创建成员'}))
@@ -6548,7 +6555,7 @@ describe('ChatPage runtime workflow integration', () => {
     create.mockRejectedValueOnce(new Error('Team changed'))
     renderChatPage({team:true})
     await waitFor(()=>expect(readCurrentSessionState()?.id).toBe(lead.id))
-    fireEvent.click(screen.getByTestId('team-create-member-button'))
+    chooseAddMenuEntry('chat-composer-menu-add-member')
     fireEvent.change(screen.getByLabelText('成员名'),{target:{value:'waiting'}})
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'),{target:{value:'do work'}})
     fireEvent.click(screen.getByRole('button',{name:'确认创建成员'}))
@@ -6566,7 +6573,7 @@ describe('ChatPage runtime workflow integration', () => {
     renderChatPage({team:true})
     await waitFor(()=>expect(readCurrentSessionState()?.id).toBe(member.id))
     expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.profileId).toBe('missing-model')
-    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
+    chooseAddMenuEntry('chat-composer-menu-team')
     fireEvent.click(screen.getByRole('button',{name:'结束团队'}))
     await waitFor(()=>expect(readCurrentSessionState()?.id).toBe(lead.id))
     expect(screen.queryByRole('button',{name:/writer.*空闲/})).toBeNull()

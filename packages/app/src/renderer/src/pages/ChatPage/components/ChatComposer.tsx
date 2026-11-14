@@ -1502,6 +1502,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}
             >
               <IconButton
+                data-testid="chat-composer-add-menu-button"
                 onClick={(event) => setAddMenuAnchorEl(event.currentTarget)}
                 disabled={disabled}
                 sx={{

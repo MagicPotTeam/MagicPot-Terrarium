@@ -35,7 +35,7 @@ vi.mock('./chatStorage', async original => {
   }
 })
 vi.mock('./chatRequestUtils', async original => ({ ...(await original<typeof import('./chatRequestUtils')>()), supportsStreamingChatCompletion: () => false }))
-vi.mock('./components/ChatComposer', () => ({ default: ({ inputValue, onInputChange, onSend }: any) => <><input data-testid="input" value={inputValue} onChange={e => onInputChange(e.target.value)} /><button onClick={onSend}>send fixture</button></> }))
+vi.mock('./components/ChatComposer', () => ({ default: ({ inputValue, onInputChange, onSend, addMenuSlot }: any) => <><ul data-testid="add-menu">{addMenuSlot?.(() => undefined)}</ul><input data-testid="input" value={inputValue} onChange={e => onInputChange(e.target.value)} /><button onClick={onSend}>send fixture</button></> }))
 vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession }: any) => <pre data-testid="session">{JSON.stringify(currentSession)}</pre> }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
@@ -113,7 +113,7 @@ it.each(['direct', 'channel', 'snapshot'] as const)('connects %s actual ChatPage
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     const area = await screen.findByRole('region', { name: '进程区' })
     const openManagement = async () => {
-      fireEvent.click(within(area).getByRole('button', { name: '团队管理' }))
+      fireEvent.click(screen.getByTestId('chat-composer-menu-team'))
       return screen.findByRole('dialog', { name: '团队管理' })
     }
     const memberRow = (name: string) => {

@@ -197,7 +197,8 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(menuEntryIds()).toEqual([
       'image-generation-entry',
       'chat-composer-menu-canvas-target',
-      'chat-composer-menu-trace'
+      'chat-composer-menu-trace',
+      'chat-composer-menu-add-member'
     ])
     expect(screen.getByTestId('chat-composer-menu-canvas-target')).toHaveTextContent('画布目标')
     expect(screen.getByTestId('chat-composer-menu-trace')).toHaveTextContent('开始追踪')
@@ -258,6 +259,62 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     await waitFor(() => expect(h.notify).toHaveBeenCalledWith(zh.chat.command_unavailable_current))
     expect(screen.queryByTestId('agent-goal-view')).toBeNull()
     expect(draftSyncKey()).toBe(syncKey)
+  })
+
+  it('offers "add member" instead of a team banner and opens the existing member form', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    expect(screen.queryByTestId('team-conversation-actions')).toBeNull()
+    expect(screen.queryByText('团队协作')).toBeNull()
+    await waitFor(() => expect(menuEntryIds()).toContain('chat-composer-menu-add-member'))
+    // No team yet: nothing to manage.
+    expect(menuEntryIds()).not.toContain('chat-composer-menu-team')
+    expect(screen.getByTestId('chat-composer-menu-add-member')).toHaveTextContent('添加成员…')
+    expect(en.chat.team_menu_add_member).toBe('Add member…')
+
+    fireEvent.click(screen.getByTestId('chat-composer-menu-add-member'))
+    expect(h.closeMenu).toHaveBeenCalledTimes(1)
+    expect(await screen.findByRole('dialog', { name: '创建成员' })).toBeInTheDocument()
+  })
+
+  it('offers "team" after "add member" when the thread has a team and opens team management', async () => {
+    h.sessions.value = [
+      { id: 'lead', title: 'Lead', profileId: 'fixture-profile', messages: [] },
+      {
+        id: 'designer',
+        title: 'designer',
+        profileId: 'fixture-profile',
+        messages: [],
+        teamLeadId: 'lead',
+        teamMemberName: 'designer',
+        teamRole: 'designer'
+      }
+    ]
+    renderPage({ traceRecording: false, onToggleTrace: vi.fn(), onOpenCanvasTarget: vi.fn() })
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    await waitFor(() => expect(menuEntryIds()).toContain('chat-composer-menu-team'))
+    expect(menuEntryIds()).toEqual([
+      'image-generation-entry',
+      'chat-composer-menu-canvas-target',
+      'chat-composer-menu-trace',
+      'chat-composer-menu-add-member',
+      'chat-composer-menu-team'
+    ])
+    expect(screen.getByTestId('chat-composer-menu-team')).toHaveTextContent('团队…')
+    expect(en.chat.team_menu_manage).toBe('Team…')
+    // The unlabeled trigger in the process area is gone; the menu entry is the only way in.
+    expect(screen.queryByRole('button', { name: '团队管理' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
+
+    fireEvent.click(screen.getByTestId('chat-composer-menu-team'))
+    expect(await screen.findByRole('dialog', { name: '团队管理' })).toBeInTheDocument()
+  })
+
+  it('offers no team entries with the remote model service', async () => {
+    h.config.value.use_remote_llm = true
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    expect(menuEntryIds()).toEqual(['image-generation-entry'])
   })
 
   it('adds no workspace entries outside the Agent column', async () => {
