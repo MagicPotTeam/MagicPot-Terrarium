@@ -28,6 +28,11 @@ export type ComposerCommand = {
   aliases?: readonly string[]
   /** Present only when the command takes arguments. */
   argumentHintKey?: ComposerSuggestionTextKey
+  /**
+   * The command does nothing useful without arguments (its hint starts with "<"), so Enter
+   * on the bare name completes it with a trailing space instead of sending it.
+   */
+  argumentsRequired?: true
   descriptionKey: ComposerSuggestionTextKey
   /** Mirrors the context checks ChatPage applies before it runs the command. */
   available: (context: ComposerCommandContext) => boolean
@@ -51,6 +56,7 @@ export const COMPOSER_COMMANDS: readonly ComposerCommand[] = [
   {
     name: 'btw',
     argumentHintKey: key('hint_btw'),
+    argumentsRequired: true,
     descriptionKey: key('command_btw'),
     available: localThread
   },
@@ -72,6 +78,7 @@ export const COMPOSER_COMMANDS: readonly ComposerCommand[] = [
   {
     name: 'edit',
     argumentHintKey: key('hint_edit'),
+    argumentsRequired: true,
     descriptionKey: key('command_edit'),
     available: local
   },
@@ -99,6 +106,7 @@ export const COMPOSER_COMMANDS: readonly ComposerCommand[] = [
   {
     name: 'tool',
     argumentHintKey: key('hint_tool'),
+    argumentsRequired: true,
     descriptionKey: key('command_tool'),
     available: (context) => context.boundTools && !context.teamMember
   }

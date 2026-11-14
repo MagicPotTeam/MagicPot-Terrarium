@@ -266,6 +266,50 @@ describe('ChatComposer slash-command suggestions', () => {
     expect(input().value).toBe('/status')
   })
 
+  it('completes a fully typed command that needs arguments instead of sending it bare', async () => {
+    const onSend = vi.fn()
+    render(<Harness commands={threadCommands} onSend={onSend} />)
+    const user = await typeInto('/edit')
+    expect(optionLabels()).toHaveLength(1)
+    await user.keyboard('{Enter}')
+    expect(onSend).not.toHaveBeenCalled()
+    expect(input().value).toBe('/edit ')
+    expect(input().selectionStart).toBe(6)
+    expect(list()).toBeNull()
+    // The text is now the person's own: the next Enter sends it as typed.
+    await user.keyboard('2 shorter{Enter}')
+    expect(onSend).toHaveBeenCalledTimes(1)
+    expect(input().value).toBe('/edit 2 shorter')
+
+    await user.clear(input())
+    await user.keyboard('/btw{Enter}')
+    expect(input().value).toBe('/btw ')
+    expect(onSend).toHaveBeenCalledTimes(1)
+    // A command with optional arguments still runs bare on a single Enter.
+    await user.clear(input())
+    await user.keyboard('/skill{Enter}')
+    expect(input().value).toBe('/skill')
+    expect(onSend).toHaveBeenCalledTimes(2)
+  })
+
+  it('captures the arrow keys only while there is more than one row to move between', async () => {
+    render(<Harness commands={threadCommands} />)
+    const user = await typeInto('/co')
+    expect(optionLabels()).toHaveLength(1)
+    // Not prevented: the caret moves as in any textarea.
+    expect(fireEvent.keyDown(input(), { key: 'ArrowDown' })).toBe(true)
+    expect(fireEvent.keyDown(input(), { key: 'ArrowUp' })).toBe(true)
+    expect(screen.getByRole('option')).toHaveAttribute('aria-selected', 'true')
+    // Enter, Tab and Escape still belong to the list.
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
+
+    await user.clear(input())
+    await user.keyboard('/s')
+    expect(optionLabels().length).toBeGreaterThan(1)
+    expect(fireEvent.keyDown(input(), { key: 'ArrowDown' })).toBe(false)
+    expect(fireEvent.keyDown(input(), { key: 'ArrowUp' })).toBe(false)
+  })
+
   it('never accepts or sends while an IME composition is active', async () => {
     const onSend = vi.fn()
     render(<Harness commands={threadCommands} onSend={onSend} />)

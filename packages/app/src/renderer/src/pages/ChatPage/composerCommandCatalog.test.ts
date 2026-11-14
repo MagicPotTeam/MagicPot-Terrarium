@@ -102,6 +102,22 @@ describe('composerCommandCatalog', () => {
     }
   })
 
+  it('requires arguments exactly for the commands whose hint starts with a mandatory "<...>"', () => {
+    const required = COMPOSER_COMMANDS.filter((command) => command.argumentsRequired)
+    expect(required.map((command) => command.name)).toEqual(['btw', 'edit', 'tool'])
+    for (const command of COMPOSER_COMMANDS) {
+      const hint = command.argumentHintKey
+        ? (enLocale.chat.composer_suggestions as Record<string, string>)[
+            command.argumentHintKey.split('.').pop()!
+          ]
+        : ''
+      expect([command.name, hint.startsWith('<')]).toEqual([
+        command.name,
+        command.argumentsRequired === true
+      ])
+    }
+  })
+
   it('has every description and argument hint in both locales', () => {
     const keys = COMPOSER_COMMANDS.flatMap((command) => [
       command.descriptionKey,

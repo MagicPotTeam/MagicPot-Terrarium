@@ -13,6 +13,8 @@ export type ComposerCommandSuggestionItem = {
   label: string
   argumentHintKey?: ComposerSuggestionTextKey
   descriptionKey: ComposerSuggestionTextKey
+  /** The command cannot run bare; see ComposerCommand.argumentsRequired. */
+  argumentsRequired: boolean
   /** The typed token already is this command, so Enter keeps running it as before. */
   typedInFull: boolean
 }
@@ -86,6 +88,7 @@ export function resolveComposerSuggestions(
             label: `/${name}`,
             argumentHintKey: command.argumentHintKey,
             descriptionKey: command.descriptionKey,
+            argumentsRequired: command.argumentsRequired === true,
             typedInFull: name === query
           }
         ]

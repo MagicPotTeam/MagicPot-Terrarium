@@ -451,6 +451,31 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     })
   })
 
+  it('clears the draft once /repair-images has run, so the "/" list does not reopen over the result', async () => {
+    renderPage(undefined)
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    const before = draftSyncKey()
+
+    fireEvent.change(screen.getByTestId('input'), { target: { value: '/repair-images' } })
+    fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
+    expect(await screen.findByText(/\/repair-images — /)).toBeInTheDocument()
+    // ChatPage clears a draft by handing the composer an empty value under a new sync key.
+    await waitFor(() => expect(draftSyncKey()).not.toBe(before))
+    expect(screen.getByTestId('input')).toHaveValue('')
+  })
+
+  it('keeps a /repair-images draft that could not run', async () => {
+    renderPage(undefined)
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    const before = draftSyncKey()
+
+    fireEvent.change(screen.getByTestId('input'), { target: { value: '/repair-images now' } })
+    fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
+    await waitFor(() => expect(h.notify).toHaveBeenCalledWith(zh.chat.use_repair_images))
+    expect(draftSyncKey()).toBe(before)
+    expect(screen.queryByText(/\/repair-images — /)).toBeNull()
+  })
+
   it('adds no workspace entries outside the Agent column', async () => {
     renderPage(undefined)
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))

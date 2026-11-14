@@ -910,15 +910,23 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
         setDismissedSuggestionValue(localInputValue)
         return
       }
-      if (unmodified && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      // A single row has nowhere to move to: the arrows keep moving the caret.
+      if (
+        unmodified &&
+        suggestions.items.length > 1 &&
+        (event.key === 'ArrowDown' || event.key === 'ArrowUp')
+      ) {
         event.preventDefault()
         const count = suggestions.items.length
         const step = event.key === 'ArrowDown' ? 1 : count - 1
         setSuggestionCursor({ key: suggestions.key, index: (activeSuggestionIndex + step) % count })
         return
       }
-      // A command typed in full still runs on Enter, exactly as without the list.
-      if (unmodified && (event.key === 'Tab' || (event.key === 'Enter' && !item.typedInFull))) {
+      // A command typed in full still runs on Enter, exactly as without the list, unless it
+      // needs arguments: then Enter completes it with the trailing space instead of sending it.
+      const runsAsTyped =
+        item.typedInFull && !(item.kind === 'command' && item.argumentsRequired)
+      if (unmodified && (event.key === 'Tab' || (event.key === 'Enter' && !runsAsTyped))) {
         event.preventDefault()
         acceptSuggestion(item)
         return

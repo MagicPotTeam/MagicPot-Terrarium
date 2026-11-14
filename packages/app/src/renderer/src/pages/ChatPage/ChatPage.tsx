@@ -8573,7 +8573,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionsRef.current.find(session => session.id === id) === expected && !loadingSessionIdsRef.current.has(id) &&
         !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) && !hasSessionDeleteTombstone(id, storageScope)
       void scanMissingLocalImages(expected.messages, paths => api().svcShell.fileExistsBatch(paths)).then(scan => {
-        if (current()) setImageRepairView({ scope: inspectionScope, session: expected, scan, confirmed: false })
+        if (!current()) return
+        setImageRepairView({ scope: inspectionScope, session: expected, scan, confirmed: false })
+        // The command ran: clear its draft (unless it was edited meanwhile) so the "/" list
+        // does not reopen over the result.
+        if (inputValueRef.current === input) { setInputValue(''); setComposerClearVersion(version => version + 1) }
       }).catch(() => { if (current()) notifyWarning(t('chat.image_existence_check_unavailable', { defaultValue: 'Image existence check unavailable. No context was changed.' })) })
         .finally(() => { imageRepairScanPendingRef.current = false })
       return

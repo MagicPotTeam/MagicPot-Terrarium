@@ -52,6 +52,19 @@ describe('resolveComposerSuggestions', () => {
     expect(resolveComposerSuggestions('/stat', commands)!.items[0].typedInFull).toBe(false)
   })
 
+  it('marks the commands that cannot run without arguments', () => {
+    const required = resolveComposerSuggestions('/', commands)!
+      .items.filter((item) => item.kind === 'command' && item.argumentsRequired)
+      .map((item) => item.label)
+    expect(required).toEqual(
+      commands.filter((command) => command.argumentsRequired).map((command) => `/${command.name}`)
+    )
+    expect(required).toContain('/edit')
+    expect(resolveComposerSuggestions('/status', commands)!.items[0]).toMatchObject({
+      argumentsRequired: false
+    })
+  })
+
   it('never suggests anything for an "@" draft: "@name task" is plain text for the composer', () => {
     expect(labels('@')).toBeNull()
     expect(labels('@设')).toBeNull()
