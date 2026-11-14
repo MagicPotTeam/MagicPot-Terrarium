@@ -19,6 +19,7 @@ import { cloneChatSessionForReplay } from './cloneChatSessionForReplay'
 import { mergeToolCheckpoint } from './chatToolCheckpoint'
 import { getChatToolLoadingStatus } from './chatToolLoadingStatus'
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import {
   Box,
@@ -335,6 +336,12 @@ interface ChatPageProps {
   threadSubRowsHost?: HTMLElement | null
   /** Reports the sub-row that is open (its title), or null for the main conversation. */
   onThreadSubRowChange?: (title: string | null) => void
+  /**
+   * Host in the Agent column's header for the model pill (null until it is mounted). When the
+   * prop is given, the model selector leaves the composer and the active conversation renders
+   * its pill into the host.
+   */
+  modelPillHost?: HTMLElement | null
 }
 
 export interface ChatPageWorkspaceMenu {
@@ -895,9 +902,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   existingConversationOpen,
   workspaceMenu,
   threadSubRowsHost,
-  onThreadSubRowChange
+  onThreadSubRowChange,
+  modelPillHost
 }) => {
   const queueResumeNoticeId = React.useId()
+  // The Agent column shows the model in its header instead of inside the composer.
+  const modelInHeader = compact && modelPillHost !== undefined
   const teamVisibilityRef = useRef({active, epoch:0})
   if (teamVisibilityRef.current.active !== active) teamVisibilityRef.current = {active, epoch:teamVisibilityRef.current.epoch+1}
   const protectionRef = useRef(existingConversationProtection)
@@ -5799,6 +5809,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         active={active}
         compact
         composerStyle
+        headerPill={modelInHeader}
         memberModel={selectedMemberModel}
         memberReasoningEffort={memberReasoningEffort}
         memberAvailableReasoningEfforts={memberProfileCapabilities.reasoningEfforts}
@@ -5820,6 +5831,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       availableProfiles,
       currentSession?.teamLeadId,
       isAgentSkillSelected,
+      modelInHeader,
       selectedCustomSkill,
       selectedMemberModel,
       memberReasoningEffort,
@@ -9840,7 +9852,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 suggestionCommands={composerSuggestionCommands}
                 suggestionSkills={compact ? composerSuggestionSkills : undefined}
                 onSelectSuggestedSkill={handleSelectSkill}
-                modelSelectorSlot={chatComposerControlSlot}
+                modelSelectorSlot={modelInHeader ? undefined : chatComposerControlSlot}
                 onClearSkill={() => handleSelectSkill(null)}
                 onCompressContext={handleCompressCurrentContext}
                 disableCompressContext={!canCompressCurrentContext}
@@ -9867,6 +9879,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
           {(showingSide || isSkillPickerOpen) && isLoading && <Button size="small" onClick={handleStopGenerating}>{t('chat.stop_generating')}</Button>}
           </Box>
         </Box>
+
+        {/* Only the active conversation shows its model pill in the column header. */}
+        {modelInHeader && active && modelPillHost
+          ? createPortal(chatComposerControlSlot, modelPillHost)
+          : null}
 
         {/* 图片右键菜单 */}
         <ImageContextMenu

@@ -1159,6 +1159,10 @@
       "remove_attachment": "Remove {{name}}",
       "remove_skill": "Clear skill {{name}}"
     },
+    "model_pill": {
+      "label": "Model: {{model}}",
+      "with_effort": "{{label}}, reasoning effort: {{effort}}"
+    },
     "agent_scratchpad": {
       "command_usage": "User composer only: /scratchpad or /pad with no arguments. This read-only view never changes notes or calls the parent model.",
       "command_unavailable": "Scratchpad view unavailable. Use the active loaded local original conversation, without attachments, hidden context, a side view or a selected skill. No parent-model fallback.",
@@ -1454,7 +1458,7 @@
     "new_conversation": "New Conversation",
     "messages": "messages",
     "model": "Model",
-    "member_model_inherited": "Inherited from lead: {{model}}",
+    "member_model_inherited": "Inherits lead: {{model}}",
     "member_model_selected": "Member model: {{model}}",
     "member_model_unavailable": "Member model unavailable",
     "member_model_save_busy": "Wait for the member and lead to finish saving and running before choosing a model.",

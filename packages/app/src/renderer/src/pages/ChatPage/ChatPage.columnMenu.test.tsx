@@ -1,5 +1,5 @@
 import React from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -88,9 +88,14 @@ vi.mock('./components/ChatComposer', () => ({
     onSend,
     selectedSkillName,
     suggestionSkills,
-    onSelectSuggestedSkill
+    onSelectSuggestedSkill,
+    modelSelectorSlot,
+    layout
   }: any) => (
     <>
+      <div data-testid="composer-model-slot" data-layout={layout}>
+        {modelSelectorSlot}
+      </div>
       <ul data-testid="composer-add-menu">{addMenuSlot?.(h.closeMenu)}</ul>
       <output data-testid="selected-skill">{selectedSkillName ?? ''}</output>
       {(suggestionSkills ?? []).map((skill: { id: string; name: string }) => (
@@ -118,7 +123,13 @@ vi.mock('./components/ChatMessageList', () => ({
   default: ({ currentSession }: any) => <pre data-testid="session">{currentSession?.id}</pre>
 }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
-vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
+vi.mock('./components/ChatPrimarySelection', () => ({
+  default: ({ headerPill, active }: { headerPill?: boolean; active?: boolean }) => (
+    <button data-testid="model-selector" data-header-pill={String(Boolean(headerPill))}>
+      {active ? 'active model' : 'inactive model'}
+    </button>
+  )
+}))
 vi.mock('./components/ChatSkillPicker', () => ({
   default: () => <div data-testid="skill-picker-takeover" />
 }))
@@ -381,6 +392,62 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
       fireEvent.change(screen.getByTestId('input'), { target: { value: '/skills' } })
       fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
       expect(screen.getByTestId('skill-picker-takeover')).toBeInTheDocument()
+    })
+  })
+
+  describe('model pill in the column header', () => {
+    const renderWithHost = (props: { active?: boolean; host?: HTMLElement | null }) => (
+      <MemoryRouter>
+        <ThemeProvider theme={createTheme()}>
+          <ChatPage
+            compact
+            active={props.active ?? true}
+            storageScope="menu-fixture"
+            route={route}
+            {...('host' in props ? { modelPillHost: props.host } : {})}
+          />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const header = () => {
+      const host = document.createElement('div')
+      document.body.appendChild(host)
+      return host
+    }
+
+    it("renders the active conversation's model selector into the header host, not the composer", async () => {
+      const host = header()
+      const view = render(renderWithHost({ host }))
+      await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+
+      expect(screen.getByTestId('composer-model-slot')).toHaveAttribute('data-layout', 'column')
+      expect(screen.getByTestId('composer-model-slot')).toBeEmptyDOMElement()
+      expect(host.children).toHaveLength(1)
+      expect(within(host).getByTestId('model-selector')).toHaveAttribute('data-header-pill', 'true')
+      expect(screen.getAllByTestId('model-selector')).toHaveLength(1)
+
+      // An inactive pane leaves the host to the pane that is active.
+      view.rerender(renderWithHost({ host, active: false }))
+      expect(host).toBeEmptyDOMElement()
+      expect(screen.queryByTestId('model-selector')).toBeNull()
+      view.rerender(renderWithHost({ host, active: true }))
+      expect(within(host).getByTestId('model-selector')).toHaveTextContent('active model')
+      host.remove()
+    })
+
+    it('shows no model selector while the header host is not mounted yet', async () => {
+      render(renderWithHost({ host: null }))
+      await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+      expect(screen.queryByTestId('model-selector')).toBeNull()
+    })
+
+    it('keeps the selector in the composer where there is no column header', async () => {
+      render(renderWithHost({}))
+      await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+      const selector = within(screen.getByTestId('composer-model-slot')).getByTestId(
+        'model-selector'
+      )
+      expect(selector).toHaveAttribute('data-header-pill', 'false')
     })
   })
 

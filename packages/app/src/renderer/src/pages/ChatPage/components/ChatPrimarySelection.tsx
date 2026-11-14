@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react'
-import { Box, Chip, Typography, Button, Menu, MenuItem } from '@mui/material'
-import type { Theme } from '@mui/material/styles'
+import React, { useEffect, useId, useState } from 'react'
+import { Box, ButtonBase, Chip, Typography, Button, Menu, MenuItem } from '@mui/material'
+import { alpha, useTheme, type Theme } from '@mui/material/styles'
 import BoltIcon from '@mui/icons-material/Bolt'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import CheckIcon from '@mui/icons-material/Check'
@@ -10,6 +10,10 @@ import {
   normalizeReasoningEffort,
   type LLMReasoningEffort
 } from '@shared/llm'
+import {
+  getAgentColumnRaisedSurface,
+  getAgentColumnTokens
+} from '@renderer/components/agentColumnTokens'
 
 export type ChatPrimarySelectionProfile = {
   id: string
@@ -34,12 +38,44 @@ type ChatPrimarySelectionProps = {
     pending?: boolean
   }
   composerStyle?: boolean
+  /**
+   * The Agent column's header pill: one bordered button (model, effort, chevron) that opens one
+   * menu with the models and the reasoning efforts. Nothing is shown for an agent skill.
+   */
+  headerPill?: boolean
   /** All three must be supplied for the caller-resolved effective member profile. */
   memberReasoningEffort?: LLMReasoningEffort | null
   memberAvailableReasoningEfforts?: LLMReasoningEffort[]
   onSelectMemberReasoningEffort?: (effort: LLMReasoningEffort | undefined) => void
   onSelectProfile: (profileId: string | null) => void
   onSelectReasoningEffort?: (effort: LLMReasoningEffort | undefined) => void
+}
+
+/**
+ * Group heading of the pill's menu. `disabled` only tells MUI's MenuList to leave it out of
+ * the keyboard order (initial focus and arrow keys); it is not forwarded to the DOM.
+ */
+const PillMenuHeading: React.FC<{ children: React.ReactNode; disabled: true }> = ({ children }) => {
+  const theme = useTheme()
+  const tokens = getAgentColumnTokens(theme)
+  return (
+    <Box
+      component="li"
+      role="presentation"
+      sx={{
+        padding: '4px 12px',
+        fontSize: tokens.fontSize.micro,
+        fontWeight: 600,
+        lineHeight: '16px',
+        letterSpacing: '0.025em',
+        textTransform: 'uppercase',
+        color: tokens.muted,
+        userSelect: 'none'
+      }}
+    >
+      {children}
+    </Box>
+  )
 }
 
 const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
@@ -53,6 +89,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   active = true,
   memberModel,
   composerStyle = false,
+  headerPill = false,
   memberReasoningEffort,
   memberAvailableReasoningEfforts,
   onSelectMemberReasoningEffort,
@@ -64,6 +101,8 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
     const value = t(key, { defaultValue: fallback })
     return value === key ? fallback : value
   }
+  const theme = useTheme()
+  const pillMenuId = useId()
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null)
   const [reasoningAnchorEl, setReasoningAnchorEl] = useState<null | HTMLElement>(null)
 
@@ -163,11 +202,240 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           }
         }
 
+  if (headerPill) {
+    if (!memberModel && isAgentSkillSelected) return null
+    const tokens = getAgentColumnTokens(theme)
+    const memberUsable =
+      Boolean(memberModel) &&
+      active &&
+      memberModel?.state !== 'unavailable' &&
+      !memberModel?.disabled &&
+      !memberModel?.pending
+    const memberSelectableIds = memberModel?.selectableProfileIds
+    // The models and efforts this pill may change; the caller revalidates every choice.
+    const pickableProfiles = memberModel
+      ? memberUsable && memberModel.onSelectProfile
+        ? memberSelectableIds
+          ? availableProfiles.filter((profile) => memberSelectableIds.includes(profile.id))
+          : availableProfiles
+        : []
+      : availableProfiles
+    const showsEffort = memberModel
+      ? memberReasoningEffort !== undefined &&
+        memberAvailableReasoningEfforts !== undefined &&
+        Boolean(onSelectMemberReasoningEffort) &&
+        reasoningEfforts.length > 0
+      : reasoningEfforts.length > 0 && Boolean(onSelectReasoningEffort)
+    const pickableEfforts = showsEffort && (!memberModel || memberUsable) ? reasoningEfforts : []
+    const pillText = memberModel
+      ? memberModel.state === 'unavailable'
+        ? t('chat.member_model_unavailable', { defaultValue: 'Member model unavailable' })
+        : memberModel.state === 'inherited'
+          ? t('chat.member_model_inherited', {
+              defaultValue: 'Inherits lead: {{model}}',
+              model: memberModel.label
+            })
+          : t('chat.member_model_selected', {
+              defaultValue: 'Member model: {{model}}',
+              model: memberModel.label
+            })
+      : displayLabel
+    const pillName = memberModel ? pillText : t('chat.model_pill.label', { model: pillText })
+    const pillLabel = showsEffort
+      ? t('chat.model_pill.with_effort', { label: pillName, effort: displayReasoningLabel })
+      : pillName
+    const pillDisabled = pickableProfiles.length === 0 && pickableEfforts.length === 0
+    const menuOpen = active && Boolean(anchorEl) && !pillDisabled
+    const isModelChecked = (profile: ChatPrimarySelectionProfile) =>
+      memberModel
+        ? memberModel.state === 'selected' && profile.model_name === memberModel.label
+        : profile.id === selectedProfileId
+    // Keyboard focus lands on the current model when the menu opens, else on the current effort.
+    const hasCheckedModel = pickableProfiles.some(isModelChecked)
+    const renderOption = (
+      key: string,
+      label: string,
+      checked: boolean,
+      focusOnOpen: boolean,
+      choose: () => void
+    ) => (
+      <MenuItem
+        key={key}
+        role="menuitemradio"
+        aria-checked={checked}
+        selected={focusOnOpen}
+        onClick={() => {
+          choose()
+          handleClose()
+        }}
+        sx={{
+          gap: 1,
+          minHeight: 0,
+          padding: '6px 12px',
+          fontSize: tokens.fontSize.small,
+          color: tokens.text,
+          '&.Mui-selected': { backgroundColor: 'transparent' },
+          '&:hover, &.Mui-focusVisible, &.Mui-selected:hover, &.Mui-selected.Mui-focusVisible': {
+            backgroundColor: tokens.hover
+          }
+        }}
+      >
+        <Box
+          component="span"
+          sx={{
+            flex: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          {label}
+        </Box>
+        {checked ? <CheckIcon aria-hidden sx={{ flex: 'none', fontSize: 14 }} /> : null}
+      </MenuItem>
+    )
+
+    return (
+      <>
+        <ButtonBase
+          type="button"
+          disableRipple
+          data-testid="chat-model-pill"
+          aria-label={pillLabel}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-controls={menuOpen ? pillMenuId : undefined}
+          aria-busy={memberModel?.pending || undefined}
+          disabled={pillDisabled}
+          title={pillText}
+          onClick={handleOpen}
+          sx={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: `${tokens.space.md}px`,
+            minWidth: 0,
+            maxWidth: '100%',
+            minHeight: 28,
+            padding: '4px 10px',
+            border: `1px solid ${alpha(tokens.muted, 0.25)}`,
+            borderRadius: `${tokens.radius.pill}px`,
+            backgroundColor: 'transparent',
+            color: tokens.text,
+            fontFamily: 'inherit',
+            transition: 'border-color 100ms ease, background-color 100ms ease',
+            '&:hover': {
+              borderColor: alpha(tokens.muted, 0.5),
+              backgroundColor: alpha(tokens.muted, 0.06)
+            },
+            '&.Mui-focusVisible': tokens.focusRing,
+            '&.Mui-disabled': { opacity: tokens.disabledOpacity }
+          }}
+        >
+          <Box
+            component="span"
+            sx={{
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              fontFamily: tokens.monoFont,
+              fontSize: tokens.fontSize.caption,
+              lineHeight: '18px'
+            }}
+          >
+            {pillText}
+          </Box>
+          {showsEffort ? (
+            <Box
+              component="span"
+              data-testid="chat-model-pill-effort"
+              sx={{
+                flex: 'none',
+                fontSize: tokens.fontSize.micro,
+                lineHeight: '18px',
+                color: tokens.muted
+              }}
+            >
+              {displayReasoningLabel}
+            </Box>
+          ) : null}
+          <ExpandMoreIcon aria-hidden sx={{ flex: 'none', fontSize: 13, color: tokens.muted }} />
+        </ButtonBase>
+        <Menu
+          id={pillMenuId}
+          anchorEl={anchorEl}
+          open={menuOpen}
+          onClose={handleClose}
+          anchorOrigin={{ horizontal: 'left', vertical: 'bottom' }}
+          transformOrigin={{ horizontal: 'left', vertical: 'top' }}
+          marginThreshold={8}
+          slotProps={{
+            paper: {
+              sx: {
+                mt: '4px',
+                minWidth: 'min(200px, 100%)',
+                // Never wider than the header slot the pill sits in, so it stays in the column.
+                maxWidth: anchorEl?.parentElement?.clientWidth || 360,
+                maxHeight: 'min(60vh, 480px)',
+                border: `1px solid ${tokens.border}`,
+                borderRadius: `${tokens.radius.content}px`,
+                bgcolor: getAgentColumnRaisedSurface(theme),
+                boxShadow: '0 10px 15px rgba(0,0,0,0.1)'
+              }
+            }
+          }}
+        >
+          {pickableProfiles.length > 0
+            ? [
+                <PillMenuHeading key="models-heading" disabled>
+                  {t('chat.model')}
+                </PillMenuHeading>,
+                ...pickableProfiles.map((profile) =>
+                  renderOption(
+                    `model:${profile.id}`,
+                    profile.model_name,
+                    isModelChecked(profile),
+                    isModelChecked(profile),
+                    () =>
+                      memberModel
+                        ? memberModel.onSelectProfile?.(profile.id)
+                        : onSelectProfile(profile.id)
+                  )
+                )
+              ]
+            : null}
+          {pickableEfforts.length > 0
+            ? [
+                <PillMenuHeading key="efforts-heading" disabled>
+                  {translate('chat.reasoning_label', 'Reasoning effort')}
+                </PillMenuHeading>,
+                ...[undefined, ...pickableEfforts].map((effort) =>
+                  renderOption(
+                    `effort:${effort ?? 'default'}`,
+                    effort
+                      ? getReasoningEffortLabel(effort)
+                      : translate('chat.reasoning_default', 'Default'),
+                    effort === normalizedSelectedEffort,
+                    !hasCheckedModel && effort === normalizedSelectedEffort,
+                    () =>
+                      memberModel
+                        ? onSelectMemberReasoningEffort?.(effort)
+                        : onSelectReasoningEffort?.(effort)
+                  )
+                )
+              ]
+            : null}
+        </Menu>
+      </>
+    )
+  }
+
   if (memberModel) {
     const label = memberModel.state === 'unavailable'
       ? t('chat.member_model_unavailable', { defaultValue: 'Member model unavailable' })
       : memberModel.state === 'inherited'
-        ? t('chat.member_model_inherited', { defaultValue: 'Inherited from lead: {{model}}', model: memberModel.label })
+        ? t('chat.member_model_inherited', { defaultValue: 'Inherits lead: {{model}}', model: memberModel.label })
         : t('chat.member_model_selected', { defaultValue: 'Member model: {{model}}', model: memberModel.label })
     const canSelect = active && memberModel.state !== 'unavailable' && !memberModel.disabled && !memberModel.pending && Boolean(memberModel.onSelectProfile)
     const selectableProfileIds = memberModel.selectableProfileIds

@@ -205,17 +205,46 @@ describe('AgentWorkspace', () => {
     ])
   })
 
-  it('keeps the workspace heading on one line in a header that holds only the title and subtitle', () => {
+  it('keeps the workspace heading on one line in a header that holds the title block and the model slot', () => {
     renderWorkspace('海报项目')
     const heading = screen.getByText('agent_workspace.title')
     expect(getComputedStyle(heading).whiteSpace).toBe('nowrap')
     expect(getComputedStyle(heading).textOverflow).toBe('ellipsis')
-    // No skills button host, no buttons, nothing but the two text lines.
+    // No skills button host and no buttons of its own: the two text lines, then the slot that
+    // the active conversation fills with its model pill.
     expect(document.getElementById('agent-workspace-skill-portal')).toBeNull()
-    const header = heading.parentElement!.parentElement!
+    const header = screen.getByTestId('agent-workspace-header')
+    expect(heading.parentElement!.parentElement).toBe(header)
     expect(header.querySelector('button, [role="button"]')).toBeNull()
-    expect(header.children).toHaveLength(1)
+    expect(Array.from(header.children)).toEqual([
+      heading.parentElement,
+      screen.getByTestId('agent-workspace-model-host')
+    ])
     expect(header).toHaveTextContent(/^agent_workspace\.title海报项目$/)
+  })
+
+  it('wraps the header and hands every pane the same model slot, which stays empty without a pill', async () => {
+    storePanes(2)
+    renderWorkspace('海报项目')
+    const header = screen.getByTestId('agent-workspace-header')
+    const host = screen.getByTestId('agent-workspace-model-host')
+    expect(getComputedStyle(header).flexWrap).toBe('wrap')
+    expect(getComputedStyle(header).gap).toBe('8px')
+    expect(getComputedStyle(header).padding).toBe('10px 12px')
+    expect(getComputedStyle(host).maxWidth).toBe('100%')
+    expect(host).toBeEmptyDOMElement()
+
+    await waitFor(() => {
+      type PaneProps = { storageScope: string; modelPillHost: HTMLElement | null; active: boolean }
+      const latest = new Map<string, PaneProps>()
+      for (const [props] of chatPageMock.mock.calls) {
+        latest.set((props as PaneProps).storageScope, props as PaneProps)
+      }
+      expect([...latest.keys()]).toEqual(['project-1.agent-1', 'project-1.agent-2'])
+      for (const props of latest.values()) expect(props.modelPillHost).toBe(host)
+      // Only one of them is active, so only one conversation fills the slot.
+      expect([...latest.values()].filter((props) => props.active)).toHaveLength(1)
+    })
   })
 
   it('keeps trace and canvas target out of the header and hands them to the conversation menu', async () => {
@@ -1386,7 +1415,7 @@ describe('AgentWorkspace', () => {
       expect(subtitle).toHaveTextContent('Poster campaign')
       expect(getComputedStyle(subtitle).fontSize).toBe('11px')
       expect(getComputedStyle(subtitle).textOverflow).toBe('ellipsis')
-      expect(getComputedStyle(screen.getByText('agent_workspace.title')).fontSize).toBe('13px')
+      expect(getComputedStyle(screen.getByText('agent_workspace.title')).fontSize).toBe('14px')
       expect(getComputedStyle(screen.getByText('agent_workspace.title')).fontWeight).toBe('600')
       unmount()
 

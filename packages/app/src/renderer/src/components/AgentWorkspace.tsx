@@ -549,6 +549,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   // Per pane: the host under its thread row (while the list is open), the open sub-row's title
   // and how many sub-rows the pane's chat page shows in that host.
   const [subRowHosts, setSubRowHosts] = useState<Record<string, HTMLElement | null>>({})
+  // Header slot of the model pill; the active pane's chat page renders its pill into it.
+  const [modelPillHost, setModelPillHost] = useState<HTMLElement | null>(null)
   const [paneSubRowTitles, setPaneSubRowTitles] = useState<Record<string, string | null>>({})
   const [paneSubRowCounts, setPaneSubRowCounts] = useState<Record<string, number>>({})
   const subRowHostRefs = useRef(new Map<string, (element: HTMLElement | null) => void>())
@@ -1127,12 +1129,14 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
       })}
     >
       <Box
+        data-testid="agent-workspace-header"
         sx={(theme) => ({
+          // A wrapping row: the model pill drops onto its own line when it does not fit.
           display: 'flex',
+          flexWrap: 'wrap',
           alignItems: 'center',
-          gap: 1,
-          px: 1.5,
-          py: 0.75,
+          gap: '8px',
+          padding: '10px 12px',
           minHeight: 49.9,
           borderBottom: `1px solid ${theme.palette.divider}`,
           backgroundColor: theme.palette.mode === 'dark' ? '#1a1a1a' : '#eaecf5',
@@ -1140,16 +1144,17 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           position: 'relative',
           zIndex: 3,
           overflow: 'visible',
+          containerType: 'inline-size',
           WebkitAppRegion: 'no-drag'
         })}
       >
-        <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
           <Typography
             variant="caption"
             sx={{
-              fontSize: columnTokens.fontSize.base,
+              fontSize: 14,
               fontWeight: 600,
-              lineHeight: 1.3,
+              lineHeight: 1.2,
               color: 'text.primary',
               whiteSpace: 'nowrap',
               overflow: 'hidden',
@@ -1175,6 +1180,20 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
             </Typography>
           )}
         </Box>
+        {/* Filled by the active pane's chat page; empty (and out of the layout) without one. */}
+        <Box
+          ref={setModelPillHost}
+          data-testid="agent-workspace-model-host"
+          sx={{
+            display: 'flex',
+            flex: '0 1 auto',
+            minWidth: 0,
+            maxWidth: '100%',
+            '&:empty': { display: 'none' },
+            // In a narrow column the pill always takes its own line, as wide as it needs.
+            '@container (max-width: 560px)': { flex: '1 1 100%' }
+          }}
+        />
       </Box>
 
       <Box
@@ -1433,6 +1452,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 existingConversationOpen={isActivePane && openChatInput?.handle.target.paneId === pane.id ? openChatInput : undefined}
                 workspaceMenu={workspaceMenu}
                 threadSubRowsHost={subRowHosts[pane.id] ?? null}
+                modelPillHost={modelPillHost}
                 onThreadSubRowChange={getSubRowChangeHandler(pane.id)}
               />
               </AgentThreadSubRowPresenceContext.Provider>
