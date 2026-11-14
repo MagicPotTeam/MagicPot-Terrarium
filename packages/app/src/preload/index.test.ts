@@ -191,7 +191,8 @@ describe('preload capability boundary', () => {
     canvasScreenshot.closeFloatingWindow('floating-1')
     canvasScreenshot.sendFloatingToCanvas('floating-1')
     const remove = canvasScreenshot.onAddImage(callback)
-    const listener = onMock.mock.calls[0]?.[1]
+    // Found by channel: the preload also listens for the renderer recovery notice from the start.
+    const listener = onMock.mock.calls.find(([channel]) => channel === 'canvas:add-image')?.[1]
     listener({}, 'data:image/png;base64,abc')
     remove()
 
@@ -213,5 +214,49 @@ describe('preload capability boundary', () => {
     expect(onMock).toHaveBeenCalledWith('canvas:add-image', listener)
     expect(callback).toHaveBeenCalledWith('data:image/png;base64,abc')
     expect(removeListenerMock).toHaveBeenCalledWith('canvas:add-image', listener)
+  })
+
+  it('keeps the renderer recovery notice until the app shell subscribes and delivers it once', () => {
+    const appEvents = exposeMock.mock.calls.find(([name]) => name === 'appEvents')?.[1]
+    const recoveryListener = onMock.mock.calls.find(
+      ([channel]) => channel === 'app:renderer-recovered'
+    )?.[1]
+    expect(recoveryListener).toBeTypeOf('function')
+    // Listening starts before the page can subscribe (the event comes on did-finish-load).
+    expect(onMock.mock.invocationCallOrder[0]).toBeLessThan(exposeMock.mock.invocationCallOrder[0])
+
+    recoveryListener({}, { reason: 'crashed', exitCode: 5, diedAt: 1000 })
+    const first = vi.fn()
+    const unsubscribe = appEvents.onRendererRecovered(first)
+    expect(first).toHaveBeenCalledExactlyOnceWith({ reason: 'crashed', exitCode: 5, diedAt: 1000 })
+
+    const second = vi.fn()
+    appEvents.onRendererRecovered(second)
+    expect(second).not.toHaveBeenCalled()
+
+    recoveryListener({}, { reason: 'oom', exitCode: -536870904, diedAt: 2000 })
+    expect(first).toHaveBeenCalledTimes(2)
+    expect(second).toHaveBeenCalledExactlyOnceWith({ reason: 'oom', exitCode: -536870904, diedAt: 2000 })
+    unsubscribe()
+    recoveryListener({}, { reason: 'crashed', exitCode: 5, diedAt: 3000 })
+    expect(first).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    null,
+    'crashed',
+    { reason: 'crashed', exitCode: 5 },
+    { reason: 'crashed', exitCode: 1.5, diedAt: 1 },
+    { reason: '<b>x</b>', exitCode: 1, diedAt: 1 },
+    { reason: 'x'.repeat(65), exitCode: 1, diedAt: 1 }
+  ])('drops a recovery notice of the wrong shape: %j', (payload) => {
+    const appEvents = exposeMock.mock.calls.find(([name]) => name === 'appEvents')?.[1]
+    const recoveryListener = onMock.mock.calls.find(
+      ([channel]) => channel === 'app:renderer-recovered'
+    )?.[1]
+    recoveryListener({}, payload)
+    const callback = vi.fn()
+    appEvents.onRendererRecovered(callback)
+    expect(callback).not.toHaveBeenCalled()
   })
 })

@@ -1,6 +1,10 @@
 import { dialog, type BrowserWindow, type RenderProcessGoneDetails } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { isAppQuitting } from './appQuitState'
+import {
+  RENDERER_RECOVERED_CHANNEL,
+  type RendererRecoveredEvent
+} from '@shared/utils/rendererRecoveryEvent'
 
 /** Why the recovery dialog is shown instead of an automatic reload. */
 export type RendererRecoveryPromptKind = 'not-automatic' | 'budget-exhausted'
@@ -17,6 +21,7 @@ type RendererDiagnosticsOptions = {
   /** True while the app is quitting or the window is going away: nothing may be recovered then. */
   isShuttingDown?: () => boolean
   monotonicNow?: () => number
+  wallClockNow?: () => number
 }
 
 // Exits that are safe to answer with an automatic reload (within the budget below).
@@ -164,7 +169,18 @@ export function attachRendererDiagnostics(
   options: RendererDiagnosticsOptions = {}
 ): void {
   const now = options.monotonicNow ?? (() => performance.now())
-  const recoverRenderer = options.recoverRenderer ?? reloadRenderer
+  const wallClockNow = options.wallClockNow ?? (() => Date.now())
+  const reloadWindow = options.recoverRenderer ?? reloadRenderer
+  // Set when a recovery reload was started; sent once to the page that the reload brings up.
+  let pendingRecoveryNotice: RendererRecoveredEvent | null = null
+  const recoverRenderer = (_window: BrowserWindow, details: RenderProcessGoneDetails) => {
+    pendingRecoveryNotice = {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      diedAt: wallClockNow()
+    }
+    reloadWindow(window, details)
+  }
   let lastObservedTime = 0
   let automaticRecoveryTimes: number[] = []
   let recoveryPromptPending = false
@@ -228,6 +244,16 @@ export function attachRendererDiagnostics(
 
   window.webContents.on('did-finish-load', () => {
     console.info('[App] Renderer finished loading')
+    const notice = pendingRecoveryNotice
+    if (!notice || !isWindowUsable()) return
+    pendingRecoveryNotice = null
+    // Tells the page why it was restarted. The preload keeps it until the app shell listens;
+    // nothing is resent: the interrupted reply stays interrupted.
+    try {
+      window.webContents.send(RENDERER_RECOVERED_CHANNEL, notice)
+    } catch {
+      console.error('[App] Failed to send the renderer recovery notice')
+    }
   })
 
   window.webContents.on(

@@ -14,6 +14,7 @@ import ManagedComfyProcessBridge from './components/ManagedComfyProcessBridge'
 import { detectManagedComfyProcess } from './components/managedComfyDetectionCoordinator'
 import MagicAgentApprovalCenter from './components/MagicAgentApprovalCenter'
 import ComfyBatchJobCenter from './components/ComfyBatchJobCenter'
+import RendererRecoveryNotice from './components/RendererRecoveryNotice'
 import { ensureComfyBatchJobStore } from './pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState'
 import { useComfyEventCallback } from './hooks/useComfyEvent'
 import { handleComfyExecutionActivityEvent } from './utils/comfyExecutionActivity'
@@ -271,6 +272,7 @@ function App(): React.JSX.Element {
         <ComfyBatchJobStoreBridge />
         <MagicAgentApprovalCenter />
         <ComfyBatchJobCenter />
+        <RendererRecoveryNotice />
         <Layout />
       </HashRouter>
     </DndProvider>

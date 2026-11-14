@@ -2352,5 +2352,13 @@
     "crop": "Crop",
     "download": "Download",
     "close": "Close"
+  },
+  "app_shell": {
+    "renderer_recovery": {
+      "title": "The window was restarted",
+      "body": "The display process stopped unexpectedly, so the window was reloaded. If a reply was being generated, it was interrupted and has not been resent. Your drafts are kept.",
+      "details": "Reason: {{reason}} · exit code {{exitCode}} · {{time}}",
+      "dismiss": "Dismiss"
+    }
   }
 }

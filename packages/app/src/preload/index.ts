@@ -6,6 +6,11 @@ import type { AppEventBridge, BuiltInPath, CanvasScreenshotBridge } from '@share
 import type { Api } from '@shared/api'
 import { winBridge } from './winBridge'
 import { createExternalImageDropAuthorization } from './externalImageDropLease'
+import {
+  parseRendererRecoveredEvent,
+  RENDERER_RECOVERED_CHANNEL,
+  type RendererRecoveredEvent
+} from '@shared/utils/rendererRecoveryEvent'
 
 // 渲染进程的自定义 API
 const api: Api = newApiIpc()
@@ -107,9 +112,34 @@ function subscribeToMainEvent(channel: 'app:close-tab' | 'qapp:dir-changed', cb:
   return () => ipcRenderer.removeListener(channel, listener)
 }
 
+// The recovery notice is sent on did-finish-load, which can come before the app shell has
+// subscribed. Listen from the start of this page and keep the event for the first subscriber.
+let undeliveredRendererRecovery: RendererRecoveredEvent | null = null
+const rendererRecoveryListeners = new Set<(event: RendererRecoveredEvent) => void>()
+ipcRenderer.on(RENDERER_RECOVERED_CHANNEL, (_event, payload: unknown) => {
+  const recovery = parseRendererRecoveredEvent(payload)
+  if (!recovery) return
+  if (rendererRecoveryListeners.size === 0) {
+    undeliveredRendererRecovery = recovery
+    return
+  }
+  for (const listener of rendererRecoveryListeners) listener(recovery)
+})
+
+function subscribeToRendererRecovery(cb: (event: RendererRecoveredEvent) => void): () => void {
+  rendererRecoveryListeners.add(cb)
+  const pending = undeliveredRendererRecovery
+  undeliveredRendererRecovery = null
+  if (pending) cb(pending)
+  return () => {
+    rendererRecoveryListeners.delete(cb)
+  }
+}
+
 const appEvents: AppEventBridge = {
   onCloseActiveTab: (cb) => subscribeToMainEvent('app:close-tab', cb),
-  onQAppDirectoryChanged: (cb) => subscribeToMainEvent('qapp:dir-changed', cb)
+  onQAppDirectoryChanged: (cb) => subscribeToMainEvent('qapp:dir-changed', cb),
+  onRendererRecovered: subscribeToRendererRecovery
 }
 
 async function authorizeLocalMediaFilePath(filePath: string): Promise<boolean> {

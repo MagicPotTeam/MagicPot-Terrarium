@@ -2352,5 +2352,13 @@
     "crop": "裁剪",
     "download": "下载",
     "close": "关闭"
+  },
+  "app_shell": {
+    "renderer_recovery": {
+      "title": "窗口已重新启动",
+      "body": "显示进程意外停止，窗口已重新加载。如果当时正在生成回复，该回复已中断，且没有自动重新发送。草稿已保留。",
+      "details": "原因：{{reason}} · 退出码 {{exitCode}} · {{time}}",
+      "dismiss": "知道了"
+    }
   }
 }

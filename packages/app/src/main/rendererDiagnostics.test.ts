@@ -33,6 +33,7 @@ type TestWindow = {
     on: ReturnType<typeof vi.fn>
     executeJavaScript: ReturnType<typeof vi.fn>
     reload: ReturnType<typeof vi.fn>
+    send: ReturnType<typeof vi.fn>
   }
 }
 
@@ -45,9 +46,14 @@ function createWindow(): TestWindow {
       isDestroyed: vi.fn(() => false),
       on: vi.fn(),
       executeJavaScript: vi.fn().mockResolvedValue(false),
-      reload: vi.fn()
+      reload: vi.fn(),
+      send: vi.fn()
     }
   }
+}
+
+function listenerOf(window: TestWindow, event: string) {
+  return window.webContents.on.mock.calls.find(([name]) => name === event)?.[1]
 }
 
 describe('rendererDiagnostics render-process-gone recovery', () => {
@@ -558,5 +564,82 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('[Renderer] echoed'))
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('[Renderer] echoed'))
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('timestamp-prefixed echo'))
+  })
+})
+
+describe('rendererDiagnostics recovery notice', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    resetAppQuittingForTests()
+  })
+
+  it('sends one notice with reason, exit code and time to the page the recovery reload brings up', () => {
+    const window = createWindow()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    attachRendererDiagnostics(window as never, { monotonicNow: () => 1000, wallClockNow: () => 1_700_000_000_000 })
+
+    // An ordinary load (first start, or a reload the user asked for) says nothing.
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).not.toHaveBeenCalled()
+
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    expect(window.webContents.send).not.toHaveBeenCalled()
+
+    listenerOf(window, 'did-finish-load')()
+    listenerOf(window, 'did-finish-load')()
+
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'crashed',
+      exitCode: 5,
+      diedAt: 1_700_000_000_000
+    })
+  })
+
+  it('sends the notice after a reload confirmed in the dialog, and nothing when the dialog is declined', async () => {
+    for (const response of [0, 1]) {
+      const window = createWindow()
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      vi.spyOn(console, 'info').mockImplementation(() => undefined)
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response, checkboxChecked: false })
+      attachRendererDiagnostics(window as never, { monotonicNow: () => 1000, wallClockNow: () => 42 })
+
+      listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+      await Promise.resolve()
+      await Promise.resolve()
+      listenerOf(window, 'did-finish-load')()
+
+      if (response === 0) {
+        expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+          reason: 'killed',
+          exitCode: 9,
+          diedAt: 42
+        })
+      } else {
+        expect(window.webContents.reload).not.toHaveBeenCalled()
+        expect(window.webContents.send).not.toHaveBeenCalled()
+      }
+    }
+  })
+
+  it('reloads once per death up to the budget and asks on the fourth death within 60 s', () => {
+    const window = createWindow()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    vi.mocked(dialog.showMessageBox).mockReset().mockReturnValue(new Promise(() => undefined))
+    let now = 0
+    attachRendererDiagnostics(window as never, { monotonicNow: () => now })
+    for (let death = 1; death <= 4; death += 1) {
+      now += 5_000
+      listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+      listenerOf(window, 'did-finish-load')()
+      expect(window.webContents.reload).toHaveBeenCalledTimes(Math.min(death, 3))
+      expect(dialog.showMessageBox).toHaveBeenCalledTimes(death === 4 ? 1 : 0)
+    }
+    expect(window.webContents.send).toHaveBeenCalledTimes(3)
   })
 })
