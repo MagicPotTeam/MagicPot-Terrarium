@@ -121,6 +121,7 @@ function string(value: unknown, field: string, optional = false): string {
     typeof value !== 'string' ||
     !value.trim() ||
     value.length > 4_096 ||
+    // eslint-disable-next-line no-control-regex -- Reject control characters in untrusted field values.
     /[\u0000-\u001f]/u.test(value)
   )
     throw new Error(`${field} must be a non-empty string without control characters.`)
