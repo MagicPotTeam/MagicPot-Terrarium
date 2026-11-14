@@ -328,6 +328,13 @@ interface ChatPageProps {
   existingConversationOpen?: ExistingConversationOpenInput
   /** Actions the Agent column owns and offers through this conversation's composer "+" menu. */
   workspaceMenu?: ChatPageWorkspaceMenu
+  /**
+   * Host under this thread's row of the Agent column's thread list (only while that list is
+   * open). The conversation renders its sub-rows (main + side conversations) into it.
+   */
+  threadSubRowsHost?: HTMLElement | null
+  /** Reports the sub-row that is open (its title), or null for the main conversation. */
+  onThreadSubRowChange?: (title: string | null) => void
 }
 
 export interface ChatPageWorkspaceMenu {
@@ -886,7 +893,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   active = true,
   existingConversationProtection,
   existingConversationOpen,
-  workspaceMenu
+  workspaceMenu,
+  threadSubRowsHost,
+  onThreadSubRowChange
 }) => {
   const queueResumeNoticeId = React.useId()
   const teamVisibilityRef = useRef({active, epoch:0})
@@ -9526,7 +9535,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} />
           <AgentThreadSkillsPanel ref={skillCommandRef} visible={isSkillPickerOpen || skillDetailsOpen} onClose={() => { setSkillDetailsOpen(false); setIsSkillPickerOpen(false) }} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
           <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
-          <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
+          <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} subRowsHost={threadSubRowsHost} onOpenSubRowChange={onThreadSubRowChange} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
             const id = currentSessionIdRef.current
             if (!id || id !== currentSessionId || storageScopeRef.current !== storageScope || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) throw new Error('Side snapshot no longer belongs to the current conversation.')
             return sessionsRef.current.find((session) => session.id === id)?.messages || []

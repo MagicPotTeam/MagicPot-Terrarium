@@ -1,6 +1,6 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
-import { Alert, Box, Button, IconButton, TextField, Typography } from '@mui/material'
-import { Add as AddIcon, ChevronRight, ExpandMore } from '@mui/icons-material'
+import { createPortal } from 'react-dom'
+import { Alert, Box, Button, TextField, Typography } from '@mui/material'
 import { useTranslation } from 'react-i18next'
 import type { AgentRouteLike } from '@shared/agent'
 import type { ChatMessage } from '@shared/llm/types'
@@ -8,15 +8,15 @@ import { AGENT_SIDE_LIMITS as LIMITS, type AgentSideSummary, type AgentSideOpen,
 import { api } from '../../../utils/windowUtils'
 import { sideSnapshot } from '../sideSnapshot'
 import type { AgentSideCommand, AgentSideCommandHandle } from '../agentSideCommand'
+import AgentThreadSubRow from '../../../components/AgentThreadSubRow'
 
 type PendingSideRequest = AgentSideStartReq | AgentSideContinueReq
-function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, onViewChange, pendingByScope }: { scope: string; profileId?: string; getMessages(): readonly ChatMessage[]; commandRef: React.ForwardedRef<AgentSideCommandHandle>; commandEnabled: boolean; onViewChange?(showingSide: boolean): void; pendingByScope: React.MutableRefObject<Map<string, PendingSideRequest>> }) {
+function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, onViewChange, pendingByScope, subRowsHost, onOpenSubRowChange }: { scope: string; profileId?: string; getMessages(): readonly ChatMessage[]; commandRef: React.ForwardedRef<AgentSideCommandHandle>; commandEnabled: boolean; onViewChange?(showingSide: boolean): void; subRowsHost?: HTMLElement | null; onOpenSubRowChange?(title: string | null): void; pendingByScope: React.MutableRefObject<Map<string, PendingSideRequest>> }) {
   const { t } = useTranslation()
   // Keep uncertain requests across trusted conversation switches, but never publish old replies.
   const pending = useRef<PendingSideRequest | undefined>(pendingByScope.current.get(scope))
   const restored = pending.current
   const [open, setOpen] = useState(!!restored), [branches, setBranches] = useState<AgentSideSummary[]>([]), [selected, setSelected] = useState(restored && 'expectedRevision' in restored ? restored.branchId : ''), [detail, setDetail] = useState<AgentSideOpen>(), [text, setText] = useState(restored?.question || ''), [error, setError] = useState(false), [busy, setBusy] = useState(false), [confirmDelete, setConfirmDelete] = useState(false), [revisionConflict, setRevisionConflict] = useState(false), [confirmNewAttempt, setConfirmNewAttempt] = useState(false)
-  const [expanded, setExpanded] = useState(false)
   useLayoutEffect(() => { onViewChange?.(open); return () => onViewChange?.(false) }, [open, onViewChange])
   const alive = useRef(true), locked = useRef(false), generation = useRef(0), selectedRef = useRef(selected)
   useLayoutEffect(() => () => {
@@ -29,15 +29,18 @@ function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, 
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; generation.current++ } }, [])
   const acceptDetail = (next: AgentSideOpen) => setDetail((previous) => previous?.branch.id === next.branch.id && (previous.branch.revision > next.branch.revision || previous.branch.revision === next.branch.revision && !previous.branch.busy && next.branch.busy) ? previous : next)
   const select = (id: string) => { setConfirmNewAttempt(false); setRevisionConflict(false); generation.current++; selectedRef.current = id; setSelected(id); setDetail(undefined); setText(''); pending.current = undefined; setConfirmDelete(false) }
+  // The branch list is read only while something shows it: the open side view, or the rows this
+  // conversation contributes to the thread list while that list is open.
+  const listVisible = Boolean(subRowsHost)
   useEffect(() => {
-    if (!open && !expanded) return
+    if (!open && !listVisible) return
     let closed = false, timer: ReturnType<typeof setTimeout> | undefined
     const poll = async () => {
       const token = generation.current, id = selectedRef.current
       try {
         const service = api().svcLLMProxy
         const result = await service.listAgentSides(JSON.parse(scope))
-        if (!closed && alive.current && token === generation.current) setBranches(result.branches)
+        if (!closed && alive.current && token === generation.current) setBranches(Array.isArray(result?.branches) ? result.branches : [])
         if (open && id && !closed && alive.current && token === generation.current) {
           const opened = await service.openAgentSide({ ...JSON.parse(scope), branchId: id })
           if (!closed && alive.current && generation.current === token && selectedRef.current === id) acceptDetail(opened)
@@ -47,7 +50,7 @@ function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, 
     }
     void poll()
     return () => { closed = true; clearTimeout(timer) }
-  }, [scope, open, expanded, selected])
+  }, [scope, open, listVisible, selected])
   const send = async () => {
     if (locked.current || !text.trim()) return
     locked.current = true; setBusy(true); setError(false); setConfirmNewAttempt(false)
@@ -127,17 +130,16 @@ function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, 
     try { const value = await api().svcLLMProxy.openAgentSide({ ...JSON.parse(scope), branchId: id }); if (alive.current && token === generation.current && selectedRef.current === id) acceptDetail(value) }
     catch { if (alive.current && token === generation.current) setError(true) }
   }
+  // The toolbar summary of the column names the side conversation that is open.
+  const openSideTitle = open && selected ? (detail?.branch.id === selected ? detail.branch.title : branches.find(branch => branch.id === selected)?.title) ?? null : null
+  useLayoutEffect(() => { onOpenSubRowChange?.(openSideTitle) }, [openSideTitle, onOpenSubRowChange])
+  useLayoutEffect(() => () => onOpenSubRowChange?.(null), [onOpenSubRowChange])
   return <Box data-testid="agent-side-navigation" sx={{ flex: open ? 1 : undefined, flexShrink: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-    <Box sx={{ display: 'flex', alignItems: 'center', px: 1, minHeight: 30, gap: 0.5, borderBottom: expanded || open ? '1px solid' : 'none', borderColor: 'divider' }}>
-      <Button size="small" color="inherit" startIcon={expanded ? <ExpandMore /> : <ChevronRight />} aria-label={t('chat.agent_side.navigation')} aria-expanded={expanded} onClick={() => setExpanded(value => !value)} sx={{ flex: 1, minWidth: 0, color: 'text.secondary', textTransform: 'none', justifyContent: 'flex-start' }}><Typography noWrap variant="caption">{!open ? t('chat.agent_side.main') : selected ? detail?.branch.title || branches.find(branch => branch.id === selected)?.title || t('chat.agent_side.title') : t('chat.agent_side.new')}</Typography></Button>
-      <IconButton size="small" aria-label={t('chat.agent_side.new')} disabled={busy || !!pending.current || !profileId} onClick={() => { setExpanded(true); void navigate('') }}><AddIcon sx={{ fontSize: 16 }} /></IconButton>
-    </Box>
-    {expanded && <Box component="nav" aria-label={t('chat.agent_side.navigation')} sx={{ py: 0.5, maxHeight: 170, overflowY: 'auto', borderBottom: '1px solid', borderColor: 'divider' }}>
-      <Button fullWidth size="small" color="inherit" aria-current={!open ? 'page' : undefined} onClick={close} sx={{ px: 2, justifyContent: 'flex-start', textTransform: 'none', bgcolor: !open ? 'action.selected' : undefined }}>{t('chat.agent_side.main')}</Button>
-      {branches.map(branch => <Button key={branch.id} fullWidth size="small" color="inherit" disabled={busy || !!pending.current} aria-current={open && selected === branch.id ? 'page' : undefined} onClick={() => void navigate(branch.id)} sx={{ pl: 4, pr: 2, justifyContent: 'flex-start', textTransform: 'none', bgcolor: open && selected === branch.id ? 'action.selected' : undefined }}>
-        <Typography noWrap variant="body2" sx={{ flex: 1, textAlign: 'left' }}>{branch.title}</Typography><Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>{t(`chat.agent_side.status_${branch.status}`)}</Typography>
-      </Button>)}
-    </Box>}
+    {/* A conversation with side conversations lists itself and its sides under its thread row; "/btw" creates sides. */}
+    {subRowsHost && branches.length > 0 && createPortal(<>
+      <AgentThreadSubRow label={t('chat.agent_side.main')} selected={!open} onSelect={close} />
+      {branches.map(branch => <AgentThreadSubRow key={branch.id} label={branch.title} selected={open && selected === branch.id} disabled={busy || !!pending.current} onSelect={() => void navigate(branch.id)} />)}
+    </>, subRowsHost)}
     {open && <Box role="region" aria-label={t('chat.agent_side.title')} sx={{ px: 2, py: 1, flex: 1, minHeight: 0, overflowY: 'auto' }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}><Typography noWrap variant="subtitle2" sx={{ flex: 1 }}>{detail?.branch.title || t('chat.agent_side.new')}</Typography><Button size="small" onClick={close}>{t('chat.agent_side.close')}</Button></Box>
       {!selected && <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>{t('chat.agent_side.notice')}</Typography>}
@@ -172,11 +174,17 @@ function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, 
     </Box>}
   </Box>
 }
-type SidePanelProps = { route?: AgentRouteLike; conversationId?: string; active: boolean; profileId?: string; getMessages(): readonly ChatMessage[]; commandEnabled?: boolean; onViewChange?(showingSide: boolean): void }
-const AgentThreadSidesPanel = forwardRef<AgentSideCommandHandle, SidePanelProps>(function AgentThreadSidesPanel({ route, conversationId, active, profileId, getMessages, commandEnabled = true, onViewChange }, ref) {
+type SidePanelProps = {
+  route?: AgentRouteLike; conversationId?: string; active: boolean; profileId?: string; getMessages(): readonly ChatMessage[]; commandEnabled?: boolean; onViewChange?(showingSide: boolean): void
+  /** Host under this thread's row of the column's thread list; present only while that list is open. */
+  subRowsHost?: HTMLElement | null
+  /** Title of the side conversation that is open, or null while the main conversation shows. */
+  onOpenSubRowChange?(title: string | null): void
+}
+const AgentThreadSidesPanel = forwardRef<AgentSideCommandHandle, SidePanelProps>(function AgentThreadSidesPanel({ route, conversationId, active, profileId, getMessages, commandEnabled = true, onViewChange, subRowsHost, onOpenSubRowChange }, ref) {
   const pendingByScope = useRef(new Map<string, PendingSideRequest>())
   if (!active || !conversationId || route?.channel !== 'canvas' || route.scopeType !== 'thread') return null
   const scope = JSON.stringify({ route, conversationId })
-  return <SidePanel key={scope} scope={scope} pendingByScope={pendingByScope} profileId={profileId} getMessages={getMessages} commandRef={ref} commandEnabled={commandEnabled} onViewChange={onViewChange} />
+  return <SidePanel key={scope} scope={scope} pendingByScope={pendingByScope} profileId={profileId} getMessages={getMessages} commandRef={ref} commandEnabled={commandEnabled} onViewChange={onViewChange} subRowsHost={subRowsHost} onOpenSubRowChange={onOpenSubRowChange} />
 })
 export default AgentThreadSidesPanel

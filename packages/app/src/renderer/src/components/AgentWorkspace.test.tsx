@@ -787,6 +787,44 @@ describe('AgentWorkspace', () => {
     })
   })
 
+  it('gives the open thread a sub-row host under its row only while the list is open', async () => {
+    renderWorkspaceWithThreadList()
+    await waitForThreadSummary('画布检查')
+    const propsOf = () =>
+      chatPageMock.mock.calls.at(-1)?.[0] as {
+        threadSubRowsHost: HTMLElement | null
+        onThreadSubRowChange: (title: string | null) => void
+      }
+    const host = document.querySelector<HTMLElement>('[data-agent-thread-sub-rows="agent-1"]')!
+    expect(host).toBeInTheDocument()
+    await waitFor(() => expect(propsOf().threadSubRowsHost).toBe(host))
+    // Directly under the thread's own row, inside the list, and empty until a chat page fills it.
+    expect(host.previousElementSibling).toBe(getThreadRows()[0])
+    expect(screen.getByTestId('agent-thread-list')).toContainElement(host)
+    expect(host).toBeEmptyDOMElement()
+
+    fireEvent.click(screen.getByTestId('agent-thread-toggle'))
+    expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument()
+    await waitFor(() => expect(propsOf().threadSubRowsHost).toBeNull())
+  })
+
+  it('appends the open sub-row title to the toolbar summary', async () => {
+    renderWorkspace()
+    await waitForThreadSummary('画布检查')
+    const propsOf = () =>
+      chatPageMock.mock.calls.at(-1)?.[0] as {
+        onThreadSubRowChange: (title: string | null) => void
+      }
+    const handler = propsOf().onThreadSubRowChange
+    act(() => handler('配色疑问'))
+    expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent('画布检查 · 配色疑问')
+    expect(screen.getByTestId('agent-thread-toggle')).toHaveAttribute('title', '画布检查 · 配色疑问')
+    // The callback keeps its identity, so the chat page is not re-subscribed on every render.
+    expect(propsOf().onThreadSubRowChange).toBe(handler)
+    act(() => handler(null))
+    expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^画布检查$/)
+  })
+
   it('opens the trace dialog from the conversation menu action', async () => {
     renderWorkspace()
 
@@ -1067,7 +1105,9 @@ describe('AgentWorkspace', () => {
       expect(getComputedStyle(list).overflowX).toBe('hidden')
       // The close row is the last child of the same scroll box, after every thread.
       expect(list.lastElementChild).toBe(screen.getByTestId('agent-thread-close-current'))
-      expect(list.children).toHaveLength(13)
+      // Twelve thread rows, each followed by its (empty) sub-row host, then the close row.
+      expect(list.children).toHaveLength(25)
+      expect(list.querySelectorAll('[data-agent-thread-sub-rows]')).toHaveLength(12)
     })
 
     it('names a team thread after the lead conversation, never after a member or the latest reply', async () => {

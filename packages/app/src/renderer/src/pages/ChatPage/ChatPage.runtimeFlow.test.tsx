@@ -955,6 +955,30 @@ const openSkillTakeover = async (root: HTMLElement = document.body): Promise<voi
   })
 }
 
+/**
+ * Stands in for AgentWorkspace's open thread list: gives ChatPage the host that its sub-rows
+ * (main + side conversations) render into.
+ */
+function WithThreadSubRows({
+  children
+}: {
+  children: (host: HTMLElement | null) => React.ReactNode
+}): React.ReactElement {
+  const [host, setHost] = React.useState<HTMLElement | null>(null)
+  return (
+    <>
+      <div data-testid="thread-sub-rows" ref={setHost} />
+      {children(host)}
+    </>
+  )
+}
+
+/** The column has no "+" for side conversations: a bare "/btw" opens the new-side form. */
+const openNewSideForm = (): void => {
+  fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/btw' } })
+  fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+}
+
 const renderChatPage = (
   storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean; team?: boolean } = 'runtime-flow'
 ) => {
@@ -3797,28 +3821,34 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { view.unmount() }
   })
 
-  it('places expandable branch navigation above the current conversation and restores the parent draft', async () => {
+  it('lists the main and side conversations as thread sub-rows and restores the parent draft', async () => {
     const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'side-nav', threadId: 'pane' } as const
     const branch = { id: '11111111-1111-4111-8111-111111111111', revision: 3, title: 'A private branch', status: 'completed', busy: false, canContinue: true }
     hoisted.listAgentSidesMock.mockResolvedValue({ branches: [branch] })
     hoisted.openAgentSideMock.mockResolvedValue({ branch, messages: [{ role: 'assistant', kind: 'answer', content: 'SIDE_NAV_ANSWER' }] })
-    const page = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    const subRowChange = vi.fn()
+    const page = renderWithProviders(<WithThreadSubRows>{host => <ChatPage compact storageScope="runtime-flow" route={route} threadSubRowsHost={host} onThreadSubRowChange={subRowChange} />}</WithThreadSubRows>)
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
       const input = screen.getByTestId('chat-composer-input-mock')
       fireEvent.change(input, { target: { value: 'PARENT_DRAFT_RETAINED' } })
-      const nav = screen.getByTestId('agent-side-navigation')
-      expect(nav.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-      const toggle = screen.getByRole('button', { name: 'chat.agent_side.navigation' })
-      expect(toggle).toHaveAttribute('aria-expanded', 'false')
-      fireEvent.click(toggle)
-      fireEvent.click(await screen.findByRole('button', { name: /A private branch/ }))
+      // No permanent row or "+" above the transcript: the rows live in the thread list host.
+      expect(screen.queryByRole('button', { name: 'chat.agent_side.navigation' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'chat.agent_side.new' })).not.toBeInTheDocument()
+      const rows = within(screen.getByTestId('thread-sub-rows'))
+      const side = await rows.findByRole('button', { name: /A private branch/ })
+      const main = rows.getByRole('button', { name: 'chat.agent_side.main' })
+      expect(rows.getAllByRole('button')).toEqual([main, side])
+      expect(main).toHaveAttribute('aria-current', 'true'); expect(side).not.toHaveAttribute('aria-current')
+      fireEvent.click(side)
       expect(await screen.findByText('SIDE_NAV_ANSWER')).toBeVisible()
       expect(input).not.toBeVisible(); expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.main' }))
+      expect(side).toHaveAttribute('aria-current', 'true'); expect(main).not.toHaveAttribute('aria-current')
+      expect(subRowChange).toHaveBeenLastCalledWith('A private branch')
+      fireEvent.click(main)
       expect(input).toBeVisible(); expect(input).toHaveValue('PARENT_DRAFT_RETAINED')
       expect(screen.queryByText('SIDE_NAV_ANSWER')).not.toBeInTheDocument()
-      fireEvent.click(toggle); expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(subRowChange).toHaveBeenLastCalledWith(null)
       expect(hoisted.stopAgentSideMock).not.toHaveBeenCalled(); expect(hoisted.startAgentSideMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled(); expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
     } finally { page.unmount() }
@@ -3854,7 +3884,7 @@ describe('ChatPage runtime workflow integration', () => {
     const page = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.new' }))
+      openNewSideForm()
       fireEvent.change(screen.getByLabelText('chat.agent_side.question'), { target: { value: 'Retain this operation' } })
       fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.start' }))
       await screen.findByText('chat.agent_side.error')
@@ -3903,7 +3933,7 @@ describe('ChatPage runtime workflow integration', () => {
     const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(a.id))
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.new' }))
+      openNewSideForm()
       fireEvent.change(screen.getByLabelText('chat.agent_side.question'), { target: { value: 'ORIGINAL_PRIVATE_QUESTION' } }); fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.start' }))
       await screen.findByText('chat.agent_side.error')
       const original = hoisted.startAgentSideMock.mock.calls[0][0]
@@ -4035,7 +4065,7 @@ describe('ChatPage runtime workflow integration', () => {
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
       const before = JSON.stringify(readCurrentSessionState()?.messages)
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.new' }))
+      openNewSideForm()
       fireEvent.change(screen.getByLabelText('chat.agent_side.question'), { target: { value: 'PRIVATE_SIDE_QUESTION' } })
       fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.start' }))
       await waitFor(() => expect(hoisted.startAgentSideMock).toHaveBeenCalledOnce())
@@ -8180,7 +8210,7 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.storedSessions.value = [a, b]; localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), a.id)
     const branch = { id: '11111111-1111-4111-8111-111111111111', revision: 1, title: 'Pane side', status: 'completed', busy: false, canContinue: true }
     hoisted.listAgentSidesMock.mockResolvedValue({ branches: [branch] }); hoisted.openAgentSideMock.mockResolvedValue({ branch, messages: [{ role: 'assistant', kind: 'answer', content: 'PANE_SIDE' }] })
-    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    const view = renderWithProviders(<WithThreadSubRows>{host => <ChatPage compact storageScope="runtime-flow" route={route} threadSubRowsHost={host} />}</WithThreadSubRows>)
     const activations = () => hoisted.setManagedFirstRunPaneScopeMock.mock.calls.filter(([req]) => req.active).map(([req]) => req)
     try {
       await waitFor(() => expect(activations()).toHaveLength(1))
@@ -8190,7 +8220,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(hoisted.setManagedFirstRunPaneScopeMock).toHaveBeenCalledWith({ ...first, active: false })
       fireEvent.click(screen.getByRole('button', { name: 'general.close' })); await waitFor(() => expect(activations()).toHaveLength(2))
       const second = activations()[1]; expect(second.lifecycleRevision).toBeGreaterThan(first.lifecycleRevision)
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.navigation' })); fireEvent.click(await screen.findByRole('button', { name: /Pane side/ }))
+      fireEvent.click(await screen.findByRole('button', { name: /Pane side/ }))
       await screen.findByText('PANE_SIDE'); expect(hoisted.setManagedFirstRunPaneScopeMock).toHaveBeenCalledWith({ ...second, active: false })
       fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.main' })); await waitFor(() => expect(activations()).toHaveLength(3))
       const third = activations()[2]

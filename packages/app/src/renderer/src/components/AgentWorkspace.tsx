@@ -593,6 +593,35 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     },
     [projectId]
   )
+  // Per pane: the host under its thread row (while the list is open) and the open sub-row's title.
+  const [subRowHosts, setSubRowHosts] = useState<Record<string, HTMLElement | null>>({})
+  const [paneSubRowTitles, setPaneSubRowTitles] = useState<Record<string, string | null>>({})
+  const subRowHostRefs = useRef(new Map<string, (element: HTMLElement | null) => void>())
+  const subRowChangeHandlers = useRef(new Map<string, (title: string | null) => void>())
+  // Callbacks stay the same for a pane's whole life: a new ref identity would detach and
+  // re-attach the host on every render.
+  const getSubRowHostRef = (paneId: string) => {
+    let ref = subRowHostRefs.current.get(paneId)
+    if (!ref) {
+      ref = (element) =>
+        setSubRowHosts((prev) =>
+          (prev[paneId] ?? null) === element ? prev : { ...prev, [paneId]: element }
+        )
+      subRowHostRefs.current.set(paneId, ref)
+    }
+    return ref
+  }
+  const getSubRowChangeHandler = (paneId: string) => {
+    let handler = subRowChangeHandlers.current.get(paneId)
+    if (!handler) {
+      handler = (title) =>
+        setPaneSubRowTitles((prev) =>
+          (prev[paneId] ?? null) === title ? prev : { ...prev, [paneId]: title }
+        )
+      subRowChangeHandlers.current.set(paneId, handler)
+    }
+    return handler
+  }
   const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null)
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null)
   const [tracePanelOpen, setTracePanelOpen] = useState(false)
@@ -632,9 +661,11 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     [t]
   )
   const activePaneIndex = activePane ? openPanes.findIndex((pane) => pane.id === activePane.id) : -1
+  const activeSubRowTitle = activePane ? paneSubRowTitles[activePane.id] : null
   const threadSummary = activePane
-    ? panePreviews[activePane.id]?.title ||
-      getPaneLabel(activePane.id, activePaneIndex, workspaceStrings.paneLabel)
+    ? (panePreviews[activePane.id]?.title ||
+        getPaneLabel(activePane.id, activePaneIndex, workspaceStrings.paneLabel)) +
+      (activeSubRowTitle ? ` · ${activeSubRowTitle}` : '')
     : openPanes.length > 0
       ? t('agent_workspace.threads_none_selected', { count: openPanes.length })
       : t('agent_workspace.no_threads')
@@ -1346,8 +1377,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
             }}
           >
             {openPanes.map((pane, index) => (
+              <React.Fragment key={pane.id}>
               <ThreadListRow
-                key={pane.id}
                 pane={pane}
                 paneScope={buildAgentPaneScope(projectId, pane.id)}
                 title={
@@ -1397,6 +1428,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                   }
                 }}
               />
+              {/* The pane's chat page renders the conversations inside this thread here. */}
+              <Box ref={getSubRowHostRef(pane.id)} data-agent-thread-sub-rows={pane.id} />
+              </React.Fragment>
             ))}
             {activePane && (
               <ButtonBase
@@ -1498,6 +1532,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 existingConversationProtection={childProtections?.get(pane.id)}
                 existingConversationOpen={isActivePane && openChatInput?.handle.target.paneId === pane.id ? openChatInput : undefined}
                 workspaceMenu={workspaceMenu}
+                threadSubRowsHost={subRowHosts[pane.id] ?? null}
+                onThreadSubRowChange={getSubRowChangeHandler(pane.id)}
               />
             </Box>
           )

@@ -1154,7 +1154,6 @@
       "status_unknown": "关闭状态未知"
     },
     "agent_side": {
-      "navigation": "对话导航",
       "main": "主对话",
       "back_main": "返回主对话",
       "title": "私有旁支对话",

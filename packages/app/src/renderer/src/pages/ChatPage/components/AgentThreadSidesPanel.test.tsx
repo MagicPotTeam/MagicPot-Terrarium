@@ -1,5 +1,5 @@
 import React, { createRef } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { sideSnapshot } from '../sideSnapshot'
 import AgentThreadSidesPanel from './AgentThreadSidesPanel'
@@ -12,33 +12,62 @@ const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'p', threadId: 
 const branch: AgentSideSummary = { id: '11111111-1111-4111-8111-111111111111', revision: 3, generation: 1, status: 'completed', title: 'Private branch', createdAt: 1, updatedAt: 2, turns: 1, modelSteps: 1, toolCalls: 0, snapshotTruncated: true, profileId: 'profile', modelLabel: 'Model', canContinue: true, busy: false }
 const detail = { branch, messages: [{ role: 'user', kind: 'question', content: 'SIDE_QUESTION' }, { role: 'assistant', kind: 'answer', content: '<script>ADVISORY</script>' }], snapshotCharacters: 12, untrustedData: true }
 const messages = [{ role: 'user' as const, content: 'PARENT_VISIBLE', hiddenContext: 'HIDDEN_SECRET', attachments: [{ type: 'file' as const, url: 'SECRET_FILE' }] }]
-const renderPanel = () => render(<AgentThreadSidesPanel route={route} conversationId="chat" active profileId="profile" getMessages={() => messages} />)
+const commandRef = createRef<AgentSideCommandHandle>()
+const renderPanel = () => render(<AgentThreadSidesPanel ref={commandRef} route={route} conversationId="chat" active profileId="profile" getMessages={() => messages} />)
+/** Stands in for AgentWorkspace's open thread list: the host the sub-rows render into. */
+function WithThreadList({ onOpenSubRowChange }: { onOpenSubRowChange?(title: string | null): void }) {
+  const [host, setHost] = React.useState<HTMLElement | null>(null)
+  return <><div data-testid="thread-sub-rows" ref={setHost} /><AgentThreadSidesPanel ref={commandRef} route={route} conversationId="chat" active profileId="profile" getMessages={() => messages} subRowsHost={host} onOpenSubRowChange={onOpenSubRowChange} /></>
+}
 beforeEach(() => { vi.useFakeTimers(); Object.values(mocks).forEach((m) => m.mockReset()); mocks.listAgentSides.mockResolvedValue({ branches: [] }); mocks.openAgentSide.mockResolvedValue(detail); mocks.startAgentSide.mockResolvedValue({ branch }); mocks.continueAgentSide.mockResolvedValue({ branch }); mocks.stopAgentSide.mockResolvedValue({ branch }); mocks.deleteAgentSide.mockResolvedValue(undefined) })
 afterEach(() => { cleanup(); vi.useRealTimers() })
-async function openPanel() { await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.new' }))) }
+/** A bare "/btw" opens the new-side form; there is no "+" button. */
+async function openPanel() { await act(async () => { commandRef.current!.execute({ action: 'help' }) }) }
 describe('user-only private side panel', () => {
-  it('uses one compact navigation toggle for the current view and keeps create and switching behavior', async () => {
+  it('renders nothing of its own while the main conversation shows, and no rows without a thread list host', async () => {
     mocks.listAgentSides.mockResolvedValue({ branches: [branch] })
-    renderPanel()
-    const toggle = screen.getByRole('button', { name: 'chat.agent_side.navigation' })
-    expect(toggle).toHaveTextContent('chat.agent_side.main')
-    expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByRole('button', { name: 'chat.agent_side.branch' })).not.toBeInTheDocument()
-    await act(async () => fireEvent.click(toggle))
-    expect(toggle).toHaveAttribute('aria-expanded', 'true')
-    expect(screen.getByRole('navigation', { name: 'chat.agent_side.navigation' })).toBeVisible()
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: /Private branch/ })))
-    expect(toggle).toHaveTextContent('Private branch')
+    const view = renderPanel()
+    await act(async () => vi.advanceTimersByTimeAsync(1500))
+    expect(view.container.querySelectorAll('button')).toHaveLength(0)
+    expect(view.container).toHaveTextContent('')
+    expect(mocks.listAgentSides).not.toHaveBeenCalled()
+  })
+  it('lists the main conversation and each side as thread sub-rows, switches on click and reports the open side', async () => {
+    mocks.listAgentSides.mockResolvedValue({ branches: [branch, { ...branch, id: '22222222-2222-4222-8222-222222222222', title: 'Second side' }] })
+    const onOpenSubRowChange = vi.fn()
+    render(<WithThreadList onOpenSubRowChange={onOpenSubRowChange} />)
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    const rows = within(screen.getByTestId('thread-sub-rows'))
+    expect(rows.getAllByRole('button').map(row => row.textContent)).toEqual(['chat.agent_side.main', 'Private branch', 'Second side'])
+    const [main, first] = rows.getAllByRole('button')
+    expect(main).toHaveAttribute('aria-current', 'true')
+    expect(first).not.toHaveAttribute('aria-current')
+    expect(getComputedStyle(first).paddingLeft).toBe('29px')
+    // No "+" row and no per-row buttons: "/btw" creates sides.
+    expect(screen.queryByRole('button', { name: 'chat.agent_side.new' })).not.toBeInTheDocument()
+    expect(onOpenSubRowChange).toHaveBeenLastCalledWith(null)
+
+    await act(async () => fireEvent.click(first))
     expect(mocks.openAgentSide).toHaveBeenCalledWith({ route, conversationId: 'chat', branchId: branch.id })
-    await act(async () => fireEvent.click(toggle))
-    expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    await act(async () => fireEvent.click(toggle))
-    fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.main' }))
-    expect(toggle).toHaveTextContent('chat.agent_side.main')
-    await openPanel()
-    expect(toggle).toHaveTextContent('chat.agent_side.new')
-    expect(screen.getByLabelText('chat.agent_side.question')).toBeVisible()
+    expect(first).toHaveAttribute('aria-current', 'true')
+    expect(main).not.toHaveAttribute('aria-current')
+    expect(onOpenSubRowChange).toHaveBeenLastCalledWith('Private branch')
+    expect(screen.getByRole('region', { name: 'chat.agent_side.title' })).toBeVisible()
+
+    fireEvent.click(main)
+    expect(main).toHaveAttribute('aria-current', 'true')
+    expect(onOpenSubRowChange).toHaveBeenLastCalledWith(null)
+    expect(screen.queryByRole('region', { name: 'chat.agent_side.title' })).not.toBeInTheDocument()
     expect(mocks.startAgentSide).not.toHaveBeenCalled()
+  })
+  it('shows no sub-rows for a conversation without side conversations', async () => {
+    render(<WithThreadList />)
+    await act(async () => vi.advanceTimersByTimeAsync(1500))
+    expect(mocks.listAgentSides).toHaveBeenCalled()
+    expect(screen.getByTestId('thread-sub-rows')).toBeEmptyDOMElement()
+    await openPanel()
+    expect(screen.getByLabelText('chat.agent_side.question')).toBeVisible()
+    expect(screen.getByTestId('thread-sub-rows')).toBeEmptyDOMElement()
   })
   it('does not load or call providers before user opens; starts with passive bounded visible snapshot only', async () => {
     renderPanel(); expect(mocks.listAgentSides).not.toHaveBeenCalled(); await openPanel()
@@ -187,7 +216,6 @@ describe('user-only private side panel', () => {
     expect(screen.getByLabelText('chat.agent_side.question')).toBeDisabled()
     fireEvent.change(screen.getByLabelText('chat.agent_side.question'), { target: { value: 'CHANGED_BY_EVENT' } })
     expect(screen.getByLabelText('chat.agent_side.question')).toHaveValue('ORIGINAL_PENDING')
-    expect(screen.getByRole('button', { name: 'chat.agent_side.new' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.new_attempt' }))
     expect(screen.getByText('chat.agent_side.new_attempt_notice')).toBeInTheDocument()
     expect(mocks.startAgentSide).toHaveBeenCalledOnce()
@@ -238,7 +266,7 @@ describe('user-only private side panel', () => {
   it('keeps the submitted identity when an old response arrives after switching away and back', async () => {
     let finish!: (value: unknown) => void
     mocks.startAgentSide.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
-    const props = (conversationId: string) => <AgentThreadSidesPanel route={route} conversationId={conversationId} active profileId="profile" getMessages={() => messages} />
+    const props = (conversationId: string) => <AgentThreadSidesPanel ref={commandRef} route={route} conversationId={conversationId} active profileId="profile" getMessages={() => messages} />
     const view = render(props('chat')); await openPanel()
     fireEvent.change(screen.getByLabelText('chat.agent_side.question'), { target: { value: 'LATE_SCOPE_QUESTION' } })
     fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.start' }))
