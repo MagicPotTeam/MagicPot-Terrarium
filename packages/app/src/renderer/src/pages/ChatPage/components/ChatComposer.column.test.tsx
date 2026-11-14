@@ -275,3 +275,96 @@ describe('ChatComposer column shell', () => {
     expect(screen.getByTestId('chat-composer-add-menu-button')).not.toHaveAttribute('aria-haspopup')
   })
 })
+
+describe('ChatComposer column chips', () => {
+  const attachments: ComposerProps['pendingAttachments'] = [
+    { type: 'image', url: 'file:///poster.png', fileName: 'poster.png' },
+    {
+      type: 'file',
+      url: 'file:///a-very-long-quarterly-report-name.pdf',
+      fileName: 'a-very-long-quarterly-report-name.pdf'
+    },
+    { type: 'file', url: 'file:///hidden.json', fileName: 'hidden.json', hiddenFromChatView: true },
+    { type: 'video', url: 'blob:clip', fileName: 'clip.mp4' }
+  ]
+
+  it('shows nothing above the shell without attachments or a skill', () => {
+    render(<ColumnComposer />)
+    expect(screen.queryByTestId('chat-composer-attachments')).toBeNull()
+  })
+
+  it('puts image thumbnails and file chips in one row above the shell', async () => {
+    const user = userEvent.setup()
+    const onRemove = vi.fn()
+    const onPreview = vi.fn()
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    render(
+      <ColumnComposer
+        pendingAttachments={attachments}
+        uploadProgress={{ 3: 40 }}
+        onRemoveAttachment={onRemove}
+        onPreviewImage={onPreview}
+      />
+    )
+
+    const row = screen.getByTestId('chat-composer-attachments')
+    expect(screen.getByTestId('chat-composer-root').firstElementChild).toBe(row)
+    expect(row.compareDocumentPosition(shell()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(shell()).not.toContainElement(row)
+    // The image keeps its thumbnail, the visible files are chips, the hidden one is left out.
+    expect(row.children).toHaveLength(3)
+    const thumbnail = within(row).getByRole('img')
+    await user.click(thumbnail)
+    expect(onPreview).toHaveBeenCalledWith('file:///poster.png')
+
+    const chips = within(row).getAllByTestId('chat-composer-file-chip')
+    expect(chips.map((chip) => chip.textContent)).toEqual([
+      'a-very-long-quarterly-report-name.pdf',
+      'clip.mp4'
+    ])
+    expect(chips[0]).toHaveAttribute('title', 'a-very-long-quarterly-report-name.pdf')
+    // An upload in progress shows a spinner in place of the file icon.
+    expect(within(chips[1]).getByRole('progressbar')).toBeInTheDocument()
+    expect(within(chips[0]).queryByRole('progressbar')).toBeNull()
+
+    await user.click(
+      within(chips[0]).getByRole('button', { name: 'Remove a-very-long-quarterly-report-name.pdf' })
+    )
+    expect(onRemove).toHaveBeenLastCalledWith(1)
+    await user.click(within(chips[1]).getByRole('button', { name: 'Remove clip.mp4' }))
+    expect(onRemove).toHaveBeenLastCalledWith(3)
+    expect(revoke).toHaveBeenCalledWith('blob:clip')
+    await user.click(within(row).getByRole('button', { name: 'Remove attachment' }))
+    expect(onRemove).toHaveBeenLastCalledWith(0)
+  })
+
+  it('shows the selected skill as the first chip of that row instead of inside the textarea', async () => {
+    const user = userEvent.setup()
+    const onClear = vi.fn()
+    render(
+      <ColumnComposer
+        selectedSkillName="Poster designer"
+        onClearSkill={onClear}
+        pendingAttachments={[attachments[1]]}
+      />
+    )
+
+    const row = screen.getByTestId('chat-composer-attachments')
+    const skill = screen.getByTestId('chat-composer-skill-chip')
+    expect(row.firstElementChild).toBe(skill)
+    expect(skill).toHaveTextContent('Poster designer')
+    expect(skill).not.toHaveTextContent('[')
+    expect(shell()).not.toHaveTextContent('Poster designer')
+    await user.click(within(skill).getByRole('button', { name: 'Clear skill Poster designer' }))
+    expect(onClear).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a lone skill chip without a height limit', () => {
+    render(<ColumnComposer selectedSkillName="Poster designer" onClearSkill={vi.fn()} />)
+    const row = screen.getByTestId('chat-composer-attachments')
+    expect(row.children).toHaveLength(1)
+    expect(getComputedStyle(row).maxHeight).toBe('')
+    // A selected skill alone is not a draft: the shell stays idle.
+    expect(shell()).not.toHaveAttribute('data-active')
+  })
+})

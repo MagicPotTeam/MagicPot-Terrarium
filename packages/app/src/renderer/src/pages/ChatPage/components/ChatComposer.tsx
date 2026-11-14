@@ -38,6 +38,7 @@ import {
   Videocam as VideoIcon,
   ViewInAr as Model3DIcon,
   InsertDriveFile as FileIcon,
+  LightbulbOutlined as SkillIcon,
   SlideshowOutlined as PowerPointFileIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
@@ -127,23 +128,28 @@ interface ChatComposerProps {
 
 const NO_SUGGESTION_COMMANDS: readonly ComposerCommand[] = []
 
-const renderFileAttachmentIcon = (attachment: ChatAttachment) => {
+/** `chipColor` replaces the per-kind colours with one colour (the Agent column's chips). */
+const renderFileAttachmentIcon = (
+  attachment: ChatAttachment,
+  fontSize = 24,
+  chipColor?: string
+) => {
   const kind = detectDisplayFileKind(attachment.fileName, attachment.mimeType)
 
   switch (kind) {
     case 'markdown':
     case 'text':
-      return <TextFileIcon sx={{ fontSize: 24, color: '#38bdf8' }} />
+      return <TextFileIcon sx={{ fontSize, color: chipColor ?? '#38bdf8' }} />
     case 'word':
-      return <WordFileIcon sx={{ fontSize: 24, color: '#60a5fa' }} />
+      return <WordFileIcon sx={{ fontSize, color: chipColor ?? '#60a5fa' }} />
     case 'powerpoint':
-      return <PowerPointFileIcon sx={{ fontSize: 24, color: '#fb923c' }} />
+      return <PowerPointFileIcon sx={{ fontSize, color: chipColor ?? '#fb923c' }} />
     case 'pdf':
-      return <PdfFileIcon sx={{ fontSize: 24, color: '#f87171' }} />
+      return <PdfFileIcon sx={{ fontSize, color: chipColor ?? '#f87171' }} />
     case 'archive':
-      return <ArchiveFileIcon sx={{ fontSize: 24, color: '#c084fc' }} />
+      return <ArchiveFileIcon sx={{ fontSize, color: chipColor ?? '#c084fc' }} />
     default:
-      return <FileIcon sx={{ fontSize: 24, color: 'text.secondary' }} />
+      return <FileIcon sx={{ fontSize, color: chipColor ?? 'text.secondary' }} />
   }
 }
 
@@ -493,6 +499,66 @@ const rankToolHelpItems = (
 
     return leftName.localeCompare(rightName)
   })
+}
+
+/** One chip of the Agent column's row above the shell: a non-image attachment or the skill. */
+const ComposerColumnChip: React.FC<{
+  testId: string
+  icon: React.ReactNode
+  label: string
+  title?: string
+  removeLabel: string
+  onRemove?: () => void
+}> = ({ testId, icon, label, title, removeLabel, onRemove }) => {
+  const theme = useTheme()
+  const tokens = useMemo(() => getAgentColumnTokens(theme), [theme])
+  return (
+    <Box
+      data-testid={testId}
+      title={title}
+      sx={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: `${tokens.space.sm}px`,
+        minWidth: 0,
+        maxWidth: 192,
+        padding: `${tokens.space.xs}px ${tokens.space.md}px`,
+        border: `1px solid ${tokens.border}`,
+        borderRadius: `${tokens.radius.content}px`,
+        backgroundColor: tokens.surface,
+        color: tokens.text,
+        fontSize: tokens.fontSize.small,
+        lineHeight: '18px'
+      }}
+    >
+      <Box sx={{ display: 'inline-flex', flex: 'none', color: tokens.muted }}>{icon}</Box>
+      <Box
+        component="span"
+        sx={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+      >
+        {label}
+      </Box>
+      {onRemove ? (
+        <IconButton
+          aria-label={removeLabel}
+          title={removeLabel}
+          onClick={onRemove}
+          sx={{
+            flex: 'none',
+            width: 18,
+            height: 18,
+            padding: 0,
+            borderRadius: `${tokens.radius.control}px`,
+            color: tokens.muted,
+            '&:hover': { backgroundColor: tokens.hover, color: tokens.text },
+            '&.Mui-focusVisible': tokens.focusRing
+          }}
+        >
+          <CloseIcon sx={{ fontSize: 14 }} />
+        </IconButton>
+      ) : null}
+    </Box>
+  )
 }
 
 const ChatComposer: React.FC<ChatComposerProps> = ({
@@ -1447,27 +1513,62 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
             sx={{
               display: 'flex',
               flexWrap: 'wrap',
-              alignItems: 'center',
+              alignItems: 'flex-end',
               alignContent: 'flex-start',
               gap: `${columnTokens.space.md}px`,
               mb: `${columnTokens.space.md}px`,
               minWidth: 0,
-              maxHeight: resolvedAttachmentPreviewMaxHeight,
+              // Only the attachment tray has a height budget; a lone skill chip never scrolls.
+              maxHeight:
+                visiblePendingAttachmentEntries.length > 0
+                  ? resolvedAttachmentPreviewMaxHeight
+                  : undefined,
               overflowX: 'hidden',
               overflowY: 'auto',
               '& > *': { flexShrink: 0 }
             }}
           >
-            {visiblePendingAttachmentEntries.map(renderAttachmentTile)}
             {selectedSkillName ? (
-              <Chip
-                label={`[${selectedSkillName}]`}
-                onDelete={onClearSkill}
-                deleteIcon={<CloseIcon style={{ fontSize: 14 }} />}
-                size="small"
-                sx={{ maxWidth: '100%', borderRadius: `${columnTokens.radius.content}px` }}
+              <ComposerColumnChip
+                testId="chat-composer-skill-chip"
+                icon={<SkillIcon sx={{ fontSize: 14 }} />}
+                label={selectedSkillName}
+                title={selectedSkillName}
+                removeLabel={t('chat.composer_column.remove_skill', { name: selectedSkillName })}
+                onRemove={onClearSkill}
               />
             ) : null}
+            {visiblePendingAttachmentEntries.map((entry, idx) => {
+              const { attachment, originalIndex } = entry
+              // Images keep their thumbnail; every other file is a chip.
+              if (attachment.type === 'image') return renderAttachmentTile(entry, idx)
+              const progress = uploadProgress[originalIndex]
+              const name = attachment.fileName || t('chat.file', { defaultValue: 'File' })
+              return (
+                <ComposerColumnChip
+                  key={pendingAttachmentKeys[idx]}
+                  testId="chat-composer-file-chip"
+                  icon={
+                    progress !== undefined && progress < 100 ? (
+                      <CircularProgress size={12} />
+                    ) : attachment.type === 'video' ? (
+                      <VideoIcon sx={{ fontSize: 14 }} />
+                    ) : attachment.type === 'model3d' ? (
+                      <Model3DIcon sx={{ fontSize: 14 }} />
+                    ) : (
+                      renderFileAttachmentIcon(attachment, 14, 'inherit')
+                    )
+                  }
+                  label={name}
+                  title={attachment.fileName || undefined}
+                  removeLabel={t('chat.composer_column.remove_attachment', { name })}
+                  onRemove={() => {
+                    if (attachment.url.startsWith('blob:')) URL.revokeObjectURL(attachment.url)
+                    onRemoveAttachment(originalIndex)
+                  }}
+                />
+              )
+            })}
           </Box>
         ) : null}
 

@@ -1155,7 +1155,9 @@
     },
     "composer_column": {
       "placeholder": "Message this conversation",
-      "more_actions": "More actions"
+      "more_actions": "More actions",
+      "remove_attachment": "Remove {{name}}",
+      "remove_skill": "Clear skill {{name}}"
     },
     "agent_scratchpad": {
       "command_usage": "User composer only: /scratchpad or /pad with no arguments. This read-only view never changes notes or calls the parent model.",

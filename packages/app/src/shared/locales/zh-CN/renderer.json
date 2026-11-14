@@ -982,7 +982,9 @@
     },
     "composer_column": {
       "placeholder": "发送给当前对话",
-      "more_actions": "更多操作"
+      "more_actions": "更多操作",
+      "remove_attachment": "移除 {{name}}",
+      "remove_skill": "取消技能 {{name}}"
     },
     "agent_scratchpad": {
       "command_usage": "仅用户输入框：/scratchpad 或 /pad，不带参数。此只读视图不修改笔记或调用父模型。",
