@@ -6,6 +6,7 @@ import { useRef, useState, type ComponentProps } from 'react'
 import { theme } from '@renderer/theme'
 import enLocale from '@shared/locales/en-US/renderer.json'
 import ChatComposer from './ChatComposer'
+import { listComposerCommands } from '../composerCommandCatalog'
 
 // Real English strings, so the test reads what a user reads.
 const translate = (key: string, options?: Record<string, unknown>) => {
@@ -366,5 +367,149 @@ describe('ChatComposer column chips', () => {
     expect(getComputedStyle(row).maxHeight).toBe('')
     // A selected skill alone is not a draft: the shell stays idle.
     expect(shell()).not.toHaveAttribute('data-active')
+  })
+})
+
+describe('ChatComposer column slash menu', () => {
+  const commands = listComposerCommands({
+    remote: false,
+    canvasThread: true,
+    scratchpad: true,
+    boundTools: false,
+    teamMember: false
+  })
+  const skills = [
+    { id: 'skill-review', name: 'code-review', description: 'Review the working tree diff' },
+    { id: 'skill-notes', name: 'release-notes', description: 'Draft release notes' }
+  ]
+  const openMenu = async (text = '/') => {
+    const user = userEvent.setup()
+    render(<ColumnComposer suggestionCommands={commands} suggestionSkills={skills} />)
+    await user.click(input())
+    await user.keyboard(text)
+    return user
+  }
+
+  it('floats above the shell at the shell width with a themed raised surface', async () => {
+    await openMenu()
+    const menu = screen.getByRole('listbox', { name: 'Available commands and skills' })
+    // Positioned against the wrapper that holds only the menu and the shell.
+    expect(menu.parentElement).toBe(shell().parentElement)
+    expect(getComputedStyle(menu.parentElement!).position).toBe('relative')
+    const style = getComputedStyle(menu)
+    expect(style.position).toBe('absolute')
+    expect(style.left).toBe('0px')
+    expect(style.right).toBe('0px')
+    expect(style.bottom).toBe('calc(100% + 8px)')
+    expect(style.borderRadius).toBe('12px')
+    expect(style.maxHeight).toBe('min(320px, 45vh)')
+    expect(style.overflowY).toBe('auto')
+    expect(style.padding).toBe('')
+    expect(style.display).not.toBe('grid')
+    // The raised surface is derived from the theme's paper colour, not a fixed hex value.
+    expect(style.backgroundColor).toMatch(/^color-mix\(in srgb, /)
+  })
+
+  it('heads the two groups with small uppercase labels', async () => {
+    await openMenu()
+    const headings = screen.getAllByTestId('chat-composer-suggestion-heading')
+    expect(headings.map((heading) => heading.textContent)).toEqual(['Commands', 'Skills'])
+    for (const heading of headings) {
+      const style = getComputedStyle(heading)
+      expect(style.fontSize).toBe('10px')
+      expect(style.fontWeight).toBe('600')
+      expect(style.textTransform).toBe('uppercase')
+      expect(style.letterSpacing).toBe('0.025em')
+      expect(style.padding).toBe('4px 12px')
+      expect(heading).toHaveAttribute('aria-hidden', 'true')
+    }
+    expect(screen.getAllByRole('group').map((group) => group.getAttribute('aria-label'))).toEqual([
+      'Commands',
+      'Skills'
+    ])
+  })
+
+  it('draws each row as a name chip, a muted hint and a description that may wrap to two lines', async () => {
+    await openMenu()
+    const row = screen.getByRole('option', { name: /\/btw/ })
+    const rowStyle = getComputedStyle(row)
+    expect(rowStyle.display).toBe('flex')
+    expect(rowStyle.padding).toBe('8px 12px')
+    expect(rowStyle.gap).toBe('12px')
+
+    const [nameGroup, description] = Array.from(row.children) as HTMLElement[]
+    const [name, hint] = Array.from(nameGroup.children) as HTMLElement[]
+    expect(name).toHaveTextContent(/^\/btw$/)
+    expect(hint).toHaveTextContent('<question>')
+    // The name keeps its own width: it is not a column shared with the widest row.
+    expect(getComputedStyle(nameGroup).flexGrow).toBe('0')
+    expect(getComputedStyle(nameGroup).flexShrink).toBe('0')
+    expect(getComputedStyle(nameGroup).fontFamily).toContain('monospace')
+    const nameStyle = getComputedStyle(name)
+    expect(nameStyle.fontWeight).toBe('600')
+    expect(nameStyle.padding).toBe('1px 4px')
+    expect(nameStyle.borderRadius).toBe('4px')
+    expect(rowStyle.fontSize).toBe('12px')
+
+    expect(description).toHaveTextContent('Ask a private side question')
+    expect(description).toHaveAttribute('title', description.textContent)
+    const descriptionStyle = getComputedStyle(description)
+    expect(descriptionStyle.whiteSpace).not.toBe('nowrap')
+    expect(descriptionStyle.overflow).toBe('hidden')
+    expect(
+      description.style.webkitLineClamp || descriptionStyle.getPropertyValue('-webkit-line-clamp')
+    ).toBe('2')
+  })
+
+  it('fills the selected row and colours its name, following the arrow keys', async () => {
+    const user = await openMenu()
+    const options = screen.getAllByRole('option')
+    const nameOf = (option: HTMLElement) =>
+      option.firstElementChild!.firstElementChild as HTMLElement
+    const primary = getComputedStyle(nameOf(options[0])).color
+    expect(options[0]).toHaveAttribute('aria-selected', 'true')
+    expect(getComputedStyle(options[0]).backgroundColor).not.toBe('rgba(0, 0, 0, 0)')
+    expect(getComputedStyle(options[1]).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    expect(getComputedStyle(nameOf(options[1])).color).not.toBe(primary)
+
+    await user.keyboard('{ArrowDown}')
+    expect(options[1]).toHaveAttribute('aria-selected', 'true')
+    expect(getComputedStyle(nameOf(options[1])).color).toBe(primary)
+    expect(getComputedStyle(options[0]).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    expect(input()).toHaveAttribute('aria-activedescendant', options[1].id)
+  })
+
+  it('keeps the selected row in view, with its group heading for the first row of a group', async () => {
+    const user = await openMenu()
+    const menu = screen.getByRole('listbox')
+    const options = screen.getAllByRole('option')
+    const heading = screen.getAllByTestId('chat-composer-suggestion-heading')[1]
+    const place = (element: HTMLElement, top: number, height: number) => {
+      Object.defineProperty(element, 'offsetTop', { configurable: true, value: top })
+      Object.defineProperty(element, 'offsetHeight', { configurable: true, value: height })
+    }
+    Object.defineProperty(menu, 'clientHeight', { configurable: true, value: 100 })
+    // A 24px heading, the command rows, a 24px heading, the skill rows; every row is 36px.
+    const skillsTop = 24 + commands.length * 36
+    options.forEach((option, index) =>
+      place(
+        option,
+        index < commands.length ? 24 + index * 36 : skillsTop + 24 + (index - commands.length) * 36,
+        36
+      )
+    )
+    place(heading, skillsTop, 24)
+    const firstSkill = options[commands.length]
+    const last = options[options.length - 1]
+
+    // The last row: its bottom edge meets the bottom of the menu, with no extra padding.
+    await user.keyboard('{ArrowUp}')
+    expect(last).toHaveAttribute('aria-selected', 'true')
+    expect(menu.scrollTop).toBe(last.offsetTop + 36 - 100)
+    // Up to the first skill while it is above the fold: its heading scrolls into view with it.
+    menu.scrollTop = last.offsetTop
+    await user.keyboard('{ArrowUp}')
+    expect(firstSkill).toHaveAttribute('aria-selected', 'true')
+    expect(menu.scrollTop).toBe(heading.offsetTop)
   })
 })

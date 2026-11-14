@@ -1582,6 +1582,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               suggestions={suggestions}
               activeIndex={activeSuggestionIndex}
               grouped={suggestionSkills !== undefined}
+              layout="column"
               onActiveIndexChange={(index) => setSuggestionCursor({ key: suggestions.key, index })}
               onAccept={acceptSuggestion}
             />

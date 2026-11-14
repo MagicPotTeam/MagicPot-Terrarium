@@ -1,6 +1,11 @@
-import React, { useLayoutEffect, useRef } from 'react'
+import React, { useLayoutEffect, useMemo, useRef } from 'react'
 import { Box } from '@mui/material'
+import { alpha, useTheme } from '@mui/material/styles'
 import { useTranslation } from 'react-i18next'
+import {
+  getAgentColumnRaisedSurface,
+  getAgentColumnTokens
+} from '@renderer/components/agentColumnTokens'
 import {
   getComposerSuggestionOptionId,
   type ComposerSuggestionItem,
@@ -16,6 +21,8 @@ interface ComposerSuggestionPopupProps {
   activeIndex: number
   /** Show the "Commands" / "Skills" group headings (the Agent column). */
   grouped?: boolean
+  /** 'column' is the Agent column's menu: as wide as the composer shell, 8px above it. */
+  layout?: 'page' | 'column'
   onActiveIndexChange: (index: number) => void
   onAccept: (item: ComposerSuggestionItem) => void
 }
@@ -26,10 +33,16 @@ const ComposerSuggestionPopup: React.FC<ComposerSuggestionPopupProps> = ({
   suggestions,
   activeIndex,
   grouped = false,
+  layout = 'page',
   onActiveIndexChange,
   onAccept
 }) => {
   const { t } = useTranslation()
+  const theme = useTheme()
+  const columnTokens = useMemo(() => getAgentColumnTokens(theme), [theme])
+  const isColumn = layout === 'column'
+  // The column's menu has no padding of its own: headings and rows span its full width.
+  const listPadding = isColumn ? 0 : LIST_PADDING
   const listRef = useRef<HTMLDivElement | null>(null)
 
   // Scroll only the list itself: scrollIntoView would also move clipped ancestors of the pane.
@@ -40,12 +53,12 @@ const ComposerSuggestionPopup: React.FC<ComposerSuggestionPopupProps> = ({
     // The first option of a group brings its heading into view with it.
     const heading = option.previousElementSibling as HTMLElement | null
     const first = heading?.getAttribute('role') === 'option' ? option : (heading ?? option)
-    const top = first.offsetTop - LIST_PADDING
-    const bottom = option.offsetTop + option.offsetHeight + LIST_PADDING
+    const top = first.offsetTop - listPadding
+    const bottom = option.offsetTop + option.offsetHeight + listPadding
     if (top < list.scrollTop) list.scrollTop = top
     else if (bottom > list.scrollTop + list.clientHeight)
       list.scrollTop = bottom - list.clientHeight
-  }, [activeIndex, suggestions.key, suggestions.items.length])
+  }, [activeIndex, listPadding, suggestions.key, suggestions.items.length])
 
   const commandItems = suggestions.items.filter((item) => item.kind === 'command')
   const skillItems = suggestions.items.filter((item) => item.kind === 'skill')
@@ -137,6 +150,154 @@ const ComposerSuggestionPopup: React.FC<ComposerSuggestionPopupProps> = ({
         >
           {description}
         </Box>
+      </Box>
+    )
+  }
+
+  // One row of the column's menu: a chip-like name, its argument hint, then the description.
+  const renderColumnOption = (item: ComposerSuggestionItem, index: number) => {
+    const selected = index === activeIndex
+    const argumentHintKey = item.kind === 'command' ? item.argumentHintKey : undefined
+    const description = item.kind === 'command' ? t(item.descriptionKey) : item.description
+    return (
+      <Box
+        key={`${index}:${item.label}`}
+        id={getComposerSuggestionOptionId(id, index)}
+        role="option"
+        aria-selected={selected}
+        data-suggestion-index={index}
+        onMouseMove={() => {
+          if (!selected) onActiveIndexChange(index)
+        }}
+        onClick={() => onAccept(item)}
+        sx={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: `${columnTokens.space.lg}px`,
+          padding: `${columnTokens.space.md}px ${columnTokens.space.lg}px`,
+          cursor: 'pointer',
+          fontSize: columnTokens.fontSize.small,
+          lineHeight: '18px',
+          backgroundColor: selected ? columnTokens.hover : 'transparent'
+        }}
+      >
+        {/* The name never shrinks; only a name longer than 60% of the row is cut. */}
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: `${columnTokens.space.sm}px`,
+            flex: 'none',
+            minWidth: 0,
+            maxWidth: '60%',
+            fontFamily: columnTokens.monoFont
+          }}
+        >
+          <Box
+            component="span"
+            title={item.kind === 'skill' ? item.label : undefined}
+            sx={{
+              minWidth: 0,
+              padding: '1px 4px',
+              borderRadius: `${columnTokens.radius.control}px`,
+              backgroundColor: columnTokens.surface,
+              fontWeight: 600,
+              color: selected ? columnTokens.accent : columnTokens.text,
+              ...ellipsis
+            }}
+          >
+            {item.label}
+          </Box>
+          {argumentHintKey ? (
+            <Box component="span" sx={{ flex: 'none', color: columnTokens.muted }}>
+              {t(argumentHintKey)}
+            </Box>
+          ) : null}
+        </Box>
+        <Box
+          component="span"
+          title={description || undefined}
+          sx={{
+            flex: 1,
+            minWidth: 0,
+            // Level with the text inside the name chip.
+            paddingTop: '1px',
+            color: columnTokens.muted,
+            overflowWrap: 'anywhere',
+            display: '-webkit-box',
+            WebkitBoxOrient: 'vertical',
+            WebkitLineClamp: 2,
+            overflow: 'hidden'
+          }}
+        >
+          {description}
+        </Box>
+      </Box>
+    )
+  }
+
+  if (isColumn) {
+    return (
+      <Box
+        ref={listRef}
+        id={id}
+        role="listbox"
+        aria-label={t(
+          grouped
+            ? 'chat.composer_suggestions.list_label'
+            : 'chat.composer_suggestions.commands_label'
+        )}
+        data-testid="chat-composer-suggestions"
+        // Keep the caret in the textarea when the list or its scrollbar is pressed.
+        onMouseDown={(event) => event.preventDefault()}
+        sx={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: `calc(100% + ${columnTokens.space.md}px)`,
+          zIndex: theme.zIndex.drawer,
+          maxHeight: 'min(320px, 45vh)',
+          overflowX: 'hidden',
+          overflowY: 'auto',
+          border: `1px solid ${columnTokens.border}`,
+          borderRadius: `${columnTokens.radius.shell}px`,
+          backgroundColor: getAgentColumnRaisedSurface(theme),
+          color: columnTokens.text,
+          boxShadow: `0 20px 25px -5px rgba(0,0,0,${theme.palette.mode === 'dark' ? 0.4 : 0.1})`
+        }}
+      >
+        {groups.map((group) =>
+          group.items.length === 0 ? null : grouped ? (
+            <Box key={group.kind} role="group" aria-label={t(group.labelKey)}>
+              <Box
+                aria-hidden
+                data-testid="chat-composer-suggestion-heading"
+                sx={{
+                  padding: `${columnTokens.space.xs}px ${columnTokens.space.lg}px`,
+                  fontSize: columnTokens.fontSize.micro,
+                  fontWeight: 600,
+                  lineHeight: '16px',
+                  letterSpacing: '0.025em',
+                  textTransform: 'uppercase',
+                  color: columnTokens.muted,
+                  // A slightly darker strip than the menu surface.
+                  backgroundColor: alpha(
+                    theme.palette.common.black,
+                    theme.palette.mode === 'dark' ? 0.2 : 0.04
+                  ),
+                  userSelect: 'none'
+                }}
+              >
+                {t(group.labelKey)}
+              </Box>
+              {group.items.map((item, position) =>
+                renderColumnOption(item, group.offset + position)
+              )}
+            </Box>
+          ) : (
+            group.items.map((item, position) => renderColumnOption(item, group.offset + position))
+          )
+        )}
       </Box>
     )
   }
