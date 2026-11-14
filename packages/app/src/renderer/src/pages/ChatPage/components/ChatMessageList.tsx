@@ -1382,8 +1382,7 @@ const ContextCompressionSummaryCard: React.FC<{
                 whiteSpace: 'nowrap'
               }}
             >
-              {triggerLabel} · {messageCountLabel}
-              {timeLabel ? ` · ${timeLabel}` : ''}
+              {messageCountLabel}
             </Box>
             <CollapseIcon
               sx={{
@@ -2086,7 +2085,7 @@ const UserMessageEditForm: React.FC<{
     chatScrollLeft: number | null
     value: string
   } | null>(null)
-  const userBubbleBg = columnTokens ? columnTokens.surface : isLight ? '#eee7ff' : '#6f5bd6'
+  const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
   const userBubbleText = columnTokens ? columnTokens.text : isLight ? '#2f235f' : '#ffffff'
   const editRadius = columnTokens ? `${columnTokens.radius.shell}px` : '18px'
   const editButtonSx = columnTokens
@@ -2177,7 +2176,27 @@ const UserMessageEditForm: React.FC<{
           : { px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }
       }
     >
-      <Box sx={{ maxWidth: columnTokens ? '92%' : '85%', width: '100%' }}>
+      <Box
+        data-testid="edit-message-bubble"
+        sx={
+          columnTokens
+            ? {
+                // The bubble stays while editing; it widens to 92% of the list.
+                maxWidth: '92%',
+                width: '100%',
+                minWidth: 0,
+                boxSizing: 'border-box',
+                bgcolor: columnTokens.surface,
+                color: columnTokens.text,
+                borderRadius: `${columnTokens.radius.shell}px`,
+                padding: '9px 14px 12px'
+              }
+            : { maxWidth: '85%', width: '100%' }
+        }
+      >
+        {columnTokens ? (
+          <ColumnUserCaption tokens={columnTokens} label={t('chat.transcript.you')} />
+        ) : null}
         {imageEntries.length > 0 ? (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
             {imageEntries.map(({ attachment, id }, attachmentIndex) => (
@@ -2302,10 +2321,10 @@ const UserMessageEditForm: React.FC<{
             sx={{
               '& .MuiOutlinedInput-root': {
                 borderRadius: editRadius,
-                bgcolor: userBubbleBg,
+                bgcolor: columnTokens ? 'transparent' : userBubbleBg,
                 ...(columnTokens
                   ? {
-                      padding: '9px 14px 12px',
+                      padding: '8px 12px',
                       fontSize: columnTokens.fontSize.base,
                       lineHeight: columnTokens.bodyLineHeight
                     }
@@ -2364,6 +2383,27 @@ const UserMessageEditForm: React.FC<{
     </Box>
   )
 }
+
+/** The muted "You" line at the top of a user bubble in the Agent column. */
+const ColumnUserCaption: React.FC<{ tokens: AgentColumnTokens; label: string }> = ({
+  tokens,
+  label
+}) => (
+  <Typography
+    component="div"
+    data-testid="user-message-caption"
+    sx={{
+      mb: '4px',
+      fontSize: tokens.fontSize.small,
+      lineHeight: '16px',
+      color: tokens.muted,
+      userSelect: 'none',
+      cursor: 'default'
+    }}
+  >
+    {label}
+  </Typography>
+)
 
 // --- 用户消息气泡 ---
 const UserMessageBubble: React.FC<{
@@ -2438,20 +2478,7 @@ const UserMessageBubble: React.FC<{
         }}
       >
         {columnTokens ? (
-          <Typography
-            component="div"
-            data-testid="user-message-caption"
-            sx={{
-              mb: '4px',
-              fontSize: columnTokens.fontSize.small,
-              lineHeight: '16px',
-              color: columnTokens.muted,
-              userSelect: 'none',
-              cursor: 'default'
-            }}
-          >
-            {t('chat.transcript.you')}
-          </Typography>
+          <ColumnUserCaption tokens={columnTokens} label={t('chat.transcript.you')} />
         ) : null}
         {visibleAttachments.length > 0 && (
           <Box
@@ -3271,6 +3298,12 @@ const columnMarkdownSx = (tokens: AgentColumnTokens, isLight: boolean): SxProps<
   // The app's base style sheet removes list bullets everywhere; Markdown lists need them.
   '& ul': { listStyleType: 'disc' },
   '& li': { my: '0.2em', '&::marker': { color: tokens.muted } },
+  // A task item shows its checkbox where the bullet would be.
+  '& li.task-list-item': { listStyleType: 'none' },
+  '& li.task-list-item input[type="checkbox"]': {
+    m: '0 0.4em 0 -1.4em',
+    verticalAlign: 'middle'
+  },
   '& li > .chat-md-p': { m: 0 },
   '& code': {
     bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',

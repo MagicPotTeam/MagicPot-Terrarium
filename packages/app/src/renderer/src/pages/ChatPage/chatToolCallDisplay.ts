@@ -57,11 +57,34 @@ export function getToolCardIcon(icon: unknown): string | undefined {
   return text.trim() ? text : undefined
 }
 
-export function formatToolCallValue(value: unknown): { text: string; truncated: boolean } {
+/**
+ * The redacting walk behind every tool-call display text. It may emit MAX_TEXT
+ * characters of strings and keys; `refill` grants that budget again.
+ */
+function createRedactingWalk() {
   let nodes = 0
   let remaining = MAX_TEXT
   let truncated = false
   const seen = new Set<object>()
+  /** A `{ label, value }` row whose label names a secret: its value is masked. */
+  const isSensitiveRow = (item: object, entries: Array<[string, unknown]>): boolean => {
+    const rowLabel = entries.find(([key]) => key === 'label')?.[1]
+    return !Array.isArray(item) && typeof rowLabel === 'string' && sensitiveKey.test(redactText(rowLabel).trim()) &&
+      entries.some(([key]) => key === 'value') && entries.every(([key]) => ['label', 'value', 'inline'].includes(key))
+  }
+  /** One entry of an object or array at `depth`: its display key and its masked value. */
+  const visitEntry = (
+    key: string,
+    child: unknown,
+    sensitiveRow: boolean,
+    depth: number
+  ): [cleanKey: string, result: unknown] => {
+    const cleanKey = redactText(key.slice(0, 128))
+    remaining -= Math.min(key.length, remaining)
+    const result =
+      sensitiveKey.test(key) || sensitiveKey.test(cleanKey) || key === 'value' && sensitiveRow ? REDACTED : visit(child, depth + 1)
+    return [cleanKey, result]
+  }
   const visit = (item: unknown, depth: number): unknown => {
     if (++nodes > MAX_NODES || depth > 8 || remaining <= 0) {
       truncated = true
@@ -78,19 +101,14 @@ export function formatToolCallValue(value: unknown): { text: string; truncated: 
     if (seen.has(item)) return '[circular]'
     seen.add(item)
     const entries = Object.entries(item)
-    const rowLabel = entries.find(([key]) => key === 'label')?.[1]
-    const sensitiveRow = !Array.isArray(item) && typeof rowLabel === 'string' && sensitiveKey.test(redactText(rowLabel).trim()) &&
-      entries.some(([key]) => key === 'value') && entries.every(([key]) => ['label', 'value', 'inline'].includes(key))
+    const sensitiveRow = isSensitiveRow(item, entries)
     const output: unknown[] | Record<string, unknown> = Array.isArray(item) ? [] : {}
     for (const [key, child] of entries) {
       if (nodes >= MAX_NODES || remaining <= 0) {
         truncated = true
         break
       }
-      const cleanKey = redactText(key.slice(0, 128))
-      remaining -= Math.min(key.length, remaining)
-      const result =
-        sensitiveKey.test(key) || sensitiveKey.test(cleanKey) || key === 'value' && sensitiveRow ? REDACTED : visit(child, depth + 1)
+      const [cleanKey, result] = visitEntry(key, child, sensitiveRow, depth)
       if (Array.isArray(output)) output.push(result)
       else
         Object.defineProperty(output, cleanKey, {
@@ -102,6 +120,20 @@ export function formatToolCallValue(value: unknown): { text: string; truncated: 
     seen.delete(item)
     return output
   }
+  return {
+    visit,
+    visitEntry,
+    isSensitiveRow,
+    refill: (): void => {
+      remaining = MAX_TEXT
+    },
+    nodesSpent: (): boolean => nodes >= MAX_NODES,
+    isTruncated: (): boolean => truncated
+  }
+}
+
+export function formatToolCallValue(value: unknown): { text: string; truncated: boolean } {
+  const walk = createRedactingWalk()
   let input = value
   if (
     typeof value === 'string' &&
@@ -114,10 +146,10 @@ export function formatToolCallValue(value: unknown): { text: string; truncated: 
       /* Plain tool output need not be JSON. */
     }
   }
-  const formatted = visit(input, 0)
+  const formatted = walk.visit(input, 0)
   const text =
     typeof formatted === 'string' ? formatted : (JSON.stringify(formatted, null, 2) ?? '')
-  return { text: text.slice(0, MAX_TEXT), truncated: truncated || text.length > MAX_TEXT }
+  return { text: text.slice(0, MAX_TEXT), truncated: walk.isTruncated() || text.length > MAX_TEXT }
 }
 
 export function formatToolCardField(label: string, value: string): string {
@@ -132,33 +164,32 @@ const SUMMARY_VALUE_LIMIT = 50
 const SUMMARY_LIMIT = 240
 
 /**
- * One-line `key=value key=value` summary for the Agent column. It is built from
- * the output of formatToolCallValue, so sensitive keys and credential patterns
- * are masked exactly as in the expanded detail; each value is cut to 50
+ * One-line `key=value key=value` summary for the Agent column. Every argument
+ * goes through the same redacting walk as the expanded detail, each with the
+ * full text budget of its own, so one very long value (a file body) neither
+ * hides the arguments after it nor changes the format. Each value is cut to 50
  * characters and the whole line to 240.
  */
 export function toolCallArgumentSummary(args: Record<string, unknown>): string {
-  const formatted = formatToolCallValue(args)
-  let safe: unknown
-  try {
-    safe = JSON.parse(formatted.text)
-  } catch {
-    safe = undefined
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return formatToolCallValue(args).text.replace(/\s+/g, ' ').slice(0, SUMMARY_LIMIT)
   }
-  if (!safe || typeof safe !== 'object' || Array.isArray(safe)) {
-    return formatted.text.replace(/\s+/g, ' ').slice(0, SUMMARY_LIMIT)
-  }
+  const walk = createRedactingWalk()
+  const entries = Object.entries(args)
+  const sensitiveRow = walk.isSensitiveRow(args, entries)
   const parts: string[] = []
   let length = 0
-  for (const [key, value] of Object.entries(safe)) {
-    if (length >= SUMMARY_LIMIT) break
-    const text = (typeof value === 'string' ? value : (JSON.stringify(value) ?? '')).replace(
-      /\s+/g,
-      ' '
-    )
+  for (const [key, child] of entries) {
+    if (length >= SUMMARY_LIMIT || walk.nodesSpent()) break
+    walk.refill()
+    const [cleanKey, value] = walk.visitEntry(key, child, sensitiveRow, 0)
+    const nested = typeof value !== 'string'
+    const text = (nested ? (JSON.stringify(value) ?? '') : value).replace(/\s+/g, ' ')
     const cut = text.length > SUMMARY_VALUE_LIMIT ? `${text.slice(0, SUMMARY_VALUE_LIMIT)}…` : text
     // Second pass on the joined pair: a credential pattern may only appear once key and value meet.
-    const part = redactText(`${key}=${cut}`)
+    const joined = redactText(`${cleanKey.replace(/\s+/g, ' ')}=${cut}`)
+    // In nested JSON that pass also swallows the quotes of a value masked by the walk; put them back.
+    const part = nested ? joined.replace(/(":)\[redacted\]/g, `$1"${REDACTED}"`) : joined
     parts.push(part)
     length += part.length + 1
   }

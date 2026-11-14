@@ -75,6 +75,40 @@ describe('tool lines in the Agent column', () => {
     expect(first.querySelector('[role="progressbar"]')).toBeNull()
   })
 
+  it('keeps the key=value line for a call whose arguments exceed the display text limit', () => {
+    const content = Array.from(
+      { length: 1500 },
+      (_, index) => `line ${index}: value ${index}`
+    ).join('\n')
+    render(
+      <ChatToolCalls
+        history={[
+          call('a', 'write', 'completed', { args: { path: 'src/big.ts', content } }),
+          call('b', 'edit', 'completed', {
+            args: {
+              file_path: '/a/b.ts',
+              old_string: 'o'.repeat(9000),
+              new_string: 'n'.repeat(9000)
+            }
+          })
+        ]}
+        live={false}
+        columnStyle
+      />
+    )
+    const [write, edit] = screen.getAllByRole('button')
+    expect(write).toHaveTextContent(
+      `writepath=src/big.ts content=${content.replace(/\s+/g, ' ').slice(0, 50)}…`
+    )
+    expect(edit).toHaveTextContent(
+      `editfile_path=/a/b.ts old_string=${'o'.repeat(50)}… new_string=${'n'.repeat(50)}…`
+    )
+    expect(write.textContent).not.toContain('{')
+    // The expanded detail still shows the arguments as capped JSON with its truncation note.
+    fireEvent.click(write)
+    expect(screen.getByText('chat.tool_call.truncated')).toBeInTheDocument()
+  })
+
   // jsdom resolves `font: inherit` over the later font-size, so the 12px text is checked in the real app.
   it('draws the header with the fixed tool tint at 28px with 8px corners', () => {
     const theme = createTheme({ palette: { mode: 'dark' } })

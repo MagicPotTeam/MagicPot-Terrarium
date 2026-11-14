@@ -45,7 +45,12 @@ afterEach(() => {
 
 const renderList = (
   session: ChatSession | undefined,
-  options: { columnStyle?: boolean; isLoading?: boolean; loadingStatus?: ChatLoadingStatus } = {}
+  options: {
+    columnStyle?: boolean
+    isLoading?: boolean
+    loadingStatus?: ChatLoadingStatus
+    editingMessageIndex?: number
+  } = {}
 ) =>
   render(
     <ThemeProvider theme={theme}>
@@ -54,8 +59,8 @@ const renderList = (
         currentSession={session}
         isLoading={options.isLoading ?? false}
         loadingStatus={options.loadingStatus}
-        editingMessageIndex={null}
-        editingContent=""
+        editingMessageIndex={options.editingMessageIndex ?? null}
+        editingContent={options.editingMessageIndex === undefined ? '' : 'Edited text'}
         onSetEditingIndex={vi.fn()}
         onSetEditingContent={vi.fn()}
         onSendEditedMessage={vi.fn()}
@@ -173,6 +178,26 @@ describe('ChatMessageList in the Agent column', () => {
     }
   })
 
+  it('keeps the bubble and its caption while a message is edited, 92% wide', () => {
+    renderList(conversation, { editingMessageIndex: 0 })
+    expect(screen.queryByTestId('user-message-bubble')).toBeNull()
+    const bubble = screen.getByTestId('edit-message-bubble')
+    expect(bubble).toHaveStyle({
+      maxWidth: '92%',
+      width: '100%',
+      boxSizing: 'border-box',
+      borderRadius: '12px',
+      padding: '9px 14px 12px',
+      backgroundColor: 'rgba(255,255,255,0.08)'
+    })
+    expect(bubble.parentElement).toHaveStyle({ justifyContent: 'flex-end' })
+    const caption = within(bubble).getByTestId('user-message-caption')
+    expect(caption).toHaveTextContent('chat.transcript.you')
+    expect(bubble.firstElementChild).toBe(caption)
+    expect(within(bubble).getByRole('textbox')).toHaveValue('Edited text')
+    expect(within(bubble).getAllByRole('button')).toHaveLength(2)
+  })
+
   it('draws the assistant answer without a bubble: parts 6px apart, at most 90% wide, 13px text', () => {
     renderList(conversation)
     const parts = screen.getByTestId('assistant-message-parts')
@@ -237,6 +262,25 @@ describe('ChatMessageList in the Agent column', () => {
     expect(view.container.querySelector('.chat-md-p')).not.toHaveAttribute('style')
   })
 
+  it('shows a task item with its checkbox in place of the bullet', () => {
+    const view = renderList({
+      ...conversation,
+      messages: [
+        { role: 'user', content: 'Plan' },
+        { role: 'assistant', content: '- [ ] open task\n- [x] done task\n- plain item' }
+      ]
+    })
+    const items = [...view.container.querySelectorAll('.chat-md-body li')]
+    expect(items).toHaveLength(3)
+    expect(items[0]).toHaveClass('task-list-item')
+    expect(items[0]).toHaveStyle({ listStyleType: 'none' })
+    expect(items[1]).toHaveStyle({ listStyleType: 'none' })
+    expect(items[0].querySelector('input[type="checkbox"]')).toHaveStyle({ marginLeft: '-1.4em' })
+    // An ordinary item of the same list keeps its bullet.
+    expect(items[2]).not.toHaveClass('task-list-item')
+    expect(getComputedStyle(items[2]).listStyleType).not.toBe('none')
+  })
+
   it('shows the working line as a dot and a label without a box, with the detail below', () => {
     const session: ChatSession = {
       ...conversation,
@@ -283,6 +327,10 @@ describe('ChatMessageList in the Agent column', () => {
     expect(card).toHaveStyle({ borderRadius: '10px', borderStyle: 'solid' })
     const toggle = screen.getByTestId('chat-context-summary-toggle')
     expect(toggle).toHaveStyle({ padding: '6px 12px' })
+    // Title and number of messages only: no trigger word, no time.
+    expect(toggle).toHaveTextContent(
+      /^chat\.context_summary_titlechat\.context_summary_message_count:4$/
+    )
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByTestId('chat-context-summary-content')).toBeNull()
     fireEvent.click(toggle)

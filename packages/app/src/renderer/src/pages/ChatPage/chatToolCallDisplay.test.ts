@@ -191,6 +191,52 @@ describe('Agent column tool line helpers', () => {
     )
   })
 
+  it('keeps the key=value form when the arguments are larger than the display text limit', () => {
+    const body = Array.from(
+      { length: 1500 },
+      (_, index) => `line ${index}: const value = ${index}`
+    ).join('\n')
+    expect(body.length).toBeGreaterThan(20_000)
+    expect(toolCallArgumentSummary({ path: 'src/big.ts', content: body })).toBe(
+      `path=src/big.ts content=${body.replace(/\s+/g, ' ').slice(0, 50)}…`
+    )
+    // A long value does not hide the arguments after it either.
+    expect(toolCallArgumentSummary({ content: body, path: 'src/big.ts' })).toBe(
+      `content=${body.replace(/\s+/g, ' ').slice(0, 50)}… path=src/big.ts`
+    )
+    expect(
+      toolCallArgumentSummary({
+        file_path: '/a/b.ts',
+        old_string: 'o'.repeat(9000),
+        new_string: 'n'.repeat(9000),
+        replace_all: false
+      })
+    ).toBe(
+      `file_path=/a/b.ts old_string=${'o'.repeat(50)}… new_string=${'n'.repeat(50)}… replace_all=false`
+    )
+  })
+
+  it('masks secrets that follow a very long argument', () => {
+    const summary = toolCallArgumentSummary({
+      content: 'x'.repeat(30_000),
+      token: 'PRIVATE_TOKEN',
+      headers: { Authorization: 'Basic PRIVATE_BASIC' },
+      url: 'https://user:PRIVATE_URL@example.invalid/x',
+      db_password: 'PRIVATE_JOINED'
+    })
+    expect(summary).toContain(`content=${'x'.repeat(50)}… token=[redacted]`)
+    expect(summary).toContain('url=https://[redacted]@example.invalid/x')
+    expect(summary).not.toMatch(/PRIVATE_(?:TOKEN|BASIC|URL|JOINED)/)
+    // A masked value inside nested JSON keeps its quotes.
+    expect(toolCallArgumentSummary({ command: 'npm test', env: { PASSWORD: 'PRIVATE_ENV' } })).toBe(
+      'command=npm test env={"PASSWORD":"[redacted]"}'
+    )
+    // The row form `{ label, value }` is masked at the top level as in the detail view.
+    expect(toolCallArgumentSummary({ label: 'Password', value: 'PRIVATE_ROW' })).toBe(
+      'label=Password value=[redacted]'
+    )
+  })
+
   it('keeps sensitive keys and credential patterns masked in the summary without changing the arguments', () => {
     const args = {
       query: 'safe',
