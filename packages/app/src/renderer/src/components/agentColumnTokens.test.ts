@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { AGENT_COLUMN_MONO_FONT, getAgentColumnTokens } from './agentColumnTokens'
 
 describe('getAgentColumnTokens', () => {
-  it('derives colours from the MUI palette instead of fixed hex values', () => {
+  it('derives base colours from the MUI palette instead of fixed hex values', () => {
     const theme = createTheme({
       palette: {
         mode: 'dark',
@@ -30,25 +30,40 @@ describe('getAgentColumnTokens', () => {
   it('uses the dark tint recipe on dark themes', () => {
     const theme = createTheme({ palette: { mode: 'dark' } })
     const tokens = getAgentColumnTokens(theme)
-    const primary = theme.palette.primary.main
 
     expect(tokens.hover).toBe('rgba(255,255,255,0.05)')
     expect(tokens.surface).toBe('rgba(255,255,255,0.08)')
-    expect(tokens.toolTint).toEqual({ header: alpha(primary, 0.12), body: alpha(primary, 0.06) })
+    // Fixed tints of the reference design: they do not follow the palette.
+    expect(tokens.toolTint).toEqual({
+      header: alpha('#0F52BA', 0.12),
+      body: alpha('#0F52BA', 0.06),
+      hairline: alpha('#0F52BA', 0.2)
+    })
+    expect(tokens.toolName).toBe(theme.palette.primary.light)
     expect(tokens.memberTint).toEqual({
-      header: alpha('#a78bfa', 0.12),
-      stats: alpha('#a78bfa', 0.2)
+      header: alpha('#A57EAE', 0.12),
+      stats: alpha('#A57EAE', 0.2),
+      label: '#E8D5ED'
     })
   })
 
   it('uses the lighter tint recipe on light themes', () => {
     const theme = createTheme({ palette: { mode: 'light' } })
     const tokens = getAgentColumnTokens(theme)
-    const primary = theme.palette.primary.main
 
     expect(tokens.hover).toBe('rgba(0,0,0,0.04)')
     expect(tokens.surface).toBe('rgba(0,0,0,0.05)')
-    expect(tokens.toolTint).toEqual({ header: alpha(primary, 0.08), body: alpha(primary, 0.04) })
+    expect(tokens.toolTint).toEqual({
+      header: alpha('#0F52BA', 0.08),
+      body: alpha('#0F52BA', 0.04),
+      hairline: alpha('#0F52BA', 0.15)
+    })
+    expect(tokens.toolName).toBe(theme.palette.primary.dark)
+    expect(tokens.memberTint).toEqual({
+      header: alpha('#A57EAE', 0.08),
+      stats: alpha('#A57EAE', 0.15),
+      label: '#A57EAE'
+    })
   })
 
   it('fixes the shared scale: radii, text sizes, spacing, mono stack and disabled opacity', () => {

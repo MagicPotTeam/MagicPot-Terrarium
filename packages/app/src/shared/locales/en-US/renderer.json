@@ -1419,7 +1419,18 @@
       "waiting": "Waiting for the tool result…",
       "no_result": "No result content was recorded.",
       "unknown_notice": "No final result was received; the operation may have executed.",
-      "truncated": "Long content is only partially displayed."
+      "truncated": "Long content is only partially displayed.",
+      "batch_title": "{{count}} tool calls",
+      "batch_more": "+{{count}} more",
+      "batch_expand": "Expand {{count}} tool calls",
+      "batch_collapse": "Collapse {{count}} tool calls"
+    },
+    "transcript": {
+      "empty_title": "No messages yet",
+      "empty_hint": "Send a message to start",
+      "you": "You",
+      "copy_code": "Copy",
+      "code_copied": "Copied"
     },
     "loading_web_search": "Searching the web",
     "loading_web_fetch": "Reading a web page",

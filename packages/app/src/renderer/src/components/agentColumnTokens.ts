@@ -3,14 +3,22 @@ import { alpha, type Theme } from '@mui/material/styles'
 /**
  * Shared design tokens of the right-hand Agent column.
  *
- * The column keeps MagicPot's own palette; only structure, sizes and the
- * low-alpha tint recipe are fixed here so every part of the column (toolbar,
- * thread list, transcript rows, composer) draws from the same values.
+ * Base colours (text, muted text, dividers, selection, focus) come from
+ * MagicPot's own palette. Structure, sizes, the low-alpha tint recipe and the
+ * two fixed tints of tool lines and delegated-agent lines are set here so every
+ * part of the column (toolbar, thread list, transcript rows, composer) draws
+ * from the same values.
  */
 export const AGENT_COLUMN_MONO_FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
 
-/** Accent reserved for delegated agents (team members); not part of the MUI palette. */
-const AGENT_COLUMN_MEMBER_ACCENT = '#a78bfa'
+/**
+ * The two tints below are fixed colours of the reference design, not palette
+ * colours: every theme draws tool lines and delegated-agent lines with them.
+ */
+export const AGENT_COLUMN_TOOL_ACCENT = '#0F52BA'
+export const AGENT_COLUMN_MEMBER_ACCENT = '#A57EAE'
+/** Label of a delegated-agent line on a dark background. */
+const AGENT_COLUMN_MEMBER_LABEL_DARK = '#E8D5ED'
 
 export interface AgentColumnTokens {
   /** 1px separators between flat regions and rows. */
@@ -25,10 +33,12 @@ export interface AgentColumnTokens {
   selected: string
   /** Neutral raised surface (user bubble, chips). */
   surface: string
-  /** Tint of tool lines: stronger on the one-line header, lighter on the body. */
-  toolTint: { header: string; body: string }
-  /** Tint of delegated-agent (team member) lines. */
-  memberTint: { header: string; stats: string }
+  /** Tint of tool lines: stronger on the one-line header, half of it on the body. */
+  toolTint: { header: string; body: string; hairline: string }
+  /** Bold monospace tool name on a tool line. */
+  toolName: string
+  /** Tint of delegated-agent (team member) lines and the colour of their label. */
+  memberTint: { header: string; stats: string; label: string }
   /** Working, queued or waiting for the person. */
   attention: string
   /** Errors and destructive rows. */
@@ -60,12 +70,15 @@ export const getAgentColumnTokens = (theme: Theme): AgentColumnTokens => {
     selected: alpha(primary, 0.24),
     surface: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)',
     toolTint: {
-      header: alpha(primary, dark ? 0.12 : 0.08),
-      body: alpha(primary, dark ? 0.06 : 0.04)
+      header: alpha(AGENT_COLUMN_TOOL_ACCENT, dark ? 0.12 : 0.08),
+      body: alpha(AGENT_COLUMN_TOOL_ACCENT, dark ? 0.06 : 0.04),
+      hairline: alpha(AGENT_COLUMN_TOOL_ACCENT, dark ? 0.2 : 0.15)
     },
+    toolName: dark ? theme.palette.primary.light : theme.palette.primary.dark,
     memberTint: {
-      header: alpha(AGENT_COLUMN_MEMBER_ACCENT, 0.12),
-      stats: alpha(AGENT_COLUMN_MEMBER_ACCENT, 0.2)
+      header: alpha(AGENT_COLUMN_MEMBER_ACCENT, dark ? 0.12 : 0.08),
+      stats: alpha(AGENT_COLUMN_MEMBER_ACCENT, dark ? 0.2 : 0.15),
+      label: dark ? AGENT_COLUMN_MEMBER_LABEL_DARK : AGENT_COLUMN_MEMBER_ACCENT
     },
     attention: theme.palette.warning.main,
     danger: theme.palette.error.main,

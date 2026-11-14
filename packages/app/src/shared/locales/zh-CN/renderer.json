@@ -1246,7 +1246,18 @@
       "waiting": "正在等待工具返回…",
       "no_result": "没有记录返回内容。",
       "unknown_notice": "未收到最终结果；不代表操作未执行。",
-      "truncated": "内容较长，仅显示部分。"
+      "truncated": "内容较长，仅显示部分。",
+      "batch_title": "{{count}} 个工具调用",
+      "batch_more": "另 {{count}} 种",
+      "batch_expand": "展开 {{count}} 个工具调用",
+      "batch_collapse": "收起 {{count}} 个工具调用"
+    },
+    "transcript": {
+      "empty_title": "还没有消息",
+      "empty_hint": "发送一条消息开始",
+      "you": "你",
+      "copy_code": "复制",
+      "code_copied": "已复制"
     },
     "loading_web_search": "正在搜索网页",
     "loading_web_fetch": "正在读取网页",

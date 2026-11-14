@@ -80,7 +80,11 @@ import { getDroppedLocalImageContent } from '@renderer/utils/droppedImageUtils'
 import { DccBridgeTarget, isSupportedDccBridgeModelSourceFormat } from '@shared/api/svcDccBridge'
 import type { ManagedMediaDerivativeMaxEdge, ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference, type MediaReference } from '@shared/mediaReference'
-import type { SxProps, Theme } from '@mui/material/styles'
+import { alpha, keyframes, type SxProps, type Theme } from '@mui/material/styles'
+import {
+  getAgentColumnTokens,
+  type AgentColumnTokens
+} from '@renderer/components/agentColumnTokens'
 import {
   ensureCachedChatImageDerivative,
   getChatImageDerivativeCacheKey,
@@ -95,6 +99,11 @@ export {
 
 interface ChatMessageListProps {
   active?: boolean
+  /**
+   * Agent column look (flat rows, neutral user bubble, one-line tool rows). The
+   * full-page chat leaves it off and keeps its own look.
+   */
+  columnStyle?: boolean
   currentSession: ChatSession | undefined
   isLoading: boolean
   loadingStatus?: ChatLoadingStatus
@@ -130,6 +139,34 @@ export type ChatPendingConfirmation = {
 }
 
 const COPIED_FEEDBACK_DURATION_MS = 1800
+/** The text "Copy" button of a code block in the Agent column reads "Copied" for this long. */
+const COLUMN_CODE_COPIED_FEEDBACK_MS = 1500
+/** Rows of the Agent column are this far apart. */
+const COLUMN_ROW_GAP_PX = 12
+const COLUMN_CODE_BLOCK_BG = { light: '#1a1a2e', dark: '#0d0d1a' } as const
+
+const columnPulse = keyframes({ '0%, 100%': { opacity: 0.4 }, '50%': { opacity: 1 } })
+const columnPulseSx = {
+  animation: `${columnPulse} 1.5s ease-in-out infinite`,
+  '@media (prefers-reduced-motion: reduce)': { animation: 'none' }
+} as const
+
+/** 22px bordered icon button of the per-message action row in the Agent column. */
+const columnActionButtonSx = (tokens: AgentColumnTokens): SxProps<Theme> => ({
+  width: 22,
+  height: 22,
+  p: 0,
+  borderRadius: `${tokens.radius.control}px`,
+  border: '1px solid',
+  borderColor: tokens.border,
+  color: tokens.muted,
+  transition: 'color 150ms, border-color 150ms',
+  '&:hover': { color: tokens.text, borderColor: tokens.muted, bgcolor: 'transparent' },
+  '&.Mui-focusVisible': tokens.focusRing,
+  '&.Mui-disabled': { color: tokens.muted, opacity: tokens.disabledOpacity },
+  '&.MuiButtonBase-root.MuiIconButton-colorSuccess': { color: 'success.main' }
+})
+const COLUMN_ACTION_ICON_SIZE = 12
 const CHAT_VIRTUALIZATION_THRESHOLD = 40
 const CHAT_VIRTUALIZATION_OVERSCAN_PX = 900
 const CHAT_ESTIMATED_MESSAGE_HEIGHT = 112
@@ -568,7 +605,19 @@ const CopiableIconButton: React.FC<{
   active?: boolean
   iconSize?: number | string
   buttonSx?: SxProps<Theme>
-}> = ({ copyLabel, copiedLabel, content, active = true, iconSize = 14, buttonSx }) => {
+  /** When set, the control is a text button with these two words instead of an icon. */
+  textLabels?: { copy: string; copied: string }
+  feedbackMs?: number
+}> = ({
+  copyLabel,
+  copiedLabel,
+  content,
+  active = true,
+  iconSize = 14,
+  buttonSx,
+  textLabels,
+  feedbackMs = COPIED_FEEDBACK_DURATION_MS
+}) => {
   const { t } = useTranslation()
   const { notifySuccess, notifyError } = useMessage()
   const [copied, setCopied] = React.useState(false)
@@ -612,14 +661,30 @@ const CopiableIconButton: React.FC<{
         setCopied(false)
         setTooltipOpen(false)
         timerRef.current = null
-      }, COPIED_FEEDBACK_DURATION_MS)
+      }, feedbackMs)
     } catch {
       if (!isCurrent()) return
       notifyError(t('chat.copy_failed', { defaultValue: 'Failed to copy text. Try again.' }))
     } finally {
       if (pendingRef.current === operation) pendingRef.current = null
     }
-  }, [active, content, copiedLabel, notifyError, notifySuccess, t])
+  }, [active, content, copiedLabel, feedbackMs, notifyError, notifySuccess, t])
+
+  if (textLabels) {
+    return (
+      <Box
+        component="button"
+        type="button"
+        aria-label={copied ? copiedLabel : copyLabel}
+        data-copied={copied ? 'true' : undefined}
+        disabled={!active || !content}
+        onClick={handleClick}
+        sx={buttonSx}
+      >
+        {copied ? textLabels.copied : textLabels.copy}
+      </Box>
+    )
+  }
 
   return (
     <Tooltip
@@ -694,6 +759,7 @@ const MeasuredChatRow: React.FC<{
 
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
   active = true,
+  columnStyle = false,
   currentSession,
   isLoading,
   loadingStatus,
@@ -716,6 +782,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const { t } = useTranslation()
   const theme = useTheme()
   const isLight = theme.palette.mode === 'light'
+  // Undefined outside the Agent column: every row then keeps the full-page look.
+  const columnTokens = React.useMemo(
+    () => (columnStyle ? getAgentColumnTokens(theme) : undefined),
+    [columnStyle, theme]
+  )
   const { notifySuccess } = useMessage()
   const messages = React.useMemo(() => currentSession?.messages ?? [], [currentSession?.messages])
   const contextCompressionSummary = currentSession?.contextCompression
@@ -986,7 +1057,17 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         flexDirection: 'column',
         maxWidth: '900px',
         mx: 'auto',
-        width: '100%'
+        width: '100%',
+        // Every row ends with the 12px row gap, so 4px more gives the 16px bottom inset.
+        ...(columnTokens
+          ? {
+              boxSizing: 'border-box',
+              px: '8px',
+              pt: '16px',
+              pb: '4px',
+              fontSize: columnTokens.fontSize.base
+            }
+          : {})
       }}
     >
       {contextCompressionSummary ? (
@@ -997,9 +1078,54 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           manual={contextCompressionSummary.manual}
           t={t}
           theme={theme}
+          columnTokens={columnTokens}
         />
       ) : null}
-      {messages.length === 0 && !contextCompressionSummary && (
+      {messages.length === 0 && !contextCompressionSummary && columnTokens ? (
+        <Box data-testid="chat-empty-state" sx={{ px: '16px', py: '64px', textAlign: 'center' }}>
+          <Box
+            aria-hidden="true"
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 48,
+              height: 48,
+              mx: 'auto',
+              mb: '12px',
+              borderRadius: '16px',
+              bgcolor: columnTokens.surface
+            }}
+          >
+            <Box
+              sx={{
+                width: 11,
+                height: 11,
+                boxSizing: 'border-box',
+                border: '1.5px solid',
+                borderColor: columnTokens.accent,
+                transform: 'rotate(45deg)'
+              }}
+            />
+          </Box>
+          <Typography sx={{ m: 0, fontSize: 14, lineHeight: '20px', color: columnTokens.muted }}>
+            {t('chat.transcript.empty_title')}
+          </Typography>
+          <Typography
+            sx={{
+              m: 0,
+              mt: '4px',
+              fontSize: 12,
+              lineHeight: '16px',
+              color: columnTokens.muted,
+              opacity: 0.75
+            }}
+          >
+            {t('chat.transcript.empty_hint')}
+          </Typography>
+        </Box>
+      ) : null}
+      {messages.length === 0 && !contextCompressionSummary && !columnTokens && (
         <Box
           sx={{
             flex: 1,
@@ -1065,7 +1191,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               identity={messageIdentities[index]}
               index={index}
               enabled={virtualized}
-              bottomSpacing={message.role === 'user' ? 0 : 16}
+              bottomSpacing={columnTokens ? COLUMN_ROW_GAP_PX : message.role === 'user' ? 0 : 16}
               onHeight={measureRow}
             >
               {message.role === 'user' ? (
@@ -1095,6 +1221,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     }}
                     savedChatScrollPositionRef={editScrollPositionRef}
                     isLight={isLight}
+                    columnTokens={columnTokens}
                   />
                 ) : (
                   <UserMessageBubble
@@ -1111,6 +1238,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     onSendModelToDcc={onSendModelToDcc}
                     t={t}
                     theme={theme}
+                    columnTokens={columnTokens}
                   />
                 )
               ) : (
@@ -1138,6 +1266,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   notifySuccess={notifySuccess}
                   t={t}
                   theme={theme}
+                  columnTokens={columnTokens}
                 />
               )}
             </MeasuredChatRow>
@@ -1158,6 +1287,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           confirmation={pendingConfirmation}
           active={active}
           onResolve={onResolvePendingConfirmation}
+          columnStyle={columnStyle}
         />
       ) : null}
       <div ref={messagesEndRef} />
@@ -1172,7 +1302,8 @@ const ContextCompressionSummaryCard: React.FC<{
   manual?: boolean
   t: TFunction<'translation'>
   theme: any
-}> = ({ summary, coveredMessageCount, updatedAt, manual, t, theme }) => {
+  columnTokens?: AgentColumnTokens
+}> = ({ summary, coveredMessageCount, updatedAt, manual, t, theme, columnTokens }) => {
   const [expanded, setExpanded] = React.useState(false)
   const timeLabel = updatedAt
     ? new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -1188,6 +1319,112 @@ const ContextCompressionSummaryCard: React.FC<{
   const summaryLabel = t('chat.context_summary_expand_label', {
     defaultValue: 'Compressed context'
   })
+
+  if (columnTokens) {
+    // One-line accent banner; the summary opens below it in a capped scroll box.
+    const border = `1px solid ${alpha(columnTokens.accent, 0.25)}`
+    return (
+      <Box sx={{ mb: `${COLUMN_ROW_GAP_PX}px`, minWidth: 0, flexShrink: 0 }}>
+        <Box
+          data-testid="chat-context-summary-card"
+          sx={{
+            border,
+            borderRadius: `${columnTokens.radius.banner}px`,
+            bgcolor: alpha(columnTokens.accent, 0.06),
+            overflow: 'hidden'
+          }}
+        >
+          <Box
+            component="button"
+            type="button"
+            data-testid="chat-context-summary-toggle"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              width: '100%',
+              minWidth: 0,
+              m: 0,
+              border: 0,
+              padding: '6px 12px',
+              bgcolor: 'transparent',
+              color: columnTokens.text,
+              cursor: 'pointer',
+              font: 'inherit',
+              fontSize: columnTokens.fontSize.small,
+              lineHeight: '16px',
+              textAlign: 'left',
+              '&:focus-visible': columnTokens.focusRing
+            }}
+          >
+            <Box
+              component="span"
+              sx={{
+                color: columnTokens.accent,
+                fontWeight: 500,
+                whiteSpace: 'nowrap',
+                flexShrink: 0
+              }}
+            >
+              {title}
+            </Box>
+            <Box
+              component="span"
+              sx={{
+                flex: 1,
+                minWidth: 0,
+                color: columnTokens.muted,
+                fontSize: columnTokens.fontSize.micro,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {triggerLabel} · {messageCountLabel}
+              {timeLabel ? ` · ${timeLabel}` : ''}
+            </Box>
+            <CollapseIcon
+              sx={{
+                fontSize: 14,
+                flexShrink: 0,
+                color: columnTokens.muted,
+                transition: 'transform 120ms',
+                transform: expanded ? 'rotate(180deg)' : undefined,
+                '@media (prefers-reduced-motion: reduce)': { transition: 'none' }
+              }}
+            />
+          </Box>
+          {expanded ? (
+            <Box
+              data-testid="chat-context-summary-content"
+              sx={{
+                borderTop: border,
+                padding: '8px 12px',
+                maxHeight: '12rem',
+                overflowY: 'auto',
+                overflowX: 'hidden',
+                overflowWrap: 'anywhere',
+                fontSize: columnTokens.fontSize.small,
+                lineHeight: 1.5,
+                '& p': { m: '0 0 0.5em' },
+                '& > :last-child': { mb: 0 },
+                '& ul, & ol': { my: '0.4em', pl: '1.5em' },
+                '& ul': { listStyleType: 'disc' },
+                '& h1, & h2, & h3': { m: '0.8em 0 0.4em', fontSize: '1em', fontWeight: 600 },
+                '& strong': { fontWeight: 600 },
+                '& > :first-of-type': { mt: 0 },
+                '& code': { fontFamily: columnTokens.monoFont, fontSize: '0.9em' }
+              }}
+            >
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown>
+            </Box>
+          ) : null}
+        </Box>
+      </Box>
+    )
+  }
 
   return (
     <Box sx={{ px: 2, mb: 1.5, display: 'flex', justifyContent: 'flex-start' }}>
@@ -1323,8 +1560,10 @@ const PendingConfirmationPanel: React.FC<{
   confirmation: ChatPendingConfirmation
   active: boolean
   onResolve?: (requestId: string, confirmed: boolean) => void
-}> = ({ confirmation, active, onResolve }) => (
-  <Box sx={{ px: 2, mb: 2 }}>
+  columnStyle?: boolean
+}> = ({ confirmation, active, onResolve, columnStyle }) => (
+  // The Agent column already insets its rows by 8px and spaces them 12px apart.
+  <Box sx={columnStyle ? { mb: `${COLUMN_ROW_GAP_PX}px`, flexShrink: 0 } : { px: 2, mb: 2 }}>
     <Box
       data-testid="chat-pending-confirmation"
       sx={{
@@ -1588,7 +1827,8 @@ const sortReportBundleAttachmentsForDisplay = (
 const TextDragHandle: React.FC<{
   content: string
   title: string
-}> = ({ content, title }) => (
+  columnTokens?: AgentColumnTokens
+}> = ({ content, title, columnTokens }) => (
   <Tooltip title={title} placement="top">
     <IconButton
       size="small"
@@ -1599,16 +1839,23 @@ const TextDragHandle: React.FC<{
         event.dataTransfer.setData('text/plain', content || '')
         event.dataTransfer.effectAllowed = 'copy'
       }}
-      sx={{
-        color: 'text.disabled',
-        width: 28,
-        height: 28,
-        cursor: 'default',
-        '&:hover': { color: 'text.secondary' },
-        '&:active': { cursor: 'default' }
-      }}
+      sx={
+        columnTokens
+          ? ([
+              columnActionButtonSx(columnTokens),
+              { cursor: 'default', '&:active': { cursor: 'default' } }
+            ] as SxProps<Theme>)
+          : {
+              color: 'text.disabled',
+              width: 28,
+              height: 28,
+              cursor: 'default',
+              '&:hover': { color: 'text.secondary' },
+              '&:active': { cursor: 'default' }
+            }
+      }
     >
-      <DragIndicatorIcon sx={{ fontSize: 16 }} />
+      <DragIndicatorIcon sx={{ fontSize: columnTokens ? COLUMN_ACTION_ICON_SIZE + 1 : 16 }} />
     </IconButton>
   </Tooltip>
 )
@@ -1698,6 +1945,7 @@ const UserMessageEditForm: React.FC<{
     scrollLeft: number
   } | null>
   isLight: boolean
+  columnTokens?: AgentColumnTokens
 }> = ({
   message,
   editingContent,
@@ -1707,7 +1955,8 @@ const UserMessageEditForm: React.FC<{
   onCancel,
   onSubmit,
   savedChatScrollPositionRef,
-  isLight
+  isLight,
+  columnTokens
 }) => {
   const { t } = useTranslation()
   const nextAttachmentId = React.useRef(0)
@@ -1837,8 +2086,20 @@ const UserMessageEditForm: React.FC<{
     chatScrollLeft: number | null
     value: string
   } | null>(null)
-  const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
-  const userBubbleText = isLight ? '#2f235f' : '#ffffff'
+  const userBubbleBg = columnTokens ? columnTokens.surface : isLight ? '#eee7ff' : '#6f5bd6'
+  const userBubbleText = columnTokens ? columnTokens.text : isLight ? '#2f235f' : '#ffffff'
+  const editRadius = columnTokens ? `${columnTokens.radius.shell}px` : '18px'
+  const editButtonSx = columnTokens
+    ? {
+        minWidth: 0,
+        px: '10px',
+        py: '4px',
+        borderRadius: `${columnTokens.radius.control}px`,
+        fontSize: columnTokens.fontSize.small,
+        lineHeight: '16px',
+        textTransform: 'none'
+      }
+    : { borderRadius: '18px', textTransform: 'none' }
 
   React.useLayoutEffect(() => {
     const editor = editorRef.current
@@ -1909,8 +2170,14 @@ const UserMessageEditForm: React.FC<{
   )
 
   return (
-    <Box sx={{ px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
-      <Box sx={{ maxWidth: '85%', width: '100%' }}>
+    <Box
+      sx={
+        columnTokens
+          ? { display: 'flex', justifyContent: 'flex-end' }
+          : { px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }
+      }
+    >
+      <Box sx={{ maxWidth: columnTokens ? '92%' : '85%', width: '100%' }}>
         {imageEntries.length > 0 ? (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
             {imageEntries.map(({ attachment, id }, attachmentIndex) => (
@@ -2015,7 +2282,7 @@ const UserMessageEditForm: React.FC<{
           onDrop={(event) => void handleImageDrop(event)}
           sx={{
             position: 'relative',
-            borderRadius: '18px',
+            borderRadius: editRadius,
             outline: isDraggingImage ? '2px dashed' : 'none',
             outlineColor: 'primary.main',
             outlineOffset: 2,
@@ -2034,8 +2301,15 @@ const UserMessageEditForm: React.FC<{
             variant="outlined"
             sx={{
               '& .MuiOutlinedInput-root': {
-                borderRadius: '18px',
-                bgcolor: userBubbleBg
+                borderRadius: editRadius,
+                bgcolor: userBubbleBg,
+                ...(columnTokens
+                  ? {
+                      padding: '9px 14px 12px',
+                      fontSize: columnTokens.fontSize.base,
+                      lineHeight: columnTokens.bodyLineHeight
+                    }
+                  : {})
               },
               '& .MuiInputBase-input': {
                 color: userBubbleText
@@ -2054,12 +2328,7 @@ const UserMessageEditForm: React.FC<{
           </Typography>
         ) : null}
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 1 }}>
-          <Button
-            variant="text"
-            size="small"
-            onClick={onCancel}
-            sx={{ borderRadius: '18px', textTransform: 'none' }}
-          >
+          <Button variant="text" size="small" onClick={onCancel} sx={editButtonSx}>
             {t('chat.cancel', { defaultValue: 'Cancel' })}
           </Button>
           <Button
@@ -2086,7 +2355,7 @@ const UserMessageEditForm: React.FC<{
               }
               onSubmit(newContent, editingAttachments.length > 0 ? editingAttachments : undefined)
             }}
-            sx={{ borderRadius: '18px', textTransform: 'none' }}
+            sx={editButtonSx}
           >
             {t('chat.save_and_rerun', { defaultValue: 'Save & Rerun' })}
           </Button>
@@ -2109,6 +2378,7 @@ const UserMessageBubble: React.FC<{
   onSendModelToDcc: (attachment: ChatAttachment, target: DccBridgeTarget) => void
   t: TFunction<'translation'>
   theme: any
+  columnTokens?: AgentColumnTokens
 }> = ({
   message,
   active,
@@ -2119,56 +2389,87 @@ const UserMessageBubble: React.FC<{
   onDownloadAttachment,
   onSendModelToDcc,
   t,
-  theme
+  theme,
+  columnTokens
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
   const attachmentKeys = useChatAttachmentRenderKeys(visibleAttachments)
   const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
   const userBubbleText = isLight ? '#2f235f' : '#ffffff'
+  const columnActionSx = columnTokens ? columnActionButtonSx(columnTokens) : undefined
 
   return (
     <Box
-      sx={{
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'flex-end',
-        alignItems: 'flex-end',
-        mb: 2,
-        px: 2
-      }}
+      sx={
+        columnTokens
+          ? { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', minWidth: 0 }
+          : {
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'flex-end',
+              alignItems: 'flex-end',
+              mb: 2,
+              px: 2
+            }
+      }
     >
       <Box
+        data-testid="user-message-bubble"
         sx={{
           position: 'relative',
-          maxWidth: '85%',
-          bgcolor: userBubbleBg,
-          borderRadius: '18px',
-          px: 3,
-          py: 2,
           wordWrap: 'break-word',
           wordBreak: 'break-word',
           overflowWrap: 'break-word',
           userSelect: 'text',
           WebkitUserSelect: 'text',
-          cursor: 'text'
+          cursor: 'text',
+          ...(columnTokens
+            ? {
+                // Neutral surface, shrink-to-fit, at most 80% of the list.
+                maxWidth: '80%',
+                minWidth: 0,
+                boxSizing: 'border-box',
+                bgcolor: columnTokens.surface,
+                color: columnTokens.text,
+                borderRadius: `${columnTokens.radius.shell}px`,
+                padding: '9px 14px 12px'
+              }
+            : { maxWidth: '85%', bgcolor: userBubbleBg, borderRadius: '18px', px: 3, py: 2 })
         }}
       >
+        {columnTokens ? (
+          <Typography
+            component="div"
+            data-testid="user-message-caption"
+            sx={{
+              mb: '4px',
+              fontSize: columnTokens.fontSize.small,
+              lineHeight: '16px',
+              color: columnTokens.muted,
+              userSelect: 'none',
+              cursor: 'default'
+            }}
+          >
+            {t('chat.transcript.you')}
+          </Typography>
+        ) : null}
         {visibleAttachments.length > 0 && (
           <Box
             data-chat-user-attachments="true"
             sx={{
-              mb: message.content ? 1.5 : 0,
+              mb: message.content ? (columnTokens ? '6px' : 1.5) : 0,
               width: '100%',
               display: 'flex',
               flexDirection: 'column',
-              alignItems: 'flex-start'
+              alignItems: 'flex-start',
+              ...(columnTokens ? { gap: '6px' } : {})
             }}
           >
             {visibleAttachments.map((attachment, attIdx) => (
               <Box
                 key={attachmentKeys[attIdx]}
                 sx={{
-                  mb: 1,
+                  mb: columnTokens ? 0 : 1,
                   width: '100%',
                   display: 'flex',
                   justifyContent: 'flex-start'
@@ -2229,8 +2530,13 @@ const UserMessageBubble: React.FC<{
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
               overflowWrap: 'break-word',
-              color: userBubbleText,
-              lineHeight: 1.6
+              ...(columnTokens
+                ? {
+                    color: columnTokens.text,
+                    fontSize: columnTokens.fontSize.base,
+                    lineHeight: columnTokens.bodyLineHeight
+                  }
+                : { color: userBubbleText, lineHeight: 1.6 })
             }}
           >
             {message.content}
@@ -2246,8 +2552,8 @@ const UserMessageBubble: React.FC<{
           zIndex: 1,
           display: 'flex',
           alignItems: 'center',
-          gap: 0,
-          mt: 0.5,
+          gap: columnTokens ? '4px' : 0,
+          mt: columnTokens ? '4px' : 0.5,
           mr: 0,
           opacity: 1,
           visibility: 'visible',
@@ -2263,34 +2569,40 @@ const UserMessageBubble: React.FC<{
           copiedLabel={t('chat.prompt_copied')}
           content={message.content || ''}
           active={active}
-          buttonSx={{
-            color: 'text.disabled',
-            width: 28,
-            height: 28,
-            '&:hover': { color: 'text.secondary' },
-            '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
-              color: 'success.main'
+          iconSize={columnTokens ? COLUMN_ACTION_ICON_SIZE : undefined}
+          buttonSx={
+            columnActionSx ?? {
+              color: 'text.disabled',
+              width: 28,
+              height: 28,
+              '&:hover': { color: 'text.secondary' },
+              '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+                color: 'success.main'
+              }
             }
-          }}
+          }
         />
         <Tooltip title={t('chat.edit_message')} placement="top">
           <IconButton
             size="small"
             onClick={onEdit}
-            sx={{
-              color: 'text.disabled',
-              width: 28,
-              height: 28,
-              '&:hover': { color: 'text.secondary' }
-            }}
+            sx={
+              columnActionSx ?? {
+                color: 'text.disabled',
+                width: 28,
+                height: 28,
+                '&:hover': { color: 'text.secondary' }
+              }
+            }
           >
-            <EditIcon sx={{ fontSize: 14 }} />
+            <EditIcon sx={{ fontSize: columnTokens ? COLUMN_ACTION_ICON_SIZE : 14 }} />
           </IconButton>
         </Tooltip>
         {message.content ? (
           <TextDragHandle
             content={message.content}
             title={t('chat.drag_prompt_to_canvas', { defaultValue: 'Drag prompt to canvas' })}
+            columnTokens={columnTokens}
           />
         ) : null}
       </Box>
@@ -2315,6 +2627,7 @@ const AssistantMessageBubble: React.FC<{
   notifySuccess: (msg: string) => void
   t: TFunction<'translation'>
   theme: any
+  columnTokens?: AgentColumnTokens
 }> = ({
   message,
   replyDownloadBaseName,
@@ -2330,7 +2643,8 @@ const AssistantMessageBubble: React.FC<{
   onSendModelToDcc,
   notifySuccess,
   t,
-  theme
+  theme,
+  columnTokens
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
   const attachmentKeys = useChatAttachmentRenderKeys(visibleAttachments)
@@ -2352,21 +2666,43 @@ const AssistantMessageBubble: React.FC<{
   const showLoadingStatus = isLoading && Boolean(loadingStatus?.label)
 
   return (
-    <Box sx={{ px: 2 }}>
+    <Box sx={columnTokens ? { minWidth: 0 } : { px: 2 }}>
       <Box
+        data-testid="assistant-message-parts"
         sx={{
           flex: 1,
           minWidth: 0,
           wordBreak: 'break-word',
-          overflowWrap: 'break-word'
+          overflowWrap: 'break-word',
+          // No bubble in the Agent column: a plain column of parts, 6px apart, at most 90% wide.
+          ...(columnTokens
+            ? {
+                maxWidth: '90%',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+                fontSize: columnTokens.fontSize.base,
+                lineHeight: columnTokens.bodyLineHeight
+              }
+            : {})
         }}
       >
-        <ChatToolCalls history={message.toolHistory} live={isLoading} />
+        <ChatToolCalls
+          history={message.toolHistory}
+          live={isLoading}
+          columnStyle={Boolean(columnTokens)}
+        />
         {/* AI 附件 */}
         {visibleAttachments.length > 0 && (
-          <Box sx={{ mb: message.content ? 1.5 : 0 }}>
+          <Box
+            sx={
+              columnTokens
+                ? { display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 0 }
+                : { mb: message.content ? 1.5 : 0 }
+            }
+          >
             {visibleAttachments.map((attachment, attIdx) => (
-              <Box key={attachmentKeys[attIdx]} sx={{ mb: 1 }}>
+              <Box key={attachmentKeys[attIdx]} sx={{ mb: columnTokens ? 0 : 1 }}>
                 {attachment.type === 'image' ? (
                   <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
@@ -2421,6 +2757,7 @@ const AssistantMessageBubble: React.FC<{
               onDownloadAttachment={onDownloadAttachment}
               notifySuccess={notifySuccess}
               t={t}
+              columnTokens={columnTokens}
             />
             {showLoadingStatus ? (
               <AssistantLoadingStatus
@@ -2428,6 +2765,7 @@ const AssistantMessageBubble: React.FC<{
                 progress={loadingProgress}
                 detail={loadingDetail}
                 theme={theme}
+                columnTokens={columnTokens}
               />
             ) : null}
           </>
@@ -2438,6 +2776,7 @@ const AssistantMessageBubble: React.FC<{
               progress={loadingProgress}
               detail={loadingDetail}
               theme={theme}
+              columnTokens={columnTokens}
             />
           ) : (
             <AssistantMarkdownContent
@@ -2454,6 +2793,7 @@ const AssistantMessageBubble: React.FC<{
               onDownloadAttachment={onDownloadAttachment}
               notifySuccess={notifySuccess}
               t={t}
+              columnTokens={columnTokens}
             />
           )
         ) : isLoading ? (
@@ -2464,6 +2804,7 @@ const AssistantMessageBubble: React.FC<{
             progress={loadingProgress}
             detail={loadingDetail}
             theme={theme}
+            columnTokens={columnTokens}
           />
         ) : message.toolHistory?.length ||
           (message.content !== undefined && message.content !== '') ? null : (
@@ -2481,35 +2822,87 @@ const AssistantLoadingStatus: React.FC<{
   progress?: string | null
   detail?: string
   theme: any
-}> = ({ label, progress, detail, theme }) => (
-  <Box
-    data-testid="assistant-loading-status"
-    sx={{
-      mt: 0.75,
-      display: 'inline-flex',
-      alignItems: 'flex-start',
-      gap: 1,
-      px: 1.25,
-      py: 0.9,
-      borderRadius: '14px',
-      bgcolor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)',
-      border: '1px solid',
-      borderColor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'
-    }}
-  >
-    <CircularProgress size={16} sx={{ mt: '2px', flexShrink: 0 }} />
-    <Box sx={{ minWidth: 0 }}>
-      <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 600, lineHeight: 1.4 }}>
-        {progress ? `${label} ${progress}` : label}
-      </Typography>
+  columnTokens?: AgentColumnTokens
+}> = ({ label, progress, detail, theme, columnTokens }) =>
+  columnTokens ? (
+    // The working line of the Agent column: a pulsing dot and a label, no box.
+    <Box
+      data-testid="assistant-loading-status"
+      sx={{ padding: '8px 4px', minWidth: 0, color: columnTokens.attention }}
+    >
+      <Box
+        sx={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: 14, lineHeight: 1.2 }}
+      >
+        <Box
+          aria-hidden="true"
+          data-testid="assistant-loading-dot"
+          sx={{
+            width: 8,
+            height: 8,
+            flexShrink: 0,
+            borderRadius: '50%',
+            bgcolor: 'currentColor',
+            ...columnPulseSx
+          }}
+        />
+        <Box
+          component="span"
+          sx={{
+            minWidth: 0,
+            overflowWrap: 'anywhere',
+            color: alpha(columnTokens.attention, 0.8),
+            ...columnPulseSx
+          }}
+        >
+          {progress ? `${label} ${progress}` : label}
+        </Box>
+      </Box>
       {detail ? (
-        <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.35 }}>
+        <Typography
+          sx={{
+            mt: '2px',
+            pl: '18px',
+            fontSize: columnTokens.fontSize.small,
+            lineHeight: '16px',
+            color: columnTokens.muted
+          }}
+        >
           {detail}
         </Typography>
       ) : null}
     </Box>
-  </Box>
-)
+  ) : (
+    <Box
+      data-testid="assistant-loading-status"
+      sx={{
+        mt: 0.75,
+        display: 'inline-flex',
+        alignItems: 'flex-start',
+        gap: 1,
+        px: 1.25,
+        py: 0.9,
+        borderRadius: '14px',
+        bgcolor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)',
+        border: '1px solid',
+        borderColor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'
+      }}
+    >
+      <CircularProgress size={16} sx={{ mt: '2px', flexShrink: 0 }} />
+      <Box sx={{ minWidth: 0 }}>
+        <Typography
+          variant="body2"
+          sx={{ color: 'text.primary', fontWeight: 600, lineHeight: 1.4 }}
+        >
+          {progress ? `${label} ${progress}` : label}
+        </Typography>
+        {detail ? (
+          <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.35 }}>
+            {detail}
+          </Typography>
+        ) : null}
+      </Box>
+    </Box>
+  )
 
 // --- AI 视频播放器 ---
 const AssistantVideoPlayer: React.FC<{ url: string; fileName?: string }> = ({ url, fileName }) => {
@@ -2621,6 +3014,8 @@ type ChatMarkdownRenderContextValue = {
   onPreviewImage: (url: string) => void
   onImageContextMenu: (event: React.MouseEvent, imageUrl: string) => void
   t: TFunction<'translation'>
+  /** Set in the Agent column only. */
+  columnTokens?: AgentColumnTokens
 }
 
 const ChatMarkdownRenderContext = React.createContext<ChatMarkdownRenderContextValue | null>(null)
@@ -2631,9 +3026,41 @@ const useChatMarkdownRenderContext = (): ChatMarkdownRenderContextValue => {
   return context
 }
 
-const ChatMarkdownParagraph: React.FC<React.PropsWithChildren> = ({ children }) => (
-  <div style={{ margin: '0.8em 0' }}>{children}</div>
-)
+const ChatMarkdownParagraph: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const { columnTokens } = useChatMarkdownRenderContext()
+  // The Agent column spaces paragraphs from its own style sheet (class, no inline margin).
+  return columnTokens ? (
+    <div className="chat-md-p">{children}</div>
+  ) : (
+    <div style={{ margin: '0.8em 0' }}>{children}</div>
+  )
+}
+
+/** True for a `code` element that is the content of a fenced block (Agent column only). */
+const ChatMarkdownFencedCodeContext = React.createContext(false)
+
+const ChatMarkdownPre: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const { columnTokens } = useChatMarkdownRenderContext()
+  return columnTokens ? (
+    <ChatMarkdownFencedCodeContext.Provider value={true}>
+      {children}
+    </ChatMarkdownFencedCodeContext.Provider>
+  ) : (
+    <pre>{children}</pre>
+  )
+}
+
+/** A wide table scrolls inside itself in the Agent column instead of widening the list. */
+const ChatMarkdownTable: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const { columnTokens } = useChatMarkdownRenderContext()
+  return columnTokens ? (
+    <div className="chat-md-table-scroll">
+      <table>{children}</table>
+    </div>
+  ) : (
+    <table>{children}</table>
+  )
+}
 
 const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ src, alt }) => {
   const { onPreviewImage, onImageContextMenu, t } = useChatMarkdownRenderContext()
@@ -2667,9 +3094,96 @@ const ChatMarkdownAnchor: React.FC<React.PropsWithChildren<{ href?: string }>> =
 )
 
 const ChatMarkdownCode = ({ node, inline, className, children, ...props }: any) => {
-  const { active, isLight, t } = useChatMarkdownRenderContext()
+  const { active, isLight, t, columnTokens } = useChatMarkdownRenderContext()
+  const fenced = React.useContext(ChatMarkdownFencedCodeContext)
   const codeMatch = /language-(\w+)/.exec(className || '')
   const codeContent = children == null ? '' : String(children).replace(/\n$/, '')
+  if (columnTokens && fenced) {
+    // Always-dark block: a header strip with the language and a text Copy button, then the code.
+    const language = (codeMatch?.[1] || 'text').toLowerCase()
+    return (
+      <div
+        className="chat-md-code-block"
+        data-testid="chat-code-block"
+        style={{
+          margin: '0.6em 0',
+          borderRadius: columnTokens.radius.content,
+          overflow: 'hidden',
+          backgroundColor: isLight ? COLUMN_CODE_BLOCK_BG.light : COLUMN_CODE_BLOCK_BG.dark,
+          color: '#e0def4'
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 8,
+            padding: '0.35em 0.8em',
+            backgroundColor: 'rgba(255,255,255,0.05)',
+            borderBottom: '1px solid rgba(255,255,255,0.08)',
+            fontSize: '0.8em',
+            lineHeight: 1.5,
+            fontFamily: columnTokens.monoFont,
+            color: '#a0a0b8',
+            userSelect: 'none',
+            cursor: 'default'
+          }}
+        >
+          <span>{language}</span>
+          <CopiableIconButton
+            copyLabel={t('chat.copy_code', { defaultValue: 'Copy code' })}
+            copiedLabel={t('chat.code_copied')}
+            content={codeContent}
+            active={active}
+            textLabels={{
+              copy: t('chat.transcript.copy_code'),
+              copied: t('chat.transcript.code_copied')
+            }}
+            feedbackMs={COLUMN_CODE_COPIED_FEEDBACK_MS}
+            buttonSx={{
+              m: 0,
+              flexShrink: 0,
+              padding: '0.15em 0.6em',
+              border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: `${columnTokens.radius.control}px`,
+              bgcolor: 'transparent',
+              color: '#c0c0d0',
+              font: 'inherit',
+              cursor: 'pointer',
+              '&:hover': { bgcolor: 'rgba(255,255,255,0.08)' },
+              '&:focus-visible': columnTokens.focusRing,
+              '&:disabled': { opacity: columnTokens.disabledOpacity, cursor: 'default' },
+              '&[data-copied="true"]': {
+                color: columnTokens.live,
+                borderColor: alpha(columnTokens.live, 0.5)
+              }
+            }}
+          />
+        </div>
+        <Prism
+          style={vscDarkPlus}
+          language={language}
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            background: 'transparent',
+            fontSize: '0.9em',
+            lineHeight: 1.5,
+            padding: '0.8em 1em',
+            overflowX: 'auto'
+          }}
+          codeTagProps={{
+            style: { fontFamily: columnTokens.monoFont, fontSize: 'inherit', lineHeight: 'inherit' }
+          }}
+          {...props}
+        >
+          {codeContent}
+        </Prism>
+      </div>
+    )
+  }
   return !inline && codeMatch ? (
     <div style={{ position: 'relative' }}>
       <div
@@ -2734,8 +3248,67 @@ const CHAT_MARKDOWN_COMPONENTS: MarkdownComponents = {
   p: ChatMarkdownParagraph,
   img: ChatMarkdownImage,
   a: ChatMarkdownAnchor,
-  code: ChatMarkdownCode
+  code: ChatMarkdownCode,
+  pre: ChatMarkdownPre,
+  table: ChatMarkdownTable
 }
+
+/** Markdown typography of the Agent column: 13px / 1.65 with compact block spacing. */
+const columnMarkdownSx = (tokens: AgentColumnTokens, isLight: boolean): SxProps<Theme> => ({
+  wordBreak: 'break-word',
+  overflowWrap: 'break-word',
+  minWidth: 0,
+  color: tokens.text,
+  fontSize: tokens.fontSize.base,
+  lineHeight: tokens.bodyLineHeight,
+  userSelect: 'text',
+  WebkitUserSelect: 'text',
+  cursor: 'text',
+  '& .chat-md-p': { m: '0 0 0.5em' },
+  '& .chat-md-body > :first-child': { mt: 0 },
+  '& .chat-md-body > :last-child': { mb: 0 },
+  '& ul, & ol': { pl: '1.5em', my: '0.4em' },
+  // The app's base style sheet removes list bullets everywhere; Markdown lists need them.
+  '& ul': { listStyleType: 'disc' },
+  '& li': { my: '0.2em', '&::marker': { color: tokens.muted } },
+  '& li > .chat-md-p': { m: 0 },
+  '& code': {
+    bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
+    padding: '0.15em 0.35em',
+    borderRadius: `${tokens.radius.control}px`,
+    fontFamily: tokens.monoFont,
+    fontSize: '0.9em'
+  },
+  '& .chat-md-code-block code': { bgcolor: 'transparent', p: 0, borderRadius: 0 },
+  '& blockquote': {
+    m: '0.5em 0',
+    pl: '0.8em',
+    borderLeft: `3px solid ${tokens.accent}`,
+    color: tokens.muted
+  },
+  '& hr': { border: 'none', borderTop: `1px solid ${tokens.border}`, my: '0.8em' },
+  '& a': {
+    color: tokens.accent,
+    textDecoration: 'none',
+    '&:hover': { textDecoration: 'underline' }
+  },
+  '& strong': { fontWeight: 600 },
+  '& h1, & h2, & h3, & h4, & h5, & h6': { fontWeight: 600, m: '0.8em 0 0.4em', lineHeight: 1.4 },
+  '& h1': { fontSize: '1.3em' },
+  '& h2': { fontSize: '1.15em' },
+  '& h3': { fontSize: '1.05em' },
+  '& h4, & h5, & h6': { fontSize: '1em' },
+  '& .chat-md-table-scroll': { maxWidth: '100%', overflowX: 'auto', my: '0.5em' },
+  // Cells keep whole words, so a table that does not fit scrolls inside its wrapper.
+  '& table': {
+    borderCollapse: 'collapse',
+    fontSize: '0.9em',
+    wordBreak: 'normal',
+    overflowWrap: 'normal'
+  },
+  '& th, & td': { border: `1px solid ${tokens.border}`, padding: '0.3em 0.6em', textAlign: 'left' },
+  '& th': { fontWeight: 600, bgcolor: tokens.hover, whiteSpace: 'nowrap' }
+})
 
 const AssistantMarkdownContent: React.FC<{
   content: string
@@ -2751,6 +3324,7 @@ const AssistantMarkdownContent: React.FC<{
   onDownloadAttachment: (attachment: ChatAttachment) => void
   notifySuccess: (msg: string) => void
   t: TFunction<'translation'>
+  columnTokens?: AgentColumnTokens
 }> = ({
   content,
   replyDownloadBaseName,
@@ -2764,7 +3338,8 @@ const AssistantMarkdownContent: React.FC<{
   onImageContextMenu,
   onDownloadAttachment,
   notifySuccess,
-  t
+  t,
+  columnTokens
 }) => {
   const videoRegex = /\[Generated Video\]\(([^)]+)\)/g
   const [downloadMenuAnchorEl, setDownloadMenuAnchorEl] = React.useState<HTMLElement | null>(null)
@@ -2884,89 +3459,103 @@ const AssistantMarkdownContent: React.FC<{
 
     setDownloadMenuAnchorEl(event.currentTarget)
   }
+  const columnActionSx = columnTokens ? columnActionButtonSx(columnTokens) : undefined
+  const markdown = textContent ? (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      urlTransform={(url) => url}
+      components={CHAT_MARKDOWN_COMPONENTS}
+    >
+      {textContent}
+    </ReactMarkdown>
+  ) : null
 
   return (
     <Box
       data-testid="assistant-markdown-content"
-      sx={{
-        wordBreak: 'break-word',
-        overflowWrap: 'break-word',
-        color: 'text.primary',
-        lineHeight: 1.8,
-        fontSize: '0.95rem',
-        userSelect: 'text',
-        WebkitUserSelect: 'text',
-        cursor: 'text',
-        '& p': { my: 1.2 },
-        '& p:first-of-type': { mt: 0 },
-        '& p:last-child': { mb: 0 },
-        '& ul, & ol': {
-          pl: 3,
-          my: 1.5,
-          '& li': {
-            my: 0.6,
-            '&::marker': {
-              color: 'text.secondary'
+      sx={
+        columnTokens
+          ? columnMarkdownSx(columnTokens, isLight)
+          : {
+              wordBreak: 'break-word',
+              overflowWrap: 'break-word',
+              color: 'text.primary',
+              lineHeight: 1.8,
+              fontSize: '0.95rem',
+              userSelect: 'text',
+              WebkitUserSelect: 'text',
+              cursor: 'text',
+              '& p': { my: 1.2 },
+              '& p:first-of-type': { mt: 0 },
+              '& p:last-child': { mb: 0 },
+              '& ul, & ol': {
+                pl: 3,
+                my: 1.5,
+                '& li': {
+                  my: 0.6,
+                  '&::marker': {
+                    color: 'text.secondary'
+                  }
+                }
+              },
+              '& li': {
+                my: 0.6,
+                '& p': { my: 0.3 }
+              },
+              '& code': {
+                bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
+                px: 0.5,
+                py: 0.25,
+                borderRadius: 0.5,
+                fontFamily: 'monospace',
+                fontSize: '0.9em'
+              },
+              '& pre': {
+                bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
+                p: 1.5,
+                borderRadius: 1,
+                overflow: 'auto',
+                my: 1.5,
+                '& code': {
+                  bgcolor: 'transparent',
+                  p: 0
+                }
+              },
+              '& blockquote': {
+                borderLeft: 'none',
+                pl: 3,
+                ml: 2,
+                mr: 0,
+                my: 1,
+                color: 'text.primary',
+                '& p': {
+                  my: 0.5
+                }
+              },
+              '& hr': {
+                border: 'none',
+                borderTop: '1px solid',
+                borderColor: isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.15)',
+                my: 3
+              },
+              '& a': {
+                color: 'primary.main',
+                textDecoration: 'none',
+                '&:hover': {
+                  textDecoration: 'underline'
+                }
+              },
+              '& strong': {
+                fontWeight: 600
+              },
+              '& h1, & h2, & h3, & h4, & h5, & h6': {
+                fontWeight: 600,
+                mt: 2.5,
+                mb: 1.5,
+                lineHeight: 1.4
+              }
             }
-          }
-        },
-        '& li': {
-          my: 0.6,
-          '& p': { my: 0.3 }
-        },
-        '& code': {
-          bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
-          px: 0.5,
-          py: 0.25,
-          borderRadius: 0.5,
-          fontFamily: 'monospace',
-          fontSize: '0.9em'
-        },
-        '& pre': {
-          bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
-          p: 1.5,
-          borderRadius: 1,
-          overflow: 'auto',
-          my: 1.5,
-          '& code': {
-            bgcolor: 'transparent',
-            p: 0
-          }
-        },
-        '& blockquote': {
-          borderLeft: 'none',
-          pl: 3,
-          ml: 2,
-          mr: 0,
-          my: 1,
-          color: 'text.primary',
-          '& p': {
-            my: 0.5
-          }
-        },
-        '& hr': {
-          border: 'none',
-          borderTop: '1px solid',
-          borderColor: isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.15)',
-          my: 3
-        },
-        '& a': {
-          color: 'primary.main',
-          textDecoration: 'none',
-          '&:hover': {
-            textDecoration: 'underline'
-          }
-        },
-        '& strong': {
-          fontWeight: 600
-        },
-        '& h1, & h2, & h3, & h4, & h5, & h6': {
-          fontWeight: 600,
-          mt: 2.5,
-          mb: 1.5,
-          lineHeight: 1.4
-        }
-      }}
+      }
     >
       {/*
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.5 }}>
@@ -2976,17 +3565,11 @@ const AssistantMarkdownContent: React.FC<{
           />
         </Box>
       */}
-      {textContent && (
+      {markdown && (
         <ChatMarkdownRenderContext.Provider
-          value={{ active, isLight, onPreviewImage, onImageContextMenu, t }}
+          value={{ active, isLight, onPreviewImage, onImageContextMenu, t, columnTokens }}
         >
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            urlTransform={(url) => url}
-            components={CHAT_MARKDOWN_COMPONENTS}
-          >
-            {textContent}
-          </ReactMarkdown>
+          {columnTokens ? <div className="chat-md-body">{markdown}</div> : markdown}
         </ChatMarkdownRenderContext.Provider>
       )}
       {videos.map((url) => (
@@ -3049,8 +3632,9 @@ const AssistantMarkdownContent: React.FC<{
           sx={{
             display: 'flex',
             alignItems: 'center',
-            gap: 0.5,
-            mt: 1
+            gap: columnTokens ? '4px' : 0.5,
+            mt: columnTokens ? '4px' : 1,
+            ...(columnTokens ? { userSelect: 'none', cursor: 'default' } : {})
           }}
         >
           {hasTextContent ? (
@@ -3059,15 +3643,18 @@ const AssistantMarkdownContent: React.FC<{
               copiedLabel={t('chat.reply_copied', { defaultValue: 'Reply copied' })}
               content={textContent}
               active={active}
-              buttonSx={{
-                color: 'text.disabled',
-                width: 28,
-                height: 28,
-                '&:hover': { color: 'text.secondary' },
-                '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
-                  color: 'success.main'
+              iconSize={columnTokens ? COLUMN_ACTION_ICON_SIZE : undefined}
+              buttonSx={
+                columnActionSx ?? {
+                  color: 'text.disabled',
+                  width: 28,
+                  height: 28,
+                  '&:hover': { color: 'text.secondary' },
+                  '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+                    color: 'success.main'
+                  }
                 }
-              }}
+              }
             />
           ) : null}
           <Tooltip title={downloadButtonLabel} placement="top">
@@ -3075,14 +3662,16 @@ const AssistantMarkdownContent: React.FC<{
               size="small"
               aria-label={downloadButtonLabel}
               onClick={handleOpenDownloadMenu}
-              sx={{
-                color: 'text.disabled',
-                width: 28,
-                height: 28,
-                '&:hover': { color: 'text.secondary' }
-              }}
+              sx={
+                columnActionSx ?? {
+                  color: 'text.disabled',
+                  width: 28,
+                  height: 28,
+                  '&:hover': { color: 'text.secondary' }
+                }
+              }
             >
-              <DownloadIcon sx={{ fontSize: 15 }} />
+              <DownloadIcon sx={{ fontSize: columnTokens ? COLUMN_ACTION_ICON_SIZE + 1 : 15 }} />
             </IconButton>
           </Tooltip>
           <Menu
@@ -3143,6 +3732,7 @@ const AssistantMarkdownContent: React.FC<{
               title={t('chat.drag_reply_to_canvas', {
                 defaultValue: '\u62d6\u62fd\u56de\u7b54\u5230\u753b\u677f'
               })}
+              columnTokens={columnTokens}
             />
           ) : null}
         </Box>

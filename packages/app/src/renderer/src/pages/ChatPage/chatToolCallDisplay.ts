@@ -128,6 +128,131 @@ export function formatToolCardField(label: string, value: string): string {
 export const toolCallSummary = (args: Record<string, unknown>): string =>
   formatToolCallValue(args).text.replace(/\s+/g, ' ').slice(0, 240)
 
+const SUMMARY_VALUE_LIMIT = 50
+const SUMMARY_LIMIT = 240
+
+/**
+ * One-line `key=value key=value` summary for the Agent column. It is built from
+ * the output of formatToolCallValue, so sensitive keys and credential patterns
+ * are masked exactly as in the expanded detail; each value is cut to 50
+ * characters and the whole line to 240.
+ */
+export function toolCallArgumentSummary(args: Record<string, unknown>): string {
+  const formatted = formatToolCallValue(args)
+  let safe: unknown
+  try {
+    safe = JSON.parse(formatted.text)
+  } catch {
+    safe = undefined
+  }
+  if (!safe || typeof safe !== 'object' || Array.isArray(safe)) {
+    return formatted.text.replace(/\s+/g, ' ').slice(0, SUMMARY_LIMIT)
+  }
+  const parts: string[] = []
+  let length = 0
+  for (const [key, value] of Object.entries(safe)) {
+    if (length >= SUMMARY_LIMIT) break
+    const text = (typeof value === 'string' ? value : (JSON.stringify(value) ?? '')).replace(
+      /\s+/g,
+      ' '
+    )
+    const cut = text.length > SUMMARY_VALUE_LIMIT ? `${text.slice(0, SUMMARY_VALUE_LIMIT)}…` : text
+    // Second pass on the joined pair: a credential pattern may only appear once key and value meet.
+    const part = redactText(`${key}=${cut}`)
+    parts.push(part)
+    length += part.length + 1
+  }
+  return parts.join(' ').slice(0, SUMMARY_LIMIT)
+}
+
+export type ToolCallDisplayStatus = ToolHistoryEntry['status'] | 'unknown'
+
+/** A saved call that never finished is shown as unknown, not as running or cancelled. */
+export const toolCallDisplayStatus = (
+  entry: ToolHistoryEntry,
+  live: boolean
+): ToolCallDisplayStatus => (entry.status === 'running' && !live ? 'unknown' : entry.status)
+
+export const toolCallDisplayName = (entry: ToolHistoryEntry): string =>
+  entry.toolName.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 128) || 'tool'
+
+export const toolCallKey = (entry: ToolHistoryEntry): string =>
+  JSON.stringify([entry.runId, entry.toolCallId])
+
+export const TOOL_CALL_BATCH_THRESHOLD = 3
+
+export type ToolCallGroup =
+  | { kind: 'single'; key: string; entry: ToolHistoryEntry }
+  | { kind: 'batch'; key: string; entries: ToolHistoryEntry[] }
+
+/**
+ * Folds every run of three or more consecutive plain calls into one batch. A
+ * call that is not plain (it pins content under its line) stays a line of its
+ * own and ends the run. The batch key comes from its first call, so calls
+ * streamed into a running batch do not reset its expanded state.
+ */
+export function groupToolCalls(
+  entries: readonly ToolHistoryEntry[],
+  isPlain: (entry: ToolHistoryEntry) => boolean = () => true
+): ToolCallGroup[] {
+  const groups: ToolCallGroup[] = []
+  let run: ToolHistoryEntry[] = []
+  const flush = (): void => {
+    if (run.length >= TOOL_CALL_BATCH_THRESHOLD) {
+      groups.push({ kind: 'batch', key: `batch:${toolCallKey(run[0])}`, entries: run })
+    } else {
+      for (const entry of run) groups.push({ kind: 'single', key: toolCallKey(entry), entry })
+    }
+    run = []
+  }
+  for (const entry of entries) {
+    if (isPlain(entry)) {
+      run.push(entry)
+      continue
+    }
+    flush()
+    groups.push({ kind: 'single', key: toolCallKey(entry), entry })
+  }
+  flush()
+  return groups
+}
+
+export interface ToolCallBatchSummary {
+  /** Running first, then failed, cancelled, unknown; completed only when nothing else applies. */
+  status: ToolCallDisplayStatus
+  counts: Record<ToolCallDisplayStatus, number>
+  /** Tool names with their number of calls, most frequent first. */
+  names: Array<[name: string, count: number]>
+}
+
+export function summarizeToolCallBatch(
+  entries: readonly ToolHistoryEntry[],
+  live: boolean
+): ToolCallBatchSummary {
+  const counts: Record<ToolCallDisplayStatus, number> = {
+    running: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    unknown: 0
+  }
+  const names = new Map<string, number>()
+  for (const entry of entries) {
+    counts[toolCallDisplayStatus(entry, live)] += 1
+    const name = toolCallDisplayName(entry)
+    names.set(name, (names.get(name) ?? 0) + 1)
+  }
+  const status = (['running', 'failed', 'cancelled', 'unknown'] as const).find(
+    (key) => counts[key] > 0
+  )
+  return {
+    status: status ?? 'completed',
+    counts,
+    // Array.prototype.sort is stable: equal counts keep the order of first use.
+    names: [...names.entries()].sort((a, b) => b[1] - a[1])
+  }
+}
+
 export function visibleToolCalls(
   history: readonly ToolHistoryEntry[] | undefined
 ): ToolHistoryEntry[] {

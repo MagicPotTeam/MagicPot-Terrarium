@@ -9547,6 +9547,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               <Box sx={{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               <ChatMessageList
                 active={active}
+                columnStyle={compact}
                 currentSession={currentSession}
                 isLoading={isLoading}
                 loadingStatus={currentLoadingStatus}

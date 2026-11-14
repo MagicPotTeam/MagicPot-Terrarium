@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ToolHistoryEntry } from '@shared/llm/types'
 import * as cardFormatting from './chatToolCallDisplay'
-import { formatToolCallValue, formatToolCardField, toolCallSummary, visibleToolCalls } from './chatToolCallDisplay'
+import {
+  formatToolCallValue,
+  formatToolCardField,
+  groupToolCalls,
+  summarizeToolCallBatch,
+  toolCallArgumentSummary,
+  toolCallDisplayStatus,
+  toolCallSummary,
+  visibleToolCalls
+} from './chatToolCallDisplay'
 
 const entry: ToolHistoryEntry = {
   runId: 'run',
@@ -141,5 +150,149 @@ describe('tool call display formatting', () => {
     expect(
       visibleToolCalls([null, { ...entry, args: null }] as unknown as ToolHistoryEntry[])
     ).toEqual([])
+  })
+})
+
+describe('Agent column tool line helpers', () => {
+  const call = (
+    id: string,
+    toolName: string,
+    status: ToolHistoryEntry['status'] = 'completed'
+  ): ToolHistoryEntry => ({
+    ...entry,
+    toolCallId: id,
+    toolName,
+    status
+  })
+
+  it('summarises arguments as key=value pairs and cuts each value to 50 characters', () => {
+    expect(toolCallArgumentSummary({ pattern: 'parseSelector\\(', path: 'src', limit: 20 })).toBe(
+      'pattern=parseSelector\\( path=src limit=20'
+    )
+    expect(toolCallArgumentSummary({ command: 'x'.repeat(80), cwd: '/tmp' })).toBe(
+      `command=${'x'.repeat(50)}… cwd=/tmp`
+    )
+    expect(toolCallArgumentSummary({ text: 'line one\n\tline two' })).toBe('text=line one line two')
+    expect(toolCallArgumentSummary({ options: { deep: true, list: [1, 2] } })).toBe(
+      'options={"deep":true,"list":[1,2]}'
+    )
+    expect(toolCallArgumentSummary({})).toBe('')
+  })
+
+  it('bounds the whole summary to 240 characters', () => {
+    const args = Object.fromEntries(
+      Array.from({ length: 40 }, (_, index) => [`key${index}`, 'v'.repeat(60)])
+    )
+    const summary = toolCallArgumentSummary(args)
+    expect(summary.length).toBeLessThanOrEqual(240)
+    expect(summary.startsWith(`key0=${'v'.repeat(50)}… key1=`)).toBe(true)
+    expect(toolCallArgumentSummary({ command: 'x'.repeat(100_000) }).length).toBeLessThanOrEqual(
+      240
+    )
+  })
+
+  it('keeps sensitive keys and credential patterns masked in the summary without changing the arguments', () => {
+    const args = {
+      query: 'safe',
+      token: 'PRIVATE_TOKEN',
+      headers: { Authorization: 'Basic PRIVATE_BASIC' },
+      url: 'https://user:PRIVATE_URL@example.invalid/x',
+      note: 'Bearer PRIVATE_BEARER',
+      db_password: 'PRIVATE_JOINED'
+    }
+    const before = JSON.stringify(args)
+    const summary = toolCallArgumentSummary(args)
+    expect(summary).toContain('query=safe')
+    expect(summary).toContain('token=[redacted]')
+    expect(summary).not.toMatch(/PRIVATE_(?:TOKEN|BASIC|URL|BEARER|JOINED)/)
+    expect(JSON.stringify(args)).toBe(before)
+  })
+
+  it('shows a saved unfinished call as unknown and a live one as running', () => {
+    expect(toolCallDisplayStatus(call('a', 'read', 'running'), false)).toBe('unknown')
+    expect(toolCallDisplayStatus(call('a', 'read', 'running'), true)).toBe('running')
+    expect(toolCallDisplayStatus(call('a', 'read', 'failed'), false)).toBe('failed')
+  })
+
+  it('keeps one or two calls as separate lines and folds three or more into one batch', () => {
+    const two = [call('a', 'read'), call('b', 'grep')]
+    expect(groupToolCalls(two).map((group) => group.kind)).toEqual(['single', 'single'])
+    const five = [...two, call('c', 'edit'), call('d', 'read'), call('e', 'bash', 'failed')]
+    const groups = groupToolCalls(five)
+    expect(groups).toHaveLength(1)
+    expect(groups[0]).toMatchObject({ kind: 'batch', key: 'batch:["run","a"]' })
+    expect(groups[0].kind === 'batch' && groups[0].entries).toEqual(five)
+  })
+
+  it('derives the batch key from the first call so later calls do not change it', () => {
+    const three = [call('a', 'read'), call('b', 'grep'), call('c', 'edit')]
+    const key = groupToolCalls(three)[0].key
+    expect(groupToolCalls([...three, call('d', 'bash', 'running')])[0].key).toBe(key)
+  })
+
+  it('lets a call that is not plain stand alone and end the run', () => {
+    const calls = [
+      call('a', 'read'),
+      call('b', 'grep'),
+      call('card', 'show_card'),
+      call('c', 'edit'),
+      call('d', 'read'),
+      call('e', 'bash')
+    ]
+    const groups = groupToolCalls(calls, (item) => item.toolName !== 'show_card')
+    expect(
+      groups.map((group) =>
+        group.kind === 'batch' ? `batch:${group.entries.length}` : group.entry.toolName
+      )
+    ).toEqual(['read', 'grep', 'show_card', 'batch:3'])
+  })
+
+  it('aggregates a batch: running first, then failed, cancelled, unknown, else completed', () => {
+    const done = [call('a', 'read'), call('b', 'read'), call('c', 'grep')]
+    expect(summarizeToolCallBatch(done, false)).toMatchObject({
+      status: 'completed',
+      counts: { completed: 3, running: 0, failed: 0, cancelled: 0, unknown: 0 },
+      names: [
+        ['read', 2],
+        ['grep', 1]
+      ]
+    })
+    const mixed = [
+      ...done,
+      call('d', 'bash', 'failed'),
+      call('e', 'edit', 'cancelled'),
+      call('f', 'web_fetch', 'running')
+    ]
+    expect(summarizeToolCallBatch(mixed, true).status).toBe('running')
+    expect(summarizeToolCallBatch(mixed, true).counts).toMatchObject({
+      running: 1,
+      failed: 1,
+      cancelled: 1
+    })
+    // Restored from storage the unfinished call is unknown, so the failure decides the glyph.
+    expect(summarizeToolCallBatch(mixed, false).status).toBe('failed')
+    expect(summarizeToolCallBatch(mixed, false).counts).toMatchObject({ running: 0, unknown: 1 })
+    expect(summarizeToolCallBatch([...done, call('e', 'edit', 'cancelled')], false).status).toBe(
+      'cancelled'
+    )
+    expect(summarizeToolCallBatch([...done, call('f', 'web_fetch', 'running')], false).status).toBe(
+      'unknown'
+    )
+  })
+
+  it('orders batch names by number of calls and keeps first use order for ties', () => {
+    const calls = [
+      call('a', 'grep'),
+      call('b', 'read'),
+      call('c', 'edit'),
+      call('d', 'read'),
+      call('e', 'bad name!')
+    ]
+    expect(summarizeToolCallBatch(calls, false).names).toEqual([
+      ['read', 2],
+      ['grep', 1],
+      ['edit', 1],
+      ['badname', 1]
+    ])
   })
 })
