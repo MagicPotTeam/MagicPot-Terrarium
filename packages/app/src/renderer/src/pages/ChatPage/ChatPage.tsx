@@ -279,6 +279,8 @@ import SessionHistoryDialog from './components/SessionHistoryDialog'
 import ChatMessageList, { type ChatPendingConfirmation } from './components/ChatMessageList'
 import AgentThreadHtmlPanel from './components/AgentThreadHtmlPanel'
 import { isAgentBasicCommand, parseAgentBasicCommand } from './agentBasicCommand'
+import { listComposerCommands } from './composerCommandCatalog'
+import type { ComposerMentionMember } from './composerSuggestions'
 import { isRepairImagesCommand, parseRepairImagesCommand, scanMissingLocalImages, projectConfirmedImageContext, type ImageRepairScan, type MissingImageReference } from './repairImagesCommand'
 import { isAgentConfigurationCommand, parseAgentConfigurationCommand } from './agentConfigurationCommand'
 import { isAgentInspectionCommand, parseAgentInspectionCommand, formatAgentEnvironment } from './agentInspectionCommand'
@@ -8358,6 +8360,64 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const scratchpadAvailable = active && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && !!currentSession &&
     config?.use_remote_llm === false && !selectedCustomSkill && !showingSide && !isSkillPickerOpen && !skillDetailsOpen && !!currentSessionId &&
     !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSessionId)) && !hasSessionDeleteTombstone(currentSessionId, storageScope)
+  // Suggest only what handleSendCurrentMessage below runs in this conversation.
+  const composerCommandsReady =
+    active &&
+    isReady &&
+    sessionsLoaded &&
+    !sessionLoadError &&
+    !!currentSession &&
+    !(currentSession.teamLeadId && teamLead?.teamEnded)
+  const composerCommandsRemote = Boolean(config?.use_remote_llm)
+  const composerCommandsCanvasThread = route?.channel === 'canvas' && route.scopeType === 'thread'
+  const composerCommandsTeamMember = Boolean(currentSession?.teamLeadId)
+  const composerCommandsBoundTools = selectedSkillToolHelpItems.length > 0
+  const composerSuggestionCommands = useMemo(
+    () =>
+      composerCommandsReady
+        ? listComposerCommands({
+            remote: composerCommandsRemote,
+            canvasThread: composerCommandsCanvasThread,
+            scratchpad: scratchpadAvailable,
+            boundTools: composerCommandsBoundTools,
+            teamMember: composerCommandsTeamMember
+          })
+        : [],
+    [
+      composerCommandsReady,
+      composerCommandsRemote,
+      composerCommandsCanvasThread,
+      scratchpadAvailable,
+      composerCommandsBoundTools,
+      composerCommandsTeamMember
+    ]
+  )
+  // "@name task" is only routed from the lead conversation of a team that has not ended.
+  const composerMentionMembersKey =
+    teamEnabled && teamLead && currentSession?.id === teamLead.id && !teamLead.teamEnded
+      ? JSON.stringify(
+          teamMembers.flatMap((member) =>
+            member.teamMemberName
+              ? [
+                  [
+                    member.teamMemberName,
+                    member.teamRole && member.teamRole !== member.teamMemberName
+                      ? member.teamRole
+                      : '',
+                    loadingSessionIds.has(member.id)
+                  ]
+                ]
+              : []
+          )
+        )
+      : '[]'
+  const composerMentionMembers = useMemo(
+    () =>
+      (JSON.parse(composerMentionMembersKey) as Array<[string, string, boolean]>).map(
+        ([name, detail, running]): ComposerMentionMember => ({ name, detail, running })
+      ),
+    [composerMentionMembersKey]
+  )
   const handleSendCurrentMessage = useCallback(() => {
     if (currentSessionIdRef.current && cappedComposerSessionsRef.current.has(currentSessionIdRef.current)) return
     const teamSettingsConflict = teamLead && persistedSessionsRef.current.get(teamLead.id)
@@ -9742,6 +9802,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     : undefined
                 }
                 toolHelpItems={selectedSkillToolHelpItems}
+                suggestionCommands={composerSuggestionCommands}
+                mentionMembers={composerMentionMembers}
                 modelSelectorSlot={chatComposerControlSlot}
                 onClearSkill={() => handleSelectSkill(null)}
                 onCompressContext={handleCompressCurrentContext}

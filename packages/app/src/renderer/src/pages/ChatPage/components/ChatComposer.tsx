@@ -577,6 +577,8 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     active &&
     !disabled &&
     isInputFocusedRef.current &&
+    // A field that was disabled while focused gets no blur event.
+    document.activeElement === composerInputRef.current &&
     localInputValue !== dismissedSuggestionValue &&
     canSuggestFor(localInputValue)
       ? resolveComposerSuggestions(
