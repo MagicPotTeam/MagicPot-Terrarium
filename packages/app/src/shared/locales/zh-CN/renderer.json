@@ -955,6 +955,8 @@
     },
     "composer_suggestions": {
       "commands_label": "命令",
+      "skills_label": "技能",
+      "list_label": "可用的命令和技能",
       "command_goal": "设置、查看或清除当前目标",
       "command_status": "查看当前对话状态",
       "command_jobs": "查看本线程的辅助任务",
@@ -1377,7 +1379,6 @@
     "image_unavailable": "图片不可用",
     "retry_image": "重新加载图片",
     "close_image_preview": "关闭图片预览",
-    "skill": "技能",
     "skill_none": "无",
     "skill_prompt_bound": "发送消息时会自动附带当前技能绑定的 Prompt。",
     "agent_skill_active": "外部技能已激活",

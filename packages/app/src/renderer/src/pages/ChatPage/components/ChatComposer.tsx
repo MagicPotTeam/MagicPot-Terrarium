@@ -77,6 +77,7 @@ import {
   applyComposerSuggestion,
   getComposerSuggestionOptionId,
   resolveComposerSuggestions,
+  type ComposerSkillSuggestion,
   type ComposerSuggestionItem
 } from '../composerSuggestions'
 import ComposerSuggestionPopup from './ComposerSuggestionPopup'
@@ -108,6 +109,13 @@ interface ChatComposerProps {
   active?: boolean
   /** Slash commands this conversation handles; none means no "/" suggestions. */
   suggestionCommands?: readonly ComposerCommand[]
+  /**
+   * Skills offered as the second group of the "/" list (the Agent column). Passing the prop,
+   * even empty, also turns on the group headings.
+   */
+  suggestionSkills?: readonly ComposerSkillSuggestion[]
+  /** A skill row of the "/" list was accepted; the typed token is already removed. */
+  onSelectSuggestedSkill?: (skillId: string) => void
 }
 
 const NO_SUGGESTION_COMMANDS: readonly ComposerCommand[] = []
@@ -501,7 +509,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   disableCompressContext = false,
   toolHelpItems = [],
   active = true,
-  suggestionCommands = NO_SUGGESTION_COMMANDS
+  suggestionCommands = NO_SUGGESTION_COMMANDS,
+  suggestionSkills,
+  onSelectSuggestedSkill
 }) => {
   const { t } = useTranslation()
   // Hidden derived attachments also count at the current send boundary. If they
@@ -562,7 +572,8 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   }, [inputSyncKey, inputValue])
 
   // Only a draft that starts with "/" can open the list; "@name task" is plain text here.
-  const canSuggestFor = (value: string) => value.startsWith('/') && suggestionCommands.length > 0
+  const canSuggestFor = (value: string) =>
+    value.startsWith('/') && (suggestionCommands.length > 0 || Boolean(suggestionSkills?.length))
   const suggestions =
     active &&
     !disabled &&
@@ -571,7 +582,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     document.activeElement === composerInputRef.current &&
     localInputValue !== dismissedSuggestionValue &&
     canSuggestFor(localInputValue)
-      ? resolveComposerSuggestions(localInputValue, suggestionCommands)
+      ? resolveComposerSuggestions(localInputValue, suggestionCommands, suggestionSkills)
       : null
   // A list that closes or changes its query starts again at the first option.
   const suggestionKey = suggestions?.key ?? null
@@ -798,6 +809,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     // The completed text must not reopen the list; the next edit does.
     setDismissedSuggestionValue(next.value)
     if (next.value !== localInputValue) onInputChange(next.value)
+    if (item.kind === 'skill') onSelectSuggestedSkill?.(item.skillId)
   }
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
@@ -997,6 +1009,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
             id={suggestionListId}
             suggestions={suggestions}
             activeIndex={activeSuggestionIndex}
+            grouped={suggestionSkills !== undefined}
             onActiveIndexChange={(index) => setSuggestionCursor({ key: suggestions.key, index })}
             onAccept={acceptSuggestion}
           />

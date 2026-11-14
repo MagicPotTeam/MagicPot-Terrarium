@@ -1128,6 +1128,8 @@
     },
     "composer_suggestions": {
       "commands_label": "Commands",
+      "skills_label": "Skills",
+      "list_label": "Available commands and skills",
       "command_goal": "Set, show or clear the current goal",
       "command_status": "Show conversation status",
       "command_jobs": "List thread helper jobs",
@@ -1441,7 +1443,6 @@
     "member_model_unavailable": "Member model unavailable",
     "member_model_save_busy": "Wait for the member and lead to finish saving and running before choosing a model.",
     "member_model_save_failed": "The member model was not saved. Refresh and try again.",
-    "skill": "Skill",
     "skill_none": "None",
     "skill_prompt_bound": "The bound skill prompt will be sent automatically with your message.",
     "agent_skill_active": "External skill active",

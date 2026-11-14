@@ -19,7 +19,6 @@ import { cloneChatSessionForReplay } from './cloneChatSessionForReplay'
 import { mergeToolCheckpoint } from './chatToolCheckpoint'
 import { getChatToolLoadingStatus } from './chatToolLoadingStatus'
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
-import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import {
   Box,
@@ -1000,27 +999,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     storageScope
   )
   const hasScopedSelectedProfileStorage = selectedProfileStorageKey !== STORAGE_KEY_SELECTED_PROFILE
-
-  // ==================== Portal State ====================
-  const [skillPortalElement, setSkillPortalElement] = useState<HTMLElement | null>(null)
-  useEffect(() => {
-    if (!compact || !active) {
-      setSkillPortalElement(null)
-      return
-    }
-
-    const resolvePortalElements = () => {
-      setSkillPortalElement(document.getElementById('agent-workspace-skill-portal'))
-    }
-
-    resolvePortalElements()
-
-    const observer =
-      typeof MutationObserver !== 'undefined' ? new MutationObserver(resolvePortalElements) : null
-    observer?.observe(document.body, { childList: true, subtree: true })
-
-    return () => observer?.disconnect()
-  }, [active, compact, storageScope])
 
   // ==================== Sessions 状态 ====================
   const [sessions, setSessionsState] = useState<ChatSession[]>([])
@@ -8414,6 +8392,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
       composerCommandsTeamMember
     ]
   )
+  // The Agent column offers the picker's skills as the second group of the "/" list.
+  const composerSuggestionSkills = useMemo(
+    () =>
+      compact && composerCommandsReady
+        ? customSkills.map((skill) => ({
+            id: skill.id,
+            name: getCustomSkillName(skill),
+            description: skill.description?.trim() || skill.category?.trim() || ''
+          }))
+        : [],
+    [compact, composerCommandsReady, customSkills]
+  )
   const handleSendCurrentMessage = useCallback(() => {
     if (currentSessionIdRef.current && cappedComposerSessionsRef.current.has(currentSessionIdRef.current)) return
     const teamSettingsConflict = teamLead && persistedSessionsRef.current.get(teamLead.id)
@@ -8609,11 +8599,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       try {
         const scope = JSON.stringify({ route, conversationId: id })
+        const parsedSkillCommand = skillCommand ? parseAgentSkillCommand(input)! : undefined
         const accepted = scratchpadCommand
           ? scratchpadCommandRef.current?.execute(parseAgentScratchpadCommand(input)!, JSON.stringify({ route, conversationId: id, storageScope }))
-          : skillCommand ? skillCommandRef.current?.execute(parseAgentSkillCommand(input)!, scope) : sideCommandRef.current?.execute(parseAgentSideCommand(input)!, scope)
+          : parsedSkillCommand ? skillCommandRef.current?.execute(parsedSkillCommand, scope) : sideCommandRef.current?.execute(parseAgentSideCommand(input)!, scope)
         if (!accepted) { notifyWarning(t(`${commandKey}.command_unavailable`)); return }
         if (skillCommand) setSkillDetailsOpen(true)
+        // The column has no skills button: a bare "/skills" opens the picker's take-over view.
+        if (compact && parsedSkillCommand?.action === 'list') setIsSkillPickerOpen(true)
         setInputValue(''); setComposerClearVersion(version => version + 1)
         // An accepted user command leaves the ordinary draft pipeline immediately.
         // Otherwise a layout re-render can restore its still-persisted text before
@@ -8638,7 +8631,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
     void sendMessage()
-  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, goalCommandAvailable, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
+  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
 
   const handleSendEditedMessage = useCallback(
     (
@@ -9011,29 +9004,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }
 
-  const compactSkillPortal =
-    compact && active && skillPortalElement && (hasCustomSkills || route?.channel === 'canvas' && route.scopeType === 'thread' && !config?.use_remote_llm)
-      ? createPortal(
-          <Button
-            size="small"
-            variant="text"
-            onClick={() => setIsSkillPickerOpen((prev) => !prev)}
-            sx={{
-              fontWeight: 700,
-              fontSize: 12,
-              borderRadius: 2,
-              px: 1.5,
-              py: 0.5,
-              color: 'text.secondary',
-              '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
-            }}
-          >
-            {t('chat.skill', { defaultValue: '技能' })}
-          </Button>,
-          skillPortalElement
-        )
-      : null
-
   // ==================== 渲染 ====================
 
   if (!isReady || !config) {
@@ -9123,7 +9093,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             </Typography>
           </Alert>
         </Box>
-        {compactSkillPortal}
       </>
     )
   }
@@ -9856,6 +9825,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 }
                 toolHelpItems={selectedSkillToolHelpItems}
                 suggestionCommands={composerSuggestionCommands}
+                suggestionSkills={compact ? composerSuggestionSkills : undefined}
+                onSelectSuggestedSkill={handleSelectSkill}
                 modelSelectorSlot={chatComposerControlSlot}
                 onClearSkill={() => handleSelectSkill(null)}
                 onCompressContext={handleCompressCurrentContext}
@@ -9911,7 +9882,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         )}
 
       </Box>
-      {compactSkillPortal}
     </>
   )
 }

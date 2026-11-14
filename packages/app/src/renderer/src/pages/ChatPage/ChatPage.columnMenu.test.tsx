@@ -79,9 +79,24 @@ vi.mock('./chatStorage', async (original) => {
   }
 })
 vi.mock('./components/ChatComposer', () => ({
-  default: ({ addMenuSlot, inputValue, inputSyncKey, onInputChange, onSend }: any) => (
+  default: ({
+    addMenuSlot,
+    inputValue,
+    inputSyncKey,
+    onInputChange,
+    onSend,
+    selectedSkillName,
+    suggestionSkills,
+    onSelectSuggestedSkill
+  }: any) => (
     <>
       <ul data-testid="composer-add-menu">{addMenuSlot?.(h.closeMenu)}</ul>
+      <output data-testid="selected-skill">{selectedSkillName ?? ''}</output>
+      {(suggestionSkills ?? []).map((skill: { id: string; name: string }) => (
+        <button key={skill.id} onClick={() => onSelectSuggestedSkill(skill.id)}>
+          {`accept /${skill.name}`}
+        </button>
+      ))}
       <input
         data-testid="input"
         data-sync-key={inputSyncKey}
@@ -102,7 +117,9 @@ vi.mock('./components/ChatMessageList', () => ({
 }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
+vi.mock('./components/ChatSkillPicker', () => ({
+  default: () => <div data-testid="skill-picker-takeover" />
+}))
 vi.mock('./components/ChatImageGenerationSettings', () => ({
   default: ({ variant }: { variant?: string }) =>
     variant === 'menuItem' ? <li data-testid="image-generation-entry" /> : null
@@ -132,6 +149,9 @@ const everyService = () =>
                         messages: [],
                         entries: [],
                         notes: [],
+                        skills: [],
+                        staleDisabledIds: [],
+                        documentToken: 'fixture-token',
                         revision: 0
                       }))
               }
@@ -315,6 +335,32 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     expect(menuEntryIds()).toEqual(['image-generation-entry'])
+  })
+
+  it('selects a skill accepted from the "/" list exactly as the picker did', async () => {
+    h.config.value.llm_config.customSkills = [
+      { id: 'fixture-poster', category: '设计', skillName: '海报设计', prompt: 'fixture', type: 'prompt' }
+    ]
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    expect(screen.getByTestId('selected-skill')).toBeEmptyDOMElement()
+    fireEvent.click(await screen.findByRole('button', { name: 'accept /海报设计' }))
+    // The chip of the composer shows the selected skill.
+    await waitFor(() => expect(screen.getByTestId('selected-skill')).toHaveTextContent('海报设计'))
+  })
+
+  it('has no skills button and opens the picker take-over view through /skills only', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    expect(screen.queryByRole('button', { name: '技能' })).toBeNull()
+    expect(screen.queryByTestId('skill-picker-takeover')).toBeNull()
+
+    // The command is accepted once the thread's skill scope is bound.
+    await waitFor(() => {
+      fireEvent.change(screen.getByTestId('input'), { target: { value: '/skills' } })
+      fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
+      expect(screen.getByTestId('skill-picker-takeover')).toBeInTheDocument()
+    })
   })
 
   it('adds no workspace entries outside the Agent column', async () => {

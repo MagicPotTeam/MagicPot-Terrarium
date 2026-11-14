@@ -74,6 +74,7 @@ vi.mock('./components/ChatComposer', () => ({
     <pre data-testid="composer-suggestion-props">
       {JSON.stringify({
         commands: props.suggestionCommands.map((command: any) => command.name),
+        skills: props.suggestionSkills ?? null,
         hasMentionMembers: 'mentionMembers' in props
       })}
     </pre>
@@ -119,13 +120,14 @@ const everyService = () =>
 const props = () =>
   JSON.parse(screen.getByTestId('composer-suggestion-props').textContent ?? '{}') as {
     commands: string[]
+    skills: Array<{ id: string; name: string; description: string }> | null
     hasMentionMembers: boolean
   }
-const renderPage = (pageRoute: typeof route | undefined) =>
+const renderPage = (pageRoute: typeof route | undefined, compact = true) =>
   render(
     <MemoryRouter>
       <ThemeProvider theme={createTheme()}>
-        <ChatPage compact storageScope="suggestion-fixture" route={pageRoute} />
+        <ChatPage compact={compact} storageScope="suggestion-fixture" route={pageRoute} />
       </ThemeProvider>
     </MemoryRouter>
   )
@@ -245,6 +247,36 @@ describe('ChatPage composer suggestions', () => {
       'module',
       'video_gen'
     ])
+  })
+
+  it('offers the picker skills as the second group in the column and none in the full-page chat', async () => {
+    h.config.value.llm_config.customSkills = [
+      {
+        id: 'fixture-poster',
+        category: '设计',
+        skillName: '海报设计',
+        prompt: 'fixture',
+        type: 'prompt',
+        description: '设计活动海报'
+      },
+      { id: 'fixture-plain', category: '写作', skillName: '文案润色', prompt: 'fixture', type: 'prompt' }
+    ]
+    const view = renderPage(route)
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    await waitFor(() => expect(props().skills?.length).toBeGreaterThanOrEqual(2))
+    // The description falls back to the category the picker groups the skill under.
+    expect(props().skills).toEqual(
+      expect.arrayContaining([
+        { id: 'fixture-poster', name: '海报设计', description: '设计活动海报' },
+        { id: 'fixture-plain', name: '文案润色', description: '写作' }
+      ])
+    )
+    view.unmount()
+
+    renderPage(route, false)
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    await waitFor(() => expect(props().commands).toContain('status'))
+    expect(props().skills).toBeNull()
   })
 
   it('offers only the commands that work with the remote model service', async () => {

@@ -940,6 +940,21 @@ const chooseAddMenuEntry = (
   fireEvent.click(screen.getByTestId(testId))
 }
 
+/**
+ * The Agent column has no skills button: a bare "/skills" typed into the composer opens the
+ * picker's take-over view. The command replaces whatever draft the composer held, and it is
+ * only accepted once the thread's skill scope is bound, hence the retry.
+ */
+const openSkillTakeover = async (root: HTMLElement = document.body): Promise<void> => {
+  await waitFor(() => {
+    fireEvent.change(within(root).getByTestId('chat-composer-input-mock'), {
+      target: { value: '/skills' }
+    })
+    fireEvent.click(within(root).getByTestId('chat-composer-send-mock'))
+    expect(within(root).getByTestId('chat-skill-picker-mock')).toBeInTheDocument()
+  })
+}
+
 const renderChatPage = (
   storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean; team?: boolean } = 'runtime-flow'
 ) => {
@@ -1199,7 +1214,6 @@ describe('ChatPage runtime workflow integration', () => {
     localStorage.clear()
     sessionStorage.clear()
     document.body.innerHTML = [
-      '<div id="agent-workspace-skill-portal"></div>',
       `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow')}"></div>`,
       `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow-a')}"></div>`,
       `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow-b')}"></div>`
@@ -3820,7 +3834,8 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(hoisted.setAgentSkillScopeMock.mock.calls.some(([req]) => req.active)).toBe(true))
       const before = JSON.stringify(readCurrentSessionState()?.messages), conversationId = readCurrentSessionState()!.id
       expect(hoisted.listAgentSessionSkillsMock).not.toHaveBeenCalled(); expect(hoisted.setAgentSkillPreferenceMock).not.toHaveBeenCalled()
-      fireEvent.click(screen.getByRole('button', { name: '技能' }))
+      expect(screen.queryByRole('button', { name: '技能' })).not.toBeInTheDocument()
+      await openSkillTakeover()
       fireEvent.click(screen.getByRole('button', { name: 'chat.agent_skill_session.open' }))
       await screen.findByText('Current procedure · chat.agent_skill_session.enabled')
       expect(hoisted.listAgentSessionSkillsMock).toHaveBeenCalledWith({ route, conversationId, documentToken: 'skill-document' })
@@ -3844,7 +3859,7 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.start' }))
       await screen.findByText('chat.agent_side.error')
       const original = hoisted.startAgentSideMock.mock.calls[0][0]
-      fireEvent.click(screen.getByRole('button', { name: '技能' }))
+      await openSkillTakeover()
       expect(screen.getByTestId('agent-side-navigation')).not.toBeVisible()
       fireEvent.click(screen.getByRole('button', { name: 'general.close' }))
       expect(screen.getByText('chat.agent_side.pending_notice')).toBeVisible()
@@ -3867,14 +3882,15 @@ describe('ChatPage runtime workflow integration', () => {
       const input = screen.getByTestId('chat-composer-input-mock')
       fireEvent.change(input, { target: { value: 'PARENT_RUNNING' } }); fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      await openSkillTakeover()
+      // The hidden composer stays mounted and keeps a draft written while the view is open.
       fireEvent.change(input, { target: { value: 'NEW_PARENT_DRAFT' } })
-      fireEvent.click(screen.getByRole('button', { name: '技能' }))
       expect(input).toBeInTheDocument(); expect(input).not.toBeVisible(); expect(signal?.aborted).toBe(false)
       expect(screen.getByRole('button', { name: 'chat.stop_generating' })).toBeVisible()
       fireEvent.click(screen.getByRole('button', { name: 'general.close' }))
       expect(screen.getByTestId('chat-composer-input-mock')).toBe(input); expect(input).toBeVisible(); expect(input).toHaveValue('NEW_PARENT_DRAFT')
       expect(signal?.aborted).toBe(false); expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
-      fireEvent.click(screen.getByRole('button', { name: '技能' }))
+      await openSkillTakeover()
       fireEvent.click(screen.getByRole('button', { name: 'chat.stop_generating' }))
       await waitFor(() => expect(signal?.aborted).toBe(true))
     } finally { await act(async () => { finish({ content: 'LATE_AFTER_STOP' }) }); view.unmount() }
@@ -8170,7 +8186,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(activations()).toHaveLength(1))
       const first = activations()[0]
       expect(first).toEqual({ route, conversationId: a.id, active: true, lifecycleRevision: expect.any(Number) }); expect(first.lifecycleRevision).toBeGreaterThan(50)
-      fireEvent.click(screen.getByRole('button', { name: '技能' }))
+      await openSkillTakeover()
       expect(hoisted.setManagedFirstRunPaneScopeMock).toHaveBeenCalledWith({ ...first, active: false })
       fireEvent.click(screen.getByRole('button', { name: 'general.close' })); await waitFor(() => expect(activations()).toHaveLength(2))
       const second = activations()[1]; expect(second.lifecycleRevision).toBeGreaterThan(first.lifecycleRevision)
@@ -8237,32 +8253,36 @@ describe('ChatPage runtime workflow integration', () => {
     const view = renderWithProviders(ui())
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'DRAFT_ACROSS_REMOTE_CHANGE' } })
-      fireEvent.click(screen.getByRole('button', { name: '技能' }))
+      await openSkillTakeover()
       expect(screen.getByTestId('chat-composer-input-mock')).not.toBeVisible()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'DRAFT_ACROSS_REMOTE_CHANGE' } })
       hoisted.currentConfig.value = { ...hoisted.currentConfig.value!, use_remote_llm: true, llm_config: { ...hoisted.currentConfig.value!.llm_config, customSkills: [] } }
       view.rerender(<MemoryRouter><ThemeProvider theme={theme}>{ui()}</ThemeProvider></MemoryRouter>)
-      await waitFor(() => expect(screen.queryByRole('button', { name: '技能' })).not.toBeInTheDocument())
-      fireEvent.click(screen.getByRole('button', { name: 'general.close' }))
+      expect(screen.queryByRole('button', { name: '技能' })).not.toBeInTheDocument()
+      fireEvent.click(await screen.findByRole('button', { name: 'general.close' }))
       expect(screen.queryByTestId('chat-skill-picker-mock')).not.toBeInTheDocument()
       expect(screen.getByTestId('chat-composer-input-mock')).toBeVisible()
       expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('DRAFT_ACROSS_REMOTE_CHANGE')
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
     } finally { view.unmount(); mergedSkills.mockRestore() }
   })
-  it('publishes a single top Skills entry only from the active mounted Agent pane', async () => {
+  it('opens the skill take-over view only in the pane whose composer ran /skills', async () => {
     const a = { channel: 'canvas', scopeType: 'thread', scopeId: 'skill-portal', threadId: 'a' } as const
     const b = { ...a, threadId: 'b' }
     const panes = (firstActive: boolean) => <><ChatPage compact storageScope="runtime-flow-a" route={a} active={firstActive} /><ChatPage compact storageScope="runtime-flow-b" route={b} active={!firstActive} /></>
     const view = renderWithProviders(panes(true))
     try {
-      await waitFor(() => expect(screen.getAllByRole('button', { name: '技能' })).toHaveLength(1))
-      fireEvent.click(screen.getByRole('button', { name: '技能' }))
+      const paneRoot = (scope: string) => document.querySelector<HTMLElement>(`[data-chat-page-root="${scope}"]`)!
+      await waitFor(() => expect(readCurrentSessionStateWithin(paneRoot('runtime-flow-a'))?.id).toBeTruthy())
+      // No pane publishes a skills button into the workspace header any more.
+      expect(screen.queryByRole('button', { name: '技能' })).not.toBeInTheDocument()
+      await openSkillTakeover(paneRoot('runtime-flow-a'))
       expect(screen.getByTestId('chat-skill-picker-mock')).toBeVisible()
+      expect(screen.getByTestId('chat-skill-picker-mock').closest('[data-chat-page-root]')).toHaveAttribute('data-chat-page-root', 'runtime-flow-a')
       fireEvent.click(screen.getByRole('button', { name: 'general.close' }))
       view.rerender(<MemoryRouter><ThemeProvider theme={theme}>{panes(false)}</ThemeProvider></MemoryRouter>)
-      await waitFor(() => expect(screen.getAllByRole('button', { name: '技能' })).toHaveLength(1))
-      fireEvent.click(screen.getByRole('button', { name: '技能' }))
+      await waitFor(() => expect(readCurrentSessionStateWithin(paneRoot('runtime-flow-b'))?.id).toBeTruthy())
+      await openSkillTakeover(paneRoot('runtime-flow-b'))
       expect(screen.getAllByTestId('chat-skill-picker-mock')).toHaveLength(1)
       expect(screen.getByTestId('chat-skill-picker-mock').closest('[data-chat-page-root]')).toHaveAttribute('data-chat-page-root', 'runtime-flow-b')
     } finally { view.unmount() }

@@ -7,6 +7,7 @@ import { theme } from '@renderer/theme'
 import enLocale from '@shared/locales/en-US/renderer.json'
 import ChatComposer from './ChatComposer'
 import { listComposerCommands, type ComposerCommand } from '../composerCommandCatalog'
+import type { ComposerSkillSuggestion } from '../composerSuggestions'
 
 // Real English strings, so the test reads what a user reads.
 const translate = (key: string, options?: Record<string, unknown>) => {
@@ -30,11 +31,15 @@ const threadCommands = listComposerCommands({
 function Harness({
   initialValue = '',
   commands,
+  skills,
+  onSelectSkill,
   onSend = vi.fn(),
   disabled = false
 }: {
   initialValue?: string
   commands?: readonly ComposerCommand[]
+  skills?: readonly ComposerSkillSuggestion[]
+  onSelectSkill?: (skillId: string) => void
   onSend?: () => void
   disabled?: boolean
 }) {
@@ -56,6 +61,8 @@ function Harness({
         composerInputRef={inputRef}
         onPreviewImage={vi.fn()}
         suggestionCommands={commands}
+        suggestionSkills={skills}
+        onSelectSuggestedSkill={onSelectSkill}
       />
       <button type="button">elsewhere</button>
     </ThemeProvider>
@@ -314,6 +321,127 @@ describe('ChatComposer slash-command suggestions', () => {
     expect(optionLabels()).toHaveLength(1)
     rerender(<Harness initialValue="/co" commands={threadCommands} disabled />)
     expect(list()).toBeNull()
+  })
+})
+
+describe('ChatComposer skill suggestions in the Agent column', () => {
+  const skills: ComposerSkillSuggestion[] = [
+    { id: 'skill-poster', name: '海报设计', description: '设计活动海报' },
+    { id: 'skill-review', name: 'code-review', description: 'Review the diff' }
+  ]
+  const headings = () =>
+    screen.getAllByTestId('chat-composer-suggestion-heading').map((heading) => heading.textContent)
+
+  it('lists commands then skills under two non-selectable headings', async () => {
+    render(<Harness commands={threadCommands} skills={skills} />)
+    await typeInto('/')
+    const listbox = screen.getByRole('listbox', { name: 'Available commands and skills' })
+    expect(headings()).toEqual(['Commands', 'Skills'])
+    for (const heading of screen.getAllByTestId('chat-composer-suggestion-heading')) {
+      expect(heading).not.toHaveAttribute('role')
+      expect(heading).toHaveAttribute('aria-hidden', 'true')
+      const style = getComputedStyle(heading)
+      expect([style.fontSize, style.fontWeight, style.textTransform]).toEqual([
+        '10px',
+        '600',
+        'uppercase'
+      ])
+    }
+    const options = within(listbox).getAllByRole('option')
+    expect(options).toHaveLength(threadCommands.length + skills.length)
+    expect(options.slice(-2).map((option) => option.textContent)).toEqual([
+      '/海报设计设计活动海报',
+      '/code-reviewReview the diff'
+    ])
+    // Headings sit between the groups, in document order.
+    const [commandsHeading, skillsHeading] = screen.getAllByTestId(
+      'chat-composer-suggestion-heading'
+    )
+    expect(
+      commandsHeading.compareDocumentPosition(options[0]) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      options[threadCommands.length - 1].compareDocumentPosition(skillsHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      skillsHeading.compareDocumentPosition(options[threadCommands.length]) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(within(listbox).getByRole('group', { name: 'Skills' })).toBeInTheDocument()
+  })
+
+  it('drops the heading of a group that has no match and moves through both groups with the arrows', async () => {
+    render(<Harness commands={threadCommands} skills={skills} />)
+    const user = await typeInto('/海')
+    expect(headings()).toEqual(['Skills'])
+    expect(optionLabels()).toEqual(['/海报设计设计活动海报'])
+    await user.keyboard('{Backspace}re')
+    expect(headings()).toEqual(['Commands', 'Skills'])
+    expect(optionLabels()).toEqual([
+      '/regenResend last message in a copy',
+      '/repair-imagesFind missing local images',
+      '/code-reviewReview the diff'
+    ])
+    await user.keyboard('{ArrowDown}{ArrowDown}')
+    expect(activeOption()).toHaveTextContent('/code-review')
+    await user.keyboard('{ArrowDown}')
+    expect(activeOption()).toHaveTextContent('/regen')
+  })
+
+  it('selects the skill and clears the typed token when a skill row is accepted with Enter or a click', async () => {
+    const onSelectSkill = vi.fn()
+    const onSend = vi.fn()
+    render(
+      <Harness
+        commands={threadCommands}
+        skills={skills}
+        onSelectSkill={onSelectSkill}
+        onSend={onSend}
+      />
+    )
+    const user = await typeInto('/海')
+    await user.keyboard('{Enter}')
+    expect(onSelectSkill).toHaveBeenCalledTimes(1)
+    expect(onSelectSkill).toHaveBeenCalledWith('skill-poster')
+    expect(input().value).toBe('')
+    expect(onSend).not.toHaveBeenCalled()
+    expect(list()).toBeNull()
+    expect(document.activeElement).toBe(input())
+
+    await user.keyboard('/code')
+    fireEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name: /code-review/ }))
+    expect(onSelectSkill).toHaveBeenCalledTimes(2)
+    expect(onSelectSkill).toHaveBeenLastCalledWith('skill-review')
+    expect(input().value).toBe('')
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('still runs a command typed in full on Enter while skills are listed below it', async () => {
+    const onSelectSkill = vi.fn()
+    const onSend = vi.fn()
+    render(
+      <Harness
+        commands={threadCommands}
+        skills={[{ id: 'skill-status', name: 'status-report' }]}
+        onSelectSkill={onSelectSkill}
+        onSend={onSend}
+      />
+    )
+    const user = await typeInto('/status')
+    expect(optionLabels()).toEqual(['/statusShow conversation status', '/status-report'])
+    await user.keyboard('{Enter}')
+    expect(onSend).toHaveBeenCalledTimes(1)
+    expect(onSelectSkill).not.toHaveBeenCalled()
+    expect(input().value).toBe('/status')
+  })
+
+  it('keeps the plain list without headings where no skills prop is given', async () => {
+    render(<Harness commands={threadCommands} />)
+    await typeInto('/')
+    expect(screen.getByRole('listbox', { name: 'Commands' })).toBeInTheDocument()
+    expect(screen.queryByTestId('chat-composer-suggestion-heading')).toBeNull()
+    expect(screen.queryByRole('group')).toBeNull()
   })
 })
 

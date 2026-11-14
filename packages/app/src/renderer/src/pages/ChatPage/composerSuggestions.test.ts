@@ -11,6 +11,12 @@ const commands = listComposerCommands({
 })
 const labels = (value: string) =>
   resolveComposerSuggestions(value, commands)?.items.map((item) => item.label) ?? null
+const skills = [
+  { id: 'skill-notes', name: 'release-notes', description: 'Draft release notes' },
+  { id: 'skill-review', name: 'code-review', description: 'Review the diff' },
+  { id: 'skill-research', name: 'Research' },
+  { id: 'skill-poster', name: '海报设计', description: '设计活动海报' }
+]
 
 describe('resolveComposerSuggestions', () => {
   it('lists every available command for a lone slash and filters by prefix without regard to case', () => {
@@ -52,6 +58,56 @@ describe('resolveComposerSuggestions', () => {
     expect(labels('@设计师')).toBeNull()
     expect(labels('@设计师 画一张海报')).toBeNull()
     expect(labels('hi @w')).toBeNull()
+  })
+})
+
+describe('resolveComposerSuggestions with skills', () => {
+  const resolve = (value: string, withCommands = commands) =>
+    resolveComposerSuggestions(value, withCommands, skills)?.items.map((item) => [
+      item.kind,
+      item.label
+    ]) ?? null
+
+  it('lists every command, then every skill, for a lone slash', () => {
+    expect(resolve('/')).toEqual([
+      ...commands.map((command) => ['command', `/${command.name}`]),
+      ['skill', '/release-notes'],
+      ['skill', '/code-review'],
+      ['skill', '/Research'],
+      ['skill', '/海报设计']
+    ])
+  })
+
+  it('puts skills that start with the query before skills that only contain it', () => {
+    expect(resolve('/re')).toEqual([
+      ['command', '/regen'],
+      ['command', '/repair-images'],
+      ['skill', '/release-notes'],
+      ['skill', '/Research'],
+      ['skill', '/code-review']
+    ])
+    expect(resolve('/海')).toEqual([['skill', '/海报设计']])
+    expect(resolve('/设计')).toEqual([['skill', '/海报设计']])
+    expect(resolve('/zzz')).toBeNull()
+  })
+
+  it('offers skills without any command, and nothing once the draft is more than one token', () => {
+    expect(resolve('/', [])).toEqual(skills.map((skill) => ['skill', `/${skill.name}`]))
+    expect(resolve('/release-notes now', [])).toBeNull()
+    expect(resolve('@re', [])).toBeNull()
+  })
+
+  it('never treats a skill as typed in full, and carries its id and description', () => {
+    const items = resolveComposerSuggestions('/research', [], skills)!.items
+    expect(items).toEqual([
+      { kind: 'skill', label: '/Research', skillId: 'skill-research', description: '', typedInFull: false }
+    ])
+  })
+
+  it('removes only the typed token when a skill is accepted', () => {
+    const suggestions = resolveComposerSuggestions('/rel', commands, skills)!
+    const skill = suggestions.items.find((item) => item.kind === 'skill')!
+    expect(applyComposerSuggestion('/rel', suggestions, skill)).toEqual({ value: '', caret: 0 })
   })
 })
 

@@ -1242,8 +1242,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
             </Typography>
           )}
         </Box>
-
-        <Box id="agent-workspace-skill-portal" sx={{ display: 'flex', alignItems: 'center' }} />
       </Box>
 
       <Box

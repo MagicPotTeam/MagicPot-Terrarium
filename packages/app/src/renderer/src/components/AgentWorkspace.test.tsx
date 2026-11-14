@@ -172,12 +172,17 @@ describe('AgentWorkspace', () => {
     ])
   })
 
-  it('keeps the workspace heading on one line while preserving the shared controls portal', () => {
-    renderWorkspace()
+  it('keeps the workspace heading on one line in a header that holds only the title and subtitle', () => {
+    renderWorkspace('海报项目')
     const heading = screen.getByText('agent_workspace.title')
     expect(getComputedStyle(heading).whiteSpace).toBe('nowrap')
     expect(getComputedStyle(heading).textOverflow).toBe('ellipsis')
-    expect(document.getElementById('agent-workspace-skill-portal')).toBeInTheDocument()
+    // No skills button host, no buttons, nothing but the two text lines.
+    expect(document.getElementById('agent-workspace-skill-portal')).toBeNull()
+    const header = heading.parentElement!.parentElement!
+    expect(header.querySelector('button, [role="button"]')).toBeNull()
+    expect(header.children).toHaveLength(1)
+    expect(header).toHaveTextContent(/^agent_workspace\.title海报项目$/)
   })
 
   it('keeps trace and canvas target out of the header and hands them to the conversation menu', async () => {
