@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events'
 import { BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createMainWindow } from './mainWindow'
+import { join } from 'node:path'
+import { createMainWindow, MAIN_WINDOW_BACKGROUND_COLOR } from './mainWindow'
 import { getAuthoritativeMainWindow, winController } from './winControls'
 import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
 import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
@@ -123,6 +124,18 @@ describe('createMainWindow teardown', () => {
       expect(catalogDisposers.get(otherWindow)).not.toHaveBeenCalled()
     }
   )
+  it('paints the dark theme background, never white, while no page is shown', async () => {
+    createMainWindow()
+    const options = vi.mocked(BrowserWindow).mock.calls[0]?.[0]
+    expect(options?.backgroundColor).toBe(MAIN_WINDOW_BACKGROUND_COLOR)
+    expect(MAIN_WINDOW_BACKGROUND_COLOR.toUpperCase()).not.toBe('#FFFFFF')
+    // Keep the window colour in step with the renderer's dark theme background.
+    // node:fs is an in-memory volume in this suite: read the real file.
+    const { readFileSync } = await vi.importActual<typeof import('node:fs')>('node:fs')
+    const themeSource = readFileSync(join(__dirname, '../renderer/src/theme.ts'), 'utf8')
+    const darkBackground = /dark:\s*\{\s*palette:\s*\{[\s\S]*?background:\s*\{\s*default:\s*'([^']+)'/.exec(themeSource)?.[1]
+    expect(darkBackground).toBe(MAIN_WINDOW_BACKGROUND_COLOR)
+  })
   it('installs the exact independent binding before onCreated navigation, registration and first built-in load', () => {
     const callback = vi.fn((window: BrowserWindow) => {
       expect(installInstalledCatalogReadBinding).toHaveBeenCalledOnce()

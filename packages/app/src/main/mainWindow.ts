@@ -34,6 +34,14 @@ type CanvasStartSystemDragPayload = {
 const testUiPolicy = getTestWindowPolicy()
 let canvasStartSystemDragRegistered = false
 
+/**
+ * What the window shows while no page is painted: before the first paint, during a reload and
+ * while a dead renderer is being replaced. It is the dark theme's background (renderer/src/theme.ts,
+ * the app starts in dark mode), so a renderer death is a short dark frame instead of a white sheet.
+ * The light theme choice lives in the renderer's storage and is not known here without a read.
+ */
+export const MAIN_WINDOW_BACKGROUND_COLOR = '#1a1a1a'
+
 function sanitizeDragFileName(fileName: string): string {
   const trimmed = (fileName || '').trim()
   const baseName = [...basename(trimmed || 'canvas-selection.png')]
@@ -140,6 +148,7 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     x: state.x,
     y: state.y,
     show: false,
+    backgroundColor: MAIN_WINDOW_BACKGROUND_COLOR,
     focusable: !testUiPolicy.noFocus,
     skipTaskbar: testUiPolicy.suppressTaskbar,
     autoHideMenuBar: true,
