@@ -291,7 +291,6 @@ import { isAgentConfigurationCommand, parseAgentConfigurationCommand } from './a
 import { isAgentInspectionCommand, parseAgentInspectionCommand, formatAgentEnvironment } from './agentInspectionCommand'
 import AgentThreadScratchpadView from './components/AgentThreadScratchpadView'
 import AgentThreadGoalEntry from './components/AgentThreadGoalEntry'
-import AgentThreadLocalReminder from './components/AgentThreadLocalReminder'
 import { isAgentScratchpadCommand, parseAgentScratchpadCommand, type AgentScratchpadCommandHandle } from './agentScratchpadCommand'
 import { isAgentSkillCommand, parseAgentSkillCommand, type AgentSkillCommandHandle } from './agentSkillCommand'
 import AgentThreadSkillsPanel from './components/AgentThreadSkillsPanel'
@@ -9596,7 +9595,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             <Typography variant="subtitle2">{inspectionView.title}</Typography>
             <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 300, overflow: 'auto' }}>{inspectionView.text}</Typography>
           </Box>}
-          <AgentThreadLocalReminder route={route} conversationId={currentSession?.id} active={active && isReady && sessionsLoaded && storageScopeRef.current === storageScope && Boolean(currentSession && !currentSession.archived && !hasSessionDeleteTombstone(currentSession.id, storageScope))} allowCreate={!sessionLoadError} />
           <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={active && isReady && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && Boolean(currentSession && !currentSession.archived && !hasSessionDeleteTombstone(currentSession.id, storageScope))} remote={!config || Boolean(config.use_remote_llm)} />
           <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} />
           <AgentThreadSkillsPanel ref={skillCommandRef} visible={isSkillPickerOpen || skillDetailsOpen} onClose={() => { setSkillDetailsOpen(false); setIsSkillPickerOpen(false) }} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
