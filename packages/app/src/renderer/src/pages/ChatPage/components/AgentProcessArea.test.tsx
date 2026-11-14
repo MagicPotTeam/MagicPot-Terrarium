@@ -77,6 +77,23 @@ describe('AgentProcessArea', () => {
     expect(liveStatus).toHaveTextContent('writer：状态：已完成')
   })
 
+  it('keeps visually hidden text at one pixel so it can never stretch or scroll the chat pane', () => {
+    // In MUI `sx`, a bare `1` for width or height means 100%. A full-size, absolutely positioned
+    // live region overflowed the chat pane, which then scrolled the member list out of view.
+    render(<AgentProcessArea entries={[
+      { id: 'writer', kind: 'member', name: 'writer', status: 'running', onOpen: vi.fn(), onStop: vi.fn() },
+      { id: 'designer', kind: 'member', name: 'designer', status: 'running', onOpen: vi.fn(), onStop: vi.fn() }
+    ]} onStopAll={vi.fn()} />)
+    const hiddenNodes = [
+      ...screen.getAllByRole('status'),
+      ...Array.from(document.querySelectorAll<HTMLElement>('span[id]')).filter(node => getComputedStyle(node).position === 'absolute')
+    ]
+    expect(hiddenNodes.length).toBeGreaterThanOrEqual(2)
+    for (const node of hiddenNodes) {
+      expect(node).toHaveStyle({ position: 'absolute', width: '1px', height: '1px', overflow: 'hidden' })
+    }
+  })
+
   it('does not expose collapsed row statuses to assistive technology', () => {
     render(<AgentProcessArea entries={[{ id: 'writer', kind: 'member', name: 'writer', status: 'running' }]} />)
     expect(screen.getByRole('status', { name: 'writer：状态：运行中' })).toBeInTheDocument()

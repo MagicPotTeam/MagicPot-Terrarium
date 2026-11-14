@@ -67,10 +67,10 @@ function ProcessRow({ entry, position, duplicateName }: { entry: ProcessEntry; p
         {hasDetail && entry.onOpen && <Button type="button" size="small" aria-label={actionLabel(expanded ? '收起' : '展开', ' 详情')} aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpanded(value => !value)} sx={{ minWidth: 0, flexShrink: 0, fontSize: 12 }}>{expanded ? '收起' : '展开'}</Button>}
         {(entry.canStop ?? (entry.status === 'running' || entry.status === 'approval')) && entry.onStop && <>
           <IconButton size="small" aria-label={actionLabel('停止')} aria-describedby={entry.kind === 'member' ? stopDescriptionId : undefined} title={entry.kind === 'member' ? memberStopDescription : undefined} onClick={entry.onStop} sx={{ fontSize: 16, flexShrink: 0 }}>×</IconButton>
-          {entry.kind === 'member' && <Box id={stopDescriptionId} component="span" sx={{ position: 'absolute', width: 1, height: 1, p: 0, m: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>{memberStopDescription}</Box>}
+          {entry.kind === 'member' && <Box id={stopDescriptionId} component="span" sx={{ position: 'absolute', width: '1px', height: '1px', p: 0, m: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>{memberStopDescription}</Box>}
         </>}
       </Box>
-      <Box component="span" role="status" aria-live="polite" aria-atomic="true" aria-label={`${name}：状态：${entry.statusText?.trim() || labels[entry.status]}`} sx={{ position: 'absolute', width: 1, height: 1, p: 0, m: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>{name}：状态：{entry.statusText?.trim() || labels[entry.status]}</Box>
+      <Box component="span" role="status" aria-live="polite" aria-atomic="true" aria-label={`${name}：状态：${entry.statusText?.trim() || labels[entry.status]}`} sx={{ position: 'absolute', width: '1px', height: '1px', p: 0, m: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>{name}：状态：{entry.statusText?.trim() || labels[entry.status]}</Box>
       {hasDetail && <Box id={detailId} hidden={!expanded} sx={{ fontSize: 12, overflowWrap: 'anywhere' }}>{entry.detail}</Box>}
     </Box>
   )
@@ -105,7 +105,7 @@ export default function AgentProcessArea({ entries, managementSlot, onStopAllMem
         <Box sx={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
           {onStopAllMembers && entries.some(entry => entry.kind === 'member' && (entry.status === 'running' || entry.status === 'approval')) && <>
             <Button size="small" aria-label="全部停止成员" aria-describedby={stopAllDescriptionId} title={stopAllDescription} onClick={onStopAllMembers} sx={{ minWidth: 0, fontSize: 12 }}>停止成员</Button>
-            <Box id={stopAllDescriptionId} component="span" sx={{ position: 'absolute', width: 1, height: 1, p: 0, m: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>{stopAllDescription}</Box>
+            <Box id={stopAllDescriptionId} component="span" sx={{ position: 'absolute', width: '1px', height: '1px', p: 0, m: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>{stopAllDescription}</Box>
           </>}
           {managementSlot}
         </Box>
