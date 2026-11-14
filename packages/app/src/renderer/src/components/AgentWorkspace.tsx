@@ -410,6 +410,8 @@ type ThreadListRowProps = {
   selected: boolean
   /** Conversations of this thread are listed under the row, which makes it a label row. */
   hasSubRows: boolean
+  /** Nothing follows this row in the list, so the region's divider closes it. */
+  last: boolean
   dragging: boolean
   dragOver: boolean
   statusLabels: Record<ThreadStatusLabelKey, string>
@@ -430,6 +432,7 @@ const ThreadListRow: React.FC<ThreadListRowProps> = ({
   status,
   selected,
   hasSubRows,
+  last,
   dragging,
   dragOver,
   statusLabels,
@@ -479,7 +482,7 @@ const ThreadListRow: React.FC<ThreadListRowProps> = ({
       justifyContent: 'flex-start',
       gap: '7px',
       padding: '7px 10px',
-      borderBottom: `1px solid ${tokens.border}`,
+      borderBottom: last ? 'none' : `1px solid ${tokens.border}`,
       color: tokens.text,
       backgroundColor: selected ? tokens.selected : 'transparent',
       opacity: dragging ? tokens.disabledOpacity : 1,
@@ -1182,7 +1185,13 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           setThreadsCollapsed(true)
           threadToggleRef.current?.focus()
         }}
-        sx={{ flexShrink: 0, minWidth: 0, WebkitAppRegion: 'no-drag' }}
+        sx={{
+          flexShrink: 0,
+          minWidth: 0,
+          // The one divider under the region, with the list closed or open.
+          borderBottom: `1px solid ${columnTokens.border}`,
+          WebkitAppRegion: 'no-drag'
+        }}
       >
         <Box
           data-testid="agent-thread-toolbar"
@@ -1192,7 +1201,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
             minWidth: 0,
             minHeight: 34,
             padding: '2px 6px',
-            borderBottom: `1px solid ${columnTokens.border}`,
             borderRadius: 0,
             boxShadow: 'none'
           }}
@@ -1272,7 +1280,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
               position: 'relative',
               maxHeight: 'min(38vh, 280px)',
               overflowX: 'hidden',
-              overflowY: 'auto'
+              overflowY: 'auto',
+              borderTop: `1px solid ${columnTokens.border}`
             }}
           >
             {openPanes.map((pane, index) => (
@@ -1284,6 +1293,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 status={panePreviews[pane.id]?.status}
                 selected={pane.id === activePane?.id}
                 hasSubRows={(paneSubRowCounts[pane.id] ?? 0) > 0}
+                last={!activePane && index === openPanes.length - 1}
                 dragging={pane.id === draggingPaneId}
                 dragOver={pane.id === dragOverPaneId && pane.id !== draggingPaneId}
                 statusLabels={threadStatusLabels}
@@ -1343,7 +1353,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                   justifyContent: 'flex-start',
                   gap: '6px',
                   padding: '7px 10px',
-                  borderBottom: `1px solid ${columnTokens.border}`,
+                  // The last row: the region's own divider follows, so no second line here.
                   color: columnTokens.danger,
                   '&:hover': { backgroundColor: columnTokens.hover }
                 }}

@@ -1126,6 +1126,58 @@ describe('AgentWorkspace', () => {
       }
     })
 
+    it('draws one divider under the region and one above the list, never two together', async () => {
+      storePanes(2)
+      loadAllSessionsMock.mockImplementation(titledSessions)
+      renderWorkspace()
+      await waitForThreadSummary('Thread 1')
+      const divider = `1px solid ${cssColor(testTheme.palette.divider)}`
+      const border = (element: Element, side: 'Top' | 'Bottom') => {
+        const style = getComputedStyle(element)
+        // jsdom reports an unset border as an empty style.
+        return ['', 'none'].includes(style[`border${side}Style`])
+          ? 'none'
+          : `${style[`border${side}Width`]} ${style[`border${side}Style`]} ${style[`border${side}Color`]}`
+      }
+      const region = screen.getByTestId('agent-thread-toolbar').parentElement!
+      const toolbar = screen.getByTestId('agent-thread-toolbar')
+
+      // Closed: the region's bottom divider is the only line.
+      expect(border(region, 'Bottom')).toBe(divider)
+      expect(border(region, 'Top')).toBe('none')
+      expect(border(toolbar, 'Bottom')).toBe('none')
+
+      fireEvent.click(screen.getByTestId('agent-thread-toggle'))
+      const list = screen.getByTestId('agent-thread-list')
+      expect(border(region, 'Bottom')).toBe(divider)
+      expect(border(toolbar, 'Bottom')).toBe('none')
+      expect(border(list, 'Top')).toBe(divider)
+      expect(border(list, 'Bottom')).toBe('none')
+      for (const row of getThreadRows()) {
+        expect(border(row, 'Bottom')).toBe(divider)
+        expect(border(row, 'Top')).toBe('none')
+      }
+      // The last row leaves the closing line to the region.
+      const close = screen.getByTestId('agent-thread-close-current')
+      expect(list.lastElementChild).toBe(close)
+      expect(border(close, 'Bottom')).toBe('none')
+      expect(border(close, 'Top')).toBe('none')
+
+      // A status line that follows starts right under that single divider.
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent(PROJECT_TRACE_CAPTURE_STATE_EVENT, {
+            detail: { projectId: 'project-1', active: true, traceId: 'trace-1', mode: 'capture' }
+          })
+        )
+      })
+      const statusLine = screen.getByTestId('agent-workspace-status-line')
+      expect(region.nextElementSibling).toBe(statusLine)
+      expect(border(statusLine, 'Top')).toBe('none')
+      expect(border(statusLine, 'Bottom')).toBe(divider)
+      expect(border(region, 'Bottom')).toBe(divider)
+    })
+
     it('numbers threads that have no conversation title by their position', async () => {
       expect(zhRenderer.agent_workspace.chat_label).toBe('对话 {{index}}')
       expect(enRenderer.agent_workspace.chat_label).toBe('Conversation {{index}}')
