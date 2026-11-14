@@ -199,6 +199,7 @@ describe('ChatPage composer suggestions', () => {
       { name: 'writer', detail: '', running: false }
     ])
     expect(props().commands).toEqual([
+      'goal',
       'status',
       'jobs',
       'compact',
@@ -226,7 +227,7 @@ describe('ChatPage composer suggestions', () => {
     // "@name" is a lead-only route and a member conversation cannot be compacted.
     expect(props().commands).not.toContain('compact')
     expect(props().commands).toEqual(
-      expect.arrayContaining(['status', 'jobs', 'btw', 'skill', 'edit'])
+      expect.arrayContaining(['goal', 'status', 'jobs', 'btw', 'skill', 'edit'])
     )
   })
 

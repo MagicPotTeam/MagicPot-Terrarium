@@ -40,6 +40,7 @@ const local = (context: ComposerCommandContext) => !context.remote
 const localThread = (context: ComposerCommandContext) => !context.remote && context.canvasThread
 
 export const COMPOSER_COMMANDS: readonly ComposerCommand[] = [
+  { name: 'goal', descriptionKey: key('command_goal'), available: localThread },
   { name: 'status', descriptionKey: key('command_status'), available: always },
   { name: 'jobs', descriptionKey: key('command_jobs'), available: localThread },
   {

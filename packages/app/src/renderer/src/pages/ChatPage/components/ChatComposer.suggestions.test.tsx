@@ -101,8 +101,10 @@ describe('ChatComposer slash-command suggestions', () => {
     const listbox = screen.getByRole('listbox', { name: 'Commands' })
     const options = within(listbox).getAllByRole('option')
     expect(options).toHaveLength(threadCommands.length)
-    expect(options[0]).toHaveTextContent('/status')
-    expect(options[0]).toHaveTextContent('Show conversation status')
+    expect(options[0]).toHaveTextContent('/goal')
+    expect(options[0]).toHaveTextContent('Set, show or clear the current goal')
+    expect(options[1]).toHaveTextContent('/status')
+    expect(options[1]).toHaveTextContent('Show conversation status')
     expect(within(listbox).getByRole('option', { name: /\/btw/ })).toHaveTextContent(
       '/btw<question>Ask a private side question'
     )
@@ -180,21 +182,21 @@ describe('ChatComposer slash-command suggestions', () => {
   it('starts again at the first option when the query changes or the list reopens', async () => {
     render(<Harness commands={threadCommands} />)
     const user = await typeInto('/')
-    await user.keyboard('{ArrowDown}{ArrowDown}')
+    await user.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}')
     expect(activeOption()).toHaveTextContent('/compact')
     await user.keyboard('s')
     expect(activeOption()).toHaveTextContent('/status')
     await user.keyboard('{ArrowDown}')
     expect(activeOption()).toHaveTextContent('/skill')
     await user.keyboard('{Backspace}')
-    expect(activeOption()).toHaveTextContent('/status')
+    expect(activeOption()).toHaveTextContent('/goal')
     // Hovering highlights an option; closing and reopening the same query forgets it.
     fireEvent.mouseMove(
       within(screen.getByRole('listbox')).getByRole('option', { name: /\/regen/ })
     )
     expect(activeOption()).toHaveTextContent('/regen')
     await user.keyboard('{Escape}x{Backspace}')
-    expect(activeOption()).toHaveTextContent('/status')
+    expect(activeOption()).toHaveTextContent('/goal')
   })
 
   it('accepts with Enter without sending, then sends on the next Enter', async () => {
@@ -216,7 +218,7 @@ describe('ChatComposer slash-command suggestions', () => {
     const onSend = vi.fn()
     render(<Harness commands={threadCommands} onSend={onSend} />)
     const user = await typeInto('/')
-    await user.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}{Tab}')
+    await user.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}{ArrowDown}{Tab}')
     expect(input().value).toBe('/btw ')
     expect(input().selectionStart).toBe(5)
     expect(document.activeElement).toBe(input())

@@ -10,7 +10,8 @@ import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import ChatPage, { type ChatPageWorkspaceMenu } from './ChatPage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 
-// Wiring only: which entries the real ChatPage adds to the composer "+" menu in the Agent column.
+// Wiring only: where the real ChatPage offers the functions that left the Agent column chrome
+// (composer "+" menu entries and slash commands).
 const h = vi.hoisted(() => ({
   config: { value: null as any },
   sessions: { value: [] as any[] },
@@ -78,8 +79,22 @@ vi.mock('./chatStorage', async (original) => {
   }
 })
 vi.mock('./components/ChatComposer', () => ({
-  default: ({ addMenuSlot }: { addMenuSlot?: (closeMenu: () => void) => React.ReactNode }) => (
-    <ul data-testid="composer-add-menu">{addMenuSlot?.(h.closeMenu)}</ul>
+  default: ({ addMenuSlot, inputValue, inputSyncKey, onInputChange, onSend }: any) => (
+    <>
+      <ul data-testid="composer-add-menu">{addMenuSlot?.(h.closeMenu)}</ul>
+      <input
+        data-testid="input"
+        data-sync-key={inputSyncKey}
+        value={inputValue}
+        onChange={(event) => onInputChange(event.target.value)}
+      />
+      <button onClick={onSend}>send fixture</button>
+    </>
+  )
+}))
+vi.mock('./components/AgentThreadGoalRecordsHost', () => ({
+  default: ({ conversationId }: { conversationId?: string }) => (
+    <div data-testid="goal-records-host">{conversationId}</div>
   )
 }))
 vi.mock('./components/ChatMessageList', () => ({
@@ -127,6 +142,8 @@ const menuEntryIds = () =>
   [...screen.getByTestId('composer-add-menu').children].map((entry) =>
     entry.getAttribute('data-testid')
   )
+/** Changes whenever ChatPage clears the composer draft. */
+const draftSyncKey = () => screen.getByTestId('input').getAttribute('data-sync-key')
 const renderPage = (workspaceMenu?: ChatPageWorkspaceMenu) =>
   render(
     <MemoryRouter>
@@ -136,12 +153,13 @@ const renderPage = (workspaceMenu?: ChatPageWorkspaceMenu) =>
     </MemoryRouter>
   )
 
-describe('ChatPage composer "+" menu in the Agent column', () => {
+describe('ChatPage functions relocated out of the Agent column chrome', () => {
   const oldApi = Object.getOwnPropertyDescriptor(window, 'api')
   beforeEach(() => {
     localStorage.clear()
     sessionStorage.clear()
     h.closeMenu.mockClear()
+    h.notify.mockClear()
     h.config.value = structuredClone(DEFAULT_CONFIG)
     h.config.value.use_remote_llm = false
     h.config.value.llm_config.api_profiles = [
@@ -204,6 +222,42 @@ describe('ChatPage composer "+" menu in the Agent column', () => {
     const probe = document.createElement('span')
     probe.style.color = theme.palette.error.main
     expect(getComputedStyle(entry).color).toBe(probe.style.color)
+  })
+
+  it('shows no goal row until /goal opens the goal records as a closable command view', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    expect(screen.queryByTestId('agent-goal-view')).toBeNull()
+    expect(screen.queryByRole('button', { name: '目标' })).toBeNull()
+
+    // Text after the name is accepted and ignored: the records are edited in the view.
+    const syncKey = draftSyncKey()
+    fireEvent.change(screen.getByTestId('input'), { target: { value: '/goal 做一张海报' } })
+    fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
+
+    const view = await screen.findByTestId('agent-goal-view')
+    expect(view).toContainElement(screen.getByTestId('goal-records-host'))
+    expect(screen.getByTestId('goal-records-host')).toHaveTextContent('lead')
+    // The accepted command leaves the draft: the composer is told to reset its text.
+    expect(draftSyncKey()).not.toBe(syncKey)
+    expect(h.notify).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: '收起目标' }))
+    expect(screen.queryByTestId('agent-goal-view')).toBeNull()
+    expect(en.chat.composer_suggestions.command_goal).toBe('Set, show or clear the current goal')
+    expect(zh.chat.composer_suggestions.command_goal).toBe('设置、查看或清除当前目标')
+  })
+
+  it('refuses /goal with the remote model service and keeps the draft', async () => {
+    h.config.value.use_remote_llm = true
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    const syncKey = draftSyncKey()
+    fireEvent.change(screen.getByTestId('input'), { target: { value: '/goal' } })
+    fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
+    await waitFor(() => expect(h.notify).toHaveBeenCalledWith(zh.chat.command_unavailable_current))
+    expect(screen.queryByTestId('agent-goal-view')).toBeNull()
+    expect(draftSyncKey()).toBe(syncKey)
   })
 
   it('adds no workspace entries outside the Agent column', async () => {

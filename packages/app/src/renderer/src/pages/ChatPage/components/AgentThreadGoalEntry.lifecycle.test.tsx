@@ -1,11 +1,17 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentGoalView } from '@shared/api/agentThreadGoal'
 
 const h = vi.hoisted(() => ({ revision: vi.fn(), bind: vi.fn(), list: vi.fn(), mutate: vi.fn() }))
 vi.mock('../../../utils/windowUtils', () => ({ api: () => ({ svcLLMProxy: { agentGoalScopeRevision: h.revision, setAgentGoalScope: h.bind, listAgentGoals: h.list, mutateAgentGoal: h.mutate } }) }))
-import Entry from './AgentThreadGoalEntry'
+import GoalEntry from './AgentThreadGoalEntry'
+type EntryProps = Omit<React.ComponentProps<typeof GoalEntry>, 'open' | 'onClose'>
+/** Stands in for ChatPage: "/goal" opens the view, the view asks to be closed. */
+function Entry(props: EntryProps) {
+  const [open, setOpen] = useState(false)
+  return <><button onClick={() => setOpen(true)}>run /goal</button><GoalEntry {...props} open={open} onClose={() => setOpen(false)} /></>
+}
 
 const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'synthetic-project', threadId: 'synthetic-pane' } as const
 const otherRoute = { ...route, threadId: 'other-pane' }
@@ -27,20 +33,19 @@ describe('manual goal entry lifecycle with synthetic service', () => {
   it.each(['inactive', 'remote', 'route', 'conversation'] as const)('closes on %s change and requires explicit reopen', async mode => {
     const page = render(<Entry {...props} />)
     try {
-      fireEvent.click(screen.getByRole('button', { name: 'Goals' }))
+      fireEvent.click(screen.getByRole('button', { name: 'run /goal' }))
       await screen.findByText('No goals yet.')
       const changed = mode === 'inactive' ? { ...props, active: false } : mode === 'remote' ? { ...props, remote: true } : mode === 'route' ? { ...props, route: otherRoute } : { ...props, conversationId: 'synthetic-b' }
       page.rerender(<Entry {...changed} />)
       expect(screen.queryByLabelText('Thread goals')).not.toBeInTheDocument()
-      if (mode === 'inactive' || mode === 'remote') expect(screen.queryByRole('button', { name: 'Goals' })).not.toBeInTheDocument()
-      else expect(screen.getByRole('button', { name: 'Goals' })).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByTestId('agent-goal-view')).not.toBeInTheDocument()
       await waitFor(() => expect(h.bind.mock.calls.some(([value]) => value.active === false && value.conversationId === 'synthetic-a')).toBe(true))
       expect(h.list).toHaveBeenCalledTimes(1)
       expect(h.bind.mock.calls.filter(([value]) => value.active)).toHaveLength(1)
       if (mode === 'inactive' || mode === 'remote') page.rerender(<Entry {...props} />)
-      expect(screen.getByRole('button', { name: 'Goals' })).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByTestId('agent-goal-view')).not.toBeInTheDocument()
       expect(h.list).toHaveBeenCalledTimes(1)
-      fireEvent.click(screen.getByRole('button', { name: 'Goals' }))
+      fireEvent.click(screen.getByRole('button', { name: 'run /goal' }))
       await screen.findByText('No goals yet.')
       expect(h.list).toHaveBeenCalledTimes(2)
       expect(h.list.mock.calls[1][0]).toMatchObject({ route: changed.route, conversationId: changed.conversationId, documentToken: 'synthetic-token' })
@@ -53,11 +58,11 @@ describe('manual goal entry lifecycle with synthetic service', () => {
     h.list.mockReturnValueOnce(gate.promise).mockResolvedValue(empty)
     const page = render(<Entry {...props} />)
     try {
-      fireEvent.click(screen.getByRole('button', { name: 'Goals' }))
+      fireEvent.click(screen.getByRole('button', { name: 'run /goal' }))
       await waitFor(() => expect(h.list).toHaveBeenCalledOnce())
       page.rerender(<Entry {...props} conversationId="synthetic-b" />)
       expect(screen.queryByLabelText('Thread goals')).not.toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: 'Goals' }))
+      fireEvent.click(screen.getByRole('button', { name: 'run /goal' }))
       await act(async () => {})
       expect(h.bind.mock.calls.filter(([value]) => value.active)).toHaveLength(1)
       expect(h.list).toHaveBeenCalledOnce()

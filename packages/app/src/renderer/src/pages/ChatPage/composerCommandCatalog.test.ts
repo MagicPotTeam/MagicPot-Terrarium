@@ -77,6 +77,7 @@ describe('composerCommandCatalog', () => {
     expect(Object.keys(parserModules).sort()).toEqual([
       './agentBasicCommand.ts',
       './agentConfigurationCommand.ts',
+      './agentGoalCommand.ts',
       './agentInspectionCommand.ts',
       './agentScratchpadCommand.ts',
       './agentSideCommand.ts',
@@ -84,7 +85,7 @@ describe('composerCommandCatalog', () => {
       './repairImagesCommand.ts',
       './replayUserCommand.ts'
     ])
-    expect(recognizers).toHaveLength(9)
+    expect(recognizers).toHaveLength(10)
   })
 
   it('lists exactly the commands the parsers understand', () => {
@@ -121,7 +122,7 @@ describe('composerCommandCatalog', () => {
 
   it('offers each command only where ChatPage runs it', () => {
     expect(names(everything)).toEqual(COMPOSER_COMMANDS.map((command) => command.name))
-    // A plain (non-canvas) local chat has no thread jobs, side questions, skills panel or notes.
+    // A plain (non-canvas) local chat has no thread goals, jobs, side questions, skills panel or notes.
     expect(names({ ...everything, canvasThread: false })).toEqual([
       'status',
       'compact',
@@ -147,6 +148,7 @@ describe('composerCommandCatalog', () => {
       'video_gen',
       'tool'
     ])
+    expect(names(everything)[0]).toBe('goal')
     expect(names({ ...everything, scratchpad: false })).not.toContain('scratchpad')
     expect(names({ ...everything, boundTools: false })).not.toContain('tool')
     // Member conversations reject compaction and direct tool calls.

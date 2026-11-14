@@ -285,6 +285,7 @@ import ChatMessageList, { type ChatPendingConfirmation } from './components/Chat
 import AgentThreadHtmlPanel from './components/AgentThreadHtmlPanel'
 import { isAgentBasicCommand, parseAgentBasicCommand } from './agentBasicCommand'
 import { listComposerCommands } from './composerCommandCatalog'
+import { isAgentGoalCommand } from './agentGoalCommand'
 import type { ComposerMentionMember } from './composerSuggestions'
 import { isRepairImagesCommand, parseRepairImagesCommand, scanMissingLocalImages, projectConfirmedImageContext, type ImageRepairScan, type MissingImageReference } from './repairImagesCommand'
 import { isAgentConfigurationCommand, parseAgentConfigurationCommand } from './agentConfigurationCommand'
@@ -8365,8 +8366,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [configurationView, setConfigurationView] = useState<{ scope: string; kind: 'plugin' | 'module' | 'video_gen' } | null>(null)
   const [inspectionView, setInspectionView] = useState<{ scope: string; title: string; text: string } | null>(null)
   const inspectionScope = JSON.stringify({ route, conversationId: currentSessionId, storageScope })
+  // "/goal" shows the goal records of the conversation it was typed in.
+  const [goalViewScope, setGoalViewScope] = useState<string | null>(null)
+  const closeGoalView = useCallback(() => setGoalViewScope(null), [])
+  const goalCommandAvailable = active && isReady && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && Boolean(currentSession && !currentSession.archived && !hasSessionDeleteTombstone(currentSession.id, storageScope))
   useEffect(() => {
     basicCommandGenerationRef.current++
+    setGoalViewScope(null)
     setInspectionView(null); setConfigurationView(null); setImageRepairView(null); setBasicCommandView(null); setBasicJobsText('')
     imageRepairContextRef.current = null
   }, [inspectionScope, active])
@@ -8550,6 +8556,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
       } catch { notifyWarning(t('chat.use_basic_command', { defaultValue: 'Use /status, /jobs or /compact without arguments.' })) }
       return
     }
+    if (isAgentGoalCommand(input)) {
+      const id = currentSessionIdRef.current
+      if (!goalCommandAvailable || !id || id !== currentSessionId || config?.use_remote_llm || route?.channel !== 'canvas' || route.scopeType !== 'thread' ||
+        pendingAttachmentsRef.current.length || pendingHiddenContextRef.current) {
+        notifyWarning(t('chat.command_unavailable_current', { defaultValue: 'Command unavailable for the current conversation.' })); return
+      }
+      setGoalViewScope(inspectionScope)
+      setInputValue(''); setComposerClearVersion(version => version + 1)
+      clearScheduledDraftPersistence(); markTransientDraftCleared(storageScope, id); writeSessionDraftBackup(id, Date.now(), undefined, storageScope)
+      setSessions(previous => previous.map(item => item.id === id ? stripSessionDraft(item) : item))
+      void persistCurrentSessionSnapshot(id, 'accepted-user-command').catch(() => undefined)
+      return
+    }
     if (isRepairImagesCommand(input)) {
       const id = currentSessionIdRef.current
       if (imageRepairScanPendingRef.current || !active || !isReady || !sessionsLoaded || sessionLoadError || !id || id !== currentSessionId ||
@@ -8643,7 +8662,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
     void sendMessage()
-  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
+  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, goalCommandAvailable, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
 
   const handleSendEditedMessage = useCallback(
     (
@@ -9595,7 +9614,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             <Typography variant="subtitle2">{inspectionView.title}</Typography>
             <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 300, overflow: 'auto' }}>{inspectionView.text}</Typography>
           </Box>}
-          <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={active && isReady && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && Boolean(currentSession && !currentSession.archived && !hasSessionDeleteTombstone(currentSession.id, storageScope))} remote={!config || Boolean(config.use_remote_llm)} />
+          <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={goalCommandAvailable} remote={!config || Boolean(config.use_remote_llm)} open={active && goalViewScope === inspectionScope} onClose={closeGoalView} />
           <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} />
           <AgentThreadSkillsPanel ref={skillCommandRef} visible={isSkillPickerOpen || skillDetailsOpen} onClose={() => { setSkillDetailsOpen(false); setIsSkillPickerOpen(false) }} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
           <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
