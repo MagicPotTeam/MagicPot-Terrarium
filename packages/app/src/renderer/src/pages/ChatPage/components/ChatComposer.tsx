@@ -924,8 +924,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
       }
       // A command typed in full still runs on Enter, exactly as without the list, unless it
       // needs arguments: then Enter completes it with the trailing space instead of sending it.
-      const runsAsTyped =
-        item.typedInFull && !(item.kind === 'command' && item.argumentsRequired)
+      const runsAsTyped = item.typedInFull && !(item.kind === 'command' && item.argumentsRequired)
       if (unmodified && (event.key === 'Tab' || (event.key === 'Enter' && !runsAsTyped))) {
         event.preventDefault()
         acceptSuggestion(item)
@@ -1654,6 +1653,31 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               placeholder={placeholder}
               disabled={disabled}
               inputComponent={StableNativeTextarea as React.ElementType<InputBaseComponentProps>}
+              // A textarea cannot end its own placeholder with an ellipsis, so the visible
+              // placeholder is this one-line label; the native one stays for assistive tech.
+              endAdornment={
+                localInputValue.length === 0 ? (
+                  <Box
+                    component="span"
+                    aria-hidden
+                    data-testid="chat-composer-placeholder"
+                    sx={{
+                      position: 'absolute',
+                      left: 0,
+                      right: 0,
+                      top: '3px',
+                      color: columnTokens.muted,
+                      pointerEvents: 'none',
+                      userSelect: 'none',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {placeholder}
+                  </Box>
+                ) : null
+              }
               inputProps={{
                 ...textareaProps,
                 'aria-label': placeholder,
@@ -1683,12 +1707,11 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   lineHeight: 'inherit',
                   wordBreak: 'break-word',
                   overflowWrap: 'break-word',
+                  // Invisible, and never wrapping: a wrapped placeholder would grow the textarea.
                   '&::placeholder': {
-                    color: columnTokens.muted,
-                    opacity: 1,
+                    color: 'transparent',
                     whiteSpace: 'nowrap',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis'
+                    overflow: 'hidden'
                   }
                 }
               }}

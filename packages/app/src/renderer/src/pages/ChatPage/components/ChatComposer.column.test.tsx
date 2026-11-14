@@ -121,6 +121,28 @@ describe('ChatComposer column shell', () => {
     expect(input().style.overflowY).toBe('auto')
   })
 
+  it('shows the placeholder as one line that ends with an ellipsis, only while the draft is empty', async () => {
+    const user = userEvent.setup()
+    render(<ColumnComposer />)
+
+    const label = screen.getByTestId('chat-composer-placeholder')
+    expect(label).toHaveTextContent(/^Message this conversation$/)
+    expect(label).toHaveAttribute('aria-hidden', 'true')
+    const style = getComputedStyle(label)
+    expect(style.whiteSpace).toBe('nowrap')
+    expect(style.overflow).toBe('hidden')
+    expect(style.textOverflow).toBe('ellipsis')
+    expect(style.pointerEvents).toBe('none')
+    // It lies over the textarea without taking part in the row's layout.
+    expect(style.position).toBe('absolute')
+    expect(shell()).toContainElement(label)
+
+    await user.type(input(), 'h')
+    expect(screen.queryByTestId('chat-composer-placeholder')).toBeNull()
+    await user.clear(input())
+    expect(screen.getByTestId('chat-composer-placeholder')).toBeInTheDocument()
+  })
+
   it('keeps one line at 26px', () => {
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(26)
     render(<ColumnComposer initialValue="one line" />)
