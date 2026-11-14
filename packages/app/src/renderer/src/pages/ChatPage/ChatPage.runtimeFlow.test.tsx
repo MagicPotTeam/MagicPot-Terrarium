@@ -62,6 +62,8 @@ const hoisted = vi.hoisted(() => ({
   },
   fileExistsBatchMock: vi.fn(async (paths: string[]) => paths.map(() => true)),
   storedSessions: { value: [] as ChatSession[] },
+  /** Pins getChatScopeRevision; null uses the real marker (the mocked writers never move it). */
+  scopeRevision: { value: null as number | null },
   scopedTestSessions: { value: null as Record<string, ChatSession[]> | null },
   draftBackups: {
     value: {} as Record<string, { updatedAt: number; draft?: ChatSessionDraft }>
@@ -396,6 +398,7 @@ vi.mock('./chatStorage', async (importOriginal) => {
     return cloneValue(hoisted.storedSessions.value.find(session=>session.id===id)??null)
   }),
   loadAllSessions: (...args: unknown[]) => hoisted.loadAllSessionsMock(...args),
+  getChatScopeRevision: (scope?: string) => hoisted.scopeRevision.value ?? actual.getChatScopeRevision(scope),
   saveAllSessions: (...args: unknown[]) => hoisted.saveAllSessionsMock(...args),
   compareAndUpdateSessionInDB: vi.fn(
     async (
@@ -1102,6 +1105,7 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.skipMigrationOnce.value = false
     hoisted.deleteTombstones.value = new Set()
     hoisted.debouncedSaveAllSessionsGate.value = null
+    hoisted.scopeRevision.value = null
     hoisted.loadAllSessionsMock.mockReset()
     hoisted.loadAllSessionsMock.mockImplementation(async () =>
       cloneValue(hoisted.storedSessions.value)
@@ -2890,6 +2894,51 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.debouncedSaveAllSessionsGate.value=null
     void release
   })
+
+  it('polls a running task without reading the scope again until something was saved', async () => {
+    let finishRequest!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () => new Promise((resolve) => { finishRequest = resolve })
+    )
+    hoisted.scopeRevision.value = 7
+    const loadingIds = (): string[] =>
+      JSON.parse(localStorage.getItem(scopedStorageKey(STORAGE_KEY_LOADING_IDS, 'runtime-flow')) || '[]')
+    const ui = (active: boolean) => (
+      <MemoryRouter><ThemeProvider theme={theme}><ChatPage compact active={active} storageScope="runtime-flow" /></ThemeProvider></MemoryRouter>
+    )
+    const page = render(ui(true))
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await dispatchNewSession({ profileId: 'vision-model', initialMessage: 'Keep working.' })
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(loadingIds()).toHaveLength(1))
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 700)) })
+
+    // Leaving the thread and coming back starts the 2 second poll for the running task.
+    page.rerender(ui(false))
+    page.rerender(ui(true))
+    await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalled())
+    await act(async () => { await Promise.resolve() })
+    hoisted.loadAllSessionsMock.mockClear()
+
+    // The first tick reads; the next two find the scope unwritten and read nothing.
+    await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(1), { timeout: 4000 })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 4300)) })
+    expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(1)
+    expect(loadingIds()).toHaveLength(1)
+
+    // The task saved something: the following tick reads again, once.
+    hoisted.scopeRevision.value = 8
+    await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(2), { timeout: 4000 })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2300)) })
+    expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(2)
+
+    // When the task ends the poll does its final reload and the reply is on screen.
+    await act(async () => finishRequest({ content: 'finished in the background' }))
+    await waitFor(() => expect(loadingIds()).toHaveLength(0))
+    await waitFor(() =>
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('finished in the background')
+    )
+  }, 30000)
 
   it('does not read its scope back after its own save but still does for another writer', async () => {
     renderChatPage()

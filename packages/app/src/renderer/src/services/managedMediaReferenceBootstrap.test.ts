@@ -83,6 +83,15 @@ describe('managed media reference bootstrap', () => {
         ['c'.repeat(64)]: 1
       }
     })
+    // Sessions and their draft backups come from one read of the chat store per scan.
+    expect(mocks.loadAllSessions).toHaveBeenCalledTimes(1)
+    expect(mocks.readSessionDraftBackup).toHaveBeenCalledWith('chat-a')
+
+    // The next scan reads again instead of reusing the previous scan's conversations.
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(mocks.loadAllSessions).toHaveBeenCalledTimes(2)
+    expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(2)
 
     stop()
     expect(vi.getTimerCount()).toBe(0)

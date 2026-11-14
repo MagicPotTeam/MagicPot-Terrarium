@@ -39,11 +39,15 @@ function readProjectIds(): string[] {
 }
 
 function createScannerSources(): ManagedMediaReferenceScannerSources {
+  // The scan needs the same conversations twice (their media and their draft backups):
+  // read them from the chat store once per scan.
+  let sessions: ReturnType<typeof loadAllSessions> | undefined
+  const readSessions = (): ReturnType<typeof loadAllSessions> => (sessions ??= loadAllSessions())
   return {
-    readChatSessions: async () => loadAllSessions(),
+    readChatSessions: async () => readSessions(),
     readChatDrafts: async () => {
-      const sessions = await loadAllSessions()
-      return sessions.map((session) => readSessionDraftBackup(session.id)).filter(Boolean)
+      const loaded = await readSessions()
+      return loaded.map((session) => readSessionDraftBackup(session.id)).filter(Boolean)
     },
     readCanvasItems: async () => {
       const documents = await Promise.all(

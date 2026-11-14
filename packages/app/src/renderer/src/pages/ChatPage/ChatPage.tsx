@@ -78,6 +78,7 @@ import {
   formatFileSize
 } from '@renderer/utils/fileUtils'
 import {
+  getChatScopeRevision,
   loadAllSessions,
   sameTeamLifecycle,
   compareAndUpdateSessionInDB,
@@ -2066,6 +2067,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const pendingIds: string[] = savedLoadingIds ? JSON.parse(savedLoadingIds) : []
       if (pendingIds.length > 0) {
         console.log('[ChatPage] 检测到后台生成任务:', pendingIds)
+        // The scope revision at which this poller last merged a read into the list.
+        let mergedScopeRevision: number | null = null
         intervalId = setInterval(async () => {
           const pollingScope = storageScope
           const pollingEpoch = sessionLoadEpochRef.current
@@ -2103,29 +2106,36 @@ const ChatPage: React.FC<ChatPageProps> = ({
             if (intervalId) clearInterval(intervalId)
             intervalId = null
           } else {
-            const stored = await loadAllSessions(pollingScope)
-            if (
-              pollingEpoch !== sessionLoadEpochRef.current ||
-              pollingMutationEpoch !== sessionMutationEpochRef.current ||
-              pollingScope !== storageScopeRef.current
-            ) {
-              return
-            }
-            const visibleStored = sortSessionsByRecencyDesc(
-              stored.filter(
-                (session) =>
-                  !deletedSessionKeysRef.current.has(`${pollingScope}\u0000${session.id}`)
+            // While the task runs this poll shows what it has saved so far. Every save moves the
+            // scope revision; when it has not moved since the read this poller merged last,
+            // storage holds nothing new and only the loading ids are synchronised.
+            const pollingScopeRevision = getChatScopeRevision(pollingScope)
+            if (pollingScopeRevision !== mergedScopeRevision) {
+              const stored = await loadAllSessions(pollingScope)
+              if (
+                pollingEpoch !== sessionLoadEpochRef.current ||
+                pollingMutationEpoch !== sessionMutationEpochRef.current ||
+                pollingScope !== storageScopeRef.current
+              ) {
+                return
+              }
+              const visibleStored = sortSessionsByRecencyDesc(
+                stored.filter(
+                  (session) =>
+                    !deletedSessionKeysRef.current.has(`${pollingScope}\u0000${session.id}`)
+                )
               )
-            )
-            let merged = mergeLoadedSessionsWithLocal(
-              visibleStored,
-              sessionsRef.current,
-              [pendingSessionIdRef.current, currentSessionIdRef.current],
-              getDirtySessionIds(pollingScope)
-            )
-            merged = reconcileLoadedTeamEnd(pollingScope, merged, visibleStored)
-            replacePersistedSessions(pollingScope, visibleStored, merged)
-            setSessions(merged)
+              let merged = mergeLoadedSessionsWithLocal(
+                visibleStored,
+                sessionsRef.current,
+                [pendingSessionIdRef.current, currentSessionIdRef.current],
+                getDirtySessionIds(pollingScope)
+              )
+              merged = reconcileLoadedTeamEnd(pollingScope, merged, visibleStored)
+              replacePersistedSessions(pollingScope, visibleStored, merged)
+              setSessions(merged)
+              mergedScopeRevision = pollingScopeRevision
+            }
             setLoadingSessionIds((prev) => {
               const prevIds = [...prev].sort().join(',')
               const newIds = currentLoadingIds.sort().join(',')
