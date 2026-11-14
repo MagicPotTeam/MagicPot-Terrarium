@@ -1,8 +1,9 @@
-import React, { useMemo } from 'react'
+import React, { useContext, useLayoutEffect, useMemo } from 'react'
 import { Box, ButtonBase } from '@mui/material'
 import { useTheme } from '@mui/material/styles'
 
 import { getAgentColumnTokens } from './agentColumnTokens'
+import { AgentThreadSubRowPresenceContext } from './agentThreadSubRowPresence'
 
 /** Text of a sub-row starts under the title of the thread row above it (past the status dot). */
 export const AGENT_THREAD_SUB_ROW_INDENT = 29
@@ -28,6 +29,12 @@ const AgentThreadSubRow: React.FC<AgentThreadSubRowProps> = ({
 }) => {
   const theme = useTheme()
   const tokens = useMemo(() => getAgentColumnTokens(theme), [theme])
+  const reportPresence = useContext(AgentThreadSubRowPresenceContext)
+  useLayoutEffect(() => {
+    if (!reportPresence) return undefined
+    reportPresence(1)
+    return () => reportPresence(-1)
+  }, [reportPresence])
 
   return (
     <ButtonBase

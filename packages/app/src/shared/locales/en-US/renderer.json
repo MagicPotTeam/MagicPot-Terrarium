@@ -1614,7 +1614,6 @@
     "status_running": "Running",
     "status_queued": "Queued",
     "status_waiting_tool": "Waiting for a tool",
-    "status_unread": "New reply",
     "status_failed": "Failed",
     "status_cancelled": "Cancelled",
     "status_interrupted": "Interrupted",

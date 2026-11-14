@@ -4,7 +4,6 @@ import {
   applyScopedChatPageRunEvent,
   CHAT_PAGE_RUN_LIFECYCLE_EVENT,
   clearScopedChatPageRunLifecycles,
-  markScopedChatPageRunRead,
   readScopedChatPageRunLifecycle,
   readScopedChatPageRunLifecycles,
   startScopedChatPageRun,
@@ -128,24 +127,6 @@ export const readScopedChatRun = (scope: string, sessionId: string): ChatSession
 
 export const readScopedChatRuns = (scope: string): ChatSessionRunState[] =>
   readScopedChatPageRunLifecycles(scope) as ChatSessionRunState[]
-
-export const markScopedChatRunRead = (
-  scope: string,
-  sessionId: string,
-  runId?: ChatPageRunId
-): ChatSessionRunState => {
-  const before = readScopedChatPageRunLifecycle(scope, sessionId) as ChatSessionRunState
-  const next = markScopedChatPageRunRead(scope, sessionId, runId) as ChatSessionRunState
-  const changed = before.unread !== next.unread && next.unread === false
-  if (changed && typeof window !== 'undefined') {
-    window.dispatchEvent(
-      new CustomEvent(CHAT_SESSION_RUN_STATE_EVENT, {
-        detail: getScopedRunStateEvent(next)
-      })
-    )
-  }
-  return next
-}
 
 export { CHAT_PAGE_RUN_LIFECYCLE_EVENT, clearScopedChatPageRunLifecycles }
 export type { ChatPageRunId, ChatPageRunStatus } from '@shared/chatPageRunLifecycle'

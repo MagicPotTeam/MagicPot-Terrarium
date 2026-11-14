@@ -1,5 +1,4 @@
 import React, {
-  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -30,7 +29,6 @@ import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLoca
 import {
   CHAT_SESSION_LOADING_STATE_EVENT,
   CHAT_SESSION_RUN_STATE_EVENT,
-  markScopedChatRunRead,
   readScopedChatRun,
   readScopedChatRuns,
   readScopedActiveLoadingSessionIds,
@@ -57,6 +55,7 @@ import {
 } from '@renderer/features/projectTrace/projectTraceRuntime'
 
 import { getAgentColumnTokens, type AgentColumnTokens } from './agentColumnTokens'
+import { AgentThreadSubRowPresenceContext } from './agentThreadSubRowPresence'
 import {
   readExistingWorkspacePanes,
   useExistingConversationWorkspacePane,
@@ -74,7 +73,6 @@ type PanePreviewStatus = 'idle' | ChatSessionRunState['status']
 type PanePreview = {
   title: string
   status: PanePreviewStatus
-  unread: boolean
   runState?: ChatSessionRunState
 }
 
@@ -232,7 +230,6 @@ const arePanePreviewsEqual = (
       rightPreview !== undefined &&
       leftPreview.title === rightPreview.title &&
       leftPreview.status === rightPreview.status &&
-      leftPreview.unread === rightPreview.unread &&
       leftPreview.runState?.runId === rightPreview.runState?.runId &&
       leftPreview.runState?.sessionId === rightPreview.runState?.sessionId
     )
@@ -271,7 +268,6 @@ const buildPanePreview = (
   const rootSession = resolvePaneRootSession(sessions, currentSessionId)
   const paneLabel = getPaneLabel(paneId, index, strings.paneLabel)
   const status: PanePreviewStatus = runState?.status || (running ? 'running' : 'idle')
-  const unread = runState?.unread === true
 
   return {
     title: compactText(
@@ -279,7 +275,6 @@ const buildPanePreview = (
       paneLabel
     ),
     status,
-    unread,
     ...(runState ? { runState } : {})
   }
 }
@@ -350,7 +345,7 @@ const loadPreviewMap = async (
 type ThreadStatusTone = 'live' | 'attention' | 'danger' | 'muted'
 
 type ThreadStatusLabelKey =
-  'running' | 'queued' | 'waitingTool' | 'unread' | 'failed' | 'cancelled' | 'interrupted' | 'idle'
+  'running' | 'queued' | 'waitingTool' | 'failed' | 'cancelled' | 'interrupted' | 'idle'
 
 type ThreadStatusPresentation = {
   /** Stable value of data-status; tests and automation read it. */
@@ -361,10 +356,8 @@ type ThreadStatusPresentation = {
   busy: boolean
 }
 
-const resolveThreadStatus = (
-  status: PanePreviewStatus,
-  unread: boolean
-): ThreadStatusPresentation => {
+/** The dot shows the run state only; a finished run reads as idle. */
+const resolveThreadStatus = (status: PanePreviewStatus): ThreadStatusPresentation => {
   if (status === 'running') {
     return { dataStatus: 'running', tone: 'live', label: 'running', busy: true }
   }
@@ -374,27 +367,23 @@ const resolveThreadStatus = (
   if (status === 'waiting-tool') {
     return { dataStatus: 'waiting-tool', tone: 'attention', label: 'waitingTool', busy: false }
   }
-  if (unread) {
-    return { dataStatus: 'unread', tone: 'muted', label: 'unread', busy: false }
-  }
   if (status === 'failed') {
     return { dataStatus: 'failed', tone: 'danger', label: 'failed', busy: false }
   }
   if (status === 'cancelled' || status === 'interrupted') {
     return { dataStatus: status, tone: 'muted', label: status, busy: false }
   }
-  return { dataStatus: 'read', tone: 'muted', label: 'idle', busy: false }
+  return { dataStatus: 'idle', tone: 'muted', label: 'idle', busy: false }
 }
 
 const THREAD_STATUS_DOT_SIZE = 7
 
 const ThreadStatusDot: React.FC<{
   status?: PanePreviewStatus
-  unread?: boolean
   labels: Record<ThreadStatusLabelKey, string>
   tokens: AgentColumnTokens
-}> = ({ status = 'idle', unread = false, labels, tokens }) => {
-  const presentation = resolveThreadStatus(status, unread)
+}> = ({ status = 'idle', labels, tokens }) => {
+  const presentation = resolveThreadStatus(status)
   const color =
     presentation.tone === 'live'
       ? tokens.live
@@ -443,7 +432,8 @@ type ThreadListRowProps = {
   title: string
   status?: PanePreviewStatus
   selected: boolean
-  unread: boolean
+  /** Conversations of this thread are listed under the row, which makes it a label row. */
+  hasSubRows: boolean
   dragging: boolean
   dragOver: boolean
   statusLabels: Record<ThreadStatusLabelKey, string>
@@ -463,7 +453,7 @@ const ThreadListRow: React.FC<ThreadListRowProps> = ({
   title,
   status,
   selected,
-  unread,
+  hasSubRows,
   dragging,
   dragOver,
   statusLabels,
@@ -524,7 +514,7 @@ const ThreadListRow: React.FC<ThreadListRowProps> = ({
       }
     }}
   >
-    <ThreadStatusDot status={status} unread={unread} labels={statusLabels} tokens={tokens} />
+    <ThreadStatusDot status={status} labels={statusLabels} tokens={tokens} />
     <Box
       component="span"
       data-testid="agent-thread-title"
@@ -535,7 +525,7 @@ const ThreadListRow: React.FC<ThreadListRowProps> = ({
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
-        fontWeight: unread ? 600 : 400
+        fontWeight: hasSubRows ? 600 : 400
       }}
     >
       {title}
@@ -575,29 +565,14 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   )
   const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>({})
   const panePreviewsRef = useRef<Record<string, PanePreview>>({})
-  const [unreadPaneIds, setUnreadPaneIds] = useState<Set<string>>(new Set())
-  const clearPaneUnread = useCallback(
-    (paneId: string) => {
-      setUnreadPaneIds((prev) => {
-        if (!prev.has(paneId)) return prev
-        const next = new Set(prev)
-        next.delete(paneId)
-        return next
-      })
-
-      const scope = buildAgentPaneScope(projectId, paneId)
-      const runState = readLatestPaneRunState(scope)
-      if (runState?.unread && runState.runId !== null) {
-        markScopedChatRunRead(scope, runState.sessionId, runState.runId)
-      }
-    },
-    [projectId]
-  )
-  // Per pane: the host under its thread row (while the list is open) and the open sub-row's title.
+  // Per pane: the host under its thread row (while the list is open), the open sub-row's title
+  // and how many sub-rows the pane's chat page shows in that host.
   const [subRowHosts, setSubRowHosts] = useState<Record<string, HTMLElement | null>>({})
   const [paneSubRowTitles, setPaneSubRowTitles] = useState<Record<string, string | null>>({})
+  const [paneSubRowCounts, setPaneSubRowCounts] = useState<Record<string, number>>({})
   const subRowHostRefs = useRef(new Map<string, (element: HTMLElement | null) => void>())
   const subRowChangeHandlers = useRef(new Map<string, (title: string | null) => void>())
+  const subRowPresenceHandlers = useRef(new Map<string, (delta: 1 | -1) => void>())
   // Callbacks stay the same for a pane's whole life: a new ref identity would detach and
   // re-attach the host on every render.
   const getSubRowHostRef = (paneId: string) => {
@@ -622,6 +597,18 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     }
     return handler
   }
+  const getSubRowPresenceHandler = (paneId: string) => {
+    let handler = subRowPresenceHandlers.current.get(paneId)
+    if (!handler) {
+      handler = (delta) =>
+        setPaneSubRowCounts((prev) => ({
+          ...prev,
+          [paneId]: Math.max(0, (prev[paneId] ?? 0) + delta)
+        }))
+      subRowPresenceHandlers.current.set(paneId, handler)
+    }
+    return handler
+  }
   const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null)
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null)
   const [tracePanelOpen, setTracePanelOpen] = useState(false)
@@ -639,8 +626,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   })
   const pendingExternalPaneRequestsRef = useRef<Array<{ requestId?: string; paneId: string }>>([])
   const previewRefreshSequenceRef = useRef(0)
-  const previewsInitializedRef = useRef(false)
-  const panesObservedRunningRef = useRef<Set<string>>(new Set())
   const visitBlocked = isVisitBlocked()
   const openPanes = useMemo(() => visitBlocked ? [] : getOpenPanes(panes), [panes, visitBlocked])
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
@@ -652,7 +637,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
       running: t('agent_workspace.status_running'),
       queued: t('agent_workspace.status_queued'),
       waitingTool: t('agent_workspace.status_waiting_tool'),
-      unread: t('agent_workspace.status_unread'),
       failed: t('agent_workspace.status_failed'),
       cancelled: t('agent_workspace.status_cancelled'),
       interrupted: t('agent_workspace.status_interrupted'),
@@ -704,39 +688,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     setActivePaneId(target.paneId)
   }, [existingConversationOpen?.coordinator, existingConversationOpen?.request?.handle, projectId])
 
-  useLayoutEffect(() => {
-    if (!previewsInitializedRef.current) {
-      if (Object.keys(panePreviews).length === 0) return
-      previewsInitializedRef.current = true
-      for (const [paneId, preview] of Object.entries(panePreviews)) {
-        if (
-          preview.status === 'queued' ||
-          preview.status === 'running' ||
-          preview.status === 'waiting-tool'
-        ) {
-          panesObservedRunningRef.current.add(paneId)
-        }
-      }
-      return
-    }
-
-    for (const [paneId, preview] of Object.entries(panePreviews)) {
-      if (
-        preview.status === 'queued' ||
-        preview.status === 'running' ||
-        preview.status === 'waiting-tool'
-      ) {
-        panesObservedRunningRef.current.add(paneId)
-      }
-    }
-  }, [panePreviews])
-
-  useEffect(() => {
-    previewsInitializedRef.current = false
-    panesObservedRunningRef.current.clear()
-    setUnreadPaneIds(new Set())
-  }, [projectId])
-
   useEffect(() => {
     const paneIdByScope = new Map(
       openPanes.map((pane) => [buildAgentPaneScope(projectId, pane.id), pane.id])
@@ -753,10 +704,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
       setPanePreviews((prev) => {
         const current = prev[paneId]
         const nextStatus = next.status
-        const nextUnread = next.unread
         if (
           current?.status === nextStatus &&
-          current.unread === nextUnread &&
           current.runState?.runId === next.runId &&
           current.runState?.sessionId === next.sessionId
         ) {
@@ -769,23 +718,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           [paneId]: {
             title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
             status: nextStatus,
-            unread: nextUnread,
             runState: next
           }
         }
-      })
-      if (next.status === 'queued' || next.status === 'running' || next.status === 'waiting-tool') {
-        panesObservedRunningRef.current.add(paneId)
-      } else {
-        panesObservedRunningRef.current.delete(paneId)
-      }
-      setUnreadPaneIds((prev) => {
-        const shouldHaveUnread = next.unread
-        if (prev.has(paneId) === shouldHaveUnread) return prev
-        const updated = new Set(prev)
-        if (shouldHaveUnread) updated.add(paneId)
-        else updated.delete(paneId)
-        return updated
       })
     }
 
@@ -818,34 +753,17 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           : detail.completed === true
             ? 'completed'
             : 'idle'
-        if (current?.status === status && current.unread === (detail.completed === true))
-          return prev
+        if (current?.status === status) return prev
 
         const paneIndex = openPanes.findIndex((pane) => pane.id === paneId)
         return {
           ...prev,
           [paneId]: {
             title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
-            status,
-            unread: detail.completed === true
+            status
           }
         }
       })
-
-      if (detail.running) {
-        panesObservedRunningRef.current.add(paneId)
-        setUnreadPaneIds((prev) => {
-          if (!prev.has(paneId)) return prev
-          const next = new Set(prev)
-          next.delete(paneId)
-          return next
-        })
-        return
-      }
-
-      const wasRunning = panesObservedRunningRef.current.delete(paneId)
-      if (!wasRunning || detail.completed !== true) return
-      setUnreadPaneIds((prev) => new Set(prev).add(paneId))
     }
 
     window.addEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
@@ -1387,7 +1305,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 }
                 status={panePreviews[pane.id]?.status}
                 selected={pane.id === activePane?.id}
-                unread={unreadPaneIds.has(pane.id) || Boolean(panePreviews[pane.id]?.unread)}
+                hasSubRows={(paneSubRowCounts[pane.id] ?? 0) > 0}
                 dragging={pane.id === draggingPaneId}
                 dragOver={pane.id === dragOverPaneId && pane.id !== draggingPaneId}
                 statusLabels={threadStatusLabels}
@@ -1504,16 +1422,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
               aria-hidden={!isActivePane}
               data-agent-workspace-pane={pane.id}
               data-agent-workspace-scope={scope}
-              onPointerDownCapture={(event) => {
-                const target = event.target as Element
-                if (!target.closest('[data-chat-scroll-container="true"]')) return
-                clearPaneUnread(pane.id)
-              }}
-              onScrollCapture={(event) => {
-                const target = event.target as Element
-                if (!target.matches('[data-chat-scroll-container="true"]')) return
-                clearPaneUnread(pane.id)
-              }}
               sx={{
                 position: 'absolute',
                 inset: 0,
@@ -1523,6 +1431,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 pointerEvents: isActivePane ? 'auto' : 'none'
               }}
             >
+              <AgentThreadSubRowPresenceContext.Provider value={getSubRowPresenceHandler(pane.id)}>
               <ChatPage
                 compact
                 storageScope={scope}
@@ -1535,6 +1444,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 threadSubRowsHost={subRowHosts[pane.id] ?? null}
                 onThreadSubRowChange={getSubRowChangeHandler(pane.id)}
               />
+              </AgentThreadSubRowPresenceContext.Provider>
             </Box>
           )
         })}

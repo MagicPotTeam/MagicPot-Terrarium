@@ -1,24 +1,37 @@
 import React from 'react'
-import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createPortal } from 'react-dom'
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AgentWorkspace from './AgentWorkspace'
+import AgentThreadSubRow from './AgentThreadSubRow'
 import zhRenderer from '@shared/locales/zh-CN/renderer.json'
 import enRenderer from '@shared/locales/en-US/renderer.json'
 import {
   clearScopedActiveLoadingSessionIds,
+  clearScopedChatPageRunLifecycles,
   clearScopedExternalLoadingSessionIds,
+  dispatchScopedChatRunEvent,
+  readScopedChatRun,
   scopedStorageKey,
+  startScopedChatRun,
   STORAGE_KEY_EXTERNAL_LOADING_IDS,
   updateScopedExternalLoadingSessionId
 } from '@renderer/pages/ChatPage/chatPageShared'
 import { PROJECT_TRACE_CAPTURE_STATE_EVENT } from '@renderer/features/projectTrace/projectTraceRuntime'
 
 const chatPageUnmountMock = vi.fn()
+/** Sub-rows the mocked chat page of a scope renders into its thread-list host (as ChatPage does). */
+const mockSubRowLabels: { current: Record<string, string[]> } = { current: {} }
 const chatPageMock = vi.fn((props?: unknown) => {
-  const typedProps = props as { active?: boolean; storageScope?: string }
+  const typedProps = props as {
+    active?: boolean
+    storageScope?: string
+    threadSubRowsHost?: HTMLElement | null
+  }
+  const subRowLabels = mockSubRowLabels.current[typedProps.storageScope ?? ''] ?? []
 
   React.useEffect(
     () => () => {
@@ -39,6 +52,13 @@ const chatPageMock = vi.fn((props?: unknown) => {
       <div data-testid="mock-composer">
         <textarea data-testid="mock-composer-input" />
       </div>
+      {typedProps.threadSubRowsHost &&
+        createPortal(
+          subRowLabels.map((label, index) => (
+            <AgentThreadSubRow key={label} label={label} selected={index === 0} onSelect={() => {}} />
+          )),
+          typedProps.threadSubRowsHost
+        )}
     </div>
   )
 })
@@ -142,6 +162,16 @@ const latestWorkspaceMenu = (): WorkspaceMenuProps =>
 const waitForThreadSummary = (title: string) =>
   waitFor(() => expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(title))
 
+/** A row with nothing to report: muted dot named "idle", regular title, no unread marker. */
+const expectIdleRegularRow = (row: HTMLElement) => {
+  const status = within(row).getByTestId('agent-thread-status')
+  expect(status).toHaveAttribute('data-status', 'idle')
+  expect(status).toHaveAttribute('aria-label', 'agent_workspace.status_idle')
+  expect(status).toHaveAttribute('role', 'img')
+  expect(getComputedStyle(within(row).getByTestId('agent-thread-title')).fontWeight).toBe('400')
+  expect(row.querySelector('[data-status="unread"]')).toBeNull()
+}
+
 /** Normalizes a CSS colour the way jsdom reports computed colours. */
 const cssColor = (value: string): string => {
   const probe = document.createElement('span')
@@ -155,6 +185,8 @@ describe('AgentWorkspace', () => {
     localStorage.clear()
     clearScopedActiveLoadingSessionIds()
     clearScopedExternalLoadingSessionIds()
+    clearScopedChatPageRunLifecycles()
+    mockSubRowLabels.current = {}
     chatPageMock.mockClear()
     chatPageUnmountMock.mockClear()
     loadAllSessionsMock.mockReset()
@@ -248,7 +280,7 @@ describe('AgentWorkspace', () => {
     expect(getComputedStyle(status).backgroundColor).toBe(
       cssColor(testTheme.palette.text.secondary)
     )
-    expect(status).toHaveAttribute('data-status', 'read')
+    expect(status).toHaveAttribute('data-status', 'idle')
     expect(status).toHaveAttribute('aria-label', 'agent_workspace.status_idle')
   })
 
@@ -290,7 +322,7 @@ describe('AgentWorkspace', () => {
     })
 
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
-    expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'unread')
+    expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'idle')
 
     await act(async () => {
       resolvePreview?.([])
@@ -298,247 +330,133 @@ describe('AgentWorkspace', () => {
     })
   })
 
-  it('marks the active thread unread when its scoped external run completes', async () => {
-    updateScopedExternalLoadingSessionId('project-1.agent-1', 'session-1', true)
-    renderWorkspaceWithThreadList()
+  it('leaves the active thread regular weight and idle after its reply finishes', async () => {
+    const { container } = renderWorkspaceWithThreadList()
+    await waitForThreadSummary('画布检查')
+    const row = container.querySelector(
+      '[data-agent-workspace-scope="project-1.agent-1"][role="button"]'
+    ) as HTMLElement
 
-    await waitFor(() => expect(screen.getByRole('progressbar')).toBeInTheDocument())
-
+    // A reply reported through the loading state (canvas runs).
+    act(() => {
+      updateScopedExternalLoadingSessionId('project-1.agent-1', 'session-1', true)
+    })
+    await waitFor(() => expect(within(row).getByRole('progressbar')).toBeInTheDocument())
     act(() => {
       updateScopedExternalLoadingSessionId('project-1.agent-1', 'session-1', false)
-      window.dispatchEvent(
-        new CustomEvent('chat:preview-refresh', {
-          detail: { scope: 'project-1.agent-1' }
-        })
-      )
     })
+    await waitFor(() => expect(within(row).queryByRole('progressbar')).not.toBeInTheDocument())
+    expectIdleRegularRow(row)
 
-    await waitFor(() => {
-      expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
-      expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'unread')
-    })
-    // Unread output is carried by the title weight and the dot's accessible name.
-    expect(screen.getByTestId('agent-thread-status')).toHaveAttribute(
-      'aria-label',
-      'agent_workspace.status_unread'
-    )
-    expect(getComputedStyle(screen.getByTestId('agent-thread-title')).fontWeight).toBe('600')
-  })
-
-  it('baselines historical inactive threads as read', async () => {
-    localStorage.setItem(
-      'agent.workspace.project-1',
-      JSON.stringify([
-        { id: 'agent-1', enabled: true },
-        { id: 'agent-2', enabled: true }
-      ])
-    )
-    loadAllSessionsMock.mockImplementation((scope: string) =>
-      Promise.resolve([
-        {
-          id: `${scope}-session`,
-          title: scope,
-          messages: [{ role: 'assistant', content: scope }]
-        }
-      ])
-    )
-
-    const { container } = renderWorkspaceWithThreadList()
-    await waitFor(() => {
-      const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
-      expect(row?.querySelector('[data-status="read"]')).not.toBeNull()
-      expect(row?.querySelector('[data-status="unread"]')).toBeNull()
-    })
-  })
-
-  it('keeps a completed unread thread unread on hover', async () => {
-    localStorage.setItem(
-      'agent.workspace.project-1',
-      JSON.stringify([
-        { id: 'agent-1', enabled: true },
-        { id: 'agent-2', enabled: true }
-      ])
-    )
-    loadAllSessionsMock.mockImplementation((scope: string) =>
-      Promise.resolve([
-        {
-          id: `${scope}-session`,
-          title: scope,
-          messages: [{ role: 'assistant', content: scope }]
-        }
-      ])
-    )
-
-    const { container } = renderWorkspaceWithThreadList()
-    const secondRow = await waitFor(() => {
-      const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
-      expect(row).not.toBeNull()
-      expect(row?.querySelector('[data-status="read"]')).not.toBeNull()
-      return row as HTMLElement
-    })
-
+    // A reply reported through the run lifecycle, which still records the run as not yet read.
     act(() => {
-      updateScopedExternalLoadingSessionId('project-1.agent-2', 'run-2', true)
-      updateScopedExternalLoadingSessionId('project-1.agent-2', 'run-2', false)
+      startScopedChatRun('project-1.agent-1', 'session-1', 'run-active')
     })
-    await waitFor(() => expect(secondRow.querySelector('[data-status="unread"]')).not.toBeNull())
-
-    fireEvent.mouseEnter(secondRow)
-    expect(secondRow.querySelector('[data-status="unread"]')).not.toBeNull()
-    expect(secondRow.querySelector('[data-status="read"]')).toBeNull()
-    expect(localStorage.getItem('agent.workspace.active.project-1')).toBe('agent-1')
-  })
-
-  it('keeps a completed unread thread unread when its row is clicked to activate it', async () => {
-    localStorage.setItem(
-      'agent.workspace.project-1',
-      JSON.stringify([
-        { id: 'agent-1', enabled: true },
-        { id: 'agent-2', enabled: true }
-      ])
-    )
-    loadAllSessionsMock.mockImplementation((scope: string) =>
-      Promise.resolve([
-        {
-          id: `${scope}-session`,
-          title: scope,
-          messages: [{ role: 'assistant', content: scope }]
-        }
-      ])
-    )
-
-    const { container } = renderWorkspaceWithThreadList()
-    const secondRow = await waitFor(() => {
-      const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
-      expect(row?.querySelector('[data-status="read"]')).not.toBeNull()
-      return row as HTMLElement
-    })
-
+    await waitFor(() => expect(within(row).getByRole('progressbar')).toBeInTheDocument())
     act(() => {
-      updateScopedExternalLoadingSessionId('project-1.agent-2', 'run-2', true)
-      updateScopedExternalLoadingSessionId('project-1.agent-2', 'run-2', false)
+      dispatchScopedChatRunEvent('project-1.agent-1', 'session-1', {
+        runId: 'run-active',
+        status: 'completed'
+      })
     })
-    await waitFor(() => expect(secondRow.querySelector('[data-status="unread"]')).not.toBeNull())
-
-    fireEvent.click(secondRow)
-    expect(secondRow.querySelector('[data-status="unread"]')).not.toBeNull()
-    expect(secondRow.querySelector('[data-status="read"]')).toBeNull()
-    expect(localStorage.getItem('agent.workspace.active.project-1')).toBe('agent-2')
-  })
-
-  it('keeps a completed unread thread unread on keyboard row activation', async () => {
-    localStorage.setItem(
-      'agent.workspace.project-1',
-      JSON.stringify([
-        { id: 'agent-1', enabled: true },
-        { id: 'agent-2', enabled: true }
-      ])
-    )
-    loadAllSessionsMock.mockImplementation((scope: string) =>
-      Promise.resolve([
-        {
-          id: `${scope}-session`,
-          title: scope,
-          messages: [{ role: 'assistant', content: scope }]
-        }
-      ])
+    await waitFor(() => expect(within(row).queryByRole('progressbar')).not.toBeInTheDocument())
+    expect(readScopedChatRun('project-1.agent-1', 'session-1').unread).toBe(true)
+    expectIdleRegularRow(row)
+    expect(within(row).getByTestId('agent-thread-status')).toHaveAttribute(
+      'data-run-status',
+      'completed'
     )
 
-    const { container } = renderWorkspaceWithThreadList()
-    const secondRow = await waitFor(() => {
-      const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
-      expect(row?.querySelector('[data-status="read"]')).not.toBeNull()
-      return row as HTMLElement
-    })
-
-    act(() => {
-      updateScopedExternalLoadingSessionId('project-1.agent-2', 'run-2', true)
-      updateScopedExternalLoadingSessionId('project-1.agent-2', 'run-2', false)
-    })
-    await waitFor(() => expect(secondRow.querySelector('[data-status="unread"]')).not.toBeNull())
-
-    fireEvent.keyDown(secondRow, { key: 'Enter' })
-    expect(secondRow.querySelector('[data-status="unread"]')).not.toBeNull()
-    expect(secondRow.querySelector('[data-status="read"]')).toBeNull()
-    expect(localStorage.getItem('agent.workspace.active.project-1')).toBe('agent-2')
-  })
-
-  it('clears unread on pointer interaction inside the conversation area only', async () => {
-    const { container } = renderWorkspaceWithThreadList()
-    await waitForThreadSummary('画布检查')
-
-    const row = container.querySelector(
-      '[data-agent-workspace-scope="project-1.agent-1"]'
-    ) as HTMLElement
-    act(() => {
-      updateScopedExternalLoadingSessionId('project-1.agent-1', 'conversation-click', true)
-      updateScopedExternalLoadingSessionId('project-1.agent-1', 'conversation-click', false)
-    })
-    await waitFor(() => expect(row.querySelector('[data-status="unread"]')).not.toBeNull())
-
+    // Reading the conversation changes nothing either: there is no unread state to clear.
     fireEvent.pointerDown(screen.getByTestId('mock-message-content'))
-    expect(row.querySelector('[data-status="read"]')).not.toBeNull()
-    expect(row.querySelector('[data-status="unread"]')).toBeNull()
-  })
-
-  it('clears unread when the conversation scroll container scrolls', async () => {
-    const { container } = renderWorkspaceWithThreadList()
-    await waitForThreadSummary('画布检查')
-
-    const row = container.querySelector(
-      '[data-agent-workspace-scope="project-1.agent-1"]'
-    ) as HTMLElement
-    act(() => {
-      updateScopedExternalLoadingSessionId('project-1.agent-1', 'conversation-scroll', true)
-      updateScopedExternalLoadingSessionId('project-1.agent-1', 'conversation-scroll', false)
-    })
-    await waitFor(() => expect(row.querySelector('[data-status="unread"]')).not.toBeNull())
-
     fireEvent.scroll(screen.getByTestId('mock-conversation-scroll'))
-    expect(row.querySelector('[data-status="read"]')).not.toBeNull()
-    expect(row.querySelector('[data-status="unread"]')).toBeNull()
+    expectIdleRegularRow(row)
   })
 
-  it('keeps unread through composer click, typing, and nested composer scrolling', async () => {
+  it('leaves a background thread regular weight and idle after its reply finishes', async () => {
+    storePanes(2)
+    loadAllSessionsMock.mockImplementation((scope: string) =>
+      Promise.resolve([
+        {
+          id: `${scope}-session`,
+          title: scope,
+          messages: [{ role: 'assistant', content: scope }]
+        }
+      ])
+    )
+
     const { container } = renderWorkspaceWithThreadList()
-    await waitForThreadSummary('画布检查')
-
-    const row = container.querySelector(
-      '[data-agent-workspace-scope="project-1.agent-1"]'
-    ) as HTMLElement
-    act(() => {
-      updateScopedExternalLoadingSessionId('project-1.agent-1', 'composer-interactions', true)
-      updateScopedExternalLoadingSessionId('project-1.agent-1', 'composer-interactions', false)
+    const secondRow = await waitFor(() => {
+      const row = container.querySelector(
+        '[data-agent-workspace-scope="project-1.agent-2"][role="button"]'
+      )
+      expect(row?.querySelector('[data-status="idle"]')).not.toBeNull()
+      return row as HTMLElement
     })
-    await waitFor(() => expect(row.querySelector('[data-status="unread"]')).not.toBeNull())
+    expect(secondRow).not.toHaveAttribute('aria-current')
 
-    const composer = screen.getByTestId('mock-composer')
-    const input = screen.getByTestId('mock-composer-input')
-    fireEvent.pointerDown(input)
-    fireEvent.change(input, { target: { value: 'draft' } })
-    fireEvent.scroll(input)
-    fireEvent.scroll(composer)
+    act(() => {
+      updateScopedExternalLoadingSessionId('project-1.agent-2', 'run-2', true)
+      updateScopedExternalLoadingSessionId('project-1.agent-2', 'run-2', false)
+    })
+    expectIdleRegularRow(secondRow)
 
-    expect(row.querySelector('[data-status="unread"]')).not.toBeNull()
-    expect(row.querySelector('[data-status="read"]')).toBeNull()
+    act(() => {
+      startScopedChatRun('project-1.agent-2', 'project-1.agent-2-session', 'run-background')
+    })
+    await waitFor(() => expect(within(secondRow).getByRole('progressbar')).toBeInTheDocument())
+    act(() => {
+      dispatchScopedChatRunEvent('project-1.agent-2', 'project-1.agent-2-session', {
+        runId: 'run-background',
+        status: 'completed'
+      })
+    })
+    await waitFor(() =>
+      expect(within(secondRow).queryByRole('progressbar')).not.toBeInTheDocument()
+    )
+    expectIdleRegularRow(secondRow)
+    // A later full refresh of the previews keeps it that way.
+    act(() => {
+      window.dispatchEvent(new CustomEvent('chat:preview-refresh'))
+    })
+    await waitFor(() => expect(loadAllSessionsMock.mock.calls.length).toBeGreaterThan(2))
+    expectIdleRegularRow(secondRow)
+
+    // Opening the thread afterwards is an ordinary selection.
+    fireEvent.click(secondRow)
+    expect(localStorage.getItem('agent.workspace.active.project-1')).toBe('agent-2')
+    expect(secondRow).toHaveAttribute('aria-current', 'true')
+    expectIdleRegularRow(secondRow)
+    expect(container.querySelector('[data-status="unread"]')).toBeNull()
   })
 
-  it('records fast running-to-completed transitions without waiting for preview refresh', async () => {
-    const { container } = renderWorkspaceWithThreadList()
+  it('makes a thread row bold only while conversations are listed under it', async () => {
+    storePanes(2)
+    mockSubRowLabels.current = { 'project-1.agent-1': ['主对话', '配色疑问'] }
+    renderWorkspaceWithThreadList()
     await waitForThreadSummary('画布检查')
+    const titles = () => screen.getAllByTestId('agent-thread-title')
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll('[data-agent-thread-sub-rows="agent-1"] [data-agent-thread-sub-row]')
+      ).toHaveLength(2)
+    )
+    // Upstream's label row of a multi-agent session: the row that heads a group is 600.
+    expect(getComputedStyle(titles()[0]).fontWeight).toBe('600')
+    expect(getComputedStyle(titles()[1]).fontWeight).toBe('400')
+    for (const subRow of document.querySelectorAll('[data-agent-thread-sub-row]')) {
+      expect(getComputedStyle(subRow).fontWeight).not.toBe('600')
+    }
 
-    const row = container.querySelector(
-      '[data-agent-workspace-scope="project-1.agent-1"]'
-    ) as HTMLElement
-    act(() => {
-      updateScopedExternalLoadingSessionId('project-1.agent-1', 'fast-run', true)
-      updateScopedExternalLoadingSessionId('project-1.agent-1', 'fast-run', false)
-    })
-
-    await waitFor(() => expect(row.querySelector('[data-status="unread"]')).not.toBeNull())
+    // Without sub-rows the same row is regular again.
+    mockSubRowLabels.current = {}
+    fireEvent.click(getThreadRows()[1])
+    await waitFor(() => expect(document.querySelector('[data-agent-thread-sub-row]')).toBeNull())
+    expect(getComputedStyle(titles()[0]).fontWeight).toBe('400')
+    expect(getComputedStyle(titles()[1]).fontWeight).toBe('400')
   })
 
-  it('clears a terminated run spinner without marking the thread unread', async () => {
+  it('clears a terminated run spinner', async () => {
     updateScopedExternalLoadingSessionId('project-1.agent-1', 'terminated-run', true)
     const { container } = renderWorkspaceWithThreadList()
     await waitFor(() => expect(screen.getByRole('progressbar')).toBeInTheDocument())
@@ -556,8 +474,7 @@ describe('AgentWorkspace', () => {
     })
 
     await waitFor(() => expect(screen.queryByRole('progressbar')).not.toBeInTheDocument())
-    expect(row.querySelector('[data-status="read"]')).not.toBeNull()
-    expect(row.querySelector('[data-status="unread"]')).toBeNull()
+    expect(row.querySelector('[data-status="idle"]')).not.toBeNull()
   })
 
   it('ignores legacy persisted external loading ids after a refresh', async () => {
@@ -569,7 +486,7 @@ describe('AgentWorkspace', () => {
     renderWorkspaceWithThreadList()
 
     await waitFor(() => {
-      expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'read')
+      expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'idle')
       expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
     })
   })
@@ -1291,7 +1208,6 @@ describe('AgentWorkspace', () => {
         'status_running',
         'status_queued',
         'status_waiting_tool',
-        'status_unread',
         'status_failed',
         'status_cancelled',
         'status_interrupted',
@@ -1301,6 +1217,10 @@ describe('AgentWorkspace', () => {
         expect(zhRenderer.agent_workspace[key]).toMatch(/[㐀-鿿]/)
         expect(enRenderer.agent_workspace[key]).toMatch(/^[\x20-\x7e·]+$/)
       }
+      // Upstream rows have no unread marker, so there is no label for one.
+      expect(zhRenderer.agent_workspace).not.toHaveProperty('status_unread')
+      expect(enRenderer.agent_workspace).not.toHaveProperty('status_unread')
+      expect(JSON.stringify(zhRenderer.agent_workspace)).not.toContain('有新回复')
       expect(zhRenderer.agent_workspace.close_thread).toBe('关闭当前线程')
       expect(enRenderer.agent_workspace.close_thread).toBe('Close this thread')
       expect(zhRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')

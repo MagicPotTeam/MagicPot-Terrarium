@@ -1441,7 +1441,6 @@
     "status_running": "运行中",
     "status_queued": "排队中",
     "status_waiting_tool": "等待工具返回",
-    "status_unread": "有新回复",
     "status_failed": "运行失败",
     "status_cancelled": "已取消",
     "status_interrupted": "已中断",

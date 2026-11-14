@@ -9,7 +9,6 @@ import {
   clearScopedChatPageRunLifecycles,
   clearScopedExternalLoadingSessionIds,
   dispatchScopedChatRunEvent,
-  markScopedChatRunRead,
   readScopedChatRun,
   startScopedChatRun
 } from '@renderer/pages/ChatPage/chatPageShared'
@@ -143,7 +142,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
     ['cancelled', 'cancelled'],
     ['interrupted', 'interrupted']
   ] as const)(
-    'renders the %s state without manufacturing unread output',
+    'renders the %s state',
     async (_label, status) => {
       renderWorkspace()
       await waitForPane()
@@ -157,7 +156,6 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
         expect(getPaneStatus()).toHaveAttribute('data-run-status', status)
         expect(getPaneStatus()).toHaveAttribute('data-status', status)
       })
-      expect(getPaneStatus()).not.toHaveAttribute('data-status', 'unread')
       expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
         runId: `run-${status}`,
         status,
@@ -193,7 +191,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
     }
   )
 
-  it('keeps completed in data-run-status while mark-read changes only unread presentation', async () => {
+  it('shows a completed run as idle and keeps completed in data-run-status', async () => {
     renderWorkspace()
     await waitForPane()
 
@@ -204,25 +202,17 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
 
     await waitFor(() => {
       expect(getPaneStatus()).toHaveAttribute('data-run-status', 'completed')
-      expect(getPaneStatus()).toHaveAttribute('data-status', 'unread')
+      expect(getPaneStatus()).toHaveAttribute('data-status', 'idle')
     })
-    expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
-      status: 'completed',
-      unread: true
-    })
-
-    await act(async () => {
-      markScopedChatRunRead(SCOPE, SESSION_ID, 'completed-run')
-    })
-
-    await waitFor(() => {
-      expect(getPaneStatus()).toHaveAttribute('data-run-status', 'completed')
-      expect(getPaneStatus()).toHaveAttribute('data-status', 'read')
-    })
+    // The thread list has no unread marker: a finished reply looks like any idle thread.
+    expect(getPaneStatus()).toHaveAttribute('aria-label', 'agent_workspace.status_idle')
+    expect(getPaneStatus()).toHaveAttribute('role', 'img')
+    expect(
+      getComputedStyle(getPaneRow().querySelector('[data-testid="agent-thread-title"]')!).fontWeight
+    ).toBe('400')
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: 'completed-run',
-      status: 'completed',
-      unread: false
+      status: 'completed'
     })
   })
 
@@ -305,7 +295,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
       unread: false
     })
     expect(getPaneStatus()).toHaveAttribute('data-run-status', 'idle')
-    expect(getPaneStatus()).toHaveAttribute('data-status', 'read')
+    expect(getPaneStatus()).toHaveAttribute('data-status', 'idle')
     expect(fixture.loadAllSessionsMock).not.toHaveBeenCalledWith(OTHER_SCOPE)
   })
 })
