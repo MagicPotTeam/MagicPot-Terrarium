@@ -15,7 +15,6 @@ import {
   clearScopedChatPageRunLifecycles,
   clearScopedExternalLoadingSessionIds,
   dispatchScopedChatRunEvent,
-  readScopedChatRun,
   scopedStorageKey,
   startScopedChatRun,
   STORAGE_KEY_EXTERNAL_LOADING_IDS,
@@ -362,7 +361,6 @@ describe('AgentWorkspace', () => {
       })
     })
     await waitFor(() => expect(within(row).queryByRole('progressbar')).not.toBeInTheDocument())
-    expect(readScopedChatRun('project-1.agent-1', 'session-1').unread).toBe(true)
     expectIdleRegularRow(row)
     expect(within(row).getByTestId('agent-thread-status')).toHaveAttribute(
       'data-run-status',
@@ -1245,10 +1243,16 @@ describe('AgentWorkspace', () => {
       await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalled())
       expect(getThreadRows().map((row) => row.textContent)).toEqual([''])
       expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^$/)
+      // The disclosure button is never left without a name while its summary is empty.
+      const toggle = screen.getByTestId('agent-thread-toggle')
+      expect(toggle).toHaveAccessibleName('agent_workspace.thread_list')
+      expect(toggle).not.toHaveAttribute('title')
       await act(async () => {
         resolveSessions?.([{ id: 'session-1', title: '画布检查', messages: [] }])
       })
       await waitForThreadSummary('画布检查')
+      expect(toggle).toHaveAccessibleName('画布检查')
+      expect(toggle).toHaveAttribute('title', '画布检查')
 
       // A thread created here is known to have no conversation: it is numbered immediately.
       loadAllSessionsMock.mockImplementation((scope: string) =>

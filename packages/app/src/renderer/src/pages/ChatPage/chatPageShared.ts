@@ -77,7 +77,6 @@ const getScopedRunStateEvent = (state: ChatSessionRunState): ChatSessionRunState
   sessionId: state.sessionId,
   runId: state.runId as ChatPageRunId,
   status: state.status === 'idle' ? 'running' : state.status,
-  unread: state.unread,
   timestamp: state.updatedAt
 })
 export const startScopedChatRun = (
@@ -109,9 +108,7 @@ export const dispatchScopedChatRunEvent = (
   }) as ChatSessionRunState | null
   const changed =
     next !== null &&
-    (current.runId !== next.runId ||
-      current.status !== next.status ||
-      current.unread !== next.unread)
+    (current.runId !== next.runId || current.status !== next.status)
   if (changed && typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent(CHAT_SESSION_RUN_STATE_EVENT, {

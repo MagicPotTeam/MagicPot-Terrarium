@@ -15,9 +15,9 @@ const messages = [{ role: 'user' as const, content: 'PARENT_VISIBLE', hiddenCont
 const commandRef = createRef<AgentSideCommandHandle>()
 const renderPanel = () => render(<AgentThreadSidesPanel ref={commandRef} route={route} conversationId="chat" active profileId="profile" getMessages={() => messages} />)
 /** Stands in for AgentWorkspace's open thread list: the host the sub-rows render into. */
-function WithThreadList({ onOpenSubRowChange, conversationId = 'chat' }: { onOpenSubRowChange?(title: string | null): void; conversationId?: string }) {
+function WithThreadList({ onOpenSubRowChange, conversationId = 'chat', active = true }: { onOpenSubRowChange?(title: string | null): void; conversationId?: string; active?: boolean }) {
   const [host, setHost] = React.useState<HTMLElement | null>(null)
-  return <><div data-testid="thread-sub-rows" ref={setHost} /><AgentThreadSidesPanel ref={commandRef} route={route} conversationId={conversationId} active profileId="profile" getMessages={() => messages} subRowsHost={host} onOpenSubRowChange={onOpenSubRowChange} /></>
+  return <><div data-testid="thread-sub-rows" ref={setHost} /><AgentThreadSidesPanel ref={commandRef} route={route} conversationId={conversationId} active={active} profileId="profile" getMessages={() => messages} subRowsHost={host} onOpenSubRowChange={onOpenSubRowChange} /></>
 }
 beforeEach(() => { vi.useFakeTimers(); Object.values(mocks).forEach((m) => m.mockReset()); mocks.listAgentSides.mockResolvedValue({ branches: [] }); mocks.openAgentSide.mockResolvedValue(detail); mocks.startAgentSide.mockResolvedValue({ branch }); mocks.continueAgentSide.mockResolvedValue({ branch }); mocks.stopAgentSide.mockResolvedValue({ branch }); mocks.deleteAgentSide.mockResolvedValue(undefined) })
 afterEach(() => { cleanup(); vi.useRealTimers() })
@@ -126,6 +126,11 @@ describe('user-only private side panel', () => {
     await openPanel()
     expect(screen.getByRole('alert')).toHaveTextContent('chat.agent_side.error')
     fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.back_main' }))
+    await act(async () => vi.advanceTimersByTimeAsync(10_000))
+    expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
+    // Switching to another thread and back shows the same conversation again: still no new read.
+    view.rerender(<WithThreadList active={false} />)
+    view.rerender(<WithThreadList />)
     await act(async () => vi.advanceTimersByTimeAsync(10_000))
     expect(mocks.listAgentSides).toHaveBeenCalledTimes(1)
 

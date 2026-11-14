@@ -160,8 +160,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
       })
       expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
         runId: `run-${status}`,
-        status,
-        unread: false
+        status
       })
     }
   )
@@ -239,8 +238,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
     expect(staleTerminal).toBeNull()
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: 'new-run',
-      status: 'running',
-      unread: false
+      status: 'running'
     })
     expect(getPaneStatus()).toHaveAttribute('data-run-status', 'running')
 
@@ -257,12 +255,11 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
       duplicateRunning = dispatchStatus('new-run', 'running')
     })
     expect(duplicateRunning).toEqual(
-      expect.objectContaining({ runId: 'new-run', status: 'failed', unread: false })
+      expect.objectContaining({ runId: 'new-run', status: 'failed' })
     )
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: 'new-run',
-      status: 'failed',
-      unread: false
+      status: 'failed'
     })
     expect(getPaneStatus()).toHaveAttribute('data-run-status', 'failed')
     expect(getPaneStatus()).toHaveAttribute('data-status', 'failed')
@@ -274,8 +271,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
 
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: null,
-      status: 'idle',
-      unread: false
+      status: 'idle'
     })
 
     await act(async () => {
@@ -288,13 +284,11 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
 
     expect(readScopedChatRun(OTHER_SCOPE, SESSION_ID)).toMatchObject({
       runId: 'other-scope-run',
-      status: 'completed',
-      unread: true
+      status: 'completed'
     })
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: null,
-      status: 'idle',
-      unread: false
+      status: 'idle'
     })
     expect(getPaneStatus()).toHaveAttribute('data-run-status', 'idle')
     expect(getPaneStatus()).toHaveAttribute('data-status', 'idle')

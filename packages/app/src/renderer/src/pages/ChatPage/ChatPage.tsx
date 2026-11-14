@@ -1832,7 +1832,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     for (const id of oldOwned) sessionTerminationEpochRef.current.set(id, (sessionTerminationEpochRef.current.get(id) ?? 0) + 1)
     for (const id of oldActive) {
       const lifecycleId = lifecycleRunIdBySessionRef.current.get(id)
-      if (lifecycleId) dispatchScopedChatRunEvent(oldScope, id, { runId: lifecycleId, status: 'interrupted', unread: false })
+      if (lifecycleId) dispatchScopedChatRunEvent(oldScope, id, { runId: lifecycleId, status: 'interrupted' })
       updateScopedActiveLoadingSessionId(oldScope, id, false, false)
       updateScopedChatLoadingStatus(oldScope, id, null)
     }
@@ -1999,8 +1999,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (activeLifecycleId) {
         dispatchScopedChatRunEvent(storageScope, sessionId, {
           runId: activeLifecycleId,
-          status: 'cancelled',
-          unread: false
+          status: 'cancelled'
         })
         lifecycleRunIdBySessionRef.current.delete(sessionId)
       }
@@ -2186,8 +2185,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
           dispatchScopedChatRunEvent(storageScope, sessionId, {
             runId: recoveryRunId,
-            status: 'interrupted',
-            unread: false
+            status: 'interrupted'
           })
         }
       }
@@ -6497,8 +6495,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
         dispatchScopedChatRunEvent(lifecycleScope, lifecycleSessionId, {
           runId: lifecycleId,
-          status,
-          unread: status === 'completed'
+          status
         })
       }
       startScopedChatRun(lifecycleScope, lifecycleSessionId, lifecycleId)

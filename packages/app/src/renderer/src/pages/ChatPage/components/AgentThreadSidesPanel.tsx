@@ -11,7 +11,7 @@ import type { AgentSideCommand, AgentSideCommandHandle } from '../agentSideComma
 import AgentThreadSubRow from '../../../components/AgentThreadSubRow'
 
 type PendingSideRequest = AgentSideStartReq | AgentSideContinueReq
-function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, onViewChange, pendingByScope, subRowsHost, onOpenSubRowChange }: { scope: string; profileId?: string; getMessages(): readonly ChatMessage[]; commandRef: React.ForwardedRef<AgentSideCommandHandle>; commandEnabled: boolean; onViewChange?(showingSide: boolean): void; subRowsHost?: HTMLElement | null; onOpenSubRowChange?(title: string | null): void; pendingByScope: React.MutableRefObject<Map<string, PendingSideRequest>> }) {
+function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, onViewChange, pendingByScope, storageFailedScope, subRowsHost, onOpenSubRowChange }: { scope: string; profileId?: string; getMessages(): readonly ChatMessage[]; commandRef: React.ForwardedRef<AgentSideCommandHandle>; commandEnabled: boolean; onViewChange?(showingSide: boolean): void; subRowsHost?: HTMLElement | null; onOpenSubRowChange?(title: string | null): void; pendingByScope: React.MutableRefObject<Map<string, PendingSideRequest>>; storageFailedScope: React.MutableRefObject<string | undefined> }) {
   const { t } = useTranslation()
   // Keep uncertain requests across trusted conversation switches, but never publish old replies.
   const pending = useRef<PendingSideRequest | undefined>(pendingByScope.current.get(scope))
@@ -33,10 +33,10 @@ function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, 
   // opens or closes, another side is selected, created or deleted) and not on a timer: the thread
   // list can stay open forever. Only an open side conversation is kept current by polling.
   const listVisible = Boolean(subRowsHost)
-  // Without encrypted storage every read fails the same way; this conversation stops asking.
-  const storageUnavailable = useRef(false)
+  // Without encrypted storage every read fails the same way; this conversation stops asking. The
+  // mark lives in the parent because this panel is unmounted whenever its thread is not the active one.
   useEffect(() => {
-    if ((!open && !listVisible) || storageUnavailable.current) return
+    if ((!open && !listVisible) || storageFailedScope.current === scope) return
     let closed = false, timer: ReturnType<typeof setTimeout> | undefined
     const read = async () => {
       const token = generation.current, id = selectedRef.current
@@ -53,14 +53,14 @@ function SidePanel({ scope, profileId, getMessages, commandRef, commandEnabled, 
           if (!closed && alive.current && generation.current === token && selectedRef.current === id) acceptDetail(opened)
         }
       } catch (error) {
-        if (error instanceof Error && error.message.includes('storage is unavailable')) { storageUnavailable.current = true; again = false }
+        if (error instanceof Error && error.message.includes('storage is unavailable')) { storageFailedScope.current = scope; again = false }
         if (!closed && alive.current) setError(true)
       }
       finally { if (!closed && again) timer = setTimeout(() => void read(), 1500) }
     }
     void read()
     return () => { closed = true; clearTimeout(timer) }
-  }, [scope, open, listVisible, selected])
+  }, [scope, open, listVisible, selected, storageFailedScope])
   const send = async () => {
     if (locked.current || !text.trim()) return
     locked.current = true; setBusy(true); setError(false); setConfirmNewAttempt(false)
@@ -193,8 +193,9 @@ type SidePanelProps = {
 }
 const AgentThreadSidesPanel = forwardRef<AgentSideCommandHandle, SidePanelProps>(function AgentThreadSidesPanel({ route, conversationId, active, profileId, getMessages, commandEnabled = true, onViewChange, subRowsHost, onOpenSubRowChange }, ref) {
   const pendingByScope = useRef(new Map<string, PendingSideRequest>())
+  const storageFailedScope = useRef<string | undefined>(undefined)
   if (!active || !conversationId || route?.channel !== 'canvas' || route.scopeType !== 'thread') return null
   const scope = JSON.stringify({ route, conversationId })
-  return <SidePanel key={scope} scope={scope} pendingByScope={pendingByScope} profileId={profileId} getMessages={getMessages} commandRef={ref} commandEnabled={commandEnabled} onViewChange={onViewChange} subRowsHost={subRowsHost} onOpenSubRowChange={onOpenSubRowChange} />
+  return <SidePanel key={scope} scope={scope} pendingByScope={pendingByScope} storageFailedScope={storageFailedScope} profileId={profileId} getMessages={getMessages} commandRef={ref} commandEnabled={commandEnabled} onViewChange={onViewChange} subRowsHost={subRowsHost} onOpenSubRowChange={onOpenSubRowChange} />
 })
 export default AgentThreadSidesPanel

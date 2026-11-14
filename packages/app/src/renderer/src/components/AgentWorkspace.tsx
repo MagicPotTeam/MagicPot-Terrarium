@@ -627,8 +627,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const activePaneIndex = activePane ? openPanes.findIndex((pane) => pane.id === activePane.id) : -1
   const activeSubRowTitle = activePane ? paneSubRowTitles[activePane.id] : null
   const threadSummary = activePane
-    ? resolveThreadTitle(panePreviews[activePane.id], activePaneIndex, t) +
-      (activeSubRowTitle ? ` · ${activeSubRowTitle}` : '')
+    ? [resolveThreadTitle(panePreviews[activePane.id], activePaneIndex, t), activeSubRowTitle]
+        .filter(Boolean)
+        .join(' · ')
     : openPanes.length > 0
       ? t('agent_workspace.threads_none_selected', { count: openPanes.length })
       : t('agent_workspace.no_threads')
@@ -1213,7 +1214,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
             aria-expanded={threadListOpen}
             aria-controls={threadListOpen ? threadListId : undefined}
             data-testid="agent-thread-toggle"
-            title={threadSummary}
+            // The summary names the button; while a title is still loading it is empty.
+            aria-label={threadSummary ? undefined : t('agent_workspace.thread_list')}
+            title={threadSummary || undefined}
             onClick={() => setThreadsCollapsed((prev) => !prev)}
             sx={{
               ...flatControlSx(columnTokens),
