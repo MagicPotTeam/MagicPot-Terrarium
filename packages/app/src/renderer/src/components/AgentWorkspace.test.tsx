@@ -1386,6 +1386,56 @@ describe('AgentWorkspace', () => {
       ).toEqual(['agent-3', 'agent-1', 'agent-2'])
     })
 
+    it('replaces the composer with one muted line while no thread is open', async () => {
+      localStorage.setItem(
+        'agent.workspace.project-1',
+        JSON.stringify([{ id: 'agent-1', enabled: false }])
+      )
+      renderWorkspace()
+
+      const region = screen.getByTestId('agent-workspace-no-thread-composer')
+      const line = region.querySelector('p')!
+      expect(line).toHaveTextContent(/^agent_workspace\.no_thread_composer$/)
+      expect(region.children).toHaveLength(1)
+      expect(region.querySelector('button, textarea, input, [role="button"]')).toBeNull()
+      expect(getComputedStyle(line).fontSize).toBe('12px')
+      expect(getComputedStyle(line).color).toBe(testTheme.palette.text.secondary)
+      expect(getComputedStyle(region).padding).toBe('8px')
+      expect(getComputedStyle(region).borderTopWidth).toBe('1px')
+      // The last region of the column, after the (empty) pane area.
+      expect(region.previousElementSibling).toContainElement(
+        screen.getByText('agent_workspace.no_active_conversation')
+      )
+      expect(screen.queryByTestId('mock-composer')).not.toBeInTheDocument()
+      // No conversation, so nothing fills the model slot either.
+      expect(screen.getByTestId('agent-workspace-model-host')).toBeEmptyDOMElement()
+
+      // The status line keeps working without a thread.
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent(PROJECT_TRACE_CAPTURE_STATE_EVENT, {
+            detail: { projectId: 'project-1', active: true, traceId: 'trace-1', mode: 'realtime' }
+          })
+        )
+      })
+      expect(screen.getByTestId('agent-workspace-status-line')).toHaveTextContent('正在记录追踪')
+      expect(screen.getByTestId('agent-workspace-no-thread-composer')).toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
+      await waitFor(() => expect(screen.getByTestId('mock-composer')).toBeInTheDocument())
+      expect(screen.queryByTestId('agent-workspace-no-thread-composer')).not.toBeInTheDocument()
+    })
+
+    it('keeps that line out of a column that has a thread', async () => {
+      renderWorkspace()
+      await waitForThreadSummary('画布检查')
+      expect(screen.queryByTestId('agent-workspace-no-thread-composer')).not.toBeInTheDocument()
+      expect(zhRenderer.agent_workspace.no_thread_composer).toBe('选择或新建一个线程开始对话')
+      expect(enRenderer.agent_workspace.no_thread_composer).toBe(
+        'Select or create a thread to start'
+      )
+    })
+
     it('summarises an empty column and offers the new-thread button with a name', async () => {
       localStorage.setItem(
         'agent.workspace.project-1',

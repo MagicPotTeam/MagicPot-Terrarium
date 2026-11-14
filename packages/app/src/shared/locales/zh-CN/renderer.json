@@ -1443,6 +1443,7 @@
     "image_reply": "图片回复",
     "no_active_conversation": "当前没有活动对话",
     "start_new_chat_with_plus": "点击 + 新建对话。",
+    "no_thread_composer": "选择或新建一个线程开始对话",
     "chat_label": "对话 {{index}}",
     "close_thread": "关闭当前线程",
     "thread_list": "线程列表",

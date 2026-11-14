@@ -1616,6 +1616,7 @@
     "image_reply": "Image reply",
     "no_active_conversation": "No active conversation",
     "start_new_chat_with_plus": "Start a new conversation with +.",
+    "no_thread_composer": "Select or create a thread to start",
     "chat_label": "Conversation {{index}}",
     "close_thread": "Close this thread",
     "thread_list": "Thread list",

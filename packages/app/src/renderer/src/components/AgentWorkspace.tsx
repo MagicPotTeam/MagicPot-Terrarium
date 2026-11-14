@@ -1482,6 +1482,33 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         )}
       </Box>
 
+      {/* Without any open thread there is no composer: one muted line takes its place. */}
+      {openPanes.length === 0 && (
+        <Box
+          data-testid="agent-workspace-no-thread-composer"
+          sx={{
+            flexShrink: 0,
+            minWidth: 0,
+            padding: '8px',
+            borderTop: `1px solid ${columnTokens.border}`
+          }}
+        >
+          <Box
+            component="p"
+            sx={{
+              margin: 0,
+              padding: '4px',
+              fontSize: columnTokens.fontSize.small,
+              lineHeight: 1.4,
+              color: columnTokens.muted,
+              overflowWrap: 'anywhere'
+            }}
+          >
+            {t('agent_workspace.no_thread_composer')}
+          </Box>
+        </Box>
+      )}
+
       <Dialog
         open={tracePanelOpen}
         onClose={() => setTracePanelOpen(false)}
