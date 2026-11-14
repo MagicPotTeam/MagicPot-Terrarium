@@ -421,6 +421,15 @@ describe('main process startup window opening', () => {
     await handler({ preventDefault: vi.fn() })
     expect(confirmQuit).toHaveBeenCalledOnce(); expect(ownerShutdown).not.toHaveBeenCalled(); expect(beforeQuitMock).not.toHaveBeenCalled(); expect(appMock.exit).not.toHaveBeenCalled()
   })
+  it('tells renderer recovery that the app is quitting only once the quit is confirmed', async () => {
+    confirmQuit.mockResolvedValueOnce(false); await loadModule()
+    const quitState = await import('./appQuitState')
+    const handler = appMock.on.mock.calls.find(([event]) => event === 'before-quit')?.[1] as (event: { preventDefault(): void }) => Promise<void>
+    await handler({ preventDefault: vi.fn() })
+    expect(quitState.isAppQuitting()).toBe(false)
+    await handler({ preventDefault: vi.fn() })
+    expect(quitState.isAppQuitting()).toBe(true)
+  })
   it('retires dispatch ownership before normal quit cleanup, even if native closure remains quarantined', async () => {
     ownerShutdown.mockRejectedValueOnce(new Error('Closure remains quarantined'))
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)

@@ -3,9 +3,11 @@ import { dialog } from 'electron'
 
 vi.mock('electron', () => ({ dialog: { showMessageBox: vi.fn() } }))
 
+import { markAppQuitting, resetAppQuittingForTests } from './appQuitState'
 import {
   attachRendererDiagnostics,
   handleRendererProcessGone,
+  resolveRendererGoneAction,
   shouldRecoverRendererProcess
 } from './rendererDiagnostics'
 
@@ -51,13 +53,29 @@ function createWindow(): TestWindow {
 describe('rendererDiagnostics render-process-gone recovery', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    resetAppQuittingForTests()
   })
 
   it('marks OOM and crash exits as recoverable', () => {
     expect(shouldRecoverRendererProcess({ reason: 'oom', exitCode: 0 })).toBe(true)
     expect(shouldRecoverRendererProcess({ reason: 'crashed', exitCode: 1 })).toBe(true)
+    expect(shouldRecoverRendererProcess({ reason: 'abnormal-exit', exitCode: 3 })).toBe(true)
     expect(shouldRecoverRendererProcess({ reason: 'killed', exitCode: 9 })).toBe(false)
     expect(shouldRecoverRendererProcess({ reason: 'clean-exit', exitCode: 0 })).toBe(false)
+  })
+
+  it.each([
+    ['clean-exit', 'ignore'],
+    ['oom', 'reload'],
+    ['crashed', 'reload'],
+    ['abnormal-exit', 'reload'],
+    ['killed', 'prompt'],
+    ['launch-failed', 'prompt'],
+    ['integrity-failure', 'prompt'],
+    ['memory-eviction', 'prompt'],
+    ['a-reason-a-later-electron-adds', 'prompt']
+  ] as const)('answers the exit reason %s with %s', (reason, action) => {
+    expect(resolveRendererGoneAction({ reason, exitCode: 1 } as never)).toBe(action)
   })
 
   it('logs root-cause details before invoking the recovery path for OOM exits', () => {
@@ -93,19 +111,167 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     expect(window.webContents.reload).toHaveBeenCalledTimes(1)
   })
 
-  it('does not recover non-crash renderer exits', () => {
+  // Updated for the recovery rules: this used to pin a silent return, which left a blank window.
+  it('asks instead of reloading automatically for exits that something outside the page caused', () => {
     const window = createWindow()
     const recoverRenderer = vi.fn()
+    const promptRenderer = vi.fn()
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const details = { reason: 'memory-eviction', exitCode: 0 }
 
-    handleRendererProcessGone(
-      window as never,
-      { reason: 'memory-eviction', exitCode: 0 } as never,
-      { recoverRenderer }
-    )
+    handleRendererProcessGone(window as never, details as never, { recoverRenderer, promptRenderer })
 
     expect(recoverRenderer).not.toHaveBeenCalled()
     expect(window.webContents.reload).not.toHaveBeenCalled()
+    expect(promptRenderer).toHaveBeenCalledExactlyOnceWith(window, details, 'not-automatic')
+  })
+
+  it('does nothing for a clean exit', () => {
+    const window = createWindow()
+    const recoverRenderer = vi.fn()
+    const promptRenderer = vi.fn()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.mocked(dialog.showMessageBox).mockReset()
+
+    handleRendererProcessGone(window as never, { reason: 'clean-exit', exitCode: 0 } as never, {
+      recoverRenderer,
+      promptRenderer
+    })
+    handleRendererProcessGone(window as never, { reason: 'clean-exit', exitCode: 0 } as never)
+
+    expect(recoverRenderer).not.toHaveBeenCalled()
+    expect(promptRenderer).not.toHaveBeenCalled()
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+  })
+
+  it.each(['killed', 'launch-failed', 'integrity-failure', 'memory-eviction'] as const)(
+    'shows the recovery dialog with Reload as the default for %s and reloads only when confirmed',
+    async (reason) => {
+      for (const response of [0, 1]) {
+        const window = createWindow()
+        const recoverRenderer = vi.fn()
+        vi.spyOn(console, 'error').mockImplementation(() => undefined)
+        vi.mocked(dialog.showMessageBox)
+          .mockReset()
+          .mockResolvedValue({ response, checkboxChecked: false })
+        attachRendererDiagnostics(window as never, { recoverRenderer, monotonicNow: () => 1000 })
+        const listener = window.webContents.on.mock.calls.find(
+          ([event]) => event === 'render-process-gone'
+        )?.[1]
+        const details = { reason, exitCode: 9 }
+
+        listener({}, details)
+
+        expect(recoverRenderer).not.toHaveBeenCalled()
+        expect(dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(
+          window,
+          expect.objectContaining({
+            message: '窗口的显示进程已意外停止。',
+            buttons: ['重新加载', '取消'],
+            defaultId: 0,
+            cancelId: 1
+          })
+        )
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(recoverRenderer).toHaveBeenCalledTimes(response === 0 ? 1 : 0)
+        if (response === 0) expect(recoverRenderer).toHaveBeenCalledWith(window, details)
+      }
+    }
+  )
+
+  it('uses the default dialog and guarded reload when the handler is called without window state', async () => {
+    const window = createWindow()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 0, checkboxChecked: false })
+
+    handleRendererProcessGone(window as never, { reason: 'killed', exitCode: 9 } as never)
+
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+    expect(dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(
+      window,
+      expect.objectContaining({ defaultId: 0, cancelId: 1 })
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['oom', 'crashed', 'abnormal-exit', 'killed', 'launch-failed', 'memory-eviction'] as const)(
+    'never reloads or asks while the app is quitting: %s',
+    (reason) => {
+      const window = createWindow()
+      const recoverRenderer = vi.fn()
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      vi.spyOn(console, 'info').mockImplementation(() => undefined)
+      vi.mocked(dialog.showMessageBox).mockReset()
+      attachRendererDiagnostics(window as never, { recoverRenderer, monotonicNow: () => 1000 })
+      const listener = window.webContents.on.mock.calls.find(
+        ([event]) => event === 'render-process-gone'
+      )?.[1]
+
+      markAppQuitting()
+      listener({}, { reason, exitCode: 9 })
+
+      expect(recoverRenderer).not.toHaveBeenCalled()
+      expect(window.webContents.reload).not.toHaveBeenCalled()
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['crashed', 'killed'] as const)(
+    'never reloads or asks once the Windows session is ending: %s',
+    (reason) => {
+      const window = createWindow()
+      const recoverRenderer = vi.fn()
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      vi.spyOn(console, 'info').mockImplementation(() => undefined)
+      vi.mocked(dialog.showMessageBox).mockReset()
+      attachRendererDiagnostics(window as never, { recoverRenderer, monotonicNow: () => 1000 })
+      const sessionEnd = window.on.mock.calls.find(([event]) => event === 'session-end')?.[1]
+      const listener = window.webContents.on.mock.calls.find(
+        ([event]) => event === 'render-process-gone'
+      )?.[1]
+      expect(sessionEnd).toBeTypeOf('function')
+
+      sessionEnd()
+      listener({}, { reason, exitCode: 9 })
+
+      expect(recoverRenderer).not.toHaveBeenCalled()
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    }
+  )
+
+  it('drops a confirmed manual reload when the app started quitting while the dialog was open', async () => {
+    const window = createWindow()
+    const recoverRenderer = vi.fn()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    let resolvePrompt!: (result: { response: number; checkboxChecked: boolean }) => void
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolvePrompt = resolve
+          })
+      )
+    attachRendererDiagnostics(window as never, { recoverRenderer, monotonicNow: () => 1000 })
+    const listener = window.webContents.on.mock.calls.find(
+      ([event]) => event === 'render-process-gone'
+    )?.[1]
+    listener({}, { reason: 'killed', exitCode: 9 })
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(1)
+
+    markAppQuitting()
+    resolvePrompt({ response: 0, checkboxChecked: false })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(recoverRenderer).not.toHaveBeenCalled()
   })
 
   it('wires render-process-gone events through the recovery handler options', () => {
@@ -243,19 +409,28 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     }
   )
 
-  it('does not spend the recoverable-crash budget for unrelated exit reasons', () => {
+  // Updated for the recovery rules: 'killed' used to be ignored silently; it now asks once.
+  it('does not spend the recoverable-crash budget for exits that are answered with the dialog', async () => {
     const window = createWindow()
     const recoverRenderer = vi.fn()
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    vi.mocked(dialog.showMessageBox).mockReset()
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 1, checkboxChecked: false })
     attachRendererDiagnostics(window as never, { recoverRenderer, monotonicNow: () => 1000 })
     const listener = window.webContents.on.mock.calls.find(
       ([event]) => event === 'render-process-gone'
     )?.[1]
     for (let index = 0; index < 10; index += 1) listener({}, { reason: 'killed', exitCode: 9 })
+    // One question for the whole burst, and no automatic reload.
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(1)
+    expect(recoverRenderer).not.toHaveBeenCalled()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
     for (let index = 0; index < 3; index += 1) listener({}, { reason: 'crashed', exitCode: 1 })
     expect(recoverRenderer).toHaveBeenCalledTimes(3)
-    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(1)
   })
 
   it('does not automatically reload while manual recovery is pending even if the window expires', async () => {
@@ -281,7 +456,13 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     expect(recoverRenderer).toHaveBeenCalledTimes(3)
     expect(dialog.showMessageBox).toHaveBeenCalledWith(
       window,
-      expect.objectContaining({ buttons: ['重新加载', '取消'], defaultId: 1, cancelId: 1 })
+      expect.objectContaining({
+        message: '窗口多次意外退出，自动恢复已暂停。',
+        buttons: ['重新加载', '取消'],
+        // Reload is now the default button (was Cancel): Enter must bring a blank window back.
+        defaultId: 0,
+        cancelId: 1
+      })
     )
     now = 61_000
     listener({}, details)

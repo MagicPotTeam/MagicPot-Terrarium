@@ -22,6 +22,7 @@ import { winController } from './winControls'
 import { flushLocalMediaAccessGrants } from './localMediaAccess'
 import { registerLocalMediaFileIntakeIpc } from './localMediaFileIntakeIpc'
 import { cleanupSubProcesses } from './subprocess/subprocess'
+import { markAppQuitting } from './appQuitState'
 
 const startupUserData = resolveStartupUserDataDirectory()
 fs.mkdirSync(startupUserData.path, { recursive: true })
@@ -194,6 +195,8 @@ app.on('before-quit', async (event) => {
   console.log('[App] 应用即将退出...')
   if (isAppUpdateInstallInProgress()) {
     event.preventDefault()
+    // The update install closes the app without asking: from here a renderer exit is expected.
+    markAppQuitting()
     if (!updateQuitCleanupPromise) {
       cleanupScreenshotManager()
       stopQAppWatcher()
@@ -208,6 +211,8 @@ app.on('before-quit', async (event) => {
 
   event.preventDefault()
   if (!(await winController.confirmAppQuit())) return
+  // Confirmed: renderer recovery must not reload the window or raise a dialog during shutdown.
+  markAppQuitting()
   cleanupScreenshotManager()
   stopQAppWatcher()
   await shutdownProviderDispatchOwner().catch(error => console.error('[App] Dispatch ownership shutdown was not confirmed; retained until process exit.', error))

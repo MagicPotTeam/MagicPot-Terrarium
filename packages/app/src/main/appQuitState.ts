@@ -1,0 +1,19 @@
+// packages/app/src/main/appQuitState.ts
+// One process-wide fact: the user's quit has been confirmed and shutdown is running.
+// Renderer recovery reads it so that a renderer which exits (or is terminated by the OS)
+// during shutdown is never reloaded and never raises a recovery dialog.
+let appQuitting = false
+
+/** Call only after the quit can no longer be cancelled (confirmation passed, or an update install is closing the app). */
+export function markAppQuitting(): void {
+  appQuitting = true
+}
+
+export function isAppQuitting(): boolean {
+  return appQuitting
+}
+
+/** Test seam: the flag is terminal in production. */
+export function resetAppQuittingForTests(): void {
+  appQuitting = false
+}

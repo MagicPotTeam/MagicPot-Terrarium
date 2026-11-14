@@ -6,6 +6,7 @@ import { attachRendererDiagnostics, handleRendererProcessGone } from './renderer
 
 const details = { reason: 'crashed' as const, exitCode: 1 }
 const createWindow = () => ({
+  on: vi.fn(),
   isDestroyed: vi.fn(() => false),
   webContents: {
     isDestroyed: vi.fn(() => false),
