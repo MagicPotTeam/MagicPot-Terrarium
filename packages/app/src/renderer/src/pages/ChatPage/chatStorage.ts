@@ -883,13 +883,18 @@ function openDB(): Promise<IDBDatabase> {
         : db.createObjectStore(STORE_NAME, { keyPath: 'storageKey' })
 
       if (targetStore && tx && db.objectStoreNames.contains(LEGACY_STORE_NAME)) {
-        const legacyRequest = tx.objectStore(LEGACY_STORE_NAME).getAll()
+        // One record at a time: the legacy store can hold conversations with inline images, and
+        // the upgrade must not need all of them in memory at once. The upgrade transaction stays
+        // open while the cursor advances and still commits or aborts as a whole.
+        const legacyRequest = tx.objectStore(LEGACY_STORE_NAME).openCursor()
         legacyRequest.onsuccess = () => {
-          for (const session of (legacyRequest.result || []) as LegacyChatSession[]) {
-            if (!hasSessionDeleteTombstone(session.id, 'default')) {
-              targetStore.put(createStoredSession(session))
-            }
+          const cursor = legacyRequest.result
+          if (!cursor) return
+          const session = cursor.value as LegacyChatSession
+          if (!hasSessionDeleteTombstone(session.id, 'default')) {
+            targetStore.put(createStoredSession(session))
           }
+          cursor.continue()
         }
       }
     }
@@ -933,25 +938,122 @@ function openDB(): Promise<IDBDatabase> {
   return dbInitPromise
 }
 
+/**
+ * Key range holding the records of one scope.
+ *
+ * Every writer of this store derives the primary key with createSessionStorageKey, i.e.
+ * `${scope}\u0000${sessionId}`, so the records of a scope are the string keys that start with
+ * `${scope}\u0000`. That set is exactly [`${scope}\u0000`, `${scope}\u0001`): IndexedDB orders
+ * strings by UTF-16 code unit; a key with the prefix first differs from the upper bound at the
+ * separator (0 < 1), and a key without it is either a proper prefix of the lower bound (sorts
+ * below it), differs from both bounds at the same earlier code unit (outside on one side), or
+ * has a code unit >= 1 where the separator would be (>= the open upper bound). This holds for
+ * every scope and session id, whatever characters they contain. A scope that itself contains
+ * the separator can share the range of a shorter scope, so callers still compare storageScope.
+ */
+function scopeKeyRange(targetScope: string): IDBKeyRange {
+  return IDBKeyRange.bound(`${targetScope}\u0000`, `${targetScope}\u0001`, false, true)
+}
+
+/**
+ * Keys that no scope range can reach: not a string, or a string without the separator. No
+ * writer of this store produces them; they are looked up once per connection, keys only (no
+ * record is deserialised), so that such a record stays visible wherever it is visible to an
+ * unranged scan. A key that has the separator but whose record names another storageScope is
+ * not detectable without reading every record and is not covered.
+ */
+const strayKeyScans = new WeakMap<IDBDatabase, Promise<IDBValidKey[]>>()
+
+function loadStrayKeys(db: IDBDatabase): Promise<IDBValidKey[]> {
+  const existing = strayKeyScans.get(db)
+  if (existing) return existing
+  const scan = new Promise<IDBValidKey[]>((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly')
+    const request = tx.objectStore(STORE_NAME).getAllKeys()
+    request.onsuccess = () =>
+      resolve(
+        (request.result || []).filter(
+          (key) => typeof key !== 'string' || !key.includes('\u0000')
+        )
+      )
+    request.onerror = () =>
+      reject(createStorageError(request.error, 'IndexedDB failed to list chat session keys.'))
+  })
+  strayKeyScans.set(db, scan)
+  // A failed scan proves nothing; the next reader asks again.
+  scan.catch(() => {
+    if (strayKeyScans.get(db) === scan) strayKeyScans.delete(db)
+  })
+  return scan
+}
+
+/**
+ * Hand the stored records of one scope to `onRecords`, inside the caller's transaction (which
+ * is still active in the callback, so a read-modify-write stays atomic). Only the scope's key
+ * range is read; records of other scopes are never deserialised.
+ */
+function requestScopeRecords(
+  store: IDBObjectStore,
+  targetScope: string,
+  strayKeys: readonly IDBValidKey[],
+  onRecords: (records: StoredChatSession[]) => void,
+  onError: (error: DOMException | null) => void
+): void {
+  const inScope = (record: StoredChatSession | undefined): record is StoredChatSession =>
+    !!record && normalizeScope(record.storageScope) === targetScope
+  const request = store.getAll(scopeKeyRange(targetScope))
+  request.onerror = () => onError(request.error)
+  request.onsuccess = () => {
+    const records = ((request.result || []) as StoredChatSession[]).filter(inScope)
+    if (strayKeys.length === 0) {
+      onRecords(records)
+      return
+    }
+    const keyed = records.map((record) => ({ key: record.storageKey as IDBValidKey, record }))
+    let pending = strayKeys.length
+    let failed = false
+    for (const key of strayKeys) {
+      const strayRequest = store.get(key)
+      strayRequest.onerror = () => {
+        if (failed) return
+        failed = true
+        onError(strayRequest.error)
+      }
+      strayRequest.onsuccess = () => {
+        if (failed) return
+        const record = strayRequest.result as StoredChatSession | undefined
+        if (inScope(record)) keyed.push({ key, record })
+        pending -= 1
+        if (pending > 0) return
+        // An unranged scan returns records in primary-key order; keep that order.
+        keyed.sort((a, b) => indexedDB.cmp(a.key, b.key))
+        onRecords(keyed.map((entry) => entry.record))
+      }
+    }
+  }
+}
+
 /** Load all sessions, sorted by creation order. */
 export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]> {
   let sessions: ChatSession[]
   const targetScope = normalizeScope(scope)
   try {
     const db = await openDB()
+    const strayKeys = await loadStrayKeys(db)
     sessions = await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly')
       const store = tx.objectStore(STORE_NAME)
-      const request = store.getAll()
-      request.onsuccess = () => {
-        const loadedSessions = ((request.result || []) as StoredChatSession[])
-          .filter((session) => normalizeScope(session.storageScope) === targetScope)
-          .map((session) => normalizeSession(session, targetScope))
-        loadedSessions.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-        resolve(loadedSessions)
-      }
-      request.onerror = () =>
-        reject(createStorageError(request.error, 'IndexedDB failed to load chat sessions.'))
+      requestScopeRecords(
+        store,
+        targetScope,
+        strayKeys,
+        (records) => {
+          const loadedSessions = records.map((session) => normalizeSession(session, targetScope))
+          loadedSessions.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+          resolve(loadedSessions)
+        },
+        (error) => reject(createStorageError(error, 'IndexedDB failed to load chat sessions.'))
+      )
     })
   } catch (error) {
     const storageError = createStorageError(error, 'IndexedDB failed to load chat sessions.')
@@ -1260,12 +1362,11 @@ export async function saveAllSessions(sessions: ChatSession[], scope = 'default'
   try {
     const db = await openDB()
     const targetScope = normalizeScope(scope)
+    const strayKeys = await loadStrayKeys(db)
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite')
       const store = tx.objectStore(STORE_NAME)
-      const request = store.getAll()
-      request.onsuccess = () => {
-        const scoped = ((request.result || []) as StoredChatSession[]).filter(existing => normalizeScope(existing.storageScope) === targetScope)
+      requestScopeRecords(store, targetScope, strayKeys, (scoped) => {
         const teamManaged = (session: ChatSession): boolean => session.teamLeadId !== undefined || session.teamMemberName !== undefined ||
           session.teamGeneration !== undefined || session.teamMemberGeneration !== undefined || session.teamLifecycleRevision !== undefined || session.teamEnded !== undefined || session.teamSettings !== undefined
         if (scoped.some(teamManaged) || sessions.some(teamManaged)) {
@@ -1279,11 +1380,11 @@ export async function saveAllSessions(sessions: ChatSession[], scope = 'default'
         for (const session of sessions.map((item) => createStoredSession(item, targetScope))) {
           store.put(session)
         }
-      }
-      request.onerror = () =>
+      }, (error) =>
         reject(
-          createStorageError(request.error, 'IndexedDB failed to read existing chat sessions.')
+          createStorageError(error, 'IndexedDB failed to read existing chat sessions.')
         )
+      )
       tx.oncomplete = () => resolve()
       tx.onerror = () =>
         reject(createStorageError(tx.error, 'IndexedDB failed to save chat sessions.'))
@@ -1311,16 +1412,15 @@ export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { 
   if (!expectedLead.id || !expectedMember.id || expectedLead.id === expectedMember.id) throw new Error('Invalid team member')
   return queueSessionMutation(expectedMember.id, targetScope, async () => {
     const db = await openDB()
+    const strayKeys = await loadStrayKeys(db)
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite')
       const store = tx.objectStore(STORE_NAME)
-      const request = store.getAll()
       let result: { lead: ChatSession; member: ChatSession } | undefined
       let failure: Error | undefined
       const abort = (error: Error) => { failure = error; try { tx.abort() } catch { reject(error) } }
-      request.onsuccess = () => {
+      const onRecords = (records: StoredChatSession[]) => {
         try {
-          const records = (request.result as StoredChatSession[]).filter(record => normalizeScope(record.storageScope) === targetScope)
           const lead = records.find(record => record.id === expectedLead.id)
           const member = records.find(record => record.id === expectedMember.id)
           if (!lead || !member || !normalizedSessionsEqual(lead, expectedLead, targetScope) || !normalizedSessionsEqual(member, expectedMember, targetScope) ||
@@ -1335,7 +1435,7 @@ export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { 
           result = { lead: normalizeSession(lead, targetScope), member: updated }
         } catch (error) { abort(createStorageError(error, 'Member model choice failed')) }
       }
-      request.onerror = () => abort(createStorageError(request.error, 'Member model choice failed'))
+      requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Member model choice failed')))
       tx.oncomplete = () => result ? resolve(result) : reject(new Error('Member model choice failed'))
       tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Member model choice failed'))
       tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Member model choice aborted'))
@@ -1351,16 +1451,15 @@ export async function createTeamMemberInDB(input: TeamMutationInput & { member: 
   if (!member.id || member.id === expectedLead.id || member.teamLeadId !== expectedLead.id || member.archived ||
       !member.teamMemberName || !/^[\p{L}\p{N}_-]{1,32}$/u.test(member.teamMemberName)) throw new Error('Invalid team member')
   const db = await openDB()
+  const strayKeys = await loadStrayKeys(db)
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
-    const request = store.getAll()
     let result: {lead: ChatSession; member: ChatSession} | undefined
     let failure: Error | undefined
     const abort = (error: Error) => { failure = error; try { tx.abort() } catch { reject(error) } }
-    request.onsuccess = () => {
+    const onRecords = (records: StoredChatSession[]) => {
       try {
-        const records = (request.result as StoredChatSession[]).filter(record => normalizeScope(record.storageScope) === targetScope)
         const rawLead = records.find(record => record.id === expectedLead.id)
         if (!rawLead || !normalizedSessionsEqual(rawLead, expectedLead, targetScope) || rawLead.teamLeadId || rawLead.archived || rawLead.teamEnded ||
             hasSessionDeleteTombstone(expectedLead.id, targetScope) || hasSessionDeleteTombstone(member.id, targetScope) || input.shouldUpdate?.() === false) throw new Error('Team changed')
@@ -1376,7 +1475,7 @@ export async function createTeamMemberInDB(input: TeamMutationInput & { member: 
         result = { lead: normalizeSession(rawLead, targetScope), member: normalizeSession(admitted, targetScope) }
       } catch (error) { abort(createStorageError(error, 'Team creation failed')) }
     }
-    request.onerror = () => abort(createStorageError(request.error, 'Team creation failed'))
+    requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Team creation failed')))
     tx.oncomplete = () => result ? resolve(result) : reject(new Error('Team creation failed'))
     tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Team creation failed'))
     tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Team creation aborted'))
@@ -1388,16 +1487,15 @@ export async function endTeamInDB(input: TeamMutationInput): Promise<{lead: Chat
   const { scope, expectedLead } = input
   const targetScope = normalizeScope(scope)
   const db = await openDB()
+  const strayKeys = await loadStrayKeys(db)
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
-    const request = store.getAll()
     let result: {lead: ChatSession; members: ChatSession[]} | undefined
     let failure: Error | undefined
     const abort = (error: Error) => { failure = error; try { tx.abort() } catch { reject(error) } }
-    request.onsuccess = () => {
+    const onRecords = (records: StoredChatSession[]) => {
       try {
-        const records = (request.result as StoredChatSession[]).filter(record => normalizeScope(record.storageScope) === targetScope)
         const rawLead = records.find(record => record.id === expectedLead.id)
         if (!rawLead || !normalizedSessionsEqual(rawLead, expectedLead, targetScope) || rawLead.teamLeadId || rawLead.archived || rawLead.teamEnded ||
             hasSessionDeleteTombstone(expectedLead.id, targetScope) || input.shouldUpdate?.() === false) throw new Error('Team changed')
@@ -1417,7 +1515,7 @@ export async function endTeamInDB(input: TeamMutationInput): Promise<{lead: Chat
         result = {lead, members}
       } catch (error) { abort(createStorageError(error, 'Team end failed')) }
     }
-    request.onerror = () => abort(createStorageError(request.error, 'Team end failed'))
+    requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Team end failed')))
     tx.oncomplete = () => result ? resolve(result) : reject(new Error('Team end failed'))
     tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Team end failed'))
     tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Team end aborted'))
