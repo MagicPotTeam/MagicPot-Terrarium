@@ -30,12 +30,17 @@ import {
   useTheme,
   Button,
   MenuItem,
+  ListItemIcon,
+  ListItemText,
   IconButton
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import AttachFileIcon from '@mui/icons-material/AttachFile'
 import AccessTimeIcon from '@mui/icons-material/AccessTime'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
+import AdsClickOutlinedIcon from '@mui/icons-material/AdsClickOutlined'
+import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined'
+import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined'
 import { useTranslation } from 'react-i18next'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useRuntimeMcpStatus } from '@renderer/hooks/useRuntimeMcpStatus'
@@ -321,6 +326,15 @@ interface ChatPageProps {
   compact?: boolean
   existingConversationProtection?: ExistingConversationProtection
   existingConversationOpen?: ExistingConversationOpenInput
+  /** Actions the Agent column owns and offers through this conversation's composer "+" menu. */
+  workspaceMenu?: ChatPageWorkspaceMenu
+}
+
+export interface ChatPageWorkspaceMenu {
+  /** A trace is being recorded: the trace entry stops it instead of opening the trace dialog. */
+  traceRecording: boolean
+  onToggleTrace: () => void
+  onOpenCanvasTarget: () => void
 }
 
 type ExternalSendToAgentDetail = {
@@ -871,7 +885,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   acceptExternalInput = true,
   active = true,
   existingConversationProtection,
-  existingConversationOpen
+  existingConversationOpen,
+  workspaceMenu
 }) => {
   const queueResumeNoticeId = React.useId()
   const teamVisibilityRef = useRef({active, epoch:0})
@@ -9786,7 +9801,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : undefined
                 }
                 addMenuSlot={
-                  (!isAgentSkillSelected || Boolean(active && isReady && currentSessionId && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId) || Boolean(teamEnabled && teamLead && !teamMembers.length))
+                  (!isAgentSkillSelected || Boolean(workspaceMenu) || Boolean(active && isReady && currentSessionId && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread' && route.threadId) || Boolean(teamEnabled && teamLead && !teamMembers.length))
                     ? (closeMenu) => [
                         teamEnabled && teamLead && !teamMembers.length && (teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length) && <MenuItem key="team-management" onClick={() => { closeMenu(); setTeamManagementOpenRequest(value => value + 1) }}>团队管理</MenuItem>,
                         !isAgentSkillSelected && <ChatImageGenerationSettings
@@ -9798,6 +9813,53 @@ const ChatPage: React.FC<ChatPageProps> = ({
                           referenceImageSize={imageGenerationReferenceSize}
                           variant="menuItem"
                         />,
+                        workspaceMenu && (
+                          <MenuItem
+                            key="canvas-target"
+                            data-testid="chat-composer-menu-canvas-target"
+                            onClick={() => {
+                              closeMenu()
+                              workspaceMenu.onOpenCanvasTarget()
+                            }}
+                          >
+                            <ListItemIcon>
+                              <AdsClickOutlinedIcon fontSize="small" />
+                            </ListItemIcon>
+                            <ListItemText
+                              primary={t('agent_workspace.canvas_target')}
+                              primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
+                            />
+                          </MenuItem>
+                        ),
+                        workspaceMenu && (
+                          <MenuItem
+                            key="trace"
+                            data-testid="chat-composer-menu-trace"
+                            onClick={() => {
+                              closeMenu()
+                              workspaceMenu.onToggleTrace()
+                            }}
+                            sx={workspaceMenu.traceRecording ? { color: 'error.main' } : undefined}
+                          >
+                            <ListItemIcon
+                              sx={workspaceMenu.traceRecording ? { color: 'inherit' } : undefined}
+                            >
+                              {workspaceMenu.traceRecording ? (
+                                <StopCircleOutlinedIcon fontSize="small" />
+                              ) : (
+                                <TimelineOutlinedIcon fontSize="small" />
+                              )}
+                            </ListItemIcon>
+                            <ListItemText
+                              primary={t(
+                                workspaceMenu.traceRecording
+                                  ? 'agent_workspace.trace_stop'
+                                  : 'agent_workspace.trace_start'
+                              )}
+                              primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
+                            />
+                          </MenuItem>
+                        )
                       ]
                     : undefined
                 }

@@ -9,7 +9,7 @@ import { readExistingWorkspacePanes, type ExistingConversationWorkspaceAdapter }
 import { PROJECTS_STORAGE_KEY } from '@renderer/pages/MainPage/projectStore'
 
 const f = vi.hoisted(() => ({ load: vi.fn(async () => []), children: [] as Child[] }))
-type Child = { storageScope: string; active: boolean; acceptExternalInput: boolean; existingConversationProtection?: ExistingConversationProtection; existingConversationOpen?: ExistingConversationOpenInput }
+type Child = { storageScope: string; active: boolean; acceptExternalInput: boolean; workspaceMenu?: { onToggleTrace: () => void }; existingConversationProtection?: ExistingConversationProtection; existingConversationOpen?: ExistingConversationOpenInput }
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'en', resolvedLanguage: 'en' } }) }))
 vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifyError: vi.fn(), notifyInfo: vi.fn() }) }))
 vi.mock('@renderer/pages/ChatPage/ChatPage', () => ({ default: (props: Child) => { f.children.push(props); return <div data-testid={props.storageScope} data-active={String(props.active)} data-guard={String(props.existingConversationProtection?.isProtected() ?? false)} data-open={String(!!props.existingConversationOpen)} /> } }))
@@ -121,7 +121,7 @@ describe('actual AgentWorkspace optional existing-only Open adapter; no Layout/U
     const { coordinator, handle, adapter } = await request(); render(wrap(adapter))
     await waitFor(() => expect(latest()?.existingConversationOpen).toBeDefined())
     const prior = latest().existingConversationOpen!.pane
-    fireEvent.click(screen.getByTestId('agent-workspace-trace-button'))
+    act(() => latest().workspaceMenu!.onToggleTrace())
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
     expect(coordinator.attachConsumer(prior)).toBeNull()
     expect(latest()?.existingConversationOpen).toBeUndefined()

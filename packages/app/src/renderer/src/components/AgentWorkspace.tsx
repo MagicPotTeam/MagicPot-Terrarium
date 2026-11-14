@@ -9,7 +9,6 @@ import React, {
 } from 'react'
 import {
   Box,
-  Button,
   ButtonBase,
   Dialog,
   DialogContent,
@@ -21,12 +20,11 @@ import { useTheme } from '@mui/material/styles'
 import {
   Add as AddIcon,
   Close as CloseIcon,
-  ExpandMore as ExpandMoreIcon,
-  StopCircleOutlined as StopIcon
+  ExpandMore as ExpandMoreIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import ChatPage from '@renderer/pages/ChatPage/ChatPage'
+import ChatPage, { type ChatPageWorkspaceMenu } from '@renderer/pages/ChatPage/ChatPage'
 import { loadAllSessions, type ChatSession } from '@renderer/pages/ChatPage/chatStorage'
 import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLocaleUtils'
 import {
@@ -1149,6 +1147,38 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     }
   }
 
+  const traceRecording = Boolean(activeTraceState.id)
+  const workspaceMenuHandlers = {
+    onToggleTrace: () => {
+      if (traceRecording) {
+        void handleStopTraceCapture()
+        return
+      }
+      setTracePanelOpen(true)
+    },
+    onOpenCanvasTarget: () => {
+      setTracePanelOpen(false)
+      window.dispatchEvent(
+        new CustomEvent('canvas:run-target-request', {
+          detail: { canvasId: projectId }
+        })
+      )
+    }
+  }
+  const workspaceMenuHandlersRef = useRef(workspaceMenuHandlers)
+  useLayoutEffect(() => {
+    workspaceMenuHandlersRef.current = workspaceMenuHandlers
+  })
+  // One stable object for every pane, so the chat pages only see the recording flag change.
+  const workspaceMenu = useMemo<ChatPageWorkspaceMenu>(
+    () => ({
+      traceRecording,
+      onToggleTrace: () => workspaceMenuHandlersRef.current.onToggleTrace(),
+      onOpenCanvasTarget: () => workspaceMenuHandlersRef.current.onOpenCanvasTarget()
+    }),
+    [traceRecording]
+  )
+
   return (
     <Box
       data-agent-workspace-root={projectId}
@@ -1214,65 +1244,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         </Box>
 
         <Box id="agent-workspace-skill-portal" sx={{ display: 'flex', alignItems: 'center' }} />
-
-        <Button
-          size="small"
-          color={activeTraceState.id ? 'error' : 'primary'}
-          variant={activeTraceState.id || tracePanelOpen ? 'contained' : 'text'}
-          startIcon={activeTraceState.id ? <StopIcon sx={{ fontSize: 15 }} /> : undefined}
-          data-testid="agent-workspace-trace-button"
-          onClick={() => {
-            if (activeTraceState.id) {
-              void handleStopTraceCapture()
-              return
-            }
-            setTracePanelOpen((prev) => !prev)
-          }}
-          sx={{
-            fontWeight: 700,
-            fontSize: 12,
-            borderRadius: 2,
-            px: 1.2,
-            py: 0.5,
-            minWidth: 'auto',
-            color: activeTraceState.id || tracePanelOpen ? 'common.white' : 'text.secondary',
-            '& .MuiButton-startIcon': { mr: 0.5 },
-            '&:hover': {
-              bgcolor: activeTraceState.id
-                ? 'error.dark'
-                : tracePanelOpen
-                  ? 'primary.dark'
-                  : 'action.hover'
-            }
-          }}
-        >
-          {activeTraceState.id ? '停止追踪' : t('menu.trace', { defaultValue: '追踪' })}
-        </Button>
-
-        <Button
-          size="small"
-          variant="text"
-          onClick={() => {
-            setTracePanelOpen(false)
-            window.dispatchEvent(
-              new CustomEvent('canvas:run-target-request', {
-                detail: { canvasId: projectId }
-              })
-            )
-          }}
-          sx={{
-            fontWeight: 700,
-            fontSize: 12,
-            borderRadius: 2,
-            px: 1.5,
-            py: 0.5,
-            minWidth: 'auto',
-            color: 'text.secondary',
-            '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
-          }}
-        >
-          {t('agent_workspace.canvas_target', { defaultValue: 'Canvas target' })}
-        </Button>
       </Box>
 
       <Box
@@ -1467,6 +1438,24 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         )}
       </Box>
 
+      {activeTraceState.id && (
+        <Box
+          role="status"
+          data-testid="agent-workspace-status-line"
+          sx={{
+            flexShrink: 0,
+            padding: '6px 10px',
+            borderBottom: `1px solid ${columnTokens.border}`,
+            fontSize: columnTokens.fontSize.base,
+            lineHeight: 1.4,
+            color: columnTokens.muted,
+            overflowWrap: 'anywhere'
+          }}
+        >
+          {t('agent_workspace.trace_recording')}
+        </Box>
+      )}
+
       <Box
         sx={{ flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}
         data-agent-workspace-scope={
@@ -1510,6 +1499,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 active={isActivePane}
                 existingConversationProtection={childProtections?.get(pane.id)}
                 existingConversationOpen={isActivePane && openChatInput?.handle.target.paneId === pane.id ? openChatInput : undefined}
+                workspaceMenu={workspaceMenu}
               />
             </Box>
           )

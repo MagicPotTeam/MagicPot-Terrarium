@@ -14,6 +14,7 @@ import {
   STORAGE_KEY_EXTERNAL_LOADING_IDS,
   updateScopedExternalLoadingSessionId
 } from '@renderer/pages/ChatPage/chatPageShared'
+import { PROJECT_TRACE_CAPTURE_STATE_EVENT } from '@renderer/features/projectTrace/projectTraceRuntime'
 
 const chatPageUnmountMock = vi.fn()
 const chatPageMock = vi.fn((props?: unknown) => {
@@ -52,8 +53,9 @@ vi.mock('react-i18next', () => ({
       if (key === 'agent_workspace.chat_label') {
         return `Agent 线程 ${String(options?.index ?? '')}`.trim()
       }
-      if (key === 'menu.trace') return '追踪'
-      if (key === 'agent_workspace.canvas_target') return zhRenderer.agent_workspace.canvas_target
+      if (key === 'agent_workspace.trace_recording') {
+        return zhRenderer.agent_workspace.trace_recording
+      }
       return key
     },
     i18n: {
@@ -127,6 +129,16 @@ const getThreadRows = (): HTMLElement[] => [
   ...document.querySelectorAll<HTMLElement>('[data-agent-thread-row]')
 ]
 
+type WorkspaceMenuProps = {
+  traceRecording: boolean
+  onToggleTrace: () => void
+  onOpenCanvasTarget: () => void
+}
+
+/** The "+" menu actions the workspace handed to the most recently rendered ChatPage. */
+const latestWorkspaceMenu = (): WorkspaceMenuProps =>
+  (chatPageMock.mock.calls.at(-1)?.[0] as { workspaceMenu: WorkspaceMenuProps }).workspaceMenu
+
 const waitForThreadSummary = (title: string) =>
   waitFor(() => expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(title))
 
@@ -168,16 +180,26 @@ describe('AgentWorkspace', () => {
     expect(document.getElementById('agent-workspace-skill-portal')).toBeInTheDocument()
   })
 
-  it('opens the canvas target action with the current project id', async () => {
+  it('keeps trace and canvas target out of the header and hands them to the conversation menu', async () => {
     expect(zhRenderer.agent_workspace.canvas_target).toBe('画布目标')
     expect(enRenderer.agent_workspace.canvas_target).toBe('Canvas target')
+    expect(zhRenderer.agent_workspace.trace_start).toBe('开始追踪')
+    expect(enRenderer.agent_workspace.trace_start).toBe('Start trace')
+    expect(zhRenderer.agent_workspace.trace_stop).toBe('停止追踪')
+    expect(enRenderer.agent_workspace.trace_stop).toBe('Stop trace')
     expect(zhRenderer.agent_workspace.check).toBe('目标')
     expect(enRenderer.agent_workspace.check).toBe('Target')
     const listener = vi.fn()
     window.addEventListener('canvas:run-target-request', listener)
     try {
       renderWorkspace()
-      fireEvent.click(screen.getByRole('button', { name: '画布目标' }))
+      const header = screen.getByText('agent_workspace.title').closest('div')!.parentElement!
+      expect(header.querySelector('button')).toBeNull()
+      expect(screen.queryByTestId('agent-workspace-trace-button')).not.toBeInTheDocument()
+
+      const menu = latestWorkspaceMenu()
+      expect(menu.traceRecording).toBe(false)
+      act(() => menu.onOpenCanvasTarget())
       expect(listener).toHaveBeenCalledTimes(1)
       expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({ canvasId: 'project-1' })
       await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalled())
@@ -760,21 +782,43 @@ describe('AgentWorkspace', () => {
     })
   })
 
-  it('opens trace as a dialog between skill and target actions without the trace icon', async () => {
+  it('opens the trace dialog from the conversation menu action', async () => {
     renderWorkspace()
 
-    const traceButton = screen.getByTestId('agent-workspace-trace-button')
-    const targetButton = screen.getByRole('button', { name: '画布目标' })
-
-    expect(
-      traceButton.compareDocumentPosition(targetButton) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-    expect(traceButton.querySelector('[data-testid="TimelineIcon"]')).toBeNull()
-
-    fireEvent.click(traceButton)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    act(() => latestWorkspaceMenu().onToggleTrace())
 
     expect(screen.getByTestId('mock-trace-panel')).toHaveAttribute('data-project-id', 'project-1')
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('shows a text-only status line under the toolbar while a trace is recording', async () => {
+    renderWorkspace()
+    expect(screen.queryByTestId('agent-workspace-status-line')).not.toBeInTheDocument()
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(PROJECT_TRACE_CAPTURE_STATE_EVENT, {
+          detail: { projectId: 'project-1', active: true, traceId: 'trace-1', mode: 'realtime' }
+        })
+      )
+    })
+
+    const statusLine = screen.getByTestId('agent-workspace-status-line')
+    expect(statusLine).toHaveAttribute('role', 'status')
+    expect(statusLine).toHaveTextContent('正在记录追踪')
+    expect(statusLine.querySelector('button')).toBeNull()
+    expect(
+      screen.getByTestId('agent-thread-toolbar').compareDocumentPosition(statusLine) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(latestWorkspaceMenu().traceRecording).toBe(true)
+
+    // The same menu action now stops the recording instead of opening the dialog.
+    await act(async () => latestWorkspaceMenu().onToggleTrace())
+    expect(screen.queryByTestId('agent-workspace-status-line')).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(latestWorkspaceMenu().traceRecording).toBe(false)
   })
 
   it('keeps opened chat panes mounted and switches visibility without a reload', async () => {

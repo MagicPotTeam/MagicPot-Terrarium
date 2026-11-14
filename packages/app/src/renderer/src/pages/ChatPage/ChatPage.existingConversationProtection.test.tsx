@@ -80,7 +80,7 @@ vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
 vi.mock('./components/ImagePreviewOverlay', () => ({ default: () => null }))
 vi.mock('./components/ImageContextMenu', () => ({ default: () => null }))
 vi.mock('./components/AgentLocalFilesPanel', () => ({ default: () => null }))
-vi.mock('./components/ChatComposer', () => ({ default: () => <div data-testid="composer" /> }))
+vi.mock('./components/ChatComposer', () => ({ default: ({ addMenuSlot }: { addMenuSlot?: (closeMenu: () => void) => React.ReactNode }) => <div data-testid="composer">{addMenuSlot?.(() => undefined)}</div> }))
 vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession }: { currentSession?: ChatSession }) => {
   f.states.push({ scope: currentSession?.storageScope ?? '', id: currentSession?.id ?? null, draft: currentSession?.draft?.inputValue })
   return <pre data-testid="selected">{currentSession?.id ?? 'none'}</pre>
@@ -282,7 +282,7 @@ describe('actual Workspace and ChatPage combined handoff, injected Layout presen
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(3))
     expect(inPane(scope)).toBe('target'); expect(coordinator.getSnapshot().result).toBeNull()
     if (change === 'different-pane') document.querySelector<HTMLElement>(`[data-agent-workspace-scope="${siblingScope}"][role="button"]`)!.click()
-    if (change === 'trace') screen.getByTestId('agent-workspace-trace-button').click()
+    if (change === 'trace') document.querySelector<HTMLElement>(`[data-agent-workspace-scope="${scope}"] [data-testid="chat-composer-menu-trace"]`)!.click()
     if (change === 'disabled') localStorage.setItem(paneKey, '[{"id":"agent-1","enabled":false},{"id":"agent-2","enabled":true}]')
     if (change === 'unmount') rendered.unmount()
     await act(async () => finish(true)); await settled()
