@@ -32,6 +32,8 @@ beforeEach(() => {
   localStorage.clear(); f.children = []; f.load.mockClear()
   localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ id: projectId, name: 'Project', chatStorageScopePrefix: projectId }]))
   localStorage.setItem(storageKey, JSON.stringify(initial)); localStorage.setItem(`agent.workspace.active.${projectId}`, 'agent-1')
+  // The thread list starts collapsed; the row tests below need the stored "expanded" choice.
+  localStorage.setItem(`agent.workspace.threadsCollapsed.${projectId}`, '0')
 })
 afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks() })
 
@@ -213,6 +215,17 @@ describe('actual AgentWorkspace optional existing-only Open adapter; no Layout/U
     render(wrap({ coordinator }))
     expect(f.children).toHaveLength(0); expect(localStorage.getItem(storageKey)).toBe('[null]')
     expect(coordinator.isGuarded(projectId)).toBe(true)
+  })
+  it('summarises a guarded visit with threads but no selected one, and offers no close row', async () => {
+    const { coordinator, handle } = await request(); coordinator.cancel(handle)
+    localStorage.setItem(`agent.workspace.active.${projectId}`, 'no-longer-open')
+    render(wrap({ coordinator }))
+    await waitFor(() => expect(screen.getByTestId('agent-thread-list')).toBeInTheDocument())
+    expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent('agent_workspace.threads_none_selected')
+    expect(document.querySelectorAll('[data-agent-thread-row]')).toHaveLength(2)
+    expect(document.querySelector('[data-agent-thread-row][aria-current="true"]')).toBeNull()
+    expect(screen.queryByTestId('agent-thread-close-current')).not.toBeInTheDocument()
+    expect(screen.getAllByTestId(/tab-project-p\.agent-/).every(pane => pane.getAttribute('data-active') === 'false')).toBe(true)
   })
   it('ordinary Workspace without Open keeps existing default behavior and supplies no protection/input', async () => {
     localStorage.removeItem(storageKey); render(wrap())

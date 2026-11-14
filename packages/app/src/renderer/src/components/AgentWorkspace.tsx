@@ -1,20 +1,26 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 import {
   Box,
   Button,
   ButtonBase,
-  Collapse,
-  CircularProgress,
   Dialog,
   DialogContent,
   IconButton,
   Tooltip,
   Typography
 } from '@mui/material'
+import { useTheme } from '@mui/material/styles'
 import {
   Add as AddIcon,
   Close as CloseIcon,
-  ExpandLess as ExpandLessIcon,
   ExpandMore as ExpandMoreIcon,
   StopCircleOutlined as StopIcon
 } from '@mui/icons-material'
@@ -31,6 +37,8 @@ import {
   readScopedChatRuns,
   readScopedActiveLoadingSessionIds,
   readScopedExternalLoadingSessionIds,
+  scopedStorageKey,
+  STORAGE_KEY_CURRENT_SESSION_ID,
   type ChatSessionLoadingStateEvent,
   type ChatSessionRunState,
   type ChatSessionRunStateEvent
@@ -49,8 +57,8 @@ import {
   readActiveProjectTraceRealtime,
   type ProjectTraceCaptureStateEvent
 } from '@renderer/features/projectTrace/projectTraceRuntime'
-import type { ChatMessage } from '@shared/api/svcLLMProxy'
 
+import { getAgentColumnTokens, type AgentColumnTokens } from './agentColumnTokens'
 import {
   readExistingWorkspacePanes,
   useExistingConversationWorkspacePane,
@@ -67,7 +75,6 @@ type PanePreviewStatus = 'idle' | ChatSessionRunState['status']
 
 type PanePreview = {
   title: string
-  subtitle: string
   status: PanePreviewStatus
   unread: boolean
   runState?: ChatSessionRunState
@@ -75,10 +82,6 @@ type PanePreview = {
 
 type AgentWorkspaceStrings = {
   newConversation: string
-  latestReply: string
-  latestPrompt: string
-  conversationCreated: string
-  emptyConversation: string
   paneLabel: (index: number) => string
 }
 
@@ -180,10 +183,6 @@ type AgentWorkspaceTranslator = TFunction<'translation'>
 
 const createAgentWorkspaceStrings = (t: AgentWorkspaceTranslator): AgentWorkspaceStrings => ({
   newConversation: t('chat.new_conversation'),
-  latestReply: t('agent_workspace.latest_reply'),
-  latestPrompt: t('agent_workspace.latest_prompt'),
-  conversationCreated: t('agent_workspace.conversation_created'),
-  emptyConversation: t('agent_workspace.empty_conversation'),
   paneLabel: (index: number) => t('agent_workspace.chat_label', { index })
 })
 
@@ -192,15 +191,31 @@ const compactText = (value: string, fallback: string): string => {
   return normalized || fallback
 }
 
-const getLatestRenderableMessage = (messages: ChatMessage[]): ChatMessage | null => {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message.role === 'system') continue
-    if (message.content?.trim() || message.attachments?.length) return message
-  }
+/**
+ * The conversation a thread is named after: the root (non-member) conversation
+ * that is open in the pane. A team member's conversation resolves to its lead,
+ * so opening a member or receiving a reply never renames the thread.
+ */
+const resolvePaneRootSession = (
+  sessions: ChatSession[],
+  currentSessionId: string | null
+): ChatSession | undefined => {
+  const current = currentSessionId
+    ? sessions.find((session) => session.id === currentSessionId)
+    : undefined
+  const currentRoot = current?.teamLeadId
+    ? sessions.find((session) => session.id === current.teamLeadId)
+    : current
+  if (currentRoot && !currentRoot.teamLeadId) return currentRoot
 
-  return null
+  // Sessions arrive oldest first; fall back to the newest root conversation.
+  const roots = sessions.filter((session) => !session.teamLeadId)
+  const openRoots = roots.filter((session) => !session.archived)
+  return openRoots[openRoots.length - 1] ?? roots[roots.length - 1]
 }
+
+const readPaneCurrentSessionId = (scope: string): string | null =>
+  readLocalStorage(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope))
 
 const arePanePreviewsEqual = (
   left: Record<string, PanePreview>,
@@ -218,7 +233,6 @@ const arePanePreviewsEqual = (
     return (
       rightPreview !== undefined &&
       leftPreview.title === rightPreview.title &&
-      leftPreview.subtitle === rightPreview.subtitle &&
       leftPreview.status === rightPreview.status &&
       leftPreview.unread === rightPreview.unread &&
       leftPreview.runState?.runId === rightPreview.runState?.runId &&
@@ -253,35 +267,19 @@ const buildPanePreview = (
   sessions: ChatSession[],
   running: boolean,
   strings: AgentWorkspaceStrings,
-  runState?: ChatSessionRunState
+  runState?: ChatSessionRunState,
+  currentSessionId: string | null = null
 ): PanePreview => {
-  const latestSession = sessions[sessions.length - 1]
-  const latestMessage = latestSession ? getLatestRenderableMessage(latestSession.messages) : null
+  const rootSession = resolvePaneRootSession(sessions, currentSessionId)
   const paneLabel = getPaneLabel(paneId, index, strings.paneLabel)
   const status: PanePreviewStatus = runState?.status || (running ? 'running' : 'idle')
   const unread = runState?.unread === true
 
-  if (latestMessage?.content) {
-    const assistantModelName =
-      latestMessage.role === 'assistant' ? latestMessage.modelName?.trim() : ''
-    return {
-      title: compactText(latestMessage.content, paneLabel),
-      subtitle:
-        latestMessage.role === 'assistant'
-          ? assistantModelName || strings.latestReply
-          : strings.latestPrompt,
-      status,
-      unread,
-      ...(runState ? { runState } : {})
-    }
-  }
-
   return {
     title: compactText(
-      getLocalizedConversationTitle(latestSession?.title, strings.newConversation),
+      getLocalizedConversationTitle(rootSession?.title, strings.newConversation),
       paneLabel
     ),
-    subtitle: latestSession ? strings.conversationCreated : strings.emptyConversation,
     status,
     unread,
     ...(runState ? { runState } : {})
@@ -299,7 +297,15 @@ const loadPanePreview = async (
   const runState = readLatestPaneRunState(scope)
   return [
     pane.id,
-    buildPanePreview(pane.id, index, sessions, isPaneRunning(scope), strings, runState)
+    buildPanePreview(
+      pane.id,
+      index,
+      sessions,
+      isPaneRunning(scope),
+      strings,
+      runState,
+      readPaneCurrentSessionId(scope)
+    )
   ] as const
 }
 
@@ -343,127 +349,107 @@ const loadPreviewMap = async (
   return Object.fromEntries(entries) as Record<string, PanePreview>
 }
 
-const PaneStatusIndicator: React.FC<{
+type ThreadStatusTone = 'live' | 'attention' | 'danger' | 'muted'
+
+type ThreadStatusLabelKey =
+  'running' | 'queued' | 'waitingTool' | 'unread' | 'failed' | 'cancelled' | 'interrupted' | 'idle'
+
+type ThreadStatusPresentation = {
+  /** Stable value of data-status; tests and automation read it. */
+  dataStatus: string
+  tone: ThreadStatusTone
+  label: ThreadStatusLabelKey
+  /** Still working: announced as an indeterminate progress indicator. */
+  busy: boolean
+}
+
+const resolveThreadStatus = (
+  status: PanePreviewStatus,
+  unread: boolean
+): ThreadStatusPresentation => {
+  if (status === 'running') {
+    return { dataStatus: 'running', tone: 'live', label: 'running', busy: true }
+  }
+  if (status === 'queued') {
+    return { dataStatus: 'queued', tone: 'attention', label: 'queued', busy: true }
+  }
+  if (status === 'waiting-tool') {
+    return { dataStatus: 'waiting-tool', tone: 'attention', label: 'waitingTool', busy: false }
+  }
+  if (unread) {
+    return { dataStatus: 'unread', tone: 'muted', label: 'unread', busy: false }
+  }
+  if (status === 'failed') {
+    return { dataStatus: 'failed', tone: 'danger', label: 'failed', busy: false }
+  }
+  if (status === 'cancelled' || status === 'interrupted') {
+    return { dataStatus: status, tone: 'muted', label: status, busy: false }
+  }
+  return { dataStatus: 'read', tone: 'muted', label: 'idle', busy: false }
+}
+
+const THREAD_STATUS_DOT_SIZE = 7
+
+const ThreadStatusDot: React.FC<{
   status?: PanePreviewStatus
   unread?: boolean
-}> = ({ status = 'idle', unread = false }) => {
-  const runStatus = status
-
-  if (runStatus === 'queued' || runStatus === 'running') {
-    return (
-      <CircularProgress
-        data-testid="agent-thread-status"
-        data-status={runStatus === 'running' ? 'running' : 'queued'}
-        data-run-status={runStatus}
-        size={12}
-        thickness={6}
-        sx={{ color: 'primary.main', flexShrink: 0 }}
-      />
-    )
-  }
-
-  if (runStatus === 'waiting-tool') {
-    return (
-      <Box
-        data-testid="agent-thread-status"
-        data-status="waiting-tool"
-        data-run-status={runStatus}
-        sx={(theme) => ({
-          width: 9,
-          height: 9,
-          borderRadius: '50%',
-          flexShrink: 0,
-          backgroundColor: theme.palette.warning.main
-        })}
-      />
-    )
-  }
-
-  if (unread) {
-    return (
-      <Box
-        data-testid="agent-thread-status"
-        data-status="unread"
-        data-run-status={runStatus}
-        sx={(theme) => ({
-          width: 9,
-          height: 9,
-          borderRadius: '50%',
-          flexShrink: 0,
-          backgroundColor: theme.palette.primary.main,
-          boxShadow: `0 0 0 2px ${
-            theme.palette.mode === 'dark' ? 'rgba(96,165,250,0.18)' : 'rgba(59,130,246,0.12)'
-          }`
-        })}
-      />
-    )
-  }
-
-  if (runStatus === 'completed') {
-    return (
-      <Box
-        data-testid="agent-thread-status"
-        data-status="read"
-        data-run-status={runStatus}
-        sx={(theme) => ({
-          width: 8,
-          height: 8,
-          borderRadius: '50%',
-          flexShrink: 0,
-          backgroundColor:
-            theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.22)'
-        })}
-      />
-    )
-  }
-
-  if (runStatus === 'failed' || runStatus === 'cancelled' || runStatus === 'interrupted') {
-    return (
-      <Box
-        data-testid="agent-thread-status"
-        data-status={runStatus}
-        data-run-status={runStatus}
-        sx={(theme) => ({
-          width: 8,
-          height: 8,
-          borderRadius: '50%',
-          flexShrink: 0,
-          backgroundColor:
-            runStatus === 'failed' ? theme.palette.error.main : theme.palette.warning.main
-        })}
-      />
-    )
-  }
+  labels: Record<ThreadStatusLabelKey, string>
+  tokens: AgentColumnTokens
+}> = ({ status = 'idle', unread = false, labels, tokens }) => {
+  const presentation = resolveThreadStatus(status, unread)
+  const color =
+    presentation.tone === 'live'
+      ? tokens.live
+      : presentation.tone === 'attention'
+        ? tokens.attention
+        : presentation.tone === 'danger'
+          ? tokens.danger
+          : tokens.muted
+  const label = labels[presentation.label]
 
   return (
     <Box
+      component="span"
+      role={presentation.busy ? 'progressbar' : 'img'}
+      aria-label={label}
+      title={label}
       data-testid="agent-thread-status"
-      data-status="read"
-      data-run-status={runStatus}
-      sx={(theme) => ({
-        width: 8,
-        height: 8,
+      data-status={presentation.dataStatus}
+      data-run-status={status}
+      sx={{
+        width: THREAD_STATUS_DOT_SIZE,
+        height: THREAD_STATUS_DOT_SIZE,
+        flex: 'none',
         borderRadius: '50%',
-        flexShrink: 0,
-        backgroundColor:
-          theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.22)'
-      })}
+        backgroundColor: color
+      }}
     />
   )
 }
 
-type PaneListItemProps = {
-  index: number
-  closeLabel: string
+/** Flat list rows and toolbar controls: square, no shadow, inset focus ring. */
+const flatControlSx = (tokens: AgentColumnTokens) =>
+  ({
+    borderRadius: 0,
+    boxShadow: 'none',
+    fontFamily: 'inherit',
+    fontSize: tokens.fontSize.base,
+    lineHeight: '16px',
+    textAlign: 'left',
+    '&.Mui-focusVisible': tokens.focusRing
+  }) as const
+
+type ThreadListRowProps = {
   pane: AgentPane
   paneScope: string
-  preview?: PanePreview
-  defaultTitle: string
+  title: string
+  status?: PanePreviewStatus
   selected: boolean
   unread: boolean
   dragging: boolean
   dragOver: boolean
-  onRemove: (paneId: string) => void
+  statusLabels: Record<ThreadStatusLabelKey, string>
+  tokens: AgentColumnTokens
   onSelect: (paneId: string) => void
   onDragStart: (paneId: string) => void
   onDragEnd: () => void
@@ -473,18 +459,17 @@ type PaneListItemProps = {
 
 const AGENT_THREAD_REORDER_DRAG_MIME = 'application/x-magicpot-agent-thread-reorder'
 
-const PaneListItem: React.FC<PaneListItemProps> = ({
-  index,
-  closeLabel,
+const ThreadListRow: React.FC<ThreadListRowProps> = ({
   pane,
   paneScope,
-  preview,
-  defaultTitle,
+  title,
+  status,
   selected,
   unread,
   dragging,
   dragOver,
-  onRemove,
+  statusLabels,
+  tokens,
   onSelect,
   onDragStart,
   onDragEnd,
@@ -495,6 +480,9 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     component="div"
     role="button"
     tabIndex={0}
+    disableRipple
+    aria-current={selected ? 'true' : undefined}
+    data-agent-thread-row={pane.id}
     data-agent-workspace-scope={paneScope}
     draggable
     onClick={() => {
@@ -518,87 +506,41 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     onDrop={(event) => {
       onDrop(event, pane.id)
     }}
-    sx={(theme) => ({
+    sx={{
+      ...flatControlSx(tokens),
       width: '100%',
-      minHeight: 40,
-      px: 1.2,
-      py: 0.65,
-      borderRadius: 1.5,
+      minWidth: 0,
       display: 'flex',
       alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: 1,
-      textAlign: 'left',
-      color: selected ? theme.palette.text.primary : theme.palette.text.secondary,
-      backgroundColor: selected
-        ? theme.palette.mode === 'dark'
-          ? 'rgba(255,255,255,0.08)'
-          : 'rgba(0,0,0,0.06)'
-        : 'transparent',
-      opacity: dragging ? 0.55 : 1,
-      transform: dragging ? 'scale(0.985)' : 'none',
-      border: dragOver ? `1px solid ${theme.palette.primary.main}` : '1px solid transparent',
+      justifyContent: 'flex-start',
+      gap: '7px',
+      padding: '7px 10px',
+      borderBottom: `1px solid ${tokens.border}`,
+      color: tokens.text,
+      backgroundColor: selected ? tokens.selected : 'transparent',
+      opacity: dragging ? tokens.disabledOpacity : 1,
+      outline: dragOver ? `1px solid ${tokens.accent}` : 'none',
+      outlineOffset: '-1px',
       '&:hover': {
-        backgroundColor:
-          theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'
+        backgroundColor: selected ? tokens.selected : tokens.hover
       }
-    })}
+    }}
   >
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, flex: 1 }}>
-      {/* Preserve run-state semantics without adding another visual element to the card. */}
-      <Box sx={{ position: 'absolute', width: '1px', height: '1px', p: 0, m: '-1px', overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>
-        <PaneStatusIndicator status={preview?.status} unread={unread || Boolean(preview?.unread)} />
-      </Box>
-
-      <Box sx={{ minWidth: 0, flex: 1 }}>
-        <Typography
-          variant="body2"
-          sx={{
-            fontSize: 13,
-            fontWeight: selected ? 700 : 600,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap'
-          }}
-        >
-          {preview?.title || defaultTitle}
-        </Typography>
-      </Box>
-    </Box>
-
+    <ThreadStatusDot status={status} unread={unread} labels={statusLabels} tokens={tokens} />
     <Box
       component="span"
-      role="button"
-      tabIndex={0}
-      aria-label={closeLabel}
-      title={closeLabel}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault()
-          event.stopPropagation()
-          onRemove(pane.id)
-        }
-      }}
-      onClick={(event) => {
-        event.stopPropagation()
-        onRemove(pane.id)
-      }}
+      data-testid="agent-thread-title"
+      title={title}
       sx={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: 28,
-        height: 28,
-        borderRadius: '50%',
-        color: 'text.secondary',
-        opacity: 0.8,
-        '&:hover': {
-          opacity: 1,
-          backgroundColor: 'rgba(255,255,255,0.1)'
-        }
+        minWidth: 0,
+        flex: 1,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        fontWeight: unread ? 600 : 400
       }}
     >
-      <CloseIcon sx={{ fontSize: 18 }} />
+      {title}
     </Box>
   </ButtonBase>
 )
@@ -629,8 +571,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     return !guardedVisit || enabled.some(pane => pane.id === remembered) ? remembered : null
   })
   const explicitPaneMutationRef = useRef(false)
+  // The thread list starts collapsed; the stored value keeps the person's last choice.
   const [threadsCollapsed, setThreadsCollapsed] = useState<boolean>(
-    () => readLocalStorage(collapsedStorageKey) === '1'
+    () => readLocalStorage(collapsedStorageKey) !== '0'
   )
   const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>({})
   const panePreviewsRef = useRef<Record<string, PanePreview>>({})
@@ -675,6 +618,33 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const openPanes = useMemo(() => visitBlocked ? [] : getOpenPanes(panes), [panes, visitBlocked])
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
   const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? (guardedVisit ? null : openPanes[0]) ?? null
+  const theme = useTheme()
+  const columnTokens = useMemo(() => getAgentColumnTokens(theme), [theme])
+  const threadStatusLabels = useMemo<Record<ThreadStatusLabelKey, string>>(
+    () => ({
+      running: t('agent_workspace.status_running'),
+      queued: t('agent_workspace.status_queued'),
+      waitingTool: t('agent_workspace.status_waiting_tool'),
+      unread: t('agent_workspace.status_unread'),
+      failed: t('agent_workspace.status_failed'),
+      cancelled: t('agent_workspace.status_cancelled'),
+      interrupted: t('agent_workspace.status_interrupted'),
+      idle: t('agent_workspace.status_idle')
+    }),
+    [t]
+  )
+  const activePaneIndex = activePane ? openPanes.findIndex((pane) => pane.id === activePane.id) : -1
+  const threadSummary = activePane
+    ? panePreviews[activePane.id]?.title ||
+      getPaneLabel(activePane.id, activePaneIndex, workspaceStrings.paneLabel)
+    : openPanes.length > 0
+      ? t('agent_workspace.threads_none_selected', { count: openPanes.length })
+      : t('agent_workspace.no_threads')
+  const threadListOpen = !threadsCollapsed && openPanes.length > 0
+  const headerSubtitle = projectName?.trim() || ''
+  const threadListId = `agent-thread-list-${useId()}`
+  const threadToggleRef = useRef<HTMLButtonElement | null>(null)
+  const threadListRef = useRef<HTMLDivElement | null>(null)
   const openChatInput = useExistingConversationWorkspacePane({
     adapter: existingConversationOpen,
     projectId,
@@ -769,7 +739,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           ...prev,
           [paneId]: {
             title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
-            subtitle: current?.subtitle || workspaceStrings.emptyConversation,
             status: nextStatus,
             unread: nextUnread,
             runState: next
@@ -828,7 +797,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           ...prev,
           [paneId]: {
             title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
-            subtitle: current?.subtitle || workspaceStrings.emptyConversation,
             status,
             unread: detail.completed === true
           }
@@ -883,7 +851,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   }, [activeStorageKey, storageKey])
 
   useEffect(() => {
-    setThreadsCollapsed(readLocalStorage(collapsedStorageKey) === '1')
+    setThreadsCollapsed(readLocalStorage(collapsedStorageKey) !== '0')
   }, [collapsedStorageKey])
 
   useEffect(() => {
@@ -958,6 +926,23 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   useEffect(() => {
     writeLocalStorage(collapsedStorageKey, threadsCollapsed ? '1' : '0')
   }, [collapsedStorageKey, threadsCollapsed])
+
+  const selectedPaneId = activePane?.id ?? null
+  useLayoutEffect(() => {
+    // Keep the selected row inside the list's own scroll box when the list opens or the
+    // selection changes. Scrolling is done by hand so no ancestor is ever scrolled.
+    const list = threadListRef.current
+    if (!threadListOpen || !list || !selectedPaneId) return
+    const row = list.querySelector<HTMLElement>('[aria-current="true"]')
+    if (!row) return
+    const rowTop = row.offsetTop
+    const rowBottom = rowTop + row.offsetHeight
+    if (rowTop < list.scrollTop) {
+      list.scrollTop = rowTop
+    } else if (rowBottom > list.scrollTop + list.clientHeight) {
+      list.scrollTop = rowBottom - list.clientHeight
+    }
+  }, [selectedPaneId, threadListOpen])
 
   useEffect(() => {
     const pendingRequests = pendingExternalPaneRequestsRef.current
@@ -1195,12 +1180,38 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           WebkitAppRegion: 'no-drag'
         })}
       >
-        <Typography
-          variant="caption"
-          sx={{ fontSize: 12, fontWeight: 700, color: 'text.secondary', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-        >
-          {t('agent_workspace.title')}
-        </Typography>
+        <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+          <Typography
+            variant="caption"
+            sx={{
+              fontSize: columnTokens.fontSize.base,
+              fontWeight: 600,
+              lineHeight: 1.3,
+              color: 'text.primary',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis'
+            }}
+          >
+            {t('agent_workspace.title')}
+          </Typography>
+          {headerSubtitle && (
+            <Typography
+              variant="caption"
+              data-testid="agent-workspace-subtitle"
+              sx={{
+                fontSize: columnTokens.fontSize.caption,
+                lineHeight: 1.3,
+                color: 'text.secondary',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis'
+              }}
+            >
+              {headerSubtitle}
+            </Typography>
+          )}
+        </Box>
 
         <Box id="agent-workspace-skill-portal" sx={{ display: 'flex', alignItems: 'center' }} />
 
@@ -1262,100 +1273,199 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         >
           {t('agent_workspace.canvas_target', { defaultValue: 'Canvas target' })}
         </Button>
-
-        <Tooltip
-          title={
-            threadsCollapsed
-              ? t('agent_workspace.expand_threads')
-              : t('agent_workspace.collapse_threads')
-          }
-          arrow
-        >
-          <IconButton
-            size="small"
-            onClick={() => setThreadsCollapsed((prev) => !prev)}
-            sx={{ color: 'text.secondary' }}
-          >
-            {threadsCollapsed ? (
-              <ExpandMoreIcon sx={{ fontSize: 18 }} />
-            ) : (
-              <ExpandLessIcon sx={{ fontSize: 18 }} />
-            )}
-          </IconButton>
-        </Tooltip>
-
-        <Tooltip title={t('agent_workspace.new_chat')} arrow>
-          <IconButton size="small" onClick={handleAddPane} sx={{ color: 'text.secondary' }}>
-            <AddIcon sx={{ fontSize: 18 }} />
-          </IconButton>
-        </Tooltip>
       </Box>
 
-      <Collapse in={!threadsCollapsed && openPanes.length > 0} timeout={180} unmountOnExit>
+      <Box
+        component="section"
+        aria-label={t('agent_workspace.thread_list')}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape' || !threadListOpen) return
+          event.stopPropagation()
+          setThreadsCollapsed(true)
+          threadToggleRef.current?.focus()
+        }}
+        sx={{ flexShrink: 0, minWidth: 0, WebkitAppRegion: 'no-drag' }}
+      >
         <Box
-          sx={(theme) => ({
-            px: 1,
-            py: 0.75,
+          data-testid="agent-thread-toolbar"
+          sx={{
             display: 'flex',
-            flexDirection: 'column',
-            gap: 0.5,
-            backgroundColor: theme.palette.mode === 'dark' ? '#1a1a1a' : '#eaecf5',
-            flexShrink: 0
-          })}
+            alignItems: 'center',
+            minWidth: 0,
+            minHeight: 34,
+            padding: '2px 6px',
+            borderBottom: `1px solid ${columnTokens.border}`,
+            borderRadius: 0,
+            boxShadow: 'none'
+          }}
         >
-          {openPanes.map((pane, index) => (
-            <PaneListItem
-              key={pane.id}
-              index={index}
-              closeLabel={t('agent_workspace.close_thread')}
-              pane={pane}
-              paneScope={buildAgentPaneScope(projectId, pane.id)}
-              preview={panePreviews[pane.id]}
-              defaultTitle={getPaneLabel(pane.id, index, workspaceStrings.paneLabel)}
-              selected={pane.id === activePaneId}
-              unread={unreadPaneIds.has(pane.id)}
-              dragging={pane.id === draggingPaneId}
-              dragOver={pane.id === dragOverPaneId && pane.id !== draggingPaneId}
-              onRemove={handleRemovePane}
-              onSelect={setActivePaneId}
-              onDragStart={(paneId) => {
-                setDraggingPaneId(paneId)
-                setDragOverPaneId(null)
-              }}
-              onDragEnd={() => {
-                setDraggingPaneId(null)
-                setDragOverPaneId(null)
-              }}
-              onDragOver={(event, paneId) => {
-                const dragTypes = Array.from(event.dataTransfer.types ?? [])
-                const isThreadReorderDrag = dragTypes.includes(AGENT_THREAD_REORDER_DRAG_MIME)
-                if (!isThreadReorderDrag) {
-                  return
-                }
-
-                event.preventDefault()
-                event.dataTransfer.dropEffect = 'move'
-                if (draggingPaneId) {
-                  setDragOverPaneId(paneId)
-                }
-              }}
-              onDrop={(event, paneId) => {
-                const dragTypes = Array.from(event.dataTransfer.types ?? [])
-                const isThreadReorderDrag = dragTypes.includes(AGENT_THREAD_REORDER_DRAG_MIME)
-                if (!isThreadReorderDrag) {
-                  return
-                }
-
-                event.preventDefault()
-                if (draggingPaneId) {
-                  handleReorderPane(paneId)
-                  setDraggingPaneId(null)
-                }
+          <ButtonBase
+            ref={threadToggleRef}
+            type="button"
+            disableRipple
+            disabled={openPanes.length === 0}
+            aria-expanded={threadListOpen}
+            aria-controls={threadListOpen ? threadListId : undefined}
+            data-testid="agent-thread-toggle"
+            title={threadSummary}
+            onClick={() => setThreadsCollapsed((prev) => !prev)}
+            sx={{
+              ...flatControlSx(columnTokens),
+              flex: 1,
+              minWidth: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'flex-start',
+              gap: '5px',
+              padding: '5px 2px',
+              color: activePane ? columnTokens.text : columnTokens.muted
+            }}
+          >
+            <ExpandMoreIcon
+              aria-hidden
+              sx={{
+                fontSize: 16,
+                flex: 'none',
+                transition: 'transform 120ms ease',
+                transform: threadListOpen ? 'rotate(180deg)' : 'none'
               }}
             />
-          ))}
+            <Box
+              component="span"
+              data-testid="agent-thread-summary"
+              sx={{
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {threadSummary}
+            </Box>
+          </ButtonBase>
+
+          <Tooltip title={t('agent_workspace.new_chat')} arrow>
+            <IconButton
+              aria-label={t('agent_workspace.new_chat')}
+              onClick={handleAddPane}
+              sx={{
+                width: 26,
+                height: 26,
+                padding: 0,
+                flex: 'none',
+                borderRadius: `${columnTokens.radius.control}px`,
+                color: columnTokens.text,
+                '&:hover': { backgroundColor: columnTokens.hover },
+                '&.Mui-focusVisible': columnTokens.focusRing
+              }}
+            >
+              <AddIcon sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
         </Box>
-      </Collapse>
+
+        {threadListOpen && (
+          <Box
+            id={threadListId}
+            ref={threadListRef}
+            data-testid="agent-thread-list"
+            sx={{
+              position: 'relative',
+              maxHeight: 'min(38vh, 280px)',
+              overflowX: 'hidden',
+              overflowY: 'auto'
+            }}
+          >
+            {openPanes.map((pane, index) => (
+              <ThreadListRow
+                key={pane.id}
+                pane={pane}
+                paneScope={buildAgentPaneScope(projectId, pane.id)}
+                title={
+                  panePreviews[pane.id]?.title ||
+                  getPaneLabel(pane.id, index, workspaceStrings.paneLabel)
+                }
+                status={panePreviews[pane.id]?.status}
+                selected={pane.id === activePane?.id}
+                unread={unreadPaneIds.has(pane.id) || Boolean(panePreviews[pane.id]?.unread)}
+                dragging={pane.id === draggingPaneId}
+                dragOver={pane.id === dragOverPaneId && pane.id !== draggingPaneId}
+                statusLabels={threadStatusLabels}
+                tokens={columnTokens}
+                onSelect={setActivePaneId}
+                onDragStart={(paneId) => {
+                  setDraggingPaneId(paneId)
+                  setDragOverPaneId(null)
+                }}
+                onDragEnd={() => {
+                  setDraggingPaneId(null)
+                  setDragOverPaneId(null)
+                }}
+                onDragOver={(event, paneId) => {
+                  const dragTypes = Array.from(event.dataTransfer.types ?? [])
+                  const isThreadReorderDrag = dragTypes.includes(AGENT_THREAD_REORDER_DRAG_MIME)
+                  if (!isThreadReorderDrag) {
+                    return
+                  }
+
+                  event.preventDefault()
+                  event.dataTransfer.dropEffect = 'move'
+                  if (draggingPaneId) {
+                    setDragOverPaneId(paneId)
+                  }
+                }}
+                onDrop={(event, paneId) => {
+                  const dragTypes = Array.from(event.dataTransfer.types ?? [])
+                  const isThreadReorderDrag = dragTypes.includes(AGENT_THREAD_REORDER_DRAG_MIME)
+                  if (!isThreadReorderDrag) {
+                    return
+                  }
+
+                  event.preventDefault()
+                  if (draggingPaneId) {
+                    handleReorderPane(paneId)
+                    setDraggingPaneId(null)
+                  }
+                }}
+              />
+            ))}
+            {activePane && (
+              <ButtonBase
+                type="button"
+                disableRipple
+                data-testid="agent-thread-close-current"
+                onClick={() => handleRemovePane(activePane.id)}
+                sx={{
+                  ...flatControlSx(columnTokens),
+                  width: '100%',
+                  minWidth: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'flex-start',
+                  gap: '6px',
+                  padding: '7px 10px',
+                  borderBottom: `1px solid ${columnTokens.border}`,
+                  color: columnTokens.danger,
+                  '&:hover': { backgroundColor: columnTokens.hover }
+                }}
+              >
+                <CloseIcon aria-hidden sx={{ fontSize: 16, flex: 'none' }} />
+                <Box
+                  component="span"
+                  sx={{
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {t('agent_workspace.close_thread')}
+                </Box>
+              </ButtonBase>
+            )}
+          </Box>
+        )}
+      </Box>
 
       <Box
         sx={{ flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}

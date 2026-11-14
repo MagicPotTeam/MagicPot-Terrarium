@@ -245,6 +245,8 @@ describe('actual Workspace and ChatPage combined handoff, injected Layout presen
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ id: target.projectId, name: 'Existing', chatStorageScopePrefix: target.projectId }]))
     localStorage.setItem(paneKey, '[{"id":"agent-1","enabled":true},{"id":"agent-2","enabled":true}]')
     localStorage.setItem(`agent.workspace.active.${target.projectId}`, 'agent-2')
+    // The Workspace thread list starts collapsed; the 'different-pane' case clicks a sibling row.
+    localStorage.setItem(`agent.workspace.threadsCollapsed.${target.projectId}`, '0')
     f.load.mockImplementation(async loadedScope => loadedScope === scope ? [existing('other'), existing('target')] : [])
     const coordinator = createExistingConversationOpenCoordinator({ validate })
     const handle = coordinator.start(target)!

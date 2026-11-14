@@ -68,12 +68,21 @@ vi.mock('@renderer/features/projectTrace/ProjectTraceManagerPanel', () => ({
   default: () => <div data-testid="lifecycle-trace-panel" />
 }))
 
+const lifecycleTheme = createTheme()
+
 const renderWorkspace = () =>
   render(
-    <ThemeProvider theme={createTheme()}>
+    <ThemeProvider theme={lifecycleTheme}>
       <AgentWorkspace projectId="project-lifecycle" />
     </ThemeProvider>
   )
+
+/** Normalizes a CSS colour the way jsdom reports computed colours. */
+const cssColor = (value: string): string => {
+  const probe = document.createElement('span')
+  probe.style.backgroundColor = value
+  return probe.style.backgroundColor
+}
 
 const getPaneRow = (): HTMLElement => {
   const row = document.querySelector(`[data-agent-workspace-scope="${SCOPE}"][role="button"]`)
@@ -103,6 +112,8 @@ const dispatchStatus = (
 
 beforeEach(() => {
   localStorage.clear()
+  // The thread list starts collapsed; these tests read the status dot of a list row.
+  localStorage.setItem('agent.workspace.threadsCollapsed.project-lifecycle', '0')
   clearScopedChatPageRunLifecycles()
   clearScopedActiveLoadingSessionIds()
   clearScopedExternalLoadingSessionIds()
@@ -152,6 +163,33 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
         status,
         unread: false
       })
+    }
+  )
+
+  it.each([
+    ['running', 'success', 'progressbar', 'agent_workspace.status_running'],
+    ['waiting-tool', 'warning', 'img', 'agent_workspace.status_waiting_tool'],
+    ['failed', 'error', 'img', 'agent_workspace.status_failed'],
+    ['cancelled', 'muted', 'img', 'agent_workspace.status_cancelled'],
+    ['interrupted', 'muted', 'img', 'agent_workspace.status_interrupted']
+  ] as const)(
+    'colours the %s dot with the %s tone and names it for assistive technology',
+    async (status, tone, role, label) => {
+      renderWorkspace()
+      await waitForPane()
+
+      await act(async () => {
+        startScopedChatRun(SCOPE, SESSION_ID, `tone-${status}`)
+        if (status !== 'running') dispatchStatus(`tone-${status}`, status)
+      })
+
+      await waitFor(() => expect(getPaneStatus()).toHaveAttribute('data-run-status', status))
+      const expected =
+        tone === 'muted' ? lifecycleTheme.palette.text.secondary : lifecycleTheme.palette[tone].main
+      expect(getComputedStyle(getPaneStatus()).backgroundColor).toBe(cssColor(expected))
+      expect(getComputedStyle(getPaneStatus()).width).toBe('7px')
+      expect(getPaneStatus()).toHaveAttribute('role', role)
+      expect(getPaneStatus()).toHaveAttribute('aria-label', label)
     }
   )
 

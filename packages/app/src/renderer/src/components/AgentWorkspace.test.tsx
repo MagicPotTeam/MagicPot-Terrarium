@@ -1,5 +1,6 @@
 import React from 'react'
 import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -45,11 +46,9 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       if (key === 'chat.new_conversation') return '新对话'
-      if (key === 'agent_workspace.image_reply') return '图片回复'
-      if (key === 'agent_workspace.latest_reply') return '最新回复'
-      if (key === 'agent_workspace.latest_prompt') return '最新提问'
-      if (key === 'agent_workspace.conversation_created') return '会话已创建'
-      if (key === 'agent_workspace.empty_conversation') return '暂无内容'
+      if (key === 'agent_workspace.threads_none_selected') {
+        return `agent_workspace.threads_none_selected:${String(options?.count ?? '')}`
+      }
       if (key === 'agent_workspace.chat_label') {
         return `Agent 线程 ${String(options?.index ?? '')}`.trim()
       }
@@ -99,12 +98,44 @@ vi.mock('@renderer/pages/ChatPage/chatStorage', () => ({
   loadAllSessions: (...args: unknown[]) => loadAllSessionsMock(...args)
 }))
 
-const renderWorkspace = () =>
+const THREAD_LIST_STATE_KEY = 'agent.workspace.threadsCollapsed.project-1'
+const CURRENT_SESSION_KEY = 'chat.currentSessionId.project-1.agent-1'
+const testTheme = createTheme()
+
+const renderWorkspace = (projectName?: string) =>
   render(
-    <ThemeProvider theme={createTheme()}>
-      <AgentWorkspace projectId="project-1" />
+    <ThemeProvider theme={testTheme}>
+      <AgentWorkspace projectId="project-1" projectName={projectName} />
     </ThemeProvider>
   )
+
+/** The thread list starts collapsed; this renders with the person's stored "expanded" choice. */
+const renderWorkspaceWithThreadList = () => {
+  localStorage.setItem(THREAD_LIST_STATE_KEY, '0')
+  return renderWorkspace()
+}
+
+const storePanes = (count: number) =>
+  localStorage.setItem(
+    'agent.workspace.project-1',
+    JSON.stringify(
+      Array.from({ length: count }, (_, index) => ({ id: `agent-${index + 1}`, enabled: true }))
+    )
+  )
+
+const getThreadRows = (): HTMLElement[] => [
+  ...document.querySelectorAll<HTMLElement>('[data-agent-thread-row]')
+]
+
+const waitForThreadSummary = (title: string) =>
+  waitFor(() => expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(title))
+
+/** Normalizes a CSS colour the way jsdom reports computed colours. */
+const cssColor = (value: string): string => {
+  const probe = document.createElement('span')
+  probe.style.backgroundColor = value
+  return probe.style.backgroundColor
+}
 
 describe('AgentWorkspace', () => {
   beforeEach(() => {
@@ -167,40 +198,51 @@ describe('AgentWorkspace', () => {
 
     await waitFor(() => {
       expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-1')
-      expect(screen.getByText('画布执行已开始。')).toBeInTheDocument()
     })
+    // The thread is named after its conversation, never after the latest message.
+    await waitForThreadSummary('画布检查')
+    expect(screen.queryByText('画布执行已开始。')).not.toBeInTheDocument()
   })
 
-  it('keeps only the title and close button visually while retaining run-state information', async () => {
-    renderWorkspace()
-    await waitFor(() => expect(screen.getByText('画布执行已开始。')).toBeInTheDocument())
+  it('shows a visible status dot and the title in a thread row, with no per-row close control', async () => {
+    renderWorkspaceWithThreadList()
+    await waitForThreadSummary('画布检查')
     const row = document.querySelector('[data-agent-workspace-scope="project-1.agent-1"][role="button"]')
     expect(row).not.toBeNull()
-    const close = row?.querySelector('[role="button"][aria-label="agent_workspace.close_thread"]')
-    expect(close).not.toBeNull()
-    expect(close).toHaveAttribute('tabindex', '0')
-    expect(row?.textContent).toContain('画布执行已开始。')
+    expect(row?.querySelector('[aria-label="agent_workspace.close_thread"]')).toBeNull()
+    expect(row?.querySelector('[data-testid="CloseIcon"]')).toBeNull()
+    expect(row?.textContent).toBe('画布检查')
     expect(row?.textContent).not.toContain('最新提问')
-    const statusWrapper = screen.getByTestId('agent-thread-status').parentElement!
-    expect(getComputedStyle(statusWrapper).width).toBe('1px')
-    expect(getComputedStyle(statusWrapper).height).toBe('1px')
-    expect(getComputedStyle(statusWrapper).overflow).toBe('hidden')
-    expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'read')
+    const status = screen.getByTestId('agent-thread-status')
+    expect(row).toContainElement(status)
+    expect(getComputedStyle(status).width).toBe('7px')
+    expect(getComputedStyle(status).height).toBe('7px')
+    expect(getComputedStyle(status).borderRadius).toBe('50%')
+    expect(getComputedStyle(status).backgroundColor).toBe(
+      cssColor(testTheme.palette.text.secondary)
+    )
+    expect(status).toHaveAttribute('data-status', 'read')
+    expect(status).toHaveAttribute('aria-label', 'agent_workspace.status_idle')
   })
 
-  it('shows the running spinner when an external loading session is active', async () => {
+  it('shows the running indicator when an external loading session is active', async () => {
     updateScopedExternalLoadingSessionId('project-1.agent-1', 'session-1', true)
 
-    renderWorkspace()
+    renderWorkspaceWithThreadList()
 
     await waitFor(() => {
       expect(screen.getByRole('progressbar')).toBeInTheDocument()
     })
+    const status = screen.getByRole('progressbar')
+    expect(status).toHaveAttribute('data-testid', 'agent-thread-status')
+    expect(status).toHaveAttribute('data-status', 'running')
+    expect(status).toHaveAttribute('aria-label', 'agent_workspace.status_running')
+    expect(getComputedStyle(status).backgroundColor).toBe(cssColor(testTheme.palette.success.main))
   })
 
-  it('clears the spinner immediately while the completion preview refresh is deferred', async () => {
+  it('clears the running indicator immediately while the completion preview refresh is deferred', async () => {
     updateScopedExternalLoadingSessionId('project-1.agent-1', 'session-1', true)
-    renderWorkspace()
+    renderWorkspaceWithThreadList()
     await waitFor(() => expect(screen.getByRole('progressbar')).toBeInTheDocument())
 
     let resolvePreview: ((sessions: unknown[]) => void) | undefined
@@ -231,7 +273,7 @@ describe('AgentWorkspace', () => {
 
   it('marks the active thread unread when its scoped external run completes', async () => {
     updateScopedExternalLoadingSessionId('project-1.agent-1', 'session-1', true)
-    renderWorkspace()
+    renderWorkspaceWithThreadList()
 
     await waitFor(() => expect(screen.getByRole('progressbar')).toBeInTheDocument())
 
@@ -248,6 +290,12 @@ describe('AgentWorkspace', () => {
       expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
       expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'unread')
     })
+    // Unread output is carried by the title weight and the dot's accessible name.
+    expect(screen.getByTestId('agent-thread-status')).toHaveAttribute(
+      'aria-label',
+      'agent_workspace.status_unread'
+    )
+    expect(getComputedStyle(screen.getByTestId('agent-thread-title')).fontWeight).toBe('600')
   })
 
   it('baselines historical inactive threads as read', async () => {
@@ -268,7 +316,7 @@ describe('AgentWorkspace', () => {
       ])
     )
 
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
     await waitFor(() => {
       const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
       expect(row?.querySelector('[data-status="read"]')).not.toBeNull()
@@ -294,7 +342,7 @@ describe('AgentWorkspace', () => {
       ])
     )
 
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
     const secondRow = await waitFor(() => {
       const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
       expect(row).not.toBeNull()
@@ -332,7 +380,7 @@ describe('AgentWorkspace', () => {
       ])
     )
 
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
     const secondRow = await waitFor(() => {
       const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
       expect(row?.querySelector('[data-status="read"]')).not.toBeNull()
@@ -369,7 +417,7 @@ describe('AgentWorkspace', () => {
       ])
     )
 
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
     const secondRow = await waitFor(() => {
       const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
       expect(row?.querySelector('[data-status="read"]')).not.toBeNull()
@@ -389,8 +437,8 @@ describe('AgentWorkspace', () => {
   })
 
   it('clears unread on pointer interaction inside the conversation area only', async () => {
-    const { container } = renderWorkspace()
-    await waitFor(() => expect(screen.getByText('画布执行已开始。')).toBeInTheDocument())
+    const { container } = renderWorkspaceWithThreadList()
+    await waitForThreadSummary('画布检查')
 
     const row = container.querySelector(
       '[data-agent-workspace-scope="project-1.agent-1"]'
@@ -407,8 +455,8 @@ describe('AgentWorkspace', () => {
   })
 
   it('clears unread when the conversation scroll container scrolls', async () => {
-    const { container } = renderWorkspace()
-    await waitFor(() => expect(screen.getByText('画布执行已开始。')).toBeInTheDocument())
+    const { container } = renderWorkspaceWithThreadList()
+    await waitForThreadSummary('画布检查')
 
     const row = container.querySelector(
       '[data-agent-workspace-scope="project-1.agent-1"]'
@@ -425,8 +473,8 @@ describe('AgentWorkspace', () => {
   })
 
   it('keeps unread through composer click, typing, and nested composer scrolling', async () => {
-    const { container } = renderWorkspace()
-    await waitFor(() => expect(screen.getByText('画布执行已开始。')).toBeInTheDocument())
+    const { container } = renderWorkspaceWithThreadList()
+    await waitForThreadSummary('画布检查')
 
     const row = container.querySelector(
       '[data-agent-workspace-scope="project-1.agent-1"]'
@@ -449,8 +497,8 @@ describe('AgentWorkspace', () => {
   })
 
   it('records fast running-to-completed transitions without waiting for preview refresh', async () => {
-    const { container } = renderWorkspace()
-    await waitFor(() => expect(screen.getByText('画布执行已开始。')).toBeInTheDocument())
+    const { container } = renderWorkspaceWithThreadList()
+    await waitForThreadSummary('画布检查')
 
     const row = container.querySelector(
       '[data-agent-workspace-scope="project-1.agent-1"]'
@@ -465,7 +513,7 @@ describe('AgentWorkspace', () => {
 
   it('clears a terminated run spinner without marking the thread unread', async () => {
     updateScopedExternalLoadingSessionId('project-1.agent-1', 'terminated-run', true)
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
     await waitFor(() => expect(screen.getByRole('progressbar')).toBeInTheDocument())
 
     const row = container.querySelector(
@@ -491,14 +539,15 @@ describe('AgentWorkspace', () => {
       JSON.stringify(['stale-session'])
     )
 
-    renderWorkspace()
+    renderWorkspaceWithThreadList()
 
     await waitFor(() => {
+      expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'read')
       expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
     })
   })
 
-  it('keeps pane titles and close controls without model subtitle or card portal in either selection', async () => {
+  it('keeps pane titles without model subtitle, card portal or per-row close control in either selection', async () => {
     loadAllSessionsMock.mockResolvedValue([
       {
         id: 'session-model-preview',
@@ -513,11 +562,9 @@ describe('AgentWorkspace', () => {
       }
     ])
 
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
 
-    await waitFor(() => {
-      expect(screen.getAllByText('Model-specific answer').length).toBeGreaterThan(0)
-    })
+    await waitForThreadSummary('Model preview')
 
     const addButton = container.querySelector('[data-testid="AddIcon"]')?.parentElement
     expect(addButton).toBeTruthy()
@@ -528,14 +575,21 @@ describe('AgentWorkspace', () => {
       expect(container.querySelectorAll('[role="button"][data-agent-workspace-scope]')).toHaveLength(2)
     })
     const rows = [...container.querySelectorAll<HTMLElement>('[role="button"][data-agent-workspace-scope]')]
+    await waitFor(() => expect(rows[1]).toHaveTextContent('Model preview'))
     for (const row of rows) {
-      expect(row).toHaveTextContent('Model-specific answer')
+      expect(row).toHaveTextContent('Model preview')
+      expect(row).not.toHaveTextContent('Model-specific answer')
       expect(row).not.toHaveTextContent('gpt-5.5')
       expect(row).not.toHaveTextContent('最新回复')
       expect(row.querySelector('[data-testid="agent-workspace-chat-controls-slot"]')).toBeNull()
       expect(row.querySelector('[id^="agent-workspace-chat-controls-"]')).toBeNull()
-      expect(row.querySelector('[data-testid="CloseIcon"]')).not.toBeNull()
+      // Closing moved to one row at the end of the list that acts on the active thread.
+      expect(row.querySelector('[data-testid="CloseIcon"]')).toBeNull()
     }
+    expect(container.querySelectorAll('[data-testid="CloseIcon"]')).toHaveLength(1)
+    expect(screen.getByTestId('agent-thread-close-current')).toHaveTextContent(
+      'agent_workspace.close_thread'
+    )
     fireEvent.click(rows[0])
     for (const row of rows) {
       expect(row).not.toHaveTextContent('gpt-5.5')
@@ -560,27 +614,28 @@ describe('AgentWorkspace', () => {
 
     const { container } = renderWorkspace()
 
-    await waitFor(() => {
-      expect(screen.getByText('对话 4')).toBeInTheDocument()
-    })
+    await waitForThreadSummary('Image preview')
 
     const addButton = container.querySelector('[data-testid="AddIcon"]')?.parentElement
     expect(addButton).toBeTruthy()
     fireEvent.click(addButton as Element)
 
     await waitFor(() => {
-      expect(screen.getAllByText('对话 4').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('Image preview').length).toBeGreaterThan(0)
       expect(screen.queryByText('最新回复')).not.toBeInTheDocument()
     })
     expect(screen.queryByText('图片回复')).not.toBeInTheDocument()
+    expect(screen.queryByText('对话 4')).not.toBeInTheDocument()
     expect(screen.queryByRole('img', { name: '对话 4' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: 'Image preview' })).not.toBeInTheDocument()
+    expect(container.querySelector('img')).toBeNull()
   })
 
   it('dispatches scope termination before closing a pane', async () => {
     const terminateScope = vi.fn()
     window.addEventListener('chat:terminate-scope', terminateScope as EventListener)
 
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
 
     const closeIcon = container.querySelector('[data-testid="CloseIcon"]')
     expect(closeIcon?.parentElement).toBeTruthy()
@@ -595,13 +650,15 @@ describe('AgentWorkspace', () => {
     window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
   })
 
-  it.each(['Enter', ' '])('closes the focused thread with %s without activating its row', async key => {
+  it.each(['Enter', ' '])('closes the active thread from the keyboard with %s on the close row', async key => {
     const terminateScope = vi.fn()
     window.addEventListener('chat:terminate-scope', terminateScope as EventListener)
     try {
-      renderWorkspace()
+      renderWorkspaceWithThreadList()
       const close = screen.getByRole('button', {name: 'agent_workspace.close_thread'})
-      fireEvent.keyDown(close, {key})
+      expect(close.tagName).toBe('BUTTON')
+      close.focus()
+      await userEvent.keyboard(key === 'Enter' ? '{Enter}' : ' ')
       expect(terminateScope).toHaveBeenCalledTimes(1)
       expect((terminateScope.mock.calls[0]?.[0] as CustomEvent<{scope?:string}>).detail).toEqual({scope:'project-1.agent-1'})
       expect(screen.queryByRole('button', {name:'agent_workspace.close_thread'})).not.toBeInTheDocument()
@@ -630,7 +687,7 @@ describe('AgentWorkspace', () => {
   })
 
   it('does not treat attachment drags as pane reordering', async () => {
-    renderWorkspace()
+    renderWorkspaceWithThreadList()
 
     const workspaceRoot = await waitFor(() => {
       const root = document.querySelector('[data-agent-workspace-root="project-1"]')
@@ -658,7 +715,7 @@ describe('AgentWorkspace', () => {
   })
 
   it('keeps pane reordering active for its dedicated drag payload', async () => {
-    renderWorkspace()
+    renderWorkspaceWithThreadList()
 
     const workspaceRoot = await waitFor(() => {
       const root = document.querySelector('[data-agent-workspace-root="project-1"]')
@@ -721,7 +778,7 @@ describe('AgentWorkspace', () => {
   })
 
   it('keeps opened chat panes mounted and switches visibility without a reload', async () => {
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
 
     await waitFor(() => {
       expect(chatPageMock).toHaveBeenCalled()
@@ -776,7 +833,7 @@ describe('AgentWorkspace', () => {
       ])
     )
 
-    const { container } = renderWorkspace()
+    const { container } = renderWorkspaceWithThreadList()
 
     await waitFor(() => {
       expect(chatPageMock).toHaveBeenCalled()
@@ -796,8 +853,9 @@ describe('AgentWorkspace', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByText('project-1.agent-1 preview')).toBeInTheDocument()
-      expect(screen.getByText('project-1.agent-2 preview')).toBeInTheDocument()
+      expect(screen.getAllByTestId('agent-thread-title').map((title) => title.textContent)).toEqual(
+        ['project-1.agent-1', 'project-1.agent-2']
+      )
     })
     loadAllSessionsMock.mockClear()
 
@@ -847,5 +905,317 @@ describe('AgentWorkspace', () => {
     )
 
     expect(screen.getAllByTestId('mock-chat-page')).toHaveLength(1)
+  })
+
+  describe('session toolbar and in-place thread list', () => {
+    const titledSessions = (scope: string) =>
+      Promise.resolve([
+        { id: `${scope}-session`, title: `Thread ${scope.split('-').pop()}`, messages: [] }
+      ])
+
+    it('starts as two flat rows: the header and a 34px toolbar, with the list collapsed', async () => {
+      renderWorkspace()
+      await waitForThreadSummary('画布检查')
+
+      const root = document.querySelector<HTMLElement>('[data-agent-workspace-root="project-1"]')!
+      const toolbar = screen.getByTestId('agent-thread-toolbar')
+      const toggle = screen.getByTestId('agent-thread-toggle')
+      const paneHost = root.querySelector<HTMLElement>(':scope > [data-agent-workspace-scope]')!
+
+      // Column top to transcript: header, then the toolbar section, then the pane host.
+      expect([...root.children].indexOf(paneHost)).toBe(2)
+      expect(root.children[1]).toContainElement(toolbar)
+      expect(root.children[1].children).toHaveLength(1)
+      expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument()
+      expect(getThreadRows()).toHaveLength(0)
+
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(toggle).not.toHaveAttribute('aria-controls')
+      expect(getComputedStyle(toolbar).minHeight).toBe('34px')
+      expect(getComputedStyle(toolbar).padding).toBe('2px 6px')
+      for (const element of [toolbar, toggle]) {
+        expect(['0', '0px']).toContain(getComputedStyle(element).borderRadius)
+        expect(getComputedStyle(element).boxShadow).toBe('none')
+      }
+      expect(getComputedStyle(root.children[0]).minHeight).toBe('49.9px')
+      expect(localStorage.getItem(THREAD_LIST_STATE_KEY)).toBe('1')
+    })
+
+    it('toggles the list in place under the toolbar and keeps it open after picking a thread', async () => {
+      storePanes(2)
+      loadAllSessionsMock.mockImplementation(titledSessions)
+      renderWorkspace()
+      await waitForThreadSummary('Thread 1')
+
+      const toggle = screen.getByTestId('agent-thread-toggle')
+      fireEvent.click(toggle)
+
+      const list = screen.getByTestId('agent-thread-list')
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(toggle).toHaveAttribute('aria-controls', list.id)
+      expect(screen.getByTestId('agent-thread-toolbar').nextElementSibling).toBe(list)
+      expect(localStorage.getItem(THREAD_LIST_STATE_KEY)).toBe('0')
+
+      const rows = getThreadRows()
+      expect(rows.map((row) => row.textContent)).toEqual(['Thread 1', 'Thread 2'])
+      expect(rows[0]).toHaveAttribute('aria-current', 'true')
+      expect(rows[1]).not.toHaveAttribute('aria-current')
+      for (const row of rows) {
+        expect(['0', '0px']).toContain(getComputedStyle(row).borderRadius)
+        expect(getComputedStyle(row).boxShadow).toBe('none')
+        expect(getComputedStyle(row).padding).toBe('7px 10px')
+      }
+      expect(getComputedStyle(rows[0]).backgroundColor).not.toBe(
+        getComputedStyle(rows[1]).backgroundColor
+      )
+
+      fireEvent.click(rows[1])
+
+      await waitForThreadSummary('Thread 2')
+      expect(screen.getByTestId('agent-thread-list')).toBeInTheDocument()
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(getThreadRows()[1]).toHaveAttribute('aria-current', 'true')
+      const activeScopes = screen
+        .getAllByTestId('mock-chat-page')
+        .filter((element) => element.getAttribute('data-active') === 'true')
+        .map((element) => element.getAttribute('data-storage-scope'))
+      expect(activeScopes).toEqual(['project-1.agent-2'])
+
+      fireEvent.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument()
+    })
+
+    it('closes the list with Escape and returns focus to the toolbar toggle', async () => {
+      renderWorkspaceWithThreadList()
+      await waitForThreadSummary('画布检查')
+      const toggle = screen.getByTestId('agent-thread-toggle')
+
+      const row = getThreadRows()[0]
+      row.focus()
+      fireEvent.keyDown(row, { key: 'Escape' })
+
+      expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument()
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(toggle).toHaveFocus()
+    })
+
+    it('caps a long list at min(38vh, 280px) with its own scroll box', async () => {
+      storePanes(12)
+      loadAllSessionsMock.mockImplementation(titledSessions)
+      renderWorkspaceWithThreadList()
+
+      await waitFor(() => expect(getThreadRows()).toHaveLength(12))
+      const list = screen.getByTestId('agent-thread-list')
+      const listClass = [...list.classList].find((name) => name.startsWith('css-'))!
+      const listRule = [...document.querySelectorAll('style')]
+        .map((style) => style.textContent ?? '')
+        .join('\n')
+        .split('}')
+        .find((rule) => rule.includes(`.${listClass}{`))
+      expect(listRule).toContain('max-height:min(38vh, 280px)')
+      expect(getComputedStyle(list).overflowY).toBe('auto')
+      expect(getComputedStyle(list).overflowX).toBe('hidden')
+      // The close row is the last child of the same scroll box, after every thread.
+      expect(list.lastElementChild).toBe(screen.getByTestId('agent-thread-close-current'))
+      expect(list.children).toHaveLength(13)
+    })
+
+    it('names a team thread after the lead conversation, never after a member or the latest reply', async () => {
+      const lead = { id: 'lead', title: '合成团队验收组长', createdAt: 1, messages: [] }
+      const designer = {
+        id: 'designer',
+        title: '设计师',
+        createdAt: 2,
+        teamLeadId: 'lead',
+        teamMemberName: '设计师',
+        messages: []
+      }
+      const writer = {
+        id: 'writer',
+        title: '文案',
+        createdAt: 3,
+        teamLeadId: 'lead',
+        teamMemberName: '文案',
+        messages: [
+          { role: 'user', content: '写一句宣传语' },
+          { role: 'assistant', content: 'ok', modelName: 'isolated-image-model' }
+        ]
+      }
+      loadAllSessionsMock.mockResolvedValue([lead, designer, writer])
+
+      renderWorkspaceWithThreadList()
+      await waitForThreadSummary('合成团队验收组长')
+      expect(getThreadRows()[0]).toHaveTextContent('合成团队验收组长')
+
+      // A member conversation becomes the open one and a reply arrives in the lead.
+      localStorage.setItem(CURRENT_SESSION_KEY, 'writer')
+      loadAllSessionsMock.mockResolvedValue([
+        { ...lead, messages: [{ role: 'assistant', content: 'ok' }] },
+        designer,
+        writer
+      ])
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', { detail: { scope: 'project-1.agent-1' } })
+        )
+      })
+      await waitFor(() => expect(loadAllSessionsMock.mock.calls.length).toBeGreaterThan(1))
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent('合成团队验收组长')
+      expect(getThreadRows()[0].textContent).toBe('合成团队验收组长')
+      expect(screen.queryByText('文案')).not.toBeInTheDocument()
+      expect(screen.queryByText('ok')).not.toBeInTheDocument()
+    })
+
+    it('prefers the root conversation that is open in the pane and falls back to the newest one', async () => {
+      loadAllSessionsMock.mockResolvedValue([
+        { id: 'older', title: 'Older conversation', createdAt: 1, messages: [] },
+        { id: 'newer', title: 'Newer conversation', createdAt: 2, messages: [] },
+        { id: 'member', title: 'Member', createdAt: 3, teamLeadId: 'newer', messages: [] }
+      ])
+
+      renderWorkspace()
+      await waitForThreadSummary('Newer conversation')
+
+      localStorage.setItem(CURRENT_SESSION_KEY, 'older')
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', { detail: { scope: 'project-1.agent-1' } })
+        )
+      })
+      await waitForThreadSummary('Older conversation')
+    })
+
+    it('closes the active thread from the red last row and keeps the list open on the next thread', async () => {
+      storePanes(2)
+      loadAllSessionsMock.mockImplementation(titledSessions)
+      const terminateScope = vi.fn()
+      window.addEventListener('chat:terminate-scope', terminateScope as EventListener)
+      try {
+        renderWorkspaceWithThreadList()
+        await waitFor(() => expect(getThreadRows()).toHaveLength(2))
+        fireEvent.click(getThreadRows()[1])
+        await waitForThreadSummary('Thread 2')
+
+        const close = screen.getByTestId('agent-thread-close-current')
+        expect(getComputedStyle(close).color).toBe(cssColor(testTheme.palette.error.main))
+        fireEvent.click(close)
+
+        expect(terminateScope).toHaveBeenCalledTimes(1)
+        expect(
+          (terminateScope.mock.calls[0]?.[0] as CustomEvent<{ scope?: string }>).detail
+        ).toEqual({ scope: 'project-1.agent-2' })
+        await waitForThreadSummary('Thread 1')
+        expect(getThreadRows().map((row) => row.textContent)).toEqual(['Thread 1'])
+        expect(screen.getByTestId('agent-thread-list')).toBeInTheDocument()
+        expect(screen.getByTestId('agent-thread-close-current')).toBeInTheDocument()
+      } finally {
+        window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
+      }
+    })
+
+    it('reorders threads by dragging one row onto another', async () => {
+      storePanes(3)
+      loadAllSessionsMock.mockImplementation(titledSessions)
+      renderWorkspaceWithThreadList()
+      await waitFor(() => expect(getThreadRows()).toHaveLength(3))
+
+      const dataTransfer = {
+        types: ['application/x-magicpot-agent-thread-reorder'],
+        effectAllowed: 'move',
+        dropEffect: 'none',
+        setData: vi.fn(),
+        getData: vi.fn(() => '')
+      }
+      const [first, , third] = getThreadRows()
+      fireEvent.dragStart(third, { dataTransfer })
+      fireEvent.dragOver(first, { dataTransfer })
+      fireEvent.drop(first, { dataTransfer })
+      fireEvent.dragEnd(third, { dataTransfer })
+
+      expect(dataTransfer.setData).toHaveBeenCalledWith(
+        'application/x-magicpot-agent-thread-reorder',
+        'agent-3'
+      )
+      await waitFor(() =>
+        expect(getThreadRows().map((row) => row.getAttribute('data-agent-thread-row'))).toEqual([
+          'agent-3',
+          'agent-1',
+          'agent-2'
+        ])
+      )
+      expect(
+        (JSON.parse(localStorage.getItem('agent.workspace.project-1')!) as { id: string }[]).map(
+          (pane) => pane.id
+        )
+      ).toEqual(['agent-3', 'agent-1', 'agent-2'])
+    })
+
+    it('summarises an empty column and offers the new-thread button with a name', async () => {
+      localStorage.setItem(
+        'agent.workspace.project-1',
+        JSON.stringify([{ id: 'agent-1', enabled: false }])
+      )
+      renderWorkspaceWithThreadList()
+
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(
+        'agent_workspace.no_threads'
+      )
+      expect(screen.getByTestId('agent-thread-toggle')).toBeDisabled()
+      expect(screen.getByTestId('agent-thread-toggle')).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument()
+
+      const add = screen.getByRole('button', { name: 'agent_workspace.new_chat' })
+      expect(getComputedStyle(add).width).toBe('26px')
+      expect(getComputedStyle(add).height).toBe('26px')
+      fireEvent.click(add)
+
+      await waitFor(() => expect(getThreadRows()).toHaveLength(1))
+      expect(screen.getByTestId('agent-thread-toggle')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('shows the project name as a muted subtitle and omits it when empty', () => {
+      const { unmount } = renderWorkspace('Poster campaign')
+      const subtitle = screen.getByTestId('agent-workspace-subtitle')
+      expect(subtitle).toHaveTextContent('Poster campaign')
+      expect(getComputedStyle(subtitle).fontSize).toBe('11px')
+      expect(getComputedStyle(subtitle).textOverflow).toBe('ellipsis')
+      expect(getComputedStyle(screen.getByText('agent_workspace.title')).fontSize).toBe('13px')
+      expect(getComputedStyle(screen.getByText('agent_workspace.title')).fontWeight).toBe('600')
+      unmount()
+
+      renderWorkspace('   ')
+      expect(screen.queryByTestId('agent-workspace-subtitle')).not.toBeInTheDocument()
+    })
+
+    it('ships every toolbar and list string in both locales', () => {
+      const keys = [
+        'close_thread',
+        'thread_list',
+        'no_threads',
+        'threads_none_selected',
+        'new_chat',
+        'status_running',
+        'status_queued',
+        'status_waiting_tool',
+        'status_unread',
+        'status_failed',
+        'status_cancelled',
+        'status_interrupted',
+        'status_idle'
+      ] as const
+      for (const key of keys) {
+        expect(zhRenderer.agent_workspace[key]).toMatch(/[㐀-鿿]/)
+        expect(enRenderer.agent_workspace[key]).toMatch(/^[\x20-\x7e·]+$/)
+      }
+      expect(zhRenderer.agent_workspace.close_thread).toBe('关闭当前线程')
+      expect(enRenderer.agent_workspace.close_thread).toBe('Close this thread')
+      expect(zhRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')
+      expect(enRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')
+    })
   })
 })
