@@ -288,7 +288,6 @@ import AgentThreadHtmlPanel from './components/AgentThreadHtmlPanel'
 import { isAgentBasicCommand, parseAgentBasicCommand } from './agentBasicCommand'
 import { listComposerCommands } from './composerCommandCatalog'
 import { isAgentGoalCommand } from './agentGoalCommand'
-import type { ComposerMentionMember } from './composerSuggestions'
 import { isRepairImagesCommand, parseRepairImagesCommand, scanMissingLocalImages, projectConfirmedImageContext, type ImageRepairScan, type MissingImageReference } from './repairImagesCommand'
 import { isAgentConfigurationCommand, parseAgentConfigurationCommand } from './agentConfigurationCommand'
 import { isAgentInspectionCommand, parseAgentInspectionCommand, formatAgentEnvironment } from './agentInspectionCommand'
@@ -8415,32 +8414,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       composerCommandsTeamMember
     ]
   )
-  // "@name task" is only routed from the lead conversation of a team that has not ended.
-  const composerMentionMembersKey =
-    teamEnabled && teamLead && currentSession?.id === teamLead.id && !teamLead.teamEnded
-      ? JSON.stringify(
-          teamMembers.flatMap((member) =>
-            member.teamMemberName
-              ? [
-                  [
-                    member.teamMemberName,
-                    member.teamRole && member.teamRole !== member.teamMemberName
-                      ? member.teamRole
-                      : '',
-                    loadingSessionIds.has(member.id)
-                  ]
-                ]
-              : []
-          )
-        )
-      : '[]'
-  const composerMentionMembers = useMemo(
-    () =>
-      (JSON.parse(composerMentionMembersKey) as Array<[string, string, boolean]>).map(
-        ([name, detail, running]): ComposerMentionMember => ({ name, detail, running })
-      ),
-    [composerMentionMembersKey]
-  )
   const handleSendCurrentMessage = useCallback(() => {
     if (currentSessionIdRef.current && cappedComposerSessionsRef.current.has(currentSessionIdRef.current)) return
     const teamSettingsConflict = teamLead && persistedSessionsRef.current.get(teamLead.id)
@@ -9883,7 +9856,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 }
                 toolHelpItems={selectedSkillToolHelpItems}
                 suggestionCommands={composerSuggestionCommands}
-                mentionMembers={composerMentionMembers}
                 modelSelectorSlot={chatComposerControlSlot}
                 onClearSkill={() => handleSelectSkill(null)}
                 onCompressContext={handleCompressCurrentContext}

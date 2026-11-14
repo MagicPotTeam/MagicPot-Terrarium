@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ThemeProvider } from '@mui/material'
@@ -7,7 +7,6 @@ import { theme } from '@renderer/theme'
 import enLocale from '@shared/locales/en-US/renderer.json'
 import ChatComposer from './ChatComposer'
 import { listComposerCommands, type ComposerCommand } from '../composerCommandCatalog'
-import type { ComposerMentionMember } from '../composerSuggestions'
 
 // Real English strings, so the test reads what a user reads.
 const translate = (key: string, options?: Record<string, unknown>) => {
@@ -28,21 +27,14 @@ const threadCommands = listComposerCommands({
   boundTools: false,
   teamMember: false
 })
-const twoMembers: ComposerMentionMember[] = [
-  { name: '设计师', detail: 'Visual design' },
-  { name: '文案', detail: 'Copywriting' }
-]
-
 function Harness({
   initialValue = '',
   commands,
-  members,
   onSend = vi.fn(),
   disabled = false
 }: {
   initialValue?: string
   commands?: readonly ComposerCommand[]
-  members?: readonly ComposerMentionMember[]
   onSend?: () => void
   disabled?: boolean
 }) {
@@ -64,7 +56,6 @@ function Harness({
         composerInputRef={inputRef}
         onPreviewImage={vi.fn()}
         suggestionCommands={commands}
-        mentionMembers={members}
       />
       <button type="button">elsewhere</button>
     </ThemeProvider>
@@ -326,92 +317,49 @@ describe('ChatComposer slash-command suggestions', () => {
   })
 })
 
-describe('ChatComposer @member suggestions', () => {
-  it('lists the members with their role when "@" starts the input and inserts "@name "', async () => {
-    const onSend = vi.fn()
-    render(<Harness commands={threadCommands} members={twoMembers} onSend={onSend} />)
+describe('ChatComposer "@" drafts', () => {
+  it('opens no list for "@" and leaves the arrow keys to the textarea', async () => {
+    render(<Harness commands={threadCommands} />)
     const user = await typeInto('@')
-    expect(screen.getByRole('listbox', { name: 'Team members' })).toBeInTheDocument()
-    expect(optionLabels()).toEqual(['@设计师Visual design', '@文案Copywriting'])
-    expect(input()).toHaveAttribute('aria-expanded', 'true')
-
-    await user.keyboard('文')
-    expect(optionLabels()).toEqual(['@文案Copywriting'])
-    await user.keyboard('{Enter}')
-    expect(input().value).toBe('@文案 ')
-    expect(input().selectionStart).toBe(4)
-    expect(onSend).not.toHaveBeenCalled()
     expect(list()).toBeNull()
-    await user.keyboard('write a slogan')
+    expect(input()).not.toHaveAttribute('aria-expanded')
+    expect(input()).not.toHaveAttribute('aria-activedescendant')
+    await user.keyboard('设计')
+    expect(list()).toBeNull()
+
+    const arrowDown = fireEvent.keyDown(input(), { key: 'ArrowDown' })
+    const arrowUp = fireEvent.keyDown(input(), { key: 'ArrowUp' })
+    // fireEvent returns false when a handler called preventDefault.
+    expect([arrowDown, arrowUp]).toEqual([true, true])
+    expect(input().value).toBe('@设计')
+  })
+
+  it('sends a finished "@name task" draft once on Enter and leaves its text unchanged', async () => {
+    const onSend = vi.fn()
+    render(<Harness commands={threadCommands} onSend={onSend} />)
+    const user = await typeInto('@设计 画一张海报')
     expect(list()).toBeNull()
     await user.keyboard('{Enter}')
     expect(onSend).toHaveBeenCalledTimes(1)
-    expect(input().value).toBe('@文案 write a slogan')
-  })
+    expect(input().value).toBe('@设计 画一张海报')
 
-  it('marks a member that is still working and omits an empty role', async () => {
-    render(
-      <Harness
-        members={[
-          { name: 'designer', detail: 'Visual design', running: true },
-          { name: 'writer', detail: '' },
-          { name: 'tester', running: true }
-        ]}
-      />
-    )
-    await typeInto('@')
-    expect(optionLabels()).toEqual([
-      '@designerRunning · Visual design',
-      '@writer',
-      '@testerRunning'
-    ])
-  })
-
-  it('completes a fully typed member name instead of sending a message without a task', async () => {
-    const onSend = vi.fn()
-    render(<Harness members={twoMembers} onSend={onSend} />)
-    const user = await typeInto('@设计师')
-    await user.keyboard('{Enter}')
-    expect(input().value).toBe('@设计师 ')
-    expect(onSend).not.toHaveBeenCalled()
-  })
-
-  it('follows the caret: only inside the leading @ token, and keeps the task that follows it', async () => {
-    render(<Harness initialValue="@设 draw a logo" members={twoMembers} />)
-    const user = await typeInto('')
-    const place = (offset: number) =>
-      act(() => {
-        input().setSelectionRange(offset, offset)
-        fireEvent.select(input())
-      })
-    place(input().value.length)
-    expect(list()).toBeNull()
-    place(0)
-    expect(list()).toBeNull()
-    place(2)
-    expect(optionLabels()).toEqual(['@设计师Visual design'])
-    await user.keyboard('{Tab}')
-    expect(input().value).toBe('@设计师 draw a logo')
-    expect(input().selectionStart).toBe(5)
-    expect(list()).toBeNull()
-  })
-
-  it('shows nothing without members, away from the start of the input, or for an unknown name', async () => {
-    const onSend = vi.fn()
-    const { unmount } = render(<Harness commands={threadCommands} onSend={onSend} />)
-    let user = await typeInto('@')
-    expect(list()).toBeNull()
-    await user.keyboard('{Enter}')
-    expect(onSend).toHaveBeenCalledTimes(1)
-    unmount()
-
-    render(<Harness members={twoMembers} onSend={onSend} />)
-    user = await typeInto('ask @')
-    expect(list()).toBeNull()
-    await user.clear(input())
-    await user.keyboard('@nobody')
+    // Also with the caret back inside the name, where the old "@" list used to take Enter.
+    input().setSelectionRange(2, 2)
+    fireEvent.select(input())
     expect(list()).toBeNull()
     await user.keyboard('{Enter}')
     expect(onSend).toHaveBeenCalledTimes(2)
+    expect(input().value).toBe('@设计 画一张海报')
+  })
+
+  it('sends a bare "@name" on Enter instead of completing it to another name', async () => {
+    const onSend = vi.fn()
+    render(<Harness commands={threadCommands} onSend={onSend} />)
+    const user = await typeInto('@设计')
+    await user.keyboard('{Enter}')
+    expect(onSend).toHaveBeenCalledTimes(1)
+    expect(input().value).toBe('@设计')
+    await user.keyboard('{Tab}')
+    expect(input().value).toBe('@设计')
   })
 })

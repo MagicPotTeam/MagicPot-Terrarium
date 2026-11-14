@@ -8,7 +8,7 @@ import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import ChatPage from './ChatPage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 
-// Wiring only: which commands and members the real ChatPage hands to the composer.
+// Wiring only: which commands the real ChatPage hands to the composer.
 const h = vi.hoisted(() => ({
   config: { value: null as any },
   sessions: { value: [] as any[] },
@@ -70,11 +70,11 @@ vi.mock('./chatStorage', async (original) => {
   }
 })
 vi.mock('./components/ChatComposer', () => ({
-  default: ({ suggestionCommands, mentionMembers }: any) => (
+  default: (props: any) => (
     <pre data-testid="composer-suggestion-props">
       {JSON.stringify({
-        commands: suggestionCommands.map((command: any) => command.name),
-        members: mentionMembers
+        commands: props.suggestionCommands.map((command: any) => command.name),
+        hasMentionMembers: 'mentionMembers' in props
       })}
     </pre>
   )
@@ -119,7 +119,7 @@ const everyService = () =>
 const props = () =>
   JSON.parse(screen.getByTestId('composer-suggestion-props').textContent ?? '{}') as {
     commands: string[]
-    members: Array<{ name: string; detail: string; running: boolean }>
+    hasMentionMembers: boolean
   }
 const renderPage = (pageRoute: typeof route | undefined) =>
   render(
@@ -189,15 +189,12 @@ describe('ChatPage composer suggestions', () => {
     sessionStorage.clear()
   })
 
-  it('offers thread commands and the team members to a lead, and no members inside a member conversation', async () => {
+  it('offers thread commands to a lead and to a member, and never hands team members to the composer', async () => {
     renderPage(route)
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    await waitFor(() => expect(props().members).toHaveLength(2))
-    // A role that only repeats the name is not shown twice.
-    expect(props().members).toEqual([
-      { name: 'designer', detail: 'Visual design', running: false },
-      { name: 'writer', detail: '', running: false }
-    ])
+    await waitFor(() => expect(props().commands).toContain('status'))
+    // The "@" member list is gone: the composer gets no member data at all.
+    expect(props().hasMentionMembers).toBe(false)
     expect(props().commands).toEqual([
       'goal',
       'status',
@@ -223,15 +220,15 @@ describe('ChatPage composer suggestions', () => {
       })
     )
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('designer'))
-    await waitFor(() => expect(props().members).toEqual([]))
-    // "@name" is a lead-only route and a member conversation cannot be compacted.
-    expect(props().commands).not.toContain('compact')
+    // A member conversation cannot be compacted.
+    await waitFor(() => expect(props().commands).not.toContain('compact'))
+    expect(props().hasMentionMembers).toBe(false)
     expect(props().commands).toEqual(
       expect.arrayContaining(['goal', 'status', 'jobs', 'btw', 'skill', 'edit'])
     )
   })
 
-  it('offers no thread-only commands and no members outside a canvas thread', async () => {
+  it('offers no thread-only commands outside a canvas thread', async () => {
     renderPage(undefined)
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     await waitFor(() => expect(props().commands).toContain('status'))
@@ -248,7 +245,6 @@ describe('ChatPage composer suggestions', () => {
       'module',
       'video_gen'
     ])
-    expect(props().members).toEqual([])
   })
 
   it('offers only the commands that work with the remote model service', async () => {
@@ -265,6 +261,5 @@ describe('ChatPage composer suggestions', () => {
       'module',
       'video_gen'
     ])
-    expect(props().members).toEqual([])
   })
 })

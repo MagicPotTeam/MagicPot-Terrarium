@@ -28,7 +28,6 @@ const ComposerSuggestionPopup: React.FC<ComposerSuggestionPopupProps> = ({
 }) => {
   const { t } = useTranslation()
   const listRef = useRef<HTMLDivElement | null>(null)
-  const isCommand = suggestions.kind === 'command'
 
   // Scroll only the list itself: scrollIntoView would also move clipped ancestors of the pane.
   useLayoutEffect(() => {
@@ -47,11 +46,7 @@ const ComposerSuggestionPopup: React.FC<ComposerSuggestionPopupProps> = ({
       ref={listRef}
       id={id}
       role="listbox"
-      aria-label={t(
-        isCommand
-          ? 'chat.composer_suggestions.commands_label'
-          : 'chat.composer_suggestions.members_label'
-      )}
+      aria-label={t('chat.composer_suggestions.commands_label')}
       data-testid="chat-composer-suggestions"
       // Keep the caret in the textarea when the list or its scrollbar is pressed.
       onMouseDown={(event) => event.preventDefault()}
@@ -81,11 +76,7 @@ const ComposerSuggestionPopup: React.FC<ComposerSuggestionPopupProps> = ({
     >
       {suggestions.items.map((item, index) => {
         const selected = index === activeIndex
-        const secondary = item.descriptionKey
-          ? t(item.descriptionKey)
-          : [item.running ? t('chat.composer_suggestions.member_running') : '', item.detail]
-              .filter(Boolean)
-              .join(' · ')
+        const description = t(item.descriptionKey)
         return (
           <Box
             key={`${index}:${item.label}`}
@@ -120,9 +111,7 @@ const ComposerSuggestionPopup: React.FC<ComposerSuggestionPopupProps> = ({
                 alignItems: 'baseline',
                 gap: 0.75,
                 minWidth: 0,
-                fontFamily: isCommand
-                  ? 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
-                  : 'inherit'
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
               }}
             >
               <Box
@@ -149,10 +138,10 @@ const ComposerSuggestionPopup: React.FC<ComposerSuggestionPopupProps> = ({
             </Box>
             <Box
               component="span"
-              title={secondary || undefined}
+              title={description}
               sx={{ minWidth: 0, fontSize: 12, color: 'text.secondary', ...ellipsis }}
             >
-              {secondary}
+              {description}
             </Box>
           </Box>
         )

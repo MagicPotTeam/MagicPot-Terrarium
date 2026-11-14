@@ -77,7 +77,6 @@ import {
   applyComposerSuggestion,
   getComposerSuggestionOptionId,
   resolveComposerSuggestions,
-  type ComposerMentionMember,
   type ComposerSuggestionItem
 } from '../composerSuggestions'
 import ComposerSuggestionPopup from './ComposerSuggestionPopup'
@@ -109,12 +108,9 @@ interface ChatComposerProps {
   active?: boolean
   /** Slash commands this conversation handles; none means no "/" suggestions. */
   suggestionCommands?: readonly ComposerCommand[]
-  /** Team members reachable with "@name"; only a lead conversation passes them. */
-  mentionMembers?: readonly ComposerMentionMember[]
 }
 
 const NO_SUGGESTION_COMMANDS: readonly ComposerCommand[] = []
-const NO_MENTION_MEMBERS: readonly ComposerMentionMember[] = []
 
 const renderFileAttachmentIcon = (attachment: ChatAttachment) => {
   const kind = detectDisplayFileKind(attachment.fileName, attachment.mimeType)
@@ -505,8 +501,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   disableCompressContext = false,
   toolHelpItems = [],
   active = true,
-  suggestionCommands = NO_SUGGESTION_COMMANDS,
-  mentionMembers = NO_MENTION_MEMBERS
+  suggestionCommands = NO_SUGGESTION_COMMANDS
 }) => {
   const { t } = useTranslation()
   // Hidden derived attachments also count at the current send boundary. If they
@@ -544,11 +539,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   )
   const [attachmentPreviewOverflowing, setAttachmentPreviewOverflowing] = useState(false)
   const suggestionListId = useId()
-  // Focus and caret live in refs: a render on every focus or caret move would re-apply the last
-  // recorded selection (see the layout effect below) to drafts that have nothing to suggest.
+  // Focus lives in a ref: a render on every focus change would re-apply the last recorded
+  // selection (see the layout effect below) to drafts that have nothing to suggest.
   const isInputFocusedRef = useRef(false)
-  // Collapsed caret offset; null = end of the text, -1 = a range is selected.
-  const caretPositionRef = useRef<number | null>(null)
   const [, refreshSuggestions] = useReducer((tick: number) => tick + 1, 0)
   const [dismissedSuggestionValue, setDismissedSuggestionValue] = useState<string | null>(null)
   const [suggestionCursor, setSuggestionCursor] = useState<{ key: string | null; index: number }>({
@@ -561,18 +554,15 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     const valueChanged = inputValue !== lastInputSyncRef.current.value
     if (!syncKeyChanged && !valueChanged) return
 
-    const replacedFromOutside = inputValue !== committedInputValueRef.current
     lastInputSyncRef.current = { key: inputSyncKey, value: inputValue }
     committedInputValueRef.current = inputValue
     if (isComposingInputRef.current && !syncKeyChanged) return
 
     setLocalInputValue(inputValue)
-    if (replacedFromOutside) caretPositionRef.current = null
   }, [inputSyncKey, inputValue])
 
-  const canSuggestFor = (value: string) =>
-    (value.startsWith('/') && suggestionCommands.length > 0) ||
-    (value.startsWith('@') && mentionMembers.length > 0)
+  // Only a draft that starts with "/" can open the list; "@name task" is plain text here.
+  const canSuggestFor = (value: string) => value.startsWith('/') && suggestionCommands.length > 0
   const suggestions =
     active &&
     !disabled &&
@@ -581,12 +571,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     document.activeElement === composerInputRef.current &&
     localInputValue !== dismissedSuggestionValue &&
     canSuggestFor(localInputValue)
-      ? resolveComposerSuggestions(
-          localInputValue,
-          caretPositionRef.current ?? localInputValue.length,
-          suggestionCommands,
-          mentionMembers
-        )
+      ? resolveComposerSuggestions(localInputValue, suggestionCommands)
       : null
   // A list that closes or changes its query starts again at the first option.
   const suggestionKey = suggestions?.key ?? null
@@ -739,15 +724,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   const handleInputSelectionChange = (
     event: React.SyntheticEvent<HTMLInputElement | HTMLTextAreaElement>
   ) => {
-    const selection = readInputSelectionSnapshot(event.currentTarget)
-    latestInputSelectionRef.current = selection
-    const caret = selection.start === selection.end ? selection.start : -1
-    const caretMoved = caret !== caretPositionRef.current
-    caretPositionRef.current = caret
-    // Only an "@member" token depends on where the caret is.
-    if (caretMoved && isInputFocusedRef.current && selection.value.startsWith('@')) {
-      if (canSuggestFor(selection.value)) refreshSuggestions()
-    }
+    latestInputSelectionRef.current = readInputSelectionSnapshot(event.currentTarget)
   }
 
   const handleInputFocus = (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -783,7 +760,6 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     latestInputSelectionRef.current = nextSelection
     pendingInputSelectionRef.current = nextSelection
     setLocalInputValue(nextValue)
-    caretPositionRef.current = nextSelection.start === nextSelection.end ? nextSelection.start : -1
     setDismissedSuggestionValue(null)
     onInputChange(nextValue)
   }
@@ -819,7 +795,6 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     latestInputSelectionRef.current = nextSelection
     pendingInputSelectionRef.current = nextSelection
     setLocalInputValue(next.value)
-    caretPositionRef.current = next.caret
     // The completed text must not reopen the list; the next edit does.
     setDismissedSuggestionValue(next.value)
     if (next.value !== localInputValue) onInputChange(next.value)
@@ -910,7 +885,6 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     latestInputSelectionRef.current = nextSelection
     pendingInputSelectionRef.current = nextSelection
     setLocalInputValue(nextValue)
-    caretPositionRef.current = nextSelectionPosition
     onInputChange(nextValue)
 
     const restoreDropSelection = () => {
@@ -933,7 +907,6 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     const nextValue = buildToolCommandDraft(tool)
     committedInputValueRef.current = nextValue
     setLocalInputValue(nextValue)
-    caretPositionRef.current = null
     onInputChange(nextValue)
     composerInputRef.current?.focus()
   }

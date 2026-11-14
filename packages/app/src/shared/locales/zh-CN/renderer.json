@@ -955,8 +955,6 @@
     },
     "composer_suggestions": {
       "commands_label": "命令",
-      "members_label": "团队成员",
-      "member_running": "运行中",
       "command_goal": "设置、查看或清除当前目标",
       "command_status": "查看当前对话状态",
       "command_jobs": "查看本线程的辅助任务",
