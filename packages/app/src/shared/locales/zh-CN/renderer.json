@@ -980,6 +980,10 @@
       "hint_configure": "[configure]",
       "hint_tool": "<工具名> [JSON]"
     },
+    "composer_column": {
+      "placeholder": "发送给当前对话",
+      "more_actions": "更多操作"
+    },
     "agent_scratchpad": {
       "command_usage": "仅用户输入框：/scratchpad 或 /pad，不带参数。此只读视图不修改笔记或调用父模型。",
       "command_unavailable": "草稿笔记视图不可用。需已载入的当前有效本地原始会话，无附件／隐藏上下文、侧会话视图或所选技能；不会回退父模型。",

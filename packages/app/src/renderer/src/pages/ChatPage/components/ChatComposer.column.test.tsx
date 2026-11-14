@@ -1,0 +1,277 @@
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { MenuItem, ThemeProvider } from '@mui/material'
+import { useRef, useState, type ComponentProps } from 'react'
+import { theme } from '@renderer/theme'
+import enLocale from '@shared/locales/en-US/renderer.json'
+import ChatComposer from './ChatComposer'
+
+// Real English strings, so the test reads what a user reads.
+const translate = (key: string, options?: Record<string, unknown>) => {
+  const value = key
+    .split('.')
+    .reduce<unknown>(
+      (node, part) => (node as Record<string, unknown> | undefined)?.[part],
+      enLocale
+    )
+  const template =
+    typeof value === 'string' ? value : ((options?.defaultValue as string | undefined) ?? key)
+  return template.replace(/{{(\w+)}}/g, (_match, name: string) => String(options?.[name] ?? ''))
+}
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }))
+
+type ComposerProps = ComponentProps<typeof ChatComposer>
+
+function ColumnComposer({
+  initialValue = '',
+  ...overrides
+}: Partial<ComposerProps> & { initialValue?: string }) {
+  const [value, setValue] = useState(initialValue)
+  const inputRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
+  return (
+    <ThemeProvider theme={theme}>
+      <ChatComposer
+        layout="column"
+        inputValue={value}
+        onInputChange={setValue}
+        onSend={vi.fn()}
+        onUploadFile={vi.fn()}
+        pendingAttachments={[]}
+        uploadProgress={{}}
+        onRemoveAttachment={vi.fn()}
+        isLoading={false}
+        onStopGenerating={vi.fn()}
+        disabled={false}
+        composerInputRef={inputRef}
+        onPreviewImage={vi.fn()}
+        {...overrides}
+      />
+    </ThemeProvider>
+  )
+}
+
+const shell = () => screen.getByTestId('chat-composer-shell')
+const input = () => screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+const moreActions = () => screen.getByRole('button', { name: 'More actions' })
+const sendButton = () => screen.getByRole('button', { name: 'Send Message' })
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+describe('ChatComposer column shell', () => {
+  it('is one row in one shell: "+", mode chip, textarea, compact button, send', () => {
+    render(
+      <ColumnComposer
+        toolbarSlot={<span data-testid="mode-chip">Image</span>}
+        statusSlot={<span data-testid="context-ring" />}
+        onCompressContext={vi.fn()}
+      />
+    )
+
+    const root = screen.getByTestId('chat-composer-root')
+    expect(root).toHaveAttribute('data-composer-layout', 'column')
+    // Nothing but the shell (and its positioning wrapper) while there are no chips.
+    expect(root.children).toHaveLength(1)
+    expect(root.firstElementChild?.children).toHaveLength(1)
+    expect(root.firstElementChild?.firstElementChild).toBe(shell())
+
+    const order = [
+      moreActions(),
+      screen.getByTestId('mode-chip'),
+      input(),
+      screen.getByRole('button', { name: 'Compress context' }),
+      sendButton()
+    ]
+    order.reduce((previous, current) => {
+      expect(
+        previous.compareDocumentPosition(current) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+      return current
+    })
+    for (const control of order) expect(shell()).toContainElement(control)
+    // The Agent column shows the model in its header and passes no model selector.
+    expect(screen.queryByTestId('chat-composer-model-selector-slot')).toBeNull()
+    expect(screen.queryByTestId('chat-composer-action-bar')).toBeNull()
+  })
+
+  it('keeps a model selector it is given inside the row, before Send', () => {
+    render(<ColumnComposer modelSelectorSlot={<button type="button">model</button>} />)
+
+    const model = screen.getByRole('button', { name: 'model' })
+    expect(shell()).toContainElement(model)
+    expect(
+      model.compareDocumentPosition(sendButton()) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
+  it('names the textarea with its one-line placeholder and bounds its height at 26px to 128px', () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(400)
+    render(<ColumnComposer initialValue={'a\nb\nc\nd\ne\nf\ng\nh\ni\nj'} />)
+
+    expect(input()).toHaveAttribute('placeholder', 'Message this conversation')
+    expect(input()).toHaveAccessibleName('Message this conversation')
+    expect(input()).toHaveAttribute('rows', '1')
+    expect(input().style.minHeight).toBe('26px')
+    expect(input().style.maxHeight).toBe('128px')
+    // Taller content is clamped and scrolls inside the textarea.
+    expect(input().style.height).toBe('128px')
+    expect(input().style.overflowY).toBe('auto')
+  })
+
+  it('keeps one line at 26px', () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(26)
+    render(<ColumnComposer initialValue="one line" />)
+    expect(input().style.height).toBe('26px')
+  })
+
+  it('marks the shell active while there is a draft or an attachment', async () => {
+    const user = userEvent.setup()
+    const { unmount } = render(<ColumnComposer />)
+    expect(shell()).not.toHaveAttribute('data-active')
+    await user.type(input(), 'hi')
+    expect(shell()).toHaveAttribute('data-active', 'true')
+    await user.clear(input())
+    expect(shell()).not.toHaveAttribute('data-active')
+    unmount()
+
+    render(
+      <ColumnComposer
+        pendingAttachments={[{ type: 'file', url: 'file:///notes.txt', fileName: 'notes.txt' }]}
+      />
+    )
+    expect(shell()).toHaveAttribute('data-active', 'true')
+  })
+
+  it('opens the existing menu from "More actions" and returns focus to it on Escape', async () => {
+    const user = userEvent.setup()
+    const upload = vi.fn()
+    render(
+      <ColumnComposer
+        onUploadFile={upload}
+        addMenuSlot={() => [<MenuItem key="trace">Start trace</MenuItem>]}
+      />
+    )
+
+    const button = moreActions()
+    expect(button).toHaveAttribute('aria-haspopup', 'menu')
+    expect(button).toHaveAttribute('aria-expanded', 'false')
+    expect(button).not.toHaveAttribute('aria-controls')
+
+    button.focus()
+    await user.keyboard('{Enter}')
+    const menu = await screen.findByRole('menu')
+    expect(button).toHaveAttribute('aria-expanded', 'true')
+    expect(document.getElementById(button.getAttribute('aria-controls') ?? '')).toContainElement(
+      menu
+    )
+    // "Add File" first, then the entries of the slot, with no divider between them.
+    expect(Array.from(menu.children).map((item) => item.getAttribute('role'))).toEqual([
+      'menuitem',
+      'menuitem'
+    ])
+    const items = within(menu).getAllByRole('menuitem')
+    expect(items.map((item) => item.textContent)).toEqual(['Add File', 'Start trace'])
+
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+    expect(button).toHaveAttribute('aria-expanded', 'false')
+    expect(button).toHaveFocus()
+
+    await user.click(button)
+    await user.click(await screen.findByRole('menuitem', { name: 'Add File' }))
+    expect(upload).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+  })
+
+  it('sends with the button or Enter only when there is something to send', async () => {
+    const user = userEvent.setup()
+    const onSend = vi.fn()
+    render(<ColumnComposer onSend={onSend} />)
+
+    expect(sendButton()).toBeDisabled()
+    await user.type(input(), '   ')
+    expect(sendButton()).toBeDisabled()
+    await user.type(input(), 'hello')
+    expect(sendButton()).toBeEnabled()
+    await user.click(sendButton())
+    expect(onSend).toHaveBeenCalledTimes(1)
+    await user.type(input(), '{Shift>}{Enter}{/Shift}')
+    expect(onSend).toHaveBeenCalledTimes(1)
+    await user.type(input(), '{Enter}')
+    expect(onSend).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows Stop instead of Send while generating and keeps the textarea usable', async () => {
+    const user = userEvent.setup()
+    const onStop = vi.fn()
+    render(<ColumnComposer isLoading onStopGenerating={onStop} />)
+
+    expect(screen.queryByRole('button', { name: 'Send Message' })).toBeNull()
+    expect(input()).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Stop generating' }))
+    expect(onStop).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers a separate send for a private command next to Stop', async () => {
+    const user = userEvent.setup()
+    const onSend = vi.fn()
+    render(<ColumnComposer isLoading sideCommandEnabled initialValue="/btw why?" onSend={onSend} />)
+
+    const sideSend = shell().querySelector('[data-chat-side-command-btn]') as HTMLElement
+    expect(sideSend).toHaveAccessibleName()
+    expect(screen.getByRole('button', { name: 'Stop generating' })).toBeInTheDocument()
+    await user.click(sideSend)
+    expect(onSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('compresses the context from the ring button with the mouse and the keyboard', async () => {
+    const user = userEvent.setup()
+    const onCompress = vi.fn()
+    render(
+      <ColumnComposer
+        statusSlot={<span data-testid="context-ring" />}
+        onCompressContext={onCompress}
+      />
+    )
+
+    const compress = screen.getByRole('button', { name: 'Compress context' })
+    expect(compress).toContainElement(screen.getByTestId('context-ring'))
+    await user.click(compress)
+    compress.focus()
+    await user.keyboard('{Enter}')
+    expect(onCompress).toHaveBeenCalledTimes(2)
+  })
+
+  it('disables the controls but still renders the shell without a conversation', () => {
+    render(<ColumnComposer disabled />)
+    expect(input()).toBeDisabled()
+    expect(moreActions()).toBeDisabled()
+    expect(sendButton()).toBeDisabled()
+  })
+
+  it('shows the bound-tool help only while a /tool command is being typed', () => {
+    const tool = { name: 'lookup', description: 'Look something up' } as NonNullable<
+      ComposerProps['toolHelpItems']
+    >[number]
+    const { unmount } = render(<ColumnComposer toolHelpItems={[tool]} />)
+    expect(screen.queryByTestId('chat-composer-tool-help')).toBeNull()
+    unmount()
+
+    render(<ColumnComposer toolHelpItems={[tool]} initialValue="/tool lo" />)
+    expect(screen.getByTestId('chat-composer-tool-help')).toHaveTextContent('lookup')
+  })
+
+  it('keeps the full-page layout when no layout is given', () => {
+    render(<ColumnComposer layout={undefined} modelSelectorSlot={<span>model-in-composer</span>} />)
+
+    expect(screen.getByTestId('chat-composer-root')).not.toHaveAttribute('data-composer-layout')
+    expect(screen.queryByTestId('chat-composer-shell')).toBeNull()
+    expect(screen.getByTestId('chat-composer-action-bar')).toBeInTheDocument()
+    expect(screen.getByText('model-in-composer')).toBeInTheDocument()
+    expect(input()).toHaveAttribute('placeholder', '')
+    fireEvent.focus(input())
+    expect(screen.getByTestId('chat-composer-add-menu-button')).not.toHaveAttribute('aria-haspopup')
+  })
+})

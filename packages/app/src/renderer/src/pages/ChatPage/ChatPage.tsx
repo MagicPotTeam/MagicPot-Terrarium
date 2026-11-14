@@ -9720,6 +9720,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               <Box sx={{ display: showingSide ? 'none' : 'contents' }}>
               <ChatComposer
                 active={active}
+                layout={compact ? 'column' : 'page'}
                 inputValue={inputValue}
                 onInputChange={handleComposerInputChange}
                 onSend={handleSendCurrentMessage}

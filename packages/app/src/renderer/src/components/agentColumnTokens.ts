@@ -92,3 +92,10 @@ export const getAgentColumnTokens = (theme: Theme): AgentColumnTokens => {
     disabledOpacity: 0.55
   }
 }
+
+/**
+ * Opaque raised surface of the panels that float over the column (the "/" list, the composer
+ * menu, the model menu): the theme's paper colour lifted towards white.
+ */
+export const getAgentColumnRaisedSurface = (theme: Theme): string =>
+  `color-mix(in srgb, ${theme.palette.background.paper}, #fff ${theme.palette.mode === 'dark' ? 9 : 60}%)`

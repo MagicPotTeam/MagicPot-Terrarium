@@ -1153,6 +1153,10 @@
       "hint_configure": "[configure]",
       "hint_tool": "<name> [JSON]"
     },
+    "composer_column": {
+      "placeholder": "Message this conversation",
+      "more_actions": "More actions"
+    },
     "agent_scratchpad": {
       "command_usage": "User composer only: /scratchpad or /pad with no arguments. This read-only view never changes notes or calls the parent model.",
       "command_unavailable": "Scratchpad view unavailable. Use the active loaded local original conversation, without attachments, hidden context, a side view or a selected skill. No parent-model fallback.",
