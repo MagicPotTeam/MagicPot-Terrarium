@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AgentWorkspace from './AgentWorkspace'
+import { forgetPaneTitles } from './agentPaneTitleMemory'
 import { createExistingConversationOpenCoordinator, type ExistingConversationProtection } from '@renderer/utils/existingConversationOpen'
 import type { ExistingConversationOpenInput } from '@renderer/pages/ChatPage/useExistingConversationOpen'
 import { readExistingWorkspacePanes, type ExistingConversationWorkspaceAdapter } from './existingConversationWorkspace'
@@ -29,6 +30,7 @@ async function request() {
   return { coordinator, handle, adapter: { coordinator, request: { handle, presentation } } }
 }
 beforeEach(() => {
+  forgetPaneTitles()
   localStorage.clear(); f.children = []; f.load.mockClear()
   localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ id: projectId, name: 'Project', chatStorageScopePrefix: projectId }]))
   localStorage.setItem(storageKey, JSON.stringify(initial)); localStorage.setItem(`agent.workspace.active.${projectId}`, 'agent-1')

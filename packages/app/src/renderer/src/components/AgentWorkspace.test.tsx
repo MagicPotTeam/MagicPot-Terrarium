@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AgentWorkspace from './AgentWorkspace'
 import AgentThreadSubRow from './AgentThreadSubRow'
+import { forgetPaneTitles } from './agentPaneTitleMemory'
 import zhRenderer from '@shared/locales/zh-CN/renderer.json'
 import enRenderer from '@shared/locales/en-US/renderer.json'
 import {
@@ -71,7 +72,7 @@ vi.mock('react-i18next', () => ({
         return `agent_workspace.threads_none_selected:${String(options?.count ?? '')}`
       }
       if (key === 'agent_workspace.chat_label') {
-        return `Agent 线程 ${String(options?.index ?? '')}`.trim()
+        return zhRenderer.agent_workspace.chat_label.replace('{{index}}', String(options?.index))
       }
       if (key === 'agent_workspace.trace_recording') {
         return zhRenderer.agent_workspace.trace_recording
@@ -186,6 +187,7 @@ describe('AgentWorkspace', () => {
     clearScopedActiveLoadingSessionIds()
     clearScopedExternalLoadingSessionIds()
     clearScopedChatPageRunLifecycles()
+    forgetPaneTitles()
     mockSubRowLabels.current = {}
     chatPageMock.mockClear()
     chatPageUnmountMock.mockClear()
@@ -1122,6 +1124,120 @@ describe('AgentWorkspace', () => {
       } finally {
         window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
       }
+    })
+
+    it('numbers threads that have no conversation title by their position', async () => {
+      expect(zhRenderer.agent_workspace.chat_label).toBe('对话 {{index}}')
+      expect(enRenderer.agent_workspace.chat_label).toBe('Conversation {{index}}')
+      // agent-1 was closed earlier; the open panes are the 1st and 2nd rows whatever their ids.
+      localStorage.setItem(
+        'agent.workspace.project-1',
+        JSON.stringify([
+          { id: 'agent-1', enabled: false },
+          { id: 'agent-3', enabled: true },
+          { id: 'agent-7', enabled: true },
+          { id: 'agent-8', enabled: true }
+        ])
+      )
+      localStorage.setItem('agent.workspace.active.project-1', 'agent-3')
+      loadAllSessionsMock.mockImplementation((scope: string) =>
+        Promise.resolve(
+          scope === 'project-1.agent-3'
+            ? [] // no conversation yet
+            : scope === 'project-1.agent-7'
+              ? [{ id: 's', title: '新对话', messages: [] }] // a conversation that still has the default name
+              : [{ id: 's', title: '海报配色', messages: [] }]
+        )
+      )
+      renderWorkspaceWithThreadList()
+      await waitFor(() =>
+        expect(getThreadRows().map((row) => row.textContent)).toEqual(['对话 1', '对话 2', '海报配色'])
+      )
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 1$/)
+      expect(screen.queryByText('新对话')).not.toBeInTheDocument()
+
+      // Reordering renumbers: the label follows the position, not the pane.
+      const dataTransfer = {
+        types: ['application/x-magicpot-agent-thread-reorder'],
+        effectAllowed: 'move',
+        dropEffect: 'none',
+        setData: vi.fn(),
+        getData: vi.fn(() => '')
+      }
+      const [first, second] = getThreadRows()
+      fireEvent.dragStart(second, { dataTransfer })
+      fireEvent.dragOver(first, { dataTransfer })
+      fireEvent.drop(first, { dataTransfer })
+      fireEvent.dragEnd(second, { dataTransfer })
+      await waitFor(() =>
+        expect(getThreadRows().map((row) => row.getAttribute('data-agent-thread-row'))).toEqual([
+          'agent-7',
+          'agent-3',
+          'agent-8'
+        ])
+      )
+      expect(getThreadRows().map((row) => row.textContent)).toEqual(['对话 1', '对话 2', '海报配色'])
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 2$/)
+    })
+
+    it('labels a new thread at once and never flashes a placeholder while titles load', async () => {
+      let resolveSessions: ((sessions: unknown[]) => void) | undefined
+      loadAllSessionsMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveSessions = resolve
+          })
+      )
+      renderWorkspaceWithThreadList()
+      // The title is not known yet: no numbered label and no "新对话" in its place.
+      await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalled())
+      expect(getThreadRows().map((row) => row.textContent)).toEqual([''])
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^$/)
+      await act(async () => {
+        resolveSessions?.([{ id: 'session-1', title: '画布检查', messages: [] }])
+      })
+      await waitForThreadSummary('画布检查')
+
+      // A thread created here is known to have no conversation: it is numbered immediately.
+      loadAllSessionsMock.mockImplementation((scope: string) =>
+        Promise.resolve(
+          scope === 'project-1.agent-1' ? [{ id: 'session-1', title: '画布检查', messages: [] }] : []
+        )
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 2$/)
+      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '对话 2'])
+      fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
+      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '对话 2', '对话 3'])
+      await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-3'))
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '对话 2', '对话 3'])
+      expect(screen.queryByText('新对话')).not.toBeInTheDocument()
+    })
+
+    it('keeps the previous title when the workspace is mounted again, until the real one is known', async () => {
+      const first = renderWorkspaceWithThreadList()
+      await waitForThreadSummary('画布检查')
+      first.unmount()
+
+      let resolveSessions: ((sessions: unknown[]) => void) | undefined
+      loadAllSessionsMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveSessions = resolve
+          })
+      )
+      renderWorkspaceWithThreadList()
+      // Synchronously, before the conversations are read again.
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^画布检查$/)
+      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查'])
+      await waitFor(() => expect(resolveSessions).toBeDefined())
+      await act(async () => {
+        resolveSessions?.([{ id: 'session-1', title: '画布检查（改名）', messages: [] }])
+      })
+      await waitForThreadSummary('画布检查（改名）')
     })
 
     it('moves focus to New when the last thread is closed, and leaves it alone otherwise', async () => {

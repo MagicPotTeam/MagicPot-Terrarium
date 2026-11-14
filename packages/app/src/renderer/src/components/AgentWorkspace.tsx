@@ -55,6 +55,7 @@ import {
 } from '@renderer/features/projectTrace/projectTraceRuntime'
 
 import { getAgentColumnTokens, type AgentColumnTokens } from './agentColumnTokens'
+import { recallPaneTitle, rememberPaneTitle } from './agentPaneTitleMemory'
 import { AgentThreadSubRowPresenceContext } from './agentThreadSubRowPresence'
 import {
   readExistingWorkspacePanes,
@@ -71,14 +72,10 @@ type AgentPane = {
 type PanePreviewStatus = 'idle' | ChatSessionRunState['status']
 
 type PanePreview = {
-  title: string
+  /** The conversation's own title; '' when it has none yet, undefined until that is known. */
+  title?: string
   status: PanePreviewStatus
   runState?: ChatSessionRunState
-}
-
-type AgentWorkspaceStrings = {
-  newConversation: string
-  paneLabel: (index: number) => string
 }
 
 const PREVIEW_POLL_INTERVAL_MS = 4000
@@ -164,27 +161,30 @@ const getNextPaneId = (panes: AgentPane[]): string => {
   return `agent-${nextIndex}`
 }
 
-const getPaneNumber = (paneId: string, index: number): number => {
-  const match = paneId.match(/agent-(\d+)/)
-  return match ? Number(match[1]) : index + 1
-}
+/** A pane that was just created here: known to have no conversation, so no title to wait for. */
+const NEW_PANE_PREVIEW: PanePreview = { title: '', status: 'idle' }
 
-const getPaneLabel = (
-  paneId: string,
+/**
+ * What a thread is called. Without a conversation title it is numbered by its position
+ * ("对话 N"); while the title is not known yet nothing is shown, so no label flashes first.
+ */
+const resolveThreadTitle = (
+  preview: PanePreview | undefined,
   index: number,
-  getLabel: AgentWorkspaceStrings['paneLabel']
-): string => getLabel(getPaneNumber(paneId, index))
+  t: TFunction<'translation'>
+): string =>
+  preview?.title === undefined
+    ? ''
+    : preview.title || t('agent_workspace.chat_label', { index: index + 1 })
 
-type AgentWorkspaceTranslator = TFunction<'translation'>
-
-const createAgentWorkspaceStrings = (t: AgentWorkspaceTranslator): AgentWorkspaceStrings => ({
-  newConversation: t('chat.new_conversation'),
-  paneLabel: (index: number) => t('agent_workspace.chat_label', { index })
-})
-
-const compactText = (value: string, fallback: string): string => {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  return normalized || fallback
+/** Previews to start from: the titles these panes showed the last time the project was open. */
+const recallPanePreviews = (projectId: string, panes: AgentPane[]): Record<string, PanePreview> => {
+  const previews: Record<string, PanePreview> = {}
+  for (const pane of panes) {
+    const title = recallPaneTitle(buildAgentPaneScope(projectId, pane.id))
+    if (title !== undefined) previews[pane.id] = { title, status: 'idle' }
+  }
+  return previews
 }
 
 /**
@@ -257,23 +257,17 @@ const readLatestPaneRunState = (scope: string): ChatSessionRunState | undefined 
 }
 
 const buildPanePreview = (
-  paneId: string,
-  index: number,
   sessions: ChatSession[],
   running: boolean,
-  strings: AgentWorkspaceStrings,
   runState?: ChatSessionRunState,
   currentSessionId: string | null = null
 ): PanePreview => {
   const rootSession = resolvePaneRootSession(sessions, currentSessionId)
-  const paneLabel = getPaneLabel(paneId, index, strings.paneLabel)
   const status: PanePreviewStatus = runState?.status || (running ? 'running' : 'idle')
 
   return {
-    title: compactText(
-      getLocalizedConversationTitle(rootSession?.title, strings.newConversation),
-      paneLabel
-    ),
+    // A conversation that still has the default name ("新对话") has no title of its own.
+    title: getLocalizedConversationTitle(rootSession?.title, '').replace(/\s+/g, ' ').trim(),
     status,
     ...(runState ? { runState } : {})
   }
@@ -281,48 +275,33 @@ const buildPanePreview = (
 
 const loadPanePreview = async (
   pane: AgentPane,
-  index: number,
-  projectId: string,
-  strings: AgentWorkspaceStrings
+  projectId: string
 ): Promise<readonly [string, PanePreview]> => {
   const scope = buildAgentPaneScope(projectId, pane.id)
   const sessions = await loadAllSessions(scope)
   const runState = readLatestPaneRunState(scope)
   return [
     pane.id,
-    buildPanePreview(
-      pane.id,
-      index,
-      sessions,
-      isPaneRunning(scope),
-      strings,
-      runState,
-      readPaneCurrentSessionId(scope)
-    )
+    buildPanePreview(sessions, isPaneRunning(scope), runState, readPaneCurrentSessionId(scope))
   ] as const
 }
 
 const loadPanePreviewWithFallback = async (
   pane: AgentPane,
-  index: number,
   projectId: string,
-  strings: AgentWorkspaceStrings,
   previousPreviews: Record<string, PanePreview>
 ): Promise<readonly [string, PanePreview]> => {
   try {
-    return await loadPanePreview(pane, index, projectId, strings)
+    return await loadPanePreview(pane, projectId)
   } catch (error) {
     console.error('[AgentWorkspace] Failed to load pane preview', pane.id, error)
+    const previous = previousPreviews[pane.id]
     return [
       pane.id,
-      previousPreviews[pane.id] ||
-        buildPanePreview(
-          pane.id,
-          index,
-          [],
-          isPaneRunning(buildAgentPaneScope(projectId, pane.id)),
-          strings
-        )
+      // The title counts as known either way, so the thread gets its numbered label.
+      previous
+        ? { ...previous, title: previous.title ?? '' }
+        : buildPanePreview([], isPaneRunning(buildAgentPaneScope(projectId, pane.id)))
     ] as const
   }
 }
@@ -330,13 +309,10 @@ const loadPanePreviewWithFallback = async (
 const loadPreviewMap = async (
   panes: AgentPane[],
   projectId: string,
-  strings: AgentWorkspaceStrings,
   previousPreviews: Record<string, PanePreview>
 ): Promise<Record<string, PanePreview>> => {
   const entries = await Promise.all(
-    panes.map((pane, index) =>
-      loadPanePreviewWithFallback(pane, index, projectId, strings, previousPreviews)
-    )
+    panes.map((pane) => loadPanePreviewWithFallback(pane, projectId, previousPreviews))
   )
 
   return Object.fromEntries(entries) as Record<string, PanePreview>
@@ -563,8 +539,10 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const [threadsCollapsed, setThreadsCollapsed] = useState<boolean>(
     () => readLocalStorage(collapsedStorageKey) !== '0'
   )
-  const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>({})
-  const panePreviewsRef = useRef<Record<string, PanePreview>>({})
+  const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>(() =>
+    recallPanePreviews(projectId, readPanesForVisit())
+  )
+  const panePreviewsRef = useRef(panePreviews)
   // Per pane: the host under its thread row (while the list is open), the open sub-row's title
   // and how many sub-rows the pane's chat page shows in that host.
   const [subRowHosts, setSubRowHosts] = useState<Record<string, HTMLElement | null>>({})
@@ -628,7 +606,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const previewRefreshSequenceRef = useRef(0)
   const visitBlocked = isVisitBlocked()
   const openPanes = useMemo(() => visitBlocked ? [] : getOpenPanes(panes), [panes, visitBlocked])
-  const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
   const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? (guardedVisit ? null : openPanes[0]) ?? null
   const theme = useTheme()
   const columnTokens = useMemo(() => getAgentColumnTokens(theme), [theme])
@@ -647,8 +624,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const activePaneIndex = activePane ? openPanes.findIndex((pane) => pane.id === activePane.id) : -1
   const activeSubRowTitle = activePane ? paneSubRowTitles[activePane.id] : null
   const threadSummary = activePane
-    ? (panePreviews[activePane.id]?.title ||
-        getPaneLabel(activePane.id, activePaneIndex, workspaceStrings.paneLabel)) +
+    ? resolveThreadTitle(panePreviews[activePane.id], activePaneIndex, t) +
       (activeSubRowTitle ? ` · ${activeSubRowTitle}` : '')
     : openPanes.length > 0
       ? t('agent_workspace.threads_none_selected', { count: openPanes.length })
@@ -713,11 +689,10 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           return prev
         }
 
-        const paneIndex = openPanes.findIndex((pane) => pane.id === paneId)
         return {
           ...prev,
           [paneId]: {
-            title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
+            title: current?.title,
             status: nextStatus,
             runState: next
           }
@@ -734,7 +709,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
 
     window.addEventListener(CHAT_SESSION_RUN_STATE_EVENT, handleRunState)
     return () => window.removeEventListener(CHAT_SESSION_RUN_STATE_EVENT, handleRunState)
-  }, [openPanes, projectId, workspaceStrings])
+  }, [openPanes, projectId])
 
   useEffect(() => {
     const paneIdByScope = new Map(
@@ -756,11 +731,10 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
             : 'idle'
         if (current?.status === status) return prev
 
-        const paneIndex = openPanes.findIndex((pane) => pane.id === paneId)
         return {
           ...prev,
           [paneId]: {
-            title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
+            title: current?.title,
             status
           }
         }
@@ -769,7 +743,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
 
     window.addEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
     return () => window.removeEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
-  }, [openPanes, projectId, workspaceStrings])
+  }, [openPanes, projectId])
 
   useEffect(() => {
     if (isVisitBlocked()) {
@@ -919,7 +893,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   useEffect(() => {
     let cancelled = false
     const paneEntriesByScope = new Map(
-      openPanes.map((pane, index) => [buildAgentPaneScope(projectId, pane.id), { pane, index }])
+      openPanes.map((pane) => [buildAgentPaneScope(projectId, pane.id), pane])
     )
 
     const refreshPreviews = async (targetScope?: string) => {
@@ -930,13 +904,12 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           if (!targetPane) return
 
           const [paneId, preview] = await loadPanePreviewWithFallback(
-            targetPane.pane,
-            targetPane.index,
+            targetPane,
             projectId,
-            workspaceStrings,
             panePreviewsRef.current
           )
           if (cancelled || sequence !== previewRefreshSequenceRef.current) return
+          rememberPaneTitle(targetScope, preview.title)
 
           setPanePreviews((prev) => {
             const nextPreviews = { ...prev, [paneId]: preview }
@@ -946,13 +919,11 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           return
         }
 
-        const nextPreviews = await loadPreviewMap(
-          openPanes,
-          projectId,
-          workspaceStrings,
-          panePreviewsRef.current
-        )
+        const nextPreviews = await loadPreviewMap(openPanes, projectId, panePreviewsRef.current)
         if (cancelled || sequence !== previewRefreshSequenceRef.current) return
+        for (const [paneId, preview] of Object.entries(nextPreviews)) {
+          rememberPaneTitle(buildAgentPaneScope(projectId, paneId), preview.title)
+        }
 
         setPanePreviews((prev) => {
           const next = arePanePreviewsEqual(prev, nextPreviews) ? prev : nextPreviews
@@ -996,7 +967,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         window.removeEventListener(eventName, triggerRefresh as EventListener)
       }
     }
-  }, [openPanes, projectId, workspaceStrings])
+  }, [openPanes, projectId])
 
   const handleRemovePane = (paneId: string) => {
     explicitPaneMutationRef.current = true
@@ -1023,11 +994,15 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     if (remainingOpenPanes.length === 0) newThreadButtonRef.current?.focus()
   }
 
+  const markPaneNew = (paneId: string) =>
+    setPanePreviews((prev) => (prev[paneId] ? prev : { ...prev, [paneId]: NEW_PANE_PREVIEW }))
+
   const handleAddPane = () => {
     explicitPaneMutationRef.current = true
     setPanes((prev) => {
       const nextPaneId = getNextPaneId(prev)
       setActivePaneId(nextPaneId)
+      markPaneNew(nextPaneId)
       return [...prev, { id: nextPaneId, enabled: true }]
     })
   }
@@ -1047,6 +1022,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
       })
       setPanes((prev) => [...prev, { id: nextPaneId, enabled: true }])
       setActivePaneId(nextPaneId)
+      markPaneNew(nextPaneId)
     }
 
     window.addEventListener('agent-workspace:create-pane', handleCreatePane as EventListener)
@@ -1304,10 +1280,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
               <ThreadListRow
                 pane={pane}
                 paneScope={buildAgentPaneScope(projectId, pane.id)}
-                title={
-                  panePreviews[pane.id]?.title ||
-                  getPaneLabel(pane.id, index, workspaceStrings.paneLabel)
-                }
+                title={resolveThreadTitle(panePreviews[pane.id], index, t)}
                 status={panePreviews[pane.id]?.status}
                 selected={pane.id === activePane?.id}
                 hasSubRows={(paneSubRowCounts[pane.id] ?? 0) > 0}

@@ -4,6 +4,7 @@ import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AgentWorkspace from './AgentWorkspace'
+import { forgetPaneTitles } from './agentPaneTitleMemory'
 import {
   clearScopedActiveLoadingSessionIds,
   clearScopedChatPageRunLifecycles,
@@ -110,6 +111,7 @@ const dispatchStatus = (
 ) => dispatchScopedChatRunEvent(SCOPE, SESSION_ID, { runId, status })
 
 beforeEach(() => {
+  forgetPaneTitles()
   localStorage.clear()
   // The thread list starts collapsed; these tests read the status dot of a list row.
   localStorage.setItem('agent.workspace.threadsCollapsed.project-lifecycle', '0')
