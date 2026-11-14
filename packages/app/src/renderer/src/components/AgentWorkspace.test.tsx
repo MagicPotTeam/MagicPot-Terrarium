@@ -1124,6 +1124,30 @@ describe('AgentWorkspace', () => {
       }
     })
 
+    it('moves focus to New when the last thread is closed, and leaves it alone otherwise', async () => {
+      storePanes(2)
+      loadAllSessionsMock.mockImplementation(titledSessions)
+      renderWorkspaceWithThreadList()
+      await waitFor(() => expect(getThreadRows()).toHaveLength(2))
+      const add = screen.getByRole('button', { name: 'agent_workspace.new_chat' })
+
+      // One thread remains: the close row is still there and keeps the focus.
+      const close = screen.getByTestId('agent-thread-close-current')
+      act(() => close.focus())
+      fireEvent.click(close)
+      await waitFor(() => expect(getThreadRows()).toHaveLength(1))
+      expect(add).not.toHaveFocus()
+      expect(screen.getByTestId('agent-thread-close-current')).toHaveFocus()
+
+      // The last thread: the list disappears, so the focus goes to the one way forward.
+      fireEvent.click(screen.getByTestId('agent-thread-close-current'))
+      await waitFor(() => expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument())
+      expect(getThreadRows()).toHaveLength(0)
+      expect(screen.getByTestId('agent-thread-toggle')).toBeDisabled()
+      expect(add).toHaveFocus()
+      expect(document.activeElement).not.toBe(document.body)
+    })
+
     it('reorders threads by dragging one row onto another', async () => {
       storePanes(3)
       loadAllSessionsMock.mockImplementation(titledSessions)

@@ -8357,7 +8357,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const inspectionScope = JSON.stringify({ route, conversationId: currentSessionId, storageScope })
   // "/goal" shows the goal records of the conversation it was typed in.
   const [goalViewScope, setGoalViewScope] = useState<string | null>(null)
-  const closeGoalView = useCallback(() => setGoalViewScope(null), [])
+  // Closing a view by hand gives the keyboard back to this conversation's composer.
+  const focusComposerInput = useCallback(() => composerInputRef.current?.focus(), [])
+  const closeGoalView = useCallback((dismissed?: boolean) => {
+    setGoalViewScope(null)
+    if (dismissed === true) composerInputRef.current?.focus()
+  }, [])
   const goalCommandAvailable = active && isReady && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && Boolean(currentSession && !currentSession.archived && !hasSessionDeleteTombstone(currentSession.id, storageScope))
   useEffect(() => {
     basicCommandGenerationRef.current++
@@ -9346,7 +9351,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
             <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
           </Box>}
-          {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost openRequest={teamManagementOpenRequest} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
+          {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost openRequest={teamManagementOpenRequest} onReturnFocus={focusComposerInput} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
             const current = teamMessageDispatcherRef.current
             if (!current || current.key !== messageKey || !route?.threadId || !messageLeadId || !teamEnabled) throw new Error('Team channel unavailable.')
             // Avoid consuming the broadcast draft for a known-unavailable model setting.

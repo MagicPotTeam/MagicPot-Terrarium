@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -81,6 +81,7 @@ vi.mock('./chatStorage', async (original) => {
 vi.mock('./components/ChatComposer', () => ({
   default: ({
     addMenuSlot,
+    composerInputRef,
     inputValue,
     inputSyncKey,
     onInputChange,
@@ -98,6 +99,7 @@ vi.mock('./components/ChatComposer', () => ({
         </button>
       ))}
       <input
+        ref={composerInputRef}
         data-testid="input"
         data-sync-key={inputSyncKey}
         value={inputValue}
@@ -263,8 +265,21 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(draftSyncKey()).not.toBe(syncKey)
     expect(h.notify).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: '收起目标' }))
+    // Closing the view by hand returns the keyboard to this conversation's composer.
+    const closeGoals = screen.getByRole('button', { name: '收起目标' })
+    act(() => closeGoals.focus())
+    fireEvent.click(closeGoals)
     expect(screen.queryByTestId('agent-goal-view')).toBeNull()
+    expect(screen.getByTestId('input')).toHaveFocus()
+
+    // Escape inside the view closes it the same way.
+    fireEvent.change(screen.getByTestId('input'), { target: { value: '/goal' } })
+    fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
+    const reopened = await screen.findByTestId('agent-goal-view')
+    act(() => screen.getByRole('button', { name: '收起目标' }).focus())
+    fireEvent.keyDown(screen.getByRole('button', { name: '收起目标' }), { key: 'Escape' })
+    expect(reopened).not.toBeInTheDocument()
+    expect(screen.getByTestId('input')).toHaveFocus()
     expect(en.chat.composer_suggestions.command_goal).toBe('Set, show or clear the current goal')
     expect(zh.chat.composer_suggestions.command_goal).toBe('设置、查看或清除当前目标')
   })
@@ -327,7 +342,13 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
 
     fireEvent.click(screen.getByTestId('chat-composer-menu-team'))
-    expect(await screen.findByRole('dialog', { name: '团队管理' })).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: '团队管理' })
+    // The menu entry that opened it is gone, so closing hands the focus to the composer.
+    const closeTeam = screen.getByRole('button', { name: '关闭团队管理' })
+    await waitFor(() => expect(closeTeam).toHaveFocus())
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
+    expect(screen.getByTestId('input')).toHaveFocus()
   })
 
   it('offers no team entries with the remote model service', async () => {

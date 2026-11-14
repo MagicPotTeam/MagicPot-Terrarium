@@ -657,6 +657,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const headerSubtitle = projectName?.trim() || ''
   const threadListId = `agent-thread-list-${useId()}`
   const threadToggleRef = useRef<HTMLButtonElement | null>(null)
+  const newThreadButtonRef = useRef<HTMLButtonElement | null>(null)
   const threadListRef = useRef<HTMLDivElement | null>(null)
   const openChatInput = useExistingConversationWorkspacePane({
     adapter: existingConversationOpen,
@@ -1017,6 +1018,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     if (activePaneId === paneId) {
       setActivePaneId(remainingOpenPanes[0]?.id || null)
     }
+    // Closing the last thread removes the list and the row that was clicked; the only
+    // control left that leads anywhere is New, so the keyboard continues from there.
+    if (remainingOpenPanes.length === 0) newThreadButtonRef.current?.focus()
   }
 
   const handleAddPane = () => {
@@ -1264,6 +1268,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
 
           <Tooltip title={t('agent_workspace.new_chat')} arrow>
             <IconButton
+              ref={newThreadButtonRef}
               aria-label={t('agent_workspace.new_chat')}
               onClick={handleAddPane}
               sx={{

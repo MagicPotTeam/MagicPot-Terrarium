@@ -11,11 +11,13 @@ const normalizeAccessibleName = (value: string) => value.replace(/\s+/g, ' ').tr
 const normalizePerceivedName = (value: string) => normalizeAccessibleName(value.replace(/[\u200b\u2060]/gu, ''))
 
 export default function AgentTeamMenu({
-  lead, members, models, buttonHost, hideTriggerWithoutHost, onSave, onEnd, onDispatch, subscriptions, onSubscriptionChange, onBroadcast, onAddMember, openRequest
+  lead, members, models, buttonHost, hideTriggerWithoutHost, onSave, onEnd, onDispatch, subscriptions, onSubscriptionChange, onBroadcast, onAddMember, openRequest, onReturnFocus
 }: {
   buttonHost?: HTMLElement | null
   hideTriggerWithoutHost?: boolean
   openRequest?: number
+  /** The dialog closed while it held the focus and there is no trigger to hand the focus back to. */
+  onReturnFocus?(): void
   models: { id: string; name: string }[]
   onBroadcast?(input: Readonly<{ id: string; text: string }>): { queued: number } | Promise<{ queued: number }>
   onEnd(): void
@@ -197,6 +199,7 @@ export default function AgentTeamMenu({
       return true
     })()
     if (visible && restoreFocus) origin.focus()
+    else if (restoreFocus) onReturnFocus?.()
     keyboardOriginRef.current = null
     pendingTriggerFocusRef.current = false
     focusOpenRequestRef.current = false

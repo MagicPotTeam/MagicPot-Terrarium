@@ -22,7 +22,8 @@ export default function AgentThreadGoalEntry({
   active: boolean
   remote: boolean
   open: boolean
-  onClose: () => void
+  /** `dismissed` is true when the person closed the view (close button or Escape). */
+  onClose: (dismissed?: boolean) => void
 }) {
   const { t } = useTranslation()
   const key =
@@ -42,9 +43,14 @@ export default function AgentThreadGoalEntry({
   return (
     <Box
       data-testid="agent-goal-view"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return
+        event.stopPropagation()
+        onClose(true)
+      }}
       sx={{ px: 1, maxHeight: '50%', overflowY: 'auto', flexShrink: 0 }}
     >
-      <Button size="small" onClick={onClose}>
+      <Button size="small" onClick={() => onClose(true)}>
         {closeLabel === 'chat.goal_close' ? 'Close goals' : closeLabel}
       </Button>
       <AgentThreadGoalRecordsHost

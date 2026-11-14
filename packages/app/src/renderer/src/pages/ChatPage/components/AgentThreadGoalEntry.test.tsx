@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const h = vi.hoisted(() => ({ revision: vi.fn(), bind: vi.fn(), list: vi.fn(), mutate: vi.fn() }))
 vi.mock('../../../utils/windowUtils', () => ({ api: () => ({ svcLLMProxy: { agentGoalScopeRevision: h.revision, setAgentGoalScope: h.bind, listAgentGoals: h.list, mutateAgentGoal: h.mutate } }) }))
@@ -27,6 +27,29 @@ describe('thread goal entry', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close goals' }))
     expect(screen.queryByLabelText('Thread goals')).toBeNull()
     await waitFor(() => expect(h.bind).toHaveBeenCalledWith(expect.objectContaining({ route, conversationId: 'first', active: false })))
+  })
+  it('reports a close by the person (button or Escape) as dismissed, and a stale close as not', async () => {
+    const onClose = vi.fn()
+    const page = render(<GoalEntry {...props} open onClose={onClose} />)
+    await screen.findByText('No goals yet.')
+    const view = screen.getByTestId('agent-goal-view')
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Close goals' }), { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenLastCalledWith(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Close goals' }))
+    expect(onClose).toHaveBeenCalledTimes(2)
+    expect(onClose).toHaveBeenLastCalledWith(true)
+    // Other keys, an input method's Escape and an Escape another handler consumed do not close.
+    fireEvent.keyDown(view, { key: 'Enter' })
+    fireEvent.keyDown(view, { key: 'Escape', isComposing: true })
+    const consumed = createEvent.keyDown(view, { key: 'Escape' })
+    consumed.preventDefault()
+    fireEvent(view, consumed)
+    expect(onClose).toHaveBeenCalledTimes(2)
+    // The conversation changed under the open view: it asks to be closed, but nobody dismissed it.
+    page.rerender(<GoalEntry {...props} conversationId="second" open onClose={onClose} />)
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(3))
+    expect(onClose).toHaveBeenLastCalledWith()
   })
   it('stays closed for remote, inactive or missing conversation and never binds these', async () => {
     const page = render(<AgentThreadGoalEntry {...props} remote />)

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import AgentTeamMenu from './AgentTeamMenu'
 import type { ChatSession } from '../chatStorage'
@@ -36,6 +36,53 @@ describe('AgentTeamMenu Escape interaction', () => {
     } finally {
       unmount()
       host.remove()
+    }
+  })
+
+  it('asks the page to take the focus back when a dialog opened without a trigger closes', async () => {
+    const onReturnFocus = vi.fn()
+    const view = (openRequest: number) => <AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn(async () => true)} onEnd={vi.fn()} hideTriggerWithoutHost openRequest={openRequest} onReturnFocus={onReturnFocus} />
+    const page = render(view(0))
+    try {
+      expect(screen.queryByRole('button', { name: '团队管理' })).not.toBeInTheDocument()
+      // Opened from the composer menu: the dialog takes the focus, Escape gives it back.
+      page.rerender(view(1))
+      const close = await screen.findByRole('button', { name: '关闭团队管理' })
+      await waitFor(() => expect(close).toHaveFocus())
+      fireEvent.keyDown(screen.getByRole('dialog', { name: '团队管理' }), { key: 'Escape' })
+      expect(screen.queryByRole('dialog', { name: '团队管理' })).not.toBeInTheDocument()
+      expect(onReturnFocus).toHaveBeenCalledTimes(1)
+
+      // The close button does the same.
+      page.rerender(view(2))
+      const closeAgain = await screen.findByRole('button', { name: '关闭团队管理' })
+      await waitFor(() => expect(closeAgain).toHaveFocus())
+      fireEvent.click(closeAgain)
+      expect(screen.queryByRole('dialog', { name: '团队管理' })).not.toBeInTheDocument()
+      expect(onReturnFocus).toHaveBeenCalledTimes(2)
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('does not steal the focus when the dialog closes while the focus is elsewhere', async () => {
+    const onReturnFocus = vi.fn()
+    const outside = document.createElement('button')
+    document.body.append(outside)
+    const view = (openRequest: number) => <AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn(async () => true)} onEnd={vi.fn()} hideTriggerWithoutHost openRequest={openRequest} onReturnFocus={onReturnFocus} />
+    const page = render(view(0))
+    try {
+      page.rerender(view(1))
+      const close = await screen.findByRole('button', { name: '关闭团队管理' })
+      await waitFor(() => expect(close).toHaveFocus())
+      act(() => outside.focus())
+      fireEvent.click(close)
+      expect(screen.queryByRole('dialog', { name: '团队管理' })).not.toBeInTheDocument()
+      expect(onReturnFocus).not.toHaveBeenCalled()
+      expect(outside).toHaveFocus()
+    } finally {
+      page.unmount()
+      outside.remove()
     }
   })
 
