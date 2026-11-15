@@ -43,6 +43,8 @@ vi.mock('../magicAgentPlatform2/triggers/triggerCommandService', () => ({ Trigge
 vi.mock('../mcp/runtime', () => ({ getMcpClientManager: h.forbidden, syncMcpClientManager: h.forbidden }))
 vi.mock('../magicAgentPlatform2/memory/publicSemanticMemoryService', () => ({ PublicSemanticMemoryService: h.forbidden }))
 
+// A drive-letter path is an absolute root only on Windows: elsewhere path.resolve('D:/x') is '<cwd>/D:/x', which the MAIN root check refuses (':' in a path part).
+const fixtureRoot = (name: string) => path.resolve(process.platform === 'win32' ? `D:/${name}` : `/${name}`)
 const base = 'file:///app/index.html', managementUrl = base + '#/agent-management'
 const available = () => Object.freeze({ status: 'available' as const, entries: Object.freeze([Object.freeze({ id: 'demo', name: 'Demo', version: '1.0.0', installedAt: '2026-01-01T00:00:00.000Z' })]) })
 const hosts: InstalledCatalogReadHost[] = []
@@ -52,7 +54,7 @@ let io: ReturnType<typeof vi.spyOn>[] = []
 function fixture(install = true) {
   const sender = Object.assign(new EventEmitter(), { id: 42, url: managementUrl, mainFrame: { url: managementUrl, parent: null as unknown, detached: false }, isDestroyed: () => false, getURL() { return this.url } })
   const window = Object.assign(new EventEmitter(), { webContents: sender, isDestroyed: () => false })
-  let main: ManagementReadWindow | null = window, state: ManagementReadState = 'ready', clock = 0, root = path.resolve('D:/catalog-service-fixture')
+  let main: ManagementReadWindow | null = window, state: ManagementReadState = 'ready', clock = 0, root = fixtureRoot('catalog-service-fixture')
   const listeners = new Set<() => void>(), getMainWindow = vi.fn(() => main), getReadState = vi.fn(() => state), getUserData = vi.fn(() => root)
   const policy = vi.fn(evaluateInstalledCatalogReadPolicy), read = vi.fn(async (_options: InstalledCatalogReadOptions): Promise<InstalledCatalogSnapshot> => available())
   const host = createInstalledCatalogReadHost({ getReadState, getUserData, evaluatePolicy: policy, readSnapshot: read, newRequestId: () => 'installed-catalog-read:service_fixture', now: () => clock, wallNow: () => 1000, onConfigCommitted(listener) { listeners.add(listener); return () => { listeners.delete(listener) } } }); hosts.push(host)
@@ -154,7 +156,7 @@ describe('installed-catalog real typed service and unary ownership composition',
       if (kind === 'config') f.commit()
       if (kind === 'route') f.navigate()
       if (kind === 'window') f.setMain(null)
-      if (kind === 'root') f.setRoot(path.resolve('D:/other-fixture-root'))
+      if (kind === 'root') f.setRoot(fixtureRoot('other-fixture-root'))
       if (kind === 'deadline') f.setClock(2000)
       if (kind === 'policy') f.policy.mockImplementation(() => null)
       return value

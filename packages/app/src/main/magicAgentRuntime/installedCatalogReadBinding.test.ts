@@ -16,6 +16,8 @@ const { cachedConfig, committed, userDataPath } = vi.hoisted(() => ({
 vi.mock('electron', () => ({ app: { isPackaged: false, getPath: userDataPath } }))
 vi.mock('../config/config', () => ({ getConfig: cachedConfig, onConfigCommitted: committed }))
 
+// A drive-letter path is an absolute root only on Windows: elsewhere path.resolve('D:/x') is '<cwd>/D:/x', which the MAIN root check refuses (':' in a path part).
+const fixtureRoot = (name: string) => path.resolve(process.platform === 'win32' ? `D:/${name}` : `/${name}`)
 const base = 'file:///app/index.html', url = base + '#/agent-management'
 const available = () => Object.freeze({ status: 'available' as const, entries: Object.freeze([Object.freeze({ id: 'demo', name: 'Demo', version: '1.0.0', installedAt: '2026-01-01T00:00:00.000Z' })]) })
 const unavailable = { status: 'unavailable', reason: 'unavailable' }
@@ -30,7 +32,7 @@ class Sender extends EventEmitter {
 }
 function fixture(install = true) {
   const sender = new Sender(), window = Object.assign(new EventEmitter(), { webContents: sender, destroyed: false, isDestroyed() { return this.destroyed } })
-  let mainWindow: ManagementReadWindow | null = window, state: ManagementReadState = 'ready', clock = 0, root: unknown = path.resolve('D:/catalog-fixture'), id = 0
+  let mainWindow: ManagementReadWindow | null = window, state: ManagementReadState = 'ready', clock = 0, root: unknown = fixtureRoot('catalog-fixture'), id = 0
   const listeners = new Set<() => void>(), getMainWindow = vi.fn(() => mainWindow), getReadState = vi.fn(() => state), getUserData = vi.fn(() => root), now = vi.fn(() => clock)
   const policy = vi.fn(evaluateInstalledCatalogReadPolicy), read = vi.fn(async (_options: InstalledCatalogReadOptions): Promise<InstalledCatalogSnapshot> => available()), newRequestId = vi.fn(() => 'installed-catalog-read:fixture_' + ++id)
   const deps = { getReadState, onConfigCommitted(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } }, getUserData, evaluatePolicy: policy, readSnapshot: read, newRequestId, now, wallNow: () => 1000 }
@@ -59,7 +61,7 @@ describe('independent MAIN installed-catalog preinstalled window owner and read 
     const f = fixture(), context = f.invocation(), pending = f.host.read({}, context, f.getMainWindow)
     expect(f.read).toHaveBeenCalledOnce(); expect(f.listeners.size).toBe(1); expect(vi.getTimerCount()).toBe(1)
     const options = f.read.mock.calls[0]?.[0]
-    expect(options).toMatchObject({ userData: path.resolve('D:/catalog-fixture') }); expect(options?.lease.isCurrent()).toBe(true)
+    expect(options).toMatchObject({ userData: fixtureRoot('catalog-fixture') }); expect(options?.lease.isCurrent()).toBe(true)
     const request = f.policy.mock.calls[0]?.[0]
     expect(request).toEqual({ discriminator: POLICY_REQUEST_DISCRIMINATOR, version: POLICY_REQUEST_VERSION, requestId: 'installed-catalog-read:fixture_1', actor: { kind: 'service', id: 'main-management-installed-catalog-reader' }, origin: 'renderer', action: 'management.installed-catalog.read', transport: 'electron-ipc', target: { kind: 'installed-package-catalog', id: 'main-user-data-installed-packages' }, input: {}, effects: [{ kind: 'filesystem.read', risk: 'read', target: 'main-user-data-installed-packages' }] })
     expect(Object.isFrozen(request)).toBe(true); expect(digestPolicyRequest(request)).toBeTruthy()
@@ -100,7 +102,7 @@ describe('independent MAIN installed-catalog preinstalled window owner and read 
   it.each(['missing', 'empty', 'relative', 'whitespace', 'throw', 'noncanonical'] as const)('rejects %s MAIN root without any CWD fallback or reader access', async kind => {
     const f = fixture()
     if (kind === 'throw') f.getUserData.mockImplementation(() => { throw new Error('PRIVATE') })
-    else f.setRoot(kind === 'missing' ? undefined : kind === 'empty' ? '' : kind === 'relative' ? 'relative/catalog' : kind === 'whitespace' ? ' ' + path.resolve('D:/catalog-fixture') : path.resolve('D:/catalog-fixture') + path.sep + '..' + path.sep + 'elsewhere')
+    else f.setRoot(kind === 'missing' ? undefined : kind === 'empty' ? '' : kind === 'relative' ? 'relative/catalog' : kind === 'whitespace' ? ' ' + fixtureRoot('catalog-fixture') : fixtureRoot('catalog-fixture') + path.sep + '..' + path.sep + 'elsewhere')
     expect(await f.host.read({}, f.invocation(), f.getMainWindow)).toEqual(unavailable)
     expect(f.read).not.toHaveBeenCalled(); expect(f.listeners.size).toBe(0); expect(vi.getTimerCount()).toBe(0)
   })
@@ -109,7 +111,7 @@ describe('independent MAIN installed-catalog preinstalled window owner and read 
     if (kind === 'disable-enable') { f.setState('disabled'); f.commit(); f.setState('ready') }
     if (kind === 'departure-return') { f.navigate(); f.navigate(url) }
     if (kind === 'reload') f.sender.emit('did-start-navigation', { isMainFrame: true }, url, false, true)
-    if (kind === 'root') f.setRoot(path.resolve('D:/different-root'))
+    if (kind === 'root') f.setRoot(fixtureRoot('different-root'))
     if (kind === 'deadline') f.setClock(2000)
     if (kind === 'clock-backward') f.setClock(-1)
     if (kind === 'policy') f.policy.mockImplementation(() => null)
