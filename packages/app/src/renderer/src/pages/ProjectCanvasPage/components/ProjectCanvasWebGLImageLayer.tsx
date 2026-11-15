@@ -2380,13 +2380,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     const finishedAt = window.performance.now()
-    const shouldCheckWebGLRuntimeError =
-      webglErrorCheckRequestedRef.current ||
-      renderCount === 1 ||
-      renderCount - webglErrorLastCheckedRenderRef.current >=
+    // gl.getError waits until the GPU process has finished everything queued so far. In the
+    // middle of a pan or zoom that wait is a late frame (50 to 130 ms each on a software
+    // renderer, once a second), and a gesture uploads nothing new that could fail: the
+    // periodic sample waits for the first render after the gesture. A requested check and
+    // the timed check after a new texture are not held back.
+    const isPeriodicSampleDue =
+      !isViewportInteractingRef.current &&
+      (renderCount - webglErrorLastCheckedRenderRef.current >=
         PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_RENDER_INTERVAL ||
-      finishedAt - webglErrorLastCheckedAtRef.current >=
-        PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_INTERVAL_MS
+        finishedAt - webglErrorLastCheckedAtRef.current >=
+          PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_INTERVAL_MS)
+    const shouldCheckWebGLRuntimeError =
+      webglErrorCheckRequestedRef.current || renderCount === 1 || isPeriodicSampleDue
     if (shouldCheckWebGLRuntimeError) {
       webglErrorCheckRequestedRef.current = false
       webglErrorLastCheckedRenderRef.current = renderCount

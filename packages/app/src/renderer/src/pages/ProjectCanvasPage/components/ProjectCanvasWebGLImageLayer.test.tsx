@@ -3030,6 +3030,57 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(additionalErrorCheckCount).toBeLessThan(additionalRenderCount)
   }, 30000)
 
+  it('does not ask the GPU for errors in the middle of a gesture, and asks again right after it', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    const readyCalls: boolean[] = []
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      render(
+        <Layer
+          ref={ref}
+          items={[createItem()]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          onReadyChange={(ready) => readyCalls.push(ready)}
+        />
+      )
+      await waitFor(() => {
+        expect(ref.current).not.toBeNull()
+        expect(createdSprites).toHaveLength(1)
+      })
+      const app = createdApplications[0]
+      // Let the timed check that follows the first texture pass.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1200))
+      })
+      expect(readyCalls.at(-1)).toBe(true)
+
+      let now = performance.now() + 10_000
+      vi.spyOn(window.performance, 'now').mockImplementation(() => now)
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+      const checksBefore = app.renderer.gl.getError.mock.calls.length
+      // Five seconds of panning at 60 Hz: 300 renders, which used to be 5 synchronous checks.
+      for (let frame = 1; frame <= 300; frame += 1) {
+        now += 1000 / 60
+        act(() => ref.current?.syncViewport({ x: frame * 2, y: 0 }, 1))
+      }
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 300)
+      expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore)
+
+      // The first render after the gesture checks again, and an error is still noticed.
+      app.renderer.gl.getError.mockImplementation(() => app.renderer.gl.OUT_OF_MEMORY)
+      act(() => ref.current?.setViewportInteracting(false))
+      now += 1000 / 60
+      act(() => ref.current?.syncViewport({ x: 700, y: 0 }, 1))
+      expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore + 1)
+      await waitFor(() => expect(readyCalls.at(-1)).toBe(false))
+    } finally {
+      consoleWarnSpy.mockRestore()
+      vi.restoreAllMocks()
+    }
+  }, 30000)
+
   it('tears down the WebGL canvas and reports not-ready when Pixi rendering fails', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
