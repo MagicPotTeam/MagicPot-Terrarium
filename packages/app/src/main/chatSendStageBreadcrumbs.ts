@@ -1,21 +1,22 @@
 // packages/app/src/main/chatSendStageBreadcrumbs.ts
-// Keeps the last chat send-stage breadcrumb of each renderer (counts and sizes only), so that a
-// renderer death recorded by processDiagnostics.ts says where in a send it happened.
-import { ipcMain, type IpcMainEvent } from 'electron'
+// Keeps the last chat send-stage breadcrumb of each renderer (counts and sizes only, plus the JS
+// heap size its preload read), so that a renderer death recorded by processDiagnostics.ts says
+// where in a send it happened.
+import { ipcMain, type BrowserWindow, type IpcMainEvent } from 'electron'
 import {
   CHAT_SEND_STAGE_CHANNEL,
-  parseChatSendStageBreadcrumb,
-  type ChatSendStageBreadcrumb
+  parseChatSendStageReport,
+  type ChatSendStageReport
 } from '@shared/utils/chatSendStageBreadcrumb'
 
-export type StoredChatSendStage = ChatSendStageBreadcrumb & { receivedAt: string }
+export type StoredChatSendStage = ChatSendStageReport & { receivedAt: string }
 
 const MAX_TRACKED_RENDERERS = 16
 const lastStageByWebContents = new Map<number, StoredChatSendStage>()
 let registered = false
 
 export function recordChatSendStage(webContentsId: number, payload: unknown, receivedAt = Date.now()): boolean {
-  const breadcrumb = parseChatSendStageBreadcrumb(payload)
+  const breadcrumb = parseChatSendStageReport(payload)
   if (!breadcrumb || !Number.isSafeInteger(webContentsId)) return false
   // Re-insert so that the map stays ordered by the latest report.
   lastStageByWebContents.delete(webContentsId)
@@ -41,14 +42,24 @@ export function forgetChatSendStage(webContentsId: number): void {
   lastStageByWebContents.delete(webContentsId)
 }
 
-/** One fire-and-forget channel; anything that is not exactly a breadcrumb is ignored. */
-export function registerChatSendStageIpc(): void {
+/**
+ * One fire-and-forget channel. A message is accepted only from the top frame of the main
+ * window's page, and only when it is exactly a breadcrumb; everything else is ignored.
+ */
+export function registerChatSendStageIpc(getMainWindow: () => BrowserWindow | null): void {
   if (registered) return
   registered = true
   ipcMain.on(CHAT_SEND_STAGE_CHANNEL, (event: IpcMainEvent, payload: unknown) => {
-    const sender = event.sender
-    if (!sender || sender.isDestroyed()) return
-    recordChatSendStage(sender.id, payload)
+    try {
+      const sender = event.sender
+      if (!sender || sender.isDestroyed()) return
+      const mainWindow = getMainWindow()
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents !== sender) return
+      if (!event.senderFrame || event.senderFrame !== sender.mainFrame) return
+      recordChatSendStage(sender.id, payload)
+    } catch {
+      // A frame or window that is going away: there is nothing to record.
+    }
   })
 }
 

@@ -2690,10 +2690,6 @@ const assertGoalProgressInput = (input: RequestChatCompletionInput): void => {
   if (input.goalProgressToken === undefined) return
   if (typeof input.goalProgressToken !== 'string' || !input.goalProgressToken || input.config.use_remote_llm || input.externalAgentSkill || input.skillRuntime || input.sessionUrl || input.isEdit || input.imageRequest || input.imageGenerationOptions && input.imageGenerationOptions.enabled !== false || input.messages.some(message => message.attachments?.length || message.hiddenContext)) throw new Error('Goal progress sharing supports only the explicit plain local text request; no remote/skill/media/continuation fallback.')
 }
-type PerformanceWithMemory = Performance & {
-  memory?: { usedJSHeapSize?: number; jsHeapSizeLimit?: number }
-}
-
 /**
  * Local diagnostics: tells the main process which send stage this renderer reached, so that a
  * renderer death can be placed in the send. Counts and sizes only (never text, names or paths);
@@ -2706,13 +2702,25 @@ const reportChatSendStage = (
   try {
     const report = typeof window === 'undefined' ? undefined : window.appDiagnostics?.reportChatSendStage
     if (!report) return
-    const memory = typeof performance === 'undefined' ? undefined : (performance as PerformanceWithMemory).memory
-    report(summarizeChatSendStage(stage, messages, memory))
+    report(summarizeChatSendStage(stage, messages))
   } catch {
     // Diagnostics must never affect a send.
   }
 }
-export const requestChatCompletion = async (
+/**
+ * A request that ends with an error or an abort reports that too. Otherwise the last breadcrumb
+ * would stay at the stage the failed request had reached and a later, unrelated renderer death
+ * would be placed in a send that was no longer running. The error itself is passed on untouched.
+ */
+const reportFailedChatSend = (input: { messages: Parameters<typeof summarizeChatSendStage>[1] }) =>
+  (error: unknown): never => {
+    reportChatSendStage('reply-failed', input.messages)
+    throw error
+  }
+export const requestChatCompletion = (
+  input: RequestChatCompletionInput
+): Promise<RequestChatCompletionResult> => requestChatCompletionInStages(input).catch(reportFailedChatSend(input))
+const requestChatCompletionInStages = async (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
   if (input.teamMessageHop && (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')) throw new Error('Team messages require local transport.')
@@ -2765,7 +2773,10 @@ export const requestChatCompletion = async (
   return result
 }
 
-export const requestChatCompletionStream = async (
+export const requestChatCompletionStream = (
+  input: RequestChatCompletionStreamInput
+): Promise<RequestChatCompletionStreamResult> => requestChatCompletionStreamInStages(input).catch(reportFailedChatSend(input))
+const requestChatCompletionStreamInStages = async (
   input: RequestChatCompletionStreamInput
 ): Promise<RequestChatCompletionStreamResult> => {
   if (input.teamMessageHop && (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')) throw new Error('Team messages require local transport.')

@@ -26,7 +26,8 @@ vi.mock('electron', () => ({
   ipcMain: h.ipcMain
 }))
 
-import { markAppQuitting, resetAppQuittingForTests } from './appQuitState'
+import { markAppQuitting, markSessionEnding, resetAppQuittingForTests } from './appQuitState'
+import { expectRendererExit, resetExpectedRendererExitsForTests } from './expectedRendererExits'
 import { resetChatSendStagesForTests } from './chatSendStageBreadcrumbs'
 import {
   appendProcessEventLine,
@@ -77,6 +78,7 @@ describe('processDiagnostics', () => {
     vi.restoreAllMocks()
     resetAppQuittingForTests()
     resetChatSendStagesForTests()
+    resetExpectedRendererExitsForTests()
   })
 
   it('starts the crash handler without upload', () => {
@@ -179,9 +181,13 @@ describe('processDiagnostics', () => {
   })
 
   it('wires app-level renderer and child deaths with the breadcrumb the renderer reported', () => {
-    startProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setInterval: () => ({}), setTimeout: () => ({}) })
-    const breadcrumb = { stage: 'request-built', messageCount: 3, imageCount: 8, imageBytes: 7_000_000, dataUrlCount: 8, dataUrlChars: 9_300_000, usedJSHeapSize: 900_000_000, jsHeapSizeLimit: 2_300_000_000 }
-    h.appListeners.get('ipc:app:chat-send-stage')?.({ sender: { id: 3, isDestroyed: () => false } }, breadcrumb)
+    const mainFrame = {}
+    const sender = { id: 3, isDestroyed: () => false, mainFrame }
+    startProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setInterval: () => ({}), setTimeout: () => ({}), getMainWindow: () => ({ isDestroyed: () => false, webContents: sender }) as never })
+    const breadcrumb = { stage: 'request-built', messageCount: 3, imageCount: 8, imageBytes: 7_000_000, dataUrlCount: 8, dataUrlChars: 9_300_000, usedJSHeapSize: 1_932_642_304, jsHeapSizeLimit: 2_248_146_944 }
+    // Only the main window's page is listened to.
+    h.appListeners.get('ipc:app:chat-send-stage')?.({ sender: { id: 4, isDestroyed: () => false, mainFrame }, senderFrame: mainFrame }, { ...breadcrumb, imageCount: 1 })
+    h.appListeners.get('ipc:app:chat-send-stage')?.({ sender, senderFrame: mainFrame }, breadcrumb)
     h.appListeners.get('render-process-gone')?.({}, { id: 3 }, { reason: 'crashed', exitCode: 5 })
     h.appListeners.get('child-process-gone')?.({}, { type: 'GPU', reason: 'oom', exitCode: 1 })
     const lines = readLines()
@@ -194,6 +200,68 @@ describe('processDiagnostics', () => {
     expect(lines[1].lastSendStage).toBeNull()
     h.appListeners.get('render-process-gone')?.({}, { id: 3 }, { reason: 'crashed', exitCode: 5 })
     expect(readLines()[2].lastSendStage).toBeNull()
+  })
+
+  it('accepts no breadcrumb at all when it was started without a main window', () => {
+    startProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setInterval: () => ({}), setTimeout: () => ({}) })
+    const mainFrame = {}
+    const breadcrumb = { stage: 'request-built', messageCount: 3, imageCount: 8, imageBytes: 1, dataUrlCount: 8, dataUrlChars: 2 }
+    h.appListeners.get('ipc:app:chat-send-stage')?.({ sender: { id: 3, isDestroyed: () => false, mainFrame }, senderFrame: mainFrame }, breadcrumb)
+    h.appListeners.get('render-process-gone')?.({}, { id: 3 }, { reason: 'crashed', exitCode: 5 })
+    expect(readLines()[0].lastSendStage).toBeNull()
+  })
+
+  it('marks the forced end of a hung renderer as the user\'s reload, once', () => {
+    const diagnostics = createProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setTimeout: () => ({}) })
+
+    expectRendererExit(7, 'reload-after-hang', 5_000)
+    diagnostics.recordRendererGone(7, { reason: 'crashed', exitCode: 5 })
+    // The reloaded page really crashes afterwards; another window's renderer was never announced.
+    diagnostics.recordRendererGone(7, { reason: 'crashed', exitCode: 5 })
+    diagnostics.recordRendererGone(8, { reason: 'crashed', exitCode: 5 })
+    // An announcement that was never followed by an exit in time names nothing later.
+    expectRendererExit(9, 'reload-after-hang', 5_000, -10_000)
+    diagnostics.recordRendererGone(9, { reason: 'crashed', exitCode: 5 })
+
+    expect(readLines().map(({ webContentsId, reason, expected }) => ({ webContentsId, reason, expected }))).toEqual([
+      { webContentsId: 7, reason: 'crashed', expected: 'reload-after-hang' },
+      { webContentsId: 7, reason: 'crashed', expected: undefined },
+      { webContentsId: 8, reason: 'crashed', expected: undefined },
+      { webContentsId: 9, reason: 'crashed', expected: undefined }
+    ])
+  })
+
+  it('records nothing once the Windows session is ending', () => {
+    const diagnostics = createProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setTimeout: () => ({}) })
+    markSessionEnding()
+
+    diagnostics.recordRendererGone(1, { reason: 'killed', exitCode: 1 })
+    diagnostics.recordChildGone({ type: 'GPU', reason: 'killed', exitCode: 1 })
+
+    expect(fs.existsSync(EVENTS)).toBe(false)
+    expect(console.error).not.toHaveBeenCalled()
+  })
+
+  it('does not report the app ending its own helper process, but records a helper that crashed', () => {
+    const diagnostics = createProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setTimeout: () => ({}) })
+
+    // The app kills these itself on timeout or cancel.
+    diagnostics.recordChildGone({ type: 'Utility', reason: 'killed', exitCode: 15, name: 'MagicPot document text', serviceName: 'MagicPot document text' })
+    diagnostics.recordChildGone({ type: 'Utility', reason: 'killed', exitCode: 15, serviceName: 'MagicPot SQLite preview' })
+    diagnostics.recordChildGone({ type: 'Utility', reason: 'killed', exitCode: 15, name: 'MagicPot Bridge isolation child' })
+    expect(fs.existsSync(EVENTS)).toBe(false)
+    expect(console.error).not.toHaveBeenCalled()
+
+    diagnostics.recordChildGone({ type: 'Utility', reason: 'oom', exitCode: -536870904, name: 'MagicPot document text' })
+    // Chromium's own services and a GPU process that merely has such a name are still deaths.
+    diagnostics.recordChildGone({ type: 'Utility', reason: 'killed', exitCode: 9, name: 'Network Service' })
+    diagnostics.recordChildGone({ type: 'GPU', reason: 'killed', exitCode: 9, name: 'MagicPot ' })
+
+    expect(readLines().map(({ processType, name, reason, appOwned }) => ({ processType, name, reason, appOwned }))).toEqual([
+      { processType: 'Utility', name: 'MagicPot document text', reason: 'oom', appOwned: true },
+      { processType: 'Utility', name: 'Network Service', reason: 'killed', appOwned: undefined },
+      { processType: 'GPU', name: 'MagicPot ', reason: 'killed', appOwned: undefined }
+    ])
   })
 
   it('keeps the file bounded to the last 200 lines', () => {

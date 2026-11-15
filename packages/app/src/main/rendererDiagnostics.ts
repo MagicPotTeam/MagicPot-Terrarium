@@ -1,13 +1,20 @@
 import { dialog, type BrowserWindow, type RenderProcessGoneDetails } from 'electron'
 import { performance } from 'node:perf_hooks'
-import { isAppQuitting } from './appQuitState'
+import { isAppQuitting, isSessionEnding, markSessionEnding } from './appQuitState'
+import { cancelExpectedRendererExit, expectRendererExit } from './expectedRendererExits'
 import {
   RENDERER_RECOVERED_CHANNEL,
   type RendererRecoveredEvent
 } from '@shared/utils/rendererRecoveryEvent'
 
 /** Why the recovery dialog is shown instead of an automatic reload. */
-export type RendererRecoveryPromptKind = 'not-automatic' | 'budget-exhausted'
+export type RendererRecoveryPromptKind =
+  | 'not-automatic'
+  | 'budget-exhausted'
+  /** A recovery reload was started but the window still shows a dead renderer. */
+  | 'reload-failed'
+  /** The user chose to reload a hung renderer, but the renderer could not be ended. */
+  | 'hang-not-ended'
 
 export type RendererGoneAction = 'ignore' | 'reload' | 'prompt'
 
@@ -30,6 +37,15 @@ type RendererDiagnosticsOptions = {
 const AUTOMATIC_RELOAD_REASONS = new Set(['oom', 'crashed', 'abnormal-exit'])
 const RECOVERY_WINDOW_MS = 60_000
 const MAX_AUTOMATIC_RECOVERIES = 3
+// A second, longer budget: deaths that come more than 20 s apart never exhaust the one above,
+// so a page that dies again and again (e.g. it runs out of memory on every load of a large
+// conversation) would be reloaded for ever without a word.
+const LONG_RECOVERY_WINDOW_MS = 10 * 60_000
+const MAX_AUTOMATIC_RECOVERIES_LONG = 6
+/** How long the forced end of a hung renderer may take before the user is asked instead. */
+export const HANG_TERMINATION_TIMEOUT_MS = 5_000
+/** When a recovery reload is checked: a renderer that is still dead then needs the dialog. */
+export const RELOAD_CHECK_DELAY_MS = 10_000
 /** How long a renderer may be unresponsive before the user is offered wait / reload. */
 export const UNRESPONSIVE_PROMPT_DELAY_MS = 15_000
 
@@ -54,6 +70,16 @@ function canUseWindow(window: BrowserWindow): boolean {
   return !window.isDestroyed() && !window.webContents.isDestroyed()
 }
 
+/** The confirmed quit, an update install or a Windows session end: every exit is expected then. */
+const isAppShuttingDown = (): boolean => isAppQuitting() || isSessionEnding()
+
+const RECOVERY_PROMPT_MESSAGES: Record<RendererRecoveryPromptKind, string> = {
+  'not-automatic': '窗口的显示进程已意外停止。',
+  'budget-exhausted': '窗口多次意外退出，自动恢复已暂停。',
+  'reload-failed': '窗口重新加载后仍未恢复。',
+  'hang-not-ended': '未能结束没有响应的窗口进程。'
+}
+
 /**
  * The recovery dialog. Reload is the default button: after a renderer death the window shows
  * nothing, so pressing Enter must bring the app back. Returns false when it could not be shown.
@@ -69,10 +95,7 @@ function showRendererRecoveryPrompt(
       .showMessageBox(window, {
         type: 'error',
         title: '窗口恢复',
-        message:
-          kind === 'budget-exhausted'
-            ? '窗口多次意外退出，自动恢复已暂停。'
-            : '窗口的显示进程已意外停止。',
+        message: RECOVERY_PROMPT_MESSAGES[kind],
         detail: '未保存的更改可能无法恢复。是否尝试重新加载窗口？',
         buttons: ['重新加载', '取消'],
         defaultId: 0,
@@ -134,7 +157,7 @@ export function handleRendererProcessGone(
 
   // A renderer that goes away while the app quits or its window closes is expected:
   // reloading it or raising a dialog would fight the shutdown.
-  if ((options.isShuttingDown ?? isAppQuitting)()) {
+  if ((options.isShuttingDown ?? isAppShuttingDown)()) {
     console.info('[App] Renderer recovery skipped because the app or the window is closing')
     return
   }
@@ -149,20 +172,26 @@ export function handleRendererProcessGone(
   recoverRenderer(window, details)
 }
 
+// Windows whose fallback dialog (below) is open: a burst of exits must raise one dialog, not a stack.
+const fallbackPromptPending = new WeakSet<BrowserWindow>()
+
 /** Fallback for callers without per-window state: ask once, reload when confirmed. */
 function promptForReloadOnce(
   window: BrowserWindow,
   details: RenderProcessGoneDetails,
   kind: RendererRecoveryPromptKind
 ): void {
-  if (!canUseWindow(window)) return
+  if (!canUseWindow(window) || fallbackPromptPending.has(window)) return
+  fallbackPromptPending.add(window)
   showRendererRecoveryPrompt(
     window,
     kind,
     (reload) => {
-      if (reload && canUseWindow(window) && !isAppQuitting()) reloadRenderer(window, details)
+      if (reload && canUseWindow(window) && !isAppShuttingDown()) reloadRenderer(window, details)
     },
-    () => undefined
+    () => {
+      fallbackPromptPending.delete(window)
+    }
   )
 }
 
@@ -173,24 +202,62 @@ export function attachRendererDiagnostics(
   const now = options.monotonicNow ?? (() => performance.now())
   const wallClockNow = options.wallClockNow ?? (() => Date.now())
   const reloadWindow = options.recoverRenderer ?? reloadRenderer
+  // Read once: the id is still needed when the window may already be gone.
+  const webContentsId = window.webContents.id
   // Set when a recovery reload was started; sent once to the page that the reload brings up.
   let pendingRecoveryNotice: RendererRecoveredEvent | null = null
-  const recoverRenderer = (_window: BrowserWindow, details: RenderProcessGoneDetails) => {
-    pendingRecoveryNotice = {
-      reason: details.reason,
-      exitCode: details.exitCode,
-      diedAt: wallClockNow()
-    }
-    reloadWindow(window, details)
-  }
   let lastObservedTime = 0
   let automaticRecoveryTimes: number[] = []
   let recoveryPromptPending = false
-  let sessionEnding = false
 
   const isWindowUsable = () => canUseWindow(window)
   const isShuttingDown = () =>
-    sessionEnding || isAppQuitting() || options.isShuttingDown?.() === true || !isWindowUsable()
+    isAppShuttingDown() || options.isShuttingDown?.() === true || !isWindowUsable()
+  const isRendererDead = () => {
+    try {
+      return typeof window.webContents.isCrashed === 'function' && window.webContents.isCrashed()
+    } catch {
+      return false
+    }
+  }
+
+  // A reload can be dropped without any event (for example when the process it was started in
+  // goes away). The window then keeps showing a dead renderer and nothing else would ever act:
+  // look once, a little later, and ask the user if that is the case.
+  let reloadCheckTimer: ReturnType<typeof setTimeout> | null = null
+  const clearReloadCheck = () => {
+    if (reloadCheckTimer) clearTimeout(reloadCheckTimer)
+    reloadCheckTimer = null
+  }
+  const checkReloadLater = (details: RenderProcessGoneDetails) => {
+    clearReloadCheck()
+    reloadCheckTimer = setTimeout(() => {
+      reloadCheckTimer = null
+      if (isShuttingDown() || !isRendererDead()) return
+      console.error('[App] Renderer recovery reload did not bring the window back', {
+        reason: details.reason,
+        exitCode: details.exitCode
+      })
+      promptForManualRecovery(window, details, 'reload-failed')
+    }, RELOAD_CHECK_DELAY_MS)
+    reloadCheckTimer.unref?.()
+  }
+  /** Starts a recovery reload and remembers what the page it brings up is told. */
+  const startRecoveryReload = (
+    details: RenderProcessGoneDetails,
+    notice: Pick<RendererRecoveredEvent, 'reason' | 'exitCode'> = details
+  ) => {
+    pendingRecoveryNotice = {
+      reason: notice.reason,
+      exitCode: notice.exitCode,
+      diedAt: wallClockNow()
+    }
+    reloadWindow(window, details)
+    checkReloadLater(details)
+  }
+  const recoverRenderer = (_window: BrowserWindow, details: RenderProcessGoneDetails) => {
+    startRecoveryReload(details)
+  }
   const promptForManualRecovery = (
     _window: BrowserWindow,
     details: RenderProcessGoneDetails,
@@ -220,9 +287,15 @@ export function attachRendererDiagnostics(
       Number.isFinite(observedTime) ? observedTime : lastObservedTime
     )
     automaticRecoveryTimes = automaticRecoveryTimes.filter(
-      (attemptTime) => lastObservedTime - attemptTime < RECOVERY_WINDOW_MS
+      (attemptTime) => lastObservedTime - attemptTime < LONG_RECOVERY_WINDOW_MS
     )
-    if (automaticRecoveryTimes.length >= MAX_AUTOMATIC_RECOVERIES) {
+    const recentRecoveries = automaticRecoveryTimes.filter(
+      (attemptTime) => lastObservedTime - attemptTime < RECOVERY_WINDOW_MS
+    ).length
+    if (
+      recentRecoveries >= MAX_AUTOMATIC_RECOVERIES ||
+      automaticRecoveryTimes.length >= MAX_AUTOMATIC_RECOVERIES_LONG
+    ) {
       console.error('[App] Renderer automatic recovery limit reached', {
         reason: details.reason,
         exitCode: details.exitCode
@@ -237,7 +310,7 @@ export function attachRendererDiagnostics(
   // Windows only: the user is logging off or shutting the PC down. The OS then ends every
   // process of the app; that must not be answered with a reload or a dialog.
   window.on('session-end', () => {
-    sessionEnding = true
+    markSessionEnding()
   })
 
   window.webContents.on('did-start-loading', () => {
@@ -246,6 +319,7 @@ export function attachRendererDiagnostics(
 
   window.webContents.on('did-finish-load', () => {
     console.info('[App] Renderer finished loading')
+    clearReloadCheck()
     const notice = pendingRecoveryNotice
     if (!notice || !isWindowUsable()) return
     pendingRecoveryNotice = null
@@ -272,27 +346,53 @@ export function attachRendererDiagnostics(
   let unresponsive = false
   let unresponsiveTimer: ReturnType<typeof setTimeout> | null = null
   let unresponsivePrompt: AbortController | null = null
-  // Until when an exit of the renderer is the forced end of a hang the user chose to reload.
-  let expectHangTerminationUntil = -Infinity
+  // Set while the forced end of a hung renderer (the user chose Reload) has not been reported yet.
+  let hangTerminationTimer: ReturnType<typeof setTimeout> | null = null
   const clearUnresponsiveTimer = () => {
     if (unresponsiveTimer) clearTimeout(unresponsiveTimer)
     unresponsiveTimer = null
   }
+  const clearHangTermination = () => {
+    if (hangTerminationTimer) clearTimeout(hangTerminationTimer)
+    hangTerminationTimer = null
+  }
+  const hangTerminationFailed = () => {
+    clearHangTermination()
+    cancelExpectedRendererExit(webContentsId)
+    if (isShuttingDown()) return
+    console.error('[App] The unresponsive renderer did not exit; asking how to recover')
+    promptForManualRecovery(
+      window,
+      { reason: 'unresponsive', exitCode: 0 } as unknown as RenderProcessGoneDetails,
+      'hang-not-ended'
+    )
+  }
   const reloadHungRenderer = () => {
-    pendingRecoveryNotice = { reason: 'unresponsive', exitCode: 0, diedAt: wallClockNow() }
-    expectHangTerminationUntil = now() + 10_000
-    console.warn('[App] Reloading the unresponsive renderer as the user chose')
+    if (hangTerminationTimer) return
+    console.warn('[App] Ending the unresponsive renderer to reload it, as the user chose')
+    // A hung renderer cannot process a reload, so it is ended first. The page is loaded again
+    // only when that exit is reported (see 'render-process-gone' below): a reload started while
+    // the old process is still going away is cancelled by its exit and the window stays dead.
+    expectRendererExit(webContentsId, 'reload-after-hang', HANG_TERMINATION_TIMEOUT_MS)
+    hangTerminationTimer = setTimeout(hangTerminationFailed, HANG_TERMINATION_TIMEOUT_MS)
+    hangTerminationTimer.unref?.()
     try {
-      // A hung renderer cannot process a reload; end it first, then load the page again.
       window.webContents.forcefullyCrashRenderer()
-      window.webContents.reload()
     } catch {
-      console.error('[App] Renderer recovery reload failed')
+      hangTerminationFailed()
     }
   }
   const askAboutHang = () => {
     unresponsiveTimer = null
-    if (!unresponsive || unresponsivePrompt || recoveryPromptPending || isShuttingDown()) return
+    if (
+      !unresponsive ||
+      unresponsivePrompt ||
+      recoveryPromptPending ||
+      hangTerminationTimer ||
+      isShuttingDown()
+    ) {
+      return
+    }
     const prompt = new AbortController()
     unresponsivePrompt = prompt
     try {
@@ -330,10 +430,19 @@ export function attachRendererDiagnostics(
     clearUnresponsiveTimer()
     unresponsivePrompt?.abort()
     unresponsivePrompt = null
-    if (now() <= expectHangTerminationUntil) {
-      // The user chose to reload a hung renderer: this exit is that reload, already handled.
-      expectHangTerminationUntil = -Infinity
-      console.error('[App] Renderer process gone', { reason: details.reason, exitCode: details.exitCode, expected: 'reload-after-hang' })
+    // Whatever was being checked belongs to the process before this exit; this exit gets its own answer.
+    clearReloadCheck()
+    if (hangTerminationTimer) {
+      // The forced end of a hung renderer the user chose to reload: not a new crash, so no dialog
+      // and no use of the crash budget. Now that the old process is gone the reload can work.
+      clearHangTermination()
+      console.warn('[App] Renderer process gone', {
+        reason: details.reason,
+        exitCode: details.exitCode,
+        expected: 'reload-after-hang'
+      })
+      if (isShuttingDown()) return
+      startRecoveryReload(details, { reason: 'unresponsive', exitCode: 0 })
       return
     }
     handleRendererProcessGone(window, details, {
@@ -343,7 +452,11 @@ export function attachRendererDiagnostics(
     })
   })
 
-  window.on('closed', clearUnresponsiveTimer)
+  window.on('closed', () => {
+    clearUnresponsiveTimer()
+    clearHangTermination()
+    clearReloadCheck()
+  })
 
   window.webContents.on('unresponsive', () => {
     console.error('[App] Renderer became unresponsive')

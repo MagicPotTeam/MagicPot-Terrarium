@@ -272,4 +272,44 @@ describe('preload capability boundary', () => {
     expect(sendMock).toHaveBeenCalledExactlyOnceWith('app:chat-send-stage', breadcrumb)
     expect(invokeMock).not.toHaveBeenCalled()
   })
+
+  it('adds the JS heap size from V8 itself and never forwards a heap number the page supplied', () => {
+    const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
+    const breadcrumb = { stage: 'request-built', messageCount: 9, imageCount: 40, imageBytes: 10, dataUrlCount: 40, dataUrlChars: 99 }
+    // Electron reports the heap statistics in KB.
+    const getHeapStatistics = vi.fn(() => ({ usedHeapSize: 1_887_346, heapSizeLimit: 2_195_456 }))
+    Object.defineProperty(process, 'getHeapStatistics', { configurable: true, value: getHeapStatistics })
+    try {
+      appDiagnostics.reportChatSendStage(breadcrumb)
+      // performance.memory is quantised and cached (26 MB during a real out-of-memory death):
+      // a page that sends its own heap number is not forwarded at all.
+      appDiagnostics.reportChatSendStage({ ...breadcrumb, usedJSHeapSize: 26_000_000, jsHeapSizeLimit: 2_330_000_000 })
+
+      expect(sendMock).toHaveBeenCalledExactlyOnceWith('app:chat-send-stage', {
+        ...breadcrumb,
+        usedJSHeapSize: 1_932_642_304,
+        jsHeapSizeLimit: 2_248_146_944
+      })
+      expect(getHeapStatistics).toHaveBeenCalledTimes(1)
+    } finally {
+      delete (process as { getHeapStatistics?: unknown }).getHeapStatistics
+    }
+  })
+
+  it('still forwards the counts when the heap statistics cannot be read', () => {
+    const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
+    const breadcrumb = { stage: 'reply-failed', messageCount: 2, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0 }
+    Object.defineProperty(process, 'getHeapStatistics', { configurable: true, value: () => { throw new Error('synthetic') } })
+    try {
+      expect(() => appDiagnostics.reportChatSendStage(breadcrumb)).not.toThrow()
+      Object.defineProperty(process, 'getHeapStatistics', { configurable: true, value: () => ({ usedHeapSize: Number.NaN, heapSizeLimit: undefined }) })
+      appDiagnostics.reportChatSendStage(breadcrumb)
+    } finally {
+      delete (process as { getHeapStatistics?: unknown }).getHeapStatistics
+    }
+    expect(sendMock.mock.calls).toEqual([
+      ['app:chat-send-stage', breadcrumb],
+      ['app:chat-send-stage', breadcrumb]
+    ])
+  })
 })

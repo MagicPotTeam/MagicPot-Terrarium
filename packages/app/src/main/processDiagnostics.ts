@@ -11,7 +11,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { isAppQuitting } from './appQuitState'
+import { isAppQuitting, isSessionEnding } from './appQuitState'
+import { takeExpectedRendererExit } from './expectedRendererExits'
 import {
   forgetChatSendStage,
   getLastChatSendStage,
@@ -61,6 +62,10 @@ export type ProcessEventLine = {
   webContentsId?: number
   /** pid the dead renderer had in the last sample, when known */
   lastKnownPid?: number
+  /** Set when the app ended the process itself, e.g. the user chose to reload a hung window. */
+  expected?: string
+  /** True for a helper process the app starts itself (document text, SQLite preview, Bridge child). */
+  appOwned?: true
   freeMemMb: number
   totalMemMb: number
   samples: ProcessMemorySample[]
@@ -242,7 +247,19 @@ export type ProcessDiagnosticsOptions = Partial<ProcessDiagnosticsDeps> & {
   /** The last send-stage breadcrumb of a renderer, by webContents id. */
   lastSendStageFor?: (webContentsId: number | undefined) => unknown
   crashDumpsDir?: () => string
+  /** The window whose page may report send-stage breadcrumbs; without it none is accepted. */
+  getMainWindow?: () => BrowserWindow | null
 }
+
+// The quit was confirmed, an update is being installed or Windows is ending the session:
+// processes that go away then are not deaths.
+const isShuttingDown = (): boolean => isAppQuitting() || isSessionEnding()
+
+// Helper processes the app starts with utilityProcess.fork all carry a 'MagicPot ...' service
+// name. The app ends them itself on timeout or cancel (reported as 'killed'): not a death.
+const isAppOwnedUtility = (details: { type: string; name?: string; serviceName?: string }): boolean =>
+  details.type === 'Utility' &&
+  [details.name, details.serviceName].some((name) => typeof name === 'string' && name.startsWith('MagicPot '))
 
 export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}): ProcessDiagnostics {
   const deps: ProcessDiagnosticsDeps = { ...defaultDeps(), ...options }
@@ -299,7 +316,9 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
 
   return {
     recordRendererGone(webContentsId, details) {
-      if (details.reason === 'clean-exit' || isAppQuitting()) return
+      // Taken even when nothing is written, so that it cannot name a later exit.
+      const expected = takeExpectedRendererExit(webContentsId)
+      if (details.reason === 'clean-exit' || isShuttingDown()) return
       const lastKnownPid = lastKnownPidOf(webContentsId)
       lastRendererGoneAt.set(webContentsId, deps.now())
       write({
@@ -309,11 +328,14 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
         exitCode: details.exitCode,
         webContentsId,
         ...(lastKnownPid ? { lastKnownPid } : {}),
+        ...(expected ? { expected } : {}),
         lastSendStage: lastSendStageFor(webContentsId) ?? null
       })
     },
     recordChildGone(details) {
-      if (details.reason === 'clean-exit' || isAppQuitting()) return
+      if (details.reason === 'clean-exit' || isShuttingDown()) return
+      const appOwned = isAppOwnedUtility(details)
+      if (appOwned && details.reason === 'killed') return
       console.error('[App] Child process gone', {
         type: details.type,
         name: details.name,
@@ -326,6 +348,7 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
         ...(details.name || details.serviceName ? { name: details.name || details.serviceName } : {}),
         reason: details.reason,
         exitCode: details.exitCode,
+        ...(appOwned ? { appOwned } : {}),
         lastSendStage: lastSendStageFor(undefined) ?? null
       })
     },
@@ -352,7 +375,7 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
 export function startProcessDiagnostics(options: ProcessDiagnosticsOptions = {}): ProcessDiagnostics {
   const deps: ProcessDiagnosticsDeps = { ...defaultDeps(), ...options }
   const diagnostics = createProcessDiagnostics(options)
-  registerChatSendStageIpc()
+  registerChatSendStageIpc(options.getMainWindow ?? (() => null))
   app.on('render-process-gone', (_event, webContents, details) => {
     diagnostics.recordRendererGone(webContents.id, details)
     // A later death of the reloaded page must not repeat this page's last stage.

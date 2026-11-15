@@ -62,6 +62,42 @@ describe.each([false, true])('send-stage breadcrumbs, stream=%s', (stream) => {
     }
   })
 
+  it('reports a failed or aborted request, so that a later death is not placed in a send that had ended', async () => {
+    const f = setup()
+    const failure = new Error('provider said no')
+    const dispatch = (stream ? window.api.svcLLMProxy.chatStream : window.api.svcLLMProxy.chat) as unknown as ReturnType<typeof vi.fn>
+    dispatch.mockImplementation(async () => { f.order.push('dispatch'); throw failure })
+
+    // The caller gets the very same error.
+    await expect(f.send()).rejects.toBe(failure)
+
+    expect(f.order).toEqual(['request-start', 'images-checked', 'request-built', 'dispatch', 'reply-failed'])
+    const failed = f.reportChatSendStage.mock.calls.at(-1)?.[0]
+    expect(failed).toEqual({ stage: 'reply-failed', messageCount: 1, imageCount: 3, imageBytes: 3000, dataUrlCount: 0, dataUrlChars: 0 })
+    expect(JSON.stringify(failed)).not.toContain('secret')
+  })
+
+  it('reports a request that was aborted before anything was read', async () => {
+    const f = setup()
+    const controller = new AbortController()
+    controller.abort()
+    const options = { config, messages: messages(), profileId: 'fixture', signal: controller.signal }
+
+    await expect(stream ? requestChatCompletionStream({ ...options, onEvent: vi.fn() }) : requestChatCompletion(options)).rejects.toBeDefined()
+
+    expect(f.order).toEqual(['reply-failed'])
+  })
+
+  it('carries no JS heap number: performance.memory does not follow the heap', async () => {
+    const f = setup()
+    vi.stubGlobal('performance', { ...performance, now: () => 0, memory: { usedJSHeapSize: 26_000_000, jsHeapSizeLimit: 2_330_000_000 } })
+    await f.send()
+    for (const [breadcrumb] of f.reportChatSendStage.mock.calls) {
+      expect(breadcrumb).not.toHaveProperty('usedJSHeapSize')
+      expect(breadcrumb).not.toHaveProperty('jsHeapSizeLimit')
+    }
+  })
+
   it('never lets a failing diagnostics bridge affect the send', async () => {
     const f = setup()
     f.reportChatSendStage.mockImplementation(() => { throw new Error('bridge gone') })

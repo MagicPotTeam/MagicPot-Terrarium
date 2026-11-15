@@ -13,7 +13,20 @@ export function isAppQuitting(): boolean {
   return appQuitting
 }
 
-/** Test seam: the flag is terminal in production. */
+// Windows only: the user is logging off or shutting the PC down. The OS then ends every process
+// of the app; none of those exits is a death worth answering or recording.
+let sessionEnding = false
+
+export function markSessionEnding(): void {
+  sessionEnding = true
+}
+
+export function isSessionEnding(): boolean {
+  return sessionEnding
+}
+
+/** Test seam: the flags are terminal in production. */
 export function resetAppQuittingForTests(): void {
   appQuitting = false
+  sessionEnding = false
 }

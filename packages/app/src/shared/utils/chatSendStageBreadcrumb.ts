@@ -13,7 +13,9 @@ export const CHAT_SEND_STAGES = [
   /** Attachments were read / encoded and the request is about to be dispatched. */
   'request-built',
   /** The dispatched request returned. */
-  'reply-finished'
+  'reply-finished',
+  /** The request ended with an error or was aborted, at whatever stage it had reached. */
+  'reply-failed'
 ] as const
 
 export type ChatSendStage = (typeof CHAT_SEND_STAGES)[number]
@@ -27,7 +29,18 @@ export type ChatSendStageBreadcrumb = {
   /** data: URLs among all attachments and their total length in characters. */
   dataUrlCount: number
   dataUrlChars: number
-  /** performance.memory, when the renderer exposes it */
+}
+
+/**
+ * What the main process keeps: the page's counts plus the size of this renderer's JS heap in bytes.
+ *
+ * The two heap numbers are attached by the PRELOAD from V8's own heap statistics
+ * (process.getHeapStatistics()), never by the page: the page's performance.memory is quantised and
+ * cached by Chromium (during a real out-of-memory death it said 26 MB while the heap was at
+ * 1.9 GB), and a number the page could choose is not evidence. A page that supplies them is not
+ * a breadcrumb (see parseChatSendStageBreadcrumb).
+ */
+export type ChatSendStageReport = ChatSendStageBreadcrumb & {
   usedJSHeapSize?: number
   jsHeapSizeLimit?: number
 }
@@ -41,8 +54,7 @@ const isCount = (value: unknown): value is number =>
 /** Walks attachments only; O(attachments), reads string lengths and prefixes, never content. */
 export function summarizeChatSendStage(
   stage: ChatSendStage,
-  messages: readonly MessageLike[],
-  memory?: { usedJSHeapSize?: unknown; jsHeapSizeLimit?: unknown } | null
+  messages: readonly MessageLike[]
 ): ChatSendStageBreadcrumb {
   let imageCount = 0
   let imageBytes = 0
@@ -63,18 +75,7 @@ export function summarizeChatSendStage(
       else if (isDataUrl) imageBytes += Math.floor((url.length - url.indexOf(',') - 1) * 0.75)
     }
   }
-  const usedJSHeapSize = memory?.usedJSHeapSize
-  const jsHeapSizeLimit = memory?.jsHeapSizeLimit
-  return {
-    stage,
-    messageCount: messages.length,
-    imageCount,
-    imageBytes,
-    dataUrlCount,
-    dataUrlChars,
-    ...(isCount(usedJSHeapSize) ? { usedJSHeapSize } : {}),
-    ...(isCount(jsHeapSizeLimit) ? { jsHeapSizeLimit } : {})
-  }
+  return { stage, messageCount: messages.length, imageCount, imageBytes, dataUrlCount, dataUrlChars }
 }
 
 const BREADCRUMB_KEYS = new Set([
@@ -83,12 +84,13 @@ const BREADCRUMB_KEYS = new Set([
   'imageCount',
   'imageBytes',
   'dataUrlCount',
-  'dataUrlChars',
-  'usedJSHeapSize',
-  'jsHeapSizeLimit'
+  'dataUrlChars'
 ])
 
-/** Accepts exactly the breadcrumb shape (known keys, a known stage, non-negative integers). */
+/**
+ * Accepts exactly the shape the page may report (known keys, a known stage, non-negative
+ * integers). There is no heap number in it: those come from the preload.
+ */
 export function parseChatSendStageBreadcrumb(value: unknown): ChatSendStageBreadcrumb | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const record = value as Record<string, unknown>
@@ -97,17 +99,38 @@ export function parseChatSendStageBreadcrumb(value: unknown): ChatSendStageBread
   if (!CHAT_SEND_STAGES.includes(record.stage as ChatSendStage)) return null
   const required = ['messageCount', 'imageCount', 'imageBytes', 'dataUrlCount', 'dataUrlChars'] as const
   if (required.some((key) => !isCount(record[key]))) return null
-  for (const key of ['usedJSHeapSize', 'jsHeapSizeLimit'] as const) {
-    if (record[key] !== undefined && !isCount(record[key])) return null
-  }
   return {
     stage: record.stage as ChatSendStage,
     messageCount: record.messageCount as number,
     imageCount: record.imageCount as number,
     imageBytes: record.imageBytes as number,
     dataUrlCount: record.dataUrlCount as number,
-    dataUrlChars: record.dataUrlChars as number,
-    ...(record.usedJSHeapSize !== undefined ? { usedJSHeapSize: record.usedJSHeapSize as number } : {}),
-    ...(record.jsHeapSizeLimit !== undefined ? { jsHeapSizeLimit: record.jsHeapSizeLimit as number } : {})
+    dataUrlChars: record.dataUrlChars as number
   }
+}
+
+const HEAP_KEYS = ['usedJSHeapSize', 'jsHeapSizeLimit'] as const
+
+/** Adds the heap numbers the preload read; anything that is not a non-negative integer is left out. */
+export function withJsHeapNumbers(
+  breadcrumb: ChatSendStageBreadcrumb,
+  heap: { usedJSHeapSize?: unknown; jsHeapSizeLimit?: unknown } | null | undefined
+): ChatSendStageReport {
+  const report: ChatSendStageReport = { ...breadcrumb }
+  for (const key of HEAP_KEYS) {
+    const value = heap?.[key]
+    if (isCount(value)) report[key] = value
+  }
+  return report
+}
+
+/** What main accepts on the channel: a breadcrumb plus, optionally, the two heap numbers. */
+export function parseChatSendStageReport(value: unknown): ChatSendStageReport | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const { usedJSHeapSize, jsHeapSizeLimit, ...counts } = value as Record<string, unknown>
+  const breadcrumb = parseChatSendStageBreadcrumb(counts)
+  if (!breadcrumb) return null
+  if (usedJSHeapSize !== undefined && !isCount(usedJSHeapSize)) return null
+  if (jsHeapSizeLimit !== undefined && !isCount(jsHeapSizeLimit)) return null
+  return withJsHeapNumbers(breadcrumb, { usedJSHeapSize, jsHeapSizeLimit })
 }

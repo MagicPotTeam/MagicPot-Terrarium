@@ -155,7 +155,7 @@ if (!launcherSmokeTest)
   app.whenReady().then(async () => {
     await setupReadyAppRuntime()
     try {
-      startProcessDiagnostics()
+      startProcessDiagnostics({ getMainWindow: () => mainWindow })
     } catch (error) {
       // Diagnostics only: never let them stop the app from starting.
       console.warn('[App] Process diagnostics could not be started', error)

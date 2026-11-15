@@ -18,7 +18,8 @@ import {
 } from '@shared/utils/rendererRecoveryEvent'
 import {
   CHAT_SEND_STAGE_CHANNEL,
-  parseChatSendStageBreadcrumb
+  parseChatSendStageBreadcrumb,
+  withJsHeapNumbers
 } from '@shared/utils/chatSendStageBreadcrumb'
 
 // 渲染进程的自定义 API
@@ -151,11 +152,30 @@ const appEvents: AppEventBridge = {
   onRendererRecovered: subscribeToRendererRecovery
 }
 
-// Fire-and-forget: one small breadcrumb per chat send stage (counts and sizes only).
+const BYTES_PER_KB = 1024
+
+// The JS heap of this renderer, from V8 itself (Electron reports it in KB). The page is not asked:
+// its performance.memory is quantised and cached, and stayed at 26 MB during a real out-of-memory
+// death. Reading the statistics allocates nothing in the heap beyond one small object.
+function readJsHeapNumbers(): { usedJSHeapSize: number; jsHeapSizeLimit: number } | null {
+  try {
+    const statistics = typeof process.getHeapStatistics === 'function' ? process.getHeapStatistics() : null
+    if (!statistics) return null
+    return {
+      usedJSHeapSize: Math.round(statistics.usedHeapSize * BYTES_PER_KB),
+      jsHeapSizeLimit: Math.round(statistics.heapSizeLimit * BYTES_PER_KB)
+    }
+  } catch {
+    return null
+  }
+}
+
+// Fire-and-forget: one small breadcrumb per chat send stage. The page supplies counts and sizes
+// only; the JS heap size is added here.
 const appDiagnostics: AppDiagnosticsBridge = {
   reportChatSendStage: (breadcrumb) => {
     const checked = parseChatSendStageBreadcrumb(breadcrumb)
-    if (checked) ipcRenderer.send(CHAT_SEND_STAGE_CHANNEL, checked)
+    if (checked) ipcRenderer.send(CHAT_SEND_STAGE_CHANNEL, withJsHeapNumbers(checked, readJsHeapNumbers()))
   }
 }
 

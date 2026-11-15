@@ -31,7 +31,9 @@ export default function RendererRecoveryNotice(): React.JSX.Element | null {
         data-testid="renderer-recovery-notice"
         closeText={t('app_shell.renderer_recovery.dismiss')}
         onClose={() => setRecovery(null)}
-        sx={{ maxWidth: 560 }}
+        // 'no-drag': the notice sits at the top edge, next to the title bar's drag strip (and inside
+        // it in a narrow window); a drag region would swallow the click on the close button.
+        sx={{ maxWidth: 560, WebkitAppRegion: 'no-drag' }}
       >
         <AlertTitle>{t('app_shell.renderer_recovery.title')}</AlertTitle>
         <Box component="span" sx={{ display: 'block' }}>
