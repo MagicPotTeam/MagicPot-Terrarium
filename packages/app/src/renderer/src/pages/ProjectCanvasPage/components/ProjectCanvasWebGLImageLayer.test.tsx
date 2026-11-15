@@ -1440,6 +1440,87 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       }
     )
 
+    it('gives up unused decodes fifteen seconds after nobody wanted them', async () => {
+      const { default: Layer, PROJECT_CANVAS_WEBGL_UNUSED_DECODE_MAX_AGE_MS: maxAgeMs } =
+        await import('./ProjectCanvasWebGLImageLayer')
+      const bitmaps: ReturnType<typeof createBitmap>[] = []
+      const pending: ReturnType<typeof deferredBitmap>[] = []
+      const decode = vi.fn(() => {
+        const next = deferredBitmap()
+        pending.push(next)
+        return next.promise
+      })
+      vi.stubGlobal('createImageBitmap', decode)
+      const items = selectableItems(6)
+      const metrics = vi.fn()
+      const view = (selected: string[]) => (
+        <Layer
+          items={items}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          selectedIds={new Set(selected)}
+          onMetricsChange={metrics}
+        />
+      )
+      const { unmount, rerender } = render(view([]))
+      await waitFor(() => expect(getLiveSpriteByLabel(items[5].id)).not.toBeNull())
+
+      // Two source decodes finish after the selection that asked for them is gone.
+      rerender(view([items[0].id, items[1].id]))
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(2))
+      rerender(view([]))
+
+      // From here the clock and the timers are moved by hand; animation frames stay real.
+      const realSetTimeout = globalThis.setTimeout
+      const startedAt = performance.now()
+      let elapsedMs = 0
+      vi.spyOn(window.performance, 'now').mockImplementation(() => startedAt + elapsedMs)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const advance = async (ms: number) => {
+        for (let passed = 0; passed < ms; passed += 250) {
+          elapsedMs += 250
+          await act(async () => {
+            vi.advanceTimersByTime(250)
+            await new Promise((resolve) => realSetTimeout(resolve, 20))
+          })
+        }
+      }
+      try {
+        await act(async () => {
+          for (const next of pending.splice(0)) {
+            const bitmap = createBitmap(640, 640)
+            bitmaps.push(bitmap)
+            next.resolve(bitmap)
+          }
+        })
+        await advance(1000)
+        expect(lastMetrics(metrics)).toMatchObject({
+          sourceImageCacheCount: 2,
+          decodedResidentBytes: 2 * 640 * 640 * 4
+        })
+        expect(bitmaps.some((bitmap) => isBitmapClosed(bitmap))).toBe(false)
+
+        // Still there shortly before the limit...
+        await advance(maxAgeMs - 3000)
+        expect(bitmaps.some((bitmap) => isBitmapClosed(bitmap))).toBe(false)
+        // ...and closed after it, with nothing left on the books.
+        await advance(4000)
+        bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
+        expect(lastMetrics(metrics)).toMatchObject({
+          sourceImageCacheCount: 0,
+          decodedResidentBytes: 0
+        })
+        expect(eagerTextureUploads).toEqual([])
+      } finally {
+        vi.useRealTimers()
+        vi.restoreAllMocks()
+      }
+
+      // The image is decoded again when it is wanted the next time.
+      rerender(view([items[0].id]))
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(3))
+      unmount()
+    }, 30000)
+
     it('evicts the oldest waiting decodes above the hard limit without starving the upload', async () => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
       const bitmaps: ReturnType<typeof createBitmap>[] = []

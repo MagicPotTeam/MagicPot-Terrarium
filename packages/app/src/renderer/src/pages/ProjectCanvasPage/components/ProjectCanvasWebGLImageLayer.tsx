@@ -154,6 +154,8 @@ type CachedImageRecord = {
   createdGeneration: number
   wantedGeneration: number
   lastTouchedAt: number
+  // When the record was first found to hold pixels that no reconcile pass wants.
+  unusedSinceMs: number | null
 }
 
 function getProjectCanvasDecodedVariantKey(record: CachedImageRecord): string {
@@ -284,6 +286,9 @@ export const PROJECT_CANVAS_WEBGL_SELECTED_PROTECTED_LIMIT = 32
 // the selection moved on) are kept for a quick return, but only a few and only so many bytes.
 export const PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_ENTRIES = 4
 export const PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_BYTES = 128 * 1024 * 1024
+// ...and only for this long. The quick return matters right after the zoom or the selection
+// changed; later the pixels (16 MiB per 2048 px image) are worth more than the saved decode.
+export const PROJECT_CANVAS_WEBGL_UNUSED_DECODE_MAX_AGE_MS = 15_000
 // Hard limit for every decoded image the layer holds, including the ones waiting for their
 // first upload.
 export const PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES = 256 * 1024 * 1024
@@ -1389,6 +1394,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     new CanvasImageResourceBudgetTracker(getProjectCanvasWebGLResourceBudgetLimits(true))
   )
   const decodedRecordTouchCounterRef = useRef(0)
+  const unusedDecodeExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textureBudgetEvictionCountRef = useRef(0)
   const previewStateRef = useRef(new Map<string, ProjectCanvasImagePreview>())
   const renderItemsRef = useRef(new Map<string, ProjectCanvasRenderableImage>())
@@ -1812,11 +1818,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     [forgetCachedImageRecord, releaseCachedImageRecord]
   )
 
+  const pruneDecodedPixelRecordsRef = useRef<() => void>(() => undefined)
+
   /**
    * Bounds the decoded images that are held on the CPU side. A decode that is on the GPU was
    * released at its upload and costs nothing here. What is left is (a) decodes waiting for
    * the next reconcile pass or for their turn in a batched sprite creation, which are kept,
-   * and (b) decodes no pass wants any more, which are a small LRU. Everything together stays
+   * and (b) decodes no pass wants any more, which are a small LRU that also expires (a timer
+   * calls this function again when the oldest is due). Everything together stays
    * under the hard limit; the newest decode is never evicted, so a pass always has one to
    * upload and the queue cannot starve.
    */
@@ -1832,6 +1841,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     imageCacheRef.current.forEach(collect)
     thumbnailCacheRef.current.forEach(collect)
     if (holders.length === 0) {
+      if (unusedDecodeExpiryTimerRef.current !== null) {
+        clearTimeout(unusedDecodeExpiryTimerRef.current)
+        unusedDecodeExpiryTimerRef.current = null
+      }
       return
     }
 
@@ -1847,25 +1860,53 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     const byRecency = (left: CachedImageRecord, right: CachedImageRecord) =>
       right.lastTouchedAt - left.lastTouchedAt
 
-    const kept: CachedImageRecord[] = holders.filter((record) => !isUnused(record))
+    const now = window.performance.now()
+    const kept: CachedImageRecord[] = []
     let unusedCount = 0
     let unusedBytes = 0
+    let nextExpiryAt = Number.POSITIVE_INFINITY
     holders
-      .filter(isUnused)
+      .filter((record) => {
+        if (isUnused(record)) {
+          return true
+        }
+        record.unusedSinceMs = null
+        kept.push(record)
+        return false
+      })
       .sort(byRecency)
       .forEach((record) => {
+        record.unusedSinceMs ??= now
+        const expiresAt = record.unusedSinceMs + PROJECT_CANVAS_WEBGL_UNUSED_DECODE_MAX_AGE_MS
         const bytes = getCanvasImageDecodedByteSize(record.image)
         if (
+          now < expiresAt &&
           unusedCount < PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_ENTRIES &&
           unusedBytes + bytes <= PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_BYTES
         ) {
           unusedCount += 1
           unusedBytes += bytes
+          nextExpiryAt = Math.min(nextExpiryAt, expiresAt)
           kept.push(record)
           return
         }
         evict(record)
       })
+
+    if (unusedDecodeExpiryTimerRef.current !== null) {
+      clearTimeout(unusedDecodeExpiryTimerRef.current)
+      unusedDecodeExpiryTimerRef.current = null
+    }
+    if (Number.isFinite(nextExpiryAt)) {
+      unusedDecodeExpiryTimerRef.current = setTimeout(
+        () => {
+          unusedDecodeExpiryTimerRef.current = null
+          pruneDecodedPixelRecordsRef.current()
+          reportMetrics({})
+        },
+        Math.max(0, nextExpiryAt - now) + 1
+      )
+    }
 
     let totalBytes = kept.reduce(
       (total, record) => total + getCanvasImageDecodedByteSize(record.image),
@@ -1895,7 +1936,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       totalBytes -= getCanvasImageDecodedByteSize(record.image)
       evict(record)
     }
-  }, [deleteCachedImageRecord, getCanvasImageDecodedByteSize])
+  }, [deleteCachedImageRecord, getCanvasImageDecodedByteSize, reportMetrics])
+  pruneDecodedPixelRecordsRef.current = pruneDecodedPixelRecords
 
   const pruneDecodedImageCacheForResidentTargets = useCallback(
     ({
@@ -2005,7 +2047,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         textureGeneration: textureGenerationByIdRef.current.get(itemId) ?? 0,
         createdGeneration: spriteReconcileGenerationRef.current,
         wantedGeneration: -1,
-        lastTouchedAt: (decodedRecordTouchCounterRef.current += 1)
+        lastTouchedAt: (decodedRecordTouchCounterRef.current += 1),
+        unusedSinceMs: null
       }
       cache.set(itemId, record)
       if (decodedAssetReleaseId) {
@@ -2739,6 +2782,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(webglErrorCheckTimerRef.current)
         webglErrorCheckTimerRef.current = null
       }
+      if (unusedDecodeExpiryTimerRef.current != null) {
+        clearTimeout(unusedDecodeExpiryTimerRef.current)
+        unusedDecodeExpiryTimerRef.current = null
+      }
       if (qualityTransitionTimerRef.current != null) {
         clearTimeout(qualityTransitionTimerRef.current)
         qualityTransitionTimerRef.current = null
@@ -2972,6 +3019,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (webglErrorCheckTimerRef.current !== null) {
         clearTimeout(webglErrorCheckTimerRef.current)
         webglErrorCheckTimerRef.current = null
+      }
+      if (unusedDecodeExpiryTimerRef.current !== null) {
+        clearTimeout(unusedDecodeExpiryTimerRef.current)
+        unusedDecodeExpiryTimerRef.current = null
       }
       if (imageVersionDeferredTimerRef.current !== null) {
         clearTimeout(imageVersionDeferredTimerRef.current)
