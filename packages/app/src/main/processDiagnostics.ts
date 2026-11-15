@@ -284,9 +284,13 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
     schedulePrune()
   }
 
+  // When each renderer last died: a sample from before that belongs to the previous (dead) process.
+  const lastRendererGoneAt = new Map<number, number>()
   const lastKnownPidOf = (webContentsId: number) => {
     const samples = ring.snapshot()
+    const previousDeath = lastRendererGoneAt.get(webContentsId) ?? -Infinity
     for (let index = samples.length - 1; index >= 0; index -= 1) {
+      if (samples[index].at <= previousDeath) break
       const pid = samples[index].windowRenderers[String(webContentsId)]
       if (pid) return pid
     }
@@ -297,6 +301,7 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
     recordRendererGone(webContentsId, details) {
       if (details.reason === 'clean-exit' || isAppQuitting()) return
       const lastKnownPid = lastKnownPidOf(webContentsId)
+      lastRendererGoneAt.set(webContentsId, deps.now())
       write({
         kind: 'renderer-gone',
         processType: 'renderer',

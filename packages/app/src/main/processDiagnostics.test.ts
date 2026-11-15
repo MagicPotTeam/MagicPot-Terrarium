@@ -133,6 +133,32 @@ describe('processDiagnostics', () => {
     expect(line.samples.at(-1).mainHeapUsedMb).toBe(50)
   })
 
+  it('does not name the pid of an earlier renderer when the reloaded one died before it was sampled', () => {
+    const clock = createClock()
+    let rendererPid = 11
+    const diagnostics = createProcessDiagnostics({
+      now: clock.now,
+      getAppMetrics: () => [],
+      getWindowRenderers: (): Record<string, number> => (rendererPid ? { '7': rendererPid } : {}),
+      logsDir: () => LOGS,
+      setTimeout: () => ({})
+    })
+    diagnostics.sampleNow()
+    clock.advance(1000)
+    rendererPid = 0
+    diagnostics.recordRendererGone(7, { reason: 'crashed', exitCode: 5 })
+    clock.advance(1000)
+    // The reloaded renderer dies before the next 3 s sample.
+    diagnostics.recordRendererGone(7, { reason: 'crashed', exitCode: 5 })
+    clock.advance(3000)
+    rendererPid = 12
+    diagnostics.sampleNow()
+    clock.advance(1000)
+    diagnostics.recordRendererGone(7, { reason: 'crashed', exitCode: 5 })
+
+    expect(readLines().map((line) => line.lastKnownPid)).toEqual([11, undefined, 12])
+  })
+
   it('records GPU and utility deaths, ignores clean exits and everything while quitting', () => {
     const diagnostics = createProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setTimeout: () => ({}) })
 
