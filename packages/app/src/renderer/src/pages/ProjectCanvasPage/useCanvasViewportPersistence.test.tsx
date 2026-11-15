@@ -1004,4 +1004,97 @@ describe('useCanvasViewportPersistence', () => {
       await Promise.resolve()
     })
   })
+
+  it('does not mark the board dirty for a change that is not persisted', async () => {
+    vi.useFakeTimers()
+    const restoredItem = createImageItem({ id: 'clean-image' })
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [restoredItem],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+
+    const { result } = renderHook(() => {
+      const [items, setItems] = React.useState<CanvasItem[]>([])
+      const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+      const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+      const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+      const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+      const [stageScale, setStageScale] = React.useState(1)
+      const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+      useCanvasViewportPersistence({
+        config: DEFAULT_CONFIG,
+        canvasId: 'canvas-clean-signature-test',
+        items,
+        groups,
+        groupBranches,
+        selectedIds,
+        figmaBinding,
+        stagePos,
+        stageScale,
+        stageSize: { width: 1280, height: 720 },
+        maxFitStageScale: 2,
+        clampStageScale: (value: number) => value,
+        getCanvasItemsVisualBounds: () => null,
+        hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+        nextZIndexRef: { current: 1 },
+        setItems,
+        setItemsWithHistory: setItems,
+        setGroups,
+        setGroupBranches,
+        setSelectedIds,
+        setStagePos,
+        setStageScale,
+        setFigmaBinding,
+        handleImportFiles: vi.fn(),
+        addModel3DToCanvas: vi.fn(),
+        addVideoToCanvas: vi.fn()
+      })
+
+      return { items, setItems }
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+      await Promise.resolve()
+    })
+    expect(result.current.items).toHaveLength(1)
+    mockSaveCanvasItems.mockClear()
+
+    // A thumbnail manifest, a decoded image and a session-only identity arrive after the restore.
+    act(() => {
+      result.current.setItems((current) =>
+        current.map(
+          (item) =>
+            ({
+              ...item,
+              thumbnailSet: { levels: [{ size: 256, url: 'blob:thumb' }] },
+              image: { width: 100, height: 100 },
+              sourceIdentity: { kind: 'session', id: 'session-1' }
+            }) as unknown as CanvasItem
+        )
+      )
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000)
+      await Promise.resolve()
+    })
+    window.dispatchEvent(new Event('blur'))
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+
+    // A persisted change still does.
+    act(() => {
+      result.current.setItems((current) => current.map((item) => ({ ...item, x: item.x + 10 })))
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+      await Promise.resolve()
+    })
+    expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+  })
 })

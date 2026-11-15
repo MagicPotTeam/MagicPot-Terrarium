@@ -17,6 +17,12 @@ import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { getElectronCanvasFilePath } from './canvasLocalFileSource'
 import { assertCanvasImportFileSize, parseCanvasImportText } from './canvasImportPreflight'
+import {
+  serializeCanvasItems as serializeItems,
+  stripCanvasAssetKeyTags,
+  type CanvasAssetKeyTagged,
+  type SerializableCanvasItem
+} from './canvasItemSerialization'
 
 const DB_NAME = 'magicpot-canvas'
 const DB_VERSION = 2 // bumped for new blob store
@@ -29,8 +35,6 @@ const AUTOSAVE_CANVAS_FILENAME = PROJECT_CANVAS_FILENAME
 const AUTOSAVE_PROJECT_LIMIT = 8
 const PROJECT_ASSET_DIRNAME = 'assets'
 
-// Serializable canvas items without DOM-only fields.
-type SerializableCanvasItem = Omit<CanvasItem, 'image'> & { image?: never }
 
 interface CanvasPersistedData {
   items: SerializableCanvasItem[]
@@ -98,38 +102,6 @@ function openDB(): Promise<IDBDatabase> {
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => rejectCanvasStorageError(reject, 'IndexedDB open', request.error)
-  })
-}
-
-/**
- * Serialize canvas items and drop non-serializable fields such as HTMLImageElement.
- */
-function serializeItems(items: CanvasItem[]): SerializableCanvasItem[] {
-  return items.map((item) => {
-    if (item.type === 'image') {
-      const { image, sourceFile, thumbnailSet: _thumbnailSet, sourceIdentity, ...rest } = item
-      const persistedSourceIdentity =
-        sourceIdentity?.kind === 'local-file' ? sourceIdentity : undefined
-      // Source-size hints may come from stale thumbnail or display metadata.
-      // Without pixel provenance, even a geometrical identity can be a crop.
-      // Persist it verbatim; source and crop remain separate in project mirrors.
-      return stripCanvasAssetKeyTags({
-        ...rest,
-        ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
-      }) as SerializableCanvasItem
-    }
-    if (item.type === 'model3d') {
-      const { deferRender, sourceFile, ...rest } = item as CanvasItem & {
-        deferRender?: boolean
-        sourceFile?: Blob
-      }
-      return stripCanvasAssetKeyTags(rest) as SerializableCanvasItem
-    }
-    if (item.type === 'video' || item.type === 'file') {
-      const { sourceFile, ...rest } = item
-      return stripCanvasAssetKeyTags(rest) as SerializableCanvasItem
-    }
-    return item as SerializableCanvasItem
   })
 }
 
@@ -260,40 +232,12 @@ const CANVAS_ASSET_KEY_PATTERN = /^[bfu]-[0-9a-f]{40}$/
 const CANVAS_ASSET_KEY_CACHE_LIMIT = 20_000
 const CANVAS_ASSET_SOURCE_SLOT = 'src'
 
-type CanvasAssetKeyTagged = {
-  assetKey?: unknown
-  assetKeySource?: unknown
-  textureAssetKeys?: unknown
-  textureAssetKeySources?: unknown
-}
-
 function isCanvasAssetKey(value: unknown): value is string {
   return typeof value === 'string' && CANVAS_ASSET_KEY_PATTERN.test(value)
 }
 
 function getCanvasTextureAssetSlot(textureName: string): string {
   return `tex:${textureName}`
-}
-
-/** Drops the in-memory key tags; the save path writes the persisted ones itself. */
-function stripCanvasAssetKeyTags<T extends object>(item: T): T {
-  const tagged = item as T & CanvasAssetKeyTagged
-  if (
-    tagged.assetKey === undefined &&
-    tagged.assetKeySource === undefined &&
-    tagged.textureAssetKeys === undefined &&
-    tagged.textureAssetKeySources === undefined
-  ) {
-    return item
-  }
-  const {
-    assetKey: _assetKey,
-    assetKeySource: _assetKeySource,
-    textureAssetKeys: _textureAssetKeys,
-    textureAssetKeySources: _textureAssetKeySources,
-    ...rest
-  } = tagged
-  return rest as T
 }
 
 const SHA256_ROUND_CONSTANTS = new Uint32Array([

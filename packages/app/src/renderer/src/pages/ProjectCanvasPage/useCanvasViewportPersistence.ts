@@ -12,6 +12,11 @@ import i18next from 'i18next'
 import type { Config } from '@shared/config/config'
 import type { CanvasFigmaBinding } from '@shared/figma'
 import { clearCanvasItems, loadCanvasItems, saveCanvasItems } from './canvasStorage'
+import {
+  areCanvasPersistenceSignaturesEqual,
+  buildCanvasPersistenceSignature,
+  type CanvasPersistenceSignature
+} from './canvasItemSerialization'
 import { releaseCanvasImageObjectUrl } from './canvasImageObjectUrlRegistry'
 import { getExactSelectedGroupBounds, resolveCanvasFitBounds } from './canvasFitBoundsUtils'
 import type { CanvasExportBounds } from './groupPlaybackUtils'
@@ -115,18 +120,6 @@ function areArrayItemsSame<T>(left: readonly T[], right: readonly T[]): boolean 
   )
 }
 
-function buildCanvasPersistenceSignature(
-  items: CanvasItem[],
-  groups: CanvasGroup[],
-  groupBranches: CanvasGroupBranch[],
-  figmaBinding: CanvasFigmaBinding | null
-): string {
-  return JSON.stringify({ items, groups, groupBranches, figmaBinding }, (key, value) => {
-    if (key === 'image' || key === 'sourceFile' || key === 'deferRender') return undefined
-    return value
-  })
-}
-
 export function useCanvasViewportPersistence({
   config,
   canvasId,
@@ -172,7 +165,7 @@ export function useCanvasViewportPersistence({
   const canvasSaveInFlightRef = useRef<{ canvasId: string; promise: Promise<void> } | null>(null)
   const saveAgainAfterInFlightRef = useRef(false)
   const lastCanvasSaveErrorRef = useRef<unknown>(null)
-  const lastPersistedCanvasSignatureRef = useRef<string | null>(null)
+  const lastPersistedCanvasSignatureRef = useRef<CanvasPersistenceSignature | null>(null)
   const isRestoringRef = useRef(true)
   const activeCanvasIdRef = useRef(canvasId)
   const localRestoreGenerationRef = useRef(0)
@@ -338,8 +331,10 @@ export function useCanvasViewportPersistence({
         groupBranches,
         figmaBinding
       )
-      hasPendingCanvasChangesRef.current =
-        currentSignature !== lastPersistedCanvasSignatureRef.current
+      hasPendingCanvasChangesRef.current = !areCanvasPersistenceSignaturesEqual(
+        currentSignature,
+        lastPersistedCanvasSignatureRef.current
+      )
       if (hasPendingCanvasChangesRef.current) lastCanvasSaveErrorRef.current = null
       void publishUnsavedState()
     }
