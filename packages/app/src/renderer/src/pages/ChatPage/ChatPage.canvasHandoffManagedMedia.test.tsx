@@ -17,6 +17,7 @@ const f = vi.hoisted(() => ({
   saved: [] as unknown[],
   importFile: vi.fn(),
   importDataUrl: vi.fn(),
+  ensureDerivative: vi.fn(),
   resolvePath: vi.fn(),
   fetch: vi.fn(),
   request: vi.fn(),
@@ -59,7 +60,11 @@ vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcFs: {},
     svcHyper: {},
-    svcManagedMedia: { importFile: f.importFile, importDataUrl: f.importDataUrl },
+    svcManagedMedia: {
+      importFile: f.importFile,
+      importDataUrl: f.importDataUrl,
+      ensureDerivative: f.ensureDerivative
+    },
     svcLLMProxy: { chat: f.request, chatStream: f.request, signHy3DModel: vi.fn() }
   })
 }))
@@ -344,5 +349,74 @@ describe('canvas hand-off into managed media', () => {
     expect(f.importDataUrl).toHaveBeenCalledWith(
       expect.objectContaining({ dataUrl: 'data:image/png;base64,AQID' })
     )
+  })
+
+  it('attaches a bounded copy of a canvas image above the per-image limit and says so', async () => {
+    await renderPage()
+    const tooBig = 8 * 1024 * 1024
+    f.importDataUrl.mockImplementation(
+      async ({ dataUrl, originalFileName }: { dataUrl: string; originalFileName: string }) => {
+        if (dataUrl.startsWith('data:image/webp')) return managed('f', originalFileName)
+        const original = managed('e', originalFileName)
+        return { ...original, reference: { ...original.reference, sizeBytes: tooBig } }
+      }
+    )
+    f.ensureDerivative.mockImplementation(async ({ maxEdge }: { maxEdge: number }) => ({
+      status: 'ready',
+      descriptor: {
+        maxEdge,
+        relativePath: `derivatives/${maxEdge}.webp`,
+        mimeType: 'image/webp',
+        sizeBytes: 900_000,
+        width: 2048,
+        height: 1536,
+        sha256: 'f'.repeat(64),
+        localMediaUrl: `local-media:///fixture-media/derivative-${maxEdge}.webp`
+      }
+    }))
+    f.fetch.mockImplementation(
+      async () =>
+        new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/webp' } })
+    )
+    await dispatch({
+      attachment: { type: 'image', url: 'data:image/png;base64,AQID', fileName: 'huge.png' }
+    })
+    await waitFor(() => expect(pending()).toHaveLength(1))
+    expect(f.ensureDerivative).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxEdge: 2048,
+        reference: expect.objectContaining({ sha256: sha('e') })
+      })
+    )
+    expect(pending()[0]).toMatchObject({
+      fileName: 'huge.png',
+      url: `local-media:///fixture-media/${sha('f')}.png`,
+      sourceWidth: 2048,
+      sourceHeight: 1536
+    })
+    expect(f.info).toHaveBeenCalledWith('chat.incoming_image_downscaled')
+    expect(f.error).not.toHaveBeenCalled()
+  })
+
+  it('refuses a canvas image above the limit that cannot be reduced, with the size message', async () => {
+    await renderPage()
+    f.importDataUrl.mockImplementation(
+      async ({ originalFileName }: { originalFileName: string }) => ({
+        ...managed('g', originalFileName),
+        reference: { ...managed('g', originalFileName).reference, sizeBytes: 9 * 1024 * 1024 }
+      })
+    )
+    f.ensureDerivative.mockResolvedValue({
+      status: 'fallbackOriginal',
+      reason: 'animated-gif',
+      localMediaUrl: 'local-media:///fixture-media/a.gif'
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await dispatch({
+      attachment: { type: 'image', url: 'data:image/gif;base64,AQID', fileName: 'anim.gif' }
+    })
+    await waitFor(() => expect(f.error).toHaveBeenCalledWith('chat.incoming_image_too_large'))
+    expect(f.error).not.toHaveBeenCalledWith('canvas.send_to_agent_failed')
+    expect(pending()).toEqual([])
   })
 })

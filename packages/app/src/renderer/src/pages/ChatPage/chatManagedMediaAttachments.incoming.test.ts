@@ -6,7 +6,9 @@ import type {
   ManagedMediaSvc
 } from '@shared/api/svcManagedMedia'
 import {
+  boundIncomingChatImageSize,
   CHAT_ATTACHMENT_STORAGE,
+  ChatImageTooLargeError,
   importChatAttachmentUrl,
   importIncomingChatImageAttachment
 } from './chatManagedMediaAttachments'
@@ -239,5 +241,112 @@ describe('importChatAttachmentUrl', () => {
     const service = makeService()
     await importChatAttachmentUrl({ service, url: 'blob:pasted', fileName: 'pasted.png' })
     expect(service.importDataUrl.mock.calls[0][0].dataUrl).toBe('data:image/png;base64,AQID')
+  })
+})
+
+describe('boundIncomingChatImageSize', () => {
+  const MAX = 5 * 1024 * 1024
+  const big = (seed: string) => ({
+    type: 'image' as const,
+    url: `local-media:///managed/${seed}.png`,
+    fileName: 'huge.png',
+    sourceWidth: 6000,
+    sourceHeight: 4000,
+    hiddenFromChatView: true,
+    media: reference(seed, 'image/png', 9 * 1024 * 1024)
+  })
+  const descriptor = (maxEdge: 256 | 512 | 1024 | 2048, sizeBytes: number) => ({
+    status: 'ready' as const,
+    descriptor: {
+      maxEdge,
+      relativePath: `derivatives/${maxEdge}.webp`,
+      mimeType: 'image/webp' as const,
+      sizeBytes,
+      width: maxEdge,
+      height: Math.round((maxEdge * 2) / 3),
+      sha256: 'c'.repeat(64),
+      localMediaUrl: `local-media:///managed/derivatives/${maxEdge}.webp`
+    }
+  })
+
+  it('leaves an image within the limit untouched', async () => {
+    const service = { ensureDerivative: vi.fn(), importDataUrl: vi.fn() }
+    const small = { ...big('aa'), media: reference('aa', 'image/png', MAX) }
+    await expect(boundIncomingChatImageSize(small, { service, maxBytes: MAX })).resolves.toEqual({
+      attachment: small
+    })
+    expect(service.ensureDerivative).not.toHaveBeenCalled()
+  })
+
+  it('replaces an image above the limit by the first bounded derivative that fits', async () => {
+    const service = {
+      ensureDerivative: vi.fn(async ({ maxEdge }: { maxEdge: 256 | 512 | 1024 | 2048 }) =>
+        descriptor(maxEdge, maxEdge === 2048 ? MAX + 1 : 700_000)
+      ),
+      importDataUrl: vi.fn(async (_req: ImportManagedMediaDataUrlReq) =>
+        imported('dd', 'image/webp', 700_000)
+      )
+    }
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/webp' } })
+    )
+    const source = big('aa')
+    const result = await boundIncomingChatImageSize(source, { service, maxBytes: MAX, fetchImpl })
+
+    expect(service.ensureDerivative.mock.calls.map(([req]) => req.maxEdge)).toEqual([2048, 1024])
+    expect(fetchImpl).toHaveBeenCalledWith('local-media:///managed/derivatives/1024.webp')
+    expect(service.importDataUrl).toHaveBeenCalledWith({
+      dataUrl: 'data:image/webp;base64,AQID',
+      originalFileName: 'huge.png',
+      storage: CHAT_ATTACHMENT_STORAGE
+    })
+    expect(result.downscaled).toEqual({
+      width: 1024,
+      height: 683,
+      originalSizeBytes: 9 * 1024 * 1024
+    })
+    expect(result.attachment).toMatchObject({
+      url: 'local-media:///managed/dd.jpg',
+      media: reference('dd', 'image/webp', 700_000),
+      fileName: 'huge.png',
+      hiddenFromChatView: true,
+      sizeBytes: 700_000,
+      sourceWidth: 1024,
+      sourceHeight: 683
+    })
+  })
+
+  it('refuses an image above the limit that cannot be reduced', async () => {
+    const gif = {
+      ensureDerivative: vi.fn(async () => ({
+        status: 'fallbackOriginal' as const,
+        reason: 'animated-gif' as const,
+        localMediaUrl: 'local-media:///managed/a.gif'
+      })),
+      importDataUrl: vi.fn()
+    }
+    await expect(
+      boundIncomingChatImageSize(big('aa'), { service: gif, maxBytes: MAX })
+    ).rejects.toBeInstanceOf(ChatImageTooLargeError)
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const failing = {
+      ensureDerivative: vi.fn(async () => Promise.reject(new Error('sidecar missing'))),
+      importDataUrl: vi.fn()
+    }
+    await expect(
+      boundIncomingChatImageSize(big('aa'), { service: failing, maxBytes: MAX })
+    ).rejects.toMatchObject({ fileName: 'huge.png', maxBytes: MAX })
+
+    const unmanaged = {
+      type: 'image' as const,
+      url: 'https://example.invalid/a.bmp',
+      sizeBytes: MAX + 1
+    }
+    await expect(
+      boundIncomingChatImageSize(unmanaged, { service: gif, maxBytes: MAX })
+    ).rejects.toBeInstanceOf(ChatImageTooLargeError)
+    expect(gif.importDataUrl).not.toHaveBeenCalled()
   })
 })

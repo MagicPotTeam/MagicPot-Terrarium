@@ -289,3 +289,91 @@ export const importIncomingChatImageAttachment = async (
     })
   )
 }
+
+/** Raised when an incoming image is above the per-image limit and cannot be reduced. */
+export class ChatImageTooLargeError extends Error {
+  constructor(
+    readonly fileName: string,
+    readonly sizeBytes: number,
+    readonly maxBytes: number
+  ) {
+    super(`${fileName || 'image'} is larger than the ${maxBytes} byte image attachment limit`)
+    this.name = 'ChatImageTooLargeError'
+  }
+}
+
+export type BoundedChatImageAttachment = {
+  attachment: ChatAttachment
+  /** Set when the attachment was replaced by a smaller managed derivative. */
+  downscaled?: { width: number; height: number; originalSizeBytes: number }
+}
+
+const DOWNSCALE_MAX_EDGES = [2048, 1024, 512] as const
+
+/**
+ * Apply the composer's per-image byte limit to an image that did not come through the
+ * composer. A managed image above the limit is replaced by the store's own bounded
+ * derivative (2048 px, then 1024 px, then 512 px: the first that fits), imported as a
+ * managed original of its own so the request sends the smaller bytes. An image that
+ * cannot be reduced (no derivative, animated GIF, not managed) is refused with
+ * ChatImageTooLargeError, which is what the composer does for a file above the limit.
+ */
+export const boundIncomingChatImageSize = async (
+  attachment: ChatAttachment,
+  {
+    service,
+    maxBytes,
+    fetchImpl = (input) => fetch(input),
+    storage = CHAT_ATTACHMENT_STORAGE
+  }: {
+    service?: Partial<Pick<ManagedMediaSvc, 'ensureDerivative' | 'importDataUrl'>>
+    maxBytes: number
+    fetchImpl?: typeof fetch
+    storage?: ManagedMediaStorage
+  }
+): Promise<BoundedChatImageAttachment> => {
+  if (attachment.type !== 'image') return { attachment }
+  const reference = normalizeMediaReference(attachment.media)
+  const managed = reference?.kind === 'managed' ? reference : undefined
+  const sizeBytes = managed?.sizeBytes ?? attachment.sizeBytes ?? 0
+  if (sizeBytes <= maxBytes) return { attachment }
+  const fileName = attachment.fileName || managed?.originalFileName || 'image'
+  const tooLarge = () => new ChatImageTooLargeError(fileName, sizeBytes, maxBytes)
+  if (!managed || !service?.ensureDerivative || !service.importDataUrl) throw tooLarge()
+
+  for (const maxEdge of DOWNSCALE_MAX_EDGES) {
+    let derivative: Awaited<ReturnType<ManagedMediaSvc['ensureDerivative']>>
+    try {
+      derivative = await service.ensureDerivative({ reference: managed, maxEdge })
+    } catch (error) {
+      console.warn('[chatManagedMediaAttachments] Bounded derivative unavailable:', error)
+      throw tooLarge()
+    }
+    if (derivative.status !== 'ready') throw tooLarge()
+    const descriptor = derivative.descriptor
+    if (descriptor.sizeBytes > maxBytes) continue
+    const blob = await fetchImageBlob(descriptor.localMediaUrl, fetchImpl)
+    const imported = await service.importDataUrl({
+      dataUrl: await blobToTypedDataUrl(blob, descriptor.mimeType),
+      originalFileName: toManagedOriginalFileName(fileName, 'image'),
+      storage
+    })
+    return {
+      attachment: {
+        ...attachment,
+        url: imported.localMediaUrl,
+        media: imported.reference,
+        mimeType: imported.reference.mimeType || descriptor.mimeType,
+        sizeBytes: imported.reference.sizeBytes ?? descriptor.sizeBytes,
+        sourceWidth: descriptor.width,
+        sourceHeight: descriptor.height
+      },
+      downscaled: {
+        width: descriptor.width,
+        height: descriptor.height,
+        originalSizeBytes: sizeBytes
+      }
+    }
+  }
+  throw tooLarge()
+}

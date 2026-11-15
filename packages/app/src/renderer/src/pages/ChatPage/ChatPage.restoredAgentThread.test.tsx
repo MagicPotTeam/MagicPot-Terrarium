@@ -685,5 +685,7 @@ describe('ChatPage restored agent thread persistence', () => {
     )
     expect(otherSession.messages.flatMap((message) => message.attachments || [])).toEqual([])
     otherRemount.unmount()
-  })
+    // The managed path settles through the save-conflict retry of the fake store; same
+    // budget as ChatPage.restoredManagedAgentThread needs.
+  }, 20_000)
 })

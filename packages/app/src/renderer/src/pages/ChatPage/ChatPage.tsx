@@ -210,9 +210,12 @@ import {
 import { collectDroppedDirectoryFilesBounded, DroppedDirectoryLimitError } from '../ProjectCanvasPage/dropDirectory'
 import { normalizeMediaReference } from '@shared/mediaReference'
 import {
+  boundIncomingChatImageSize,
+  ChatImageTooLargeError,
   importChatAttachment,
   importChatAttachmentUrl,
-  importIncomingChatImageAttachment
+  importIncomingChatImageAttachment,
+  type BoundedChatImageAttachment
 } from './chatManagedMediaAttachments'
 import {
   BUILT_IN_TAGGING_SKILL_ID,
@@ -777,17 +780,30 @@ const hasDuplicateAttachment = (
 }
 
 /**
+ * Apply the composer's per-image limit to an incoming image: one above it is replaced by
+ * the managed store's bounded derivative (reported in `downscaled`) or refused with
+ * ChatImageTooLargeError when it cannot be reduced.
+ */
+const boundIncomingChatImage = (attachment: ChatAttachment): Promise<BoundedChatImageAttachment> =>
+  boundIncomingChatImageSize(attachment, {
+    service: api().svcManagedMedia,
+    maxBytes: getChatAttachmentMaxSizeMB('image') * 1024 * 1024
+  })
+
+/**
  * Bring an image that arrives from the canvas or another producer into the composer's
  * managed form. Crops are still rendered first; blob: URLs are imported, not inlined.
  */
 const prepareIncomingChatAttachment = async (
   attachment: ChatAttachment
-): Promise<ChatAttachment | null> => {
+): Promise<BoundedChatImageAttachment | null> => {
   const materialized = await materializeInternalImageDragAttachment(attachment, {
     keepBlobImageUrl: true
   })
   if (!materialized) return null
-  return importIncomingChatImageAttachment(materialized, { service: api().svcManagedMedia })
+  return boundIncomingChatImage(
+    await importIncomingChatImageAttachment(materialized, { service: api().svcManagedMedia })
+  )
 }
 
 const attachmentDescriptorsMatch = (left: ChatAttachment, right: ChatAttachment): boolean =>
@@ -962,6 +978,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useMessage()
   const notifyWarningRef = useRef(notifyWarning)
   notifyWarningRef.current = notifyWarning
+  // Read through a ref so the hand-off callbacks keep their identity.
+  const notifyInfoRef = useRef(notifyInfo)
+  notifyInfoRef.current = notifyInfo
   // Identifies the events this mounted page emits; see handlePreviewRefresh.
   const [previewRefreshSource] = useState<object>(() => ({}))
   const emitPreviewRefresh = useCallback(
@@ -2476,7 +2495,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // Every image becomes a managed attachment (local-media URL + media reference)
       // before it reaches composer, draft, message or session state: no data:/blob: URL.
       const resolveAttachments = async (): Promise<ChatAttachment[]> => {
-        const resolved: ChatAttachment[] = []
+        const resolved: BoundedChatImageAttachment[] = []
         for (const item of rawAttachments) {
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           const next = await prepareIncomingChatAttachment(item)
@@ -2489,17 +2508,39 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const inline = await convertInlineImageToAttachment(image, 'pasted-image.png')
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           if (!inline) throw new Error('External inline image could not be materialized')
-          const next = await importIncomingChatImageAttachment(inline, {
-            service: api().svcManagedMedia
-          })
+          const next = await boundIncomingChatImage(
+            await importIncomingChatImageAttachment(inline, { service: api().svcManagedMedia })
+          )
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           resolved.push(next)
         }
-        return resolved
+        // Tell the user about every image that was attached as a smaller copy.
+        for (const { attachment: item, downscaled } of resolved) {
+          if (!downscaled) continue
+          notifyInfoRef.current(
+            t('chat.incoming_image_downscaled', {
+              fileName: item.fileName || 'image',
+              maxMB: getChatAttachmentMaxSizeMB('image'),
+              width: downscaled.width,
+              height: downscaled.height
+            })
+          )
+        }
+        return resolved.map((item) => item.attachment)
       }
       const notifyMaterializationFailure = (error: unknown): void => {
         if (!isDestinationCurrent()) return
         console.error('[ChatPage] Failed to materialize external attachments:', error)
+        if (error instanceof ChatImageTooLargeError) {
+          notifyError(
+            t('chat.incoming_image_too_large', {
+              fileName: error.fileName,
+              maxMB: getChatAttachmentMaxSizeMB('image'),
+              size: formatFileSize(error.sizeBytes)
+            })
+          )
+          return
+        }
         notifyError(t('canvas.send_to_agent_failed'))
       }
 
@@ -4700,8 +4741,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }
             )
             if (!isDropTargetCurrent()) return
-            const materializedDraggedFileAttachment =
+            const materializedDraggedFileAttachment = (
               await prepareIncomingChatAttachment(draggedFileAttachment)
+            )?.attachment
             if (!isDropTargetCurrent()) return
             if (!materializedDraggedFileAttachment) {
               notifyError(t('canvas.send_to_agent_failed'))
@@ -4754,10 +4796,32 @@ const ChatPage: React.FC<ChatPageProps> = ({
             if (!isDropTargetCurrent()) return
             let materialized: ChatAttachment | null
             try {
-              materialized = await prepareIncomingChatAttachment(attachment)
+              const prepared = await prepareIncomingChatAttachment(attachment)
+              if (!isDropTargetCurrent()) return
+              materialized = prepared?.attachment ?? null
+              if (prepared?.downscaled) {
+                notifyInfoRef.current(
+                  t('chat.incoming_image_downscaled', {
+                    fileName: prepared.attachment.fileName || 'image',
+                    maxMB: getChatAttachmentMaxSizeMB('image'),
+                    width: prepared.downscaled.width,
+                    height: prepared.downscaled.height
+                  })
+                )
+              }
             } catch (error) {
               if (!isDropTargetCurrent()) return
               console.error('[ChatPage] Failed to import dropped canvas attachment:', error)
+              if (error instanceof ChatImageTooLargeError) {
+                notifyError(
+                  t('chat.incoming_image_too_large', {
+                    fileName: error.fileName,
+                    maxMB: getChatAttachmentMaxSizeMB('image'),
+                    size: formatFileSize(error.sizeBytes)
+                  })
+                )
+                return
+              }
               materialized = null
             }
             if (!isDropTargetCurrent()) return
