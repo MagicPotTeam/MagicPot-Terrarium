@@ -218,11 +218,14 @@ export const importIncomingChatImageAttachment = async (
   const localPath = isData || isBlob ? null : resolveLocalMediaPathFromUrl(url)
   if (!isData && !isBlob && !localPath) return attachment
 
+  // For a file source the file's own extension says more about its bytes than the
+  // attachment's display name or declared type (a pasted-image.png label on a .jpg file,
+  // a bounded webp copy that kept its .png display name); main checks the bytes anyway.
   const declaredMime =
+    (localPath ? imageMimeTypeFromName(localPath) : '') ||
     normalizeImageMimeType(attachment.mimeType) ||
     (isData ? dataUrlMimeType(url) : '') ||
-    imageMimeTypeFromName(attachment.fileName) ||
-    (localPath ? imageMimeTypeFromName(localPath) : '')
+    imageMimeTypeFromName(attachment.fileName)
   const originalFileName = toManagedOriginalFileName(
     attachment.fileName || (localPath ? localPath.split(/[\\/]/).filter(Boolean).pop() : undefined),
     'image'
@@ -289,6 +292,35 @@ export const importIncomingChatImageAttachment = async (
     })
   )
 }
+
+/** Longest one incoming image may take to be imported (and bounded) before it is refused. */
+export const INCOMING_CHAT_IMAGE_IMPORT_TIMEOUT_MS = 60_000
+
+/**
+ * Reject when `work` has not settled within `timeoutMs`, so an import that hangs (a file
+ * on an unreachable share, a stuck worker) ends in the caller's error path instead of
+ * blocking every later hand-off. The late result of `work` is ignored.
+ */
+export const withIncomingChatImageImportTimeout = <T>(
+  work: Promise<T>,
+  timeoutMs: number = INCOMING_CHAT_IMAGE_IMPORT_TIMEOUT_MS
+): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Incoming image import did not finish within ${timeoutMs} ms`)),
+      timeoutMs
+    )
+    work.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
 
 /** Raised when an incoming image is above the per-image limit and cannot be reduced. */
 export class ChatImageTooLargeError extends Error {

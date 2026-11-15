@@ -67,15 +67,18 @@ describe('separate external edit events', () => {
     expect(f.error).toHaveBeenCalledWith('canvas.agent_edit_input_unavailable'); expect(f.materialize).not.toHaveBeenCalled(); expect(f.receiver).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('edit')).toHaveTextContent('edit baseline'); expect(screen.getByTestId('composer')).toHaveValue(`draft-${scopeA}`); expect(screen.getByTestId('pending')).toHaveTextContent('[]')
   })
-  it('observes each independent event when B resolves before A', async () => {
-    render(page(scopeA)); await enter(scopeA); const a = image('a'), b = image('b'), da = deferred<ChatAttachment>(), db = deferred<ChatAttachment>()
-    f.materialize.mockImplementation((item: ChatAttachment) => item.fileName === a.fileName ? da.promise : db.promise)
+  // Updated for the ordered hand-off: this used to pin "the event that resolves first is
+  // delivered first" (B before A). Imports now take real time, so separate events are staged
+  // in arrival order and the edit form keeps the order of the canvas selection.
+  it('delivers independent events in arrival order when A resolves after B was sent', async () => {
+    render(page(scopeA)); await enter(scopeA); const a = image('a'), b = image('b'), da = deferred<ChatAttachment>()
+    f.materialize.mockImplementation((item: ChatAttachment) => item.fileName === a.fileName ? da.promise : Promise.resolve(item))
     try {
-      await dispatch(scopeA, { attachment: a }); await dispatch(scopeA, { attachment: b }); await waitFor(() => expect(f.materialize).toHaveBeenCalledTimes(2))
-      await act(async () => { db.resolve(b); await db.promise }); await waitFor(() => expect(f.receiver).toHaveBeenCalledExactlyOnceWith(`session-${scopeA}`, b))
+      await dispatch(scopeA, { attachment: a }); await dispatch(scopeA, { attachment: b }); await waitFor(() => expect(f.materialize).toHaveBeenCalledWith(a))
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) }); expect(f.receiver).not.toHaveBeenCalled()
       await act(async () => { da.resolve(a); await da.promise }); await waitFor(() => expect(f.receiver).toHaveBeenCalledTimes(2))
-      expect(f.receiver.mock.calls).toEqual([[`session-${scopeA}`, b], [`session-${scopeA}`, a]])
-    } finally { da.resolve(a); db.resolve(b) }
+      expect(f.receiver.mock.calls).toEqual([[`session-${scopeA}`, a], [`session-${scopeA}`, b]])
+    } finally { da.resolve(a) }
   })
   it('does not deliver late A into B after scope remount; B has an independent positive control', async () => {
     const view = render(page(scopeA)); await enter(scopeA); const a = image('a'), b = image('b'), da = deferred<ChatAttachment>()

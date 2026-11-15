@@ -4736,7 +4736,9 @@ describe('ChatPage runtime workflow integration', () => {
 
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
 
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledWith('blob:duplicate-user-upload')
+    expect(hoisted.importManagedDataUrlMock).toHaveBeenCalledTimes(1)
     expect(hoisted.importManagedDataUrlMock).toHaveBeenCalledWith(
       expect.objectContaining({ dataUrl: 'data:image/png;base64,AQID', originalFileName: 'first.png' })
     )

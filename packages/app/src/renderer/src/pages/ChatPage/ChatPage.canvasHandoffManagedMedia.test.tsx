@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
+import { useEffect, useMemo } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
@@ -15,6 +16,8 @@ const f = vi.hoisted(() => ({
   config: null as Config | null,
   sessions: [] as ChatSession[],
   saved: [] as unknown[],
+  edited: [] as ChatAttachment[],
+  importTimeoutMs: 60_000,
   importFile: vi.fn(),
   importDataUrl: vi.fn(),
   ensureDerivative: vi.fn(),
@@ -68,6 +71,16 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     svcLLMProxy: { chat: f.request, chatStream: f.request, signHy3DModel: vi.fn() }
   })
 }))
+// The real module with a per-test import timeout (read at call time through the getter).
+vi.mock('./chatManagedMediaAttachments', async (original) => {
+  const actual = await original<typeof import('./chatManagedMediaAttachments')>()
+  return {
+    ...actual,
+    get INCOMING_CHAT_IMAGE_IMPORT_TIMEOUT_MS() {
+      return f.importTimeoutMs
+    }
+  }
+})
 vi.mock('./chatStorage', async (original) => ({
   ...(await original<typeof import('./chatStorage')>()),
   loadAllSessions: async () => f.sessions,
@@ -91,7 +104,43 @@ vi.mock('./components/ImagePreviewOverlay', () => ({ default: () => null }))
 vi.mock('./components/ImageContextMenu', () => ({ default: () => null }))
 vi.mock('./components/AgentLocalFilesPanel', () => ({ default: () => null }))
 vi.mock('./components/ChatImageGenerationSettings', () => ({ default: () => null }))
-vi.mock('./components/ChatMessageList', () => ({ default: () => null }))
+// Stands in for the edit form: registers the per-attachment receiver while a message is edited.
+vi.mock('./components/ChatMessageList', () => ({
+  default: function MessageList({
+    editingMessageIndex,
+    editingContent,
+    onSetEditingIndex,
+    onSetEditingContent,
+    onRegisterEditingAttachmentReceiver
+  }: {
+    editingMessageIndex: number | null
+    editingContent: string
+    onSetEditingIndex: (index: number) => void
+    onSetEditingContent: (content: string) => void
+    onRegisterEditingAttachmentReceiver: (
+      receiver: ((attachment: ChatAttachment) => void) | null
+    ) => void
+  }) {
+    const receiver = useMemo(() => (attachment: ChatAttachment) => f.edited.push(attachment), [])
+    useEffect(() => {
+      onRegisterEditingAttachmentReceiver(editingMessageIndex === null ? null : receiver)
+      return () => onRegisterEditingAttachmentReceiver(null)
+    }, [editingMessageIndex, receiver, onRegisterEditingAttachmentReceiver])
+    return (
+      <div>
+        <span data-testid="edit">{editingContent}</span>
+        <button
+          onClick={() => {
+            onSetEditingIndex(0)
+            onSetEditingContent('edit baseline')
+          }}
+        >
+          edit
+        </button>
+      </div>
+    )
+  }
+}))
 vi.mock('./components/ChatComposer', () => ({
   default: ({
     inputValue,
@@ -168,6 +217,8 @@ beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   f.saved = []
+  f.edited = []
+  f.importTimeoutMs = 60_000
   f.config = structuredClone(DEFAULT_CONFIG)
   f.sessions = [
     {
@@ -207,6 +258,71 @@ afterEach(async () => {
   cleanup()
   await act(async () => {})
   vi.unstubAllGlobals()
+})
+
+/** An 8 MB original whose 2048 px webp derivative fits the limit (see the hand-off test below). */
+const stubOverLimitImports = () => {
+  f.importDataUrl.mockImplementation(
+    async ({ dataUrl, originalFileName }: { dataUrl: string; originalFileName: string }) => {
+      if (dataUrl.startsWith('data:image/webp')) return managed('f', originalFileName)
+      const original = managed('e', originalFileName)
+      return { ...original, reference: { ...original.reference, sizeBytes: 8 * 1024 * 1024 } }
+    }
+  )
+  f.fetch.mockImplementation(
+    async () =>
+      new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/webp' } })
+  )
+}
+const readyDerivative = async ({ maxEdge }: { maxEdge: number }) => ({
+  status: 'ready',
+  descriptor: {
+    maxEdge,
+    relativePath: `derivatives/${maxEdge}.webp`,
+    mimeType: 'image/webp',
+    sizeBytes: 900_000,
+    width: 2048,
+    height: 1536,
+    sha256: 'f'.repeat(64),
+    localMediaUrl: `local-media:///fixture-media/derivative-${maxEdge}.webp`
+  }
+})
+/** An internal canvas drag whose payload names a file and carries it as a File. */
+const dropDraggedFile = (name: string) => {
+  class FakeImage {
+    onload: (() => void) | null = null
+    onerror: (() => void) | null = null
+    naturalWidth = 4000
+    naturalHeight = 3000
+    width = 4000
+    height = 3000
+    set src(_value: string) {
+      setTimeout(() => this.onload?.(), 0)
+    }
+  }
+  vi.stubGlobal('Image', FakeImage)
+  const urlApi = URL as unknown as {
+    createObjectURL?: (blob: Blob) => string
+    revokeObjectURL?: (url: string) => void
+  }
+  if (!urlApi.createObjectURL) urlApi.createObjectURL = () => 'blob:dragged-file'
+  if (!urlApi.revokeObjectURL) urlApi.revokeObjectURL = () => undefined
+  const file = new File([new Uint8Array([1, 2, 3])], name, { type: 'image/png' })
+  const payload = JSON.stringify({ fileItem: { filename: name }, promptId: 'p1' })
+  fireEvent.drop(screen.getByTestId('composer'), {
+    dataTransfer: {
+      files: [file],
+      items: [],
+      types: ['application/x-qapp-image', 'Files'],
+      getData: (key: string) => (key === 'application/x-qapp-image' ? payload : '')
+    }
+  })
+}
+const localImage = (name: string): ChatAttachment => ({
+  type: 'image',
+  url: `local-media:///boards/${name}`,
+  mimeType: 'image/png',
+  fileName: name
 })
 
 describe('canvas hand-off into managed media', () => {
@@ -417,6 +533,138 @@ describe('canvas hand-off into managed media', () => {
     })
     await waitFor(() => expect(f.error).toHaveBeenCalledWith('chat.incoming_image_too_large'))
     expect(f.error).not.toHaveBeenCalledWith('canvas.send_to_agent_failed')
+    expect(pending()).toEqual([])
+  })
+
+  it('keeps two selected files with identical bytes and different names, and skips a true repeat', async () => {
+    await renderPage()
+    // ref-A.png and ref-B.png are copies of one picture: the store gives both one reference.
+    f.importFile.mockImplementation(async ({ originalFileName }: { originalFileName: string }) =>
+      managed(originalFileName.startsWith('ref') ? 'a' : 'c', originalFileName)
+    )
+    await dispatch({ attachment: localImage('ref-A.png') })
+    await dispatch({ attachment: localImage('ref-B.png') })
+    await dispatch({ attachment: localImage('other.png') })
+    await dispatch({ hiddenText: 'manifest: ref-A.png, ref-B.png, other.png' })
+    const selection = ['ref-A.png', 'ref-B.png', 'other.png']
+    await waitFor(() => expect(pending().map((item) => item.fileName)).toEqual(selection))
+    expect(pending()[0].media).toMatchObject({ sha256: sha('a') })
+    expect(pending()[1].media).toMatchObject({ sha256: sha('a') })
+    expect(f.error).not.toHaveBeenCalled()
+
+    // The same file again (same name, same content) is still one occurrence.
+    await dispatch({ attachment: localImage('ref-A.png') })
+    await dispatch({ text: 'after the repeat' })
+    await waitFor(() =>
+      expect(screen.getByTestId('composer')).toHaveValue('draft\nafter the repeat')
+    )
+    expect(pending().map((item) => item.fileName)).toEqual(selection)
+  })
+
+  it('gives the edit form the images in arrival order when the first import finishes last', async () => {
+    f.sessions[0].messages = [{ role: 'user', content: 'original' }]
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'edit' }))
+    await waitFor(() => expect(screen.getByTestId('edit')).toHaveTextContent('edit baseline'))
+    await act(async () => {})
+
+    const slow = deferred<ReturnType<typeof managed>>()
+    f.importFile.mockImplementation(async ({ originalFileName }: { originalFileName: string }) =>
+      originalFileName === 'first.png' ? slow.promise : managed('c', originalFileName)
+    )
+    await dispatch({ attachment: localImage('first.png') })
+    await dispatch({ attachment: localImage('second.png') })
+    await dispatch({ attachment: localImage('third.png') })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80))
+    })
+    // Nothing overtakes the first image while it is still being imported.
+    expect(f.edited).toEqual([])
+    await act(async () => {
+      slow.resolve(managed('a', 'first.png'))
+      await slow.promise
+    })
+    await waitFor(() => expect(f.edited).toHaveLength(3))
+    expect(f.edited.map((item) => item.fileName)).toEqual(['first.png', 'second.png', 'third.png'])
+    expect(f.edited.every((item) => item.media?.kind === 'managed')).toBe(true)
+    // The edit form received them; the bottom composer did not.
+    expect(pending()).toEqual([])
+    expect(f.error).not.toHaveBeenCalled()
+  })
+
+  it('refuses an import that never settles and still applies the later hand-offs', async () => {
+    f.importTimeoutMs = 150
+    await renderPage()
+    f.importFile.mockImplementationOnce(() => new Promise(() => {}))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await dispatch({ attachment: localImage('stuck.png') })
+    await dispatch({
+      attachment: { type: 'image', url: 'data:image/png;base64,AQID', fileName: 'later.png' }
+    })
+    await dispatch({ text: 'typed by canvas' })
+    await waitFor(() => expect(f.error).toHaveBeenCalledWith('canvas.send_to_agent_failed'))
+    await waitFor(() => expect(pending().map((item) => item.fileName)).toEqual(['later.png']))
+    await waitFor(() =>
+      expect(screen.getByTestId('composer')).toHaveValue('draft\ntyped by canvas')
+    )
+    expect(f.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads and imports a source once when one hand-off carries it twice', async () => {
+    await renderPage()
+    const payload = JSON.stringify({
+      attachments: [
+        { type: 'image', url: 'blob:same-source', fileName: 'first.png' },
+        { type: 'image', url: 'blob:same-source', fileName: 'second.png', sourceWidth: 7 }
+      ]
+    })
+    fireEvent.drop(screen.getByTestId('composer'), {
+      dataTransfer: {
+        files: [],
+        items: [],
+        types: ['application/x-qapp-image'],
+        getData: (key: string) => (key === 'application/x-qapp-image' ? payload : '')
+      }
+    })
+    await waitFor(() => expect(pending()).toHaveLength(2))
+    expect(f.fetch).toHaveBeenCalledTimes(1)
+    expect(f.importDataUrl).toHaveBeenCalledTimes(1)
+    expect(pending().map((item) => [item.fileName, item.url, item.media?.kind])).toEqual([
+      ['first.png', `local-media:///fixture-media/${sha('c')}.png`, 'managed'],
+      ['second.png', `local-media:///fixture-media/${sha('c')}.png`, 'managed']
+    ])
+    expect(pending()[1]).toMatchObject({ sourceWidth: 7 })
+  })
+
+  it('tells the user when a dragged canvas file above the limit is attached as a smaller copy', async () => {
+    await renderPage()
+    stubOverLimitImports()
+    f.ensureDerivative.mockImplementation(readyDerivative)
+    dropDraggedFile('huge-file.png')
+    await waitFor(() => expect(pending()).toHaveLength(1))
+    expect(pending()[0]).toMatchObject({
+      fileName: 'huge-file.png',
+      url: `local-media:///fixture-media/${sha('f')}.png`
+    })
+    expect(f.info).toHaveBeenCalledTimes(1)
+    expect(f.info).toHaveBeenCalledWith('chat.incoming_image_downscaled')
+    expect(f.error).not.toHaveBeenCalled()
+  })
+
+  it('refuses a dragged canvas file above the limit that cannot be reduced, with the size message', async () => {
+    await renderPage()
+    stubOverLimitImports()
+    f.ensureDerivative.mockResolvedValue({
+      status: 'fallbackOriginal',
+      reason: 'animated-gif',
+      localMediaUrl: 'local-media:///fixture-media/a.gif'
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    dropDraggedFile('huge-anim.png')
+    await waitFor(() => expect(f.error).toHaveBeenCalledWith('chat.incoming_image_too_large'))
+    expect(f.error).toHaveBeenCalledTimes(1)
+    expect(f.error).not.toHaveBeenCalledWith('canvas.send_to_agent_failed')
+    expect(f.info).not.toHaveBeenCalled()
     expect(pending()).toEqual([])
   })
 })

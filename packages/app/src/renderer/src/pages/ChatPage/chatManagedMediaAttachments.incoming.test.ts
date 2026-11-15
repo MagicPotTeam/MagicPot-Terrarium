@@ -10,7 +10,8 @@ import {
   CHAT_ATTACHMENT_STORAGE,
   ChatImageTooLargeError,
   importChatAttachmentUrl,
-  importIncomingChatImageAttachment
+  importIncomingChatImageAttachment,
+  withIncomingChatImageImportTimeout
 } from './chatManagedMediaAttachments'
 
 const reference = (sha: string, mimeType = 'image/jpeg', sizeBytes = 6) => ({
@@ -218,6 +219,36 @@ describe('importIncomingChatImageAttachment', () => {
     ).rejects.toThrow('Managed media service is unavailable')
   })
 
+  it('declares the type of the file itself, not of a display name that disagrees with it', async () => {
+    const service = makeService()
+    const resolveAuthorizedLocalPath = async (filePath: string) => filePath
+    // The 'image' field of a send-to-agent event is labelled pasted-image.png whatever it is.
+    await importIncomingChatImageAttachment(
+      { type: 'image', url: 'local-media:///boards/photo.jpg', fileName: 'pasted-image.png' },
+      { service, resolveAuthorizedLocalPath }
+    )
+    // A bounded webp copy keeps its original .png display name and declared type.
+    await importIncomingChatImageAttachment(
+      {
+        type: 'image',
+        url: 'local-media:///media/originals/ab/copy.webp',
+        mimeType: 'image/png',
+        fileName: 'heavy.png'
+      },
+      { service, resolveAuthorizedLocalPath }
+    )
+    // A path without a known extension falls back to the declared type.
+    await importIncomingChatImageAttachment(
+      { type: 'image', url: 'local-media:///boards/scan', mimeType: 'image/jpeg', fileName: 'x' },
+      { service, resolveAuthorizedLocalPath }
+    )
+    expect(service.importFile.mock.calls.map(([req]) => [req.sourcePath, req.mimeType])).toEqual([
+      ['/boards/photo.jpg', 'image/jpeg'],
+      ['/media/originals/ab/copy.webp', 'image/webp'],
+      ['/boards/scan', 'image/jpeg']
+    ])
+  })
+
   it('passes a store-safe original file name while keeping the display name', async () => {
     const service = makeService()
     const result = await importIncomingChatImageAttachment(
@@ -348,5 +379,44 @@ describe('boundIncomingChatImageSize', () => {
       boundIncomingChatImageSize(unmanaged, { service: gif, maxBytes: MAX })
     ).rejects.toBeInstanceOf(ChatImageTooLargeError)
     expect(gif.importDataUrl).not.toHaveBeenCalled()
+  })
+})
+
+describe('withIncomingChatImageImportTimeout', () => {
+  it('rejects when the import does not settle in time and ignores its late result', async () => {
+    vi.useFakeTimers()
+    try {
+      let finish!: (value: string) => void
+      const stuck = new Promise<string>((resolve) => {
+        finish = resolve
+      })
+      const outcome = withIncomingChatImageImportTimeout(stuck, 1000).then(
+        (value) => `resolved:${value}`,
+        (error: Error) => `rejected:${error.message}`
+      )
+      await vi.advanceTimersByTimeAsync(999)
+      await expect(Promise.race([outcome, Promise.resolve('pending')])).resolves.toBe('pending')
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(outcome).resolves.toMatch(/^rejected:.*1000 ms/)
+      finish('late')
+      await expect(outcome).resolves.toMatch(/^rejected:/)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('passes the result or the failure through and leaves no timer behind', async () => {
+    vi.useFakeTimers()
+    try {
+      await expect(withIncomingChatImageImportTimeout(Promise.resolve('ok'), 1000)).resolves.toBe(
+        'ok'
+      )
+      await expect(
+        withIncomingChatImageImportTimeout(Promise.reject(new Error('store full')), 1000)
+      ).rejects.toThrow('store full')
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

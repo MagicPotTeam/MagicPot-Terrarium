@@ -44,6 +44,7 @@ import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined'
 import PersonAddAltOutlinedIcon from '@mui/icons-material/PersonAddAltOutlined'
 import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useRuntimeMcpStatus } from '@renderer/hooks/useRuntimeMcpStatus'
 import { useMessage } from '@renderer/hooks/useMessage'
@@ -215,6 +216,8 @@ import {
   importChatAttachment,
   importChatAttachmentUrl,
   importIncomingChatImageAttachment,
+  INCOMING_CHAT_IMAGE_IMPORT_TIMEOUT_MS,
+  withIncomingChatImageImportTimeout,
   type BoundedChatImageAttachment
 } from './chatManagedMediaAttachments'
 import {
@@ -765,14 +768,21 @@ const getAttachmentIdentityKey = (attachment: ChatAttachment): string => {
     : `url:${attachment.url}`
 }
 
+/**
+ * Managed content is shared by every file with the same bytes, so two managed attachments
+ * are the same occurrence only when their file names match as well: two selected files
+ * with identical bytes and different names both stay attached (as they did by URL).
+ */
 const hasDuplicateAttachment = (
   attachments: ChatAttachment[],
   candidate: ChatAttachment
 ): boolean => {
   const candidateKey = getAttachmentIdentityKey(candidate)
+  const candidateIsManaged = candidateKey.startsWith('managed:')
   return attachments.some(
     (attachment) =>
-      getAttachmentIdentityKey(attachment) === candidateKey ||
+      (getAttachmentIdentityKey(attachment) === candidateKey &&
+        (!candidateIsManaged || (attachment.fileName || '') === (candidate.fileName || ''))) ||
       (Boolean(attachment.fileName) &&
         attachment.fileName === candidate.fileName &&
         attachment.sizeBytes === candidate.sizeBytes)
@@ -790,21 +800,83 @@ const boundIncomingChatImage = (attachment: ChatAttachment): Promise<BoundedChat
     maxBytes: getChatAttachmentMaxSizeMB('image') * 1024 * 1024
   })
 
+/** Import an incoming image into managed media, then apply the per-image limit to it. */
+const importAndBoundIncomingChatImage = async (
+  attachment: ChatAttachment
+): Promise<BoundedChatImageAttachment> =>
+  boundIncomingChatImage(
+    await importIncomingChatImageAttachment(attachment, { service: api().svcManagedMedia })
+  )
+
+/** First managed import of each source URL in one hand-off batch. */
+type IncomingChatImageBatch = Map<string, BoundedChatImageAttachment>
+
 /**
  * Bring an image that arrives from the canvas or another producer into the composer's
  * managed form. Crops are still rendered first; blob: URLs are imported, not inlined.
+ * A second occurrence of the same source in `batch` reuses the first import instead of
+ * reading and importing the bytes again. An import that does not settle is refused.
  */
 const prepareIncomingChatAttachment = async (
-  attachment: ChatAttachment
+  attachment: ChatAttachment,
+  batch?: IncomingChatImageBatch
 ): Promise<BoundedChatImageAttachment | null> => {
-  const materialized = await materializeInternalImageDragAttachment(attachment, {
-    keepBlobImageUrl: true
-  })
-  if (!materialized) return null
-  return boundIncomingChatImage(
-    await importIncomingChatImageAttachment(materialized, { service: api().svcManagedMedia })
-  )
+  const prepare = async (): Promise<BoundedChatImageAttachment | null> => {
+    const materialized = await materializeInternalImageDragAttachment(attachment, {
+      keepBlobImageUrl: true
+    })
+    if (!materialized) return null
+    // A crop is rendered into its own image; only an untouched source can be shared.
+    const sourceUrl =
+      materialized === attachment && attachment.type === 'image' ? attachment.url : ''
+    const first = sourceUrl ? batch?.get(sourceUrl) : undefined
+    if (first) {
+      return {
+        attachment: {
+          ...materialized,
+          url: first.attachment.url,
+          media: first.attachment.media,
+          mimeType: first.attachment.mimeType,
+          sizeBytes: first.attachment.sizeBytes,
+          ...(first.downscaled
+            ? {
+                sourceWidth: first.attachment.sourceWidth,
+                sourceHeight: first.attachment.sourceHeight
+              }
+            : {})
+        },
+        downscaled: first.downscaled
+      }
+    }
+    const prepared = await importAndBoundIncomingChatImage(materialized)
+    const isManaged = getAttachmentIdentityKey(prepared.attachment).startsWith('managed:')
+    if (sourceUrl && batch && isManaged) batch.set(sourceUrl, prepared)
+    return prepared
+  }
+  return withIncomingChatImageImportTimeout(prepare(), INCOMING_CHAT_IMAGE_IMPORT_TIMEOUT_MS)
 }
+
+/** Notice for an incoming image that was attached as a smaller copy. */
+const describeIncomingImageDownscaled = (
+  t: TFunction,
+  { attachment, downscaled }: BoundedChatImageAttachment
+): string =>
+  t('chat.incoming_image_downscaled', {
+    fileName: attachment.fileName || 'image',
+    maxMB: getChatAttachmentMaxSizeMB('image'),
+    width: downscaled?.width,
+    height: downscaled?.height
+  })
+
+/** Message for a failed incoming image: the size message when it is above the limit. */
+const describeIncomingImageFailure = (t: TFunction, error: unknown): string =>
+  error instanceof ChatImageTooLargeError
+    ? t('chat.incoming_image_too_large', {
+        fileName: error.fileName,
+        maxMB: getChatAttachmentMaxSizeMB('image'),
+        size: formatFileSize(error.sizeBytes)
+      })
+    : t('canvas.send_to_agent_failed')
 
 const attachmentDescriptorsMatch = (left: ChatAttachment, right: ChatAttachment): boolean =>
   left.type === right.type && left.url === right.url && left.fileName === right.fileName
@@ -2345,9 +2417,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingExternalSendToAgentRef = useRef<ExternalSendToAgentDetail[]>([])
   const [pendingExternalSendToAgentVersion, setPendingExternalSendToAgentVersion] = useState(0)
   const editingAttachmentReceiverRef = useRef<((attachment: ChatAttachment) => void) | null>(null)
-  // Tail of the external 'send-to-agent' composer staging, so asynchronous imports
-  // are applied in the order the events arrived. It never rejects.
-  const externalComposerStagingRef = useRef<Promise<void>>(Promise.resolve())
+  // Tails of the external 'send-to-agent' staging (composer and edit form), one per
+  // destination, so asynchronous imports are applied in the order the events arrived.
+  // A tail never rejects and removes itself when it is the last one of its destination.
+  const externalStagingTailsRef = useRef<Map<string, Promise<void>>>(new Map())
   const registerEditingAttachmentReceiver = useCallback(
     (receiver: ((attachment: ChatAttachment) => void) | null) => {
       if (editingAttachmentReceiverRef.current !== receiver) {
@@ -2496,52 +2569,55 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // before it reaches composer, draft, message or session state: no data:/blob: URL.
       const resolveAttachments = async (): Promise<ChatAttachment[]> => {
         const resolved: BoundedChatImageAttachment[] = []
+        const batch: IncomingChatImageBatch = new Map()
         for (const item of rawAttachments) {
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
-          const next = await prepareIncomingChatAttachment(item)
+          const next = await prepareIncomingChatAttachment(item, batch)
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           if (!next) throw new Error('External attachment could not be materialized')
           resolved.push(next)
         }
         if (image) {
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
-          const inline = await convertInlineImageToAttachment(image, 'pasted-image.png')
+          const inline = await withIncomingChatImageImportTimeout(
+            convertInlineImageToAttachment(image, 'pasted-image.png'),
+            INCOMING_CHAT_IMAGE_IMPORT_TIMEOUT_MS
+          )
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           if (!inline) throw new Error('External inline image could not be materialized')
-          const next = await boundIncomingChatImage(
-            await importIncomingChatImageAttachment(inline, { service: api().svcManagedMedia })
+          const next = await withIncomingChatImageImportTimeout(
+            importAndBoundIncomingChatImage(inline),
+            INCOMING_CHAT_IMAGE_IMPORT_TIMEOUT_MS
           )
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           resolved.push(next)
         }
         // Tell the user about every image that was attached as a smaller copy.
-        for (const { attachment: item, downscaled } of resolved) {
-          if (!downscaled) continue
-          notifyInfoRef.current(
-            t('chat.incoming_image_downscaled', {
-              fileName: item.fileName || 'image',
-              maxMB: getChatAttachmentMaxSizeMB('image'),
-              width: downscaled.width,
-              height: downscaled.height
-            })
-          )
+        for (const item of resolved) {
+          if (item.downscaled) notifyInfoRef.current(describeIncomingImageDownscaled(t, item))
         }
         return resolved.map((item) => item.attachment)
       }
       const notifyMaterializationFailure = (error: unknown): void => {
         if (!isDestinationCurrent()) return
         console.error('[ChatPage] Failed to materialize external attachments:', error)
-        if (error instanceof ChatImageTooLargeError) {
-          notifyError(
-            t('chat.incoming_image_too_large', {
-              fileName: error.fileName,
-              maxMB: getChatAttachmentMaxSizeMB('image'),
-              size: formatFileSize(error.sizeBytes)
-            })
-          )
-          return
-        }
-        notifyError(t('canvas.send_to_agent_failed'))
+        notifyError(describeIncomingImageFailure(t, error))
+      }
+      // Imports are asynchronous, so the events of one destination are staged one after
+      // another: the composer or the edit form receives them in arrival order (the canvas
+      // sends one event per image). A destination that is no longer current does not hold
+      // back the next one, and every import is bounded by a timeout.
+      const stageInArrivalOrder = (apply: (resolved: ChatAttachment[]) => void): void => {
+        const tails = externalStagingTailsRef.current
+        const destinationKey = `${destinationEpoch}|${storageScope}|${destinationSessionId ?? ''}`
+        const tail: Promise<void> = (tails.get(destinationKey) ?? Promise.resolve())
+          .then(() => resolveAttachments())
+          .then(apply)
+          .catch(notifyMaterializationFailure)
+          .then(() => {
+            if (tails.get(destinationKey) === tail) tails.delete(destinationKey)
+          })
+        tails.set(destinationKey, tail)
       }
 
       // While a user message is being edited, canvas send-to-agent attachments
@@ -2570,13 +2646,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
         // The editor currently exposes only a per-attachment receiver. Stage the
         // whole detail first; this is not an acknowledgement or a cross-event batch.
-        void resolveAttachments()
-          .then((resolvedAttachments) => {
-            if (!isEditingReceiverCurrent()) return
-            resolvedAttachments.forEach((item) => editingAttachmentReceiver(item))
-            if (text) setEditingContent((prev) => (prev ? `${prev}\n${text}` : text))
-          })
-          .catch(notifyMaterializationFailure)
+        // Events are staged in arrival order, so the edit form keeps the canvas order.
+        stageInArrivalOrder((resolvedAttachments) => {
+          if (!isEditingReceiverCurrent()) return
+          resolvedAttachments.forEach((item) => editingAttachmentReceiver(item))
+          if (text) setEditingContent((prev) => (prev ? `${prev}\n${text}` : text))
+        })
         return
       }
 
@@ -2607,29 +2682,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       // Stage attachments and inline image before applying any part of this
       // event. Other events and existing composer state are not a transaction.
-      // Imports are asynchronous, so events are staged one after another: the
-      // composer receives them in arrival order (the canvas sends one per image).
-      const staged = externalComposerStagingRef.current
-        .then(() => resolveAttachments())
-        .then((resolvedAttachments) => {
-          if (!isDestinationCurrent()) return
-          if (resolvedAttachments.length > 0) {
-            setPendingAttachments((prev) => {
-              if (!isDestinationCurrent()) return prev
-              let next = prev
-              for (const item of resolvedAttachments) {
-                if (!item.url || hasDuplicateAttachment(next, item)) continue
-                if (next === prev) next = [...prev]
-                next.push(item)
-              }
-              return next
-            })
-          }
-          if (text) setInputValue((prev) => (prev ? `${prev}\n${text}` : text))
-          if (hiddenText) setPendingHiddenContext((prev) => mergeHiddenContext(prev, hiddenText))
-        })
-        .catch(notifyMaterializationFailure)
-      externalComposerStagingRef.current = staged
+      stageInArrivalOrder((resolvedAttachments) => {
+        if (!isDestinationCurrent()) return
+        if (resolvedAttachments.length > 0) {
+          setPendingAttachments((prev) => {
+            if (!isDestinationCurrent()) return prev
+            let next = prev
+            for (const item of resolvedAttachments) {
+              if (!item.url || hasDuplicateAttachment(next, item)) continue
+              if (next === prev) next = [...prev]
+              next.push(item)
+            }
+            return next
+          })
+        }
+        if (text) setInputValue((prev) => (prev ? `${prev}\n${text}` : text))
+        if (hiddenText) setPendingHiddenContext((prev) => mergeHiddenContext(prev, hiddenText))
+      })
     },
     [
       mergeHiddenContext,
@@ -4741,13 +4810,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }
             )
             if (!isDropTargetCurrent()) return
-            const materializedDraggedFileAttachment = (
-              await prepareIncomingChatAttachment(draggedFileAttachment)
-            )?.attachment
+            let preparedDraggedFile: BoundedChatImageAttachment | null
+            try {
+              preparedDraggedFile = await prepareIncomingChatAttachment(draggedFileAttachment)
+            } catch (error) {
+              if (!isDropTargetCurrent()) return
+              console.error('[ChatPage] Failed to import dragged canvas file:', error)
+              notifyError(describeIncomingImageFailure(t, error))
+              return
+            }
             if (!isDropTargetCurrent()) return
-            if (!materializedDraggedFileAttachment) {
+            const materializedDraggedFileAttachment = preparedDraggedFile?.attachment
+            if (!preparedDraggedFile || !materializedDraggedFileAttachment) {
               notifyError(t('canvas.send_to_agent_failed'))
               return
+            }
+            // An image above the per-image limit was attached as a smaller copy: say so.
+            if (preparedDraggedFile.downscaled) {
+              notifyInfoRef.current(describeIncomingImageDownscaled(t, preparedDraggedFile))
             }
             if (materializedDraggedFileAttachment.url !== draggedFileAttachment.url) {
               revokeBlobUrl(draggedFileAttachment.url)
@@ -4792,44 +4872,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
           // batch must not start materializing its remaining attachments.
           // Images are imported into managed media here (blob:/data:/local-media).
           const materializedAttachments: ChatAttachment[] = []
+          const dropBatch: IncomingChatImageBatch = new Map()
           for (const attachment of nextAttachments) {
             if (!isDropTargetCurrent()) return
-            let materialized: ChatAttachment | null
+            let prepared: BoundedChatImageAttachment | null
             try {
-              const prepared = await prepareIncomingChatAttachment(attachment)
-              if (!isDropTargetCurrent()) return
-              materialized = prepared?.attachment ?? null
-              if (prepared?.downscaled) {
-                notifyInfoRef.current(
-                  t('chat.incoming_image_downscaled', {
-                    fileName: prepared.attachment.fileName || 'image',
-                    maxMB: getChatAttachmentMaxSizeMB('image'),
-                    width: prepared.downscaled.width,
-                    height: prepared.downscaled.height
-                  })
-                )
-              }
+              prepared = await prepareIncomingChatAttachment(attachment, dropBatch)
             } catch (error) {
               if (!isDropTargetCurrent()) return
               console.error('[ChatPage] Failed to import dropped canvas attachment:', error)
-              if (error instanceof ChatImageTooLargeError) {
-                notifyError(
-                  t('chat.incoming_image_too_large', {
-                    fileName: error.fileName,
-                    maxMB: getChatAttachmentMaxSizeMB('image'),
-                    size: formatFileSize(error.sizeBytes)
-                  })
-                )
-                return
-              }
-              materialized = null
+              notifyError(describeIncomingImageFailure(t, error))
+              return
             }
             if (!isDropTargetCurrent()) return
-            if (!materialized) {
+            if (!prepared) {
               notifyError(t('canvas.send_to_agent_failed'))
               return
             }
-            materializedAttachments.push(materialized)
+            if (prepared.downscaled) {
+              notifyInfoRef.current(describeIncomingImageDownscaled(t, prepared))
+            }
+            materializedAttachments.push(prepared.attachment)
           }
           if (!isDropTargetCurrent()) return
           if (
