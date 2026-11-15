@@ -108,6 +108,8 @@ export type CommandsBackgroundInput = Readonly<{
 }>
 
 export type CommandJobsSpawnProcess = typeof spawn
+/** POSIX process-group signal; same contract as process.kill (a negative pid addresses the group). */
+export type CommandJobsKillProcessGroup = (pid: number, signal: NodeJS.Signals) => unknown
 export type CommandJobsConfinementCapabilities = Readonly<{
   memory: boolean
   cpu: boolean
@@ -139,6 +141,7 @@ export class CommandJobsToolHost {
   private readonly terminations = new Map<string, Promise<void>>()
   private readonly maxConcurrentJobs: number
   private readonly spawnProcess: CommandJobsSpawnProcess
+  private readonly killProcessGroup: CommandJobsKillProcessGroup
   private readonly auditSink?: CommandJobsAuditSink
   private readonly confinementAdapter?: CommandJobsConfinementAdapter
   private readonly mandatoryResourceLimits?: Readonly<{ maxMemoryBytes: number; maxCpuTimeMs: number }>
@@ -152,6 +155,8 @@ export class CommandJobsToolHost {
       namespace?: string
       maxConcurrentJobs?: number
       spawnProcess?: CommandJobsSpawnProcess
+      /** Test seam for the non-Windows stop path; defaults to process.kill. Windows uses taskkill through spawnProcess. */
+      killProcessGroup?: CommandJobsKillProcessGroup
       auditSink?: CommandJobsAuditSink
       confinementAdapter?: CommandJobsConfinementAdapter
       /** Fail closed if the actual execution permit omits or weakens these caps. */
@@ -175,6 +180,7 @@ export class CommandJobsToolHost {
     )
     this.maxConcurrentJobs = bound(options.maxConcurrentJobs ?? 4, 1, 16, 'maxConcurrentJobs')
     this.spawnProcess = options.spawnProcess ?? spawn
+    this.killProcessGroup = options.killProcessGroup ?? ((pid, signal) => process.kill(pid, signal))
     this.auditSink = options.auditSink
     this.confinementAdapter = options.confinementAdapter
     if (options.mandatoryResourceLimits) {
@@ -446,9 +452,9 @@ export class CommandJobsToolHost {
           } catch { controllerFailed = true; clearTimeout(timer); resolve(false) }
         })
       } else {
-        try { process.kill(-pid, 'SIGTERM') } catch { /* process group may already have exited */ }
+        try { this.killProcessGroup(-pid, 'SIGTERM') } catch { /* process group may already have exited */ }
         await new Promise((resolve) => setTimeout(resolve, 250))
-        try { process.kill(-pid, 'SIGKILL') } catch { /* no remaining group */ }
+        try { this.killProcessGroup(-pid, 'SIGKILL') } catch { /* no remaining group */ }
       }
     }
     let timer: ReturnType<typeof setTimeout> | undefined
