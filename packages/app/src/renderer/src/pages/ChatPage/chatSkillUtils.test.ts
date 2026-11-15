@@ -7,7 +7,6 @@ import {
   getCustomSkillCategory,
   getCustomSkillName,
   getSkillCategoryForSkillId,
-  getSkillsForCategory,
   normalizeProfileIdForSkill,
   resolveCustomSkillId
 } from './chatSkillUtils'
@@ -47,8 +46,7 @@ describe('chatSkillUtils', () => {
     expect(buildCustomSkillCategories(skills)).toEqual(['Art', 'Ops', 'Uncategorized'])
   })
 
-  it('filters skills by category and resolves ids safely', () => {
-    expect(getSkillsForCategory(skills, 'Art').map((skill) => skill.id)).toEqual(['art-normal'])
+  it('resolves ids safely', () => {
     expect(findCustomSkillById(skills, 'ops-agent')?.skillName).toBe('Pipeline Agent')
     expect(resolveCustomSkillId(skills, 'missing-skill')).toBeNull()
   })

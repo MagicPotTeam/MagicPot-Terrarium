@@ -16,18 +16,6 @@ export const buildCustomSkillCategories = (skills: CustomSkill[] | undefined): s
     left.localeCompare(right)
   )
 
-export const getSkillsForCategory = (
-  skills: CustomSkill[] | undefined,
-  category: string | null | undefined
-): CustomSkill[] => {
-  const normalizedCategory = normalize(category)
-  if (!normalizedCategory) {
-    return []
-  }
-
-  return (skills || []).filter((skill) => getCustomSkillCategory(skill) === normalizedCategory)
-}
-
 export const findCustomSkillById = (
   skills: CustomSkill[] | undefined,
   skillId: string | null | undefined

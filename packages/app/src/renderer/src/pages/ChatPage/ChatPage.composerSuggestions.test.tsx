@@ -85,7 +85,6 @@ vi.mock('./components/ChatMessageList', () => ({
 }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
 
 const route = {
   channel: 'canvas',

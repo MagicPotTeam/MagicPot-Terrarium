@@ -22,7 +22,6 @@ vi.mock('./chatStorage', async (importOriginal) => {
 vi.mock('./components/SessionSidebar', () => ({ default: () => <div /> }))
 vi.mock('./components/SessionHistoryDialog', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
 vi.mock('./components/ImagePreviewOverlay', () => ({ default: () => null }))
 vi.mock('./components/ImageContextMenu', () => ({ default: () => null }))
 vi.mock('./components/AgentLocalFilesPanel', () => ({ default: () => null }))

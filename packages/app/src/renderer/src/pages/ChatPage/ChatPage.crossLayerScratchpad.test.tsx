@@ -59,7 +59,6 @@ vi.mock('./components/ChatComposer', () => ({ default: ({ inputValue, onInputCha
 vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession }: any) => <pre data-testid="session">{JSON.stringify(currentSession)}</pre> }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
 
 const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'isolated-fixture', threadId: 'pane' } as const
 const url = 'file:///fixture/index.html#/canvas?id=isolated-fixture'

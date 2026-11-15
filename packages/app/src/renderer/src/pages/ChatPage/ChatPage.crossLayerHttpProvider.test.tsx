@@ -41,7 +41,6 @@ vi.mock('./components/ChatComposer', () => ({ default: ({ inputValue, onInputCha
 vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession }: any) => <pre data-testid="session">{JSON.stringify(currentSession)}</pre> }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
 
 it('uses real local HTTP model for team approval and result summary', async () => {
   expect(process.env.NODE_ENV).toBe('test')

@@ -39,7 +39,6 @@ vi.mock('./components/ChatComposer', () => ({ default: ({ inputValue, onInputCha
 vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession }: any) => <pre data-testid="session">{JSON.stringify(currentSession)}</pre> }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
 
 it.each(['direct', 'channel', 'snapshot'] as const)('connects %s actual ChatPage to real queue and local fixture tool call, without real Electron IPC', async (scenario) => {
   expect(process.env.NODE_ENV).toBe('test')

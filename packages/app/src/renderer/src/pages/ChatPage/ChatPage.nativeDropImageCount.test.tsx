@@ -98,7 +98,6 @@ vi.mock('./chatStorage', async (original) => ({
 vi.mock('./components/SessionSidebar', () => ({ default: ({ onSelectSession }: { onSelectSession: (id: string) => void }) => <button onClick={() => onSelectSession('b')}>switch b</button> }))
 vi.mock('./components/SessionHistoryDialog', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
 vi.mock('./components/ImagePreviewOverlay', () => ({ default: () => null }))
 vi.mock('./components/ImageContextMenu', () => ({ default: () => null }))
 vi.mock('./components/AgentLocalFilesPanel', () => ({ default: () => null }))
