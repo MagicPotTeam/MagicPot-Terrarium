@@ -491,7 +491,7 @@ describe('content-addressed canvas blob store', () => {
     expect(fake.blobKeys()).toEqual([assetBlobKey('history-fail', [1, 2])])
   })
 
-  it('never deletes blobs of another canvas, legacy per-item blobs or foreign keys', async () => {
+  it('never deletes blobs of another canvas, unscoped blobs or foreign keys', async () => {
     const blobs = fake.committed.get('canvas-blobs')!
     const foreign = { data: new Uint8Array([1]).buffer, mimeType: 'image/png' }
     blobs.set('other-canvas::canvas::asset::' + contentKey([1]), foreign)
@@ -504,10 +504,10 @@ describe('content-addressed canvas blob store', () => {
     await saveCanvasItems([item], 'prune-scope')
     await saveCanvasItems([], 'prune-scope')
 
+    // Only the per-item blob of this canvas that no stored item reads any more is gone.
     expect(fake.blobKeys()).toEqual(
       [
         'other-canvas::canvas::asset::' + contentKey([1]),
-        'prune-scope::canvas::legacy-item-id',
         'prune-scope::canvas::asset::not-a-content-key',
         'unscoped-legacy-item-id',
         'prune-scope-2::canvas::asset::' + contentKey([1])
@@ -1090,5 +1090,138 @@ describe('metadata-only saves', () => {
     await saveCanvasItems([{ ...item, x: 5 } as CanvasItem], 'meta-mirror')
     expect(mirror.assetFiles()).toEqual([`${contentKey([6])}.png`])
     expect(fake.record('meta-mirror')!.items[0]).toMatchObject({ x: 5 })
+  })
+})
+
+describe('boards saved by an earlier version', () => {
+  const legacyBlob = (bytes: number[], mimeType = 'image/png') => ({
+    data: new Uint8Array(bytes).buffer,
+    mimeType
+  })
+
+  function seedLegacyBoard(storeKey: string) {
+    const model = {
+      ...(imageItem('old-model', '') as object),
+      type: 'model3d',
+      fileName: 'old.glb',
+      textures: { diffuse: 'blob:stale-texture-url' }
+    }
+    fake.committed.get('canvas-items')!.set(storeKey, {
+      items: [
+        { ...(imageItem('old-a', '') as object), src: '' },
+        { ...(imageItem('old-b', '') as object), src: '', caption: 'kept' },
+        model,
+        { id: 'note', type: 'text', text: 'hello', x: 0, y: 0, zIndex: 3 }
+      ],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    const blobs = fake.committed.get('canvas-blobs')!
+    blobs.set(`${storeKey}::canvas::old-a`, legacyBlob([1, 1, 1]))
+    blobs.set(`${storeKey}::canvas::old-b`, legacyBlob([2, 2]))
+    blobs.set(`${storeKey}::canvas::old-model`, legacyBlob([3], 'model/gltf-binary'))
+    blobs.set(`${storeKey}::canvas::old-model::tex::diffuse`, legacyBlob([4, 4, 4, 4]))
+    // An orphan of a long-deleted item, another canvas and a pre-scope blob.
+    blobs.set(`${storeKey}::canvas::deleted-long-ago`, legacyBlob([9]))
+    blobs.set('another-board::canvas::old-a', legacyBlob([7]))
+    blobs.set('old-a', legacyBlob([8]))
+  }
+
+  const legacyKeysOf = (storeKey: string) =>
+    fake.blobKeys().filter(
+      (key) => key.startsWith(`${storeKey}::canvas::`) && !key.includes('::canvas::asset::')
+    )
+
+  it('opens with every binary and is re-keyed by its first save', async () => {
+    seedLegacyBoard('migrate')
+    const loaded = await loadCanvasItems('migrate')
+    expect(loaded.items.map((item) => item.id)).toEqual(['old-a', 'old-b', 'old-model', 'note'])
+    for (const item of loaded.items.slice(0, 3)) {
+      expect((item as { src: string }).src).toMatch(/^blob:restored-/)
+    }
+
+    await saveCanvasItems(loaded.items, 'migrate')
+
+    // Every binary is now stored under its content key, byte for byte...
+    const record = fake.record('migrate')!
+    expect(record.items.map((item) => item.assetKey)).toEqual([
+      contentKey([1, 1, 1]),
+      contentKey([2, 2]),
+      contentKey([3]),
+      undefined
+    ])
+    expect(record.items[2].textureAssetKeys).toEqual({ diffuse: contentKey([4, 4, 4, 4]) })
+    expect(record.items[1]).toMatchObject({ caption: 'kept' })
+    for (const bytes of [[1, 1, 1], [2, 2], [3], [4, 4, 4, 4]]) {
+      expect(fake.blobBytes(assetBlobKey('migrate', bytes))).toEqual(bytes)
+    }
+    // ...and only then the per-item blobs of this board are gone. Nothing else is touched.
+    expect(legacyKeysOf('migrate')).toEqual([])
+    expect(fake.blobKeys()).toContain('another-board::canvas::old-a')
+    expect(fake.blobKeys()).toContain('old-a')
+
+    // The migrated board reopens completely and its next save moves no bytes.
+    const reopened = await loadCanvasItems('migrate')
+    expect(reopened.items.map((item) => item.id)).toEqual(['old-a', 'old-b', 'old-model', 'note'])
+    fake.resetLog()
+    fetchCalls = []
+    await saveCanvasItems(reopened.items, 'migrate')
+    expect(fake.blobPuts()).toEqual([])
+    expect(fetchCalls).toEqual([])
+  })
+
+  it('keeps every old blob when the first save does not commit', async () => {
+    seedLegacyBoard('migrate-abort')
+    const loaded = await loadCanvasItems('migrate-abort')
+    const recordBefore = JSON.stringify(fake.record('migrate-abort'))
+    const legacyBefore = legacyKeysOf('migrate-abort')
+
+    fake.failNext({ store: 'canvas-items', mode: 'async-abort' })
+    await expect(saveCanvasItems(loaded.items, 'migrate-abort')).rejects.toThrow()
+
+    expect(JSON.stringify(fake.record('migrate-abort'))).toBe(recordBefore)
+    expect(legacyKeysOf('migrate-abort')).toEqual(legacyBefore)
+    // The old form still opens with everything.
+    const reopened = await loadCanvasItems('migrate-abort')
+    expect(reopened.items.map((item) => item.id)).toEqual(['old-a', 'old-b', 'old-model', 'note'])
+  })
+
+  it('keeps the old blobs until the mirror has acknowledged the board as well', async () => {
+    seedLegacyBoard('migrate-mirror')
+    const mirror = createFakeMirror()
+    mirror.state.failProjectFileWrite = true
+    const loaded = await loadCanvasItems('migrate-mirror')
+    const legacyBefore = legacyKeysOf('migrate-mirror')
+
+    await saveCanvasItems(loaded.items, 'migrate-mirror')
+    expect(fake.record('migrate-mirror')!.items[0].assetKey).toBe(contentKey([1, 1, 1]))
+    expect(legacyKeysOf('migrate-mirror')).toEqual(legacyBefore)
+
+    mirror.state.failProjectFileWrite = false
+    await saveCanvasItems(loaded.items, 'migrate-mirror')
+    expect(legacyKeysOf('migrate-mirror')).toEqual([])
+    expect(mirror.project().items).toHaveLength(4)
+  })
+
+  it('keeps the per-item blob of a stored item that has no content key', async () => {
+    // A managed image saved by an earlier version that still stored its bytes per item.
+    const managed = {
+      ...(imageItem('managed-old', 'local-media:///C:/managed/m.png') as object),
+      media: { kind: 'managed', id: 'media-9' }
+    }
+    fake.committed.get('canvas-items')!.set('migrate-managed', {
+      items: [managed],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    fake.committed
+      .get('canvas-blobs')!
+      .set('migrate-managed::canvas::managed-old', legacyBlob([5, 5]))
+
+    await saveCanvasItems([managed as unknown as CanvasItem], 'migrate-managed')
+    expect(fake.record('migrate-managed')!.items[0].assetKey).toBeUndefined()
+    expect(fake.blobKeys()).toEqual(['migrate-managed::canvas::managed-old'])
   })
 })

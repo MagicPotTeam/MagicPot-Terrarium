@@ -1839,6 +1839,39 @@ function collectKnownCanvasAssetKeys(
 }
 
 /**
+ * The per-item blob keys (item id, model texture key) that loading this record
+ * would fall back to: the same items the loader queues reads for, minus those
+ * whose content-keyed blob is stored.
+ */
+function collectLegacyCanvasBlobKeysStillRead(
+  persistedItems: readonly SerializableCanvasItem[],
+  storedAssetKeys: ReadonlySet<string>
+): Set<string> {
+  const stillRead = new Set<string>()
+  for (const item of persistedItems) {
+    if (!item || typeof item !== 'object' || !isBlobPersistableCanvasItem(item)) continue
+    const persistedKeys = readPersistedCanvasAssetKeys(item)
+    const loaderReadsBlob =
+      !item.src || hasLocallyPersistableCanvasSrc(item) || isRelativeCanvasAssetReference(item.src)
+    if (
+      loaderReadsBlob &&
+      !(persistedKeys.assetKey && storedAssetKeys.has(persistedKeys.assetKey))
+    ) {
+      stillRead.add(item.id)
+    }
+    if (item.type === 'model3d' && item.textures) {
+      for (const textureName of Object.keys(item.textures)) {
+        const textureAssetKey = persistedKeys.textureAssetKeys[textureName]
+        if (loaderReadsBlob && !(textureAssetKey && storedAssetKeys.has(textureAssetKey))) {
+          stillRead.add(getModelTextureKey(item.id, textureName))
+        }
+      }
+    }
+  }
+  return stillRead
+}
+
+/**
  * Deletes the content-keyed blobs of one canvas that nothing references any
  * more. The referenced set is read from the committed record inside the same
  * transaction, so a blob the stored canvas needs can never be removed; keys of
@@ -1849,7 +1882,8 @@ function collectKnownCanvasAssetKeys(
 async function pruneCanvasAssetBlobs(
   db: IDBDatabase,
   storeKey: string,
-  protectedAssetKeys: ReadonlySet<string>
+  protectedAssetKeys: ReadonlySet<string>,
+  deleteMigratedLegacyBlobs: boolean
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readwrite')
@@ -1873,11 +1907,21 @@ async function pruneCanvasAssetBlobs(
           | undefined
         if (persisted === undefined) return
         const referenced = countCanvasAssetKeyReferences(extractPersistedCanvasData(persisted).items)
+        const persistedItems = extractPersistedCanvasData(persisted).items
         listCanvasBlobKeys(blobStore, storeKey, (index) => {
           if (!index) return
           for (const assetKey of index.assetKeys) {
             if (referenced.has(assetKey) || protectedAssetKeys.has(assetKey)) continue
             blobStore.delete(getScopedCanvasAssetBlobKey(storeKey, assetKey))
+          }
+          if (!deleteMigratedLegacyBlobs) return
+          // Per-item blobs written by earlier versions: kept only while loading the
+          // committed record would still read them, that is for an item without a
+          // content key or whose keyed blob is not stored.
+          const stillRead = collectLegacyCanvasBlobKeysStillRead(persistedItems, index.assetKeys)
+          for (const legacyKey of index.legacyKeys) {
+            if (legacyKey.startsWith(CANVAS_ASSET_BLOB_KEY_PREFIX) || stillRead.has(legacyKey)) continue
+            blobStore.delete(getScopedCanvasBlobKey(storeKey, legacyKey))
           }
         })
       }
@@ -2503,12 +2547,16 @@ async function saveCanvasItemsExclusive(
 
     // 3. The mirror: missing asset files, the project file, then its own cleanup.
     // Its failure does not fail the save; IndexedDB already holds the board.
+    // Blobs of earlier versions are only given up once the board is also safe
+    // in the mirror (or there is no mirror in this environment at all).
+    let mirrorIsCurrent = false
     try {
       if (mirrorPlan === undefined) {
         mirrorPlan = await planCanvasMirrorSave(storeKey, items, assetKeyByLogicalKey, true)
       }
+      if (mirrorPlan === null) mirrorIsCurrent = true
       if (mirrorPlan) {
-        await executeCanvasMirrorSave(
+        mirrorIsCurrent = await executeCanvasMirrorSave(
           mirrorPlan,
           storeKey,
           items,
@@ -2528,7 +2576,7 @@ async function saveCanvasItemsExclusive(
     try {
       const protectedAssetKeys = new Set(assetKeyByLogicalKey.values())
       collectKnownCanvasAssetKeys(options.getProtectedItems?.() ?? [], protectedAssetKeys)
-      await pruneCanvasAssetBlobs(db, storeKey, protectedAssetKeys)
+      await pruneCanvasAssetBlobs(db, storeKey, protectedAssetKeys, mirrorIsCurrent)
     } catch (error) {
       console.warn('[Canvas Storage] Failed to prune unreferenced canvas assets:', error)
     }
