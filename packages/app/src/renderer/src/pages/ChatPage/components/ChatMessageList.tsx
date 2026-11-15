@@ -1036,14 +1036,24 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     wasNearBottomRef.current = true
     setScroll({ top: container.scrollTop, viewport: container.clientHeight })
   }, [chatContainerRef, hasTail, tailScrollToken])
-  // A tail row that grows afterwards (its content arrives) keeps a list that is at its end there.
+  // A tail row that grows afterwards (its content arrives) keeps a list that stood at its end
+  // there. Whether it stood at the end is read from the geometry before the growth: the scroll
+  // event of the frame in which the row grew has already seen the taller content.
+  const tailHeightRef = React.useRef(0)
   React.useEffect(() => {
     const tailElement = tailRef.current
     if (!hasTail || !tailElement || typeof ResizeObserver === 'undefined') return
+    tailHeightRef.current = 0
     const observer = new ResizeObserver(() => {
+      const height = tailElement.getBoundingClientRect().height
+      const growth = height - tailHeightRef.current
+      tailHeightRef.current = height
       const container = chatContainerRef.current
-      if (!container || !wasNearBottomRef.current) return
-      container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+      if (!container || growth <= 0) return
+      const end = Math.max(0, container.scrollHeight - container.clientHeight)
+      if (end - container.scrollTop - growth > CHAT_STICK_TO_BOTTOM_THRESHOLD_PX) return
+      container.scrollTop = end
+      wasNearBottomRef.current = true
     })
     observer.observe(tailElement)
     return () => observer.disconnect()

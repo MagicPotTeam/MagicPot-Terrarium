@@ -118,6 +118,66 @@ describe('the transcript tail of the Agent column', () => {
     expect(scroller.scrollTop).toBe(600)
   })
 
+  it('follows a tail row that grows while the list stands at its end, and not when the person scrolled away', () => {
+    // jsdom has no ResizeObserver: the double hands out the callback of the tail's observer.
+    const observers: { target: Element | null; notify: () => void }[] = []
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        private entry: { target: Element | null; notify: () => void }
+        constructor(callback: () => void) {
+          this.entry = { target: null, notify: callback }
+          observers.push(this.entry)
+        }
+        observe(target: Element) {
+          this.entry.target = target
+        }
+        unobserve() {
+          this.entry.target = null
+        }
+        disconnect() {
+          this.entry.target = null
+        }
+      }
+    )
+    try {
+      const view = render(list(short, { tailScrollToken: 0 }))
+      const scroller = layOut(900, 300)
+      view.rerender(list(short, { tail: card, tailScrollToken: 1 }))
+      expect(scroller.scrollTop).toBe(600)
+      const tail = screen.getByTestId('chat-transcript-tail')
+      const observer = observers.find((entry) => entry.target === tail)!
+      const tailHeight = (height: number) =>
+        vi.spyOn(tail, 'getBoundingClientRect').mockReturnValue({ height } as DOMRect)
+      tailHeight(40)
+      observer.notify()
+
+      // The row grows by 200px (its content arrived); the scroll event of that frame has already
+      // seen the taller content, so the list no longer looks "near the end".
+      layOut(1100, 300)
+      scroller.dispatchEvent(new Event('scroll'))
+      tailHeight(240)
+      observer.notify()
+      expect(scroller.scrollTop).toBe(800)
+
+      // The person scrolled up before the row grew again: the list stays where it is.
+      scroller.scrollTop = 100
+      scroller.dispatchEvent(new Event('scroll'))
+      layOut(1300, 300)
+      tailHeight(440)
+      observer.notify()
+      expect(scroller.scrollTop).toBe(100)
+
+      // A row that shrinks moves nothing.
+      scroller.scrollTop = 1000
+      tailHeight(300)
+      observer.notify()
+      expect(scroller.scrollTop).toBe(1000)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('keeps a long transcript virtualised with the tail after the bottom spacer', () => {
     const messages = Array.from({ length: 60 }, (_, index) => ({
       role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
