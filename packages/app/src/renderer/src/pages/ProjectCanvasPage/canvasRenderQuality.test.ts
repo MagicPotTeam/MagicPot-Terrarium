@@ -5,7 +5,9 @@ import {
   PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS,
   createProjectCanvasRenderQualityGovernor,
   isProjectCanvasAdaptiveQualityEnabled,
+  PROJECT_CANVAS_WEBGL_RENDER_GROUP_MAX_SCREEN_REACH_PX,
   resolveProjectCanvasRenderDpr,
+  shouldUseProjectCanvasWorldRenderGroup,
   type ProjectCanvasAdaptiveQualityGlobal
 } from './canvasRenderQuality'
 
@@ -81,5 +83,23 @@ describe('canvasRenderQuality', () => {
     expect(isProjectCanvasAdaptiveQualityEnabled()).toBe(true)
     adaptiveQualityGlobal.__MAGICPOT_PROJECT_CANVAS_ADAPTIVE_QUALITY__ = false
     expect(isProjectCanvasAdaptiveQualityEnabled()).toBe(false)
+  })
+
+  it('uses the world render group only where 32-bit GPU maths stays sub-pixel exact', () => {
+    const shouldUse = shouldUseProjectCanvasWorldRenderGroup
+    const limit = PROJECT_CANVAS_WEBGL_RENDER_GROUP_MAX_SCREEN_REACH_PX
+    const stage = { width: 1920, height: 1080 }
+    expect(shouldUse({ x: 0, y: 0 }, stage, false)).toBe(true)
+    expect(shouldUse({ x: -90_000, y: 150_000 }, stage, false)).toBe(true)
+    // At the limit: stays on, does not turn on.
+    expect(shouldUse({ x: limit - 1920, y: 0 }, stage, true)).toBe(true)
+    expect(shouldUse({ x: limit - 1920, y: 0 }, stage, false)).toBe(false)
+    expect(shouldUse({ x: limit - 1919, y: 0 }, stage, true)).toBe(false)
+    expect(shouldUse({ x: 0, y: -(limit * 0.75 - 1920) }, stage, false)).toBe(true)
+    expect(shouldUse({ x: 0, y: -5_000_000 }, stage, true)).toBe(false)
+    // Unknown stage size and broken numbers.
+    expect(shouldUse({ x: 100, y: 100 }, undefined, false)).toBe(true)
+    expect(shouldUse({ x: Number.NaN, y: 0 }, stage, true)).toBe(false)
+    expect(shouldUse({ x: Number.POSITIVE_INFINITY, y: 0 }, stage, true)).toBe(false)
   })
 })

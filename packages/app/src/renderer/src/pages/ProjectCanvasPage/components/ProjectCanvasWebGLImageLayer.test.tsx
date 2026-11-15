@@ -2955,6 +2955,47 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect((createdSprites[0].texture.source as { scaleMode?: string }).scaleMode).toBe('linear')
   }, 15000)
 
+  describe('world render group', () => {
+    const getWorld = () =>
+      createdSprites[0].parent as unknown as { isRenderGroup?: boolean; position: MockPoint }
+
+    it('makes the world a render group, so a pan or zoom is one transform on the GPU', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      render(<Layer ref={ref} items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdSprites).toHaveLength(1))
+      expect(getWorld().isRenderGroup).toBe(true)
+
+      act(() => ref.current?.syncViewport({ x: -40_000, y: 12_000 }, 0.2))
+      expect(getWorld().isRenderGroup).toBe(true)
+      expect(getWorld().position.x).toBe(-40_000)
+    })
+
+    it('transforms on the CPU where 32-bit GPU maths would move images by visible amounts', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const { PROJECT_CANVAS_WEBGL_RENDER_GROUP_MAX_SCREEN_REACH_PX: limit } =
+        await import('../canvasRenderQuality')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      render(<Layer ref={ref} items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdSprites).toHaveLength(1))
+      const app = createdApplications[0]
+
+      // A deep zoom far from the canvas origin: the stage offset is millions of screen pixels.
+      const rendersBefore = app.render.mock.calls.length
+      act(() => ref.current?.syncViewport({ x: -22_500_000, y: -3_000_000 }, 500))
+      expect(getWorld().isRenderGroup).toBe(false)
+      expect(getWorld().position.x).toBe(-22_500_000)
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // Just inside the limit again is not enough to switch back (no flapping on the limit)...
+      act(() => ref.current?.syncViewport({ x: -(limit - 1280 - 10), y: 0 }, 500))
+      expect(getWorld().isRenderGroup).toBe(false)
+      // ...well inside is.
+      act(() => ref.current?.syncViewport({ x: -(limit / 2), y: 0 }, 500))
+      expect(getWorld().isRenderGroup).toBe(true)
+    })
+  })
+
   describe('lockstep frame', () => {
     // Animation frames that only run when the test says so.
     const installManualAnimationFrames = () => {
@@ -2998,7 +3039,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       })
       const app = createdApplications[0]
       // Let the start-up renders and reconcile timers run out: quiet for 200 ms.
-      for (let renders = -1; renders !== app.render.mock.calls.length; ) {
+      for (let renders = -1; renders !== app.render.mock.calls.length;) {
         renders = app.render.mock.calls.length
         await act(async () => {
           await new Promise((resolve) => setTimeout(resolve, 200))

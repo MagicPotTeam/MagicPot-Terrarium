@@ -47,6 +47,7 @@ import {
   createProjectCanvasRenderQualityGovernor,
   isProjectCanvasAdaptiveQualityEnabled,
   resolveProjectCanvasRenderDpr,
+  shouldUseProjectCanvasWorldRenderGroup,
   type ProjectCanvasRenderQuality
 } from '../canvasRenderQuality'
 import { useCanvasSpatialIndexLifecycle } from '../useCanvasSpatialIndexLifecycle'
@@ -358,6 +359,18 @@ function applySpriteTransform(
     (item.height / metrics.textureHeight) * item.scaleY
   )
   sprite.rotation = (item.rotation * Math.PI) / 180
+}
+
+function syncProjectCanvasWorldRenderGroup(
+  world: Container,
+  pos: { x: number; y: number },
+  stageSize: { width: number; height: number } | null | undefined
+) {
+  const enabled = world.isRenderGroup === true
+  const nextEnabled = shouldUseProjectCanvasWorldRenderGroup(pos, stageSize, enabled)
+  if (nextEnabled !== enabled) {
+    world.isRenderGroup = nextEnabled
+  }
 }
 
 function getProjectCanvasTextureByteSize(
@@ -2606,6 +2619,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       lastAppliedViewportRef.current = { x: pos.x, y: pos.y, scale }
+      syncProjectCanvasWorldRenderGroup(world, pos, stageSizeRef.current)
       world.position.set(pos.x, pos.y)
       world.scale.set(scale)
       renderImmediateOrSchedule()
@@ -2919,6 +2933,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
         const world = new Container()
         world.sortableChildren = true
+        syncProjectCanvasWorldRenderGroup(world, stagePosRef.current, stageSizeRef.current)
         const canvas = app.canvas as HTMLCanvasElement
         const handleContextLost = (event: Event) => {
           event.preventDefault()
