@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -40,7 +40,7 @@ test('creates missing output directories one component at a time without followi
       () => ensureSafeDirectory(path.join(linked, 'nested', 'output'), 'output-dir'),
       /symlink or reparse point/
     )
-    assert.equal(path.existsSync(path.join(real, 'nested')), false)
+    assert.equal(existsSync(path.join(real, 'nested')), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
