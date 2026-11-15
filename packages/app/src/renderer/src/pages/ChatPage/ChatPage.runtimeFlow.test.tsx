@@ -4803,7 +4803,7 @@ describe('ChatPage runtime workflow integration', () => {
     expect(requestMessages.at(-1)?.attachments?.[0]?.url).toBe('file://C:/MagicPot/existing.png')
   })
 
-  it('offers manual thread goal records for the current local canvas session without dispatch', async () => {
+  it('offers manual thread goal records through /goal for the current local canvas session without dispatch', async () => {
     const first: ChatSession = { id: 'goal-session-first', title: 'First', profileId: 'base-model', messages: [] }
     const second: ChatSession = { id: 'goal-session-second', title: 'Second', profileId: 'base-model', messages: [] }
     hoisted.storedSessions.value = [first, second]
@@ -4812,7 +4812,8 @@ describe('ChatPage runtime workflow integration', () => {
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(first.id))
       expect(hoisted.agentGoalScopeRevisionMock).not.toHaveBeenCalled()
-      fireEvent.click(screen.getByRole('button', { name: 'Goals' }))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/goal' } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       expect(await screen.findByText('No goals yet.')).toBeVisible()
       const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'runtime-project', threadId: 'runtime-pane' }
       expect(hoisted.listAgentGoalsMock).toHaveBeenCalledWith({ route, conversationId: first.id, documentToken: 'goal-document' })
@@ -4821,7 +4822,8 @@ describe('ChatPage runtime workflow integration', () => {
       await dispatchSwitchSession(second.id)
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(second.id))
       expect(screen.queryByLabelText('Thread goals')).not.toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: 'Goals' }))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/goal' } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       await waitFor(() => expect(hoisted.listAgentGoalsMock).toHaveBeenCalledWith({ route, conversationId: second.id, documentToken: 'goal-document' }))
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
     } finally { page.unmount() }
