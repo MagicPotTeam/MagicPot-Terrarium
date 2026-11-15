@@ -304,7 +304,7 @@ import { isRepairImagesCommand, parseRepairImagesCommand, scanMissingLocalImages
 import { isAgentConfigurationCommand, parseAgentConfigurationCommand } from './agentConfigurationCommand'
 import { isAgentInspectionCommand, parseAgentInspectionCommand, formatAgentEnvironment } from './agentInspectionCommand'
 import AgentThreadScratchpadView, { type AgentScratchpadResult } from './components/AgentThreadScratchpadView'
-import ChatCommandTail, { type ChatTailCard, type ChatTailCardDraft } from './components/ChatCommandTail'
+import ChatCommandTail, { type ChatTailCard, type ChatTailCardDraft, type ChatTailConfirmCard } from './components/ChatCommandTail'
 import AgentThreadGoalEntry from './components/AgentThreadGoalEntry'
 import { isAgentScratchpadCommand, parseAgentScratchpadCommand, type AgentScratchpadCommandHandle } from './agentScratchpadCommand'
 import { isAgentSkillCommand, parseAgentSkillCommand, type AgentSkillCommandHandle } from './agentSkillCommand'
@@ -8577,13 +8577,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const tailOwnerRef = useRef({ scope: inspectionScope, active })
   tailOwnerRef.current = { scope: inspectionScope, active }
   /** Adds a card for a command that ran in `scope`; a result that arrives after the conversation changed is dropped. */
-  const appendTailCard = useCallback((scope: string, card: ChatTailCardDraft<CommandTailTarget>) => {
+  const appendTailCard = useCallback((scope: string, card: ChatTailCardDraft<CommandTailTarget>): number | null => {
     const owner = tailOwnerRef.current
-    if (!isMountedRef.current || !owner.active || owner.scope !== scope) return
+    if (!isMountedRef.current || !owner.active || owner.scope !== scope) return null
     const id = ++tailCardIdRef.current
     setTailCards(previous => [...previous, { ...card, id, scope } as ChatTailCard<CommandTailTarget>])
     setTailScrollToken(token => token + 1)
+    return id
   }, [])
+  // What the default button of a confirm card does, by card id.
+  const tailConfirmActionsRef = useRef(new Map<number,
+    | { type: 'replay'; view: NonNullable<typeof replayView> }
+    | { type: 'repair'; session: ChatSession; scan: ImageRepairScan }>())
   const openCommandTailTarget = useCallback((target: CommandTailTarget) => navigate(target.path, { state: target.state }), [navigate])
   const configurationTailCard = (kind: 'plugin' | 'module' | 'video_gen'): ChatTailCardDraft<CommandTailTarget> => ({
     kind: 'links', command: `/${kind}`, text: t(`chat.command_card.${kind}_hint`),
@@ -8618,6 +8623,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     basicCommandGenerationRef.current++
     setGoalViewScope(null)
     setTailCards(previous => previous.length ? [] : previous)
+    tailConfirmActionsRef.current.clear()
     setInspectionView(null); setConfigurationView(null); setImageRepairView(null); setBasicCommandView(null); setBasicJobsText('')
     imageRepairContextRef.current = null
   }, [inspectionScope, active])
@@ -8746,7 +8752,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const session = sessionsRef.current.find(item=>item.id===id)
         if (!session) return
         if (command.kind !== 'branch') planReplay(session.messages, command)
-        setReplayView({scope:inspectionScope,session,command,modelConfig:config.llm_config,profileId:selectedProfileId,skillId:selectedSkillId})
+        const view = {scope:inspectionScope,session,command,modelConfig:config.llm_config,profileId:selectedProfileId,skillId:selectedSkillId}
+        if (compact) {
+          const cardId = appendTailCard(inspectionScope, {
+            kind: 'confirm', command: `/${command.kind}`, title: t('chat.command_card.confirm_title'),
+            prompt: command.kind === 'edit' ? t('chat.command_card.edit_prompt', { number: command.index + 1 }) : t(`chat.command_card.${command.kind}_prompt`),
+            confirmLabel: t('chat.command_card.new_conversation'), cancelLabel: t('chat.command_card.cancel')
+          })
+          if (cardId !== null) tailConfirmActionsRef.current.set(cardId, { type: 'replay', view })
+        } else setReplayView(view)
         setInputValue(''); setComposerClearVersion(version=>version+1)
       } catch { notifyWarning(t('chat.use_replay_commands', { defaultValue: 'Use /branch, /regen or /edit <message number> <text>. Tool/attachment replay requires the existing editor and review.' })) }
       return
@@ -8780,7 +8794,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (command === 'compact' && loadingSessionIdsRef.current.has(id)) {
             notifyWarning(t('chat.compaction_unavailable_busy', { defaultValue: 'Compaction unavailable or conversation is busy.' })); return
           }
-          if (command === 'jobs' && compact) {
+          if (command === 'compact' && compact) {
+            // Same as the composer's compact button; the summary banner of the transcript is the result.
+            handleCompressCurrentContext()
+          } else if (command === 'jobs' && compact) {
             // The card carries the list as it is now; running "/jobs" again adds a fresh card.
             const scope = inspectionScope
             const conversationRoute = route!
@@ -8830,7 +8847,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) && !hasSessionDeleteTombstone(id, storageScope)
       void scanMissingLocalImages(expected.messages, paths => api().svcShell.fileExistsBatch(paths)).then(scan => {
         if (!current()) return
-        setImageRepairView({ scope: inspectionScope, session: expected, scan, confirmed: false })
+        if (!compact) setImageRepairView({ scope: inspectionScope, session: expected, scan, confirmed: false })
+        else {
+          const checked = [t('chat.repair_images_checked', { checked: scan.checked, defaultValue: `Checked ${scan.checked} references (maximum 128).` }),
+            scan.limited ? t('chat.repair_images_scan_limit', { defaultValue: 'Scan limit reached.' }) : ''].filter(Boolean).join(' ')
+          if (!scan.missing.length) appendTailCard(inspectionScope, { kind: 'text', command: '/repair-images', muted: true, note: checked,
+            text: t('chat.repair_images_none', { defaultValue: 'No missing local images found among checked completed messages.' }) })
+          else {
+            const cardId = appendTailCard(inspectionScope, {
+              kind: 'confirm', command: '/repair-images', title: t('chat.command_card.confirm_title'),
+              prompt: t('chat.command_card.repair_prompt', { count: scan.missing.length }),
+              detail: [...scan.missing.map(item => t('chat.repair_images_message', { message: item.messageIndex + 1, image: item.attachmentIndex + 1, defaultValue: `Message ${item.messageIndex + 1}, image ${item.attachmentIndex + 1}` })), checked].join('\n'),
+              confirmLabel: t('chat.command_card.confirm'), cancelLabel: t('chat.command_card.cancel')
+            })
+            if (cardId !== null) tailConfirmActionsRef.current.set(cardId, { type: 'repair', session: expected, scan })
+          }
+        }
         // The command ran: clear its draft (unless it was edited meanwhile) so the "/" list
         // does not reopen over the result.
         if (inputValueRef.current === input) { setInputValue(''); setComposerClearVersion(version => version + 1) }
@@ -8921,7 +8953,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
     void sendMessage()
-  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, appendTailCard, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
+  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, appendTailCard, handleCompressCurrentContext, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
 
   const handleSendEditedMessage = useCallback(
     (
@@ -8942,12 +8974,77 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [selectSkill]
   )
 
+  /** Creates the separate conversation of a confirmed /branch, /regen or /edit. False when the command can no longer run. */
+  const runReplay = (view: NonNullable<typeof replayView>): boolean => {
+    const id = currentSessionIdRef.current
+    if (!active || !isReady || !sessionsLoaded || sessionLoadError || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || id !== view.session.id || storageScopeRef.current !== storageScope || sessionsRef.current.find(item=>item.id===id) !== view.session || view.modelConfig !== config.llm_config || view.profileId !== selectedProfileId || view.skillId !== selectedSkillId || loadingSessionIdsRef.current.has(id) || config.use_remote_llm || hasSessionDeleteTombstone(id,storageScope) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id))) { notifyWarning(t('chat.conversation_settings_changed_reopen', { defaultValue: 'Conversation or settings changed. Reopen command.' })); return false }
+    try {
+      const planned = view.command.kind === 'branch' ? null : planReplay(view.session.messages,view.command)
+      const copy = cloneChatSessionForReplay(view.session, planned?.baseMessages)
+      const branch = { ...copy, id: crypto.randomUUID(), title: `${copy.title} [${view.command.kind}]`, messages: copy.messages, createdAt:Date.now(), updatedAt:Date.now() }
+      delete branch.sessionUrl
+      delete branch.teamLeadId
+      delete branch.teamMemberName
+      delete branch.memberModelChoice
+      delete branch.teamMemberGeneration
+      delete branch.teamLifecycleRevision
+      delete branch.teamRole
+      delete branch.teamGeneration
+      delete branch.teamSettings
+      delete branch.teamTasks
+      delete branch.teamChannel
+      delete branch.sessionProfileId
+      delete branch.sessionRouteFingerprint
+      delete branch.draft
+      if (planned) branch.draft = { inputValue:planned.content, pendingAttachments:[], pendingHiddenContext:'', updatedAt:Date.now() }
+      replayBusyRef.current=true
+      void activateNewSession(branch).then(async()=>{
+        if (!branch.draft || storageScopeRef.current!==storageScope || currentSessionIdRef.current!==branch.id) return
+        const restoredDraft={...branch.draft,updatedAt:Date.now()}
+        await persistDraftSnapshot(branch.id,restoredDraft)
+        if (storageScopeRef.current===storageScope && currentSessionIdRef.current===branch.id) applyDraftToComposerState(restoredDraft)
+      }).catch(()=>notifyWarning(t('chat.could_not_save_branch', { defaultValue: 'Could not save branch. Original conversation remains.' }))).finally(()=>{replayBusyRef.current=false})
+      return true
+    } catch { notifyWarning(t('chat.cannot_plan_replay', { defaultValue: 'Cannot plan this replay. Original conversation unchanged.' })); return false }
+  }
+  /** Marks the missing images of a confirmed /repair-images for the next requests. False when the conversation has changed since the scan. */
+  const confirmImageRepair = (repair: { session: ChatSession; scan: ImageRepairScan }): boolean => {
+    if (sessionsRef.current.find(session => session.id === currentSessionIdRef.current) !== repair.session ||
+      loadingSessionIdsRef.current.has(repair.session.id) || storageScopeRef.current !== storageScope ||
+      hasSessionDeleteTombstone(repair.session.id, storageScope)) {
+      notifyWarning(t('chat.conversation_changed_repair', { defaultValue: 'Conversation changed. Run /repair-images again.' })); return false
+    }
+    const references = new Map<ChatMessage, readonly MissingImageReference[]>()
+    for (const item of repair.scan.missing) {
+      const message = repair.session.messages[item.messageIndex]
+      references.set(message, [...(references.get(message) ?? []), item])
+    }
+    imageRepairContextRef.current = { scope: inspectionScope, references }
+    return true
+  }
+  // The answer to a confirm card of the transcript tail. The card stays, with the reply.
+  const answerTailConfirmRef = useRef<(card: ChatTailConfirmCard, confirmed: boolean) => void>(() => undefined)
+  answerTailConfirmRef.current = (card, confirmed) => {
+    const action = tailConfirmActionsRef.current.get(card.id)
+    if (!action || (confirmed && action.type === 'replay' && replayBusyRef.current)) return
+    tailConfirmActionsRef.current.delete(card.id)
+    const done = !confirmed || (action.type === 'replay' ? runReplay(action.view) : confirmImageRepair(action))
+    setTailCards(previous => previous.map(item => item.id !== card.id || item.kind !== 'confirm' ? item : {
+      ...item,
+      resolution: done
+        ? { state: t('chat.command_card.answered'), reply: confirmed ? item.confirmLabel : item.cancelLabel }
+        : { state: t('chat.command_card.expired') }
+    }))
+    // The buttons are gone: the keyboard goes back to the composer.
+    composerInputRef.current?.focus()
+  }
+  const answerTailConfirm = useCallback((card: ChatTailConfirmCard, confirmed: boolean) => answerTailConfirmRef.current(card, confirmed), [])
   // Memoised: the message list is, and must not re-render with every render of the page.
   const transcriptTail = useMemo(() => {
     if (!compact || !active) return null
     const cards = tailCards.filter(card => card.scope === inspectionScope)
-    return cards.length ? <ChatCommandTail cards={cards} onLink={openCommandTailTarget} /> : null
-  }, [compact, active, tailCards, inspectionScope, openCommandTailTarget])
+    return cards.length ? <ChatCommandTail cards={cards} onLink={openCommandTailTarget} onAnswer={answerTailConfirm} /> : null
+  }, [compact, active, tailCards, inspectionScope, openCommandTailTarget, answerTailConfirm])
 
   const skillPickerToolbarSlot = useMemo(
     () => (
@@ -9619,17 +9716,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             {!imageRepairView.scan.missing.length && <Typography>{t('chat.repair_images_none', { defaultValue: 'No missing local images found among checked completed messages.' })}</Typography>}
             {imageRepairView.confirmed ? <Typography>{t('chat.repair_images_confirmed', { defaultValue: 'Confirmed branch-context placeholders. Original history unchanged.' })}</Typography> :
               <Button disabled={!imageRepairView.scan.missing.length} onClick={() => {
-                if (sessionsRef.current.find(session => session.id === currentSessionIdRef.current) !== imageRepairView.session ||
-                  loadingSessionIdsRef.current.has(imageRepairView.session.id) || storageScopeRef.current !== storageScope ||
-                  hasSessionDeleteTombstone(imageRepairView.session.id, storageScope)) {
-                  notifyWarning(t('chat.conversation_changed_repair', { defaultValue: 'Conversation changed. Run /repair-images again.' })); setImageRepairView(null); return
-                }
-                const references = new Map<ChatMessage, readonly MissingImageReference[]>()
-                for (const item of imageRepairView.scan.missing) {
-                  const message = imageRepairView.session.messages[item.messageIndex]
-                  references.set(message, [...(references.get(message) ?? []), item])
-                }
-                imageRepairContextRef.current = { scope: inspectionScope, references }
+                if (!confirmImageRepair(imageRepairView)) { setImageRepairView(null); return }
                 setImageRepairView({ ...imageRepairView, confirmed: true })
               }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
             <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
@@ -9772,35 +9859,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               if (replayBusyRef.current) return
               const view = replayView
               setReplayView(null)
-              const id = currentSessionIdRef.current
-              if (!view || !active || !isReady || !sessionsLoaded || sessionLoadError || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || id !== view.session.id || storageScopeRef.current !== storageScope || sessionsRef.current.find(item=>item.id===id) !== view.session || view.modelConfig !== config.llm_config || view.profileId !== selectedProfileId || view.skillId !== selectedSkillId || loadingSessionIdsRef.current.has(id) || config.use_remote_llm || hasSessionDeleteTombstone(id,storageScope) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id))) { notifyWarning(t('chat.conversation_settings_changed_reopen', { defaultValue: 'Conversation or settings changed. Reopen command.' })); return }
-              try {
-                const planned = view.command.kind === 'branch' ? null : planReplay(view.session.messages,view.command)
-                const copy = cloneChatSessionForReplay(view.session, planned?.baseMessages)
-                const branch = { ...copy, id: crypto.randomUUID(), title: `${copy.title} [${view.command.kind}]`, messages: copy.messages, createdAt:Date.now(), updatedAt:Date.now() }
-                delete branch.sessionUrl
-                delete branch.teamLeadId
-                delete branch.teamMemberName
-                delete branch.memberModelChoice
-                delete branch.teamMemberGeneration
-                delete branch.teamLifecycleRevision
-                delete branch.teamRole
-                delete branch.teamGeneration
-                delete branch.teamSettings
-                delete branch.teamTasks
-                delete branch.teamChannel
-                delete branch.sessionProfileId
-                delete branch.sessionRouteFingerprint
-                delete branch.draft
-                if (planned) branch.draft = { inputValue:planned.content, pendingAttachments:[], pendingHiddenContext:'', updatedAt:Date.now() }
-                replayBusyRef.current=true
-                void activateNewSession(branch).then(async()=>{
-                  if (!branch.draft || storageScopeRef.current!==storageScope || currentSessionIdRef.current!==branch.id) return
-                  const restoredDraft={...branch.draft,updatedAt:Date.now()}
-                  await persistDraftSnapshot(branch.id,restoredDraft)
-                  if (storageScopeRef.current===storageScope && currentSessionIdRef.current===branch.id) applyDraftToComposerState(restoredDraft)
-                }).catch(()=>notifyWarning(t('chat.could_not_save_branch', { defaultValue: 'Could not save branch. Original conversation remains.' }))).finally(()=>{replayBusyRef.current=false})
-              } catch { notifyWarning(t('chat.cannot_plan_replay', { defaultValue: 'Cannot plan this replay. Original conversation unchanged.' })) }
+              runReplay(view)
             }}>{t('chat.create_separate_conversation', { defaultValue: 'Create separate conversation' })}</Button>
             <Button onClick={()=>setReplayView(null)}>{t('chat.cancel_replay', { defaultValue: 'Cancel replay' })}</Button>
           </Box>}

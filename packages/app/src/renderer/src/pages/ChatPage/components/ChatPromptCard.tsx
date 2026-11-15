@@ -35,6 +35,8 @@ export const ChatPromptCard: React.FC<{
   accent?: ChatPromptCardAccent
   resolution?: ChatPromptCardResolution | null
   testId?: string
+  /** The slash command the card belongs to, for tests and tooling (not shown). */
+  command?: string
   children?: React.ReactNode
 }> = ({
   icon,
@@ -45,6 +47,7 @@ export const ChatPromptCard: React.FC<{
   accent = 'neutral',
   resolution,
   testId = 'chat-prompt-card',
+  command,
   children
 }) => {
   const theme = useTheme()
@@ -66,6 +69,7 @@ export const ChatPromptCard: React.FC<{
       role="group"
       aria-labelledby={titleId}
       data-testid={testId}
+      data-command={command}
       data-resolved={resolved ? 'true' : undefined}
       sx={{
         boxSizing: 'border-box',

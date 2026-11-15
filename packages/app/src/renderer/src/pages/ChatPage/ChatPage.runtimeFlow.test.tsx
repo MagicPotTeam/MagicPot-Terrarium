@@ -3601,7 +3601,7 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { view.unmount() }
   })
 
-  it('opens local status and explicit jobs refresh without model calls; compact never samples before confirmation', async () => {
+  it('shows local status and the jobs list as cards without model calls; an empty conversation has nothing to compact', async () => {
     const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'basic-commands', threadId: 'pane' } as const
     const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
     try {
@@ -3619,6 +3619,9 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      // "/compact" asks nothing and adds no card: the summary banner of the transcript is its result.
+      expect(screen.queryByTestId('agent-basic-command-view')).toBeNull()
+      expect(screen.getAllByTestId('chat-command-card')).toHaveLength(2)
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/compact now' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith('Use /status, /jobs or /compact without arguments.')
@@ -3638,10 +3641,14 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/repair-images' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await screen.findByText('Message 1, image 1')
+      const card = await screen.findByTestId('chat-command-confirm-card')
+      expect(card).toHaveTextContent('Message 1, image 1')
+      expect(screen.queryByTestId('image-repair-view')).toBeNull()
       expect(readCurrentSessionState()?.messages[0].attachments?.[0].url).toBe('local-media:///missing-history.png')
-      fireEvent.click(screen.getByRole('button', { name: 'Confirm branch image placeholders' }))
-      expect(screen.getByText('Confirmed branch-context placeholders. Original history unchanged.')).toBeVisible()
+      fireEvent.click(within(card).getByRole('button', { name: 'chat.command_card.confirm' }))
+      expect(card).toHaveAttribute('data-resolved', 'true')
+      expect(card).toHaveTextContent('→ chat.command_card.confirm')
+      expect(within(card).queryByRole('button')).toBeNull()
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'Continue without that image' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
@@ -3661,8 +3668,11 @@ describe('ChatPage runtime workflow integration', () => {
       const before = JSON.stringify(readCurrentSessionState()?.messages)
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/repair-images' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      expect(await screen.findByTestId('image-repair-view')).toHaveTextContent('No missing local images found')
-      expect(screen.getByRole('button', { name: 'Confirm branch image placeholders' })).toBeDisabled()
+      await waitFor(() => expect(screen.getByTestId('chat-command-card')).toHaveTextContent('No missing local images found'))
+      // Nothing is missing, so there is nothing to confirm: the result is a plain card.
+      expect(screen.getByTestId('chat-command-card')).toHaveAttribute('data-command', '/repair-images')
+      expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
+      expect(screen.queryByTestId('image-repair-view')).toBeNull()
       expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
       expect(hoisted.fileExistsBatchMock).not.toHaveBeenCalled()
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/repair-images all' } })
@@ -4967,10 +4977,13 @@ describe('ChatPage runtime workflow integration', () => {
     const original = readCurrentSessionState()!
     fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target:{value:'/branch'} })
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-    await waitFor(()=>expect(screen.getByTestId('replay-confirmation')).toBeVisible())
+    await waitFor(()=>expect(screen.getByTestId('chat-command-confirm-card')).toHaveAttribute('data-command','/branch'))
+    expect(screen.queryByTestId('replay-confirmation')).toBeNull()
     expect(readCurrentSessionState()?.id).toBe(original.id)
-    fireEvent.click(screen.getByRole('button',{name:'Create separate conversation'}))
+    fireEvent.click(screen.getByRole('button',{name:'chat.command_card.new_conversation'}))
     await waitFor(()=>expect(readCurrentSessionState()?.id).not.toBe(original.id))
+    // The card belonged to the conversation that was left.
+    expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
     expect(readCurrentSessionState()?.messages).toEqual(original.messages)
     expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
   })
@@ -4986,8 +4999,8 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.requestChatCompletionMock.mockClear()
     fireEvent.change(screen.getByTestId('chat-composer-input-mock'),{target:{value:command}})
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-    await waitFor(()=>expect(screen.getByTestId('replay-confirmation')).toBeVisible())
-    fireEvent.click(screen.getByRole('button',{name:'Create separate conversation'}))
+    await waitFor(()=>expect(screen.getByTestId('chat-command-confirm-card')).toHaveAttribute('data-command',command.split(' ')[0]))
+    fireEvent.click(screen.getByRole('button',{name:'chat.command_card.new_conversation'}))
     await waitFor(()=>expect(readCurrentSessionState()?.id).not.toBe(original.id))
     await waitFor(()=>expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(expectedDraft))
     expect(readCurrentSessionState()?.sessionUrl).toBeUndefined()
@@ -5004,9 +5017,12 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.requestChatCompletionMock.mockClear()
     fireEvent.change(screen.getByTestId('chat-composer-input-mock'),{target:{value:'/edit 1 replacement'}})
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-    await waitFor(()=>expect(screen.getByTestId('replay-confirmation')).toBeVisible())
-    fireEvent.click(screen.getByRole('button',{name:'Cancel replay'}))
-    expect(screen.queryByTestId('replay-confirmation')).toBeNull()
+    const card = await screen.findByTestId('chat-command-confirm-card')
+    fireEvent.click(within(card).getByRole('button',{name:'chat.command_card.cancel'}))
+    // The answered card stays in the transcript with the reply; its buttons are gone.
+    expect(card).toHaveAttribute('data-resolved','true')
+    expect(card).toHaveTextContent('→ chat.command_card.cancel')
+    expect(within(card).queryByRole('button')).toBeNull()
     expect(readCurrentSessionState()?.id).toBe(original.id)
     expect(readCurrentSessionState()?.messages).toEqual(original.messages)
     expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()

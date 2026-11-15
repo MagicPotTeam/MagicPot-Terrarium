@@ -1,4 +1,5 @@
 import React from 'react'
+import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import {
   ChatCommandResultCard,
   CommandCardActions,
@@ -7,6 +8,7 @@ import {
   CommandCardText,
   type CommandCardListItem
 } from './ChatCommandCard'
+import { ChatPromptCard, type ChatPromptCardResolution } from './ChatPromptCard'
 
 type TailCardBase = {
   id: number
@@ -37,6 +39,19 @@ export type ChatTailCard<Target = unknown> =
     })
   | (TailCardBase & { kind: 'list'; title?: string; items: CommandCardListItem[] })
   | (TailCardBase & { kind: 'links'; text: string; links: ChatTailLink<Target>[] })
+  | (TailCardBase & {
+      /** A command that asks before it acts: a prompt card with a default and a cancel button. */
+      kind: 'confirm'
+      title: string
+      prompt: string
+      detail?: string
+      confirmLabel: string
+      cancelLabel: string
+      /** Set once the person has answered; the card then stays, dimmed, with the reply. */
+      resolution?: ChatPromptCardResolution
+    })
+
+export type ChatTailConfirmCard = Extract<ChatTailCard, { kind: 'confirm' }>
 
 /** A card as the page creates it; the tail's owner adds the id and the scope. */
 export type ChatTailCardDraft<Target = unknown> =
@@ -49,14 +64,41 @@ export type ChatTailCardDraft<Target = unknown> =
 /** The rows that follow the last message of the Agent column: one card per command, in order. */
 export function ChatCommandTail<Target>({
   cards,
-  onLink
+  onLink,
+  onAnswer
 }: {
   cards: readonly ChatTailCard<Target>[]
   onLink: (target: Target) => void
+  /** The person chose the default button (`confirmed`) or cancel on a confirm card. */
+  onAnswer: (card: ChatTailConfirmCard, confirmed: boolean) => void
 }): React.ReactElement {
   return (
     <>
       {cards.map((card) => {
+        if (card.kind === 'confirm') {
+          return (
+            <ChatPromptCard
+              key={card.id}
+              testId="chat-command-confirm-card"
+              command={card.command}
+              icon={<WarningAmberIcon aria-hidden="true" />}
+              accent="warning"
+              title={card.title}
+              prompt={card.prompt}
+              detail={card.detail}
+              resolution={card.resolution}
+              options={[
+                {
+                  key: 'confirm',
+                  label: card.confirmLabel,
+                  primary: true,
+                  onSelect: () => onAnswer(card, true)
+                },
+                { key: 'cancel', label: card.cancelLabel, onSelect: () => onAnswer(card, false) }
+              ]}
+            />
+          )
+        }
         if (card.kind === 'text') {
           return (
             <ChatCommandResultCard

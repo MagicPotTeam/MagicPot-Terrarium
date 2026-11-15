@@ -1611,7 +1611,17 @@
       "plugin_hint": "Plugins are configured in the plugin center.",
       "module_hint": "The tool environment and MCP clients are configured in Settings.",
       "video_gen_hint": "Videos are generated in the video generation workspace.",
-      "scratchpad_note": "Read-only snapshot; not sent to the model."
+      "scratchpad_note": "Read-only snapshot; not sent to the model.",
+      "confirm_title": "Confirm",
+      "confirm": "Confirm",
+      "cancel": "Cancel",
+      "new_conversation": "New conversation",
+      "answered": "answered",
+      "expired": "expired",
+      "branch_prompt": "Copy every message of this conversation into a new one. The original stays.",
+      "regen_prompt": "Create a new conversation that keeps everything before the last user message and puts that message back in the input. The original stays.",
+      "edit_prompt": "Create a new conversation that keeps everything before message {{number}} and puts the edited text in the input. The original stays.",
+      "repair_prompt": "Replace {{count}} missing local image(s) with a placeholder note in later requests? The original history stays unchanged."
     }
   },
   "agent_workspace": {

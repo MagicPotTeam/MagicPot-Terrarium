@@ -1,5 +1,6 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -414,6 +415,121 @@ describe('slash-command results in the Agent column', () => {
     fireEvent.click(screen.getByRole('button', { name: 'open lead' }))
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     expect(cards()).toHaveLength(0)
+  })
+
+  it('asks before /branch, /regen and /edit through a prompt card and keeps the answered card', async () => {
+    await renderPage()
+    run('/branch')
+    const card = await screen.findByTestId('chat-command-confirm-card')
+    expect(screen.getByTestId('list')).toContainElement(card)
+    expect(card).toHaveAttribute('data-command', '/branch')
+    expect(within(card).getByTestId('chat-prompt-card-title')).toHaveTextContent('确认')
+    expect(within(card).getByTestId('chat-prompt-card-prompt')).toHaveTextContent(
+      zh.chat.command_card.branch_prompt
+    )
+    const buttons = within(card).getAllByRole('button')
+    expect(buttons.map((button) => button.textContent)).toEqual(['新建对话', '取消'])
+    expect(buttons[0]).toHaveAttribute('data-primary', 'true')
+    expect(buttons[1]).not.toHaveAttribute('data-primary')
+    expect(screen.getByTestId('input')).toHaveValue('')
+    expectNothingAboveTheTranscript()
+
+    fireEvent.click(buttons[1])
+    expect(card).toHaveAttribute('data-resolved', 'true')
+    expect(within(card).getByTestId('chat-prompt-card-state')).toHaveTextContent('已回答')
+    expect(within(card).getByTestId('chat-prompt-card-reply')).toHaveTextContent('→ 取消')
+    expect(within(card).queryByRole('button')).toBeNull()
+    // The buttons are gone: the keyboard is back in the composer, and nothing was created.
+    expect(screen.getByTestId('input')).toHaveFocus()
+    expect(screen.getByTestId('session')).toHaveTextContent('lead')
+
+    run('/regen')
+    run('/edit 1 Another question')
+    await waitFor(() => expect(screen.getAllByTestId('chat-command-confirm-card')).toHaveLength(3))
+    const [, regen, edit] = screen.getAllByTestId('chat-command-confirm-card')
+    expect(regen).toHaveTextContent(zh.chat.command_card.regen_prompt)
+    expect(edit).toHaveTextContent('保留第 1 条消息之前的内容')
+    for (const key of ['branch_prompt', 'regen_prompt', 'edit_prompt', 'repair_prompt'] as const) {
+      expect(en.chat.command_card[key]).toMatch(/^[A-Z]/)
+    }
+    expect(en.chat.command_card.confirm_title).toBe('Confirm')
+    expect(en.chat.command_card.new_conversation).toBe('New conversation')
+  })
+
+  it('confirms a card with the keyboard and leaves for the new conversation', async () => {
+    await renderPage()
+    run('/branch')
+    const card = await screen.findByTestId('chat-command-confirm-card')
+    const user = userEvent.setup()
+    screen.getByTestId('input').focus()
+    // The card is above the composer: the buttons are the two tab stops before the input.
+    await user.tab({ shift: true })
+    expect(within(card).getByRole('button', { name: '取消' })).toHaveFocus()
+    await user.tab({ shift: true })
+    expect(within(card).getByRole('button', { name: '新建对话' })).toHaveFocus()
+    await user.keyboard('{Enter}')
+    await waitFor(() => expect(screen.getByTestId('session')).not.toHaveTextContent('lead'))
+    // The card belonged to the conversation that was left.
+    expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
+    expect(cards()).toHaveLength(0)
+  })
+
+  it('marks a confirmation that can no longer run as expired instead of running it', async () => {
+    const view = await renderPage()
+    run('/branch')
+    const card = await screen.findByTestId('chat-command-confirm-card')
+    // The model settings change between the question and the answer.
+    h.config.value = { ...h.config.value, llm_config: structuredClone(h.config.value.llm_config) }
+    view.rerender(page())
+    h.notify.mockClear()
+    fireEvent.click(within(card).getByRole('button', { name: '新建对话' }))
+    expect(card).toHaveAttribute('data-resolved', 'true')
+    expect(within(card).getByTestId('chat-prompt-card-state')).toHaveTextContent('已失效')
+    expect(within(card).queryByTestId('chat-prompt-card-reply')).toBeNull()
+    expect(h.notify).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('session')).toHaveTextContent('lead')
+    expect(en.chat.command_card.expired).toBe('expired')
+  })
+
+  it('lists the missing images of /repair-images in the card and confirms with Space', async () => {
+    h.sessions.value[0].messages[1].attachments = [
+      { type: 'image', url: 'local-media:///fixture/missing.png' }
+    ]
+    const fileExistsBatch = vi.fn(async () => [false])
+    useServices({ 'svcShell.fileExistsBatch': fileExistsBatch })
+    await renderPage()
+    run('/repair-images')
+    const card = await screen.findByTestId('chat-command-confirm-card')
+    expect(card).toHaveAttribute('data-command', '/repair-images')
+    expect(within(card).getByTestId('chat-prompt-card-prompt')).toHaveTextContent('1 张缺失的本地图片')
+    expect(within(card).getByTestId('chat-prompt-card-detail')).toHaveTextContent(/2.*1/)
+    expect(within(card).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '确认',
+      '取消'
+    ])
+    expectNothingAboveTheTranscript()
+
+    const user = userEvent.setup()
+    within(card).getByRole('button', { name: '确认' }).focus()
+    await user.keyboard(' ')
+    expect(card).toHaveAttribute('data-resolved', 'true')
+    expect(within(card).getByTestId('chat-prompt-card-reply')).toHaveTextContent('→ 确认')
+    expect(screen.getByTestId('input')).toHaveFocus()
+
+    // Nothing missing: nothing to confirm, the result is a plain card.
+    fileExistsBatch.mockResolvedValue([true])
+    run('/repair-images')
+    await waitFor(() => expect(commands()).toEqual(['/repair-images']))
+    expect(screen.getAllByTestId('chat-command-confirm-card')).toHaveLength(1)
+  })
+
+  it('runs /compact at once: no question, no card', async () => {
+    await renderPage()
+    run('/compact')
+    await waitFor(() => expect(screen.getByTestId('input')).toHaveValue(''))
+    expect(cards()).toHaveLength(0)
+    expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
+    expectNothingAboveTheTranscript()
   })
 
   it('drops the cards when the pane stops being the active one', async () => {
