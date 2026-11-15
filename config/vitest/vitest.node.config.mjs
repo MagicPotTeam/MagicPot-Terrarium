@@ -6,7 +6,10 @@ export default defineConfig({
   test: {
     name: 'node',
     environments: 'node',
-    setupFiles: ['packages/app/src/main/tests/setup/memfs.setup.ts'],
+    setupFiles: [
+      'packages/app/src/main/tests/setup/memfs.setup.ts',
+      'packages/app/src/main/tests/setup/installedCatalogStorage.setup.ts'
+    ],
     exclude: [
       'scripts/prepare-embedded-staging.test.js',
       'scripts/verify-packaged-runtime-dependencies.test.js',
