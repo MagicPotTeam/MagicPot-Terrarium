@@ -130,6 +130,16 @@ type CachedImageRecord = {
   itemId: string
   decodedAssetReleaseId?: string
   decodedAssetRefCount: number
+  // Raised when the same level is decoded again to replace a texture that cannot be
+  // refreshed in place; it gives the replacement its own shared texture.
+  textureGeneration: number
+}
+
+function getProjectCanvasDecodedVariantKey(record: CachedImageRecord): string {
+  const baseKey = record.cacheKind === 'source' ? 'source' : `thumbnail:${record.src}`
+  return record.textureGeneration > 0
+    ? `${baseKey}#reacquired:${record.textureGeneration}`
+    : baseKey
 }
 
 function isCachedImageRecordCurrent(
@@ -556,36 +566,44 @@ function isProjectCanvasTinyPreview(preview: ProjectCanvasImagePreview, stageSca
   )
 }
 
+/**
+ * A texture that was drawn tiny and grows back is refreshed (a fix for textures that turned
+ * black after a rapid resize). A texture whose input is still alive is unloaded, and Pixi
+ * uploads it again on the next draw. A texture whose decoded input was released after its
+ * upload cannot be uploaded again: for that one the function returns true, and the caller
+ * has the level decoded again and swaps the texture when the new one is ready.
+ */
 function refreshProjectCanvasTextureAfterTinyPreview(
   record: SpriteRecord,
   preview: ProjectCanvasImagePreview,
   stageScale: number
-) {
+): boolean {
   const screenMaxEdge = getProjectCanvasPreviewScreenMaxEdge(preview, stageScale)
   if (screenMaxEdge <= PROJECT_CANVAS_WEBGL_TINY_PREVIEW_SCREEN_EDGE_PX) {
     record.sawTinyPreview = true
-    return
+    return false
   }
 
   if (
     !record.sawTinyPreview ||
     screenMaxEdge < PROJECT_CANVAS_WEBGL_TINY_PREVIEW_RECOVERY_SCREEN_EDGE_PX
   ) {
-    return
+    return false
   }
 
+  record.sawTinyPreview = false
   const textureSource = (record.sourceTexture ?? record.texture).source as
     { destroyed?: boolean; resource?: unknown; unload?: () => void } | undefined
-  if (
-    textureSource &&
-    !textureSource.destroyed &&
-    typeof textureSource.unload === 'function' &&
-    // Unloading asks Pixi to upload the input again; a released decode cannot be uploaded.
-    !isProjectCanvasDecodedImageReleased(textureSource.resource)
-  ) {
+  if (!textureSource || textureSource.destroyed) {
+    return false
+  }
+  if (isProjectCanvasDecodedImageReleased(textureSource.resource)) {
+    return true
+  }
+  if (typeof textureSource.unload === 'function') {
     textureSource.unload()
   }
-  record.sawTinyPreview = false
+  return false
 }
 
 function getProjectCanvasRenderDeviceScale(quality: ProjectCanvasRenderQuality = 'full') {
@@ -1153,6 +1171,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   // input alive, because Pixi uploads it on a later draw.
   const textureDecodedAssetRef = useRef(new WeakMap<Texture, CachedImageRecord>())
   const eagerlyUploadedTexturesRef = useRef(new WeakSet<Texture>())
+  // Items whose texture has to be replaced by a fresh decode of the same level, and the
+  // generation that the replacing cache record gets.
+  const pendingTextureReacquireIdsRef = useRef(new Set<string>())
+  const textureGenerationByIdRef = useRef(new Map<string, number>())
   const decodedRecordsByImageRef = useRef(new Map<object, Set<CachedImageRecord>>())
   const nextDecodedAssetReleaseIdRef = useRef(1)
   const sharedTextureByteTrackerRef = useRef(new CanvasImageSharedResourceByteTracker())
@@ -1308,6 +1330,25 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     hasDeferredImageVersionUpdateRef.current = false
     queueImageVersionFrame()
   }, [queueImageVersionFrame])
+
+  // The texture of this item cannot be uploaded again (its decoded input was released).
+  // Ask the next reconcile pass to decode the level again; the texture on screen stays
+  // until the replacement is uploaded.
+  const requestTextureReacquire = useCallback(
+    (itemId: string) => {
+      if (pendingTextureReacquireIdsRef.current.has(itemId)) {
+        return
+      }
+
+      pendingTextureReacquireIdsRef.current.add(itemId)
+      textureGenerationByIdRef.current.set(
+        itemId,
+        (textureGenerationByIdRef.current.get(itemId) ?? 0) + 1
+      )
+      scheduleImageVersionUpdate()
+    },
+    [scheduleImageVersionUpdate]
+  )
 
   const trackRuntimeObjectUrl = useCallback(
     (id: string, objectUrl: string): CanvasImageReleaseHandle => {
@@ -1710,7 +1751,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         cacheKind,
         itemId,
         decodedAssetReleaseId,
-        decodedAssetRefCount: 1
+        decodedAssetRefCount: 1,
+        textureGeneration: textureGenerationByIdRef.current.get(itemId) ?? 0
       }
       cache.set(itemId, record)
       if (decodedAssetReleaseId) {
@@ -2587,6 +2629,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       clearCachedImageRecords(imageCacheRef.current, 'component-unmount')
       clearCachedImageRecords(thumbnailCacheRef.current, 'component-unmount')
       decodedRecordsByImageRef.current.clear()
+      pendingTextureReacquireIdsRef.current.clear()
+      textureGenerationByIdRef.current.clear()
       objectUrlReleaseHandlesRef.current.forEach((handle) => handle.release('component-unmount'))
       objectUrlReleaseHandlesRef.current.clear()
       resourceBudgetTrackerRef.current.remove('project-canvas-webgl:object-url-runtime')
@@ -2808,7 +2852,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           previewStateRef.current.delete(itemId)
           const renderItem = renderItemsRef.current.get(itemId)
           if (renderItem) {
-            refreshProjectCanvasTextureAfterTinyPreview(record, renderItem, stageScaleRef.current)
+            if (
+              refreshProjectCanvasTextureAfterTinyPreview(record, renderItem, stageScaleRef.current)
+            ) {
+              requestTextureReacquire(itemId)
+            }
             applySpriteTransform(
               record.sprite,
               { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
@@ -2822,7 +2870,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
 
         previewStateRef.current.set(itemId, preview)
-        refreshProjectCanvasTextureAfterTinyPreview(record, preview, stageScaleRef.current)
+        if (refreshProjectCanvasTextureAfterTinyPreview(record, preview, stageScaleRef.current)) {
+          requestTextureReacquire(itemId)
+        }
         applySpriteTransform(
           record.sprite,
           { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
@@ -2837,6 +2887,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       applyViewportTransform,
       markSpriteRecordUsed,
       renderImmediateOrSchedule,
+      requestTextureReacquire,
       scheduleViewportReconcile,
       setViewportInteractingState
     ]
@@ -3003,6 +3054,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const markUnavailableSource = (outcome: 'skipped' | 'failed', error?: unknown) => {
         const currentItem = currentItemByIdRef.current.get(item.id)
         if (currentItem && isRequestCurrent()) {
+          pendingTextureReacquireIdsRef.current.delete(item.id)
           if (mode === 'source-upgrade' && outcome === 'skipped') {
             skippedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
           } else if (mode === 'source-upgrade') {
@@ -3444,6 +3496,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               nextItem?.thumbnailSet?.levels.some((level) => level.src === queued.src) &&
               getCanvasImageSourceRevisionKey(nextItem) === requestRevisionKey
             ) {
+              pendingTextureReacquireIdsRef.current.delete(queued.itemId)
               failedThumbnailLoadSrcByIdRef.current.set(queued.itemId, queued.src)
               failedThumbnailLoadRevisionByIdRef.current.set(queued.itemId, requestRevisionKey)
               scheduleImageVersionUpdate()
@@ -3531,9 +3584,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
       const decodedVariantKey =
         cachedSource?.image === image
-          ? 'source'
+          ? getProjectCanvasDecodedVariantKey(cachedSource)
           : cachedThumbnail?.image === image
-            ? `thumbnail:${cachedThumbnail.src}`
+            ? getProjectCanvasDecodedVariantKey(cachedThumbnail)
             : null
       if (decodedVariantKey === null) {
         return true
@@ -3612,6 +3665,21 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       } else if (cachedThumbnail) {
         deleteCachedImageRecord(thumbnailCacheRef.current, item.id, 'replaced')
       }
+      // A texture that must be refreshed but cannot be uploaded again is replaced by a new
+      // decode of the same level. Until that decode is uploaded the old texture stays.
+      const reacquireGeneration = pendingTextureReacquireIdsRef.current.has(item.id)
+        ? (textureGenerationByIdRef.current.get(item.id) ?? 0)
+        : 0
+      const shownImage =
+        reacquireGeneration > 0 ? renderItemsRef.current.get(item.id)?.image : undefined
+      if (
+        currentThumbnail &&
+        shownImage === currentThumbnail.image &&
+        currentThumbnail.textureGeneration < reacquireGeneration &&
+        isProjectCanvasDecodedImageReleased(currentThumbnail.image)
+      ) {
+        queueThumbnailLoad(item, currentThumbnail.src, sourceUpgradePriority)
+      }
       const failedThumbnailSrc = failedThumbnailLoadSrcByIdRef.current.get(item.id)
       if (
         failedThumbnailSrc &&
@@ -3645,6 +3713,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
       if (cached) {
         failedLoadSrcByIdRef.current.delete(item.id)
+        if (
+          shownImage === cached.image &&
+          cached.textureGeneration < reacquireGeneration &&
+          isProjectCanvasDecodedImageReleased(cached.image) &&
+          !isViewportInteractingRef.current &&
+          !isPerformanceThrottledRef.current
+        ) {
+          if (fallbackImage) {
+            queueSourceUpgrade(item, sourceUpgradePriority)
+          } else {
+            startImageLoad(item, 'initial', sourceUpgradePriority)
+          }
+        }
         const cachedSourceDecision = resolveCanvasImageLodDecision({
           item,
           image: fallbackImage ?? null,
@@ -3827,6 +3908,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     thumbnailLoadGenerationByIdRef.current.forEach((_generation, itemId) => {
       if (!nextIds.has(itemId)) {
         thumbnailLoadGenerationByIdRef.current.delete(itemId)
+      }
+    })
+    textureGenerationByIdRef.current.forEach((_generation, itemId) => {
+      if (!nextIds.has(itemId)) {
+        textureGenerationByIdRef.current.delete(itemId)
+        pendingTextureReacquireIdsRef.current.delete(itemId)
       }
     })
     initialLoadQueueRef.current = initialLoadQueueRef.current.filter((entry) => {
@@ -4343,7 +4430,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             getCanvasImageAssetIdentityKey(cachedSource?.image),
             cachedThumbnail?.src,
             getCanvasImageAssetIdentityKey(cachedThumbnail?.image),
-            activeSourceUpgradeSrcByIdRef.current.get(item.id)
+            activeSourceUpgradeSrcByIdRef.current.get(item.id),
+            pendingTextureReacquireIdsRef.current.has(item.id)
           ]
         },
         {
@@ -4516,16 +4604,17 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       } else {
         resourceBudgetTrackerRef.current.remove(encodedBlobReservationId)
       }
-      const decodedVariantKey = isProjectCanvasCachedSourceImage(
-        renderItem.image,
-        imageCacheRef.current.get(item.id)
-      )
-        ? 'source'
-        : thumbnailCacheRef.current.get(item.id)?.image === renderItem.image
-          ? `thumbnail:${thumbnailCacheRef.current.get(item.id)?.src ?? ''}`
-          : getCanvasImageStableSourceKey(item)
-            ? 'provided-source'
-            : `provided-object:${getCanvasImageAssetIdentityKey(renderItem.image)}`
+      const cachedSourceForVariant = imageCacheRef.current.get(item.id)
+      const cachedThumbnailForVariant = thumbnailCacheRef.current.get(item.id)
+      const decodedVariantKey =
+        cachedSourceForVariant &&
+        isProjectCanvasCachedSourceImage(renderItem.image, cachedSourceForVariant)
+          ? getProjectCanvasDecodedVariantKey(cachedSourceForVariant)
+          : cachedThumbnailForVariant?.image === renderItem.image
+            ? getProjectCanvasDecodedVariantKey(cachedThumbnailForVariant)
+            : getCanvasImageStableSourceKey(item)
+              ? 'provided-source'
+              : `provided-object:${getCanvasImageAssetIdentityKey(renderItem.image)}`
       const sharedTextureKey = getCanvasImageSharedTextureKey(
         item,
         renderItem.image,
@@ -4581,11 +4670,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           )
           existingRecord.transformKey = transformKey
         }
-        refreshProjectCanvasTextureAfterTinyPreview(
-          existingRecord,
-          transformState,
-          stageScaleRef.current
-        )
+        if (
+          refreshProjectCanvasTextureAfterTinyPreview(
+            existingRecord,
+            transformState,
+            stageScaleRef.current
+          )
+        ) {
+          requestTextureReacquire(item.id)
+        }
         markSpriteRecordUsed(existingRecord)
         reconciledSnapshotItems.set(item.id, item)
         return
@@ -4739,6 +4832,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           newSpriteCreationBudget -= 1
         }
         markSpriteRecordUsed(spriteRecordsRef.current.get(item.id)!)
+        // Whatever texture had to be replaced is gone with the previous sprite.
+        pendingTextureReacquireIdsRef.current.delete(item.id)
         reconciledSnapshotItems.set(item.id, item)
         world.addChild(sprite)
         worldOrderDirty = true
@@ -4873,6 +4968,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     markSpriteRecordUsed,
     pruneDecodedImageCacheForResidentTargets,
     releaseDecodedImagePixelsAfterUpload,
+    requestTextureReacquire,
     removeTextureBudgetReservation,
     cancelScheduledRender,
     scheduleRender,

@@ -1173,6 +1173,42 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect((item.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
     })
 
+    it('decodes a released thumbnail level again when its texture has to be refreshed', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const first = createBitmap(1024, 512)
+      const second = createBitmap(1024, 512)
+      const pendingSecond = deferredBitmap()
+      const decode = vi
+        .fn()
+        .mockResolvedValueOnce(first)
+        .mockImplementationOnce(() => pendingSecond.promise)
+      vi.stubGlobal('createImageBitmap', decode)
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const item = thumbnailItem()
+      const { unmount } = render(
+        <Layer ref={ref} items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.15} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(first))
+      const oldSprite = getLiveSpriteByLabel(item.id)!
+      const oldSource = oldSprite.texture.source as MockTextureSource
+      const preview = { x: item.x, y: item.y, width: item.width, height: item.height, rotation: 0 }
+
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 0.01, scaleY: 0.01 }))
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 1, scaleY: 1 }))
+
+      expect(oldSource.unload).not.toHaveBeenCalled()
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(2))
+      expect(getLiveSpriteByLabel(item.id)).toBe(oldSprite)
+      await act(async () => pendingSecond.resolve(second))
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(second))
+      expect(oldSprite.texture.destroyed).toBe(true)
+      expect(eagerTextureUploads).toEqual([first, second])
+      expect(first.close).toHaveBeenCalledTimes(1)
+      expect(second.close).toHaveBeenCalledTimes(1)
+      unmount()
+      expect((item.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
+    })
+
     it('does not cancel a shared source decode when only one pending consumer leaves', async () => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
       const bitmap = createBitmap(640, 360)
@@ -1732,6 +1768,72 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(source.unload).toHaveBeenCalledTimes(1)
     expect(sprite.scale.x).toBe(2)
     expect(sprite.scale.y).toBe(2)
+  }, 15000)
+
+  it('decodes a released level again instead of unloading it when a tiny preview grows back', async () => {
+    vi.stubGlobal('electronFile', {
+      resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(['image'], { type: 'image/png' })
+      }))
+    )
+    const first = createBitmap(640, 360)
+    const second = createBitmap(640, 360)
+    const pendingSecond = deferredBitmap()
+    const decode = vi
+      .fn()
+      .mockResolvedValueOnce(first)
+      .mockImplementationOnce(() => pendingSecond.promise)
+    vi.stubGlobal('createImageBitmap', decode)
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    const item = createItem({
+      src: 'local-media:///C:/images/tiny-refresh.png',
+      sourceWidth: 640,
+      sourceHeight: 360,
+      image: undefined as unknown as HTMLImageElement
+    })
+    try {
+      const { unmount } = render(
+        <Layer ref={ref} items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(first))
+      expect(first.close).toHaveBeenCalledTimes(1)
+      const oldSprite = getLiveSpriteByLabel(item.id)!
+      const oldSource = oldSprite.texture.source as MockTextureSource
+      const preview = { x: 24, y: 36, width: 200, height: 120, rotation: 0 }
+
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 0.1, scaleY: 0.1 }))
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 1, scaleY: 1 }))
+
+      // Unloading would make Pixi upload the closed bitmap again. The level is decoded again
+      // instead, and the texture on screen stays until the replacement exists.
+      expect(oldSource.unload).not.toHaveBeenCalled()
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(2))
+      expect(getLiveSpriteByLabel(item.id)).toBe(oldSprite)
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+
+      await act(async () => pendingSecond.resolve(second))
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(second))
+      expect(oldSprite.destroyed).toBe(true)
+      expect(oldSprite.texture.destroyed).toBe(true)
+      expect(eagerTextureUploads).toEqual([first, second])
+      expect(second.close).toHaveBeenCalledTimes(1)
+      expect(first.close).toHaveBeenCalledTimes(1)
+      // One re-acquire per refresh: nothing is decoded a third time.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 120))
+      })
+      expect(decode).toHaveBeenCalledTimes(2)
+      unmount()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   }, 15000)
 
   it('recreates sprite state when the texture key changes', async () => {
