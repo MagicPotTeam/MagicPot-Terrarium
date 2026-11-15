@@ -30,6 +30,8 @@ type RendererDiagnosticsOptions = {
 const AUTOMATIC_RELOAD_REASONS = new Set(['oom', 'crashed', 'abnormal-exit'])
 const RECOVERY_WINDOW_MS = 60_000
 const MAX_AUTOMATIC_RECOVERIES = 3
+/** How long a renderer may be unresponsive before the user is offered wait / reload. */
+export const UNRESPONSIVE_PROMPT_DELAY_MS = 15_000
 
 /** True when the exit may be answered with an automatic reload. */
 export function shouldRecoverRendererProcess(details: RenderProcessGoneDetails): boolean {
@@ -266,7 +268,74 @@ export function attachRendererDiagnostics(
     }
   )
 
+  // A hung renderer: wait 15 s (long synchronous work often recovers), then offer wait / reload.
+  let unresponsive = false
+  let unresponsiveTimer: ReturnType<typeof setTimeout> | null = null
+  let unresponsivePrompt: AbortController | null = null
+  // Until when an exit of the renderer is the forced end of a hang the user chose to reload.
+  let expectHangTerminationUntil = -Infinity
+  const clearUnresponsiveTimer = () => {
+    if (unresponsiveTimer) clearTimeout(unresponsiveTimer)
+    unresponsiveTimer = null
+  }
+  const reloadHungRenderer = () => {
+    pendingRecoveryNotice = { reason: 'unresponsive', exitCode: 0, diedAt: wallClockNow() }
+    expectHangTerminationUntil = now() + 10_000
+    console.warn('[App] Reloading the unresponsive renderer as the user chose')
+    try {
+      // A hung renderer cannot process a reload; end it first, then load the page again.
+      window.webContents.forcefullyCrashRenderer()
+      window.webContents.reload()
+    } catch {
+      console.error('[App] Renderer recovery reload failed')
+    }
+  }
+  const askAboutHang = () => {
+    unresponsiveTimer = null
+    if (!unresponsive || unresponsivePrompt || recoveryPromptPending || isShuttingDown()) return
+    const prompt = new AbortController()
+    unresponsivePrompt = prompt
+    try {
+      void dialog
+        .showMessageBox(window, {
+          type: 'warning',
+          title: '窗口没有响应',
+          message: '窗口已超过 15 秒没有响应。',
+          detail: '可以继续等待，或重新加载窗口。正在生成的回复会中断，不会自动重新发送；草稿会保留。',
+          buttons: ['等待', '重新加载'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+          signal: prompt.signal
+        })
+        .then(({ response }) => {
+          if (prompt.signal.aborted || isShuttingDown() || !unresponsive) return
+          if (response === 1) reloadHungRenderer()
+          else unresponsiveTimer = setTimeout(askAboutHang, UNRESPONSIVE_PROMPT_DELAY_MS)
+        })
+        .catch(() => {
+          console.error('[App] Failed to show the unresponsive renderer prompt')
+        })
+        .finally(() => {
+          if (unresponsivePrompt === prompt) unresponsivePrompt = null
+        })
+    } catch {
+      unresponsivePrompt = null
+      console.error('[App] Failed to show the unresponsive renderer prompt')
+    }
+  }
+
   window.webContents.on('render-process-gone', (_event, details) => {
+    unresponsive = false
+    clearUnresponsiveTimer()
+    unresponsivePrompt?.abort()
+    unresponsivePrompt = null
+    if (now() <= expectHangTerminationUntil) {
+      // The user chose to reload a hung renderer: this exit is that reload, already handled.
+      expectHangTerminationUntil = -Infinity
+      console.error('[App] Renderer process gone', { reason: details.reason, exitCode: details.exitCode, expected: 'reload-after-hang' })
+      return
+    }
     handleRendererProcessGone(window, details, {
       recoverRenderer: recoverWithinBudget,
       promptRenderer: promptForManualRecovery,
@@ -274,8 +343,24 @@ export function attachRendererDiagnostics(
     })
   })
 
+  window.on('closed', clearUnresponsiveTimer)
+
   window.webContents.on('unresponsive', () => {
     console.error('[App] Renderer became unresponsive')
+    unresponsive = true
+    if (!unresponsiveTimer && !unresponsivePrompt) {
+      unresponsiveTimer = setTimeout(askAboutHang, UNRESPONSIVE_PROMPT_DELAY_MS)
+    }
+  })
+
+  window.webContents.on('responsive', () => {
+    if (!unresponsive) return
+    console.info('[App] Renderer became responsive again')
+    unresponsive = false
+    clearUnresponsiveTimer()
+    // The question is moot now: close it.
+    unresponsivePrompt?.abort()
+    unresponsivePrompt = null
   })
 
   window.webContents.on('console-message', (_event, level, message, line, sourceId) => {

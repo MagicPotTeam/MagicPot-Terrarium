@@ -135,6 +135,10 @@ vi.mock('./subprocess/subprocess', () => ({
 }))
 
 vi.mock('./utils/loggingOverride', () => ({}))
+vi.mock('./processDiagnostics', () => ({
+  startLocalCrashDumps: vi.fn(),
+  startProcessDiagnostics: vi.fn()
+}))
 
 function createWindow(id: string) {
   const windowListeners = new Map<string, (...args: unknown[]) => void>()

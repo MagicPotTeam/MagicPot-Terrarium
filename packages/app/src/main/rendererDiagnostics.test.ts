@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dialog } from 'electron'
 
 vi.mock('electron', () => ({ dialog: { showMessageBox: vi.fn() } }))
@@ -34,6 +34,7 @@ type TestWindow = {
     executeJavaScript: ReturnType<typeof vi.fn>
     reload: ReturnType<typeof vi.fn>
     send: ReturnType<typeof vi.fn>
+    forcefullyCrashRenderer: ReturnType<typeof vi.fn>
   }
 }
 
@@ -47,7 +48,8 @@ function createWindow(): TestWindow {
       on: vi.fn(),
       executeJavaScript: vi.fn().mockResolvedValue(false),
       reload: vi.fn(),
-      send: vi.fn()
+      send: vi.fn(),
+      forcefullyCrashRenderer: vi.fn()
     }
   }
 }
@@ -641,5 +643,107 @@ describe('rendererDiagnostics recovery notice', () => {
       expect(dialog.showMessageBox).toHaveBeenCalledTimes(death === 4 ? 1 : 0)
     }
     expect(window.webContents.send).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('rendererDiagnostics unresponsive renderer', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    resetAppQuittingForTests()
+  })
+
+  const flush = async () => {
+    for (let index = 0; index < 4; index += 1) await Promise.resolve()
+  }
+
+  it('waits 15 s, then offers wait / reload with Wait as the default', () => {
+    const window = createWindow()
+    vi.mocked(dialog.showMessageBox).mockReset().mockReturnValue(new Promise(() => undefined))
+    attachRendererDiagnostics(window as never)
+
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(14_999)
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+
+    expect(dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(
+      window,
+      expect.objectContaining({ buttons: ['等待', '重新加载'], defaultId: 0, cancelId: 0 })
+    )
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+  })
+
+  it('asks nothing when the renderer recovers within 15 s, and closes an open question when it recovers later', async () => {
+    const window = createWindow()
+    let signal: AbortSignal | undefined
+    vi.mocked(dialog.showMessageBox).mockReset().mockImplementation(((_window: unknown, options: { signal?: AbortSignal }) => {
+      signal = options.signal
+      return new Promise(() => undefined)
+    }) as never)
+    attachRendererDiagnostics(window as never)
+
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(10_000)
+    listenerOf(window, 'responsive')()
+    vi.advanceTimersByTime(60_000)
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(1)
+    listenerOf(window, 'responsive')()
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it('reloads only when the user chooses Reload, then shows the notice and does not treat the forced end as a new crash', async () => {
+    const window = createWindow()
+    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 1, checkboxChecked: false })
+    attachRendererDiagnostics(window as never, { wallClockNow: () => 77 })
+
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    await flush()
+
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(1)
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'unresponsive',
+      exitCode: 0,
+      diedAt: 77
+    })
+  })
+
+  it('asks again after another 15 s when the user chose to wait and it is still hung', async () => {
+    const window = createWindow()
+    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 0, checkboxChecked: false })
+    attachRendererDiagnostics(window as never)
+
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    await flush()
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(15_000)
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(2)
+  })
+
+  it('never asks while the app is quitting', () => {
+    const window = createWindow()
+    vi.mocked(dialog.showMessageBox).mockReset()
+    attachRendererDiagnostics(window as never)
+    listenerOf(window, 'unresponsive')()
+    markAppQuitting()
+    vi.advanceTimersByTime(30_000)
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
   })
 })

@@ -11,6 +11,7 @@ const h = vi.hoisted(() => {
 vi.mock('electron', () => ({ app: h.app, BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock('./config/userDataDirectory', () => ({ resolveStartupUserDataDirectory: h.resolver }))
 vi.mock('./utils/loggingOverride', () => ({}))
+vi.mock('./processDiagnostics', () => ({ startLocalCrashDumps: vi.fn(), startProcessDiagnostics: vi.fn() }))
 vi.mock('./appRuntime', () => ({ getAppStartupTestWindowPolicy: () => ({ automatedRun: false }), initializeMainProcessRuntime: vi.fn(), setupReadyAppRuntime: vi.fn() }))
 vi.mock('./lifeCycle', () => ({ beforeShow: vi.fn(), beforeQuit: vi.fn() }))
 vi.mock('./magicAgentPlatform2/productionRuntime', () => ({ runMagicAgentApprovalSmoke: vi.fn() }))

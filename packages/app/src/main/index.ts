@@ -23,6 +23,7 @@ import { flushLocalMediaAccessGrants } from './localMediaAccess'
 import { registerLocalMediaFileIntakeIpc } from './localMediaFileIntakeIpc'
 import { cleanupSubProcesses } from './subprocess/subprocess'
 import { markAppQuitting } from './appQuitState'
+import { startLocalCrashDumps, startProcessDiagnostics } from './processDiagnostics'
 
 const startupUserData = resolveStartupUserDataDirectory()
 fs.mkdirSync(startupUserData.path, { recursive: true })
@@ -51,6 +52,8 @@ function setPortableAppPath(name: string, targetPath: string): void {
 setPortableAppPath('sessionData', path.join(startupUserData.path, 'sessionData'))
 setPortableAppPath('logs', path.join(startupUserData.path, 'logs'))
 setPortableAppPath('crashDumps', path.join(startupUserData.path, 'crashDumps'))
+// Local minidumps only (never uploaded); see processDiagnostics.ts.
+startLocalCrashDumps()
 const portableTempPath = path.join(startupUserData.path, 'runtime', 'temp')
 setPortableAppPath('temp', portableTempPath)
 process.env.TEMP = portableTempPath
@@ -151,6 +154,7 @@ function openMainWindow(): void {
 if (!launcherSmokeTest)
   app.whenReady().then(async () => {
     await setupReadyAppRuntime()
+    startProcessDiagnostics()
 
     console.log('[App] 正在准备显示窗口...')
     try {
