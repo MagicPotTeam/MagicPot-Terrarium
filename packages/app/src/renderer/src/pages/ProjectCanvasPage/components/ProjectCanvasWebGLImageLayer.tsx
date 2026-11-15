@@ -272,6 +272,11 @@ export const PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES = 256 * 1024 * 1
 const PROJECT_CANVAS_WEBGL_IMAGE_VISIBLE_OVERSCAN_PX = 320
 const VIEWPORT_RECONCILE_DEBOUNCE_MS = 48
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS = 180
+// While the view is being panned or zoomed, the frame is drawn inside the viewport sync call
+// (the stage's requestAnimationFrame callback), in the same frame as the DOM layers. Renders
+// requested by background work wait this long for that draw, which includes them, before
+// they ask for a frame of their own (two frames at 60 Hz).
+const PROJECT_CANVAS_WEBGL_GESTURE_BACKGROUND_RENDER_YIELD_MS = 34
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_VIEWPORT_RECONCILE_MS = 240
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_IMAGE_VERSION_MAX_DEFER_MS = 750
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_INITIAL_IMAGE_LOAD_CONCURRENCY = 2
@@ -2220,6 +2225,79 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     })
   }, [reportMetrics])
 
+  const requestRenderFrame = useCallback(() => {
+    rafRef.current = window.requestAnimationFrame(() => {
+      rafRef.current = null
+      renderApp()
+    })
+  }, [renderApp])
+
+  /**
+   * Asks for a render in a coming animation frame. This is the path of background work (a
+   * reconcile pass that added or replaced sprites, tiles, start-up). What the user moves is
+   * drawn by renderImmediateOrSchedule instead.
+   */
+  const scheduleRender = useCallback(() => {
+    if (!appRef.current || rafRef.current !== null || renderThrottleTimerRef.current !== null) {
+      return
+    }
+
+    let delayMs = 0
+    if (isPerformanceThrottledRef.current) {
+      const elapsedMs = window.performance.now() - lastRenderAtRef.current
+      delayMs = Math.max(
+        0,
+        PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS - elapsedMs
+      )
+    }
+    if (isViewportInteractingRef.current) {
+      // The gesture draws a frame every time the view moves, and that draw shows this change
+      // too. A frame requested here would be a second render in a frame the gesture draws
+      // anyway, so wait for the gesture and only draw alone when the pointer rests.
+      delayMs = Math.max(delayMs, PROJECT_CANVAS_WEBGL_GESTURE_BACKGROUND_RENDER_YIELD_MS)
+    }
+    if (delayMs > 0) {
+      renderThrottleTimerRef.current = setTimeout(() => {
+        renderThrottleTimerRef.current = null
+        if (!appRef.current || rafRef.current !== null) {
+          return
+        }
+        requestRenderFrame()
+      }, delayMs)
+      return
+    }
+
+    requestRenderFrame()
+  }, [requestRenderFrame])
+
+  const cancelScheduledRender = useCallback(() => {
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+    if (renderThrottleTimerRef.current !== null) {
+      clearTimeout(renderThrottleTimerRef.current)
+      renderThrottleTimerRef.current = null
+    }
+  }, [])
+
+  /**
+   * Draws now, in the caller's frame. The viewport sync runs inside the stage's
+   * requestAnimationFrame callback, after the DOM layers got their transform: rendering here
+   * keeps the images in the same frame as everything else, instead of one frame behind in a
+   * requestAnimationFrame of their own. A render that was already scheduled is cancelled,
+   * because this one shows the same state: one render per frame.
+   */
+  const renderImmediateOrSchedule = useCallback(() => {
+    if (isPerformanceThrottledRef.current) {
+      scheduleRender()
+      return
+    }
+
+    cancelScheduledRender()
+    renderApp()
+  }, [cancelScheduledRender, renderApp, scheduleRender])
+
   const scheduleViewportReconcile = useCallback(
     (options: { allowDuringInteraction?: boolean } = {}) => {
       const allowDuringInteraction = options.allowDuringInteraction === true
@@ -2314,6 +2392,13 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      if (renderThrottleTimerRef.current !== null) {
+        // A background render was waiting for the next gesture frame. The gesture is over:
+        // ask again, now without that wait.
+        cancelScheduledRender()
+        scheduleRender()
+      }
+
       if (isPerformanceThrottledRef.current) {
         sourceUpgradeAllowedAtRef.current = 0
         forceViewportReconcile()
@@ -2330,9 +2415,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       forceViewportReconcile()
     },
     [
+      cancelScheduledRender,
       flushMetricsReport,
       forceViewportReconcile,
       scheduleImageVersionUpdate,
+      scheduleRender,
       clearSourceUpgradeQueue,
       scheduleSourceUpgradeIdleReconcile
     ]
@@ -2411,60 +2498,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       imageElementLoadTimeouts.clear()
     }
   }, [])
-
-  const scheduleRender = useCallback(() => {
-    if (!appRef.current || rafRef.current !== null || renderThrottleTimerRef.current !== null) {
-      return
-    }
-
-    const requestRenderFrame = () => {
-      rafRef.current = window.requestAnimationFrame(() => {
-        rafRef.current = null
-        renderApp()
-      })
-    }
-
-    if (isPerformanceThrottledRef.current) {
-      const elapsedMs = window.performance.now() - lastRenderAtRef.current
-      const delayMs = Math.max(
-        0,
-        PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS - elapsedMs
-      )
-      if (delayMs > 0) {
-        renderThrottleTimerRef.current = setTimeout(() => {
-          renderThrottleTimerRef.current = null
-          if (!appRef.current || rafRef.current !== null) {
-            return
-          }
-          requestRenderFrame()
-        }, delayMs)
-        return
-      }
-    }
-
-    requestRenderFrame()
-  }, [renderApp])
-
-  const cancelScheduledRender = useCallback(() => {
-    if (rafRef.current !== null) {
-      window.cancelAnimationFrame(rafRef.current)
-      rafRef.current = null
-    }
-    if (renderThrottleTimerRef.current !== null) {
-      clearTimeout(renderThrottleTimerRef.current)
-      renderThrottleTimerRef.current = null
-    }
-  }, [])
-
-  const renderImmediateOrSchedule = useCallback(() => {
-    if (isPerformanceThrottledRef.current || isViewportInteractingRef.current) {
-      scheduleRender()
-      return
-    }
-
-    cancelScheduledRender()
-    renderApp()
-  }, [cancelScheduledRender, renderApp, scheduleRender])
 
   const resizeRendererToStage = useCallback(
     (preferredSize?: { width: number; height: number }) => {

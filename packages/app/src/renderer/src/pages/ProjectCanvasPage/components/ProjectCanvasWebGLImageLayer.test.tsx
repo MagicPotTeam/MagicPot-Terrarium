@@ -2955,6 +2955,181 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect((createdSprites[0].texture.source as { scaleMode?: string }).scaleMode).toBe('linear')
   }, 15000)
 
+  describe('lockstep frame', () => {
+    // Animation frames that only run when the test says so.
+    const installManualAnimationFrames = () => {
+      let nextId = 1
+      const callbacks = new Map<number, FrameRequestCallback>()
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn((callback: FrameRequestCallback) => {
+          const id = nextId++
+          callbacks.set(id, callback)
+          return id
+        })
+      )
+      vi.stubGlobal(
+        'cancelAnimationFrame',
+        vi.fn((id: number) => {
+          callbacks.delete(id)
+        })
+      )
+      return {
+        pending: () => callbacks.size,
+        flush: () => {
+          const due = Array.from(callbacks.values())
+          callbacks.clear()
+          due.forEach((callback) => callback(performance.now()))
+        }
+      }
+    }
+
+    const renderSettledLayer = async (items: CanvasImageItem[]) => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const view = (nextItems: CanvasImageItem[]) => (
+        <Layer ref={ref} items={nextItems} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      const utils = render(view(items))
+      await waitFor(() => {
+        expect(ref.current).not.toBeNull()
+        expect(createdApplications).toHaveLength(1)
+        expect(createdSprites).toHaveLength(items.length)
+      })
+      const app = createdApplications[0]
+      // Let the start-up renders and reconcile timers run out: quiet for 200 ms.
+      for (let renders = -1; renders !== app.render.mock.calls.length; ) {
+        renders = app.render.mock.calls.length
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        })
+      }
+      return { ref, app, view, ...utils }
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    })
+
+    it('draws every gesture frame inside the viewport sync, not in a frame of its own', async () => {
+      const { ref, app } = await renderSettledLayer([createItem()])
+      const frames = installManualAnimationFrames()
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+
+      for (let frame = 1; frame <= 5; frame += 1) {
+        act(() => ref.current?.syncViewport({ x: frame * 12, y: frame * 4 }, 1))
+        // Drawn before the sync call returns: the same frame as the DOM layers.
+        expect(app.render.mock.calls.length).toBe(rendersBefore + frame)
+        expect(createdSprites[0].parent?.position.x).toBe(frame * 12)
+        // And no animation frame was asked for, so nothing draws this view a frame later.
+        expect(frames.pending()).toBe(0)
+      }
+
+      // The same view again is not a new frame.
+      act(() => ref.current?.syncViewport({ x: 60, y: 20 }, 1))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 5)
+      act(() => frames.flush())
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 5)
+    })
+
+    it('cancels a render that was already scheduled when the gesture frame draws', async () => {
+      const items = [createItem()]
+      const { ref, app, view, rerender } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      const rendersBefore = app.render.mock.calls.length
+
+      // A reconcile pass asks for a render in the next animation frame.
+      rerender(view([{ ...items[0], zIndex: 7 }]))
+      expect(frames.pending()).toBe(1)
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+
+      act(() => ref.current?.setViewportInteracting(true))
+      act(() => ref.current?.syncViewport({ x: 40, y: 0 }, 1))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+      expect(frames.pending()).toBe(0)
+      act(() => frames.flush())
+      // One render for that frame, not two.
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+    })
+
+    it('lets the gesture frame draw background changes instead of rendering twice', async () => {
+      const items = [createItem()]
+      const { ref, app, view, rerender } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+
+      // A reconcile pass in the middle of the gesture: no frame of its own yet.
+      rerender(view([{ ...items[0], zIndex: 7 }]))
+      expect(frames.pending()).toBe(0)
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+
+      // The next gesture frame shows it.
+      act(() => ref.current?.syncViewport({ x: 40, y: 0 }, 1))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+      act(() => {
+        vi.advanceTimersByTime(200)
+        frames.flush()
+      })
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // The pointer rests: the change is drawn alone, a moment later, once.
+      rerender(view([{ ...items[0], zIndex: 9 }]))
+      act(() => {
+        vi.advanceTimersByTime(20)
+      })
+      expect(frames.pending()).toBe(0)
+      act(() => {
+        vi.advanceTimersByTime(20)
+      })
+      expect(frames.pending()).toBe(1)
+      act(() => frames.flush())
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+      act(() => {
+        vi.advanceTimersByTime(200)
+        frames.flush()
+      })
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+    })
+
+    it('draws a waiting background change right after the gesture ends', async () => {
+      const items = [createItem()]
+      const { ref, app, view, rerender } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+      rerender(view([{ ...items[0], zIndex: 7 }]))
+      expect(frames.pending()).toBe(0)
+
+      act(() => ref.current?.setViewportInteracting(false))
+      // No 34 ms wait any more: the next animation frame.
+      expect(frames.pending()).toBeGreaterThanOrEqual(1)
+      act(() => frames.flush())
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+    })
+
+    it('does not render after the layer is gone', async () => {
+      const items = [createItem()]
+      const { ref, app, view, rerender, unmount } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      act(() => ref.current?.setViewportInteracting(true))
+      rerender(view([{ ...items[0], zIndex: 7 }]))
+      const rendersBefore = app.render.mock.calls.length
+
+      unmount()
+      act(() => {
+        vi.advanceTimersByTime(500)
+        frames.flush()
+      })
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+    })
+  })
+
   it('reconciles resident images after imperative viewport movement without prop changes', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
