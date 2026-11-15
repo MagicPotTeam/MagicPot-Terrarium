@@ -114,21 +114,21 @@ function serializeItems(items: CanvasItem[]): SerializableCanvasItem[] {
       // Source-size hints may come from stale thumbnail or display metadata.
       // Without pixel provenance, even a geometrical identity can be a crop.
       // Persist it verbatim; source and crop remain separate in project mirrors.
-      return {
+      return stripCanvasAssetKeyTags({
         ...rest,
         ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
-      } as SerializableCanvasItem
+      }) as SerializableCanvasItem
     }
     if (item.type === 'model3d') {
       const { deferRender, sourceFile, ...rest } = item as CanvasItem & {
         deferRender?: boolean
         sourceFile?: Blob
       }
-      return rest as SerializableCanvasItem
+      return stripCanvasAssetKeyTags(rest) as SerializableCanvasItem
     }
     if (item.type === 'video' || item.type === 'file') {
       const { sourceFile, ...rest } = item
-      return rest as SerializableCanvasItem
+      return stripCanvasAssetKeyTags(rest) as SerializableCanvasItem
     }
     return item as SerializableCanvasItem
   })
@@ -236,6 +236,340 @@ function getScopedCanvasBlobKeyPrefix(storeKey: string): string {
 function getLogicalCanvasBlobKey(storeKey: string, storageKey: string): string | null {
   const prefix = getScopedCanvasBlobKeyPrefix(storeKey)
   return storageKey.startsWith(prefix) ? storageKey.slice(prefix.length) : null
+}
+
+// ─── Content keys ────────────────────────────────────────────────────────────
+// A content key names the bytes behind one asset slot (an item's `src` or one
+// model texture). Path-backed sources are keyed by their file identity (path,
+// size, mtime); everything else by a SHA-256 of the bytes. A key is only ever
+// trusted together with the source string it was computed for, so replacing an
+// item's `src` always yields a new key, however the item object was copied.
+const CANVAS_ASSET_KEY_HEX_LENGTH = 40
+const CANVAS_ASSET_KEY_PATTERN = /^[bf]-[0-9a-f]{40}$/
+const CANVAS_ASSET_KEY_CACHE_LIMIT = 20_000
+const CANVAS_ASSET_SOURCE_SLOT = 'src'
+
+type CanvasAssetKeyTagged = {
+  assetKey?: unknown
+  assetKeySource?: unknown
+  textureAssetKeys?: unknown
+  textureAssetKeySources?: unknown
+}
+
+function isCanvasAssetKey(value: unknown): value is string {
+  return typeof value === 'string' && CANVAS_ASSET_KEY_PATTERN.test(value)
+}
+
+function getCanvasTextureAssetSlot(textureName: string): string {
+  return `tex:${textureName}`
+}
+
+/** Drops the in-memory key tags; the save path writes the persisted ones itself. */
+function stripCanvasAssetKeyTags<T extends object>(item: T): T {
+  const tagged = item as T & CanvasAssetKeyTagged
+  if (
+    tagged.assetKey === undefined &&
+    tagged.assetKeySource === undefined &&
+    tagged.textureAssetKeys === undefined &&
+    tagged.textureAssetKeySources === undefined
+  ) {
+    return item
+  }
+  const {
+    assetKey: _assetKey,
+    assetKeySource: _assetKeySource,
+    textureAssetKeys: _textureAssetKeys,
+    textureAssetKeySources: _textureAssetKeySources,
+    ...rest
+  } = tagged
+  return rest as T
+}
+
+const SHA256_ROUND_CONSTANTS = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+])
+
+/** Plain SHA-256 for contexts without SubtleCrypto (insecure origins, test doubles). */
+function sha256HexFallback(bytes: Uint8Array): string {
+  const state = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+  ])
+  const bitLength = bytes.byteLength * 8
+  const paddedLength = (((bytes.byteLength + 8) >> 6) + 1) << 6
+  const padded = new Uint8Array(paddedLength)
+  padded.set(bytes)
+  padded[bytes.byteLength] = 0x80
+  const view = new DataView(padded.buffer)
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000))
+  view.setUint32(paddedLength - 4, bitLength >>> 0)
+  const words = new Uint32Array(64)
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(offset + index * 4)
+    for (let index = 16; index < 64; index += 1) {
+      const w15 = words[index - 15]
+      const w2 = words[index - 2]
+      const s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3)
+      const s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10)
+      words[index] = (words[index - 16] + s0 + words[index - 7] + s1) >>> 0
+    }
+    let [a, b, c, d, e, f, g, h] = state
+    for (let index = 0; index < 64; index += 1) {
+      const s1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))
+      const ch = (e & f) ^ (~e & g)
+      const t1 = (h + s1 + ch + SHA256_ROUND_CONSTANTS[index] + words[index]) >>> 0
+      const s0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))
+      const maj = (a & b) ^ (a & c) ^ (b & c)
+      const t2 = (s0 + maj) >>> 0
+      h = g
+      g = f
+      f = e
+      e = (d + t1) >>> 0
+      d = c
+      c = b
+      b = a
+      a = (t1 + t2) >>> 0
+    }
+    state[0] = (state[0] + a) >>> 0
+    state[1] = (state[1] + b) >>> 0
+    state[2] = (state[2] + c) >>> 0
+    state[3] = (state[3] + d) >>> 0
+    state[4] = (state[4] + e) >>> 0
+    state[5] = (state[5] + f) >>> 0
+    state[6] = (state[6] + g) >>> 0
+    state[7] = (state[7] + h) >>> 0
+  }
+  return Array.from(state, (word) => word.toString(16).padStart(8, '0')).join('')
+}
+
+async function sha256Hex(data: ArrayBuffer | Uint8Array): Promise<string> {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
+  const subtle = globalThis.crypto?.subtle
+  if (subtle && typeof subtle.digest === 'function') {
+    try {
+      const digest = await subtle.digest('SHA-256', bytes as BufferSource)
+      return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(
+        ''
+      )
+    } catch {
+      // Fall through to the plain implementation; a missing key must never block a save.
+    }
+  }
+  return sha256HexFallback(bytes)
+}
+
+async function buildCanvasContentAssetKey(data: ArrayBuffer): Promise<string> {
+  return `b-${(await sha256Hex(data)).slice(0, CANVAS_ASSET_KEY_HEX_LENGTH)}`
+}
+
+function getCanvasFileIdentityCacheId(
+  canonicalPath: string,
+  sizeBytes: number,
+  lastModifiedMs: number
+): string {
+  return `file-identity\n${canonicalPath}\n${Math.floor(sizeBytes)}\n${Math.floor(lastModifiedMs)}`
+}
+
+async function buildCanvasFileIdentityAssetKey(
+  canonicalPath: string,
+  sizeBytes: number,
+  lastModifiedMs: number
+): Promise<string> {
+  const identity = `canvas-asset-file-v1\n${canonicalPath}\n${Math.floor(sizeBytes)}\n${Math.floor(lastModifiedMs)}`
+  const digest = await sha256Hex(new TextEncoder().encode(identity))
+  return `f-${digest.slice(0, CANVAS_ASSET_KEY_HEX_LENGTH)}`
+}
+
+// Per item object: valid while the object is alive and its source is unchanged.
+const canvasAssetKeyBySlot = new WeakMap<object, Map<string, { src: string; key: string }>>()
+// Sources whose bytes cannot change: object URLs and (path, size, mtime) identities.
+const canvasAssetKeyByImmutableSource = new Map<string, string>()
+
+function rememberCanvasImmutableAssetKey(cacheId: string, key: string): void {
+  canvasAssetKeyByImmutableSource.delete(cacheId)
+  canvasAssetKeyByImmutableSource.set(cacheId, key)
+  while (canvasAssetKeyByImmutableSource.size > CANVAS_ASSET_KEY_CACHE_LIMIT) {
+    const oldest = canvasAssetKeyByImmutableSource.keys().next().value
+    if (oldest === undefined) break
+    canvasAssetKeyByImmutableSource.delete(oldest)
+  }
+}
+
+function rememberCanvasAssetKey(owner: object, slotId: string, src: string, key: string): void {
+  let slots = canvasAssetKeyBySlot.get(owner)
+  if (!slots) {
+    slots = new Map()
+    canvasAssetKeyBySlot.set(owner, slots)
+  }
+  slots.set(slotId, { src, key })
+  if (src.startsWith('blob:')) rememberCanvasImmutableAssetKey(src, key)
+}
+
+function readCanvasAssetKeyTag(owner: object, slotId: string, src: string): string | null {
+  const tagged = owner as CanvasAssetKeyTagged
+  if (slotId === CANVAS_ASSET_SOURCE_SLOT) {
+    return isCanvasAssetKey(tagged.assetKey) && tagged.assetKeySource === src
+      ? tagged.assetKey
+      : null
+  }
+  const textureName = slotId.startsWith('tex:') ? slotId.slice('tex:'.length) : null
+  if (
+    textureName === null ||
+    !tagged.textureAssetKeys ||
+    typeof tagged.textureAssetKeys !== 'object' ||
+    !tagged.textureAssetKeySources ||
+    typeof tagged.textureAssetKeySources !== 'object'
+  ) {
+    return null
+  }
+  const keys = tagged.textureAssetKeys as Record<string, unknown>
+  const sources = tagged.textureAssetKeySources as Record<string, unknown>
+  if (!Object.prototype.hasOwnProperty.call(keys, textureName)) return null
+  const key = keys[textureName]
+  return isCanvasAssetKey(key) && sources[textureName] === src ? key : null
+}
+
+function getMatchingLocalFileIdentity(
+  owner: object,
+  slotId: string,
+  src: string
+): { canonicalPath: string; sizeBytes: number; lastModifiedMs: number } | null {
+  if (slotId !== CANVAS_ASSET_SOURCE_SLOT) return null
+  const identity = (owner as { sourceIdentity?: CanvasImageItem['sourceIdentity'] }).sourceIdentity
+  if (
+    !identity ||
+    identity.kind !== 'local-file' ||
+    !identity.canonicalPath ||
+    !(identity.sizeBytes > 0) ||
+    !(identity.lastModifiedMs > 0)
+  ) {
+    return null
+  }
+  const localPath = resolveLocalFilePathFromSource(src)
+  if (!localPath) return null
+  const comparable = (value: string): string => normalizeComparablePath(value).replace(/^\/+/, '')
+  return comparable(localPath) === comparable(identity.canonicalPath)
+    ? {
+        canonicalPath: identity.canonicalPath,
+        sizeBytes: identity.sizeBytes,
+        lastModifiedMs: identity.lastModifiedMs
+      }
+    : null
+}
+
+/** A key this session already knows for the slot; never reads bytes and never waits. */
+function peekCanvasAssetKey(owner: object, slotId: string, src: string): string | null {
+  const tagged = readCanvasAssetKeyTag(owner, slotId, src)
+  if (tagged) return tagged
+  const cached = canvasAssetKeyBySlot.get(owner)?.get(slotId)
+  if (cached && cached.src === src) return cached.key
+  if (src.startsWith('blob:')) return canvasAssetKeyByImmutableSource.get(src) ?? null
+  const identity = getMatchingLocalFileIdentity(owner, slotId, src)
+  return identity
+    ? (canvasAssetKeyByImmutableSource.get(
+        getCanvasFileIdentityCacheId(
+          identity.canonicalPath,
+          identity.sizeBytes,
+          identity.lastModifiedMs
+        )
+      ) ?? null)
+    : null
+}
+
+async function readCanvasLocalSourceFileIdentity(
+  localPath: string
+): Promise<{ canonicalPath: string; sizeBytes: number; lastModifiedMs: number } | null> {
+  const thumbnailService = window.api?.svcCanvasThumbnail
+  if (!thumbnailService || typeof thumbnailService.getSourceFileMetadata !== 'function') {
+    return null
+  }
+  try {
+    const metadata = await thumbnailService.getSourceFileMetadata({ fullPath: localPath })
+    if (
+      !metadata?.exists ||
+      !metadata.canonicalPath ||
+      !(metadata.sizeBytes >= 0) ||
+      !(metadata.lastModifiedMs > 0)
+    ) {
+      return null
+    }
+    return {
+      canonicalPath: metadata.canonicalPath,
+      sizeBytes: metadata.sizeBytes,
+      lastModifiedMs: metadata.lastModifiedMs
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The key of a path-backed slot, from the item's own local-file identity or a
+ * stat of the file. Returns null for sources that are not local files (their
+ * key needs the bytes) and when the file cannot be inspected.
+ */
+async function resolveCanvasFileIdentityAssetKey(
+  owner: object,
+  slotId: string,
+  src: string
+): Promise<string | null> {
+  const localPath = resolveLocalFilePathFromSource(src)
+  if (!localPath) return null
+
+  const itemIdentity = getMatchingLocalFileIdentity(owner, slotId, src)
+  if (itemIdentity) {
+    const key = await buildCanvasFileIdentityAssetKey(
+      itemIdentity.canonicalPath,
+      itemIdentity.sizeBytes,
+      itemIdentity.lastModifiedMs
+    )
+    rememberCanvasImmutableAssetKey(
+      getCanvasFileIdentityCacheId(
+        itemIdentity.canonicalPath,
+        itemIdentity.sizeBytes,
+        itemIdentity.lastModifiedMs
+      ),
+      key
+    )
+    rememberCanvasAssetKey(owner, slotId, src, key)
+    return key
+  }
+
+  // Without an identity on the item the file is inspected again whenever the
+  // item object changed, so a file replaced on disk is never mistaken for the old one.
+  const fileIdentity = await readCanvasLocalSourceFileIdentity(localPath)
+  if (!fileIdentity) return null
+  const key = await buildCanvasFileIdentityAssetKey(
+    fileIdentity.canonicalPath,
+    fileIdentity.sizeBytes,
+    fileIdentity.lastModifiedMs
+  )
+  rememberCanvasAssetKey(owner, slotId, src, key)
+  return key
+}
+
+/** Resolves the key of one slot; `readBytes` is only called when the key needs the content. */
+async function resolveCanvasAssetKey(
+  owner: object,
+  slotId: string,
+  src: string,
+  readBytes: () => Promise<ArrayBuffer | null>
+): Promise<string | null> {
+  const known = peekCanvasAssetKey(owner, slotId, src)
+  if (known) return known
+  const fromFile = await resolveCanvasFileIdentityAssetKey(owner, slotId, src)
+  if (fromFile) return fromFile
+  const bytes = await readBytes()
+  if (!bytes) return null
+  const key = await buildCanvasContentAssetKey(bytes)
+  rememberCanvasAssetKey(owner, slotId, src, key)
+  return key
 }
 
 async function resolveCanvasBinaryAssetFromSourceFile(
@@ -1168,18 +1502,52 @@ export async function saveCanvasItems(
 
     const allBlobEntries = [...persistedBlobEntries, ...persistedTextureEntries]
 
+    // Content key of every stored binary, recorded next to the item so later
+    // saves can tell an unchanged asset from a new one without its bytes.
+    const blobEntryByKey = new Map(allBlobEntries.map((entry) => [entry.key, entry]))
+    const itemAssetKeys = new Map<string, string>()
+    for (const item of blobItems) {
+      const entry = blobEntryByKey.get(item.id)
+      const assetKey = entry
+        ? await resolveCanvasAssetKey(item, CANVAS_ASSET_SOURCE_SLOT, item.src, async () => entry.data)
+        : null
+      if (assetKey) itemAssetKeys.set(item.id, assetKey)
+    }
+    const textureAssetKeysByItemId = new Map<string, Record<string, string>>()
+    for (const item of items) {
+      if (item.type !== 'model3d' || !item.textures) continue
+      for (const [texName, texUrl] of Object.entries(item.textures)) {
+        const entry = blobEntryByKey.get(getModelTextureKey(item.id, texName))
+        if (!entry || !texUrl.startsWith('blob:')) continue
+        const assetKey = await resolveCanvasAssetKey(
+          item,
+          getCanvasTextureAssetSlot(texName),
+          texUrl,
+          async () => entry.data
+        )
+        if (!assetKey) continue
+        const keys = textureAssetKeysByItemId.get(item.id) ?? {}
+        keys[texName] = assetKey
+        textureAssetKeysByItemId.set(item.id, keys)
+      }
+    }
+
     const locallyPersistedItemIds = new Set(
       persistedBlobEntries.map((entry) => entry.key).filter((key) => !key.includes('::tex::'))
     )
     const persistedItems = serializeItems(items).map((item) => {
-      if (
-        isBlobPersistableCanvasItem(item) &&
-        locallyPersistedItemIds.has(item.id) &&
-        hasLocallyPersistableCanvasSrc(item)
-      ) {
-        return { ...item, src: '' } as SerializableCanvasItem
+      if (!isBlobPersistableCanvasItem(item)) return item
+      const textureAssetKeys = textureAssetKeysByItemId.get(item.id)
+      const withTextureKeys = textureAssetKeys ? { ...item, textureAssetKeys } : item
+      if (locallyPersistedItemIds.has(item.id) && hasLocallyPersistableCanvasSrc(item)) {
+        const assetKey = itemAssetKeys.get(item.id)
+        return {
+          ...withTextureKeys,
+          src: '',
+          ...(assetKey ? { assetKey } : {})
+        } as unknown as SerializableCanvasItem
       }
-      return item
+      return withTextureKeys as unknown as SerializableCanvasItem
     })
     const payload: CanvasPersistedData = {
       items: persistedItems,
