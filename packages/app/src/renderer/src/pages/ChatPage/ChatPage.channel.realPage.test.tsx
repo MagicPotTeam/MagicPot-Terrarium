@@ -10,11 +10,17 @@
  * The three team-message cases are ported from ChatPage.crossLayerTeamMessages.test.tsx, which
  * needs the MAIN service, a loopback HTTP server and temp directories. Here MAIN is
  * `FakeTeamMain`: an in-memory stand-in for the chat bridge and the MAIN team message queue.
+ *
+ * Every mount gets its own copy of the page and of the chat storage (`loadPageModules`): the
+ * storage caches its connection, summary indexes and save baselines at module level, so a shared
+ * copy would make all cases read and write the storage of the first one. `./ChatPage` and
+ * `./chatStorage` are therefore never imported statically here.
  */
 import {
   allowChannelBridge,
   allowChannelInMemoryIndexedDb,
   assertNoChannelDeniedAttempts,
+  channelDeniedAttemptCount,
   channelDeniedAttempts,
   channelGuardedGlobals,
   isChannelGuardDenied,
@@ -43,9 +49,8 @@ import type {
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { createFakeChatIndexedDb, type FakeChatIndexedDb } from '../../testUtils/fakeChatIndexedDb'
-import ChatPage from './ChatPage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
-import { loadSessionFromDB, saveSessionToDB, type ChatSession } from './chatStorage'
+import type { ChatSession } from './chatStorage'
 
 // Runs before every import of this file: the guards must already be installed by the setup file.
 vi.hoisted(() => {
@@ -274,10 +279,6 @@ class FakeTeamMain {
 
   /** What the page may call on `window.api`; everything else stays refused by the guards. */
   bridge(): ChannelBridgeAllowance {
-    const unavailable = (method: string) =>
-      this.track(method, async () => {
-        throw new Error(`${method} is not available in the channel fixture.`)
-      })
     return {
       svcLLMProxy: {
         chatStream: (request: LLMChatReq, stream: ServerStreaming<LLMChatStreamResp>) =>
@@ -350,21 +351,44 @@ class FakeTeamMain {
         listAgentArchiveQueries: this.track('listAgentArchiveQueries', async () => ({
           queries: []
         })),
-        // Skill, HTML-app and first-run pane bindings are MAIN capabilities this fixture leaves off.
-        agentSkillScopeRevision: unavailable('agentSkillScopeRevision'),
-        setAgentSkillScope: unavailable('setAgentSkillScope'),
-        setAgentHtmlScope: unavailable('setAgentHtmlScope'),
-        managedFirstRunPaneRevision: unavailable('managedFirstRunPaneRevision'),
-        setManagedFirstRunPaneScope: unavailable('setManagedFirstRunPaneScope')
+        // Skill, HTML-app and first-run pane bindings are MAIN capabilities this fixture leaves
+        // off: listed as `null`, they read as absent (as in the original test, whose MAIN bridge
+        // did not have them), so the page takes its "not available" path without a call.
+        agentSkillScopeRevision: null,
+        setAgentSkillScope: null,
+        setAgentHtmlScope: null,
+        managedFirstRunPaneRevision: null,
+        setManagedFirstRunPaneScope: null
       }
     }
   }
 }
 
-type ChannelPageProps = Partial<React.ComponentProps<typeof ChatPage>>
+type ChatPageComponent = (typeof import('./ChatPage'))['default']
+type ChatStorageModule = typeof import('./chatStorage')
+type ChannelPageProps = Partial<React.ComponentProps<ChatPageComponent>>
+
+const SESSION_STORE = 'sessions-v2'
+const storageKey = (id: string): string => `${SCOPE}\u0000${id}`
+
+/**
+ * A new copy of the page and of the chat storage it uses: no cached connection, summary index,
+ * save baseline or any other module state of an earlier mount. With the same fake storage this is
+ * a restart of the renderer's storage layer; with a new one, a page of its own.
+ */
+async function loadPageModules(): Promise<{
+  ChatPage: ChatPageComponent
+  storage: ChatStorageModule
+}> {
+  vi.resetModules()
+  const storage = await import('./chatStorage')
+  const { default: ChatPage } = await import('./ChatPage')
+  return { ChatPage, storage }
+}
 
 interface ChannelPage {
   main: FakeTeamMain
+  /** The in-memory storage this page, and only this page, reads and writes. */
   idb: FakeChatIndexedDb
   /** Renders the same page again with other props (pane switches: `{ active: false }`). */
   rerender(props: ChannelPageProps): void
@@ -375,6 +399,8 @@ interface ChannelPage {
   openTeamManagement(): Promise<HTMLElement>
   /** Expands a member row of the process area and returns it. */
   memberRow(name: string): HTMLElement
+  /** Names of the member rows the process area shows, sorted. */
+  memberNames(): string[]
   /** Unmounts, waits until storage and bridge are quiet, and asserts nothing was refused. */
   finish(): Promise<void>
   /** Unmounts and waits until storage and bridge are quiet (no assertions). */
@@ -382,7 +408,7 @@ interface ChannelPage {
 }
 
 /** The page of the running test until it finished; a failed test is torn down in afterEach. */
-let mountedPage: ChannelPage | undefined
+let mountedPage: Pick<ChannelPage, 'main' | 'quiesce'> | undefined
 
 const theme = createTheme()
 const lead = (): ChatSession =>
@@ -405,14 +431,22 @@ const member = (id: string, role: string): ChatSession =>
   }) as ChatSession
 
 async function mountChannelPage(input: {
+  /** The members the storage holds: seeded on a new storage, expected on a restart. */
   members: ChatSession[]
   model: FakeModel
-  /** Storage of an earlier page of the same test: a restart, nothing is seeded again. */
+  /**
+   * Storage an earlier page of the same test left behind: a restart. Nothing is seeded again, the
+   * page and the chat storage are loaded anew and open their own connection to this storage, and
+   * the connection of the earlier page is refused from here on.
+   */
   storage?: FakeChatIndexedDb
   /** Extra ChatPage props (for example `active: false` for a hidden pane). */
   props?: ChannelPageProps
 }): Promise<ChannelPage> {
+  if (mountedPage)
+    throw new Error('mountChannelPage: finish() the earlier page of this test first.')
   const idb = input.storage ?? createFakeChatIndexedDb()
+  const { ChatPage, storage } = await loadPageModules()
   idb.install((_name, fake) => allowChannelInMemoryIndexedDb(fake))
   const main = new FakeTeamMain(input.model)
   allowChannelBridge('api', main.bridge())
@@ -432,10 +466,18 @@ async function mountChannelPage(input: {
   ] as Config['llm_config']['api_profiles']
   h.config.value = config
 
+  const expectedKeys = ['lead', ...input.members.map((session) => session.id)]
+    .map(storageKey)
+    .sort()
   if (!input.storage) {
-    for (const session of [lead(), ...input.members]) await saveSessionToDB(session, SCOPE)
+    for (const session of [lead(), ...input.members]) await storage.saveSessionToDB(session, SCOPE)
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'lead')
+    // The seed went into THIS fake, one record per session, and nothing else is in it.
+    expect(idb.stats.calls.put).toBe(expectedKeys.length)
   }
+  // This storage holds exactly the conversations of this case: nothing of an earlier mount or test.
+  expect(idb.keys(SESSION_STORE)).toEqual(expectedKeys)
+  const handedOutBeforeMount = idb.stats.handedOut.length
 
   const element = (props: ChannelPageProps = {}): React.ReactElement => (
     <MemoryRouter>
@@ -445,19 +487,12 @@ async function mountChannelPage(input: {
     </MemoryRouter>
   )
   const view = render(element())
-  const area = await screen.findByRole('region', { name: '进程区' })
-  // The real page is mounted on the lead conversation: real composer, real message list.
-  expect(document.querySelector(`[data-chat-page-root="${SCOPE}"]`)).not.toBeNull()
-  expect(screen.getByTestId('chat-composer-input')).toBeInTheDocument()
-  expect(screen.getByTestId('chat-message-list')).toBeInTheDocument()
-  for (const session of input.members) {
-    await within(area).findByRole('button', { name: `展开 ${session.id} 详情` })
-  }
 
   const activity = (): number =>
     main.calls.length + Object.values(idb.stats.calls).reduce((sum, count) => sum + count, 0)
   // Debounced saves (500 ms) and in-flight bridge answers of the unmounted page must land while
-  // this test's fakes are still allowed: wait until both have been quiet for a while.
+  // this test's fakes are still allowed: wait until both have been quiet for a while. A save that
+  // comes later than that finds its database refused by the guards and fails the test it lands in.
   const quiesce = async (): Promise<void> => {
     mountedPage = undefined
     view.unmount()
@@ -472,11 +507,37 @@ async function mountChannelPage(input: {
       }
     }
   }
+  // Registered before the first assertion on the page, so a mount that fails is torn down too.
+  mountedPage = { main, quiesce }
+
+  const area = await screen.findByRole('region', { name: '进程区' })
+  // The real page is mounted on the lead conversation: real composer, real message list.
+  expect(document.querySelector(`[data-chat-page-root="${SCOPE}"]`)).not.toBeNull()
+  expect(screen.getByTestId('chat-composer-input')).toBeInTheDocument()
+  expect(screen.getByTestId('chat-message-list')).toBeInTheDocument()
+  for (const session of input.members) {
+    await within(area).findByRole('button', { name: `展开 ${session.id} 详情` })
+  }
+  const memberNames = (): string[] =>
+    within(area)
+      .queryAllByRole('button', { name: /^(?:展开|收起) .+ 详情$/ })
+      .map(
+        (button) =>
+          /^(?:展开|收起) (.+) 详情$/.exec(button.getAttribute('aria-label') ?? '')?.[1] ?? '?'
+      )
+      .sort()
+  // The team on screen is the team of this storage: no member row of an earlier mount or test.
+  expect(memberNames()).toEqual(input.members.map((session) => session.id).sort())
+  // The page read its conversations from THIS fake (after a restart: over a new connection).
+  expect(idb.stats.handedOut.slice(handedOutBeforeMount)).toEqual(
+    expect.arrayContaining(expectedKeys)
+  )
+
   const page: ChannelPage = {
     main,
     idb,
     rerender: (props) => view.rerender(element(props)),
-    stored: (id) => loadSessionFromDB(id, SCOPE),
+    stored: (id) => storage.loadSessionFromDB(id, SCOPE),
     area,
     send: (text) => {
       fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: text } })
@@ -498,20 +559,28 @@ async function mountChannelPage(input: {
       expect(document.getElementById(toggle.getAttribute('aria-controls')!)).toBeVisible()
       return row
     },
+    memberNames,
     finish: async () => {
+      const storageCallsBeforeUnmount = Object.values(idb.stats.calls).reduce(
+        (sum, count) => sum + count,
+        0
+      )
       await quiesce()
       expect(main.pendingCalls()).toBe(0)
       // No toast: no save failure, no refused team message, no warning of any kind.
       expect(h.notify.mock.calls).toEqual([])
       expect(channelDeniedAttempts()).toEqual([])
+      // The storage half of the quiet wait watched a storage that is really in use.
+      expect(storageCallsBeforeUnmount).toBeGreaterThan(expectedKeys.length)
+      // Still exactly this case's conversations: no record of another case was written here.
+      expect(idb.keys(SESSION_STORE)).toEqual(expectedKeys)
     },
     quiesce
   }
-  mountedPage = page
   return page
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   // jsdom has no layout: the transcript scrolls its end marker into view.
   if (typeof Element.prototype.scrollIntoView !== 'function') {
     Object.defineProperty(Element.prototype, 'scrollIntoView', {
@@ -520,15 +589,19 @@ beforeAll(() => {
       value: () => undefined
     })
   }
-})
+  // The first load of the page transforms its whole module graph (several seconds): done here,
+  // outside the time limit of a test. Every mount loads its own copy again, which is quick.
+  await loadPageModules()
+}, 180000)
 beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   h.notify.mockClear()
 })
 afterEach(async () => {
-  // A test that failed before page.finish(): end held replies and let the page settle, so its
-  // late saves cannot land in the next test (where they would be refused and counted).
+  // A test that failed before page.finish(): end held replies and let the page settle while its
+  // fakes are still allowed. A save that comes later still is not lost silently: its database is
+  // refused by the guards and counted in the test it lands in.
   if (mountedPage) {
     mountedPage.main.abortAll()
     await mountedPage.quiesce()
@@ -599,6 +672,17 @@ describe('channel deny guards', () => {
     expect(kept[199].detail).toBe('http://127.0.0.1:9/retry-199')
     expect(kept[200].detail).toBe('... and 250 more refusal(s) that were counted but not kept')
     expect(channelDeniedAttempts()).toEqual([])
+    expect(channelDeniedAttemptCount()).toBe(0)
+
+    // The end-of-test message reports how many were refused, not how many stacks were kept.
+    for (let attempt = 0; attempt < 450; attempt += 1) {
+      void fetch(`http://127.0.0.1:9/again-${attempt}`).catch(() => undefined)
+    }
+    expect(channelDeniedAttemptCount()).toBe(450)
+    expect(() => assertNoChannelDeniedAttempts()).toThrow(
+      /^450 denied attempt\(s\) during the test:/
+    )
+    expect(channelDeniedAttemptCount()).toBe(0)
   })
 
   it('refuses XHR, WebSocket, EventSource and workers on both globals', () => {
@@ -650,6 +734,45 @@ describe('channel deny guards', () => {
     ])
   })
 
+  it('refuses UDP and DNS, which never open a TCP connection', async () => {
+    const dgram = await import('node:dgram')
+    const dns = await import('node:dns')
+    const dnsPromises = await import('node:dns/promises')
+    const socket = dgram.createSocket('udp4')
+    try {
+      expect(() => socket.send('x', 9, '127.0.0.1')).toThrow(/refused udp/)
+      expect(() => socket.bind(0)).toThrow(/refused udp/)
+      expect(() => socket.connect(9, '127.0.0.1')).toThrow(/refused udp/)
+    } finally {
+      socket.close()
+    }
+    // The named export, as a module gets it with `import { lookup } from 'node:dns'` ...
+    expect(() => dns.lookup('localhost', () => undefined)).toThrow(/refused dns/)
+    // ... and the property of the module object.
+    expect(() => dns.default.lookup('example.invalid', () => undefined)).toThrow(/refused dns/)
+    expect(() => dns.resolve4('example.invalid', () => undefined)).toThrow(/refused dns/)
+    expect(() => new dns.Resolver().resolve('example.invalid', () => undefined)).toThrow(
+      /refused dns/
+    )
+    await expect(dnsPromises.lookup('example.invalid')).rejects.toSatisfy(isChannelGuardDenied)
+    await expect(new dnsPromises.Resolver().resolve4('example.invalid')).rejects.toSatisfy(
+      isChannelGuardDenied
+    )
+    expect(
+      takeChannelDeniedAttempts().map((attempt) => `${attempt.kind}: ${attempt.detail}`)
+    ).toEqual([
+      'udp: dgram.Socket.send(x, 9, 127.0.0.1)',
+      'udp: dgram.Socket.bind(0)',
+      'udp: dgram.Socket.connect(9, 127.0.0.1)',
+      'dns: dns.lookup(localhost)',
+      'dns: dns.lookup(example.invalid)',
+      'dns: dns.resolve4(example.invalid)',
+      'dns: dns.Resolver.resolve(example.invalid)',
+      'dns: dns.promises.lookup(example.invalid)',
+      'dns: dns.promises.Resolver.resolve4(example.invalid)'
+    ])
+  })
+
   it('refuses a request from a third global (an iframe window) at the transport', async () => {
     const frame = document.body.appendChild(document.createElement('iframe'))
     try {
@@ -674,29 +797,120 @@ describe('channel deny guards', () => {
     }
   })
 
-  it('refuses IndexedDB unless the test allows an in-memory fake, and forgets the fake afterwards', async () => {
-    expect(() => indexedDB.open('magicpot-chat')).toThrow(/refused indexeddb/)
-    await expect(indexedDB.databases()).rejects.toSatisfy(isChannelGuardDenied)
-    expect(takeChannelDeniedAttempts()).toEqual([
-      denied('indexeddb', 'indexedDB.open(magicpot-chat)'),
-      denied('indexeddb', 'indexedDB.databases()')
-    ])
-    const fake = createFakeChatIndexedDb()
-    // The fake cannot be put on the global directly ...
-    expect(() => fake.install((name, value) => vi.stubGlobal(name, value))).toThrow(TypeError)
-    // ... only through the guards, for this test.
-    fake.install((_name, value) => allowChannelInMemoryIndexedDb(value))
-    await saveSessionToDB(
-      { id: 'in-memory', title: 'in-memory', messages: [] } as ChatSession,
-      'guard-self-test'
-    )
-    expect((await loadSessionFromDB('in-memory', 'guard-self-test'))?.title).toBe('in-memory')
-    expect(channelDeniedAttempts()).toEqual([])
+  // Three tests in this order: the allowance of the first must be gone in the other two.
+  describe('IndexedDB allowance across tests', () => {
+    // The chat storage copy and the fake of the next test, kept for the two tests after it: business
+    // code that cached its connection, as the real chat storage does.
+    let keptStorage: typeof import('./chatStorage') | undefined
+    let keptFake: FakeChatIndexedDb | undefined
+    const selfTestSession = (id: string): ChatSession =>
+      ({ id, title: id, messages: [] }) as ChatSession
+
+    it('refuses IndexedDB unless the test allows an in-memory fake, and forgets the fake afterwards', async () => {
+      expect(() => indexedDB.open('magicpot-chat')).toThrow(/refused indexeddb/)
+      await expect(indexedDB.databases()).rejects.toSatisfy(isChannelGuardDenied)
+      expect(takeChannelDeniedAttempts()).toEqual([
+        denied('indexeddb', 'indexedDB.open(magicpot-chat)'),
+        denied('indexeddb', 'indexedDB.databases()')
+      ])
+      const fake = createFakeChatIndexedDb()
+      // The fake cannot be put on the global directly ...
+      expect(() => fake.install((name, value) => vi.stubGlobal(name, value))).toThrow(TypeError)
+      // ... only through the guards, for this test.
+      fake.install((_name, value) => allowChannelInMemoryIndexedDb(value))
+      vi.resetModules()
+      const storage = await import('./chatStorage')
+      await storage.saveSessionToDB(selfTestSession('in-memory'), 'guard-self-test')
+      expect((await storage.loadSessionFromDB('in-memory', 'guard-self-test'))?.title).toBe(
+        'in-memory'
+      )
+      expect(fake.keys('sessions-v2')).toEqual(['guard-self-test\u0000in-memory'])
+      expect(channelDeniedAttempts()).toEqual([])
+      keptStorage = storage
+      keptFake = fake
+    })
+
+    it('refuses IndexedDB again in the next test', () => {
+      expect(() => indexedDB.open('magicpot-chat')).toThrow(/refused indexeddb/)
+      expect(takeChannelDeniedAttempts()).toHaveLength(1)
+    })
+
+    it('refuses the connection that business code kept from an earlier test', async () => {
+      // Nothing is allowed in this test; the chat storage copy of the test before last still holds
+      // the database it opened there.
+      expect(keptStorage, 'run the whole "IndexedDB allowance across tests" group').toBeDefined()
+      const storage = keptStorage!
+      const fake = keptFake!
+      const storageErrors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const callsBefore = structuredClone(fake.stats.calls)
+      const read = await storage.loadSessionFromDB('in-memory', 'guard-self-test').then(
+        (session) => ({ session }),
+        (error: unknown) => ({ error })
+      )
+      // Whatever the storage makes of the failure, it did not get the record ...
+      expect(read).not.toHaveProperty('session.title')
+      const write = await storage.saveSessionToDB(selfTestSession('late'), 'guard-self-test').then(
+        () => 'saved',
+        () => 'failed'
+      )
+      expect(write).toBe('failed')
+      expect(storageErrors).toHaveBeenCalled()
+      storageErrors.mockRestore()
+      // ... the earlier test's storage was neither read nor written ...
+      expect(fake.stats.calls).toEqual(callsBefore)
+      expect(fake.keys('sessions-v2')).toEqual(['guard-self-test\u0000in-memory'])
+      // ... and every attempt was refused and counted.
+      const attempts = takeChannelDeniedAttempts()
+      expect(attempts.length).toBeGreaterThanOrEqual(2)
+      expect(attempts.every((attempt) => attempt.kind === 'indexeddb')).toBe(true)
+      expect(attempts[0]).toEqual(
+        denied(
+          'indexeddb',
+          /^IDBDatabase\.transaction\(sessions-v2\) after its in-memory allowance ended/
+        )
+      )
+    })
   })
 
-  it('refuses IndexedDB again in the next test', () => {
-    expect(() => indexedDB.open('magicpot-chat')).toThrow(/refused indexeddb/)
-    expect(takeChannelDeniedAttempts()).toHaveLength(1)
+  it('ends an allowance when the test allows again: databases, transactions and the factory', async () => {
+    const fake = createFakeChatIndexedDb()
+    fake.seedStore('sessions-v2', 'storageKey', [])
+    fake.setVersion(2)
+    const opened = (): Promise<IDBDatabase> =>
+      new Promise((resolve, reject) => {
+        const request = indexedDB.open('magicpot-chat', 2)
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+    fake.install((_name, value) => allowChannelInMemoryIndexedDb(value))
+    const firstFactory = indexedDB
+    const first = await opened()
+    const firstTransaction = first.transaction('sessions-v2', 'readonly')
+    expect(firstTransaction.objectStore('sessions-v2').keyPath).toBe('storageKey')
+    expect(channelDeniedAttempts()).toEqual([])
+
+    // A restart on the same storage: a new allowance for the same fake.
+    fake.install((_name, value) => allowChannelInMemoryIndexedDb(value))
+    expect(indexedDB).not.toBe(firstFactory)
+    expect(() => first.transaction('sessions-v2', 'readwrite')).toThrow(/refused indexeddb/)
+    expect(() => firstTransaction.objectStore('sessions-v2')).toThrow(/refused indexeddb/)
+    expect(() => first.close()).toThrow(/refused indexeddb/)
+    expect(() => firstFactory.open('magicpot-chat', 2)).toThrow(/refused indexeddb/)
+    expect(
+      takeChannelDeniedAttempts().map((attempt) => attempt.detail.split(' after ')[0])
+    ).toEqual([
+      'IDBDatabase.transaction(sessions-v2)',
+      'IDBTransaction.objectStore(sessions-v2)',
+      'IDBDatabase.close()',
+      'indexedDB.open(magicpot-chat)'
+    ])
+    // The new allowance works, on the same records.
+    const second = await opened()
+    expect(second).not.toBe(first)
+    expect(second.transaction('sessions-v2', 'readonly').objectStore('sessions-v2').keyPath).toBe(
+      'storageKey'
+    )
+    expect(channelDeniedAttempts()).toEqual([])
   })
 
   it('refuses every bridge call that the test did not list', async () => {
@@ -888,6 +1102,9 @@ describe('real ChatPage team messages on in-memory fakes', () => {
       teamMember: teamIdentity('designer')
     })
     expect(main.chatRequests[0].teamMessageHop).toBeUndefined()
+    // What the fixture's copy of the MAIN tool gate (canvasAgentTools.ts) offers for those fields.
+    // The real gate, and that MAIN stops after two hops, stay covered by
+    // ChatPage.crossLayerTeamMessages.test.tsx; here only the request fields above are product code.
     expect(
       main.modelTurns.find((turn) => turn.conversationId === 'writer' && turn.hop === 1)?.teamTools
     ).toEqual(['send_message', 'send_channel'])
@@ -1163,7 +1380,25 @@ describe('real ChatPage restart on in-memory fakes', () => {
     expect(stored?.filter(([role]) => role === 'user')).toHaveLength(1)
     // Opening a stored conversation asks the model nothing.
     expect(second.main.chatRequests).toEqual([])
+    expect(second.idb).toBe(first.idb)
     await second.finish()
+
+    // The restart was one of the storage layer too: the connection the first page's copy of the
+    // chat storage had opened is refused, so that page cannot read or write this storage any more.
+    const storageErrors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const callsBefore = structuredClone(first.idb.stats.calls)
+    expect(
+      await first.stored('designer').then(
+        (session) => session?.id ?? 'nothing',
+        () => 'failed'
+      )
+    ).not.toBe('designer')
+    expect(first.idb.stats.calls).toEqual(callsBefore)
+    expect(takeChannelDeniedAttempts()[0]).toMatchObject({
+      kind: 'indexeddb',
+      detail: expect.stringMatching(/^IDBDatabase\.transaction\(sessions-v2\) after its in-memory/)
+    })
+    storageErrors.mockRestore()
   }, 20000)
 })
 

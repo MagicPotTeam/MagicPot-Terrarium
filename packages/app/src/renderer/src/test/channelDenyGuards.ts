@@ -11,6 +11,8 @@
  *  - transport level: net.Socket.prototype.connect and net.Server.prototype.listen are replaced, so
  *    Node's own fetch (undici), node:http(s), a jsdom iframe's XMLHttpRequest, the `ws` package or
  *    any module imported later (static or dynamic) cannot open or accept a TCP connection either;
+ *    UDP (dgram.Socket bind / connect / send) and DNS (node:dns and node:dns/promises lookups and
+ *    resolvers) are refused the same way;
  *  - bridge level: every preload bridge (`window.api`, `window.win`, ...) is a proxy that refuses
  *    each call that the running test did not list with `allowChannelBridge`.
  *
@@ -23,9 +25,20 @@
  * (`allowChannelInMemoryIndexedDb`) and listed bridge functions (`allowChannelBridge`).
  * There is no way to allow the network.
  *
- * Known limits: UDP (node:dgram), DNS lookups without a connection and child processes are not
- * guarded; renderer code has no access to them.
+ * The IndexedDB allowance ends with the test (or when the test allows again) at the level of the
+ * handles, not only of the `indexedDB` global: the factory, every database it opened and every
+ * transaction of those databases refuse and count each call from then on. Business code that
+ * cached a connection (chatStorage does) therefore cannot keep reading or writing the storage of
+ * an earlier test. (Object stores, cursors and requests are not wrapped: they belong to a
+ * transaction, which does not outlive the task that uses it.)
+ *
+ * Known limits: child processes and node:worker_threads are not guarded; renderer code has no
+ * access to them. A module that captured a node:dns function before this file ran keeps it (this
+ * file is the first setup file, so no business module can).
  */
+import dgram from 'node:dgram'
+import dns from 'node:dns'
+import { syncBuiltinESMExports } from 'node:module'
 import { Server, Socket } from 'node:net'
 import { afterAll, afterEach, expect } from 'vitest'
 
@@ -38,6 +51,8 @@ export type ChannelDeniedKind =
   | 'beacon'
   | 'indexeddb'
   | 'socket'
+  | 'udp'
+  | 'dns'
   | 'bridge'
   | 'guard-replaced'
 
@@ -77,6 +92,8 @@ export const isChannelGuardDenied = (error: unknown): boolean =>
 interface ChannelDenyGuards {
   deniedAttempts(): readonly ChannelDeniedAttempt[]
   takeDeniedAttempts(): ChannelDeniedAttempt[]
+  /** Refusals since the last test boundary or take, including those whose stack was not kept. */
+  deniedAttemptCount(): number
   totalDeniedAttempts(): number
   allowInMemoryIndexedDb(fake: unknown): void
   allowBridge(root: ChannelBridgeRoot, allowance: ChannelBridgeAllowance): void
@@ -116,7 +133,7 @@ function installChannelDenyGuards(): ChannelDenyGuards {
   let denied: ChannelDeniedAttempt[] = []
   let dropped = 0
   let total = 0
-  let inMemoryIndexedDb: unknown = null
+  let indexedDbAllowance: { ended: boolean; factory: object } | null = null
   const bridgeAllowances = new Map<string, ChannelBridgeAllowance>()
 
   const deny = (kind: ChannelDeniedKind, detail: string): Error => {
@@ -200,8 +217,91 @@ function installChannelDenyGuards(): ChannelDenyGuards {
     ['EventSource', () => deniedEventSource],
     ['Worker', () => deniedWorker],
     ['SharedWorker', () => deniedSharedWorker],
-    ['indexedDB', () => inMemoryIndexedDb ?? deniedIndexedDb]
+    ['indexedDB', () => indexedDbAllowance?.factory ?? deniedIndexedDb]
   ]
+
+  // ---- in-memory IndexedDB allowance ------------------------------------------------------
+  /** Guarded stand-ins of the fake's factory, databases and transactions, by raw object. */
+  const guardedIndexedDbHandles = new WeakMap<object, { allowance: object; guarded: object }>()
+  /**
+   * A stand-in that forwards to the fake while the allowance lasts and refuses (and counts)
+   * every method call once it has ended. Properties and event handlers pass through.
+   */
+  const guardIndexedDbHandle = <T extends object>(
+    raw: T,
+    allowance: { ended: boolean },
+    label: string,
+    wrapResult: (method: string, result: unknown) => unknown = (_method, result) => result
+  ): T => {
+    // A fake may hand out the same object again under a later allowance: that one is live.
+    const known = guardedIndexedDbHandles.get(raw)
+    if (known && known.allowance === allowance) return known.guarded as T
+    const methods = new Map<string, unknown>()
+    const guarded = new Proxy(raw, {
+      get: (target, key) => {
+        const member: unknown = Reflect.get(target, key, target)
+        if (typeof key === 'symbol' || typeof member !== 'function' || key.startsWith('on')) {
+          return member
+        }
+        let method = methods.get(key)
+        if (!method) {
+          method = (...args: unknown[]): unknown => {
+            if (allowance.ended) {
+              throw deny(
+                'indexeddb',
+                `${label}.${key}(${describe(args[0])}) after its in-memory allowance ended (handle kept from an earlier test or an earlier allowance)`
+              )
+            }
+            // Looked up again: the fake may have replaced the member since the first call.
+            const current = Reflect.get(target, key, target) as (...rest: unknown[]) => unknown
+            return wrapResult(key, current.apply(target, args))
+          }
+          methods.set(key, method)
+        }
+        return method
+      },
+      set: (target, key, value) => Reflect.set(target, key, value, target)
+    })
+    guardedIndexedDbHandles.set(raw, { allowance, guarded })
+    return guarded
+  }
+  const guardIndexedDbDatabase = (value: unknown, allowance: { ended: boolean }): unknown =>
+    value && typeof value === 'object' && typeof (value as IDBDatabase).transaction === 'function'
+      ? guardIndexedDbHandle(value, allowance, 'IDBDatabase', (method, result) =>
+          method === 'transaction' && result && typeof result === 'object'
+            ? guardIndexedDbHandle(result, allowance, 'IDBTransaction')
+            : result
+        )
+      : value
+  /**
+   * The open request stays the fake's own object (the fake passes it as `event.target`); only
+   * its `result` is read through the guard, so the page never holds an unguarded database.
+   */
+  const guardIndexedDbOpenRequest = (request: unknown, allowance: { ended: boolean }): unknown => {
+    if (!request || typeof request !== 'object') return request
+    const own = Object.getOwnPropertyDescriptor(request, 'result')
+    let assigned = !!own && 'value' in own
+    let value: unknown = own && 'value' in own ? own.value : undefined
+    const inherited = Object.getPrototypeOf(request) as object | null
+    Object.defineProperty(request, 'result', {
+      configurable: true,
+      enumerable: true,
+      get: () =>
+        guardIndexedDbDatabase(
+          assigned ? value : inherited ? Reflect.get(inherited, 'result', request) : undefined,
+          allowance
+        ),
+      set: (next: unknown) => {
+        assigned = true
+        value = next
+      }
+    })
+    return request
+  }
+  const endIndexedDbAllowance = (): void => {
+    if (indexedDbAllowance) indexedDbAllowance.ended = true
+    indexedDbAllowance = null
+  }
 
   // ---- bridge level -----------------------------------------------------------------------
   /** Reads that probe an object (promise resolution, serialisers, matchers) are not calls. */
@@ -377,9 +477,77 @@ function installChannelDenyGuards(): ChannelDenyGuards {
   const deniedListen = function listen(): never {
     throw deny('socket', 'net.Server.listen()')
   }
+  // UDP and DNS never start a TCP connection, so they are refused by name.
+  const deniedUdp = (method: string) =>
+    function (this: unknown, ...args: unknown[]): never {
+      const where = args
+        .filter((arg) => typeof arg === 'string' || typeof arg === 'number')
+        .map((arg) => describe(arg))
+        .join(', ')
+      throw deny('udp', `dgram.Socket.${method}(${where})`)
+    }
+  const deniedDns = (name: string, promised: boolean) =>
+    function (this: unknown, first?: unknown): Promise<never> {
+      const error = deny('dns', `${name}(${describe(first)})`)
+      if (promised) return rejected(error)
+      throw error
+    }
+  type Patch = { target: object; key: string; label: string; value: unknown }
+  const transportPatches: Patch[] = [
+    {
+      target: Socket.prototype,
+      key: 'connect',
+      label: 'net.Socket.prototype.connect',
+      value: deniedConnect
+    },
+    {
+      target: Server.prototype,
+      key: 'listen',
+      label: 'net.Server.prototype.listen',
+      value: deniedListen
+    },
+    ...['bind', 'connect', 'send', 'sendto']
+      .filter(
+        (key) =>
+          typeof (dgram.Socket.prototype as unknown as Record<string, unknown>)[key] === 'function'
+      )
+      .map((key) => ({
+        target: dgram.Socket.prototype,
+        key,
+        label: `dgram.Socket.prototype.${key}`,
+        value: deniedUdp(key)
+      }))
+  ]
+  const DNS_CALL = /^(lookup|lookupService|reverse|resolve\w*)$/
+  const dnsTargets: Array<[object | undefined, string, boolean]> = [
+    [dns, 'dns', false],
+    [dns.Resolver?.prototype, 'dns.Resolver.prototype', false],
+    [dns.promises, 'dns.promises', true],
+    [dns.promises?.Resolver?.prototype, 'dns.promises.Resolver.prototype', true]
+  ]
+  for (const [target, label, promised] of dnsTargets) {
+    if (!target) continue
+    for (const key of Object.getOwnPropertyNames(target)) {
+      if (!DNS_CALL.test(key) || typeof (target as Record<string, unknown>)[key] !== 'function')
+        continue
+      transportPatches.push({
+        target,
+        key,
+        label: `${label}.${key}`,
+        value: deniedDns(`${label}.${key}`.replace('.prototype', ''), promised)
+      })
+    }
+  }
   const placeTransport = (): void => {
-    Socket.prototype.connect = deniedConnect as unknown as typeof Socket.prototype.connect
-    Server.prototype.listen = deniedListen as unknown as typeof Server.prototype.listen
+    let placed = false
+    for (const patch of transportPatches) {
+      const holder = patch.target as Record<string, unknown>
+      if (holder[patch.key] === patch.value) continue
+      holder[patch.key] = patch.value
+      placed = true
+    }
+    // `import { lookup } from 'node:dns'` binds the export, not the property: refresh the exports.
+    if (placed) syncBuiltinESMExports()
   }
   placeTransport()
 
@@ -415,12 +583,19 @@ function installChannelDenyGuards(): ChannelDenyGuards {
       dropped = 0
       return taken
     },
+    deniedAttemptCount: () => denied.length + dropped,
     totalDeniedAttempts: () => total,
     allowInMemoryIndexedDb: (fake) => {
       if (!fake || typeof (fake as { open?: unknown }).open !== 'function') {
         throw new Error('allowChannelInMemoryIndexedDb needs an in-memory IDBFactory fake.')
       }
-      inMemoryIndexedDb = fake
+      // One allowance at a time: what an earlier one opened is refused from here on.
+      endIndexedDbAllowance()
+      const allowance = { ended: false, factory: {} as object }
+      allowance.factory = guardIndexedDbHandle(fake, allowance, 'indexedDB', (method, result) =>
+        method === 'open' ? guardIndexedDbOpenRequest(result, allowance) : result
+      )
+      indexedDbAllowance = allowance
     },
     allowBridge: (name, allowance) => {
       if (!CHANNEL_BRIDGE_ROOTS.includes(name)) throw new Error(`Unknown bridge: ${String(name)}`)
@@ -430,7 +605,7 @@ function installChannelDenyGuards(): ChannelDenyGuards {
       )
     },
     resetAllowances: () => {
-      inMemoryIndexedDb = null
+      endIndexedDbAllowance()
       bridgeAllowances.clear()
     },
     repairReplacedGuards: () => {
@@ -444,10 +619,10 @@ function installChannelDenyGuards(): ChannelDenyGuards {
           // A guard that cannot be put back keeps being reported after every test.
         }
       }
-      if (Socket.prototype.connect !== (deniedConnect as unknown))
-        replaced.push('net.Socket.prototype.connect')
-      if (Server.prototype.listen !== (deniedListen as unknown))
-        replaced.push('net.Server.prototype.listen')
+      for (const patch of transportPatches) {
+        if ((patch.target as Record<string, unknown>)[patch.key] !== patch.value)
+          replaced.push(patch.label)
+      }
       placeTransport()
       return replaced
     },
@@ -475,9 +650,15 @@ export const channelDenyGuardsInstalled = (): boolean =>
 export const channelDeniedAttempts = (): readonly ChannelDeniedAttempt[] => guards.deniedAttempts()
 /** Returns the refusals and clears them: for a test that refuses something on purpose. */
 export const takeChannelDeniedAttempts = (): ChannelDeniedAttempt[] => guards.takeDeniedAttempts()
+/** Number of refusals since the last test boundary (or take), also those kept without a stack. */
+export const channelDeniedAttemptCount = (): number => guards.deniedAttemptCount()
 /** Refusals since the guards were installed; never reset. */
 export const totalChannelDeniedAttempts = (): number => guards.totalDeniedAttempts()
-/** Lets the page use an in-memory IndexedDB fake until the end of the running test. */
+/**
+ * Lets the page use an in-memory IndexedDB fake until the end of the running test, or until the
+ * test calls this again (a restart: the databases and transactions opened so far are refused
+ * from then on, also when the same fake is allowed again).
+ */
 export const allowChannelInMemoryIndexedDb = (fake: unknown): void =>
   guards.allowInMemoryIndexedDb(fake)
 /** Lists bridge members the page may call until the end of the running test; calls merge. */
@@ -504,13 +685,14 @@ const formatAttempts = (attempts: readonly ChannelDeniedAttempt[]): string =>
  * test.
  */
 export function assertNoChannelDeniedAttempts(when = 'during the test'): void {
+  const count = guards.deniedAttemptCount()
   const attempts = guards.takeDeniedAttempts()
   const replaced = guards.repairReplacedGuards()
   const problems: string[] = []
   if (replaced.length)
     problems.push(`Channel deny guards were replaced ${when}: ${replaced.join(', ')}`)
   if (attempts.length) {
-    problems.push(`${attempts.length} denied attempt(s) ${when}:\n${formatAttempts(attempts)}`)
+    problems.push(`${count} denied attempt(s) ${when}:\n${formatAttempts(attempts)}`)
   }
   if (problems.length) throw new Error(problems.join('\n'))
 }

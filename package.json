@@ -79,6 +79,7 @@
     "test:web:light:1": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.light.config.mjs --shard=1/3",
     "test:web:light:2": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.light.config.mjs --shard=2/3",
     "test:web:light:3": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.light.config.mjs --shard=3/3",
+    "test:web:channel": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.channel.config.mjs",
     "test:web": "npm run test:web:heavy:qapp-design && npm run test:web:heavy:custom-skill-manager && npm run test:web:heavy:panel-plugin && npm run test:web:heavy:panel-llm && npm run test:web:heavy:chat-agent-skill && npm run test:web:heavy:image-edit-panel && npm run test:web:heavy:image-viewer && npm run test:web:heavy:side-panel && npm run test:web:heavy:qapp-context && npm run test:web:light:1 && npm run test:web:light:2 && npm run test:web:light:3",
     "test": "npm run test:node && npm run test:web",
     "test:smoke:startup": "cross-env NODE_OPTIONS=--max-old-space-size=6144 RUN_ELECTRON_STARTUP_SMOKE=1 vitest run --config config/vitest/vitest.node.smoke.config.mjs",
