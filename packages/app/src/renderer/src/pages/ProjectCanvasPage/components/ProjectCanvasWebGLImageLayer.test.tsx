@@ -3313,6 +3313,154 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     })
   })
 
+  describe('ComfyUI throttle', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+      vi.unstubAllGlobals()
+      setWindowDevicePixelRatio(originalDevicePixelRatio)
+    })
+
+    // A layer while a ComfyUI job runs, with a hand-moved clock and hand-run animation frames.
+    const renderThrottledLayer = async () => {
+      setWindowDevicePixelRatio(2)
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const items = [createItem()]
+      const view = (nextItems: CanvasImageItem[]) => (
+        <Layer
+          ref={ref}
+          items={nextItems}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          isPerformanceThrottled
+        />
+      )
+      const utils = render(view(items))
+      await waitFor(() => {
+        expect(ref.current).not.toBeNull()
+        expect(createdSprites).toHaveLength(1)
+      })
+      const app = createdApplications[0]
+      for (let renders = -1; renders !== app.render.mock.calls.length;) {
+        renders = app.render.mock.calls.length
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 400))
+        })
+      }
+      let now = 100_000
+      vi.spyOn(window.performance, 'now').mockImplementation(() => now)
+      const callbacks = new Map<number, FrameRequestCallback>()
+      let nextFrameId = 1
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn((callback: FrameRequestCallback) => {
+          callbacks.set(nextFrameId, callback)
+          return nextFrameId++
+        })
+      )
+      vi.stubGlobal(
+        'cancelAnimationFrame',
+        vi.fn((id: number) => {
+          callbacks.delete(id)
+        })
+      )
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const advance = (ms: number) => {
+        now += ms
+        act(() => {
+          vi.advanceTimersByTime(ms)
+        })
+      }
+      const runFrames = () =>
+        act(() => {
+          const due = Array.from(callbacks.values())
+          callbacks.clear()
+          due.forEach((callback) => callback(now))
+        })
+      return {
+        ref,
+        app,
+        items,
+        view,
+        advance,
+        runFrames,
+        pendingFrames: () => callbacks.size,
+        ...utils
+      }
+    }
+
+    it('draws every gesture frame at once while a job runs', async () => {
+      const { ref, app, advance } = await renderThrottledLayer()
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+
+      // 30 frames at 60 Hz: the throttle used to allow one render per 180 ms, three in all.
+      for (let frame = 1; frame <= 30; frame += 1) {
+        advance(1000 / 60)
+        act(() => ref.current?.syncViewport({ x: frame * 5, y: 0 }, 1))
+        expect(app.render.mock.calls.length).toBe(rendersBefore + frame)
+      }
+      // And at the full resolution.
+      expect(app.renderer.resolution).toBe(2)
+    })
+
+    it('draws a dragged image at once while a job runs', async () => {
+      const { ref, app, advance } = await renderThrottledLayer()
+      const rendersBefore = app.render.mock.calls.length
+      for (let step = 1; step <= 10; step += 1) {
+        advance(1000 / 60)
+        act(() =>
+          ref.current?.syncItemPreview('image-1', {
+            x: 24 + step * 4,
+            y: 36,
+            width: 200,
+            height: 120,
+            scaleX: 1,
+            scaleY: 1,
+            rotation: 0
+          })
+        )
+        expect(app.render.mock.calls.length).toBe(rendersBefore + step)
+      }
+    })
+
+    it('still spaces out background renders while a job runs', async () => {
+      const { ref, app, items, view, rerender, advance, runFrames, pendingFrames } =
+        await renderThrottledLayer()
+      // A render just happened (a gesture frame).
+      act(() => ref.current?.syncViewport({ x: 2, y: 0 }, 1))
+      const rendersBefore = app.render.mock.calls.length
+      advance(10)
+      rerender(view([{ ...items[0], zIndex: 5 }]))
+      // The reconcile pass may not render yet...
+      expect(pendingFrames()).toBe(0)
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+      advance(100)
+      rerender(view([{ ...items[0], zIndex: 6 }]))
+      expect(pendingFrames()).toBe(0)
+      advance(100)
+      // ...and both changes are drawn by one render once the 180 ms interval is over.
+      expect(pendingFrames()).toBe(1)
+      runFrames()
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+    })
+
+    it('does not hold a lowered resolution for the length of the job', async () => {
+      const { ref, app, advance } = await renderThrottledLayer()
+      act(() => ref.current?.setViewportInteracting(true))
+      for (let frame = 1; frame <= 12; frame += 1) {
+        advance(40)
+        act(() => ref.current?.syncViewport({ x: frame * 5, y: 0 }, 1))
+      }
+      expect(app.renderer.resolution).toBe(1)
+
+      act(() => ref.current?.setViewportInteracting(false))
+      advance(200)
+      // The job is still running; the gesture is over, so the full resolution is back.
+      expect(app.renderer.resolution).toBe(2)
+    })
+  })
+
   describe('world render group', () => {
     const getWorld = () =>
       createdSprites[0].parent as unknown as { isRenderGroup?: boolean; position: MockPoint }

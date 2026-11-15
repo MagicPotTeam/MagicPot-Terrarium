@@ -2365,8 +2365,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
   /**
    * Asks for a render in a coming animation frame. This is the path of background work (a
-   * reconcile pass that added or replaced sprites, tiles, start-up). What the user moves is
-   * drawn by renderImmediateOrSchedule instead.
+   * reconcile pass that added or replaced sprites, tiles, start-up), and the only render path
+   * that a running ComfyUI job slows down. What the user moves is drawn by
+   * renderImmediateOrSchedule instead.
    */
   const scheduleRender = useCallback(() => {
     if (!appRef.current || rafRef.current !== null || renderThrottleTimerRef.current !== null) {
@@ -2418,16 +2419,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
    * keeps the images in the same frame as everything else, instead of one frame behind in a
    * requestAnimationFrame of their own. A render that was already scheduled is cancelled,
    * because this one shows the same state: one render per frame.
+   *
+   * This is what the user sees move (the view, an image being dragged, a resize), so it is
+   * never held back by the ComfyUI throttle: that would show the images at 5 frames per second
+   * under DOM layers moving at full rate. The render itself is a fraction of a millisecond.
    */
   const renderImmediateOrSchedule = useCallback(() => {
-    if (isPerformanceThrottledRef.current) {
-      scheduleRender()
-      return
-    }
-
     cancelScheduledRender()
     renderApp()
-  }, [cancelScheduledRender, renderApp, scheduleRender])
+  }, [cancelScheduledRender, renderApp])
 
   const resizeRendererToStage = useCallback(
     (preferredSize?: { width: number; height: number }) => {
@@ -2497,20 +2497,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return
     }
 
-    const isInteractionActive = () =>
-      isViewportInteractingRef.current || isPerformanceThrottledRef.current
+    // Only a gesture counts. A running ComfyUI job is not one: it must neither lower the
+    // resolution nor keep a lowered one for as long as the job runs.
     const quality = governor.update({
       now: window.performance.now(),
-      interactionActive: isInteractionActive()
+      interactionActive: isViewportInteractingRef.current
     })
     applyRenderQuality(quality)
-    if (quality === 'interactive' && !isInteractionActive()) {
+    if (quality === 'interactive' && !isViewportInteractingRef.current) {
       qualityTransitionTimerRef.current = setTimeout(() => {
         qualityTransitionTimerRef.current = null
         applyRenderQuality(
           governor.update({
             now: window.performance.now(),
-            interactionActive: isInteractionActive()
+            interactionActive: isViewportInteractingRef.current
           })
         )
       }, PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS)
@@ -2722,7 +2722,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
   useEffect(() => {
     syncRenderQualityToInteraction()
-  }, [isPerformanceThrottled, isViewportInteracting, syncRenderQualityToInteraction])
+  }, [isViewportInteracting, syncRenderQualityToInteraction])
 
   const applyViewportTransform = useCallback(
     (pos: { x: number; y: number }, scale: number) => {
