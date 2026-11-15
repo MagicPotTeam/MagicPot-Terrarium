@@ -1579,8 +1579,6 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
           </Box>
         ) : null}
 
-        {isToolCommandMode ? toolHelp : null}
-
         {/* Positioning parent of the "/" list, which floats above the shell. */}
         <Box sx={{ position: 'relative', minWidth: 0 }}>
           {suggestions ? (

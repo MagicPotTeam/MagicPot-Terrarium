@@ -274,7 +274,7 @@ describe('ChatComposer column shell', () => {
     expect(sendButton()).toBeDisabled()
   })
 
-  it('shows the bound-tool help only while a /tool command is being typed', () => {
+  it('never shows the bound-tool help paragraph, also while a /tool command is being typed', () => {
     const tool = { name: 'lookup', description: 'Look something up' } as NonNullable<
       ComposerProps['toolHelpItems']
     >[number]
@@ -282,7 +282,13 @@ describe('ChatComposer column shell', () => {
     expect(screen.queryByTestId('chat-composer-tool-help')).toBeNull()
     unmount()
 
-    render(<ColumnComposer toolHelpItems={[tool]} initialValue="/tool lo" />)
+    // The "/tool" row of the "/" list carries the hint; nothing is drawn above the shell.
+    const column = render(<ColumnComposer toolHelpItems={[tool]} initialValue="/tool lo" />)
+    expect(screen.queryByTestId('chat-composer-tool-help')).toBeNull()
+    column.unmount()
+
+    // The full-page chat keeps the paragraph.
+    render(<ColumnComposer layout={undefined} toolHelpItems={[tool]} initialValue="/tool lo" />)
     expect(screen.getByTestId('chat-composer-tool-help')).toHaveTextContent('lookup')
   })
 
