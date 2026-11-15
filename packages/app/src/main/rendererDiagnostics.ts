@@ -134,7 +134,7 @@ export function handleRendererProcessGone(
 
   // A renderer that goes away while the app quits or its window closes is expected:
   // reloading it or raising a dialog would fight the shutdown.
-  if (options.isShuttingDown?.()) {
+  if ((options.isShuttingDown ?? isAppQuitting)()) {
     console.info('[App] Renderer recovery skipped because the app or the window is closing')
     return
   }

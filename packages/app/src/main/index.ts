@@ -154,7 +154,12 @@ function openMainWindow(): void {
 if (!launcherSmokeTest)
   app.whenReady().then(async () => {
     await setupReadyAppRuntime()
-    startProcessDiagnostics()
+    try {
+      startProcessDiagnostics()
+    } catch (error) {
+      // Diagnostics only: never let them stop the app from starting.
+      console.warn('[App] Process diagnostics could not be started', error)
+    }
 
     console.log('[App] 正在准备显示窗口...')
     try {

@@ -254,6 +254,20 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     }
   )
 
+  it('the handler on its own also does nothing while the app is quitting', () => {
+    const window = createWindow()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.mocked(dialog.showMessageBox).mockReset()
+    markAppQuitting()
+
+    handleRendererProcessGone(window as never, { reason: 'crashed', exitCode: 5 } as never)
+    handleRendererProcessGone(window as never, { reason: 'killed', exitCode: 9 } as never)
+
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+  })
+
   it('drops a confirmed manual reload when the app started quitting while the dialog was open', async () => {
     const window = createWindow()
     const recoverRenderer = vi.fn()
