@@ -98,6 +98,12 @@ export {
   resetChatImageDerivativeCacheForTests
 } from '../chatImageDerivativeScheduler'
 
+/**
+ * Command cards that keep their place in the transcript: they follow the message with the index
+ * `after - 1` (0: they come before the first message).
+ */
+export type ChatAnchoredTailGroup = { after: number; node: React.ReactNode }
+
 interface ChatMessageListProps {
   active?: boolean
   /**
@@ -110,6 +116,11 @@ interface ChatMessageListProps {
    * rows of the scroll content, before the working line, and stay outside the virtual window.
    */
   tail?: React.ReactNode
+  /**
+   * Agent column only: command cards that newer messages have followed. They stay where they
+   * were created, inside the measured row of the message they follow.
+   */
+  anchoredTail?: readonly ChatAnchoredTailGroup[]
   /** Changes when a row was just added to the tail: the list then scrolls to its end. */
   tailScrollToken?: number
   currentSession: ChatSession | undefined
@@ -769,6 +780,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   active = true,
   columnStyle = false,
   tail,
+  anchoredTail,
   tailScrollToken,
   currentSession,
   isLoading,
@@ -801,6 +813,20 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const messages = React.useMemo(() => currentSession?.messages ?? [], [currentSession?.messages])
   const hasTail = columnStyle && tail !== undefined && tail !== null && tail !== false
   const tailRef = React.useRef<HTMLDivElement | null>(null)
+  // The cards of each row: by the index of the message they follow, -1 for those before the
+  // first message. A place past the last message falls back to the last message.
+  const anchoredTailByRow = React.useMemo(() => {
+    if (!columnStyle || !anchoredTail?.length || messages.length === 0) return null
+    const byRow = new Map<number, React.ReactNode[]>()
+    for (const group of anchoredTail) {
+      const row = Math.min(Math.max(0, Math.floor(group.after)), messages.length) - 1
+      byRow.set(row, [
+        ...(byRow.get(row) ?? []),
+        <React.Fragment key={group.after}>{group.node}</React.Fragment>
+      ])
+    }
+    return byRow
+  }, [anchoredTail, columnStyle, messages.length])
   // With a tail the working line moves below it: the last message portals it into this host.
   const [workingLineHost, setWorkingLineHost] = React.useState<HTMLDivElement | null>(null)
   const contextCompressionSummary = currentSession?.contextCompression
@@ -1242,6 +1268,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               bottomSpacing={columnTokens ? COLUMN_ROW_GAP_PX : message.role === 'user' ? 0 : 16}
               onHeight={measureRow}
             >
+              {index === 0 && anchoredTailByRow?.has(-1) ? (
+                <AnchoredTailCards placement="before">
+                  {anchoredTailByRow.get(-1)}
+                </AnchoredTailCards>
+              ) : null}
               {message.role === 'user' ? (
                 editingMessageIndex === index ? (
                   <UserMessageEditForm
@@ -1320,6 +1351,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   columnTokens={columnTokens}
                 />
               )}
+              {anchoredTailByRow?.has(index) ? (
+                <AnchoredTailCards placement="after">
+                  {anchoredTailByRow.get(index)}
+                </AnchoredTailCards>
+              ) : null}
             </MeasuredChatRow>
           </React.Fragment>
         )
@@ -1333,20 +1369,23 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           }}
         />
       ) : null}
-      {hasTail ? (
+      {columnStyle ? (
+        // Always there in the column, also while it is empty: a card that arrives in a live
+        // region that already exists is announced.
         <Box
           ref={tailRef}
           data-testid="chat-transcript-tail"
+          aria-live="polite"
           sx={{
             display: 'flex',
             flexDirection: 'column',
             gap: `${COLUMN_ROW_GAP_PX}px`,
-            mb: `${COLUMN_ROW_GAP_PX}px`,
             minWidth: 0,
-            flexShrink: 0
+            flexShrink: 0,
+            '&:not(:empty)': { mb: `${COLUMN_ROW_GAP_PX}px` }
           }}
         >
-          {tail}
+          {hasTail ? tail : null}
         </Box>
       ) : null}
       {pendingConfirmation ? (
@@ -1368,6 +1407,28 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     </Box>
   )
 }
+
+/** The command cards of one row: a column with the row gap, set off from the message. */
+const AnchoredTailCards: React.FC<{
+  placement: 'before' | 'after'
+  children: React.ReactNode
+}> = ({ placement, children }) => (
+  <Box
+    data-testid="chat-transcript-anchored-cards"
+    data-placement={placement}
+    sx={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: `${COLUMN_ROW_GAP_PX}px`,
+      minWidth: 0,
+      ...(placement === 'before'
+        ? { mb: `${COLUMN_ROW_GAP_PX}px` }
+        : { mt: `${COLUMN_ROW_GAP_PX}px` })
+    }}
+  >
+    {children}
+  </Box>
+)
 
 const ContextCompressionSummaryCard: React.FC<{
   summary: string

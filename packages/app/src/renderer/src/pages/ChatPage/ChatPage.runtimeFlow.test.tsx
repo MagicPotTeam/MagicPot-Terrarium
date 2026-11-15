@@ -844,6 +844,8 @@ vi.mock('./components/ChatMessageList', () => ({
     onResolvePendingConfirmation?: (requestId: string, confirmed: boolean) => void
     /** Agent column: the command cards that follow the last message. */
     tail?: React.ReactNode
+    /** Agent column: the command cards that stay after an older message. */
+    anchoredTail?: readonly { after: number; node: React.ReactNode }[]
   }) => {
     hoisted.chatMessageListMock(props)
     return (
@@ -851,6 +853,7 @@ vi.mock('./components/ChatMessageList', () => ({
         <pre data-testid="chat-session-state">
           {JSON.stringify(props.currentSession ?? null, null, 2)}
         </pre>
+        {props.anchoredTail?.map(group => <React.Fragment key={group.after}>{group.node}</React.Fragment>)}
         {props.tail}
         {props.pendingConfirmation ? (
           <div data-testid="chat-pending-confirmation-mock">
@@ -4962,6 +4965,26 @@ describe('ChatPage runtime workflow integration', () => {
     expect(readCurrentSessionState()?.messages).toEqual(original.messages)
     expect(readCurrentSessionState()?.draft).toBeUndefined()
   })
+  it('accepts the full-page branch confirmation after the typed command was saved and cleared as a draft', async () => {
+    // The full-page chat shares the stale check with the Agent column and keeps its own view.
+    const view = renderWithProviders(<ChatPage storageScope="runtime-flow" />)
+    try {
+      await waitFor(()=>expect(readCurrentSessionState()?.id).toBeTruthy())
+      const original = readCurrentSessionState()!
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target:{value:'/branch'} })
+      await waitFor(()=>expect(readCurrentSessionState()?.draft?.inputValue).toBe('/branch'))
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      const confirmation = await screen.findByTestId('replay-confirmation')
+      expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
+      await waitFor(()=>expect(readCurrentSessionState()?.draft).toBeUndefined())
+      hoisted.notifyWarningMock.mockClear()
+      fireEvent.click(within(confirmation).getByRole('button',{name:'Create separate conversation'}))
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+      await waitFor(()=>expect(readCurrentSessionState()?.id).not.toBe(original.id))
+      expect(readCurrentSessionState()?.messages).toEqual(original.messages)
+      expect(screen.queryByTestId('replay-confirmation')).toBeNull()
+    } finally { view.unmount() }
+  })
   it.each([['/regen','original replay text'],['/edit 1 replacement','replacement']])('opens %s as an unsent separate draft and preserves original messages', async (command, expectedDraft) => {
     renderChatPage()
     await waitFor(()=>expect(readCurrentSessionState()?.id).toBeTruthy())
@@ -5008,10 +5031,12 @@ describe('ChatPage runtime workflow integration', () => {
     const originalId = readCurrentSessionState()!.id
     fireEvent.change(screen.getByTestId('chat-composer-input-mock'),{target:{value:'/branch'}})
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-    const card = await screen.findByTestId('chat-command-confirm-card')
+    await screen.findByTestId('chat-command-confirm-card')
     fireEvent.change(screen.getByTestId('chat-composer-input-mock'),{target:{value:'new source turn'}})
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
     await waitFor(()=>expect(readCurrentSessionState()?.messages.some(message=>message.role==='assistant')).toBe(true))
+    // The card stayed where the command ran: before the new turn.
+    const card = screen.getByTestId('chat-command-confirm-card')
     fireEvent.click(within(card).getByRole('button',{name:'chat.command_card.new_conversation'}))
     expect(readCurrentSessionState()?.id).toBe(originalId)
     // The answer came too late: the card says so instead of creating a conversation.

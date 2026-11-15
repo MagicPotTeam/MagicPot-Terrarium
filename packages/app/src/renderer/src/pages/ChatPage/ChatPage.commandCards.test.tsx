@@ -72,7 +72,11 @@ vi.mock('./chatStorage', async (original) => {
     loadSessionFromDB: vi.fn(async (id: string) =>
       structuredClone(h.sessions.value.find((s) => s.id === id) ?? null)
     ),
-    saveSessionToDB: vi.fn(async () => undefined),
+    // Keeps what the page saves, so that a sent message and its reply survive the reload.
+    saveSessionToDB: vi.fn(async (session: { id: string }) => {
+      const index = h.sessions.value.findIndex((item) => item.id === session.id)
+      if (index >= 0) h.sessions.value[index] = structuredClone(session)
+    }),
     saveAllSessions: vi.fn(async () => undefined),
     migrateFromLocalStorage: vi.fn(async () => null),
     debouncedSaveSessions: vi.fn(),
@@ -102,12 +106,33 @@ vi.mock('./components/AgentThreadGoalRecordsHost', () => ({
     <div data-testid="goal-records-host">{conversationId}</div>
   )
 }))
-// The list double shows what ChatPage hands to the real list: the tail rows and the scroll token.
+// The list double shows what ChatPage hands to the real list: the cards that keep their place
+// after an older message, the tail rows and the scroll token.
 vi.mock('./components/ChatMessageList', () => ({
-  default: ({ currentSession, tail, tailScrollToken, columnStyle }: any) => (
-    <div data-testid="list" data-column={String(Boolean(columnStyle))} data-token={tailScrollToken}>
+  default: ({
+    currentSession,
+    tail,
+    anchoredTail,
+    tailScrollToken,
+    columnStyle,
+    onSendEditedMessage
+  }: any) => (
+    <div
+      data-testid="list"
+      data-column={String(Boolean(columnStyle))}
+      data-token={tailScrollToken}
+      data-messages={currentSession?.messages.length}
+    >
       <pre data-testid="session">{currentSession?.id}</pre>
-      {tail}
+      <button onClick={() => onSendEditedMessage('Edited first question', [], undefined, [])}>
+        edit first message
+      </button>
+      {(anchoredTail ?? []).map((group: { after: number; node: React.ReactNode }) => (
+        <div key={group.after} data-testid="anchored" data-after={group.after}>
+          {group.node}
+        </div>
+      ))}
+      <div data-testid="tail">{tail}</div>
     </div>
   )
 }))
@@ -604,6 +629,83 @@ describe('slash-command results in the Agent column', () => {
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('other'))
     expect(cards()).toHaveLength(0)
     expect(screen.queryByText(`Poster · ${zh.chat.agent_skill_session.enabled}`)).toBeNull()
+  })
+
+  it('keeps a card after the message it followed once a newer message exists', async () => {
+    // The model answers at once.
+    useServices({
+      'svcLLMProxy.chatStream': vi.fn(
+        async (_request: unknown, stream: { onData: (chunk: Record<string, unknown>) => void }) =>
+          stream.onData({ type: 'done', content: 'Second answer', fullContent: 'Second answer' })
+      )
+    })
+    await renderPage()
+    run('/status')
+    await waitFor(() => expect(commands()).toEqual(['/status']))
+    run('/goal')
+    await waitFor(() => expect(commands()).toEqual(['/status', '/goal']))
+    const records = await screen.findByTestId('goal-records-host')
+    // Made after the last of the two messages: both are the tail of the transcript.
+    expect(screen.queryByTestId('anchored')).toBeNull()
+    for (const card of cards()) expect(screen.getByTestId('tail')).toContainElement(card)
+
+    run('An ordinary message')
+    await waitFor(() => expect(screen.getByTestId('list')).toHaveAttribute('data-messages', '4'))
+    // The cards stay after the second message; the tail is free for what comes next.
+    const kept = screen.getByTestId('anchored')
+    expect(kept).toHaveAttribute('data-after', '2')
+    expect(commands()).toEqual(['/status', '/goal'])
+    for (const card of cards()) expect(kept).toContainElement(card)
+    expect(screen.getByTestId('tail')).toBeEmptyDOMElement()
+    // The goal view is the one that was open: drawing its card at the new place did not restart it.
+    expect(screen.getAllByTestId('goal-records-host')).toEqual([records])
+    expect(cards()[1]).toContainElement(records)
+
+    // A command that runs now is the new tail.
+    const before = token()
+    run('/env')
+    await waitFor(() => expect(commands()).toEqual(['/status', '/goal', '/env']))
+    expect(token()).toBe(before + 1)
+    expect(screen.getByTestId('tail')).toContainElement(cards()[2])
+    expect(kept).not.toContainElement(cards()[2])
+    expectNothingAboveTheTranscript()
+  })
+
+  it('keeps a card at the new end when the messages it followed were taken away', async () => {
+    useServices({
+      'svcLLMProxy.chatStream': vi.fn(
+        async (_request: unknown, stream: { onData: (chunk: Record<string, unknown>) => void }) =>
+          stream.onData({ type: 'done', content: 'An answer', fullContent: 'An answer' })
+      )
+    })
+    h.sessions.value[0].messages.push(
+      { role: 'user', content: 'Second question' },
+      { role: 'assistant', content: 'Second answer' }
+    )
+    await renderPage()
+    const messages = () => screen.getByTestId('list').getAttribute('data-messages')
+    await waitFor(() => expect(messages()).toBe('4'))
+    run('/status')
+    await waitFor(() => expect(commands()).toEqual(['/status']))
+    expect(screen.getByTestId('tail')).toContainElement(cards()[0])
+
+    // The first message is edited: the conversation restarts there with two messages.
+    fireEvent.click(screen.getByRole('button', { name: 'edit first message' }))
+    await waitFor(() => expect(messages()).toBe('2'))
+    // The reply arrived and was saved.
+    await waitFor(() =>
+      expect(
+        h.sessions.value[0].messages.map((message: { content: string }) => message.content)
+      ).toEqual(['Edited first question', 'An answer'])
+    )
+    expect(screen.getByTestId('tail')).toContainElement(cards()[0])
+
+    // What is sent afterwards follows the card; it does not slip back behind four messages.
+    run('One more message')
+    await waitFor(() => expect(messages()).toBe('4'))
+    expect(screen.getByTestId('anchored')).toHaveAttribute('data-after', '2')
+    expect(screen.getByTestId('anchored')).toContainElement(cards()[0])
+    expect(screen.getByTestId('tail')).toBeEmptyDOMElement()
   })
 
   it('drops the cards when the pane stops being the active one', async () => {

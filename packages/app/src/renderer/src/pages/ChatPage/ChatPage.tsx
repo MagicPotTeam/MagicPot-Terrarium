@@ -294,7 +294,7 @@ import { useChatProfiles } from './hooks/useChatProfiles'
 // Components
 import SessionSidebar from './components/SessionSidebar'
 import SessionHistoryDialog from './components/SessionHistoryDialog'
-import ChatMessageList, { type ChatPendingConfirmation } from './components/ChatMessageList'
+import ChatMessageList, { type ChatAnchoredTailGroup, type ChatPendingConfirmation } from './components/ChatMessageList'
 import AgentThreadHtmlPanel from './components/AgentThreadHtmlPanel'
 import { isAgentBasicCommand, parseAgentBasicCommand } from './agentBasicCommand'
 import { listComposerCommands } from './composerCommandCatalog'
@@ -8534,18 +8534,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [inspectionView, setInspectionView] = useState<{ scope: string; title: string; text: string } | null>(null)
   const inspectionScope = JSON.stringify({ route, conversationId: currentSessionId, storageScope })
   // The Agent column shows the result of a command as a card at the end of the transcript.
-  // Cards are view state of the open conversation: kept in order, never stored.
+  // Cards are view state of the open conversation: kept in order, never stored. A card stays
+  // after the message that was the last one when the command ran (its anchor).
   const [tailCards, setTailCards] = useState<ChatTailCard<CommandTailTarget>[]>([])
   const [tailScrollToken, setTailScrollToken] = useState(0)
   const tailCardIdRef = useRef(0)
-  const tailOwnerRef = useRef({ scope: inspectionScope, active })
-  tailOwnerRef.current = { scope: inspectionScope, active }
+  const tailMessageCount = currentSession?.messages.length ?? 0
+  const tailOwnerRef = useRef({ scope: inspectionScope, active, messageCount: tailMessageCount })
+  tailOwnerRef.current = { scope: inspectionScope, active, messageCount: tailMessageCount }
+  // Messages were taken away (an earlier message was edited): a card that stood past the new end stays at that end.
+  // A conversation that is not loaded at the moment says nothing about its messages.
+  const tailSessionLoaded = Boolean(currentSession)
+  useEffect(() => {
+    if (!tailSessionLoaded) return
+    setTailCards(previous => previous.some(card => card.anchor > tailMessageCount) ? previous.map(card => card.anchor > tailMessageCount ? { ...card, anchor: tailMessageCount } : card) : previous)
+  }, [tailSessionLoaded, tailMessageCount])
   /** Adds a card for a command that ran in `scope`; a result that arrives after the conversation changed is dropped. */
   const appendTailCard = useCallback((scope: string, card: ChatTailCardDraft<CommandTailTarget>): number | null => {
     const owner = tailOwnerRef.current
     if (!isMountedRef.current || !owner.active || owner.scope !== scope) return null
     const id = ++tailCardIdRef.current
-    setTailCards(previous => [...previous, { ...card, id, scope } as ChatTailCard<CommandTailTarget>])
+    setTailCards(previous => [...previous, { ...card, id, scope, anchor: owner.messageCount } as ChatTailCard<CommandTailTarget>])
     setTailScrollToken(token => token + 1)
     return id
   }, [])
@@ -8554,17 +8563,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const owner = tailOwnerRef.current
     if (!isMountedRef.current || !owner.active || owner.scope !== scope) return
     const id = ++tailCardIdRef.current
-    setTailCards(previous => [...previous.filter(card => card.kind !== 'panel' || card.panel !== panel), { kind: 'panel', panel, command, title, id, scope }])
+    setTailCards(previous => [...previous.filter(card => card.kind !== 'panel' || card.panel !== panel), { kind: 'panel', panel, command, title, id, scope, anchor: owner.messageCount }])
     setTailScrollToken(token => token + 1)
   }, [])
-  // The body elements of those cards: the views are drawn into them.
-  const [goalCardHost, setGoalCardHost] = useState<HTMLElement | null>(null)
-  const [skillsCardHost, setSkillsCardHost] = useState<HTMLElement | null>(null)
-  const handleTailPanelHost = useCallback((panel: string, element: HTMLElement | null) => {
-    if (panel === 'goal') setGoalCardHost(element)
-    else if (panel === 'skills') setSkillsCardHost(element)
-  }, [])
-  const skillsCardOpen = compact && active && tailCards.some(card => card.kind === 'panel' && card.panel === 'skills' && card.scope === inspectionScope)
+  // The views of those cards are drawn into elements of the page; the card's body takes its element in.
+  // A view therefore keeps its state when its card is drawn again at another place of the transcript.
+  const [tailPanelHosts] = useState(() => ({ goal: document.createElement('div'), skills: document.createElement('div') }))
+  const tailPanelOpen = (panel: 'goal' | 'skills') => compact && active && tailCards.some(card => card.kind === 'panel' && card.panel === panel && card.scope === inspectionScope)
+  const goalCardOpen = tailPanelOpen('goal')
+  const skillsCardOpen = tailPanelOpen('skills')
   // What the default button of a confirm card does, by card id.
   const tailConfirmActionsRef = useRef(new Map<number,
     | { type: 'replay'; view: NonNullable<typeof replayView> }
@@ -9028,11 +9035,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }
   const answerTailConfirm = useCallback((card: ChatTailConfirmCard, confirmed: boolean) => answerTailConfirmRef.current(card, confirmed), [])
   // Memoised: the message list is, and must not re-render with every render of the page.
-  const transcriptTail = useMemo(() => {
-    if (!compact || !active) return null
+  // Cards made after the last message are the tail; the others stay with the message they followed.
+  const transcriptCards = useMemo(() => {
+    const none = { tail: null, anchored: undefined }
+    if (!compact || !active) return none
     const cards = tailCards.filter(card => card.scope === inspectionScope)
-    return cards.length ? <ChatCommandTail cards={cards} onLink={openCommandTailTarget} onAnswer={answerTailConfirm} onPanelHost={handleTailPanelHost} /> : null
-  }, [compact, active, tailCards, inspectionScope, openCommandTailTarget, answerTailConfirm, handleTailPanelHost])
+    if (!cards.length) return none
+    const group = (items: typeof cards) => <ChatCommandTail cards={items} onLink={openCommandTailTarget} onAnswer={answerTailConfirm} panelHosts={tailPanelHosts} />
+    const last = cards.filter(card => card.anchor >= tailMessageCount)
+    const anchors = [...new Set(cards.filter(card => card.anchor < tailMessageCount).map(card => card.anchor))].sort((a, b) => a - b)
+    return {
+      tail: last.length ? group(last) : null,
+      anchored: anchors.length ? anchors.map((after): ChatAnchoredTailGroup => ({ after, node: group(cards.filter(card => card.anchor === after)) })) : undefined
+    }
+  }, [compact, active, tailCards, inspectionScope, tailMessageCount, openCommandTailTarget, answerTailConfirm, tailPanelHosts])
 
   // ==================== Hunyuan 3D SidePanel generate event ====================
   useEffect(() => {
@@ -9843,9 +9859,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
             <Typography variant="subtitle2">{inspectionView.title}</Typography>
             <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 300, overflow: 'auto' }}>{inspectionView.text}</Typography>
           </Box>}
-          <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={goalCommandAvailable} remote={!config || Boolean(config.use_remote_llm)} open={active && goalViewScope === inspectionScope} onClose={closeGoalView} cardHost={compact ? goalCardHost : undefined} />
+          <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={goalCommandAvailable} remote={!config || Boolean(config.use_remote_llm)} open={active && goalViewScope === inspectionScope} onClose={closeGoalView} cardHost={compact ? (goalCardOpen ? tailPanelHosts.goal : null) : undefined} />
           <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} onResult={compact ? handleScratchpadResult : undefined} />
-          <AgentThreadSkillsPanel ref={skillCommandRef} visible={compact ? skillsCardOpen : skillDetailsOpen} onClose={() => setSkillDetailsOpen(false)} cardHost={compact ? skillsCardHost : undefined} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
+          <AgentThreadSkillsPanel ref={skillCommandRef} visible={compact ? skillsCardOpen : skillDetailsOpen} onClose={() => setSkillDetailsOpen(false)} cardHost={compact ? (skillsCardOpen ? tailPanelHosts.skills : null) : undefined} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
           <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} subRowsHost={threadSubRowsHost} onOpenSubRowChange={onThreadSubRowChange} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
             const id = currentSessionIdRef.current
             if (!id || id !== currentSessionId || storageScopeRef.current !== storageScope || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) throw new Error('Side snapshot no longer belongs to the current conversation.')
@@ -9857,7 +9873,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
               <ChatMessageList
                 active={active}
                 columnStyle={compact}
-                tail={transcriptTail}
+                tail={transcriptCards.tail}
+                anchoredTail={transcriptCards.anchored}
                 tailScrollToken={tailScrollToken}
                 currentSession={currentSession}
                 isLoading={isLoading}

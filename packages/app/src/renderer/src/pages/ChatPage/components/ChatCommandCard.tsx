@@ -13,9 +13,9 @@ const useColumnTokens = (): AgentColumnTokens => {
 }
 
 /**
- * The result of a slash command, shown as a row at the end of the transcript: a header line
- * (terminal icon, the command, an optional title at the right) above a body. The card has no
- * close button; it leaves with the conversation.
+ * The result of a slash command, shown as a row of the transcript: a header line (terminal icon,
+ * the command, an optional title at the right) above a body, on a raised surface without an
+ * outline or a rule. The card has no close button; it leaves with the conversation.
  */
 export const ChatCommandResultCard: React.FC<{
   /** The command as typed, without arguments: "/status". */
@@ -28,20 +28,13 @@ export const ChatCommandResultCard: React.FC<{
   testId?: string
   children?: React.ReactNode
 }> = ({ command, title, error = false, fill = false, testId = 'chat-command-card', children }) => {
-  const theme = useTheme()
   const tokens = useColumnTokens()
-  const dark = theme.palette.mode === 'dark'
-  // A faint outline in the accent colour (the error colour for a failed command), and a fainter
-  // rule under the header.
-  const outline = error ? alpha(tokens.danger, dark ? 0.4 : 0.35) : alpha(tokens.accent, dark ? 0.25 : 0.2)
-  const rule = error ? alpha(tokens.danger, dark ? 0.25 : 0.2) : alpha(tokens.accent, dark ? 0.2 : 0.15)
   return (
     <Box
       component="section"
       data-testid={testId}
       data-command={command}
       data-error={error ? 'true' : undefined}
-      aria-live="polite"
       sx={{
         alignSelf: 'flex-start',
         boxSizing: 'border-box',
@@ -49,7 +42,6 @@ export const ChatCommandResultCard: React.FC<{
         width: fill ? '90%' : undefined,
         minWidth: 0,
         overflow: 'hidden',
-        border: `1px solid ${outline}`,
         borderRadius: `${tokens.radius.content}px`,
         bgcolor: tokens.surface,
         color: tokens.text
@@ -57,14 +49,7 @@ export const ChatCommandResultCard: React.FC<{
     >
       <Box
         component="header"
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          minWidth: 0,
-          padding: '8px 12px',
-          borderBottom: `1px solid ${rule}`
-        }}
+        sx={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, padding: '8px 12px' }}
       >
         <TerminalIcon
           aria-hidden="true"
@@ -168,7 +153,7 @@ export const CommandCardNote: React.FC<{ children: React.ReactNode }> = ({ child
 
 export type CommandCardListItem = { key: string; label: string; description?: string }
 
-/** List body: one row per item, a second muted line for its description. */
+/** List body: one row per item, a second muted line for its description; no rules between rows. */
 export const CommandCardList: React.FC<{ items: readonly CommandCardListItem[] }> = ({ items }) => {
   const tokens = useColumnTokens()
   return (
@@ -185,15 +170,7 @@ export const CommandCardList: React.FC<{ items: readonly CommandCardListItem[] }
       }}
     >
       {items.map((item) => (
-        <Box
-          component="li"
-          key={item.key}
-          sx={{
-            padding: '6px 0',
-            borderBottom: `1px solid ${tokens.border}`,
-            '&:last-of-type': { borderBottom: 0 }
-          }}
-        >
+        <Box component="li" key={item.key} sx={{ padding: '6px 0' }}>
           <Box
             sx={{ overflowWrap: 'anywhere', fontSize: tokens.fontSize.small, lineHeight: '16px' }}
           >
@@ -308,7 +285,8 @@ export const CommandCardPanelBody = React.forwardRef<
           my: '2px',
           mr: '6px',
           padding: '2px 8px',
-          border: `1px solid ${tokens.border}`,
+          // The divider colour disappears on the card's surface in the light theme.
+          border: `1px solid ${alpha(tokens.text, 0.3)}`,
           borderRadius: `${tokens.radius.control}px`,
           bgcolor: 'transparent',
           color: tokens.text,

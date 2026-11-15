@@ -2,6 +2,7 @@ import React from 'react'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, alpha, createTheme } from '@mui/material/styles'
+import { Button } from '@mui/material'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ChatCommandResultCard,
@@ -29,20 +30,15 @@ describe('ChatCommandResultCard', () => {
     )
     const card = screen.getByTestId('chat-command-card')
     expect(card.tagName).toBe('SECTION')
-    expect(card).toHaveAttribute('aria-live', 'polite')
+    // The transcript tail is the live region; a card does not announce itself a second time.
+    expect(card).not.toHaveAttribute('aria-live')
     expect(card).toHaveAttribute('data-command', '/status')
     expect(card).toHaveStyle({ maxWidth: '90%', alignSelf: 'flex-start', borderRadius: '8px' })
-    // A faint outline in the accent colour and a fainter rule under the header.
-    expect(card).toHaveStyle({
-      borderStyle: 'solid',
-      borderWidth: '1px',
-      borderColor: alpha(theme.palette.primary.main, 0.25)
-    })
-    expect(card.querySelector('header')).toHaveStyle({
-      borderBottomStyle: 'solid',
-      borderBottomWidth: '1px',
-      borderBottomColor: alpha(theme.palette.primary.main, 0.2)
-    })
+    // A raised surface only: no outline around the card and no rule under its header.
+    expect(card).toHaveStyle({ backgroundColor: 'rgba(255,255,255,0.08)' })
+    expect(getComputedStyle(card).borderTopWidth).toMatch(/^(0(px)?)?$/)
+    expect(getComputedStyle(card.querySelector('header')!).borderBottomWidth).toMatch(/^(0(px)?)?$/)
+    expect(card.querySelector('header')).toHaveStyle({ padding: '8px 12px' })
     expect(card).not.toHaveStyle({ width: '90%' })
     const command = within(card).getByTestId('chat-command-card-command')
     expect(command.tagName).toBe('CODE')
@@ -73,7 +69,12 @@ describe('ChatCommandResultCard', () => {
       </ChatCommandResultCard>
     )
     expect(screen.getByTestId('chat-command-card')).toHaveAttribute('data-error', 'true')
-    expect(screen.getByTestId('chat-command-card')).toHaveStyle({ borderColor: alpha('#ee4444', 0.4) })
+    expect(getComputedStyle(screen.getByTestId('chat-command-card')).borderTopWidth).toMatch(
+      /^(0(px)?)?$/
+    )
+    expect(
+      getComputedStyle(screen.getByTestId('chat-command-card').querySelector('svg')!).color
+    ).toBe('rgb(238, 68, 68)')
     expect(screen.getByRole('alert')).toHaveTextContent('Could not read the jobs.')
     expect(screen.getByRole('alert')).toHaveStyle({ color: '#ee4444' })
   })
@@ -96,6 +97,8 @@ describe('ChatCommandResultCard', () => {
     expect(rows).toHaveLength(2)
     expect(rows[0]).toHaveTextContent('explorerunning · a1')
     expect(within(rows[0]).getByText('running · a1')).toHaveStyle({ fontSize: '11px' })
+    // No rules between the rows.
+    expect(getComputedStyle(rows[0]).borderBottomWidth).toMatch(/^(0(px)?)?$/)
     expect(screen.getByTestId('chat-command-card-note')).toHaveStyle({ fontSize: '11px' })
   })
 
@@ -138,6 +141,26 @@ describe('ChatCommandResultCard', () => {
       overflowY: 'auto',
       fontSize: '12px'
     })
+  })
+
+  it('outlines the buttons of an embedded view with a colour that shows on the card in the light theme', () => {
+    const light = createTheme({ palette: { mode: 'light' } })
+    render(
+      <ThemeProvider theme={light}>
+        <ChatCommandResultCard command="/skills">
+          <CommandCardPanelBody>
+            <Button>Refresh</Button>
+          </CommandCardPanelBody>
+        </ChatCommandResultCard>
+      </ThemeProvider>
+    )
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument()
+    // jsdom does not weigh the selectors of nested rules: read the rule itself.
+    const rules = [...document.querySelectorAll('style')].map((style) => style.textContent).join('')
+    const outline = alpha(light.palette.text.primary, 0.3)
+    expect(outline).toBe('rgba(0, 0, 0, 0.3)')
+    expect(rules).toMatch(/ \.MuiButton-root\{[^}]*border:1px solid rgba\(0, 0, 0, 0\.3\);/)
+    expect(outline).not.toBe(light.palette.divider)
   })
 })
 

@@ -17,14 +17,20 @@ type TailCardBase = {
   scope: string
   /** The command as typed, without arguments: "/status". */
   command: string
+  /**
+   * How many messages the conversation had when the command ran. The card keeps that place:
+   * it follows the message `anchor - 1` (0: it comes before the first message), also when
+   * newer messages arrive.
+   */
+  anchor: number
 }
 
 /** Where a link of a card leads; the page that owns the tail knows how to go there. */
 export type ChatTailLink<Target> = { key: string; label: string; target: Target }
 
 /**
- * One row of the transcript tail: the result of a slash command. Cards are view state of the
- * open conversation; they are never stored.
+ * One command card of the transcript: the result of a slash command. Cards are view state of
+ * the open conversation; they are never stored.
  */
 export type ChatTailCard<Target = unknown> =
   | (TailCardBase & {
@@ -55,8 +61,9 @@ export type ChatTailCard<Target = unknown> =
   | (TailCardBase & {
       /**
        * A live view of the conversation (goal records, thread skills) inside a card. The page
-       * that owns the tail draws the view into the card's body. There is one card per panel:
-       * running its command again moves the card to the end.
+       * that owns the cards draws the view into an element of its own, which the card's body
+       * takes in. There is one card per panel: running its command again moves the card to
+       * the end.
        */
       kind: 'panel'
       panel: string
@@ -65,39 +72,46 @@ export type ChatTailCard<Target = unknown> =
 
 export type ChatTailConfirmCard = Extract<ChatTailCard, { kind: 'confirm' }>
 
-/** A card as the page creates it; the tail's owner adds the id and the scope. */
+/** A card as the page creates it; the owner of the cards adds the id, the scope and the anchor. */
 export type ChatTailCardDraft<Target = unknown> =
   ChatTailCard<Target> extends infer Card
     ? Card extends TailCardBase
-      ? Omit<Card, 'id' | 'scope'>
+      ? Omit<Card, 'id' | 'scope' | 'anchor'>
       : never
     : never
 
-/** The body of a panel card: an empty box that the owner of the tail fills. */
-const PanelCardBody: React.FC<{
-  panel: string
-  onHost: (panel: string, element: HTMLElement | null) => void
-}> = ({ panel, onHost }) => {
-  const setHost = React.useCallback(
-    (element: HTMLDivElement | null) => onHost(panel, element),
-    [panel, onHost]
-  )
-  return <CommandCardPanelBody ref={setHost} />
+/**
+ * The body of a panel card. It takes in the element that holds the view. The element belongs
+ * to the owner of the cards, so the view inside keeps its state when the card is drawn again
+ * at another place of the transcript (a newer message arrived, the row left the window of a
+ * long transcript and came back).
+ */
+const PanelCardBody: React.FC<{ host: HTMLElement | undefined }> = ({ host }) => {
+  const bodyRef = React.useRef<HTMLDivElement | null>(null)
+  React.useLayoutEffect(() => {
+    const body = bodyRef.current
+    if (!body || !host) return
+    body.appendChild(host)
+    return () => {
+      if (host.parentNode === body) body.removeChild(host)
+    }
+  }, [host])
+  return <CommandCardPanelBody ref={bodyRef} />
 }
 
-/** The rows that follow the last message of the Agent column: one card per command, in order. */
+/** Command cards of the Agent column's transcript that stand at one place, in order. */
 export function ChatCommandTail<Target>({
   cards,
   onLink,
   onAnswer,
-  onPanelHost
+  panelHosts
 }: {
   cards: readonly ChatTailCard<Target>[]
   onLink: (target: Target) => void
   /** The person chose the default button (`confirmed`) or cancel on a confirm card. */
   onAnswer: (card: ChatTailConfirmCard, confirmed: boolean) => void
-  /** The body element of a panel card, or null when the card left. */
-  onPanelHost: (panel: string, element: HTMLElement | null) => void
+  /** The element of each panel's view, by panel name; the card of the panel shows it. */
+  panelHosts: Readonly<Record<string, HTMLElement | undefined>>
 }): React.ReactElement {
   return (
     <>
@@ -112,7 +126,7 @@ export function ChatCommandTail<Target>({
               title={card.title}
               fill
             >
-              <PanelCardBody panel={card.panel} onHost={onPanelHost} />
+              <PanelCardBody host={panelHosts[card.panel]} />
             </ChatCommandResultCard>
           )
         }

@@ -10,8 +10,9 @@ import AgentThreadGoalRecordsHost from './AgentThreadGoalRecordsHost'
  * for: when that scope changes or stops being available the view closes, and showing it again
  * takes a new "/goal". The host owns the scope binding.
  *
- * In the Agent column the view is the body of a command card of the transcript: `cardHost` is
- * that body. The card has no close button; it leaves with the conversation.
+ * In the Agent column the view is the body of a command card of the transcript: it is drawn into
+ * `cardHost`, an element that the card's body shows. The card has no close button; it leaves
+ * with the conversation.
  */
 export default function AgentThreadGoalEntry({
   route,
@@ -29,7 +30,7 @@ export default function AgentThreadGoalEntry({
   open: boolean
   /** `dismissed` is true when the person closed the view (close button or Escape). */
   onClose: (dismissed?: boolean) => void
-  /** Agent column: the card body to draw into (null until the card is there). */
+  /** Agent column: the element to draw into (null while there is no card). */
   cardHost?: HTMLElement | null
 }) {
   const { t } = useTranslation()

@@ -2,7 +2,7 @@ import React from 'react'
 import { cleanup, render, screen } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import ChatMessageList from './ChatMessageList'
+import ChatMessageList, { type ChatAnchoredTailGroup } from './ChatMessageList'
 import type { ChatSession } from '../chatStorage'
 import type { ChatLoadingStatus } from '../chatLoadingStatus'
 
@@ -20,6 +20,7 @@ afterEach(cleanup)
 type Options = {
   columnStyle?: boolean
   tail?: React.ReactNode
+  anchoredTail?: readonly ChatAnchoredTailGroup[]
   tailScrollToken?: number
   isLoading?: boolean
   loadingStatus?: ChatLoadingStatus
@@ -30,6 +31,7 @@ const list = (session: ChatSession, options: Options = {}): React.ReactElement =
     <ChatMessageList
       columnStyle={options.columnStyle ?? true}
       tail={options.tail}
+      anchoredTail={options.anchoredTail}
       tailScrollToken={options.tailScrollToken}
       currentSession={session}
       isLoading={options.isLoading ?? false}
@@ -81,15 +83,124 @@ describe('the transcript tail of the Agent column', () => {
     ).toBeTruthy()
   })
 
-  it('renders no tail element without tail rows and none outside the column', () => {
+  it('keeps an empty live region for the tail in the column and renders none outside it', () => {
     const view = render(list(short))
-    expect(screen.queryByTestId('chat-transcript-tail')).toBeNull()
+    // The region is there before the first card, so that a card that arrives is announced.
+    const tail = screen.getByTestId('chat-transcript-tail')
+    expect(tail).toHaveAttribute('aria-live', 'polite')
+    expect(tail).toBeEmptyDOMElement()
     expect(screen.queryByTestId('chat-transcript-working-line')).toBeNull()
+    view.rerender(list(short, { tail: card }))
+    expect(screen.getByTestId('chat-transcript-tail')).toBe(tail)
+    expect(tail).toContainElement(screen.getByTestId('card'))
     view.rerender(list(short, { tail: null }))
-    expect(screen.queryByTestId('chat-transcript-tail')).toBeNull()
+    expect(screen.getByTestId('chat-transcript-tail')).toBe(tail)
+    expect(tail).toBeEmptyDOMElement()
     view.rerender(list(short, { columnStyle: false, tail: card }))
     expect(screen.queryByTestId('chat-transcript-tail')).toBeNull()
     expect(screen.queryByTestId('card')).toBeNull()
+  })
+
+  it('keeps a card after the message it followed when newer messages arrive, so the reply is the last row', () => {
+    const status = <div data-testid="status-card">status</div>
+    const view = render(list(short, { tail: status, tailScrollToken: 1 }))
+    expect(screen.getByTestId('chat-transcript-tail')).toContainElement(
+      screen.getByTestId('status-card')
+    )
+
+    // The person sends a message and gets the reply: the page now hands the card over with the
+    // place it was made at (after two messages).
+    const longer: ChatSession = {
+      ...short,
+      messages: [
+        ...short.messages,
+        { role: 'user', content: 'Next question' },
+        { role: 'assistant', content: 'Next answer' }
+      ]
+    }
+    view.rerender(list(longer, { anchoredTail: [{ after: 2, node: status }], tailScrollToken: 1 }))
+    const scroller = screen.getByTestId('chat-message-list')
+    const rows = [...scroller.querySelectorAll('[data-chat-message-index]')]
+    expect(rows).toHaveLength(4)
+    const kept = screen.getByTestId('status-card')
+    // Inside the row of the second message, after the message itself.
+    expect(kept.closest('[data-chat-message-index]')).toBe(rows[1])
+    const group = kept.closest('[data-testid="chat-transcript-anchored-cards"]')!
+    expect(group).toHaveAttribute('data-placement', 'after')
+    expect(group).toHaveStyle({
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '12px',
+      marginTop: '12px'
+    })
+    expect(
+      screen.getByText('Hi').compareDocumentPosition(kept) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    // The new exchange follows the card; the reply is the last thing of the transcript.
+    expect(
+      kept.compareDocumentPosition(screen.getByText('Next question')) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(rows[3]).toHaveTextContent('Next answer')
+    expect(screen.getByTestId('chat-transcript-tail')).toBeEmptyDOMElement()
+    expect(screen.queryByTestId('chat-transcript-working-line')).toBeNull()
+    const after = [...scroller.querySelectorAll('*')].filter(
+      (element) =>
+        rows[3].compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING &&
+        !rows[3].contains(element) &&
+        (element.textContent ?? '').trim() !== ''
+    )
+    expect(after).toEqual([])
+  })
+
+  it('puts a card of an empty conversation before the first message and newer cards in the tail', () => {
+    const first = <div data-testid="first-card">first</div>
+    const view = render(
+      list(short, {
+        anchoredTail: [{ after: 0, node: first }],
+        tail: card
+      })
+    )
+    const rows = [...view.container.querySelectorAll('[data-chat-message-index]')]
+    const kept = screen.getByTestId('first-card')
+    expect(kept.closest('[data-chat-message-index]')).toBe(rows[0])
+    expect(kept.closest('[data-testid="chat-transcript-anchored-cards"]')).toHaveAttribute(
+      'data-placement',
+      'before'
+    )
+    expect(
+      kept.compareDocumentPosition(screen.getByText('Hello')) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(screen.getByTestId('chat-transcript-tail')).toContainElement(screen.getByTestId('card'))
+    // Outside the column nothing of it is drawn.
+    view.rerender(list(short, { columnStyle: false, anchoredTail: [{ after: 0, node: first }] }))
+    expect(screen.queryByTestId('first-card')).toBeNull()
+  })
+
+  it('draws a kept card only while its row is inside the window of a long transcript', () => {
+    const messages = Array.from({ length: 60 }, (_, index) => ({
+      role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+      content: `message ${index}`
+    }))
+    const kept = <div data-testid="kept-card">kept</div>
+    const view = render(
+      list(
+        { id: 'long', title: 'Long', messages },
+        {
+          anchoredTail: [
+            { after: 1, node: kept },
+            { after: 58, node: card }
+          ]
+        }
+      )
+    )
+    const rows = [...view.container.querySelectorAll('[data-chat-message-index]')]
+    expect(rows.length).toBeLessThan(60)
+    // The list stands at its start: the first row is drawn with its card, row 57 is not.
+    expect(screen.getByTestId('kept-card').closest('[data-chat-message-index]')).toBe(rows[0])
+    expect(view.container.querySelector('[data-chat-message-index="57"]')).toBeNull()
+    expect(screen.queryByTestId('card')).toBeNull()
+    expect(screen.getByTestId('chat-virtual-bottom-spacer')).toBeInTheDocument()
   })
 
   it('replaces the empty state when a conversation without messages has a tail row', () => {
