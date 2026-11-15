@@ -235,6 +235,20 @@ export default function AgentThreadGoalRecordsPanel({
                   if (!pending && validReportSummary(summary))
                     onReport({ goalId: goal.id, summary })
                 }}
+                sx={
+                  embedded
+                    ? {
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        gap: '6px 8px',
+                        mt: '6px',
+                        // The note takes a line of its own; the field and its button share the next.
+                        '& > .MuiTypography-caption': { flexBasis: '100%' },
+                        '& .MuiTextField-root': { flex: '1 1 140px', minWidth: 0 }
+                      }
+                    : undefined
+                }
               >
                 <Typography variant="caption">
                   {translate('chat.agent_goal.report_notice', 'Saving replaces the current progress summary.')}
@@ -322,9 +336,9 @@ function CreateGoalForm({
           ? {
               display: 'flex',
               flexWrap: 'wrap',
-              alignItems: 'flex-end',
+              alignItems: 'flex-start',
               gap: '8px',
-              mt: '8px',
+              mt: '12px',
               '& .MuiTextField-root': { flex: '1 1 140px', minWidth: 0 }
             }
           : { display: 'flex', flexDirection: 'column', gap: 1, mt: 1 }

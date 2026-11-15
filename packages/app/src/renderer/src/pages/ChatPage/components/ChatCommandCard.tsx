@@ -1,6 +1,6 @@
 import React from 'react'
 import { Box } from '@mui/material'
-import { useTheme } from '@mui/material/styles'
+import { alpha, useTheme } from '@mui/material/styles'
 import TerminalIcon from '@mui/icons-material/Terminal'
 import { getAgentColumnTokens, type AgentColumnTokens } from '../../../components/agentColumnTokens'
 
@@ -28,7 +28,13 @@ export const ChatCommandResultCard: React.FC<{
   testId?: string
   children?: React.ReactNode
 }> = ({ command, title, error = false, fill = false, testId = 'chat-command-card', children }) => {
+  const theme = useTheme()
   const tokens = useColumnTokens()
+  const dark = theme.palette.mode === 'dark'
+  // A faint outline in the accent colour (the error colour for a failed command), and a fainter
+  // rule under the header.
+  const outline = error ? alpha(tokens.danger, dark ? 0.4 : 0.35) : alpha(tokens.accent, dark ? 0.25 : 0.2)
+  const rule = error ? alpha(tokens.danger, dark ? 0.25 : 0.2) : alpha(tokens.accent, dark ? 0.2 : 0.15)
   return (
     <Box
       component="section"
@@ -43,6 +49,7 @@ export const ChatCommandResultCard: React.FC<{
         width: fill ? '90%' : undefined,
         minWidth: 0,
         overflow: 'hidden',
+        border: `1px solid ${outline}`,
         borderRadius: `${tokens.radius.content}px`,
         bgcolor: tokens.surface,
         color: tokens.text
@@ -50,7 +57,14 @@ export const ChatCommandResultCard: React.FC<{
     >
       <Box
         component="header"
-        sx={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, padding: '8px 12px' }}
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          minWidth: 0,
+          padding: '8px 12px',
+          borderBottom: `1px solid ${rule}`
+        }}
       >
         <TerminalIcon
           aria-hidden="true"
@@ -61,6 +75,13 @@ export const ChatCommandResultCard: React.FC<{
           data-testid="chat-command-card-command"
           sx={{
             minWidth: 0,
+            // Plain bold monospace: no chip behind the command.
+            m: 0,
+            p: 0,
+            border: 0,
+            borderRadius: 0,
+            bgcolor: 'transparent',
+            color: 'inherit',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
@@ -280,17 +301,26 @@ export const CommandCardPanelBody = React.forwardRef<
         '& .MuiAlert-message': { p: 0, overflow: 'visible' },
         '& .MuiAlert-colorWarning': { color: tokens.attention },
         '& .MuiAlert-colorError': { color: tokens.danger },
+        // Actions of a view are small outlined buttons that wrap with the text around them.
         '& .MuiButton-root': {
           minWidth: 0,
           minHeight: 24,
+          my: '2px',
           mr: '6px',
           padding: '2px 8px',
+          border: `1px solid ${tokens.border}`,
           borderRadius: `${tokens.radius.control}px`,
+          bgcolor: 'transparent',
+          color: tokens.text,
           fontSize: tokens.fontSize.small,
+          fontWeight: 400,
           lineHeight: '18px',
           textAlign: 'left',
           textTransform: 'none',
-          whiteSpace: 'normal'
+          whiteSpace: 'normal',
+          '&:hover': { bgcolor: tokens.hover },
+          '&.Mui-focusVisible': { ...tokens.focusRing, outlineOffset: '1px' },
+          '&.Mui-disabled': { color: tokens.text, opacity: tokens.disabledOpacity }
         },
         // Plain buttons of a view (retry, acknowledge) read as the card's text links.
         '& button:not(.MuiButtonBase-root)': {

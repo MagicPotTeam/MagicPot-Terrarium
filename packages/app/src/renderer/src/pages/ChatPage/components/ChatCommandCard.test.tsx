@@ -32,6 +32,18 @@ describe('ChatCommandResultCard', () => {
     expect(card).toHaveAttribute('aria-live', 'polite')
     expect(card).toHaveAttribute('data-command', '/status')
     expect(card).toHaveStyle({ maxWidth: '90%', alignSelf: 'flex-start', borderRadius: '8px' })
+    // A faint outline in the accent colour and a fainter rule under the header.
+    expect(card).toHaveStyle({
+      borderStyle: 'solid',
+      borderWidth: '1px',
+      borderColor: alpha(theme.palette.primary.main, 0.25)
+    })
+    expect(card.querySelector('header')).toHaveStyle({
+      borderBottomStyle: 'solid',
+      borderBottomWidth: '1px',
+      borderBottomColor: alpha(theme.palette.primary.main, 0.2)
+    })
+    expect(card).not.toHaveStyle({ width: '90%' })
     const command = within(card).getByTestId('chat-command-card-command')
     expect(command.tagName).toBe('CODE')
     expect(command).toHaveTextContent('/status')
@@ -61,6 +73,7 @@ describe('ChatCommandResultCard', () => {
       </ChatCommandResultCard>
     )
     expect(screen.getByTestId('chat-command-card')).toHaveAttribute('data-error', 'true')
+    expect(screen.getByTestId('chat-command-card')).toHaveStyle({ borderColor: alpha('#ee4444', 0.4) })
     expect(screen.getByRole('alert')).toHaveTextContent('Could not read the jobs.')
     expect(screen.getByRole('alert')).toHaveStyle({ color: '#ee4444' })
   })
@@ -101,6 +114,15 @@ describe('ChatCommandResultCard', () => {
     button.focus()
     await userEvent.keyboard('{Enter}')
     expect(open).toHaveBeenCalledTimes(1)
+  })
+
+  it('takes the full 90% when its body holds a form', () => {
+    show(
+      <ChatCommandResultCard command="/goal" title="Thread goals" fill>
+        <CommandCardPanelBody />
+      </ChatCommandResultCard>
+    )
+    expect(screen.getByTestId('chat-command-card')).toHaveStyle({ width: '90%', maxWidth: '90%' })
   })
 
   it('gives an embedded view the card sizes and a 16rem scroll box', () => {
