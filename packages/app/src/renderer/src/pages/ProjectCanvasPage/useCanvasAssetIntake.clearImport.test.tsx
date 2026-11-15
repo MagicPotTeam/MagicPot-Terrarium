@@ -162,7 +162,7 @@ describe('same-canvas Clear and import', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1600) })
     expect(storage.save).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ id: 'fresh' })]),
-      'clear-import-test', [], [], null
+      'clear-import-test', [], [], null, expect.anything()
     )
   })
 })

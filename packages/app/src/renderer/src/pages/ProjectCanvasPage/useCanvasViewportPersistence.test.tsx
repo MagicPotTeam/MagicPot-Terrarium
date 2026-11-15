@@ -1097,4 +1097,205 @@ describe('useCanvasViewportPersistence', () => {
     })
     expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
   })
+
+  describe('when a save may run', () => {
+    function renderDirtyBoard(canvasId: string) {
+      return renderHook(() => {
+        const [items, setItems] = React.useState<CanvasItem[]>([])
+        const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+        const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+        const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+        const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+        const [stageScale, setStageScale] = React.useState(1)
+        const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+        useCanvasViewportPersistence({
+          config: DEFAULT_CONFIG,
+          canvasId,
+          items,
+          groups,
+          groupBranches,
+          selectedIds,
+          figmaBinding,
+          stagePos,
+          stageScale,
+          stageSize: { width: 1280, height: 720 },
+          maxFitStageScale: 2,
+          clampStageScale: (value: number) => value,
+          getCanvasItemsVisualBounds: () => null,
+          hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+          nextZIndexRef: { current: 1 },
+          setItems,
+          setItemsWithHistory: setItems,
+          setGroups,
+          setGroupBranches,
+          setSelectedIds,
+          setStagePos,
+          setStageScale,
+          setFigmaBinding,
+          handleImportFiles: vi.fn(),
+          addModel3DToCanvas: vi.fn(),
+          addVideoToCanvas: vi.fn()
+        })
+
+        return { setItems, setStagePos }
+      })
+    }
+
+    async function mountDirtyBoard(canvasId: string) {
+      vi.useFakeTimers()
+      mockLoadCanvasItems.mockResolvedValue({
+        items: [],
+        groups: [],
+        groupBranches: [],
+        figmaBinding: null
+      })
+      const rendered = renderDirtyBoard(canvasId)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+        await Promise.resolve()
+      })
+      mockSaveCanvasItems.mockClear()
+      act(() => {
+        rendered.result.current.setItems([createImageItem({ id: `${canvasId}-image` })])
+      })
+      return rendered
+    }
+
+    const saveOptionsOfCall = (index: number) =>
+      mockSaveCanvasItems.mock.calls[index][5] as { metadataOnly?: boolean }
+    const pointerEvent = (type: string, pointerId: number) =>
+      Object.assign(new Event(type), { pointerId })
+
+    it.each(['blur', 'visibilitychange'] as const)(
+      'flushes on %s with a metadata-only save and leaves moving bytes to the timer',
+      async (trigger) => {
+        await mountDirtyBoard(`canvas-flush-${trigger}`)
+        mockSaveCanvasItems.mockResolvedValueOnce('needs-bytes').mockResolvedValue(undefined)
+        const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+
+        await act(async () => {
+          if (trigger === 'blur') window.dispatchEvent(new Event('blur'))
+          else document.dispatchEvent(new Event('visibilitychange'))
+          await Promise.resolve()
+          await Promise.resolve()
+        })
+        hidden.mockRestore()
+
+        // Asked for the record alone; the storage layer said bytes are needed and wrote nothing.
+        expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+        expect(saveOptionsOfCall(0).metadataOnly).toBe(true)
+
+        // No second save is started by the event itself...
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(100)
+        })
+        expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+
+        // ...the pending autosave timer does the full save.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(400)
+          await Promise.resolve()
+        })
+        expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+        expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+      }
+    )
+
+    it('does not save again after a metadata-only flush succeeded', async () => {
+      await mountDirtyBoard('canvas-flush-clean')
+      await act(async () => {
+        window.dispatchEvent(new Event('blur'))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+      expect(saveOptionsOfCall(0).metadataOnly).toBe(true)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+    })
+
+    it('falls back to a full save at once when the page is going away', async () => {
+      await mountDirtyBoard('canvas-flush-pagehide')
+      mockSaveCanvasItems.mockResolvedValueOnce('needs-bytes').mockResolvedValue(undefined)
+
+      await act(async () => {
+        window.dispatchEvent(new Event('pagehide'))
+        await Promise.resolve()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(0).metadataOnly).toBe(true)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+    })
+
+    it('postpones the autosave while a pointer is down and saves once it is released', async () => {
+      await mountDirtyBoard('canvas-gesture-pointer')
+      act(() => {
+        window.dispatchEvent(pointerEvent('pointerdown', 7))
+      })
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+
+      act(() => {
+        window.dispatchEvent(pointerEvent('pointerup', 7))
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+      expect(saveOptionsOfCall(0).metadataOnly).toBeUndefined()
+    })
+
+    it('postpones the autosave while the viewport is moving', async () => {
+      const { result } = await mountDirtyBoard('canvas-gesture-viewport')
+      for (let step = 1; step <= 8; step += 1) {
+        act(() => {
+          if (step % 2 === 0) window.dispatchEvent(new Event('wheel'))
+          else result.current.setStagePos({ x: step, y: step })
+        })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(200)
+          await Promise.resolve()
+        })
+      }
+      expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+    })
+
+    it('never holds a save back longer than ten seconds', async () => {
+      await mountDirtyBoard('canvas-gesture-cap')
+      act(() => {
+        window.dispatchEvent(pointerEvent('pointerdown', 3))
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+
+      // The pointer is still down (a lost pointerup must not block saving forever).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+    })
+  })
 })

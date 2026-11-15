@@ -1597,10 +1597,13 @@ async function storeCanvasAssetBlobs(
   db: IDBDatabase,
   storeKey: string,
   slots: readonly CanvasBlobStoreSlot[],
-  existing: CanvasBlobKeyIndex | null
+  existing: CanvasBlobKeyIndex | null,
+  allowByteReads = true
 ): Promise<{
   assetKeyByLogicalKey: Map<string, string>
   missingLogicalKeys: string[]
+  /** Only with `allowByteReads` false: a slot needs its bytes read, nothing was written. */
+  needsBytes: boolean
   /** Bytes read during this save, by logical key, for the mirror that follows. */
   readEntries: ResolvedCanvasBinaryAsset[]
 }> {
@@ -1608,6 +1611,7 @@ async function storeCanvasAssetBlobs(
   const missingLogicalKeys: string[] = []
   const readEntries: ResolvedCanvasBinaryAsset[] = []
   const storedKeys = new Set(existing?.assetKeys ?? [])
+  let needsBytes = false
   const pendingByAssetKey = new Map<string, Promise<boolean>>()
 
   let batch: CanvasAssetBlobWrite[] = []
@@ -1631,6 +1635,10 @@ async function storeCanvasAssetBlobs(
   const storeSlot = async (slot: CanvasBlobStoreSlot): Promise<void> => {
     let bytes: ResolvedCanvasBinaryAsset | null | undefined
     const readBytes = async (): Promise<ArrayBuffer | null> => {
+      if (!allowByteReads) {
+        needsBytes = true
+        return null
+      }
       if (bytes === undefined) {
         bytes = await readCanvasBlobStoreSlotBytes(slot, storeKey)
         if (bytes) readEntries.push(bytes)
@@ -1701,7 +1709,7 @@ async function storeCanvasAssetBlobs(
   )
   await Promise.all(workers)
   await flush()
-  return { assetKeyByLogicalKey, missingLogicalKeys, readEntries }
+  return { assetKeyByLogicalKey, missingLogicalKeys, readEntries, needsBytes }
 }
 
 /**
@@ -1788,7 +1796,16 @@ export type SaveCanvasItemsOptions = {
    * longer reference them.
    */
   getProtectedItems?: () => Iterable<readonly CanvasItem[]>
+  /**
+   * Save only if no asset byte has to be read or written, neither for
+   * IndexedDB nor for the mirror. Otherwise nothing at all is written and the
+   * save resolves with 'needs-bytes'.
+   */
+  metadataOnly?: boolean
 }
+
+/** `undefined`: saved. 'needs-bytes': a metadata-only save was asked for and was not possible. */
+export type CanvasSaveOutcome = void | 'needs-bytes'
 
 /** Content keys of in-memory items this session knows, without reading anything. */
 function collectKnownCanvasAssetKeys(
@@ -2398,7 +2415,7 @@ export function saveCanvasItems(
   groupBranches: CanvasGroupBranch[] = [],
   figmaBinding: CanvasFigmaBinding | null = null,
   options: SaveCanvasItemsOptions = {}
-): Promise<void> {
+): Promise<CanvasSaveOutcome> {
   return runExclusiveCanvasStoreOperation(storeKey, () =>
     saveCanvasItemsExclusive(items, storeKey, groups, groupBranches, figmaBinding, options)
   )
@@ -2411,7 +2428,8 @@ async function saveCanvasItemsExclusive(
   groupBranches: CanvasGroupBranch[],
   figmaBinding: CanvasFigmaBinding | null,
   options: SaveCanvasItemsOptions
-): Promise<void> {
+): Promise<CanvasSaveOutcome> {
+  const metadataOnly = options.metadataOnly === true
   let db: IDBDatabase | undefined
   try {
     db = await openDB()
@@ -2420,9 +2438,11 @@ async function saveCanvasItemsExclusive(
     const slots = collectCanvasBlobStoreSlots(items)
     let assetKeyByLogicalKey = new Map<string, string>()
     let readEntries: ResolvedCanvasBinaryAsset[] = []
+    let mirrorPlan: CanvasMirrorPlan | null | undefined
     for (let attempt = 1; ; attempt += 1) {
       const existing = slots.length > 0 ? await readCanvasBlobKeyIndex(db, storeKey) : null
-      const stored = await storeCanvasAssetBlobs(db, storeKey, slots, existing)
+      const stored = await storeCanvasAssetBlobs(db, storeKey, slots, existing, !metadataOnly)
+      if (stored.needsBytes) return 'needs-bytes'
       if (stored.missingLogicalKeys.length > 0) {
         throw new Error(
           `[Canvas Storage] Refusing to save canvas metadata because binary data could not be persisted: ${stored.missingLogicalKeys.join(', ')}`
@@ -2430,6 +2450,16 @@ async function saveCanvasItemsExclusive(
       }
       assetKeyByLogicalKey = stored.assetKeyByLogicalKey
       readEntries = stored.readEntries
+
+      if (metadataOnly && mirrorPlan === undefined) {
+        // Decided before anything is written: the mirror must not need bytes either.
+        try {
+          mirrorPlan = await planCanvasMirrorSave(storeKey, items, assetKeyByLogicalKey, false)
+        } catch {
+          return 'needs-bytes'
+        }
+        if (mirrorPlan?.needsBytes) return 'needs-bytes'
+      }
 
       // 2. Commit the metadata; it names each stored binary by its content key.
       const persistedItems = serializeItems(items).map((item) => {
@@ -2474,7 +2504,9 @@ async function saveCanvasItemsExclusive(
     // 3. The mirror: missing asset files, the project file, then its own cleanup.
     // Its failure does not fail the save; IndexedDB already holds the board.
     try {
-      const mirrorPlan = await planCanvasMirrorSave(storeKey, items, assetKeyByLogicalKey, true)
+      if (mirrorPlan === undefined) {
+        mirrorPlan = await planCanvasMirrorSave(storeKey, items, assetKeyByLogicalKey, true)
+      }
       if (mirrorPlan) {
         await executeCanvasMirrorSave(
           mirrorPlan,
@@ -2500,6 +2532,7 @@ async function saveCanvasItemsExclusive(
     } catch (error) {
       console.warn('[Canvas Storage] Failed to prune unreferenced canvas assets:', error)
     }
+    return undefined
   } catch (err) {
     const normalizedError = normalizeCanvasStorageError(err, '[Canvas Storage] Save failed.')
     console.error('[Canvas Storage] 保存失败:', normalizedError)

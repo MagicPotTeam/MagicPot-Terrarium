@@ -1030,3 +1030,65 @@ describe('content-addressed autosave mirror', () => {
     expect(mirror.project().items[0].src).toBe('https://example.invalid/missing.png')
   })
 })
+
+describe('metadata-only saves', () => {
+  it('writes nothing at all when an asset still has to be stored', async () => {
+    const mirror = createFakeMirror()
+    const item = imageItem('new', registerSource('blob:meta-new', [1, 2, 3]))
+
+    await expect(
+      saveCanvasItems([item], 'meta-only', [], [], null, { metadataOnly: true })
+    ).resolves.toBe('needs-bytes')
+    expect(fetchCalls).toEqual([])
+    expect(fake.record('meta-only')).toBeUndefined()
+    expect(fake.blobKeys()).toEqual([])
+    expect(mirror.text.size).toBe(0)
+    expect(mirror.files.size).toBe(0)
+    expect(mirror.calls.write).toEqual([])
+    expect(mirror.calls.copy).toEqual([])
+  })
+
+  it('saves the record and the project file when every asset is already stored', async () => {
+    const mirror = createFakeMirror()
+    const item = imageItem('known', registerSource('blob:meta-known', [4, 4]))
+    await saveCanvasItems([item], 'meta-ok')
+
+    mirror.resetCalls()
+    fetchCalls = []
+    fake.resetLog()
+    await expect(
+      saveCanvasItems([{ ...item, x: 77 } as CanvasItem], 'meta-ok', [], [], null, {
+        metadataOnly: true
+      })
+    ).resolves.toBeUndefined()
+
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobPuts()).toEqual([])
+    expect(mirror.calls.write).toEqual([])
+    expect(mirror.calls.copy).toEqual([])
+    expect(mirror.calls.readFileFromPath).toEqual([])
+    expect(fake.record('meta-ok')!.items[0]).toMatchObject({ id: 'known', x: 77 })
+    expect(mirror.project().items[0]).toMatchObject({ id: 'known', x: 77 })
+  })
+
+  it('refuses when only the mirror lacks an asset, and leaves the stored record alone', async () => {
+    const mirror = createFakeMirror()
+    const item = imageItem('half', registerSource('blob:meta-half', [6]))
+    await saveCanvasItems([item], 'meta-mirror')
+    const recordBefore = JSON.stringify(fake.record('meta-mirror'))
+    mirror.files.clear()
+
+    await expect(
+      saveCanvasItems([{ ...item, x: 5 } as CanvasItem], 'meta-mirror', [], [], null, {
+        metadataOnly: true
+      })
+    ).resolves.toBe('needs-bytes')
+    expect(JSON.stringify(fake.record('meta-mirror'))).toBe(recordBefore)
+    expect(mirror.files.size).toBe(0)
+
+    // The following ordinary save repairs the mirror.
+    await saveCanvasItems([{ ...item, x: 5 } as CanvasItem], 'meta-mirror')
+    expect(mirror.assetFiles()).toEqual([`${contentKey([6])}.png`])
+    expect(fake.record('meta-mirror')!.items[0]).toMatchObject({ x: 5 })
+  })
+})
