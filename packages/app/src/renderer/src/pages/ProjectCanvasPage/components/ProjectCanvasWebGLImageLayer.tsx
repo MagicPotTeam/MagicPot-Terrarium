@@ -52,7 +52,6 @@ import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from '../canv
 import type { CanvasImageThumbnailLevel, CanvasImageThumbnailSet } from '../canvasThumbnailTypes'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
 import {
-  PROJECT_CANVAS_ADAPTIVE_QUALITY_DOWNGRADE_DEBOUNCE_MS,
   PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS,
   createProjectCanvasRenderQualityGovernor,
   isProjectCanvasAdaptiveQualityEnabled,
@@ -2430,6 +2429,94 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     renderApp()
   }, [cancelScheduledRender, renderApp, scheduleRender])
 
+  const resizeRendererToStage = useCallback(
+    (preferredSize?: { width: number; height: number }) => {
+      const app = appRef.current
+      const host = hostRef.current
+      if (!app || !host) {
+        return
+      }
+
+      const rect = preferredSize ? null : host.getBoundingClientRect()
+      const rawWidth = preferredSize?.width ?? rect?.width ?? 0
+      const rawHeight = preferredSize?.height ?? rect?.height ?? 0
+      const width = Number.isFinite(rawWidth) && rawWidth > 0 ? Math.round(rawWidth) : 1
+      const height = Number.isFinite(rawHeight) && rawHeight > 0 ? Math.round(rawHeight) : 1
+      const renderer = (app as ResizablePixiApplication).renderer
+      const nextResolution = getProjectCanvasRenderDeviceScale(renderQualityRef.current)
+      const resolutionChanged = Boolean(renderer && renderer.resolution !== nextResolution)
+      if (renderer && resolutionChanged) {
+        renderer.resolution = nextResolution
+      }
+      const lastSize = rendererSizeRef.current
+      if (lastSize?.width === width && lastSize.height === height && !resolutionChanged) {
+        return
+      }
+
+      rendererSizeRef.current = { width, height }
+      const canvas = app.canvas as HTMLCanvasElement
+      canvas.style.position = 'absolute'
+      canvas.style.inset = '0'
+      canvas.style.display = 'block'
+      canvas.style.width = '100%'
+      canvas.style.height = '100%'
+      renderer?.resize?.(width, height)
+      renderImmediateOrSchedule()
+    },
+    [renderImmediateOrSchedule]
+  )
+
+  const applyRenderQuality = useCallback(
+    (quality: ProjectCanvasRenderQuality) => {
+      const nextQuality = isProjectCanvasAdaptiveQualityEnabled() ? quality : 'full'
+      if (renderQualityRef.current === nextQuality) {
+        return
+      }
+      renderQualityRef.current = nextQuality
+      resizeRendererToStage(stageSizeRef.current)
+    },
+    [resizeRendererToStage]
+  )
+
+  /**
+   * Brings the render quality in line with the gesture state. Starting or continuing a
+   * gesture never lowers the resolution; only measured slow frames do (see the viewport
+   * transform). After a gesture that was lowered, the full resolution returns once the view
+   * has been still for the restore delay.
+   */
+  const syncRenderQualityToInteraction = useCallback(() => {
+    if (qualityTransitionTimerRef.current !== null) {
+      clearTimeout(qualityTransitionTimerRef.current)
+      qualityTransitionTimerRef.current = null
+    }
+
+    const governor = renderQualityGovernorRef.current
+    if (!isProjectCanvasAdaptiveQualityEnabled()) {
+      governor.reset()
+      applyRenderQuality('full')
+      return
+    }
+
+    const isInteractionActive = () =>
+      isViewportInteractingRef.current || isPerformanceThrottledRef.current
+    const quality = governor.update({
+      now: window.performance.now(),
+      interactionActive: isInteractionActive()
+    })
+    applyRenderQuality(quality)
+    if (quality === 'interactive' && !isInteractionActive()) {
+      qualityTransitionTimerRef.current = setTimeout(() => {
+        qualityTransitionTimerRef.current = null
+        applyRenderQuality(
+          governor.update({
+            now: window.performance.now(),
+            interactionActive: isInteractionActive()
+          })
+        )
+      }, PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS)
+    }
+  }, [applyRenderQuality])
+
   const scheduleViewportReconcile = useCallback(
     (options: { allowDuringInteraction?: boolean } = {}) => {
       const allowDuringInteraction = options.allowDuringInteraction === true
@@ -2504,6 +2591,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       isViewportInteractingRef.current = active
+      syncRenderQualityToInteraction()
       if (active) {
         if (viewportReconcileTimerRef.current != null) {
           clearTimeout(viewportReconcileTimerRef.current)
@@ -2553,7 +2641,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       scheduleImageVersionUpdate,
       scheduleRender,
       clearSourceUpgradeQueue,
-      scheduleSourceUpgradeIdleReconcile
+      scheduleSourceUpgradeIdleReconcile,
+      syncRenderQualityToInteraction
     ]
   )
 
@@ -2631,91 +2720,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
   }, [])
 
-  const resizeRendererToStage = useCallback(
-    (preferredSize?: { width: number; height: number }) => {
-      const app = appRef.current
-      const host = hostRef.current
-      if (!app || !host) {
-        return
-      }
-
-      const rect = preferredSize ? null : host.getBoundingClientRect()
-      const rawWidth = preferredSize?.width ?? rect?.width ?? 0
-      const rawHeight = preferredSize?.height ?? rect?.height ?? 0
-      const width = Number.isFinite(rawWidth) && rawWidth > 0 ? Math.round(rawWidth) : 1
-      const height = Number.isFinite(rawHeight) && rawHeight > 0 ? Math.round(rawHeight) : 1
-      const renderer = (app as ResizablePixiApplication).renderer
-      const nextResolution = getProjectCanvasRenderDeviceScale(renderQualityRef.current)
-      const resolutionChanged = Boolean(renderer && renderer.resolution !== nextResolution)
-      if (renderer && resolutionChanged) {
-        renderer.resolution = nextResolution
-      }
-      const lastSize = rendererSizeRef.current
-      if (lastSize?.width === width && lastSize.height === height && !resolutionChanged) {
-        return
-      }
-
-      rendererSizeRef.current = { width, height }
-      const canvas = app.canvas as HTMLCanvasElement
-      canvas.style.position = 'absolute'
-      canvas.style.inset = '0'
-      canvas.style.display = 'block'
-      canvas.style.width = '100%'
-      canvas.style.height = '100%'
-      renderer?.resize?.(width, height)
-      renderImmediateOrSchedule()
-    },
-    [renderImmediateOrSchedule]
-  )
-
-  const applyRenderQuality = useCallback(
-    (quality: ProjectCanvasRenderQuality) => {
-      const nextQuality = isProjectCanvasAdaptiveQualityEnabled() ? quality : 'full'
-      if (renderQualityRef.current === nextQuality) {
-        return
-      }
-      renderQualityRef.current = nextQuality
-      resizeRendererToStage(stageSizeRef.current)
-    },
-    [resizeRendererToStage]
-  )
-
   useEffect(() => {
-    if (qualityTransitionTimerRef.current !== null) {
-      clearTimeout(qualityTransitionTimerRef.current)
-      qualityTransitionTimerRef.current = null
-    }
-
-    const governor = renderQualityGovernorRef.current
-    const interactionActive = isViewportInteracting || isPerformanceThrottled
-    const now = window.performance.now()
-    if (!isProjectCanvasAdaptiveQualityEnabled()) {
-      governor.reset()
-      applyRenderQuality('full')
-      return
-    }
-
-    applyRenderQuality(governor.update({ now, interactionActive }))
-    const transitionDelayMs = interactionActive
-      ? PROJECT_CANVAS_ADAPTIVE_QUALITY_DOWNGRADE_DEBOUNCE_MS
-      : PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS
-    qualityTransitionTimerRef.current = setTimeout(() => {
-      qualityTransitionTimerRef.current = null
-      applyRenderQuality(
-        governor.update({
-          now: window.performance.now(),
-          interactionActive
-        })
-      )
-    }, transitionDelayMs)
-
-    return () => {
-      if (qualityTransitionTimerRef.current !== null) {
-        clearTimeout(qualityTransitionTimerRef.current)
-        qualityTransitionTimerRef.current = null
-      }
-    }
-  }, [applyRenderQuality, isPerformanceThrottled, isViewportInteracting])
+    syncRenderQualityToInteraction()
+  }, [isPerformanceThrottled, isViewportInteracting, syncRenderQualityToInteraction])
 
   const applyViewportTransform = useCallback(
     (pos: { x: number; y: number }, scale: number) => {
@@ -2741,10 +2748,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       syncProjectCanvasWorldRenderGroup(world, pos, stageSizeRef.current)
       world.position.set(pos.x, pos.y)
       world.scale.set(scale)
+      const frameStartedAt = window.performance.now()
       renderImmediateOrSchedule()
+      if (isViewportInteractingRef.current && isProjectCanvasAdaptiveQualityEnabled()) {
+        // A gesture frame: lower the resolution only when frames have been slow for a while.
+        applyRenderQuality(
+          renderQualityGovernorRef.current.recordFrame({
+            now: frameStartedAt,
+            renderDurationMs: window.performance.now() - frameStartedAt
+          })
+        )
+      }
       return true
     },
-    [isInitialized, renderImmediateOrSchedule]
+    [applyRenderQuality, isInitialized, renderImmediateOrSchedule]
   )
 
   const markSpriteRecordUsed = useCallback((record: SpriteRecord) => {

@@ -115,6 +115,7 @@ type MockApplicationInstance = {
   renderer: {
     resize: ReturnType<typeof vi.fn>
     gl: MockWebGLContext
+    resolution?: number
     context?: { webGLVersion: number }
     texture?: { initSource: ReturnType<typeof vi.fn> }
   }
@@ -3216,6 +3217,99 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       )
       expect(liveObject().kind).toBe('sprite')
       expect(createdEdgeAntialiasShaders).toEqual([])
+    })
+  })
+
+  describe('render resolution during gestures', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+      setWindowDevicePixelRatio(originalDevicePixelRatio)
+    })
+
+    // A layer on a device pixel ratio 2 screen, with a clock the test moves by hand.
+    const renderHighDpiLayer = async () => {
+      setWindowDevicePixelRatio(2)
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      render(<Layer ref={ref} items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => {
+        expect(ref.current).not.toBeNull()
+        expect(createdSprites).toHaveLength(1)
+      })
+      const app = createdApplications[0]
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      })
+      expect(app.renderer.resolution).toBe(2)
+      let now = 100_000
+      vi.spyOn(window.performance, 'now').mockImplementation(() => now)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      let x = 0
+      const gestureFrames = (count: number, intervalMs: number) => {
+        for (let frame = 0; frame < count; frame += 1) {
+          now += intervalMs
+          x += 3
+          act(() => {
+            vi.advanceTimersByTime(intervalMs)
+            ref.current?.syncViewport({ x, y: 0 }, 1)
+          })
+        }
+      }
+      const wait = (ms: number) => {
+        now += ms
+        act(() => {
+          vi.advanceTimersByTime(ms)
+        })
+      }
+      return { ref, app, gestureFrames, wait }
+    }
+
+    it('keeps the full device pixel ratio through a gesture: no resize, no blur and pop', async () => {
+      const { ref, app, gestureFrames, wait } = await renderHighDpiLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => ref.current?.setViewportInteracting(true))
+      // Well past the 80 ms after which the layer used to drop to a ratio of 1.
+      gestureFrames(90, 1000 / 60)
+      expect(app.renderer.resolution).toBe(2)
+      act(() => ref.current?.setViewportInteracting(false))
+      wait(1000)
+
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+    })
+
+    it('lowers the resolution once after ten slow frames and restores it after the gesture', async () => {
+      const { ref, app, gestureFrames, wait } = await renderHighDpiLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => ref.current?.setViewportInteracting(true))
+      // The first frame has no interval; nine slow frames follow.
+      gestureFrames(10, 40)
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+
+      const rendersBefore = app.render.mock.calls.length
+      gestureFrames(1, 40)
+      expect(app.renderer.resolution).toBe(1)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 1)
+      // The frame is drawn again at the new resolution, so the canvas is never blank.
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+
+      // Fast frames at the lower resolution do not flip it back during the gesture.
+      gestureFrames(120, 1000 / 60)
+      expect(app.renderer.resolution).toBe(1)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 1)
+
+      act(() => ref.current?.setViewportInteracting(false))
+      wait(100)
+      expect(app.renderer.resolution).toBe(1)
+      wait(100)
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 2)
+      wait(2000)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 2)
     })
   })
 

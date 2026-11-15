@@ -1,6 +1,15 @@
 export type ProjectCanvasRenderQuality = 'full' | 'interactive'
 
-export const PROJECT_CANVAS_ADAPTIVE_QUALITY_DOWNGRADE_DEBOUNCE_MS = 80
+// The layer renders at the full device pixel ratio, also while the view is panned or zoomed:
+// switching the resolution at the start and end of every gesture showed as a blur followed by
+// a sharp pop, and reallocated the drawing buffer twice. The resolution is lowered only when
+// the gesture measurably cannot keep up: this many gesture frames in a row took longer than
+// the frame budget times the ratio. It comes back after the gesture has ended.
+export const PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_BUDGET_MS = 1000 / 60
+export const PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_RATIO = 1.5
+export const PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_COUNT = 10
+// A longer gap between two gesture frames is a pause of the pointer, not a slow frame.
+export const PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_PAUSE_MS = 250
 export const PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS = 180
 export const PROJECT_CANVAS_INTERACTIVE_DPR = 1
 
@@ -16,7 +25,10 @@ export function isProjectCanvasAdaptiveQualityEnabled(): boolean {
 
 export type ProjectCanvasRenderQualityGovernorOptions = {
   enabled?: boolean
-  downgradeDebounceMs?: number
+  frameBudgetMs?: number
+  slowFrameRatio?: number
+  slowFrameCount?: number
+  framePauseMs?: number
   restoreDebounceMs?: number
 }
 
@@ -26,24 +38,39 @@ export type ProjectCanvasRenderQualityGovernorUpdate = {
   forceFull?: boolean
 }
 
+export type ProjectCanvasRenderQualityGovernorFrame = {
+  // When this gesture frame started.
+  now: number
+  // How long the layer's own render of this frame took, when known.
+  renderDurationMs?: number
+}
+
 export function createProjectCanvasRenderQualityGovernor({
   enabled = true,
-  downgradeDebounceMs = PROJECT_CANVAS_ADAPTIVE_QUALITY_DOWNGRADE_DEBOUNCE_MS,
+  frameBudgetMs = PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_BUDGET_MS,
+  slowFrameRatio = PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_RATIO,
+  slowFrameCount = PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_COUNT,
+  framePauseMs = PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_PAUSE_MS,
   restoreDebounceMs = PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS
 }: ProjectCanvasRenderQualityGovernorOptions = {}) {
   let quality: ProjectCanvasRenderQuality = 'full'
-  let interactionStartedAt: number | null = null
+  let interactionActive = false
   let interactionEndedAt: number | null = null
+  let lastFrameAt: number | null = null
+  let slowFrameStreak = 0
 
   const reset = () => {
     quality = 'full'
-    interactionStartedAt = null
+    interactionActive = false
     interactionEndedAt = null
+    lastFrameAt = null
+    slowFrameStreak = 0
   }
 
+  /** Tells the governor that a gesture started, goes on or ended. Never lowers the quality. */
   const update = ({
     now,
-    interactionActive,
+    interactionActive: nextInteractionActive,
     forceFull = false
   }: ProjectCanvasRenderQualityGovernorUpdate) => {
     if (!enabled || forceFull) {
@@ -51,24 +78,26 @@ export function createProjectCanvasRenderQualityGovernor({
       return quality
     }
 
-    if (interactionActive) {
+    if (nextInteractionActive) {
+      if (!interactionActive) {
+        lastFrameAt = null
+        slowFrameStreak = 0
+      }
+      interactionActive = true
       interactionEndedAt = null
-      if (interactionStartedAt === null) {
-        interactionStartedAt = now
-      }
-      if (quality === 'full' && now - interactionStartedAt >= downgradeDebounceMs) {
-        quality = 'interactive'
-      }
       return quality
     }
 
-    interactionStartedAt = null
+    interactionActive = false
+    lastFrameAt = null
+    slowFrameStreak = 0
     if (quality === 'interactive') {
       if (interactionEndedAt === null) {
         interactionEndedAt = now
       }
       if (now - interactionEndedAt >= restoreDebounceMs) {
         quality = 'full'
+        interactionEndedAt = null
       }
     } else {
       interactionEndedAt = null
@@ -76,10 +105,43 @@ export function createProjectCanvasRenderQualityGovernor({
     return quality
   }
 
+  /**
+   * Counts one frame of the running gesture. The cost of a frame is the time since the previous
+   * gesture frame (unless that gap is a pause) or the layer's own render time, whichever is
+   * larger. Once lowered, the quality stays lowered until the gesture has ended: raising it in
+   * the middle of a gesture would bring the slow frames back and flip again.
+   */
+  const recordFrame = ({ now, renderDurationMs }: ProjectCanvasRenderQualityGovernorFrame) => {
+    if (!enabled || !interactionActive) {
+      return quality
+    }
+
+    const sinceLastFrameMs = lastFrameAt === null ? 0 : now - lastFrameAt
+    lastFrameAt = now
+    const frameIntervalMs =
+      Number.isFinite(sinceLastFrameMs) && sinceLastFrameMs > 0 && sinceLastFrameMs <= framePauseMs
+        ? sinceLastFrameMs
+        : 0
+    const renderMs =
+      typeof renderDurationMs === 'number' && Number.isFinite(renderDurationMs)
+        ? Math.max(0, renderDurationMs)
+        : 0
+    if (Math.max(frameIntervalMs, renderMs) > frameBudgetMs * slowFrameRatio) {
+      slowFrameStreak += 1
+    } else {
+      slowFrameStreak = 0
+    }
+    if (quality === 'full' && slowFrameStreak >= slowFrameCount) {
+      quality = 'interactive'
+    }
+    return quality
+  }
+
   return {
     getQuality: () => quality,
     reset,
-    update
+    update,
+    recordFrame
   }
 }
 
