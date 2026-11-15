@@ -788,6 +788,13 @@ function getProjectCanvasRenderDeviceScale(quality: ProjectCanvasRenderQuality =
   return resolveProjectCanvasRenderDpr(baseDpr, quality)
 }
 
+/** False on a screen whose full resolution is already the lowered one: nothing to decide. */
+function canProjectCanvasLowerRenderResolution() {
+  return (
+    getProjectCanvasRenderDeviceScale('interactive') < getProjectCanvasRenderDeviceScale('full')
+  )
+}
+
 const areProjectCanvasWebGLMetricsEqual = areProjectCanvasWebGLRuntimeMetricsEqual
 
 function getProjectCanvasWebGLErrorName(
@@ -1408,6 +1415,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const renderThrottleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const qualityTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const renderQualityGovernorRef = useRef(createProjectCanvasRenderQualityGovernor())
+  const renderQualityFrameSamplerRef = useRef<number | null>(null)
   const renderQualityRef = useRef<ProjectCanvasRenderQuality>('full')
   const lastRenderAtRef = useRef(0)
   const webglRenderCountRef = useRef(0)
@@ -2527,20 +2535,62 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     [resizeRendererToStage]
   )
 
+  const stopRenderQualityFrameSampler = useCallback(() => {
+    if (renderQualityFrameSamplerRef.current !== null) {
+      window.cancelAnimationFrame(renderQualityFrameSamplerRef.current)
+      renderQualityFrameSamplerRef.current = null
+    }
+  }, [])
+
+  /**
+   * Times the display frames of the running gesture, one requestAnimationFrame callback per
+   * frame, and lowers the resolution when enough of them in a row were slow. It runs only
+   * while the governor asks for it (the draws of the gesture came late), so a gesture that
+   * keeps up costs no callback here, and it stops by itself when the draws are on time again,
+   * the pointer rests, the resolution was lowered or the gesture ended.
+   */
+  const startRenderQualityFrameSampler = useCallback(() => {
+    if (renderQualityFrameSamplerRef.current !== null) {
+      return
+    }
+
+    const sampleFrame = (frameTime: number) => {
+      renderQualityFrameSamplerRef.current = null
+      const governor = renderQualityGovernorRef.current
+      if (
+        !appRef.current ||
+        !isViewportInteractingRef.current ||
+        !isProjectCanvasAdaptiveQualityEnabled()
+      ) {
+        return
+      }
+
+      applyRenderQuality(governor.recordFrame({ now: frameTime }))
+      if (governor.shouldMeasureFrames(window.performance.now())) {
+        renderQualityFrameSamplerRef.current = window.requestAnimationFrame(sampleFrame)
+      }
+    }
+    renderQualityFrameSamplerRef.current = window.requestAnimationFrame(sampleFrame)
+  }, [applyRenderQuality])
+
   /**
    * Brings the render quality in line with the gesture state. Starting or continuing a
-   * gesture never lowers the resolution; only measured slow frames do (see the viewport
-   * transform). After a gesture that was lowered, the full resolution returns once the view
-   * has been still for the restore delay.
+   * gesture never lowers the resolution; only measured slow display frames do (see the
+   * viewport transform). After a gesture that was lowered, the full resolution returns once
+   * the view has been still for the restore delay.
    */
   const syncRenderQualityToInteraction = useCallback(() => {
     if (qualityTransitionTimerRef.current !== null) {
       clearTimeout(qualityTransitionTimerRef.current)
       qualityTransitionTimerRef.current = null
     }
+    if (!isViewportInteractingRef.current) {
+      stopRenderQualityFrameSampler()
+    }
 
     const governor = renderQualityGovernorRef.current
     if (!isProjectCanvasAdaptiveQualityEnabled()) {
+      stopRenderQualityFrameSampler()
       governor.reset()
       applyRenderQuality('full')
       return
@@ -2564,7 +2614,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         )
       }, PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS)
     }
-  }, [applyRenderQuality])
+  }, [applyRenderQuality, stopRenderQualityFrameSampler])
 
   /**
    * A texture was created. Its upload may fail (out of memory), which only gl.getError
@@ -2790,6 +2840,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(qualityTransitionTimerRef.current)
         qualityTransitionTimerRef.current = null
       }
+      if (renderQualityFrameSamplerRef.current != null) {
+        window.cancelAnimationFrame(renderQualityFrameSamplerRef.current)
+        renderQualityFrameSamplerRef.current = null
+      }
       if (sourceUpgradeIdleTimerRef.current != null) {
         clearTimeout(sourceUpgradeIdleTimerRef.current)
         sourceUpgradeIdleTimerRef.current = null
@@ -2835,18 +2889,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       world.scale.set(scale)
       const frameStartedAt = window.performance.now()
       renderImmediateOrSchedule()
-      if (isViewportInteractingRef.current && isProjectCanvasAdaptiveQualityEnabled()) {
-        // A gesture frame: lower the resolution only when frames have been slow for a while.
-        applyRenderQuality(
-          renderQualityGovernorRef.current.recordFrame({
-            now: frameStartedAt,
-            renderDurationMs: window.performance.now() - frameStartedAt
-          })
-        )
+      if (
+        isViewportInteractingRef.current &&
+        isProjectCanvasAdaptiveQualityEnabled() &&
+        canProjectCanvasLowerRenderResolution() &&
+        // A gesture frame. When these come late, the display frames are timed: only slow
+        // frames lower the resolution, not input that arrives slowly.
+        renderQualityGovernorRef.current.recordGestureFrame({ now: frameStartedAt })
+      ) {
+        startRenderQualityFrameSampler()
       }
       return true
     },
-    [applyRenderQuality, isInitialized, renderImmediateOrSchedule]
+    [isInitialized, renderImmediateOrSchedule, startRenderQualityFrameSampler]
   )
 
   const markSpriteRecordUsed = useCallback((record: SpriteRecord) => {
@@ -3027,6 +3082,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (imageVersionDeferredTimerRef.current !== null) {
         clearTimeout(imageVersionDeferredTimerRef.current)
         imageVersionDeferredTimerRef.current = null
+      }
+      if (renderQualityFrameSamplerRef.current !== null) {
+        window.cancelAnimationFrame(renderQualityFrameSamplerRef.current)
+        renderQualityFrameSamplerRef.current = null
       }
       if (spriteReconcileFrameRef.current !== null) {
         window.cancelAnimationFrame(spriteReconcileFrameRef.current)

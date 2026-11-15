@@ -3380,15 +3380,19 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     afterEach(() => {
       vi.useRealTimers()
       vi.restoreAllMocks()
+      vi.unstubAllGlobals()
       setWindowDevicePixelRatio(originalDevicePixelRatio)
     })
 
-    // A layer on a device pixel ratio 2 screen, with a clock the test moves by hand.
-    const renderHighDpiLayer = async () => {
-      setWindowDevicePixelRatio(2)
+    // A layer on a screen with the given device pixel ratio, with a clock the test moves by
+    // hand and display frames (requestAnimationFrame) the test runs by hand.
+    const renderLayerWithManualFrames = async (devicePixelRatio = 2) => {
+      setWindowDevicePixelRatio(devicePixelRatio)
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
       const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
-      render(<Layer ref={ref} items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      const { unmount } = render(
+        <Layer ref={ref} items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
       await waitFor(() => {
         expect(ref.current).not.toBeNull()
         expect(createdSprites).toHaveLength(1)
@@ -3397,19 +3401,42 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 300))
       })
-      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resolution).toBe(devicePixelRatio)
       let now = 100_000
       vi.spyOn(window.performance, 'now').mockImplementation(() => now)
+      const callbacks = new Map<number, FrameRequestCallback>()
+      let nextFrameId = 1
+      const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+        callbacks.set(nextFrameId, callback)
+        return nextFrameId++
+      })
+      vi.stubGlobal('requestAnimationFrame', requestFrame)
+      vi.stubGlobal(
+        'cancelAnimationFrame',
+        vi.fn((id: number) => {
+          callbacks.delete(id)
+        })
+      )
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       let x = 0
-      const gestureFrames = (count: number, intervalMs: number) => {
-        for (let frame = 0; frame < count; frame += 1) {
-          now += intervalMs
-          x += 3
-          act(() => {
-            vi.advanceTimersByTime(intervalMs)
+      // One display frame `intervalMs` after the previous one. With `moved`, the view moves in
+      // it (the stage's callback runs first, as in the app); then the layer's own callbacks.
+      const displayFrame = (intervalMs: number, moved: boolean) => {
+        now += intervalMs
+        act(() => {
+          vi.advanceTimersByTime(intervalMs)
+          const due = Array.from(callbacks.values())
+          callbacks.clear()
+          if (moved) {
+            x += 3
             ref.current?.syncViewport({ x, y: 0 }, 1)
-          })
+          }
+          due.forEach((callback) => callback(now))
+        })
+      }
+      const displayFrames = (count: number, intervalMs: number, moved = true) => {
+        for (let frame = 0; frame < count; frame += 1) {
+          displayFrame(intervalMs, moved)
         }
       }
       const wait = (ms: number) => {
@@ -3418,17 +3445,29 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           vi.advanceTimersByTime(ms)
         })
       }
-      return { ref, app, gestureFrames, wait }
+      return {
+        ref,
+        app,
+        unmount,
+        displayFrame,
+        displayFrames,
+        wait,
+        requestedFrames: () => requestFrame.mock.calls.length,
+        pendingFrames: () => callbacks.size
+      }
     }
 
     it('keeps the full device pixel ratio through a gesture: no resize, no blur and pop', async () => {
-      const { ref, app, gestureFrames, wait } = await renderHighDpiLayer()
+      const { ref, app, displayFrames, wait, requestedFrames } = await renderLayerWithManualFrames()
       const resizesBefore = app.renderer.resize.mock.calls.length
+      const requestedBefore = requestedFrames()
 
       act(() => ref.current?.setViewportInteracting(true))
       // Well past the 80 ms after which the layer used to drop to a ratio of 1.
-      gestureFrames(90, 1000 / 60)
+      displayFrames(90, 1000 / 60)
       expect(app.renderer.resolution).toBe(2)
+      // A gesture that keeps up is drawn in the stage's frame callback: none of the layer's own.
+      expect(requestedFrames()).toBe(requestedBefore)
       act(() => ref.current?.setViewportInteracting(false))
       wait(1000)
 
@@ -3436,27 +3475,62 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
     })
 
-    it('lowers the resolution once after ten slow frames and restores it after the gesture', async () => {
-      const { ref, app, gestureFrames, wait } = await renderHighDpiLayer()
+    it('keeps the full resolution when only the input is slow: a careful drag, a notched wheel', async () => {
+      const { ref, app, displayFrame, displayFrames, wait, pendingFrames } =
+        await renderLayerWithManualFrames()
       const resizesBefore = app.renderer.resize.mock.calls.length
 
       act(() => ref.current?.setViewportInteracting(true))
-      // The first frame has no interval; nine slow frames follow.
-      gestureFrames(10, 40)
+      // The pointer moves one pixel every 50 ms, a wheel notch comes every 100 ms: the view
+      // is drawn that seldom, on a display that shows a frame every 16.7 ms. The time
+      // between two draws used to count as a slow frame and lowered the resolution here.
+      for (let move = 0; move < 40; move += 1) {
+        displayFrames(2, 1000 / 60, false)
+        displayFrame(1000 / 60, true)
+      }
+      for (let notch = 0; notch < 40; notch += 1) {
+        displayFrames(5, 1000 / 60, false)
+        displayFrame(1000 / 60, true)
+      }
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+
+      // The pointer rests with the button held: the layer stops timing frames.
+      displayFrames(30, 1000 / 60, false)
+      expect(pendingFrames()).toBe(0)
+
+      act(() => ref.current?.setViewportInteracting(false))
+      wait(1000)
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+    })
+
+    it('lowers the resolution once after ten slow display frames and restores it after the gesture', async () => {
+      const { ref, app, displayFrames, wait, pendingFrames } = await renderLayerWithManualFrames()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => ref.current?.setViewportInteracting(true))
+      // The display shows a frame every 40 ms and the view moves in each. The first draw has
+      // no interval, three late draws start the timing, whose first frame has no interval
+      // either: nine timed slow frames after 14 display frames.
+      displayFrames(14, 40)
       expect(app.renderer.resolution).toBe(2)
       expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
 
       const rendersBefore = app.render.mock.calls.length
-      gestureFrames(1, 40)
+      displayFrames(1, 40)
       expect(app.renderer.resolution).toBe(1)
       expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 1)
       // The frame is drawn again at the new resolution, so the canvas is never blank.
       expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+      // Lowered: nothing left to time.
+      expect(pendingFrames()).toBe(0)
 
       // Fast frames at the lower resolution do not flip it back during the gesture.
-      gestureFrames(120, 1000 / 60)
+      displayFrames(120, 1000 / 60)
       expect(app.renderer.resolution).toBe(1)
       expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 1)
+      expect(pendingFrames()).toBe(0)
 
       act(() => ref.current?.setViewportInteracting(false))
       wait(100)
@@ -3466,6 +3540,40 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 2)
       wait(2000)
       expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 2)
+    })
+
+    it('stops timing frames when the gesture ends or the layer goes away', async () => {
+      const { ref, unmount, displayFrames, requestedFrames, pendingFrames } =
+        await renderLayerWithManualFrames()
+
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(6, 40)
+      expect(pendingFrames()).toBe(1)
+      act(() => ref.current?.setViewportInteracting(false))
+      // Whatever the end of the gesture asked for is drawn; then no frame is requested again.
+      displayFrames(5, 1000 / 60, false)
+      const requestedAfterGesture = requestedFrames()
+      displayFrames(30, 40, false)
+      expect(requestedFrames()).toBe(requestedAfterGesture)
+      expect(pendingFrames()).toBe(0)
+
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(6, 40)
+      expect(pendingFrames()).toBe(1)
+      unmount()
+      expect(pendingFrames()).toBe(0)
+    })
+
+    it('times nothing on a screen whose full resolution is the lowered one', async () => {
+      const { ref, app, displayFrames, requestedFrames } = await renderLayerWithManualFrames(1)
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      const requestedBefore = requestedFrames()
+
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(40, 40)
+      expect(requestedFrames()).toBe(requestedBefore)
+      expect(app.renderer.resolution).toBe(1)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
     })
   })
 
@@ -3602,11 +3710,13 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     })
 
     it('does not hold a lowered resolution for the length of the job', async () => {
-      const { ref, app, advance } = await renderThrottledLayer()
+      const { ref, app, advance, runFrames } = await renderThrottledLayer()
       act(() => ref.current?.setViewportInteracting(true))
-      for (let frame = 1; frame <= 12; frame += 1) {
+      // Display frames 40 ms apart, the view moves in each: slow enough to lower it.
+      for (let frame = 1; frame <= 16; frame += 1) {
         advance(40)
         act(() => ref.current?.syncViewport({ x: frame * 5, y: 0 }, 1))
+        runFrames()
       }
       expect(app.renderer.resolution).toBe(1)
 

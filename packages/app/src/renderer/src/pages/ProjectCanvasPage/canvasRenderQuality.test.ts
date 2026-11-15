@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_BUDGET_MS,
   PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_PAUSE_MS,
+  PROJECT_CANVAS_ADAPTIVE_QUALITY_LATE_GESTURE_FRAME_COUNT,
   PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS,
   PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_COUNT,
   PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_RATIO,
@@ -25,7 +26,7 @@ describe('canvasRenderQuality', () => {
   const slowFrameMs = budget * PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_RATIO + 1
   const slowCount = PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_COUNT
 
-  // Runs `count` gesture frames that are `intervalMs` apart; returns the time of the last one.
+  // Runs `count` display frames that are `intervalMs` apart; returns the time of the last one.
   const runFrames = (
     governor: ReturnType<typeof createProjectCanvasRenderQualityGovernor>,
     startAt: number,
@@ -135,6 +136,107 @@ describe('canvasRenderQuality', () => {
       governor.recordFrame({ now, renderDurationMs: slowFrameMs })
     }
     expect(governor.getQuality()).toBe('interactive')
+  })
+
+  it('asks for frame timing only after several late draws in a row, and never lowers on draws alone', () => {
+    const governor = createProjectCanvasRenderQualityGovernor()
+    const lateCount = PROJECT_CANVAS_ADAPTIVE_QUALITY_LATE_GESTURE_FRAME_COUNT
+    governor.update({ now: 0, interactionActive: true })
+
+    // Draws on time: nothing to time.
+    let now = 0
+    for (let draw = 0; draw < 200; draw += 1) {
+      now += budget
+      expect(governor.recordGestureFrame({ now })).toBe(false)
+    }
+    // Late draws (a slow drag: one every 50 ms). The first ones are not yet a reason.
+    for (let draw = 1; draw < lateCount; draw += 1) {
+      now += 50
+      expect(governor.recordGestureFrame({ now })).toBe(false)
+    }
+    now += 50
+    expect(governor.recordGestureFrame({ now })).toBe(true)
+    expect(governor.shouldMeasureFrames(now)).toBe(true)
+    // However many late draws follow, they do not lower the quality by themselves.
+    for (let draw = 0; draw < 100; draw += 1) {
+      now += 50
+      expect(governor.recordGestureFrame({ now })).toBe(true)
+    }
+    expect(governor.getQuality()).toBe('full')
+
+    // One draw on time ends the reason; so does a pause of the pointer, and the gesture's end.
+    now += budget
+    expect(governor.recordGestureFrame({ now })).toBe(false)
+    for (let draw = 0; draw < lateCount; draw += 1) {
+      now += 50
+      governor.recordGestureFrame({ now })
+    }
+    expect(governor.shouldMeasureFrames(now)).toBe(true)
+    expect(
+      governor.shouldMeasureFrames(now + PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_PAUSE_MS + 1)
+    ).toBe(false)
+    now += PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_PAUSE_MS + 1
+    expect(governor.recordGestureFrame({ now })).toBe(false)
+    for (let draw = 0; draw < lateCount; draw += 1) {
+      now += 50
+      governor.recordGestureFrame({ now })
+    }
+    expect(governor.shouldMeasureFrames(now)).toBe(true)
+    governor.update({ now, interactionActive: false })
+    expect(governor.shouldMeasureFrames(now)).toBe(false)
+    expect(governor.recordGestureFrame({ now: now + 50 })).toBe(false)
+  })
+
+  it('lowers on late draws only when the timed display frames are slow too', () => {
+    const lateCount = PROJECT_CANVAS_ADAPTIVE_QUALITY_LATE_GESTURE_FRAME_COUNT
+    const lateDraws = (
+      governor: ReturnType<typeof createProjectCanvasRenderQualityGovernor>,
+      startAt: number
+    ) => {
+      let now = startAt
+      for (let draw = 0; draw <= lateCount; draw += 1) {
+        now += slowFrameMs
+        governor.recordGestureFrame({ now })
+      }
+      return now
+    }
+
+    // Input is slow, the display keeps up: frames at 60 Hz between the draws.
+    const keepsUp = createProjectCanvasRenderQualityGovernor()
+    keepsUp.update({ now: 0, interactionActive: true })
+    let now = lateDraws(keepsUp, 0)
+    for (let draw = 0; draw < 60; draw += 1) {
+      now = runFrames(keepsUp, now, 3, budget)
+      expect(keepsUp.recordGestureFrame({ now })).toBe(true)
+    }
+    expect(keepsUp.getQuality()).toBe('full')
+
+    // The display is slow: every frame carries a draw and takes longer than the limit.
+    const slow = createProjectCanvasRenderQualityGovernor()
+    slow.update({ now: 0, interactionActive: true })
+    now = lateDraws(slow, 0)
+    for (let frame = 0; frame <= slowCount; frame += 1) {
+      expect(slow.getQuality()).toBe('full')
+      now += slowFrameMs
+      slow.recordGestureFrame({ now })
+      slow.recordFrame({ now })
+    }
+    expect(slow.getQuality()).toBe('interactive')
+    // Lowered: no more timing in this gesture.
+    expect(slow.recordGestureFrame({ now: now + slowFrameMs })).toBe(false)
+
+    // A draw on time in between starts the count again.
+    const mixed = createProjectCanvasRenderQualityGovernor()
+    mixed.update({ now: 0, interactionActive: true })
+    now = lateDraws(mixed, 0)
+    now = runFrames(mixed, now, slowCount, slowFrameMs)
+    now += budget
+    mixed.recordGestureFrame({ now })
+    now = lateDraws(mixed, now)
+    now = runFrames(mixed, now, slowCount, slowFrameMs)
+    expect(mixed.getQuality()).toBe('full')
+    runFrames(mixed, now, 1, slowFrameMs)
+    expect(mixed.getQuality()).toBe('interactive')
   })
 
   it('ignores frames outside a gesture', () => {
