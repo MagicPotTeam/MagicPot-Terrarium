@@ -384,6 +384,68 @@ function closeCanvasImageAssetIfPossible(value: unknown) {
   }
 }
 
+// Decoded images whose pixels already live in a GPU texture and were released on the CPU
+// side. They stay in the decoded caches only as size and identity handles for that texture:
+// nothing may upload or draw them again.
+const releasedProjectCanvasDecodedImages = new WeakSet<object>()
+
+function isProjectCanvasDecodedImageReleased(image: unknown): boolean {
+  return (
+    typeof image === 'object' && image !== null && releasedProjectCanvasDecodedImages.has(image)
+  )
+}
+
+/**
+ * A closed ImageBitmap reports 0 x 0. The level-of-detail and texture-key code keeps reading
+ * the size of a decoded image after its pixels were uploaded, so pin the size on the object
+ * before it is closed. Returns false when the size cannot be pinned; the caller then keeps
+ * the pixels.
+ */
+function pinProjectCanvasDecodedImageSize(image: CanvasImageAsset): boolean {
+  if (!isCanvasImageBitmapLike(image)) {
+    return true
+  }
+
+  const { width, height } = getCanvasImageAssetSize(image)
+  if (!(width > 0) || !(height > 0)) {
+    return false
+  }
+
+  try {
+    Object.defineProperty(image, 'width', { configurable: true, enumerable: true, value: width })
+    Object.defineProperty(image, 'height', {
+      configurable: true,
+      enumerable: true,
+      value: height
+    })
+  } catch {
+    return false
+  }
+
+  const pinned = getCanvasImageAssetSize(image)
+  return pinned.width === width && pinned.height === height
+}
+
+type PixiRendererWithEagerTextureUpload = {
+  texture?: {
+    initSource?: (source: unknown) => void
+  }
+}
+
+/**
+ * Uploads a texture now instead of on its first draw, so that the decoded pixels can be
+ * released in the same step. Returns false when the renderer offers no eager upload.
+ */
+function uploadProjectCanvasTextureNow(app: Application | null, texture: Texture): boolean {
+  const textureSystem = (app?.renderer as PixiRendererWithEagerTextureUpload | undefined)?.texture
+  if (!textureSystem || typeof textureSystem.initSource !== 'function') {
+    return false
+  }
+
+  textureSystem.initSource(texture.source)
+  return true
+}
+
 function getProjectCanvasCachedImageReleaseId(
   cacheKind: 'source' | 'thumbnail' | 'transient',
   resourceKind: 'imageBitmap' | 'objectUrl',
@@ -505,8 +567,14 @@ function refreshProjectCanvasTextureAfterTinyPreview(
   }
 
   const textureSource = (record.sourceTexture ?? record.texture).source as
-    { destroyed?: boolean; unload?: () => void } | undefined
-  if (textureSource && !textureSource.destroyed && typeof textureSource.unload === 'function') {
+    { destroyed?: boolean; resource?: unknown; unload?: () => void } | undefined
+  if (
+    textureSource &&
+    !textureSource.destroyed &&
+    typeof textureSource.unload === 'function' &&
+    // Unloading asks Pixi to upload the input again; a released decode cannot be uploaded.
+    !isProjectCanvasDecodedImageReleased(textureSource.resource)
+  ) {
     textureSource.unload()
   }
   record.sawTinyPreview = false
@@ -1073,7 +1141,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const imageIdentityIdsRef = useRef(new WeakMap<object, number>())
   const nextImageIdentityIdRef = useRef(1)
   const sharedTexturePoolRef = useRef(new CanvasImageSharedResourcePool<Texture>())
+  // Only used when the renderer cannot upload eagerly: the texture then keeps its decoded
+  // input alive, because Pixi uploads it on a later draw.
   const textureDecodedAssetRef = useRef(new WeakMap<Texture, CachedImageRecord>())
+  const eagerlyUploadedTexturesRef = useRef(new WeakSet<Texture>())
+  const decodedRecordsByImageRef = useRef(new Map<object, Set<CachedImageRecord>>())
   const nextDecodedAssetReleaseIdRef = useRef(1)
   const sharedTextureByteTrackerRef = useRef(new CanvasImageSharedResourceByteTracker())
   const imageLoadRequestTokensRef = useRef(new CanvasImageRequestTokenTracker())
@@ -1450,6 +1522,43 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     []
   )
 
+  const forgetCachedImageRecord = useCallback((record: CachedImageRecord) => {
+    const records = decodedRecordsByImageRef.current.get(record.image)
+    if (!records) {
+      return
+    }
+
+    records.delete(record)
+    if (records.size === 0) {
+      decodedRecordsByImageRef.current.delete(record.image)
+    }
+  }, [])
+
+  /**
+   * The pixels of `image` are in a GPU texture now. Every cache record that holds this decoded
+   * object gives up its share, so the bitmap is closed, and the records stay as handles.
+   */
+  const releaseDecodedImagePixelsAfterUpload = useCallback(
+    (image: CanvasImageAsset) => {
+      if (isProjectCanvasDecodedImageReleased(image)) {
+        return
+      }
+
+      const records = decodedRecordsByImageRef.current.get(image)
+      if (!records || records.size === 0) {
+        // Not a decode this layer owns (for example the item's own preview image).
+        return
+      }
+      if (!pinProjectCanvasDecodedImageSize(image)) {
+        return
+      }
+
+      releasedProjectCanvasDecodedImages.add(image)
+      records.forEach((record) => releaseCachedImageRecord(record, 'uploaded'))
+    },
+    [releaseCachedImageRecord]
+  )
+
   const destroySharedTexture = useCallback(
     (texture: Texture) => {
       destroyProjectCanvasTexture(texture, true)
@@ -1472,17 +1581,21 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       releaseCachedImageRecord(record, reason)
+      forgetCachedImageRecord(record)
       cache.delete(itemId)
     },
-    [releaseCachedImageRecord]
+    [forgetCachedImageRecord, releaseCachedImageRecord]
   )
 
   const clearCachedImageRecords = useCallback(
     (cache: Map<string, CachedImageRecord>, reason: CanvasImageReleaseReason) => {
-      cache.forEach((record) => releaseCachedImageRecord(record, reason))
+      cache.forEach((record) => {
+        releaseCachedImageRecord(record, reason)
+        forgetCachedImageRecord(record)
+      })
       cache.clear()
     },
-    [releaseCachedImageRecord]
+    [forgetCachedImageRecord, releaseCachedImageRecord]
   )
 
   const pruneDecodedImageCacheForResidentTargets = useCallback(
@@ -1555,6 +1668,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       releaseCachedImageRecord(existing, reason)
+      if (existing) {
+        forgetCachedImageRecord(existing)
+      }
       let decodedAssetReleaseId: string | undefined
       if (
         decodedAssetRelease ||
@@ -1590,6 +1706,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
       cache.set(itemId, record)
       if (decodedAssetReleaseId) {
+        const recordsForImage = decodedRecordsByImageRef.current.get(image) ?? new Set()
+        recordsForImage.add(record)
+        decodedRecordsByImageRef.current.set(image, recordsForImage)
         resourceBudgetTrackerRef.current.upsert({
           id: `project-canvas-webgl:decoded-resident:${decodedAssetReleaseId}`,
           decodedResidentBytes: getCanvasImageDecodedByteSize(image),
@@ -1600,7 +1719,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
       return record
     },
-    [getCanvasImageDecodedByteSize, releaseCachedImageRecord]
+    [forgetCachedImageRecord, getCanvasImageDecodedByteSize, releaseCachedImageRecord]
   )
 
   const setTextureBudgetReservation = useCallback(
@@ -2459,6 +2578,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       skippedSourceUpgradeSrcByIdRef.current.clear()
       clearCachedImageRecords(imageCacheRef.current, 'component-unmount')
       clearCachedImageRecords(thumbnailCacheRef.current, 'component-unmount')
+      decodedRecordsByImageRef.current.clear()
       objectUrlReleaseHandlesRef.current.forEach((handle) => handle.release('component-unmount'))
       objectUrlReleaseHandlesRef.current.clear()
       resourceBudgetTrackerRef.current.remove('project-canvas-webgl:object-url-runtime')
@@ -3373,7 +3493,60 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return true
     }
 
+    const dropDecodedRecordsForImage = (itemId: string, image: CanvasImageAsset) => {
+      if (imageCacheRef.current.get(itemId)?.image === image) {
+        deleteCachedImageRecord(imageCacheRef.current, itemId, 'manual')
+      }
+      if (thumbnailCacheRef.current.get(itemId)?.image === image) {
+        deleteCachedImageRecord(thumbnailCacheRef.current, itemId, 'manual')
+      }
+    }
+
+    // A decode whose pixels were released after their upload is only a handle for that
+    // texture. Once the texture is gone the handle is stale and must not be drawn.
+    const isStaleReleasedDecodedImage = (item: CanvasImageItem, image: CanvasImageAsset) => {
+      if (!isProjectCanvasDecodedImageReleased(image)) {
+        return false
+      }
+
+      const cachedSource = imageCacheRef.current.get(item.id)
+      const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+      const decodedVariantKey =
+        cachedSource?.image === image
+          ? 'source'
+          : cachedThumbnail?.image === image
+            ? `thumbnail:${cachedThumbnail.src}`
+            : null
+      if (decodedVariantKey === null) {
+        return true
+      }
+
+      return (
+        sharedTexturePoolRef.current.getRefCount(
+          getCanvasImageSharedTextureKey(
+            item,
+            image,
+            decodedVariantKey,
+            getCanvasImageAssetIdentityKey(image)
+          )
+        ) === 0
+      )
+    }
+
     const ensureImage = (item: CanvasImageItem, sourceUpgradePriority: number) => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const image = resolveImageForItem(item, sourceUpgradePriority)
+        if (!image || !isStaleReleasedDecodedImage(item, image)) {
+          return image
+        }
+        // Decode it again: the next attempt falls back to what is still drawable.
+        dropDecodedRecordsForImage(item.id, image)
+      }
+
+      return item.image ?? null
+    }
+
+    const resolveImageForItem = (item: CanvasImageItem, sourceUpgradePriority: number) => {
       const failedSourceUpgradeSrc = failedSourceUpgradeSrcByIdRef.current.get(item.id)
       const skippedSourceUpgradeSrc = skippedSourceUpgradeSrcByIdRef.current.get(item.id)
       if (failedSourceUpgradeSrc && failedSourceUpgradeSrc !== item.src) {
@@ -3467,6 +3640,17 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           deviceScale: getProjectCanvasRenderDeviceScale()
         })
         if (fallbackImage && !cachedSourceDecision.shouldUseSourceTexture) {
+          if (
+            thumbnailLevel?.src &&
+            currentThumbnail?.src !== thumbnailLevel.src &&
+            failedThumbnailLoadSrcByIdRef.current.get(item.id) !== thumbnailLevel.src &&
+            existingRecord &&
+            renderItemsRef.current.get(item.id)?.image === cached.image
+          ) {
+            // The level that should replace the source texture is not decoded yet. Keep the
+            // sharper texture on screen instead of dropping to the small preview in between.
+            return cached.image
+          }
           return fallbackImage
         }
         if (!fallbackImage && !cachedSourceDecision.shouldUseSourceTexture) {
@@ -4340,6 +4524,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
       }
       const needsNewSpriteRecord = !existingRecord || existingRecord.textureKey !== textureKey
+      if (
+        needsNewSpriteRecord &&
+        isProjectCanvasDecodedImageReleased(renderItem.image) &&
+        sharedTexturePoolRef.current.getRefCount(sharedTextureKey) === 0
+      ) {
+        // Last line of defence: the pixels of this decode were released after their upload
+        // and that texture no longer exists. Never upload the closed bitmap; decode again.
+        dropDecodedRecordsForImage(item.id, renderItem.image)
+        scheduleImageVersionUpdate()
+        if (existingRecord) {
+          preserveExistingRenderItem()
+        }
+        return
+      }
       if (needsNewSpriteRecord && newSpriteCreationBudget <= 0) {
         if (existingRecord) {
           preserveExistingRenderItem()
@@ -4438,17 +4636,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         let createdSharedTexture = false
         baseTexture = sharedTexturePoolRef.current.acquire(sharedTextureKey, () => {
           createdSharedTexture = true
-          const createdTexture = createProjectCanvasTexture(image)
-          const cachedSource = imageCacheRef.current.get(item.id)
-          const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
-          const decodedAsset = cachedSource?.image === image ? cachedSource : cachedThumbnail
-          if (decodedAsset?.image === image && decodedAsset.decodedAssetReleaseId) {
-            // Pixi may upload again after unload. Retain the actual shared texture
-            // input, not a sprite's potentially different decoded object.
-            decodedAsset.decodedAssetRefCount += 1
-            textureDecodedAssetRef.current.set(createdTexture, decodedAsset)
-          }
-          return createdTexture
+          return createProjectCanvasTexture(image)
         })
         if (createdSharedTexture) {
           webglErrorCheckRequestedRef.current = true
@@ -4456,6 +4644,32 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         sharedTextureByteTrackerRef.current.acquire(sharedTextureKey, textureByteSize)
         if (!baseTexture) {
           throw new Error('Pixi returned an empty texture.')
+        }
+        if (
+          decodedRecordsByImageRef.current.has(image) &&
+          !isProjectCanvasDecodedImageReleased(image)
+        ) {
+          // One copy per image: upload the decoded pixels now and close the bitmap, instead
+          // of keeping a decoded twin next to the texture for as long as the texture lives.
+          if (
+            eagerlyUploadedTexturesRef.current.has(baseTexture) ||
+            uploadProjectCanvasTextureNow(appRef.current, baseTexture)
+          ) {
+            eagerlyUploadedTexturesRef.current.add(baseTexture)
+            // Pixi must never unload this texture behind the layer's back: its input is gone.
+            ;(baseTexture.source as { autoGarbageCollect?: boolean }).autoGarbageCollect = false
+            releaseDecodedImagePixelsAfterUpload(image)
+          } else if (createdSharedTexture) {
+            const cachedSource = imageCacheRef.current.get(item.id)
+            const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+            const decodedAsset = cachedSource?.image === image ? cachedSource : cachedThumbnail
+            if (decodedAsset?.image === image && decodedAsset.decodedAssetReleaseId) {
+              // No eager upload on this renderer: Pixi uploads on a later draw, so the
+              // texture keeps its actual input alive until it is destroyed.
+              decodedAsset.decodedAssetRefCount += 1
+              textureDecodedAssetRef.current.set(baseTexture, decodedAsset)
+            }
+          }
         }
         ;(baseTexture.source as { scaleMode?: 'nearest' | 'linear' }).scaleMode =
           getProjectCanvasTextureScaleMode()
@@ -4642,6 +4856,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     items,
     markSpriteRecordUsed,
     pruneDecodedImageCacheForResidentTargets,
+    releaseDecodedImagePixelsAfterUpload,
     removeTextureBudgetReservation,
     cancelScheduledRender,
     scheduleRender,
