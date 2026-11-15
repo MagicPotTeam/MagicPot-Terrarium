@@ -2800,6 +2800,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       )
 
       const app = createdApplications[0]
+      // The error check is sampled: let the check that follows the first texture pass (one
+      // interval after it), and then more than another interval go by.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 2300))
+      })
       app.renderer.gl.getError.mockImplementationOnce(() => app.renderer.gl.OUT_OF_MEMORY)
 
       act(() => {
@@ -2820,6 +2825,76 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         expect.objectContaining({
           message: 'WebGL renderer reported OUT_OF_MEMORY (1285).'
         })
+      )
+    } finally {
+      consoleWarnSpy.mockRestore()
+    }
+  }, 30000)
+
+  it('does not ask the GPU for errors after every new texture', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    // 24 images arrive four at a time, as during an import: 24 new textures, many renders.
+    const items = Array.from({ length: 24 }, (_, index) =>
+      createNamedItem(`imported-${index}`, { x: (index % 6) * 210, y: Math.floor(index / 6) * 130 })
+    )
+    const view = (count: number) => (
+      <Layer items={items.slice(0, count)} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+    const { rerender } = render(view(4))
+    await waitFor(() => expect(createdSprites).toHaveLength(4))
+    const app = createdApplications[0]
+    const startedAt = performance.now()
+    const rendersBefore = app.render.mock.calls.length
+    const checksBefore = app.renderer.gl.getError.mock.calls.length
+    for (let count = 8; count <= 24; count += 4) {
+      rerender(view(count))
+      await waitFor(() => expect(createdSprites).toHaveLength(count))
+      await waitFor(() => expect(app.render.mock.calls.length).toBeGreaterThan(rendersBefore))
+    }
+    const elapsedSeconds = (performance.now() - startedAt) / 1000
+
+    expect(createdBaseTextures.length).toBe(24)
+    const checks = app.renderer.gl.getError.mock.calls.length - checksBefore
+    // One sampled check per second at most (plus the one that may be due right now), not one
+    // per texture.
+    expect(checks).toBeLessThanOrEqual(Math.ceil(elapsedSeconds) + 1)
+    expect(checks).toBeLessThan(20)
+  }, 30000)
+
+  it('notices a failed texture upload about a second later, even without another render', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const readyCalls: boolean[] = []
+    const handleReadyChange = (ready: boolean) => readyCalls.push(ready)
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const first = [createItem()]
+      const { rerender } = render(
+        <Layer items={first} {...TEST_STAGE_VIEWPORT_1280_720} onReadyChange={handleReadyChange} />
+      )
+      await waitFor(() => expect(createdSprites).toHaveLength(1))
+      const app = createdApplications[0]
+      // Let the sampled check that follows the first texture pass.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1200))
+      })
+      expect(readyCalls.at(-1)).toBe(true)
+
+      // The upload of the next texture fails on the GPU.
+      app.renderer.gl.getError.mockImplementation(() => app.renderer.gl.OUT_OF_MEMORY)
+      rerender(
+        <Layer
+          items={[...first, createNamedItem('too-much', { x: 400 })]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          onReadyChange={handleReadyChange}
+        />
+      )
+      await waitFor(() => expect(createdBaseTextures).toHaveLength(2))
+      // Nothing else happens on the canvas; the sampled check finds the error.
+      await waitFor(() => expect(readyCalls.at(-1)).toBe(false), { timeout: 4000 })
+      expect(document.querySelector('canvas')).toBeNull()
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        '[Canvas WebGL] Pixi render failed; falling back to non-WebGL image rendering.',
+        expect.objectContaining({ message: 'WebGL renderer reported OUT_OF_MEMORY (1285).' })
       )
     } finally {
       consoleWarnSpy.mockRestore()

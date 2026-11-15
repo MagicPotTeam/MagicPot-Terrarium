@@ -1403,6 +1403,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const webglErrorLastCheckedRenderRef = useRef(0)
   const webglErrorLastCheckedAtRef = useRef(Number.NEGATIVE_INFINITY)
   const webglErrorCheckRequestedRef = useRef(true)
+  const webglErrorCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const activeItemCountRef = useRef(0)
   const stagePosRef = useRef(stagePos)
   const stageScaleRef = useRef(stageScale)
@@ -2517,6 +2518,34 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
   }, [applyRenderQuality])
 
+  /**
+   * A texture was created. Its upload may fail (out of memory), which only gl.getError
+   * reports, and that call waits for the GPU process to finish everything queued so far.
+   * Asking for it on the next render after every new texture made an import of 100 images
+   * spend seconds in that wait. So the check is sampled: one check, one interval after the
+   * first texture of a burst, which also covers a canvas that does not render again.
+   */
+  const requestSampledWebGLErrorCheck = useCallback(() => {
+    if (webglErrorCheckTimerRef.current !== null) {
+      return
+    }
+
+    webglErrorCheckTimerRef.current = setTimeout(() => {
+      webglErrorCheckTimerRef.current = null
+      const app = appRef.current
+      if (!app) {
+        return
+      }
+
+      webglErrorLastCheckedRenderRef.current = webglRenderCountRef.current
+      webglErrorLastCheckedAtRef.current = window.performance.now()
+      const webglRuntimeFailure = getProjectCanvasWebGLRuntimeFailure(app)
+      if (webglRuntimeFailure) {
+        runtimeFailureHandlerRef.current?.(webglRuntimeFailure)
+      }
+    }, PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_INTERVAL_MS)
+  }, [])
+
   const scheduleViewportReconcile = useCallback(
     (options: { allowDuringInteraction?: boolean } = {}) => {
       const allowDuringInteraction = options.allowDuringInteraction === true
@@ -2700,6 +2729,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (renderThrottleTimerRef.current != null) {
         clearTimeout(renderThrottleTimerRef.current)
         renderThrottleTimerRef.current = null
+      }
+      if (webglErrorCheckTimerRef.current != null) {
+        clearTimeout(webglErrorCheckTimerRef.current)
+        webglErrorCheckTimerRef.current = null
       }
       if (qualityTransitionTimerRef.current != null) {
         clearTimeout(qualityTransitionTimerRef.current)
@@ -2930,6 +2963,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (renderThrottleTimerRef.current !== null) {
         clearTimeout(renderThrottleTimerRef.current)
         renderThrottleTimerRef.current = null
+      }
+      if (webglErrorCheckTimerRef.current !== null) {
+        clearTimeout(webglErrorCheckTimerRef.current)
+        webglErrorCheckTimerRef.current = null
       }
       if (imageVersionDeferredTimerRef.current !== null) {
         clearTimeout(imageVersionDeferredTimerRef.current)
@@ -5158,7 +5195,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           return createProjectCanvasTexture(image)
         })
         if (createdSharedTexture) {
-          webglErrorCheckRequestedRef.current = true
+          requestSampledWebGLErrorCheck()
         }
         sharedTextureByteTrackerRef.current.acquire(sharedTextureKey, textureByteSize)
         if (!baseTexture) {
@@ -5402,6 +5439,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     setCachedImageRecord,
     setTextureBudgetReservation,
     selectedIds,
+    requestSampledWebGLErrorCheck,
     syncSpriteRecordEdgeAntialias,
     viewportVersion
   ])
