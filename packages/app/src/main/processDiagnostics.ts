@@ -12,6 +12,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { isAppQuitting } from './appQuitState'
+import {
+  forgetChatSendStage,
+  getLastChatSendStage,
+  registerChatSendStageIpc
+} from './chatSendStageBreadcrumbs'
 
 export const PROCESS_EVENTS_FILE_NAME = 'process-events.jsonl'
 export const MAX_PROCESS_EVENT_LINES = 200
@@ -242,7 +247,7 @@ export type ProcessDiagnosticsOptions = Partial<ProcessDiagnosticsDeps> & {
 export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}): ProcessDiagnostics {
   const deps: ProcessDiagnosticsDeps = { ...defaultDeps(), ...options }
   const ring = new ProcessMemoryRing(deps)
-  const lastSendStageFor = options.lastSendStageFor ?? (() => null)
+  const lastSendStageFor = options.lastSendStageFor ?? getLastChatSendStage
   const crashDumpsDir = options.crashDumpsDir ?? (() => app.getPath('crashDumps'))
   let prunePending = false
   let lastLagTick = deps.monotonicNow()
@@ -342,8 +347,11 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
 export function startProcessDiagnostics(options: ProcessDiagnosticsOptions = {}): ProcessDiagnostics {
   const deps: ProcessDiagnosticsDeps = { ...defaultDeps(), ...options }
   const diagnostics = createProcessDiagnostics(options)
+  registerChatSendStageIpc()
   app.on('render-process-gone', (_event, webContents, details) => {
     diagnostics.recordRendererGone(webContents.id, details)
+    // A later death of the reloaded page must not repeat this page's last stage.
+    forgetChatSendStage(webContents.id)
   })
   app.on('child-process-gone', (_event, details) => {
     diagnostics.recordChildGone(details)

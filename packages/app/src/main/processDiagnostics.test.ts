@@ -13,7 +13,8 @@ const h = vi.hoisted(() => {
       getPath: vi.fn((name: string) => `/user-data/${name}`)
     },
     crashReporter: { start: vi.fn() },
-    powerMonitor: { on: vi.fn() }
+    powerMonitor: { on: vi.fn() },
+    ipcMain: { on: vi.fn((channel: string, listener: (...args: unknown[]) => void) => appListeners.set(`ipc:${channel}`, listener)) }
   }
 })
 
@@ -21,10 +22,12 @@ vi.mock('electron', () => ({
   app: h.app,
   BrowserWindow: { getAllWindows: () => [] },
   crashReporter: h.crashReporter,
-  powerMonitor: h.powerMonitor
+  powerMonitor: h.powerMonitor,
+  ipcMain: h.ipcMain
 }))
 
 import { markAppQuitting, resetAppQuittingForTests } from './appQuitState'
+import { resetChatSendStagesForTests } from './chatSendStageBreadcrumbs'
 import {
   appendProcessEventLine,
   createProcessDiagnostics,
@@ -73,6 +76,7 @@ describe('processDiagnostics', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     resetAppQuittingForTests()
+    resetChatSendStagesForTests()
   })
 
   it('starts the crash handler without upload', () => {
@@ -148,14 +152,22 @@ describe('processDiagnostics', () => {
     ])
   })
 
-  it('wires app-level renderer and child deaths', () => {
+  it('wires app-level renderer and child deaths with the breadcrumb the renderer reported', () => {
     startProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setInterval: () => ({}), setTimeout: () => ({}) })
+    const breadcrumb = { stage: 'request-built', messageCount: 3, imageCount: 8, imageBytes: 7_000_000, dataUrlCount: 8, dataUrlChars: 9_300_000, usedJSHeapSize: 900_000_000, jsHeapSizeLimit: 2_300_000_000 }
+    h.appListeners.get('ipc:app:chat-send-stage')?.({ sender: { id: 3, isDestroyed: () => false } }, breadcrumb)
     h.appListeners.get('render-process-gone')?.({}, { id: 3 }, { reason: 'crashed', exitCode: 5 })
     h.appListeners.get('child-process-gone')?.({}, { type: 'GPU', reason: 'oom', exitCode: 1 })
-    expect(readLines().map((line) => [line.kind, line.reason, line.webContentsId])).toEqual([
+    const lines = readLines()
+    expect(lines.map((line) => [line.kind, line.reason, line.webContentsId])).toEqual([
       ['renderer-gone', 'crashed', 3],
       ['child-gone', 'oom', undefined]
     ])
+    expect(lines[0].lastSendStage).toMatchObject(breadcrumb)
+    // The dead page's breadcrumb is not repeated for later deaths.
+    expect(lines[1].lastSendStage).toBeNull()
+    h.appListeners.get('render-process-gone')?.({}, { id: 3 }, { reason: 'crashed', exitCode: 5 })
+    expect(readLines()[2].lastSendStage).toBeNull()
   })
 
   it('keeps the file bounded to the last 200 lines', () => {

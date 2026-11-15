@@ -259,4 +259,17 @@ describe('preload capability boundary', () => {
     appEvents.onRendererRecovered(callback)
     expect(callback).not.toHaveBeenCalled()
   })
+
+  it('forwards only exact send-stage breadcrumbs on their one channel', () => {
+    const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
+    expect(Object.keys(appDiagnostics)).toEqual(['reportChatSendStage'])
+    const breadcrumb = { stage: 'request-built', messageCount: 1, imageCount: 8, imageBytes: 10, dataUrlCount: 8, dataUrlChars: 99 }
+
+    appDiagnostics.reportChatSendStage(breadcrumb)
+    appDiagnostics.reportChatSendStage({ ...breadcrumb, content: 'secret' })
+    appDiagnostics.reportChatSendStage('request-built')
+
+    expect(sendMock).toHaveBeenCalledExactlyOnceWith('app:chat-send-stage', breadcrumb)
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
 })

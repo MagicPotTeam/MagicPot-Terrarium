@@ -1,6 +1,7 @@
 // packages/app/src/preload/index.d.ts
 import type { Api } from '@shared/api'
 import type {
+  AppDiagnosticsBridge,
   AppEventBridge,
   BuiltInPath,
   CanvasScreenshotBridge,
@@ -23,6 +24,7 @@ export type ProjectCanvasBenchmarkRuntimeBridge = Readonly<{
 declare global {
   interface Window {
     appEvents?: AppEventBridge
+    appDiagnostics?: AppDiagnosticsBridge
     canvasScreenshot?: CanvasScreenshotBridge
     electronFile?: ElectronFileBridge
     api: Api

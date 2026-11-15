@@ -53,6 +53,7 @@ import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
 import { isRunnableProfile, usesOpenAIResponsesImagePolicy } from '@shared/llm/utils'
 import { DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY } from '@shared/llm/openaiResponses'
 import { MAX_LLM_CHUNKED_BINARY_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
+import { summarizeChatSendStage, type ChatSendStage } from '@shared/utils/chatSendStageBreadcrumb'
 export { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 type ChatRequestPayload = {
@@ -2689,6 +2690,28 @@ const assertGoalProgressInput = (input: RequestChatCompletionInput): void => {
   if (input.goalProgressToken === undefined) return
   if (typeof input.goalProgressToken !== 'string' || !input.goalProgressToken || input.config.use_remote_llm || input.externalAgentSkill || input.skillRuntime || input.sessionUrl || input.isEdit || input.imageRequest || input.imageGenerationOptions && input.imageGenerationOptions.enabled !== false || input.messages.some(message => message.attachments?.length || message.hiddenContext)) throw new Error('Goal progress sharing supports only the explicit plain local text request; no remote/skill/media/continuation fallback.')
 }
+type PerformanceWithMemory = Performance & {
+  memory?: { usedJSHeapSize?: number; jsHeapSizeLimit?: number }
+}
+
+/**
+ * Local diagnostics: tells the main process which send stage this renderer reached, so that a
+ * renderer death can be placed in the send. Counts and sizes only (never text, names or paths);
+ * it never changes the request or the visible status, and a missing bridge is a no-op.
+ */
+const reportChatSendStage = (
+  stage: ChatSendStage,
+  messages: Parameters<typeof summarizeChatSendStage>[1]
+): void => {
+  try {
+    const report = typeof window === 'undefined' ? undefined : window.appDiagnostics?.reportChatSendStage
+    if (!report) return
+    const memory = typeof performance === 'undefined' ? undefined : (performance as PerformanceWithMemory).memory
+    report(summarizeChatSendStage(stage, messages, memory))
+  } catch {
+    // Diagnostics must never affect a send.
+  }
+}
 export const requestChatCompletion = async (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
@@ -2698,6 +2721,7 @@ export const requestChatCompletion = async (
   validateCustomSkillForSend(input.externalAgentSkill)
   throwIfAborted(input.signal)
   const requestInput = projectRequestInputForTransport(input)
+  reportChatSendStage('request-start', requestInput.messages)
   assertExplicitUserImageCount(
     requestInput.messages.findLast((message) => message.role === 'user')?.attachments
   )
@@ -2712,6 +2736,7 @@ export const requestChatCompletion = async (
     requestInput.signal
   )
   throwIfAborted(requestInput.signal)
+  reportChatSendStage('images-checked', preflightMessages)
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
@@ -2731,10 +2756,13 @@ export const requestChatCompletion = async (
       shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
-  return dispatchChatCompletionRequest({
+  reportChatSendStage('request-built', requestMessages)
+  const result = await dispatchChatCompletionRequest({
     ...requestInput,
     messages: requestMessages
   })
+  reportChatSendStage('reply-finished', requestMessages)
+  return result
 }
 
 export const requestChatCompletionStream = async (
@@ -2746,6 +2774,7 @@ export const requestChatCompletionStream = async (
   validateCustomSkillForSend(input.externalAgentSkill)
   throwIfAborted(input.signal)
   const requestInput = projectRequestInputForTransport(input)
+  reportChatSendStage('request-start', requestInput.messages)
   assertExplicitUserImageCount(
     requestInput.messages.findLast((message) => message.role === 'user')?.attachments
   )
@@ -2760,6 +2789,7 @@ export const requestChatCompletionStream = async (
     requestInput.signal
   )
   throwIfAborted(requestInput.signal)
+  reportChatSendStage('images-checked', preflightMessages)
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
@@ -2779,10 +2809,12 @@ export const requestChatCompletionStream = async (
       shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
+  reportChatSendStage('request-built', requestMessages)
   const result = await dispatchChatCompletionStreamRequest({
     ...requestInput,
     messages: requestMessages
   })
+  reportChatSendStage('reply-finished', requestMessages)
 
   const normalizedResult = applySkillOutputModeContract(
     result.result,

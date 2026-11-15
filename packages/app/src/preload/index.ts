@@ -2,7 +2,12 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { newApiIpc } from './apiIpc'
 import pkgPath from 'path'
-import type { AppEventBridge, BuiltInPath, CanvasScreenshotBridge } from '@shared/utils/utilWindow'
+import type {
+  AppDiagnosticsBridge,
+  AppEventBridge,
+  BuiltInPath,
+  CanvasScreenshotBridge
+} from '@shared/utils/utilWindow'
 import type { Api } from '@shared/api'
 import { winBridge } from './winBridge'
 import { createExternalImageDropAuthorization } from './externalImageDropLease'
@@ -11,6 +16,10 @@ import {
   RENDERER_RECOVERED_CHANNEL,
   type RendererRecoveredEvent
 } from '@shared/utils/rendererRecoveryEvent'
+import {
+  CHAT_SEND_STAGE_CHANNEL,
+  parseChatSendStageBreadcrumb
+} from '@shared/utils/chatSendStageBreadcrumb'
 
 // 渲染进程的自定义 API
 const api: Api = newApiIpc()
@@ -142,6 +151,14 @@ const appEvents: AppEventBridge = {
   onRendererRecovered: subscribeToRendererRecovery
 }
 
+// Fire-and-forget: one small breadcrumb per chat send stage (counts and sizes only).
+const appDiagnostics: AppDiagnosticsBridge = {
+  reportChatSendStage: (breadcrumb) => {
+    const checked = parseChatSendStageBreadcrumb(breadcrumb)
+    if (checked) ipcRenderer.send(CHAT_SEND_STAGE_CHANNEL, checked)
+  }
+}
+
 async function authorizeLocalMediaFilePath(filePath: string): Promise<boolean> {
   if (!filePath) return false
   try {
@@ -165,6 +182,7 @@ if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('canvasScreenshot', canvasScreenshot)
     contextBridge.exposeInMainWorld('appEvents', appEvents)
+    contextBridge.exposeInMainWorld('appDiagnostics', appDiagnostics)
     contextBridge.exposeInMainWorld('electronFile', electronFile)
     contextBridge.exposeInMainWorld('api', api)
     contextBridge.exposeInMainWorld('path', path)
@@ -184,6 +202,9 @@ if (process.contextIsolated) {
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- named app event bridge is injected at runtime
   // @ts-ignore
   window.appEvents = appEvents
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- diagnostics bridge is injected at runtime
+  // @ts-ignore
+  window.appDiagnostics = appDiagnostics
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Electron file bridge is injected at runtime
   // @ts-ignore
   window.electronFile = electronFile

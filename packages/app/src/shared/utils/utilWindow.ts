@@ -5,6 +5,7 @@
  * 通过在 preload 往 window 注入，使渲染进程处理与 Node 端一致
  */
 import type { RendererRecoveredEvent } from './rendererRecoveryEvent'
+import type { ChatSendStageBreadcrumb } from './chatSendStageBreadcrumb'
 
 ///////////
 // built-in path
@@ -79,6 +80,11 @@ export type AppEventBridge = {
    * The event is kept until the first subscriber, so a late subscription still receives it.
    */
   onRendererRecovered: (cb: (event: RendererRecoveredEvent) => void) => () => void
+}
+
+/** Local diagnostics only: kept in the main process, never sent anywhere. */
+export type AppDiagnosticsBridge = {
+  reportChatSendStage: (breadcrumb: ChatSendStageBreadcrumb) => void
 }
 
 export type WinBridge = {
