@@ -4939,6 +4939,27 @@ describe('ChatPage runtime workflow integration', () => {
     expect(readCurrentSessionState()?.messages).toEqual(original.messages)
     expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
   })
+  it('accepts the branch confirmation after the typed command was saved and cleared as a draft', async () => {
+    renderChatPage()
+    await waitFor(()=>expect(readCurrentSessionState()?.id).toBeTruthy())
+    const original = readCurrentSessionState()!
+    const key = `runtime-flow:${original.id}`
+    // A person types slower than the draft is saved: the session record then carries the command as its draft.
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target:{value:'/branch'} })
+    await waitFor(()=>expect(readCurrentSessionState()?.draft?.inputValue).toBe('/branch'))
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    const card = await screen.findByTestId('chat-command-confirm-card')
+    // The accepted command clears the draft, which replaces the session record once more.
+    await waitFor(()=>expect(readCurrentSessionState()?.draft).toBeUndefined())
+    expect(hoisted.draftBackups.value[key]?.draft).toBeUndefined()
+    hoisted.notifyWarningMock.mockClear()
+    fireEvent.click(within(card).getByRole('button',{name:'chat.command_card.new_conversation'}))
+    // Only other messages make the question stale; a saved or cleared draft does not.
+    expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+    await waitFor(()=>expect(readCurrentSessionState()?.id).not.toBe(original.id))
+    expect(readCurrentSessionState()?.messages).toEqual(original.messages)
+    expect(readCurrentSessionState()?.draft).toBeUndefined()
+  })
   it.each([['/regen','original replay text'],['/edit 1 replacement','replacement']])('opens %s as an unsent separate draft and preserves original messages', async (command, expectedDraft) => {
     renderChatPage()
     await waitFor(()=>expect(readCurrentSessionState()?.id).toBeTruthy())

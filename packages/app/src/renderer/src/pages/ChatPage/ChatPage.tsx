@@ -8961,10 +8961,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   /** Creates the separate conversation of a confirmed /branch, /regen or /edit. False when the command can no longer run. */
   const runReplay = (view: NonNullable<typeof replayView>): boolean => {
     const id = currentSessionIdRef.current
-    if (!active || !isReady || !sessionsLoaded || sessionLoadError || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || id !== view.session.id || storageScopeRef.current !== storageScope || sessionsRef.current.find(item=>item.id===id) !== view.session || view.modelConfig !== config.llm_config || view.profileId !== selectedProfileId || view.skillId !== selectedSkillId || loadingSessionIdsRef.current.has(id) || config.use_remote_llm || hasSessionDeleteTombstone(id,storageScope) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id))) { notifyWarning(t('chat.conversation_settings_changed_reopen', { defaultValue: 'Conversation or settings changed. Reopen command.' })); return false }
+    // The record of the conversation is replaced whenever a draft is saved or cleared (also by the
+    // command's own text), so the question is stale only when the messages are no longer the same.
+    const source = sessionsRef.current.find(item=>item.id===id)
+    if (!active || !isReady || !sessionsLoaded || sessionLoadError || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current || id !== view.session.id || storageScopeRef.current !== storageScope || !source || source.messages !== view.session.messages || view.modelConfig !== config.llm_config || view.profileId !== selectedProfileId || view.skillId !== selectedSkillId || loadingSessionIdsRef.current.has(id) || config.use_remote_llm || hasSessionDeleteTombstone(id,storageScope) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope,id))) { notifyWarning(t('chat.conversation_settings_changed_reopen', { defaultValue: 'Conversation or settings changed. Reopen command.' })); return false }
     try {
-      const planned = view.command.kind === 'branch' ? null : planReplay(view.session.messages,view.command)
-      const copy = cloneChatSessionForReplay(view.session, planned?.baseMessages)
+      const planned = view.command.kind === 'branch' ? null : planReplay(source.messages,view.command)
+      const copy = cloneChatSessionForReplay(source, planned?.baseMessages)
       const branch = { ...copy, id: crypto.randomUUID(), title: `${copy.title} [${view.command.kind}]`, messages: copy.messages, createdAt:Date.now(), updatedAt:Date.now() }
       delete branch.sessionUrl
       delete branch.teamLeadId
@@ -8993,8 +8996,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }
   /** Marks the missing images of a confirmed /repair-images for the next requests. False when the conversation has changed since the scan. */
   const confirmImageRepair = (repair: { session: ChatSession; scan: ImageRepairScan }): boolean => {
-    if (sessionsRef.current.find(session => session.id === currentSessionIdRef.current) !== repair.session ||
-      loadingSessionIdsRef.current.has(repair.session.id) || storageScopeRef.current !== storageScope ||
+    // As for a replay: a saved or cleared draft replaces the record, only other messages make the scan stale.
+    if (sessionsRef.current.find(session => session.id === currentSessionIdRef.current)?.messages !== repair.session.messages ||
+      currentSessionIdRef.current !== repair.session.id || loadingSessionIdsRef.current.has(repair.session.id) || storageScopeRef.current !== storageScope ||
       hasSessionDeleteTombstone(repair.session.id, storageScope)) {
       notifyWarning(t('chat.conversation_changed_repair', { defaultValue: 'Conversation changed. Run /repair-images again.' })); return false
     }
