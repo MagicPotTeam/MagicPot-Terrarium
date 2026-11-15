@@ -1,4 +1,13 @@
 import {
+  CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN,
+  CANVAS_MIRROR_ASSET_KEY_PATTERN,
+  CanvasMirrorAssetResp,
+  CopyCanvasMirrorAssetReq,
+  ListCanvasMirrorAssetsReq,
+  ListCanvasMirrorAssetsResp,
+  PruneCanvasMirrorAssetsReq,
+  PruneCanvasMirrorAssetsResp,
+  WriteCanvasMirrorAssetReq,
   FsSvc,
   MAX_FILENAME_LENGTH,
   MAX_FULL_FILE_BYTES,
@@ -28,6 +37,7 @@ import {
   WriteTextFileResp
 } from '@shared/api/svcFs'
 import fs from 'fs/promises'
+import { constants as fsConstants, type Stats } from 'fs'
 import * as path from 'path'
 import { getCurrentUserDataDirectoryState } from '../config/userDataDirectory'
 import { app } from 'electron'
@@ -222,6 +232,177 @@ const readImageFileWithinByteBudget = (fullPath: string, maxBytes: number): Prom
 function normalizeExtension(value: string): string {
   const normalized = value.trim().toLowerCase()
   return normalized.startsWith('.') ? normalized : `.${normalized}`
+}
+
+// ─── Canvas autosave mirror assets ───────────────────────────────────────────
+const CANVAS_MIRROR_ASSET_DIRNAME = 'assets'
+const CANVAS_MIRROR_CANVAS_FILENAME = 'project.mpcanvas'
+const CANVAS_MIRROR_SNAPSHOT_DIR_PATTERN =
+  /^snapshot-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const CANVAS_MIRROR_TEMP_FILE_PATTERN =
+  /^\.[bfu]-[0-9a-f]{40}(?:\.[a-z0-9]{1,16})?\.tmp-\d+-\d+-[0-9a-z]+$/
+/** Unreferenced entries younger than this are kept: another window may be about to reference them. */
+export const CANVAS_MIRROR_PRUNE_GRACE_MS = 10 * 60 * 1000
+
+const requireCanvasMirrorProjectDirName = (projectDirName: string): string => {
+  const name = requireBasename(projectDirName)
+  if (name !== name.trim() || name.includes(':')) {
+    throw new Error('Invalid canvas mirror project directory name')
+  }
+  return name
+}
+
+const requireCanvasMirrorAssetFileName = (assetFileName: string): string => {
+  if (typeof assetFileName !== 'string' || !CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(assetFileName)) {
+    throw new Error('Invalid canvas mirror asset file name')
+  }
+  return assetFileName
+}
+
+const lstatOrNull = async (targetPath: string): Promise<Stats | null> => {
+  try {
+    return await runBoundedFsOp(() => fs.lstat(targetPath))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+/**
+ * Resolves <autoSaveRoot>/<projectDirName>/assets. Neither the project folder
+ * nor the asset folder may be a symbolic link, and the real asset folder must
+ * be exactly two levels below the real autosave root. Returns null when the
+ * folder does not exist and `create` is false.
+ */
+const resolveCanvasMirrorAssetDir = async (
+  projectDirName: string,
+  create: boolean
+): Promise<{ projectDir: string; assetDir: string } | null> => {
+  const autoSaveRoot = path.resolve(getCurrentUserDataDirectoryState().autoSaveRoot)
+  const projectDir = resolveContainedFile(
+    autoSaveRoot,
+    requireCanvasMirrorProjectDirName(projectDirName)
+  )
+  const assetDir = path.join(projectDir, CANVAS_MIRROR_ASSET_DIRNAME)
+
+  for (const directory of [projectDir, assetDir]) {
+    let stats = await lstatOrNull(directory)
+    if (!stats) {
+      if (!create) return null
+      await runBoundedFsOp(() => fs.mkdir(directory, { recursive: true }))
+      stats = await lstatOrNull(directory)
+    }
+    if (!stats || stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw new Error('Canvas mirror folder is not a plain directory')
+    }
+  }
+
+  const [realRoot, realAssetDir] = await Promise.all([
+    runBoundedFsOp(() => fs.realpath(autoSaveRoot)),
+    runBoundedFsOp(() => fs.realpath(assetDir))
+  ])
+  const relative = path.relative(realRoot, realAssetDir)
+  const segments = relative.split(path.sep)
+  if (
+    path.isAbsolute(relative) ||
+    segments.length !== 2 ||
+    segments.some((segment) => !segment || segment === '.' || segment === '..')
+  ) {
+    throw new Error('Canvas mirror folder is outside the autosave root')
+  }
+  return { projectDir, assetDir }
+}
+
+const canvasMirrorAssetWrites = new Map<string, Promise<CanvasMirrorAssetResp>>()
+
+/**
+ * Publishes one content-keyed mirror asset. An existing file is never
+ * replaced (the stored project file may reference it), except an empty file
+ * left behind by an interrupted write. The bytes go to a temporary file that
+ * is flushed and then linked into place, so a reader never sees a partial file.
+ */
+const publishCanvasMirrorAsset = async (
+  assetDir: string,
+  assetFileName: string,
+  sourceSizeBytes: number,
+  writeTemp: (tempPath: string) => Promise<void>
+): Promise<CanvasMirrorAssetResp> => {
+  const destination = path.join(assetDir, requireCanvasMirrorAssetFileName(assetFileName))
+  const previous = canvasMirrorAssetWrites.get(destination)
+  const run = async (): Promise<CanvasMirrorAssetResp> => {
+    const existing = await lstatOrNull(destination)
+    if (existing && (existing.isSymbolicLink() || !existing.isFile())) {
+      throw new Error('Canvas mirror asset path is not a regular file')
+    }
+    const repairEmptyFile = !!existing && existing.size === 0 && sourceSizeBytes > 0
+    if (existing && !repairEmptyFile) {
+      return { status: 'exists', sizeBytes: existing.size }
+    }
+
+    const tempPath = path.join(
+      assetDir,
+      `.${assetFileName}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    )
+    try {
+      await runBoundedFsOp(async () => {
+        await writeTemp(tempPath)
+        const handle = await fs.open(tempPath, 'r+')
+        try {
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+      })
+      const written = await runBoundedFsOp(() => fs.lstat(tempPath))
+      if (repairEmptyFile) {
+        await runBoundedFsOp(() => fs.rename(tempPath, destination))
+        return { status: 'written', sizeBytes: written.size }
+      }
+      try {
+        await runBoundedFsOp(() => fs.link(tempPath, destination))
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'EEXIST') {
+          const winner = await runBoundedFsOp(() => fs.lstat(destination))
+          return { status: 'exists', sizeBytes: winner.size }
+        }
+        // File systems without hard links: move into place unless it appeared meanwhile.
+        const appeared = await lstatOrNull(destination)
+        if (appeared) return { status: 'exists', sizeBytes: appeared.size }
+        await runBoundedFsOp(() => fs.rename(tempPath, destination))
+      }
+      return { status: 'written', sizeBytes: written.size }
+    } finally {
+      await fs.rm(tempPath, { force: true }).catch(() => undefined)
+    }
+  }
+  const result = previous ? previous.then(run, run) : run()
+  canvasMirrorAssetWrites.set(destination, result)
+  try {
+    return await result
+  } finally {
+    if (canvasMirrorAssetWrites.get(destination) === result) {
+      canvasMirrorAssetWrites.delete(destination)
+    }
+  }
+}
+
+const getNewestTimeMs = (stats: Stats): number =>
+  Math.max(stats.mtimeMs || 0, stats.ctimeMs || 0, stats.birthtimeMs || 0)
+
+/** Collects every relative "assets/..." reference found in a stored project file. */
+const collectCanvasMirrorAssetRefs = (value: unknown, target: Set<string>, depth = 0): void => {
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[\\/]+/g, '/').replace(/^\.\//, '')
+    if (normalized.startsWith(`${CANVAS_MIRROR_ASSET_DIRNAME}/`)) target.add(normalized)
+    return
+  }
+  if (!value || typeof value !== 'object' || depth > 64) return
+  if (Array.isArray(value)) {
+    for (const entry of value) collectCanvasMirrorAssetRefs(entry, target, depth + 1)
+    return
+  }
+  for (const entry of Object.values(value)) collectCanvasMirrorAssetRefs(entry, target, depth + 1)
 }
 
 export class FsSvcImpl implements FsSvc {
@@ -507,7 +688,15 @@ export class FsSvcImpl implements FsSvc {
     await runBoundedFsOp(async () => {
       const tempPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`
       try {
-        await fs.writeFile(tempPath, content, 'utf8')
+        // Flushed before the rename: callers delete what the previous version
+        // of the file referenced once this write is acknowledged.
+        const handle = await fs.open(tempPath, 'w')
+        try {
+          await handle.writeFile(content, 'utf8')
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
         await fs.rename(tempPath, fullPath)
       } finally {
         await fs.rm(tempPath, { force: true }).catch(() => undefined)
@@ -518,6 +707,158 @@ export class FsSvcImpl implements FsSvc {
       success: true,
       fullPath
     }
+  }
+
+  /** The roots the renderer may read media from; the same list readImageFromPath uses. */
+  private getCanvasMirrorSourceRoots = (): string[] => {
+    const storageState = getCurrentUserDataDirectoryState()
+    return [
+      app.getPath('userData'),
+      path.join(app.getPath('temp'), 'magicpot-local-media'),
+      storageState.projectRoot,
+      storageState.autoSaveRoot
+    ]
+  }
+
+  copyCanvasMirrorAsset = async (req: CopyCanvasMirrorAssetReq): Promise<CanvasMirrorAssetResp> => {
+    const assetFileName = requireCanvasMirrorAssetFileName(req.assetFileName)
+    // Canonical (symlinks resolved) and authorized exactly like readImageFromPath.
+    const sourcePath = resolveAuthorizedLocalMediaPath(
+      req.sourcePath,
+      this.getCanvasMirrorSourceRoots()
+    )
+    if (!sourcePath) {
+      throw new Error('Canvas mirror asset source is not authorized')
+    }
+    const sourceStats = await runBoundedFsOp(() => fs.stat(sourcePath))
+    if (!sourceStats.isFile()) {
+      throw new Error('Canvas mirror asset source is not a file')
+    }
+    const location = await resolveCanvasMirrorAssetDir(req.projectDirName, true)
+    if (!location) throw new Error('Canvas mirror folder is unavailable')
+    return publishCanvasMirrorAsset(location.assetDir, assetFileName, sourceStats.size, (tempPath) =>
+      fs.copyFile(sourcePath, tempPath, fsConstants.COPYFILE_EXCL)
+    )
+  }
+
+  writeCanvasMirrorAsset = async (
+    req: WriteCanvasMirrorAssetReq
+  ): Promise<CanvasMirrorAssetResp> => {
+    const assetFileName = requireCanvasMirrorAssetFileName(req.assetFileName)
+    requireBoundedPayload(req.data, MAX_FULL_FILE_BYTES, 'Canvas mirror asset')
+    const location = await resolveCanvasMirrorAssetDir(req.projectDirName, true)
+    if (!location) throw new Error('Canvas mirror folder is unavailable')
+    return publishCanvasMirrorAsset(
+      location.assetDir,
+      assetFileName,
+      req.data.byteLength,
+      (tempPath) => fs.writeFile(tempPath, Buffer.from(req.data), { flag: 'wx' })
+    )
+  }
+
+  listCanvasMirrorAssets = async (
+    req: ListCanvasMirrorAssetsReq
+  ): Promise<ListCanvasMirrorAssetsResp> => {
+    const location = await resolveCanvasMirrorAssetDir(req.projectDirName, false)
+    if (!location) return { assetFileNames: [] }
+    const entries = await runBoundedFsOp(() =>
+      fs.readdir(location.assetDir, { withFileTypes: true })
+    )
+    const assetFileNames: string[] = []
+    for (const entry of entries) {
+      if (!entry.isFile() || !CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(entry.name)) continue
+      // An empty file is an interrupted write; report it as missing so it is written again.
+      const stats = await lstatOrNull(path.join(location.assetDir, entry.name))
+      if (stats?.isFile() && stats.size > 0) assetFileNames.push(entry.name)
+    }
+    return { assetFileNames }
+  }
+
+  /**
+   * Deletes the content-keyed assets and the snapshot folders of earlier
+   * versions that the stored project file no longer references. Only entries
+   * directly under <autoSaveRoot>/<projectDirName>/assets that match one of
+   * those two name patterns are ever removed; entries younger than the grace
+   * period, entries the caller asks to keep and symbolic links are left alone.
+   * Without a readable project file nothing is deleted.
+   */
+  pruneCanvasMirrorAssets = async (
+    req: PruneCanvasMirrorAssetsReq
+  ): Promise<PruneCanvasMirrorAssetsResp> => {
+    const result: PruneCanvasMirrorAssetsResp = {
+      removedAssetFileNames: [],
+      removedSnapshotDirNames: []
+    }
+    const location = await resolveCanvasMirrorAssetDir(req.projectDirName, false)
+    if (!location) return result
+
+    const canvasPath = path.join(location.projectDir, CANVAS_MIRROR_CANVAS_FILENAME)
+    const referenced = new Set<string>()
+    try {
+      const canvasStats = await runBoundedFsOp(() => fs.lstat(canvasPath))
+      if (canvasStats.isSymbolicLink() || !canvasStats.isFile()) return result
+      if (canvasStats.size > MAX_TEXT_FILE_BYTES) return result
+      const parsed: unknown = JSON.parse(await runBoundedFsOp(() => fs.readFile(canvasPath, 'utf8')))
+      if (!parsed || typeof parsed !== 'object') return result
+      collectCanvasMirrorAssetRefs(parsed, referenced)
+    } catch {
+      return result
+    }
+
+    const keepEntryNames = new Set<string>(req.keepEntryNames)
+    const keepAssetKeys = new Set<string>(
+      req.keepAssetKeys.filter((key) => CANVAS_MIRROR_ASSET_KEY_PATTERN.test(key))
+    )
+    for (const ref of referenced) {
+      const entryName = ref.split('/')[1]
+      if (entryName) keepEntryNames.add(entryName)
+    }
+    const comparable = (name: string): string =>
+      process.platform === 'win32' || process.platform === 'darwin' ? name.toLowerCase() : name
+    const keepComparableNames = new Set([...keepEntryNames].map(comparable))
+
+    const now = Date.now()
+    const isYoung = (stats: Stats): boolean =>
+      now - getNewestTimeMs(stats) < CANVAS_MIRROR_PRUNE_GRACE_MS
+    const entries = await runBoundedFsOp(() =>
+      fs.readdir(location.assetDir, { withFileTypes: true })
+    )
+    for (const entry of entries) {
+      const entryPath = path.join(location.assetDir, entry.name)
+      if (path.dirname(entryPath) !== location.assetDir) continue
+      if (keepComparableNames.has(comparable(entry.name))) continue
+      try {
+        const stats = await runBoundedFsOp(() => fs.lstat(entryPath))
+        if (stats.isSymbolicLink()) continue
+
+        if (stats.isFile()) {
+          const isAsset = CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(entry.name)
+          const isTemp = CANVAS_MIRROR_TEMP_FILE_PATTERN.test(entry.name)
+          if (!isAsset && !isTemp) continue
+          if (isAsset && keepAssetKeys.has(entry.name.split('.')[0])) continue
+          if (isYoung(stats)) continue
+          await runBoundedFsOp(() => fs.unlink(entryPath))
+          if (isAsset) result.removedAssetFileNames.push(entry.name)
+          continue
+        }
+
+        if (!stats.isDirectory() || !CANVAS_MIRROR_SNAPSHOT_DIR_PATTERN.test(entry.name)) continue
+        // A writer of an earlier version fills the category folders of a snapshot before
+        // its project file; their timestamps move with every file it adds.
+        let newestMs = getNewestTimeMs(stats)
+        const children = await runBoundedFsOp(() => fs.readdir(entryPath, { withFileTypes: true }))
+        for (const child of children) {
+          const childStats = await lstatOrNull(path.join(entryPath, child.name))
+          if (childStats) newestMs = Math.max(newestMs, getNewestTimeMs(childStats))
+        }
+        if (now - newestMs < CANVAS_MIRROR_PRUNE_GRACE_MS) continue
+        await runBoundedFsOp(() => fs.rm(entryPath, { recursive: true, force: true }))
+        result.removedSnapshotDirNames.push(entry.name)
+      } catch (error) {
+        console.warn('[svcFs] Failed to prune a canvas mirror entry:', entry.name, error)
+      }
+    }
+    return result
   }
 
   readLoraTriggerWordsNative = async (

@@ -642,3 +642,391 @@ describe('content-addressed canvas blob store', () => {
     expect(loaded.items[0]).not.toHaveProperty('assetKey')
   })
 })
+
+// ─── Autosave mirror ─────────────────────────────────────────────────────────
+// An in-memory stand-in for the main-side mirror calls on a POSIX layout.
+function createFakeMirror() {
+  const autoSaveRoot = '/home/u/AutoSave'
+  /** Files of the mirror folders, by full path. */
+  const files = new Map<string, Uint8Array>()
+  const text = new Map<string, string>()
+  /** Files elsewhere on disk that main may read. */
+  const localFiles = new Map<string, Uint8Array>()
+  const events: string[] = []
+  const calls = {
+    copy: [] as Array<{ assetFileName: string; sourcePath: string }>,
+    write: [] as Array<{ assetFileName: string; bytes: number }>,
+    prune: [] as Array<{ keepAssetKeys: string[]; keepEntryNames: string[] }>,
+    readFileFromPath: [] as string[],
+    saveImageToPath: [] as string[]
+  }
+  const state = { failProjectFileWrite: false, refuseCopy: false }
+  const assetPath = (projectDirName: string, assetFileName: string): string =>
+    `${autoSaveRoot}/${projectDirName}/assets/${assetFileName}`
+  const publish = (target: string, data: Uint8Array) => {
+    const existing = files.get(target)
+    if (existing) return { status: 'exists' as const, sizeBytes: existing.byteLength }
+    files.set(target, data.slice())
+    return { status: 'written' as const, sizeBytes: data.byteLength }
+  }
+  const readable = (fullPath: string): Uint8Array | undefined =>
+    localFiles.get(fullPath) ?? files.get(fullPath)
+
+  const svcFs = {
+    copyCanvasMirrorAsset: async (req: {
+      projectDirName: string
+      assetFileName: string
+      sourcePath: string
+    }) => {
+      calls.copy.push({ assetFileName: req.assetFileName, sourcePath: req.sourcePath })
+      const data = readable(req.sourcePath)
+      if (state.refuseCopy || !data) throw new Error('Canvas mirror asset source is not authorized')
+      events.push(`asset:${req.assetFileName}`)
+      return publish(assetPath(req.projectDirName, req.assetFileName), data)
+    },
+    writeCanvasMirrorAsset: async (req: {
+      projectDirName: string
+      assetFileName: string
+      data: Uint8Array
+    }) => {
+      calls.write.push({ assetFileName: req.assetFileName, bytes: req.data.byteLength })
+      events.push(`asset:${req.assetFileName}`)
+      return publish(assetPath(req.projectDirName, req.assetFileName), req.data)
+    },
+    listCanvasMirrorAssets: async (req: { projectDirName: string }) => {
+      const prefix = assetPath(req.projectDirName, '')
+      return {
+        assetFileNames: [...files.keys()]
+          .filter((fullPath) => fullPath.startsWith(prefix) && !fullPath.slice(prefix.length).includes('/'))
+          .map((fullPath) => fullPath.slice(prefix.length))
+      }
+    },
+    pruneCanvasMirrorAssets: async (req: {
+      projectDirName: string
+      keepAssetKeys: string[]
+      keepEntryNames: string[]
+    }) => {
+      events.push('prune')
+      calls.prune.push({ keepAssetKeys: req.keepAssetKeys, keepEntryNames: req.keepEntryNames })
+      return { removedAssetFileNames: [], removedSnapshotDirNames: [] }
+    },
+    pruneAutoSaveProjects: async () => ({ removedProjectDirs: [] }),
+    writeTextFile: async (req: { outputPath: string; filename: string; content: string }) => {
+      if (state.failProjectFileWrite) throw new Error('synthetic disk full')
+      events.push('project-file')
+      const fullPath = `${req.outputPath}/${req.filename}`
+      text.set(fullPath, req.content)
+      return { success: true, fullPath }
+    },
+    readTextFile: async ({ fullPath }: { fullPath: string }) => {
+      const content = text.get(fullPath)
+      if (content === undefined) throw new Error('File not found')
+      return { content, filename: fullPath.split('/').pop()! }
+    },
+    readFileFromPath: async ({ fullPath }: { fullPath: string }) => {
+      calls.readFileFromPath.push(fullPath)
+      const data = readable(fullPath)
+      if (!data) throw new Error(`File not found: ${fullPath}`)
+      return { data, filename: fullPath.split('/').pop()! }
+    },
+    saveImageToPath: async ({ outputPath, filename }: { outputPath: string; filename: string }) => {
+      calls.saveImageToPath.push(`${outputPath}/${filename}`)
+      return { success: true, fullPath: `${outputPath}/${filename}` }
+    },
+    listFilesInFolder: async () => ({
+      files: [...files.keys()].map((fullPath) => ({ fullPath, filename: fullPath.split('/').pop()! }))
+    })
+  }
+
+  vi.stubGlobal('api', {
+    svcFs,
+    svcState: {
+      getConfig: async () => ({ config: {} }),
+      getUserDataDirectoryState: async () => ({
+        state: { autoSaveRoot, projectRoot: '/home/u/Projects' }
+      })
+    },
+    svcCanvasThumbnail: {
+      getSourceFileMetadata: async ({ fullPath }: { fullPath: string }) => {
+        const data = readable(fullPath)
+        return data
+          ? {
+              exists: true,
+              canonicalPath: fullPath,
+              sizeBytes: data.byteLength,
+              lastModifiedMs: 1_700_000_000_000
+            }
+          : { exists: false }
+      }
+    }
+  })
+  Object.defineProperty(window, 'path', {
+    configurable: true,
+    writable: true,
+    value: {
+      join: (...parts: string[]) => parts.join('/').replace(/\/+/g, '/'),
+      dirname: (value: string) => value.slice(0, value.lastIndexOf('/')),
+      basename: (value: string) => value.slice(value.lastIndexOf('/') + 1)
+    }
+  })
+
+  return {
+    autoSaveRoot,
+    files,
+    text,
+    localFiles,
+    events,
+    calls,
+    state,
+    resetCalls() {
+      calls.copy.length = 0
+      calls.write.length = 0
+      calls.prune.length = 0
+      calls.readFileFromPath.length = 0
+      calls.saveImageToPath.length = 0
+      events.length = 0
+    },
+    projectFilePath: (): string => [...text.keys()].find((name) => name.endsWith('.mpcanvas'))!,
+    projectDir(): string {
+      const projectFilePath = this.projectFilePath()
+      return projectFilePath.slice(0, projectFilePath.lastIndexOf('/'))
+    },
+    project(): { items: Array<Record<string, unknown> & { id: string; src: string }> } {
+      return JSON.parse(text.get(this.projectFilePath())!)
+    },
+    assetFiles(): string[] {
+      return [...files.keys()].map((fullPath) => fullPath.slice(fullPath.lastIndexOf('/') + 1)).sort()
+    },
+    totalBytes: (): number => [...files.values()].reduce((sum, data) => sum + data.byteLength, 0)
+  }
+}
+
+describe('content-addressed autosave mirror', () => {
+  it('writes each asset once: saving the board again moves no bytes and adds no file', async () => {
+    const mirror = createFakeMirror()
+    const a = imageItem('a', registerSource('blob:mirror-a', [1, 2, 3]))
+    const b = imageItem('b', registerSource('blob:mirror-b', [4, 5]))
+    const twin = imageItem('twin', 'blob:mirror-a')
+    await saveCanvasItems([a, b, twin], 'mirror-once')
+
+    expect(mirror.assetFiles()).toEqual(
+      [`${contentKey([1, 2, 3])}.png`, `${contentKey([4, 5])}.png`].sort()
+    )
+    expect(mirror.project().items.map((item) => item.src)).toEqual([
+      `assets/${contentKey([1, 2, 3])}.png`,
+      `assets/${contentKey([4, 5])}.png`,
+      `assets/${contentKey([1, 2, 3])}.png`
+    ])
+    // The bytes read for IndexedDB are reused: nothing is fetched twice.
+    expect(fetchCalls.sort()).toEqual(['blob:mirror-a', 'blob:mirror-b'])
+    const sizeAfterFirstSave = mirror.totalBytes()
+
+    for (let save = 0; save < 20; save += 1) {
+      mirror.resetCalls()
+      fetchCalls = []
+      fake.resetLog()
+      await saveCanvasItems(
+        [{ ...a, x: save } as CanvasItem, { ...b, y: save } as CanvasItem, twin],
+        'mirror-once'
+      )
+      expect(fetchCalls).toEqual([])
+      expect(fake.blobPuts()).toEqual([])
+      expect(mirror.calls.copy).toEqual([])
+      expect(mirror.calls.write).toEqual([])
+      expect(mirror.calls.readFileFromPath).toEqual([])
+      expect(mirror.calls.saveImageToPath).toEqual([])
+    }
+    expect(mirror.totalBytes()).toBe(sizeAfterFirstSave)
+    expect(mirror.assetFiles()).toHaveLength(2)
+    expect([...mirror.files.keys()].some((fullPath) => fullPath.includes('snapshot-'))).toBe(false)
+    expect(mirror.project().items[0]).toMatchObject({ id: 'a', x: 19 })
+  })
+
+  it('copies path-backed and managed images file-to-file and round-trips a POSIX path', async () => {
+    const mirror = createFakeMirror()
+    mirror.localFiles.set('/home/u/pics/ref one.png', new Uint8Array([7, 7, 7]))
+    mirror.localFiles.set('/home/u/userData/managed/m1.png', new Uint8Array([8, 8]))
+    const pathBacked = imageItem('path', 'local-media:///home/u/pics/ref%20one.png', {
+      fileName: 'ref one.png'
+    })
+    const managed = imageItem('managed', 'local-media:///home/u/userData/managed/m1.png', {
+      media: { kind: 'managed', id: 'media-1' }
+    })
+    await saveCanvasItems([pathBacked, managed], 'mirror-posix')
+
+    // Main copied both files itself, from their absolute POSIX paths.
+    expect(mirror.calls.copy.map((call) => call.sourcePath).sort()).toEqual([
+      '/home/u/pics/ref one.png',
+      '/home/u/userData/managed/m1.png'
+    ])
+    expect(mirror.calls.write).toEqual([])
+    expect(mirror.calls.saveImageToPath).toEqual([])
+    // Only the IndexedDB copy of the unmanaged image went through the renderer, once.
+    expect(mirror.calls.readFileFromPath).toEqual(['/home/u/pics/ref one.png'])
+    expect(mirror.assetFiles()).toHaveLength(2)
+
+    mirror.resetCalls()
+    await saveCanvasItems(
+      [{ ...pathBacked, x: 5 } as CanvasItem, { ...managed, x: 6 } as CanvasItem],
+      'mirror-posix'
+    )
+    expect(mirror.calls.copy).toEqual([])
+    expect(mirror.calls.write).toEqual([])
+    expect(mirror.calls.readFileFromPath).toEqual([])
+    expect(mirror.assetFiles()).toHaveLength(2)
+
+    // IndexedDB is gone: the board comes back from the mirror alone.
+    fake = createFakeIndexedDb()
+    vi.stubGlobal('indexedDB', fake.api)
+    const restored = await loadCanvasItems('mirror-posix')
+    expect(restored.items.map((item) => item.id)).toEqual(['path', 'managed'])
+    const restoredSources = restored.items.map((item) => (item as { src: string }).src)
+    for (const src of restoredSources) {
+      expect(src.startsWith(`local-media://${mirror.projectDir()}/assets/f-`)).toBe(true)
+    }
+    // The managed-media reference scanner still finds the media id.
+    expect((restored.items[1] as { media?: { id: string } }).media).toEqual({
+      kind: 'managed',
+      id: 'media-1'
+    })
+
+    // Saving the restored board reads the mirror file by its absolute path and
+    // references the asset files where they are instead of copying them.
+    mirror.resetCalls()
+    await saveCanvasItems(restored.items, 'mirror-posix')
+    expect(mirror.calls.readFileFromPath).toHaveLength(1)
+    expect(mirror.calls.readFileFromPath[0].startsWith(`${mirror.projectDir()}/assets/f-`)).toBe(true)
+    expect(mirror.calls.copy).toEqual([])
+    expect(mirror.calls.write).toEqual([])
+    expect(mirror.assetFiles()).toHaveLength(2)
+    expect(mirror.project().items.map((item) => `${mirror.projectDir()}/${item.src}`).sort()).toEqual(
+      restoredSources.map((src) => src.slice('local-media://'.length)).sort()
+    )
+    expect(fake.record('mirror-posix')!.items).toHaveLength(2)
+  })
+
+  it('sends the bytes through the renderer when main refuses the direct copy', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.refuseCopy = true
+    mirror.localFiles.set('/mnt/share/big.png', new Uint8Array([3, 1, 4, 1, 5]))
+    await saveCanvasItems([imageItem('big', 'local-media:///mnt/share/big.png')], 'mirror-refused')
+
+    expect(mirror.calls.copy).toHaveLength(1)
+    expect(mirror.calls.write).toHaveLength(1)
+    expect(mirror.calls.write[0].bytes).toBe(5)
+    expect(mirror.assetFiles()).toHaveLength(1)
+    expect(mirror.project().items[0].src).toBe(`assets/${mirror.assetFiles()[0]}`)
+  })
+
+  it('keeps the previous project file and every asset it names when a save is interrupted', async () => {
+    const mirror = createFakeMirror()
+    const old = imageItem('pic', registerSource('blob:crash-old', [1, 1, 1]))
+    await saveCanvasItems([old], 'mirror-crash')
+    const previousProjectFile = mirror.text.get(mirror.projectFilePath())!
+    const previousRefs = mirror.project().items.map((item) => item.src)
+    const previousBytes = previousRefs.map((ref) => [...mirror.files.get(`${mirror.projectDir()}/${ref}`)!])
+
+    // The asset of the new state is written, the project file is not.
+    mirror.state.failProjectFileWrite = true
+    mirror.resetCalls()
+    const next = imageItem('pic', registerSource('blob:crash-new', [2, 2, 2, 2]))
+    await expect(saveCanvasItems([next], 'mirror-crash')).resolves.toBeUndefined()
+
+    expect(mirror.calls.write).toHaveLength(1)
+    expect(mirror.calls.prune).toEqual([])
+    expect(mirror.text.get(mirror.projectFilePath())).toBe(previousProjectFile)
+    previousRefs.forEach((ref, index) => {
+      expect([...mirror.files.get(`${mirror.projectDir()}/${ref}`)!]).toEqual(previousBytes[index])
+    })
+
+    // Recovery from the mirror alone yields the previous board, complete.
+    fake = createFakeIndexedDb()
+    vi.stubGlobal('indexedDB', fake.api)
+    const recovered = await loadCanvasItems('mirror-crash')
+    expect(recovered.items).toHaveLength(1)
+    expect((recovered.items[0] as { src: string }).src).toBe(
+      `local-media://${mirror.projectDir()}/${previousRefs[0]}`
+    )
+
+    // The next successful save completes the interrupted one without rewriting the asset.
+    mirror.state.failProjectFileWrite = false
+    vi.stubGlobal('indexedDB', fake.api)
+    mirror.resetCalls()
+    await saveCanvasItems([next], 'mirror-crash')
+    expect(mirror.calls.write).toEqual([])
+    expect(mirror.project().items[0].src).toBe(`assets/${contentKey([2, 2, 2, 2])}.png`)
+  })
+
+  it('prunes only after the project file is acknowledged and protects what can come back', async () => {
+    const mirror = createFakeMirror()
+    const keep = imageItem('keep', registerSource('blob:prune-keep', [1]))
+    const undoable = imageItem('undoable', registerSource('blob:prune-undo', [2, 2]))
+    await saveCanvasItems([keep, undoable], 'mirror-prune')
+    expect(mirror.events.indexOf('prune')).toBeGreaterThan(mirror.events.indexOf('project-file'))
+    expect(
+      mirror.events.filter((event) => event.startsWith('asset:')).every(
+        (event) => mirror.events.indexOf(event) < mirror.events.indexOf('project-file')
+      )
+    ).toBe(true)
+
+    // A restored item of an earlier version still points into a snapshot folder of the mirror.
+    const snapshotDir = 'snapshot-11111111-2222-3333-4444-555555555555'
+    const legacyPath = `${mirror.projectDir()}/assets/${snapshotDir}/images/legacy.png`
+    mirror.files.set(legacyPath, new Uint8Array([9, 9, 9]))
+    const legacy = imageItem('legacy', `local-media://${legacyPath}`)
+
+    mirror.resetCalls()
+    await saveCanvasItems([keep, legacy], 'mirror-prune', [], [], null, {
+      getProtectedItems: () => [[keep, undoable]]
+    })
+    expect(mirror.calls.prune).toHaveLength(1)
+    const [{ keepAssetKeys, keepEntryNames }] = mirror.calls.prune
+    expect(keepAssetKeys).toContain(contentKey([1]))
+    expect(keepAssetKeys).toContain(contentKey([2, 2]))
+    expect(keepEntryNames).toEqual([snapshotDir])
+    // The legacy file was copied into the content-addressed layout, not referenced in place.
+    expect(mirror.project().items[1].src).toMatch(/^assets\/f-[0-9a-f]{40}\.png$/)
+
+    // When the history cannot be read nothing is pruned at all.
+    mirror.resetCalls()
+    await saveCanvasItems([keep], 'mirror-prune', [], [], null, {
+      getProtectedItems: () => {
+        throw new Error('history unavailable')
+      }
+    })
+    expect(mirror.calls.prune).toEqual([])
+  })
+
+  it('mirrors remote and inline sources once, keyed by their source string', async () => {
+    const mirror = createFakeMirror()
+    const remote = imageItem('remote', registerSource('https://example.invalid/a.png', [5, 5, 5]))
+    const inline = imageItem('inline', 'data:image/png;base64,AQID')
+    await saveCanvasItems([remote, inline], 'mirror-remote')
+
+    expect(mirror.assetFiles()).toHaveLength(2)
+    expect(mirror.assetFiles().every((name) => /^u-[0-9a-f]{40}\.png$/.test(name))).toBe(true)
+    expect(fetchCalls).toEqual(['https://example.invalid/a.png'])
+    // IndexedDB keeps the source strings themselves; only the mirror holds copies.
+    expect(fake.blobKeys()).toEqual([])
+    expect(fake.record('mirror-remote')!.items.map((item) => item.src)).toEqual([
+      'https://example.invalid/a.png',
+      'data:image/png;base64,AQID'
+    ])
+
+    mirror.resetCalls()
+    fetchCalls = []
+    await saveCanvasItems(
+      [{ ...remote, x: 1 } as CanvasItem, { ...inline, x: 2 } as CanvasItem],
+      'mirror-remote'
+    )
+    expect(fetchCalls).toEqual([])
+    expect(mirror.calls.write).toEqual([])
+  })
+
+  it('leaves the source of an item untouched when its bytes cannot be mirrored', async () => {
+    const mirror = createFakeMirror()
+    await saveCanvasItems([imageItem('lost', 'https://example.invalid/missing.png')], 'mirror-lost')
+    expect(mirror.assetFiles()).toEqual([])
+    expect(mirror.project().items[0].src).toBe('https://example.invalid/missing.png')
+  })
+})
