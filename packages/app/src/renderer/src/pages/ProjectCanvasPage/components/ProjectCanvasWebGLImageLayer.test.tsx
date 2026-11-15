@@ -2853,7 +2853,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     for (let index = 0; index < 20; index += 1) {
       act(() => {
         ref.current?.syncItemPreview('image-1', {
-          x: 24 + index,
+          // Every step moves the image (the item itself is at x 24), so every step renders.
+          x: 25 + index,
           y: 36,
           width: 200,
           height: 120,
@@ -3414,6 +3415,44 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(frames.pending()).toBeGreaterThanOrEqual(1)
       act(() => frames.flush())
       expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+    })
+
+    it('does not render for preview calls that change nothing on screen', async () => {
+      const items = [
+        createNamedItem('first', { x: 20 }),
+        createNamedItem('second', { x: 320 }),
+        createNamedItem('third', { x: 620 })
+      ]
+      const { ref, app } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      const rendersBefore = app.render.mock.calls.length
+      const canonical = { x: 20, y: 36, width: 200, height: 120, scaleX: 1, scaleY: 1, rotation: 0 }
+
+      // What every hit proxy does when a pan or zoom starts: reset a preview that was never
+      // set. With 160 images on screen that used to be 160 renders in one task.
+      act(() => {
+        ref.current?.setViewportInteracting(true)
+        items.forEach((item) => ref.current?.syncItemPreview(item.id, null))
+      })
+      // A preview equal to the item's own transform moves nothing either.
+      act(() => ref.current?.syncItemPreview('first', canonical))
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+      expect(frames.pending()).toBe(0)
+
+      // A real move is drawn at once, also during the gesture; repeating it is not.
+      act(() => ref.current?.syncItemPreview('first', { ...canonical, x: 64 }))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+      expect(getLiveSpriteByLabel('first')?.position.x).toBe(64)
+      act(() => ref.current?.syncItemPreview('first', { ...canonical, x: 64 }))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // Clearing the preview moves the image back: one render, then nothing.
+      act(() => ref.current?.syncItemPreview('first', null))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+      expect(getLiveSpriteByLabel('first')?.position.x).toBe(20)
+      act(() => ref.current?.syncItemPreview('first', null))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+      expect(frames.pending()).toBe(0)
     })
 
     it('does not render after the layer is gone', async () => {

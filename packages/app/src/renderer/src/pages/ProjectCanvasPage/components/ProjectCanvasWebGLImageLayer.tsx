@@ -3198,41 +3198,46 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           return
         }
 
+        // Moves the sprite to `transform`. False when nothing on screen changes: the hit
+        // proxies of all visible images reset their preview when a gesture starts, and none
+        // of those calls may cost a render.
+        const applyPreviewTransform = (transform: ProjectCanvasImagePreview) => {
+          const hadTinyPreview = record.sawTinyPreview
+          if (
+            refreshProjectCanvasTextureAfterTinyPreview(record, transform, stageScaleRef.current)
+          ) {
+            requestTextureReacquire(itemId)
+          }
+          const textureRefreshed = hadTinyPreview && !record.sawTinyPreview
+          const displayObjectReplaced = syncSpriteRecordEdgeAntialias(record, transform.rotation)
+          const transformKey = getProjectCanvasRenderTransformKey(transform)
+          const moved = record.transformKey !== transformKey
+          if (moved) {
+            applySpriteTransform(
+              record.sprite,
+              { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
+              transform
+            )
+            record.transformKey = transformKey
+          }
+          return moved || displayObjectReplaced || textureRefreshed
+        }
+
+        let changed = false
         if (!preview) {
           previewStateRef.current.delete(itemId)
           const renderItem = renderItemsRef.current.get(itemId)
           if (renderItem) {
-            if (
-              refreshProjectCanvasTextureAfterTinyPreview(record, renderItem, stageScaleRef.current)
-            ) {
-              requestTextureReacquire(itemId)
-            }
-            syncSpriteRecordEdgeAntialias(record, renderItem.rotation)
-            applySpriteTransform(
-              record.sprite,
-              { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
-              renderItem
-            )
-            record.transformKey = getProjectCanvasRenderTransformKey(renderItem)
+            changed = applyPreviewTransform(renderItem)
           }
-          markSpriteRecordUsed(record)
-          renderImmediateOrSchedule()
-          return
+        } else {
+          previewStateRef.current.set(itemId, preview)
+          changed = applyPreviewTransform(preview)
         }
-
-        previewStateRef.current.set(itemId, preview)
-        if (refreshProjectCanvasTextureAfterTinyPreview(record, preview, stageScaleRef.current)) {
-          requestTextureReacquire(itemId)
-        }
-        syncSpriteRecordEdgeAntialias(record, preview.rotation)
-        applySpriteTransform(
-          record.sprite,
-          { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
-          preview
-        )
-        record.transformKey = getProjectCanvasRenderTransformKey(preview)
         markSpriteRecordUsed(record)
-        renderImmediateOrSchedule()
+        if (changed) {
+          renderImmediateOrSchedule()
+        }
       }
     }),
     [
