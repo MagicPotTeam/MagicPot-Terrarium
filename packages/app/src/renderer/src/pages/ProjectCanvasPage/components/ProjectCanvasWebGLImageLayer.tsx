@@ -2397,6 +2397,13 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       webglErrorCheckRequestedRef.current = false
       webglErrorLastCheckedRenderRef.current = renderCount
       webglErrorLastCheckedAtRef.current = finishedAt
+      if (webglErrorCheckTimerRef.current !== null) {
+        // This check sees every texture created so far (their uploads are done by now), so
+        // the timed check that was waiting for them would only wait for the GPU a second
+        // time. A texture created later asks for its own.
+        clearTimeout(webglErrorCheckTimerRef.current)
+        webglErrorCheckTimerRef.current = null
+      }
       const webglRuntimeFailure = getProjectCanvasWebGLRuntimeFailure(app)
       if (webglRuntimeFailure) {
         runtimeFailureHandlerRef.current?.(webglRuntimeFailure)

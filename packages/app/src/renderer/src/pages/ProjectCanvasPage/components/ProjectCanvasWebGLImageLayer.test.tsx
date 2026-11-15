@@ -2942,6 +2942,37 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(checks).toBeLessThan(20)
   }, 30000)
 
+  it('asks once for a new texture when the render that follows it checks already', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const first = [createItem()]
+    const { rerender } = render(<Layer items={first} {...TEST_STAGE_VIEWPORT_1280_720} />)
+    await waitFor(() => expect(createdSprites).toHaveLength(1))
+    const app = createdApplications[0]
+    // Let the timed check of the first texture pass (one second), and then the sample interval
+    // (another second), so that the next render is due for a sample.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2300))
+    })
+
+    const checksBefore = app.renderer.gl.getError.mock.calls.length
+    const rendersBefore = app.render.mock.calls.length
+    rerender(
+      <Layer
+        items={[...first, createNamedItem('second', { x: 400 })]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+      />
+    )
+    await waitFor(() => expect(createdBaseTextures).toHaveLength(2))
+    // The render that draws the new texture is due for a sample: one check...
+    await waitFor(() => expect(app.render.mock.calls.length).toBeGreaterThan(rendersBefore))
+    expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore + 1)
+    // ...and not a second one from the timer that the new texture had started.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1300))
+    })
+    expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore + 1)
+  }, 30000)
+
   it('notices a failed texture upload about a second later, even without another render', async () => {
     const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
     const readyCalls: boolean[] = []
