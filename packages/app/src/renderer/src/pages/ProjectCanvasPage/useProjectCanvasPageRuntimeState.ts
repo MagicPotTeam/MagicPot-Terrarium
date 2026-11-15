@@ -270,11 +270,24 @@ export function useProjectCanvasPageRuntimeState() {
     setSelectedIds(new Set())
   }, [setSelectedIds])
 
+  // Read-only view of the undo history and the redo stack for the save path:
+  // assets those snapshots can still bring back must not be pruned.
+  const undoRedoItemListsRef = useRef({ history, future })
+  undoRedoItemListsRef.current = { history, future }
+  const getUndoRedoItemLists = useCallback(
+    (): CanvasItem[][] => [
+      ...undoRedoItemListsRef.current.history,
+      ...undoRedoItemListsRef.current.future
+    ],
+    []
+  )
+
   return useMemo(
     () => ({
       activeOcrHover,
       annoTool,
       drawingState,
+      getUndoRedoItemLists,
       groups,
       groupBranches,
       handleRedo,
@@ -317,6 +330,7 @@ export function useProjectCanvasPageRuntimeState() {
       activeOcrHover,
       annoTool,
       drawingState,
+      getUndoRedoItemLists,
       groups,
       groupBranches,
       handleRedo,

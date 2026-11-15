@@ -71,6 +71,8 @@ type UseCanvasViewportPersistenceOptions = {
   suspendAutoSave?: boolean
   restoreGenerationRef?: MutableRefObject<number>
   isCanvasSceneImporting?: () => boolean
+  /** Read-only: the item lists of the undo history and the redo stack. */
+  getUndoRedoItemLists?: () => Iterable<readonly CanvasItem[]>
 }
 
 type CanvasPersistenceSnapshot = {
@@ -155,7 +157,8 @@ export function useCanvasViewportPersistence({
   addVideoToCanvas,
   suspendAutoSave = false,
   restoreGenerationRef: sharedRestoreGenerationRef,
-  isCanvasSceneImporting
+  isCanvasSceneImporting,
+  getUndoRedoItemLists
 }: UseCanvasViewportPersistenceOptions) {
   const latestPersistedCanvasStateRef = useRef<CanvasPersistenceSnapshot>({
     canvasId,
@@ -176,6 +179,8 @@ export function useCanvasViewportPersistence({
   const restoreGenerationRef = sharedRestoreGenerationRef ?? localRestoreGenerationRef
   const shouldClearCanvasBeforeRestoreRef = useRef(false)
   const suspendAutoSaveRef = useRef(suspendAutoSave)
+  const getUndoRedoItemListsRef = useRef(getUndoRedoItemLists)
+  getUndoRedoItemListsRef.current = getUndoRedoItemLists
   const latestHydrateCanvasImageItemForCanvasRef = useRef(hydrateCanvasImageItemForCanvas)
   const latestNextZIndexRefRef = useRef(nextZIndexRef)
   const documentTitleRef = useRef(documentTitle)
@@ -428,7 +433,18 @@ export function useCanvasViewportPersistence({
             saveCanvasId,
             snapshot.groups,
             snapshot.groupBranches,
-            snapshot.figmaBinding
+            snapshot.figmaBinding,
+            {
+              // Assets that the live items (they may be newer than this
+              // snapshot), an undo or a redo can still bring back are kept.
+              getProtectedItems: () => {
+                const latest = latestPersistedCanvasStateRef.current
+                return [
+                  ...(latest.canvasId === saveCanvasId ? [latest.items] : []),
+                  ...(getUndoRedoItemListsRef.current?.() ?? [])
+                ]
+              }
+            }
           )
           lastPersistedCanvasSignatureRef.current = buildCanvasPersistenceSignature(
             snapshot.items,

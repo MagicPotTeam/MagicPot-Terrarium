@@ -446,19 +446,6 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items[1]).not.toHaveProperty('thumbnailSet')
 
     const db = await openFakeCanvasDb()
-    const blobStore = db.transaction('canvas-blobs', 'readonly').objectStore('canvas-blobs')
-    const readBlobEntry = (key: string): Promise<{ data: ArrayBuffer; mimeType: string }> =>
-      new Promise((resolve) => {
-        const request = blobStore.get(`identity-compat-test::canvas::${key}`)
-        request.onsuccess = () => resolve(request.result as { data: ArrayBuffer; mimeType: string })
-      })
-    const localBlobEntry = await readBlobEntry('image-identity-compat')
-    const sessionBlobEntry = await readBlobEntry('image-session-compat')
-    expect(localBlobEntry.mimeType).toBe('image/png')
-    expect(sessionBlobEntry.mimeType).toBe('image/png')
-    expect(new TextDecoder().decode(localBlobEntry.data)).toBe('original')
-    expect(new TextDecoder().decode(sessionBlobEntry.data)).toBe('session')
-
     const persisted = await new Promise<unknown>((resolve) => {
       const request = db
         .transaction('canvas-items', 'readonly')
@@ -466,6 +453,22 @@ describe('canvasStorage provenance metadata', () => {
         .get('identity-compat-test')
       request.onsuccess = () => resolve(request.result)
     })
+    // Binaries are stored under the content key recorded on each item.
+    const persistedAssetKeys = (
+      persisted as { items: Array<{ id: string; assetKey: string }> }
+    ).items.map((persistedItem) => persistedItem.assetKey)
+    const blobStore = db.transaction('canvas-blobs', 'readonly').objectStore('canvas-blobs')
+    const readBlobEntry = (assetKey: string): Promise<{ data: ArrayBuffer; mimeType: string }> =>
+      new Promise((resolve) => {
+        const request = blobStore.get(`identity-compat-test::canvas::asset::${assetKey}`)
+        request.onsuccess = () => resolve(request.result as { data: ArrayBuffer; mimeType: string })
+      })
+    const localBlobEntry = await readBlobEntry(persistedAssetKeys[0])
+    const sessionBlobEntry = await readBlobEntry(persistedAssetKeys[1])
+    expect(localBlobEntry.mimeType).toBe('image/png')
+    expect(sessionBlobEntry.mimeType).toBe('image/png')
+    expect(new TextDecoder().decode(localBlobEntry.data)).toBe('original')
+    expect(new TextDecoder().decode(sessionBlobEntry.data)).toBe('session')
     db.close()
     expect((persisted as { items: Array<Record<string, unknown>> }).items).toHaveLength(2)
     expect((persisted as { items: Array<Record<string, unknown>> }).items[0]).toMatchObject({

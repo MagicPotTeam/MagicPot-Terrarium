@@ -353,7 +353,8 @@ describe('useCanvasViewportPersistence', () => {
       'canvas-route-return-test',
       [],
       [],
-      null
+      null,
+      expect.anything()
     )
 
     const secondMount = renderPersistenceHook()
@@ -604,7 +605,8 @@ describe('useCanvasViewportPersistence', () => {
       'canvas-serialized-save-test',
       [],
       [],
-      null
+      null,
+      expect.anything()
     )
 
     act(() => {
@@ -630,7 +632,8 @@ describe('useCanvasViewportPersistence', () => {
       'canvas-serialized-save-test',
       [],
       [],
-      null
+      null,
+      expect.anything()
     )
   })
 
@@ -713,7 +716,8 @@ describe('useCanvasViewportPersistence', () => {
         canvasId,
         [],
         [],
-        null
+        null,
+        expect.anything()
       )
     })
 
@@ -770,7 +774,8 @@ describe('useCanvasViewportPersistence', () => {
         'canvas-native-save-test',
         [],
         [],
-        null
+        null,
+        expect.anything()
       )
       expect(mockReportUnsavedSaveResult).toHaveBeenCalledWith({
         requestId: 'save-request-1',
@@ -904,7 +909,99 @@ describe('useCanvasViewportPersistence', () => {
       'canvas-import-save-test',
       [],
       [],
-      null
+      null,
+      expect.anything()
     )
+  })
+
+  it('protects the assets of the live items, the undo history and the redo stack from pruning', async () => {
+    vi.useFakeTimers()
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    const undoSnapshot = [createImageItem({ id: 'deleted-but-undoable' })]
+    const redoSnapshot = [createImageItem({ id: 'undone-but-redoable' })]
+
+    const { result } = renderHook(() => {
+      const [items, setItems] = React.useState<CanvasItem[]>([])
+      const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+      const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+      const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+      const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+      const [stageScale, setStageScale] = React.useState(1)
+      const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+      useCanvasViewportPersistence({
+        config: DEFAULT_CONFIG,
+        canvasId: 'canvas-protected-assets-test',
+        items,
+        groups,
+        groupBranches,
+        selectedIds,
+        figmaBinding,
+        stagePos,
+        stageScale,
+        stageSize: { width: 1280, height: 720 },
+        maxFitStageScale: 2,
+        clampStageScale: (value: number) => value,
+        getCanvasItemsVisualBounds: () => null,
+        hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+        nextZIndexRef: { current: 1 },
+        setItems,
+        setItemsWithHistory: setItems,
+        setGroups,
+        setGroupBranches,
+        setSelectedIds,
+        setStagePos,
+        setStageScale,
+        setFigmaBinding,
+        handleImportFiles: vi.fn(),
+        addModel3DToCanvas: vi.fn(),
+        addVideoToCanvas: vi.fn(),
+        getUndoRedoItemLists: () => [undoSnapshot, redoSnapshot]
+      })
+
+      return { setItems }
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    mockSaveCanvasItems.mockClear()
+    const pendingSave = createDeferred<void>()
+    mockSaveCanvasItems.mockReturnValueOnce(pendingSave.promise).mockResolvedValue(undefined)
+
+    act(() => {
+      result.current.setItems([createImageItem({ id: 'saved-image' })])
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+      await Promise.resolve()
+    })
+    expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+
+    // The board changes while that save is still running.
+    act(() => {
+      result.current.setItems([createImageItem({ id: 'newer-live-image' })])
+    })
+
+    const options = mockSaveCanvasItems.mock.calls[0][5] as {
+      getProtectedItems: () => Iterable<readonly CanvasItem[]>
+    }
+    const protectedIds = [...options.getProtectedItems()].map((list) => list.map((item) => item.id))
+    expect(protectedIds).toEqual([
+      ['newer-live-image'],
+      ['deleted-but-undoable'],
+      ['undone-but-redoable']
+    ])
+
+    await act(async () => {
+      pendingSave.resolve()
+      await vi.advanceTimersByTimeAsync(300)
+      await Promise.resolve()
+    })
   })
 })

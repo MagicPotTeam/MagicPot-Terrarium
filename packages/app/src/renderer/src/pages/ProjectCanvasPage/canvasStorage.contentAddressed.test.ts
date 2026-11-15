@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { saveCanvasItems } from './canvasStorage'
+import { countCanvasAssetKeyReferences, loadCanvasItems, saveCanvasItems } from './canvasStorage'
 import type { CanvasItem } from './types'
 
 // A small transactional model of IndexedDB: writes are staged per transaction and
@@ -25,6 +25,7 @@ function createFakeIndexedDb() {
     transactions: [] as Array<{ stores: string[]; mode: string; committed: boolean; aborted: boolean }>
   }
   let failure: { store: string; mode: 'sync-throw' | 'async-abort' } | null = null
+  let beforeTransaction: ((stores: string[], mode: string) => void) | null = null
 
   const database = {
     objectStoreNames: { contains: (name: string) => committed.has(name) },
@@ -32,6 +33,7 @@ function createFakeIndexedDb() {
     close: vi.fn(),
     transaction(names: string | string[], mode: string = 'readonly') {
       const scope = typeof names === 'string' ? [names] : [...names]
+      beforeTransaction?.(scope, mode)
       const record = { stores: scope, mode, committed: false, aborted: false }
       log.transactions.push(record)
       const ops: FakeOp[] = []
@@ -137,6 +139,11 @@ function createFakeIndexedDb() {
     failNext(next: typeof failure) {
       failure = next
     },
+    onTransaction(hook: typeof beforeTransaction) {
+      beforeTransaction = hook
+    },
+    blobPuts: () => log.puts.filter((put) => put.store === 'canvas-blobs'),
+    recordPuts: () => log.puts.filter((put) => put.store === 'canvas-items'),
     blobKeys: () => [...committed.get('canvas-blobs')!.keys()].sort(),
     blobBytes: (key: string) =>
       Array.from(
@@ -167,7 +174,9 @@ function createFakeIndexedDb() {
 type FakeIndexedDb = ReturnType<typeof createFakeIndexedDb>
 
 const sourceBytes = new Map<string, Uint8Array>()
+const restoredBlobs = new Map<string, Blob>()
 let fetchCalls: string[] = []
+let nextRestoredUrl = 0
 
 function registerSource(url: string, bytes: number[]): string {
   sourceBytes.set(url, new Uint8Array(bytes))
@@ -213,11 +222,21 @@ beforeEach(() => {
     'fetch',
     vi.fn(async (url: string) => {
       fetchCalls.push(url)
+      const restored = restoredBlobs.get(url)
+      if (restored) return { ok: true, blob: async () => restored }
       const bytes = sourceBytes.get(url)
       if (!bytes) return { ok: false }
       return { ok: true, arrayBuffer: async () => bytes.slice().buffer }
     })
   )
+  restoredBlobs.clear()
+  vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
+    nextRestoredUrl += 1
+    const url = `blob:restored-${nextRestoredUrl}`
+    restoredBlobs.set(url, blob as Blob)
+    return url
+  })
+  vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
   vi.stubGlobal('api', undefined)
   Object.defineProperty(window, 'path', { configurable: true, writable: true, value: undefined })
   vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -326,5 +345,300 @@ describe('canvas content keys', () => {
     expect(saved.assetKey).toBe(contentKey([7, 7]))
     expect(saved.textureAssetKeys).toEqual({ 'hull.png': contentKey([8, 8, 8]) })
     expect(saved).not.toHaveProperty('textureAssetKeySources')
+  })
+})
+
+const assetBlobKey = (storeKey: string, bytes: number[]): string =>
+  `${storeKey}::canvas::asset::${contentKey(bytes)}`
+
+describe('content-addressed canvas blob store', () => {
+  it('stores the bytes once: saving the same board again writes metadata only', async () => {
+    const items = [
+      imageItem('a', registerSource('blob:twice-a', [1, 1, 1, 1])),
+      imageItem('b', registerSource('blob:twice-b', [2, 2, 2, 2, 2]))
+    ]
+    await saveCanvasItems(items, 'twice')
+    expect(fake.blobPuts().map((put) => put.key).sort()).toEqual(
+      [assetBlobKey('twice', [1, 1, 1, 1]), assetBlobKey('twice', [2, 2, 2, 2, 2])].sort()
+    )
+    expect(fake.blobPuts().reduce((sum, put) => sum + put.bytes, 0)).toBe(9)
+
+    fake.resetLog()
+    fetchCalls = []
+    await saveCanvasItems(items, 'twice')
+
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobPuts()).toEqual([])
+    expect(fake.recordPuts()).toHaveLength(1)
+    expect(fake.log.deletes).toEqual([])
+  })
+
+  it('moves no image bytes when an item is edited', async () => {
+    const original = imageItem('moved', registerSource('blob:edit-move', [4, 4, 4]))
+    await saveCanvasItems([original], 'edit')
+
+    fake.resetLog()
+    fetchCalls = []
+    const moved = { ...original, x: 250, y: -40, zIndex: 9 } as CanvasItem
+    await saveCanvasItems([moved], 'edit')
+
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobPuts()).toEqual([])
+    expect(fake.record('edit')!.items[0]).toMatchObject({
+      x: 250,
+      y: -40,
+      assetKey: contentKey([4, 4, 4])
+    })
+  })
+
+  it('does not read a path-backed file again once its identity key is stored', async () => {
+    const readFileFromPath = vi.fn(async () => ({
+      data: new Uint8Array([6, 6, 6, 6, 6, 6]),
+      filename: 'ref.png'
+    }))
+    vi.stubGlobal('api', { svcFs: { readFileFromPath } })
+    const sourceIdentity = {
+      version: 1,
+      kind: 'local-file',
+      canonicalPath: 'D:\\refs\\ref.png',
+      sizeBytes: 6,
+      lastModifiedMs: 1_700_000_000_123,
+      cacheKey: 'k'
+    }
+    const item = imageItem('ref', 'local-media:///D:/refs/ref.png', { sourceIdentity })
+    await saveCanvasItems([item], 'path-backed')
+    expect(readFileFromPath).toHaveBeenCalledTimes(1)
+    expect(fake.blobPuts()).toHaveLength(1)
+
+    fake.resetLog()
+    readFileFromPath.mockClear()
+    await saveCanvasItems([{ ...item, x: 33 } as CanvasItem], 'path-backed')
+
+    expect(readFileFromPath).not.toHaveBeenCalled()
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobPuts()).toEqual([])
+  })
+
+  it('shares one blob between items with the same content and counts both references', async () => {
+    const src = registerSource('blob:shared-1', [3, 3, 3])
+    const first = imageItem('first', src)
+    const copy = imageItem('copy', src, { x: 80 })
+    await saveCanvasItems([first, copy], 'shared')
+
+    expect(fake.blobKeys()).toEqual([assetBlobKey('shared', [3, 3, 3])])
+    expect(countCanvasAssetKeyReferences(fake.record('shared')!.items)).toEqual(
+      new Map([[contentKey([3, 3, 3]), 2]])
+    )
+
+    // Deleting one of the two must not take the blob the other still uses.
+    await saveCanvasItems([copy], 'shared')
+    expect(fake.blobKeys()).toEqual([assetBlobKey('shared', [3, 3, 3])])
+    expect(countCanvasAssetKeyReferences(fake.record('shared')!.items)).toEqual(
+      new Map([[contentKey([3, 3, 3]), 1]])
+    )
+
+    // With the last reference gone the blob is deleted.
+    await saveCanvasItems([], 'shared')
+    expect(fake.blobKeys()).toEqual([])
+  })
+
+  it('keeps the blob of a deleted item while the undo history can still restore it', async () => {
+    const item = imageItem('undo-me', registerSource('blob:undo-1', [5, 4, 3, 2, 1]))
+    const keep = imageItem('keep', registerSource('blob:undo-keep', [8]))
+    await saveCanvasItems([item, keep], 'undo')
+
+    // Delete: the history snapshot still holds the item.
+    const history = [[item, keep]]
+    await saveCanvasItems([keep], 'undo', [], [], null, { getProtectedItems: () => history })
+    expect(fake.blobKeys()).toContain(assetBlobKey('undo', [5, 4, 3, 2, 1]))
+
+    // Undo: the item returns without a single byte being read or written.
+    fake.resetLog()
+    fetchCalls = []
+    await saveCanvasItems([item, keep], 'undo', [], [], null, { getProtectedItems: () => [[keep]] })
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobPuts()).toEqual([])
+    expect(fake.record('undo')!.items.map((saved) => saved.id)).toEqual(['undo-me', 'keep'])
+
+    // Redo of the delete while the redo stack holds it, then the entry leaves the window.
+    await saveCanvasItems([keep], 'undo', [], [], null, { getProtectedItems: () => [[item, keep]] })
+    expect(fake.blobKeys()).toContain(assetBlobKey('undo', [5, 4, 3, 2, 1]))
+    await saveCanvasItems([keep], 'undo', [], [], null, { getProtectedItems: () => [[keep]] })
+    expect(fake.blobKeys()).toEqual([assetBlobKey('undo', [8])])
+  })
+
+  it('stores the bytes again when a pruned asset comes back', async () => {
+    const item = imageItem('back', registerSource('blob:back-1', [9, 8, 7]))
+    await saveCanvasItems([item], 'back')
+    await saveCanvasItems([], 'back')
+    expect(fake.blobKeys()).toEqual([])
+
+    await saveCanvasItems([item], 'back')
+    expect(fake.blobKeys()).toEqual([assetBlobKey('back', [9, 8, 7])])
+    expect(fake.blobBytes(assetBlobKey('back', [9, 8, 7]))).toEqual([9, 8, 7])
+  })
+
+  it('skips the cleanup altogether when the history cannot be read', async () => {
+    const item = imageItem('gone', registerSource('blob:history-fail-1', [1, 2]))
+    await saveCanvasItems([item], 'history-fail')
+    await saveCanvasItems([], 'history-fail', [], [], null, {
+      getProtectedItems: () => {
+        throw new Error('history unavailable')
+      }
+    })
+
+    expect(fake.record('history-fail')!.items).toEqual([])
+    expect(fake.blobKeys()).toEqual([assetBlobKey('history-fail', [1, 2])])
+  })
+
+  it('never deletes blobs of another canvas, legacy per-item blobs or foreign keys', async () => {
+    const blobs = fake.committed.get('canvas-blobs')!
+    const foreign = { data: new Uint8Array([1]).buffer, mimeType: 'image/png' }
+    blobs.set('other-canvas::canvas::asset::' + contentKey([1]), foreign)
+    blobs.set('prune-scope::canvas::legacy-item-id', foreign)
+    blobs.set('prune-scope::canvas::asset::not-a-content-key', foreign)
+    blobs.set('unscoped-legacy-item-id', foreign)
+    blobs.set('prune-scope-2::canvas::asset::' + contentKey([1]), foreign)
+
+    const item = imageItem('scoped', registerSource('blob:scope-1', [4, 2]))
+    await saveCanvasItems([item], 'prune-scope')
+    await saveCanvasItems([], 'prune-scope')
+
+    expect(fake.blobKeys()).toEqual(
+      [
+        'other-canvas::canvas::asset::' + contentKey([1]),
+        'prune-scope::canvas::legacy-item-id',
+        'prune-scope::canvas::asset::not-a-content-key',
+        'unscoped-legacy-item-id',
+        'prune-scope-2::canvas::asset::' + contentKey([1])
+      ].sort()
+    )
+  })
+
+  it('writes the bytes again when the stored blob vanished between the check and the commit', async () => {
+    const item = imageItem('raced', registerSource('blob:race-1', [6, 5, 4]))
+    await saveCanvasItems([item], 'race')
+    const blobKey = assetBlobKey('race', [6, 5, 4])
+
+    // Another window prunes the blob right before this save commits its metadata.
+    let interfered = false
+    fake.onTransaction((stores, mode) => {
+      if (!interfered && mode === 'readwrite' && stores.includes('canvas-items')) {
+        interfered = true
+        fake.committed.get('canvas-blobs')!.delete(blobKey)
+      }
+    })
+    await saveCanvasItems([{ ...item, x: 12 } as CanvasItem], 'race')
+    fake.onTransaction(null)
+
+    expect(interfered).toBe(true)
+    expect(fake.blobBytes(blobKey)).toEqual([6, 5, 4])
+    expect(fake.record('race')!.items[0]).toMatchObject({ x: 12, assetKey: contentKey([6, 5, 4]) })
+  })
+
+  it('refuses to commit metadata that would point at bytes it cannot store', async () => {
+    const stable = imageItem('stable', registerSource('blob:refuse-1', [1, 2, 3]))
+    await saveCanvasItems([stable], 'refuse')
+    const before = fake.record('refuse')
+
+    const unreadable = imageItem('stable', 'blob:refuse-unreadable')
+    await expect(saveCanvasItems([unreadable], 'refuse')).rejects.toThrow(
+      'binary data could not be persisted: stable'
+    )
+
+    expect(fake.record('refuse')).toEqual(before)
+    expect(fake.blobKeys()).toEqual([assetBlobKey('refuse', [1, 2, 3])])
+  })
+
+  it('restores every item from its keyed blob and recognises the restored sources on the next save', async () => {
+    const shared = registerSource('blob:restore-shared', [7, 7, 7])
+    const items = [
+      imageItem('one', shared),
+      imageItem('two', shared, { x: 40 }),
+      imageItem('three', registerSource('blob:restore-three', [1, 0, 1]))
+    ]
+    await saveCanvasItems(items, 'restore')
+
+    const loaded = await loadCanvasItems('restore')
+    expect(loaded.items.map((item) => item.id)).toEqual(['one', 'two', 'three'])
+    const [one, two, three] = loaded.items as Array<CanvasItem & { src: string }>
+    // One object URL per stored blob, shared by the items that share the content.
+    expect(one.src).toMatch(/^blob:restored-/)
+    expect(two.src).toBe(one.src)
+    expect(three.src).not.toBe(one.src)
+    expect(restoredBlobs.size).toBe(2)
+
+    fake.resetLog()
+    fetchCalls = []
+    const edited = loaded.items.map((item) => ({ ...item, y: 500 }) as CanvasItem)
+    await saveCanvasItems(edited, 'restore')
+
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobPuts()).toEqual([])
+    expect(fake.blobKeys()).toEqual(
+      [assetBlobKey('restore', [7, 7, 7]), assetBlobKey('restore', [1, 0, 1])].sort()
+    )
+    expect(fake.record('restore')!.items.map((item) => item.assetKey)).toEqual([
+      contentKey([7, 7, 7]),
+      contentKey([7, 7, 7]),
+      contentKey([1, 0, 1])
+    ])
+    // The in-memory binding of key and source never reaches storage.
+    for (const saved of fake.record('restore')!.items) {
+      expect(saved).not.toHaveProperty('assetKeySource')
+    }
+  })
+
+  it('round-trips a model with textures through keyed blobs', async () => {
+    const item = {
+      id: 'model-rt',
+      type: 'model3d',
+      src: registerSource('blob:model-rt', [2, 4, 6]),
+      fileName: 'ship.glb',
+      textures: { 'hull.png': registerSource('blob:model-rt-hull', [9, 9]) },
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false
+    } as unknown as CanvasItem
+    await saveCanvasItems([item], 'model-rt')
+
+    const loaded = await loadCanvasItems('model-rt')
+    const restored = loaded.items[0] as CanvasItem & { src: string; textures: Record<string, string> }
+    expect(restored.src).toMatch(/^blob:restored-/)
+    expect(restored.textures['hull.png']).toMatch(/^blob:restored-/)
+    expect(restored.textures['hull.png']).not.toBe(restored.src)
+
+    fake.resetLog()
+    fetchCalls = []
+    await saveCanvasItems([{ ...restored, x: 5 } as CanvasItem], 'model-rt')
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobPuts()).toEqual([])
+    expect(fake.blobKeys()).toEqual(
+      [assetBlobKey('model-rt', [2, 4, 6]), assetBlobKey('model-rt', [9, 9])].sort()
+    )
+  })
+
+  it('still loads a board whose binaries are stored per item id by an earlier version', async () => {
+    const legacyBytes = new Uint8Array([4, 4, 4, 4]).buffer
+    fake.committed.get('canvas-items')!.set('legacy-load', {
+      items: [{ ...(imageItem('old-image', '') as object), src: '' }],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    fake.committed
+      .get('canvas-blobs')!
+      .set('legacy-load::canvas::old-image', { data: legacyBytes, mimeType: 'image/png' })
+
+    const loaded = await loadCanvasItems('legacy-load')
+    expect(loaded.items).toHaveLength(1)
+    expect((loaded.items[0] as { src: string }).src).toMatch(/^blob:restored-/)
+    expect(loaded.items[0]).not.toHaveProperty('assetKey')
   })
 })

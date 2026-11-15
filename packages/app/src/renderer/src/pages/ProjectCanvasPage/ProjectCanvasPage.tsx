@@ -246,6 +246,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     activeOcrHover,
     annoTool,
     drawingState,
+    getUndoRedoItemLists,
     groups,
     groupBranches,
     handleRedo,
@@ -873,7 +874,8 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     addVideoToCanvas,
     suspendAutoSave: isImageBatchImportActive,
     restoreGenerationRef,
-    isCanvasSceneImporting
+    isCanvasSceneImporting,
+    getUndoRedoItemLists
   })
 
   useEffect(() => {
