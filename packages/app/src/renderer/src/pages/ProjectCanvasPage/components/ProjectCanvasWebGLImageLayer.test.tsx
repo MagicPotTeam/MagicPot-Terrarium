@@ -270,6 +270,8 @@ function installPixiMock() {
           destroyed: false,
           resource: image as unknown | null,
           gpuValid: false,
+          // Pixi's ImageSource is collectable by default.
+          autoGarbageCollect: true,
           unload: vi.fn(),
           get image() {
             return this.resource
@@ -1317,6 +1319,72 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       backgroundAlpha: 0,
       clearBeforeRender: true
     })
+  })
+
+  it('turns the Pixi garbage collector off and keeps its textures through a long idle period', async () => {
+    vi.stubGlobal('electronFile', {
+      resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(['image'], { type: 'image/png' })
+      }))
+    )
+    const bitmap = createBitmap(640, 360)
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => bitmap)
+    )
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const bitmapItem = createNamedItem('gc-bitmap', {
+      src: 'local-media:///C:/images/gc-bitmap.png',
+      sourceWidth: 640,
+      sourceHeight: 360,
+      image: undefined as unknown as HTMLImageElement
+    })
+    const htmlItem = createNamedItem('gc-html', { x: 400 })
+    try {
+      const { unmount } = render(
+        <Layer items={[bitmapItem, htmlItem]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => {
+        expect(getTextureImage(getLiveSpriteByLabel(bitmapItem.id))).toBe(bitmap)
+        expect(getLiveSpriteByLabel(htmlItem.id)).not.toBeNull()
+      })
+      const app = createdApplications[0]
+      // Pixi's collector would unload a texture after 60 s without use and upload its
+      // resource again on the next draw. The bitmap is closed by then, so it must stay off,
+      // and every texture of the layer is exempt even if the collector is switched on.
+      expect(app.initOptions).toMatchObject({ gcActive: false })
+      expect(app.initOptions).not.toHaveProperty('textureGCActive')
+      expect(createdBaseTextures.length).toBeGreaterThanOrEqual(2)
+      createdBaseTextures.forEach((texture) => {
+        expect((texture.source as { autoGarbageCollect?: boolean }).autoGarbageCollect).toBe(false)
+      })
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+
+      vi.useFakeTimers()
+      ;(app.render as unknown as () => void)()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5 * 60_000)
+      })
+      expect(() => (app.render as unknown as () => void)()).not.toThrow()
+      createdBaseTextures.forEach((texture) => {
+        const source = texture.source as MockTextureSource
+        expect(source.unload).not.toHaveBeenCalled()
+        expect(source.gpuValid).toBe(true)
+      })
+      // The resource of the bitmap texture was read exactly once, for its first upload.
+      expect(eagerTextureUploads).toEqual([bitmap])
+      expect(getTextureImage(getLiveSpriteByLabel(bitmapItem.id))).toBe(bitmap)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
   })
 
   it('resizes the Pixi renderer when the stage size changes', async () => {

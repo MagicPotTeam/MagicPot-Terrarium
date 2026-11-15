@@ -508,13 +508,21 @@ function getProjectCanvasTextureScaleMode(): 'linear' {
 }
 
 function createProjectCanvasTexture(image: CanvasImageAsset): Texture {
-  return Texture.from(
+  const texture = Texture.from(
     {
       resource: image,
       alphaMode: PROJECT_CANVAS_WEBGL_TEXTURE_ALPHA_MODE
     },
     true
   )
+  // The layer's own residency code (sprite destroy, texture budget) decides what stays on
+  // the GPU. Pixi's collector must never unload one of these textures on its own schedule:
+  // the decoded input of an uploaded texture is released, so it could not be uploaded again.
+  const textureSource = texture.source as { autoGarbageCollect?: boolean } | null | undefined
+  if (textureSource) {
+    textureSource.autoGarbageCollect = false
+  }
+  return texture
 }
 
 function applyProjectCanvasTextureScaleMode(record: SpriteRecord) {
@@ -2679,8 +2687,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           autoStart: false,
           sharedTicker: false,
           preference: 'webgl',
-          powerPreference: 'high-performance'
+          powerPreference: 'high-performance',
+          // No timed collection by Pixi (60 s unused, checked every 30 s): textures are
+          // created and destroyed by this layer only. `textureGCActive` is a deprecated
+          // alias of the same switch in Pixi 8.15+ and is not passed.
+          gcActive: false
         })
+        const pixiGarbageCollector = (
+          app.renderer as { gc?: { enabled?: boolean } } | null | undefined
+        )?.gc
+        if (pixiGarbageCollector?.enabled) {
+          pixiGarbageCollector.enabled = false
+        }
 
         if (disposed) {
           app.destroy(true, { children: true })
@@ -4656,8 +4674,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             uploadProjectCanvasTextureNow(appRef.current, baseTexture)
           ) {
             eagerlyUploadedTexturesRef.current.add(baseTexture)
-            // Pixi must never unload this texture behind the layer's back: its input is gone.
-            ;(baseTexture.source as { autoGarbageCollect?: boolean }).autoGarbageCollect = false
             releaseDecodedImagePixelsAfterUpload(image)
           } else if (createdSharedTexture) {
             const cachedSource = imageCacheRef.current.get(item.id)
