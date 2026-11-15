@@ -697,6 +697,22 @@ describe('droppedImageUtils', () => {
     )
   })
 
+  it('leaves a blob image URL untouched for chat receivers that import it themselves', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const attachment = {
+      type: 'image' as const,
+      url: 'blob:canvas-source',
+      fileName: 'canvas.png',
+      metadata: { caption: 'canvas context' }
+    }
+
+    await expect(
+      materializeInternalImageDragAttachment(attachment, { keepBlobImageUrl: true })
+    ).resolves.toBe(attachment)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('returns null when a blob image attachment can no longer be read', async () => {
     vi.stubGlobal(
       'fetch',

@@ -4663,13 +4663,33 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
-  it('persists duplicate blob image URLs once and uses durable URLs for history and one request', async () => {
+  it('imports auto-sent blob images into managed media and never keeps the blob URL', async () => {
+    // Updated for the canvas hand-off fix: auto-sent blob images used to stay blob: in the
+    // message and were copied to AutoSave by saveImageToDir at send time; they are now
+    // managed media (content-addressed, so the duplicate occurrence shares the reference).
     const fetchMock = vi.fn(async () => ({
+      ok: true,
       blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
     }))
     vi.stubGlobal('fetch', fetchMock)
     const revokeObjectURL = vi.fn()
     vi.stubGlobal('URL', { ...URL, revokeObjectURL })
+    const managedUrl = `local-media:///managed/originals/aa/${'a'.repeat(64)}.png`
+    hoisted.importManagedDataUrlMock.mockReset()
+    hoisted.importManagedDataUrlMock.mockImplementation(
+      async ({ originalFileName }: { originalFileName: string }) => ({
+        reference: {
+          version: 1,
+          kind: 'managed',
+          relativePath: `user-output/chat-attachments/originals/aa/${'a'.repeat(64)}.png`,
+          sha256: 'a'.repeat(64),
+          sizeBytes: 3,
+          mimeType: 'image/png',
+          originalFileName
+        },
+        localMediaUrl: managedUrl
+      })
+    )
     hoisted.storedSessions.value = [
       {
         id: 'session-duplicate-blob-user-image',
@@ -4716,31 +4736,36 @@ describe('ChatPage runtime workflow integration', () => {
 
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
 
-    expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledWith('blob:duplicate-user-upload')
-    expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(1)
+    expect(hoisted.importManagedDataUrlMock).toHaveBeenCalledWith(
+      expect.objectContaining({ dataUrl: 'data:image/png;base64,AQID', originalFileName: 'first.png' })
+    )
+    expect(hoisted.saveImageToDirMock).not.toHaveBeenCalled()
     expect(revokeObjectURL).not.toHaveBeenCalled()
 
-    const durableUrl = 'file://C:/MagicPot/AutoSave/Agent/chat_upload.png'
-    expect(readCurrentSessionState()?.messages[0]?.attachments?.map((item) => item.url)).toEqual([
-      durableUrl,
-      durableUrl
+    const stored = readCurrentSessionState()?.messages[0]?.attachments
+    expect(stored?.map((item) => [item.fileName, item.url])).toEqual([
+      ['first.png', managedUrl],
+      ['second.png', managedUrl]
     ])
+    expect(stored?.every((item) => item.media?.kind === 'managed')).toBe(true)
     for (const call of hoisted.requestChatCompletionMock.mock.calls) {
       const requestMessages = call[0]?.messages as ChatMessage[] | undefined
       const requestAttachments = requestMessages?.at(-1)?.attachments ?? []
       expect(requestAttachments.length).toBeGreaterThan(0)
-      expect(requestAttachments.every((item) => !item.url.startsWith('blob:'))).toBe(true)
-      expect(requestAttachments.every((item) => item.url === durableUrl)).toBe(true)
+      expect(requestAttachments.every((item) => !/^(?:blob|data):/.test(item.url))).toBe(true)
     }
   })
 
-  it('preserves blob image URLs when outgoing persistence fails', async () => {
+  it('does not send an auto-sent blob image whose managed import fails', async () => {
+    // Updated for the canvas hand-off fix: this used to send and store the raw blob: URL.
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({ blob: async () => new Blob(['image'], { type: 'image/png' }) }))
+      vi.fn(async () => ({ ok: true, blob: async () => new Blob(['image'], { type: 'image/png' }) }))
     )
-    hoisted.saveImageToDirMock.mockResolvedValueOnce({ savedPath: null })
+    hoisted.importManagedDataUrlMock.mockReset()
+    hoisted.importManagedDataUrlMock.mockRejectedValue(new Error('managed store unavailable'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
 
     renderChatPage()
     await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
@@ -4764,13 +4789,11 @@ describe('ChatPage runtime workflow integration', () => {
       )
     })
 
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-    expect(readCurrentSessionState()?.messages[0]?.attachments?.[0]?.url).toBe(
-      'blob:failed-user-upload'
-    )
-    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
-      ?.messages as ChatMessage[]
-    expect(requestMessages.at(-1)?.attachments?.[0]?.url).toBe('blob:failed-user-upload')
+    await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalled())
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(
+      (readCurrentSessionState()?.messages ?? []).flatMap((message) => message.attachments ?? [])
+    ).toEqual([])
   })
 
   it('leaves durable outgoing image URLs unchanged', async () => {

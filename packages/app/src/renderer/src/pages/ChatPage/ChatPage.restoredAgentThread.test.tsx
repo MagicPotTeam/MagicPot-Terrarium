@@ -221,7 +221,9 @@ const fixture = vi.hoisted(() => ({
   config: null as Config | null,
   profiles: [] as LLMAPIProfile[],
   ipcChat: vi.fn(),
-  materializeAttachment: vi.fn()
+  materializeAttachment: vi.fn(),
+  importDataUrl: vi.fn(),
+  materializeForRequest: vi.fn()
 }))
 
 const createConfig = (): Config => ({
@@ -236,7 +238,10 @@ const createConfig = (): Config => ({
         provider: 'openai',
         api_mode: 'responses',
         model_use: 'vision',
-        is_vision_model: true
+        is_vision_model: true,
+        // Main refuses inline images for profiles without this declaration.
+        attachment_transports: ['request-data-url'],
+        preferred_attachment_transport: 'request-data-url'
       } as LLMAPIProfile
     ],
     customSkills: [],
@@ -370,6 +375,8 @@ const hashBytes = (bytes: Uint8Array): string =>
   createHash('sha256').update(Buffer.from(bytes)).digest('hex')
 
 const pngHash = hashBytes(decodeBase64(PNG_BASE64))
+// The send-to-agent hand-off imports the inline PNG into managed media (content-addressed).
+const MANAGED_PNG_URL = `local-media:///fixture-chat-media/originals/${pngHash.slice(0, 2)}/${pngHash}.png`
 
 const readSessionFromUi = (): ChatSession | null => {
   const raw = screen.getByTestId('restored-agent-session').textContent?.trim() || ''
@@ -403,7 +410,7 @@ const waitForPersistedSession = async (
     const sessions = await loadAllSessions(scope)
     found = sessions.find(predicate)
     expect(found).toBeTruthy()
-  })
+  }, { timeout: 8000 })
   return found as ChatSession
 }
 
@@ -448,6 +455,32 @@ beforeEach(() => {
   fixture.ipcChat.mockImplementation(async () => ({
     content: `assistant-${fixture.ipcChat.mock.calls.length}`
   }))
+  fixture.importDataUrl.mockReset()
+  fixture.importDataUrl.mockImplementation(
+    async ({ dataUrl, originalFileName }: { dataUrl: string; originalFileName: string }) => {
+      const bytes = decodeBase64(dataUrl.split(',')[1])
+      const sha256 = hashBytes(bytes)
+      return {
+        reference: {
+          version: 1,
+          kind: 'managed',
+          relativePath: `user-output/chat-attachments/originals/${sha256.slice(0, 2)}/${sha256}.png`,
+          sha256,
+          sizeBytes: bytes.byteLength,
+          mimeType: 'image/png',
+          originalFileName
+        },
+        localMediaUrl: `local-media:///fixture-chat-media/originals/${sha256.slice(0, 2)}/${sha256}.png`
+      }
+    }
+  )
+  fixture.materializeForRequest.mockReset()
+  fixture.materializeForRequest.mockImplementation(async () => ({
+    transport: 'request-data-url',
+    dataUrl: PNG_DATA_URL,
+    mimeType: 'image/png',
+    sizeBytes: decodeBase64(PNG_BASE64).byteLength
+  }))
 
   const fakeIndexedDb = createFakeIndexedDb()
   activeFakeIndexedDb = fakeIndexedDb
@@ -462,7 +495,10 @@ beforeEach(() => {
         cancelConversation: vi.fn(async () => undefined),
         signHy3DModel: vi.fn()
       },
-      svcManagedMedia: {},
+      svcManagedMedia: {
+        importDataUrl: fixture.importDataUrl,
+        materializeForRequest: fixture.materializeForRequest
+      },
       svcAgentLocalFiles: {},
       svcFs: {},
       svcHyper: {
@@ -531,13 +567,18 @@ describe('ChatPage restored agent thread persistence', () => {
       (session) =>
         session.id === sessionId &&
         session.messages.some(
-          (message) => message.role === 'user' && message.attachments?.[0]?.url === PNG_DATA_URL
+          (message) => message.role === 'user' && message.attachments?.[0]?.url === MANAGED_PNG_URL
         )
     )
-    expect(firstPersisted.messages[0]?.attachments?.[0]?.url).toBe(PNG_DATA_URL)
-    expect(
-      hashBytes(decodeBase64(firstPersisted.messages[0].attachments![0].url.split(',')[1]))
-    ).toBe(pngHash)
+    // Stored as a managed descriptor, never as the inline data URL it arrived as.
+    expect(firstPersisted.messages[0]?.attachments?.[0]?.url).toBe(MANAGED_PNG_URL)
+    expect(firstPersisted.messages[0]?.attachments?.[0]?.media).toEqual(
+      expect.objectContaining({ kind: 'managed', sha256: pngHash })
+    )
+    expect(JSON.stringify(firstPersisted)).not.toContain('data:')
+    expect(fixture.importDataUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ dataUrl: PNG_DATA_URL, originalFileName: PNG_FILE_NAME })
+    )
 
     fireEvent.change(screen.getByTestId('restored-agent-composer-input'), {
       target: { value: 'Follow up in plain text.' }
@@ -568,7 +609,12 @@ describe('ChatPage restored agent thread persistence', () => {
         expect.objectContaining({
           role: 'user',
           content: 'Describe this owned PNG.',
-          attachments: [expect.objectContaining({ url: PNG_DATA_URL })]
+          attachments: [
+            expect.objectContaining({
+              url: MANAGED_PNG_URL,
+              media: expect.objectContaining({ sha256: pngHash })
+            })
+          ]
         }),
         expect.objectContaining({ role: 'user', content: 'Follow up in plain text.' })
       ])

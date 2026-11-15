@@ -208,7 +208,12 @@ import {
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
 import { collectDroppedDirectoryFilesBounded, DroppedDirectoryLimitError } from '../ProjectCanvasPage/dropDirectory'
-import { importChatAttachment, importChatAttachmentUrl } from './chatManagedMediaAttachments'
+import { normalizeMediaReference } from '@shared/mediaReference'
+import {
+  importChatAttachment,
+  importChatAttachmentUrl,
+  importIncomingChatImageAttachment
+} from './chatManagedMediaAttachments'
 import {
   BUILT_IN_TAGGING_SKILL_ID,
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
@@ -749,17 +754,41 @@ const revokeBlobUrl = (url?: string): void => {
   URL.revokeObjectURL(url)
 }
 
+/** Managed attachments are identified by their content reference, others by URL. */
+const getAttachmentIdentityKey = (attachment: ChatAttachment): string => {
+  const media = normalizeMediaReference(attachment.media)
+  return media?.kind === 'managed' && media.sha256
+    ? `managed:${media.sha256.toLowerCase()}`
+    : `url:${attachment.url}`
+}
+
 const hasDuplicateAttachment = (
   attachments: ChatAttachment[],
   candidate: ChatAttachment
-): boolean =>
-  attachments.some(
+): boolean => {
+  const candidateKey = getAttachmentIdentityKey(candidate)
+  return attachments.some(
     (attachment) =>
-      attachment.url === candidate.url ||
+      getAttachmentIdentityKey(attachment) === candidateKey ||
       (Boolean(attachment.fileName) &&
         attachment.fileName === candidate.fileName &&
         attachment.sizeBytes === candidate.sizeBytes)
   )
+}
+
+/**
+ * Bring an image that arrives from the canvas or another producer into the composer's
+ * managed form. Crops are still rendered first; blob: URLs are imported, not inlined.
+ */
+const prepareIncomingChatAttachment = async (
+  attachment: ChatAttachment
+): Promise<ChatAttachment | null> => {
+  const materialized = await materializeInternalImageDragAttachment(attachment, {
+    keepBlobImageUrl: true
+  })
+  if (!materialized) return null
+  return importIncomingChatImageAttachment(materialized, { service: api().svcManagedMedia })
+}
 
 const attachmentDescriptorsMatch = (left: ChatAttachment, right: ChatAttachment): boolean =>
   left.type === right.type && left.url === right.url && left.fileName === right.fileName
@@ -2297,6 +2326,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingExternalSendToAgentRef = useRef<ExternalSendToAgentDetail[]>([])
   const [pendingExternalSendToAgentVersion, setPendingExternalSendToAgentVersion] = useState(0)
   const editingAttachmentReceiverRef = useRef<((attachment: ChatAttachment) => void) | null>(null)
+  // Tail of the external 'send-to-agent' composer staging, so asynchronous imports
+  // are applied in the order the events arrived. It never rejects.
+  const externalComposerStagingRef = useRef<Promise<void>>(Promise.resolve())
   const registerEditingAttachmentReceiver = useCallback(
     (receiver: ((attachment: ChatAttachment) => void) | null) => {
       if (editingAttachmentReceiverRef.current !== receiver) {
@@ -2441,22 +2473,26 @@ const ChatPage: React.FC<ChatPageProps> = ({
         attachmentDropTargetEpochRef.current === destinationEpoch &&
         currentSessionIdRef.current === destinationSessionId &&
         storageScopeRef.current === storageScope
-      const resolveAttachments = async (materializeBlobImages = true): Promise<ChatAttachment[]> => {
+      // Every image becomes a managed attachment (local-media URL + media reference)
+      // before it reaches composer, draft, message or session state: no data:/blob: URL.
+      const resolveAttachments = async (): Promise<ChatAttachment[]> => {
         const resolved: ChatAttachment[] = []
         for (const item of rawAttachments) {
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
-          const next = materializeBlobImages || !item.url.startsWith('blob:')
-            ? await materializeInternalImageDragAttachment(item)
-            : item
+          const next = await prepareIncomingChatAttachment(item)
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           if (!next) throw new Error('External attachment could not be materialized')
           resolved.push(next)
         }
         if (image) {
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
-          const next = await convertInlineImageToAttachment(image, 'pasted-image.png')
+          const inline = await convertInlineImageToAttachment(image, 'pasted-image.png')
           if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
-          if (!next) throw new Error('External inline image could not be materialized')
+          if (!inline) throw new Error('External inline image could not be materialized')
+          const next = await importIncomingChatImageAttachment(inline, {
+            service: api().svcManagedMedia
+          })
+          if (!isDestinationCurrent()) throw new Error('External attachment destination changed')
           resolved.push(next)
         }
         return resolved
@@ -2516,7 +2552,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           isComposerSubmissionCurrent: isDestinationCurrent,
           resolveAttachments: async () => {
             try {
-              return await resolveAttachments(false)
+              return await resolveAttachments()
             } catch (error) {
               notifyMaterializationFailure(error)
               throw error
@@ -2530,7 +2566,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       // Stage attachments and inline image before applying any part of this
       // event. Other events and existing composer state are not a transaction.
-      void resolveAttachments()
+      // Imports are asynchronous, so events are staged one after another: the
+      // composer receives them in arrival order (the canvas sends one per image).
+      const staged = externalComposerStagingRef.current
+        .then(() => resolveAttachments())
         .then((resolvedAttachments) => {
           if (!isDestinationCurrent()) return
           if (resolvedAttachments.length > 0) {
@@ -2549,6 +2588,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (hiddenText) setPendingHiddenContext((prev) => mergeHiddenContext(prev, hiddenText))
         })
         .catch(notifyMaterializationFailure)
+      externalComposerStagingRef.current = staged
     },
     [
       mergeHiddenContext,
@@ -4661,7 +4701,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             )
             if (!isDropTargetCurrent()) return
             const materializedDraggedFileAttachment =
-              await materializeInternalImageDragAttachment(draggedFileAttachment)
+              await prepareIncomingChatAttachment(draggedFileAttachment)
             if (!isDropTargetCurrent()) return
             if (!materializedDraggedFileAttachment) {
               notifyError(t('canvas.send_to_agent_failed'))
@@ -4708,10 +4748,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
           // Do not start reading every attachment at once. A failed or stale
           // batch must not start materializing its remaining attachments.
+          // Images are imported into managed media here (blob:/data:/local-media).
           const materializedAttachments: ChatAttachment[] = []
           for (const attachment of nextAttachments) {
             if (!isDropTargetCurrent()) return
-            const materialized = await materializeInternalImageDragAttachment(attachment)
+            let materialized: ChatAttachment | null
+            try {
+              materialized = await prepareIncomingChatAttachment(attachment)
+            } catch (error) {
+              if (!isDropTargetCurrent()) return
+              console.error('[ChatPage] Failed to import dropped canvas attachment:', error)
+              materialized = null
+            }
             if (!isDropTargetCurrent()) return
             if (!materialized) {
               notifyError(t('canvas.send_to_agent_failed'))
@@ -4736,13 +4784,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
               const seen = new Set(
                 prev.map(
                   (attachment) =>
-                    `${attachment.type}:${attachment.url}:${attachment.fileName || ''}`
+                    `${attachment.type}:${getAttachmentIdentityKey(attachment)}:${attachment.fileName || ''}`
                 )
               )
               const merged = [...prev]
 
               for (const attachment of materializedAttachments) {
-                const key = `${attachment.type}:${attachment.url}:${attachment.fileName || ''}`
+                const key = `${attachment.type}:${getAttachmentIdentityKey(attachment)}:${attachment.fileName || ''}`
                 if (seen.has(key)) continue
                 seen.add(key)
                 merged.push(attachment)

@@ -28,6 +28,7 @@ const fixture = vi.hoisted(() => ({
   writeTextFile: vi.fn(),
   fileToDataUrl: vi.fn(),
   materializeInternalImageDragAttachment: vi.fn(),
+  importDataUrl: vi.fn(),
   notifyError: vi.fn(),
   notifyWarning: vi.fn(),
   discoverVideoFrames: vi.fn(),
@@ -89,7 +90,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcLLMProxy: { signHy3DModel: vi.fn(), ...fixture.requestApi?.svcLLMProxy },
     svcHyper: { saveImageToDir: fixture.saveImageToDir },
-    svcManagedMedia: fixture.requestApi?.svcManagedMedia ?? {}
+    svcManagedMedia: fixture.requestApi?.svcManagedMedia ?? { importDataUrl: fixture.importDataUrl }
   })
 }))
 
@@ -597,6 +598,19 @@ describe('ChatPage image preflight at the send boundary', () => {
 
   it('keeps an over-limit canvas overview removable and preserves the draft across incoming event mocks', async () => {
     configure()
+    // The inline overview is imported into managed media at the hand-off.
+    fixture.importDataUrl.mockImplementation(async ({ originalFileName }: { originalFileName: string }) => ({
+      reference: {
+        version: 1,
+        kind: 'managed',
+        relativePath: `user-output/chat-attachments/originals/ab/${'ab'.repeat(32)}.png`,
+        sha256: 'ab'.repeat(32),
+        sizeBytes: 3,
+        mimeType: 'image/png',
+        originalFileName
+      },
+      localMediaUrl: `local-media:///fixture-media/${'ab'.repeat(32)}.png`
+    }))
     await renderPage(makeSession([], 'canvas overview'))
     await settleInitialDraftPersistence()
     await act(async () => {
@@ -626,6 +640,13 @@ describe('ChatPage image preflight at the send boundary', () => {
       )
     })
     await waitFor(() => expect(pendingAttachments()).toHaveLength(51))
+    expect(pendingAttachments()[50]).toEqual(
+      expect.objectContaining({
+        url: `local-media:///fixture-media/${'ab'.repeat(32)}.png`,
+        fileName: 'canvas-selection.png',
+        hiddenFromChatView: true
+      })
+    )
     fireEvent.click(screen.getByTestId('composer-send'))
     await waitFor(() =>
       expect(fixture.notifyError).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
@@ -1006,8 +1027,10 @@ describe('ChatPage image preflight at the send boundary', () => {
   })
 
   it.each([
+    // Every incoming attachment now goes through the crop materializer, which leaves
+    // a non-image (and any blob: URL) unchanged; the blob video is still never read.
     { label: 'accessible URL', url: 'https://fixture.invalid/video.mp4', materializes: true },
-    { label: 'blob URL', url: 'blob:fixture-video', materializes: false }
+    { label: 'blob URL', url: 'blob:fixture-video', materializes: true }
   ])(
     'allows queued $label video with both frames at the exact limit',
     async ({ url, materializes }) => {

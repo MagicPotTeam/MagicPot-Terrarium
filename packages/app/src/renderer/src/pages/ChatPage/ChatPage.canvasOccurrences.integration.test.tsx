@@ -11,14 +11,14 @@ import { buildChatWorkspaceControlsPortalId, scopedStorageKey, STORAGE_KEY_CURRE
 import ChatPage from './ChatPage'
 import { useCanvasBridgeActions } from '../ProjectCanvasPage/useCanvasBridgeActions'
 
-const f = vi.hoisted(() => ({ config: null as Config | null, sessions: [] as ChatSession[], profiles: [{ id: 'fixture', model_name: 'fixture', model_use: 'chat' }], remote: [], materialize: vi.fn(), request: vi.fn(), stream: vi.fn(), error: vi.fn(), noop: vi.fn(), dispatch: vi.fn() }))
+const f = vi.hoisted(() => ({ config: null as Config | null, sessions: [] as ChatSession[], profiles: [{ id: 'fixture', model_name: 'fixture', model_use: 'chat' }], remote: [], materialize: vi.fn(), importDataUrl: vi.fn(), request: vi.fn(), stream: vi.fn(), error: vi.fn(), noop: vi.fn(), dispatch: vi.fn() }))
 vi.mock('react-redux', () => ({ useDispatch: () => f.dispatch }))
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en', resolvedLanguage: 'en' }, t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue || key }) }))
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: f.config, isReady: true, buildEnv: DEFAULT_BUILD_ENV, configUtils: {}, updateConfig: f.noop }) }))
 vi.mock('./hooks/useChatProfiles', () => ({ useChatProfiles: () => ({ availableProfiles: f.profiles, remoteProfiles: f.remote }) }))
 vi.mock('@renderer/hooks/useRuntimeMcpStatus', () => ({ useRuntimeMcpStatus: () => ({ runtimeMcpStatus: null }) }))
 vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifySuccess: f.noop, notifyInfo: f.noop, notifyError: f.error, notifyWarning: f.noop }) }))
-vi.mock('@renderer/utils/windowUtils', () => ({ api: () => ({ svcFs: {}, svcHyper: {}, svcManagedMedia: {}, svcLLMProxy: { chat: f.request, chatStream: f.stream, signHy3DModel: f.noop } }) }))
+vi.mock('@renderer/utils/windowUtils', () => ({ api: () => ({ svcFs: {}, svcHyper: {}, svcManagedMedia: { importDataUrl: f.importDataUrl }, svcLLMProxy: { chat: f.request, chatStream: f.stream, signHy3DModel: f.noop } }) }))
 vi.mock('@renderer/utils/fileUtils', () => ({ fileToDataUrl: vi.fn(), fileToBlobUrl: vi.fn(), selectFile: vi.fn(), checkFileSize: () => true, isImageFile: () => true }))
 vi.mock('@renderer/utils/messageUtils', () => ({ getMessageText: (message: { content?: string }) => message.content || '' }))
 vi.mock('./chatStorage', async original => ({ ...await original<typeof import('./chatStorage')>(), loadAllSessions: async () => f.sessions, saveSessionToDB: async () => {}, debouncedSaveSessions: () => undefined, cancelDebouncedSessionSave: () => undefined, saveChatSessions: () => undefined, loadChatSessionBackups: () => ({}), saveChatSessionBackups: () => undefined }))
@@ -35,7 +35,12 @@ vi.mock('./components/ChatMessageList', () => ({ default: () => null }))
 // Lightweight composer displays actual props and invokes the genuine ChatPage callback.
 vi.mock('./components/ChatComposer', () => ({ default: ({ inputValue, pendingAttachments, onSend }: { inputValue: string; pendingAttachments: ChatAttachment[]; onSend: () => void }) => <div><input data-testid="input" value={inputValue} readOnly /><pre data-testid="attachments">{JSON.stringify(pendingAttachments)}</pre><button onClick={() => onSend()}>send fixture</button></div> }))
 const scope = 'canvas-occurrence-fixture'
-beforeEach(() => { vi.resetAllMocks(); localStorage.clear(); sessionStorage.clear(); f.config = structuredClone(DEFAULT_CONFIG); f.config.use_remote_llm = false; f.config.llm_config.api_profiles = [{ id: 'fixture', model_name: 'fixture', provider: 'openai', api_mode: 'responses' } as LLMAPIProfile]; f.sessions = [{ id: 'fixture-session', title: 'fixture', messages: [], profileId: 'fixture', storageScope: scope, draft: { inputValue: '', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 1 } }]; f.materialize.mockImplementation(async (item: ChatAttachment) => item); f.request.mockResolvedValue({ content: 'ok' }); vi.stubGlobal('api', { svcLLMProxy: { chat: f.request, chatStream: f.stream }, svcManagedMedia: {} }); vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network forbidden'))); Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() }) })
+// Content-addressed like the real store: the same bytes give the same reference and URL.
+const importManagedFixture = async ({ dataUrl, originalFileName }: { dataUrl: string; originalFileName: string }) => {
+  const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(dataUrl)))).map(byte => byte.toString(16).padStart(2, '0')).join('')
+  return { reference: { version: 1, kind: 'managed', relativePath: `user-output/chat-attachments/originals/${sha256.slice(0, 2)}/${sha256}.png`, sha256, sizeBytes: 1, mimeType: 'image/png', originalFileName }, localMediaUrl: `local-media:///fixture-media/${sha256}.png` }
+}
+beforeEach(() => { vi.resetAllMocks(); localStorage.clear(); sessionStorage.clear(); f.config = structuredClone(DEFAULT_CONFIG); f.config.use_remote_llm = false; f.config.llm_config.api_profiles = [{ id: 'fixture', model_name: 'fixture', provider: 'openai', api_mode: 'responses' } as LLMAPIProfile]; f.sessions = [{ id: 'fixture-session', title: 'fixture', messages: [], profileId: 'fixture', storageScope: scope, draft: { inputValue: '', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 1 } }]; f.materialize.mockImplementation(async (item: ChatAttachment) => item); f.importDataUrl.mockImplementation(importManagedFixture); f.request.mockResolvedValue({ content: 'ok' }); vi.stubGlobal('api', { svcLLMProxy: { chat: f.request, chatStream: f.stream }, svcManagedMedia: {} }); vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network forbidden'))); Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() }) })
 afterEach(async () => { cleanup(); await act(async () => {}); vi.unstubAllGlobals() })
 
 describe('canvas to ChatPage occurrence seam', () => {
@@ -53,10 +58,13 @@ describe('canvas to ChatPage occurrence seam', () => {
     await waitFor(() => expect(screen.getByTestId('input')).toHaveValue('synthetic prompt'))
     const pending = JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
     expect(pending.map(item => item.fileName)).toEqual(images.map(item => item.fileName))
+    // Canvas images enter the composer as managed attachments, never as inline data URLs.
+    expect(pending.every(item => item.url.startsWith('local-media:') && item.media?.kind === 'managed')).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
     await waitFor(() => expect(f.request).toHaveBeenCalledOnce())
     const message = f.request.mock.calls[0][0].messages.at(-1)
     expect(message.attachments.map((item: ChatAttachment) => item.fileName)).toEqual(images.map(item => item.fileName))
+    expect(message.attachments.some((item: ChatAttachment) => /^(?:data|blob):/.test(item.url))).toBe(false)
     expect(message.content).toContain('synthetic prompt')
     hook.unmount(); events.mockRestore()
   })

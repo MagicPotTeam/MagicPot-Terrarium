@@ -757,15 +757,27 @@ const materializeBlobImageAttachment = async (
   }
 }
 
+export type InternalImageDragMaterializeOptions = {
+  /**
+   * Leave blob: image URLs as they are instead of copying them into a base64 data: URL.
+   * Chat receivers set this and import the blob into managed media themselves; the
+   * canvas sender keeps the default so a borrowed blob survives its owner's release.
+   */
+  keepBlobImageUrl?: boolean
+}
+
 export const materializeInternalImageDragAttachment = async (
-  attachment: ChatAttachment
+  attachment: ChatAttachment,
+  options: InternalImageDragMaterializeOptions = {}
 ): Promise<ChatAttachment | null> => {
   if (attachment.type !== 'image') return attachment
 
   const cropSource = parseCanvasImageCropSourceMetadata(
     attachment.metadata?.[CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]
   )
-  if (!cropSource) return materializeBlobImageAttachment(attachment)
+  if (!cropSource) {
+    return options.keepBlobImageUrl ? attachment : materializeBlobImageAttachment(attachment)
+  }
 
   try {
     const croppedAttachment = await cropImageAttachmentFromSource(
@@ -796,7 +808,9 @@ export const materializeInternalImageDragAttachment = async (
 export const materializeInternalImageDragAttachments = async (
   attachments: ChatAttachment[]
 ): Promise<ChatAttachment[]> => {
-  const materialized = await Promise.all(attachments.map(materializeInternalImageDragAttachment))
+  const materialized = await Promise.all(
+    attachments.map((attachment) => materializeInternalImageDragAttachment(attachment))
+  )
   return materialized.filter((attachment): attachment is ChatAttachment => Boolean(attachment))
 }
 
