@@ -3536,6 +3536,115 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     })
   })
 
+  describe('panel resize next to the canvas', () => {
+    afterEach(async () => {
+      const { emitCanvasLayoutResizeInteraction } = await import('../canvasLayoutResizeInteraction')
+      emitCanvasLayoutResizeInteraction(false)
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    })
+
+    // A layer whose host size the test sets, with a ResizeObserver the test fires by hand.
+    const renderObservedLayer = async () => {
+      const observerCallbacks: (() => void)[] = []
+      vi.stubGlobal(
+        'ResizeObserver',
+        class {
+          observe = vi.fn()
+          disconnect = vi.fn()
+
+          constructor(callback: () => void) {
+            observerCallbacks.push(callback)
+          }
+        }
+      )
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const { emitCanvasLayoutResizeInteraction } = await import('../canvasLayoutResizeInteraction')
+      const utils = render(<Layer items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => {
+        expect(createdSprites).toHaveLength(1)
+        expect(observerCallbacks).toHaveLength(1)
+      })
+      const app = createdApplications[0]
+      const host = utils.container.querySelector('.project-canvas-webgl-layer') as HTMLElement
+      let hostSize = { width: 1280, height: 720 }
+      vi.spyOn(host, 'getBoundingClientRect').mockImplementation(
+        () => ({ ...hostSize, x: 0, y: 0, top: 0, left: 0 }) as DOMRect
+      )
+      const resizeHost = (width: number, height = 720) => {
+        hostSize = { width, height }
+        act(() => observerCallbacks.forEach((callback) => callback()))
+      }
+      return { app, resizeHost, emit: emitCanvasLayoutResizeInteraction, ...utils }
+    }
+
+    it('follows the host size when no panel is being dragged', async () => {
+      const { app, resizeHost } = await renderObservedLayer()
+      resizeHost(1100)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1100, 720)
+      resizeHost(1000, 650)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1000, 650)
+      expect(app.canvas.style.width).toBe('100%')
+    })
+
+    it('does not resize the renderer while a panel is dragged and resizes once at the end', async () => {
+      const { app, resizeHost, emit } = await renderObservedLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      const rendersBefore = app.render.mock.calls.length
+
+      act(() => emit(true, 'right'))
+      // Twenty mouse moves of the drag.
+      for (let move = 1; move <= 20; move += 1) {
+        resizeHost(1280 - move * 12)
+      }
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+      // The canvas keeps its size on screen instead of being stretched to the host.
+      expect(app.canvas.style.width).toBe('1280px')
+      expect(app.canvas.style.height).toBe('720px')
+
+      act(() => emit(false))
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 1)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1040, 720)
+      expect(app.canvas.style.width).toBe('100%')
+      expect(app.canvas.style.height).toBe('100%')
+      // Drawn again at once, so the resized canvas is not blank.
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // Afterwards it follows the host again.
+      resizeHost(1300)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 2)
+    })
+
+    it('does nothing at the end of a drag that did not change the canvas size', async () => {
+      const { app, resizeHost, emit } = await renderObservedLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => emit(true, 'side'))
+      act(() => emit(false))
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+
+      // A drag that returns to the starting width needs no reallocation either.
+      act(() => emit(true, 'right'))
+      resizeHost(1200)
+      resizeHost(1280)
+      act(() => emit(false))
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+      expect(app.canvas.style.width).toBe('100%')
+    })
+
+    it('restores the canvas style when the layer goes away in the middle of a drag', async () => {
+      const { app, resizeHost, emit, unmount } = await renderObservedLayer()
+      act(() => emit(true, 'right'))
+      resizeHost(900)
+      expect(app.canvas.style.width).toBe('1280px')
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      unmount()
+      act(() => emit(false))
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+    })
+  })
+
   describe('world render group', () => {
     const getWorld = () =>
       createdSprites[0].parent as unknown as { isRenderGroup?: boolean; position: MockPoint }

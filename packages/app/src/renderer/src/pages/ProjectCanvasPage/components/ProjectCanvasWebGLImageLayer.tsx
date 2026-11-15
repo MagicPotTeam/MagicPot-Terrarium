@@ -24,6 +24,11 @@ import {
 import type { CanvasImageAsset, CanvasImageItem } from '../types'
 import { buildCanvasSpatialIndex, queryCanvasSpatialIndex } from '../canvasSpatialIndex'
 import { getCanvasViewportBounds } from '../canvasViewportPlacementUtils'
+import {
+  CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
+  getCanvasLayoutResizeInteractionState,
+  type CanvasLayoutResizeInteractionDetail
+} from '../canvasLayoutResizeInteraction'
 import { getCanvasItemBounds } from '../projectCanvasPageShared'
 import {
   buildProjectCanvasRenderableImage,
@@ -3320,15 +3325,66 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return
     }
 
-    const observer = new ResizeObserver(() => {
+    // While a panel next to the canvas is being dragged, the host changes its size on every
+    // mouse move. Resizing the renderer reallocates the drawing buffer and redraws; doing that
+    // per move made the drag stutter. During the drag the canvas keeps its buffer and its
+    // size on screen (the host clips it, or shows empty space where it grew), and the renderer
+    // is resized once when the drag ends.
+    let hasSkippedResize = false
+    let pinnedCanvas: HTMLCanvasElement | null = null
+    const pinCanvasSize = () => {
+      const canvas = appRef.current?.canvas as HTMLCanvasElement | undefined
+      const size = rendererSizeRef.current
+      if (!canvas || !size || pinnedCanvas === canvas) {
+        return
+      }
+      pinnedCanvas = canvas
+      canvas.style.width = `${size.width}px`
+      canvas.style.height = `${size.height}px`
+    }
+    const unpinCanvasSize = () => {
+      if (!pinnedCanvas) {
+        return
+      }
+      pinnedCanvas.style.width = '100%'
+      pinnedCanvas.style.height = '100%'
+      pinnedCanvas = null
+    }
+    const resizeToHost = () => {
       resizeRendererToStage()
       scheduleViewportReconcile()
+    }
+    const observer = new ResizeObserver(() => {
+      if (getCanvasLayoutResizeInteractionState().active) {
+        hasSkippedResize = true
+        pinCanvasSize()
+        return
+      }
+      unpinCanvasSize()
+      resizeToHost()
     })
+    const handleLayoutResizeInteraction = (event: Event) => {
+      const detail = (event as CustomEvent<CanvasLayoutResizeInteractionDetail>).detail
+      if (detail?.active) {
+        return
+      }
+      unpinCanvasSize()
+      if (hasSkippedResize) {
+        hasSkippedResize = false
+        resizeToHost()
+      }
+    }
     observer.observe(host)
+    window.addEventListener(CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT, handleLayoutResizeInteraction)
     resizeRendererToStage(stageSizeRef.current)
 
     return () => {
       observer.disconnect()
+      window.removeEventListener(
+        CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
+        handleLayoutResizeInteraction
+      )
+      unpinCanvasSize()
     }
   }, [isInitialized, resizeRendererToStage, scheduleViewportReconcile])
 
