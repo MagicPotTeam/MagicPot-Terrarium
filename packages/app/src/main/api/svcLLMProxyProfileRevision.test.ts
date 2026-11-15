@@ -6,6 +6,7 @@ import { getConfig, onConfigCommitted } from '../config/config'
 import { cliFromProfile } from '@shared/llm'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 
+vi.mock('electron', () => ({ app: { isPackaged: false } }))
 vi.mock('../assistantRuntime/runtime', () => ({ getAssistantRuntime: vi.fn() }))
 vi.mock('../mcp/runtime', () => ({ syncMcpClientManager: vi.fn() }))
 vi.mock('../config/config', () => ({
