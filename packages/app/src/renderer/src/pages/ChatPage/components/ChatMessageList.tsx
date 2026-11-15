@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-refresh/only-export-components */
 import React from 'react'
+import { createPortal } from 'react-dom'
 import ChatToolCalls from './ChatToolCalls'
 import { isEqual } from 'es-toolkit'
 import {
@@ -104,6 +105,13 @@ interface ChatMessageListProps {
    * full-page chat leaves it off and keeps its own look.
    */
   columnStyle?: boolean
+  /**
+   * Agent column only: rows that follow the last message (command cards). They are the last
+   * rows of the scroll content, before the working line, and stay outside the virtual window.
+   */
+  tail?: React.ReactNode
+  /** Changes when a row was just added to the tail: the list then scrolls to its end. */
+  tailScrollToken?: number
   currentSession: ChatSession | undefined
   isLoading: boolean
   loadingStatus?: ChatLoadingStatus
@@ -760,6 +768,8 @@ const MeasuredChatRow: React.FC<{
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
   active = true,
   columnStyle = false,
+  tail,
+  tailScrollToken,
   currentSession,
   isLoading,
   loadingStatus,
@@ -789,6 +799,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   )
   const { notifySuccess } = useMessage()
   const messages = React.useMemo(() => currentSession?.messages ?? [], [currentSession?.messages])
+  const hasTail = columnStyle && tail !== undefined && tail !== null && tail !== false
+  const tailRef = React.useRef<HTMLDivElement | null>(null)
+  // With a tail the working line moves below it: the last message portals it into this host.
+  const [workingLineHost, setWorkingLineHost] = React.useState<HTMLDivElement | null>(null)
   const contextCompressionSummary = currentSession?.contextCompression
   const sidecarExportEntries = React.useMemo(
     () => resolveAssistantSidecarExportEntries(messages, currentSession?.skillId),
@@ -1011,6 +1025,30 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     setScroll({ top: container.scrollTop, viewport: container.clientHeight })
   }, [chatContainerRef, heightRevision])
 
+  // A row that was just added to the tail is scrolled into view, wherever the list stood.
+  const tailScrollTokenRef = React.useRef(tailScrollToken)
+  React.useLayoutEffect(() => {
+    if (tailScrollTokenRef.current === tailScrollToken) return
+    tailScrollTokenRef.current = tailScrollToken
+    const container = chatContainerRef.current
+    if (!container || !hasTail) return
+    container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+    wasNearBottomRef.current = true
+    setScroll({ top: container.scrollTop, viewport: container.clientHeight })
+  }, [chatContainerRef, hasTail, tailScrollToken])
+  // A tail row that grows afterwards (its content arrives) keeps a list that is at its end there.
+  React.useEffect(() => {
+    const tailElement = tailRef.current
+    if (!hasTail || !tailElement || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      const container = chatContainerRef.current
+      if (!container || !wasNearBottomRef.current) return
+      container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+    })
+    observer.observe(tailElement)
+    return () => observer.disconnect()
+  }, [chatContainerRef, hasTail])
+
   const handleStartEditing = React.useCallback(
     (index: number, content: string) => {
       const scrollContainer = chatContainerRef.current
@@ -1081,7 +1119,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           columnTokens={columnTokens}
         />
       ) : null}
-      {messages.length === 0 && !contextCompressionSummary && columnTokens ? (
+      {messages.length === 0 && !contextCompressionSummary && columnTokens && !hasTail ? (
         <Box data-testid="chat-empty-state" sx={{ px: '16px', py: '64px', textAlign: 'center' }}>
           <Box
             aria-hidden="true"
@@ -1259,6 +1297,9 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   loadingStatus={
                     isLoading && index === messages.length - 1 ? loadingStatus : undefined
                   }
+                  workingLineHost={
+                    hasTail && isLoading && index === messages.length - 1 ? workingLineHost : null
+                  }
                   onPreviewImage={onPreviewImage}
                   onImageContextMenu={onImageContextMenu}
                   onDownloadAttachment={onDownloadAttachment}
@@ -1282,12 +1323,35 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           }}
         />
       ) : null}
+      {hasTail ? (
+        <Box
+          ref={tailRef}
+          data-testid="chat-transcript-tail"
+          sx={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: `${COLUMN_ROW_GAP_PX}px`,
+            mb: `${COLUMN_ROW_GAP_PX}px`,
+            minWidth: 0,
+            flexShrink: 0
+          }}
+        >
+          {tail}
+        </Box>
+      ) : null}
       {pendingConfirmation ? (
         <PendingConfirmationPanel
           confirmation={pendingConfirmation}
           active={active}
           onResolve={onResolvePendingConfirmation}
           columnStyle={columnStyle}
+        />
+      ) : null}
+      {hasTail ? (
+        <Box
+          ref={setWorkingLineHost}
+          data-testid="chat-transcript-working-line"
+          sx={{ flexShrink: 0, minWidth: 0, '&:not(:empty)': { mb: `${COLUMN_ROW_GAP_PX}px` } }}
         />
       ) : null}
       <div ref={messagesEndRef} />
@@ -2655,6 +2719,8 @@ const AssistantMessageBubble: React.FC<{
   t: TFunction<'translation'>
   theme: any
   columnTokens?: AgentColumnTokens
+  /** When set, the working line is drawn there (below the transcript tail) instead of inline. */
+  workingLineHost?: HTMLElement | null
 }> = ({
   message,
   replyDownloadBaseName,
@@ -2664,6 +2730,7 @@ const AssistantMessageBubble: React.FC<{
   isLight,
   isLoading,
   loadingStatus,
+  workingLineHost,
   onPreviewImage,
   onImageContextMenu,
   onDownloadAttachment,
@@ -2691,6 +2758,18 @@ const AssistantMessageBubble: React.FC<{
     : loadingStatus?.detail
   const loadingProgress = formatChatLoadingStatusProgress(loadingStatus)
   const showLoadingStatus = isLoading && Boolean(loadingStatus?.label)
+  const renderWorkingLine = (label: string): React.ReactNode => {
+    const line = (
+      <AssistantLoadingStatus
+        label={label}
+        progress={loadingProgress}
+        detail={loadingDetail}
+        theme={theme}
+        columnTokens={columnTokens}
+      />
+    )
+    return workingLineHost ? createPortal(line, workingLineHost) : line
+  }
 
   return (
     <Box sx={columnTokens ? { minWidth: 0 } : { px: 2 }}>
@@ -2786,25 +2865,11 @@ const AssistantMessageBubble: React.FC<{
               t={t}
               columnTokens={columnTokens}
             />
-            {showLoadingStatus ? (
-              <AssistantLoadingStatus
-                label={loadingStatus?.label || ''}
-                progress={loadingProgress}
-                detail={loadingDetail}
-                theme={theme}
-                columnTokens={columnTokens}
-              />
-            ) : null}
+            {showLoadingStatus ? renderWorkingLine(loadingStatus?.label || '') : null}
           </>
         ) : visibleAttachments.length > 0 ? (
           showLoadingStatus ? (
-            <AssistantLoadingStatus
-              label={loadingStatus?.label || ''}
-              progress={loadingProgress}
-              detail={loadingDetail}
-              theme={theme}
-              columnTokens={columnTokens}
-            />
+            renderWorkingLine(loadingStatus?.label || '')
           ) : (
             <AssistantMarkdownContent
               content=""
@@ -2824,15 +2889,9 @@ const AssistantMessageBubble: React.FC<{
             />
           )
         ) : isLoading ? (
-          <AssistantLoadingStatus
-            label={
-              loadingStatus?.label || t('chat.loading_status_default', { defaultValue: '正在处理' })
-            }
-            progress={loadingProgress}
-            detail={loadingDetail}
-            theme={theme}
-            columnTokens={columnTokens}
-          />
+          renderWorkingLine(
+            loadingStatus?.label || t('chat.loading_status_default', { defaultValue: '正在处理' })
+          )
         ) : message.toolHistory?.length ||
           (message.content !== undefined && message.content !== '') ? null : (
           <Typography variant="body2" sx={{ color: 'text.disabled', fontStyle: 'italic' }}>
