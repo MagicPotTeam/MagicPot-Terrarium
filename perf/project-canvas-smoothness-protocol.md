@@ -1,7 +1,6 @@
 # Project canvas: measurement protocol for "as smooth and as memory-light as PureRef"
 
 Line numbers refer to the tree at the time of writing (November 2026) and will drift.
-scripts/projectCanvas, pages/ProjectCanvasPage or src/main changed between them (last change there: 8d24bcb8, 2026-11-14), so they hold for both.
 Companion script: `scripts/projectCanvas/canvasSmoothBench.mjs` (npm script `benchmark:project-canvas:smooth:raw`).
 
 ## 0. What the existing benchmarks can and cannot tell you
