@@ -721,8 +721,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const decode = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second)
       vi.stubGlobal('createImageBitmap', decode)
       const item = localSourceItem()
+      const metrics = vi.fn()
       const { unmount, rerender } = render(
-        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />
+        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} onMetricsChange={metrics} />
       )
       await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(first))
       expect(first.close).toHaveBeenCalledTimes(1)
@@ -734,13 +735,20 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           items={[item]}
           {...TEST_STAGE_VIEWPORT_1280_720}
           stagePos={{ x: -50_000, y: -50_000 }}
+          onMetricsChange={metrics}
         />
       )
       await waitFor(() => expect(getLiveSpriteByLabel(item.id)).toBeNull())
       expect(firstTexture.destroyed).toBe(true)
+      // The cache record went with the last sprite: nothing is kept for an image off screen.
+      await waitFor(() =>
+        expect(metrics).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sourceImageCacheCount: 0, decodedResidentBytes: 0 })
+        )
+      )
 
       // Come back: the released decode must not be uploaded again.
-      rerender(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      rerender(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} onMetricsChange={metrics} />)
       await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(second))
       expect(decode).toHaveBeenCalledTimes(2)
       expect(eagerTextureUploads).toEqual([first, second])
@@ -1207,6 +1215,231 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(second.close).toHaveBeenCalledTimes(1)
       unmount()
       expect((item.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
+    })
+
+    const selectableItems = (count: number, sourceSide = 640) =>
+      Array.from({ length: count }, (_, index) =>
+        createNamedItem(`selectable-${index + 1}`, {
+          src: `local-media:///C:/images/selectable-${index + 1}.png`,
+          x: 20 + (index % 3) * 260,
+          y: 20 + Math.floor(index / 3) * 200,
+          sourceWidth: sourceSide,
+          sourceHeight: sourceSide,
+          zIndex: index
+        })
+      )
+    const lastMetrics = (metrics: ReturnType<typeof vi.fn>) =>
+      metrics.mock.calls[metrics.mock.calls.length - 1]?.[0] as
+        ProjectCanvasWebGLRuntimeMetrics | undefined
+
+    it('drops every source decode record when a selection is cleared', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmaps: ReturnType<typeof createBitmap>[] = []
+      const decode = vi.fn(async () => {
+        const bitmap = createBitmap(640, 640)
+        bitmaps.push(bitmap)
+        return bitmap
+      })
+      vi.stubGlobal('createImageBitmap', decode)
+      const items = selectableItems(6)
+      const metrics = vi.fn()
+      const { unmount, rerender } = render(
+        <Layer
+          items={items}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          selectedIds={new Set(items.map((item) => item.id))}
+          onMetricsChange={metrics}
+        />
+      )
+      // A small selection forces the source texture of every selected image.
+      await waitFor(() => {
+        expect(bitmaps).toHaveLength(6)
+        items.forEach((item) =>
+          expect(bitmaps).toContain(getTextureImage(getLiveSpriteByLabel(item.id)))
+        )
+      })
+      await waitFor(() =>
+        expect(lastMetrics(metrics)).toMatchObject({
+          sourceImageCacheCount: 6,
+          usingSourceImageCount: 6,
+          decodedResidentBytes: 0
+        })
+      )
+
+      rerender(
+        <Layer
+          items={items}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          selectedIds={new Set()}
+          onMetricsChange={metrics}
+        />
+      )
+      await waitFor(() => {
+        items.forEach((item) =>
+          expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(item.image)
+        )
+      })
+      await waitFor(() =>
+        expect(lastMetrics(metrics)).toMatchObject({
+          sourceImageCacheCount: 0,
+          usingSourceImageCount: 0,
+          decodedResidentBytes: 0
+        })
+      )
+      bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
+      expect(decode).toHaveBeenCalledTimes(6)
+      unmount()
+    })
+
+    it.each([
+      { side: 640, kept: 4 },
+      // 4096 x 4096 is 64 MiB decoded: the 128 MiB cap keeps two of them.
+      { side: 4096, kept: 2 }
+    ])(
+      'keeps at most $kept unused $side px decodes that finished after a deselect',
+      async ({ side, kept }) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        const bitmaps: ReturnType<typeof createBitmap>[] = []
+        const pending: ReturnType<typeof deferredBitmap>[] = []
+        const decode = vi.fn(() => {
+          const next = deferredBitmap()
+          pending.push(next)
+          return next.promise
+        })
+        vi.stubGlobal('createImageBitmap', decode)
+        const items = selectableItems(6, side)
+        const metrics = vi.fn()
+        const view = (selected: string[]) => (
+          <Layer
+            items={items}
+            {...TEST_STAGE_VIEWPORT_1280_720}
+            selectedIds={new Set(selected)}
+            onMetricsChange={metrics}
+          />
+        )
+        const { unmount, rerender } = render(view([]))
+        await waitFor(() => expect(getLiveSpriteByLabel(items[5].id)).not.toBeNull())
+
+        // Three times: select two images, clear the selection while both source decodes are
+        // still running, then let them finish. Nobody wants the six results.
+        for (let round = 0; round < 3; round += 1) {
+          rerender(view([items[round * 2].id, items[round * 2 + 1].id]))
+          await waitFor(() => expect(decode).toHaveBeenCalledTimes((round + 1) * 2))
+          rerender(view([]))
+          await act(async () => {
+            for (const next of pending.splice(0)) {
+              const bitmap = createBitmap(side, side)
+              bitmaps.push(bitmap)
+              next.resolve(bitmap)
+            }
+          })
+          const finished = (round + 1) * 2
+          await waitFor(() => {
+            expect(bitmaps.filter((bitmap) => isBitmapClosed(bitmap))).toHaveLength(
+              Math.max(0, finished - kept)
+            )
+            expect(lastMetrics(metrics)?.sourceImageCacheCount).toBe(Math.min(kept, finished))
+          })
+        }
+
+        // The oldest ones were closed, the newest stay for a quick return.
+        const closed = bitmaps.filter((bitmap) => isBitmapClosed(bitmap))
+        expect(closed).toEqual(bitmaps.slice(0, 6 - kept))
+        expect(lastMetrics(metrics)?.decodedResidentBytes).toBe(kept * side * side * 4)
+        expect(lastMetrics(metrics)?.decodedResidentBytes).toBeLessThanOrEqual(128 * 1024 * 1024)
+        expect(eagerTextureUploads).toEqual([])
+
+        // Selecting the newest again uses the kept decode: no new decode, one upload.
+        rerender(view([items[5].id]))
+        await waitFor(() =>
+          expect(bitmaps).toContain(getTextureImage(getLiveSpriteByLabel(items[5].id)))
+        )
+        expect(decode).toHaveBeenCalledTimes(6)
+        expect(eagerTextureUploads).toHaveLength(1)
+        unmount()
+        bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
+      }
+    )
+
+    it('evicts the oldest waiting decodes above the hard limit without starving the upload', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmaps: ReturnType<typeof createBitmap>[] = []
+      const pending: ReturnType<typeof deferredBitmap>[] = []
+      const decode = vi.fn(() => {
+        const next = deferredBitmap()
+        pending.push(next)
+        return next.promise
+      })
+      vi.stubGlobal('createImageBitmap', decode)
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const items = Array.from({ length: 6 }, (_, index) => {
+        const fixture = createThumbnailSetFixture(`hard-limit-${index}`)
+        return createNamedItem(`hard-limit-${index}`, {
+          ...fixture,
+          thumbnailSet: {
+            ...fixture.thumbnailSet,
+            levels: fixture.thumbnailSet.levels.map((level) => ({
+              ...level,
+              src: level.src.replace('thumb-lod', `C:/thumb-lod-${index}`)
+            }))
+          },
+          src: `local-media:///C:/images/hard-limit-${index}.png`,
+          image: createBitmap(192, 96) as unknown as HTMLImageElement,
+          // Stacked and 960 px wide on screen: every item asks for its largest (2048) level,
+          // so the oversized test bitmaps cannot make the layer ask for another level.
+          x: 0,
+          y: 0,
+          zIndex: index,
+          width: 3200,
+          height: 1400,
+          sourceWidth: 4096,
+          sourceHeight: 2048
+        })
+      })
+      const { unmount } = render(
+        <Layer ref={ref} items={items} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.3} />
+      )
+      // Six thumbnail levels decode at once.
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(6))
+      // While the viewport moves, finished decodes wait for the next reconcile pass.
+      act(() => ref.current?.setViewportInteracting(true))
+      await act(async () => {
+        for (const next of pending.splice(0)) {
+          // 64 MiB each: six of them are 384 MiB, above the 256 MiB limit.
+          const bitmap = createBitmap(4096, 4096)
+          bitmaps.push(bitmap)
+          next.resolve(bitmap)
+        }
+      })
+      // The two oldest were given up at once; the four newest (256 MiB) wait for their upload.
+      expect(bitmaps.map((bitmap) => isBitmapClosed(bitmap))).toEqual([
+        true,
+        true,
+        false,
+        false,
+        false,
+        false
+      ])
+      expect(eagerTextureUploads).toEqual([])
+
+      act(() => ref.current?.setViewportInteracting(false))
+      // The four are uploaded, and the two evicted levels are decoded again.
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(4))
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(8))
+      await act(async () => {
+        for (const next of pending.splice(0)) {
+          const bitmap = createBitmap(4096, 4096)
+          bitmaps.push(bitmap)
+          next.resolve(bitmap)
+        }
+      })
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(6))
+      items.forEach((item) =>
+        expect(bitmaps).toContain(getTextureImage(getLiveSpriteByLabel(item.id)))
+      )
+      expect(decode).toHaveBeenCalledTimes(8)
+      unmount()
+      bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
     })
 
     it('does not cancel a shared source decode when only one pending consumer leaves', async () => {

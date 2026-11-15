@@ -133,6 +133,12 @@ type CachedImageRecord = {
   // Raised when the same level is decoded again to replace a texture that cannot be
   // refreshed in place; it gives the replacement its own shared texture.
   textureGeneration: number
+  // Bookkeeping for the cache of decodes that are not on the GPU (yet): the reconcile pass
+  // that was running or last started when the record was created, the last pass that wanted
+  // to draw it, and a recency counter.
+  createdGeneration: number
+  wantedGeneration: number
+  lastTouchedAt: number
 }
 
 function getProjectCanvasDecodedVariantKey(record: CachedImageRecord): string {
@@ -256,6 +262,13 @@ export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES = 128 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET = 128
 export const PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT = 64
 export const PROJECT_CANVAS_WEBGL_SELECTED_PROTECTED_LIMIT = 32
+// Decoded images that no texture needs right now (a decode that finished after the zoom or
+// the selection moved on) are kept for a quick return, but only a few and only so many bytes.
+export const PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_ENTRIES = 4
+export const PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_BYTES = 128 * 1024 * 1024
+// Hard limit for every decoded image the layer holds, including the ones waiting for their
+// first upload.
+export const PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES = 256 * 1024 * 1024
 const PROJECT_CANVAS_WEBGL_IMAGE_VISIBLE_OVERSCAN_PX = 320
 const VIEWPORT_RECONCILE_DEBOUNCE_MS = 48
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS = 180
@@ -454,6 +467,23 @@ function uploadProjectCanvasTextureNow(app: Application | null, texture: Texture
 
   textureSystem.initSource(texture.source)
   return true
+}
+
+function getProjectCanvasWebGLResourceBudgetLimits(limitDecodedResidentBytes: boolean) {
+  return {
+    sourceTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+    thumbnailTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+    gpuTextureBytesTotal: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+    // Without an eager upload a texture keeps its decoded input for its whole life; those
+    // bytes then follow the texture budget and must not block new work here.
+    ...(limitDecodedResidentBytes
+      ? { decodedResidentBytes: PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES }
+      : {}),
+    decodedInFlightBytes: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
+    gpuUploadBytesInFlight: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
+    objectUrlCount: PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET,
+    activeSourceUpgrades: PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY
+  }
 }
 
 function getProjectCanvasCachedImageReleaseId(
@@ -1215,16 +1245,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const spatialTileUploadReservationIdsRef = useRef(new Map<string, Set<string>>())
   const objectUrlRegistryConfiguredRef = useRef(false)
   const resourceBudgetTrackerRef = useRef(
-    new CanvasImageResourceBudgetTracker({
-      sourceTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-      thumbnailTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-      gpuTextureBytesTotal: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-      decodedInFlightBytes: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
-      gpuUploadBytesInFlight: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
-      objectUrlCount: PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET,
-      activeSourceUpgrades: PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY
-    })
+    new CanvasImageResourceBudgetTracker(getProjectCanvasWebGLResourceBudgetLimits(true))
   )
+  const decodedRecordTouchCounterRef = useRef(0)
   const textureBudgetEvictionCountRef = useRef(0)
   const previewStateRef = useRef(new Map<string, ProjectCanvasImagePreview>())
   const renderItemsRef = useRef(new Map<string, ProjectCanvasRenderableImage>())
@@ -1647,6 +1670,91 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     [forgetCachedImageRecord, releaseCachedImageRecord]
   )
 
+  /**
+   * Bounds the decoded images that are held on the CPU side. A decode that is on the GPU was
+   * released at its upload and costs nothing here. What is left is (a) decodes waiting for
+   * the next reconcile pass or for their turn in a batched sprite creation, which are kept,
+   * and (b) decodes no pass wants any more, which are a small LRU. Everything together stays
+   * under the hard limit; the newest decode is never evicted, so a pass always has one to
+   * upload and the queue cannot starve.
+   */
+  const pruneDecodedPixelRecords = useCallback(() => {
+    const generation = spriteReconcileGenerationRef.current
+    const holders: CachedImageRecord[] = []
+    const collect = (record: CachedImageRecord) => {
+      // refCount 0: released after upload. refCount > 1: kept alive by a texture.
+      if (record.decodedAssetReleaseId && record.decodedAssetRefCount === 1) {
+        holders.push(record)
+      }
+    }
+    imageCacheRef.current.forEach(collect)
+    thumbnailCacheRef.current.forEach(collect)
+    if (holders.length === 0) {
+      return
+    }
+
+    const evict = (record: CachedImageRecord) => {
+      const cache =
+        record.cacheKind === 'source' ? imageCacheRef.current : thumbnailCacheRef.current
+      if (cache.get(record.itemId) === record) {
+        deleteCachedImageRecord(cache, record.itemId, 'budget-pressure')
+      }
+    }
+    const isUnused = (record: CachedImageRecord) =>
+      record.createdGeneration < generation && record.wantedGeneration !== generation
+    const byRecency = (left: CachedImageRecord, right: CachedImageRecord) =>
+      right.lastTouchedAt - left.lastTouchedAt
+
+    const kept: CachedImageRecord[] = holders.filter((record) => !isUnused(record))
+    let unusedCount = 0
+    let unusedBytes = 0
+    holders
+      .filter(isUnused)
+      .sort(byRecency)
+      .forEach((record) => {
+        const bytes = getCanvasImageDecodedByteSize(record.image)
+        if (
+          unusedCount < PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_ENTRIES &&
+          unusedBytes + bytes <= PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_BYTES
+        ) {
+          unusedCount += 1
+          unusedBytes += bytes
+          kept.push(record)
+          return
+        }
+        evict(record)
+      })
+
+    let totalBytes = kept.reduce(
+      (total, record) => total + getCanvasImageDecodedByteSize(record.image),
+      0
+    )
+    if (totalBytes <= PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES) {
+      return
+    }
+    // Over the hard limit: oldest first, unused before waiting ones, never the newest.
+    const newest = kept.reduce((latest, record) =>
+      record.lastTouchedAt > latest.lastTouchedAt ? record : latest
+    )
+    const evictionOrder = [
+      ...kept.filter(isUnused).sort(byRecency).reverse(),
+      ...kept
+        .filter((record) => !isUnused(record))
+        .sort(byRecency)
+        .reverse()
+    ]
+    for (const record of evictionOrder) {
+      if (totalBytes <= PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES) {
+        break
+      }
+      if (record === newest) {
+        continue
+      }
+      totalBytes -= getCanvasImageDecodedByteSize(record.image)
+      evict(record)
+    }
+  }, [deleteCachedImageRecord, getCanvasImageDecodedByteSize])
+
   const pruneDecodedImageCacheForResidentTargets = useCallback(
     ({
       cache,
@@ -1752,7 +1860,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         itemId,
         decodedAssetReleaseId,
         decodedAssetRefCount: 1,
-        textureGeneration: textureGenerationByIdRef.current.get(itemId) ?? 0
+        textureGeneration: textureGenerationByIdRef.current.get(itemId) ?? 0,
+        createdGeneration: spriteReconcileGenerationRef.current,
+        wantedGeneration: -1,
+        lastTouchedAt: (decodedRecordTouchCounterRef.current += 1)
       }
       cache.set(itemId, record)
       if (decodedAssetReleaseId) {
@@ -1766,10 +1877,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           visible: true,
           lastAccessedAt: window.performance.now()
         })
+        pruneDecodedPixelRecords()
       }
       return record
     },
-    [forgetCachedImageRecord, getCanvasImageDecodedByteSize, releaseCachedImageRecord]
+    [
+      forgetCachedImageRecord,
+      getCanvasImageDecodedByteSize,
+      pruneDecodedPixelRecords,
+      releaseCachedImageRecord
+    ]
   )
 
   const setTextureBudgetReservation = useCallback(
@@ -2470,7 +2587,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   }, [])
 
   const destroySpriteRecord = useCallback(
-    (itemId: string, options?: { retainPreview?: boolean }) => {
+    (itemId: string, options?: { retainPreview?: boolean; replaced?: boolean }) => {
       const record = spriteRecordsRef.current.get(itemId)
       if (!record) {
         return
@@ -2497,8 +2614,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (!options?.retainPreview) {
         previewStateRef.current.delete(itemId)
       }
+      if (!options?.replaced) {
+        // The item has no sprite any more. A decode that was released after its upload is
+        // only a handle for a texture this item no longer shows; without the sprite it would
+        // stay in the cache for nothing. (Decodes that still hold pixels are left to the LRU.)
+        for (const cache of [imageCacheRef.current, thumbnailCacheRef.current]) {
+          const cached = cache.get(itemId)
+          if (cached && isProjectCanvasDecodedImageReleased(cached.image)) {
+            deleteCachedImageRecord(cache, itemId, 'budget-pressure')
+          }
+        }
+        pendingTextureReacquireIdsRef.current.delete(itemId)
+      }
     },
-    [destroySharedTexture, removeTextureBudgetReservation]
+    [deleteCachedImageRecord, destroySharedTexture, removeTextureBudgetReservation]
   )
 
   const evictOldestResidentSprite = useCallback(
@@ -2743,6 +2872,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         if (pixiGarbageCollector?.enabled) {
           pixiGarbageCollector.enabled = false
         }
+        resourceBudgetTrackerRef.current.setLimits(
+          getProjectCanvasWebGLResourceBudgetLimits(
+            typeof (app.renderer as PixiRendererWithEagerTextureUpload | null | undefined)?.texture
+              ?.initSource === 'function'
+          )
+        )
 
         if (disposed) {
           app.destroy(true, { children: true })
@@ -3608,6 +3743,21 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const image = resolveImageForItem(item, sourceUpgradePriority)
         if (!image || !isStaleReleasedDecodedImage(item, image)) {
+          if (image) {
+            const cachedSource = imageCacheRef.current.get(item.id)
+            const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+            const wantedRecord =
+              cachedSource?.image === image
+                ? cachedSource
+                : cachedThumbnail?.image === image
+                  ? cachedThumbnail
+                  : undefined
+            if (wantedRecord) {
+              // This pass draws it (now, or in a later batch): not an unused decode.
+              wantedRecord.wantedGeneration = spriteReconcileGeneration
+              wantedRecord.lastTouchedAt = decodedRecordTouchCounterRef.current += 1
+            }
+          }
           return image
         }
         // Decode it again: the next attempt falls back to what is still drawable.
@@ -3749,6 +3899,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             // The level that should replace the source texture is not decoded yet. Keep the
             // sharper texture on screen instead of dropping to the small preview in between.
             return cached.image
+          }
+          if (
+            isProjectCanvasDecodedImageReleased(cached.image) &&
+            // A stale fallback is dropped by the caller, which then asks again: the source
+            // texture has to stay on screen until the fallback level is decoded.
+            !isStaleReleasedDecodedImage(item, fallbackImage)
+          ) {
+            // The source is not wanted at this zoom or selection any more. Its pixels live
+            // only in the texture, which goes away with the sprite: drop the handle now.
+            // (A source decode that was never uploaded stays as an unused decode and is
+            // bounded by the LRU.)
+            deleteCachedImageRecord(imageCacheRef.current, item.id, 'budget-pressure')
           }
           return fallbackImage
         }
@@ -4802,7 +4964,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         applySpriteTransform(sprite, { textureWidth, textureHeight }, transformState)
         sprite.zIndex = renderItem.zIndex
         if (existingRecord) {
-          destroySpriteRecord(item.id, { retainPreview: true })
+          destroySpriteRecord(item.id, { retainPreview: true, replaced: true })
         }
         spriteRecordsRef.current.set(item.id, {
           sprite,
@@ -4870,6 +5032,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
     })
 
+    // Uploads of this pass released their decodes; what no texture wanted is now bounded.
+    pruneDecodedPixelRecords()
+    pumpInitialImageLoadQueue()
     pumpSourceUpgradeQueue()
     let lastSpriteSortDurationMs: number | null = null
     let spriteSortCount = metricsRef.current.spriteSortCount ?? 0
@@ -4967,6 +5132,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     items,
     markSpriteRecordUsed,
     pruneDecodedImageCacheForResidentTargets,
+    pruneDecodedPixelRecords,
     releaseDecodedImagePixelsAfterUpload,
     requestTextureReacquire,
     removeTextureBudgetReservation,
