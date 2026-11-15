@@ -124,9 +124,6 @@ vi.mock('./components/SessionHistoryDialog', () => ({
   )
 }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({
-  default: () => <div data-testid="skill-picker-takeover" />
-}))
 vi.mock('./components/ChatImageGenerationSettings', () => ({ default: () => null }))
 
 const route = {
@@ -530,6 +527,83 @@ describe('slash-command results in the Agent column', () => {
     expect(cards()).toHaveLength(0)
     expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
     expectNothingAboveTheTranscript()
+  })
+
+  it('shows the goal records inside one card that moves to the end when /goal runs again', async () => {
+    await renderPage()
+    run('/goal')
+    await waitFor(() => expect(commands()).toEqual(['/goal']))
+    const card = cards()[0]
+    expect(within(card).getByTestId('chat-command-card-title')).toHaveTextContent('线程目标')
+    const records = await screen.findByTestId('goal-records-host')
+    expect(within(card).getByTestId('chat-command-card-panel')).toContainElement(records)
+    expect(records).toHaveTextContent('lead')
+    // No close button: the card leaves with the conversation.
+    expect(within(card).queryByRole('button')).toBeNull()
+    expect(screen.getByTestId('input')).toHaveValue('')
+
+    run('/status')
+    await waitFor(() => expect(commands()).toEqual(['/goal', '/status']))
+    const before = token()
+    run('/goal')
+    await waitFor(() => expect(commands()).toEqual(['/status', '/goal']))
+    expect(token()).toBe(before + 1)
+    // The same view moved with its card; it was not opened a second time.
+    expect(screen.getAllByTestId('goal-records-host')).toEqual([records])
+    expect(cards()[1]).toContainElement(records)
+    expectNothingAboveTheTranscript()
+
+    fireEvent.click(screen.getByRole('button', { name: 'open other' }))
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('other'))
+    expect(cards()).toHaveLength(0)
+    expect(screen.queryByTestId('goal-records-host')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'open lead' }))
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    expect(cards()).toHaveLength(0)
+    expect(screen.queryByTestId('goal-records-host')).toBeNull()
+  })
+
+  it('shows the thread skills inside one card for /skills and /skill, with the transcript still there', async () => {
+    const listAgentSessionSkills = vi.fn(async () => ({
+      revision: 1,
+      skills: [
+        { id: 'one', name: 'Poster', description: 'Makes posters', paths: [], hidden: false, enabled: true }
+      ],
+      staleDisabledIds: [],
+      truncated: false,
+      grantsPermission: false
+    }))
+    useServices({ 'svcLLMProxy.listAgentSessionSkills': listAgentSessionSkills })
+    await renderPage()
+    // The command is accepted once the thread's skill scope is bound.
+    await waitFor(() => {
+      run('/skills')
+      expect(commands()).toEqual(['/skills'])
+    })
+    const card = cards()[0]
+    const panel = within(card).getByTestId('chat-command-card-panel')
+    expect(await within(panel).findByText(`Poster · ${zh.chat.agent_skill_session.enabled}`)).toBeVisible()
+    // The card has no close button, and nothing took the place of the transcript or the composer.
+    expect(within(card).queryByRole('button', { name: zh.general.close })).toBeNull()
+    expect(screen.getByTestId('list')).toBeVisible()
+    expect(screen.getByTestId('input')).toBeVisible()
+    expect(screen.getByTestId('input')).toHaveValue('')
+    expectNothingAboveTheTranscript()
+
+    run('/status')
+    await waitFor(() => expect(commands()).toEqual(['/skills', '/status']))
+    // "/skill" is the same view: its one card moves to the end under the command that was typed.
+    run('/skill list')
+    await waitFor(() => expect(commands()).toEqual(['/status', '/skill']))
+    expect(within(cards()[1]).getByText(`Poster · ${zh.chat.agent_skill_session.enabled}`)).toBeVisible()
+    // The skills card does not take other commands away.
+    run('/scratchpad')
+    await waitFor(() => expect(commands()).toEqual(['/status', '/skill', '/scratchpad']))
+
+    fireEvent.click(screen.getByRole('button', { name: 'open other' }))
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('other'))
+    expect(cards()).toHaveLength(0)
+    expect(screen.queryByText(`Poster · ${zh.chat.agent_skill_session.enabled}`)).toBeNull()
   })
 
   it('drops the cards when the pane stops being the active one', async () => {

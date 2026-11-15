@@ -51,6 +51,31 @@ describe('thread goal entry', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(3))
     expect(onClose).toHaveBeenLastCalledWith()
   })
+  it('in the Agent column draws the records into the body of a card, without a close button', async () => {
+    const onClose = vi.fn()
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    try {
+      // The card is not there yet: nothing is drawn and nothing is bound.
+      const page = render(<GoalEntry {...props} open onClose={onClose} cardHost={null} />)
+      expect(h.revision).not.toHaveBeenCalled()
+      page.rerender(<GoalEntry {...props} open onClose={onClose} cardHost={host} />)
+      await screen.findByText('No goals yet.')
+      expect(host).toContainElement(screen.getByRole('region', { name: 'Thread goals' }))
+      expect(screen.queryByTestId('agent-goal-view')).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Close goals' })).toBeNull()
+      // The card names the view: the records do not repeat the heading.
+      expect(screen.queryByText('Thread goals')).toBeNull()
+      // A card has no close: Escape inside it does nothing.
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Create draft' }), { key: 'Escape' })
+      expect(onClose).not.toHaveBeenCalled()
+      // The conversation changed under the card: the view still asks to be closed.
+      page.rerender(<GoalEntry {...props} conversationId="second" open onClose={onClose} cardHost={host} />)
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+      expect(onClose).toHaveBeenLastCalledWith()
+      expect(host).toBeEmptyDOMElement()
+    } finally { host.remove() }
+  })
   it('stays closed for remote, inactive or missing conversation and never binds these', async () => {
     const page = render(<AgentThreadGoalEntry {...props} remote />)
     fireEvent.click(screen.getByRole('button', { name: 'run /goal' }))

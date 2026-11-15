@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { Box, Button } from '@mui/material'
 import type { AgentRouteLike } from '@shared/agent'
@@ -8,6 +9,9 @@ import AgentThreadGoalRecordsHost from './AgentThreadGoalRecordsHost'
  * The goal records view that "/goal" opens. It belongs to the thread conversation it was opened
  * for: when that scope changes or stops being available the view closes, and showing it again
  * takes a new "/goal". The host owns the scope binding.
+ *
+ * In the Agent column the view is the body of a command card of the transcript: `cardHost` is
+ * that body. The card has no close button; it leaves with the conversation.
  */
 export default function AgentThreadGoalEntry({
   route,
@@ -15,7 +19,8 @@ export default function AgentThreadGoalEntry({
   active,
   remote,
   open,
-  onClose
+  onClose,
+  cardHost
 }: {
   route?: AgentRouteLike
   conversationId?: string
@@ -24,6 +29,8 @@ export default function AgentThreadGoalEntry({
   open: boolean
   /** `dismissed` is true when the person closed the view (close button or Escape). */
   onClose: (dismissed?: boolean) => void
+  /** Agent column: the card body to draw into (null until the card is there). */
+  cardHost?: HTMLElement | null
 }) {
   const { t } = useTranslation()
   const key =
@@ -38,6 +45,21 @@ export default function AgentThreadGoalEntry({
     if (stale) onClose()
   }, [stale, onClose])
   if (!open || stale) return null
+  if (cardHost !== undefined) {
+    return cardHost
+      ? createPortal(
+          <AgentThreadGoalRecordsHost
+            key={key}
+            route={route}
+            conversationId={conversationId}
+            active={active}
+            remote={remote}
+            embedded
+          />,
+          cardHost
+        )
+      : null
+  }
 
   const closeLabel = t('chat.goal_close', { defaultValue: 'Close goals' })
   return (

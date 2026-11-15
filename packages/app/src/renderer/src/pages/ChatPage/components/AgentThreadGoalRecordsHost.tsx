@@ -18,12 +18,12 @@ function enqueue(task: () => Promise<void>): void { serial = serial.then(task, t
 const validReportSummary = (value: string) => Boolean(value.trim()) && value.length <= AGENT_GOAL_LIMITS.summary && !value.includes('\0')
 const service = () => api().svcLLMProxy
 
-export default function AgentThreadGoalRecordsHost({ route, conversationId, active, remote }: { route?: AgentRouteLike; conversationId?: string; active: boolean; remote: boolean }) {
+export default function AgentThreadGoalRecordsHost({ route, conversationId, active, remote, embedded }: { route?: AgentRouteLike; conversationId?: string; active: boolean; remote: boolean; /** Inside a command card of the Agent column: no frame and no heading of its own. */ embedded?: boolean }) {
   const key = active && !remote && route?.channel === 'canvas' && route.scopeType === 'thread' && conversationId ? JSON.stringify({ route, conversationId }) : ''
   const scope = useMemo(() => key ? JSON.parse(key) as Scope : undefined, [key])
-  return scope ? <GoalBinding key={key} scope={scope} /> : null
+  return scope ? <GoalBinding key={key} scope={scope} embedded={embedded} /> : null
 }
-function GoalBinding({ scope }: { scope: Scope }) {
+function GoalBinding({ scope, embedded }: { scope: Scope; embedded?: boolean }) {
   const { t } = useTranslation()
   const translate = (key: string, fallback: string) => {
     const value = t(key, { defaultValue: fallback })
@@ -128,5 +128,5 @@ function GoalBinding({ scope }: { scope: Scope }) {
       } finally { if (pendingMutations.get(scopeKey) === pendingMutation) pendingMutations.delete(scopeKey); settle(); if (isCurrent()) { s.lock = false; setPending(false) } }
     })()
   }
-  return <><AgentThreadGoalRecordsPanel createResetVersion={formVersion} reportAck={reportAck} view={view} pending={pending || unknown} error={error} onCreate={intent => mutate(intent, 'create')} onControl={intent => mutate(intent, 'control')} onReport={intent => mutate(intent, 'report')} onDecision={intent => mutate(intent, 'decision')} />{!view && !pending && error ? <button type="button" onClick={() => { setPending(true); setError(unknown ? translate('chat.agent_goal.result_unknown', 'Result unknown. Review the refreshed goals before continuing.') : null); setLoadVersion(version => version + 1) }}>{translate('chat.agent_goal.retry_loading', 'Retry loading goals')}</button> : null}{unknown && !pending && view ? <button type="button" onClick={acknowledge}>{translate('chat.agent_goal.reviewed_goals', 'I reviewed the goals')}</button> : null}</>
+  return <><AgentThreadGoalRecordsPanel embedded={embedded} createResetVersion={formVersion} reportAck={reportAck} view={view} pending={pending || unknown} error={error} onCreate={intent => mutate(intent, 'create')} onControl={intent => mutate(intent, 'control')} onReport={intent => mutate(intent, 'report')} onDecision={intent => mutate(intent, 'decision')} />{!view && !pending && error ? <button type="button" onClick={() => { setPending(true); setError(unknown ? translate('chat.agent_goal.result_unknown', 'Result unknown. Review the refreshed goals before continuing.') : null); setLoadVersion(version => version + 1) }}>{translate('chat.agent_goal.retry_loading', 'Retry loading goals')}</button> : null}{unknown && !pending && view ? <button type="button" onClick={acknowledge}>{translate('chat.agent_goal.reviewed_goals', 'I reviewed the goals')}</button> : null}</>
 }

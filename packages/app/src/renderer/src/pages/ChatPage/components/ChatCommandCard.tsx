@@ -23,9 +23,11 @@ export const ChatCommandResultCard: React.FC<{
   title?: string
   /** Error look: the icon takes the error colour (the body is then a CommandCardText error). */
   error?: boolean
+  /** Take the full 90% instead of the width of the content: for bodies that hold a form. */
+  fill?: boolean
   testId?: string
   children?: React.ReactNode
-}> = ({ command, title, error = false, testId = 'chat-command-card', children }) => {
+}> = ({ command, title, error = false, fill = false, testId = 'chat-command-card', children }) => {
   const tokens = useColumnTokens()
   return (
     <Box
@@ -38,6 +40,7 @@ export const ChatCommandResultCard: React.FC<{
         alignSelf: 'flex-start',
         boxSizing: 'border-box',
         maxWidth: '90%',
+        width: fill ? '90%' : undefined,
         minWidth: 0,
         overflow: 'hidden',
         borderRadius: `${tokens.radius.content}px`,
@@ -288,6 +291,20 @@ export const CommandCardPanelBody = React.forwardRef<
           textAlign: 'left',
           textTransform: 'none',
           whiteSpace: 'normal'
+        },
+        // Plain buttons of a view (retry, acknowledge) read as the card's text links.
+        '& button:not(.MuiButtonBase-root)': {
+          m: 0,
+          mr: '12px',
+          p: 0,
+          border: 0,
+          bgcolor: 'transparent',
+          color: tokens.accent,
+          cursor: 'pointer',
+          font: 'inherit',
+          textAlign: 'left',
+          '&:hover': { textDecoration: 'underline' },
+          '&:focus-visible': { ...tokens.focusRing, outlineOffset: '2px' }
         },
         '& .MuiInputBase-root': { fontSize: tokens.fontSize.base },
         '& .MuiInputLabel-root': { fontSize: tokens.fontSize.base },

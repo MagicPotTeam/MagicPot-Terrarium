@@ -178,7 +178,6 @@ import {
   findCustomSkillById,
   getCustomSkillName,
   getSkillCategoryForSkillId,
-  getSkillsForCategory,
   normalizeProfileIdForSkill,
   resolveCustomSkillId
 } from './chatSkillUtils'
@@ -320,7 +319,6 @@ import ChatComposer from './components/ChatComposer'
 import ImagePreviewOverlay from './components/ImagePreviewOverlay'
 import ImageContextMenu from './components/ImageContextMenu'
 import ChatPrimarySelection from './components/ChatPrimarySelection'
-import ChatSkillPicker from './components/ChatSkillPicker'
 import ChatImageGenerationSettings from './components/ChatImageGenerationSettings'
 import { DEFAULT_CHAT_IMAGE_GENERATION_OPTIONS } from './components/ChatImageGenerationSettings.constants'
 
@@ -3052,7 +3050,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
   })
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null)
   const [selectedSkillCategory, setSelectedSkillCategory] = useState<string>(NO_SKILL_VALUE)
-  const [isSkillPickerOpen, setIsSkillPickerOpen] = useState(false)
   const [reasoningEffortByProfileId, setReasoningEffortByProfileId] = useState<
     Record<string, LLMReasoningEffort>
   >(() => readStoredReasoningEffortMap(reasoningEffortStorageKey))
@@ -3152,12 +3149,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     () => enrichMagicPotAppCatalogWithRuntime(buildMagicPotAppCatalog(config), runtimeMcpStatus),
     [config, runtimeMcpStatus]
   )
-  const hasCustomSkills = customSkills.length > 0
   const skillCategories = useMemo(() => buildCustomSkillCategories(customSkills), [customSkills])
-  const skillsForSelectedCategory = useMemo(
-    () => getSkillsForCategory(customSkills, selectedSkillCategory),
-    [customSkills, selectedSkillCategory]
-  )
   const selectedCustomSkill = useMemo(
     () => findCustomSkillById(customSkills, selectedSkillId),
     [customSkills, selectedSkillId]
@@ -4230,7 +4222,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     if (active) return
     setHistoryOpen(false)
     setImageContextMenu(null)
-    setIsSkillPickerOpen(false)
     setIsDragging(false)
   }, [active])
 
@@ -5319,29 +5310,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [currentSessionId, setSessions]
   )
 
-  const selectSkillCategory = useCallback(
-    (category: string) => {
-      const nextCategory = category || NO_SKILL_VALUE
-      const currentSkillCategory = selectedSkillId
-        ? getSkillCategoryForSkillId(customSkills, selectedSkillId)
-        : NO_SKILL_VALUE
-
-      setSelectedSkillCategory(nextCategory)
-
-      if (!nextCategory) {
-        setSelectedSkillId(null)
-        updateCurrentSessionSkill(null)
-        return
-      }
-
-      if (currentSkillCategory !== nextCategory) {
-        setSelectedSkillId(null)
-        updateCurrentSessionSkill(null)
-      }
-    },
-    [customSkills, selectedSkillId, updateCurrentSessionSkill]
-  )
-
   const selectSkill = useCallback(
     async (skillId: string | null) => {
       const nextSkillId = resolveAvailableSkillId(skillId)
@@ -5388,7 +5356,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         )
       }
       updateCurrentSessionSkill(nextSkill.id)
-      setIsSkillPickerOpen(false)
     },
     [
       activateNewSession,
@@ -8240,10 +8207,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const showNoApiWarning = shouldShowNoApiWarning({
     availableProfileCount: availableProfiles.length,
     useRemoteLlm: Boolean(config?.use_remote_llm),
-    hasExternalAgentSkills,
-    compact,
-    isSkillPickerOpen,
-    hasCustomSkills
+    hasExternalAgentSkills
   })
   // Identity DATA for this visible original pane only. No execution entry is
   // connected to the returned token; ordinary chat/skills/sides keep their owners.
@@ -8253,7 +8217,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     boundaryKey: storageScope,
     active: active && isReady && config?.use_remote_llm === false && !showNoApiWarning && sessionsLoaded && !!currentSession &&
       !sessionLoadError && storageScopeRef.current === storageScope && !showingSide &&
-      !isSkillPickerOpen && !skillDetailsOpen && !!currentSessionId &&
+      !skillDetailsOpen && !!currentSessionId &&
       !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSessionId)) &&
       !hasSessionDeleteTombstone(currentSessionId, storageScope)
   })
@@ -8539,7 +8503,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [teamApprovalHost, setTeamApprovalHost] = useState<HTMLDivElement | null>(null)
   const approvalSurfaceRef = useRef<object | null>(null)
   const [teamWaitingState, setTeamWaitingState] = useState<{ key: string; token: object; host: HTMLElement; ids: ReadonlySet<string> } | null>(null)
-  const approvalSurfaceKey = teamEnabled && route && teamApprovalHost && teamMembers.length && !showingSide && !isSkillPickerOpen &&
+  const approvalSurfaceKey = teamEnabled && route && teamApprovalHost && teamMembers.length && !showingSide &&
     sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope
     ? JSON.stringify([storageScope, route.channel, route.scopeType, route.scopeId, route.threadId, messageLeadId, messageGeneration,
       teamMembers.map(member => [member.id, member.teamMemberName ?? member.title])]) : null
@@ -8585,6 +8549,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
     setTailScrollToken(token => token + 1)
     return id
   }, [])
+  /** Shows the one card of a live view (goal records, thread skills) at the end; an older card of that view leaves. */
+  const showTailPanel = useCallback((scope: string, panel: 'goal' | 'skills', command: string, title?: string) => {
+    const owner = tailOwnerRef.current
+    if (!isMountedRef.current || !owner.active || owner.scope !== scope) return
+    const id = ++tailCardIdRef.current
+    setTailCards(previous => [...previous.filter(card => card.kind !== 'panel' || card.panel !== panel), { kind: 'panel', panel, command, title, id, scope }])
+    setTailScrollToken(token => token + 1)
+  }, [])
+  // The body elements of those cards: the views are drawn into them.
+  const [goalCardHost, setGoalCardHost] = useState<HTMLElement | null>(null)
+  const [skillsCardHost, setSkillsCardHost] = useState<HTMLElement | null>(null)
+  const handleTailPanelHost = useCallback((panel: string, element: HTMLElement | null) => {
+    if (panel === 'goal') setGoalCardHost(element)
+    else if (panel === 'skills') setSkillsCardHost(element)
+  }, [])
+  const skillsCardOpen = compact && active && tailCards.some(card => card.kind === 'panel' && card.panel === 'skills' && card.scope === inspectionScope)
   // What the default button of a confirm card does, by card id.
   const tailConfirmActionsRef = useRef(new Map<number,
     | { type: 'replay'; view: NonNullable<typeof replayView> }
@@ -8616,6 +8596,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const focusComposerInput = useCallback(() => composerInputRef.current?.focus(), [])
   const closeGoalView = useCallback((dismissed?: boolean) => {
     setGoalViewScope(null)
+    // In the column the view is a card of the transcript: it leaves with the view.
+    setTailCards(previous => previous.some(card => card.kind === 'panel' && card.panel === 'goal') ? previous.filter(card => card.kind !== 'panel' || card.panel !== 'goal') : previous)
     if (dismissed === true) composerInputRef.current?.focus()
   }, [])
   const goalCommandAvailable = active && isReady && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && Boolean(currentSession && !currentSession.archived && !hasSessionDeleteTombstone(currentSession.id, storageScope))
@@ -8629,7 +8611,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [inspectionScope, active])
   const scratchpadCommandRef = useRef<AgentScratchpadCommandHandle>(null)
   const scratchpadAvailable = active && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope && !!currentSession &&
-    config?.use_remote_llm === false && !selectedCustomSkill && !showingSide && !isSkillPickerOpen && !skillDetailsOpen && !!currentSessionId &&
+    config?.use_remote_llm === false && !selectedCustomSkill && !showingSide && !skillDetailsOpen && !!currentSessionId &&
     !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSessionId)) && !hasSessionDeleteTombstone(currentSessionId, storageScope)
   // Suggest only what handleSendCurrentMessage below runs in this conversation.
   const composerCommandsReady =
@@ -8825,6 +8807,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyWarning(t('chat.command_unavailable_current', { defaultValue: 'Command unavailable for the current conversation.' })); return
       }
       setGoalViewScope(inspectionScope)
+      // Column: the records are the body of a card; "/goal" again moves that one card to the end.
+      if (compact) showTailPanel(inspectionScope, 'goal', '/goal', t('chat.agent_goal.panel_title', { defaultValue: 'Thread goals' }))
       setInputValue(''); setComposerClearVersion(version => version + 1)
       clearScheduledDraftPersistence(); markTransientDraftCleared(storageScope, id); writeSessionDraftBackup(id, Date.now(), undefined, storageScope)
       setSessions(previous => previous.map(item => item.id === id ? stripSessionDraft(item) : item))
@@ -8926,9 +8910,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           ? scratchpadCommandRef.current?.execute(parseAgentScratchpadCommand(input)!, JSON.stringify({ route, conversationId: id, storageScope }))
           : parsedSkillCommand ? skillCommandRef.current?.execute(parsedSkillCommand, scope) : sideCommandRef.current?.execute(parseAgentSideCommand(input)!, scope)
         if (!accepted) { notifyWarning(t(`${commandKey}.command_unavailable`)); return }
-        if (skillCommand) setSkillDetailsOpen(true)
-        // The column has no skills button: a bare "/skills" opens the picker's take-over view.
-        if (compact && parsedSkillCommand?.action === 'list') setIsSkillPickerOpen(true)
+        // Column: the thread skills are the body of a card (the "/" list is the skill picker).
+        if (skillCommand && compact) showTailPanel(inspectionScope, 'skills', input.trim().split(/\s+/)[0].toLowerCase())
+        else if (skillCommand) setSkillDetailsOpen(true)
         setInputValue(''); setComposerClearVersion(version => version + 1)
         // An accepted user command leaves the ordinary draft pipeline immediately.
         // Otherwise a layout re-render can restore its still-persisted text before
@@ -8953,7 +8937,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
     void sendMessage()
-  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, appendTailCard, handleCompressCurrentContext, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
+  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, appendTailCard, showTailPanel, handleCompressCurrentContext, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
 
   const handleSendEditedMessage = useCallback(
     (
@@ -9043,31 +9027,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const transcriptTail = useMemo(() => {
     if (!compact || !active) return null
     const cards = tailCards.filter(card => card.scope === inspectionScope)
-    return cards.length ? <ChatCommandTail cards={cards} onLink={openCommandTailTarget} onAnswer={answerTailConfirm} /> : null
-  }, [compact, active, tailCards, inspectionScope, openCommandTailTarget, answerTailConfirm])
-
-  const skillPickerToolbarSlot = useMemo(
-    () => (
-      <ChatSkillPicker
-        compact={compact}
-        skillCategories={skillCategories}
-        selectedSkillCategory={selectedSkillCategory}
-        selectedSkillId={selectedSkillId}
-        skillsForSelectedCategory={skillsForSelectedCategory}
-        onSelectSkillCategory={selectSkillCategory}
-        onSelectSkill={handleSelectSkill}
-      />
-    ),
-    [
-      compact,
-      handleSelectSkill,
-      selectSkillCategory,
-      selectedSkillCategory,
-      selectedSkillId,
-      skillCategories,
-      skillsForSelectedCategory
-    ]
-  )
+    return cards.length ? <ChatCommandTail cards={cards} onLink={openCommandTailTarget} onAnswer={answerTailConfirm} onPanelHost={handleTailPanelHost} /> : null
+  }, [compact, active, tailCards, inspectionScope, openCommandTailTarget, answerTailConfirm, handleTailPanelHost])
 
   // ==================== Hunyuan 3D SidePanel generate event ====================
   useEffect(() => {
@@ -9878,17 +9839,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
             <Typography variant="subtitle2">{inspectionView.title}</Typography>
             <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 300, overflow: 'auto' }}>{inspectionView.text}</Typography>
           </Box>}
-          <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={goalCommandAvailable} remote={!config || Boolean(config.use_remote_llm)} open={active && goalViewScope === inspectionScope} onClose={closeGoalView} />
+          <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={goalCommandAvailable} remote={!config || Boolean(config.use_remote_llm)} open={active && goalViewScope === inspectionScope} onClose={closeGoalView} cardHost={compact ? goalCardHost : undefined} />
           <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} onResult={compact ? handleScratchpadResult : undefined} />
-          <AgentThreadSkillsPanel ref={skillCommandRef} visible={isSkillPickerOpen || skillDetailsOpen} onClose={() => { setSkillDetailsOpen(false); setIsSkillPickerOpen(false) }} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
-          <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
+          <AgentThreadSkillsPanel ref={skillCommandRef} visible={compact ? skillsCardOpen : skillDetailsOpen} onClose={() => setSkillDetailsOpen(false)} cardHost={compact ? skillsCardHost : undefined} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
           <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} subRowsHost={threadSubRowsHost} onOpenSubRowChange={onThreadSubRowChange} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
             const id = currentSessionIdRef.current
             if (!id || id !== currentSessionId || storageScopeRef.current !== storageScope || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) throw new Error('Side snapshot no longer belongs to the current conversation.')
             return sessionsRef.current.find((session) => session.id === id)?.messages || []
           }} />
-          </Box>
-          <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
               <Box hidden={showingSide} sx={{ flex: 1, minWidth: 0, minHeight: 0, display: showingSide ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
               {teamEnabled && <Box sx={{maxHeight:'30%',overflow:'auto',minWidth:0,display:'flex',flexDirection:'column'}}><Box ref={setTeamApprovalHost} data-testid="team-inline-approvals" sx={{px:1}}/></Box>}
               <Box sx={{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
@@ -10195,23 +10153,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 statusSlot={contextCompressionStatusSlot}
               />
               </Box>
-          </Box>
-          {isSkillPickerOpen ? (
-            <Box sx={{ flex: 1, overflowY: 'auto', p: 0, bgcolor: 'background.default' }}>
-              {(config.use_remote_llm || route?.channel !== 'canvas' || route.scopeType !== 'thread') && <Button size="small" onClick={() => setIsSkillPickerOpen(false)}>{t('general.close')}</Button>}
-              <ChatSkillPicker
-                compact={false}
-                customSkills={customSkills}
-                skillCategories={skillCategories}
-                selectedSkillCategory={selectedSkillCategory}
-                selectedSkillId={selectedSkillId}
-                skillsForSelectedCategory={skillsForSelectedCategory}
-                onSelectSkillCategory={selectSkillCategory}
-                onSelectSkill={selectSkill}
-              />
-            </Box>
-          ) : null}
-          {(showingSide || isSkillPickerOpen) && isLoading && <Button size="small" onClick={handleStopGenerating}>{t('chat.stop_generating')}</Button>}
+          {showingSide && isLoading && <Button size="small" onClick={handleStopGenerating}>{t('chat.stop_generating')}</Button>}
           </Box>
         </Box>
 

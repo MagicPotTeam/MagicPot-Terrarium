@@ -1,4 +1,5 @@
 import React, { forwardRef, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Alert, Box, Button, Typography } from '@mui/material'
 import { useTranslation } from 'react-i18next'
 import type { AgentRouteLike } from '@shared/agent'
@@ -7,7 +8,7 @@ import { api } from '../../../utils/windowUtils'
 import type { AgentSkillCommand, AgentSkillCommandHandle } from '../agentSkillCommand'
 import { acknowledgeSkillPreference, beginSkillPreference, pendingSkillPreference } from '../skillPreferenceOperations'
 let lifecycleRevision = 0
-function Skills({ scope, commandRef, commandEnabled, visible, onClose }: { scope: string; commandRef: React.ForwardedRef<AgentSkillCommandHandle>; commandEnabled: boolean; visible: boolean; onClose?(): void }) {
+function Skills({ scope, commandRef, commandEnabled, visible, onClose, cardHost }: { scope: string; commandRef: React.ForwardedRef<AgentSkillCommandHandle>; commandEnabled: boolean; visible: boolean; onClose?(): void; cardHost?: HTMLElement | null }) {
   const { t } = useTranslation(), [detail, setDetail] = useState<AgentSkillUserDetail>(), [confirmSeparate, setConfirmSeparate] = useState(false), [bindingAttempt, setBindingAttempt] = useState(0), [bindingBusy, setBindingBusy] = useState(false), [rejected, setRejected] = useState(false), [bound, setBound] = useState<string>(), [catalog, setCatalog] = useState<AgentSkillSessionList>(), [busy, setBusy] = useState(false), [error, setError] = useState(false), [pending, setPending] = useState(() => pendingSkillPreference(scope))
   const live = useRef(false), lock = useRef(false), generation = useRef(0)
   const commandAvailable = useRef(commandEnabled), commandGeneration = useRef(0); commandAvailable.current = commandEnabled
@@ -86,9 +87,13 @@ function Skills({ scope, commandRef, commandEnabled, visible, onClose }: { scope
     void runCommand(command); return true
   } }))
   if (!visible) return null
-  return <Box sx={{ mx: 2, mb: 1 }}>
-    {onClose && <Button size="small" onClick={onClose}>{t('general.close')}</Button>}
-    {detail && <Box sx={{ p: 1, maxHeight: 280, overflow: 'auto', border: '1px solid', borderColor: 'divider' }}>
+  // Agent column: the panel is the body of a command card, which frames and scrolls it.
+  const embedded = cardHost !== undefined
+  if (embedded && !cardHost) return null
+  const boxSx = embedded ? { mb: '6px', minWidth: 0 } : { p: 1, maxHeight: 280, overflow: 'auto', border: '1px solid', borderColor: 'divider' }
+  const content = <Box sx={embedded ? { minWidth: 0 } : { mx: 2, mb: 1 }}>
+    {onClose && !embedded && <Button size="small" onClick={onClose}>{t('general.close')}</Button>}
+    {detail && <Box sx={boxSx}>
       <Alert severity="warning">{t('chat.agent_skill_session.body_notice')}</Alert>
       <Typography variant="body2">{detail.name} · {t(detail.enabled ? 'chat.agent_skill_session.enabled' : 'chat.agent_skill_session.disabled')}</Typography>
       <Typography variant="caption" display="block">{detail.baseDirectory}</Typography>
@@ -107,7 +112,7 @@ function Skills({ scope, commandRef, commandEnabled, visible, onClose }: { scope
         <Button size="small" onClick={() => setConfirmSeparate(false)}>{t('chat.agent_skill_session.keep_pending')}</Button>
       </Alert>}
     </>}
-    {catalog && <Box sx={{ p: 1, border: '1px solid', borderColor: 'divider', maxHeight: 280, overflow: 'auto' }}>
+    {catalog && <Box sx={boxSx}>
       <Alert severity="info">{t('chat.agent_skill_session.notice')}</Alert>
       {(catalog.truncated || catalog.staleDisabledIds.length > 0) && <Alert severity="warning">{t('chat.agent_skill_session.partial')}</Alert>}
       {catalog.staleDisabledIds.map(id => <Box key={id}><Typography variant="caption">{id}</Typography><Button size="small" disabled={busy || !!pending || !bound} onClick={() => void change(id, true)}>{t('chat.agent_skill_session.forget_stale')}</Button></Box>)}
@@ -120,11 +125,16 @@ function Skills({ scope, commandRef, commandEnabled, visible, onClose }: { scope
       </Box>)}
     </Box>}
   </Box>
+  return cardHost ? createPortal(content, cardHost) : content
 }
-type SkillsPanelProps = { route?: AgentRouteLike; conversationId?: string; active: boolean; commandEnabled?: boolean; visible?: boolean; onClose?(): void }
-const AgentThreadSkillsPanel = forwardRef<AgentSkillCommandHandle, SkillsPanelProps>(function AgentThreadSkillsPanel({ route, conversationId, active, commandEnabled = true, visible = true, onClose }, ref) {
+type SkillsPanelProps = {
+  route?: AgentRouteLike; conversationId?: string; active: boolean; commandEnabled?: boolean; visible?: boolean; onClose?(): void
+  /** Agent column: the body of the command card to draw into (null until the card is there). No close button then. */
+  cardHost?: HTMLElement | null
+}
+const AgentThreadSkillsPanel = forwardRef<AgentSkillCommandHandle, SkillsPanelProps>(function AgentThreadSkillsPanel({ route, conversationId, active, commandEnabled = true, visible = true, onClose, cardHost }, ref) {
   if (!active || !conversationId || route?.channel !== 'canvas' || route.scopeType !== 'thread') return null
   const scope = JSON.stringify({ route, conversationId })
-  return <Skills key={scope} scope={scope} commandRef={ref} commandEnabled={commandEnabled} visible={visible} onClose={onClose} />
+  return <Skills key={scope} scope={scope} commandRef={ref} commandEnabled={commandEnabled} visible={visible} onClose={onClose} cardHost={cardHost} />
 })
 export default AgentThreadSkillsPanel

@@ -30,6 +30,11 @@ export type AgentThreadGoalRecordsPanelProps = {
   onDecision?: (intent: AgentThreadGoalDecisionIntent) => void
   createResetVersion?: number
   reportAck?: AgentThreadGoalReportAck
+  /**
+   * Inside a command card of the Agent column: the card is the frame and names the view, so the
+   * panel draws neither, and its fields and buttons sit in wrapping rows.
+   */
+  embedded?: boolean
 }
 
 /** Pure user-intent surface. Parent owns binding, authorization, mutation and errors. */
@@ -42,7 +47,8 @@ export default function AgentThreadGoalRecordsPanel({
   onReport,
   onDecision,
   createResetVersion = 0,
-  reportAck
+  reportAck,
+  embedded = false
 }: AgentThreadGoalRecordsPanelProps) {
   const { t } = useTranslation()
   const translate = (key: string, fallback: string, values: Record<string, string | number> = {}) => {
@@ -88,13 +94,20 @@ export default function AgentThreadGoalRecordsPanel({
   return (
     <Box
       component="section"
-      aria-labelledby={headingId}
-      sx={{ mx: 2, mb: 1, p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}
+      aria-labelledby={embedded ? undefined : headingId}
+      aria-label={embedded ? translate('chat.agent_goal.panel_title', 'Thread goals') : undefined}
+      sx={
+        embedded
+          ? { minWidth: 0 }
+          : { mx: 2, mb: 1, p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 2 }
+      }
     >
-      <Typography id={headingId} variant="subtitle2">
-        {translate('chat.agent_goal.panel_title', 'Thread goals')}
-      </Typography>
-      <Typography variant="caption">
+      {embedded ? null : (
+        <Typography id={headingId} variant="subtitle2">
+          {translate('chat.agent_goal.panel_title', 'Thread goals')}
+        </Typography>
+      )}
+      <Typography variant="caption" display={embedded ? 'block' : undefined}>
         {translate('chat.agent_goal.panel_notice', 'Manual records only. Activating a goal does not run a model or grant permissions.')}
       </Typography>
       {error ? <Alert severity="error">{error}</Alert> : null}
@@ -248,7 +261,13 @@ export default function AgentThreadGoalRecordsPanel({
           </Box>
         )
       })}
-      <CreateGoalForm key={createResetVersion} view={view} pending={pending} onCreate={onCreate} />
+      <CreateGoalForm
+        key={createResetVersion}
+        view={view}
+        pending={pending}
+        onCreate={onCreate}
+        embedded={embedded}
+      />
     </Box>
   )
 }
@@ -260,8 +279,9 @@ const validReportSummary = (summary: string): boolean =>
 function CreateGoalForm({
   view,
   pending,
-  onCreate
-}: Pick<AgentThreadGoalRecordsPanelProps, 'view' | 'pending' | 'onCreate'>) {
+  onCreate,
+  embedded = false
+}: Pick<AgentThreadGoalRecordsPanelProps, 'view' | 'pending' | 'onCreate' | 'embedded'>) {
   const { t } = useTranslation()
   const translate = (key: string, fallback: string, values: Record<string, string | number> = {}) => {
     const value = t(key, { ...values, defaultValue: fallback })
@@ -297,7 +317,18 @@ function CreateGoalForm({
           }
         })
       }}
-      sx={{ display: 'flex', flexDirection: 'column', gap: 1, mt: 1 }}
+      sx={
+        embedded
+          ? {
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'flex-end',
+              gap: '8px',
+              mt: '8px',
+              '& .MuiTextField-root': { flex: '1 1 140px', minWidth: 0 }
+            }
+          : { display: 'flex', flexDirection: 'column', gap: 1, mt: 1 }
+      }
     >
       <TextField
         label={translate('chat.agent_goal.goal_title_label', 'Goal title')}

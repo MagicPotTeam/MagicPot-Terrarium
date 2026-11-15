@@ -201,6 +201,32 @@ describe('user-only conversation skill preferences panel', () => {
     await screen.findByText('Metadata skill · chat.agent_skill_session.disabled')
     expect(h.change.mock.calls[1][0]).toEqual(original)
   })
+  it('in the Agent column draws into the body of a card: no close button and no frame of its own', async () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const onClose = vi.fn(), ref = createRef<AgentSkillCommandHandle>(), scope = JSON.stringify({ route, conversationId: 'card' })
+    try {
+      // The scope is bound and commands are accepted before the card exists; nothing is drawn yet.
+      const view = render(<AgentThreadSkillsPanel ref={ref} route={route} conversationId="card" active visible={false} onClose={onClose} cardHost={null} />)
+      await waitFor(() => expect(h.bind).toHaveBeenCalledWith(expect.objectContaining({ active: true })))
+      await waitFor(() => { let accepted = false; act(() => { accepted = ref.current!.execute({ action: 'list' }, scope) }); expect(accepted).toBe(true) })
+      expect(screen.queryByRole('button')).toBeNull()
+      view.rerender(<AgentThreadSkillsPanel ref={ref} route={route} conversationId="card" active visible onClose={onClose} cardHost={null} />)
+      expect(screen.queryByRole('button')).toBeNull()
+      view.rerender(<AgentThreadSkillsPanel ref={ref} route={route} conversationId="card" active visible onClose={onClose} cardHost={host} />)
+      const row = await screen.findByText('Metadata skill · chat.agent_skill_session.enabled')
+      expect(host).toContainElement(row)
+      expect(screen.queryByRole('button', { name: 'general.close' })).toBeNull()
+      // The card frames and scrolls the list: no border and no scroll box inside it.
+      for (let element = row.parentElement; element && element !== host; element = element.parentElement) {
+        expect(getComputedStyle(element).borderStyle).not.toBe('solid')
+        expect(getComputedStyle(element).maxHeight).not.toBe('280px')
+      }
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_skill_session.disable' }))
+      await screen.findByText('Metadata skill · chat.agent_skill_session.disabled')
+      expect(onClose).not.toHaveBeenCalled()
+    } finally { host.remove() }
+  })
   it('does not bind inactive or ordinary chat surfaces', () => {
     const view = render(<AgentThreadSkillsPanel route={route} conversationId="inactive" active={false} />)
     view.rerender(<AgentThreadSkillsPanel conversationId="ordinary" active />)

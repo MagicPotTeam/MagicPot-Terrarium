@@ -120,7 +120,12 @@ vi.mock('./components/AgentThreadGoalRecordsHost', () => ({
   )
 }))
 vi.mock('./components/ChatMessageList', () => ({
-  default: ({ currentSession }: any) => <pre data-testid="session">{currentSession?.id}</pre>
+  default: ({ currentSession, tail }: any) => (
+    <div data-testid="list">
+      <pre data-testid="session">{currentSession?.id}</pre>
+      {tail}
+    </div>
+  )
 }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({
@@ -129,9 +134,6 @@ vi.mock('./components/ChatPrimarySelection', () => ({
       {active ? 'active model' : 'inactive model'}
     </button>
   )
-}))
-vi.mock('./components/ChatSkillPicker', () => ({
-  default: () => <div data-testid="skill-picker-takeover" />
 }))
 vi.mock('./components/ChatImageGenerationSettings', () => ({
   default: ({ variant }: { variant?: string }) =>
@@ -258,39 +260,32 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(getComputedStyle(entry).color).toBe(probe.style.color)
   })
 
-  it('shows no goal row until /goal opens the goal records as a closable command view', async () => {
+  it('shows no goal row until /goal adds the goal records as a card of the transcript', async () => {
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    expect(screen.queryByTestId('agent-goal-view')).toBeNull()
+    expect(screen.queryByTestId('goal-records-host')).toBeNull()
     expect(screen.queryByRole('button', { name: '目标' })).toBeNull()
 
-    // Text after the name is accepted and ignored: the records are edited in the view.
+    // Text after the name is accepted and ignored: the records are edited in the card.
     const syncKey = draftSyncKey()
     fireEvent.change(screen.getByTestId('input'), { target: { value: '/goal 做一张海报' } })
     fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
 
-    const view = await screen.findByTestId('agent-goal-view')
-    expect(view).toContainElement(screen.getByTestId('goal-records-host'))
-    expect(screen.getByTestId('goal-records-host')).toHaveTextContent('lead')
+    const records = await screen.findByTestId('goal-records-host')
+    const card = screen.getByTestId('chat-command-card')
+    expect(card).toHaveAttribute('data-command', '/goal')
+    expect(card).toContainElement(records)
+    expect(screen.getByTestId('list')).toContainElement(card)
+    expect(records).toHaveTextContent('lead')
     // The accepted command leaves the draft: the composer is told to reset its text.
     expect(draftSyncKey()).not.toBe(syncKey)
     expect(h.notify).not.toHaveBeenCalled()
 
-    // Closing the view by hand returns the keyboard to this conversation's composer.
-    const closeGoals = screen.getByRole('button', { name: '收起目标' })
-    act(() => closeGoals.focus())
-    fireEvent.click(closeGoals)
+    // A card has no close button and Escape does not remove it: it leaves with the conversation.
     expect(screen.queryByTestId('agent-goal-view')).toBeNull()
-    expect(screen.getByTestId('input')).toHaveFocus()
-
-    // Escape inside the view closes it the same way.
-    fireEvent.change(screen.getByTestId('input'), { target: { value: '/goal' } })
-    fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
-    const reopened = await screen.findByTestId('agent-goal-view')
-    act(() => screen.getByRole('button', { name: '收起目标' }).focus())
-    fireEvent.keyDown(screen.getByRole('button', { name: '收起目标' }), { key: 'Escape' })
-    expect(reopened).not.toBeInTheDocument()
-    expect(screen.getByTestId('input')).toHaveFocus()
+    expect(screen.queryByRole('button', { name: '收起目标' })).toBeNull()
+    fireEvent.keyDown(records, { key: 'Escape' })
+    expect(screen.getByTestId('goal-records-host')).toBe(records)
     expect(en.chat.composer_suggestions.command_goal).toBe('Set, show or clear the current goal')
     expect(zh.chat.composer_suggestions.command_goal).toBe('设置、查看或清除当前目标')
   })
@@ -303,7 +298,8 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     fireEvent.change(screen.getByTestId('input'), { target: { value: '/goal' } })
     fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
     await waitFor(() => expect(h.notify).toHaveBeenCalledWith(zh.chat.command_unavailable_current))
-    expect(screen.queryByTestId('agent-goal-view')).toBeNull()
+    expect(screen.queryByTestId('goal-records-host')).toBeNull()
+    expect(screen.queryByTestId('chat-command-card')).toBeNull()
     expect(draftSyncKey()).toBe(syncKey)
   })
 
@@ -381,18 +377,20 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     await waitFor(() => expect(screen.getByTestId('selected-skill')).toHaveTextContent('海报设计'))
   })
 
-  it('has no skills button and opens the picker take-over view through /skills only', async () => {
+  it('has no skills button; /skills adds the thread skills card and leaves the composer in place', async () => {
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     expect(screen.queryByRole('button', { name: '技能' })).toBeNull()
-    expect(screen.queryByTestId('skill-picker-takeover')).toBeNull()
 
     // The command is accepted once the thread's skill scope is bound.
     await waitFor(() => {
       fireEvent.change(screen.getByTestId('input'), { target: { value: '/skills' } })
       fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
-      expect(screen.getByTestId('skill-picker-takeover')).toBeInTheDocument()
+      expect(screen.getByTestId('input')).toHaveValue('')
     })
+    // The "/" list is the skill picker: nothing takes over the pane.
+    expect(screen.getByTestId('input')).toBeVisible()
+    expect(screen.queryByRole('button', { name: '技能' })).toBeNull()
   })
 
   describe('model pill in the column header', () => {
@@ -458,7 +456,12 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
 
     fireEvent.change(screen.getByTestId('input'), { target: { value: '/repair-images' } })
     fireEvent.click(screen.getByRole('button', { name: 'send fixture' }))
-    expect(await screen.findByText(/\/repair-images — /)).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-command-card')).toHaveAttribute(
+        'data-command',
+        '/repair-images'
+      )
+    )
     // ChatPage clears a draft by handing the composer an empty value under a new sync key.
     await waitFor(() => expect(draftSyncKey()).not.toBe(before))
     expect(screen.getByTestId('input')).toHaveValue('')

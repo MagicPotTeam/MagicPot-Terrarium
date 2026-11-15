@@ -5,6 +5,7 @@ import {
   CommandCardActions,
   CommandCardList,
   CommandCardNote,
+  CommandCardPanelBody,
   CommandCardText,
   type CommandCardListItem
 } from './ChatCommandCard'
@@ -51,6 +52,17 @@ export type ChatTailCard<Target = unknown> =
       resolution?: ChatPromptCardResolution
     })
 
+  | (TailCardBase & {
+      /**
+       * A live view of the conversation (goal records, thread skills) inside a card. The page
+       * that owns the tail draws the view into the card's body. There is one card per panel:
+       * running its command again moves the card to the end.
+       */
+      kind: 'panel'
+      panel: string
+      title?: string
+    })
+
 export type ChatTailConfirmCard = Extract<ChatTailCard, { kind: 'confirm' }>
 
 /** A card as the page creates it; the tail's owner adds the id and the scope. */
@@ -61,20 +73,49 @@ export type ChatTailCardDraft<Target = unknown> =
       : never
     : never
 
+/** The body of a panel card: an empty box that the owner of the tail fills. */
+const PanelCardBody: React.FC<{
+  panel: string
+  onHost: (panel: string, element: HTMLElement | null) => void
+}> = ({ panel, onHost }) => {
+  const setHost = React.useCallback(
+    (element: HTMLDivElement | null) => onHost(panel, element),
+    [panel, onHost]
+  )
+  return <CommandCardPanelBody ref={setHost} />
+}
+
 /** The rows that follow the last message of the Agent column: one card per command, in order. */
 export function ChatCommandTail<Target>({
   cards,
   onLink,
-  onAnswer
+  onAnswer,
+  onPanelHost
 }: {
   cards: readonly ChatTailCard<Target>[]
   onLink: (target: Target) => void
   /** The person chose the default button (`confirmed`) or cancel on a confirm card. */
   onAnswer: (card: ChatTailConfirmCard, confirmed: boolean) => void
+  /** The body element of a panel card, or null when the card left. */
+  onPanelHost: (panel: string, element: HTMLElement | null) => void
 }): React.ReactElement {
   return (
     <>
       {cards.map((card) => {
+        if (card.kind === 'panel') {
+          // Keyed by the panel, not by the card: the view inside keeps its state when the
+          // command is run again and the card moves to the end.
+          return (
+            <ChatCommandResultCard
+              key={`panel:${card.panel}`}
+              command={card.command}
+              title={card.title}
+              fill
+            >
+              <PanelCardBody panel={card.panel} onHost={onPanelHost} />
+            </ChatCommandResultCard>
+          )
+        }
         if (card.kind === 'confirm') {
           return (
             <ChatPromptCard

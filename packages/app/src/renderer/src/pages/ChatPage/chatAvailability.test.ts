@@ -2,28 +2,29 @@ import { describe, expect, it } from 'vitest'
 import { shouldShowNoApiWarning } from './chatAvailability'
 
 describe('shouldShowNoApiWarning', () => {
-  it('shows the warning when no runtime is configured and the skill picker is closed', () => {
+  it('shows the warning when no runtime is configured', () => {
     expect(
       shouldShowNoApiWarning({
         availableProfileCount: 0,
         useRemoteLlm: false,
-        hasExternalAgentSkills: false,
-        compact: true,
-        isSkillPickerOpen: false,
-        hasCustomSkills: true
+        hasExternalAgentSkills: false
       })
     ).toBe(true)
   })
 
-  it('keeps the compact skill browser reachable without a configured runtime', () => {
+  it('does not show the warning when a model profile or the remote runtime is available', () => {
+    expect(
+      shouldShowNoApiWarning({
+        availableProfileCount: 1,
+        useRemoteLlm: false,
+        hasExternalAgentSkills: false
+      })
+    ).toBe(false)
     expect(
       shouldShowNoApiWarning({
         availableProfileCount: 0,
-        useRemoteLlm: false,
-        hasExternalAgentSkills: false,
-        compact: true,
-        isSkillPickerOpen: true,
-        hasCustomSkills: true
+        useRemoteLlm: true,
+        hasExternalAgentSkills: false
       })
     ).toBe(false)
   })
@@ -33,10 +34,7 @@ describe('shouldShowNoApiWarning', () => {
       shouldShowNoApiWarning({
         availableProfileCount: 0,
         useRemoteLlm: false,
-        hasExternalAgentSkills: true,
-        compact: true,
-        isSkillPickerOpen: false,
-        hasCustomSkills: true
+        hasExternalAgentSkills: true
       })
     ).toBe(false)
   })

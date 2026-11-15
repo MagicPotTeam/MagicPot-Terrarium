@@ -51,6 +51,19 @@ describe('thread goal records pure panel', () => {
     expect(panel).not.toHaveAttribute('aria-label')
   })
 
+  it('embedded in a command card draws no frame and no heading, and keeps its name', () => {
+    render(<AgentThreadGoalRecordsPanel view={view()} pending={false} error={null} embedded {...callbacks()} />)
+    const panel = screen.getByRole('region', { name: 'Thread goals' })
+    // The card names the view in its header: the panel does not repeat it.
+    expect(screen.queryByText('Thread goals')).toBeNull()
+    expect(getComputedStyle(panel).borderStyle).not.toBe('solid')
+    expect(panel).toHaveTextContent('Manual records only.')
+    // Fields and the button share wrapping rows.
+    const form = screen.getByRole('button', { name: 'Create draft' }).closest('form')!
+    expect(form).toHaveStyle({ display: 'flex', flexWrap: 'wrap' })
+    expect(within(form).getAllByRole('textbox')).toHaveLength(2)
+  })
+
   it('renders empty and unavailable/error states without calling IPC', () => {
     const cb = callbacks(),
       page = render(
