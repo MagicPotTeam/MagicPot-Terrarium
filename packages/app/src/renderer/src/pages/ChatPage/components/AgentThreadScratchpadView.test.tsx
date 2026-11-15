@@ -77,4 +77,22 @@ describe('explicit user-only current-conversation scratchpad snapshot', () => {
     await screen.findByText('chat.agent_scratchpad.truncated')
     expect(document.querySelector('pre')?.textContent?.split('\n')).toHaveLength(50); expect(document.querySelector('pre')?.textContent).not.toContain('note50')
   })
+  it('hands each read to its owner and draws nothing itself when a result handler is given', async () => {
+    const onResult = vi.fn(), ref = createRef<AgentScratchpadCommandHandle>()
+    const page = render(<AgentThreadScratchpadView ref={ref} {...props} onResult={onResult} />)
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    await waitFor(() => expect(onResult).toHaveBeenCalledExactlyOnceWith({ snapshot: { revision: 1, text: 'retained: VIEW_ONLY_TEXT', truncated: false } }))
+    expect(page.container).toBeEmptyDOMElement()
+    // A second read is a second result; a failed read is reported as a failure, never as empty notes.
+    h.read.mockRejectedValueOnce(new Error('denied'))
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    await waitFor(() => expect(onResult).toHaveBeenLastCalledWith({ error: true }))
+    expect(onResult).toHaveBeenCalledTimes(2); expect(page.container).toBeEmptyDOMElement()
+    // A read that is still open when the conversation changes reports nothing.
+    const pending = deferred<ReturnType<typeof snapshot>>(); h.read.mockImplementationOnce(() => pending.promise)
+    act(() => expect(ref.current?.execute({ action: 'view' }, scope())).toBe(true))
+    page.rerender(<AgentThreadScratchpadView ref={ref} {...props} conversationId="sibling" onResult={onResult} />)
+    await act(async () => { pending.resolve(snapshot('OLD_LATE_PRIVATE')) })
+    expect(onResult).toHaveBeenCalledTimes(2)
+  })
 })

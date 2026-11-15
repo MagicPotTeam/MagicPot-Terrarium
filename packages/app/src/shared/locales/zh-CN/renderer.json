@@ -1432,7 +1432,14 @@
     "queue_edit": "编辑待发送消息",
     "queue_remove": "取消待发送消息",
     "queue_collapse": "收起",
-    "queue_show_more": "再显示 {{count}} 条"
+    "queue_show_more": "再显示 {{count}} 条",
+    "command_card": {
+      "jobs_failed": "无法读取任务。",
+      "plugin_hint": "插件在插件中心配置。",
+      "module_hint": "工具环境和 MCP 客户端在设置中配置。",
+      "video_gen_hint": "视频在视频生成工作区生成。",
+      "scratchpad_note": "只读快照，不会发送给模型。"
+    }
   },
   "agent_workspace": {
     "title": "Agent 线程",

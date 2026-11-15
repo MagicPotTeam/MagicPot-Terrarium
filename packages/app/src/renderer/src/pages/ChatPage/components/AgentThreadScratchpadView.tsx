@@ -5,11 +5,18 @@ import type { AgentRouteLike } from '@shared/agent'
 import { api } from '../../../utils/windowUtils'
 import { formatAgentScratchpad, type AgentScratchpadCommandHandle } from '../agentScratchpadCommand'
 
-type Props = { route?: AgentRouteLike; conversationId?: string; storageScope: string; active: boolean; commandEnabled: boolean }
 type Snapshot = ReturnType<typeof formatAgentScratchpad>
-function SnapshotView({ scope, commandRef }: { scope: string; commandRef: React.ForwardedRef<AgentScratchpadCommandHandle> }) {
+/** What one explicit read produced: the snapshot, or that the notes could not be read. */
+export type AgentScratchpadResult = { snapshot: Snapshot } | { error: true }
+type Props = {
+  route?: AgentRouteLike; conversationId?: string; storageScope: string; active: boolean; commandEnabled: boolean
+  /** When given, the view draws nothing itself and hands each result to its owner (the Agent column shows it as a card). */
+  onResult?: (result: AgentScratchpadResult) => void
+}
+function SnapshotView({ scope, commandRef, onResult }: { scope: string; commandRef: React.ForwardedRef<AgentScratchpadCommandHandle>; onResult?: Props['onResult'] }) {
   const { t } = useTranslation(), [open, setOpen] = useState(false), [snapshot, setSnapshot] = useState<Snapshot>(), [error, setError] = useState(false), [busy, setBusy] = useState(false)
   const live = useRef(false), generation = useRef(0), lock = useRef(false)
+  const report = useRef(onResult); report.current = onResult
   useLayoutEffect(() => {
     const ownedGeneration = generation
     live.current = true
@@ -17,15 +24,16 @@ function SnapshotView({ scope, commandRef }: { scope: string; commandRef: React.
   }, [])
   useImperativeHandle(commandRef, () => ({ execute(command, expectedScope) {
     if (!live.current || command.action !== 'view' || expectedScope !== scope || lock.current) return false
-    lock.current = true; setOpen(true); setBusy(true); setSnapshot(undefined); setError(false)
+    lock.current = true
+    if (!report.current) { setOpen(true); setBusy(true); setSnapshot(undefined); setError(false) }
     const token = ++generation.current
     void (async () => {
       const service = api().svcLLMProxy
       if (typeof service.getAgentNotes !== 'function') throw new Error('Scratchpad read API unavailable.')
       const { route, conversationId } = JSON.parse(scope)
       const result = formatAgentScratchpad(await service.getAgentNotes({ route, conversationId }))
-      if (live.current && token === generation.current) setSnapshot(result)
-    })().catch(() => { if (live.current && token === generation.current) setError(true) })
+      if (live.current && token === generation.current) { if (report.current) report.current({ snapshot: result }); else setSnapshot(result) }
+    })().catch(() => { if (live.current && token === generation.current) { if (report.current) report.current({ error: true }); else setError(true) } })
       .finally(() => { if (live.current && token === generation.current) { lock.current = false; setBusy(false) } })
     return true
   } }), [scope])
@@ -43,9 +51,9 @@ function SnapshotView({ scope, commandRef }: { scope: string; commandRef: React.
     </>}
   </Box>
 }
-const AgentThreadScratchpadView = forwardRef<AgentScratchpadCommandHandle, Props>(function AgentThreadScratchpadView({ route, conversationId, storageScope, active, commandEnabled }, ref) {
+const AgentThreadScratchpadView = forwardRef<AgentScratchpadCommandHandle, Props>(function AgentThreadScratchpadView({ route, conversationId, storageScope, active, commandEnabled, onResult }, ref) {
   if (!active || !commandEnabled || !conversationId || route?.channel !== 'canvas' || route.scopeType !== 'thread') return null
   const scope = JSON.stringify({ route, conversationId, storageScope })
-  return <SnapshotView key={scope} scope={scope} commandRef={ref} />
+  return <SnapshotView key={scope} scope={scope} commandRef={ref} onResult={onResult} />
 })
 export default AgentThreadScratchpadView

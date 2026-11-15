@@ -1605,7 +1605,14 @@
     "queue_edit": "Edit queued message",
     "queue_remove": "Cancel queued message",
     "queue_collapse": "Collapse",
-    "queue_show_more": "Show {{count}} more"
+    "queue_show_more": "Show {{count}} more",
+    "command_card": {
+      "jobs_failed": "Could not read the jobs.",
+      "plugin_hint": "Plugins are configured in the plugin center.",
+      "module_hint": "The tool environment and MCP clients are configured in Settings.",
+      "video_gen_hint": "Videos are generated in the video generation workspace.",
+      "scratchpad_note": "Read-only snapshot; not sent to the model."
+    }
   },
   "agent_workspace": {
     "title": "Agent Threads",

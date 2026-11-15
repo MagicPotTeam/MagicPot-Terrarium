@@ -846,6 +846,8 @@ vi.mock('./components/ChatMessageList', () => ({
       cancelLabel: string
     } | null
     onResolvePendingConfirmation?: (requestId: string, confirmed: boolean) => void
+    /** Agent column: the command cards that follow the last message. */
+    tail?: React.ReactNode
   }) => {
     hoisted.chatMessageListMock(props)
     return (
@@ -853,6 +855,7 @@ vi.mock('./components/ChatMessageList', () => ({
         <pre data-testid="chat-session-state">
           {JSON.stringify(props.currentSession ?? null, null, 2)}
         </pre>
+        {props.tail}
         {props.pendingConfirmation ? (
           <div data-testid="chat-pending-confirmation-mock">
             <span>{props.pendingConfirmation.prompt}</span>
@@ -3531,10 +3534,12 @@ describe('ChatPage runtime workflow integration', () => {
       for (const command of ['/env', '/system_prompt']) {
         fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: command } })
         fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-        expect(await screen.findByTestId('agent-inspection-view')).toHaveTextContent(command)
+        await waitFor(() => expect(screen.getAllByTestId('chat-command-card').at(-1)).toHaveAttribute('data-command', command))
         expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
-        fireEvent.click(screen.getByRole('button', { name: 'Close command view' }))
       }
+      // The column shows each result as a card of the transcript; nothing opens above it.
+      expect(screen.queryByTestId('agent-inspection-view')).toBeNull()
+      expect(screen.getAllByTestId('chat-command-card')).toHaveLength(2)
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
       expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
@@ -3555,15 +3560,15 @@ describe('ChatPage runtime workflow integration', () => {
       for (const command of ['/plugin', '/module configure']) {
         fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: command } })
         fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-        expect(await screen.findByTestId('agent-configuration-view')).toHaveTextContent(command.split(' ')[0])
+        await waitFor(() => expect(screen.getAllByTestId('chat-command-card').at(-1)).toHaveAttribute('data-command', command.split(' ')[0]))
         expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
         if (command === '/plugin') expect(screen.getByRole('button', { name: 'Open plugin center' })).toBeVisible()
         else {
           expect(screen.getByRole('button', { name: 'Open tool environment settings' })).toBeVisible()
           expect(screen.getByRole('button', { name: 'Open MCP client settings' })).toBeVisible()
         }
-        fireEvent.click(screen.getByRole('button', { name: 'Close configuration view' }))
       }
+      expect(screen.queryByTestId('agent-configuration-view')).toBeNull()
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/module enable bash' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith('Use /plugin [configure] or /module [configure]. Change switches and parameters in the existing editor.')
@@ -3576,7 +3581,9 @@ describe('ChatPage runtime workflow integration', () => {
 
   it('does not publish a late jobs refresh into a reopened panel', async () => {
     const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'jobs-late', threadId: 'pane' } as const
-    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    // The full-page chat keeps the panel with its refresh and close buttons; the Agent column
+    // shows a card per "/jobs" instead (ChatPage.commandCards.test.tsx).
+    const view = renderWithProviders(<ChatPage storageScope="runtime-flow" route={route} />)
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
       const command = () => {
@@ -3601,11 +3608,12 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/status' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      expect(await screen.findByTestId('agent-inspection-view')).toHaveTextContent('"messages"')
+      await waitFor(() => expect(screen.getByTestId('chat-command-card')).toHaveTextContent('"messages"'))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/jobs' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      fireEvent.click(await screen.findByRole('button', { name: 'Refresh thread jobs' }))
       expect(await screen.findByText('No helper jobs.')).toBeVisible()
+      expect(screen.getAllByTestId('chat-command-card').map(card => card.getAttribute('data-command'))).toEqual(['/status', '/jobs'])
+      expect(screen.queryByRole('button', { name: 'Refresh thread jobs' })).toBeNull()
       expect(hoisted.listAgentJobsMock).toHaveBeenCalledWith({ route, conversationId: readCurrentSessionState()!.id })
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/compact' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
@@ -3673,14 +3681,16 @@ describe('ChatPage runtime workflow integration', () => {
       expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
       hoisted.getAgentNotesMock.mockResolvedValue({ revision: 4, notes: [{ key: 'retained', value: '<script>NOT_EXECUTABLE</script>\nSAVED_WORKING_NOTE', updatedAt: 1 }] })
       const before = JSON.stringify(readCurrentSessionState()?.messages), id = readCurrentSessionState()!.id
-      for (const command of ['/scratchpad', '/pad']) {
+      for (const [index, command] of ['/scratchpad', '/pad'].entries()) {
         fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: command } }); fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-        await screen.findByText(/SAVED_WORKING_NOTE/)
+        // Each read is its own card at the end of the transcript; there is nothing to close.
+        await waitFor(() => expect(screen.getAllByText(/SAVED_WORKING_NOTE/)).toHaveLength(index + 1))
+        expect(screen.getAllByTestId('chat-command-card').at(-1)).toHaveAttribute('data-command', command)
         expect(hoisted.getAgentNotesMock).toHaveBeenLastCalledWith({ route, conversationId: id })
         expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
         expect(document.querySelector('script')).toBeNull()
-        fireEvent.click(screen.getByRole('button', { name: 'general.close' }))
       }
+      expect(screen.queryByTestId('agent-scratchpad-view')).toBeNull()
       expect(hoisted.getAgentNotesMock).toHaveBeenCalledTimes(2)
       expect(hoisted.mutateAgentNoteMock).not.toHaveBeenCalled(); expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled(); expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
       expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)

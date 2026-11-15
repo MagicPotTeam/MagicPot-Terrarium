@@ -303,7 +303,8 @@ import { isAgentGoalCommand } from './agentGoalCommand'
 import { isRepairImagesCommand, parseRepairImagesCommand, scanMissingLocalImages, projectConfirmedImageContext, type ImageRepairScan, type MissingImageReference } from './repairImagesCommand'
 import { isAgentConfigurationCommand, parseAgentConfigurationCommand } from './agentConfigurationCommand'
 import { isAgentInspectionCommand, parseAgentInspectionCommand, formatAgentEnvironment } from './agentInspectionCommand'
-import AgentThreadScratchpadView from './components/AgentThreadScratchpadView'
+import AgentThreadScratchpadView, { type AgentScratchpadResult } from './components/AgentThreadScratchpadView'
+import ChatCommandTail, { type ChatTailCard, type ChatTailCardDraft } from './components/ChatCommandTail'
 import AgentThreadGoalEntry from './components/AgentThreadGoalEntry'
 import { isAgentScratchpadCommand, parseAgentScratchpadCommand, type AgentScratchpadCommandHandle } from './agentScratchpadCommand'
 import { isAgentSkillCommand, parseAgentSkillCommand, type AgentSkillCommandHandle } from './agentSkillCommand'
@@ -362,6 +363,9 @@ export interface ChatPageWorkspaceMenu {
   onToggleTrace: () => void
   onOpenCanvasTarget: () => void
 }
+
+/** Where a link of a command card leads. */
+type CommandTailTarget = { path: string; state: unknown }
 
 type ExternalSendToAgentDetail = {
   image?: string
@@ -8565,6 +8569,42 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [configurationView, setConfigurationView] = useState<{ scope: string; kind: 'plugin' | 'module' | 'video_gen' } | null>(null)
   const [inspectionView, setInspectionView] = useState<{ scope: string; title: string; text: string } | null>(null)
   const inspectionScope = JSON.stringify({ route, conversationId: currentSessionId, storageScope })
+  // The Agent column shows the result of a command as a card at the end of the transcript.
+  // Cards are view state of the open conversation: kept in order, never stored.
+  const [tailCards, setTailCards] = useState<ChatTailCard<CommandTailTarget>[]>([])
+  const [tailScrollToken, setTailScrollToken] = useState(0)
+  const tailCardIdRef = useRef(0)
+  const tailOwnerRef = useRef({ scope: inspectionScope, active })
+  tailOwnerRef.current = { scope: inspectionScope, active }
+  /** Adds a card for a command that ran in `scope`; a result that arrives after the conversation changed is dropped. */
+  const appendTailCard = useCallback((scope: string, card: ChatTailCardDraft<CommandTailTarget>) => {
+    const owner = tailOwnerRef.current
+    if (!isMountedRef.current || !owner.active || owner.scope !== scope) return
+    const id = ++tailCardIdRef.current
+    setTailCards(previous => [...previous, { ...card, id, scope } as ChatTailCard<CommandTailTarget>])
+    setTailScrollToken(token => token + 1)
+  }, [])
+  const openCommandTailTarget = useCallback((target: CommandTailTarget) => navigate(target.path, { state: target.state }), [navigate])
+  const configurationTailCard = (kind: 'plugin' | 'module' | 'video_gen'): ChatTailCardDraft<CommandTailTarget> => ({
+    kind: 'links', command: `/${kind}`, text: t(`chat.command_card.${kind}_hint`),
+    links: kind === 'video_gen'
+      ? [{ key: 'video', label: t('chat.open_video_generation_workspace', { defaultValue: 'Open video generation workspace' }), target: { path: '/qappexecute', state: { magicpotOpenVideoGeneration: true } } }]
+      : kind === 'plugin'
+        ? [{ key: 'plugins', label: t('chat.open_plugin_center', { defaultValue: 'Open plugin center' }), target: { path: '/workshop/plugins', state: null } }]
+        : [{ key: 'environment', label: t('chat.open_tool_environment_settings', { defaultValue: 'Open tool environment settings' }), target: { path: '/settings?tab=environment', state: null } },
+           { key: 'mcp', label: t('chat.open_mcp_client_settings', { defaultValue: 'Open MCP client settings' }), target: { path: '/settings?tab=mcp', state: null } }]
+  })
+  const scratchpadCommandNameRef = useRef('/scratchpad')
+  const handleScratchpadResult = useCallback((result: AgentScratchpadResult) => {
+    const command = scratchpadCommandNameRef.current
+    if ('error' in result) { appendTailCard(tailOwnerRef.current.scope, { kind: 'text', command, text: t('chat.agent_scratchpad.failed'), error: true }); return }
+    const { snapshot } = result
+    appendTailCard(tailOwnerRef.current.scope, {
+      kind: 'text', command, title: t('chat.agent_scratchpad.revision', { revision: snapshot.revision }),
+      text: snapshot.text || t('chat.agent_scratchpad.empty'), mono: Boolean(snapshot.text), muted: !snapshot.text,
+      note: [t('chat.command_card.scratchpad_note'), snapshot.truncated ? t('chat.agent_scratchpad.truncated') : ''].filter(Boolean).join(' ')
+    })
+  }, [appendTailCard, t])
   // "/goal" shows the goal records of the conversation it was typed in.
   const [goalViewScope, setGoalViewScope] = useState<string | null>(null)
   // Closing a view by hand gives the keyboard back to this conversation's composer.
@@ -8577,6 +8617,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useEffect(() => {
     basicCommandGenerationRef.current++
     setGoalViewScope(null)
+    setTailCards(previous => previous.length ? [] : previous)
     setInspectionView(null); setConfigurationView(null); setImageRepairView(null); setBasicCommandView(null); setBasicJobsText('')
     imageRepairContextRef.current = null
   }, [inspectionScope, active])
@@ -8721,14 +8762,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
       try {
         const command = parseAgentBasicCommand(input)!
         if (command === 'status') {
-          setInspectionView({ scope: inspectionScope, title: '/status', text: JSON.stringify({
+          const text = JSON.stringify({
             profileId: selectedProfileId, skillId: selectedSkillId, messages: session.messages.length,
             running: loadingSessionIdsRef.current.has(id), remote: config.use_remote_llm,
             compactedMessages: session.compactedMessages?.length ?? 0,
 
-          }, null, 2) })
+          }, null, 2)
+          if (compact) appendTailCard(inspectionScope, { kind: 'text', command: '/status', text, mono: true })
+          else setInspectionView({ scope: inspectionScope, title: '/status', text })
         } else if (command === 'video_gen') {
-          setConfigurationView({ scope: inspectionScope, kind: 'video_gen' })
+          if (compact) appendTailCard(inspectionScope, configurationTailCard('video_gen'))
+          else setConfigurationView({ scope: inspectionScope, kind: 'video_gen' })
         } else {
           if (command === 'jobs' && (route?.channel !== 'canvas' || route.scopeType !== 'thread' || config.use_remote_llm)) {
             notifyWarning(t('chat.jobs_local_only', { defaultValue: 'Jobs are available only in a local canvas thread.' })); return
@@ -8736,8 +8780,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (command === 'compact' && loadingSessionIdsRef.current.has(id)) {
             notifyWarning(t('chat.compaction_unavailable_busy', { defaultValue: 'Compaction unavailable or conversation is busy.' })); return
           }
-          setBasicJobsText('')
-          setBasicCommandView({ scope: inspectionScope, kind: command, session, modelConfig: config.llm_config, profileId: selectedProfileId, generation: ++basicCommandGenerationRef.current })
+          if (command === 'jobs' && compact) {
+            // The card carries the list as it is now; running "/jobs" again adds a fresh card.
+            const scope = inspectionScope
+            const conversationRoute = route!
+            void Promise.resolve().then(() => api().svcLLMProxy.listAgentJobs({ route: conversationRoute, conversationId: id })).then(result => {
+              appendTailCard(scope, result.jobs.length
+                ? { kind: 'list', command: '/jobs', items: result.jobs.map(job => ({ key: job.id, label: job.kind, description: `${job.status} · ${job.id}` })) }
+                : { kind: 'text', command: '/jobs', text: t('chat.no_helper_jobs', { defaultValue: 'No helper jobs.' }), muted: true })
+            }).catch(() => appendTailCard(scope, { kind: 'text', command: '/jobs', text: t('chat.command_card.jobs_failed'), error: true }))
+          } else {
+            setBasicJobsText('')
+            setBasicCommandView({ scope: inspectionScope, kind: command, session, modelConfig: config.llm_config, profileId: selectedProfileId, generation: ++basicCommandGenerationRef.current })
+          }
         }
         setInputValue(''); setComposerClearVersion(version => version + 1)
         clearScheduledDraftPersistence(); markTransientDraftCleared(storageScope, id); writeSessionDraftBackup(id, Date.now(), undefined, storageScope)
@@ -8793,16 +8848,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
       try {
         const configuration = parseAgentConfigurationCommand(input)
         if (configuration) {
-          setConfigurationView({ scope: inspectionScope, kind: configuration })
-          setInspectionView(null)
+          if (compact) appendTailCard(inspectionScope, configurationTailCard(configuration))
+          else {
+            setConfigurationView({ scope: inspectionScope, kind: configuration })
+            setInspectionView(null)
+          }
         } else {
         const command = parseAgentInspectionCommand(input)!
         const text = command === 'env'
           ? formatAgentEnvironment({ conversationId: id, profileId: selectedProfileId, skillId: selectedSkillId,
               storageScope, remote: config.use_remote_llm, route })
           : buildSystemPromptFromSkillRuntime(selectedSkillRuntime) || t('chat.no_renderer_system_prompt', { defaultValue: '(No renderer-configured system prompt.)' })
-        setInspectionView({ scope: inspectionScope, title: `/${command}`, text: text.slice(0, 65536) })
-        setConfigurationView(null)
+        if (compact) appendTailCard(inspectionScope, { kind: 'text', command: `/${command}`, text: text.slice(0, 65536), mono: true })
+        else {
+          setInspectionView({ scope: inspectionScope, title: `/${command}`, text: text.slice(0, 65536) })
+          setConfigurationView(null)
+        }
         }
         setInputValue(''); setComposerClearVersion(version => version + 1)
         clearScheduledDraftPersistence()
@@ -8828,6 +8889,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       try {
         const scope = JSON.stringify({ route, conversationId: id })
         const parsedSkillCommand = skillCommand ? parseAgentSkillCommand(input)! : undefined
+        if (scratchpadCommand) scratchpadCommandNameRef.current = input.trim().toLowerCase()
         const accepted = scratchpadCommand
           ? scratchpadCommandRef.current?.execute(parseAgentScratchpadCommand(input)!, JSON.stringify({ route, conversationId: id, storageScope }))
           : parsedSkillCommand ? skillCommandRef.current?.execute(parsedSkillCommand, scope) : sideCommandRef.current?.execute(parseAgentSideCommand(input)!, scope)
@@ -8859,7 +8921,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
     void sendMessage()
-  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
+  }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, appendTailCard, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
 
   const handleSendEditedMessage = useCallback(
     (
@@ -8879,6 +8941,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [selectSkill]
   )
+
+  // Memoised: the message list is, and must not re-render with every render of the page.
+  const transcriptTail = useMemo(() => {
+    if (!compact || !active) return null
+    const cards = tailCards.filter(card => card.scope === inspectionScope)
+    return cards.length ? <ChatCommandTail cards={cards} onLink={openCommandTailTarget} /> : null
+  }, [compact, active, tailCards, inspectionScope, openCommandTailTarget])
 
   const skillPickerToolbarSlot = useMemo(
     () => (
@@ -9751,7 +9820,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 300, overflow: 'auto' }}>{inspectionView.text}</Typography>
           </Box>}
           <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={goalCommandAvailable} remote={!config || Boolean(config.use_remote_llm)} open={active && goalViewScope === inspectionScope} onClose={closeGoalView} />
-          <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} />
+          <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} onResult={compact ? handleScratchpadResult : undefined} />
           <AgentThreadSkillsPanel ref={skillCommandRef} visible={isSkillPickerOpen || skillDetailsOpen} onClose={() => { setSkillDetailsOpen(false); setIsSkillPickerOpen(false) }} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
           <Box sx={{ display: isSkillPickerOpen ? 'none' : 'contents' }}>
           <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} subRowsHost={threadSubRowsHost} onOpenSubRowChange={onThreadSubRowChange} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
@@ -9767,6 +9836,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
               <ChatMessageList
                 active={active}
                 columnStyle={compact}
+                tail={transcriptTail}
+                tailScrollToken={tailScrollToken}
                 currentSession={currentSession}
                 isLoading={isLoading}
                 loadingStatus={currentLoadingStatus}
