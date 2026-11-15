@@ -71,6 +71,10 @@ type MockTextureSource = {
   unload: ReturnType<typeof vi.fn>
 }
 type MockSpriteInstance = {
+  // 'mesh' is the edge-antialiased display object of a rotated image.
+  kind: 'sprite' | 'mesh'
+  shader?: { destroyed: boolean; resources: Record<string, unknown> }
+  geometry?: { destroyed: boolean }
   texture: MockTextureInstance
   position: MockPoint
   scale: MockPoint
@@ -89,6 +93,8 @@ type MockContainerInstance = {
   position: MockPoint
   scale: MockPoint
   addChild: (child: MockSpriteInstance) => void
+  addChildAt: (child: MockSpriteInstance, index: number) => void
+  getChildIndex: (child: MockSpriteInstance) => number
   sortChildren: () => void
 }
 
@@ -109,6 +115,7 @@ type MockApplicationInstance = {
   renderer: {
     resize: ReturnType<typeof vi.fn>
     gl: MockWebGLContext
+    context?: { webGLVersion: number }
     texture?: { initSource: ReturnType<typeof vi.fn> }
   }
   render: ReturnType<typeof vi.fn>
@@ -131,6 +138,9 @@ let closedBitmaps = new WeakSet<object>()
 // false simulates a renderer without an eager upload: Pixi then uploads on a later draw.
 let mockRendererSupportsEagerUpload = true
 let eagerTextureUploads: unknown[] = []
+// 1 simulates a WebGL 1 context, which cannot run the edge-antialias program.
+let mockWebGLVersion = 2
+let createdEdgeAntialiasShaders: { destroyed: boolean; resources: Record<string, unknown> }[] = []
 const originalDevicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio
 
 type MockImageInstance = {
@@ -221,6 +231,7 @@ function installPixiMock() {
       height: number
       destroyed = false
       destroySourceCalled = false
+      textureMatrix = { mapCoord: { frameOf: this as MockTextureInstance } }
 
       constructor({
         source,
@@ -305,6 +316,7 @@ function installPixiMock() {
     }
 
     class MockSprite implements MockSpriteInstance {
+      kind: 'sprite' | 'mesh' = 'sprite'
       position = createPoint()
       scale = createPoint(1, 1)
       rotation = 0
@@ -331,6 +343,52 @@ function installPixiMock() {
       }
     }
 
+    class MockGlProgram {
+      static from(options: { vertex: string; fragment: string; name?: string }) {
+        return { ...options }
+      }
+    }
+
+    class MockShader {
+      destroyed = false
+      resources: Record<string, unknown>
+
+      constructor(options: { glProgram: unknown; resources: Record<string, unknown> }) {
+        this.resources = options.resources
+        createdEdgeAntialiasShaders.push(this)
+      }
+
+      destroy() {
+        this.destroyed = true
+      }
+    }
+
+    class MockMeshGeometry {
+      destroyed = false
+
+      constructor(public options: { positions: Float32Array; uvs: Float32Array }) {}
+
+      destroy() {
+        this.destroyed = true
+      }
+    }
+
+    class MockMesh extends MockSprite {
+      shader: MockShader
+      geometry: MockMeshGeometry
+
+      constructor(options: {
+        geometry: MockMeshGeometry
+        shader: MockShader
+        texture: MockTextureInstance
+      }) {
+        super(options.texture)
+        this.kind = 'mesh'
+        this.shader = options.shader
+        this.geometry = options.geometry
+      }
+    }
+
     class MockContainer implements MockContainerInstance {
       children: MockSpriteInstance[] = []
       sortableChildren = false
@@ -340,6 +398,19 @@ function installPixiMock() {
       addChild(child: MockSpriteInstance) {
         this.children.push(child)
         child.parent = this
+      }
+
+      addChildAt(child: MockSpriteInstance, index: number) {
+        this.children.splice(index, 0, child)
+        child.parent = this
+      }
+
+      getChildIndex(child: MockSpriteInstance) {
+        const index = this.children.indexOf(child)
+        if (index < 0) {
+          throw new Error('The supplied child is not a child of the container.')
+        }
+        return index
       }
 
       sortChildren() {
@@ -371,6 +442,7 @@ function installPixiMock() {
               }
             }
           : {}),
+        context: { webGLVersion: mockWebGLVersion },
         gl: {
           getError: vi.fn(() => 0),
           NO_ERROR: 0,
@@ -412,7 +484,11 @@ function installPixiMock() {
     return {
       Application: MockApplication,
       Container: MockContainer,
+      GlProgram: MockGlProgram,
+      Mesh: MockMesh,
+      MeshGeometry: MockMeshGeometry,
       Rectangle: MockRectangle,
+      Shader: MockShader,
       Sprite: MockSprite,
       Texture: MockTexture
     }
@@ -596,6 +672,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     closedBitmaps = new WeakSet<object>()
     mockRendererSupportsEagerUpload = true
     eagerTextureUploads = []
+    mockWebGLVersion = 2
+    createdEdgeAntialiasShaders = []
     setWindowDevicePixelRatio(originalDevicePixelRatio)
     installPixiMock()
   })
@@ -1890,11 +1968,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       })
     })
 
-    expect(sprite.position.x).toBe(80)
-    expect(sprite.position.y).toBe(90)
-    expect(sprite.scale.x).toBe(3)
-    expect(sprite.scale.y).toBe(1)
-    expect(sprite.rotation).toBeCloseTo(Math.PI / 12)
+    // A rotated preview is drawn by the edge-antialiased mesh, a unit quad: its scale is the
+    // previewed size on the canvas (200 x 1.5 by 120 x 0.5).
+    const rotatedPreview = getLiveSpriteByLabel('image-1')!
+    expect(rotatedPreview.kind).toBe('mesh')
+    expect(rotatedPreview.position.x).toBe(80)
+    expect(rotatedPreview.position.y).toBe(90)
+    expect(rotatedPreview.scale.x).toBe(300)
+    expect(rotatedPreview.scale.y).toBe(60)
+    expect(rotatedPreview.rotation).toBeCloseTo(Math.PI / 12)
     expect(app.render).toHaveBeenCalledTimes(renderCountBeforePreview + 1)
 
     const renderCountBeforeClear = app.render.mock.calls.length
@@ -1902,11 +1984,13 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       ref.current?.syncItemPreview('image-1', null)
     })
 
-    expect(sprite.position.x).toBe(24)
-    expect(sprite.position.y).toBe(36)
-    expect(sprite.scale.x).toBe(2)
-    expect(sprite.scale.y).toBe(2)
-    expect(sprite.rotation).toBe(0)
+    const restored = getLiveSpriteByLabel('image-1')!
+    expect(restored.kind).toBe('sprite')
+    expect(restored.position.x).toBe(24)
+    expect(restored.position.y).toBe(36)
+    expect(restored.scale.x).toBe(2)
+    expect(restored.scale.y).toBe(2)
+    expect(restored.rotation).toBe(0)
     expect(app.render).toHaveBeenCalledTimes(renderCountBeforeClear + 1)
   }, 15000)
 
@@ -2954,6 +3038,185 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(app.render.mock.calls.length).toBeGreaterThan(rendersAfterFirstSync)
     expect((createdSprites[0].texture.source as { scaleMode?: string }).scaleMode).toBe('linear')
   }, 15000)
+
+  describe('edge antialiasing without a multisampled buffer', () => {
+    const rotatedItem = (rotation: number, overrides: Partial<CanvasImageItem> = {}) =>
+      createItem({ rotation, x: 300, y: 200, ...overrides })
+    const liveObject = (id = 'image-1') => getLiveSpriteByLabel(id)!
+    const world = () => liveObject().parent!
+
+    it('creates the WebGL context without multisampling', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      render(<Layer items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdApplications).toHaveLength(1))
+      expect(createdApplications[0].initOptions).toMatchObject({ antialias: false })
+    })
+
+    it.each([0, 90, -90, 180, 270, 360])(
+      'draws an image rotated by %i degrees as a plain sprite',
+      async (rotation) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        render(<Layer items={[rotatedItem(rotation)]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+        await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+        expect(liveObject().kind).toBe('sprite')
+        expect(createdEdgeAntialiasShaders).toEqual([])
+        // Texture pixels scaled to the item size.
+        expect(liveObject().scale.x).toBe(2)
+        expect(liveObject().scale.y).toBe(2)
+      }
+    )
+
+    it('draws a rotated image with the edge-antialiased mesh, at the same place and size', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const { unmount } = render(
+        <Layer
+          items={[rotatedItem(15, { scaleX: 1.5, zIndex: 4 })]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+        />
+      )
+      await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+      const mesh = liveObject()
+      expect(mesh.kind).toBe('mesh')
+      expect(mesh.position.x).toBe(300)
+      expect(mesh.position.y).toBe(200)
+      expect(mesh.rotation).toBeCloseTo((15 * Math.PI) / 180)
+      expect(mesh.zIndex).toBe(4)
+      // A unit quad: the scale is the item's size on the canvas (200 x 120, scaleX 1.5).
+      expect(mesh.scale.x).toBe(300)
+      expect(mesh.scale.y).toBe(120)
+      expect(createdEdgeAntialiasShaders).toHaveLength(1)
+      expect(mesh.shader?.resources.uTexture).toBe(mesh.texture.source)
+      expect(mesh.shader?.resources.textureUniforms).toEqual({
+        uTextureMatrix: {
+          type: 'mat3x3<f32>',
+          value: (mesh.texture as unknown as { textureMatrix: { mapCoord: unknown } }).textureMatrix
+            .mapCoord
+        }
+      })
+
+      unmount()
+      expect(mesh.destroyed).toBe(true)
+      expect(mesh.shader?.destroyed).toBe(true)
+      expect(mesh.geometry?.destroyed).toBe(true)
+    })
+
+    it('samples the crop of a rotated image through the cropped texture frame', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      render(
+        <Layer
+          items={[rotatedItem(30, { crop: { x: 10, y: 5, width: 40, height: 30 } })]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+        />
+      )
+      await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+      const mesh = liveObject()
+      expect(mesh.kind).toBe('mesh')
+      expect(mesh.texture.frame).toMatchObject({ x: 10, y: 5, width: 40, height: 30 })
+      const matrix = (
+        mesh.shader?.resources.textureUniforms as {
+          uTextureMatrix: { value: { frameOf: MockTextureInstance } }
+        }
+      ).uTextureMatrix.value
+      expect(matrix.frameOf).toBe(mesh.texture)
+    })
+
+    it('switches between sprite and mesh in place while an image is being rotated', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const items = [
+        createNamedItem('below', { zIndex: 1 }),
+        createItem({ zIndex: 1 }),
+        createNamedItem('above', { zIndex: 1 })
+      ]
+      render(<Layer ref={ref} items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdSprites).toHaveLength(3))
+      const sprite = liveObject()
+      const app = createdApplications[0]
+      const texture = sprite.texture
+      const orderBefore = world().children.map((child) => child.label)
+      const preview = { x: 24, y: 36, width: 200, height: 120, scaleX: 1, scaleY: 1 }
+
+      const rendersBefore = app.render.mock.calls.length
+      act(() => ref.current?.syncItemPreview('image-1', { ...preview, rotation: 12 }))
+      const mesh = liveObject()
+      expect(mesh).not.toBe(sprite)
+      expect(mesh.kind).toBe('mesh')
+      expect(sprite.destroyed).toBe(true)
+      expect(sprite.parent).toBeNull()
+      // Same texture, same place in the z-order, drawn in the same call.
+      expect(mesh.texture).toBe(texture)
+      expect(texture.destroyed).toBe(false)
+      expect(world().children.map((child) => child.label)).toEqual(orderBefore)
+      expect(mesh.zIndex).toBe(1)
+      expect(mesh.scale.x).toBe(200)
+      expect(mesh.rotation).toBeCloseTo((12 * Math.PI) / 180)
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // Further rotation keeps the mesh.
+      act(() => ref.current?.syncItemPreview('image-1', { ...preview, rotation: 40 }))
+      expect(liveObject()).toBe(mesh)
+      expect(createdEdgeAntialiasShaders).toHaveLength(1)
+
+      // The gesture is cancelled: back to the unrotated item and to a plain sprite.
+      act(() => ref.current?.syncItemPreview('image-1', null))
+      const restored = liveObject()
+      expect(restored.kind).toBe('sprite')
+      expect(restored.texture).toBe(texture)
+      expect(restored.scale.x).toBe(2)
+      expect(restored.rotation).toBe(0)
+      expect(mesh.destroyed).toBe(true)
+      expect(mesh.shader?.destroyed).toBe(true)
+      expect(world().children.map((child) => child.label)).toEqual(orderBefore)
+      expect(texture.destroyed).toBe(false)
+    })
+
+    it('switches to the mesh when a rotation is committed, without a new texture', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const item = createItem()
+      const view = (rotation: number) => (
+        <Layer items={[{ ...item, rotation }]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      const { rerender } = render(view(0))
+      await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+      const texture = liveObject().texture
+      const texturesBefore = createdBaseTextures.length
+
+      rerender(view(33))
+      await waitFor(() => expect(liveObject().kind).toBe('mesh'))
+      expect(liveObject().texture).toBe(texture)
+      expect(liveObject().scale.x).toBe(200)
+      expect(liveObject().rotation).toBeCloseTo((33 * Math.PI) / 180)
+
+      rerender(view(90))
+      await waitFor(() => expect(liveObject().kind).toBe('sprite'))
+      expect(liveObject().texture).toBe(texture)
+      expect(liveObject().scale.x).toBe(2)
+      expect(createdBaseTextures).toHaveLength(texturesBefore)
+      expect(createdEdgeAntialiasShaders.every((shader) => shader.destroyed)).toBe(true)
+    })
+
+    it('keeps plain sprites on a WebGL 1 context, which has no derivatives', async () => {
+      mockWebGLVersion = 1
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      render(<Layer ref={ref} items={[rotatedItem(15)]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+      expect(liveObject().kind).toBe('sprite')
+      act(() =>
+        ref.current?.syncItemPreview('image-1', {
+          x: 300,
+          y: 200,
+          width: 200,
+          height: 120,
+          scaleX: 1,
+          scaleY: 1,
+          rotation: 50
+        })
+      )
+      expect(liveObject().kind).toBe('sprite')
+      expect(createdEdgeAntialiasShaders).toEqual([])
+    })
+  })
 
   describe('world render group', () => {
     const getWorld = () =>

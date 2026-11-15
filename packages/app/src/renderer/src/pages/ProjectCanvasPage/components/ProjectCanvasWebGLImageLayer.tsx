@@ -1,5 +1,15 @@
 import { Box } from '@mui/material'
-import { Application, Container, Rectangle, Sprite, Texture } from 'pixi.js'
+import {
+  Application,
+  Container,
+  GlProgram,
+  Mesh,
+  MeshGeometry,
+  Rectangle,
+  Shader,
+  Sprite,
+  Texture
+} from 'pixi.js'
 import {
   forwardRef,
   memo,
@@ -200,7 +210,9 @@ type SpatialTileItemRuntime = {
 }
 
 type SpriteRecord = {
-  sprite: Sprite
+  // A Sprite, or the edge-antialiased mesh while the image is rotated.
+  sprite: Sprite | Mesh<MeshGeometry, Shader>
+  edgeAntialiasShader?: Shader
   texture: Texture
   sourceTexture?: Texture
   textureKey: string
@@ -254,6 +266,7 @@ type PixiRendererWithWebGLContext = {
   gl?: ProjectCanvasWebGLRenderingContext
   context?: {
     gl?: ProjectCanvasWebGLRenderingContext
+    webGLVersion?: number
   }
 }
 
@@ -551,9 +564,113 @@ function destroyProjectCanvasTexture(texture: Texture | null | undefined, destro
   texture.destroy(destroySource)
 }
 
+// The layer's drawing buffer has no multisampling (it cost four times the colour buffer plus a
+// multisampled depth and stencil buffer, for a scene of flat textured quads). Edges of
+// axis-aligned images do not need it. A rotated image does: it is drawn by this program, which
+// fades the alpha over the last screen pixel towards each edge of the quad, so its edges stay
+// smooth at any zoom. It needs screen-space derivatives, which are core in GLSL ES 3.00.
+const PROJECT_CANVAS_WEBGL_EDGE_ANTIALIAS_VERTEX = `#version 300 es
+in vec2 aPosition;
+in vec2 aUV;
+uniform mat3 uProjectionMatrix;
+uniform mat3 uWorldTransformMatrix;
+uniform vec4 uWorldColorAlpha;
+uniform mat3 uTransformMatrix;
+uniform vec4 uColor;
+uniform mat3 uTextureMatrix;
+out vec4 vColor;
+out vec2 vUV;
+out vec2 vEdge;
+void main(void) {
+  vEdge = aUV;
+  vUV = (uTextureMatrix * vec3(aUV, 1.0)).xy;
+  mat3 modelViewProjectionMatrix = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+  gl_Position = vec4((modelViewProjectionMatrix * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
+  vColor = uColor * uWorldColorAlpha;
+}
+`
+const PROJECT_CANVAS_WEBGL_EDGE_ANTIALIAS_FRAGMENT = `#version 300 es
+in vec4 vColor;
+in vec2 vUV;
+in vec2 vEdge;
+uniform sampler2D uTexture;
+out vec4 finalColor;
+void main(void) {
+  vec4 color = texture(uTexture, vUV) * vColor;
+  vec2 pixel = max(fwidth(vEdge), vec2(0.000001));
+  vec2 coverage = clamp(min(vEdge, 1.0 - vEdge) / pixel, 0.0, 1.0);
+  color.a *= coverage.x * coverage.y;
+  finalColor = color;
+}
+`
+
+/** Rotated by something other than a multiple of 90 degrees: the edges are diagonal on screen. */
+function needsProjectCanvasEdgeAntialias(rotationDegrees: number) {
+  if (!Number.isFinite(rotationDegrees)) {
+    return false
+  }
+
+  const quarterTurns = rotationDegrees / 90
+  return Math.abs(quarterTurns - Math.round(quarterTurns)) > 0.0001
+}
+
+function createProjectCanvasEdgeAntialiasGeometry() {
+  // A unit quad shared by every rotated image; the display object's scale gives it its size.
+  return new MeshGeometry({
+    positions: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+    uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3])
+  })
+}
+
+function createProjectCanvasEdgeAntialiasShader(texture: Texture) {
+  return new Shader({
+    glProgram: GlProgram.from({
+      name: 'project-canvas-edge-antialias',
+      vertex: PROJECT_CANVAS_WEBGL_EDGE_ANTIALIAS_VERTEX,
+      fragment: PROJECT_CANVAS_WEBGL_EDGE_ANTIALIAS_FRAGMENT
+    }),
+    resources: {
+      uTexture: texture.source,
+      textureUniforms: {
+        // Maps the quad's 0..1 coordinates into the texture frame (the crop).
+        uTextureMatrix: { type: 'mat3x3<f32>', value: texture.textureMatrix.mapCoord }
+      }
+    }
+  })
+}
+
+/**
+ * The display object of one image and the size of its local quad: a Sprite (texture pixels),
+ * or the edge-antialiased mesh (unit quad) when `edgeAntialiasGeometry` is given.
+ */
+function createProjectCanvasImageDisplayObject(
+  texture: Texture,
+  edgeAntialiasGeometry: MeshGeometry | null
+): Pick<SpriteRecord, 'sprite' | 'edgeAntialiasShader' | 'textureWidth' | 'textureHeight'> {
+  if (!edgeAntialiasGeometry) {
+    return {
+      sprite: new Sprite(texture),
+      edgeAntialiasShader: undefined,
+      textureWidth: Math.max(1, texture.width),
+      textureHeight: Math.max(1, texture.height)
+    }
+  }
+
+  const shader = createProjectCanvasEdgeAntialiasShader(texture)
+  return {
+    sprite: new Mesh<MeshGeometry, Shader>({ geometry: edgeAntialiasGeometry, shader, texture }),
+    edgeAntialiasShader: shader,
+    textureWidth: 1,
+    textureHeight: 1
+  }
+}
+
 function destroyProjectCanvasSpriteRecord(record: SpriteRecord, releaseSourceTexture: () => void) {
   record.sprite.removeFromParent()
   record.sprite.destroy()
+  record.edgeAntialiasShader?.destroy()
+  record.edgeAntialiasShader = undefined
 
   if (record.texture !== record.sourceTexture) {
     destroyProjectCanvasTexture(record.texture, false)
@@ -1215,6 +1332,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const imageIdentityIdsRef = useRef(new WeakMap<object, number>())
   const nextImageIdentityIdRef = useRef(1)
   const sharedTexturePoolRef = useRef(new CanvasImageSharedResourcePool<Texture>())
+  // Set when the renderer can run the edge-antialias program (WebGL 2).
+  const edgeAntialiasGeometryRef = useRef<MeshGeometry | null>(null)
   // Only used when the renderer cannot upload eagerly: the texture then keeps its decoded
   // input alive, because Pixi uploads it on a later draw.
   const textureDecodedAssetRef = useRef(new WeakMap<Texture, CachedImageRecord>())
@@ -2633,6 +2752,43 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     record.lastUsedAt = spriteUsageCounterRef.current
   }, [])
 
+  /**
+   * Gives the image the display object its rotation needs: the edge-antialiased mesh while it
+   * is rotated, a plain sprite otherwise. The texture stays; only the object that draws it is
+   * replaced, at the same place in the world's child list. Returns true when it was replaced:
+   * the caller then has to apply the transform again.
+   */
+  const syncSpriteRecordEdgeAntialias = useCallback(
+    (record: SpriteRecord, rotationDegrees: number) => {
+      const geometry = needsProjectCanvasEdgeAntialias(rotationDegrees)
+        ? edgeAntialiasGeometryRef.current
+        : null
+      if (Boolean(geometry) === Boolean(record.edgeAntialiasShader)) {
+        return false
+      }
+
+      const previous = record.sprite
+      const previousShader = record.edgeAntialiasShader
+      const next = createProjectCanvasImageDisplayObject(record.texture, geometry)
+      next.sprite.label = previous.label
+      next.sprite.zIndex = previous.zIndex
+      const parent = previous.parent
+      if (parent) {
+        parent.addChildAt(next.sprite, parent.getChildIndex(previous))
+      }
+      previous.removeFromParent()
+      previous.destroy()
+      previousShader?.destroy()
+      record.sprite = next.sprite
+      record.edgeAntialiasShader = next.edgeAntialiasShader
+      record.textureWidth = next.textureWidth
+      record.textureHeight = next.textureHeight
+      record.transformKey = ''
+      return true
+    },
+    []
+  )
+
   const destroySpriteRecord = useCallback(
     (itemId: string, options?: { retainPreview?: boolean; replaced?: boolean }) => {
       const record = spriteRecordsRef.current.get(itemId)
@@ -2877,6 +3033,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       spatialTileSourceBlobByKeyRef.current.clear()
 
       try {
+        edgeAntialiasGeometryRef.current?.destroy(true)
+      } catch (error) {
+        console.warn('[Canvas WebGL] Failed to destroy the edge antialias geometry.', error)
+      }
+      edgeAntialiasGeometryRef.current = null
+      try {
         appRef.current?.destroy(true, { children: true })
       } catch (error) {
         console.warn('[Canvas WebGL] Failed to destroy Pixi runtime after GPU failure.', error)
@@ -2901,7 +3063,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           resizeTo: host,
           backgroundAlpha: 0,
           clearBeforeRender: true,
-          antialias: true,
+          // No multisampled drawing buffer; rotated images antialias their own edges.
+          antialias: false,
           autoDensity: true,
           resolution: getProjectCanvasRenderDeviceScale(renderQualityRef.current),
           autoStart: false,
@@ -2931,6 +3094,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           return
         }
 
+        edgeAntialiasGeometryRef.current =
+          (app.renderer as PixiRendererWithWebGLContext).context?.webGLVersion === 2
+            ? createProjectCanvasEdgeAntialiasGeometry()
+            : null
         const world = new Container()
         world.sortableChildren = true
         syncProjectCanvasWorldRenderGroup(world, stagePosRef.current, stageSizeRef.current)
@@ -3040,6 +3207,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             ) {
               requestTextureReacquire(itemId)
             }
+            syncSpriteRecordEdgeAntialias(record, renderItem.rotation)
             applySpriteTransform(
               record.sprite,
               { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
@@ -3056,6 +3224,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         if (refreshProjectCanvasTextureAfterTinyPreview(record, preview, stageScaleRef.current)) {
           requestTextureReacquire(itemId)
         }
+        syncSpriteRecordEdgeAntialias(record, preview.rotation)
         applySpriteTransform(
           record.sprite,
           { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
@@ -3072,7 +3241,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       renderImmediateOrSchedule,
       requestTextureReacquire,
       scheduleViewportReconcile,
-      setViewportInteractingState
+      setViewportInteractingState,
+      syncSpriteRecordEdgeAntialias
     ]
   )
 
@@ -4865,6 +5035,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       if (existingRecord && existingRecord.textureKey === textureKey) {
         nextRenderItems.set(item.id, renderItem)
+        if (syncSpriteRecordEdgeAntialias(existingRecord, transformState.rotation)) {
+          worldOrderDirty = true
+        }
         if (existingRecord.sprite.zIndex !== item.zIndex) {
           existingRecord.sprite.zIndex = item.zIndex
           worldOrderDirty = true
@@ -4953,6 +5126,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       let baseTexture: Texture | null = null
       let texture: Texture | null = null
+      let unregisteredDisplayObject: ReturnType<
+        typeof createProjectCanvasImageDisplayObject
+      > | null = null
       try {
         let createdSharedTexture = false
         baseTexture = sharedTexturePoolRef.current.acquire(sharedTextureKey, () => {
@@ -5005,17 +5181,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               })
             : baseTexture
 
-        const sprite = new Sprite(texture)
-        const textureWidth = Math.max(1, texture.width)
-        const textureHeight = Math.max(1, texture.height)
+        const displayObject = createProjectCanvasImageDisplayObject(
+          texture,
+          needsProjectCanvasEdgeAntialias(transformState.rotation)
+            ? edgeAntialiasGeometryRef.current
+            : null
+        )
+        unregisteredDisplayObject = displayObject
+        const { sprite, textureWidth, textureHeight } = displayObject
         sprite.label = item.id
         applySpriteTransform(sprite, { textureWidth, textureHeight }, transformState)
         sprite.zIndex = renderItem.zIndex
         if (existingRecord) {
           destroySpriteRecord(item.id, { retainPreview: true, replaced: true })
         }
+        unregisteredDisplayObject = null
         spriteRecordsRef.current.set(item.id, {
           sprite,
+          edgeAntialiasShader: displayObject.edgeAntialiasShader,
           texture,
           sourceTexture: baseTexture,
           textureKey,
@@ -5061,6 +5244,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         deleteCachedImageRecord(imageCacheRef.current, item.id, 'error-cleanup')
         if (existingRecord) {
           preserveExistingRenderItem()
+        }
+        if (unregisteredDisplayObject) {
+          unregisteredDisplayObject.sprite.destroy()
+          unregisteredDisplayObject.edgeAntialiasShader?.destroy()
         }
         if (texture && texture !== baseTexture) {
           texture.destroy(false)
@@ -5193,6 +5380,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     setCachedImageRecord,
     setTextureBudgetReservation,
     selectedIds,
+    syncSpriteRecordEdgeAntialias,
     viewportVersion
   ])
 
