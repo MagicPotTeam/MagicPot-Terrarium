@@ -366,7 +366,7 @@ export type ProjectCanvasWebGLImageLayerHandle = {
 }
 
 function applySpriteTransform(
-  sprite: Sprite,
+  sprite: SpriteRecord['sprite'],
   metrics: { textureWidth: number; textureHeight: number },
   item: ProjectCanvasImagePreview
 ) {
