@@ -13,6 +13,8 @@ import { serializeCanvasItem } from './canvasItemSerialization'
 import { useCanvasBridgeActions } from './useCanvasBridgeActions'
 import {
   collectCanvasLegacyCropCandidates,
+  isLegacyCropWithoutSourceSize,
+  LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY,
   useCanvasLegacyCropUpgrade,
   type CanvasLegacyCropEvidence,
   type CanvasLegacyCropEvidenceReader
@@ -170,13 +172,28 @@ function createLegacyCrop(overrides: Partial<CanvasImageItem> = {}): CanvasImage
 type HarnessProps = {
   canvasId: string
   readEvidence?: CanvasLegacyCropEvidenceReader
+  hydrate?: (item: CanvasImageItem) => Promise<CanvasImageItem | null>
+}
+
+const RESTORED_BLOB_SRC = 'blob:restored-legacy-crop'
+
+// Hydration as the real app does it on the full-load path: src is the restored
+// blob: URL of the board's own copy, and missing size hints are filled in from
+// the decoded image (canvasAssetIntakeHelpers hydrateCanvasImageItemForCanvas).
+function backfillingHydrate(decoded: { width: number; height: number; sizeBytes: number }) {
+  return async (item: CanvasImageItem): Promise<CanvasImageItem> => ({
+    ...item,
+    sourceWidth: item.sourceWidth ?? decoded.width,
+    sourceHeight: item.sourceHeight ?? decoded.height,
+    sizeBytes: item.sizeBytes ?? decoded.sizeBytes
+  })
 }
 
 // The page wiring: the persistence hook loads the board and reports 'items
 // loaded'; the upgrade pass writes without history; the save path persists.
 function renderBoard(initialProps: HarnessProps) {
   return renderHook(
-    ({ canvasId, readEvidence }: HarnessProps) => {
+    ({ canvasId, readEvidence, hydrate }: HarnessProps) => {
       const [items, setItems] = React.useState<CanvasItem[]>([])
       const [groups, setGroups] = React.useState<CanvasGroup[]>([])
       const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
@@ -206,7 +223,7 @@ function renderBoard(initialProps: HarnessProps) {
         maxFitStageScale: 2,
         clampStageScale: (value: number) => value,
         getCanvasItemsVisualBounds: () => null,
-        hydrateCanvasImageItemForCanvas: async (item) => item,
+        hydrateCanvasImageItemForCanvas: hydrate ?? (async (item) => item),
         nextZIndexRef: React.useRef(1),
         setItems,
         setItemsWithHistory: setItems,
@@ -416,13 +433,6 @@ describe('useCanvasLegacyCropUpgrade (owner decision 2)', () => {
       }),
       reason: 'byte-size-mismatch',
       reads: 1
-    },
-    {
-      name: 'no source size was stored',
-      served: { [SOURCE_PATH]: { bytes: SOURCE_BYTES, width: 100, height: 80 } },
-      item: createLegacyCrop({ sourceWidth: undefined, sourceHeight: undefined }),
-      reason: 'no-source-size',
-      reads: 0
     },
     {
       name: 'the crop lies outside the stored source',
@@ -635,8 +645,143 @@ describe('useCanvasLegacyCropUpgrade (owner decision 2)', () => {
     expect(dirtyStates.at(-1)).toBe(false)
   })
 
+  it('keeps a crop stored without a source size refused on every later open, although hydration fills the hints in', async () => {
+    const fixture = installSourceFixture({
+      [RESTORED_BLOB_SRC]: { bytes: SOURCE_BYTES, width: 100, height: 80 }
+    })
+    const hydrate = backfillingHydrate({
+      width: 100,
+      height: 80,
+      sizeBytes: SOURCE_BYTES.byteLength
+    })
+    const stored = createLegacyCrop({
+      src: RESTORED_BLOB_SRC,
+      sourceWidth: undefined,
+      sourceHeight: undefined,
+      sizeBytes: undefined
+    })
+
+    // Open 1: refused with one line, nothing read; the crop is marked.
+    mockLoadCanvasItems.mockResolvedValue(boardWith([stored]))
+    const first = renderBoard({ canvasId: 'board-a', hydrate })
+    await waitFor(() => expect(mockSaveCanvasItems).toHaveBeenCalled())
+    expect(legacyCropWarnings(warn)).toEqual([
+      '[Canvas] A crop saved without a source record stays unverified (no-source-size).'
+    ])
+    expect(fixture.fetch).not.toHaveBeenCalled()
+    expect(first.result.current.setItemsWithoutHistory).toHaveBeenCalledTimes(1)
+    const opened = findImage(first.result.current.items)
+    expect(opened).not.toHaveProperty('cropSource')
+    expect(isLegacyCropWithoutSourceSize(opened)).toBe(true)
+    // The save holds the hints hydration filled in, and the marker next to them.
+    const [savedItems] = mockSaveCanvasItems.mock.calls.at(-1) as [CanvasItem[]]
+    const saved = findImage(savedItems)
+    expect(saved).toMatchObject({ sourceWidth: 100, sourceHeight: 80, crop: CROP })
+    expect(saved).not.toHaveProperty('cropSource')
+    expect(
+      (saved as unknown as Record<string, unknown>)[LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY]
+    ).toEqual(CROP)
+    expect(serializeCanvasItem(opened)).toHaveProperty(LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY, CROP)
+    const firstRefusal = await sendToAgent([opened])
+    expect(firstRefusal.accepted).toBe(false)
+    expect(firstRefusal.notifyError).toHaveBeenCalledExactlyOnceWith(
+      'canvas.agent_send_cropped_image_failed'
+    )
+    first.unmount()
+
+    // Open 2 and 3 on what was saved: the stored hints are now present, but the
+    // crop is still not measured, and the bridge still refuses.
+    let reopened = saved
+    for (let open = 2; open <= 3; open += 1) {
+      warn.mockClear()
+      mockSaveCanvasItems.mockClear()
+      fixture.fetch.mockClear()
+      mockLoadCanvasItems.mockResolvedValue(boardWith([reopened]))
+      const board = renderBoard({ canvasId: 'board-a', hydrate })
+      await waitFor(() => expect(legacyCropWarnings(warn)).toHaveLength(1))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 600))
+      })
+      expect(legacyCropWarnings(warn)[0]).toContain('(no-source-size)')
+      expect(fixture.fetch).not.toHaveBeenCalled()
+      expect(board.result.current.setItemsWithoutHistory).not.toHaveBeenCalled()
+      expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+      reopened = findImage(board.result.current.items)
+      expect(reopened).not.toHaveProperty('cropSource')
+      const refused = await sendToAgent([reopened])
+      expect(refused.accepted).toBe(false)
+      expect(refused.notifyError).toHaveBeenCalledExactlyOnceWith(
+        'canvas.agent_send_cropped_image_failed'
+      )
+      expect(refused.attachmentUrls).toEqual([])
+      board.unmount()
+    }
+  })
+
+  it('keeps the crop marked when an ordinary edit autosaves the board before the next open', async () => {
+    installSourceFixture({ [RESTORED_BLOB_SRC]: { bytes: SOURCE_BYTES, width: 100, height: 80 } })
+    const hydrate = backfillingHydrate({
+      width: 100,
+      height: 80,
+      sizeBytes: SOURCE_BYTES.byteLength
+    })
+    const stored = createLegacyCrop({
+      src: RESTORED_BLOB_SRC,
+      sourceWidth: undefined,
+      sourceHeight: undefined
+    })
+    mockLoadCanvasItems.mockResolvedValue(boardWith([stored]))
+    const first = renderBoard({ canvasId: 'board-a', hydrate })
+    await waitFor(() =>
+      expect(isLegacyCropWithoutSourceSize(findImage(first.result.current.items))).toBe(true)
+    )
+    // An ordinary edit (a move) after the pass, then the autosave.
+    act(() => {
+      first.result.current.setItems((prev) =>
+        prev.map((item) => (item.id === 'legacy-crop' ? { ...item, x: 42 } : item))
+      )
+    })
+    await waitFor(() =>
+      expect(
+        (mockSaveCanvasItems.mock.calls as Array<[CanvasItem[]]>).some(
+          ([items]) => findImage(items).x === 42
+        )
+      ).toBe(true)
+    )
+    const [savedItems] = mockSaveCanvasItems.mock.calls.at(-1) as [CanvasItem[]]
+    first.unmount()
+
+    const readEvidence: CanvasLegacyCropEvidenceReader = vi.fn(async () => MATCHING_EVIDENCE)
+    mockLoadCanvasItems.mockResolvedValue(boardWith(savedItems))
+    const second = renderBoard({ canvasId: 'board-a', hydrate, readEvidence })
+    await waitFor(() => expect(legacyCropWarnings(warn)).toHaveLength(2))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    })
+    expect(readEvidence).not.toHaveBeenCalled()
+    expect(findImage(second.result.current.items)).not.toHaveProperty('cropSource')
+  })
+
+  it('measures a new crop of a marked image like any other crop', async () => {
+    const fixture = installSourceFixture({
+      [RESTORED_BLOB_SRC]: { bytes: SOURCE_BYTES, width: 100, height: 80 }
+    })
+    // The marker covers an older rectangle; the current crop was made later
+    // with stored size hints.
+    const stored = {
+      ...createLegacyCrop({ src: RESTORED_BLOB_SRC }),
+      [LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY]: { x: 0, y: 0, width: 5, height: 5 }
+    } as CanvasImageItem
+    expect(isLegacyCropWithoutSourceSize(stored)).toBe(false)
+    mockLoadCanvasItems.mockResolvedValue(boardWith([stored]))
+    const { result } = renderBoard({ canvasId: 'board-a' })
+    await waitFor(() => expect(findImage(result.current.items).cropSource?.origin).toBe('reopen'))
+    expect(fixture.fetch).toHaveBeenCalledTimes(1)
+    expect(legacyCropWarnings(warn)).toEqual([])
+  })
+
   it('judges candidates on the stored items', () => {
-    const { candidates, refusals } = collectCanvasLegacyCropCandidates([
+    const { candidates, refusals, toMark } = collectCanvasLegacyCropCandidates([
       createLegacyCrop(),
       createLegacyCrop({
         id: 'recorded',
@@ -645,12 +790,27 @@ describe('useCanvasLegacyCropUpgrade (owner decision 2)', () => {
       createLegacyCrop({ id: 'uncropped', crop: undefined }),
       createLegacyCrop({ id: 'fractional-hint', sourceWidth: 100.5 }),
       createLegacyCrop({ id: 'negative', crop: { x: -1, y: 0, width: 10, height: 10 } }),
-      createLegacyCrop({ id: 'no-bytes', sizeBytes: undefined })
+      createLegacyCrop({ id: 'no-bytes', sizeBytes: undefined }),
+      createLegacyCrop({ id: 'no-hints', sourceWidth: undefined, sourceHeight: undefined }),
+      {
+        ...createLegacyCrop({ id: 'marked' }),
+        [LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY]: { ...CROP }
+      } as CanvasImageItem
     ])
     expect(candidates.map((candidate) => [candidate.id, candidate.expectedSizeBytes])).toEqual([
       ['legacy-crop', SOURCE_BYTES.byteLength],
       ['no-bytes', null]
     ])
-    expect(refusals).toEqual(['no-source-size', 'crop-outside-source'])
+    expect(refusals).toEqual([
+      'no-source-size',
+      'crop-outside-source',
+      'no-source-size',
+      'no-source-size'
+    ])
+    // Crops first seen without a valid stored size are marked; a marked one is not again.
+    expect(toMark).toEqual([
+      { id: 'fractional-hint', crop: CROP },
+      { id: 'no-hints', crop: CROP }
+    ])
   })
 })

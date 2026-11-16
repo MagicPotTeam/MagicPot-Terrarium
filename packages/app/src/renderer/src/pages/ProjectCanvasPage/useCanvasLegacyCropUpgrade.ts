@@ -9,6 +9,14 @@
 // send time). Matching pixel size does not certify how the crop was measured,
 // so it never enables the mirror flatten or the identity strip: those require
 // origin 'confirm' (isConfirmedIdentityCrop).
+//
+// A crop stored without a source pixel size stays refused for good (owner
+// default (a)). Hydration fills sourceWidth/sourceHeight in from the decoded
+// image and the next save stores them, so from the second open on they would
+// look stored. The pass therefore marks such a crop on its first open
+// (LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY, an item-level field holding the crop it
+// applies to) and never measures a marked crop. A new crop (any other
+// rectangle) is no longer covered by the marker.
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import {
   CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES,
@@ -40,6 +48,17 @@ export type CanvasLegacyCropRefusal =
   | 'source-unavailable'
   | 'pixel-size-mismatch'
   | 'byte-size-mismatch'
+
+/**
+ * Item-level marker: the crop rectangle that was stored without a source pixel
+ * size. Persisted with the item (the previous release carries item-level fields
+ * through unchanged); it never changes the image bytes or the display.
+ */
+export const LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY = 'legacyCropWithoutSourceSize'
+
+type CanvasLegacyCropMarked = {
+  [LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY]?: unknown
+}
 
 export type CanvasLegacyCropCandidate = {
   id: string
@@ -90,22 +109,46 @@ function isSameCrop(left: CanvasCrop | undefined, right: CanvasCrop): boolean {
   )
 }
 
+function copyCrop(crop: CanvasCrop): CanvasCrop {
+  return { x: crop.x, y: crop.y, width: crop.width, height: crop.height }
+}
+
+/** The item's current crop was first seen by this pass without a stored source size. */
+export function isLegacyCropWithoutSourceSize(item: CanvasItem): boolean {
+  if (item.type !== 'image' || !item.crop) return false
+  const marker = (item as CanvasImageItem & CanvasLegacyCropMarked)[
+    LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY
+  ]
+  if (!marker || typeof marker !== 'object') return false
+  return isSameCrop(item.crop, marker as CanvasCrop)
+}
+
 /**
  * Cropped images without a record, judged on the items as they were stored
  * (before hydration can backfill size hints). Without a stored pixel size there
- * is nothing to compare with, and a crop outside the stored size is refused.
+ * is nothing to compare with: such a crop is refused and listed in `toMark`, so
+ * the size hints hydration fills in never make it a candidate on a later open.
+ * A marked crop is refused without a read, and a crop outside the stored size
+ * is refused.
  */
 export function collectCanvasLegacyCropCandidates(storedItems: readonly CanvasItem[]): {
   candidates: CanvasLegacyCropCandidate[]
   refusals: CanvasLegacyCropRefusal[]
+  toMark: Array<{ id: string; crop: CanvasCrop }>
 } {
   const candidates: CanvasLegacyCropCandidate[] = []
   const refusals: CanvasLegacyCropRefusal[] = []
+  const toMark: Array<{ id: string; crop: CanvasCrop }> = []
   for (const item of storedItems) {
     if (item.type !== 'image' || !item.crop || item.cropSource !== undefined) continue
+    if (isLegacyCropWithoutSourceSize(item)) {
+      refusals.push('no-source-size')
+      continue
+    }
     const { sourceWidth, sourceHeight } = item
     if (!isPositiveSafeInteger(sourceWidth) || !isPositiveSafeInteger(sourceHeight)) {
       refusals.push('no-source-size')
+      toMark.push({ id: item.id, crop: copyCrop(item.crop) })
       continue
     }
     if (!isCropInsideSource(item.crop, sourceWidth, sourceHeight)) {
@@ -114,13 +157,13 @@ export function collectCanvasLegacyCropCandidates(storedItems: readonly CanvasIt
     }
     candidates.push({
       id: item.id,
-      crop: { x: item.crop.x, y: item.crop.y, width: item.crop.width, height: item.crop.height },
+      crop: copyCrop(item.crop),
       sourceWidth,
       sourceHeight,
       expectedSizeBytes: getStoredSourceSizeBytes(item)
     })
   }
-  return { candidates, refusals }
+  return { candidates, refusals, toMark }
 }
 
 /** The live item still shows the stored crop in the stored space and has no record. */
@@ -222,7 +265,32 @@ export function useCanvasLegacyCropUpgrade({
     const token = ++passTokenRef.current
     const isPassCurrent = () =>
       mountedRef.current && passTokenRef.current === token && canvasIdRef.current === passCanvasId
-    const { candidates, refusals } = collectCanvasLegacyCropCandidates(storedItems)
+    const { candidates, refusals, toMark } = collectCanvasLegacyCropCandidates(storedItems)
+    if (toMark.length > 0 && isPassCurrent()) {
+      // Synchronously, in the effect after the commit that holds the hydrated
+      // items: the marker lands before any later edit or save can take the
+      // backfilled size hints for stored ones.
+      const marks = new Map(toMark.map((entry) => [entry.id, entry.crop]))
+      optionsRef.current.setItemsWithoutHistory((prev) => {
+        if (!isPassCurrent()) return prev
+        let changed = false
+        const next = prev.map((item) => {
+          const crop = marks.get(item.id)
+          if (
+            !crop ||
+            item.type !== 'image' ||
+            item.cropSource !== undefined ||
+            !isSameCrop(item.crop, crop) ||
+            isLegacyCropWithoutSourceSize(item)
+          ) {
+            return item
+          }
+          changed = true
+          return { ...item, [LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY]: copyCrop(crop) } as CanvasItem
+        })
+        return changed ? next : prev
+      })
+    }
     if (candidates.length === 0) {
       refusals.forEach(logLegacyCropRefusal)
       return
