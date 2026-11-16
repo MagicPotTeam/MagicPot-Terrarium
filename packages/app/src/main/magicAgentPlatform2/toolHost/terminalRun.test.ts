@@ -117,6 +117,36 @@ function input(
   return { ...result, grantId: `grant-${authorizationId}`, expectedGrantUseCount: 0 }
 }
 
+// Liveness that ignores zombies. PID 1 of a container may reap reparented
+// orphans late (measured 1.4-1.9 s here; on ubuntu-latest CI, PID 1 is systemd
+// and reaps promptly), and kill(pid, 0) still succeeds for a zombie although it
+// has exited and runs no code. On Linux the state letter after the LAST ')' of
+// /proc/<pid>/stat decides (comm may contain ')'): Z or X is not running, any
+// other state (R, S, D, T, t, I ...) is. PID reuse can only make a caller that
+// expects "not running" fail falsely, never pass falsely.
+function processIsRunning(pid: number): boolean {
+  if (process.platform === 'linux') {
+    let stat: string
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+    const afterComm = stat.slice(stat.lastIndexOf(')') + 1)
+    const state = afterComm.trim().charAt(0)
+    return state !== 'Z' && state !== 'X'
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return true
+    throw error
+  }
+}
+
 describe('TerminalRunToolHost', () => {
   it('authorizes and consumes the one-shot permit before process side effects', async () => {
     const { root, authorization } = setup()
@@ -364,12 +394,15 @@ describe('TerminalRunToolHost caller cancellation', () => {
     })
     await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 1500 })
     const ids: number[] = JSON.parse(readFileSync(ready, 'utf8'))
+    // Proves the liveness helper is not vacuous: the sleeping child and
+    // grandchild are reported running before the cancel.
+    for (const pid of ids) expect(processIsRunning(pid)).toBe(true)
     controller.abort()
     const result = await task
     // Even a failing baseline must finish/close its owned tree before assertions.
     await vi.waitFor(
       () => {
-        for (const pid of ids) expect(() => process.kill(pid, 0)).toThrow()
+        for (const pid of ids) expect(processIsRunning(pid)).toBe(false)
       },
       { timeout: 1500 }
     )
