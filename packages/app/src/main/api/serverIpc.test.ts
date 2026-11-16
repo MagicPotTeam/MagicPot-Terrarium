@@ -85,6 +85,7 @@ vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: vi.fn
 }) }))
 vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({ createInstalledCatalogReadDelegate: catalogDelegateFactory }))
 vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: createServiceClass() }))
+vi.mock('./svcReportBundlesImpl', () => ({ ReportBundlesSvcImpl: createServiceClass() }))
 describe('serverIpc createServer', () => {
   beforeEach(() => {
     handleMock.mockClear()
@@ -305,6 +306,19 @@ describe('serverIpc createServer', () => {
       'svcManagedMedia.ensureDerivative',
       expect.any(Function)
     )
+  })
+
+  it('registers svcReportBundles on ipcMain', () => {
+    const api = createServer()
+    expect(api.svcReportBundles).toBeDefined()
+    initServerIpc()
+    for (const methodName of ['beginBundle', 'register', 'verify'] as const) {
+      expect(apiDef.svcReportBundles[methodName].type).toBe('unary')
+      expect(handleMock).toHaveBeenCalledWith(
+        `svcReportBundles.${methodName}`,
+        expect.any(Function)
+      )
+    }
   })
 
   it('registers svcCanvasThumbnail unary methods on ipcMain', () => {

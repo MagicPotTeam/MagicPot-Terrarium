@@ -10,6 +10,7 @@ import {
   resolveAuthorizedLocalMediaPath
 } from './localMediaAccess'
 import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
+import { initializeReportBundleRegistry } from './reportBundles/reportBundleRegistry'
 
 const silentErrorCodes = [
   'ECONNRESET',
@@ -220,6 +221,7 @@ export function initializeMainProcessRuntime(getMainWindow: () => BrowserWindow 
 
 export async function setupReadyAppRuntime(): Promise<void> {
   initializeLocalMediaAccess(path.join(app.getPath('userData'), 'local-media-grants.json'))
+  initializeReportBundleRegistry({ userDataDir: app.getPath('userData') })
   protocol.handle('local-media', handleLocalMediaRequest)
   console.log('[App] local-media:// 协议已注册')
 

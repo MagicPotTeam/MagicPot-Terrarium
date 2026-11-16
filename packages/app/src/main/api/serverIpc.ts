@@ -30,6 +30,7 @@ import { createInstalledCatalogReadDelegate } from '../magicAgentRuntime/install
 import { createStartupStorageReadDelegate } from '../storageMetadata/startupStorageReadBinding'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 import { ManagedMediaSvcImpl } from './svcManagedMediaImpl'
+import { ReportBundlesSvcImpl } from './svcReportBundlesImpl'
 import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaCleanupScheduler'
 import { getChatMediaDir } from '../llmProxy/chatMediaDir'
 
@@ -85,7 +86,8 @@ export const createServer = (
           referenceCounts: snapshot.referenceCounts
         })
       }
-    })
+    }),
+    svcReportBundles: new ReportBundlesSvcImpl({ getMainWindow })
   }
 
   return {
