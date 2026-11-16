@@ -1,7 +1,9 @@
 // packages/app/src/shared/utils/chatSendStageBreadcrumb.ts
 // A breadcrumb the renderer reports at each stage of a chat send, so that a renderer death can be
 // placed in the send ("it died after the request with 8 images of 9 M characters was built").
-// COUNTS AND SIZES ONLY: never message text, file names, paths or URLs.
+// COUNTS, SIZES AND ENUMERATED NAMES ONLY: never message text, error messages, file names, paths
+// or URLs. Each request of a page has its own sequence number, so that main can tell overlapping
+// sends apart (a background request must not hide the image send that is still running).
 
 export const CHAT_SEND_STAGE_CHANNEL = 'app:chat-send-stage'
 
@@ -20,8 +22,52 @@ export const CHAT_SEND_STAGES = [
 
 export type ChatSendStage = (typeof CHAT_SEND_STAGES)[number]
 
+/** The stages after which a send is no longer running. */
+export const TERMINAL_CHAT_SEND_STAGES: readonly ChatSendStage[] = ['reply-finished', 'reply-failed']
+/** The stages a failed send can have reached. */
+export const RUNNING_CHAT_SEND_STAGES = ['request-start', 'images-checked', 'request-built'] as const
+export type RunningChatSendStage = (typeof RUNNING_CHAT_SEND_STAGES)[number]
+
+/**
+ * The error names a failed send may report. Any other name (an app's own error class, a value that
+ * is not an error) is reported as 'other': a name is never copied from the error itself.
+ */
+export const CHAT_SEND_ERROR_NAMES = [
+  'Error',
+  'AbortError',
+  'TimeoutError',
+  'TypeError',
+  'RangeError',
+  'SyntaxError',
+  'ReferenceError',
+  'QuotaExceededError',
+  'NotReadableError',
+  'NotFoundError',
+  'NetworkError',
+  'DataError',
+  'EncodingError',
+  'InvalidStateError',
+  'SecurityError',
+  'other'
+] as const
+export type ChatSendErrorName = (typeof CHAT_SEND_ERROR_NAMES)[number]
+
+/** The enumerated name of a thrown value; reads only its `name`, never its message. */
+export function chatSendErrorName(error: unknown): ChatSendErrorName {
+  try {
+    const name = error && typeof error === 'object' ? (error as { name?: unknown }).name : undefined
+    return typeof name === 'string' && (CHAT_SEND_ERROR_NAMES as readonly string[]).includes(name)
+      ? (name as ChatSendErrorName)
+      : 'other'
+  } catch {
+    return 'other'
+  }
+}
+
 export type ChatSendStageBreadcrumb = {
   stage: ChatSendStage
+  /** The request's number within this page (1, 2, ...): every stage of one request carries the same. */
+  sendSeq: number
   messageCount: number
   imageCount: number
   /** Known image sizes plus the decoded size of inline data: images. */
@@ -29,6 +75,9 @@ export type ChatSendStageBreadcrumb = {
   /** data: URLs among all attachments and their total length in characters. */
   dataUrlCount: number
   dataUrlChars: number
+  /** 'reply-failed' only: the stage the request had reached, and the error's enumerated name. */
+  failedAfter?: RunningChatSendStage
+  errorName?: ChatSendErrorName
 }
 
 /**
@@ -54,7 +103,8 @@ const isCount = (value: unknown): value is number =>
 /** Walks attachments only; O(attachments), reads string lengths and prefixes, never content. */
 export function summarizeChatSendStage(
   stage: ChatSendStage,
-  messages: readonly MessageLike[]
+  messages: readonly MessageLike[],
+  sendSeq: number
 ): ChatSendStageBreadcrumb {
   let imageCount = 0
   let imageBytes = 0
@@ -75,16 +125,41 @@ export function summarizeChatSendStage(
       else if (isDataUrl) imageBytes += Math.floor((url.length - url.indexOf(',') - 1) * 0.75)
     }
   }
-  return { stage, messageCount: messages.length, imageCount, imageBytes, dataUrlCount, dataUrlChars }
+  return { stage, sendSeq, messageCount: messages.length, imageCount, imageBytes, dataUrlCount, dataUrlChars }
+}
+
+/**
+ * The breadcrumb of a request that failed or was aborted: the counts of the last stage it reported
+ * (so the sizes of a built request survive), that stage, and the error's enumerated name.
+ */
+export function failedChatSendStage(
+  last: ChatSendStageBreadcrumb,
+  error: unknown
+): ChatSendStageBreadcrumb | null {
+  if (!(RUNNING_CHAT_SEND_STAGES as readonly string[]).includes(last.stage)) return null
+  return {
+    stage: 'reply-failed',
+    sendSeq: last.sendSeq,
+    messageCount: last.messageCount,
+    imageCount: last.imageCount,
+    imageBytes: last.imageBytes,
+    dataUrlCount: last.dataUrlCount,
+    dataUrlChars: last.dataUrlChars,
+    failedAfter: last.stage as RunningChatSendStage,
+    errorName: chatSendErrorName(error)
+  }
 }
 
 const BREADCRUMB_KEYS = new Set([
   'stage',
+  'sendSeq',
   'messageCount',
   'imageCount',
   'imageBytes',
   'dataUrlCount',
-  'dataUrlChars'
+  'dataUrlChars',
+  'failedAfter',
+  'errorName'
 ])
 
 /**
@@ -97,16 +172,27 @@ export function parseChatSendStageBreadcrumb(value: unknown): ChatSendStageBread
   const keys = Object.keys(record)
   if (keys.length > BREADCRUMB_KEYS.size || keys.some((key) => !BREADCRUMB_KEYS.has(key))) return null
   if (!CHAT_SEND_STAGES.includes(record.stage as ChatSendStage)) return null
-  const required = ['messageCount', 'imageCount', 'imageBytes', 'dataUrlCount', 'dataUrlChars'] as const
+  const required = ['sendSeq', 'messageCount', 'imageCount', 'imageBytes', 'dataUrlCount', 'dataUrlChars'] as const
   if (required.some((key) => !isCount(record[key]))) return null
-  return {
+  const breadcrumb: ChatSendStageBreadcrumb = {
     stage: record.stage as ChatSendStage,
+    sendSeq: record.sendSeq as number,
     messageCount: record.messageCount as number,
     imageCount: record.imageCount as number,
     imageBytes: record.imageBytes as number,
     dataUrlCount: record.dataUrlCount as number,
     dataUrlChars: record.dataUrlChars as number
   }
+  // A failure names the stage it came after and the error's enumerated name; nothing else does.
+  if (breadcrumb.stage === 'reply-failed') {
+    if (!(RUNNING_CHAT_SEND_STAGES as readonly unknown[]).includes(record.failedAfter)) return null
+    if (!(CHAT_SEND_ERROR_NAMES as readonly unknown[]).includes(record.errorName)) return null
+    breadcrumb.failedAfter = record.failedAfter as RunningChatSendStage
+    breadcrumb.errorName = record.errorName as ChatSendErrorName
+  } else if (record.failedAfter !== undefined || record.errorName !== undefined) {
+    return null
+  }
+  return breadcrumb
 }
 
 const HEAP_KEYS = ['usedJSHeapSize', 'jsHeapSizeLimit'] as const

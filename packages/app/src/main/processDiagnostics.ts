@@ -1,7 +1,7 @@
 // packages/app/src/main/processDiagnostics.ts
 // Records why a process of the app died, so that a report like "the window turned white" can be
 // diagnosed afterwards: exit reason, exit code, the memory of every process during the last 30 s,
-// free / total RAM and the last chat send stage the renderer reported.
+// free / total RAM, the last chat send stage the renderer reported and its sends that had not ended.
 //
 // Everything stays on this PC: one bounded JSON-lines file under <userData>/logs and, for native
 // crashes, local minidumps. Nothing is uploaded and nothing here contains message text, file
@@ -16,6 +16,7 @@ import { takeExpectedRendererExit } from './expectedRendererExits'
 import {
   forgetChatSendStage,
   getLastChatSendStage,
+  getOpenChatSends,
   registerChatSendStageIpc
 } from './chatSendStageBreadcrumbs'
 
@@ -71,6 +72,12 @@ export type ProcessEventLine = {
   samples: ProcessMemorySample[]
   /** Last chat send stage reported by the renderer (counts and sizes only), when any. */
   lastSendStage: unknown
+  /**
+   * renderer-gone only: the renderer's sends that had not reported their end, oldest first, each
+   * with its number and last stage (at most 8). A send running when the renderer died is here even
+   * when another request of the page reported after it.
+   */
+  openSends?: unknown[]
 }
 
 type ProcessDiagnosticsDeps = {
@@ -246,6 +253,8 @@ export type ProcessDiagnostics = {
 export type ProcessDiagnosticsOptions = Partial<ProcessDiagnosticsDeps> & {
   /** The last send-stage breadcrumb of a renderer, by webContents id. */
   lastSendStageFor?: (webContentsId: number | undefined) => unknown
+  /** The unfinished sends of a renderer, by webContents id. */
+  openSendsFor?: (webContentsId: number) => unknown[]
   crashDumpsDir?: () => string
   /** The window whose page may report send-stage breadcrumbs; without it none is accepted. */
   getMainWindow?: () => BrowserWindow | null
@@ -265,6 +274,7 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
   const deps: ProcessDiagnosticsDeps = { ...defaultDeps(), ...options }
   const ring = new ProcessMemoryRing(deps)
   const lastSendStageFor = options.lastSendStageFor ?? getLastChatSendStage
+  const openSendsFor = options.openSendsFor ?? getOpenChatSends
   const crashDumpsDir = options.crashDumpsDir ?? (() => app.getPath('crashDumps'))
   let prunePending = false
   let lastLagTick = deps.monotonicNow()
@@ -329,7 +339,8 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
         webContentsId,
         ...(lastKnownPid ? { lastKnownPid } : {}),
         ...(expected ? { expected } : {}),
-        lastSendStage: lastSendStageFor(webContentsId) ?? null
+        lastSendStage: lastSendStageFor(webContentsId) ?? null,
+        openSends: openSendsFor(webContentsId) ?? []
       })
     },
     recordChildGone(details) {

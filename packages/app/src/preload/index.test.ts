@@ -263,7 +263,7 @@ describe('preload capability boundary', () => {
   it('forwards only exact send-stage breadcrumbs on their one channel', () => {
     const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
     expect(Object.keys(appDiagnostics)).toEqual(['reportChatSendStage'])
-    const breadcrumb = { stage: 'request-built', messageCount: 1, imageCount: 8, imageBytes: 10, dataUrlCount: 8, dataUrlChars: 99 }
+    const breadcrumb = { stage: 'request-built', sendSeq: 3, messageCount: 1, imageCount: 8, imageBytes: 10, dataUrlCount: 8, dataUrlChars: 99 }
 
     appDiagnostics.reportChatSendStage(breadcrumb)
     appDiagnostics.reportChatSendStage({ ...breadcrumb, content: 'secret' })
@@ -273,9 +273,30 @@ describe('preload capability boundary', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  it('forwards the send number and a failure\'s stage and enumerated error name, and nothing that is not one', () => {
+    const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
+    const counts = { messageCount: 1, imageCount: 8, imageBytes: 10, dataUrlCount: 8, dataUrlChars: 99 }
+    const failed = { stage: 'reply-failed', sendSeq: 4, ...counts, failedAfter: 'images-checked', errorName: 'RangeError' }
+    appDiagnostics.reportChatSendStage(failed)
+    // A number that is not a count, a message in the name, a free-text stage, failure fields on a running stage.
+    for (const forged of [
+      { stage: 'request-start', sendSeq: '4', ...counts },
+      { stage: 'request-start', sendSeq: -1, ...counts },
+      { stage: 'request-start', sendSeq: 1.5, ...counts },
+      { stage: 'request-start', ...counts },
+      { ...failed, errorName: 'Error: C:\\Users\\secret\\a.png not found' },
+      { ...failed, failedAfter: 'while reading secret.png' },
+      { ...failed, errorName: undefined },
+      { stage: 'request-built', sendSeq: 4, ...counts, errorName: 'TypeError' }
+    ]) {
+      appDiagnostics.reportChatSendStage(forged)
+    }
+    expect(sendMock).toHaveBeenCalledExactlyOnceWith('app:chat-send-stage', failed)
+  })
+
   it('adds the JS heap size from V8 itself and never forwards a heap number the page supplied', () => {
     const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
-    const breadcrumb = { stage: 'request-built', messageCount: 9, imageCount: 40, imageBytes: 10, dataUrlCount: 40, dataUrlChars: 99 }
+    const breadcrumb = { stage: 'request-built', sendSeq: 1, messageCount: 9, imageCount: 40, imageBytes: 10, dataUrlCount: 40, dataUrlChars: 99 }
     // Electron reports the heap statistics in KB.
     const getHeapStatistics = vi.fn(() => ({ usedHeapSize: 1_887_346, heapSizeLimit: 2_195_456 }))
     Object.defineProperty(process, 'getHeapStatistics', { configurable: true, value: getHeapStatistics })
@@ -298,7 +319,7 @@ describe('preload capability boundary', () => {
 
   it('still forwards the counts when the heap statistics cannot be read', () => {
     const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
-    const breadcrumb = { stage: 'reply-failed', messageCount: 2, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0 }
+    const breadcrumb = { stage: 'reply-failed', sendSeq: 2, messageCount: 2, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0, failedAfter: 'request-start', errorName: 'AbortError' }
     Object.defineProperty(process, 'getHeapStatistics', { configurable: true, value: () => { throw new Error('synthetic') } })
     try {
       expect(() => appDiagnostics.reportChatSendStage(breadcrumb)).not.toThrow()

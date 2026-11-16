@@ -77,7 +77,12 @@ import {
   MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES
 } from '@shared/llm/chatAttachmentTransportLimits'
 import { readBoundedLocalChatImageBlob } from './boundedLocalChatImageReader'
-import { summarizeChatSendStage, type ChatSendStage } from '@shared/utils/chatSendStageBreadcrumb'
+import {
+  failedChatSendStage,
+  summarizeChatSendStage,
+  type ChatSendStage,
+  type ChatSendStageBreadcrumb
+} from '@shared/utils/chatSendStageBreadcrumb'
 export { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 type ChatRequestPayload = {
@@ -3282,36 +3287,56 @@ const assertGoalProgressInput = (input: RequestChatCompletionInput): void => {
 }
 /**
  * Local diagnostics: tells the main process which send stage this renderer reached, so that a
- * renderer death can be placed in the send. Counts and sizes only (never text, names or paths);
- * it never changes the request or the visible status, and a missing bridge is a no-op.
+ * renderer death can be placed in the send. Counts, sizes and enumerated names only (never text,
+ * error messages, names or paths); it never changes the request or the visible status, and a
+ * missing bridge is a no-op.
  */
-const reportChatSendStage = (
-  stage: ChatSendStage,
-  messages: Parameters<typeof summarizeChatSendStage>[1]
-): void => {
+const sendChatSendStage = (breadcrumb: ChatSendStageBreadcrumb): void => {
   try {
     const report = typeof window === 'undefined' ? undefined : window.appDiagnostics?.reportChatSendStage
-    if (!report) return
-    report(summarizeChatSendStage(stage, messages))
+    if (report) report(breadcrumb)
   } catch {
     // Diagnostics must never affect a send.
   }
 }
+type ChatSendStageMessages = Parameters<typeof summarizeChatSendStage>[1]
+type ReportChatSendStage = (stage: ChatSendStage, messages: ChatSendStageMessages) => void
+// Numbers the requests of this page, so that main can tell overlapping sends apart (a background
+// request that ends must not hide an image send that is still running). Restarts with the page.
+let chatSendSeq = 0
 /**
- * A request that ends with an error or an abort reports that too. Otherwise the last breadcrumb
- * would stay at the stage the failed request had reached and a later, unrelated renderer death
- * would be placed in a send that was no longer running. The error itself is passed on untouched.
+ * One request's reporter. Every stage of the request carries the same number. A request that ends
+ * with an error or an abort reports 'reply-failed' with the stage it had reached, the counts of
+ * that stage and the error's enumerated name, so that main closes exactly this send; one that
+ * failed before it reported anything reports nothing. The error itself is passed on untouched.
  */
-const reportFailedChatSend = (input: { messages: Parameters<typeof summarizeChatSendStage>[1] }) =>
-  (error: unknown): never => {
-    reportChatSendStage('reply-failed', input.messages)
+const createChatSendStageReporter = () => {
+  const sendSeq = ++chatSendSeq
+  let last: ChatSendStageBreadcrumb | null = null
+  const report: ReportChatSendStage = (stage, messages) => {
+    try {
+      last = summarizeChatSendStage(stage, messages, sendSeq)
+    } catch {
+      return
+    }
+    sendChatSendStage(last)
+  }
+  const fail = (error: unknown): never => {
+    const failed = last ? failedChatSendStage(last, error) : null
+    if (failed) sendChatSendStage(failed)
     throw error
   }
+  return { report, fail }
+}
 export const requestChatCompletion = (
   input: RequestChatCompletionInput
-): Promise<RequestChatCompletionResult> => requestChatCompletionInStages(input).catch(reportFailedChatSend(input))
+): Promise<RequestChatCompletionResult> => {
+  const stages = createChatSendStageReporter()
+  return requestChatCompletionInStages(input, stages.report).catch(stages.fail)
+}
 const requestChatCompletionInStages = async (
-  input: RequestChatCompletionInput
+  input: RequestChatCompletionInput,
+  reportChatSendStage: ReportChatSendStage
 ): Promise<RequestChatCompletionResult> => {
   if (input.teamMessageHop && (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')) throw new Error('Team messages require local transport.')
   assertLocalProfileRevisionInput(input)
@@ -3386,9 +3411,13 @@ const requestChatCompletionInStages = async (
 
 export const requestChatCompletionStream = (
   input: RequestChatCompletionStreamInput
-): Promise<RequestChatCompletionStreamResult> => requestChatCompletionStreamInStages(input).catch(reportFailedChatSend(input))
+): Promise<RequestChatCompletionStreamResult> => {
+  const stages = createChatSendStageReporter()
+  return requestChatCompletionStreamInStages(input, stages.report).catch(stages.fail)
+}
 const requestChatCompletionStreamInStages = async (
-  input: RequestChatCompletionStreamInput
+  input: RequestChatCompletionStreamInput,
+  reportChatSendStage: ReportChatSendStage
 ): Promise<RequestChatCompletionStreamResult> => {
   if (input.teamMessageHop && (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')) throw new Error('Team messages require local transport.')
   assertLocalProfileRevisionInput(input)

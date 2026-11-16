@@ -182,9 +182,9 @@ describe('processDiagnostics', () => {
 
   it('wires app-level renderer and child deaths with the breadcrumb the renderer reported', () => {
     const mainFrame = {}
-    const sender = { id: 3, isDestroyed: () => false, mainFrame }
+    const sender = { id: 3, isDestroyed: () => false, mainFrame, on: vi.fn(), once: vi.fn() }
     startProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setInterval: () => ({}), setTimeout: () => ({}), getMainWindow: () => ({ isDestroyed: () => false, webContents: sender }) as never })
-    const breadcrumb = { stage: 'request-built', messageCount: 3, imageCount: 8, imageBytes: 7_000_000, dataUrlCount: 8, dataUrlChars: 9_300_000, usedJSHeapSize: 1_932_642_304, jsHeapSizeLimit: 2_248_146_944 }
+    const breadcrumb = { stage: 'request-built', sendSeq: 1, messageCount: 3, imageCount: 8, imageBytes: 7_000_000, dataUrlCount: 8, dataUrlChars: 9_300_000, usedJSHeapSize: 1_932_642_304, jsHeapSizeLimit: 2_248_146_944 }
     // Only the main window's page is listened to.
     h.appListeners.get('ipc:app:chat-send-stage')?.({ sender: { id: 4, isDestroyed: () => false, mainFrame }, senderFrame: mainFrame }, { ...breadcrumb, imageCount: 1 })
     h.appListeners.get('ipc:app:chat-send-stage')?.({ sender, senderFrame: mainFrame }, breadcrumb)
@@ -196,16 +196,38 @@ describe('processDiagnostics', () => {
       ['child-gone', 'oom', undefined]
     ])
     expect(lines[0].lastSendStage).toMatchObject(breadcrumb)
+    expect(lines[0].openSends).toEqual([expect.objectContaining(breadcrumb)])
     // The dead page's breadcrumb is not repeated for later deaths.
     expect(lines[1].lastSendStage).toBeNull()
     h.appListeners.get('render-process-gone')?.({}, { id: 3 }, { reason: 'crashed', exitCode: 5 })
     expect(readLines()[2].lastSendStage).toBeNull()
+    expect(readLines()[2].openSends).toEqual([])
+  })
+
+  it('names the image send that was still running when a text request ended just before the death', () => {
+    const mainFrame = {}
+    const sender = { id: 5, isDestroyed: () => false, mainFrame, on: vi.fn(), once: vi.fn() }
+    startProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setInterval: () => ({}), setTimeout: () => ({}), getMainWindow: () => ({ isDestroyed: () => false, webContents: sender }) as never })
+    const report = (stage: string, sendSeq: number, imageCount: number) =>
+      h.appListeners.get('ipc:app:chat-send-stage')?.({ sender, senderFrame: mainFrame }, { stage, sendSeq, messageCount: 2, imageCount, imageBytes: imageCount * 1000, dataUrlCount: imageCount, dataUrlChars: imageCount * 4000 })
+    report('request-start', 1, 8)
+    report('images-checked', 1, 8)
+    report('request-built', 1, 8)
+    report('request-start', 2, 0)
+    report('request-built', 2, 0)
+    report('reply-finished', 2, 0)
+    h.appListeners.get('render-process-gone')?.({}, { id: 5 }, { reason: 'oom', exitCode: 1 })
+    const [line] = readLines()
+    expect(line.lastSendStage).toMatchObject({ stage: 'reply-finished', sendSeq: 2 })
+    expect(line.openSends).toEqual([expect.objectContaining({ stage: 'request-built', sendSeq: 1, imageCount: 8, dataUrlChars: 32_000 })])
+    // Counts, sizes and enumerated names only.
+    expect(Object.keys(line.openSends[0]).sort()).toEqual(['dataUrlChars', 'dataUrlCount', 'imageBytes', 'imageCount', 'messageCount', 'receivedAt', 'sendSeq', 'stage'])
   })
 
   it('accepts no breadcrumb at all when it was started without a main window', () => {
     startProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setInterval: () => ({}), setTimeout: () => ({}) })
     const mainFrame = {}
-    const breadcrumb = { stage: 'request-built', messageCount: 3, imageCount: 8, imageBytes: 1, dataUrlCount: 8, dataUrlChars: 2 }
+    const breadcrumb = { stage: 'request-built', sendSeq: 1, messageCount: 3, imageCount: 8, imageBytes: 1, dataUrlCount: 8, dataUrlChars: 2 }
     h.appListeners.get('ipc:app:chat-send-stage')?.({ sender: { id: 3, isDestroyed: () => false, mainFrame }, senderFrame: mainFrame }, breadcrumb)
     h.appListeners.get('render-process-gone')?.({}, { id: 3 }, { reason: 'crashed', exitCode: 5 })
     expect(readLines()[0].lastSendStage).toBeNull()

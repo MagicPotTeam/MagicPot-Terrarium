@@ -6,14 +6,25 @@ vi.mock('electron', () => ({
 }))
 
 import {
+  forgetChatSendStageOnPageChange,
   getLastChatSendStage,
+  getOpenChatSends,
   recordChatSendStage,
   registerChatSendStageIpc,
   resetChatSendStagesForTests
 } from './chatSendStageBreadcrumbs'
 
-const crumb = (stage: string, imageCount = 8) => ({ stage, messageCount: 2, imageCount, imageBytes: 7_000_000, dataUrlCount: 8, dataUrlChars: 9_300_000 })
-const sender = (id: number, destroyed = false) => ({ id, isDestroyed: () => destroyed, mainFrame: { frame: id } })
+const crumb = (stage: string, imageCount = 8, sendSeq = 1) => ({
+  stage,
+  sendSeq,
+  messageCount: 2,
+  imageCount,
+  imageBytes: 7_000_000,
+  dataUrlCount: 8,
+  dataUrlChars: 9_300_000,
+  ...(stage === 'reply-failed' ? { failedAfter: 'request-built', errorName: 'Error' } : {})
+})
+const sender = (id: number, destroyed = false) => ({ id, isDestroyed: () => destroyed, mainFrame: { frame: id }, on: vi.fn(), once: vi.fn() })
 type Sender = ReturnType<typeof sender>
 /** A message from the top frame of that page. */
 const from = (source: Sender) => ({ sender: source, senderFrame: source.mainFrame })
@@ -91,5 +102,99 @@ describe('chat send-stage breadcrumbs in main', () => {
     expect(getLastChatSendStage(25)?.imageCount).toBe(25)
     recordChatSendStage(25, crumb('request-built', 1))
     expect(getLastChatSendStage()).toMatchObject({ stage: 'request-built', imageCount: 1 })
+  })
+
+  it('keeps every send that has not ended, so a background request that ends cannot hide a running image send', () => {
+    recordChatSendStage(1, crumb('request-start', 40, 1))
+    recordChatSendStage(1, crumb('images-checked', 40, 1))
+    recordChatSendStage(1, crumb('request-built', 40, 1))
+    // A text-only request (e.g. the context compaction) overlaps and ends.
+    recordChatSendStage(1, crumb('request-start', 0, 2))
+    recordChatSendStage(1, crumb('request-built', 0, 2))
+    recordChatSendStage(1, crumb('reply-finished', 0, 2))
+
+    expect(getLastChatSendStage(1)).toMatchObject({ stage: 'reply-finished', sendSeq: 2, imageCount: 0 })
+    expect(getOpenChatSends(1)).toEqual([expect.objectContaining({ stage: 'request-built', sendSeq: 1, imageCount: 40 })])
+
+    // Its own end closes it; a failure of an unknown send closes nothing.
+    recordChatSendStage(1, crumb('reply-failed', 0, 9))
+    expect(getOpenChatSends(1)).toHaveLength(1)
+    recordChatSendStage(1, crumb('reply-failed', 40, 1))
+    expect(getOpenChatSends(1)).toEqual([])
+    expect(getLastChatSendStage(1)).toMatchObject({ stage: 'reply-failed', sendSeq: 1, failedAfter: 'request-built', errorName: 'Error' })
+  })
+
+  it('keeps at most eight unfinished sends per renderer, dropping the oldest', () => {
+    for (let seq = 1; seq <= 12; seq += 1) recordChatSendStage(1, crumb('request-start', seq, seq))
+    expect(getOpenChatSends(1).map((stage) => stage.sendSeq)).toEqual([5, 6, 7, 8, 9, 10, 11, 12])
+    // A later stage of a kept send keeps its place.
+    recordChatSendStage(1, crumb('request-built', 5, 5))
+    expect(getOpenChatSends(1).map((stage) => [stage.sendSeq, stage.stage])[0]).toEqual([5, 'request-built'])
+  })
+
+  it('a report that arrives out of order neither reopens an ended send nor moves a send back', () => {
+    recordChatSendStage(1, crumb('request-start', 3, 1))
+    recordChatSendStage(1, crumb('request-built', 3, 1))
+    recordChatSendStage(1, crumb('images-checked', 3, 1))
+    expect(getOpenChatSends(1)).toEqual([expect.objectContaining({ sendSeq: 1, stage: 'request-built' })])
+    recordChatSendStage(1, crumb('reply-finished', 3, 1))
+    recordChatSendStage(1, crumb('request-built', 3, 1))
+    expect(getOpenChatSends(1)).toEqual([])
+  })
+
+  it('starts over when the page restarted its numbers without a process death', () => {
+    recordChatSendStage(1, crumb('request-start', 40, 1))
+    recordChatSendStage(1, crumb('request-built', 40, 1))
+    recordChatSendStage(1, crumb('request-start', 0, 2))
+    // A new page: its first request is number 1 again.
+    recordChatSendStage(1, crumb('request-start', 2, 1))
+    expect(getOpenChatSends(1)).toEqual([expect.objectContaining({ sendSeq: 1, imageCount: 2, stage: 'request-start' })])
+  })
+
+  it('forgets a page\'s sends when its main frame navigates or reloads, not on an in-page navigation', () => {
+    const listeners = new Map<string, (...args: unknown[]) => void>()
+    const webContents = {
+      id: 1,
+      on: vi.fn((event: string, listener: (...args: unknown[]) => void) => listeners.set(event, listener)),
+      once: vi.fn((event: string, listener: (...args: unknown[]) => void) => listeners.set(event, listener))
+    }
+    forgetChatSendStageOnPageChange(webContents as never)
+    forgetChatSendStageOnPageChange(webContents as never)
+    // Attached once per page, whatever the number of reports.
+    expect(webContents.on).toHaveBeenCalledTimes(2)
+    expect(webContents.once).toHaveBeenCalledTimes(1)
+    const fill = () => recordChatSendStage(1, crumb('request-built', 8, 4))
+
+    fill()
+    listeners.get('did-start-navigation')!({ isMainFrame: true, isSameDocument: true })
+    listeners.get('did-start-navigation')!({ isMainFrame: false, isSameDocument: false })
+    expect(getOpenChatSends(1)).toHaveLength(1)
+    listeners.get('did-start-navigation')!({ isMainFrame: true, isSameDocument: false })
+    expect(getOpenChatSends(1)).toEqual([])
+    expect(getLastChatSendStage(1)).toBeNull()
+
+    // The older positional form (url, isInPlace, isMainFrame).
+    fill()
+    listeners.get('did-start-navigation')!({}, 'file:///index.html', true, true)
+    expect(getOpenChatSends(1)).toHaveLength(1)
+    listeners.get('did-start-navigation')!({}, 'file:///index.html', false, true)
+    expect(getOpenChatSends(1)).toEqual([])
+
+    fill()
+    listeners.get('did-navigate')!()
+    expect(getLastChatSendStage(1)).toBeNull()
+    fill()
+    listeners.get('destroyed')!()
+    expect(getLastChatSendStage(1)).toBeNull()
+  })
+
+  it('watches the reporting page for navigations once it reports', () => {
+    const main = sender(1)
+    registerChatSendStageIpc(() => windowOf(main) as never)
+    const listener = h.listeners.get('app:chat-send-stage')!
+    listener(from(main), crumb('request-start'))
+    listener(from(main), crumb('request-built'))
+    expect(main.on.mock.calls.map(([event]) => event)).toEqual(['did-start-navigation', 'did-navigate'])
+    expect(main.once.mock.calls.map(([event]) => event)).toEqual(['destroyed'])
   })
 })
