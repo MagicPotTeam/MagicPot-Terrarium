@@ -2319,6 +2319,137 @@ describe('canvasStorage provenance metadata', () => {
     expect(item).toMatchObject({ src: 'blob:synthetic-original', crop })
   })
 
+  it('writes the source, the crop and its record to the project mirror without flattening', async () => {
+    // Synthetic bytes, decoder, canvas and filesystem. The mirror keeps the
+    // original next to the crop (plan: 项目镜像保留原素材+crop); a confirm record
+    // is persisted with them. Flattening in the mirror is item G3-4F, which
+    // awaits an owner decision.
+    const sourceBytes = new Uint8Array([10, 20, 30, 40])
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, arrayBuffer: async () => sourceBytes.slice().buffer }))
+    )
+    const drawImage = vi.fn()
+    const toBlob = vi.fn((callback: BlobCallback, type?: string) =>
+      callback(new Blob([new Uint8Array([90, 91])], { type }))
+    )
+    const createElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation(((
+      tag: string,
+      options?: ElementCreationOptions
+    ) =>
+      tag.toLowerCase() === 'canvas'
+        ? ({
+            width: 0,
+            height: 0,
+            getContext: () => ({ drawImage }),
+            toBlob
+          } as unknown as HTMLCanvasElement)
+        : createElement(tag, options)) as typeof document.createElement)
+    const textFiles = new Map<string, string>()
+    const binaries = new Map<string, Uint8Array>()
+    const root = 'C:\\mock-isolated-crop-record-mirror'
+    Object.defineProperty(window, 'path', {
+      configurable: true,
+      value: {
+        join: (...parts: string[]) => path.win32.join(...parts),
+        basename: path.win32.basename,
+        dirname: path.win32.dirname
+      }
+    })
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: {
+        svcState: {
+          getUserDataDirectoryState: vi.fn(async () => ({
+            state: {
+              currentPath: root,
+              defaultPath: root,
+              storageRoot: path.win32.dirname(root),
+              defaultStorageRoot: path.win32.dirname(root),
+              projectRoot: path.win32.join(root, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(root, 'AutoSave'),
+              legacyLayout: true,
+              isCustom: false,
+              source: 'default'
+            }
+          }))
+        },
+        svcFs: {
+          listFilesInFolder: vi.fn(async () => ({ files: [] })),
+          writeTextFile: vi.fn(async ({ outputPath, filename, content }) => {
+            const fullPath = path.win32.join(outputPath, filename)
+            textFiles.set(fullPath, content)
+            return { success: true, fullPath }
+          }),
+          readTextFile: vi.fn(async ({ fullPath }) => {
+            const content = textFiles.get(fullPath)
+            if (content === undefined) throw new Error('missing mock file')
+            return { content, filename: path.win32.basename(fullPath) }
+          }),
+          saveImageToPath: vi.fn(async ({ image, outputPath, filename }) => {
+            const fullPath = path.win32.join(outputPath, filename)
+            binaries.set(fullPath, new Uint8Array(image))
+            return { success: true, fullPath }
+          })
+        }
+      }
+    })
+    const cropSource = {
+      version: 1 as const,
+      origin: 'confirm' as const,
+      width: 200,
+      height: 200,
+      sizeBytes: sourceBytes.byteLength,
+      sha256: createHash('sha256').update(sourceBytes).digest('hex')
+    }
+    const crop = { x: 20, y: 10, width: 50, height: 50 }
+    const common = {
+      type: 'image' as const,
+      x: 0,
+      y: 0,
+      width: 50,
+      height: 50,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      fileName: 'photo.png',
+      sourceWidth: 200,
+      sourceHeight: 200,
+      cropSource
+    }
+    const items: CanvasItem[] = [
+      { ...common, id: 'confirmed-crop', src: 'blob:synthetic-original', crop },
+      {
+        ...common,
+        id: 'confirmed-identity',
+        src: 'blob:synthetic-identity',
+        crop: { x: 0, y: 0, width: 200, height: 200 }
+      }
+    ]
+    await saveCanvasItems(items, 'isolated-project-crop-record')
+    const entry = [...textFiles.entries()].find(([file]) => file.endsWith('project.mpcanvas'))
+    expect(entry).toBeDefined()
+    const project = JSON.parse(entry![1]) as {
+      items: Array<{ id: string; src: string; crop?: unknown; cropSource?: unknown }>
+    }
+    expect(project.items).toHaveLength(2)
+    const [savedCrop, savedIdentity] = project.items
+    expect(savedCrop).toMatchObject({ id: 'confirmed-crop', crop, cropSource })
+    expect(savedIdentity.id).toBe('confirmed-identity')
+    expect(savedIdentity).not.toHaveProperty('crop')
+    expect(savedIdentity).not.toHaveProperty('cropSource')
+    const projectDir = path.win32.dirname(entry![0])
+    for (const saved of project.items) {
+      expect(binaries.get(path.win32.join(projectDir, saved.src))).toEqual(sourceBytes)
+    }
+    expect(drawImage).not.toHaveBeenCalled()
+    expect(toBlob).not.toHaveBeenCalled()
+    expect(items[0]).toMatchObject({ src: 'blob:synthetic-original', crop, cropSource })
+  })
+
   it('does not overwrite assets referenced by the previous project before the second metadata commit', async () => {
     // In-memory fake filesystem and synthetic bytes; neither images nor disk are real.
     const original = new Uint8Array([10, 20, 30, 40])
