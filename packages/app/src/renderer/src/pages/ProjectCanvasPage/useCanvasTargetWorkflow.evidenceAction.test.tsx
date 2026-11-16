@@ -641,6 +641,9 @@ describe('Canvas Target evidence action gate', () => {
         const { live } = await runWithMidRunCanvas([plain, movedBoard], [canvasAction({ action: 'set_z_order', source: 'item_ids', itemIds: ['source'], zOrder: 'front' })])
         expect(f.commits).toHaveBeenCalledOnce()
         expect(live().find((item) => item.id === 'board')?.x).toBe(900)
+        // Only the selected item gets a new zIndex (K8c).
+        expect(live().find((item) => item.id === 'board')).toBe(movedBoard)
+        expect(live().find((item) => item.id === 'source')?.zIndex).toBe(2)
       })
 
       it('keeps a group the user created during the run when the run groups the selected item', async () => {
@@ -885,6 +888,17 @@ describe('Canvas Target evidence action gate', () => {
       )
       expect(items.find((item) => item.id === 'source')).toMatchObject({ x: 10, y: 5 })
       expect(items.find((item) => item.id === 'board')).toMatchObject({ x: 900 })
+    })
+
+    it('changes the zIndex of the selected item only and keeps the order the user gave the others', async () => {
+      const board2: CanvasImageItem = { ...board, id: 'board2', src: 'data:image/png;base64,BOARD2', zIndex: 3 }
+      const { items } = await runOnLiveCanvas(
+        [firstMove, step('second', 'after_model_stages', { action: 'set_z_order', source: 'item_ids', itemIds: ['source'], zOrder: 'front' })],
+        // The user sends board2 to the back while the run goes on.
+        ({ setItems }) => setItems((items) => items.map((item) => (item.id === 'board2' ? { ...item, zIndex: 0 } : item))),
+        { startItems: [plain, board, board2] }
+      )
+      expect(items.map((item) => [item.id, item.zIndex])).toEqual([['source', 3], ['board', 2], ['board2', 0]])
     })
 
     it('does not copy back an item the run created that the user deleted', async () => {

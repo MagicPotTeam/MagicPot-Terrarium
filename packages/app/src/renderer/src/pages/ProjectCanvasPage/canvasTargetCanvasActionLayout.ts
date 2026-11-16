@@ -241,30 +241,32 @@ export function transformCanvasItems(
   }
 }
 
-function normalizeZOrderItems(
-  items: CanvasItem[],
-  selectedIds: Set<string>,
-  mode: 'front' | 'back'
-) {
-  const sorted = [...items].sort((a, b) => a.zIndex - b.zIndex)
-  const selected = sorted.filter((item) => selectedIds.has(item.id))
-  const unselected = sorted.filter((item) => !selectedIds.has(item.id))
-  const ordered = mode === 'front' ? [...unselected, ...selected] : [...selected, ...unselected]
-  const zIndexById = new Map<string, number>()
-  ordered.forEach((item, index) => zIndexById.set(item.id, index + 1))
-  return items.map((item) => ({ ...item, zIndex: zIndexById.get(item.id) ?? item.zIndex }))
+function sortByZIndex(items: CanvasItem[]): CanvasItem[] {
+  return [...items].sort((a, b) => a.zIndex - b.zIndex)
 }
 
-function stepZOrderItems(
+// The bottom-to-top order a z-order action asks for.
+function orderForFrontOrBack(
   items: CanvasItem[],
-  selectedIds: Set<string>,
+  sourceIds: Set<string>,
+  mode: 'front' | 'back'
+): CanvasItem[] {
+  const sorted = sortByZIndex(items)
+  const sources = sorted.filter((item) => sourceIds.has(item.id))
+  const others = sorted.filter((item) => !sourceIds.has(item.id))
+  return mode === 'front' ? [...others, ...sources] : [...sources, ...others]
+}
+
+function orderForStep(
+  items: CanvasItem[],
+  sourceIds: Set<string>,
   mode: Extract<CanvasTargetCanvasZOrder, 'forward' | 'backward'>
 ): CanvasItem[] {
-  const sorted = [...items].sort((a, b) => a.zIndex - b.zIndex)
+  const sorted = sortByZIndex(items)
 
   if (mode === 'forward') {
     for (let index = sorted.length - 2; index >= 0; index -= 1) {
-      if (selectedIds.has(sorted[index].id) && !selectedIds.has(sorted[index + 1].id)) {
+      if (sourceIds.has(sorted[index].id) && !sourceIds.has(sorted[index + 1].id)) {
         const next = sorted[index + 1]
         sorted[index + 1] = sorted[index]
         sorted[index] = next
@@ -272,17 +274,67 @@ function stepZOrderItems(
     }
   } else {
     for (let index = 1; index < sorted.length; index += 1) {
-      if (selectedIds.has(sorted[index].id) && !selectedIds.has(sorted[index - 1].id)) {
+      if (sourceIds.has(sorted[index].id) && !sourceIds.has(sorted[index - 1].id)) {
         const prev = sorted[index - 1]
         sorted[index - 1] = sorted[index]
         sorted[index] = prev
       }
     }
   }
+  return sorted
+}
 
+// Gives only the source items new zIndex values that put them where
+// `ordered` (bottom to top) has them. Every other item keeps its zIndex, so
+// a run's z-order change never renumbers items it may not change (and never
+// undoes the user's own reordering of them). A run of sources that already
+// sits in order between its neighbours keeps its values; otherwise it goes
+// just above the item below it (front: above the highest other item), just
+// below the item above it (back: below the lowest), or evenly between the
+// two when there is no whole number free between them.
+function assignSourceZIndexes(
+  items: CanvasItem[],
+  ordered: CanvasItem[],
+  sourceIds: Set<string>
+): CanvasItem[] {
   const zIndexById = new Map<string, number>()
-  sorted.forEach((item, index) => zIndexById.set(item.id, index + 1))
-  return items.map((item) => ({ ...item, zIndex: zIndexById.get(item.id) ?? item.zIndex }))
+  let start = 0
+  while (start < ordered.length) {
+    if (!sourceIds.has(ordered[start].id)) {
+      start += 1
+      continue
+    }
+    let end = start
+    while (end < ordered.length && sourceIds.has(ordered[end].id)) end += 1
+    const run = ordered.slice(start, end)
+    const lower = start > 0 ? ordered[start - 1].zIndex : undefined
+    const upper = end < ordered.length ? ordered[end].zIndex : undefined
+    const inPlace = run.every(
+      (item, index) =>
+        (lower === undefined || item.zIndex > lower) &&
+        (upper === undefined || item.zIndex < upper) &&
+        (index === 0 || item.zIndex > run[index - 1].zIndex)
+    )
+    if (!inPlace && (lower !== undefined || upper !== undefined)) {
+      run.forEach((item, index) => {
+        let zIndex: number
+        if (upper === undefined) zIndex = lower! + index + 1
+        else if (lower === undefined) zIndex = upper - (run.length - index)
+        else if (upper - lower > run.length) zIndex = lower + index + 1
+        else zIndex = lower + ((upper - lower) * (index + 1)) / (run.length + 1)
+        zIndexById.set(item.id, zIndex)
+      })
+    }
+    start = end
+  }
+  let changed = false
+  const nextItems = items.map((item) => {
+    const zIndex = zIndexById.get(item.id)
+    if (zIndex === undefined || zIndex === item.zIndex) return item
+    changed = true
+    return { ...item, zIndex }
+  })
+  return changed ? nextItems : items
 }
 
 export function setCanvasItemsZOrder(
@@ -296,10 +348,11 @@ export function setCanvasItemsZOrder(
   }
 
   const zOrder = action.zOrder || 'front'
-  const nextItems =
+  const ordered =
     zOrder === 'front' || zOrder === 'back'
-      ? normalizeZOrderItems(state.items, sourceIdSet, zOrder)
-      : stepZOrderItems(state.items, sourceIdSet, zOrder)
+      ? orderForFrontOrBack(state.items, sourceIdSet, zOrder)
+      : orderForStep(state.items, sourceIdSet, zOrder)
+  const nextItems = assignSourceZIndexes(state.items, ordered, sourceIdSet)
 
   return {
     items: nextItems,
