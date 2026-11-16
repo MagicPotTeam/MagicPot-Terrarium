@@ -63,6 +63,13 @@ export function AgentTeamMemberForm({ lead, members, creating, onClose, onCreate
   </>
 }
 
+/** Bordered 22px text buttons, as the per-message action row of the Agent column. */
+const memberImageButtonSx = {
+  height: 22, minWidth: 0, px: '6px', py: 0, fontSize: 11, lineHeight: '20px', textTransform: 'none', borderRadius: '4px',
+  border: '1px solid', borderColor: 'divider', color: 'text.secondary',
+  '&:hover': { color: 'text.primary', borderColor: 'text.secondary', bgcolor: 'transparent' }
+} as const
+
 /** Render existing manual image actions with the exact slots used by auto placement. */
 export function AgentTeamMemberImages({ member, placeImage }: { member: ChatSession; placeImage: TeamImagePlacement['place'] }) {
   const images = member.messages.flatMap((message,messageIndex)=>message.role==='assistant'?(message.attachments??[]).filter(attachment=>attachment.type==='image').map((attachment,attachmentIndex)=>({attachment,slot:JSON.stringify([member.id,messageIndex,attachmentIndex])})):[])
@@ -70,7 +77,7 @@ export function AgentTeamMemberImages({ member, placeImage }: { member: ChatSess
   const [keys, setKeys] = useState(() => reconcileTeamImageButtonKeys({ nextId: 0, entries: [] }, urls))
   const nextKeys = reconcileTeamImageButtonKeys(keys, urls)
   if (nextKeys !== keys) setKeys(nextKeys)
-  return <>{images.map(({attachment,slot},index)=><Button key={nextKeys.entries[index].key} size="small" onClick={()=>{placeImage(member.id,{...attachment,fileName:`${member.teamMemberName}·图${index+1}`},undefined,undefined,slot)}}>投放 {member.teamMemberName}·图{index+1}</Button>)}</>
+  return <>{images.map(({attachment,slot},index)=><Button key={nextKeys.entries[index].key} size="small" onClick={()=>{placeImage(member.id,{...attachment,fileName:`${member.teamMemberName}·图${index+1}`},undefined,undefined,slot)}} sx={memberImageButtonSx}>投放 {member.teamMemberName}·图{index+1}</Button>)}</>
 }
 
 export default function AgentTeamTree({lead,members,currentId,running,waiting,activityHost,projectId,leadModelName,onSelect,onCreate,onStop}: {

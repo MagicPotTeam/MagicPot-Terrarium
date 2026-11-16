@@ -110,20 +110,9 @@ it.each(['direct', 'channel', 'snapshot'] as const)('connects %s actual ChatPage
     const view = render(<MemoryRouter><ThemeProvider theme={createTheme()}><ChatPage compact storageScope="isolated-fixture" route={route} /></ThemeProvider></MemoryRouter>)
     cleanup.push(() => view.unmount())
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    const area = await screen.findByRole('region', { name: '进程区' })
     const openManagement = async () => {
       fireEvent.click(screen.getByTestId('chat-composer-menu-team'))
       return screen.findByRole('dialog', { name: '团队管理' })
-    }
-    const memberRow = (name: string) => {
-      const row = within(area).getByRole('button', { name: `展开 ${name} 详情` }).closest('li')
-      if (!row) throw Error(`missing member row: ${name}`)
-      const toggle = within(row).getByRole('button', { name: `展开 ${name} 详情` })
-      fireEvent.click(toggle)
-      expect(toggle).toHaveAttribute('aria-expanded', 'true')
-      const detail = document.getElementById(toggle.getAttribute('aria-controls')!)
-      expect(detail).toBeVisible()
-      return row
     }
     if (scenario === 'snapshot') {
       fireEvent.change(screen.getByTestId('input'), { target: { value: '@writer hold writer busy' } })
@@ -139,22 +128,23 @@ it.each(['direct', 'channel', 'snapshot'] as const)('connects %s actual ChatPage
       const broadcast = (text: string) => { fireEvent.change(screen.getByLabelText('频道消息'), { target: { value: text } }); fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' })) }
       const byRecipient = (id: string, text: string) => chatRequests.filter(req => req.conversationId === id && String(req.messages.at(-1)?.content ?? '').includes(text))
       broadcast('snapshot old broadcast')
-      const writerRow = memberRow('writer'), reviewerRow = memberRow('reviewer'), observerRow = memberRow('observer')
+      // The busy writer keeps the broadcast queued; the reviewer is asked at once and answers.
       await waitFor(() => {
-        expect(within(within(writerRow).getByTestId('team-message-activity')).getByText(/用户 → writer.*snapshot old broadcast/)).toHaveTextContent('排队中')
-        expect(within(within(reviewerRow).getByTestId('team-message-activity')).getByText(/用户 → reviewer.*snapshot old broadcast/)).toHaveTextContent('已收到响应（不代表送达）')
+        expect(byRecipient('reviewer', 'snapshot old broadcast')).toHaveLength(1)
+        expect(h.sessions.value.find(s => s.id === 'reviewer')?.messages.some((m: any) => m.role === 'assistant' && m.content)).toBe(true)
       })
+      expect(byRecipient('writer', 'snapshot old broadcast')).toHaveLength(0)
       fireEvent.click(writer); fireEvent.click(observer)
       await waitFor(() => { expect(writer).not.toBeChecked(); expect(observer).toBeChecked() })
       broadcast('snapshot new broadcast')
       await waitFor(() => {
-        expect(within(within(reviewerRow).getByTestId('team-message-activity')).getByText(/用户 → reviewer.*snapshot new broadcast/)).toHaveTextContent('已收到响应（不代表送达）')
-        expect(within(within(observerRow).getByTestId('team-message-activity')).getByText(/用户 → observer.*snapshot new broadcast/)).toHaveTextContent('已收到响应（不代表送达）')
+        expect(byRecipient('reviewer', 'snapshot new broadcast')).toHaveLength(1)
+        expect(byRecipient('observer', 'snapshot new broadcast')).toHaveLength(1)
       })
       expect(byRecipient('writer', 'snapshot old broadcast')).toHaveLength(0)
       expect(byRecipient('writer', 'snapshot new broadcast')).toHaveLength(0)
       releaseBusy?.(); releaseBusy = undefined
-      await waitFor(() => expect(within(within(writerRow).getByTestId('team-message-activity')).getByText(/用户 → writer.*snapshot old broadcast/)).toHaveTextContent('已收到响应（不代表送达）'))
+      await waitFor(() => expect(byRecipient('writer', 'snapshot old broadcast')).toHaveLength(1))
       for (const [id, text, count] of [
         ['writer', 'snapshot old broadcast', 1], ['writer', 'snapshot new broadcast', 0],
         ['reviewer', 'snapshot old broadcast', 1], ['reviewer', 'snapshot new broadcast', 1],
@@ -179,9 +169,6 @@ it.each(['direct', 'channel', 'snapshot'] as const)('connects %s actual ChatPage
       }
       const toolMessage = requests.flatMap(body => body.messages).find((m: any) => m.role === 'tool' && m.tool_call_id === 'fixture-channel')
       expect(JSON.parse(toolMessage.content)).toEqual({ status: 'queued', requestId: expect.any(String) })
-      const writerRow = memberRow('writer'), reviewerRow = memberRow('reviewer'), observerRow = memberRow('observer')
-      await waitFor(() => { for (const [id, row] of [['writer', writerRow], ['reviewer', reviewerRow]] as const) expect(within(within(row).getByTestId('team-message-activity')).getByText(new RegExp(`designer → ${id}`))).toHaveTextContent('已收到响应（不代表送达）') })
-      expect(within(observerRow).queryByText(/designer → observer/)).toBeNull()
       expect(claimRequests).toHaveLength(1)
       expect((await bridge.claimAgentTeamMessage(claimRequests[0])).intent).toBeUndefined()
     } else {
@@ -202,13 +189,9 @@ it.each(['direct', 'channel', 'snapshot'] as const)('connects %s actual ChatPage
       expect(sent).toBeTruthy()
       expect(JSON.parse(sent.messages.find((m: any) => m.role === 'tool' && m.tool_call_id === callId).content)).toEqual({ status: 'queued', requestId: expect.any(String) })
     }
-    const writerRow = memberRow('writer'), designerRow = memberRow('designer')
-    const activity = await within(writerRow).findByTestId('team-message-activity')
-    const activityLine = within(activity).getByText(/designer → writer/)
-    expect(activityLine).toHaveTextContent('来自成员的测试消息')
-    expect(activityLine).toHaveTextContent('已收到响应（不代表送达）')
-    expect(getComputedStyle(activityLine).color).toBe('rgba(0, 0, 0, 0.6)')
-    expect(within(await within(designerRow).findByTestId('team-message-activity')).getByText(/writer → designer/)).toHaveTextContent('文案回复设计')
+    // The column lists no message activity: each message is seen as a request to its recipient.
+    expect(chatRequests.filter(req => req.conversationId === 'writer' && JSON.stringify(req.messages).includes('来自成员的测试消息'))).toHaveLength(1)
+    expect(chatRequests.filter(req => req.conversationId === 'designer' && JSON.stringify(req.messages).includes('文案回复设计'))).toHaveLength(1)
     expect(claimRequests).toHaveLength(2)
     for (const claim of claimRequests.slice()) expect((await bridge.claimAgentTeamMessage(claim)).intent).toBeUndefined()
     }

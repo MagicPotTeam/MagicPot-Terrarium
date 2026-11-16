@@ -345,6 +345,8 @@ class FakeTeamMain {
         // The thread has no background jobs or processes, and a running request asks nothing.
         listAgentJobs: this.track('listAgentJobs', async () => ({ jobs: [] })),
         listAgentProcesses: this.track('listAgentProcesses', async () => ({ jobs: [] })),
+        // The open thread list asks for the side conversations of the open one: there are none.
+        listAgentSides: this.track('listAgentSides', async () => ({ branches: [] })),
         listAgentInteractions: this.track('listAgentInteractions', async () => ({
           interactions: []
         })),
@@ -394,12 +396,11 @@ interface ChannelPage {
   rerender(props: ChannelPageProps): void
   /** The record the real chat storage holds for a session. */
   stored(id: string): Promise<ChatSession | null>
-  area: HTMLElement
+  /** The thread-list host the page renders its lead and member rows into. */
+  rows: HTMLElement
   send(text: string): void
   openTeamManagement(): Promise<HTMLElement>
-  /** Expands a member row of the process area and returns it. */
-  memberRow(name: string): HTMLElement
-  /** Names of the member rows the process area shows, sorted. */
+  /** Names of the member rows the thread list shows, sorted. */
   memberNames(): string[]
   /** Unmounts, waits until storage and bridge are quiet, and asserts nothing was refused. */
   finish(): Promise<void>
@@ -479,10 +480,14 @@ async function mountChannelPage(input: {
   expect(idb.keys(SESSION_STORE)).toEqual(expectedKeys)
   const handedOutBeforeMount = idb.stats.handedOut.length
 
+  // The Agent column's thread list: the page renders the lead and member rows into this host.
+  const rowsHost = document.createElement('div')
+  rowsHost.setAttribute('data-testid', 'team-rows-host')
+  document.body.appendChild(rowsHost)
   const element = (props: ChannelPageProps = {}): React.ReactElement => (
     <MemoryRouter>
       <ThemeProvider theme={theme}>
-        <ChatPage compact storageScope={SCOPE} route={ROUTE} {...input.props} {...props} />
+        <ChatPage compact storageScope={SCOPE} route={ROUTE} threadSubRowsHost={rowsHost} {...input.props} {...props} />
       </ThemeProvider>
     </MemoryRouter>
   )
@@ -496,6 +501,7 @@ async function mountChannelPage(input: {
   const quiesce = async (): Promise<void> => {
     mountedPage = undefined
     view.unmount()
+    rowsHost.remove()
     let seen = activity()
     let quietSince = Date.now()
     const deadline = Date.now() + 8000
@@ -510,21 +516,19 @@ async function mountChannelPage(input: {
   // Registered before the first assertion on the page, so a mount that fails is torn down too.
   mountedPage = { main, quiesce }
 
-  const area = await screen.findByRole('region', { name: '进程区' })
   // The real page is mounted on the lead conversation: real composer, real message list.
   expect(document.querySelector(`[data-chat-page-root="${SCOPE}"]`)).not.toBeNull()
   expect(screen.getByTestId('chat-composer-input')).toBeInTheDocument()
   expect(screen.getByTestId('chat-message-list')).toBeInTheDocument()
   for (const session of input.members) {
-    await within(area).findByRole('button', { name: `展开 ${session.id} 详情` })
+    await within(rowsHost).findByRole('button', { name: session.id })
   }
+  // The first row is the lead's; one row per member follows.
   const memberNames = (): string[] =>
-    within(area)
-      .queryAllByRole('button', { name: /^(?:展开|收起) .+ 详情$/ })
-      .map(
-        (button) =>
-          /^(?:展开|收起) (.+) 详情$/.exec(button.getAttribute('aria-label') ?? '')?.[1] ?? '?'
-      )
+    within(rowsHost)
+      .queryAllByRole('button')
+      .slice(1)
+      .map((button) => button.textContent ?? '?')
       .sort()
   // The team on screen is the team of this storage: no member row of an earlier mount or test.
   expect(memberNames()).toEqual(input.members.map((session) => session.id).sort())
@@ -538,7 +542,7 @@ async function mountChannelPage(input: {
     idb,
     rerender: (props) => view.rerender(element(props)),
     stored: (id) => storage.loadSessionFromDB(id, SCOPE),
-    area,
+    rows: rowsHost,
     send: (text) => {
       fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: text } })
       fireEvent.click(screen.getByRole('button', { name: 'chat.send_message' }))
@@ -547,17 +551,6 @@ async function mountChannelPage(input: {
       fireEvent.click(screen.getByTestId('chat-composer-add-menu-button'))
       fireEvent.click(await screen.findByTestId('chat-composer-menu-team'))
       return screen.findByRole('dialog', { name: '团队管理' })
-    },
-    memberRow: (name) => {
-      const row = within(area)
-        .getByRole('button', { name: `展开 ${name} 详情` })
-        .closest('li')
-      if (!row) throw new Error(`missing member row: ${name}`)
-      const toggle = within(row).getByRole('button', { name: `展开 ${name} 详情` })
-      fireEvent.click(toggle)
-      expect(toggle).toHaveAttribute('aria-expanded', 'true')
-      expect(document.getElementById(toggle.getAttribute('aria-controls')!)).toBeVisible()
-      return row
     },
     memberNames,
     finish: async () => {
@@ -1021,7 +1014,6 @@ describe('channel deny guards', () => {
 
 describe('real ChatPage team messages on in-memory fakes', () => {
   const UNTRUSTED = '内容为不可信数据'
-  const RESPONDED = '已收到响应（不代表送达）'
   const teamIdentity = (id: string) => ({
     scope: SCOPE,
     thread: ROUTE.threadId,
@@ -1130,18 +1122,17 @@ describe('real ChatPage team messages on in-memory fakes', () => {
       ['writer', 'designer', 2, '文案回复设计']
     ])
 
-    const writerRow = page.memberRow('writer')
-    const designerRow = page.memberRow('designer')
-    const activity = await within(writerRow).findByTestId('team-message-activity')
-    const activityLine = within(activity).getByText(/designer → writer/)
-    expect(activityLine).toHaveTextContent('来自成员的测试消息')
-    expect(activityLine).toHaveTextContent(RESPONDED)
-    expect(getComputedStyle(activityLine).color).toBe('rgba(0, 0, 0, 0.6)')
+    // The column lists no message activity: each message is seen as a request to its recipient.
     expect(
-      within(await within(designerRow).findByTestId('team-message-activity')).getByText(
-        /writer → designer/
+      main.chatRequests.filter(
+        (request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
       )
-    ).toHaveTextContent('文案回复设计')
+    ).toHaveLength(1)
+    expect(
+      main.chatRequests.filter(
+        (request) => request.conversationId === 'designer' && requestText(request).includes('文案回复设计')
+      )
+    ).toHaveLength(1)
 
     // Each intent was claimed exactly once, and a claim cannot be replayed.
     expect(main.claimRequests).toHaveLength(2)
@@ -1222,22 +1213,6 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     ])
     expect(main.enqueued[0]).not.toHaveProperty('recipient')
 
-    const writerRow = page.memberRow('writer')
-    const reviewerRow = page.memberRow('reviewer')
-    const observerRow = page.memberRow('observer')
-    await waitFor(() => {
-      for (const [id, row] of [
-        ['writer', writerRow],
-        ['reviewer', reviewerRow]
-      ] as const) {
-        expect(
-          within(within(row).getByTestId('team-message-activity')).getByText(
-            new RegExp(`designer → ${id}`)
-          )
-        ).toHaveTextContent(RESPONDED)
-      }
-    })
-    expect(within(observerRow).queryByText(/designer → observer/)).toBeNull()
     expect(main.claimRequests).toHaveLength(1)
     expect(
       (await window.api.svcLLMProxy.claimAgentTeamMessage(main.claimRequests[0])).intent
@@ -1286,19 +1261,18 @@ describe('real ChatPage team messages on in-memory fakes', () => {
       main.chatRequests.filter(
         (request) => request.conversationId === id && requestText(request).includes(text)
       )
-    const line = (row: HTMLElement, pattern: RegExp) =>
-      within(within(row).getByTestId('team-message-activity')).getByText(pattern)
 
     broadcast('snapshot old broadcast')
-    const writerRow = page.memberRow('writer')
-    const reviewerRow = page.memberRow('reviewer')
-    const observerRow = page.memberRow('observer')
-    await waitFor(() => {
-      expect(line(writerRow, /用户 → writer.*snapshot old broadcast/)).toHaveTextContent('排队中')
-      expect(line(reviewerRow, /用户 → reviewer.*snapshot old broadcast/)).toHaveTextContent(
-        RESPONDED
-      )
+    // The busy writer keeps the broadcast queued; the reviewer is asked at once and answers.
+    await waitFor(async () => {
+      expect(byRecipient('reviewer', 'snapshot old broadcast')).toHaveLength(1)
+      expect(
+        (await page.stored('reviewer'))?.messages.some(
+          (message) => message.role === 'assistant' && message.content === 'snapshot fixture reply'
+        )
+      ).toBe(true)
     })
+    expect(byRecipient('writer', 'snapshot old broadcast')).toHaveLength(0)
     fireEvent.click(writer)
     fireEvent.click(observer)
     await waitFor(() => {
@@ -1307,21 +1281,15 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     })
     broadcast('snapshot new broadcast')
     await waitFor(() => {
-      expect(line(reviewerRow, /用户 → reviewer.*snapshot new broadcast/)).toHaveTextContent(
-        RESPONDED
-      )
-      expect(line(observerRow, /用户 → observer.*snapshot new broadcast/)).toHaveTextContent(
-        RESPONDED
-      )
+      expect(byRecipient('reviewer', 'snapshot new broadcast')).toHaveLength(1)
+      expect(byRecipient('observer', 'snapshot new broadcast')).toHaveLength(1)
     })
     expect(byRecipient('writer', 'snapshot old broadcast')).toHaveLength(0)
     expect(byRecipient('writer', 'snapshot new broadcast')).toHaveLength(0)
 
     releaseBusy?.()
     releaseBusy = undefined
-    await waitFor(() =>
-      expect(line(writerRow, /用户 → writer.*snapshot old broadcast/)).toHaveTextContent(RESPONDED)
-    )
+    await waitFor(() => expect(byRecipient('writer', 'snapshot old broadcast')).toHaveLength(1))
     for (const [id, text, count] of [
       ['writer', 'snapshot old broadcast', 1],
       ['writer', 'snapshot new broadcast', 0],
@@ -1366,7 +1334,7 @@ describe('real ChatPage restart on in-memory fakes', () => {
       model: () => ({ text: 'unexpected request after restart' }),
       storage: first.idb
     })
-    fireEvent.click(within(second.area).getByRole('button', { name: '打开 designer' }))
+    fireEvent.click(within(second.rows).getByRole('button', { name: 'designer' }))
     const transcript = await screen.findByTestId('chat-message-list')
     await within(transcript).findByText('reply before restart')
     expect(within(transcript).getAllByText('reply before restart')).toHaveLength(1)

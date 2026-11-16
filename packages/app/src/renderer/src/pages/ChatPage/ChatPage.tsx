@@ -1,10 +1,8 @@
-import AgentTeamMessageActivity from './components/AgentTeamMessageActivity'
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
-import { reduceTeamActivity, selectTeamActivity } from './teamMessageActivityState'
+import { reduceTeamActivity } from './teamMessageActivityState'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
 import { setTeamTaskStatus, validateTeamTasks } from './agentTeamTasks'
-import { prepareTeamMemberDependencySummaries } from './teamMemberDependencySummary'
 import { createTeamLiveActivity } from './teamLiveActivity'
 import { claimTeamTaskInDB } from './agentTeamTaskDispatch'
 import AgentTeamMenu from './components/AgentTeamMenu'
@@ -8238,7 +8236,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const teamEnabled = active && isReady && !config.use_remote_llm && route?.channel==='canvas' && route.scopeType==='thread'
   // The thread has a team to manage: members, or a lead that still carries team records.
   const threadHasTeam = Boolean(teamLead && (teamMembers.length > 0 || teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length))
-  const [teamMessageEntries, dispatchTeamActivity] = React.useReducer(reduceTeamActivity, { owner: 0, key: '', entries: [], activeKey: '', live: false, closedFor: null })
+  const [, dispatchTeamActivity] = React.useReducer(reduceTeamActivity, { owner: 0, key: '', entries: [], activeKey: '', live: false, closedFor: null })
   const teamMessageActivityOwnerRef = useRef(0)
   const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{ key: string; ids: readonly string[] }>({ key: '', ids: [] })
   const teamMessageDispatcherRef = useRef<{ key: string; owner: number; dispatcher: TeamMessageDispatcher; pump: () => void; scopeEpoch: number; visibilityEpoch: number } | null>(null)
@@ -9068,6 +9066,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
       anchored: anchors.length ? anchors.map((after): ChatAnchoredTailGroup => ({ after, node: group(cards.filter(card => card.anchor === after)) })) : undefined
     }
   }, [compact, active, tailCards, inspectionScope, tailMessageCount, openCommandTailTarget, answerTailConfirm, tailPanelHosts])
+  // A member conversation keeps the buttons that place the member's images on the canvas, as
+  // a row at the end of its transcript (they used to sit in the member's process-area details).
+  const teamImagePlaceRef = useRef(teamImagePlacement.place)
+  teamImagePlaceRef.current = teamImagePlacement.place
+  const openTeamMember = teamRowsTeam && currentSession?.teamLeadId ? currentSession : null
+  const memberImagesTail = useMemo(() => {
+    if (!openTeamMember?.messages.some(message => message.role === 'assistant' && message.attachments?.some(attachment => attachment.type === 'image'))) return null
+    return <Box data-testid="team-member-image-actions" sx={{ display: 'flex', flexWrap: 'wrap', gap: '4px', minWidth: 0 }}>
+      <AgentTeamMemberImages member={openTeamMember} placeImage={(...args) => teamImagePlaceRef.current(...args)} />
+    </Box>
+  }, [openTeamMember])
+  const transcriptTail = useMemo(() => memberImagesTail ? <>{transcriptCards.tail}{memberImagesTail}</> : transcriptCards.tail, [transcriptCards.tail, memberImagesTail])
 
   // ==================== Hunyuan 3D SidePanel generate event ====================
   useEffect(() => {
@@ -9491,55 +9501,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     )
   }
 
-  const renderProcessArea = (teamImagePlace: ReturnType<typeof useTeamImagePlacement>['place'] | undefined, leadJobs: TeamLeadJobEntriesValue) => {
-    const activityTeamKey = messageLeadId ? `${storageScope}\u0000${messageLeadId}` : ''
-    const activityOwner = teamMessageDispatcherRef.current
-    const activityGateClosed = !sessionsLoaded || !!sessionLoadError || !!teamLead?.teamEnded || !!teamLead?.archived ||
-      teamEndPendingRef.current.has(activityTeamKey) || teamEndedMainRef.current.has(activityTeamKey) ||
-      (activityOwner?.key === messageKey && (activityOwner.scopeEpoch !== sessionLoadEpochRef.current || activityOwner.visibilityEpoch !== teamVisibilityRef.current.epoch))
-    const currentTeamMessages = teamEnabled ? selectTeamActivity(teamMessageEntries, messageKey, activityGateClosed) : []
-    const hasTeamMember = (id?: string) => !!id && teamMembers.some(member => member.id === id)
-    const messageActivity = (entries: typeof currentTeamMessages) => entries.map(entry => ({
-      id: `${entry.intent.id}:${entry.recipient ?? 'none'}`,
-      sourceName: entry.intent.source.kind === 'user' ? '用户' : teamMembers.find(member => member.id === (entry.intent.source.kind === 'member' ? entry.intent.source.member : ''))?.teamMemberName || (entry.intent.source.kind === 'member' ? entry.intent.source.member : '用户'),
-      recipientName: teamMembers.find(member => member.id === entry.recipient)?.teamMemberName || entry.recipient || '频道',
-      text: entry.intent.text, status: entry.status
-    }))
-    const unassignedActivity = currentTeamMessages.filter(entry => !hasTeamMember(entry.recipient) &&
-      (entry.intent.source.kind !== 'member' || !hasTeamMember(entry.intent.source.member)))
-    const dependenciesForMember = teamEnabled && teamMembers.length
-      ? prepareTeamMemberDependencySummaries(teamLead?.teamTasks, Boolean(teamLead?.teamEnded))
-      : undefined
-    const teamEntries: ProcessEntry[] = teamEnabled ? teamMembers.map(member => {
-            const lifecycle = readScopedChatRun(storageScope, member.id)
-            const previousTool = member.messages.flatMap(message => message.toolHistory ?? []).at(-1)
-            const currentTool = loadingSessionIds.has(member.id) ? loadingStatusBySessionId[member.id]?.observedTool : undefined
-            const status: ProcessEntry['status'] = teamWaiting.has(member.id) ? 'approval'
-              : loadingSessionIds.has(member.id) ? 'running'
-                : lifecycle.status === 'completed' ? 'completed'
-                  : lifecycle.status === 'failed' ? 'failed'
-                    : lifecycle.status === 'cancelled' ? 'cancelled'
-                      : lifecycle.status === 'interrupted' || previousTool?.status === 'running' ? 'unknown' : 'idle'
-            const dependency = dependenciesForMember!(member.id, status)
-            const memberModel = (() => { try { return resolveTeamRequestSettings(member, teamLead).profileId } catch { return null } })()
-            const activity = currentTeamMessages.filter(entry => entry.recipient === member.id ||
-              (!hasTeamMember(entry.recipient) && entry.intent.source.kind === 'member' && entry.intent.source.member === member.id))
-            return {
-              id: JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, member.id]), kind: 'member', name: member.teamMemberName || member.title,
-              role: member.teamRole, status, selected: member.id === currentSessionId,
-              statusText: status === 'running' ? loadingStatusBySessionId[member.id]?.label : dependency.idleStatusText,
-              onOpen: () => selectSession(member.id),
-              onStop: () => terminateSession(member.id, { dropQueued: true }),
-              detail: <Box sx={{ pl: 4 }}>
-                <Typography variant="caption" display="block">模型：{memberModel ? config.llm_config.api_profiles.find(profile => profile.id === memberModel)?.model_name?.trim() || '设置不可用' : '设置不可用'}</Typography>
-                {dependency.detailText && dependency.detailText !== dependency.idleStatusText && <Typography variant="caption" display="block">{dependency.detailText}</Typography>}
-                {currentTool && <Typography variant="caption" display="block">工具：{currentTool}</Typography>}
-                {previousTool && <Typography variant="caption" display="block">最近工具步骤：{typeof previousTool.toolName === 'string' && /^[\p{L}\p{N}_.-]{1,80}$/u.test(previousTool.toolName) ? previousTool.toolName : '未知工具'} · {previousTool.status === 'completed' ? '完成' : previousTool.status === 'failed' ? '失败' : previousTool.status === 'cancelled' ? '已取消' : '未知'}</Typography>}
-                {teamImagePlace && <AgentTeamMemberImages member={member} placeImage={teamImagePlace}/>}
-                {activity.length > 0 && <AgentTeamMessageActivity entries={messageActivity(activity)}/>}
-              </Box>
-            }
-          }) : []
+  // Helper jobs and background processes of the open conversation. The team is listed in the
+  // thread list and the header select instead.
+  const renderProcessArea = (leadJobs: TeamLeadJobEntriesValue) => {
           const observedHelpers: ProcessEntry[] = currentSessionId ? helperObserver.list(currentSessionId).map(item => ({
             id: JSON.stringify(['tool-observation', storageScope, currentSessionId, item.parentRunId, item.runId, item.toolCallId]),
             kind: 'job', name: item.name,
@@ -9565,13 +9529,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             detail: processScope ? <AgentProcessDetails job={job} scope={processScope}/> : undefined,
             onStop: () => { void processController.stop(job).catch(() => notifyWarning('无法停止后台进程，请重试')) }
           }))
-          return <AgentProcessArea entries={[...teamEntries, ...observedHelpers, ...helperEntries, ...leadHelperEntries, ...processEntries]} showStaticWhenEmpty={unassignedActivity.length > 0 || jobController.error || processController.error || leadJobs.error} onStopAllMembers={teamEnabled && teamLead ? () => {
-            for (const member of teamMembers) {
-              if (loadingSessionIdsRef.current.has(member.id) || teamWaiting.has(member.id)) terminateSession(member.id, { dropQueued: true })
-            }
-          } : undefined} staticSlot={<>
-            {currentSession?.teamLeadId && teamLead && <Button size="small" onClick={() => selectSession(teamLead.id)}>← 返回组长 · {teamLead.title}</Button>}
-            {unassignedActivity.length > 0 && <details><summary>其他团队消息</summary><AgentTeamMessageActivity entries={messageActivity(unassignedActivity)}/></details>}
+          return <AgentProcessArea entries={[...observedHelpers, ...helperEntries, ...leadHelperEntries, ...processEntries]} showStaticWhenEmpty={Boolean(jobController.error || processController.error || leadJobs.error)} staticSlot={<>
             {(jobController.error || processController.error) && <Typography variant="caption" color="warning.main">当前对话后台进程状态刷新失败{((jobController.error && jobController.jobs.length > 0) || (processController.error && processController.jobs.length > 0)) ? '，部分显示的状态可能已过期。' : ''}</Typography>}
             {leadJobs.error && <Typography variant="caption" color="warning.main">组长后台助手状态刷新失败{leadJobs.entries.length > 0 ? '，部分显示的状态可能已过期。' : ''}</Typography>}
           </>} />
@@ -9850,7 +9808,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }
               setSessions(previous=>previous.some(session=>session.id===result.member.id) ? previous : [...previous,result.member])
             }}/>}
-          <TeamLeadJobEntries route={route} currentId={currentSessionId} leadId={teamLead?.id} activeTeamKey={teamLeadJobsKey} isLive={isLeadJobsLive} currentIds={new Set(jobController.jobs.map(job => job.id))}>{leadJobs => renderProcessArea(teamEnabled && teamLead ? teamImagePlacement.place : undefined, leadJobs)}</TeamLeadJobEntries>
+          <TeamLeadJobEntries route={route} currentId={currentSessionId} leadId={teamLead?.id} activeTeamKey={teamLeadJobsKey} isLive={isLeadJobsLive} currentIds={new Set(jobController.jobs.map(job => job.id))}>{leadJobs => renderProcessArea(leadJobs)}</TeamLeadJobEntries>
           <Box sx={{ display: 'contents' }}>
           {active && replayView?.scope === inspectionScope && <Box data-testid="replay-confirmation" sx={{p:2}}>
             <Typography variant="subtitle2">{t('chat.confirm_replay', { kind: replayView.command.kind, defaultValue: `Confirm /${replayView.command.kind}` })}</Typography>
@@ -9893,7 +9851,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               <ChatMessageList
                 active={active}
                 columnStyle={compact}
-                tail={transcriptCards.tail}
+                tail={transcriptTail}
                 anchoredTail={transcriptCards.anchored}
                 tailScrollToken={tailScrollToken}
                 currentSession={currentSession}

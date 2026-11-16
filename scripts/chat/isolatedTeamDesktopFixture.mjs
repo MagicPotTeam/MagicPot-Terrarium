@@ -135,6 +135,28 @@ export async function chooseIsolatedComposerMenuEntry(page, identity, entryTestI
   await page.locator(`[role="menu"] [data-testid="${entryTestId}"]`).click({ timeout: TIMEOUT })
 }
 
+/**
+ * The team rows of the isolated pane in the Agent column's thread list: "组长" first, then one row
+ * per member. Opens the thread list (the toolbar disclosure) when it is closed.
+ */
+async function isolatedTeamRows(page, identity) {
+  // The pane may show a member conversation: only the pane itself must be the isolated one.
+  await page.locator(selector(identity)).waitFor({ state: 'attached', timeout: TIMEOUT })
+  const toggle = page.locator('[data-testid="agent-thread-toggle"]')
+  if (await toggle.getAttribute('aria-expanded', { timeout: TIMEOUT }) !== 'true') await toggle.click({ timeout: TIMEOUT })
+  return page.locator(`[data-agent-thread-sub-rows="${PANE}"]`)
+}
+
+/** Opens a conversation of the team ('组长' or a member name) through its row of the thread list. */
+export async function openIsolatedTeamConversation(page, identity, name) {
+  if (typeof name !== 'string' || !name) throw new TypeError('A team row name is required.')
+  const rows = await isolatedTeamRows(page, identity)
+  const row = rows.getByRole('button', { name, exact: true })
+  await row.click({ timeout: TIMEOUT })
+  await page.waitForFunction(({ pane, name }) => Array.from(document.querySelectorAll(`[data-agent-thread-sub-rows="${pane}"] [data-agent-thread-sub-row]`))
+    .some(node => node.textContent === name && node.getAttribute('aria-current') === 'true'), { pane: PANE, name }, { timeout: TIMEOUT })
+}
+
 async function createMember(page, identity, name) {
   validateIdentity(identity)
   let attempts = memberAttempts.get(identity)
@@ -143,11 +165,10 @@ async function createMember(page, identity, name) {
   // Reserve before any awaited UI action: concurrent calls and unknown results
   // cannot re-open or replay the creation flow in this runner process.
   attempts.add(name)
-  const pane = await waitForIsolatedTeamPane(page, identity)
-  const process = pane.getByRole('region', { name: '进程区', exact: true })
+  const rows = await isolatedTeamRows(page, identity)
   // Every member is added from the composer "+" menu of the lead conversation.
   if (name !== '设计师') {
-    await process.getByRole('button', { name: '打开 设计师', exact: true }).waitFor({ state: 'visible', timeout: TIMEOUT })
+    await rows.getByRole('button', { name: '设计师', exact: true }).waitFor({ state: 'visible', timeout: TIMEOUT })
   }
   await chooseIsolatedComposerMenuEntry(page, identity, 'chat-composer-menu-add-member')
   const form = page.getByRole('dialog', { name: '创建成员', exact: true })
@@ -157,7 +178,8 @@ async function createMember(page, identity, name) {
   // A visible form is not a successful commit. One click only; timeout throws.
   await form.getByRole('button', { name: '确认创建成员', exact: true }).click({ timeout: TIMEOUT })
   await form.waitFor({ state: 'hidden', timeout: TIMEOUT })
-  await process.getByRole('button', { name: `打开 ${name}`, exact: true }).waitFor({ state: 'visible', timeout: TIMEOUT })
+  // The new member is listed as a row under the thread in the thread list.
+  await rows.getByRole('button', { name, exact: true }).waitFor({ state: 'visible', timeout: TIMEOUT })
 }
 
 /** Uses the real composer menu and real member creation form, once. */
@@ -165,7 +187,7 @@ export async function createIsolatedDesigner(page, identity) {
   return createMember(page, identity, '设计师')
 }
 
-/** Uses the real process management dialog and real member creation form, once. */
+/** Uses the real composer menu and real member creation form, once. */
 export async function createIsolatedWriter(page, identity) {
   return createMember(page, identity, '文案')
 }

@@ -156,7 +156,6 @@ it.each(['approve', 'end', 'deny'] as const)('two members with real MAIN scratch
       return
     }
     if (endWhilePending) {
-      const area = await screen.findByRole('region', { name: '进程区' })
       fireEvent.click(screen.getByTestId('chat-composer-menu-team'))
       const management = await screen.findByRole('dialog', { name: '团队管理' })
       fireEvent.click(within(management).getByRole('button', { name: '结束团队' }))

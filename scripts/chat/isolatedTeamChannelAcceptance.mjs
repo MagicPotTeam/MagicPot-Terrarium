@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { _electron as electron } from 'playwright'
 import { isolatedImageEnvironment, fixtureConfig, assertIsolatedRuntime } from './isolatedImageDesktopAcceptance.mjs'
 import { startSyntheticTeamResponsesMock } from './syntheticTeamResponsesMock.mjs'
-import { seedIsolatedTeamLead, createIsolatedDesigner, createIsolatedWriter, verifyIsolatedTeamMembers, waitForIsolatedTeamPane, broadcastIsolatedTeamChannel, chooseIsolatedComposerMenuEntry } from './isolatedTeamDesktopFixture.mjs'
+import { seedIsolatedTeamLead, createIsolatedDesigner, createIsolatedWriter, verifyIsolatedTeamMembers, waitForIsolatedTeamPane, broadcastIsolatedTeamChannel, chooseIsolatedComposerMenuEntry, openIsolatedTeamConversation } from './isolatedTeamDesktopFixture.mjs'
 
 const require = createRequire(import.meta.url)
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -158,7 +158,6 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
     const before = await readMembers(page, identity, ids)
     assert(before.every(row => row.messageCount === 0))
     const pane = await waitForIsolatedTeamPane(page, identity)
-    const process = pane.getByRole('region', { name: '进程区', exact: true })
     await chooseIsolatedComposerMenuEntry(page, identity, 'chat-composer-menu-team')
     const dialog = page.getByRole('dialog', { name: '团队管理', exact: true })
     await dialog.waitFor({ state: 'visible' })
@@ -214,12 +213,13 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
     // The dialog is closed by the real UI; no synthetic DOM events or records.
     await dialog.getByRole('button', { name: '关闭团队管理', exact: true }).click()
     await dialog.waitFor({ state: 'hidden' })
-    const expand = process.getByRole('button', { name: '展开 设计师 详情', exact: true })
-    await expand.click()
-    const activity = process.getByText(/用户 → 设计师 · 已收到响应（不代表送达）/)
-    await activity.waitFor({ state: 'visible', timeout: 30_000 })
-    report.uiObservation = { responseActivityVisible: true }
+    // The column lists no message activity: the broadcast is seen in the designer's own
+    // conversation, opened through its row of the thread list. Then back to the lead.
+    await openIsolatedTeamConversation(page, identity, '设计师')
+    await pane.locator('[data-testid="chat-message-list"]').getByText(marker).first().waitFor({ state: 'visible', timeout: 30_000 })
+    report.uiObservation = { memberTranscriptVisible: true }
     await page.screenshot({ path: path.join(runRoot, 'evidence/channel-activity.png') })
+    await openIsolatedTeamConversation(page, identity, '组长')
 
     // A controlled close/relaunch proves that the observed channel rows survive a
     // real Electron restart. It deliberately does not claim delivery recovery or

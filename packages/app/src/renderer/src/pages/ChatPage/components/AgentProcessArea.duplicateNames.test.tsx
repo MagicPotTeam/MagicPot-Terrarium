@@ -26,23 +26,6 @@ describe('AgentProcessArea duplicate action names', () => {
     expect(screen.getByText('second task')).not.toBeVisible()
   })
 
-  it('distinguishes member and job actions with the same name without changing callbacks', () => {
-    const openMember = vi.fn()
-    const stopMember = vi.fn()
-    const stopJob = vi.fn()
-    render(<AgentProcessArea entries={[
-      { id: 'member', kind: 'member', name: 'explore', status: 'running', onOpen: openMember, onStop: stopMember, detail: 'member detail' },
-      { id: 'job', kind: 'job', name: 'explore', status: 'running', onStop: stopJob, detail: 'job detail' }
-    ]} />)
-    fireEvent.click(screen.getByRole('button', { name: '打开 explore' }))
-    fireEvent.click(screen.getByRole('button', { name: '当前列表第 1 项（位置随列表变化），展开：explore 详情' }))
-    expect(screen.getByText('member detail')).toBeVisible()
-    fireEvent.click(screen.getByRole('button', { name: '当前列表第 1 项（位置随列表变化），停止：explore' }))
-    expect(openMember).toHaveBeenCalledOnce()
-    expect(stopMember).toHaveBeenCalledOnce()
-    expect(stopJob).not.toHaveBeenCalled()
-  })
-
   it('keeps the actionable row name when its namesake has no available action', () => {
     const stop = vi.fn()
     render(<AgentProcessArea entries={[

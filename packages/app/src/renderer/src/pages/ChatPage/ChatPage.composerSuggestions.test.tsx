@@ -122,11 +122,18 @@ const props = () =>
     skills: Array<{ id: string; name: string; description: string }> | null
     hasMentionMembers: boolean
   }
+// The thread list of the Agent column: the page renders the lead and member rows into it.
+const rowsHost = document.createElement('div')
 const renderPage = (pageRoute: typeof route | undefined, compact = true) =>
   render(
     <MemoryRouter>
       <ThemeProvider theme={createTheme()}>
-        <ChatPage compact={compact} storageScope="suggestion-fixture" route={pageRoute} />
+        <ChatPage
+          compact={compact}
+          storageScope="suggestion-fixture"
+          route={pageRoute}
+          threadSubRowsHost={rowsHost}
+        />
       </ThemeProvider>
     </MemoryRouter>
   )
@@ -215,11 +222,7 @@ describe('ChatPage composer suggestions', () => {
       'video_gen'
     ])
 
-    fireEvent.click(
-      within(await screen.findByRole('region', { name: '进程区' })).getByRole('button', {
-        name: '打开 designer'
-      })
-    )
+    fireEvent.click(await within(rowsHost).findByRole('button', { name: 'designer' }))
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('designer'))
     // A member conversation cannot be compacted.
     await waitFor(() => expect(props().commands).not.toContain('compact'))

@@ -985,9 +985,16 @@ const openNewSideForm = (): void => {
   fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
 }
 
+// The Agent column's thread list: a page rendered with `rows` lists its lead and members here.
+const teamRowsHost = document.createElement('div')
+teamRowsHost.setAttribute('data-testid', 'team-rows-host')
+const teamRows = () => within(teamRowsHost)
+
 const renderChatPage = (
-  storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean; team?: boolean } = 'runtime-flow'
+  storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean; team?: boolean; rows?: boolean } = 'runtime-flow'
 ) => {
+  const rows = typeof storageScopeOrProps !== 'string' && storageScopeOrProps.rows
+  if (rows && !teamRowsHost.isConnected) document.body.appendChild(teamRowsHost)
   const storageScope =
     typeof storageScopeOrProps === 'string' ? storageScopeOrProps : 'runtime-flow'
   const acceptExternalInput =
@@ -1001,6 +1008,7 @@ const renderChatPage = (
       acceptExternalInput={acceptExternalInput}
       active={active}
       route={typeof storageScopeOrProps!=='string' && storageScopeOrProps.team ? {channel:'canvas',scopeType:'thread',scopeId:'runtime-project',threadId:'runtime-pane'} : undefined}
+      threadSubRowsHost={rows ? teamRowsHost : undefined}
     />
   )
 }
@@ -1376,57 +1384,13 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
-  it('offline team activity shows the lead profile model name', async () => {
-    const fetchGuard = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network forbidden'))
-    try {
-      const lead: ChatSession = { id: 'model-lead', title: 'Lead', messages: [], profileId: 'lead-profile' }
-      const member: ChatSession = { id: 'model-member', title: 'Member', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
-      hoisted.currentConfig.value!.llm_config.api_profiles = [{ id: 'lead-profile', model_name: 'Lead Fixture Model', base_url: 'http://127.0.0.1', api_key: 'fixture' }]
-      hoisted.availableProfiles.value = [{ id: 'lead-profile', model_name: 'Lead Fixture Model', model_use: 'chat' }]
-      hoisted.storedSessions.value = [lead, member]
-      localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-      renderChatPage({ team: true })
-      const area = await screen.findByRole('region', { name: '进程区' })
-      fireEvent.click(within(area).getByRole('button', { name: '展开 Alice 详情' }))
-      expect(within(area).getByText('模型：Lead Fixture Model')).toBeVisible()
-      expect(fetchGuard).not.toHaveBeenCalled()
-    } finally { fetchGuard.mockRestore() }
-  })
-
-  it('shows the explicit member model in expanded member details instead of the lead model', async () => {
-    const lead: ChatSession = {id:'detail-choice-lead', title:'Lead', messages:[], profileId:'base-model'}
-    const member: ChatSession = {id:'detail-choice-member', title:'Member', messages:[], teamLeadId:lead.id, teamMemberName:'Alice', memberModelChoice:{version:1,profileId:'vision-model'}}
-    hoisted.currentConfig.value!.llm_config.api_profiles = [
-      {id:'base-model',model_name:'Lead Model',base_url:'http://127.0.0.1',api_key:'fixture'},
-      {id:'vision-model',model_name:'Member Model',base_url:'http://127.0.0.1',api_key:'fixture'}
-    ]
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    renderChatPage({team:true})
-    const area = await screen.findByRole('region', {name:'进程区'})
-    fireEvent.click(within(area).getByRole('button',{name:'展开 Alice 详情'}))
-    expect(within(area).getByText('模型：Member Model')).toBeVisible()
-    expect(within(area).queryByText('模型：Lead Model')).not.toBeInTheDocument()
-  })
-  it('shows unavailable rather than the lead model in member details when a versioned selection is blocked', async () => {
-    const lead: ChatSession = { id:'model-blocked-lead', title:'Lead', messages:[], profileId:'base-model', teamSettings:{maxMembers:6,defaultModel:null,autoCleanup:false,memberModelSelection:{version:1,profileId:'vision-model'}} }
-    const member: ChatSession = { id:'model-blocked-member', title:'Member', messages:[], teamLeadId:lead.id, teamMemberName:'Alice' }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    renderChatPage({team:true})
-    const area = await screen.findByRole('region', {name:'进程区'})
-    fireEvent.click(within(area).getByRole('button',{name:'展开 Alice 详情'}))
-    expect(within(area).getByText('模型：设置不可用')).toBeVisible()
-    expect(within(area).queryByText('模型：组长模型')).not.toBeInTheDocument()
-  })
-
   it('offline process area creates members from the conversation header and keeps navigation and management available', async () => {
     const fetchGuard = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network forbidden'))
     try {
       const lead: ChatSession = { id: 'process-area-lead', title: 'Lead', messages: [], profileId: 'base-model' }
       hoisted.storedSessions.value = [lead]
       localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-      renderChatPage({ team: true })
+      renderChatPage({ team: true, rows: true })
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
       expect(screen.queryByRole('button', { name: '团队管理' })).not.toBeInTheDocument()
@@ -1439,32 +1403,32 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Alice' } })
       fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Alice' } })
       fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-      const area = await screen.findByRole('region', { name: '进程区' })
-      const alice = await within(area).findByRole('button', { name: '打开 Alice' })
-      expect(alice).toHaveTextContent('Alice')
-      expect(alice.textContent?.match(/Alice/g)).toHaveLength(1)
+      // The members are rows of the thread list, after the lead's row; the process area lists none.
+      const alice = await teamRows().findByRole('button', { name: 'Alice' })
+      expect(alice.textContent).toBe('Alice')
+      expect(teamRows().getAllByRole('button').map(row => row.textContent)).toEqual(['Lead', 'Alice'])
+      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
       chooseAddMenuEntry('chat-composer-menu-team')
       fireEvent.click(screen.getByRole('button', { name: '组建团队 / 添加成员' }))
       fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Bob' } })
       fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Writer' } })
       fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-      expect(await within(area).findByRole('button', { name: '打开 Bob' })).toHaveTextContent('Bob · Writer')
+      expect(await teamRows().findByRole('button', { name: 'Bob' })).toHaveTextContent(/^Bob$/)
+      expect(teamRows().getByRole('button', { name: 'Lead' })).toHaveAttribute('aria-current', 'true')
       fireEvent.click(alice)
       await waitFor(() => expect(readCurrentSessionState()?.teamMemberName).toBe('Alice'))
-      await waitFor(() => expect(within(area).getByRole('button', { name: '打开 Alice' })).toHaveAttribute('aria-current', 'page'))
-      fireEvent.click(within(area).getByRole('button', { name: /返回组长/ }))
+      await waitFor(() => expect(teamRows().getByRole('button', { name: 'Alice' })).toHaveAttribute('aria-current', 'true'))
+      expect(teamRows().getByRole('button', { name: 'Lead' })).not.toHaveAttribute('aria-current')
+      // There is no "return to lead" button: the lead's row opens the lead again.
+      expect(screen.queryByRole('button', { name: /返回组长/ })).not.toBeInTheDocument()
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      const collapse = within(area).getByRole('button', { name: /进程 ·/ })
-      fireEvent.click(collapse)
-      expect(collapse).toHaveAttribute('aria-expanded', 'false')
-      expect(within(area).queryByRole('button', { name: '打开 Alice' })).not.toBeInTheDocument()
-      fireEvent.click(collapse)
-      expect(within(area).getByRole('button', { name: '打开 Alice' })).toBeVisible()
+      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
       expect(fetchGuard).not.toHaveBeenCalled()
     } finally { fetchGuard.mockRestore() }
   })
 
-  it('offline process area stops a running member and retains its row', async () => {
+  it('stops a running member from its conversation and keeps its row', async () => {
     const fetchGuard = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network forbidden'))
     try {
       const lead: ChatSession = { id: 'process-running-lead', title: 'Lead', messages: [], profileId: 'base-model' }
@@ -1473,20 +1437,23 @@ describe('ChatPage runtime workflow integration', () => {
       localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
       let release!: (value: { content: string }) => void
       hoisted.requestChatCompletionMock.mockImplementation(() => new Promise(resolve => { release = resolve }))
-      renderChatPage({ team: true })
+      renderChatPage({ team: true, rows: true })
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '@Alice run' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      const area = await screen.findByRole('region', { name: '进程区' })
-      await waitFor(() => expect(within(area).getByRole('button', { name: '停止 Alice' })).toBeVisible())
-      fireEvent.click(within(area).getByRole('button', { name: '停止 Alice' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      fireEvent.click(await teamRows().findByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      fireEvent.click(await screen.findByTestId('chat-composer-stop-mock'))
       await act(async () => release({ content: 'late fixture response' }))
-      expect(await within(area).findByRole('button', { name: '打开 Alice' })).toBeVisible()
+      await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
+      expect(readCurrentSessionState()?.messages.some(message => message.content === 'late fixture response')).toBe(false)
+      expect(teamRows().getByRole('button', { name: 'Alice' })).toHaveAttribute('aria-current', 'true')
       expect(fetchGuard).not.toHaveBeenCalled()
     } finally { fetchGuard.mockRestore() }
   })
 
-  it('offline process area retains a completed member after its response', async () => {
+  it('keeps a member row after the member answered', async () => {
     const fetchGuard = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network forbidden'))
     try {
       const lead: ChatSession = { id: 'process-complete-lead', title: 'Lead', messages: [], profileId: 'base-model' }
@@ -1494,13 +1461,15 @@ describe('ChatPage runtime workflow integration', () => {
       hoisted.storedSessions.value = [lead, member]
       localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
       hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'fixture completed' })
-      renderChatPage({ team: true })
+      renderChatPage({ team: true, rows: true })
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '@Alice run' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      const area = await screen.findByRole('region', { name: '进程区' })
-      await waitFor(() => expect(within(area).getByRole('button', { name: '打开 Alice' })).toHaveTextContent('已完成'))
-      expect(within(area).queryByRole('button', { name: '停止 Alice' })).not.toBeInTheDocument()
+      await waitFor(() => expect(hoisted.storedSessions.value.find(session => session.id === member.id)?.messages.some(message => message.content === 'fixture completed')).toBe(true))
+      expect(teamRows().getByRole('button', { name: 'Alice' })).toBeVisible()
+      // Nothing runs any more: the composer offers no stop.
+      await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
+      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
       expect(fetchGuard).not.toHaveBeenCalled()
     } finally { fetchGuard.mockRestore() }
   })
@@ -1601,12 +1570,12 @@ describe('ChatPage runtime workflow integration', () => {
       if (conversationId === ordinary.id) return new Promise(resolve => { releaseOrdinary = resolve })
       return Promise.resolve({ jobs: conversationId === alice.id ? [aliceJob] : conversationId === bob.id ? [bobJob] : [] })
     })
-    const view = renderChatPage({ team: true })
+    const view = renderChatPage({ team: true, rows: true })
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
       const area = await screen.findByRole('region', { name: '进程区' })
       await within(area).findByRole('button', { name: '展开 explore 详情' })
-      expect(within(area).getByRole('button', { name: '打开 Alice' })).toHaveAttribute('aria-current', 'page')
+      expect(teamRows().getByRole('button', { name: 'Alice' })).toHaveAttribute('aria-current', 'true')
       fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
       const assertSameArea = () => {
         expect(area.isConnected).toBe(true)
@@ -1619,7 +1588,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(area.textContent).toContain('python'))
       assertSameArea(); assertCollapsed()
       fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
-      expect(within(area).getByRole('button', { name: '打开 Bob' })).toHaveAttribute('aria-current', 'page')
+      expect(teamRows().getByRole('button', { name: 'Bob' })).toHaveAttribute('aria-current', 'true')
       expect(within(area).getByRole('button', { name: '展开 python 详情' })).toBeVisible()
       expect(within(area).queryByRole('button', { name: '展开 explore 详情' })).not.toBeInTheDocument()
       fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
@@ -1634,14 +1603,14 @@ describe('ChatPage runtime workflow integration', () => {
       assertSameArea(); assertCollapsed()
       fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
       expect(within(area).getByRole('button', { name: '展开 python 详情' })).toBeVisible()
-      expect(within(area).queryByRole('button', { name: '打开 Bob' })).not.toBeInTheDocument()
+      expect(teamRows().queryByRole('button', { name: 'Bob' })).not.toBeInTheDocument()
       fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
       await dispatchSwitchSession(alice.id)
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
       await waitFor(() => expect(area.textContent).toContain('explore'))
       assertSameArea(); assertCollapsed()
       fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
-      expect(within(area).getByRole('button', { name: '打开 Alice' })).toHaveAttribute('aria-current', 'page')
+      expect(teamRows().getByRole('button', { name: 'Alice' })).toHaveAttribute('aria-current', 'true')
       expect(within(area).getByRole('button', { name: '展开 explore 详情' })).toBeVisible()
       expect(within(area).queryByRole('button', { name: '展开 python 详情' })).not.toBeInTheDocument()
       expect(hoisted.listAgentJobsMock).toHaveBeenCalledWith({ route: { channel: 'canvas', scopeType: 'thread', scopeId: 'runtime-project', threadId: 'runtime-pane' }, conversationId: ordinary.id })
@@ -2101,14 +2070,15 @@ describe('ChatPage runtime workflow integration', () => {
       }
       return Promise.resolve({ jobs: args.conversationId === lead.id ? [job('strict-fresh')] : [] })
     })
-    const ui = (active: boolean) => <React.StrictMode><MemoryRouter><ThemeProvider theme={theme}><ChatPage compact active={active} storageScope="runtime-flow" route={route} /></ThemeProvider></MemoryRouter></React.StrictMode>
+    const ui = (active: boolean) => <React.StrictMode><MemoryRouter><ThemeProvider theme={theme}><ChatPage compact active={active} storageScope="runtime-flow" route={route} threadSubRowsHost={teamRowsHost} /></ThemeProvider></MemoryRouter></React.StrictMode>
+    if (!teamRowsHost.isConnected) document.body.appendChild(teamRowsHost)
     const page = render(ui(true))
     const originalNotify = hoisted.notifyErrorMock
     const leadCalls = () => calls.filter(call => call.conversationId === lead.id)
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(entry === 'member' ? member.id : lead.id))
       if (entry === 'lead') {
-        fireEvent.click(await screen.findByRole('button', { name: '打开 Alice' }))
+        fireEvent.click(await teamRows().findByRole('button', { name: 'Alice' }))
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
       }
       await waitFor(() => expect(leadCalls().length).toBeGreaterThan(0))
@@ -4866,15 +4836,15 @@ describe('ChatPage runtime workflow integration', () => {
     const member: ChatSession = { id: 'composer-model-writer', title: '文案', teamLeadId: lead.id, teamMemberName: '文案', teamRole: '文案', profileId: 'vision-model', messages: [] }
     hoisted.storedSessions.value = [lead, member]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const page = renderChatPage({ team: true })
+    const page = renderChatPage({ team: true, rows: true })
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      fireEvent.click(screen.getByRole('button', { name: '打开 文案' }))
+      fireEvent.click(teamRows().getByRole('button', { name: '文案' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
       expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
       expect(screen.queryByTestId('select-vision-model')).not.toBeInTheDocument()
       expect(hoisted.storedSessions.value.find(item => item.id === lead.id)?.profileId).toBe('base-model')
-      fireEvent.click(screen.getByRole('button', { name: /返回组长/ }))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       expect(screen.getByTestId('chat-primary-selection-value')).toHaveTextContent('base-model')
     } finally {
@@ -4909,20 +4879,20 @@ describe('ChatPage runtime workflow integration', () => {
     const designer: ChatSession = { id:'choice-designer', title:'设计师', messages:[], teamLeadId:lead.id, teamMemberName:'设计师', profileId:'base-model' }
     hoisted.storedSessions.value = [lead, writer, designer]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const page = renderChatPage({team:true})
+    const page = renderChatPage({ team: true, rows: true })
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      fireEvent.click(screen.getByRole('button', {name:'打开 文案'}))
+      fireEvent.click(teamRows().getByRole('button', { name: '文案' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(writer.id))
       fireEvent.click(screen.getByTestId('select-member-vision-model'))
       await waitFor(() => expect(hoisted.storedSessions.value.find(item => item.id === writer.id)?.memberModelChoice).toEqual({version:1, profileId:'vision-model'}))
       await waitFor(() => expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('selected:Vision Model'))
       expect(hoisted.storedSessions.value.find(item => item.id === lead.id)?.profileId).toBe('base-model')
       expect(hoisted.storedSessions.value.find(item => item.id === designer.id)?.memberModelChoice).toBeUndefined()
-      fireEvent.click(screen.getByRole('button', {name:'打开 设计师'}))
+      fireEvent.click(teamRows().getByRole('button', { name: '设计师' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(designer.id))
       expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
-      fireEvent.click(screen.getByRole('button', {name:'打开 文案'}))
+      fireEvent.click(teamRows().getByRole('button', { name: '文案' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(writer.id))
       expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('selected:Vision Model')
     } finally { page.unmount() }
@@ -5091,7 +5061,7 @@ describe('ChatPage runtime workflow integration', () => {
         throw new Error(`Unexpected fixture request: ${text}`)
       })
       localStorage.setItem(scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'), 'base-model')
-      renderChatPage({ team: true })
+      renderChatPage({ team: true, rows: true })
       await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
       const lead = readCurrentSessionState()!.id
       for (const [name, role, count] of [[designerName, '设计师', '1'], [writerName, '文案', '2']] as const) {
@@ -5104,7 +5074,7 @@ describe('ChatPage runtime workflow integration', () => {
         fireEvent.change(screen.getByLabelText('成员名'), { target: { value: name } })
         fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: role } })
         fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-        await waitFor(() => expect(screen.getByRole('region', { name: '进程区' })).toHaveTextContent(`成员 ${count}`))
+        await waitFor(() => expect(teamRows().getAllByRole('button')).toHaveLength(Number(count) + 1))
       }
       const designer = hoisted.storedSessions.value.find(session => session.teamMemberName === designerName)!
       const writer = hoisted.storedSessions.value.find(session => session.teamMemberName === writerName)!
@@ -5133,22 +5103,20 @@ describe('ChatPage runtime workflow integration', () => {
         const inlineApproval = screen.getByTestId('team-inline-approvals')
         expect(within(inlineApproval).getByRole('button', { name: '批准' })).toBeVisible()
         expect(within(inlineApproval).getByRole('button', { name: '拒绝' })).toBeVisible()
-        const processArea = screen.getByRole('region', { name: '进程区' })
-        await waitFor(() => expect(within(processArea).getByRole('button', { name: `打开 ${writerName}` })).toHaveTextContent('待审批'))
-        expect(within(processArea).getByRole('button', { name: `停止 ${writerName}` })).toBeVisible()
+        // The waiting member is not listed in a process area; its approval card is the only surface.
+        expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
         expect(inlineApproval).toBeInTheDocument()
-        expect(processArea.contains(inlineApproval)).toBe(false)
         expect(fetchGuard.mock.calls.map(([input]) => input).filter(input => input !== 'data:image/png;base64,QQ==')).toEqual([])
         fireEvent.click(screen.getByRole('button', { name: '批准' }))
         await waitFor(() => expect(hoisted.resolvePendingApprovalMock).toHaveBeenCalledWith({ approvalId: 'writer-tool', expectedRevision: 3, approved: true }))
       } finally { approvalView.unmount() }
       await waitFor(() => expect(hoisted.storedSessions.value.find(session => session.id === writer.id)?.messages.some(message => message.content === '文案结果')).toBe(true))
       expect(writerReturned).toBe(true)
-      fireEvent.click(screen.getByRole('button', { name: `打开 ${designerName}` }))
+      fireEvent.click(teamRows().getByRole('button', { name: designerName }))
       await waitFor(() => expect(readCurrentSessionState()?.messages.some(message => message.content === '设计结果')).toBe(true))
-      fireEvent.click(screen.getByRole('button', { name: `打开 ${writerName}` }))
+      fireEvent.click(teamRows().getByRole('button', { name: writerName }))
       await waitFor(() => expect(readCurrentSessionState()?.messages.some(message => message.content === '文案结果')).toBe(true))
-      fireEvent.click(screen.getByRole('button', { name: /返回组长/ }))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead))
       send('汇总团队结果')
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
@@ -5166,7 +5134,7 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it.each(['single', 'all'] as const)('exposes team %s stop while a queued composer item is in preflight', async mode => {
+  it.each(['member'] as const)('exposes team %s stop while a queued composer item is in preflight', async mode => {
     const lead: ChatSession = { id: `preflight-stop-${mode}-lead`, title: 'Lead', messages: [], profileId: 'base-model' }
     const member: ChatSession = { id: `preflight-stop-${mode}-member`, title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
     hoisted.storedSessions.value = [lead, member]
@@ -5178,13 +5146,13 @@ describe('ChatPage runtime workflow integration', () => {
     const running = new Promise<{ content: string }>(resolve => { finish = resolve })
     const gate = { entered: false, gate: new Promise<void>(resolve => { release = resolve }) }
     hoisted.requestChatCompletionMock.mockImplementation(() => running)
-    const page = renderChatPage({ team: true })
+    const page = renderChatPage({ team: true, rows: true })
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '@Alice active request' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-      fireEvent.click(screen.getByRole('button', { name: '打开 Alice' }))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'queued preflight text' } })
       fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
@@ -5194,7 +5162,8 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(gate.entered).toBe(true), { timeout: 2000 })
       await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('正在准备'))
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
-      const stop = screen.getByRole('button', { name: mode === 'single' ? '停止 Alice' : '全部停止成员' })
+      // The member's own conversation is open: its composer stop stops it.
+      const stop = screen.getByTestId('chat-composer-stop-mock')
       expect(stop).toBeVisible()
       expect(stop).toBeEnabled()
       fireEvent.click(stop)
@@ -5214,7 +5183,7 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it.each(['single', 'all'] as const)('preserves an unstarted ordinary composer queue on team %s stop without overwriting a new draft', async (mode) => {
+  it.each(['member'] as const)('preserves an unstarted ordinary composer queue on team %s stop without overwriting a new draft', async (mode) => {
     const lead: ChatSession = { id: `safe-stop-${mode}-lead`, title: 'Lead', messages: [], profileId: 'base-model' }
     const member: ChatSession = { id: `safe-stop-${mode}-member`, title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
     hoisted.storedSessions.value = [lead, member]
@@ -5228,20 +5197,20 @@ describe('ChatPage runtime workflow integration', () => {
       signal = requestSignal
       return running
     })
-    const page = renderChatPage({ team: true })
+    const page = renderChatPage({ team: true, rows: true })
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '@Alice running' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       await waitFor(() => expect(signal).toBeDefined())
-      fireEvent.click(screen.getByRole('button', { name: '打开 Alice' }))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'unstarted queued text' } })
       fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
       await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('unstarted queued text'))
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'newer unsent draft' } })
-      fireEvent.click(screen.getByRole('button', { name: mode === 'single' ? '停止 Alice' : '全部停止成员' }))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
       expect(signal?.aborted).toBe(true)
       await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('未发送 · 已暂停'))
       expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('unstarted queued text')
@@ -5258,87 +5227,46 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('stops both running members and drops their queued sends from the team status bar', async () => {
-    const lead: ChatSession = { id: 'stop-all-lead', title: 'Lead', messages: [], profileId: 'base-model' }
-    const alice: ChatSession = { id: 'stop-all-alice', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
-    const bob: ChatSession = { id: 'stop-all-bob', title: 'Bob', messages: [], teamLeadId: lead.id, teamMemberName: 'Bob' }
-    hoisted.storedSessions.value = [lead, alice, bob]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const signals = new Map<string, AbortSignal>()
-    hoisted.requestChatCompletionMock.mockImplementation(({ conversationId, signal }: { conversationId: string; signal: AbortSignal }) => new Promise((_resolve, reject) => {
-      signals.set(conversationId, signal)
-      signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
-    }))
-    const page = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      for (const name of ['Alice', 'Bob']) {
-        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: `@${name} running` } })
-        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-        await waitFor(() => expect(signals.has(name === 'Alice' ? alice.id : bob.id)).toBe(true))
-      }
-      await waitFor(() => expect(screen.getByRole('region', { name: '进程区' })).toHaveTextContent('运行项 2'))
-      for (const member of [alice, bob]) {
-        fireEvent.click(screen.getByRole('button', { name: `打开 ${member.teamMemberName}` }))
-        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
-        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: `queued for ${member.teamMemberName}` } })
-        fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
-        await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(`queued for ${member.teamMemberName}`))
-      }
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
-      fireEvent.click(screen.getByRole('button', { name: '全部停止成员' }))
-      expect(signals.get(alice.id)?.aborted).toBe(true)
-      expect(signals.get(bob.id)?.aborted).toBe(true)
-      await waitFor(() => expect(screen.getByRole('region', { name: '进程区' })).toHaveTextContent('运行项 0'))
-      expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: '打开 Alice' }))
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
-      expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
-    } finally { page.unmount() }
-  })
-
   it('creates a member with empty history and switches back to its lead without enabling execution', async () => {
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'), 'base-model')
-    renderChatPage({ team: true })
+    renderChatPage({ team: true, rows: true })
     await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
     const lead = readCurrentSessionState()!.id
     chooseAddMenuEntry('chat-composer-menu-add-member')
     fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'writer' } })
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'write notes' } })
     fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-    await waitFor(() => expect(screen.getByRole('region', { name: '进程区' })).toHaveTextContent('成员 1'))
+    await waitFor(() => expect(teamRows().getAllByRole('button').map(row => row.textContent)).toEqual(['Lead', 'writer']))
     const committed = hoisted.storedSessions.value.find(session => session.teamMemberName === 'writer')
     expect(committed).toMatchObject({ teamLeadId: lead, messages: [] })
-    fireEvent.click(screen.getByRole('button', { name: '打开 writer' }))
+    fireEvent.click(teamRows().getByRole('button', { name: 'writer' }))
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(committed?.id))
     expect(readCurrentSessionState()?.messages).toEqual([])
-    fireEvent.click(screen.getByRole('button', { name: /返回组长/ }))
+    fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead))
     expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
   })
 
   it('creates a team member, switches within the same column and returns to lead', async () => {
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE,'runtime-flow'),'base-model')
-    renderChatPage({team:true})
+    renderChatPage({ team: true, rows: true })
     await waitFor(()=>expect(readCurrentSessionState()?.profileId).toBe('base-model'))
     const lead=readCurrentSessionState()!.id
     chooseAddMenuEntry('chat-composer-menu-add-member')
     fireEvent.change(screen.getByLabelText('成员名'),{target:{value:'writer'}})
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'),{target:{value:'write notes'}})
     fireEvent.click(screen.getByRole('button',{name:'确认创建成员'}))
-    await waitFor(()=>expect(screen.getByRole('region', { name: '进程区' })).toHaveTextContent('成员 1'))
+    await waitFor(() => expect(teamRows().getAllByRole('button').map(row => row.textContent)).toEqual(['Lead', 'writer']))
     expect(readCurrentSessionState()?.id).toBe(lead)
     fireEvent.change(screen.getByTestId('chat-composer-input-mock'),{target:{value:'@writer write a short note'}})
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
     await waitFor(()=>expect(hoisted.requestChatCompletionMock).toHaveBeenCalled())
     expect(readCurrentSessionState()?.id).toBe(lead)
     expect(readCurrentSessionState()?.messages).toHaveLength(0)
-    fireEvent.click(screen.getByRole('button',{name:'打开 writer'}))
+    fireEvent.click(teamRows().getByRole('button', { name: 'writer' }))
     await waitFor(()=>expect(readCurrentSessionState()?.teamLeadId).toBe(lead))
     await waitFor(()=>expect(readCurrentSessionState()?.messages.some(message=>message.content==='write a short note')).toBe(true))
-    fireEvent.click(screen.getByRole('button',{name:/返回组长/}))
+    fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
     await waitFor(()=>expect(readCurrentSessionState()?.id).toBe(lead))
   })
   async function openTeamManagement() {
@@ -5357,7 +5285,7 @@ describe('ChatPage runtime workflow integration', () => {
     const lead: ChatSession = { id: 'model-change-local-record', title: 'Lead', messages: [], profileId: 'base-model', teamSettings: { maxMembers: 6, defaultModel: 'base-model', autoCleanup: false } }
     hoisted.storedSessions.value = [lead]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    renderChatPage({ team: true })
+    renderChatPage({ team: true, rows: true })
     await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
     fireEvent.click(screen.getByTestId('select-vision-model'))
     await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('vision-model'))
@@ -5381,7 +5309,7 @@ describe('ChatPage runtime workflow integration', () => {
     const lead: ChatSession = { id: 'team-draft-save-race', title: 'Lead', profileId: 'base-model', messages: [], teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false } }
     hoisted.storedSessions.value = [lead]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    renderChatPage({ team: true })
+    renderChatPage({ team: true, rows: true })
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
     await openTeamManagement()
     const input = screen.getByLabelText(label)
@@ -5418,7 +5346,7 @@ describe('ChatPage runtime workflow integration', () => {
     const lead: ChatSession = { id: 'team-draft-success', title: 'Lead', profileId: 'base-model', messages: [], teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false } }
     hoisted.storedSessions.value = [lead]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    renderChatPage({ team: true })
+    renderChatPage({ team: true, rows: true })
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
     await openTeamManagement()
     const input = screen.getByLabelText(label)
@@ -5565,132 +5493,6 @@ describe('ChatPage runtime workflow integration', () => {
       releaseWrite?.()
       page.unmount()
     }
-  })
-
-  it('shows member identity once and keeps useful model details when expanded', async () => {
-    const lead: ChatSession = { id: 'detail-lead', title: 'Lead', profileId: 'base-model', messages: [] }
-    const member: ChatSession = { id: 'detail-writer', title: '文案', teamLeadId: lead.id, teamMemberName: '文案', teamRole: '文案', messages: [] }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const page = renderChatPage({ team: true })
-    try {
-      const area = await screen.findByRole('region', { name: '进程区' })
-      fireEvent.click(within(area).getByRole('button', { name: '展开 文案 详情' }))
-      expect(within(area).getByRole('button', { name: '打开 文案' })).toHaveTextContent('文案')
-      expect(within(area).queryByText(/^角色 \/ 任务：/)).not.toBeInTheDocument()
-      expect(within(area).getByText(/^模型：/)).toBeVisible()
-    } finally {
-      page.unmount()
-    }
-  })
-
-  it('shows only this member’s observed current tool while it is running, not old history', async () => {
-    const lead: ChatSession = { id: 'tool-lead', title: 'Lead', profileId: 'base-model', messages: [] }
-    const member: ChatSession = { id: 'tool-writer', title: 'writer', teamLeadId: lead.id, teamMemberName: 'writer', messages: [
-      { role: 'assistant', content: 'old answer', toolHistory: [{ runId: 'old', toolCallId: 'old-call', toolName: 'old.tool', status: 'completed', args: {}, content: 'old-result' }] }
-    ] }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), member.id)
-    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
-    let request!: { onEvent: (event: unknown) => void; signal: AbortSignal }
-    let finish!: (value: unknown) => void
-    hoisted.requestChatCompletionStreamMock.mockImplementationOnce(input => { request = input; return new Promise(resolve => { finish = resolve }) })
-    const page = renderChatPage({ team: true })
-    try {
-      const area = await screen.findByRole('region', { name: '进程区' })
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
-      fireEvent.click(within(area).getByRole('button', { name: '展开 writer 详情' }))
-      const oldHistory = within(area).getByText('最近工具步骤：old.tool · 完成')
-      expect(oldHistory).toBeVisible()
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'run live tool' } })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(request).toBeDefined())
-      expect(within(area).getByText('最近工具步骤：old.tool · 完成')).toBeVisible()
-      expect(within(area).queryByText('工具：old.tool')).not.toBeInTheDocument()
-      const firstTool = { runId: 'live', toolCallId: 'live-call', toolName: 'image_gen' }
-      const secondTool = { runId: 'live', toolCallId: 'second-call', toolName: 'web_search' }
-      await act(async () => request.onEvent({ type: 'tool-status', toolStatus: { ...firstTool, status: 'running' } }))
-      expect(within(area).getByText('工具：image_gen')).toBeVisible()
-      expect(within(area).getByText('出图中')).toBeVisible()
-      await act(async () => request.onEvent({ type: 'text-delta', delta: 'partial output' }))
-      expect(within(area).getByText('工具：image_gen')).toBeVisible()
-      await act(async () => request.onEvent({ type: 'tool-status', toolStatus: { ...secondTool, status: 'running' } }))
-      expect(within(area).getByText('工具：web_search')).toBeVisible()
-      await act(async () => request.onEvent({ type: 'tool-status', toolStatus: { ...firstTool, status: 'completed' } }))
-      expect(within(area).getByText('工具：web_search')).toBeVisible()
-      expect(within(area).queryByText('Tool returned; waiting for the model to continue')).not.toBeInTheDocument()
-      await act(async () => request.onEvent({ type: 'tool-status', toolStatus: { ...secondTool, status: 'completed' } }))
-      expect(within(area).queryByText('工具：web_search')).not.toBeInTheDocument()
-      await act(async () => request.onEvent({ type: 'tool-status', toolStatus: { ...firstTool, status: 'running' } }))
-      expect(within(area).getByText('工具：image_gen')).toBeVisible()
-      await act(async () => request.onEvent({ type: 'retry', retry: { reason: 'connection-error', attempt: 1, maxAttempts: 2, delayMs: 1 } }))
-      expect(within(area).queryByText('工具：image_gen')).not.toBeInTheDocument()
-      await act(async () => request.onEvent({ type: 'tool-status', toolStatus: { ...firstTool, status: 'running' } }))
-      expect(within(area).getByText('工具：image_gen')).toBeVisible()
-      fireEvent.click(within(area).getByRole('button', { name: '停止 writer' }))
-      await waitFor(() => expect(request.signal.aborted).toBe(true))
-      await waitFor(() => expect(within(area).queryByText('工具：image_gen')).not.toBeInTheDocument())
-      await act(async () => request.onEvent({ type: 'tool-status', toolStatus: { ...secondTool, status: 'running' } }))
-      expect(within(area).queryByText('工具：web_search')).not.toBeInTheDocument()
-      await act(async () => { finish({ result: { content: 'done' }, response: 'done' }) })
-      expect(within(area).queryByText('工具：old.tool')).not.toBeInTheDocument()
-    } finally {
-      finish?.({ result: { content: 'cleanup' }, response: 'cleanup' })
-      page.unmount()
-    }
-  })
-
-  it('keeps each member’s current tool isolated while switching during a run', async () => {
-    const lead: ChatSession = { id: 'tool-switch-lead', title: 'Lead', profileId: 'base-model', messages: [] }
-    const alice: ChatSession = { id: 'tool-switch-alice', title: 'Alice', teamLeadId: lead.id, teamMemberName: 'Alice', messages: [] }
-    const bob: ChatSession = { id: 'tool-switch-bob', title: 'Bob', teamLeadId: lead.id, teamMemberName: 'Bob', messages: [] }
-    hoisted.storedSessions.value = [lead, alice, bob]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), alice.id)
-    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
-    let request!: { onEvent: (event: unknown) => void }
-    let finish!: (value: unknown) => void
-    hoisted.requestChatCompletionStreamMock.mockImplementationOnce(input => { request = input; return new Promise(resolve => { finish = resolve }) })
-    const page = renderChatPage({ team: true })
-    try {
-      const area = await screen.findByRole('region', { name: '进程区' })
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
-      fireEvent.click(within(area).getByRole('button', { name: '展开 Alice 详情' }))
-      fireEvent.click(within(area).getByRole('button', { name: '展开 Bob 详情' }))
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'Alice task' } })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(request).toBeDefined())
-      await act(async () => request.onEvent({ type: 'tool-status', toolStatus: { runId: 'alice-run', toolCallId: 'alice-tool', toolName: 'image_gen', status: 'running' } }))
-      expect(within(area).getByText('工具：image_gen')).toBeVisible()
-      fireEvent.click(within(area).getByRole('button', { name: '打开 Bob' }))
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(bob.id))
-      const bobRow = within(area).getByRole('button', { name: '打开 Bob' }).closest('li')!
-      expect(within(bobRow).queryByText('工具：image_gen')).not.toBeInTheDocument()
-      expect(within(area).getByText('工具：image_gen')).toBeVisible()
-      await act(async () => finish({ result: { content: 'Alice done' }, response: 'Alice done' }))
-      await waitFor(() => expect(within(area).queryByText('工具：image_gen')).not.toBeInTheDocument())
-      await waitFor(() => expect(within(area).getByRole('button', { name: '打开 Alice' })).toHaveTextContent('已完成'))
-      expect(within(bobRow).queryByText('工具：image_gen')).not.toBeInTheDocument()
-    } finally {
-      finish?.({ result: { content: 'cleanup' }, response: 'cleanup' })
-      page.unmount()
-    }
-  })
-
-  it('shows an idle member waiting for its task dependency without claiming it is running', async () => {
-    const lead: ChatSession = { id: 'dependency-lead', title: 'Lead', messages: [], profileId: 'base-model', teamTasks: [
-      { id: 'prepare', title: '准备素材', ownerId: 'designer', status: 'pending', dependsOn: [] },
-      { id: 'poster', title: '制作海报', ownerId: 'designer', status: 'pending', dependsOn: ['prepare'] }
-    ] }
-    const member: ChatSession = { id: 'designer', title: 'designer', messages: [], teamLeadId: lead.id, teamMemberName: 'designer' }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    renderChatPage({ team: true })
-    const area = await screen.findByRole('region', { name: '进程区' })
-    await waitFor(() => expect(within(area).getByRole('button', { name: '打开 designer' })).toBeVisible())
-    expect(within(area).getByText('等待依赖：准备素材')).toBeVisible()
-    expect(within(area).getByRole('button', { name: '进程 · 成员 1 · 运行项 0 · 待审批项 0' })).toBeVisible()
-    expect(within(area).queryByRole('button', { name: '停止 designer' })).not.toBeInTheDocument()
-    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
   })
 
   it('dispatches only a ready assigned team task and persists done after its member responds', async () => {
@@ -5932,7 +5734,7 @@ describe('ChatPage runtime workflow integration', () => {
       pending = input
       return new Promise(resolve => { finish = resolve })
     })
-    const page = renderChatPage({ team: true })
+    const page = renderChatPage({ team: true, rows: true })
     let release!: () => void
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
@@ -5951,7 +5753,7 @@ describe('ChatPage runtime workflow integration', () => {
       await act(async () => release())
       await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(expect.stringContaining('Session save conflict')))
       expect(hoisted.storedSessions.value.find(item => item.id === member.id)).toMatchObject({ title: 'External member edit', messages: [] })
-      fireEvent.click(screen.getByRole('button', { name: '打开 Writer' }))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Writer' }))
       await waitFor(() => expect(readCurrentSessionState()?.messages.some(message => message.content === 'do work')).toBe(true))
     } finally {
       hoisted.saveSessionToDBGate.value = null
@@ -6468,47 +6270,6 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { reopened.unmount() }
   })
 
-  it('keeps the current team message visible after its last member is removed', async () => {
-    const lead: ChatSession = {id:'last-member-lead',title:'Lead',messages:[],profileId:'base-model'}
-    const alice: ChatSession = {id:'last-member-alice',title:'Alice',messages:[],teamLeadId:lead.id,teamMemberName:'Alice'}
-    const bob: ChatSession = {id:'last-member-bob',title:'Bob',messages:[],teamLeadId:lead.id,teamMemberName:'Bob'}
-    hoisted.storedSessions.value = [lead, alice, bob]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID,'runtime-flow'),lead.id)
-    const intent = {id:'last-member-message',source:{scope:'runtime-flow',thread:'runtime-pane',lead:lead.id,member:alice.id},kind:'message',hop:1,recipient:bob.id,text:'last member activity'}
-    let queued = true
-    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({intents:queued ? [intent] : []}))
-    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {queued = false; return {intent}})
-    const page = renderChatPage({team:true})
-    try {
-      fireEvent.click(await screen.findByRole('button', { name: '展开 Bob 详情' }))
-      expect(await screen.findByText(/Alice → Bob · 已收到响应（不代表送达）.*last member activity/)).toBeVisible()
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
-      await act(async () => window.dispatchEvent(new CustomEvent('chat:deleteSession', { detail: { scope:'runtime-flow', sessionId:bob.id } })))
-      await waitFor(() => expect(screen.queryByRole('button', { name: '展开 Bob 详情' })).not.toBeInTheDocument())
-      fireEvent.click(screen.getByRole('button', { name: '展开 Alice 详情' }))
-      expect(screen.getByText(/Alice → last-member-bob · 已收到响应（不代表送达）.*last member activity/)).toBeVisible()
-      await act(async () => window.dispatchEvent(new CustomEvent('chat:deleteSession', { detail: { scope:'runtime-flow', sessionId:alice.id } })))
-      await waitFor(() => expect(screen.queryByRole('button', { name: '展开 Alice 详情' })).not.toBeInTheDocument())
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
-      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-      const area = screen.getByRole('region', { name: '进程区' })
-      fireEvent.click(within(area).getByText('其他团队消息'))
-      expect(within(area).getByText(/last-member-alice → last-member-bob · 已收到响应（不代表送达）.*last member activity/)).toBeVisible()
-      const route = { channel:'canvas', scopeType:'thread', scopeId:'runtime-project', threadId:'runtime-pane' } as const
-      const ui = (active: boolean) => <MemoryRouter><ThemeProvider theme={theme}><ChatPage compact active={active} storageScope="runtime-flow" route={route} /></ThemeProvider></MemoryRouter>
-      page.rerender(ui(false))
-      expect(screen.queryByText(/last member activity/)).not.toBeInTheDocument()
-      page.rerender(ui(true))
-      const restoredArea = screen.getByRole('region', { name: '进程区' })
-      fireEvent.click(within(restoredArea).getByText('其他团队消息'))
-      expect(within(restoredArea).getByText(/last-member-alice → last-member-bob · 已收到响应（不代表送达）.*last member activity/)).toBeVisible()
-      page.rerender(<MemoryRouter><ThemeProvider theme={theme}><ChatPage compact active storageScope="other-scope" route={route} /></ThemeProvider></MemoryRouter>)
-      expect(screen.queryByText(/last member activity/)).not.toBeInTheDocument()
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
-      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { page.unmount() }
-  })
-
   it('records an invalid recipient as not sent without a model request', async () => {
     const lead: ChatSession = {id:'missing-lead',title:'Lead',messages:[],profileId:'base-model'}
     const alice: ChatSession = {id:'alice',title:'Alice',messages:[],teamLeadId:lead.id,teamMemberName:'Alice'}
@@ -6520,9 +6281,8 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {queued = false; return {intent}})
     const page = renderChatPage({team:true})
     try {
-      const area = await screen.findByRole('region', { name: '进程区' })
-      fireEvent.click(within(area).getByRole('button', { name: '展开 Alice 详情' }))
-      expect(await within(area).findByText(/Alice → missing-bob · 状态未确认/)).toBeVisible()
+      await waitFor(() => expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalled())
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
     } finally { page.unmount() }
@@ -6699,7 +6459,7 @@ describe('ChatPage runtime workflow integration', () => {
       pending = input
       return new Promise(resolve => { finish = resolve })
     })
-    const page = renderChatPage({ team: true })
+    const page = renderChatPage({ team: true, rows: true })
     let release!: () => void
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
@@ -6722,7 +6482,7 @@ describe('ChatPage runtime workflow integration', () => {
       await act(async () => { release() })
       await expect(inFlightSave).rejects.toThrow('Session lifecycle changed')
       expect(hoisted.storedSessions.value.find(session => session.id === member.id)).toMatchObject({ archived: true, teamLifecycleRevision: 1 })
-      expect(screen.queryByRole('button', { name: '打开 Writer' })).not.toBeInTheDocument()
+      expect(teamRows().queryByRole('button', { name: 'Writer' })).not.toBeInTheDocument()
     } finally {
       hoisted.saveSessionToDBGate.value = null
       release?.()
@@ -6948,7 +6708,7 @@ describe('ChatPage runtime workflow integration', () => {
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
     let release!: () => void
     const gate = {gate:new Promise<void>(resolve => { release = resolve }),entered:false}
-    const page = renderChatPage({team:true})
+    const page = renderChatPage({ team: true, rows: true })
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       hoisted.teamPreflightReadGate.value = gate
@@ -6957,10 +6717,10 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(gate.entered).toBe(true))
       if (change === 'edit') fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {target:{value:'newer draft'}})
       else {
-        fireEvent.click(screen.getByRole('button', {name:'打开 writer'}))
+        fireEvent.click(teamRows().getByRole('button', { name: 'writer' }))
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
         if (change === 'switch-back') {
-          fireEvent.click(screen.getByRole('button', {name:/返回组长/}))
+          fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
           await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
           await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('@writer first version'))
         }
@@ -6973,7 +6733,7 @@ describe('ChatPage runtime workflow integration', () => {
       if (change === 'edit') expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('newer draft')
       else {
         if (change === 'switch') {
-          fireEvent.click(screen.getByRole('button', {name:/返回组长/}))
+          fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
           await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
         }
         await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('@writer first version'))
