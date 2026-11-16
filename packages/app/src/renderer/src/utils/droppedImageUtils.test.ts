@@ -43,6 +43,7 @@ import {
   UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE
 } from './droppedImageUtils'
 import { DEFAULT_PARAMS } from '@renderer/pages/ChatPage/hy3d/types'
+import { setAgentAttachmentDragPayload } from '@renderer/pages/ChatPage/chatDragData'
 
 const createDataTransfer = (data: Record<string, string>, files: File[] = []) =>
   ({
@@ -297,6 +298,44 @@ describe('droppedImageUtils', () => {
         reportBundleLabel: 'Canvas Check'
       }
     ])
+  })
+
+  it('keeps the MAIN binding of a report dragged from a bubble', () => {
+    const binding = `rb1.${'D'.repeat(43)}`
+    const report = {
+      type: 'file' as const,
+      url: 'local-media:///C:/demo/report.md',
+      fileName: 'report.md',
+      mimeType: 'text/markdown',
+      reportBundleId: 'bundle-1',
+      reportBundleRole: 'primary-report' as const,
+      reportBundleRefName: 'report.md',
+      reportBundleManifestUrl: 'local-media:///C:/demo/manifest.json',
+      reportBundleLabel: 'Canvas Check',
+      reportBundleBinding: binding
+    }
+    const data: Record<string, string> = {}
+    setAgentAttachmentDragPayload(
+      { setData: (type: string, value: string) => void (data[type] = value), effectAllowed: 'all' },
+      report
+    )
+    for (const transfer of [createDataTransfer(data), createDataTransfer({ 'text/plain': data['text/plain'] })]) {
+      expect(parseInternalImageDragPayload(transfer)?.attachments?.[0]).toEqual({
+        ...report,
+        sizeBytes: undefined,
+        ocrResult: undefined
+      })
+    }
+    // Only a string is carried; anything else is dropped like the other report fields.
+    const malformed = parseInternalImageDragPayload(
+      createDataTransfer({
+        [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
+          itemTypes: ['file'],
+          attachments: [{ ...report, reportBundleBinding: { forged: true } }]
+        })
+      })
+    )
+    expect(malformed?.attachments?.[0]).not.toHaveProperty('reportBundleBinding')
   })
 
   it('parses OCR result metadata from internal drag payloads when provided', () => {

@@ -5562,7 +5562,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
                         },
                         customEvent.detail.modelName,
                         {
-                          skillId: session.skillId
+                          skillId: session.skillId,
+                          // The canvas report producer posts here with the binding MAIN
+                          // issued for this conversation; it is the only trusted source.
+                          keepReportBundleBindings: true
                         }
                       )
                     : {

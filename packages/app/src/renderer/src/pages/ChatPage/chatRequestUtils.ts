@@ -1824,8 +1824,10 @@ const normalizeResponse = (response: {
   usage?: Record<string, unknown>
   finishReason?: LLMChatStreamResp['finishReason']
 }): RequestChatCompletionResult => {
+  // A report binding is issued by MAIN to the canvas producer only; one that arrives in a
+  // model, tool or remote reply is never trusted and is not kept.
   const normalizedAttachments = normalizeAttachmentOcrResults(
-    response.attachments,
+    withoutReportBundleBindings(response.attachments),
     response.ocrResult
   )
   const imageAttachments = response.imageUrl?.trim()

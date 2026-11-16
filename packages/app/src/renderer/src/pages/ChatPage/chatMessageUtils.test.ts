@@ -649,3 +649,31 @@ describe('buildAssistantMessageFromResponse', () => {
     })
   })
 })
+
+describe('report bundle bindings in assistant results', () => {
+  const binding = `rb1.${'E'.repeat(43)}`
+  const primary = {
+    type: 'file' as const,
+    url: 'local-media:///bundle/report.md',
+    fileName: 'report.md',
+    reportBundleId: 'bundle-1',
+    reportBundleRole: 'primary-report' as const,
+    reportBundleBinding: binding
+  }
+
+  it('drops a binding that arrives in a model or tool reply', () => {
+    const message = buildAssistantMessageFromResult({ content: 'reply', attachments: [primary] })
+    const { reportBundleBinding: _binding, ...unbound } = primary
+    expect(message.attachments).toEqual([unbound])
+    expect(JSON.stringify(message)).not.toContain(binding)
+  })
+
+  it('keeps the binding of the canvas producer message only when asked to', () => {
+    const message = buildAssistantMessageFromResult(
+      { content: 'canvas report', attachments: [primary] },
+      'control-model',
+      { keepReportBundleBindings: true }
+    )
+    expect(message.attachments).toEqual([primary])
+  })
+})

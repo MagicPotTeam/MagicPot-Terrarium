@@ -290,6 +290,11 @@ const parsePayload = (raw: string): InternalImageDragPayload | null => {
                 typeof (attachment as ChatAttachment).reportBundleLabel === 'string'
                   ? (attachment as ChatAttachment).reportBundleLabel
                   : undefined,
+              // A report dragged from a bubble into the composer of the same conversation keeps
+              // its MAIN binding; MAIN still checks it against the conversation and the files.
+              ...(typeof (attachment as ChatAttachment).reportBundleBinding === 'string'
+                ? { reportBundleBinding: (attachment as ChatAttachment).reportBundleBinding }
+                : {}),
               ...(isPlainRecord((attachment as ChatAttachment).metadata)
                 ? { metadata: { ...(attachment as ChatAttachment).metadata } }
                 : {})

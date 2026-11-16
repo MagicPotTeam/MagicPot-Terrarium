@@ -204,3 +204,26 @@ describe('registered report bundles in ChatPage (MAIN verify before the draft is
     expect(stored.messages.some((message: { content?: string }) => message.content === 'Queued follow-up')).toBe(false)
   })
 })
+
+describe('where a report binding may come from', () => {
+  const binding = `rb1.${'F'.repeat(43)}`
+  const boundPrimary = report({ reportBundleId: 'bundle-1', reportBundleManifestUrl: 'local-media:///synthetic/manifest.json', reportBundleBinding: binding })
+  const storedMessages = () => JSON.parse(screen.getByTestId('session').textContent || 'null')?.messages as ChatSession['messages']
+
+  it('stores a model reply attachment without the binding it carried', async () => {
+    await setup([])
+    f.request.mockResolvedValue({ content: 'model reply', attachments: [boundPrimary] })
+    fireEvent.click(screen.getByTestId('send'))
+    await waitFor(() => expect(storedMessages().some(message => message.role === 'assistant' && message.content.includes('model reply'))).toBe(true))
+    const reply = storedMessages().findLast(message => message.role === 'assistant')
+    expect(reply?.attachments?.some(attachment => attachment.reportBundleRole === 'primary-report')).toBe(true)
+    expect(JSON.stringify(storedMessages())).not.toContain(binding)
+  })
+
+  it('keeps the binding on the canvas producer message appended to this conversation', async () => {
+    await setup([])
+    act(() => { window.dispatchEvent(new CustomEvent('chat:append-message', { detail: { scope, sessionId: 'fixture-session', role: 'assistant', content: 'canvas report', attachments: [boundPrimary] } })) })
+    await waitFor(() => expect(storedMessages()).toHaveLength(1))
+    expect(storedMessages()[0].attachments).toEqual([boundPrimary])
+  })
+})

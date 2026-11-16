@@ -565,6 +565,15 @@ export const normalizeChatToolHistory = (value: unknown): ChatMessage['toolHisto
   return records.length ? records : undefined
 }
 
+const hasReportBundleBinding = (attachment: ChatAttachment): boolean =>
+  'reportBundleBinding' in attachment
+
+const withoutReportBundleBinding = (attachment: ChatAttachment): ChatAttachment => {
+  if (!hasReportBundleBinding(attachment)) return attachment
+  const { reportBundleBinding: _binding, ...rest } = attachment
+  return rest
+}
+
 export const buildAssistantMessageFromResult = (
   result: {
     content?: string
@@ -576,8 +585,17 @@ export const buildAssistantMessageFromResult = (
   modelName?: string,
   options?: {
     skillId?: string | null
+    /**
+     * Keep `reportBundleBinding` on attachments. Only for the canvas report producer's own
+     * appended message, which carries the binding MAIN issued when it sealed the bundle. A
+     * binding that arrives in model, tool or provider output is never trusted and is dropped.
+     */
+    keepReportBundleBindings?: boolean
   }
 ): ChatMessage => {
+  if (!options?.keepReportBundleBindings && result.attachments?.some(hasReportBundleBinding)) {
+    result = { ...result, attachments: result.attachments.map(withoutReportBundleBinding) }
+  }
   const toolHistory = normalizeChatToolHistory(result.toolHistory ?? result.metadata?.toolHistory)
   if (options?.skillId === BUILT_IN_TAGGING_SKILL_ID) {
     const taggingMessage = buildBuiltInTaggingAssistantMessage(result, modelName)
