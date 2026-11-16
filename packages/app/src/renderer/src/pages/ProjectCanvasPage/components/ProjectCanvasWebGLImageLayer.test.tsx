@@ -794,26 +794,28 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     })
 
     // Three images whose decodes (2048 x 2048, 16 MiB each) finish in the same task.
-    const renderThreeLargeDecodes = async (side = 2048) => {
+    const renderThreeLargeDecodes = async (side = 2048, count = 3) => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
-      const pending = [deferredBitmap(), deferredBitmap(), deferredBitmap()]
+      const pending = Array.from({ length: count }, () => deferredBitmap())
       const bitmaps = pending.map(() => createBitmap(side, side))
       let decodeIndex = 0
       vi.stubGlobal(
         'createImageBitmap',
         vi.fn(() => pending[Math.min(decodeIndex++, pending.length - 1)].promise)
       )
-      const items = ['large-a', 'large-b', 'large-c'].map((id, index) =>
-        localSourceItem({
-          id,
-          src: `local-media:///C:/images/${id}.png`,
-          x: 24 + index * 260,
-          sourceWidth: side,
-          sourceHeight: side
-        })
+      const items = Array.from({ length: count }, (_, index) => `large-${index + 1}`).map(
+        (id, index) =>
+          localSourceItem({
+            id,
+            src: `local-media:///C:/images/${id}.png`,
+            x: 24 + (index % 4) * 260,
+            y: 24 + Math.floor(index / 4) * 260,
+            sourceWidth: side,
+            sourceHeight: side
+          })
       )
       const utils = render(<Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
-      await waitFor(() => expect(decodeIndex).toBe(3))
+      await waitFor(() => expect(decodeIndex).toBe(count))
       const app = createdApplications[0]
       const uploadFrames: number[] = []
       let displayFrame = 0
@@ -894,6 +896,34 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       await waitFor(() => expect(eagerTextureUploads).toHaveLength(3))
       expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
       expect(new Set(uploadFrames).size).toBe(1)
+    })
+
+    it('spreads a burst of small uploads over display frames by bytes', async () => {
+      // Six 4 MiB textures from one pass: 16 MiB go up in the first frame, the rest in the next.
+      const { items, bitmaps, uploadFrames } = await renderThreeLargeDecodes(1024, 6)
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(6))
+      expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
+      const uploadsPerFrame = new Map<number, number>()
+      uploadFrames.forEach((frame) =>
+        uploadsPerFrame.set(frame, (uploadsPerFrame.get(frame) ?? 0) + 1)
+      )
+      expect([...uploadsPerFrame.values()]).toEqual([4, 2])
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+    })
+
+    it('waits for the previous frame of small uploads to finish on the GPU', async () => {
+      mockWebGLFences = true
+      const { items, settle } = await renderThreeLargeDecodes(1024, 6)
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(4))
+      await settle(250)
+      // One fence covers the whole first frame of uploads; the rest waits for it.
+      expect(eagerTextureUploads).toHaveLength(4)
+      expect(createdWebGLFences).toHaveLength(1)
+      createdWebGLFences[0].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(6))
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
     })
 
     it('moves, re-layers and rotates an image whose large upload is held back', async () => {
