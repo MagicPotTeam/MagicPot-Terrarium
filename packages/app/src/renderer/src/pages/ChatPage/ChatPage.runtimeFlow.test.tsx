@@ -8342,8 +8342,10 @@ describe('ChatPage runtime workflow integration', () => {
     }
 
     // The drop reads its blob: URL inside the managed-media import (b86546df), a few microtasks
-    // after the drop event: wait until that read is in flight before changing the destination.
-    const beginBlobDrop = async () => {
+    // after the drop event: by default wait until that read is in flight before changing the
+    // destination. With { beforeRead: true } return right after the drop event instead, so the
+    // test can change the destination in the window before the read starts.
+    const beginBlobDrop = async ({ beforeRead = false }: { beforeRead?: boolean } = {}) => {
       let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
       const readAsDataURL = vi.fn()
       vi.stubGlobal(
@@ -8376,7 +8378,12 @@ describe('ChatPage runtime workflow integration', () => {
           getData: (type: string) => (type === 'application/x-qapp-image' ? payload : '')
         }
       })
-      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop'))
+      if (beforeRead) {
+        // Nothing has been read yet: the destination change happens before the fetch starts.
+        expect(fetchMock).not.toHaveBeenCalled()
+      } else {
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop'))
+      }
       return async () => {
         await act(async () => {
           releaseFetch({
@@ -8384,7 +8391,18 @@ describe('ChatPage runtime workflow integration', () => {
             blob: async () => new Blob(['canvas'], { type: 'image/png' })
           })
         })
+        if (beforeRead && fetchMock.mock.calls.length === 0) {
+          // A drop discarded before its read may never fetch: let it settle instead.
+          await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 20))
+          })
+          return
+        }
         await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+        // Let the import that follows the read settle before the caller asserts the outcome.
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        })
       }
     }
 
@@ -8436,6 +8454,39 @@ describe('ChatPage runtime workflow integration', () => {
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
         startEditing(originalReceiver)
         const finishDrop = await beginBlobDrop()
+
+        act(() => {
+          editingProps().onSetEditingIndex(null)
+          editingProps().onSetEditingContent('')
+          editingProps().onRegisterEditingAttachmentReceiver(null)
+        })
+        if (change !== 'cancel') {
+          act(() => {
+            editingProps().onSetEditingIndex(change === 'another edit' ? 2 : 0)
+            editingProps().onRegisterEditingAttachmentReceiver(
+              change === 'another edit' ? nextReceiver : originalReceiver
+            )
+          })
+        }
+        await finishDrop()
+
+        expect(originalReceiver).not.toHaveBeenCalled()
+        expect(nextReceiver).not.toHaveBeenCalled()
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
+    it.each(['cancel', 'another edit', 'edit round trip'])(
+      'discards the old internal drop after %s before its blob read starts',
+      async (change) => {
+        const originalReceiver = vi.fn()
+        const nextReceiver = vi.fn()
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        startEditing(originalReceiver)
+        const finishDrop = await beginBlobDrop({ beforeRead: true })
 
         act(() => {
           editingProps().onSetEditingIndex(null)
@@ -8536,6 +8587,37 @@ describe('ChatPage runtime workflow integration', () => {
         expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       }
     )
+
+    it.each(['switch', 'session round trip'])(
+      'discards the old internal drop after a %s before its blob read starts',
+      async (change) => {
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        const finishDrop = await beginBlobDrop({ beforeRead: true })
+
+        await dispatchSwitchSession('drop-session-b')
+        if (change === 'session round trip') await dispatchSwitchSession('drop-session-a')
+        await finishDrop()
+
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
+    it('discards an internal drop when the ChatPage unmounts before its blob read starts', async () => {
+      const receiveAttachment = vi.fn()
+      const { unmount } = renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(receiveAttachment)
+      const finishDrop = await beginBlobDrop({ beforeRead: true })
+
+      unmount()
+      await finishDrop()
+
+      expect(receiveAttachment).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
 
     it('discards a delayed ordinary file import after switching sessions away and back', async () => {
       let finishImport!: () => void
