@@ -37,7 +37,9 @@ export default function RendererRecoveryNotice(): React.JSX.Element | null {
       >
         <AlertTitle>{t('app_shell.renderer_recovery.title')}</AlertTitle>
         <Box component="span" sx={{ display: 'block' }}>
-          {t('app_shell.renderer_recovery.body')}
+          {/* A message being sent when the renderer died can be missing: the text asks the user to
+              check it. After a hang the user chose the reload, so it is not called unexpected. */}
+          {t(recovery.reason === 'unresponsive' ? 'app_shell.renderer_recovery.body_unresponsive' : 'app_shell.renderer_recovery.body')}
         </Box>
         <Typography component="span" variant="caption" sx={{ display: 'block', mt: 0.5, opacity: 0.85 }}>
           {t('app_shell.renderer_recovery.details', {

@@ -49,8 +49,8 @@ describe('RendererRecoveryNotice', () => {
   })
 
   it.each([
-    ['zh-CN', '窗口已重新启动', '没有自动重新发送', '知道了'],
-    ['en-US', 'The window was restarted', 'has not been resent', 'Dismiss']
+    ['zh-CN', '窗口已重新启动', '没有任何内容被自动重新发送', '知道了'],
+    ['en-US', 'The window was restarted', 'nothing was resent', 'Dismiss']
   ] as const)(
     'stays visible after a recovery until dismissed (%s)',
     async (language, title, notResent, dismiss) => {
@@ -80,6 +80,40 @@ describe('RendererRecoveryNotice', () => {
       }
     }
   )
+
+  it.each([
+    ['zh-CN', '请确认你最后发送的消息仍在对话中', '意外停止', '按你的选择', /草稿/],
+    ['en-US', 'check that your last message is in the conversation', 'stopped unexpectedly', 'as you asked', /draft/i]
+  ] as const)(
+    'asks the user to check the last message and never claims drafts are kept; a hang reload is not called unexpected (%s)',
+    async (language, checkLastMessage, unexpected, asYouAsked, draftClaim) => {
+      const crashed = await renderNotice(language)
+      act(() => crashed.listeners[0]?.({ reason: 'oom', exitCode: -536870904, diedAt: Date.now() }))
+      const notice = screen.getByTestId('renderer-recovery-notice')
+      expect(notice).toHaveTextContent(checkLastMessage)
+      expect(notice).toHaveTextContent(unexpected)
+      expect(notice.textContent).not.toMatch(draftClaim)
+      crashed.view.unmount()
+
+      const hung = await renderNotice(language)
+      act(() => hung.listeners[0]?.({ reason: 'unresponsive', exitCode: 0, diedAt: Date.now() }))
+      const hangNotice = screen.getByTestId('renderer-recovery-notice')
+      expect(hangNotice).toHaveTextContent(asYouAsked)
+      expect(hangNotice).toHaveTextContent(checkLastMessage)
+      expect(hangNotice).not.toHaveTextContent(unexpected)
+      expect(hangNotice.textContent).not.toMatch(draftClaim)
+    }
+  )
+
+  it('keeps both texts short in both languages: at most two sentences each', () => {
+    for (const locale of [zh, en]) {
+      const texts = locale.app_shell.renderer_recovery
+      for (const text of [texts.body, texts.body_unresponsive]) {
+        expect(text.split(/[。.!?！？]/).filter((part) => part.trim()).length).toBeLessThanOrEqual(2)
+        expect(text.length).toBeLessThanOrEqual(locale === zh ? 60 : 150)
+      }
+    }
+  })
 
   it('renders without the bridge (tests, browser preview)', () => {
     delete (window as unknown as { appEvents?: unknown }).appEvents

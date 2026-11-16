@@ -2490,7 +2490,8 @@
   "app_shell": {
     "renderer_recovery": {
       "title": "The window was restarted",
-      "body": "The display process stopped unexpectedly, so the window was reloaded. If a reply was being generated, it was interrupted and has not been resent. Your drafts are kept.",
+      "body": "The window stopped unexpectedly and was reloaded; nothing was resent. Please check that your last message is in the conversation.",
+      "body_unresponsive": "The window was not responding and was reloaded as you asked; nothing was resent. Please check that your last message is in the conversation.",
       "details": "Reason: {{reason}} · exit code {{exitCode}} · {{time}}",
       "dismiss": "Dismiss"
     },
