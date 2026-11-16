@@ -1055,6 +1055,13 @@ const watchTeamDispatch = () => {
   }
 }
 
+/**
+ * What the member form (AgentTeamMemberForm, opened from "+" > 添加成员 since a0384d0a, in the
+ * column overlay since 83165777) says when a create fails: the create may have committed, so it
+ * is reported as unconfirmed, not as refused.
+ */
+const MEMBER_CREATE_UNCONFIRMED = '创建结果未确认；请先核对原团队成员列表。没有记录不代表未创建；未确认前请勿重复创建。'
+
 const storedMessages = (id: string) => hoisted.storedSessions.value.find(session => session.id === id)?.messages ?? []
 
 const renderChatPage = (
@@ -6365,7 +6372,7 @@ describe('ChatPage runtime workflow integration', () => {
       const committedCreate = vi.mocked(createTeamMemberInDB).mock.results[0].value
       await expect(committedCreate).rejects.toThrow('Team changed')
       // End unmounts the creation form; it must not resurrect its old error UI.
-      expect(screen.queryByText('无法创建：请检查唯一成员名、范围或并发上限。')).not.toBeInTheDocument()
+      expect(screen.queryByText(MEMBER_CREATE_UNCONFIRMED)).not.toBeInTheDocument()
       expect(hoisted.storedSessions.value.some(session=>session.teamMemberName==='waiting' && !session.archived)).toBe(false)
       expect(screen.queryByRole('button',{name:/waiting.*空闲/})).toBeNull()
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
@@ -6428,7 +6435,8 @@ describe('ChatPage runtime workflow integration', () => {
     fireEvent.change(screen.getByLabelText('成员名'),{target:{value:'waiting'}})
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'),{target:{value:'do work'}})
     fireEvent.click(screen.getByRole('button',{name:'确认创建成员'}))
-    expect(await screen.findByText('无法创建：请检查唯一成员名、范围或并发上限。')).toBeVisible()
+    expect(await screen.findByRole('alert')).toHaveTextContent(MEMBER_CREATE_UNCONFIRMED)
+    expect(within(screen.getByTestId('agent-team-member-form')).getByRole('alert')).toBeVisible()
     expect(screen.getByLabelText('成员名')).toHaveValue('waiting')
     expect(screen.getByLabelText('角色 / 当前任务')).toHaveValue('do work')
     expect(create).toHaveBeenCalledTimes(1)
@@ -8324,7 +8332,9 @@ describe('ChatPage runtime workflow integration', () => {
       }
     }
 
-    const beginBlobDrop = () => {
+    // The drop reads its blob: URL inside the managed-media import (b86546df), a few microtasks
+    // after the drop event: wait until that read is in flight before changing the destination.
+    const beginBlobDrop = async () => {
       let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
       const readAsDataURL = vi.fn()
       vi.stubGlobal(
@@ -8357,7 +8367,7 @@ describe('ChatPage runtime workflow integration', () => {
           getData: (type: string) => (type === 'application/x-qapp-image' ? payload : '')
         }
       })
-      expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop')
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop'))
       return async () => {
         await act(async () => {
           releaseFetch({
@@ -8375,7 +8385,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
       startEditing(receiveAttachment)
 
-      const finishDrop = beginBlobDrop()
+      const finishDrop = await beginBlobDrop()
       await finishDrop()
 
       expect(receiveAttachment).toHaveBeenCalledWith(
@@ -8398,7 +8408,7 @@ describe('ChatPage runtime workflow integration', () => {
       )
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
 
-      const finishDrop = beginBlobDrop()
+      const finishDrop = await beginBlobDrop()
       await finishDrop()
 
       expect(screen.getByTestId('chat-composer-attachment-names')).toHaveTextContent(
@@ -8416,7 +8426,7 @@ describe('ChatPage runtime workflow integration', () => {
         renderChatPage()
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
         startEditing(originalReceiver)
-        const finishDrop = beginBlobDrop()
+        const finishDrop = await beginBlobDrop()
 
         act(() => {
           editingProps().onSetEditingIndex(null)
@@ -8506,7 +8516,7 @@ describe('ChatPage runtime workflow integration', () => {
       async (change) => {
         renderChatPage()
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
-        const finishDrop = beginBlobDrop()
+        const finishDrop = await beginBlobDrop()
 
         await dispatchSwitchSession('drop-session-b')
         if (change === 'session round trip') await dispatchSwitchSession('drop-session-a')
@@ -8625,7 +8635,7 @@ describe('ChatPage runtime workflow integration', () => {
       const { unmount } = renderChatPage()
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
       startEditing(receiveAttachment)
-      const finishDrop = beginBlobDrop()
+      const finishDrop = await beginBlobDrop()
 
       unmount()
       await finishDrop()
@@ -8641,7 +8651,7 @@ describe('ChatPage runtime workflow integration', () => {
       )
       const { rerender } = renderChatPage()
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
-      const finishDrop = beginBlobDrop()
+      const finishDrop = await beginBlobDrop()
       const changeScope = (scope: string) =>
         rerender(
           <MemoryRouter>
