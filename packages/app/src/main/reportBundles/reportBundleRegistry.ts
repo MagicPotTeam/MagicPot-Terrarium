@@ -20,8 +20,16 @@
  * conversations, imports, drags, model or tool replies). It does not protect against a
  * compromised renderer, which can already read every local-media root (userData included,
  * so it can read registry.json and the snapshots; bindings cannot be derived from them).
- * Residual risk: verify checks the files, then the renderer reads the primary and the images
- * from the original bundle directory; a file swapped in that window is sent.
+ * Residual risks: verify checks the files, then the renderer reads the primary and the images
+ * from the original bundle directory; a file swapped in that window is sent. A local process
+ * can rewrite a file in place and restore its size and times (on Windows even its change
+ * time); that is outside the threat model. Volumes without a change time (FAT/exFAT) refuse
+ * every registration (fail closed). Two app instances on one userData would each keep their
+ * own registry and the last writer wins (the app takes no single-instance lock).
+ *
+ * Durability: registry.json is never replaced by a registry that could not read it. A
+ * transient read error is retried (and merged) before any write; unusable content is moved
+ * aside as registry.json.unreadable-*; a registry of a newer version is left untouched.
  *
  * Importing this module touches no app path; initializeReportBundleRegistry does.
  */
@@ -52,21 +60,28 @@ import type {
 import { hasLocalMediaTraversal } from '../localMediaAccess'
 
 export const REPORT_BUNDLE_TICKET_TTL_MS = 10 * 60_000
-/** File-system timestamps can lag the wall clock (coarse kernel clocks, FAT/exFAT granularity). */
-export const REPORT_BUNDLE_CTIME_TOLERANCE_MS = 2_000
+/**
+ * File-system change times lag the wall clock by up to one coarse clock tick (Linux jiffies,
+ * the Windows system timer: well under 20 ms). The margin stays small so that a file written
+ * before beginReportBundle (a producer ordering bug, or a legacy file) is refused.
+ */
+export const REPORT_BUNDLE_CTIME_TOLERANCE_MS = 250
 export const REPORT_BUNDLE_MAX_MANIFEST_BYTES = 256 * 1024
 export const REPORT_BUNDLE_MAX_RECORDS = 2_000
 export const REPORT_BUNDLE_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 const MAX_OUTSTANDING_TICKETS = 64
 const REGISTRY_VERSION = 1
 const REGISTRY_FLUSH_DELAY_MS = 250
-const MAX_REGISTRY_FILE_BYTES = 64 * 1024 * 1024
+export const REPORT_BUNDLE_MAX_REGISTRY_BYTES = 64 * 1024 * 1024
+/** A snapshot directory without a record is removed at startup once it is older than this. */
+const ORPHAN_SNAPSHOT_GRACE_MS = 10 * 60_000
 const MAX_MANIFEST_NAME_CHARS = 1024
 const MAX_MANIFEST_TITLE_CHARS = 4096
 const MAX_BUNDLE_NAME_CHARS = 255
 const READ_CHUNK_BYTES = 1024 * 1024
 const SNAPSHOT_DIR_NAME = 'report-bundles'
 const REGISTRY_FILE_NAME = 'registry.json'
+const UNREADABLE_REGISTRY_SUFFIX = '.unreadable-'
 const SNAPSHOT_MANIFEST_NAME = 'manifest.json'
 const REFUSED_MESSAGE = 'Report bundle registration refused.'
 const SHA256_HEX = /^[a-f0-9]{64}$/
@@ -123,8 +138,16 @@ type RegistryState = {
   now: () => number
   maxRecords: number
   flushDelayMs: number
+  maxRegistryBytes: number
   records: Map<string, RegistryRecord>
   tickets: Map<string, WriteTicket>
+  /**
+   * 'ok': registry.json was read (or did not exist) and may be rewritten.
+   * 'retry': it could not be read (a transient I/O error); it is read again and merged before
+   * any write, and nothing overwrites it until that succeeds.
+   * 'locked': it was written by a newer app version; it is never overwritten.
+   */
+  loadState: 'ok' | 'retry' | 'locked'
   dirty: boolean
   flushTimer: ReturnType<typeof setTimeout> | null
 }
@@ -134,6 +157,7 @@ export type ReportBundleRegistryOptions = {
   now?: () => number
   maxRecords?: number
   flushDelayMs?: number
+  maxRegistryBytes?: number
 }
 
 let state: RegistryState | null = null
@@ -252,54 +276,169 @@ function parsePersistedRecord(value: unknown): RegistryRecord | null {
   }
 }
 
-function loadRecords(current: RegistryState): void {
+type RegistryReadOutcome =
+  | { kind: 'ok'; records: RegistryRecord[]; fromFile: boolean }
+  | { kind: 'retry' }
+  | { kind: 'locked' }
+
+/**
+ * Moves a registry file this app cannot use aside instead of ever overwriting it, so that its
+ * bindings stay recoverable. Returns false when it could not be moved.
+ */
+function quarantineRegistryFile(registryPath: string): boolean {
+  const aside = `${registryPath}${UNREADABLE_REGISTRY_SUFFIX}${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
+  try {
+    fs.renameSync(registryPath, aside)
+    console.warn('[ReportBundles] Moved an unreadable registry aside; starting empty.')
+    return true
+  } catch {
+    console.warn('[ReportBundles] Could not move an unreadable registry aside.')
+    return false
+  }
+}
+
+/**
+ * Reads registry.json. Never returns 'ok' with fewer records than the file holds unless the
+ * file was moved aside (unusable content) or does not exist: a transient read error is
+ * 'retry', a registry of a newer version is 'locked'.
+ */
+function readRegistryFile(registryPath: string, maxBytes: number): RegistryReadOutcome {
   let raw: string
   try {
-    const stat = fs.lstatSync(current.registryPath)
-    if (!stat.isFile() || stat.size > MAX_REGISTRY_FILE_BYTES) {
-      console.warn('[ReportBundles] Ignoring an unexpected registry file.')
-      return
+    const stat = fs.lstatSync(registryPath)
+    if (!stat.isFile() || stat.size > maxBytes) {
+      return quarantineRegistryFile(registryPath)
+        ? { kind: 'ok', records: [], fromFile: false }
+        : { kind: 'retry' }
     }
-    raw = fs.readFileSync(current.registryPath, 'utf8')
+    raw = fs.readFileSync(registryPath, 'utf8')
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.warn('[ReportBundles] Failed to read the registry; starting empty.')
-    }
-    return
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+      return { kind: 'ok', records: [], fromFile: false }
+    console.warn('[ReportBundles] Failed to read the registry; it is kept and read again later.')
+    return { kind: 'retry' }
   }
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch {
-    console.warn('[ReportBundles] The registry is not valid JSON; starting empty.')
-    return
+    parsed = undefined
   }
-  if (!isRecord(parsed) || parsed.version !== REGISTRY_VERSION || !Array.isArray(parsed.records))
-    return
+  if (
+    isRecord(parsed) &&
+    typeof parsed.version === 'number' &&
+    Number.isFinite(parsed.version) &&
+    parsed.version > REGISTRY_VERSION
+  ) {
+    console.warn('[ReportBundles] The registry was written by a newer version; it is left as is.')
+    return { kind: 'locked' }
+  }
+  if (!isRecord(parsed) || parsed.version !== REGISTRY_VERSION || !Array.isArray(parsed.records)) {
+    return quarantineRegistryFile(registryPath)
+      ? { kind: 'ok', records: [], fromFile: false }
+      : { kind: 'retry' }
+  }
   const records = parsed.records
     .map(parsePersistedRecord)
     .filter((record): record is RegistryRecord => record !== null)
-    .sort((left, right) => right.lastVerifiedAt - left.lastVerifiedAt)
-  for (const record of records) {
+  return { kind: 'ok', records, fromFile: true }
+}
+
+/**
+ * Merges records read from disk into memory. Of two records for the same bundle directory the
+ * newer registration wins; above the record cap the least recently verified are evicted.
+ */
+function applyLoadedRecords(current: RegistryState, loaded: RegistryRecord[]): void {
+  const byDir = new Map<string, RegistryRecord>()
+  for (const record of current.records.values()) byDir.set(pathKey(record.bundleDir), record)
+  const sorted = [...loaded].sort((left, right) => right.lastVerifiedAt - left.lastVerifiedAt)
+  for (const record of sorted) {
     if (current.records.has(record.bindingHash)) continue
-    if (current.records.size >= current.maxRecords) {
-      removeSnapshot(current, record.bindingHash)
+    const dirKey = pathKey(record.bundleDir)
+    const sameDir = byDir.get(dirKey)
+    if (sameDir) {
       current.dirty = true
-      continue
+      if (sameDir.createdAt >= record.createdAt) {
+        removeSnapshot(current, record.bindingHash)
+        continue
+      }
+      dropRecord(current, sameDir.bindingHash)
     }
     current.records.set(record.bindingHash, record)
+    byDir.set(dirKey, record)
+  }
+  evictOverCap(current, null)
+}
+
+/** Least recently verified first; insertion order breaks ties, so newer records go last. */
+function recordsByRecency(current: RegistryState): RegistryRecord[] {
+  return Array.from(current.records.values()).sort(
+    (left, right) => left.lastVerifiedAt - right.lastVerifiedAt
+  )
+}
+
+function evictOverCap(current: RegistryState, keepHash: string | null): void {
+  if (current.records.size <= current.maxRecords) return
+  for (const victim of recordsByRecency(current)) {
+    if (current.records.size <= current.maxRecords) break
+    if (victim.bindingHash === keepHash) continue
+    dropRecord(current, victim.bindingHash)
+    current.dirty = true
   }
 }
 
-function persistRecords(current: RegistryState): void {
-  if (!current.dirty) return
-  const payload = { version: REGISTRY_VERSION, records: Array.from(current.records.values()) }
+/** Reads a registry that could not be read at startup; false while it still cannot be. */
+function ensureLoaded(current: RegistryState): boolean {
+  if (current.loadState === 'ok') return true
+  if (current.loadState === 'locked') return false
+  const outcome = readRegistryFile(current.registryPath, current.maxRegistryBytes)
+  if (outcome.kind === 'locked') current.loadState = 'locked'
+  if (outcome.kind !== 'ok') return false
+  applyLoadedRecords(current, outcome.records)
+  current.loadState = 'ok'
+  current.dirty = true
+  return true
+}
+
+/**
+ * Serialises the records within the registry's size bound, evicting the least recently
+ * verified ones (never the newest) when the bound would be exceeded.
+ */
+function serializeRecords(current: RegistryState): string {
+  const parts = new Map<string, string>()
+  let total = 0
+  for (const record of current.records.values()) {
+    const part = JSON.stringify(record)
+    parts.set(record.bindingHash, part)
+    total += Buffer.byteLength(part, 'utf8') + 1
+  }
+  const head = `{"version":${REGISTRY_VERSION},"records":[`
+  const tail = ']}\n'
+  const overhead = Buffer.byteLength(head) + Buffer.byteLength(tail)
+  if (overhead + total > current.maxRegistryBytes) {
+    for (const victim of recordsByRecency(current)) {
+      if (overhead + total <= current.maxRegistryBytes || current.records.size <= 1) break
+      total -= Buffer.byteLength(parts.get(victim.bindingHash) ?? '', 'utf8') + 1
+      parts.delete(victim.bindingHash)
+      dropRecord(current, victim.bindingHash)
+    }
+  }
+  return `${head}${Array.from(parts.values()).join(',')}${tail}`
+}
+
+/** Writes registry.json atomically (mode 0600). Returns false when it was not written. */
+function persistRecords(current: RegistryState): boolean {
+  if (!current.dirty) return true
+  // Never replace a registry that could not be read: its bindings could never be re-issued.
+  if (!ensureLoaded(current)) return false
+  const payload = serializeRecords(current)
   const tempPath = `${current.registryPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
   try {
     fs.mkdirSync(path.dirname(current.registryPath), { recursive: true, mode: 0o700 })
-    fs.writeFileSync(tempPath, `${JSON.stringify(payload)}\n`, { mode: 0o600 })
+    fs.writeFileSync(tempPath, payload, { mode: 0o600 })
     fs.renameSync(tempPath, current.registryPath)
     current.dirty = false
+    return true
   } catch (error) {
     try {
       fs.rmSync(tempPath, { force: true })
@@ -307,6 +446,7 @@ function persistRecords(current: RegistryState): void {
       // Ignore cleanup failures after a persistence error.
     }
     console.warn('[ReportBundles] Failed to persist the registry:', (error as Error)?.name)
+    return false
   }
 }
 
@@ -320,12 +460,12 @@ function schedulePersist(current: RegistryState): void {
   current.flushTimer.unref?.()
 }
 
-function flushNow(current: RegistryState): void {
+function flushNow(current: RegistryState): boolean {
   if (current.flushTimer) {
     clearTimeout(current.flushTimer)
     current.flushTimer = null
   }
-  persistRecords(current)
+  return persistRecords(current)
 }
 
 function snapshotDirFor(current: RegistryState, bindingHash: string): string {
@@ -345,6 +485,38 @@ function dropRecord(current: RegistryState, bindingHash: string): void {
   if (current.records.delete(bindingHash)) removeSnapshot(current, bindingHash)
 }
 
+/**
+ * Removes snapshot directories that no record names (left by a crash between the snapshot
+ * write and the registry write). Runs only after registry.json was read in full and no
+ * unreadable registry was set aside, so a snapshot whose record could not be read survives.
+ */
+function sweepOrphanSnapshots(current: RegistryState): void {
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(current.snapshotRoot, { withFileTypes: true })
+  } catch {
+    return
+  }
+  if (
+    entries.some((entry) =>
+      entry.name.startsWith(`${REGISTRY_FILE_NAME}${UNREADABLE_REGISTRY_SUFFIX}`)
+    )
+  )
+    return
+  const cutoff = current.now() - ORPHAN_SNAPSHOT_GRACE_MS
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !SHA256_HEX.test(entry.name) || current.records.has(entry.name))
+      continue
+    try {
+      const stats = fs.lstatSync(path.join(current.snapshotRoot, entry.name))
+      if (stats.isDirectory() && !stats.isSymbolicLink() && stats.mtimeMs < cutoff)
+        removeSnapshot(current, entry.name)
+    } catch {
+      // Leave it for the next start.
+    }
+  }
+}
+
 /** Loads the registry after Electron's userData path is final. Never throws. */
 export function initializeReportBundleRegistry(options: ReportBundleRegistryOptions): void {
   if (state?.flushTimer) clearTimeout(state.flushTimer)
@@ -358,12 +530,23 @@ export function initializeReportBundleRegistry(options: ReportBundleRegistryOpti
       now: options.now ?? Date.now,
       maxRecords: Math.max(1, Math.floor(options.maxRecords ?? REPORT_BUNDLE_MAX_RECORDS)),
       flushDelayMs: Math.max(0, options.flushDelayMs ?? REGISTRY_FLUSH_DELAY_MS),
+      maxRegistryBytes: Math.max(
+        1024,
+        Math.floor(options.maxRegistryBytes ?? REPORT_BUNDLE_MAX_REGISTRY_BYTES)
+      ),
       records: new Map(),
       tickets: new Map(),
+      loadState: 'ok',
       dirty: false,
       flushTimer: null
     }
-    loadRecords(next)
+    const outcome = readRegistryFile(next.registryPath, next.maxRegistryBytes)
+    if (outcome.kind === 'ok') {
+      applyLoadedRecords(next, outcome.records)
+      if (outcome.fromFile) sweepOrphanSnapshots(next)
+    } else {
+      next.loadState = outcome.kind
+    }
     state = next
     if (next.dirty) flushNow(next)
   } catch (error) {
@@ -376,8 +559,13 @@ export function isReportBundleRegistryInitialized(): boolean {
   return state !== null
 }
 
+/** Writes pending changes now (for example at quit). Never throws. */
 export function flushReportBundleRegistry(): void {
-  if (state) flushNow(state)
+  try {
+    if (state) flushNow(state)
+  } catch {
+    console.warn('[ReportBundles] Failed to flush the registry.')
+  }
 }
 
 export function resetReportBundleRegistryForTest(): void {
@@ -709,6 +897,8 @@ async function registerReportBundleUnchecked(
   }
   if (!primary) return refuse('primary-count')
   if (state !== current) return refuse('not-initialised')
+  // A registry that could not be read is never replaced, so nothing can be registered into it.
+  if (!ensureLoaded(current)) return refuse('registry-unavailable')
 
   const binding = `rb1.${crypto.randomBytes(32).toString('base64url')}`
   const bindingHash = sha256Hex(binding)
@@ -740,6 +930,9 @@ async function registerReportBundleUnchecked(
   for (const record of Array.from(current.records.values())) {
     if (samePath(record.bundleDir, bundleDir)) dropRecord(current, record.bindingHash)
   }
+  // The new record is the most recent one even if the wall clock went backwards.
+  let newest = startedAt
+  for (const record of current.records.values()) newest = Math.max(newest, record.lastVerifiedAt)
   current.records.set(bindingHash, {
     bindingHash,
     bundleDir,
@@ -749,19 +942,18 @@ async function registerReportBundleUnchecked(
     images: images.map((image) => image.fingerprint),
     snapshotSha256: sha256Hex(snapshotBytes),
     createdAt: startedAt,
-    lastVerifiedAt: startedAt
+    lastVerifiedAt: newest
   })
-  while (current.records.size > current.maxRecords) {
-    let victim: RegistryRecord | null = null
-    for (const record of current.records.values()) {
-      if (!victim || record.lastVerifiedAt < victim.lastVerifiedAt) victim = record
-    }
-    if (!victim) break
-    dropRecord(current, victim.bindingHash)
-  }
-  // A lost registration would refuse the report forever: write it now, not debounced.
+  evictOverCap(current, bindingHash)
+  // A lost registration would refuse the report forever: write it now, not debounced, and
+  // never hand out a binding that is not on disk.
   current.dirty = true
-  flushNow(current)
+  if (!flushNow(current) || !current.records.has(bindingHash)) {
+    current.records.delete(bindingHash)
+    removeSnapshot(current, bindingHash)
+    current.dirty = true
+    return refuse('registry-write')
+  }
   return { binding, bundleId: ticket.bundleId, imageCount: images.length, omittedEntries }
 }
 
@@ -843,6 +1035,9 @@ async function primaryUrlMatches(record: RegistryRecord, primaryUrl: string): Pr
   const filePath = parseLocalFileUrl(primaryUrl)
   if (!filePath) return false
   try {
+    // The URL must name the file itself, not a link to it (only ancestors may be links,
+    // e.g. /var -> /private/var): a link could be retargeted after verification.
+    if (!isSingleLinkRegularFile(await fsp.lstat(filePath, { bigint: true }))) return false
     const real = path.resolve(await fsp.realpath(filePath))
     if (!samePath(real, record.primary.path)) return false
     const stats = await fsp.lstat(real, { bigint: true })
@@ -888,7 +1083,7 @@ async function verifyOne(
   if (!manifestUrl) return refused
   record.primary = primary
   record.images = images
-  record.lastVerifiedAt = current.now()
+  record.lastVerifiedAt = Math.max(record.lastVerifiedAt, current.now())
   schedulePersist(current)
   return { binding, status: 'verified', manifestUrl, imageCount: record.images.length }
 }
@@ -902,6 +1097,8 @@ export async function verifyReportBundles(
   req: VerifyReportBundlesReq
 ): Promise<VerifyReportBundlesResp> {
   const current = state
+  // Records of a registry that could not be read at startup are refused until it can be.
+  if (current?.loadState === 'retry') ensureLoaded(current)
   const distinct = new Map<string, string | null>()
   for (const item of Array.isArray(req?.items) ? req.items : []) {
     if (!isReportBundleBinding(item?.binding)) continue
@@ -965,25 +1162,40 @@ function isUnchangedSync(fingerprint: FileFingerprint): boolean {
   }
 }
 
+function boundConversationMatches(record: RegistryRecord, conversation: unknown): boolean {
+  if (typeof conversation === 'string')
+    return conversation !== '' && record.conversation.conversationId === conversation
+  if (
+    !isRecord(conversation) ||
+    typeof conversation.conversationId !== 'string' ||
+    !conversation.conversationId ||
+    (conversation.storageScope !== undefined && typeof conversation.storageScope !== 'string')
+  ) {
+    return false
+  }
+  return conversationMatches(record, {
+    conversationId: conversation.conversationId,
+    ...(typeof conversation.storageScope === 'string'
+      ? { storageScope: conversation.storageScope }
+      : {})
+  })
+}
+
 /**
  * Synchronous check for the MAIN chat boundary: the binding belongs to this conversation and
  * `primaryUrl` is the registered primary itself, either as a local-media/file URL of the
  * unchanged registered file or as a data: URL whose decoded bytes hash to the registered
  * primary. Child images are checked only by verifyReportBundles.
+ *
+ * `conversation` is either the conversation id, or `{ conversationId, storageScope? }`; pass
+ * the object so that a recorded storageScope is compared exactly as verifyReportBundles does.
  */
-export function isBoundTo(binding: unknown, conversationId: unknown, primaryUrl: unknown): boolean {
+export function isBoundTo(binding: unknown, conversation: unknown, primaryUrl: unknown): boolean {
   const current = state
-  if (
-    !current ||
-    !isReportBundleBinding(binding) ||
-    typeof conversationId !== 'string' ||
-    !conversationId ||
-    typeof primaryUrl !== 'string'
-  ) {
-    return false
-  }
+  if (!current || !isReportBundleBinding(binding) || typeof primaryUrl !== 'string') return false
+  if (current.loadState === 'retry') ensureLoaded(current)
   const record = current.records.get(sha256Hex(binding))
-  if (!record || record.conversation.conversationId !== conversationId) return false
+  if (!record || !boundConversationMatches(record, conversation)) return false
   if (primaryUrl.startsWith('data:')) {
     const bytes = decodeDataUrl(primaryUrl)
     return bytes !== null && sha256Hex(bytes) === record.primary.sha256
@@ -991,6 +1203,7 @@ export function isBoundTo(binding: unknown, conversationId: unknown, primaryUrl:
   const filePath = parseLocalFileUrl(primaryUrl)
   if (!filePath) return false
   try {
+    if (!isSingleLinkRegularFile(fs.lstatSync(filePath, { bigint: true }))) return false
     const real = path.resolve(fs.realpathSync.native(filePath))
     return samePath(real, record.primary.path) && isUnchangedSync(record.primary)
   } catch {

@@ -65,7 +65,8 @@ vi.mock('./testWindowRuntime', () => ({
   getTestWindowPolicy: vi.fn()
 }))
 
-import { net, protocol } from 'electron'
+import { app, net, protocol } from 'electron'
+import { flushReportBundleRegistry } from './reportBundles/reportBundleRegistry'
 import {
   initializeMainProcessRuntime,
   setupReadyAppRuntime,
@@ -122,6 +123,12 @@ describe('appRuntime local-media protocol helpers', () => {
     )
     expect(protocol.handle).toHaveBeenCalledWith('local-media', expect.any(Function))
     expect(order).toEqual(['grants', 'protocol'])
+  })
+
+  it('flushes the report-bundle registry when the app quits', async () => {
+    vi.mocked(app.on).mockClear()
+    await setupReadyAppRuntime()
+    expect(app.on).toHaveBeenCalledWith('will-quit', flushReportBundleRegistry)
   })
 
   it('uses the shared scoped roots for protocol requests and excludes broad artifacts', async () => {

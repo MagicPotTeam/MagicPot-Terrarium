@@ -537,6 +537,183 @@ describe('report bundle registry lifecycle', () => {
   })
 })
 
+describe('report bundle registry durability', () => {
+  const snapshotRoot = () => path.join(userData, 'report-bundles')
+  const registryPath = () => path.join(snapshotRoot(), 'registry.json')
+  const reinit = (options: { maxRecords?: number; maxRegistryBytes?: number } = {}) => {
+    resetReportBundleRegistryForTest()
+    initializeReportBundleRegistry({ userDataDir: userData, now, ...options })
+  }
+  const failRegistryReadOnce = () => {
+    const realRead = fs.readFileSync
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((
+      file: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (String(file) === registryPath() && spy.mock.calls.length === 1) {
+        throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+      }
+      return (realRead as (...args: unknown[]) => unknown)(file, ...rest)
+    }) as typeof fs.readFileSync)
+    return spy
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('never overwrites a registry it failed to read; it reads it again and merges', async () => {
+    const a = await seal('bundle-a')
+    expect((await verifyOne(a.resp.binding, a.primaryUrl)).status).toBe('verified')
+    flushReportBundleRegistry()
+
+    failRegistryReadOnce()
+    reinit()
+    const b = await seal('bundle-b')
+    vi.restoreAllMocks()
+
+    reinit()
+    expect((await verifyOne(a.resp.binding, a.primaryUrl)).status).toBe('verified')
+    expect((await verifyOne(b.resp.binding, b.primaryUrl)).status).toBe('verified')
+    expect(fs.existsSync(path.join(snapshotRoot(), sha256(a.resp.binding)))).toBe(true)
+  })
+
+  it('verifies earlier bindings once a registry that failed to load can be read', async () => {
+    const a = await seal('bundle-a')
+    flushReportBundleRegistry()
+    failRegistryReadOnce()
+    reinit()
+    expect((await verifyOne(a.resp.binding, a.primaryUrl)).status).toBe('verified')
+    expect(isBoundTo(a.resp.binding, conversation, a.primaryUrl)).toBe(true)
+  })
+
+  it('refuses a registration, and leaves the file alone, while the registry stays unreadable', async () => {
+    const a = await seal('bundle-a')
+    flushReportBundleRegistry()
+    const before = fs.readFileSync(registryPath(), 'utf8')
+    const realRead = fs.readFileSync
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((
+      file: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (String(file) === registryPath()) throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+      return (realRead as (...args: unknown[]) => unknown)(file, ...rest)
+    }) as typeof fs.readFileSync)
+    reinit()
+    await expectRegisterRefused('bundle-b', {})
+    vi.restoreAllMocks()
+    expect(fs.readFileSync(registryPath(), 'utf8')).toBe(before)
+    reinit()
+    expect((await verifyOne(a.resp.binding, a.primaryUrl)).status).toBe('verified')
+  })
+
+  it('leaves a registry of a newer version untouched and registers nothing into it', async () => {
+    await seal('bundle-a')
+    flushReportBundleRegistry()
+    const future = JSON.stringify({ version: 99, records: [{ anything: true }] })
+    fs.writeFileSync(registryPath(), future)
+    reinit()
+    await expectRegisterRefused('bundle-b', {})
+    flushReportBundleRegistry()
+    expect(fs.readFileSync(registryPath(), 'utf8')).toBe(future)
+  })
+
+  it('moves invalid or oversized registry files aside instead of replacing them', async () => {
+    const a = await seal('bundle-a')
+    flushReportBundleRegistry()
+    fs.writeFileSync(registryPath(), '{oops')
+    reinit()
+    const b = await seal('bundle-b')
+    const aside = fs
+      .readdirSync(snapshotRoot())
+      .filter((name) => name.startsWith('registry.json.unreadable-'))
+    expect(aside).toHaveLength(1)
+    expect(fs.readFileSync(path.join(snapshotRoot(), aside[0]), 'utf8')).toBe('{oops')
+    expect((await verifyOne(b.resp.binding, b.primaryUrl)).status).toBe('verified')
+    // The set-aside registry's snapshots are kept for recovery, even as apparent orphans.
+    clockOffset += 3_600_000
+    reinit()
+    expect(fs.existsSync(path.join(snapshotRoot(), sha256(a.resp.binding)))).toBe(true)
+
+    fs.rmSync(path.join(snapshotRoot(), aside[0]))
+    const big = fs.readFileSync(registryPath(), 'utf8')
+    reinit({ maxRegistryBytes: Buffer.byteLength(big) - 1 })
+    expect((await verifyOne(b.resp.binding, b.primaryUrl)).status).toBe('refused')
+    const moved = fs
+      .readdirSync(snapshotRoot())
+      .filter((name) => name.startsWith('registry.json.unreadable-'))
+    expect(moved.map((name) => fs.readFileSync(path.join(snapshotRoot(), name), 'utf8'))).toEqual([
+      big
+    ])
+  })
+
+  it('refuses the registration and hands out no binding when registry.json cannot be written', async () => {
+    const bundleDir = bundleDirFor('unwritable')
+    const { ticket } = await beginReportBundle({ bundleDir, conversation }, [root])
+    writeBundleFiles(bundleDir, 'unwritable')
+    const realRename = fs.renameSync
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(to) === registryPath()) throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+      return realRename(from, to)
+    })
+    await expect(registerReportBundle({ ticket })).rejects.toBeInstanceOf(ReportBundleRefusedError)
+    vi.restoreAllMocks()
+    const hashed = fs.readdirSync(snapshotRoot()).filter((name) => /^[a-f0-9]{64}$/.test(name))
+    expect(hashed).toEqual([])
+  })
+
+  it('keeps registry.json within its size bound by evicting the least recently verified', async () => {
+    const first = await seal('size-1')
+    flushReportBundleRegistry()
+    const oneRecord = Buffer.byteLength(fs.readFileSync(registryPath(), 'utf8'))
+    reinit({ maxRegistryBytes: oneRecord * 2 + 64 })
+    clockOffset += 100
+    const second = await seal('size-2')
+    clockOffset += 100
+    const third = await seal('size-3')
+    flushReportBundleRegistry()
+    expect(fs.statSync(registryPath()).size).toBeLessThanOrEqual(oneRecord * 2 + 64)
+    expect((await verifyOne(first.resp.binding, first.primaryUrl)).status).toBe('refused')
+    expect(fs.existsSync(path.join(snapshotRoot(), sha256(first.resp.binding)))).toBe(false)
+    expect((await verifyOne(second.resp.binding, second.primaryUrl)).status).toBe('verified')
+    expect((await verifyOne(third.resp.binding, third.primaryUrl)).status).toBe('verified')
+  })
+
+  it('never evicts the record it has just registered, even after the clock went back', async () => {
+    reinit({ maxRecords: 1 })
+    const old = await seal('clock-old')
+    clockOffset -= 3_600_000
+    const fresh = await seal('clock-new')
+    expect((await verifyOne(fresh.resp.binding, fresh.primaryUrl)).status).toBe('verified')
+    expect((await verifyOne(old.resp.binding, old.primaryUrl)).status).toBe('refused')
+  })
+
+  it('sweeps old snapshot directories without a record at startup', async () => {
+    const kept = await seal('kept')
+    flushReportBundleRegistry()
+    const oldOrphan = path.join(snapshotRoot(), 'a'.repeat(64))
+    const newOrphan = path.join(snapshotRoot(), 'b'.repeat(64))
+    const notHex = path.join(snapshotRoot(), 'keep-me')
+    for (const dir of [oldOrphan, newOrphan, notHex]) fs.mkdirSync(dir)
+    const hourAgo = new Date(Date.now() - 3_600_000)
+    fs.utimesSync(oldOrphan, hourAgo, hourAgo)
+    fs.utimesSync(notHex, hourAgo, hourAgo)
+    reinit()
+    expect(fs.existsSync(oldOrphan)).toBe(false)
+    expect(fs.existsSync(newOrphan)).toBe(true)
+    expect(fs.existsSync(notHex)).toBe(true)
+    expect((await verifyOne(kept.resp.binding, kept.primaryUrl)).status).toBe('verified')
+  })
+
+  it('refuses files written shortly before the write session opened', async () => {
+    const early = bundleDirFor('early')
+    writeBundleFiles(early, 'early')
+    clockOffset += 1_000
+    const { ticket } = await beginReportBundle({ bundleDir: early, conversation }, [root])
+    await expect(registerReportBundle({ ticket })).rejects.toBeInstanceOf(ReportBundleRefusedError)
+  })
+})
+
 describe('isBoundTo', () => {
   it('accepts the registered local-media URL and a data: URL of the exact primary bytes', async () => {
     const { resp, bundleDir, primaryUrl } = await seal()
@@ -576,5 +753,28 @@ describe('isBoundTo', () => {
     expect(isBoundTo('not-a-binding', 'conv-1', primaryUrl)).toBe(false)
     fs.writeFileSync(path.join(bundleDir, 'report.md'), other)
     expect(isBoundTo(resp.binding, 'conv-1', primaryUrl)).toBe(false)
+  })
+
+  it('compares the recorded storage scope when given the conversation', async () => {
+    const { resp, primaryUrl } = await seal()
+    expect(isBoundTo(resp.binding, conversation, primaryUrl)).toBe(true)
+    expect(isBoundTo(resp.binding, { ...conversation, storageScope: 'other' }, primaryUrl)).toBe(
+      false
+    )
+    expect(isBoundTo(resp.binding, { conversationId: 'conv-1' }, primaryUrl)).toBe(false)
+    expect(isBoundTo(resp.binding, { ...conversation, conversationId: 'conv-2' }, primaryUrl)).toBe(
+      false
+    )
+    expect(isBoundTo(resp.binding, { conversationId: 7 }, primaryUrl)).toBe(false)
+  })
+
+  it('refuses a primary URL that names a link to the registered primary', async () => {
+    const { resp, bundleDir } = await seal()
+    const alias = path.join(tmp, 'alias.md')
+    fs.symlinkSync(path.join(bundleDir, 'report.md'), alias)
+    const aliasUrl = toLocalMediaUrl(alias)!
+    expect((await verifyOne(resp.binding, aliasUrl)).status).toBe('refused')
+    expect(isBoundTo(resp.binding, 'conv-1', aliasUrl)).toBe(false)
+    expect(isBoundTo(resp.binding, conversation, aliasUrl)).toBe(false)
   })
 })

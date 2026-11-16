@@ -150,6 +150,11 @@ export function validateRegisterReportBundleResp(value: unknown): RegisterReport
   }
 }
 
+/**
+ * At most {@link REPORT_BUNDLE_VERIFY_MAX_ITEMS} raw items are accepted. Callers must
+ * deduplicate by binding before calling (the same report referenced by many messages is one
+ * item); a conversation with more distinct bound reports than that is refused (fail closed).
+ */
 export function validateVerifyReportBundlesReq(value: unknown): VerifyReportBundlesReq {
   const label = 'svcReportBundles.verify request'
   if (
