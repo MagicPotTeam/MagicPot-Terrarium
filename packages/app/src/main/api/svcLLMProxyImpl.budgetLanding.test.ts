@@ -27,7 +27,7 @@ vi.mock('../assistantRuntime/runtime', () => ({ getAssistantRuntime: () => ({ li
 vi.mock('../mcp/runtime', () => ({ syncMcpClientManager: vi.fn() }))
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
-import { MAX_AGENT_TOOL_CALLS, MAX_NATIVE_TRANSCRIPT_BYTES } from '@shared/llm/nativeTools'
+import { AGENT_TOOL_CALL_SOFT_BUDGET, MAX_AGENT_TOOL_CALLS, MAX_NATIVE_TRANSCRIPT_BYTES } from '@shared/llm/nativeTools'
 import { getConfig } from '../config/config'
 import { LLMProxySvcImpl } from './svcLLMProxyImpl'
 
@@ -43,6 +43,7 @@ type ChatParams = {
 }
 
 const SUMMARY = 'Summary: 64 files read; the rest remains.'
+const SOFT_NOTE = /Tool budget notice/
 const tool = { name: 'files.read', description: 'Read owned file', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }
 const request = (extra: Record<string, unknown> = {}) => ({
   conversationId: 'budget-landing',
@@ -126,6 +127,32 @@ describe('agent loop budget landing (native tools)', () => {
     expect(final.systemPrompt).toBe('You are the base agent.')
     // The previous step still had the full tool surface.
     expect(seen.at(-2)!.toolTurns).toHaveLength(64)
+  })
+
+  it('adds the 75 % wrap-up note once, from the soft budget on, never before', async () => {
+    let n = 0
+    const { chat, seen } = recordingChat(params => params.tools
+      ? { content: '', toolCalls: [call('c' + n++)] }
+      : { content: SUMMARY })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    await new LLMProxySvcImpl().chat(request())
+    expect(AGENT_TOOL_CALL_SOFT_BUDGET).toBe(48)
+    seen.slice(0, AGENT_TOOL_CALL_SOFT_BUDGET).forEach(p => expect(p.systemPrompt).not.toMatch(SOFT_NOTE))
+    seen.slice(AGENT_TOOL_CALL_SOFT_BUDGET, -1).forEach(p => {
+      expect(p.systemPrompt!.match(new RegExp(SOFT_NOTE.source, 'g'))).toHaveLength(1)
+      expect(p.messages.some(m => typeof m.content === 'string' && SOFT_NOTE.test(m.content))).toBe(false)
+    })
+    expect(seen.at(-1)!.systemPrompt).not.toMatch(SOFT_NOTE)
+  })
+
+  it('does not add the note to a short run', async () => {
+    const { chat, seen } = recordingChat((_params, i) => i < 3 ? { content: '', toolCalls: [call('s' + i)] } : { content: 'done' })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const result = await new LLMProxySvcImpl().chat(request())
+    expect(result.content).toBe('done')
+    expect(result.finishReason).not.toBe('length')
+    expect(result.metadata?.limitReached).toBeUndefined()
+    seen.forEach(p => expect(p.systemPrompt).not.toMatch(SOFT_NOTE))
   })
 
   it('still refuses a batch that crosses the cap as a whole', async () => {
@@ -299,6 +326,8 @@ describe('agent loop budget landing (text tool protocol)', () => {
     expect(final.tools).toBeUndefined()
     expect(final.messages.filter(m => typeof m.content === 'string' && m.content.startsWith('[Tool Result]'))).toHaveLength(64)
     expect(final.messages.at(-1)).toMatchObject({ role: 'user' })
+    expect(seen.slice(AGENT_TOOL_CALL_SOFT_BUDGET, -1).every(p => SOFT_NOTE.test(p.systemPrompt || ''))).toBe(true)
+    expect(seen.slice(0, AGENT_TOOL_CALL_SOFT_BUDGET).some(p => SOFT_NOTE.test(p.systemPrompt || ''))).toBe(false)
   })
 
   it('drops the overflowing legacy result from the final call on the transcript budget', async () => {
@@ -341,11 +370,13 @@ describe('agent loop budget landing (text tool protocol)', () => {
 describe('loops that keep the old budget error', () => {
   it('does not land a structured-output request (the summary could not satisfy the schema)', async () => {
     let n = 0
-    const chat = vi.fn(async (params: ChatParams) => params.tools ? { content: '', toolCalls: [call('j' + n++)] } : { content: SUMMARY })
+    const { chat, seen } = recordingChat(params => params.tools ? { content: '', toolCalls: [call('j' + n++)] } : { content: SUMMARY })
     vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
     const structuredOutput = { name: 'plan', schema: { type: 'object', properties: {} } }
     const error = await new LLMProxySvcImpl().chat(request({ structuredOutput })).catch(e => e)
     expect(error.message).toMatch(/tool-call budget exhausted/)
     expect(chat).toHaveBeenCalledTimes(65)
+    // No promise of a summary to a run that will not get one.
+    seen.forEach(p => expect(p.systemPrompt || '').not.toMatch(SOFT_NOTE))
   })
 })
