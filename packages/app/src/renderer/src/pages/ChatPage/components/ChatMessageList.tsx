@@ -2174,6 +2174,14 @@ const UserMessageEditForm: React.FC<{
     },
     []
   )
+  // What the form holds now, read when an async report preflight returns: a submit goes ahead
+  // only when the source message, the text and the attachments are still the checked ones.
+  const latestEditStateRef = React.useRef({ message, content: '', attachments: editingAttachments })
+  latestEditStateRef.current = {
+    message,
+    content: editingContent.trim(),
+    attachments: editingAttachments
+  }
   const [isDraggingImage, setIsDraggingImage] = React.useState(false)
   const pendingImageImportsRef = React.useRef(new Set<symbol>())
   const [pendingImageImportCount, setPendingImageImportCount] = React.useState(0)
@@ -2596,6 +2604,16 @@ const UserMessageEditForm: React.FC<{
                     () => {
                       if (reportPreflightRef.current !== preflight) return
                       reportPreflightRef.current = null
+                      // Changed while MAIN answered: keep the form, a new Save checks again.
+                      const latest = latestEditStateRef.current
+                      if (
+                        !isEqual(editingSource, latest.message) ||
+                        latest.content !== newContent ||
+                        !isEqual(latest.attachments, editingAttachments) ||
+                        pendingImageImportsRef.current.size > 0
+                      ) {
+                        return
+                      }
                       onSubmit(newContent, submittedAttachments)
                     },
                     (error: unknown) => {

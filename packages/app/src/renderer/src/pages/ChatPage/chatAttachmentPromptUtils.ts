@@ -3,6 +3,7 @@ import type {
   ChatAttachment,
   ChatMessage
 } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
+import { normalizeMediaReference } from '@shared/mediaReference'
 import { normalizeLocalMediaUrl } from './chatPageShared'
 
 const TEXT_FILE_EXTENSIONS = new Set([
@@ -246,9 +247,29 @@ function buildAttachmentKey(attachment: ChatAttachment): string {
   ].join('::')
 }
 
-/** Identity of a bundle image within its bundle: bundle id and reference name. */
-function buildBundleImageIdentity(bundleId: string, refName: string): string {
-  return JSON.stringify([bundleId, refName])
+/**
+ * Identity of a bundle image within its bundle: bundle id, reference name and byte size.
+ * The size ties an explicit copy to the image MAIN verified (its snapshot manifest records
+ * each file's size): a stage id can repeat across runs, so a copy of an earlier run's image
+ * with the same name must not stand in for the current one. Without a known size there is
+ * no identity, and the bundle image is added as before.
+ */
+function buildBundleImageIdentity(
+  bundleId: string | undefined,
+  refName: string | undefined,
+  sizeBytes: unknown
+): string | null {
+  if (!bundleId || !refName) return null
+  if (typeof sizeBytes !== 'number' || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+    return null
+  }
+  return JSON.stringify([bundleId, refName, sizeBytes])
+}
+
+/** Byte size of an explicit attachment: the managed reference's when it has a valid one. */
+function getExplicitAttachmentSize(attachment: ChatAttachment): unknown {
+  const media = normalizeMediaReference(attachment.media)
+  return media?.kind === 'managed' ? media.sizeBytes : attachment.sizeBytes
 }
 
 export async function expandReportBundleAttachments(
@@ -258,9 +279,10 @@ export async function expandReportBundleAttachments(
   options: {
     /**
      * Every primary in `attachments` was verified by MAIN (the request path's projection).
-     * An explicit report image of the same bundle and reference name is then treated as
-     * already present, whatever its URL: since images arriving by hand-off get a managed URL,
-     * the URL-based key no longer matches and the picture would be sent twice. Only within
+     * An explicit report image of the same bundle, reference name and byte size is then
+     * treated as already present, whatever its URL: since images arriving by hand-off get a
+     * managed URL, the URL-based key no longer matches and the picture would be sent twice.
+     * A copy of another size (an earlier run, a downscaled copy) is not. Only within
      * this one message; the same image in another message stays a separate occurrence.
      */
     verifiedBundles?: boolean
@@ -275,14 +297,17 @@ export async function expandReportBundleAttachments(
   const seenKeys = new Set(expanded.map(buildAttachmentKey))
   const explicitBundleImages = new Set(
     options.verifiedBundles
-      ? attachments.flatMap((attachment) =>
-          attachment.type === 'image' &&
-          attachment.reportBundleRole === 'report-image' &&
-          attachment.reportBundleId &&
-          attachment.reportBundleRefName
-            ? [buildBundleImageIdentity(attachment.reportBundleId, attachment.reportBundleRefName)]
-            : []
-        )
+      ? attachments.flatMap((attachment) => {
+          if (attachment.type !== 'image' || attachment.reportBundleRole !== 'report-image') {
+            return []
+          }
+          const identity = buildBundleImageIdentity(
+            attachment.reportBundleId,
+            attachment.reportBundleRefName,
+            getExplicitAttachmentSize(attachment)
+          )
+          return identity ? [identity] : []
+        })
       : []
   )
   const manifestUrls = Array.from(
@@ -310,13 +335,12 @@ export async function expandReportBundleAttachments(
         if (seenKeys.has(key)) {
           continue
         }
-        if (
-          attachment.reportBundleId &&
-          attachment.reportBundleRefName &&
-          explicitBundleImages.has(
-            buildBundleImageIdentity(attachment.reportBundleId, attachment.reportBundleRefName)
-          )
-        ) {
+        const identity = buildBundleImageIdentity(
+          attachment.reportBundleId,
+          attachment.reportBundleRefName,
+          attachment.sizeBytes
+        )
+        if (identity && explicitBundleImages.has(identity)) {
           continue
         }
         seenKeys.add(key)

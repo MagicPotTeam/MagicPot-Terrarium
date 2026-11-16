@@ -138,7 +138,11 @@ import {
   type ChatContextTokenCalibration
 } from './chatContextCompression'
 import type { ChatLoadingStatus } from './chatLoadingStatus'
-import { buildAssistantMessageFromResult, normalizeChatToolHistory } from './chatMessageUtils'
+import {
+  buildAssistantMessageFromResult,
+  normalizeChatToolHistory,
+  withoutReportBundleBinding
+} from './chatMessageUtils'
 import {
   appendAssistantDeltaToSession,
   appendAssistantPlaceholderToSession,
@@ -7100,7 +7104,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
       let streamedOcrResult: ChatMessage['ocrResult']
       const seenStreamAttachmentKeys = new Set<string>()
 
-      const rememberStreamAttachment = (attachment: ChatAttachment): void => {
+      const rememberStreamAttachment = (streamed: ChatAttachment): void => {
+        // Streamed attachments come from the model or a tool: a report binding on them is never
+        // kept, also on the cancelled-partial path that stores them without the result builder.
+        const attachment = withoutReportBundleBinding(streamed)
         const attachmentKey = `${attachment.type}:${attachment.url}:${attachment.fileName || ''}`
         if (seenStreamAttachmentKeys.has(attachmentKey)) {
           return

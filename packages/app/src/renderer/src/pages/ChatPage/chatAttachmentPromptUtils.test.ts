@@ -107,12 +107,12 @@ describe('expandReportBundleAttachments with an explicit copy of a bundle image'
   const primary = (id: string): ChatAttachment => ({ type: 'file', url: `local-media:///${id}/report.md`, reportBundleRole: 'primary-report', reportBundleId: id, reportBundleManifestUrl: `local-media:///main/${id}/manifest.json` })
   const manifest = (bundleId: string) => JSON.stringify({ version: 1, bundleId, title: bundleId, entries: [
     { role: 'primary-report', fileName: 'report.md', refName: 'report.md' },
-    { role: 'report-image', fileName: 'fig-01.png', refName: 'fig-01.png', sourceUrl: `local-media:///bundles/${bundleId}/images/fig-01.png` },
-    { role: 'report-image', fileName: 'fig-02.png', refName: 'fig-02.png', sourceUrl: `local-media:///bundles/${bundleId}/images/fig-02.png` }
+    { role: 'report-image', fileName: 'fig-01.png', refName: 'fig-01.png', sourceUrl: `local-media:///bundles/${bundleId}/images/fig-01.png`, sizeBytes: 101 },
+    { role: 'report-image', fileName: 'fig-02.png', refName: 'fig-02.png', sourceUrl: `local-media:///bundles/${bundleId}/images/fig-02.png`, sizeBytes: 102 }
   ] })
   const reader = async (url: string) => manifest(url.includes('/a/') ? 'a' : 'b')
   // A bubble image dragged into the composer: since the hand-off it carries a managed URL.
-  const managedCopy: ChatAttachment = { type: 'image', url: 'local-media:///managed/originals/aa/0123.png', fileName: 'fig-01.png', reportBundleId: 'a', reportBundleRole: 'report-image', reportBundleRefName: 'fig-01.png' }
+  const managedCopy: ChatAttachment = { type: 'image', url: 'local-media:///managed/originals/aa/0123.png', fileName: 'fig-01.png', reportBundleId: 'a', reportBundleRole: 'report-image', reportBundleRefName: 'fig-01.png', media: { version: 1, kind: 'managed', relativePath: `originals/aa/${'a'.repeat(64)}.png`, sha256: 'a'.repeat(64), sizeBytes: 101, mimeType: 'image/png', originalFileName: 'fig-01.png' } }
   const images = (attachments: ChatAttachment[] | undefined) => attachments?.filter(item => item.type === 'image').map(item => `${item.reportBundleId}:${item.reportBundleRefName}:${item.url}`)
 
   it('does not add the bundle image a second time for a verified bundle', async () => {
@@ -130,6 +130,27 @@ describe('expandReportBundleAttachments with an explicit copy of a bundle image'
       'a:fig-02.png:local-media:///bundles/a/images/fig-02.png',
       'b:fig-01.png:local-media:///bundles/b/images/fig-01.png',
       'b:fig-02.png:local-media:///bundles/b/images/fig-02.png'
+    ])
+  })
+
+  it('still adds the verified image when the explicit copy has another size (an earlier run with the same stage id)', async () => {
+    const earlierRun: ChatAttachment = { ...managedCopy, url: 'local-media:///managed/originals/bb/0456.png', media: { version: 1, kind: 'managed', relativePath: `originals/bb/${'b'.repeat(64)}.png`, sha256: 'b'.repeat(64), sizeBytes: 999, mimeType: 'image/png', originalFileName: 'fig-01.png' } }
+    const output = await expandReportBundleAttachments([primary('a'), earlierRun], reader, undefined, { verifiedBundles: true })
+    expect(images(output)).toEqual([
+      `a:fig-01.png:${earlierRun.url}`,
+      'a:fig-01.png:local-media:///bundles/a/images/fig-01.png',
+      'a:fig-02.png:local-media:///bundles/a/images/fig-02.png'
+    ])
+  })
+
+  it('still adds the verified image when the explicit copy has no known size', async () => {
+    const unsized: ChatAttachment = { ...managedCopy }
+    delete unsized.media
+    const output = await expandReportBundleAttachments([primary('a'), unsized], reader, undefined, { verifiedBundles: true })
+    expect(images(output)).toEqual([
+      `a:fig-01.png:${unsized.url}`,
+      'a:fig-01.png:local-media:///bundles/a/images/fig-01.png',
+      'a:fig-02.png:local-media:///bundles/a/images/fig-02.png'
     ])
   })
 

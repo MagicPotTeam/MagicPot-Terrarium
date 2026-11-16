@@ -220,6 +220,26 @@ describe('where a report binding may come from', () => {
     expect(JSON.stringify(storedMessages())).not.toContain(binding)
   })
 
+  it('stores a streamed model attachment without its binding when the reply is cancelled after it', async () => {
+    await setup([], true)
+    let attachmentDelivered = false
+    f.stream.mockImplementation(async (_request: unknown, response: { onData: (chunk: unknown) => void; abortReceiver?: { onAbort: (handler: () => void) => void } }) => {
+      response.onData({ type: 'text-delta', delta: 'partial', done: false })
+      response.onData({ type: 'attachment', delta: '', done: false, attachment: boundPrimary })
+      attachmentDelivered = true
+      await new Promise<void>((_resolve, reject) => { response.abortReceiver?.onAbort(() => reject(new Error('aborted'))) })
+    })
+    fireEvent.click(screen.getByTestId('send'))
+    await waitFor(() => expect(attachmentDelivered).toBe(true))
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    await act(async () => { window.dispatchEvent(new CustomEvent('chat:terminate-session', { detail: { scope, sessionId: 'fixture-session' } })) })
+    await waitFor(() => expect(storedMessages().some(message => message.role === 'assistant' && message.content.includes('partial'))).toBe(true))
+    const reply = storedMessages().findLast(message => message.role === 'assistant')
+    expect(reply?.attachments?.some(attachment => attachment.reportBundleRole === 'primary-report')).toBe(true)
+    expect(JSON.stringify(storedMessages())).not.toContain(binding)
+    expect(JSON.stringify(f.sessions)).not.toContain(binding)
+  })
+
   it('keeps the binding on the canvas producer message appended to this conversation', async () => {
     await setup([])
     act(() => { window.dispatchEvent(new CustomEvent('chat:append-message', { detail: { scope, sessionId: 'fixture-session', role: 'assistant', content: 'canvas report', attachments: [boundPrimary] } })) })

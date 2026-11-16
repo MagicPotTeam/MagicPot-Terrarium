@@ -568,7 +568,8 @@ export const normalizeChatToolHistory = (value: unknown): ChatMessage['toolHisto
 const hasReportBundleBinding = (attachment: ChatAttachment): boolean =>
   'reportBundleBinding' in attachment
 
-const withoutReportBundleBinding = (attachment: ChatAttachment): ChatAttachment => {
+/** Drops a report binding: one that arrives in model, tool or provider output is never trusted. */
+export const withoutReportBundleBinding = (attachment: ChatAttachment): ChatAttachment => {
   if (!hasReportBundleBinding(attachment)) return attachment
   const { reportBundleBinding: _binding, ...rest } = attachment
   return rest

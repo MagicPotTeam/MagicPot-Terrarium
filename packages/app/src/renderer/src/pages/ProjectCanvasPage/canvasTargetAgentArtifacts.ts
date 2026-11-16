@@ -1094,6 +1094,8 @@ export async function materializeCanvasTargetAgentMessagePayload(
 
   // The write session must exist before the first write into the bundle directory: MAIN only
   // seals files written after the ticket was issued. Any failure leaves the report unbound.
+  // A ticket left unused because a later write throws needs no release: MAIN drops tickets
+  // after REPORT_BUNDLE_TICKET_TTL_MS (10 minutes) and keeps at most 64 outstanding.
   let bundleTicket: string | null = null
   let registrationSkippedReason: string | null = null
   if (!options.beginReportBundle || !options.registerReportBundle || !options.conversation) {

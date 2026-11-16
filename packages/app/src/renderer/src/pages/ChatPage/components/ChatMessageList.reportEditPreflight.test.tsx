@@ -117,6 +117,25 @@ describe('real ChatMessageList async MAIN report preflight for edits', () => {
     expect(f.session).toEqual(f.before)
   })
 
+  it('keeps the form when the text changes while MAIN answers, and a new Save checks the new text', async () => {
+    const session = historySession()
+    let accept: () => void = () => undefined
+    const preflightEditReports = vi.fn<NonNullable<Props['preflightEditReports']>>(() => new Promise<void>(resolve => { accept = resolve }))
+    const f = setup(session, 1, { preflightEditReports })
+    await waitFor(() => expect(preflightEditReports).toHaveBeenCalledOnce())
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'changed text, typed on' } })
+    accept()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(f.onSendEditedMessage).not.toHaveBeenCalled()
+    expect(screen.getByTestId('edit-message-composer')).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('changed text, typed on')
+    preflightEditReports.mockResolvedValue(undefined)
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    await waitFor(() => expect(f.onSendEditedMessage).toHaveBeenCalledOnce())
+    expect(preflightEditReports).toHaveBeenCalledTimes(2)
+    expect(f.onSendEditedMessage.mock.calls[0][0]).toBe('changed text, typed on')
+  })
+
   it('passes the edited bound report itself to the preflight', async () => {
     const session: ChatSession = { id: 'bound-current', title: 'fixture', messages: [{ role: 'user', content: 'original', attachments: [bound] }] }
     const preflightEditReports = vi.fn<NonNullable<Props['preflightEditReports']>>(async () => undefined)

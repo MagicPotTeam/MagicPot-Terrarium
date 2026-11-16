@@ -1157,16 +1157,17 @@ const projectToolHistoryForProvider = (
     toolHistory: preservedToolHistory
   }
 }
+const withoutReportBundleBinding = (attachment: ChatAttachment): ChatAttachment => {
+  if (attachment.reportBundleBinding === undefined) return attachment
+  const copy = { ...attachment }
+  delete copy.reportBundleBinding
+  return copy
+}
 const withoutReportBundleBindings = (
   attachments: ChatAttachment[] | undefined
 ): ChatAttachment[] | undefined =>
   attachments?.some((attachment) => attachment.reportBundleBinding !== undefined)
-    ? attachments.map((attachment) => {
-        if (attachment.reportBundleBinding === undefined) return attachment
-        const copy = { ...attachment }
-        delete copy.reportBundleBinding
-        return copy
-      })
+    ? attachments.map(withoutReportBundleBinding)
     : attachments
 
 /**
@@ -2324,9 +2325,10 @@ const requestLocalChatCompletionStream = async (
 
         if (chunk.type === 'attachment' && chunk.attachment) {
           refreshStreamDeadline()
+          // A streamed model or tool attachment never carries a trusted report binding.
           input.onEvent({
             type: 'attachment',
-            attachment: chunk.attachment
+            attachment: withoutReportBundleBinding(chunk.attachment)
           })
         }
 
@@ -2525,7 +2527,7 @@ const dispatchChatCompletionStreamRequest = async (
     throwIfAborted(input.signal)
     input.onEvent({
       type: 'attachment',
-      attachment
+      attachment: withoutReportBundleBinding(attachment)
     })
     throwIfAborted(input.signal)
   }
