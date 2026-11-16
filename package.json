@@ -232,7 +232,7 @@
     "@types/ws": "^8.18.1",
     "@types/yauzl": "3.4.0",
     "@vitejs/plugin-react": "^4.7.0",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "cross-env": "^10.0.0",
     "electron": "42.11.16",
     "electron-builder": "^26.8.1",
@@ -255,7 +255,7 @@
     "ts-json-schema-generator": "^2.4.0",
     "typescript": "^5.8.3",
     "vite": "^7.3.7",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "yauzl": "3.4.0"
   },
   "optionalDependencies": {
@@ -264,6 +264,9 @@
   "overrides": {
     "@eslint/eslintrc": {
       "js-yaml": "4.3.2"
+    },
+    "@vercel/cli-config": {
+      "zod": "4.6.7"
     },
     "@xmldom/xmldom": "0.8.15",
     "app-builder-lib": {
