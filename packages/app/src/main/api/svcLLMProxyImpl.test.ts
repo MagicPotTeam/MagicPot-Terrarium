@@ -6655,10 +6655,13 @@ describe('native Agent tool loop', () => {
     listToolsMock.mockReturnValue(bound)
     callToolMock.mockResolvedValue({ content: 'owned' })
     let n = 0
-    const chat = vi.fn(async () => ({ content: '', toolCalls: [call('budget_' + n++)] }))
+    // The model keeps asking for tools even in the final tool-less call: no landing text, so the
+    // budget error stays (a usable final text lands the turn: svcLLMProxyImpl.budgetLanding.test.ts).
+    const chat = vi.fn(async (_params: { tools?: unknown }) => ({ content: '', toolCalls: [call('budget_' + n++)] }))
     vi.mocked(cliFromProfile).mockReturnValue({ supportsNativeTools: true, chat } as never)
     await expect(new LLMProxySvcImpl().chat(request())).rejects.toThrow(/budget exhausted/)
     expect(callToolMock).toHaveBeenCalledTimes(64)
-    expect(chat).toHaveBeenCalledTimes(65)
+    expect(chat).toHaveBeenCalledTimes(66)
+    expect(chat.mock.calls.at(-1)?.[0].tools).toBeUndefined()
   })
 })

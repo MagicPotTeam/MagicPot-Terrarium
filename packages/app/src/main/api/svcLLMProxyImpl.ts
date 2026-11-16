@@ -66,6 +66,7 @@ import { createCanvasPathReadHandler, createScopedCanvasPathReadHandler, type Ca
 import { createSkillToolStream } from './skillToolStream'
 import { classifySkillToolPrefix, parseSkillToolInvocation } from './skillToolProtocol'
 import {
+  MAX_AGENT_MODEL_STEPS,
   MAX_AGENT_TOOL_CALLS,
   MAX_NATIVE_TRANSCRIPT_BYTES,
   prepareNativeToolBatch,
@@ -142,6 +143,7 @@ import {
   type ModelInvocationContract
 } from '@shared/llm'
 import { resolveRemoteProfileRouting } from '@shared/llm/remoteProfileRouting'
+import type { LLMAgentLoopLimit } from '@shared/llm/types'
 import { getAssistantRuntime } from '../assistantRuntime/runtime'
 import { getAssistantSessionKey, type AssistantRoute, type AssistantRunToolProvider } from '../assistantRuntime/types'
 import { buildAgentRoute, normalizeAgentRoute } from '@shared/agent'
@@ -1164,6 +1166,57 @@ const buildToolResultMessage = (
     result.trim() || '(empty result)'
   ].join('\n')
 })
+
+const AGENT_LOOP_LIMIT_ERRORS: Record<LLMAgentLoopLimit, string> = {
+  model_steps: 'Agent model-step budget exhausted. Completed tool results have been retained.',
+  tool_calls: `Agent tool-call budget exhausted (${MAX_SKILL_RUNTIME_TOOL_CALLS} calls). Completed tool results have been retained.`,
+  transcript: 'Agent tool transcript budget exhausted. Completed tool results have been retained.'
+}
+const AGENT_LOOP_LIMIT_NAMES: Record<LLMAgentLoopLimit, string> = {
+  model_steps: 'model-step',
+  tool_calls: `tool-call (${MAX_SKILL_RUNTIME_TOOL_CALLS} calls)`,
+  transcript: 'tool transcript size'
+}
+/** The closing instruction of a landed turn. It is the last message so every provider sees a user turn. */
+const buildAgentLoopLimitNote = (
+  limit: LLMAgentLoopLimit,
+  detail: { refusedCalls: number; withheldResults: number }
+): ChatMessage => ({
+  role: 'user',
+  content: [
+    `[Tool budget reached] This turn's ${AGENT_LOOP_LIMIT_NAMES[limit]} budget is used up. No tools are available any more and none will run.`,
+    detail.refusedCalls
+      ? `Your last request for ${detail.refusedCalls} more tool call(s) was NOT executed.`
+      : '',
+    detail.withheldResults
+      ? `The results of the last ${detail.withheldResults} tool call(s) are not shown because they exceeded the transcript budget; they were still recorded for the user.`
+      : '',
+    'Using only the tool results above, answer the user in plain text: summarize what was done and found, what is still unfinished, and how they can continue. Do not output tool calls or tool JSON.'
+  ].filter(Boolean).join('\n')
+})
+/** Native tool turns as the plain-text tool protocol, so a request without tools carries no
+ * provider tool frames (some providers reject tool calls/results when no tools are declared). */
+const flattenNativeToolTurns = (turns: readonly LLMToolTurn[]): ChatMessage[] =>
+  turns.flatMap((turn) => {
+    const outputs = new Map(turn.results.map((result) => [result.callId, result.output]))
+    return [
+      ...(turn.content.trim() ? [{ role: 'assistant' as const, content: turn.content }] : []),
+      ...turn.calls.flatMap((call) => {
+        let args: Record<string, unknown> = {}
+        try {
+          const parsed: unknown = JSON.parse(call.arguments)
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, unknown>
+        } catch {
+          // Arguments were validated before execution; keep the receipt even if not.
+        }
+        const invocation = { toolName: call.name, args }
+        return [
+          { role: 'assistant' as const, content: JSON.stringify(invocation) },
+          buildToolResultMessage(invocation, outputs.get(call.id) ?? '')
+        ]
+      })
+    ]
+  })
 
 const buildSkillRuntimeRoute = (req: LLMChatReq): AssistantRoute =>
   (req.route
@@ -2920,6 +2973,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const nativeTurns: LLMToolTurn[] = []
     const executedNativeIds = new Set<string>()
     let transcriptBytes = 0
+    // A reached budget lands the turn with one tool-less answer instead of an error.
+    let limitReached: LLMAgentLoopLimit | undefined
+    const limitDetail = { refusedCalls: 0, withheldResults: 0 }
     const normalizeInvocationToken = (value: unknown, fallback: string): string => {
       const candidate = typeof value === 'string' ? value.trim() : ''
       return /^[A-Za-z0-9._:-]{1,96}$/.test(candidate) ? candidate : fallback
@@ -2929,7 +2985,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       `session-${crypto.randomUUID()}`
     )
     const invocationTask = normalizeInvocationToken(req.skillRuntime?.skillId, 'chat')
-    const invocationForStep = (step: number): ModelInvocationContract =>
+    const invocationForStep = (step: number | 'final'): ModelInvocationContract =>
       createModelInvocationContract(
         {
           project: 'magicpot',
@@ -2963,10 +3019,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         throwIfAborted(options?.signal)
         restricted?.assertCurrent()
         options?.assertSkillContext?.()
-        if (modelStepCount >= MAX_SKILL_RUNTIME_TOOL_CALLS + 2)
-          throw new Error(
-            'Agent model-step budget exhausted. Completed tool results have been retained.'
-          )
+        if (modelStepCount >= MAX_AGENT_MODEL_STEPS) {
+          limitReached = 'model_steps'
+          break
+        }
         const stepStream =
           availableSkillTools.length > 0 && !failedEditExplanation ? createSkillToolStream(options?.onDelta) : undefined
         let nativeOutputStarted = false
@@ -3115,10 +3171,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         stepStream?.finish(requested.length > 0)
         throwIfAborted(options?.signal)
         if (!requested.length) break
-        if (step + requested.length > MAX_SKILL_RUNTIME_TOOL_CALLS)
-          throw new Error(
-            `Agent tool-call budget exhausted (${MAX_SKILL_RUNTIME_TOOL_CALLS} calls). Completed tool results have been retained.`
-          )
+        if (step + requested.length > MAX_SKILL_RUNTIME_TOOL_CALLS) {
+          // A batch that crosses the cap is refused as a whole: none of it runs.
+          limitReached = 'tool_calls'
+          limitDetail.refusedCalls = requested.length
+          break
+        }
         // Reject an ambiguous replay before any member of this batch can have effects.
         for (const item of requested) {
           if (item.call && executedNativeIds.has(item.call.id))
@@ -3137,6 +3195,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         // only `step` would make parallel calls share the same toolCallId and
         // collide in status events, durable records, and cancellation tracking.
         const batchStep = step
+        const messagesBeforeBatch = conversationMessages.length
         for (const [requestedIndex, requestedTool] of requested.entries()) {
           throwIfAborted(options?.signal)
           const toolCallId = `${runId}:tool:${batchStep + requestedIndex}`
@@ -3260,11 +3319,77 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           (nativeToolsEnabled
             ? 0
             : Buffer.byteLength(String(toolHistory.at(-1)?.content || ''), 'utf8'))
-        if (transcriptBytes > MAX_NATIVE_TRANSCRIPT_BYTES)
-          throw new Error(
-            'Agent tool transcript budget exhausted. Completed tool results have been retained.'
-          )
+        if (transcriptBytes > MAX_NATIVE_TRANSCRIPT_BYTES) {
+          // The receipts stay in toolHistory; the overflowing batch is kept out of the
+          // model transcript (a native turn is not pushed, text results are removed).
+          limitReached = 'transcript'
+          limitDetail.withheldResults = requested.length
+          conversationMessages.length = messagesBeforeBatch
+          break
+        }
         if (nativeToolsEnabled) nativeTurns.push(turn)
+      }
+      if (limitReached) {
+        const limitError = new Error(AGENT_LOOP_LIMIT_ERRORS[limitReached])
+        // Callers that cannot accept a plain-text answer keep the budget error: managed
+        // real-chat and goal runs (exact dispatch accounting, 'length' is a failure there),
+        // structured output (a summary cannot satisfy the schema) and a failed edit.
+        if (restricted || options?.goalProgress || failedEditExplanation || req.structuredOutput ||
+            req.skillRuntime?.execution?.outputMode === 'structured') throw limitError
+        // No new request after the team has ended (owner contract); the run keeps its old outcome.
+        try { assertTeamRequestActive(req) } catch { throw limitError }
+        options?.assertSkillContext?.()
+        throwIfAborted(options?.signal)
+        // Exactly one more model call: no tools, no provider tools, no media, no structured output.
+        const finalStream = createSkillToolStream(options?.onDelta)
+        let landed: LLMChatResult
+        try {
+          landed = normalizeLLMChatResult(await cli.chat({
+            correlationId: req.correlationId,
+            ...(req.teamMessageHop ? { retryCapacity: false } : !req.videoGenerationOptions && this.retryModelCapacity
+              ? { retryCapacity: true }
+              : {}),
+            disableProviderTools: true,
+            disableAutomaticImageGeneration: true,
+            messages: [
+              ...conversationMessages,
+              ...(nativeToolsEnabled ? flattenNativeToolTurns(nativeTurns) : []),
+              buildAgentLoopLimitNote(limitReached, limitDetail)
+            ],
+            systemPrompt: req.systemPrompt?.trim() || undefined,
+            reasoningEffort: req.reasoningEffort,
+            maxOutputTokens: req.maxOutputTokens,
+            temperature: req.temperature,
+            imageGenerationOptions: { enabled: false },
+            imageHistoryPolicy: req.imageHistoryPolicy,
+            invocation: invocationForStep('final'),
+            signal: options?.signal,
+            sessionUrl: continuationUrl,
+            conversationId: req.conversationId,
+            onDelta: finalStream.onDelta
+          }))
+        } catch (error) {
+          throwIfAborted(options?.signal)
+          throw Object.assign(limitError, { cause: error })
+        }
+        modelStepCount += 1
+        lastStepUsage = landed.usage
+        totalUsage = addToolLoopUsage(totalUsage, lastStepUsage)
+        throwIfAborted(options?.signal)
+        // Only plain text is a landing; tool frames, tool JSON or nothing keep the budget error.
+        if (!landed.content.trim() || classifySkillToolPrefix(landed.content) !== 'text' ||
+            parseExplicitToolCommand(landed.content)) {
+          finalStream.finish(true)
+          throw limitError
+        }
+        finalStream.finish(false)
+        content = landed.content
+        chatResult = {
+          content,
+          finishReason: 'length',
+          ...(landed.sessionUrl ? { sessionUrl: landed.sessionUrl } : {}),
+          metadata: { ...(landed.metadata || {}), limitReached }
+        }
       }
     } catch (error) {
       // The optional final explanation cannot erase an already known failed

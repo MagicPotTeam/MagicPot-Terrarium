@@ -21,6 +21,9 @@ export type LLMToolTurn = {
 const MAX_CALL_BYTES = 512 * 1024
 export const MAX_NATIVE_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 export const MAX_AGENT_TOOL_CALLS = 64
+/** Model calls of one Agent turn: every tool step plus one protocol repair and the final answer.
+ * Reaching it (or the call/transcript budget) lands the turn with one tool-less summary call. */
+export const MAX_AGENT_MODEL_STEPS = MAX_AGENT_TOOL_CALLS + 2
 const record = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v)
 const byteLength = (v: string): number => new TextEncoder().encode(v).byteLength

@@ -93,6 +93,10 @@ export type LLMChatFinishReason = 'stop' | 'length' | 'tool_call' | 'cancelled' 
 
 export type LLMChatMetadata = Record<string, unknown>
 
+/** The Agent loop budget that ended a turn. The turn is then answered by one final model call
+ * without tools, returned with finishReason 'length' and metadata.limitReached set to this value. */
+export type LLMAgentLoopLimit = 'tool_calls' | 'model_steps' | 'transcript'
+
 export type LLMChatTokenUsage = {
   promptTokens?: number
   inputTextTokens?: number
