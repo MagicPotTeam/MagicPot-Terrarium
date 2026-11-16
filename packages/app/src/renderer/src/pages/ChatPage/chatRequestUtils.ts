@@ -2849,6 +2849,60 @@ export const preflightChatRequestImages = (
   return preflightRequestImageCount(input, resolveSelectedRequestProfile(input))
 }
 
+type ChatRequestReportRoute = Pick<
+  RequestChatCompletionInput,
+  'config' | 'profileId' | 'remoteProfile' | 'externalAgentSkill' | 'imageHistoryPolicy' | 'apiMode'
+>
+
+export type PreflightChatRequestReportsInput = Pick<
+  RequestChatCompletionInput,
+  'messages' | 'conversationId' | 'storageScope' | 'signal'
+> &
+  Partial<ChatRequestReportRoute>
+
+/**
+ * The first stage of the request path for primary reports, run by the page before it gives up
+ * the draft (video frames, blob persistence, the placeholder message): the synchronous shape
+ * guards, MAIN's verify of every bound primary for this conversation, the projection onto what
+ * MAIN vouched for and, when the route is given (`config`), the expansion the image history
+ * policy selects with the image count re-check. The request path repeats all of it, so a
+ * successful send reads each verified manifest twice (once here, once in the request);
+ * nothing read here is passed on.
+ *
+ * Returns null, synchronously, when the messages hold no primary report: no bridge call, no
+ * read, no extra await for ordinary sends. Synchronous guard failures throw synchronously;
+ * every later failure rejects with the same messages as the request path.
+ */
+export const preflightChatRequestReports = (
+  input: PreflightChatRequestReportsInput
+): Promise<void> | null => {
+  const routeInput = input.config
+    ? projectRequestInputForTransport(input as RequestChatCompletionInput)
+    : undefined
+  const messages = routeInput?.messages ?? input.messages
+  assertExplicitUserImageCount(messages.findLast((message) => message.role === 'user')?.attachments)
+  assertNoUnverifiedPrimaryReports(messages)
+  if (!messages.some((message) => message.attachments?.some(isPrimaryReportFileDescriptor))) {
+    return null
+  }
+  let maxImages: number | undefined
+  if (routeInput) {
+    validateCustomSkillForSend(routeInput.externalAgentSkill)
+    maxImages = preflightRequestImageCount(routeInput, resolveSelectedRequestProfile(routeInput))
+  }
+  return (async () => {
+    const verifiedMessages = await verifyPrimaryReportBundles(messages, input, input.signal)
+    if (!routeInput) return
+    await expandMessagesForImagePreflight(
+      verifiedMessages,
+      routeInput.imageHistoryPolicy,
+      maxImages,
+      input.signal
+    )
+    throwIfAborted(input.signal)
+  })()
+}
+
 const assertLocalProfileRevisionInput = (input: RequestChatCompletionInput): void => {
   if (input.expectedProfileRevision === undefined) return
   if (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent' ||

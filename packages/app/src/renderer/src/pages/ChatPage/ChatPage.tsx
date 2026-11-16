@@ -156,6 +156,7 @@ import {
 import { getLocalizedConversationTitle } from './chatLocaleUtils'
 import {
   preflightChatRequestImages,
+  preflightChatRequestReports,
   requestChatCompletion,
   requestChatCompletionStream,
   isInvalidSessionContinuationError,
@@ -6433,6 +6434,41 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyError(error instanceof Error ? error.message : String(error))
         return
       }
+      // MAIN verifies every bound report bundle (and the expanded image count is checked)
+      // before the draft is given up: blob persistence and the placeholder come later. A
+      // refusal keeps the draft; a queued item is paused by its lease. Ordinary sends have
+      // no primary report and pass synchronously, without a bridge call or an extra await.
+      const startReportPreflight = (messages: ChatMessage[]): Promise<boolean> | boolean => {
+        let pending: Promise<void> | null
+        try {
+          pending = preflightChatRequestReports({
+            config,
+            messages,
+            profileId,
+            remoteProfile: remoteRequestProfile,
+            externalAgentSkill: activeExternalAgentSkill,
+            imageHistoryPolicy: provisionalImageHistoryPolicy,
+            conversationId: targetSessionId,
+            storageScope
+          })
+        } catch (error) {
+          notifyError(error instanceof Error ? error.message : String(error))
+          return false
+        }
+        if (!pending) return true
+        return pending.then(
+          () => isPreflightCurrent(),
+          (error: unknown) => {
+            notifyError(error instanceof Error ? error.message : String(error))
+            return false
+          }
+        )
+      }
+      const provisionalReportPreflight = startReportPreflight([
+        ...historyMessages,
+        provisionalUserMessage
+      ])
+      if (provisionalReportPreflight !== true && !(await provisionalReportPreflight)) return
 
       if (overrides?.resolveAttachments) {
         msgAttachments = await overrides.resolveAttachments()
@@ -6479,6 +6515,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           notifyError(error instanceof Error ? error.message : String(error))
           return
         }
+        const resolvedReportPreflight = startReportPreflight([...historyMessages, userMessage])
+        if (resolvedReportPreflight !== true && !(await resolvedReportPreflight)) return
       }
 
       if (getBaseProfileId(profileId) === HUNYUAN_3D_PROFILE_ID) {
