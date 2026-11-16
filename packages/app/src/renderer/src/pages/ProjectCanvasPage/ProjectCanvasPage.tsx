@@ -163,6 +163,7 @@ import { useCanvasCustomAddEvents } from './useCanvasCustomAddEvents'
 import { useCanvasKeyboardShortcuts } from './useCanvasKeyboardShortcuts'
 import { useCanvasBridgeActions } from './useCanvasBridgeActions'
 import { useCanvasViewportPersistence } from './useCanvasViewportPersistence'
+import { useCanvasLegacyCropUpgrade } from './useCanvasLegacyCropUpgrade'
 import { useCanvasLayerRuntime } from './useCanvasLayerRuntime'
 import { useCanvasInlineTextEffects } from './useCanvasInlineTextEffects'
 import { useCanvasMediaRuntime } from './useCanvasMediaRuntime'
@@ -833,6 +834,13 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     setExtractingImageId
   })
 
+  // Owner decision 2: old crops are re-measured once per board open.
+  const { handleCanvasItemsLoaded } = useCanvasLegacyCropUpgrade({
+    canvasId,
+    items,
+    setItemsWithoutHistory: setItems
+  })
+
   const {
     clearConfirmOpen,
     closeClearConfirmDialog,
@@ -875,7 +883,8 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     suspendAutoSave: isImageBatchImportActive,
     restoreGenerationRef,
     isCanvasSceneImporting,
-    getUndoRedoItemLists
+    getUndoRedoItemLists,
+    onCanvasItemsLoaded: handleCanvasItemsLoaded
   })
 
   useEffect(() => {

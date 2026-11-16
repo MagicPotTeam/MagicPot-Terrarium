@@ -79,6 +79,14 @@ type UseCanvasViewportPersistenceOptions = {
   isCanvasSceneImporting?: () => boolean
   /** Read-only: the item lists of the undo history and the redo stack. */
   getUndoRedoItemLists?: () => Iterable<readonly CanvasItem[]>
+  /** Called once per board open, after the items are loaded and hydrated. */
+  onCanvasItemsLoaded?: (event: CanvasItemsLoadedEvent) => void
+}
+
+/** A board's items are on the canvas: the items as stored, before hydration. */
+export type CanvasItemsLoadedEvent = {
+  canvasId: string
+  storedItems: readonly CanvasItem[]
 }
 
 type CanvasPersistenceSnapshot = {
@@ -150,7 +158,8 @@ export function useCanvasViewportPersistence({
   suspendAutoSave = false,
   restoreGenerationRef: sharedRestoreGenerationRef,
   isCanvasSceneImporting,
-  getUndoRedoItemLists
+  getUndoRedoItemLists,
+  onCanvasItemsLoaded
 }: UseCanvasViewportPersistenceOptions) {
   const latestPersistedCanvasStateRef = useRef<CanvasPersistenceSnapshot>({
     canvasId,
@@ -175,6 +184,8 @@ export function useCanvasViewportPersistence({
   const suspendAutoSaveRef = useRef(suspendAutoSave)
   const getUndoRedoItemListsRef = useRef(getUndoRedoItemLists)
   getUndoRedoItemListsRef.current = getUndoRedoItemLists
+  const onCanvasItemsLoadedRef = useRef(onCanvasItemsLoaded)
+  onCanvasItemsLoadedRef.current = onCanvasItemsLoaded
   const activePointerIdsRef = useRef(new Set<number>())
   const lastViewportInteractionAtRef = useRef(0)
   const latestHydrateCanvasImageItemForCanvasRef = useRef(hydrateCanvasImageItemForCanvas)
@@ -527,6 +538,7 @@ export function useCanvasViewportPersistence({
 
     const restore = async () => {
       isRestoringRef.current = true
+      let loadedItems: readonly CanvasItem[] | null = null
       try {
         clearPendingCanvasSave()
         hasPendingCanvasChangesRef.current = false
@@ -633,6 +645,7 @@ export function useCanvasViewportPersistence({
               return changed ? nextItems : currentItems
             })
           }
+          loadedItems = saved.items
         }
       } catch (error) {
         console.error('[Canvas] Failed to restore canvas state.', error)
@@ -640,6 +653,9 @@ export function useCanvasViewportPersistence({
         if (restoreGenerationRef.current === restoreGeneration) {
           isRestoringRef.current = false
         }
+      }
+      if (loadedItems && !cancelled && restoreGenerationRef.current === restoreGeneration) {
+        onCanvasItemsLoadedRef.current?.({ canvasId, storedItems: loadedItems })
       }
     }
 
