@@ -837,6 +837,28 @@ vi.mock('./components/ChatComposer', () => ({
   }
 }))
 
+/**
+ * Fails a test fast when ChatPage re-renders in an endless effect loop. Such a loop never yields a
+ * macrotask (act() keeps flushing the updates synchronously), so neither waitFor nor the test
+ * timeout can stop it and the worker fills its heap. Any real test yields between renders long
+ * before this many: the count is reset by the first macrotask after a render.
+ */
+const RENDER_LOOP_LIMIT = 1000
+let rendersWithoutMacrotask = 0
+let renderLoopResetScheduled = false
+const guardRenderLoop = (): void => {
+  rendersWithoutMacrotask += 1
+  if (!renderLoopResetScheduled) {
+    renderLoopResetScheduled = true
+    setTimeout(() => {
+      rendersWithoutMacrotask = 0
+      renderLoopResetScheduled = false
+    }, 0)
+  }
+  if (rendersWithoutMacrotask > RENDER_LOOP_LIMIT)
+    throw new Error(`ChatPage rendered ${rendersWithoutMacrotask} times without yielding: endless effect loop`)
+}
+
 vi.mock('./components/ChatMessageList', () => ({
   default: (props: {
     currentSession?: ChatSession
@@ -857,6 +879,7 @@ vi.mock('./components/ChatMessageList', () => ({
     anchoredTail?: readonly { after: number; node: React.ReactNode }[]
   }) => {
     hoisted.chatMessageListMock(props)
+    guardRenderLoop()
     return (
       <>
         <pre data-testid="chat-session-state">
