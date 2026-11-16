@@ -42,7 +42,8 @@ describe('getAgentColumnTokens', () => {
     expect(tokens.toolName).toBe(theme.palette.primary.light)
     expect(tokens.memberTint).toEqual({
       header: alpha('#A57EAE', 0.12),
-      stats: alpha('#A57EAE', 0.2),
+      body: alpha('#A57EAE', 0.06),
+      hairline: alpha('#A57EAE', 0.2),
       label: '#E8D5ED'
     })
   })
@@ -61,7 +62,8 @@ describe('getAgentColumnTokens', () => {
     expect(tokens.toolName).toBe(theme.palette.primary.dark)
     expect(tokens.memberTint).toEqual({
       header: alpha('#A57EAE', 0.08),
-      stats: alpha('#A57EAE', 0.15),
+      body: alpha('#A57EAE', 0.04),
+      hairline: alpha('#A57EAE', 0.15),
       label: '#A57EAE'
     })
   })

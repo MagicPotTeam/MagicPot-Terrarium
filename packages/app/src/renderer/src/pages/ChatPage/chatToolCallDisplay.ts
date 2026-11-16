@@ -308,3 +308,43 @@ export function visibleToolCalls(
   }
   return [...entries.values()]
 }
+
+/**
+ * The helper tools that hand a task to a delegated agent. Their calls are drawn as
+ * delegated-agent lines ("[sub] explore") instead of tool lines and never join a batch.
+ */
+export const HELPER_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'explore',
+  'critic',
+  'fork',
+  'response',
+  'summarize'
+])
+
+export const isHelperToolCall = (entry: ToolHistoryEntry): boolean =>
+  HELPER_TOOL_NAMES.has(entry.toolName)
+
+/**
+ * What a helper call returned, for the body of its line: the delegated agent's report text
+ * (shown as formatting-only Markdown), or, for any other result such as a background job
+ * receipt, the redacted value as raw text. Display only.
+ */
+export function helperToolCallResult(
+  entry: ToolHistoryEntry
+): { kind: 'report' | 'raw'; text: string } | undefined {
+  const content = entry.content
+  if (content === undefined || content === '') return undefined
+  if (content.length <= MAX_TEXT && content.trimStart().startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(content)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const report = (parsed as Record<string, unknown>).content
+        if (typeof report === 'string' && report.trim()) return { kind: 'report', text: report }
+      }
+    } catch {
+      /* Not a report: shown as raw text. */
+    }
+  }
+  const raw = formatToolCallValue(content).text
+  return raw.trim() ? { kind: 'raw', text: raw } : undefined
+}

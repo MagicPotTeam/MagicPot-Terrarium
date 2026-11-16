@@ -6,6 +6,7 @@ import {
   Check,
   Close,
   ExpandMore,
+  HourglassEmpty,
   RadioButtonUnchecked,
   Remove,
   Settings
@@ -23,6 +24,8 @@ import {
   getToolCardAccent,
   getToolCardIcon,
   groupToolCalls,
+  helperToolCallResult,
+  isHelperToolCall,
   summarizeToolCallBatch,
   toolCallArgumentSummary,
   toolCallDisplayName,
@@ -48,6 +51,8 @@ const codeStyle = {
 
 /** Height cap of one expanded section and of pinned card content in the Agent column. */
 const COLUMN_SECTION_MAX_HEIGHT = '16rem'
+/** Height cap of the result box of a delegated-agent line. */
+const COLUMN_DELEGATED_MAX_HEIGHT = '12rem'
 /** Height cap of the list inside an expanded batch. */
 const COLUMN_BATCH_MAX_HEIGHT = '18rem'
 /** How many tool names the batch line lists before it says how many more there are. */
@@ -84,13 +89,17 @@ const resolveCardAccentColor = (theme: Theme, token: string): string => {
   }
 }
 
+/** The state of a delegated-agent line: a tool call state, or waiting for the person's approval. */
+export type DelegatedRowStatus = ToolCallDisplayStatus | 'waiting'
+
 /** Status changes the glyph, never the colour of the line. */
 const ColumnStatusGlyph: React.FC<{
-  status: ToolCallDisplayStatus
+  status: DelegatedRowStatus
   tokens: AgentColumnTokens
   size?: number
 }> = ({ status, tokens, size = 14 }) => {
   const sx = { fontSize: size, flexShrink: 0 }
+  if (status === 'waiting') return <HourglassEmpty sx={{ ...sx, color: tokens.attention }} />
   if (status === 'running') {
     return (
       <Settings
@@ -173,6 +182,190 @@ const ColumnChevron: React.FC<{ open: boolean; tokens: AgentColumnTokens }> = ({
     }}
   />
 )
+
+/**
+ * One delegated-agent line of the Agent column ("[sub] explore", "[成员] 文案"): the same
+ * one-line header as a tool line, in the delegated-agent tint, with the label in bold
+ * monospace, the task in grey, the state glyph and a chevron. When the line has something to
+ * show, the header opens it (`children`: the result box or a placeholder line).
+ */
+export const DelegatedAgentRow: React.FC<{
+  label: string
+  summary: string
+  status: DelegatedRowStatus
+  /** The state in words, for the accessible name of the header. */
+  statusLabel: string
+  /** False while there is nothing to show: no chevron, the header does not open. */
+  expandable: boolean
+  open: boolean
+  onToggle: () => void
+  testId?: string
+  /** The body, drawn only while the line is open. */
+  children?: React.ReactNode
+}> = ({ label, summary, status, statusLabel, expandable, open, onToggle, testId, children }) => {
+  const theme = useTheme()
+  const tokens = React.useMemo(() => getAgentColumnTokens(theme), [theme])
+  const content = (
+    <>
+      <ColumnStatusGlyph status={status} tokens={tokens} />
+      <Box component="span" sx={{ ...columnNameSx(tokens), color: tokens.memberTint.label }}>
+        {label}
+      </Box>
+      <Box component="span" sx={columnSummarySx(tokens)}>
+        {summary}
+      </Box>
+      {expandable ? <ColumnChevron open={open} tokens={tokens} /> : null}
+    </>
+  )
+  const headerSx = { ...columnHeaderSx(tokens), bgcolor: tokens.memberTint.header }
+  const name = `${label} — ${statusLabel}`
+  return (
+    <Box
+      data-testid={testId}
+      data-chat-delegated-line={status}
+      sx={{
+        borderRadius: `${tokens.radius.content}px`,
+        overflow: 'hidden',
+        minWidth: 0,
+        flexShrink: 0
+      }}
+    >
+      {expandable ? (
+        <Box
+          component="button"
+          type="button"
+          aria-label={name}
+          aria-expanded={open}
+          onClick={onToggle}
+          sx={headerSx}
+        >
+          {content}
+        </Box>
+      ) : (
+        <Box role="group" aria-label={name} sx={{ ...headerSx, cursor: 'default' }}>
+          {content}
+        </Box>
+      )}
+      {open && expandable ? (
+        <Box sx={{ borderTop: `1px solid ${tokens.memberTint.hairline}`, minWidth: 0 }}>
+          {children}
+        </Box>
+      ) : null}
+    </Box>
+  )
+}
+
+/** The result of a delegated agent in the tinted box: formatting-only Markdown, or raw text. */
+export const DelegatedResult: React.FC<{ text: string; raw?: boolean; error?: boolean }> = ({
+  text,
+  raw = false,
+  error = false
+}) => {
+  const theme = useTheme()
+  const tokens = React.useMemo(() => getAgentColumnTokens(theme), [theme])
+  return (
+    <Box
+      data-testid="chat-delegated-result"
+      sx={{
+        padding: '8px 12px',
+        maxHeight: COLUMN_DELEGATED_MAX_HEIGHT,
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        bgcolor: tokens.memberTint.header,
+        fontSize: tokens.fontSize.small,
+        lineHeight: '18px',
+        color: error ? tokens.danger : tokens.text,
+        overflowWrap: 'anywhere',
+        userSelect: 'text',
+        // The shared formatting-only body brings its own sizes; the box keeps 12px text.
+        '& > div': { fontSize: 'inherit', lineHeight: 'inherit', my: 0 }
+      }}
+    >
+      {raw || error ? (
+        <Box
+          component="pre"
+          sx={{
+            m: 0,
+            whiteSpace: 'pre-wrap',
+            fontFamily: raw ? tokens.monoFont : 'inherit',
+            fontSize: 'inherit',
+            lineHeight: 'inherit'
+          }}
+        >
+          {formatToolCallValue(text).text}
+        </Box>
+      ) : (
+        <AgentThreadCardBody body={text} />
+      )}
+    </Box>
+  )
+}
+
+/** A one-line placeholder in the body: "(running...)" in grey or "(interrupted)" in amber. */
+export const DelegatedNote: React.FC<{ text: string; tone: 'running' | 'interrupted' }> = ({
+  text,
+  tone
+}) => {
+  const theme = useTheme()
+  const tokens = React.useMemo(() => getAgentColumnTokens(theme), [theme])
+  return (
+    <Box
+      data-testid="chat-delegated-note"
+      sx={{
+        padding: '8px 12px',
+        fontSize: tokens.fontSize.small,
+        lineHeight: '16px',
+        color: tone === 'running' ? tokens.muted : tokens.attention,
+        bgcolor: tone === 'running' ? tokens.memberTint.body : alpha(tokens.attention, 0.08)
+      }}
+    >
+      {text}
+    </Box>
+  )
+}
+
+/** A helper call (explore, critic, fork, response, summarize) as a delegated-agent line. */
+const HelperCallRow: React.FC<{
+  entry: ToolHistoryEntry
+  live: boolean
+  open: boolean
+  onToggle: () => void
+}> = ({ entry, live, open, onToggle }) => {
+  const { t } = useTranslation()
+  const status = toolCallDisplayStatus(entry, live)
+  const name = toolCallDisplayName(entry)
+  const summary = React.useMemo(() => toolCallArgumentSummary(entry.args), [entry.args])
+  const result = React.useMemo(
+    () => (open ? helperToolCallResult(entry) : undefined),
+    [open, entry]
+  )
+  const error = entry.error !== undefined && entry.error !== '' ? entry.error : undefined
+  const hasResult = entry.content !== undefined && entry.content !== ''
+  return (
+    <DelegatedAgentRow
+      label={t('chat.delegated.helper_label', { name })}
+      summary={summary}
+      status={status}
+      statusLabel={t(`chat.tool_call.status_${status}`)}
+      // The result or the error, or a placeholder while it runs and after it was stopped.
+      expandable={
+        hasResult || error !== undefined || status === 'running' || status === 'cancelled'
+      }
+      open={open}
+      onToggle={onToggle}
+    >
+      {result ? (
+        <DelegatedResult text={result.text} raw={result.kind === 'raw'} />
+      ) : error !== undefined ? (
+        <DelegatedResult text={error} error />
+      ) : status === 'running' ? (
+        <DelegatedNote text={t('chat.delegated.running')} tone="running" />
+      ) : status === 'cancelled' ? (
+        <DelegatedNote text={t('chat.delegated.interrupted')} tone="interrupted" />
+      ) : null}
+    </DelegatedAgentRow>
+  )
+}
 
 const ToolCallRow: React.FC<{
   entry: ToolHistoryEntry
@@ -670,7 +863,9 @@ export default function ChatToolCalls({
       columnStyle
         ? groupToolCalls(
             entries,
+            // A helper call is a delegated-agent line of its own and ends a run of calls.
             (entry) =>
+              !isHelperToolCall(entry) &&
               pinnedCardDisplay(
                 entry.toolName,
                 toolCallDisplayStatus(entry, live),
@@ -702,6 +897,14 @@ export default function ChatToolCalls({
             onToggle={() => toggle(group.key)}
             openKeys={openKeys}
             onToggleRow={toggle}
+          />
+        ) : columnStyle && isHelperToolCall(group.entry) ? (
+          <HelperCallRow
+            key={group.key}
+            entry={group.entry}
+            live={live}
+            open={openKeys.has(group.key)}
+            onToggle={() => toggle(group.key)}
           />
         ) : (
           <ToolCallRow

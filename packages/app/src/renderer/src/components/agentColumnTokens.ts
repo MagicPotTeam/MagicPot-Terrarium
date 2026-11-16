@@ -37,8 +37,12 @@ export interface AgentColumnTokens {
   toolTint: { header: string; body: string; hairline: string }
   /** Bold monospace tool name on a tool line. */
   toolName: string
-  /** Tint of delegated-agent (team member) lines and the colour of their label. */
-  memberTint: { header: string; stats: string; label: string }
+  /**
+   * Tint of delegated-agent lines (helpers and team members): the header and the result
+   * box, a lighter fill for a placeholder line, the hairline under the header, and the
+   * colour of the label.
+   */
+  memberTint: { header: string; body: string; hairline: string; label: string }
   /** Working, queued or waiting for the person. */
   attention: string
   /** Errors and destructive rows. */
@@ -77,7 +81,8 @@ export const getAgentColumnTokens = (theme: Theme): AgentColumnTokens => {
     toolName: dark ? theme.palette.primary.light : theme.palette.primary.dark,
     memberTint: {
       header: alpha(AGENT_COLUMN_MEMBER_ACCENT, dark ? 0.12 : 0.08),
-      stats: alpha(AGENT_COLUMN_MEMBER_ACCENT, dark ? 0.2 : 0.15),
+      body: alpha(AGENT_COLUMN_MEMBER_ACCENT, dark ? 0.06 : 0.04),
+      hairline: alpha(AGENT_COLUMN_MEMBER_ACCENT, dark ? 0.2 : 0.15),
       label: dark ? AGENT_COLUMN_MEMBER_LABEL_DARK : AGENT_COLUMN_MEMBER_ACCENT
     },
     attention: theme.palette.warning.main,

@@ -6,11 +6,15 @@ import { ThemeProvider, alpha, createTheme } from '@mui/material/styles'
 import type { ToolHistoryEntry } from '@shared/llm/types'
 import ChatToolCalls from './ChatToolCalls'
 
-// Keys stand in for the text; a count is appended so the batch title can be checked.
+// Keys stand in for the text; a count or a name is appended so titles and labels can be checked.
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, options?: { count?: number }) =>
-      options?.count === undefined ? key : `${key}:${options.count}`
+    t: (key: string, options?: { count?: number; name?: string }) =>
+      options?.count !== undefined
+        ? `${key}:${options.count}`
+        : options?.name !== undefined
+          ? `${key}:${options.name}`
+          : key
   })
 }))
 
@@ -394,5 +398,166 @@ describe('tool lines in the Agent column', () => {
 
   it('renders nothing without tool records', () => {
     expect(render(<ChatToolCalls live={false} columnStyle />).container).toBeEmptyDOMElement()
+  })
+})
+
+describe('helper calls as delegated-agent lines in the Agent column', () => {
+  const helper = (
+    id: string,
+    name: string,
+    status: ToolHistoryEntry['status'] = 'completed',
+    patch: Partial<ToolHistoryEntry> = {}
+  ) =>
+    call(id, name, status, {
+      args: { task: `Find every call site of ${id}` },
+      content: JSON.stringify({
+        kind: name,
+        status: 'completed',
+        runId: 'r',
+        content: `**Three** call sites for ${id}.`,
+        advisoryOnly: true
+      }),
+      ...patch
+    })
+  const delegated = (container: HTMLElement) => [
+    ...container.querySelectorAll('[data-chat-delegated-line]')
+  ]
+
+  it('draws a helper call as "[sub] <kind>" in the delegated tint with the task in grey', () => {
+    const theme = createTheme({ palette: { mode: 'dark' } })
+    const { container } = render(
+      <ThemeProvider theme={theme}>
+        <ChatToolCalls history={[helper('a', 'explore')]} live={false} columnStyle />
+      </ThemeProvider>
+    )
+    expect(lines(container)).toHaveLength(0)
+    expect(delegated(container)).toHaveLength(1)
+    const header = screen.getByRole('button')
+    expect(header).toHaveAccessibleName(
+      'chat.delegated.helper_label:explore — chat.tool_call.status_completed'
+    )
+    expect(header).toHaveTextContent(
+      'chat.delegated.helper_label:explore' + 'task=Find every call site of a'
+    )
+    expect(header).toHaveStyle({ backgroundColor: alpha('#A57EAE', 0.12), minHeight: '28px' })
+    expect(within(header).getByText('chat.delegated.helper_label:explore')).toHaveStyle({
+      color: '#E8D5ED',
+      fontWeight: '600'
+    })
+    expect(header.querySelector('[data-testid="CheckIcon"]')).not.toBeNull()
+    expect(delegated(container)[0]).toHaveStyle({ borderRadius: '8px', overflow: 'hidden' })
+  })
+
+  it('opens the report in the tinted 12rem box as formatting-only Markdown', () => {
+    render(<ChatToolCalls history={[helper('a', 'critic')]} live={false} columnStyle />)
+    const header = screen.getByRole('button')
+    expect(header).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByTestId('chat-delegated-result')).not.toBeInTheDocument()
+    fireEvent.click(header)
+    expect(header).toHaveAttribute('aria-expanded', 'true')
+    const box = screen.getByTestId('chat-delegated-result')
+    expect(box).toHaveStyle({ maxHeight: '12rem', overflowY: 'auto', padding: '8px 12px' })
+    expect(box.querySelector('strong')?.textContent).toBe('Three')
+    expect(box).toHaveTextContent('Three call sites for a.')
+    // No arguments section, no stats strip, no nested conversation.
+    expect(screen.queryByText('chat.tool_call.arguments')).not.toBeInTheDocument()
+  })
+
+  it('shows a background job receipt as raw text', () => {
+    const job = JSON.stringify({
+      job: { id: 'job-1', kind: 'explore', status: 'running' },
+      background: true,
+      advisoryOnly: true
+    })
+    render(
+      <ChatToolCalls
+        history={[helper('a', 'explore', 'completed', { content: job })]}
+        live={false}
+        columnStyle
+      />
+    )
+    fireEvent.click(screen.getByRole('button'))
+    const box = screen.getByTestId('chat-delegated-result')
+    expect(box.querySelector('pre')).not.toBeNull()
+    expect(box).toHaveTextContent('job-1')
+  })
+
+  it('says "(running...)" while it runs, "(interrupted)" after a stop and shows a failure in the error colour', () => {
+    const theme = createTheme({ palette: { mode: 'dark' } })
+    const { container } = render(
+      <ThemeProvider theme={theme}>
+        <ChatToolCalls
+          history={[
+            helper('a', 'explore', 'running', { content: undefined }),
+            helper('b', 'fork', 'cancelled', { content: undefined }),
+            helper('c', 'summarize', 'failed', { content: undefined, error: 'budget exhausted' })
+          ]}
+          live
+          columnStyle
+        />
+      </ThemeProvider>
+    )
+    expect(
+      delegated(container).map((line) => line.getAttribute('data-chat-delegated-line'))
+    ).toEqual(['running', 'cancelled', 'failed'])
+    const [running, cancelled, failed] = screen.getAllByRole('button')
+    fireEvent.click(running)
+    fireEvent.click(cancelled)
+    fireEvent.click(failed)
+    const notes = screen.getAllByTestId('chat-delegated-note')
+    expect(notes.map((note) => note.textContent)).toEqual([
+      'chat.delegated.running',
+      'chat.delegated.interrupted'
+    ])
+    expect(notes[1]).toHaveStyle({ color: theme.palette.warning.main })
+    expect(screen.getByTestId('chat-delegated-result')).toHaveTextContent('budget exhausted')
+    expect(screen.getByTestId('chat-delegated-result')).toHaveStyle({
+      color: theme.palette.error.main
+    })
+  })
+
+  it('has no chevron and does not open when a finished call left nothing to show', () => {
+    render(
+      <ChatToolCalls
+        history={[helper('a', 'response', 'completed', { content: '' })]}
+        live={false}
+        columnStyle
+      />
+    )
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('group', {
+        name: 'chat.delegated.helper_label:response — chat.tool_call.status_completed'
+      })
+    ).toBeInTheDocument()
+    expect(document.querySelector('[data-testid="ExpandMoreIcon"]')).toBeNull()
+  })
+
+  it('never joins a batch: a helper call ends the run of plain calls', () => {
+    const { container } = render(
+      <ChatToolCalls
+        history={[
+          call('a', 'read'),
+          call('b', 'grep'),
+          helper('h', 'explore'),
+          call('c', 'read'),
+          call('d', 'edit'),
+          call('e', 'bash')
+        ]}
+        live={false}
+        columnStyle
+      />
+    )
+    // read, grep (two plain lines), the helper line, then a batch of three.
+    expect(batches(container)).toHaveLength(1)
+    expect(lines(container)).toHaveLength(2)
+    expect(delegated(container)).toHaveLength(1)
+  })
+
+  it('leaves helper calls as ordinary rows in the full-page chat', () => {
+    const { container } = render(<ChatToolCalls history={[helper('a', 'explore')]} live={false} />)
+    expect(delegated(container)).toHaveLength(0)
+    expect(screen.getByRole('button')).toHaveTextContent('explore')
+    expect(screen.getByRole('button')).toHaveTextContent('chat.tool_call.status_completed')
   })
 })

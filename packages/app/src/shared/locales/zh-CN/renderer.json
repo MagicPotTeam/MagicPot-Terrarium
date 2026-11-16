@@ -1449,6 +1449,11 @@
       "regen_prompt": "新建一个对话，保留最后一条用户消息之前的内容，并把那条消息放回输入框。原对话保留。",
       "edit_prompt": "新建一个对话，保留第 {{number}} 条消息之前的内容，并把修改后的文字放入输入框。原对话保留。",
       "repair_prompt": "在之后的请求中用占位说明代替 {{count}} 张缺失的本地图片？原始记录不变。"
+    },
+    "delegated": {
+      "helper_label": "[sub] {{name}}",
+      "running": "(运行中…)",
+      "interrupted": "(已中断)"
     }
   },
   "agent_workspace": {

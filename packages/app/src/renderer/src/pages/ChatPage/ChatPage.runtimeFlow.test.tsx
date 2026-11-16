@@ -1902,39 +1902,7 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('offline helper stream displays only invocation metadata and fences late events after stop', async () => {
-    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
-    let request!: { onEvent: (event: unknown) => void }
-    let finish!: (value: unknown) => void
-    hoisted.requestChatCompletionStreamMock.mockImplementation((input: typeof request) => { request = input; return new Promise(resolve => { finish = resolve }) })
-    const view = renderChatPage()
-    const names = ['explore', 'critic', 'fork', 'response', 'summarize']
-    const emit = (name: string, status: string) => request.onEvent({ type: 'tool-status', toolStatus: { runId: 'fixture-run', toolCallId: `call-${name}`, toolName: name, status, args: { secret: 'SECRET_ARGUMENT' }, content: 'SECRET_HISTORY' } })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'run helper fixture' } })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(request).toBeDefined())
-      await act(async () => { for (const name of names) emit(name, 'running'); emit('not_allowed', 'running') })
-      const area = await screen.findByRole('region', { name: '进程区' })
-      for (const name of names) expect(within(area).getByText(name)).toBeVisible()
-      expect(within(area).getAllByText('调用中')).toHaveLength(5)
-      expect(area).not.toHaveTextContent('SECRET_ARGUMENT')
-      expect(area).not.toHaveTextContent('SECRET_HISTORY')
-      expect(area).not.toHaveTextContent('not_allowed')
-      for (const name of names) expect(within(area).queryByRole('button', { name: `停止 ${name}` })).not.toBeInTheDocument()
-      await act(async () => emit('explore', 'completed'))
-      expect(within(area).getByText('调用已返回')).toBeVisible()
-      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
-      await waitFor(() => expect(within(area).getAllByText('状态未知')).toHaveLength(4))
-      await act(async () => { emit('critic', 'completed'); finish({ result: { content: 'late' }, response: 'late' }) })
-      expect(within(area).getAllByText('状态未知')).toHaveLength(4)
-      expect(within(area).getAllByText('调用已返回')).toHaveLength(1)
-      expect(area).not.toHaveTextContent('SECRET_ARGUMENT')
-    } finally { view.unmount() }
-  })
-
-  it('offline helper stream becomes unknown on same-scope reload without aborting its parent', async () => {
+  it('offline helper stream keeps its parent request through a same-scope reload', async () => {
     const session: ChatSession = { id: 'helper-reload', title: 'Reload', messages: [], profileId: 'base-model' }
     hoisted.storedSessions.value = [session]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), session.id)
@@ -1951,17 +1919,13 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       await waitFor(() => expect(request).toBeDefined())
       await act(async () => request.onEvent(event('running')))
-      expect(within(await screen.findByRole('region', { name: '进程区' })).getByText('调用中')).toBeVisible()
       let reloadStarted = false
       hoisted.loadAllSessionsMock.mockImplementationOnce(async () => { reloadStarted = true; return cloneValue(hoisted.storedSessions.value) })
       hoisted.notifyErrorMock = vi.fn()
       page.rerender(<MemoryRouter><ThemeProvider theme={theme}><ChatPage compact storageScope="runtime-flow" /></ThemeProvider></MemoryRouter>)
       await waitFor(() => expect(reloadStarted).toBe(true))
-      await waitFor(() => expect(within(screen.getByRole('region', { name: '进程区' })).getByText('状态未知')).toBeVisible())
       expect(request.signal.aborted).toBe(false)
       await act(async () => request.onEvent(event('completed')))
-      expect(within(screen.getByRole('region', { name: '进程区' })).getByText('状态未知')).toBeVisible()
-      expect(screen.queryByText('调用已返回')).not.toBeInTheDocument()
       expect(request.signal.aborted).toBe(false)
       await act(async () => finish({ result: { content: 'done' }, response: 'done' }))
     } finally {
@@ -1988,24 +1952,19 @@ describe('ChatPage runtime workflow integration', () => {
       send('first fixture')
       await waitFor(() => expect(requests).toHaveLength(1))
       await act(async () => requests[0].onEvent(event('running')))
-      expect(within(await screen.findByRole('region', { name: '进程区' })).getByText('调用中')).toBeVisible()
       let reloaded = false
       hoisted.loadAllSessionsMock.mockImplementationOnce(async () => { reloaded = true; return cloneValue(hoisted.storedSessions.value) })
       hoisted.notifyErrorMock = vi.fn()
       page.rerender(ui())
       await waitFor(() => expect(reloaded).toBe(true))
-      await waitFor(() => expect(within(screen.getByRole('region', { name: '进程区' })).getByText('状态未知')).toBeVisible())
       expect(requests[0].signal.aborted).toBe(false)
       fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
       await waitFor(() => expect(requests[0].signal.aborted).toBe(true))
       send('second fixture')
       await waitFor(() => expect(requests).toHaveLength(2))
       await act(async () => requests[1].onEvent(event('running')))
-      expect(within(screen.getByRole('region', { name: '进程区' })).getByText('调用中')).toBeVisible()
       await act(async () => { requests[0].onEvent(event('completed')); finishes[0]({ result: { content: 'old' }, response: 'old' }) })
-      expect(within(screen.getByRole('region', { name: '进程区' })).getByText('调用中')).toBeVisible()
       await act(async () => requests[1].onEvent(event('completed')))
-      expect(within(screen.getByRole('region', { name: '进程区' })).getByText('调用已返回')).toBeVisible()
       await act(async () => finishes[1]({ result: { content: 'new' }, response: 'new' }))
     } finally {
       for (const finish of finishes) finish({ result: { content: 'cleanup' }, response: 'cleanup' })
@@ -2014,7 +1973,7 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('strict helper ignores old same-id events after stop and settled old request', async () => {
+  it('a helper stream of a stopped and settled request does not disturb the next request', async () => {
     const session: ChatSession = { id: 'strict-helper-settled', title: 'Helper', messages: [], profileId: 'base-model' }
     hoisted.storedSessions.value = [session]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), session.id)
@@ -2030,7 +1989,6 @@ describe('ChatPage runtime workflow integration', () => {
       send('first fixture')
       await waitFor(() => expect(requests).toHaveLength(1))
       await act(async () => requests[0].onEvent(event('running')))
-      expect(within(await screen.findByRole('region', { name: '进程区' })).getByText('调用中')).toBeVisible()
       fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
       await waitFor(() => expect(requests[0].signal.aborted).toBe(true))
       await act(async () => finishes[0]({ result: { content: 'old' }, response: 'old' }))
@@ -2038,11 +1996,8 @@ describe('ChatPage runtime workflow integration', () => {
       send('second fixture')
       await waitFor(() => expect(requests).toHaveLength(2))
       await act(async () => requests[1].onEvent(event('running')))
-      expect(within(screen.getByRole('region', { name: '进程区' })).getByText('调用中')).toBeVisible()
       await act(async () => requests[0].onEvent(event('completed')))
-      expect(within(screen.getByRole('region', { name: '进程区' })).getByText('调用中')).toBeVisible()
       await act(async () => requests[1].onEvent(event('completed')))
-      expect(within(screen.getByRole('region', { name: '进程区' })).getByText('调用已返回')).toBeVisible()
       await act(async () => finishes[1]({ result: { content: 'new' }, response: 'new' }))
     } finally {
       for (const finish of finishes) finish({ result: { content: 'cleanup' }, response: 'cleanup' })

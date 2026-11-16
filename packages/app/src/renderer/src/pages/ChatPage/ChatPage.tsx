@@ -9519,12 +9519,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // Helper jobs and background processes of the open conversation. The team is listed in the
   // thread list and the header select instead.
   const renderProcessArea = (leadJobs: TeamLeadJobEntriesValue) => {
-          const observedHelpers: ProcessEntry[] = currentSessionId ? helperObserver.list(currentSessionId).map(item => ({
-            id: JSON.stringify(['tool-observation', storageScope, currentSessionId, item.parentRunId, item.runId, item.toolCallId]),
-            kind: 'job', name: item.name,
-            status: item.status === 'running' ? 'running' : item.status === 'returned' ? 'completed' : item.status,
-            statusText: item.status === 'running' ? '调用中' : item.status === 'returned' ? '调用已返回' : item.status === 'failed' ? '调用失败' : item.status === 'cancelled' ? '调用已取消' : '状态未知'
-          })) : []
           const helperEntries: ProcessEntry[] = jobController.jobs.map(job => ({
             id: JSON.stringify(['current-helper', jobController.scopeKey, job.id]), kind: 'job', name: job.kind,
             status: job.status === 'running' ? 'running' : job.status === 'completed' ? 'completed' : job.status === 'cancelled' ? 'cancelled' : 'failed',
@@ -9544,7 +9538,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             detail: processScope ? <AgentProcessDetails job={job} scope={processScope}/> : undefined,
             onStop: () => { void processController.stop(job).catch(() => notifyWarning('无法停止后台进程，请重试')) }
           }))
-          return <AgentProcessArea entries={[...observedHelpers, ...helperEntries, ...leadHelperEntries, ...processEntries]} showStaticWhenEmpty={Boolean(jobController.error || processController.error || leadJobs.error)} staticSlot={<>
+          return <AgentProcessArea entries={[...helperEntries, ...leadHelperEntries, ...processEntries]} showStaticWhenEmpty={Boolean(jobController.error || processController.error || leadJobs.error)} staticSlot={<>
             {(jobController.error || processController.error) && <Typography variant="caption" color="warning.main">当前对话后台进程状态刷新失败{((jobController.error && jobController.jobs.length > 0) || (processController.error && processController.jobs.length > 0)) ? '，部分显示的状态可能已过期。' : ''}</Typography>}
             {leadJobs.error && <Typography variant="caption" color="warning.main">组长后台助手状态刷新失败{leadJobs.entries.length > 0 ? '，部分显示的状态可能已过期。' : ''}</Typography>}
           </>} />

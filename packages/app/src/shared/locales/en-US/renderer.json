@@ -1622,6 +1622,11 @@
       "regen_prompt": "Create a new conversation that keeps everything before the last user message and puts that message back in the input. The original stays.",
       "edit_prompt": "Create a new conversation that keeps everything before message {{number}} and puts the edited text in the input. The original stays.",
       "repair_prompt": "Replace {{count}} missing local image(s) with a placeholder note in later requests? The original history stays unchanged."
+    },
+    "delegated": {
+      "helper_label": "[sub] {{name}}",
+      "running": "(running...)",
+      "interrupted": "(interrupted)"
     }
   },
   "agent_workspace": {
