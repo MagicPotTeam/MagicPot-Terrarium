@@ -1901,11 +1901,12 @@ const FileAttachmentCard: React.FC<{
   const folderTabColor = theme.palette.mode === 'light' ? '#eef2ff' : '#111827'
   // A report the request path refuses (no MAIN binding) is shown muted, with a short caption in
   // place of the meta label; opening, dragging and downloading the file itself stay as they are.
+  // No aria-disabled on the card: it would expose the working Download button as disabled.
   const reportUnavailable = isUnavailablePrimaryReportFile(attachment)
 
   return (
     <Box
-      aria-disabled={reportUnavailable || undefined}
+      data-report-unavailable={reportUnavailable ? 'true' : undefined}
       draggable={Boolean(attachment.url)}
       onDragStart={(event) => {
         if (!attachment.url) return
@@ -1959,7 +1960,7 @@ const FileAttachmentCard: React.FC<{
             sx={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
           >
             {reportUnavailable
-              ? t('chat.report_unavailable', { defaultValue: 'Unavailable: unverified source' })
+              ? t('chat.report_unavailable', { defaultValue: 'Unverified source' })
               : buildFileMetaLabel({
                   fileName: attachment.fileName,
                   mimeType: attachment.mimeType,

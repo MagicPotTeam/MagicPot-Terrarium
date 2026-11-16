@@ -92,14 +92,23 @@ const cardOf = (fileName: string): HTMLElement => {
   return card
 }
 
+// The Download button inside a card must never sit under aria-disabled: assistive technology
+// and Playwright would then treat the still-working download as disabled.
+const expectDownloadNotAriaDisabled = (card: HTMLElement) => {
+  const button = within(card).getByRole('button', { name: 'chat.download_attachment' })
+  expect(button.closest('[aria-disabled="true"]')).toBeNull()
+}
+
 const expectUnavailable = (card: HTMLElement) => {
-  expect(card).toHaveAttribute('aria-disabled', 'true')
+  expect(card).toHaveAttribute('data-report-unavailable', 'true')
+  expectDownloadNotAriaDisabled(card)
   expect(card).toHaveStyle({ opacity: '0.55' })
   expect(within(card).getByText((text) => text === CAPTION_KEY)).toBeInTheDocument()
 }
 
 const expectAvailable = (card: HTMLElement) => {
-  expect(card).not.toHaveAttribute('aria-disabled')
+  expect(card).not.toHaveAttribute('data-report-unavailable')
+  expectDownloadNotAriaDisabled(card)
   expect(card).not.toHaveStyle({ opacity: '0.55' })
   expect(within(card).queryByText((text) => text.includes(CAPTION_KEY))).not.toBeInTheDocument()
 }
@@ -149,16 +158,24 @@ describe('ChatMessageList unavailable report chip', () => {
     expect(within(card).queryByText(/KB/)).not.toBeInTheDocument()
     expect(within(card).getByText('legacy-report.md')).toBeInTheDocument()
     expect(card).toHaveAttribute('draggable', 'true')
+    expectDownloadNotAriaDisabled(card)
     fireEvent.click(within(card).getByRole('button', { name: 'chat.download_attachment' }))
     expect(onDownloadAttachment).toHaveBeenCalledWith(expect.objectContaining(legacyReport))
   })
 
-  it('has the caption in every renderer locale file', () => {
-    for (const locale of [enUS, zhCN] as Array<{ chat: Record<string, unknown> }>) {
+  it('has a short caption in every renderer locale file', () => {
+    // The caption sits where the meta label ("Markdown | 1.5 KB") sits, in a card that can be as
+    // narrow as a user bubble; a longer caption is truncated and pushes the kind badge onto two
+    // lines. Keep it about as wide as a meta label (Latin about 18 characters, CJK about 9).
+    const limits: Array<[{ chat: Record<string, unknown> }, number]> = [
+      [enUS, 18],
+      [zhCN, 9]
+    ]
+    for (const [locale, maxLength] of limits) {
       const caption = locale.chat.report_unavailable
       expect(typeof caption).toBe('string')
       expect((caption as string).length).toBeGreaterThan(0)
-      expect((caption as string).length).toBeLessThanOrEqual(40)
+      expect((caption as string).length).toBeLessThanOrEqual(maxLength)
     }
   })
 })

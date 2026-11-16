@@ -1481,7 +1481,7 @@
     "attachment_preview": "Attachment preview",
     "paste_image_hint": "You can paste images from clipboard (Ctrl+V)",
     "download_attachment": "Download attachment",
-    "report_unavailable": "Unavailable: unverified source",
+    "report_unavailable": "Unverified source",
     "model3d_file": "3D Model File",
     "start_listening": "Start voice input",
     "stop_listening": "Stop voice input",
