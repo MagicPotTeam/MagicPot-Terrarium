@@ -562,6 +562,32 @@ describe('Canvas Target evidence action gate', () => {
     })
   })
 
+  // The extraction's output is placed on the canvas with its own blob src; a
+  // later add_image of that URL re-places the run's own output.
+  it('re-places the run\'s own extraction output (selected_sources)', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const added = vi.fn((event: Event) => {
+      const detail = (event as CustomEvent<{ src: string; onAdded?: (item: unknown) => void }>).detail
+      detail.onAdded?.({ ...plain, id: 'replaced', src: detail.src })
+    })
+    window.addEventListener('canvas:add-image', added)
+    f.plan.mockResolvedValue({
+      id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [],
+      capabilityActions: [
+        { ...extractAction, itemIds: ['source'] },
+        { type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: 'blob:extracted-fixture', fileName: 'again.png' }
+      ]
+    })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selected_sources'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    window.removeEventListener('canvas:add-image', added)
+    expect(f.extract).toHaveBeenCalledOnce()
+    expect(added).toHaveBeenCalledOnce()
+    expect((added.mock.calls[0][0] as CustomEvent<{ src: string }>).detail.src).toBe('blob:extracted-fixture')
+  })
+
   // An add_* placement of a canvas source is not a run output: once the
   // selected source is gone, the run's copy of it does not make its URL
   // placeable again.

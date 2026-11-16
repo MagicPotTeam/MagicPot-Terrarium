@@ -2299,10 +2299,12 @@ export function useCanvasTargetWorkflow({
         source?: 'quick_app' | 'canvas',
         runOutput = true
       ) => {
-        // Only ids the run's view of the canvas did not hold yet are new items.
+        // Only ids the run's view of the canvas did not hold yet, or that the
+        // run created itself (an extraction commits its items before they are
+        // registered here), are new items.
         const knownIds = new Set(runtimeCanvasItems.map((item) => item.id))
         placedItems.forEach((item) => {
-          if (knownIds.has(item.id)) return
+          if (knownIds.has(item.id) && !runCreatedItemIds.has(item.id)) return
           runCreatedItemIds.add(item.id)
           if (runOutput) runPlacedItemIds.add(item.id)
         })
