@@ -12,6 +12,10 @@ import { _electron as electron } from 'playwright'
 import { isolatedImageEnvironment, fixtureConfig, assertIsolatedRuntime } from './isolatedImageDesktopAcceptance.mjs'
 import { startSyntheticTeamResponsesMock } from './syntheticTeamResponsesMock.mjs'
 import { seedIsolatedTeamLead, createIsolatedDesigner, createIsolatedWriter, verifyIsolatedTeamMembers, waitForIsolatedTeamPane, broadcastIsolatedTeamChannel, chooseIsolatedComposerMenuEntry, openIsolatedTeamConversation } from './isolatedTeamDesktopFixture.mjs'
+import {
+  isLinuxIsolatedPlatform, isolatedWorkerPath, isolatedWorkerSourceArgument, isolatedElectronArgs,
+  assertNoLinuxWorkerSource, buildLinuxIsolatedWorker, needsLinuxXvfbRelaunch, relaunchIsolatedRunnerUnderXvfb
+} from './isolatedDesktopPlatform.mjs'
 
 const require = createRequire(import.meta.url)
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -116,13 +120,15 @@ async function readMembers(page, identity, ids) {
   }, { identity, ids, marker, content })
 }
 
-export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
+export async function runIsolatedTeamChannelDesktop(runRoot, workerSource, { platform = process.platform } = {}) {
+  const linux = isLinuxIsolatedPlatform(platform)
+  if (linux) assertNoLinuxWorkerSource(workerSource)
   assert(path.isAbsolute(runRoot) && inside(privateRoot, runRoot), 'Use a new private root')
-  assert(path.isAbsolute(workerSource) && inside(privateRoot, workerSource), 'Use an owned worker')
+  if (!linux) assert(path.isAbsolute(workerSource) && inside(privateRoot, workerSource), 'Use an owned worker')
   const runId = path.basename(runRoot), base = path.resolve(runRoot, '../../..')
   assert.equal(normalized(path.join(base, '.magicpot-trash/MagicPot', runId)), normalized(runRoot))
   assert.equal(normalized(await fs.realpath(runRoot)), normalized(runRoot))
-  assert(inside(privateRoot, await fs.realpath(workerSource)))
+  if (!linux) assert(inside(privateRoot, await fs.realpath(workerSource)))
   assert.deepEqual((await fs.readdir(runRoot)).sort(), ['app'], 'Root must be fresh and never run')
   const appRoot = path.join(runRoot, 'app'), stat = await fs.lstat(appRoot)
   assert(stat.isDirectory() && !stat.isSymbolicLink())
@@ -130,17 +136,18 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
   const mainEntry = path.join(appRoot, 'out/main/index.js')
   assert(inside(runRoot, await fs.realpath(mainEntry)))
   await fs.mkdir(path.join(runRoot, 'evidence'))
-  const workerPath = path.join(runRoot, 'bin/canvas-thumbnail-sidecar.exe')
+  const workerPath = isolatedWorkerPath(runRoot, platform)
   const report = { status: 'running', stage: 'prepare', scope: 'synthetic-channel-only', limitations: ['Lead is seeded; member creation is UI.', 'Mock matches last user text part, not the entire request.', 'The relaunch check verifies persisted session rows only; it does not prove reliable delivery, durable receipts, in-flight replay or restart recovery of a pending request.', 'No claim of real model execution or system-wide network isolation.'] }
   let app, page, mock, outcome
   try {
     for (const dir of ['bin', 'cwd', 'storage', 'home', 'appdata', 'localappdata', 'temp', 'storage/Data', 'storage/Projects']) await fs.mkdir(path.join(runRoot, dir))
-    await fs.copyFile(workerSource, workerPath, constants.COPYFILE_EXCL)
+    if (linux) await buildLinuxIsolatedWorker(runRoot, { repoRoot: repo })
+    else await fs.copyFile(workerSource, workerPath, constants.COPYFILE_EXCL)
     mock = await startSyntheticTeamResponsesMock()
     await fs.writeFile(path.join(runRoot, 'storage/Data/config.json'), JSON.stringify(fixtureConfig(mock.baseURL)), { flag: 'wx' })
     await fs.writeFile(path.join(appRoot, 'bootstrap.cjs'), 'require(' + JSON.stringify(path.join(repo, 'scripts/chat/isolatedImageDesktopBootstrap.cjs')) + ').startIsolatedImageDesktop(' + JSON.stringify({ runRoot, mainEntry, mockOrigin: new URL(mock.baseURL).origin, workerPath }) + ')\n', { flag: 'wx' })
     report.stage = 'launch'
-    app = await electron.launch({ executablePath: require('electron'), args: [appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'], cwd: path.join(runRoot, 'cwd'), env: isolatedImageEnvironment(runRoot, base, runId), timeout: 90_000 })
+    app = await electron.launch({ executablePath: require('electron'), args: isolatedElectronArgs([appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'], platform), cwd: path.join(runRoot, 'cwd'), env: isolatedImageEnvironment(runRoot, base, runId, platform), timeout: 90_000 })
     page = await app.firstWindow({ timeout: 90_000 })
     page.setDefaultTimeout(30_000)
     await page.waitForFunction(() => Boolean(window.api?.svcState && document.querySelector('#root')?.childElementCount), undefined, { timeout: 90_000 })
@@ -238,9 +245,9 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
 
     app = await electron.launch({
       executablePath: require('electron'),
-      args: [appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'],
+      args: isolatedElectronArgs([appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'], platform),
       cwd: path.join(runRoot, 'cwd'),
-      env: isolatedImageEnvironment(runRoot, base, runId),
+      env: isolatedImageEnvironment(runRoot, base, runId, platform),
       timeout: 90_000
     })
     page = await app.firstWindow({ timeout: 90_000 })
@@ -274,10 +281,14 @@ export async function runIsolatedTeamChannelDesktop(runRoot, workerSource) {
   return outcome
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  if (!process.argv[2] || !process.argv[3]) throw Error('Provide new private run root and worker')
+const isMainModule = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+// Linux: re-run this file under xvfb-run with the worker built from source (no worker argument).
+if (isMainModule && needsLinuxXvfbRelaunch()) {
+  process.exitCode = await relaunchIsolatedRunnerUnderXvfb(fileURLToPath(import.meta.url), process.argv.slice(2), { privateRoot })
+} else if (isMainModule) {
+  if (!process.argv[2] || (!isLinuxIsolatedPlatform() && !process.argv[3])) throw Error('Provide new private run root and worker')
   try {
-    const report = await runIsolatedTeamChannelDesktop(path.resolve(process.argv[2]), path.resolve(process.argv[3]))
+    const report = await runIsolatedTeamChannelDesktop(path.resolve(process.argv[2]), isolatedWorkerSourceArgument(process.argv[3]))
     console.log('isolated-team-channel', JSON.stringify({ status: report.status, stage: report.stage, reportReceipt: report.reportReceipt }))
     process.exitCode = report.status === 'partial-passed' ? 0 : 1
   } catch {

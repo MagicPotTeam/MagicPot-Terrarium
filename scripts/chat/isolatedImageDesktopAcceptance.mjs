@@ -8,6 +8,10 @@ import { _electron as electron } from 'playwright'
 import { createDeterministicPng } from './chatImageMemoryBenchmark.mjs'
 import { startSyntheticResponsesMock } from './syntheticResponsesMock.mjs'
 import { seedIsolatedImageSession, sendIsolatedImageSession, inspectIsolatedImageSession } from './isolatedImageSendFixture.mjs'
+import {
+  isLinuxIsolatedPlatform, isolatedWorkerPath, isolatedWorkerSourceArgument, isolatedElectronArgs, linuxIsolatedEnvironment,
+  assertNoLinuxWorkerSource, assertFreshIsolatedRunRoot, buildLinuxIsolatedWorker, needsLinuxXvfbRelaunch, relaunchIsolatedRunnerUnderXvfb
+} from './isolatedDesktopPlatform.mjs'
 
 const require = createRequire(import.meta.url)
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -18,7 +22,7 @@ const pause = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 const normal = value => path.resolve(value).replaceAll('\\', '/').toLowerCase()
 const inside = (parent, value) => normal(value).startsWith(normal(parent) + '/')
 
-export function isolatedImageEnvironment(runRoot, base, runId) {
+export function isolatedImageEnvironment(runRoot, base, runId, platform = process.platform) {
   const environment = {}
   for (const [key, value] of Object.entries(process.env)) {
     if (['SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS'].includes(key.toUpperCase())) {
@@ -39,9 +43,10 @@ export function isolatedImageEnvironment(runRoot, base, runId) {
     MAGICPOT_TEST_ARTIFACT_ROOT: runRoot,
     MAGICPOT_STORAGE_ROOT: path.join(runRoot, 'storage'),
     MAGICPOT_MCP_STDIO_SERVER: '0',
-    MAGICPOT_CANVAS_THUMBNAIL_SIDECAR_PATH: path.join(runRoot, 'bin/canvas-thumbnail-sidecar.exe'),
+    MAGICPOT_CANVAS_THUMBNAIL_SIDECAR_PATH: isolatedWorkerPath(runRoot, platform),
     VITE_MAGICPOT_AUTO_START_COMFYUI: 'false'
   })
+  if (isLinuxIsolatedPlatform(platform)) Object.assign(environment, linuxIsolatedEnvironment(runRoot))
   return environment
 }
 
@@ -215,9 +220,12 @@ export async function assertIsolatedRuntime(appHandle, page, runRoot, baseURL) {
 
 /** Real application and renderer/IPC/provider path, with only synthetic sources
  * and a loopback model fixture. The seeded draft is not a drag/drop/import test. */
-export async function runIsolatedImageDesktop(runRoot, workerSource, { crashTwice = true } = {}) {
+export async function runIsolatedImageDesktop(runRoot, workerSource, { crashTwice = true, platform = process.platform } = {}) {
+  const linux = isLinuxIsolatedPlatform(platform)
+  if (linux) assertNoLinuxWorkerSource(workerSource)
   assert(path.isAbsolute(runRoot) && inside(privateScratch, runRoot), 'Invalid isolated run root')
-  assert(path.isAbsolute(workerSource) && inside(privateScratch, workerSource), 'Use only the owned private worker')
+  if (linux) await assertFreshIsolatedRunRoot(runRoot, privateScratch)
+  else assert(path.isAbsolute(workerSource) && inside(privateScratch, workerSource), 'Use only the owned private worker')
   const runId = path.basename(runRoot)
   const base = path.resolve(runRoot, '../../..')
   assert.equal(normal(path.join(base, '.magicpot-trash/MagicPot', runId)), normal(runRoot))
@@ -226,11 +234,12 @@ export async function runIsolatedImageDesktop(runRoot, workerSource, { crashTwic
   assert.equal(packageData.name, 'magicpot-isolated-image-acceptance')
   const mainEntry = path.join(appRoot, 'out/main/index.js')
   await fs.access(mainEntry)
-  const workerPath = path.join(runRoot, 'bin/canvas-thumbnail-sidecar.exe')
+  const workerPath = isolatedWorkerPath(runRoot, platform)
   for (const directory of ['bin', 'cwd', 'storage/Data', 'storage/Projects', 'fixtures', 'evidence', 'home', 'appdata', 'localappdata', 'temp']) {
     await fs.mkdir(path.join(runRoot, directory), { recursive: true })
   }
-  await fs.copyFile(workerSource, workerPath)
+  if (linux) await buildLinuxIsolatedWorker(runRoot, { repoRoot })
+  else await fs.copyFile(workerSource, workerPath)
   const largePaths = [], historyPaths = [], originalHashes = []
   let sourceBytes = 0
   for (let index = 0; index < 11; index++) {
@@ -255,12 +264,12 @@ export async function runIsolatedImageDesktop(runRoot, workerSource, { crashTwic
     report.stage = 'launch'
     appHandle = await electron.launch({
       executablePath: require('electron'),
-      args: [appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'),
+      args: isolatedElectronArgs([appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'),
         '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'),
         '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
-        '--disable-background-timer-throttling'],
+        '--disable-background-timer-throttling'], platform),
       cwd: path.join(runRoot, 'cwd'),
-      env: isolatedImageEnvironment(runRoot, base, runId),
+      env: isolatedImageEnvironment(runRoot, base, runId, platform),
       timeout: 90_000
     })
     appHandle.process().stdout?.on('data', chunk => { output = (output + chunk.toString()).slice(-65_536) })
@@ -395,8 +404,13 @@ export async function runIsolatedImageDesktop(runRoot, workerSource, { crashTwic
   return report
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  if (!process.argv[2] || !process.argv[3]) throw new Error('Pass isolated runRoot and private worker source paths.')
-  const result = await runIsolatedImageDesktop(path.resolve(process.argv[2]), path.resolve(process.argv[3]), { crashTwice: !process.argv.includes('--no-crash-recovery') })
+const isMainModule = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+// Linux: re-run this file under xvfb-run with the worker built from source (no worker argument).
+if (isMainModule && needsLinuxXvfbRelaunch()) {
+  process.exitCode = await relaunchIsolatedRunnerUnderXvfb(fileURLToPath(import.meta.url), process.argv.slice(2), { privateRoot: privateScratch })
+} else if (isMainModule) {
+  if (!process.argv[2] || (!isLinuxIsolatedPlatform() && !process.argv[3])) throw new Error('Pass isolated runRoot and private worker source paths.')
+  const linuxArgs = isLinuxIsolatedPlatform() ? process.argv.slice(3).filter(value => value !== '--no-crash-recovery') : []
+  const result = await runIsolatedImageDesktop(path.resolve(process.argv[2]), isolatedWorkerSourceArgument(isLinuxIsolatedPlatform() ? linuxArgs[0] : process.argv[3]), { crashTwice: !process.argv.includes('--no-crash-recovery') })
   process.exitCode = result.status === 'passed' ? 0 : 1
 }

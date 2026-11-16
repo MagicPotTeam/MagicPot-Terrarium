@@ -12,6 +12,10 @@ import { startSyntheticResponsesMock } from './syntheticResponsesMock.mjs'
 import {
   seedIsolatedTeamLead, createIsolatedDesigner, createIsolatedWriter, inspectIsolatedTeamPane, verifyIsolatedTeamMembers
 } from './isolatedTeamDesktopFixture.mjs'
+import {
+  isLinuxIsolatedPlatform, isolatedWorkerPath, isolatedWorkerSourceArgument, isolatedElectronArgs,
+  assertNoLinuxWorkerSource, buildLinuxIsolatedWorker, needsLinuxXvfbRelaunch, relaunchIsolatedRunnerUnderXvfb
+} from './isolatedDesktopPlatform.mjs'
 
 const require = createRequire(import.meta.url)
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -47,14 +51,16 @@ async function closeOwned(handle) {
 }
 
 /** The caller must pass a freshly built run root. Never reuse a partial run. */
-export async function runIsolatedTeamDesktop(runRoot, workerSource) {
+export async function runIsolatedTeamDesktop(runRoot, workerSource, { platform = process.platform } = {}) {
+  const linux = isLinuxIsolatedPlatform(platform)
+  if (linux) assertNoLinuxWorkerSource(workerSource)
   assert(path.isAbsolute(runRoot) && inside(privateRoot, runRoot), 'Use a new owned private run root')
-  assert(path.isAbsolute(workerSource) && inside(privateRoot, workerSource), 'Use the owned private worker')
+  if (!linux) assert(path.isAbsolute(workerSource) && inside(privateRoot, workerSource), 'Use the owned private worker')
   const runId = path.basename(runRoot)
   const base = path.resolve(runRoot, '../../..')
   assert.equal(normalized(path.join(base, '.magicpot-trash/MagicPot', runId)), normalized(runRoot))
   assert.equal(normalized(await fs.realpath(runRoot)), normalized(runRoot), 'Run root must be canonical')
-  assert(inside(privateRoot, await fs.realpath(workerSource)), 'Worker must resolve inside the private root')
+  if (!linux) assert(inside(privateRoot, await fs.realpath(workerSource)), 'Worker must resolve inside the private root')
   const appRoot = path.join(runRoot, 'app')
   // A build creates only app/. Refuse a root with any prior profile, evidence,
   // or other leftovers before making directories, configuring or launching.
@@ -71,8 +77,9 @@ export async function runIsolatedTeamDesktop(runRoot, workerSource) {
   for (const directory of ['storage/Data', 'storage/Projects']) {
     await fs.mkdir(path.join(runRoot, directory))
   }
-  const workerPath = path.join(runRoot, 'bin/canvas-thumbnail-sidecar.exe')
-  await fs.copyFile(workerSource, workerPath, constants.COPYFILE_EXCL)
+  const workerPath = isolatedWorkerPath(runRoot, platform)
+  if (linux) await buildLinuxIsolatedWorker(runRoot, { repoRoot })
+  else await fs.copyFile(workerSource, workerPath, constants.COPYFILE_EXCL)
   const mock = await startSyntheticResponsesMock()
   const evidence = path.join(runRoot, 'evidence')
   const report = { status: 'running', stage: 'prepare', scope: 'synthetic-lead-and-two-ui-member-creations-only', runRoot, startedAt: new Date().toISOString(), states: [], runtime: [], cleanup: [] }
@@ -86,8 +93,8 @@ export async function runIsolatedTeamDesktop(runRoot, workerSource) {
     report.stage = 'launch'
     appHandle = await electron.launch({
       executablePath: require('electron'),
-      args: [appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'],
-      cwd: path.join(runRoot, 'cwd'), env: isolatedImageEnvironment(runRoot, base, runId), timeout: 90_000
+      args: isolatedElectronArgs([appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'], platform),
+      cwd: path.join(runRoot, 'cwd'), env: isolatedImageEnvironment(runRoot, base, runId, platform), timeout: 90_000
     })
     appHandle.process().stdout?.on('data', chunk => { stdout = (stdout + chunk.toString()).slice(-65_536) })
     appHandle.process().stderr?.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-65_536) })
@@ -146,8 +153,12 @@ export async function runIsolatedTeamDesktop(runRoot, workerSource) {
   return report
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  if (!process.argv[2] || !process.argv[3]) throw new Error('Pass a new private run root and private worker path.')
-  const report = await runIsolatedTeamDesktop(path.resolve(process.argv[2]), path.resolve(process.argv[3]))
+const isMainModule = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+// Linux: re-run this file under xvfb-run with the worker built from source (no worker argument).
+if (isMainModule && needsLinuxXvfbRelaunch()) {
+  process.exitCode = await relaunchIsolatedRunnerUnderXvfb(fileURLToPath(import.meta.url), process.argv.slice(2), { privateRoot })
+} else if (isMainModule) {
+  if (!process.argv[2] || (!isLinuxIsolatedPlatform() && !process.argv[3])) throw new Error('Pass a new private run root and private worker path.')
+  const report = await runIsolatedTeamDesktop(path.resolve(process.argv[2]), isolatedWorkerSourceArgument(process.argv[3]))
   process.exitCode = report.status === 'partial-passed' ? 0 : 1
 }

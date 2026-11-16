@@ -11,6 +11,10 @@ import { _electron as electron } from 'playwright'
 import { isolatedImageEnvironment, fixtureConfig, assertIsolatedRuntime } from './isolatedImageDesktopAcceptance.mjs'
 import { startSyntheticTeamResponsesMock } from './syntheticTeamResponsesMock.mjs'
 import { seedIsolatedTeamLead, createIsolatedDesigner, createIsolatedWriter, verifyIsolatedTeamMembers, waitForIsolatedTeamPane, inspectIsolatedTeamPane } from './isolatedTeamDesktopFixture.mjs'
+import {
+  isLinuxIsolatedPlatform, isolatedWorkerPath, isolatedWorkerSourceArgument, isolatedElectronArgs,
+  assertNoLinuxWorkerSource, buildLinuxIsolatedWorker, needsLinuxXvfbRelaunch, relaunchIsolatedRunnerUnderXvfb
+} from './isolatedDesktopPlatform.mjs'
 
 const require = createRequire(import.meta.url)
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -130,13 +134,15 @@ async function readEvidence(page, identity, designerId, baselineIds = null) {
   }, { identity, designerId, baselineIds })
 }
 
-export async function runIsolatedTeamDesignerDesktop(runRoot, workerSource) {
+export async function runIsolatedTeamDesignerDesktop(runRoot, workerSource, { platform = process.platform } = {}) {
+  const linux = isLinuxIsolatedPlatform(platform)
+  if (linux) assertNoLinuxWorkerSource(workerSource)
   assert(path.isAbsolute(runRoot) && inside(privateRoot, runRoot), 'Use a new owned private run root')
-  assert(path.isAbsolute(workerSource) && inside(privateRoot, workerSource), 'Use the owned private worker')
+  if (!linux) assert(path.isAbsolute(workerSource) && inside(privateRoot, workerSource), 'Use the owned private worker')
   const runId = path.basename(runRoot), base = path.resolve(runRoot, '../../..')
   assert.equal(normalized(path.join(base, '.magicpot-trash/MagicPot', runId)), normalized(runRoot))
   assert.equal(normalized(await fs.realpath(runRoot)), normalized(runRoot), 'Run root must be canonical')
-  assert(inside(privateRoot, await fs.realpath(workerSource)), 'Worker must resolve inside the private root')
+  if (!linux) assert(inside(privateRoot, await fs.realpath(workerSource)), 'Worker must resolve inside the private root')
   const appRoot = path.join(runRoot, 'app')
   assert.deepEqual((await fs.readdir(runRoot)).sort(), ['app'], 'Use a freshly built, never-run root')
   const appStat = await fs.lstat(appRoot)
@@ -147,8 +153,9 @@ export async function runIsolatedTeamDesignerDesktop(runRoot, workerSource) {
   assert(inside(runRoot, await fs.realpath(mainEntry)), 'The built app must be in this run root')
   for (const directory of ['bin', 'cwd', 'storage', 'evidence', 'home', 'appdata', 'localappdata', 'temp']) await fs.mkdir(path.join(runRoot, directory))
   for (const directory of ['storage/Data', 'storage/Projects']) await fs.mkdir(path.join(runRoot, directory))
-  const workerPath = path.join(runRoot, 'bin/canvas-thumbnail-sidecar.exe')
-  await fs.copyFile(workerSource, workerPath, constants.COPYFILE_EXCL)
+  const workerPath = isolatedWorkerPath(runRoot, platform)
+  if (linux) await buildLinuxIsolatedWorker(runRoot, { repoRoot })
+  else await fs.copyFile(workerSource, workerPath, constants.COPYFILE_EXCL)
   const mock = await startSyntheticTeamResponsesMock()
   const evidence = path.join(runRoot, 'evidence')
   const report = { status: 'running', stage: 'prepare', scope: 'synthetic-designer-image-only', runRoot, startedAt: new Date().toISOString(), states: [], runtime: [], cleanup: [], limitations: ['Lead is seeded, not UI-created.', 'Mock image response is synthetic, not image_gen.', 'Cross-database observations are not atomic.', 'Matching synthetic SHA-256 establishes byte equality, not causal provenance or project-file export.'] }
@@ -158,7 +165,7 @@ export async function runIsolatedTeamDesignerDesktop(runRoot, workerSource) {
     await fs.writeFile(path.join(runRoot, 'storage/Data/config.json'), JSON.stringify(fixtureConfig(mock.baseURL), null, 2), { flag: 'wx' })
     await fs.writeFile(path.join(appRoot, 'bootstrap.cjs'), 'require(' + JSON.stringify(path.join(repoRoot, 'scripts/chat/isolatedImageDesktopBootstrap.cjs')) + ').startIsolatedImageDesktop(' + JSON.stringify({ runRoot, mainEntry, mockOrigin: new URL(mock.baseURL).origin, workerPath }) + ')\n', { flag: 'wx' })
     report.stage = 'launch'
-    appHandle = await electron.launch({ executablePath: require('electron'), args: [appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'], cwd: path.join(runRoot, 'cwd'), env: isolatedImageEnvironment(runRoot, base, runId), timeout: 90_000 })
+    appHandle = await electron.launch({ executablePath: require('electron'), args: isolatedElectronArgs([appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'], platform), cwd: path.join(runRoot, 'cwd'), env: isolatedImageEnvironment(runRoot, base, runId, platform), timeout: 90_000 })
     appHandle.process().stdout?.on('data', chunk => { stdout = (stdout + chunk.toString()).slice(-65_536) })
     appHandle.process().stderr?.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-65_536) })
     page = await appHandle.firstWindow({ timeout: 90_000 })
@@ -254,9 +261,13 @@ export async function runIsolatedTeamDesignerDesktop(runRoot, workerSource) {
   return report
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  if (!process.argv[2] || !process.argv[3]) throw new Error('Pass a new private run root and private worker path.')
-  const report = await runIsolatedTeamDesignerDesktop(path.resolve(process.argv[2]), path.resolve(process.argv[3]))
+const isMainModule = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+// Linux: re-run this file under xvfb-run with the worker built from source (no worker argument).
+if (isMainModule && needsLinuxXvfbRelaunch()) {
+  process.exitCode = await relaunchIsolatedRunnerUnderXvfb(fileURLToPath(import.meta.url), process.argv.slice(2), { privateRoot })
+} else if (isMainModule) {
+  if (!process.argv[2] || (!isLinuxIsolatedPlatform() && !process.argv[3])) throw new Error('Pass a new private run root and private worker path.')
+  const report = await runIsolatedTeamDesignerDesktop(path.resolve(process.argv[2]), isolatedWorkerSourceArgument(process.argv[3]))
   console.log('isolated-team-designer-result', JSON.stringify({ status: report.status, stage: report.stage, error: report.error?.message, runRoot: report.runRoot, cleanup: report.cleanup }))
   process.exitCode = report.status === 'partial-passed' ? 0 : 1
 }

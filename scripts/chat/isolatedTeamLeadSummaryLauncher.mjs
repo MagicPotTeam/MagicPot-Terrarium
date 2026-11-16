@@ -13,6 +13,10 @@ import { isolatedImageEnvironment, fixtureConfig, assertIsolatedRuntime } from '
 import { seedIsolatedTeamLead, waitForIsolatedTeamPane } from './isolatedTeamDesktopFixture.mjs'
 import { seedSummaryOnIsolatedPage, readSyntheticSummaryRows } from './isolatedTeamLeadSummaryPage.mjs'
 import { startIsolatedTeamLeadSummaryMock, SUMMARY_PROMPT, SUMMARY_OUTPUT } from './isolatedTeamLeadSummaryMock.mjs'
+import {
+  isLinuxIsolatedPlatform, isolatedWorkerPath, isolatedWorkerSourceArgument, isolatedElectronArgs,
+  assertNoLinuxWorkerSource, buildLinuxIsolatedWorker, needsLinuxXvfbRelaunch, relaunchIsolatedRunnerUnderXvfb
+} from './isolatedDesktopPlatform.mjs'
 
 const require = createRequire(import.meta.url)
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -164,12 +168,16 @@ function assertGuard(snapshot) {
 /** Expects a unique freshly built root containing only app/. Never rerun it. */
 // Preflight may be abandoned without creating network resources. A late opened
 // file handle is closed best effort; a late read/close remains outcome-unknown.
-async function inspectSummaryPreflight(runRoot, workerSource) {
+async function inspectSummaryPreflight(runRoot, workerSource, platform) {
+  const linux = isLinuxIsolatedPlatform(platform)
+  if (linux) assertNoLinuxWorkerSource(workerSource)
   assert(path.isAbsolute(runRoot) && inside(scratch, runRoot), 'New private run root required')
-  assert(path.isAbsolute(workerSource) && inside(scratch, workerSource), 'Private worker required')
+  if (!linux) assert(path.isAbsolute(workerSource) && inside(scratch, workerSource), 'Private worker required')
   const runId = path.basename(runRoot), base = path.resolve(runRoot, '../../..')
   assert.equal(normalize(path.join(base, '.magicpot-trash/MagicPot', runId)), normalize(runRoot))
   assert.equal(normalize(await fs.realpath(runRoot)), normalize(runRoot), 'Canonical root required')
+  // Linux builds the worker from source into the root after the reservation; no designated binary.
+  if (linux) return inspectSummaryRoot(runRoot, runId, base, null, null)
   const expectedWorker = path.join(scratch, 'chat-image-codec-target-20261111/release/canvas-thumbnail-sidecar.exe')
   assert.equal(normalize(workerSource), normalize(expectedWorker), 'Only the designated private worker is accepted')
   assert.equal(normalize(await fs.realpath(expectedWorker)), normalize(expectedWorker), 'The designated worker must not be a symbolic link')
@@ -188,6 +196,9 @@ async function inspectSummaryPreflight(runRoot, workerSource) {
   assert(workerBytes.byteLength === 2_305_024, 'Unexpected worker size')
   const workerDigest = createHash('sha256').update(workerBytes).digest('hex')
   assert.equal(workerDigest, '98c21c7b04f2d4a1c0c98f1bb40904593ee0b7a90d0d31b29b4a9ba66426746e', 'Unrecognized synthetic worker binary')
+  return inspectSummaryRoot(runRoot, runId, base, workerBytes, workerDigest)
+}
+async function inspectSummaryRoot(runRoot, runId, base, workerBytes, workerDigest) {
   assert.deepEqual(await fs.readdir(runRoot), ['app'], 'Root was already used or is incomplete')
   const appRoot = path.join(runRoot, 'app'), appStat = await fs.lstat(appRoot)
   assert(appStat.isDirectory() && !appStat.isSymbolicLink())
@@ -204,9 +215,9 @@ async function inspectSummaryPreflight(runRoot, workerSource) {
 
 const QUARANTINE_IMPLEMENTED = false
 /** Expects a unique freshly built root containing only app/. Never rerun it. */
-export async function runLeadSummaryLauncher(runRoot, workerSource) {
+export async function runLeadSummaryLauncher(runRoot, workerSource, { platform = process.platform } = {}) {
   if (!QUARANTINE_IMPLEMENTED) throw Error('Synthetic launcher disabled: owned quarantine for unknown app/process-tree exit is not implemented')
-  const { runId, base, workerBytes, workerDigest, appRoot, mainEntry } = await withSyntheticDeadline(() => inspectSummaryPreflight(runRoot, workerSource), 90_000, 'preflight')
+  const { runId, base, workerBytes, workerDigest, appRoot, mainEntry } = await withSyntheticDeadline(() => inspectSummaryPreflight(runRoot, workerSource, platform), 90_000, 'preflight')
   const evidence = path.join(runRoot, 'evidence')
   let app, page, mock, identity, outcome = 'not-observed', error = null, launchInvoked = false, mockStartupInvoked = false
   const seedController = new AbortController()
@@ -221,16 +232,19 @@ export async function runLeadSummaryLauncher(runRoot, workerSource) {
     report.stage = 'reserved'
     for (const directory of ['bin', 'cwd', 'storage', 'home', 'appdata', 'localappdata', 'temp', 'playwright-artifacts']) await withSyntheticDeadline(() => fs.mkdir(path.join(runRoot, directory)), 15_000, `create ${directory}`)
     for (const directory of ['storage/Data', 'storage/Projects']) await withSyntheticDeadline(() => fs.mkdir(path.join(runRoot, directory)), 15_000, `create ${directory}`)
-    const workerPath = path.join(runRoot, 'bin/canvas-thumbnail-sidecar.exe')
-    await withSyntheticDeadline(() => fs.writeFile(workerPath, workerBytes, { flag: 'wx' }), 15_000, 'write synthetic worker')
-    assert.equal(createHash('sha256').update(await withSyntheticDeadline(() => fs.readFile(workerPath), 15_000, 'verify synthetic worker')).digest('hex'), workerDigest, 'Copied worker verification failed')
+    const workerPath = isolatedWorkerPath(runRoot, platform)
+    if (isLinuxIsolatedPlatform(platform)) await withSyntheticDeadline(() => buildLinuxIsolatedWorker(runRoot, { repoRoot: repo }), 16 * 60_000, 'build Linux worker from source')
+    else {
+      await withSyntheticDeadline(() => fs.writeFile(workerPath, workerBytes, { flag: 'wx' }), 15_000, 'write synthetic worker')
+      assert.equal(createHash('sha256').update(await withSyntheticDeadline(() => fs.readFile(workerPath), 15_000, 'verify synthetic worker')).digest('hex'), workerDigest, 'Copied worker verification failed')
+    }
     mockStartupInvoked = true
     mock = await withSyntheticDeadline(() => startIsolatedTeamLeadSummaryMock(), 10_000, 'mock startup', late => cleanupOwnedSummaryResources(undefined, late))
     await withSyntheticDeadline(() => fs.writeFile(path.join(runRoot, 'storage/Data/config.json'), JSON.stringify(fixtureConfig(mock.baseURL)), { flag: 'wx' }), 15_000, 'synthetic config write')
     await withSyntheticDeadline(() => fs.writeFile(path.join(appRoot, 'bootstrap.cjs'), 'require(' + JSON.stringify(path.join(repo, 'scripts/chat/isolatedImageDesktopBootstrap.cjs')) + ').startIsolatedImageDesktop(' + JSON.stringify({ runRoot, mainEntry, mockOrigin: new URL(mock.baseURL).origin, workerPath }) + ')\n', { flag: 'wx' }), 15_000, 'synthetic bootstrap write')
     report.stage = 'launch'
     launchInvoked = true
-    app = await withSyntheticDeadline(() => electron.launch({ executablePath: require('electron'), args: [appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'], cwd: path.join(runRoot, 'cwd'), artifactsDir: path.join(runRoot, 'playwright-artifacts'), env: isolatedImageEnvironment(runRoot, base, runId), timeout: 90_000 }), 100_000, 'Electron launch', late => cleanupOwnedSummaryResources(late, undefined))
+    app = await withSyntheticDeadline(() => electron.launch({ executablePath: require('electron'), args: isolatedElectronArgs([appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'), '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'), '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling'], platform), cwd: path.join(runRoot, 'cwd'), artifactsDir: path.join(runRoot, 'playwright-artifacts'), env: isolatedImageEnvironment(runRoot, base, runId, platform), timeout: 90_000 }), 100_000, 'Electron launch', late => cleanupOwnedSummaryResources(late, undefined))
     page = await withSyntheticDeadline(() => app.firstWindow({ timeout: 90_000 }), 95_000, 'first window'); page.setDefaultTimeout(30_000)
     await withSyntheticDeadline(() => page.waitForFunction(() => Boolean(window.api?.svcState && document.querySelector('#root')?.childElementCount), undefined, { timeout: 90_000 }), 95_000, 'renderer startup')
     const initial = await withSyntheticDeadline(() => assertIsolatedRuntime(app, page, runRoot, mock.baseURL), 45_000, 'startup runtime inspection')
@@ -329,9 +343,14 @@ export async function runLeadSummaryLauncher(runRoot, workerSource) {
 
 // Nonzero exit with no structured receipt means preflight or persistence itself
 // failed; the root must be considered used or unknown and must not be replayed.
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  if (!process.argv[2] || !process.argv[3]) throw Error('Pass one new built private root and private worker')
-  const receipt = await runLeadSummaryLauncher(path.resolve(process.argv[2]), path.resolve(process.argv[3]))
+const isMainModule = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+// Linux: once enabled, re-run under xvfb-run with the worker built from source. While disabled it
+// refuses before any relaunch, root reservation, socket or process.
+if (isMainModule && QUARANTINE_IMPLEMENTED && needsLinuxXvfbRelaunch()) {
+  process.exitCode = await relaunchIsolatedRunnerUnderXvfb(fileURLToPath(import.meta.url), process.argv.slice(2), { privateRoot: scratch })
+} else if (isMainModule) {
+  if (!process.argv[2] || (!isLinuxIsolatedPlatform() && !process.argv[3])) throw Error('Pass one new built private root and private worker')
+  const receipt = await runLeadSummaryLauncher(path.resolve(process.argv[2]), isolatedWorkerSourceArgument(process.argv[3]))
   console.log('synthetic-lead-summary-observation', JSON.stringify(receipt))
   // Always nonzero: receipt remains observation-only until an independent verifier exists.
   process.exitCode = 1

@@ -181,5 +181,14 @@ const run = async () => {
   console.log(JSON.stringify({ status: output.status, runRoot, create: output.create, trigger: output.trigger, providerRequests: output.providerRequests, runtime: output.runtime?.guard, sqlite: output.sqlite, close: output.close }))
   return output
 }
-const result = await run()
-process.exitCode = result.status === 'passed' ? 0 : 1
+// Not ported to Linux on purpose: this runner deletes and refills a fixed root, copies the app
+// and configuration from a fixed Windows source root, and enables the SDK server, which the
+// isolated bootstrap refuses (enable_server must be false). It stops here before touching any file.
+const TRIGGER_LINUX_REFUSAL = 'Trigger desktop acceptance is not available on Linux: it reuses a fixed root and needs the SDK server, which the isolated bootstrap refuses.'
+if (process.platform === 'linux') {
+  console.error(TRIGGER_LINUX_REFUSAL)
+  process.exitCode = 1
+} else {
+  const result = await run()
+  process.exitCode = result.status === 'passed' ? 0 : 1
+}

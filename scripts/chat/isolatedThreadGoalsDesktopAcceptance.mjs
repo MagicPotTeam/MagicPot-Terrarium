@@ -12,6 +12,10 @@ import {
   createIsolatedThreadGoal, setIsolatedThreadGoalStatus,
   closeIsolatedThreadGoals, inspectIsolatedThreadGoals
 } from './isolatedThreadGoalsFixture.mjs'
+import {
+  isLinuxIsolatedPlatform, isolatedWorkerPath, isolatedWorkerSourceArgument, isolatedElectronArgs,
+  assertNoLinuxWorkerSource, assertFreshIsolatedRunRoot, buildLinuxIsolatedWorker, needsLinuxXvfbRelaunch, relaunchIsolatedRunnerUnderXvfb
+} from './isolatedDesktopPlatform.mjs'
 
 const require = createRequire(import.meta.url)
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -90,9 +94,12 @@ async function closeOwned(appHandle) {
 
 /** Real manual Goals UI/IPC/SQLite, followed by a full owned Electron restart.
  * The loopback model remains observation-only: no chat or model call is expected. */
-export async function runIsolatedThreadGoalsDesktop(runRoot, workerSource) {
+export async function runIsolatedThreadGoalsDesktop(runRoot, workerSource, { platform = process.platform } = {}) {
+  const linux = isLinuxIsolatedPlatform(platform)
+  if (linux) assertNoLinuxWorkerSource(workerSource)
   assert(path.isAbsolute(runRoot) && inside(privateRoot, runRoot), 'Use a new owned private run root')
-  assert(path.isAbsolute(workerSource) && inside(privateRoot, workerSource), 'Use the existing private worker')
+  if (linux) await assertFreshIsolatedRunRoot(runRoot, privateRoot)
+  else assert(path.isAbsolute(workerSource) && inside(privateRoot, workerSource), 'Use the existing private worker')
   const runId = path.basename(runRoot)
   const base = path.resolve(runRoot, '../../..')
   assert.equal(normalized(path.join(base, '.magicpot-trash/MagicPot', runId)), normalized(runRoot))
@@ -104,8 +111,9 @@ export async function runIsolatedThreadGoalsDesktop(runRoot, workerSource) {
   for (const directory of ['bin', 'cwd', 'storage/Data', 'storage/Projects', 'evidence', 'home', 'appdata', 'localappdata', 'temp']) {
     await fs.mkdir(path.join(runRoot, directory), { recursive: true })
   }
-  const workerPath = path.join(runRoot, 'bin/canvas-thumbnail-sidecar.exe')
-  await fs.copyFile(workerSource, workerPath, constants.COPYFILE_EXCL)
+  const workerPath = isolatedWorkerPath(runRoot, platform)
+  if (linux) await buildLinuxIsolatedWorker(runRoot, { repoRoot })
+  else await fs.copyFile(workerSource, workerPath, constants.COPYFILE_EXCL)
   const mock = await startSyntheticResponsesMock()
   const report = {
     status: 'running', stage: 'prepare', runRoot, startedAt: new Date().toISOString(),
@@ -119,12 +127,12 @@ export async function runIsolatedThreadGoalsDesktop(runRoot, workerSource) {
   async function launch(cycle) {
     const handle = await electron.launch({
       executablePath: require('electron'),
-      args: [appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'),
+      args: isolatedElectronArgs([appRoot, '--user-data-dir=' + path.join(runRoot, 'storage/Data'),
         '--disk-cache-dir=' + path.join(runRoot, 'storage/Data/cache'),
         '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
-        '--disable-background-timer-throttling'],
+        '--disable-background-timer-throttling'], platform),
       cwd: path.join(runRoot, 'cwd'),
-      env: isolatedImageEnvironment(runRoot, base, runId),
+      env: isolatedImageEnvironment(runRoot, base, runId, platform),
       timeout: 90_000
     })
     appHandle = handle
@@ -229,8 +237,12 @@ export async function runIsolatedThreadGoalsDesktop(runRoot, workerSource) {
   return report
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  if (!process.argv[2] || !process.argv[3]) throw new Error('Pass the new private run root and private worker path.')
-  const report = await runIsolatedThreadGoalsDesktop(path.resolve(process.argv[2]), path.resolve(process.argv[3]))
+const isMainModule = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
+// Linux: re-run this file under xvfb-run with the worker built from source (no worker argument).
+if (isMainModule && needsLinuxXvfbRelaunch()) {
+  process.exitCode = await relaunchIsolatedRunnerUnderXvfb(fileURLToPath(import.meta.url), process.argv.slice(2), { privateRoot })
+} else if (isMainModule) {
+  if (!process.argv[2] || (!isLinuxIsolatedPlatform() && !process.argv[3])) throw new Error('Pass the new private run root and private worker path.')
+  const report = await runIsolatedThreadGoalsDesktop(path.resolve(process.argv[2]), isolatedWorkerSourceArgument(process.argv[3]))
   process.exitCode = report.status === 'passed' ? 0 : 1
 }

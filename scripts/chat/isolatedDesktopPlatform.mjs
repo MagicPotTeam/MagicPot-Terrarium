@@ -334,12 +334,14 @@ export async function cleanupOwnedLinuxProcesses({ owner, runRoot, procRoot = '/
  */
 export async function relaunchIsolatedRunnerUnderXvfb(script, argv, { privateRoot, spawn = spawnChild, procRoot = '/proc', kill, env = process.env, execPath = process.execPath, platform = process.platform, sampleMs = 500, settleMs = 5000, graceMs = 10_000, log = message => console.log(message) } = {}) {
   assert(isLinuxIsolatedPlatform(platform), 'The xvfb relaunch is Linux only')
-  assert(Array.isArray(argv) && argv.length >= 1 && argv[0], 'Pass one new private run root')
-  assertNoLinuxWorkerSource(argv[1])
+  assert(Array.isArray(argv) && argv.length >= 1 && argv[0] && !argv[0].startsWith('--'), 'Pass one new private run root')
+  // Flags (--name) are forwarded; any other argument would be a worker path, which Linux never takes.
+  const flags = argv.slice(1)
+  assertNoLinuxWorkerSource(flags.find(value => !value.startsWith('--')))
   const runRoot = path.resolve(argv[0])
   await assertFreshIsolatedRunRoot(runRoot, privateRoot)
   const owner = randomUUID()
-  const { command, args, env: childEnv } = linuxXvfbCommand({ script, args: [runRoot, ...argv.slice(2)], execPath, env, owner })
+  const { command, args, env: childEnv } = linuxXvfbCommand({ script, args: [runRoot, ...flags], execPath, env, owner })
   const observer = createLinuxRunObserver({ owner, runRoot, procRoot, sampleMs })
   observer.start()
   const startedAt = new Date().toISOString()
