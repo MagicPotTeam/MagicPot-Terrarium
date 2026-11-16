@@ -10,9 +10,9 @@ const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = n
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe.each([false, true])('ordinary local image bounded read, stream=%s', stream => {
-  function setup(body: ReadableStream<Uint8Array> | null, blobResult: () => Promise<Blob>) {
+  function setup(body: ReadableStream<Uint8Array> | null, blobResult: () => Promise<Blob>, fetchGate?: Promise<void>) {
     const blob = vi.fn(blobResult), arrayBuffer = vi.fn(async () => new ArrayBuffer(0))
-    const fetch = vi.fn(async () => ({ ok: true, headers: { get: () => 'image/png' }, body, blob, arrayBuffer }) as unknown as Response)
+    const fetch = vi.fn(async () => { await fetchGate; return { ok: true, headers: { get: () => 'image/png' }, body, blob, arrayBuffer } as unknown as Response })
     vi.stubGlobal('fetch', fetch)
     const chat = vi.fn(async () => ({ content: 'ok' }))
     const chatStream = vi.fn(async (_request, response) => { response.onData({ type: 'done', delta: '', done: true, content: 'ok', finishReason: 'stop' }) })
@@ -68,14 +68,18 @@ describe.each([false, true])('ordinary local image bounded read, stream=%s', str
     f.unchanged()
   })
 
-  it('aborts a pending blob fallback and does not dispatch', async () => {
-    const gate = deferred<Blob>()
-    const f = setup(null, () => gate.promise)
+  // Owner decision A (no-body contract): a bodyless response has no blob() fallback any more.
+  it('rejects an abort while fetch is pending for a bodyless response with AbortError and never reads or dispatches', async () => {
+    const fetchGate = deferred<void>()
+    const f = setup(null, async () => new Blob([new Uint8Array([1])], { type: 'image/png' }), fetchGate.promise)
     const pending = f.send(), rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
-    await vi.waitFor(() => expect(f.blob).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(f.fetch).toHaveBeenCalledOnce())
     f.controller.abort(); await rejected
     expect(f.chat).not.toHaveBeenCalled(); expect(f.chatStream).not.toHaveBeenCalled()
-    gate.resolve(new Blob([new Uint8Array([1])], { type: 'image/png' }))
-    expect(f.arrayBuffer).not.toHaveBeenCalled(); f.unchanged()
+    fetchGate.resolve()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(f.blob).not.toHaveBeenCalled(); expect(f.arrayBuffer).not.toHaveBeenCalled()
+    expect(f.chat).not.toHaveBeenCalled(); expect(f.chatStream).not.toHaveBeenCalled()
+    f.unchanged()
   })
 })

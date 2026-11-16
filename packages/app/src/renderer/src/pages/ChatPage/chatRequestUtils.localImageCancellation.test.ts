@@ -21,16 +21,18 @@ afterEach(() => {
 })
 
 describe.each([false, true])('ordinary local-image cancellation (stream: %s)', (streaming) => {
-  it.each(['fetch', 'blob', 'array-buffer', 'file-reader'] as const)(
+  // Owner decision A (no-body contract): request images are read only from the body
+  // stream, so the former 'blob' and 'array-buffer' phases are now an abort while the
+  // body read is stalled, before any chunk ('body-read') or after one ('body-read-after-chunk').
+  it.each(['fetch', 'body-read', 'body-read-after-chunk', 'file-reader'] as const)(
     'returns on abort during %s and ignores its late result',
     async (phase) => {
       const fetchGate = deferred<Response>()
-      const blobGate = deferred<Blob>()
-      const bufferGate = deferred<ArrayBuffer>()
-      const fixtureBlob = new Blob(['a'], { type: 'image/png' })
+      const readGate = deferred<ReadableStreamReadResult<Uint8Array>>()
+      const streamed = phase === 'fetch' || phase === 'file-reader'
       const constructedBlob = vi.fn()
       const NativeBlob = globalThis.Blob
-      if (phase === 'array-buffer') {
+      if (!streamed) {
         class CountingBlob extends NativeBlob {
           constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
             super(parts, options)
@@ -67,18 +69,29 @@ describe.each([false, true])('ordinary local-image cancellation (stream: %s)', (
         }
       }
       vi.stubGlobal('FileReader', FakeReader)
-      const streamed = phase === 'fetch' || phase === 'file-reader'
       const streamResponse = createImageResponse('a')
       const blob = streamed
         ? vi.spyOn(streamResponse, 'blob')
-        : vi.fn(() => (phase === 'blob' ? blobGate.promise : Promise.resolve(fixtureBlob)))
-      const arrayBuffer = vi.fn(() => bufferGate.promise)
+        : vi.fn(async () => new NativeBlob(['a'], { type: 'image/png' }))
+      const arrayBuffer = streamed
+        ? vi.spyOn(streamResponse, 'arrayBuffer')
+        : vi.fn(async () => new Uint8Array([97]).buffer)
+      // A stalled reader: the first read (or the second, after one chunk) waits on readGate.
+      const read = vi.fn((): Promise<ReadableStreamReadResult<Uint8Array>> =>
+        phase === 'body-read-after-chunk' && read.mock.calls.length === 1
+          ? Promise.resolve({ done: false, value: new Uint8Array([97]) })
+          : readGate.promise
+      )
+      const cancel = vi.fn(async () => {})
+      const stalledReads = phase === 'body-read-after-chunk' ? 2 : 1
       const response = streamed
         ? streamResponse
         : ({
             ok: true,
             headers: { get: () => 'image/png' },
-            ...(phase === 'array-buffer' ? { arrayBuffer } : { blob })
+            body: { getReader: () => ({ read, cancel, releaseLock: vi.fn() }) },
+            blob,
+            arrayBuffer
           } as unknown as Response)
       const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
         phase === 'fetch' ? fetchGate.promise : Promise.resolve(response)
@@ -132,8 +145,7 @@ describe.each([false, true])('ordinary local-image cancellation (stream: %s)', (
       try {
         await vi.waitFor(() => {
           if (phase === 'fetch') expect(fetchMock).toHaveBeenCalledOnce()
-          else if (phase === 'blob') expect(blob).toHaveBeenCalledOnce()
-          else if (phase === 'array-buffer') expect(arrayBuffer).toHaveBeenCalledOnce()
+          else if (!streamed) expect(read).toHaveBeenCalledTimes(stalledReads)
           else expect(readers[0]?.readAsDataURL).toHaveBeenCalledOnce()
         })
         expect(fetchMock).toHaveBeenCalledOnce()
@@ -143,24 +155,34 @@ describe.each([false, true])('ordinary local-image cancellation (stream: %s)', (
         expect(await pending).toMatchObject({ name: 'AbortError' })
         expect(fetchMock.mock.calls[0][1]?.signal).toBe(controller.signal)
         if (phase === 'file-reader') expect(readers[0].abort).toHaveBeenCalledOnce()
+        if (!streamed) expect(cancel).toHaveBeenCalled()
 
         fetchGate.resolve(response)
-        blobGate.resolve(fixtureBlob)
-        bufferGate.resolve(new Uint8Array([97]).buffer)
+        // The late result would complete the image: a chunk for a first read, the end of
+        // the stream after a chunk.
+        readGate.resolve(
+          phase === 'body-read'
+            ? { done: false, value: new Uint8Array([97]) }
+            : { done: true, value: undefined }
+        )
         lateLoad?.()
         await new Promise((resolve) => setTimeout(resolve, 0))
         expect(fetchMock).toHaveBeenCalledOnce()
         if (phase === 'fetch') expect(blob).not.toHaveBeenCalled()
-        if (phase === 'blob' || phase === 'array-buffer') expect(readers).toHaveLength(0)
-        if (phase === 'array-buffer') expect(constructedBlob).not.toHaveBeenCalled()
+        if (!streamed) {
+          expect(readers).toHaveLength(0)
+          expect(constructedBlob).not.toHaveBeenCalled()
+          expect(read).toHaveBeenCalledTimes(stalledReads)
+          expect(blob).not.toHaveBeenCalled()
+          expect(arrayBuffer).not.toHaveBeenCalled()
+        }
         expect(chat).not.toHaveBeenCalled()
         expect(chatStream).not.toHaveBeenCalled()
         expect(cancelConversation).not.toHaveBeenCalled()
       } finally {
         cleaning = true
         fetchGate.resolve(response)
-        blobGate.resolve(fixtureBlob)
-        bufferGate.resolve(new Uint8Array([97]).buffer)
+        readGate.resolve({ done: true, value: undefined })
         for (const reader of readers) reader.finish()
         await pending
       }

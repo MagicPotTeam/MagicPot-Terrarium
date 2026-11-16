@@ -567,16 +567,14 @@ const normalizeImageAttachmentForRequest = async (
       throw new Error(`Failed to load image attachment (${response.status})`)
     }
 
-    // A response with a body is read chunk by chunk under a hard per-image cap;
-    // a body without getReader is refused by the reader, never sent to blob().
-    // Only a bodyless response still takes the uncapped fallback.
-    const blob =
-      response.body
-        ? await readBoundedLocalChatImageBlob(response, {
-            maxBytes: MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES,
-            ...(options.signal ? { signal: options.signal } : {})
-          })
-        : await responseToBlob(response, options.signal)
+    // Every request image is read chunk by chunk from the response body under a
+    // hard per-image cap. A response without a readable body (no body, or a body
+    // without getReader) is refused by the reader before blob() or arrayBuffer()
+    // could read it uncapped; an ok 204/205 response is refused, not sent empty.
+    const blob = await readBoundedLocalChatImageBlob(response, {
+      maxBytes: MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES,
+      ...(options.signal ? { signal: options.signal } : {})
+    })
     throwIfAborted(options.signal)
     const dataUrl = await blobToDataUrl(blob, options.signal)
     throwIfAborted(options.signal)
