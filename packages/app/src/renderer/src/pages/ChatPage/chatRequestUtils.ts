@@ -1169,7 +1169,17 @@ const withoutReportBundleBindings = (
       })
     : attachments
 
-const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequestPayload => {
+/**
+ * Builds the request body. A report binding is a bearer secret for the local MAIN chat boundary
+ * (svcLLMProxy.chat / chatStream), which checks it and strips it before any provider, remote
+ * server or log sees the request. Every other destination (the remote LLM server fetched from
+ * the renderer, an external agent endpoint) must never receive it, so it is kept only when the
+ * caller dispatches to that MAIN boundary and says so.
+ */
+const buildChatRequestPayload = (
+  input: RequestChatCompletionInput,
+  destination: { localMainBoundary?: boolean } = {}
+): ChatRequestPayload => {
   const resolvedSystemPrompt =
     input.externalAgentSkill?.type === 'agent'
       ? input.externalAgentSkill.prompt?.trim() || input.systemPrompt?.trim() || undefined
@@ -1187,18 +1197,17 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
       (explicitApiMode === 'auto' ? undefined : explicitApiMode))
     : undefined
 
-  // A report binding is a bearer secret for the local MAIN boundary only: never send it to
-  // an external agent endpoint.
-  const external = input.externalAgentSkill?.type === 'agent'
+  const keepReportBundleBinding =
+    destination.localMainBoundary === true && input.externalAgentSkill?.type !== 'agent'
   return {
     messages: input.messages.map((message) => {
       const projected = projectToolHistoryForProvider(message)
       return {
         role: message.role,
         content: projected.content,
-        attachments: external
-          ? withoutReportBundleBindings(message.attachments)
-          : message.attachments,
+        attachments: keepReportBundleBinding
+          ? message.attachments
+          : withoutReportBundleBindings(message.attachments),
         ...(projected.toolHistory !== undefined ? { toolHistory: projected.toolHistory } : {})
       }
     }),
@@ -1515,10 +1524,13 @@ const projectVerifiedPrimaryReports = (
         if (!isPrimaryReportFileDescriptor(attachment)) return attachment
         const bundle = verified.get(attachment.reportBundleBinding ?? '')
         if (!bundle) return refuseUnverifiedReportBundle()
-        const projected: ChatAttachment = {
-          ...attachment,
-          reportBundleImageCount: bundle.imageCount
-        }
+        const projected: ChatAttachment = { ...attachment }
+        // MAIN's count replaces the descriptor's hint. countProviderBoundImages takes the
+        // larger of hint and expanded children only within one reportBundleId group, so a
+        // primary without an id gets no hint: its children are counted once expanded,
+        // never twice.
+        if (attachment.reportBundleId) projected.reportBundleImageCount = bundle.imageCount
+        else delete projected.reportBundleImageCount
         delete projected.media
         delete projected.binary
         if (bundle.manifestUrl) projected.reportBundleManifestUrl = bundle.manifestUrl
@@ -2152,7 +2164,10 @@ const requestLocalChatCompletion = async (
   }
 
   try {
-    const request = { ...buildChatRequestPayload(input), cancellationId }
+    const request = {
+      ...buildChatRequestPayload(input, { localMainBoundary: true }),
+      cancellationId
+    }
     if (input.beforeLocalDispatch) await awaitWithAbort(Promise.resolve().then(input.beforeLocalDispatch), input.signal)
     throwIfAborted(input.signal)
     const pending = window.api.svcLLMProxy.chat(request)
@@ -2279,7 +2294,7 @@ const requestLocalChatCompletionStream = async (
     const streamInvoker =
       invoke || (window.api.svcLLMProxy.chatStream as unknown as RendererStreamInvoker)
     const streamRequest = {
-      ...((request ?? buildChatRequestPayload(input)) as object),
+      ...((request ?? buildChatRequestPayload(input, { localMainBoundary: true })) as object),
       cancellationId
     }
     if (input.beforeLocalDispatch) await Promise.race([Promise.resolve().then(input.beforeLocalDispatch), control])

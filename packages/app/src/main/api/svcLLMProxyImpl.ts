@@ -1547,9 +1547,14 @@ type RestrictedChatLoop = Readonly<{
  * conversation and to these primary bytes: the registered file's own URL, or a data: URL whose
  * decoded bytes hash to the registered primary. This is a consistency check on binding,
  * conversation and primary bytes only; the bytes of child images are checked by the
- * renderer-side svcReportBundles.verify before it reads them, not here. Any failure throws the
- * fixed message, which never names a path. The binding is a bearer secret, so it is removed
- * from the request once checked and never reaches a provider, a remote server or a log.
+ * renderer-side svcReportBundles.verify before it reads them, not here. It binds only the
+ * primary attachment carrier: the report text the renderer inlines into message content is not
+ * covered. A primary that carries `binary` or `media` is refused, because either would replace
+ * the checked url as the report body later in this request. Conversation ids are compared
+ * as given; LLMChatReq carries no storageScope, so the scope check is the renderer's verify
+ * only. Any failure throws the fixed message, which never names a path. The binding is a
+ * bearer secret, so it is removed from the request once checked and never reaches a provider,
+ * a remote server or a log.
  */
 function assertBoundPrimaryReports<T extends Pick<LLMChatReq, 'messages' | 'conversationId'>>(
   req: T
@@ -1573,7 +1578,9 @@ function assertBoundPrimaryReports<T extends Pick<LLMChatReq, 'messages' | 'conv
     for (const attachment of message.attachments ?? []) {
       if (
         isPrimaryReportFileDescriptor(attachment) &&
-        !isBoundTo(attachment.reportBundleBinding, req.conversationId, attachment.url)
+        (attachment.binary !== undefined ||
+          attachment.media !== undefined ||
+          !isBoundTo(attachment.reportBundleBinding, req.conversationId, attachment.url))
       ) {
         throw new Error(UNVERIFIED_REPORT_BUNDLE_MESSAGE)
       }

@@ -80,7 +80,8 @@ describe('registered primary-report request verification', () => {
     sizeBytes: 1,
     sha256: 'a'.repeat(64)
   }
-  function boundFixture(service: 'registry' | 'missing' | 'rejecting' = 'registry') {
+  type Service = 'registry' | 'missing' | 'rejecting' | 'empty' | 'foreign manifest'
+  function boundFixture(service: Service = 'registry') {
     const f = fixture()
     const fetch = vi.fn(
       async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -90,6 +91,16 @@ describe('registered primary-report request verification', () => {
     const reports = createReportBundleRegistryFixture()
     if (service === 'rejecting')
       reports.verify.mockRejectedValue(new Error('synthetic IPC failure'))
+    if (service === 'empty') reports.verify.mockResolvedValue({ results: [] })
+    if (service === 'foreign manifest')
+      reports.verify.mockImplementation(async (req) => ({
+        results: req.items.map((item) => ({
+          binding: item.binding,
+          status: 'verified' as const,
+          manifestUrl: 'https://synthetic.invalid/manifest.json',
+          imageCount: 0
+        }))
+      }))
     if (service !== 'missing')
       (window.api as unknown as Record<string, unknown>).svcReportBundles = reports.svcReportBundles
     return { ...f, fetch, reports }
@@ -116,7 +127,7 @@ describe('registered primary-report request verification', () => {
     readonly [
       string,
       (r: ReturnType<typeof boundFixture>['reports']) => ChatMessage[],
-      'registry' | 'missing' | 'rejecting',
+      Service,
       Record<string, unknown>,
       boolean
     ]
@@ -233,6 +244,63 @@ describe('registered primary-report request verification', () => {
       false
     ],
     [
+      'a verify answer without any result',
+      (r) => [
+        {
+          role: 'user',
+          content: 'synthetic',
+          attachments: [
+            r.register(
+              primary({ reportBundleManifestUrl: 'local-media:///synthetic/manifest.json' }),
+              conversationId
+            )
+          ]
+        }
+      ],
+      'empty',
+      { conversationId },
+      true
+    ],
+    [
+      'a verified answer whose manifest URL is not local media',
+      (r) => [
+        {
+          role: 'user',
+          content: 'synthetic',
+          attachments: [
+            r.register(
+              primary({ reportBundleManifestUrl: 'local-media:///synthetic/manifest.json' }),
+              conversationId
+            )
+          ]
+        }
+      ],
+      'foreign manifest',
+      { conversationId },
+      true
+    ],
+    [
+      'a verified binding whose primary also carries binary',
+      (r) => [
+        {
+          role: 'user',
+          content: 'synthetic',
+          attachments: [
+            {
+              ...r.register(
+                primary({ reportBundleManifestUrl: 'local-media:///synthetic/manifest.json' }),
+                conversationId
+              ),
+              binary: { transport: 'chunked-binary-v1', reference: {}, chunks: [] }
+            } as never
+          ]
+        }
+      ],
+      'registry',
+      { conversationId },
+      false
+    ],
+    [
       'a verified binding in history carried by another url',
       (r) => {
         const bound = r.register(
@@ -336,6 +404,81 @@ describe('registered primary-report request verification', () => {
       expect(sent).toContain('report.txt')
       expect(sent).not.toContain(bound.reportBundleBinding)
       expect(sent).not.toContain('reportBundleBinding')
+    }
+  )
+
+  it.each([false, true])(
+    'never sends the binding to the remote LLM server, which the renderer fetches directly (stream=%s)',
+    async (stream) => {
+      const f = boundFixture()
+      const origin = 'http://127.0.0.1:1'
+      f.fetch.mockImplementation(async (url: string | URL | Request) =>
+        String(url).startsWith(origin)
+          ? new Response(JSON.stringify({ content: 'remote synthetic' }), {
+              headers: { 'content-type': 'application/json' }
+            })
+          : new Response('synthetic', { headers: { 'content-type': 'text/plain' } })
+      )
+      const remoteConfig: Config = {
+        ...config,
+        use_remote_llm: true,
+        remote_llm_server_config: {
+          ...DEFAULT_CONFIG.remote_llm_server_config,
+          server_origin: origin,
+          access_token: ''
+        }
+      }
+      const bound = f.reports.register(primary(), conversationId, { manifestUrl: null })
+      const input = {
+        config: remoteConfig,
+        messages: [{ role: 'user' as const, content: 'synthetic', attachments: [bound] }],
+        profileId: 'fixture-profile',
+        remoteProfile: {
+          id: 'fixture-profile',
+          base_url: 'https://synthetic.invalid/v1',
+          model_name: 'fixture-model',
+          provider: 'openai' as const,
+          api_mode: 'chat-completions' as const,
+          model_use: 'chat' as const
+        },
+        conversationId
+      }
+      await expect(
+        stream
+          ? requestChatCompletionStream({ ...input, onEvent: vi.fn() })
+          : requestChatCompletion(input)
+      ).resolves.toBeDefined()
+      expect(f.reports.verify).toHaveBeenCalledOnce()
+      const remoteBodies = f.fetch.mock.calls
+        .filter(([url]) => String(url).startsWith(origin))
+        .map(([, init]) => String(init?.body ?? ''))
+      expect(remoteBodies.length).toBeGreaterThan(0)
+      expect(remoteBodies.some((body) => body.includes('report.txt'))).toBe(true)
+      for (const body of remoteBodies) {
+        expect(body).not.toContain(bound.reportBundleBinding)
+        expect(body).not.toContain('reportBundleBinding')
+      }
+      for (const fn of [f.chat, f.chatStream, f.remoteFetch, f.externalAgentStream])
+        expect(fn).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([false, true])(
+    'hands the binding only to the local MAIN chat boundary, which checks and strips it (stream=%s)',
+    async (stream) => {
+      const f = boundFixture()
+      const bound = f.reports.register(primary(), conversationId, { manifestUrl: null })
+      await expect(
+        runBound([{ role: 'user', content: 'synthetic', attachments: [bound] }], stream, false, {
+          conversationId
+        })
+      ).resolves.toBeDefined()
+      const ipc = stream ? f.chatStream : f.chat
+      const sent = (ipc.mock.calls.at(-1) as unknown[])[0] as { messages: ChatMessage[] }
+      const sentPrimary = sent.messages
+        .flatMap((message) => message.attachments ?? [])
+        .find((attachment) => attachment.reportBundleRole === 'primary-report')
+      expect(sentPrimary?.reportBundleBinding).toBe(bound.reportBundleBinding)
     }
   )
 
@@ -533,6 +676,50 @@ describe('registered primary-report request verification', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+
+  it("counts a verified primary without a bundle id once, by its expanded children, not also by MAIN's count", async () => {
+    const f = boundFixture()
+    const limited: Config = {
+      ...config,
+      llm_config: {
+        ...config.llm_config,
+        api_profiles: [
+          { ...config.llm_config.api_profiles[0], api_mode: 'responses', max_input_images: 10 }
+        ]
+      }
+    }
+    const owned = 'local-media:///synthetic/id-less/manifest.json'
+    const manifest = {
+      version: 1,
+      bundleId: 'snapshot-bundle',
+      title: 'synthetic',
+      entries: Array.from({ length: 6 }, (_, index) => ({
+        role: 'report-image',
+        fileName: `image-${index}.png`,
+        mimeType: 'image/png',
+        sourceUrl: `data:image/png;base64,aW1hZ2Ut${index}A==`
+      }))
+    }
+    f.fetch.mockImplementation(async (url: string | URL | Request) =>
+      String(url) === owned
+        ? new Response(JSON.stringify(manifest), {
+            headers: { 'content-type': 'application/json' }
+          })
+        : new Response('synthetic', { headers: { 'content-type': 'text/plain' } })
+    )
+    const bound = f.reports.register(primary({ reportBundleManifestUrl: owned }), conversationId, {
+      imageCount: 6
+    })
+    const messages: ChatMessage[] = [{ role: 'user', content: 'synthetic', attachments: [bound] }]
+    await expect(
+      runBound(messages, false, false, { conversationId, config: limited })
+    ).resolves.toBeDefined()
+    const sent = (f.chat.mock.calls.at(-1) as unknown[])[0] as { messages: ChatMessage[] }
+    const sentImages = sent.messages
+      .flatMap((message) => message.attachments ?? [])
+      .filter((attachment) => attachment.type === 'image')
+    expect(sentImages).toHaveLength(6)
   })
 
   it.each([

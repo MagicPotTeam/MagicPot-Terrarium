@@ -224,6 +224,46 @@ describe.each(['unary', 'stream'] as const)('MAIN report-bundle binding check (%
     expectRefused(await run(mode, makeReq(binding, dataUrlOf(reportText), undefined)))
   })
 
+  it('refuses a registered primary that also carries binary or media, which would replace its checked url', async () => {
+    const binding = await sealBundle('conv-1')
+    const withExtra = (extra: Record<string, unknown>): LLMChatReq => {
+      const req = makeReq(binding, dataUrlOf(reportText), 'conv-1')
+      const [message] = req.messages
+      return {
+        ...req,
+        messages: [{ ...message, attachments: [{ ...message.attachments![0], ...extra } as never] }]
+      }
+    }
+    const otherBytes = Buffer.from('# Another report\n')
+    expectRefused(
+      await run(
+        mode,
+        withExtra({
+          binary: {
+            transport: 'chunked-binary-v1',
+            reference: { sizeBytes: otherBytes.length, chunkCount: 1 },
+            chunks: [{ index: 0, bytes: new Uint8Array(otherBytes) }]
+          }
+        })
+      )
+    )
+    expectRefused(
+      await run(
+        mode,
+        withExtra({
+          media: {
+            version: 1,
+            kind: 'managed',
+            relativePath: `originals/aa/${'a'.repeat(64)}.md`,
+            mimeType: 'text/markdown',
+            sizeBytes: otherBytes.length,
+            sha256: 'a'.repeat(64)
+          }
+        })
+      )
+    )
+  })
+
   it('refuses every binding while the registry is not initialised', async () => {
     const binding = await sealBundle('conv-1')
     resetReportBundleRegistryForTest()
