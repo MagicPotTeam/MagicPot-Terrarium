@@ -11,9 +11,7 @@ const exactRoute = () => window.location.hash === '#/agent-management'
 
 /** Manual metadata snapshot only. Renderer lifetime checks never grant MAIN read authority. */
 export default function ManagementInstalledCatalog() {
-  const id = useId(), location = useLocation(), { i18n } = useTranslation()
-  const chinese = i18n.language?.toLowerCase().startsWith('zh')
-  const text = (en: string, zh: string) => chinese ? zh : en
+  const id = useId(), location = useLocation(), { t } = useTranslation()
   const lifetime = useRef<Lifetime | null>(null)
   const [view, setView] = useState<View>({ status: 'idle' })
   useLayoutEffect(() => {
@@ -61,18 +59,18 @@ export default function ManagementInstalledCatalog() {
   }
   return <Paper component="section" aria-labelledby={id} variant="outlined" sx={{ p: 2 }}>
     <Stack spacing={1.5}>
-      <Typography id={id} component="h2" variant="h6">{text('Installed catalogs', '已安装目录')}</Typography>
-      <Button onClick={() => { void read() }} disabled={view.status === 'loading'} sx={{ alignSelf: 'flex-start' }}>{text('Read installed catalog', '读取已安装目录')}</Button>
-      {view.status === 'idle' && <Typography>{text('Not loaded — use Read installed catalog', '尚未读取 — 请点击读取已安装目录')}</Typography>}
-      {view.status === 'loading' && <Typography role="status">{text('Reading installed catalog', '正在读取已安装目录')}</Typography>}
-      {view.status === 'unavailable' && <Alert severity="warning">{text('Installed catalog unavailable', '已安装目录不可用')}</Alert>}
+      <Typography id={id} component="h2" variant="h6">{t('agent_management.installed_catalog.heading')}</Typography>
+      <Button onClick={() => { void read() }} disabled={view.status === 'loading'} sx={{ alignSelf: 'flex-start' }}>{t('agent_management.installed_catalog.read')}</Button>
+      {view.status === 'idle' && <Typography>{t('agent_management.installed_catalog.idle')}</Typography>}
+      {view.status === 'loading' && <Typography role="status">{t('agent_management.installed_catalog.loading')}</Typography>}
+      {view.status === 'unavailable' && <Alert severity="warning">{t('agent_management.installed_catalog.unavailable')}</Alert>}
       {view.status === 'available' && (view.entries.length === 0
-        ? <Typography>{text('No installed packages in the validated catalog snapshot', '已验证的目录快照中没有已安装包')}</Typography>
+        ? <Typography>{t('agent_management.installed_catalog.empty')}</Typography>
         : <Stack component="ul" spacing={1.5} sx={{ pl: 3 }}>{view.entries.map(entry => <Stack component="li" key={entry.id} sx={{ overflowWrap: 'anywhere' }}>
           <Typography>{entry.name}</Typography>
           <Typography variant="body2">ID: {entry.id}</Typography>
-          <Typography variant="body2">{text('Version', '版本')}: {entry.version}</Typography>
-          <Typography variant="body2">{text('Installed at', '安装时间')}: {entry.installedAt}</Typography>
+          <Typography variant="body2">{t('agent_management.installed_catalog.version')}: {entry.version}</Typography>
+          <Typography variant="body2">{t('agent_management.installed_catalog.installed_at')}: {entry.installedAt}</Typography>
         </Stack>)}</Stack>)}
     </Stack>
   </Paper>

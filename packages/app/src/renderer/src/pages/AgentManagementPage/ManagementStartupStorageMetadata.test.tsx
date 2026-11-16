@@ -10,7 +10,10 @@ import ManagementStartupStorageMetadata from './ManagementStartupStorageMetadata
 const h = vi.hoisted(() => ({ read: vi.fn(), api: vi.fn(), forbidden: vi.fn(() => { throw new Error('No extra service probe') }), language: 'en', ready: true }))
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: DEFAULT_CONFIG, isReady: h.ready, updateConfig: h.forbidden }) }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: h.language } }) }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ i18n: { language: h.language }, t: localeTranslator(h.language) }) }
+})
 let controller: ConfigObservationController
 const available = (source = 'persisted', legacyLayout = false) => ({ status: 'available', source, legacyLayout })
 const unavailable = 'Startup storage metadata unavailable', idle = 'Not loaded — use Read startup storage metadata'

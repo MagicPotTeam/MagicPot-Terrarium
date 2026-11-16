@@ -1,12 +1,14 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Alert, Button, Checkbox, FormControlLabel, Stack, TextField } from '@mui/material'
 import { sshBashConfigSchema } from '@shared/sshBashConfig'
 import type { Config } from '@shared/config/config'
 export default function StudioSshConfiguration({ config, onSave }: { config: Config; onSave: (value: { project_trace_config: Config['project_trace_config'] }) => Promise<void> }) {
+  const { t } = useTranslation()
   const [text,setText] = useState(() => JSON.stringify({ ...config.project_trace_config.agent_ssh_config, password: undefined },null,2))
   const [password,setPassword] = useState(''), [consent,setConsent] = useState(false), [busy,setBusy] = useState(false), [status,setStatus] = useState('')
   return <Stack spacing={1}>
-    <Alert severity="info">SSH 配置</Alert>
+    <Alert severity="info">{t('agent_management.studio.ssh_configuration')}</Alert>
     <TextField label="SSH backend JSON (host, user, optional port/key_filename/known_hosts_policy)" multiline minRows={4} value={text ?? '{}'} disabled={busy} onChange={event=>{setText(event.target.value);setConsent(false)}} />
     <TextField label="SSH password (optional; blank preserves existing)" type="password" value={password} disabled={busy} onChange={event=>{setPassword(event.target.value);setConsent(false)}} />
     <FormControlLabel label="Use SSH for approved shell.execute calls" control={<Checkbox checked={consent} disabled={busy} onChange={event=>setConsent(event.target.checked)}/>} />

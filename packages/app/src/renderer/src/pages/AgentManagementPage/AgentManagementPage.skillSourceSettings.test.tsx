@@ -10,7 +10,11 @@ const location = Object.freeze({ pathname: '/agent-management', search: '', hash
 vi.mock('react-router-dom', () => ({ useNavigate: () => h.navigate, useLocation: () => location }))
 vi.mock('@renderer/store', () => ({ useAppDispatch: () => h.dispatch }))
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config, isReady: ready, updateConfig: h.save }) }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language }, t: (key: string) => key }) }))
+// Management copy comes from the locale files; other keys stay raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ i18n: { language }, t: (key: string, options?: Record<string, unknown>) => scopedLocaleTranslator(language, ['agent_management.'], (raw) => raw)(key, options) }) }
+})
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
 const secret = 'PRIVATE_SOURCE_PATH_AND_PROFILE_MUST_NOT_LEAVE_MANAGEMENT'
 const action = () => screen.getByRole('button', { name: 'Open skill-source settings' })

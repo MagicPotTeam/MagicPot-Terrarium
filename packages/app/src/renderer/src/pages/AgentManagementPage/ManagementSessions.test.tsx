@@ -9,7 +9,10 @@ const deps = vi.hoisted(() => ({ metadata: vi.fn(), read: vi.fn(), current: vi.f
 vi.mock('./managementPaneMetadata', () => ({ readManagementPaneSnapshot: deps.metadata }))
 vi.mock('../ChatPage/chatStorage', () => ({ readExistingSessionSummaries: deps.read }))
 vi.mock('@renderer/utils/windowUtils', () => ({ api: deps.api }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' } }) }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ i18n: { language: 'en' }, t: localeTranslator('en') }) }
+})
 const owner = { projectId: 'p', projectName: 'Project', paneId: 'agent-1', storageScope: 'p.agent-1' }
 const summary = { storageScope: 'p.agent-1', sessionId: 'existing', title: '<script>inert existing title</script>', titleTruncated: false, createdAt: 7 }
 function deferred() { let resolve!: (value: ExistingSessionSummaryResult) => void; const promise = new Promise<ExistingSessionSummaryResult>(r => { resolve = r }); return { promise, resolve } }

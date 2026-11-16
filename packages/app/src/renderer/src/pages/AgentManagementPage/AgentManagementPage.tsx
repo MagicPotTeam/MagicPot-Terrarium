@@ -15,29 +15,24 @@ import ManagementStudioWorkspace from './ManagementStudioWorkspace'
 /** Existing config projection, independent explicit metadata/summaries and Open; no mount-time service reads. */
 export default function AgentManagementPage() {
   const { config, isReady, updateConfig } = useConfig()
-  const { i18n } = useTranslation()
-  const chinese = i18n.language?.toLowerCase().startsWith('zh')
-  const text = (en: string, zh: string) => (chinese ? zh : en)
+  const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const id = useId()
   const overview = useMemo(() => (isReady ? projectLocalConfigOverview(config) : null), [config, isReady])
   const unavailable = [
-    { heading: text('Account identity', '账号身份') },
-    { heading: text('Persistence', '持久化') },
+    { heading: t('agent_management.page.account_identity') },
+    { heading: t('agent_management.page.persistence') },
     {
-      heading: text('Runtime and deployment', '运行时与部署'),
-      detail: text(
-        'Unavailable',
-        '不可用'
-      )
+      heading: t('agent_management.page.runtime_deployment'),
+      detail: t('agent_management.page.unavailable')
     }
   ]
   const backToSettings = () => {
     dispatch(
       openTab({
         id: 'tab-settings',
-        label: text('Settings', '设置'),
+        label: t('agent_management.page.settings_tab'),
         routePath: '/settings',
         closable: true
       })
@@ -50,7 +45,7 @@ export default function AgentManagementPage() {
     dispatch(
       openTab({
         id: 'tab-settings',
-        label: text('Settings', '设置'),
+        label: t('agent_management.page.settings_tab'),
         routePath: '/settings',
         closable: true
       })
@@ -62,7 +57,7 @@ export default function AgentManagementPage() {
   const openWorkshop = (routePath: '/workshop/plugins' | '/custom-skill-manager') => {
     dispatch(openTab({
       id: routePath === '/workshop/plugins' ? 'tab-workshop-plugins' : 'tab-custom-skill-manager',
-      label: routePath === '/workshop/plugins' ? text('Plugins', '插件') : text('Custom Skill', '自定义技能'),
+      label: routePath === '/workshop/plugins' ? t('agent_management.page.plugins_tab') : t('agent_management.page.custom_skill_tab'),
       routePath,
       closable: true
     }))
@@ -74,18 +69,15 @@ export default function AgentManagementPage() {
       <Stack spacing={2} sx={{ maxWidth: 1000, mx: 'auto' }}>
         <Stack direction="row" alignItems="center" justifyContent="space-between" gap={2}>
           <Typography component="h1" variant="h5">
-            {text('Agent management', 'Agent 管理')}
+            {t('agent_management.title')}
           </Typography>
-          <Button onClick={backToSettings}>{text('Back to Settings', '返回设置')}</Button>
+          <Button onClick={backToSettings}>{t('agent_management.page.back_to_settings')}</Button>
         </Stack>
         <Alert severity="info">
-          {text(
-            'Configuration',
-            '配置'
-          )}
+          {t('agent_management.page.configuration')}
         </Alert>
         {!overview ? (
-          <Typography role="status">{text('Loading configuration', '正在加载配置')}</Typography>
+          <Typography role="status">{t('agent_management.page.loading_configuration')}</Typography>
         ) : (
           <>
             <Paper
@@ -95,20 +87,14 @@ export default function AgentManagementPage() {
               sx={{ p: 2 }}
             >
               <Typography id={`${id}-profiles`} component="h2" variant="h6">
-                {text('Configured model profiles', '已配置模型档案')}
+                {t('agent_management.page.model_profiles')}
               </Typography>
               <Typography id={`${id}-model-settings-notice`} variant="body2" sx={{ mb: 1 }}>
-                {text(
-                  'Model settings',
-                  '模型设置'
-                )}
+                {t('agent_management.page.model_settings')}
               </Typography>
               {config.use_remote_llm && (
                 <Typography id={`${id}-model-settings-remote`} variant="body2" sx={{ mb: 1 }}>
-                  {text(
-                    'Local model-profile editing is unavailable while remote LLM mode is active.',
-                    '远程 LLM 模式下，本地模型配置编辑不可用。'
-                  )}
+                  {t('agent_management.page.model_settings_remote')}
                 </Typography>
               )}
               <Button
@@ -116,10 +102,10 @@ export default function AgentManagementPage() {
                 onClick={() => openSettingsPanel('llm')}
                 aria-describedby={`${id}-model-settings-notice${config.use_remote_llm ? ` ${id}-model-settings-remote` : ''}`}
               >
-                {text('Open model-profile settings', '打开模型配置设置')}
+                {t('agent_management.page.open_model_settings')}
               </Button>
               {!overview.profiles.length ? (
-                <Typography>{text('No model profiles configured', '尚未配置模型档案')}</Typography>
+                <Typography>{t('agent_management.page.no_model_profiles')}</Typography>
               ) : (
                 <Stack component="ul" spacing={1.5} sx={{ pl: 3 }}>
                   {overview.profiles.map((profile, index) => (
@@ -134,10 +120,10 @@ export default function AgentManagementPage() {
                         ID: {profile.id}
                       </Typography>
                       <Typography variant="body2">
-                        {text('Provider', '服务商')}:{' '}
-                        {profile.provider ?? text('Not specified', '未指定')} ·{' '}
-                        {text('Call type', '调用类型')}:{' '}
-                        {profile.callType ?? text('Not specified', '未指定')}
+                        {t('agent_management.page.provider')}:{' '}
+                        {profile.provider ?? t('agent_management.page.not_specified')} ·{' '}
+                        {t('agent_management.page.call_type')}:{' '}
+                        {profile.callType ?? t('agent_management.page.not_specified')}
                       </Typography>
                     </Box>
                   ))}
@@ -151,26 +137,20 @@ export default function AgentManagementPage() {
               sx={{ p: 2 }}
             >
               <Typography id={`${id}-sources`} component="h2" variant="h6">
-                {text('Configured procedural skill sources', '已配置程序化技能来源')}
+                {t('agent_management.page.skill_sources_heading')}
               </Typography>
               <Typography variant="body2" sx={{ mb: 1 }}>
-                {text(
-                  'Skill sources',
-                  '技能来源'
-                )}
+                {t('agent_management.page.skill_sources')}
               </Typography>
               <Typography id={`${id}-source-settings-notice`} variant="body2" sx={{ mb: 1 }}>
-                {text(
-                  'Environment settings',
-                  '环境设置'
-                )}
+                {t('agent_management.page.environment_settings')}
               </Typography>
               <Button onClick={() => openSettingsPanel('environment')} aria-describedby={`${id}-source-settings-notice`}>
-                {text('Open skill-source settings', '打开技能来源设置')}
+                {t('agent_management.page.open_skill_source_settings')}
               </Button>
               {!overview.sources.length ? (
                 <Typography>
-                  {text('No procedural skill sources configured', '尚未配置程序化技能来源')}
+                  {t('agent_management.page.no_skill_sources')}
                 </Typography>
               ) : (
                 <Stack component="ul" spacing={1.5} sx={{ pl: 3 }}>
@@ -178,13 +158,13 @@ export default function AgentManagementPage() {
                     <Box component="li" key={`${index}:${source.id}`}>
                       <Typography sx={{ overflowWrap: 'anywhere' }}>{source.id}</Typography>
                       <Typography variant="body2">
-                        {text('Source type', '来源类型')}: {source.source} ·{' '}
-                        {text('Configured flag', '配置标记')}:{' '}
-                        {source.enabled ? text('enabled', '启用') : text('disabled', '禁用')}
+                        {t('agent_management.page.source_type')}: {source.source} ·{' '}
+                        {t('agent_management.page.configured_flag')}:{' '}
+                        {source.enabled ? t('agent_management.page.enabled') : t('agent_management.page.disabled')}
                       </Typography>
                       {source.projectId !== undefined && (
                         <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
-                          {text('Configured project ID', '配置项目 ID')}: {source.projectId}
+                          {t('agent_management.page.configured_project_id')}: {source.projectId}
                         </Typography>
                       )}
                     </Box>
@@ -216,7 +196,7 @@ export default function AgentManagementPage() {
               {heading}
             </Typography>
             <Typography color="text.secondary">
-              {text('Unavailable in this local-config view', '此本地配置视图暂不可用')}
+              {t('agent_management.page.unavailable_in_view')}
             </Typography>
             {detail && <Typography color="text.secondary">{detail}</Typography>}
           </Paper>

@@ -11,9 +11,7 @@ type State = { status: 'idle' | 'loading' | 'unavailable' } | { status: 'ready';
 
 /** Explicit metadata snapshot, never a ChatPage mount or conversation-Open authority. */
 export default function ManagementSessions() {
-  const { i18n } = useTranslation()
-  const chinese = i18n.language?.toLowerCase().startsWith('zh')
-  const text = (en: string, zh: string) => (chinese ? zh : en)
+  const { t } = useTranslation()
   const id = useId()
   const [state, setState] = useState<State>({ status: 'idle' })
   const openSnapshot = useExistingConversationOpenSnapshot()
@@ -88,64 +86,55 @@ export default function ManagementSessions() {
     <Paper component="section" aria-labelledby={`${id}-sessions`} variant="outlined" sx={{ p: 2 }}>
       <Stack spacing={1.5}>
         <Typography id={`${id}-sessions`} component="h2" variant="h6">
-          {text('Sessions', '会话')}
+          {t('agent_management.sessions.heading')}
         </Typography>
         <Button variant="outlined" disabled={state.status === 'loading'} onClick={() => void read()}>
-          {text('Read existing conversation summaries', '读取已有会话摘要')}
+          {t('agent_management.sessions.read')}
         </Button>
         {state.status === 'idle' && (
           <Typography>
-            {text(
-              'Not loaded — use Read existing conversation summaries',
-              '尚未读取，请使用“读取已有会话摘要”'
-            )}
+            {t('agent_management.sessions.idle')}
           </Typography>
         )}
         {state.status === 'loading' && (
           <Typography role="status">
-            {text('Reading existing conversation summaries', '正在读取已有会话摘要')}
+            {t('agent_management.sessions.loading')}
           </Typography>
         )}
         {state.status === 'unavailable' && (
           <Alert severity="warning">
-            {text(
-              'Existing conversation summaries unavailable. Storage may be missing, incompatible, changed, unreadable or over the bounded limit; no migration or repair was attempted.',
-              '已有会话摘要不可用：存储可能缺失、不兼容、已变化、不可读或超出数量限制；未执行迁移或修复。'
-            )}
+            {t('agent_management.sessions.unavailable')}
           </Alert>
         )}
-        {openUnavailable && <Alert severity="warning">{text('Open request unavailable', '打开请求不可用')}</Alert>}
+        {openUnavailable && <Alert severity="warning">{t('agent_management.sessions.open_unavailable')}</Alert>}
         {state.status === 'ready' &&
           (!state.rows.length ? (
             <Typography>
-              {text(
-                'No existing conversations in the validated enabled panes',
-                '已验证的启用面板中没有已有会话'
-              )}
+              {t('agent_management.sessions.empty')}
             </Typography>
           ) : (
             <Stack component="ul" spacing={1.5} sx={{ pl: 3 }}>
               {state.rows.map((row) => (
                 <Stack component="li" key={JSON.stringify([row.storageScope, row.sessionId])}>
                   <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                    {row.title || text('(Untitled)', '（无标题）')}
+                    {row.title || t('agent_management.sessions.untitled')}
                   </Typography>
                   {row.titleTruncated && (
-                    <Typography variant="caption">{text('Title truncated', '标题已截断')}</Typography>
+                    <Typography variant="caption">{t('agent_management.sessions.title_truncated')}</Typography>
                   )}
                   <Typography variant="body2">{row.projectName}</Typography>
                   <Typography variant="caption" sx={{ overflowWrap: 'anywhere' }}>
-                    {text('Project', '项目')}: {row.projectId} · {text('Pane', '面板')}: {row.paneId}
+                    {t('agent_management.sessions.project')}: {row.projectId} · {t('agent_management.sessions.pane')}: {row.paneId}
                   </Typography>
                   <Typography variant="caption" sx={{ overflowWrap: 'anywhere' }}>
-                    {text('Scope', '作用域')}: {row.storageScope} · ID: {row.sessionId}
+                    {t('agent_management.sessions.scope')}: {row.storageScope} · ID: {row.sessionId}
                   </Typography>
                   <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} disabled={!!openSnapshot.request && sameTarget(openSnapshot.request.handle.target, row)} onClick={() => open(row)}>
-                    {text('Open existing conversation', '打开已有会话')}
+                    {t('agent_management.sessions.open')}
                   </Button>
                   <Typography variant="caption">
-                    {text('Created at (stored epoch ms)', '创建时间（存储的 epoch 毫秒）')}:{' '}
-                    {row.createdAt ?? text('Not recorded', '未记录')}
+                    {t('agent_management.sessions.created_at')}:{' '}
+                    {row.createdAt ?? t('agent_management.sessions.not_recorded')}
                   </Typography>
                 </Stack>
               ))}

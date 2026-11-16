@@ -14,7 +14,12 @@ vi.mock('../store', async () => {
   return { useAppDispatch: redux.useDispatch, useAppSelector: redux.useSelector }
 })
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: DEFAULT_CONFIG, isReady: true, updateConfig: effects.save }) }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => key }) }))
+// Management copy comes from the en-US locale; other keys stay raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator('en', ['agent_management.'], (key) => key)
+  return { useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, options?: Record<string, unknown>) => translate(key, options) }) }
+})
 vi.mock('@renderer/utils/windowUtils', () => ({ api: effects.api }))
 vi.mock('./TitleBar', () => ({ default: () => null }))
 vi.mock('./ActivityBar', () => ({ default: () => null }))

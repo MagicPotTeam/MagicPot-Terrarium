@@ -7,7 +7,10 @@ import ManagementBundledCreativeDeclarations from './ManagementBundledCreativeDe
 
 const h = vi.hoisted(() => ({ api: vi.fn(() => { throw new Error('Static declarations must never access services') }), language: 'en' }))
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: h.language } }) }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ i18n: { language: h.language }, t: localeTranslator(h.language) }) }
+})
 function Navigation() {
   const navigate = useNavigate()
   return <><button onClick={() => navigate('/agent-management#other')}>Inner hash departure</button><button onClick={() => navigate('/agent-management', { replace: true })}>Return management</button><button onClick={() => navigate('/settings')}>Leave management</button></>

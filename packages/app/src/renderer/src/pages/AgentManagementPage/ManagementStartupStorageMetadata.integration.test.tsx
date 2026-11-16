@@ -14,7 +14,12 @@ import AgentManagementPage from './AgentManagementPage'
 const h = vi.hoisted(() => ({ api: vi.fn(), get: vi.fn(), build: vi.fn(), watch: vi.fn(), save: vi.fn(), read: vi.fn(), forbidden: vi.fn(() => { throw new Error('EXTRA_CAPABILITY_OR_STORAGE_PROBE') }) }))
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
 vi.mock('@renderer/store', async () => { const redux = await import('react-redux'); return { useAppDispatch: redux.useDispatch, useAppSelector: redux.useSelector } })
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => key }) }))
+// Management copy comes from the en-US locale; other keys stay raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator('en', ['agent_management.'], (key) => key)
+  return { useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, options?: Record<string, unknown>) => translate(key, options) }) }
+})
 let onData: ((data: { config: Config }) => void) | undefined
 const read = () => screen.getByRole('button', { name: 'Read startup storage metadata' })
 function deferred() { let resolve!: (value: unknown) => void, reject!: (reason: unknown) => void; const promise = new Promise<unknown>((done, fail) => { resolve = done; reject = fail }); return { promise, resolve, reject } }

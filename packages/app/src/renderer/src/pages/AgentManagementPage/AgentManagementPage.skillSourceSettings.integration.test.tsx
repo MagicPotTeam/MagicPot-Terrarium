@@ -11,7 +11,12 @@ import Layout from '@renderer/components/Layout'
 const h = vi.hoisted(() => ({ config: undefined as Config | undefined, save: vi.fn(async (_value: unknown) => {}), api: vi.fn(() => { throw new Error('Navigation fixture must not call services') }), environment: vi.fn(), general: vi.fn(), llm: vi.fn() }))
 vi.mock('@renderer/store', async () => { const redux = await import('react-redux'); return { useAppDispatch: redux.useDispatch, useAppSelector: redux.useSelector } })
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: h.config, isReady: true, updateConfig: h.save }) }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => key }) }))
+// Management copy comes from the en-US locale; other keys stay raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator('en', ['agent_management.'], (key) => key)
+  return { useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, options?: Record<string, unknown>) => translate(key, options) }) }
+})
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
 vi.mock('@renderer/components/TitleBar', () => ({ default: () => null }))
 vi.mock('@renderer/components/ActivityBar', () => ({ default: () => null }))

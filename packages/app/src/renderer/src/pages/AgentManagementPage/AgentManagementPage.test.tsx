@@ -22,9 +22,13 @@ vi.mock('@renderer/hooks/useConfig', () => ({
 vi.mock('@renderer/store', () => ({ useAppDispatch: () => effects.dispatch }))
 vi.mock('react-router-dom', () => ({ useNavigate: () => effects.navigate, useLocation: () => locationFixture }))
 const locationFixture = Object.freeze({ pathname: '/agent-management', search: '', hash: '', key: 'overview-fixture', state: null })
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ i18n: { language }, t: (key: string) => key })
-}))
+// Management copy comes from the locale files; other keys stay raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return {
+    useTranslation: () => ({ i18n: { language }, t: (key: string, options?: Record<string, unknown>) => scopedLocaleTranslator(language, ['agent_management.'], (raw) => raw)(key, options) })
+  }
+})
 vi.mock('@renderer/utils/windowUtils', () => ({ api: effects.api }))
 const sentinel = 'SECRET_FIELD_MUST_NOT_REACH_DTO_OR_DOM'
 function fixture(): Config {
@@ -217,5 +221,24 @@ describe('local-config management overview', () => {
     expect(screen.getAllByText('此本地配置视图暂不可用')).toHaveLength(3)
     expect(screen.getByRole('button', { name: '读取已安装目录' })).toBeEnabled()
     expect(screen.getByText('尚未读取 — 请点击读取已安装目录')).toBeInTheDocument()
+  })
+  it('shows the whole page in English in en-US without Chinese text or raw management keys', () => {
+    language = 'en-US'
+    config = { ...config, use_remote_llm: true }
+    render(<AgentManagementPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'Show bundled declarations' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open Studio workspace' }))
+    fireEvent.change(screen.getByLabelText('Non-secret target label'), { target: { value: 'fixture host' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Show preparation checklist' }))
+    expect(screen.getByRole('heading', { name: 'Agent management' })).toBeInTheDocument()
+    expect(screen.getByText('Local model-profile editing is unavailable while remote LLM mode is active.')).toBeInTheDocument()
+    expect(screen.getByText('Configured project ID: tab-project-existing')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Studio workspace (basic)' })).toBeInTheDocument()
+    expect(screen.getByText('SSH configuration')).toBeInTheDocument()
+    expect(screen.getByText('Docker configuration')).toBeInTheDocument()
+    expect(screen.getByText('Check the host and key')).toBeInTheDocument()
+    const shown = document.body.textContent ?? ''
+    expect(shown).not.toMatch(/[\u3400-\u9fff]/)
+    expect(shown).not.toMatch(/agent_management\./)
   })
 })

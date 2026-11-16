@@ -11,7 +11,12 @@ const location = Object.freeze({ pathname: '/agent-management', search: '', hash
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config, isReady: true, updateConfig: h.save }) }))
 vi.mock('@renderer/store', () => ({ useAppDispatch: () => h.dispatch }))
 vi.mock('react-router-dom', () => ({ useNavigate: () => h.navigate, useLocation: () => location }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => key }) }))
+// Management copy comes from the en-US locale; other keys stay raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator('en', ['agent_management.'], (key) => key)
+  return { useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, options?: Record<string, unknown>) => translate(key, options) }) }
+})
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
 const secret = 'PRIVATE_KEY_NOT_EXPORTED'
 const existing = () => ({ version: 1 as const, creatures: [{ id: 'one', name: 'First', modelProfileId: 'model-id', systemPrompt: 'Be helpful' }], nodes: [{ id: 'local', name: 'Local', address: 'http://127.0.0.1:9000' }] })
@@ -69,7 +74,8 @@ describe('Studio basic workspace', () => {
   it('exposes only configured unverified account labels and hands off to existing plugin/skill destinations on click', () => {
     open()
     expect(screen.getByText(/configured@example.test/)).toHaveTextContent('(unverified)')
-    expect(screen.getByRole('heading',{name:'Model and account labels / 模型与账号标记'})).toBeVisible()
+    // en-US shows only the English half of the bilingual heading; zh-CN keeps the whole text.
+    expect(screen.getByRole('heading',{name:'Model and account labels'})).toBeVisible()
     expect(document.body.innerHTML).not.toContain(secret)
     expect(document.body.innerHTML).not.toContain('PRIVATE_ENDPOINT')
     fireEvent.click(screen.getByRole('button', { name: 'Open plugin center' }))

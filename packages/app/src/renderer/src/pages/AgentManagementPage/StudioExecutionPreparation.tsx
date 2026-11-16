@@ -1,10 +1,12 @@
 import { planPreparedShellInvocation } from '@shared/preparedShellInvocation'
 import { createExecutionPreparation } from '@shared/executionPreparation'
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Alert, Button, MenuItem, Paper, Stack, TextField, Typography } from '@mui/material'
 
 /** User-entered preparation notes only; no command generation, discovery or connections. */
 export default function StudioExecutionPreparation() {
+  const { t } = useTranslation()
   const [kind, setKind] = useState('ssh')
   const [target, setTarget] = useState('')
   const [details, setDetails] = useState({ host: '', port: '22', user: '', hostKeySha256: '', context: '', container: '', relativePath: '' })
@@ -15,7 +17,7 @@ export default function StudioExecutionPreparation() {
   return <Paper variant="outlined" sx={{ p: 2 }}>
     <Stack spacing={1}>
       <Typography variant="subtitle1">SSH / Docker / database preparation</Typography>
-      <Alert severity="info">请勿填写密钥或密码</Alert>
+      <Alert severity="info">{t('agent_management.studio.no_secrets')}</Alert>
       <TextField select label="Preparation backend" value={kind} onChange={event => { setKind(event.target.value); setTarget(''); setReviewed(false); setPrepared('') }}>
         <MenuItem value="ssh">SSH remote shell</MenuItem><MenuItem value="docker">Docker container shell</MenuItem><MenuItem value="database">SQLite database</MenuItem>
       </TextField>
@@ -44,7 +46,7 @@ export default function StudioExecutionPreparation() {
       <Button disabled={!target.trim()} onClick={() => setReviewed(true)}>Show preparation checklist</Button>
       {reviewed && <>
         <Typography>{target.trim()}</Typography>
-        <Typography>{kind === 'ssh' ? '核对主机与密钥' : kind === 'docker' ? '核对容器与挂载' : '核对数据库路径'}</Typography>
+        <Typography>{kind === 'ssh' ? t('agent_management.studio.checklist_ssh') : kind === 'docker' ? t('agent_management.studio.checklist_docker') : t('agent_management.studio.checklist_database')}</Typography>
       </>}
     </Stack>
   </Paper>

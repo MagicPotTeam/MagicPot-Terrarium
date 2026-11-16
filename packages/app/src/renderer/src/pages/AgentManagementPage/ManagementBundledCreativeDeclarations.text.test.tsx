@@ -7,7 +7,10 @@ import ManagementBundledCreativeDeclarations from './ManagementBundledCreativeDe
 // Test-only module replacement. Production reads no wire/user data and its actual rows are frozen.
 const hostile = vi.hoisted(() => ({ name: '<img src=x onerror="window.DECLARATION_INJECTED=1">', category: '<svg onload="window.DECLARATION_INJECTED=1">', description: '<script>window.DECLARATION_INJECTED=1</script>' }))
 vi.mock('@shared/magicAgentRuntime/bundledCreativeDeclarations', () => ({ bundledCreativeDeclarations: Object.freeze({ fixture: Object.freeze(hostile) }) }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' } }) }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ i18n: { language: 'en' }, t: localeTranslator('en') }) }
+})
 afterEach(cleanup)
 
 describe('bundled declarations render ordinary React text, never markup', () => {

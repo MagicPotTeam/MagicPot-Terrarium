@@ -12,7 +12,12 @@ import Layout from '@renderer/components/Layout'
 const h = vi.hoisted(() => ({ config: undefined as Config | undefined, save: vi.fn(async (_value: unknown) => {}), api: vi.fn(() => { throw new Error('Public model-settings navigation must not call providers, auth or discovery') }), environment: vi.fn(), general: vi.fn(), notify: vi.fn() }))
 vi.mock('@renderer/store', async () => { const redux = await import('react-redux'); return { useAppDispatch: redux.useDispatch, useAppSelector: redux.useSelector } })
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: h.config, isReady: true, updateConfig: h.save }) }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key }) }))
+// Management copy comes from the en-US locale; other keys keep the default-value fixture.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator('en', ['agent_management.'], (key, options) => (options?.defaultValue as string | undefined) ?? key)
+  return { useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, options?: { defaultValue?: string }) => translate(key, options) }) }
+})
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
 vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifyInfo: h.notify, notifySuccess: h.notify, notifyWarning: h.notify, closeMessage: h.notify }) }))
 vi.mock('@renderer/components/TitleBar', () => ({ default: () => null }))

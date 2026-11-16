@@ -6,7 +6,10 @@ import ManagementInstalledCatalog from './ManagementInstalledCatalog'
 
 const h = vi.hoisted(() => ({ read: vi.fn(), api: vi.fn(), forbidden: vi.fn(() => { throw new Error('No other service') }), language: 'en' }))
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: h.language } }) }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ i18n: { language: h.language }, t: localeTranslator(h.language) }) }
+})
 const row = { id: 'demo', name: '<img src=x onerror="SECRET=1">', version: '1.2.3', installedAt: '2026-01-01T00:00:00.000Z' }
 const available = (name = row.name) => ({ status: 'available', entries: [{ ...row, name }] })
 const unavailable = 'Installed catalog unavailable', empty = 'No installed packages in the validated catalog snapshot'

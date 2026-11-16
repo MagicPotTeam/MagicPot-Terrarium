@@ -2,6 +2,7 @@ import StudioSshConfiguration from './StudioSshConfiguration'
 import StudioDockerConfiguration from './StudioDockerConfiguration'
 import StudioExecutionPreparation from './StudioExecutionPreparation'
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Alert, Button, FormControl, InputLabel, MenuItem, Paper, Select, Stack, TextField, Typography } from '@mui/material'
 import type { Config } from '@shared/config/config'
 import {
@@ -28,6 +29,7 @@ export default function ManagementStudioWorkspace({ config, onSave, onOpenPlugin
   onOpenPlugins: () => void
   onOpenSkills: () => void
 }) {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [workspace, setWorkspace] = useState(emptyStudioWorkspace)
   const [draft, setDraft] = useState(newCreature)
@@ -93,7 +95,7 @@ export default function ManagementStudioWorkspace({ config, onSave, onOpenPlugin
   }
   const profiles = open ? config.llm_config.api_profiles : []
   return <Paper component="section" aria-label="Studio workspace (basic)" variant="outlined" sx={{ p: 2 }}>
-    <Typography component="h2" variant="h6">Studio workspace (basic) / Studio 基础版</Typography>
+    <Typography component="h2" variant="h6">{t('agent_management.studio.workspace_heading')}</Typography>
     <Button disabled={busy} onClick={() => setOpen(value => !value)}>{open ? 'Close Studio workspace' : 'Open Studio workspace'}</Button>
     {open && <Stack spacing={2}>
       {message && <Alert severity={error ? 'error' : 'success'}>{message}</Alert>}
@@ -101,7 +103,7 @@ export default function ManagementStudioWorkspace({ config, onSave, onOpenPlugin
         <Button onClick={onOpenPlugins}>Open plugin center</Button>
         <Button onClick={onOpenSkills}>Open custom-skill manager</Button>
       </Stack>
-      <Typography component="h3" variant="subtitle1">Creature templates / Creature 模板</Typography>
+      <Typography component="h3" variant="subtitle1">{t('agent_management.studio.creature_templates')}</Typography>
       <Stack component="ul" spacing={1}>
         {workspace.creatures.map(item => <li key={item.id}>
           <Typography>{item.name} · {item.id} · model: {item.modelProfileId || '(not assigned)'}</Typography>
@@ -126,11 +128,11 @@ export default function ManagementStudioWorkspace({ config, onSave, onOpenPlugin
         }}>Save creature</Button>
         <Button disabled={busy} onClick={() => { setDraft(newCreature()); setEditing(null) }}>New creature</Button>
       </Stack>
-      <Typography component="h3" variant="subtitle1">Model and account labels / 模型与账号标记</Typography>
+      <Typography component="h3" variant="subtitle1">{t('agent_management.studio.model_account_labels')}</Typography>
       <Stack component="ul">{profiles.map((profile, index) => <li key={`${index}:${profile.id}`}>
         {profile.model_name} · {profile.id} · {profile.provider ?? 'default'} · {profile.call_type ?? 'default'} · account: {profile.auth_account_email || 'not configured'} (unverified)
       </li>)}</Stack>
-      <Typography component="h3" variant="subtitle1">Deployment nodes / 部署节点</Typography>
+      <Typography component="h3" variant="subtitle1">{t('agent_management.studio.deployment_nodes')}</Typography>
       <Stack component="ul">{workspace.nodes.map(item => <li key={item.id}>
         <Typography>{item.name} · {item.id} · {item.address}</Typography>
         <Button disabled={busy} aria-label={`Edit node ${item.id}`} onClick={() => { setNode({ ...item }); setEditingNode(item.id) }}>Edit</Button>
@@ -163,7 +165,7 @@ export default function ManagementStudioWorkspace({ config, onSave, onOpenPlugin
       <StudioSshConfiguration config={config} onSave={onSave} />
       <StudioDockerConfiguration config={config} onSave={onSave} />
       <StudioExecutionPreparation />
-      <Typography component="h3" variant="subtitle1">Save / restore Studio JSON / 保存恢复</Typography>
+      <Typography component="h3" variant="subtitle1">{t('agent_management.studio.save_restore')}</Typography>
       <Button disabled={busy} onClick={() => {
         try { downloadJson('magicpot-studio.json', studioWorkspaceSchema.parse(workspace)); setError(false); setMessage('Studio JSON download requested.') }
         catch { fail('Unable to export Studio JSON.') }

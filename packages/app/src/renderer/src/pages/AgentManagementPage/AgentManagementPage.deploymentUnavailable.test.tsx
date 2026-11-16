@@ -17,7 +17,11 @@ const location = Object.freeze({ pathname: '/agent-management', search: '', hash
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config, isReady: ready, updateConfig: h.save }) }))
 vi.mock('@renderer/store', () => ({ useAppDispatch: () => h.dispatch }))
 vi.mock('react-router-dom', () => ({ useNavigate: () => h.navigate, useLocation: () => location }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language }, t: (key: string) => key }) }))
+// Management copy comes from the locale files; other keys stay raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ i18n: { language }, t: (key: string, options?: Record<string, unknown>) => scopedLocaleTranslator(language, ['agent_management.'], (raw) => raw)(key, options) }) }
+})
 vi.mock('@renderer/utils/windowUtils', () => ({ api: h.api }))
 const sentinel = 'PRIVATE_DEPLOYMENT_URL_TOKEN_PATH_NOT_FOR_DOM'
 const strictPage = () => <React.StrictMode><AgentManagementPage /></React.StrictMode>

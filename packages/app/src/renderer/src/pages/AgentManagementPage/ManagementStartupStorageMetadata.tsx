@@ -17,10 +17,8 @@ const exactRawRoute = () => window.location.hash === '#/agent-management' && !wi
 
 /** Manual display snapshot only. Neither renderer readiness nor an observation grants MAIN authority. */
 export default function ManagementStartupStorageMetadata() {
-  const id = useId(), location = useLocation(), { i18n } = useTranslation(), { isReady } = useConfig()
+  const id = useId(), location = useLocation(), { t } = useTranslation(), { isReady } = useConfig()
   const source = useConfigObservation(), observation = useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot)
-  const chinese = i18n.language?.toLowerCase().startsWith('zh')
-  const text = (en: string, zh: string) => chinese ? zh : en
   const lifetime = useRef<Lifetime | null>(null), [ownedView, setOwnedView] = useState<OwnedView | null>(null)
   const routerExact = location.pathname === '/agent-management' && location.search === '' && location.hash === ''
   const allowed = (snapshot: ConfigObservationSnapshot) => isReady && snapshot.ready && source.getSnapshot() === snapshot && routerExact && exactRawRoute()
@@ -77,20 +75,20 @@ export default function ManagementStartupStorageMetadata() {
   }
   const view = ownedView && ownedView.owner.active && lifetime.current === ownedView.owner && ownedView.owner.sequence === ownedView.sequence && ownedView.observation === observation && allowed(observation) ? ownedView.view : idle
   const label = view.status === 'available' ? {
-    default: text('Default startup source', '默认启动来源'),
-    persisted: text('Persisted startup source', '已保存的启动来源'),
-    env: text('Environment startup source', '环境变量启动来源')
+    default: t('agent_management.startup_storage.default_source'),
+    persisted: t('agent_management.startup_storage.persisted_source'),
+    env: t('agent_management.startup_storage.env_source')
   }[view.source] : ''
   return <Paper component="section" aria-labelledby={id} variant="outlined" sx={{ p: 2 }}>
     <Stack spacing={1.5}>
-      <Typography id={id} component="h2" variant="h6">{text('Startup storage metadata', '启动存储元数据')}</Typography>
-      <Button onClick={() => { void read() }} disabled={!allowed(observation) || view.status === 'loading'} sx={{ alignSelf: 'flex-start' }}>{text('Read startup storage metadata', '读取启动存储元数据')}</Button>
-      {view.status === 'idle' && <Typography>{text('Not loaded — use Read startup storage metadata', '尚未读取 — 请点击读取启动存储元数据')}</Typography>}
-      {view.status === 'loading' && <Typography role="status">{text('Reading startup storage metadata', '正在读取启动存储元数据')}</Typography>}
-      {view.status === 'unavailable' && <Alert severity="warning">{text('Startup storage metadata unavailable', '启动存储元数据不可用')}</Alert>}
+      <Typography id={id} component="h2" variant="h6">{t('agent_management.startup_storage.heading')}</Typography>
+      <Button onClick={() => { void read() }} disabled={!allowed(observation) || view.status === 'loading'} sx={{ alignSelf: 'flex-start' }}>{t('agent_management.startup_storage.read')}</Button>
+      {view.status === 'idle' && <Typography>{t('agent_management.startup_storage.idle')}</Typography>}
+      {view.status === 'loading' && <Typography role="status">{t('agent_management.startup_storage.loading')}</Typography>}
+      {view.status === 'unavailable' && <Alert severity="warning">{t('agent_management.startup_storage.unavailable')}</Alert>}
       {view.status === 'available' && <>
-        <Typography>{text(`Source: ${label}`, `来源：${label}`)}</Typography>
-        <Typography>{text(`Legacy layout: ${view.legacyLayout ? 'Yes' : 'No'}`, `旧版布局：${view.legacyLayout ? '是' : '否'}`)}</Typography>
+        <Typography>{t('agent_management.startup_storage.source', { label })}</Typography>
+        <Typography>{t('agent_management.startup_storage.legacy_layout', { value: view.legacyLayout ? t('agent_management.startup_storage.yes') : t('agent_management.startup_storage.no') })}</Typography>
       </>}
     </Stack>
   </Paper>
