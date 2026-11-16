@@ -169,11 +169,12 @@ describe('explicit canvas import supplied-text preflight, not a full canvas code
     expectRejected({ ...empty(), extra: nested(limits.maxDepth + 1) })
   })
   for (const [name, key, maximum] of [['items', 'items', limits.maxItems], ['groups', 'groups', limits.maxGroups], ['branches', 'groupBranches', limits.maxGroupBranches]] as const) {
-    it(`enforces inclusive ${name} count without requiring unique IDs or referential integrity`, () => {
-      const value = key === 'items' ? item() : key === 'groups' ? { id: 'g', itemIds: [] } : { id: 'b' }
-      const data = { ...empty(), [key]: Array(maximum).fill(value) }
+    it(`enforces inclusive ${name} count without requiring referential integrity`, () => {
+      const entries = (length: number) => Array.from({ length }, (_, i) =>
+        key === 'items' ? { ...item(), id: `text-${i}` } : key === 'groups' ? { id: `g${i}`, itemIds: [] } : { id: `b${i}` })
+      const data = { ...empty(), [key]: entries(maximum) }
       expect(parseCanvasImportText(JSON.stringify(data))).toEqual(data)
-      expectRejected({ ...data, [key]: Array(maximum + 1).fill(value) })
+      expectRejected({ ...data, [key]: entries(maximum + 1) })
     })
   }
   for (const [name, groups] of [['nonarray', {}], ['null entry', [null]], ['array entry', [[]]], ['missing id', [{ itemIds: [] }]],
