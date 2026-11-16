@@ -124,3 +124,47 @@ describe('chat send-stage breadcrumb', () => {
     expect(parseChatSendStageBreadcrumb(value)).toBeNull()
   })
 })
+
+describe('main-side report parser: shape first, nothing copied before it', () => {
+  const valid = { stage: 'request-built', sendSeq: 2, messageCount: 1, imageCount: 8, imageBytes: 10, dataUrlCount: 8, dataUrlChars: 99 }
+
+  it('accepts a plain object, also one without a prototype (as structured clone may deliver it)', () => {
+    expect(parseChatSendStageReport({ ...valid, usedJSHeapSize: 5, jsHeapSizeLimit: 9 })).toEqual({ ...valid, usedJSHeapSize: 5, jsHeapSizeLimit: 9 })
+    expect(parseChatSendStageReport(Object.assign(Object.create(null), valid))).toEqual(valid)
+  })
+
+  it('rejects a typed array, an array, a map or a class instance by its prototype, without walking it', () => {
+    const huge = new Uint8Array(10_000_000)
+    const started = performance.now()
+    expect(parseChatSendStageReport(huge)).toBeNull()
+    expect(performance.now() - started).toBeLessThan(50)
+    expect(parseChatSendStageReport([valid])).toBeNull()
+    expect(parseChatSendStageReport(new Map(Object.entries(valid)))).toBeNull()
+    class Breadcrumb { constructor() { Object.assign(this, valid) } }
+    expect(parseChatSendStageReport(new Breadcrumb())).toBeNull()
+    expect(parseChatSendStageReport(Object.assign(Object.create({ inherited: true }), valid))).toBeNull()
+    expect(parseChatSendStageReport({ ...valid, [Symbol('x')]: 1 })).toBeNull()
+  })
+
+  it('stops at the first unknown key and never reads the value of a key it does not know', () => {
+    const read: string[] = []
+    const visited: string[] = []
+    const record: Record<string, unknown> = { ...valid, content: 'secret' }
+    for (let index = 0; index < 1000; index += 1) record[`k${index}`] = index
+    const probe = new Proxy(record, {
+      get: (target, key, receiver) => {
+        if (typeof key === 'string') read.push(key)
+        return Reflect.get(target, key, receiver)
+      },
+      getOwnPropertyDescriptor: (target, key) => {
+        if (typeof key === 'string') visited.push(key)
+        return Reflect.getOwnPropertyDescriptor(target, key)
+      },
+      getPrototypeOf: () => Object.prototype
+    })
+    expect(parseChatSendStageReport(probe)).toBeNull()
+    expect(read).toEqual([])
+    // The key walk ends at 'content', the first key that is not part of a report.
+    expect(visited).not.toContain('k999')
+  })
+})

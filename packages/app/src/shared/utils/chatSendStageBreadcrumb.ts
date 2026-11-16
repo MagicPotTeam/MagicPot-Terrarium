@@ -150,7 +150,7 @@ export function failedChatSendStage(
   }
 }
 
-const BREADCRUMB_KEYS = new Set([
+const BREADCRUMB_KEYS = new Set<string>([
   'stage',
   'sendSeq',
   'messageCount',
@@ -163,33 +163,73 @@ const BREADCRUMB_KEYS = new Set([
 ])
 
 /**
+ * True only for a plain object (prototype Object.prototype or null) whose own enumerable keys are
+ * all in `allowed`. Checked BEFORE anything is read or copied: a typed array, an array, a class
+ * instance or a map is rejected by its prototype alone, and the key walk stops at the first key
+ * that is not allowed or as soon as there are more keys than `allowed` holds, so a payload with
+ * millions of keys is never listed or copied in full. Only key NAMES are looked at here.
+ */
+function isPlainRecordWithKeys(value: unknown, allowed: ReadonlySet<string>): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return false
+  let count = 0
+  // With Object.prototype or null as prototype, for-in visits own enumerable string keys only.
+  for (const key in value) {
+    count += 1
+    if (count > allowed.size || !allowed.has(key)) return false
+  }
+  // Symbol keys are never part of a breadcrumb.
+  return Object.getOwnPropertySymbols(value).length === 0
+}
+
+/**
  * Accepts exactly the shape the page may report (known keys, a known stage, non-negative
  * integers). There is no heap number in it: those come from the preload.
  */
 export function parseChatSendStageBreadcrumb(value: unknown): ChatSendStageBreadcrumb | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
-  const keys = Object.keys(record)
-  if (keys.length > BREADCRUMB_KEYS.size || keys.some((key) => !BREADCRUMB_KEYS.has(key))) return null
-  if (!CHAT_SEND_STAGES.includes(record.stage as ChatSendStage)) return null
-  const required = ['sendSeq', 'messageCount', 'imageCount', 'imageBytes', 'dataUrlCount', 'dataUrlChars'] as const
-  if (required.some((key) => !isCount(record[key]))) return null
-  const breadcrumb: ChatSendStageBreadcrumb = {
-    stage: record.stage as ChatSendStage,
-    sendSeq: record.sendSeq as number,
-    messageCount: record.messageCount as number,
-    imageCount: record.imageCount as number,
-    imageBytes: record.imageBytes as number,
-    dataUrlCount: record.dataUrlCount as number,
-    dataUrlChars: record.dataUrlChars as number
+  if (!isPlainRecordWithKeys(value, BREADCRUMB_KEYS)) return null
+  return readBreadcrumb(value)
+}
+
+/** Reads the known keys by name from a record whose keys were already checked. */
+function readBreadcrumb(record: Record<string, unknown>): ChatSendStageBreadcrumb | null {
+  const stage = record.stage
+  if (!CHAT_SEND_STAGES.includes(stage as ChatSendStage)) return null
+  const sendSeq = record.sendSeq
+  const messageCount = record.messageCount
+  const imageCount = record.imageCount
+  const imageBytes = record.imageBytes
+  const dataUrlCount = record.dataUrlCount
+  const dataUrlChars = record.dataUrlChars
+  if (
+    !isCount(sendSeq) ||
+    !isCount(messageCount) ||
+    !isCount(imageCount) ||
+    !isCount(imageBytes) ||
+    !isCount(dataUrlCount) ||
+    !isCount(dataUrlChars)
+  ) {
+    return null
   }
+  const breadcrumb: ChatSendStageBreadcrumb = {
+    stage: stage as ChatSendStage,
+    sendSeq,
+    messageCount,
+    imageCount,
+    imageBytes,
+    dataUrlCount,
+    dataUrlChars
+  }
+  const failedAfter = record.failedAfter
+  const errorName = record.errorName
   // A failure names the stage it came after and the error's enumerated name; nothing else does.
   if (breadcrumb.stage === 'reply-failed') {
-    if (!(RUNNING_CHAT_SEND_STAGES as readonly unknown[]).includes(record.failedAfter)) return null
-    if (!(CHAT_SEND_ERROR_NAMES as readonly unknown[]).includes(record.errorName)) return null
-    breadcrumb.failedAfter = record.failedAfter as RunningChatSendStage
-    breadcrumb.errorName = record.errorName as ChatSendErrorName
-  } else if (record.failedAfter !== undefined || record.errorName !== undefined) {
+    if (!(RUNNING_CHAT_SEND_STAGES as readonly unknown[]).includes(failedAfter)) return null
+    if (!(CHAT_SEND_ERROR_NAMES as readonly unknown[]).includes(errorName)) return null
+    breadcrumb.failedAfter = failedAfter as RunningChatSendStage
+    breadcrumb.errorName = errorName as ChatSendErrorName
+  } else if (failedAfter !== undefined || errorName !== undefined) {
     return null
   }
   return breadcrumb
@@ -210,13 +250,20 @@ export function withJsHeapNumbers(
   return report
 }
 
-/** What main accepts on the channel: a breadcrumb plus, optionally, the two heap numbers. */
+const REPORT_KEYS = new Set<string>([...BREADCRUMB_KEYS, ...HEAP_KEYS])
+
+/**
+ * What main accepts on the channel: a breadcrumb plus, optionally, the two heap numbers. Main
+ * gets this from a renderer, so the shape is checked before anything is read or copied (see
+ * isPlainRecordWithKeys) and the known keys are read by name.
+ */
 export function parseChatSendStageReport(value: unknown): ChatSendStageReport | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const { usedJSHeapSize, jsHeapSizeLimit, ...counts } = value as Record<string, unknown>
-  const breadcrumb = parseChatSendStageBreadcrumb(counts)
-  if (!breadcrumb) return null
+  if (!isPlainRecordWithKeys(value, REPORT_KEYS)) return null
+  const usedJSHeapSize = value.usedJSHeapSize
+  const jsHeapSizeLimit = value.jsHeapSizeLimit
   if (usedJSHeapSize !== undefined && !isCount(usedJSHeapSize)) return null
   if (jsHeapSizeLimit !== undefined && !isCount(jsHeapSizeLimit)) return null
+  const breadcrumb = readBreadcrumb(value)
+  if (!breadcrumb) return null
   return withJsHeapNumbers(breadcrumb, { usedJSHeapSize, jsHeapSizeLimit })
 }
