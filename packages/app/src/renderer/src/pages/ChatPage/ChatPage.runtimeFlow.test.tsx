@@ -4874,7 +4874,9 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('stops the running members from the lead composer and drops their queued sends', async () => {
+  // Owner decision 3 (stop and composer queue): a member stop keeps each member's unsent queued
+  // item, paused, instead of dropping it. Re-expressed from '... and drops their queued sends'.
+  it('stops the running members from the lead composer and pauses their unsent queued items', async () => {
     const lead: ChatSession = { id: 'stop-all-lead', title: 'Lead', messages: [], profileId: 'base-model' }
     const alice: ChatSession = { id: 'stop-all-alice', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
     const bob: ChatSession = { id: 'stop-all-bob', title: 'Bob', messages: [], teamLeadId: lead.id, teamMemberName: 'Bob' }
@@ -4915,9 +4917,14 @@ describe('ChatPage runtime workflow integration', () => {
       expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
       // The stopped members say so in the lead's view.
       await waitFor(() => expect(delegatedLineStates()).toEqual(['cancelled', 'cancelled']))
-      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
-      expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
+      for (const member of [alice, bob]) {
+        fireEvent.click(teamRows().getByRole('button', { name: member.teamMemberName! }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+        // The unsent item stays in the member's queue, paused, and is never sent by the stop.
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(`queued for ${member.teamMemberName}`)
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('未发送 · 已暂停')
+        expect(readCurrentSessionState()?.messages.some(message => message.content === `queued for ${member.teamMemberName}`)).toBe(false)
+      }
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
     } finally { page.unmount() }
@@ -4954,6 +4961,106 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       fireEvent.click(await screen.findByTestId('chat-composer-stop-mock'))
       expect(signals.get(bob.id)?.aborted).toBe(true)
+    } finally { page.unmount() }
+  })
+
+  it('offers the lead composer stop while a member prepares a queued item, and the stop pauses that item', async () => {
+    const lead: ChatSession = { id: 'lead-preflight-stop-lead', title: 'Lead', messages: [], profileId: 'base-model' }
+    const member: ChatSession = { id: 'lead-preflight-stop-alice', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const fetchBlocked = vi.fn(async () => { throw new Error('Unexpected network access') })
+    vi.stubGlobal('fetch', fetchBlocked)
+    let finish!: (value: { content: string }) => void
+    let release!: () => void
+    const running = new Promise<{ content: string }>(resolve => { finish = resolve })
+    const gate = { entered: false, gate: new Promise<void>(resolve => { release = resolve }) }
+    hoisted.requestChatCompletionMock.mockImplementation(() => running)
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '@Alice active request' } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'queued member text' } })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+      await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued member text'))
+      hoisted.teamPreflightReadGate.value = gate
+      await act(async () => finish({ content: 'first synthetic response' }))
+      await waitFor(() => expect(gate.entered).toBe(true), { timeout: 2000 })
+      // Alice is not loading but prepares her queued item: the lead's stop covers her and her
+      // delegated line says she runs.
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['running']))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      hoisted.teamPreflightReadGate.value = null
+      await act(async () => release())
+      await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('未发送 · 已暂停'))
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued member text')
+      expect(readCurrentSessionState()?.messages.some(message => message.content === 'queued member text')).toBe(false)
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(fetchBlocked).not.toHaveBeenCalled()
+    } finally {
+      hoisted.teamPreflightReadGate.value = null
+      release()
+      finish({ content: 'synthetic cleanup' })
+      page.unmount()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps a member user item paused and drops its team-internal auto-send on a member stop', async () => {
+    const lead: ChatSession = { id: 'mixed-stop-lead', title: 'Lead', messages: [], profileId: 'base-model' }
+    const alice: ChatSession = { id: 'mixed-stop-alice', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
+    hoisted.storedSessions.value = [lead, alice]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let signal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(({ signal: requestSignal }: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+      signal = requestSignal
+      requestSignal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+    }))
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '@Alice running' } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(signal).toBeDefined())
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
+      // A canvas auto-send (team-internal: it resolves its attachments itself) and a user item.
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { text: 'internal canvas auto-send', autoSend: true, requestId: 'mixed-stop-request', targetScope: 'runtime-flow' } }))
+      })
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'user queued text' } })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      expect(signal?.aborted).toBe(true)
+      await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
+      expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('user queued text')
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('未发送 · 已暂停')
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      // The dropped auto-send released its request key: the same request can be delivered again.
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { text: 'internal canvas auto-send', autoSend: true, requestId: 'mixed-stop-request', targetScope: 'runtime-flow' } }))
+      })
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      expect((hoisted.requestChatCompletionMock.mock.calls[1][0].messages as ChatMessage[]).at(-1)?.content).toBe('internal canvas auto-send')
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('user queued text')
     } finally { page.unmount() }
   })
 
@@ -8523,7 +8630,10 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('queues Enter while loading, preserves attachments lazily, and continues after stop', async () => {
+  // Owner decision 3 (stop and composer queue): Stop pauses the queued item instead of sending
+  // it; editing it back into the composer and sending resumes it. Re-expressed from
+  // '... and continues after stop'.
+  it('queues Enter while loading, preserves attachments lazily, pauses after stop and resumes on edit', async () => {
     let firstSignal: AbortSignal | undefined
     hoisted.requestChatCompletionMock
       .mockImplementationOnce(
@@ -8571,6 +8681,19 @@ describe('ChatPage runtime workflow integration', () => {
 
     fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
     expect(firstSignal?.aborted).toBe(true)
+
+    // Stop never sends the queued item by itself: it stays, paused, with its attachment.
+    await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('未发送 · 已暂停'))
+    expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued text')
+    expect(within(screen.getByTestId('chat-queue-item')).getByLabelText('1 个附件')).toBeInTheDocument()
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(within(screen.getByTestId('chat-queue-item')).getByRole('button', { name: 'chat.queue_edit' }))
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('queued text')
+    expect(screen.getByTestId('chat-composer-attachment-names')).toHaveTextContent('queued.png')
+    expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
 
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
     const queuedRequest = hoisted.requestChatCompletionMock.mock.calls[1]?.[0] as {

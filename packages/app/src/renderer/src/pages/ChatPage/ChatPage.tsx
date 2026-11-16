@@ -315,6 +315,16 @@ import { useManagedFirstRunPane } from './useManagedFirstRunPane'
 import AgentThreadSidesPanel from './components/AgentThreadSidesPanel'
 import AgentTeamThreadRows, { type AgentTeamThreadRowsTeam } from './components/AgentTeamThreadRows'
 import AgentTeamDelegatedRows from './components/AgentTeamDelegatedRows'
+import {
+  isQueuedSendLeaseCurrent,
+  isUserQueuedSend,
+  leaseQueuedSend,
+  nextDrainableSend,
+  pauseQueuedSend,
+  releaseStopHolds as releaseQueuedStopHolds,
+  settleQueueOnStop,
+  withoutLease
+} from './chatQueuedSends'
 import { hasDelegatedWork } from './agentTeamDelegatedWork'
 import AgentTeamTargetSelect from './components/AgentTeamTargetSelect'
 import { isAgentSideCommand, parseAgentSideCommand, type AgentSideCommandHandle } from './agentSideCommand'
@@ -454,13 +464,24 @@ type QueuedSessionSend = {
   fromComposer?: boolean
   /** The composer's own hidden text, before any generated team context was merged. */
   originalComposerHiddenContext?: string
-  /** Requires explicit user action after the owning scope was left. */
+  /** Requires explicit user action (Stop, failed preparation, the owning scope was left). */
   paused?: boolean
   /** A local composer item is being prepared and cannot be edited or removed. */
   inFlight?: boolean
   /** The next queued item may resume when this failed item is explicitly removed. */
   blocksFollowing?: boolean
+  /** Token of the current in-memory lease; a late callback of an earlier lease never matches. */
+  leaseId?: number
+  /** Kept back by a manual Stop until the user's own composer send to this session is accepted. */
+  heldByStop?: number
 }
+
+/** A send to this session is in its preflight (a leased queue item included): Stop can stop it. */
+const sessionPreparing = (
+  id: string,
+  sending: { has(id: string): boolean },
+  queues: ReadonlyMap<string, QueuedSessionSend[]>
+): boolean => sending.has(id) || Boolean(queues.get(id)?.some(item => item.inFlight))
 
 type ExternalInitialChatMessage = {
   role: ChatMessage['role']
@@ -1992,6 +2013,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
     queuedSessionSendsRef.current = next
     setQueuedSessionSends(next)
   }, [])
+  // Render mirror of sendingSessionIdsRef: a session in its send preflight can be stopped.
+  const [sendingSessionIds, setSendingSessionIds] = useState<ReadonlySet<string>>(() => new Set())
+  const syncSendingSessionIds = useCallback(() => {
+    setSendingSessionIds(new Set(sendingSessionIdsRef.current))
+  }, [])
+  const queueLeaseIdRef = useRef(0)
+  const stopHoldEpochRef = useRef(0)
+  /** The user's own send to this session was accepted: items held by a manual Stop may follow it. */
+  const releaseStopHolds = useCallback((sessionId: string) => {
+    const queue = queuedSessionSendsRef.current.get(sessionId)
+    const released = queue && releaseQueuedStopHolds(queue)
+    if (!queue || released === queue) return
+    const next = new Map(queuedSessionSendsRef.current)
+    next.set(sessionId, [...released!])
+    updateQueuedSessionSends(next)
+  }, [updateQueuedSessionSends])
   const pendingSessionSendKeysRef = useRef<Set<string>>(new Set())
   const drainQueuedSessionRef = useRef<(sessionId: string) => void>(() => undefined)
   const [composerClearVersion, setComposerClearVersion] = useState(0)
@@ -2048,11 +2085,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
     contextCompactLastAttemptAtBySessionIdRef.current.clear()
     cancelledSessionsRef.current.clear()
     sendingSessionIdsRef.current.clear()
+    syncSendingSessionIds()
     const oldQueues = queuedSessionSendsRef.current
     const suspendedQueues = new Map<string, QueuedSessionSend[]>()
     for (const [sessionId, queue] of oldQueues) {
-      const userSends = queue.filter(item => item.overrides?.composerSubmission || (!item.queueKey && !item.overrides?.onTeamRequestStarted && !item.overrides?.onTaskCompleted && !item.overrides?.resolveAttachments))
-      if (userSends.length) suspendedQueues.set(sessionId, userSends.map(item => ({ ...item, paused: true, inFlight: false, blocksFollowing: false })))
+      const userSends = queue.filter(isUserQueuedSend)
+      if (userSends.length) suspendedQueues.set(sessionId, userSends.map(pauseQueuedSend))
     }
     if (suspendedQueues.size) suspendedSessionSendsByScopeRef.current.set(oldScope, suspendedQueues)
     else suspendedSessionSendsByScopeRef.current.delete(oldScope)
@@ -2061,7 +2099,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     pendingSessionSendKeysRef.current.clear()
     updateQueuedSessionSends(restoredQueues)
     for (const controller of [...controllers, ...compactControllers]) controller.abort('Chat storage scope changed.')
-  }, [storageScope, updateQueuedSessionSends])
+  }, [storageScope, syncSendingSessionIds, updateQueuedSessionSends])
   useEffect(() => {
     externalLoadingSessionIdsRef.current = externalLoadingSessionIds
   }, [externalLoadingSessionIds])
@@ -2162,7 +2200,29 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const terminateSession = useCallback(
-    (sessionId: string, options?: { dropQueued?: boolean }) => {
+    (sessionId: string, options?: { dropQueued?: boolean; pauseUserSends?: boolean }) => {
+      // The queue is settled first: every lease token is gone before the abort below and before
+      // clearLoadingSessionTracking schedules its drain, so neither can lease the next item.
+      // - Explicit session/scope termination (dropQueued) drops everything queued behind the run.
+      // - A member stop (dropQueued + pauseUserSends) keeps every unaccepted user item, paused.
+      // - A manual Stop pauses the first user item and holds the others until the user's own
+      //   send to this session is accepted; Stop never sends the next item by itself.
+      // Team-internal items are dropped by every kind of stop: their delivery has its own state.
+      const queuedSends = queuedSessionSendsRef.current.get(sessionId)
+      if (queuedSends?.length) {
+        const { kept, dropped } = settleQueueOnStop(
+          queuedSends,
+          options?.dropQueued ? (options.pauseUserSends ? 'member' : 'terminate') : 'manual',
+          ++stopHoldEpochRef.current
+        )
+        for (const queuedSend of dropped) {
+          if (queuedSend.queueKey) pendingSessionSendKeysRef.current.delete(queuedSend.queueKey)
+        }
+        const nextQueues = new Map(queuedSessionSendsRef.current)
+        if (kept.length) nextQueues.set(sessionId, kept)
+        else nextQueues.delete(sessionId)
+        updateQueuedSessionSends(nextQueues)
+      }
       sessionTerminationEpochRef.current.set(
         sessionId,
         (sessionTerminationEpochRef.current.get(sessionId) ?? 0) + 1
@@ -2172,21 +2232,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (helper?.scope === storageScope) {
         try { helper.handle.end() } catch { /* Observation is never allowed to block Stop. */ }
         if (helperHandlesRef.current.get(sessionId) === helper) helperHandlesRef.current.delete(sessionId)
-      }
-      if (options?.dropQueued) {
-        // Explicit session/scope termination must not drain work queued behind
-        // the cancelled run. A manual Stop keeps the existing FIFO contract.
-        const queuedSends = queuedSessionSendsRef.current.get(sessionId)
-        if (queuedSends?.length) {
-          for (const queuedSend of queuedSends) {
-            if (queuedSend.queueKey) {
-              pendingSessionSendKeysRef.current.delete(queuedSend.queueKey)
-            }
-          }
-          const nextQueues = new Map(queuedSessionSendsRef.current)
-          nextQueues.delete(sessionId)
-          updateQueuedSessionSends(nextQueues)
-        }
       }
       const activeLifecycleId = lifecycleRunIdBySessionRef.current.get(sessionId)
       if (activeLifecycleId) {
@@ -6936,6 +6981,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setSessions(userMsgUpdater)
       overrides?.onComposerSubmissionAccepted?.()
       overrides?.onQueuedComposerAccepted?.()
+      // The user's own composer send to this session was accepted (a drained queue item does
+      // this in its lease): what a manual Stop held back may follow it, in order.
+      if (!overrides?.isQueuedComposerCurrent && (!overrides || overrides.composerSubmission || overrides.onComposerSubmissionAccepted)) {
+        releaseStopHolds(targetSessionId)
+      }
       if (clearsLiveComposer) {
         inputValueRef.current = ''
         setInputValue('')
@@ -8148,6 +8198,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       mergeHiddenContext,
       prepareOutgoingUserMessage,
       reconcileLoadedTeamEnd,
+      releaseStopHolds,
       replacePersistedSessions,
       resolveAvailableSkillId,
       resolveAvailableProfileId,
@@ -8254,11 +8305,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (committedRunScopeRef.current !== storageScope) return
       if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
       sendingSessionIdsRef.current.add(targetSessionId)
+      syncSendingSessionIds()
       try {
         await executeSendMessage(queuedOverrides)
       } finally {
         if (committedRunScopeRef.current === storageScope && committedRunScopeEpochRef.current === sendScopeEpoch) {
           sendingSessionIdsRef.current.delete(targetSessionId)
+          syncSendingSessionIds()
           if (queueKey) pendingSessionSendKeysRef.current.delete(queueKey)
           drainQueuedSessionRef.current(targetSessionId)
         }
@@ -8273,6 +8326,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setInputValue,
       setPendingAttachments,
       setPendingHiddenContext,
+      syncSendingSessionIds,
       updateQueuedSessionSends
     ]
   )
@@ -8285,28 +8339,31 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
     const queue = queuedSessionSendsRef.current.get(sessionId)
-    const next = queue?.[0]
-    if (next?.paused || next?.inFlight) return
+    // Items held by a manual Stop keep their place but are never sent by a drain; a paused
+    // item (Stop, failed preparation, left scope) blocks everything behind it.
+    const next = nextDrainableSend(queue)
     if (!next) {
-      if (queuedSessionSendsRef.current.has(sessionId)) {
+      if (queuedSessionSendsRef.current.has(sessionId) && !queue?.length) {
         const nextQueues = new Map(queuedSessionSendsRef.current)
         nextQueues.delete(sessionId)
         updateQueuedSessionSends(nextQueues)
       }
       return
     }
-    // Only ordinary composer items get a local lease. They remain visible while
-    // preflight runs, and are retired only when a local user turn is accepted.
+    // Every item with user-authored content gets a local lease. It remains visible while
+    // preflight runs, and is retired only when a local user turn is accepted.
     // A failed preparation is paused in memory; it is never automatically replayed.
-    if (next.fromComposer && next.overrides) {
+    // Each lease has its own token: Stop, a scope switch and termination clear it, so a late
+    // callback of an earlier lease never acts, even when the same item is leased again.
+    if (isUserQueuedSend(next) && next.overrides) {
       const scopeEpoch = committedRunScopeEpochRef.current
+      const leaseId = ++queueLeaseIdRef.current
       let acceptedInLocalState = false
       const current = () => isMountedRef.current && committedRunScopeRef.current === storageScope &&
         committedRunScopeEpochRef.current === scopeEpoch &&
-        Boolean(queuedSessionSendsRef.current.get(sessionId)?.some(item => item.id === next.id && item.inFlight))
-      const leasedQueue = queue.map(item => item.id === next.id ? { ...item, inFlight: true } : item)
+        isQueuedSendLeaseCurrent(queuedSessionSendsRef.current.get(sessionId), next.id, leaseId)
       const leased = new Map(queuedSessionSendsRef.current)
-      leased.set(sessionId, leasedQueue)
+      leased.set(sessionId, leaseQueuedSend(queue!, next.id, leaseId))
       updateQueuedSessionSends(leased)
       const accepted = () => {
         if (!current()) return
@@ -8316,6 +8373,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (remaining.length) queues.set(sessionId, remaining)
         else queues.delete(sessionId)
         updateQueuedSessionSends(queues)
+        // The user's own composer turn was accepted: what a manual Stop held may follow it.
+        if (next.fromComposer) releaseStopHolds(sessionId)
       }
       void sendMessage({
         ...next.overrides,
@@ -8330,15 +8389,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (!current()) return
           const queues = new Map(queuedSessionSendsRef.current)
           queues.set(sessionId, (queues.get(sessionId) ?? []).map(item =>
-            item.id === next.id ? { ...item, inFlight: false, paused: true, blocksFollowing: true } : item
+            item.id === next.id ? { ...withoutLease(item), paused: true, blocksFollowing: true } : item
           ))
           updateQueuedSessionSends(queues)
         })
       return
     }
     const nextQueues = new Map(queuedSessionSendsRef.current)
-    if (queue.length === 1) nextQueues.delete(sessionId)
-    else nextQueues.set(sessionId, queue.slice(1))
+    const rest = queue!.filter(item => item.id !== next.id)
+    if (!rest.length) nextQueues.delete(sessionId)
+    else nextQueues.set(sessionId, rest)
     updateQueuedSessionSends(nextQueues)
     if (next.queueKey) pendingSessionSendKeysRef.current.delete(next.queueKey)
     void sendMessage(next.overrides).catch((error) => {
@@ -9463,8 +9523,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // Running and waiting for an approval are the same facts the lead's stop button uses.
   const delegatedWaitingKey = [...teamWaiting].sort().join('\u0000')
   const delegatedWaiting = useMemo(() => new Set(delegatedWaitingKey ? delegatedWaitingKey.split('\u0000') : []), [delegatedWaitingKey])
+  // A member that prepares a send (a queued item in its preflight) runs as far as the stop goes.
+  const delegatedRunningKey = teamMembers
+    .filter(member => loadingSessionIds.has(member.id) || sessionPreparing(member.id, sendingSessionIds, queuedSessionSends))
+    .map(member => member.id).sort().join('\u0000')
+  const delegatedRunning = useMemo(() => new Set(delegatedRunningKey ? delegatedRunningKey.split('\u0000') : []), [delegatedRunningKey])
   const delegatedCandidates = compact && teamRowsTeam && currentSession && !currentSession.teamLeadId
-    ? [...teamMembers].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)).filter(member => hasDelegatedWork(member, loadingSessionIds, delegatedWaiting))
+    ? [...teamMembers].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)).filter(member => hasDelegatedWork(member, delegatedRunning, delegatedWaiting))
     : []
   // Kept while the same member records are listed: a reply of the lead does not redraw the lines.
   const delegatedMembersRef = useRef<readonly ChatSession[]>([])
@@ -9473,8 +9538,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }
   const delegatedMembers = delegatedMembersRef.current
   const delegatedRowsTail = useMemo(() => delegatedMembers.length
-    ? <AgentTeamDelegatedRows members={delegatedMembers} scope={storageScope} running={loadingSessionIds} waiting={delegatedWaiting} />
-    : null, [delegatedMembers, storageScope, loadingSessionIds, delegatedWaiting])
+    ? <AgentTeamDelegatedRows members={delegatedMembers} scope={storageScope} running={delegatedRunning} waiting={delegatedWaiting} />
+    : null, [delegatedMembers, storageScope, delegatedRunning, delegatedWaiting])
   // In the column the member approval cards are prompt cards at the end of the transcript:
   // their host follows the tail (the full-page chat keeps it above the transcript).
   // A card that arrives is announced; a card that leaves after 批准 / 拒绝 gives the keyboard
@@ -9896,19 +9961,29 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [config.download_dir, notifyError, t]
   )
 
-  // In the lead conversation the composer's stop also covers the members that run or wait for
-  // an approval, and stops them as the old "stop members" button did (their queued sends dropped).
-  const activeTeamMemberIds = (ids: { has(id: string): boolean }) =>
+  // In the lead conversation the composer's stop also covers the members that run, wait for an
+  // approval or prepare a send (a queued item in its preflight included). A member stop keeps
+  // the member's unsent user items as paused queue entries and drops its team-internal items.
+  // Render reads state; the click reads the refs, which are never older than the state.
+  const activeTeamMemberIds = (
+    ids: { has(id: string): boolean },
+    sending: { has(id: string): boolean },
+    queues: ReadonlyMap<string, QueuedSessionSend[]>
+  ) =>
     teamRowsTeam && !currentSession?.teamLeadId
-      ? teamMembers.filter(member => ids.has(member.id) || teamWaiting.has(member.id)).map(member => member.id)
+      ? teamMembers.filter(member => ids.has(member.id) || teamWaiting.has(member.id) || sessionPreparing(member.id, sending, queues)).map(member => member.id)
       : []
-  const composerRunning = isLoading || activeTeamMemberIds(loadingSessionIds).length > 0
+  const currentSessionPreparing = Boolean(currentSessionId) && sessionPreparing(currentSessionId!, sendingSessionIds, queuedSessionSends)
+  const composerRunning = isLoading || currentSessionPreparing ||
+    activeTeamMemberIds(loadingSessionIds, sendingSessionIds, queuedSessionSends).length > 0
   const handleStopGenerating = () => {
-    const members = activeTeamMemberIds(loadingSessionIdsRef.current)
-    if (currentSessionId && (isLoading || !members.length)) {
+    const members = activeTeamMemberIds(loadingSessionIdsRef.current, sendingSessionIdsRef.current, queuedSessionSendsRef.current)
+    const ownWork = Boolean(currentSessionId) && (isLoading || loadingSessionIdsRef.current.has(currentSessionId!) ||
+      sessionPreparing(currentSessionId!, sendingSessionIdsRef.current, queuedSessionSendsRef.current))
+    if (currentSessionId && (ownWork || !members.length)) {
       terminateSession(currentSessionId)
     }
-    for (const memberId of members) terminateSession(memberId, { dropQueued: true })
+    for (const memberId of members) terminateSession(memberId, { dropQueued: true, pauseUserSends: true })
   }
 
   // ==================== 渲染 ====================
