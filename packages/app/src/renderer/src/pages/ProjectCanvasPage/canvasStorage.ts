@@ -10,6 +10,7 @@ import type {
   CanvasVideoItem
 } from './types'
 import type { CanvasFigmaBinding } from '@shared/figma'
+import { MAX_FULL_FILE_BYTES } from '@shared/api/svcFs'
 import { restoreGlobalQAppCache } from '../QuickAppPage/components/QAppContext'
 import { buildProjectStorageDirName, getProjectById } from '../MainPage/projectStore'
 import { normalizeGeneratedRootDirName, unprefixGeneratedRootDirName } from '@shared/projectStorage'
@@ -2559,30 +2560,46 @@ async function stageCanvasMirrorAsset(
   storeKey: string,
   seedEntries: ReadonlyMap<string, ResolvedCanvasBinaryAsset>
 ): Promise<boolean> {
-  const { slot } = slotPlan
-  const localPath = resolveLocalFilePathFromSource(slot.src)
-  // A file the main process may read is copied there; its bytes never enter the renderer.
-  if (
-    localPath &&
-    plan.transport.copy &&
-    (!getCanvasAssetSlotSourceFile(slot.owner, slot.slotId) ||
-      getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src)) &&
-    (await plan.transport.copy(assetFileName, localPath))
-  ) {
-    return true
-  }
+  // One asset that cannot be staged never fails the whole mirror save: its slot is
+  // left unsafe (it keeps its previous reference; see executeCanvasMirrorSave).
+  try {
+    const { slot } = slotPlan
+    const localPath = resolveLocalFilePathFromSource(slot.src)
+    // A file the main process may read is copied there; its bytes never enter the renderer.
+    if (
+      localPath &&
+      plan.transport.copy &&
+      (!getCanvasAssetSlotSourceFile(slot.owner, slot.slotId) ||
+        getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src)) &&
+      (await plan.transport.copy(assetFileName, localPath))
+    ) {
+      return true
+    }
 
-  const assetKey = assetFileName.split('.')[0]
-  const bytes =
-    seedEntries.get(slot.logicalKey) ??
-    plan.bytesByLogicalKey.get(slot.logicalKey) ??
-    (await readCanvasMirrorSlotBytes(slot, storeKey, assetKey))
-  if (!bytes) {
-    console.error('[Canvas Storage] Failed to stage project asset:', slot.logicalKey)
+    const assetKey = assetFileName.split('.')[0]
+    const seeded =
+      seedEntries.get(slot.logicalKey) ?? plan.bytesByLogicalKey.get(slot.logicalKey)
+    if (!seeded && localPath) {
+      // Never pull a file through the renderer (and IPC) that main refuses to take back.
+      const sizeBytes =
+        getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src)?.sizeBytes ??
+        (await readCanvasLocalSourceFileIdentity(localPath))?.sizeBytes
+      if (sizeBytes !== undefined && sizeBytes > MAX_FULL_FILE_BYTES) {
+        console.warn('[Canvas Storage] Project asset is too large to send through the renderer:', slot.logicalKey)
+        return false
+      }
+    }
+    const bytes = seeded ?? (await readCanvasMirrorSlotBytes(slot, storeKey, assetKey))
+    if (!bytes || bytes.data.byteLength > MAX_FULL_FILE_BYTES) {
+      console.error('[Canvas Storage] Failed to stage project asset:', slot.logicalKey)
+      return false
+    }
+    await plan.transport.write(assetFileName, bytes.data)
+    return true
+  } catch (error) {
+    console.warn('[Canvas Storage] Failed to stage project asset:', slotPlan.slot.logicalKey, error)
     return false
   }
-  await plan.transport.write(assetFileName, bytes.data)
-  return true
 }
 
 /**

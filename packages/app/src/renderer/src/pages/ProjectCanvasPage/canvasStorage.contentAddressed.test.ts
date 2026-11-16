@@ -689,7 +689,14 @@ function createFakeMirror() {
   }
   // applyPrune: delete like main does (no grace period): every entry directly under
   // assets/ that the project file on disk does not reference and the caller does not keep.
-  const state = { failProjectFileWrite: false, refuseCopy: false, applyPrune: false }
+  const state = {
+    failProjectFileWrite: false,
+    refuseCopy: false,
+    applyPrune: false,
+    failWrite: null as ((assetFileName: string) => boolean) | null,
+    /** Sizes the metadata call reports instead of the real ones, by full path. */
+    reportedSizes: new Map<string, number>()
+  }
   const assetPath = (projectDirName: string, assetFileName: string): string =>
     `${autoSaveRoot}/${projectDirName}/assets/${assetFileName}`
   const publish = (target: string, data: Uint8Array) => {
@@ -719,6 +726,7 @@ function createFakeMirror() {
       data: Uint8Array
     }) => {
       calls.write.push({ assetFileName: req.assetFileName, bytes: req.data.byteLength })
+      if (state.failWrite?.(req.assetFileName)) throw new Error('synthetic asset write failure')
       events.push(`asset:${req.assetFileName}`)
       return publish(assetPath(req.projectDirName, req.assetFileName), req.data)
     },
@@ -797,7 +805,7 @@ function createFakeMirror() {
           ? {
               exists: true,
               canonicalPath: fullPath,
-              sizeBytes: data.byteLength,
+              sizeBytes: state.reportedSizes.get(fullPath) ?? data.byteLength,
               lastModifiedMs: 1_700_000_000_000
             }
           : { exists: false }
@@ -1740,5 +1748,48 @@ describe('writers that load a board and save it back', () => {
       expect(fake.blobBytes(assetBlobKey('figma', [...bytes]))).toEqual(bytes)
       expect(fake.blobBytes(legacyBlobKey('figma', id))).toEqual(bytes)
     }
+  })
+})
+
+describe('mirror staging failures', () => {
+  it('stages the other assets and writes the project file when one asset write fails', async () => {
+    const mirror = createFakeMirror()
+    const good = imageItem('good', registerSource('blob:stage-good', [1, 2, 3]))
+    const bad = imageItem('bad', registerSource('blob:stage-bad', [4, 5]))
+    mirror.state.failWrite = (name) => name.startsWith(contentKey([4, 5]))
+    await saveCanvasItems([good, bad], 'stage-fail')
+
+    expect(mirror.assetFiles()).toEqual([`${contentKey([1, 2, 3])}.png`])
+    expect(mirror.project().items.map((item) => item.src)).toEqual([
+      `assets/${contentKey([1, 2, 3])}.png`,
+      'blob:stage-bad'
+    ])
+    // No earlier copy of the failed asset: nothing is pruned in this save.
+    expect(mirror.calls.prune).toEqual([])
+
+    // The next save retries the failed asset only.
+    mirror.state.failWrite = null
+    mirror.resetCalls()
+    await saveCanvasItems([good, bad], 'stage-fail')
+    expect(mirror.calls.write.map((call) => call.assetFileName)).toEqual([`${contentKey([4, 5])}.png`])
+    expect(mirror.project().items[1].src).toBe(`assets/${contentKey([4, 5])}.png`)
+  })
+
+  it('never reads a source larger than the IPC limit through the renderer when main cannot copy it', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.refuseCopy = true
+    const bigPath = '/home/u/userData/managed/huge.png'
+    mirror.localFiles.set(bigPath, new Uint8Array([7]))
+    mirror.state.reportedSizes.set(bigPath, 300 * 1024 * 1024)
+    // A managed image is not stored in IndexedDB, so only the mirror would read it.
+    const huge = imageItem('huge', `local-media://${bigPath}`, { media: { kind: 'managed', id: 'm-huge' } })
+    const small = imageItem('small', registerSource('blob:stage-small', [9]))
+    await saveCanvasItems([huge, small], 'stage-huge')
+
+    expect(mirror.calls.copy.map((call) => call.sourcePath)).toEqual([bigPath])
+    expect(mirror.calls.readFileFromPath).toEqual([])
+    expect(fetchCalls.filter((url) => url.includes('huge'))).toEqual([])
+    expect(mirror.calls.write.map((call) => call.assetFileName)).toEqual([`${contentKey([9])}.png`])
+    expect(mirror.project().items[0].src).toBe(`local-media://${bigPath}`)
   })
 })

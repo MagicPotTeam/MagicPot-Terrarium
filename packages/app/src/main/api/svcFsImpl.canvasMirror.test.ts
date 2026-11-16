@@ -1,4 +1,5 @@
 import fs from 'fs'
+import fsp from 'fs/promises'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -242,19 +243,81 @@ describe('FsSvcImpl canvas mirror assets', () => {
       expect(listAssetDir()).toEqual([`${KEY_B}.png`])
     })
 
-    it('refuses a source larger than the full-file limit and creates nothing', async () => {
-      const source = path.join(projectRoot, 'Board-1', 'huge.png')
+    it('copies a source larger than the IPC payload limit file to file', async () => {
+      const source = path.join(projectRoot, 'Board-1', 'huge.psd')
       writeFile(source, '')
-      // Sparse: takes no disk space.
+      // Sparse on the source side; the copy is streamed in main, no payload crosses IPC.
       fs.truncateSync(source, MAX_FULL_FILE_BYTES + 1)
+      await expect(
+        service.copyCanvasMirrorAsset({
+          projectDirName: PROJECT,
+          assetFileName: `${KEY_B}.psd`,
+          sourcePath: source
+        })
+      ).resolves.toEqual({ status: 'written', sizeBytes: MAX_FULL_FILE_BYTES + 1 })
+      expect(fs.statSync(path.join(assetDir, `${KEY_B}.psd`)).size).toBe(MAX_FULL_FILE_BYTES + 1)
+      expect(listAssetDir()).toEqual([`${KEY_B}.psd`])
+    })
+
+    it('refuses a copy the free disk space cannot hold and publishes nothing', async () => {
+      const source = writeFile(path.join(projectRoot, 'Board-1', 'out.png'), 'pixels')
+      vi.spyOn(fsp, 'statfs').mockResolvedValue({
+        type: 0,
+        bsize: 4096,
+        blocks: 1000,
+        bfree: 10,
+        bavail: 10,
+        files: 0,
+        ffree: 0
+      } as unknown as Awaited<ReturnType<typeof fsp.statfs>>)
       await expect(
         service.copyCanvasMirrorAsset({
           projectDirName: PROJECT,
           assetFileName: `${KEY_B}.png`,
           sourcePath: source
         })
-      ).rejects.toThrow('Canvas mirror asset source is too large')
-      expect(fs.readdirSync(autoSaveRoot)).toEqual([])
+      ).rejects.toThrow('Not enough free disk space')
+      expect(listAssetDir()).toEqual([])
+    })
+
+    it.runIf(process.platform !== 'win32')(
+      'copies a read-only source into a writable file and leaves no temporary file',
+      async () => {
+        const source = writeFile(path.join(projectRoot, 'Board-1', 'locked.png'), 'locked pixels')
+        fs.chmodSync(source, 0o444)
+        await expect(
+          service.copyCanvasMirrorAsset({
+            projectDirName: PROJECT,
+            assetFileName: `${KEY_B}.png`,
+            sourcePath: source
+          })
+        ).resolves.toEqual({ status: 'written', sizeBytes: 13 })
+        const published = path.join(assetDir, `${KEY_B}.png`)
+        expect(fs.readFileSync(published, 'utf8')).toBe('locked pixels')
+        // Not inherited from the source: the file can be pruned (and replaced when empty) later.
+        expect(fs.statSync(published).mode & 0o777).toBe(0o644)
+        expect(listAssetDir()).toEqual([`${KEY_B}.png`])
+      }
+    )
+
+    it('leaves no temporary file behind when a copy fails half way', async () => {
+      const source = writeFile(path.join(projectRoot, 'Board-1', 'shrinking.png'), 'short')
+      // The file is bigger when it is inspected than when it is read: it changed meanwhile.
+      const realStat = fsp.stat.bind(fsp)
+      vi.spyOn(fsp, 'stat').mockImplementation(async (target, options) => {
+        const stats = await realStat(target, options as never)
+        return String(target) === fs.realpathSync(source)
+          ? (Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { size: 999 }) as typeof stats)
+          : stats
+      })
+      await expect(
+        service.copyCanvasMirrorAsset({
+          projectDirName: PROJECT,
+          assetFileName: `${KEY_B}.png`,
+          sourcePath: source
+        })
+      ).rejects.toThrow('changed while it was copied')
+      expect(listAssetDir()).toEqual([])
     })
 
     it('refuses a source outside the application roots until the user granted it', async () => {
@@ -402,6 +465,41 @@ describe('FsSvcImpl canvas mirror assets', () => {
       expect(
         fs.readFileSync(path.join(assetDir, SNAPSHOT_USED, 'images', 'used.png'), 'utf8')
       ).toBe('used snapshot')
+    })
+
+    it('counts absolute paths and local-media / file URLs into the asset folder as references', async () => {
+      const SNAPSHOT_ABS = 'snapshot-22222222-3333-4444-5555-666666666666'
+      writeFile(path.join(assetDir, SNAPSHOT_ABS, 'images', 'a b.png'), 'absolute')
+      writeFile(path.join(assetDir, `u-${'e'.repeat(40)}.png`), 'file url')
+      writeProjectFile([
+        { id: '1', type: 'image', src: `${assetDir}/${SNAPSHOT_OLD}/images/old.png` },
+        {
+          id: '2',
+          type: 'image',
+          src: `local-media://${encodeURI(`${assetDir}/${SNAPSHOT_ABS}/images/a b.png`)}`
+        },
+        { id: '3', type: 'image', src: `${assetDir}${path.sep}${KEY_B}.png` },
+        { id: '4', type: 'image', src: `file://${assetDir}/u-${'e'.repeat(40)}.png` },
+        // Outside the folder, or escaping it: not a reference.
+        { id: '5', type: 'image', src: `${assetDir}/../${KEY_C}` },
+        { id: '6', type: 'image', src: `${outsideRoot}/assets/${KEY_C}` }
+      ])
+      afterGrace()
+      const result = await prune()
+      expect(result).toEqual({
+        removedAssetFileNames: [`${KEY_A}.png`, KEY_C].sort(),
+        removedSnapshotDirNames: [SNAPSHOT_USED]
+      })
+      expect(listAssetDir()).toEqual(
+        [
+          `${KEY_B}.png`,
+          `u-${'e'.repeat(40)}.png`,
+          SNAPSHOT_OLD,
+          SNAPSHOT_ABS,
+          'images',
+          'notes.txt'
+        ].sort()
+      )
     })
 
     it('keeps the entries the caller names, by key and by entry name', async () => {

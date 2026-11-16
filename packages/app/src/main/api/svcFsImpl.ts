@@ -36,8 +36,8 @@ import {
   WriteTextFileReq,
   WriteTextFileResp
 } from '@shared/api/svcFs'
-import fs from 'fs/promises'
-import { constants as fsConstants, type Stats } from 'fs'
+import fs, { type FileHandle } from 'fs/promises'
+import { createReadStream, type Stats } from 'fs'
 import * as path from 'path'
 import { getCurrentUserDataDirectoryState } from '../config/userDataDirectory'
 import { app } from 'electron'
@@ -319,13 +319,16 @@ const canvasMirrorAssetWrites = new Map<string, Promise<CanvasMirrorAssetResp>>(
  * Publishes one content-keyed mirror asset. An existing file is never
  * replaced (the stored project file may reference it), except an empty file
  * left behind by an interrupted write. The bytes go to a temporary file that
- * is flushed and then linked into place, so a reader never sees a partial file.
+ * this process creates itself ('wx', mode 0o644: no mode, read-only attribute
+ * or file flag of a source is inherited), is flushed and then linked into
+ * place, so a reader never sees a partial file. The temporary file is removed
+ * on every path out.
  */
 const publishCanvasMirrorAsset = async (
   assetDir: string,
   assetFileName: string,
   sourceSizeBytes: number,
-  writeTemp: (tempPath: string) => Promise<void>
+  writeTemp: (handle: FileHandle) => Promise<void>
 ): Promise<CanvasMirrorAssetResp> => {
   const destination = path.join(assetDir, requireCanvasMirrorAssetFileName(assetFileName))
   const previous = canvasMirrorAssetWrites.get(destination)
@@ -345,15 +348,19 @@ const publishCanvasMirrorAsset = async (
     )
     try {
       await runBoundedFsOp(async () => {
-        await writeTemp(tempPath)
-        const handle = await fs.open(tempPath, 'r+')
+        const handle = await fs.open(tempPath, 'wx', 0o644)
         try {
+          await writeTemp(handle)
           await handle.sync()
         } finally {
           await handle.close()
         }
       })
       const written = await runBoundedFsOp(() => fs.lstat(tempPath))
+      if (written.size !== sourceSizeBytes) {
+        // The source changed while it was copied: publish nothing under this key.
+        throw new Error('Canvas mirror asset source changed while it was copied')
+      }
       if (repairEmptyFile) {
         await runBoundedFsOp(() => fs.rename(tempPath, destination))
         return { status: 'written', sizeBytes: written.size }
@@ -390,19 +397,93 @@ const publishCanvasMirrorAsset = async (
 const getNewestTimeMs = (stats: Stats): number =>
   Math.max(stats.mtimeMs || 0, stats.ctimeMs || 0, stats.birthtimeMs || 0)
 
-/** Collects every relative "assets/..." reference found in a stored project file. */
-const collectCanvasMirrorAssetRefs = (value: unknown, target: Set<string>, depth = 0): void => {
+const decodeCanvasMirrorRefPart = (value: string): string => {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+/** Separators unified, leading and trailing ones dropped; lower case where the file system ignores case. */
+const toComparableCanvasMirrorPath = (value: string): string => {
+  const unified = value.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '')
+  return process.platform === 'win32' || process.platform === 'darwin'
+    ? unified.toLowerCase()
+    : unified
+}
+
+/**
+ * The "assets/<entry>/..." form of an absolute path or a local-media / file
+ * URL that points inside `assetDir`; null for anything else. Leading
+ * separators are ignored on both sides, as URLs written by earlier versions
+ * lost them.
+ */
+const resolveAbsoluteCanvasMirrorRef = (value: string, assetDir: string): string | null => {
+  let candidate = value.trim()
+  const scheme = ['local-media://', 'file://'].find((prefix) =>
+    candidate.toLowerCase().startsWith(prefix)
+  )
+  if (scheme) {
+    candidate = decodeCanvasMirrorRefPart(candidate.slice(scheme.length).split(/[?#]/)[0])
+  } else if (!path.isAbsolute(candidate) && !/^[a-zA-Z]:[\\/]/.test(candidate)) {
+    return null
+  }
+  const dir = toComparableCanvasMirrorPath(assetDir)
+  const file = toComparableCanvasMirrorPath(candidate)
+  if (!dir || !file.startsWith(`${dir}/`)) return null
+  const rest = candidate.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').slice(dir.length + 1)
+  const segments = rest.split('/')
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null
+  return `${CANVAS_MIRROR_ASSET_DIRNAME}/${segments.join('/')}`
+}
+
+/**
+ * Collects every reference into the asset folder found in a stored project
+ * file: relative "assets/..." strings, and absolute paths or local-media /
+ * file URLs that resolve inside `assetDir`.
+ */
+const collectCanvasMirrorAssetRefs = (
+  value: unknown,
+  target: Set<string>,
+  assetDir: string,
+  depth = 0
+): void => {
   if (typeof value === 'string') {
     const normalized = value.replace(/[\\/]+/g, '/').replace(/^\.\//, '')
-    if (normalized.startsWith(`${CANVAS_MIRROR_ASSET_DIRNAME}/`)) target.add(normalized)
+    if (normalized.startsWith(`${CANVAS_MIRROR_ASSET_DIRNAME}/`)) {
+      target.add(normalized)
+      return
+    }
+    const absoluteRef = resolveAbsoluteCanvasMirrorRef(value, assetDir)
+    if (absoluteRef) target.add(absoluteRef)
     return
   }
   if (!value || typeof value !== 'object' || depth > 64) return
   if (Array.isArray(value)) {
-    for (const entry of value) collectCanvasMirrorAssetRefs(entry, target, depth + 1)
+    for (const entry of value) collectCanvasMirrorAssetRefs(entry, target, assetDir, depth + 1)
     return
   }
-  for (const entry of Object.values(value)) collectCanvasMirrorAssetRefs(entry, target, depth + 1)
+  for (const entry of Object.values(value)) {
+    collectCanvasMirrorAssetRefs(entry, target, assetDir, depth + 1)
+  }
+}
+
+/** Bytes kept free on the volume of the mirror besides the asset being copied. */
+const CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES = 256 * 1024 * 1024
+
+const assertCanvasMirrorFreeSpace = async (assetDir: string, sizeBytes: number): Promise<void> => {
+  if (typeof fs.statfs !== 'function') return
+  let available: number
+  try {
+    const stats = await runBoundedFsOp(() => fs.statfs(assetDir))
+    available = Number(stats.bavail) * Number(stats.bsize)
+  } catch {
+    return // No statistics for this volume: the write itself reports a full disk.
+  }
+  if (Number.isFinite(available) && available < sizeBytes + CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES) {
+    throw new Error('Not enough free disk space for the canvas mirror asset')
+  }
 }
 
 export class FsSvcImpl implements FsSvc {
@@ -734,14 +815,24 @@ export class FsSvcImpl implements FsSvc {
     if (!sourceStats.isFile()) {
       throw new Error('Canvas mirror asset source is not a file')
     }
-    // The same limit as readImageFromPath and writeCanvasMirrorAsset.
-    if (sourceStats.size > MAX_FULL_FILE_BYTES) {
-      throw new Error('Canvas mirror asset source is too large')
-    }
+    // File to file: no IPC payload, so no payload limit; only the free disk space bounds it.
     const location = await resolveCanvasMirrorAssetDir(req.projectDirName, true)
     if (!location) throw new Error('Canvas mirror folder is unavailable')
-    return publishCanvasMirrorAsset(location.assetDir, assetFileName, sourceStats.size, (tempPath) =>
-      fs.copyFile(sourcePath, tempPath, fsConstants.COPYFILE_EXCL)
+    await assertCanvasMirrorFreeSpace(location.assetDir, sourceStats.size)
+    return publishCanvasMirrorAsset(
+      location.assetDir,
+      assetFileName,
+      sourceStats.size,
+      async (handle) => {
+        // Streamed into our own temporary file, so a read-only source copies like any other.
+        for await (const chunk of createReadStream(sourcePath)) {
+          const buffer = chunk as Buffer
+          for (let offset = 0; offset < buffer.length; ) {
+            const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset)
+            offset += bytesWritten
+          }
+        }
+      }
     )
   }
 
@@ -756,7 +847,7 @@ export class FsSvcImpl implements FsSvc {
       location.assetDir,
       assetFileName,
       req.data.byteLength,
-      (tempPath) => fs.writeFile(tempPath, Buffer.from(req.data), { flag: 'wx' })
+      (handle) => handle.writeFile(Buffer.from(req.data))
     )
   }
 
@@ -804,7 +895,7 @@ export class FsSvcImpl implements FsSvc {
       if (canvasStats.size > MAX_TEXT_FILE_BYTES) return result
       const parsed: unknown = JSON.parse(await runBoundedFsOp(() => fs.readFile(canvasPath, 'utf8')))
       if (!parsed || typeof parsed !== 'object') return result
-      collectCanvasMirrorAssetRefs(parsed, referenced)
+      collectCanvasMirrorAssetRefs(parsed, referenced, location.assetDir)
     } catch {
       return result
     }
