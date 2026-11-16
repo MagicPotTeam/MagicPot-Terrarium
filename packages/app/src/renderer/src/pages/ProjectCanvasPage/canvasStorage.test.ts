@@ -679,7 +679,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(items[0]).toMatchObject({ src: originalSrc, crop })
   })
 
-  describe('crop source records on save', () => {
+  describe('crop source records', () => {
     // 'c3ludGhldGlj' = the 9 bytes "synthetic"; the 200x200 size is synthetic, nothing is decoded.
     const syntheticSrc = 'data:image/png;base64,c3ludGhldGlj'
     const syntheticSha256 = createHash('sha256').update('synthetic').digest('hex')
@@ -782,6 +782,143 @@ describe('canvasStorage provenance metadata', () => {
         expect(restored).toMatchObject({ src: syntheticSrc, crop: fullCrop })
         expect(restored).not.toHaveProperty('cropSource')
       }
+    })
+
+    const partialCrop = { x: 10, y: 20, width: 50, height: 60 }
+
+    async function exportToJson(items: CanvasItem[]): Promise<{ items: CanvasItem[] }> {
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+      const capturedBlobs: Blob[] = []
+      URL.createObjectURL = vi.fn((blob: Blob | MediaSource) => {
+        capturedBlobs.push(blob as Blob)
+        return 'blob:mock-export'
+      })
+      await exportCanvasFile(items, 'crop-record.mpcanvas')
+      expect(capturedBlobs).toHaveLength(1)
+      return JSON.parse(await readBlobAsText(capturedBlobs[0])) as { items: CanvasItem[] }
+    }
+
+    async function importJson(json: unknown): Promise<CanvasItem[]> {
+      const file = { text: async () => JSON.stringify(json) } as File
+      return (await importCanvasFile(file)).items
+    }
+
+    it('drops a malformed record stored in IndexedDB on load and keeps the crop', async () => {
+      const valid = createCroppedImage({ id: 'valid-record', crop: partialCrop })
+      const malformed = createCroppedImage({
+        id: 'malformed-record',
+        crop: partialCrop,
+        cropSource: createRecord({ sha256: 'not-a-sha256' })
+      })
+      await seedCanvasMetadataStore('record-malformed-idb', { items: [valid, malformed] })
+
+      const restored = await loadCanvasItems('record-malformed-idb')
+
+      expect(restored.items).toHaveLength(2)
+      expect(restored.items[0]).toMatchObject({
+        id: 'valid-record',
+        crop: partialCrop,
+        cropSource: createRecord()
+      })
+      expect(restored.items[1]).toMatchObject({ id: 'malformed-record', crop: partialCrop })
+      expect(restored.items[1]).not.toHaveProperty('cropSource')
+    })
+
+    it('keeps a record through save, load, .mpcanvas export and import', async () => {
+      const restored = await saveAndLoad(
+        createCroppedImage({ crop: partialCrop }),
+        'record-round-trip'
+      )
+      expect(restored).toMatchObject({ crop: partialCrop, cropSource: createRecord() })
+
+      const exported = await exportToJson([restored])
+      expect(exported.items[0]).toMatchObject({ crop: partialCrop, cropSource: createRecord() })
+
+      const imported = await importJson(exported)
+      expect(imported).toHaveLength(1)
+      expect(imported[0]).toMatchObject({
+        id: 'record-image',
+        sourceWidth: 200,
+        sourceHeight: 200,
+        crop: partialCrop,
+        cropSource: createRecord()
+      })
+    })
+
+    it('drops a malformed record in an imported .mpcanvas and keeps the crop', async () => {
+      const exported = await exportToJson([
+        createCroppedImage({ id: 'tampered-hash', crop: partialCrop }),
+        createCroppedImage({ id: 'tampered-keys', crop: partialCrop }),
+        createCroppedImage({ id: 'untouched', crop: partialCrop })
+      ])
+      const [tamperedHash, tamperedKeys] = exported.items as unknown as Array<
+        Record<string, unknown>
+      >
+      // A forged record with a wider space, or an extra key, is not a record.
+      tamperedHash.cropSource = createRecord({ width: 4000, sha256: 'A'.repeat(64) })
+      tamperedKeys.cropSource = { ...createRecord(), trusted: true }
+
+      const imported = await importJson(exported)
+
+      expect(imported).toHaveLength(3)
+      for (const item of imported.slice(0, 2)) {
+        expect(item).toMatchObject({ crop: partialCrop, sourceWidth: 200, sourceHeight: 200 })
+        expect(item).not.toHaveProperty('cropSource')
+      }
+      expect(imported[2]).toMatchObject({
+        id: 'untouched',
+        crop: partialCrop,
+        cropSource: createRecord()
+      })
+    })
+
+    it('drops a malformed record when restoring from the project mirror and keeps the crop', async () => {
+      const exported = await exportToJson([
+        createCroppedImage({ id: 'mirror-malformed', crop: partialCrop }),
+        createCroppedImage({ id: 'mirror-valid', crop: partialCrop })
+      ])
+      ;(exported.items[0] as unknown as Record<string, unknown>).cropSource = createRecord({
+        origin: 'mirror'
+      })
+      const mirrorJson = JSON.stringify(exported)
+      const autoSaveRoot = 'C:\\mock-user-data\\AutoSave'
+      const readTextFile = vi.fn(async ({ fullPath }: { fullPath: string }) => {
+        if (!fullPath.startsWith(autoSaveRoot) || !fullPath.endsWith('project.mpcanvas')) {
+          throw new Error(`File not found: ${fullPath}`)
+        }
+        return { content: mirrorJson, filename: path.win32.basename(fullPath) }
+      })
+      Object.defineProperty(window, 'path', {
+        configurable: true,
+        writable: true,
+        value: {
+          join: (...segments: string[]) => path.win32.join(...segments),
+          basename: (targetPath: string) => path.win32.basename(targetPath),
+          dirname: (targetPath: string) => path.win32.dirname(targetPath)
+        } as unknown as Window['path']
+      })
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: {
+          svcState: {
+            getUserDataDirectoryState: vi.fn(async () => ({ state: { autoSaveRoot } }))
+          },
+          svcFs: { readTextFile }
+        } as unknown as Window['api']
+      })
+
+      const restored = await loadCanvasItems('record-mirror-restore')
+
+      expect(readTextFile).toHaveBeenCalled()
+      expect(restored.items).toHaveLength(2)
+      expect(restored.items[0]).toMatchObject({ id: 'mirror-malformed', crop: partialCrop })
+      expect(restored.items[0]).not.toHaveProperty('cropSource')
+      expect(restored.items[1]).toMatchObject({
+        id: 'mirror-valid',
+        crop: partialCrop,
+        cropSource: createRecord()
+      })
     })
   })
 

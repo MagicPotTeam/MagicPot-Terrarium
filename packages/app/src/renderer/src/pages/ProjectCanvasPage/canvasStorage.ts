@@ -19,6 +19,7 @@ import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { getElectronCanvasFilePath } from './canvasLocalFileSource'
 import { assertCanvasImportFileSize, parseCanvasImportText } from './canvasImportPreflight'
 import { sha256Hex } from './canvasSha256'
+import { dropMalformedCropSource } from './canvasCropProvenance'
 import {
   serializeCanvasItems as serializeItems,
   stripCanvasAssetKeyTags,
@@ -1424,7 +1425,11 @@ function restorePersistedCanvasItems(
 ): CanvasItem[] {
   const restored: CanvasItem[] = []
 
-  for (const item of data) {
+  for (const storedItem of data) {
+    // IndexedDB, the project mirror and .mpcanvas imports all restore here; the
+    // import preflight has no allow-list on item keys, so a record that does
+    // not have the exact shape is dropped here and its crop stays unverified.
+    const item = dropMalformedCropSource(storedItem)
     const embeddedUrl = isBlobPersistableCanvasItem(item)
       ? (restoredBlobUrls.get(item.id) ?? null)
       : null
