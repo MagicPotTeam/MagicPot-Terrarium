@@ -11,72 +11,84 @@ import {
   Typography
 } from '@mui/material'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
+import type { TFunction } from 'i18next'
+import { useTranslation } from 'react-i18next'
 import type { MagicAgentPlatformPendingApproval } from '@shared/api/svcMagicAgentPlatform'
 import { ChatPromptCard } from '../pages/ChatPage/components/ChatPromptCard'
 import { api } from '../utils/windowUtils'
 
 const POLL_MS = 1000
 
-const actionLabels: Record<string, string> = {
-  'memory_write': '修改持久记忆文件（独立审批）',
-  'scratchpad': '修改当前会话草稿笔记',
-  'comfyui.workflow.submit': '提交 ComfyUI 工作流',
-  'canvas.export': '导出画布',
-  'image.create': '生成或编辑图片',
-  'video.create': '生成或编辑视频',
-  'asset.import': '导入素材',
-  'mcp.tool.call': '调用外部 MCP 工具',
-  'agent.terminal.run': '运行受控终端命令',
-  'terminal.run': '运行终端命令',
-  'python.run': '运行 Python 代码',
-  'python.background': '在后台运行 Python 代码',
-  'commands.background': '启动后台任务',
-  'files.write': '写入文件',
-  'files.edit': '修改文件',
-  'files.patch': '应用文件补丁',
-  'files.multi-edit': '批量修改文件',
-  'files.json.write': '写入 JSON 文件',
-  'files.snapshot.restore': '恢复文件快照',
-  'git.checkout': '切换 Git 分支或版本',
-  'git.add': '暂存 Git 更改',
-  'git.commit': '创建 Git 提交'
-}
+// Each known tool maps to its label under agent_workspace.approval.actions.
+const actionLabelKeys = {
+  memory_write: 'memory_write',
+  scratchpad: 'scratchpad',
+  'comfyui.workflow.submit': 'comfyui_workflow_submit',
+  'canvas.export': 'canvas_export',
+  'image.create': 'image_create',
+  'video.create': 'video_create',
+  'asset.import': 'asset_import',
+  'mcp.tool.call': 'mcp_tool_call',
+  'agent.terminal.run': 'agent_terminal_run',
+  'terminal.run': 'terminal_run',
+  'python.run': 'python_run',
+  'python.background': 'python_background',
+  'commands.background': 'commands_background',
+  'files.write': 'files_write',
+  'files.edit': 'files_edit',
+  'files.patch': 'files_patch',
+  'files.multi-edit': 'files_multi_edit',
+  'files.json.write': 'files_json_write',
+  'files.snapshot.restore': 'files_snapshot_restore',
+  'git.checkout': 'git_checkout',
+  'git.add': 'git_add',
+  'git.commit': 'git_commit'
+} as const
 
-const parameterLabels: Record<string, string> = {
-  content: '文件完整内容',
-  namespace: '路由所属记忆目录',
-  namespaceGeneration: '记忆命名空间代次',
-  namespaceCreation: '创建目录及归属标记',
-  preimage: '此前完整文件 SHA-256（null 表示不存在）',
-  create: '仅创建新文件',
-  operationId: 'MAIN 操作标识',
-  conversationId: '会话',
-  action: '操作',
-  key: '笔记键',
-  value: '笔记内容',
-  expectedRevision: '预期笔记版本',
-  clearScope: '清空范围',
-  prompt: '任务内容',
-  model: '模型',
-  path: '路径',
-  targetPath: '目标路径',
-  sourcePath: '来源路径',
-  outputPath: '输出路径',
-  url: '网址',
-  workflow: '工作流',
-  qAppKey: '快捷应用',
-  command: '命令',
-  args: '参数',
-  cwd: '工作目录',
-  code: '代码',
-  toolName: '外部工具',
-  name: '名称'
-}
+// Each known input field maps to its label under agent_workspace.approval.parameters.
+// The order here is the display order.
+const parameterLabelKeys = {
+  content: 'content',
+  namespace: 'namespace',
+  namespaceGeneration: 'namespace_generation',
+  namespaceCreation: 'namespace_creation',
+  preimage: 'preimage',
+  create: 'create',
+  operationId: 'operation_id',
+  conversationId: 'conversation_id',
+  action: 'action',
+  key: 'key',
+  value: 'value',
+  expectedRevision: 'expected_revision',
+  clearScope: 'clear_scope',
+  prompt: 'prompt',
+  model: 'model',
+  path: 'path',
+  targetPath: 'target_path',
+  sourcePath: 'source_path',
+  outputPath: 'output_path',
+  url: 'url',
+  workflow: 'workflow',
+  qAppKey: 'q_app_key',
+  command: 'command',
+  args: 'args',
+  cwd: 'cwd',
+  code: 'code',
+  toolName: 'tool_name',
+  name: 'name'
+} as const
+
+const ownKey = <T extends object>(record: T, key: string): key is Extract<keyof T, string> =>
+  Object.prototype.hasOwnProperty.call(record, key)
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
 
-const approvalDisplay = (approval: MagicAgentPlatformPendingApproval, omitTechnical = false) => {
+const approvalDisplay = (
+  approval: MagicAgentPlatformPendingApproval,
+  t: TFunction<'translation'>,
+  omitTechnical = false
+) => {
   // Only use the redacted request supplied by the trusted main-process service.
   const redacted = isRecord(approval.request) ? approval.request : {}
   const request = isRecord(redacted.request) ? redacted.request : {}
@@ -89,19 +101,28 @@ const approvalDisplay = (approval: MagicAgentPlatformPendingApproval, omitTechni
   const input = isRecord(request.input) ? request.input : {}
   const keys = Object.keys(input).filter(key => !omitTechnical || !['conversationId', 'expectedRevision', 'namespaceGeneration', 'operationId'].includes(key))
   const orderedKeys = [
-    ...Object.keys(parameterLabels).filter((key) => keys.includes(key)),
-    ...keys.filter((key) => !(key in parameterLabels))
+    ...Object.keys(parameterLabelKeys).filter((key) => keys.includes(key)),
+    ...keys.filter((key) => !(key in parameterLabelKeys))
   ].slice(0, 6)
   return {
-    toolName: toolName || '未提供工具名称',
-    action: toolName ? actionLabels[toolName] || toolName : '待确认操作',
+    toolName: toolName || t('agent_workspace.approval.tool_name_missing'),
+    action: toolName
+      ? ownKey(actionLabelKeys, toolName)
+        ? t(`agent_workspace.approval.actions.${actionLabelKeys[toolName]}`)
+        : toolName
+      : t('agent_workspace.approval.pending_action'),
     parameters: orderedKeys.map((key) => {
       const value = input[key]
       const text = typeof value === 'string' ? value : JSON.stringify(value)
       return {
         key,
-        label: parameterLabels[key] || key,
-        text: text && text.length > 480 ? `${text.slice(0, 480)}…（完整内容见详情）` : text
+        label: ownKey(parameterLabelKeys, key)
+          ? t(`agent_workspace.approval.parameters.${parameterLabelKeys[key]}`)
+          : key,
+        text:
+          text && text.length > 480
+            ? t('agent_workspace.approval.truncated', { text: text.slice(0, 480) })
+            : text
       }
     })
   }
@@ -110,6 +131,7 @@ const approvalDisplay = (approval: MagicAgentPlatformPendingApproval, omitTechni
 export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   const [approvals, setApprovals] = useState<MagicAgentPlatformPendingApproval[]>([])
   const [busy, setBusy] = useState(false)
+  const { t } = useTranslation()
 
   const resolving=React.useRef(false)
   const refreshEpoch=React.useRef(0)
@@ -134,7 +156,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   useEffect(()=>{surfaces.forEach(surface=>surface.onWaiting(new Set(inline.filter(item=>item.surface===surface).map(item=>matchTeamApproval(item.approval.request,surface)!))))},[approvals,surfaces])
   const approval = approvals.find(item=>!inline.some(entry=>entry.approval===item)) ?? inline[0]?.approval
   if (!approval) return null
-  const display = approvalDisplay(approval)
+  const display = approvalDisplay(approval, t)
 
   const resolve = async (approved: boolean, selected = approval): Promise<void> => {
     if(resolving.current)return
@@ -158,7 +180,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   }
 
   const inlineCards=inline.map(({approval:pending,surface})=>{
-    const shown = approvalDisplay(pending, true)
+    const shown = approvalDisplay(pending, t, true)
     const envelope = isRecord(pending.request) ? pending.request : {}
     const request = isRecord(envelope.request) ? envelope.request : {}
     const input = isRecord(request.input) ? request.input : {}
@@ -171,30 +193,33 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
         testId="team-approval-card"
         icon={<WarningAmberIcon aria-hidden="true" />}
         accent="warning"
-        title={isNote ? `${member} 想保存一条笔记` : `${member} 请求操作`}
-        prompt={isNote ? <Box component="span" title={typeof input.value === 'string' ? input.value : undefined} sx={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{typeof input.value === 'string' ? input.value : '笔记内容未提供'}</Box> : shown.action}
+        title={isNote ? t('agent_workspace.approval.member_wants_note', { member }) : t('agent_workspace.approval.member_requests_action', { member })}
+        prompt={isNote ? <Box component="span" title={typeof input.value === 'string' ? input.value : undefined} sx={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{typeof input.value === 'string' ? input.value : t('agent_workspace.approval.note_missing')}</Box> : shown.action}
         detail={isNote || !shown.parameters.length ? undefined : <>{shown.parameters.map(parameter => <Box key={parameter.key} component="span" sx={{display:'block'}}>{parameter.label}: {parameter.text}</Box>)}</>}
         options={[
-          { key: 'approve', label: '批准', primary: true, disabled: busy, onSelect: () => void resolve(true, pending) },
-          { key: 'deny', label: '拒绝', disabled: busy, onSelect: () => void resolve(false, pending) }
+          { key: 'approve', label: t('agent_workspace.approval.approve'), primary: true, disabled: busy, onSelect: () => void resolve(true, pending) },
+          { key: 'deny', label: t('agent_workspace.approval.deny'), disabled: busy, onSelect: () => void resolve(false, pending) }
         ]}
       >
-        <Box component="details" sx={{px:'4px',pb:'8px',color:'text.secondary',fontSize:12,'& summary':{cursor:'pointer',fontSize:12,lineHeight:'16px'}}}><summary>详情</summary><Typography component="pre" sx={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'16rem',overflow:'auto',m:0,mt:'4px',fontFamily:'monospace',fontSize:11,lineHeight:'16px'}}>{JSON.stringify(pending.request,null,2)}</Typography></Box>
+        <Box component="details" sx={{px:'4px',pb:'8px',color:'text.secondary',fontSize:12,'& summary':{cursor:'pointer',fontSize:12,lineHeight:'16px'}}}><summary>{t('agent_workspace.approval.details')}</summary><Typography component="pre" sx={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'16rem',overflow:'auto',m:0,mt:'4px',fontFamily:'monospace',fontSize:11,lineHeight:'16px'}}>{JSON.stringify(pending.request,null,2)}</Typography></Box>
       </ChatPromptCard>
     </Box>,surface!.element,pending.approvalId)
   })
   if(inline.some(item=>item.approval===approval))return <>{inlineCards}</>
   return (<>{inlineCards}
     <Dialog open aria-labelledby="magic-agent-approval-title">
-      <DialogTitle id="magic-agent-approval-title">确认 AI 请求的操作</DialogTitle>
+      <DialogTitle id="magic-agent-approval-title">{t('agent_workspace.approval.dialog_title')}</DialogTitle>
       <DialogContent>
         <Typography fontWeight={600}>{display.action}</Typography>
         <Typography variant="body2" color="text.secondary">
-          工具：{display.toolName}
+          {t('agent_workspace.approval.tool', { name: display.toolName })}
         </Typography>
         {approval.graphContext ? (
           <Typography variant="body2" color="text.secondary">
-            任务 {approval.graphContext.runId} · 步骤 {approval.graphContext.nodeId}
+            {t('agent_workspace.approval.task_step', {
+              runId: approval.graphContext.runId,
+              nodeId: approval.graphContext.nodeId
+            })}
           </Typography>
         ) : null}
         <Box component="dl" sx={{ m: 0, mt: 2 }}>
@@ -215,7 +240,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
         </Box>
         <Box component="details" sx={{ mt: 2 }}>
           <Box component="summary" sx={{ cursor: 'pointer' }}>
-            查看完整请求（敏感信息已隐藏）
+            {t('agent_workspace.approval.full_request')}
           </Box>
           <Box
             component="pre"
@@ -227,10 +252,10 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
       </DialogContent>
       <DialogActions>
         <Button disabled={busy} onClick={() => void resolve(false)}>
-          拒绝
+          {t('agent_workspace.approval.deny')}
         </Button>
         <Button disabled={busy} variant="contained" onClick={() => void resolve(true)}>
-          允许这次操作
+          {t('agent_workspace.approval.allow_once')}
         </Button>
       </DialogActions>
     </Dialog></>

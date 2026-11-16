@@ -20,7 +20,12 @@ vi.mock('../../../../main/config/buildEnv', () => ({ getBuildEnv: () => { if (!h
 vi.mock('../../../../main/config/config', () => ({ getConfig: () => h.config.value, saveConfig: vi.fn(), onConfigCommitted: vi.fn() }))
 vi.mock('../../../../main/assistantRuntime/runtime', () => ({ getAssistantRuntime: () => ({ listTools: h.listTools, callTool: h.callTool }) }))
 vi.mock('../../../../main/mcp/runtime', () => ({ syncMcpClientManager: vi.fn(async () => undefined) }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' }, t: (key: string, opts?: { defaultValue?: string }) => opts?.defaultValue || key }) }))
+// The approval center's copy comes from the zh-CN locale; every other key stays raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('../../testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator('zh-CN', ['agent_workspace.approval.'], (key, opts) => (opts?.defaultValue as string | undefined) || key)
+  return { useTranslation: () => ({ i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' }, t: (key: string, opts?: Record<string, unknown>) => translate(key, opts) }) }
+})
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: h.config.value, isReady: true, buildEnv: DEFAULT_BUILD_ENV, configUtils: h.configUtils, updateConfig: h.update }) }))
 vi.mock('@renderer/hooks/useRuntimeMcpStatus', () => ({ useRuntimeMcpStatus: () => ({ runtimeMcpStatus: null }) }))
 vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifySuccess: h.notify, notifyError: h.notify, notifyWarning: h.notify, notifyInfo: h.notify }) }))

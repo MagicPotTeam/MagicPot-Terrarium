@@ -1,6 +1,7 @@
 import { registerTeamApprovalSurface } from './teamApprovalSurface'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import i18n from '../i18n'
 import MagicAgentApprovalCenter from './MagicAgentApprovalCenter'
 
 const platformApi = vi.hoisted(() => ({
@@ -13,6 +14,10 @@ vi.mock('../utils/windowUtils', () => ({
 }))
 
 describe('MagicAgentApprovalCenter', () => {
+  // The texts come from the locale files; the assertions below read the zh-CN copy.
+  beforeAll(async () => { await i18n.changeLanguage('zh-CN') })
+  afterEach(async () => { if (i18n.language !== 'zh-CN') await i18n.changeLanguage('zh-CN') })
+
   it('shows matching members inline with complete payload and falls back after unregister',async()=>{
     const host=document.createElement('div');document.body.append(host)
     const route={channel:'canvas',scopeType:'thread',scopeId:'project',threadId:'pane'}
@@ -325,5 +330,38 @@ describe('MagicAgentApprovalCenter', () => {
     expect(JSON.stringify(platformApi.resolvePendingApproval.mock.calls)).not.toMatch(
       /grant|permit|approver/i
     )
+  })
+
+  it('shows English copy without Chinese text or raw keys when the app language is en-US', async () => {
+    await act(async () => { await i18n.changeLanguage('en-US') })
+    const host = document.createElement('div')
+    document.body.append(host)
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' }
+    const inline = { approvalId: 'inline-en', revision: 1, request: { request: { sessionId: 'member', route, target: { id: 'scratchpad' }, input: { action: 'set', key: 'k', expectedRevision: 1 } } } }
+    const dialog = { approvalId: 'dialog-en', revision: 2, graphContext: { runId: 'run-1', nodeId: 'node-1' }, request: { request: { target: { id: 'files.write' }, input: { path: './a.txt', content: 'x'.repeat(600), create: true, preimage: null } } } }
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [dialog, inline] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', 'Writer']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      expect(await screen.findByRole('dialog')).toBeVisible()
+      expect(screen.getByText('Confirm the action the AI requested')).toBeVisible()
+      expect(screen.getByText('Write a file')).toBeVisible()
+      expect(screen.getByText('Tool: files.write')).toBeVisible()
+      expect(screen.getByText('Task run-1 · Step node-1')).toBeVisible()
+      expect(screen.getByText('Full file content')).toBeVisible()
+      expect(screen.getByText(/^x{480}… \(full content in Details\)$/)).toBeVisible()
+      expect(screen.getByRole('button', { name: 'Allow this action' })).toBeEnabled()
+      expect(screen.getByRole('button', { name: 'Deny' })).toBeEnabled()
+      expect(within(host).getByText('Writer wants to save a note')).toBeVisible()
+      expect(within(host).getByText('No note content provided')).toBeVisible()
+      expect(within(host).getByRole('button', { name: 'Approve', hidden: true })).toBeVisible()
+      expect(within(host).getByText('Details')).toBeVisible()
+      const shown = `${document.body.textContent ?? ''} ${host.textContent ?? ''}`
+      expect(shown).not.toMatch(/[\u3400-\u9fff]/)
+      expect(shown).not.toMatch(/agent_workspace\./)
+    } finally {
+      await act(async () => { unregister() })
+      view.unmount(); host.remove()
+    }
   })
 })

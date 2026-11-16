@@ -212,13 +212,22 @@ const createConfig = (): Config => ({
   }
 })
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' },
-    t: (key: string, options?: { defaultValue?: string; error?: string }) =>
-      options?.defaultValue || options?.error || key
-  })
-}))
+// The approval center's copy comes from the zh-CN locale; every other key stays raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('../../testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator(
+    'zh-CN',
+    ['agent_workspace.approval.'],
+    (key, options) =>
+      (options?.defaultValue as string | undefined) || (options?.error as string | undefined) || key
+  )
+  return {
+    useTranslation: () => ({
+      i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' },
+      t: (key: string, options?: { defaultValue?: string; error?: string }) => translate(key, options)
+    })
+  }
+})
 
 vi.mock('@renderer/hooks/useConfig', () => ({
   useConfig: () => ({
