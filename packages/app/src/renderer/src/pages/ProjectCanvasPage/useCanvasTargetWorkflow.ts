@@ -521,27 +521,34 @@ async function executeCanvasTargetExtractImageRegionAction(
 
 function buildCanvasTargetSourceReferenceRefusal(
   subject: string,
-  refusal: CanvasTargetSourceReferenceRefusal
+  refusal: CanvasTargetSourceReferenceRefusal,
+  fallbackReasons: { evidenceMode: string; selection: string }
 ): CanvasTargetCanvasActionResult {
   if (refusal === 'evidence_mode') {
     return {
       content: `${subject} skipped by the current evidence policy.`,
       canvasDispatchCount: 0,
-      fallbackReason: 'Reading a canvas source requires selected source assets.'
-    }
-  }
-  if (refusal === 'not_selected') {
-    return {
-      content: `${subject} skipped because a source was not selected.`,
-      canvasDispatchCount: 0,
-      fallbackReason: 'Reading a canvas source requires explicitly selected items.'
+      fallbackReason: fallbackReasons.evidenceMode
     }
   }
   return {
-    content: `${subject} skipped because a referenced source could not be verified against the selection.`,
+    content:
+      refusal === 'not_selected'
+        ? `${subject} skipped because a source was not selected.`
+        : `${subject} skipped because a source is missing or changed since it was selected.`,
     canvasDispatchCount: 0,
-    fallbackReason: `Source reference refused (${refusal}).`
+    fallbackReason: fallbackReasons.selection
   }
+}
+
+const CANVAS_TARGET_EXTRACT_REFUSAL_REASONS = {
+  evidenceMode: 'Source image extraction requires selected source assets.',
+  selection: 'Source image extraction requires explicitly selected items.'
+}
+
+const CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS = {
+  evidenceMode: 'Placing a canvas source requires selected source assets.',
+  selection: 'Placing a canvas source requires explicitly selected items.'
 }
 
 async function executeCanvasTargetCanvasAction(
@@ -619,7 +626,11 @@ async function executeCanvasTargetCanvasAction(
           })
         : { allowed: false, refusal: 'no_authority', references: [] }
       if (!verdict.allowed) {
-        return buildCanvasTargetSourceReferenceRefusal('Image extraction', verdict.refusal)
+        return buildCanvasTargetSourceReferenceRefusal(
+          'Image extraction',
+          verdict.refusal,
+          CANVAS_TARGET_EXTRACT_REFUSAL_REASONS
+        )
       }
       return executeCanvasTargetExtractImageRegionAction(action, {
         ...options,
@@ -670,7 +681,11 @@ async function executeCanvasTargetCanvasAction(
       // reference to that item: placing it would hand its bytes back to the
       // run as a stage result. It needs the same authority as any reference.
       if (!options.semanticState) {
-        return buildCanvasTargetSourceReferenceRefusal(`Canvas ${action.action}`, 'no_authority')
+        return buildCanvasTargetSourceReferenceRefusal(
+          `Canvas ${action.action}`,
+          'no_authority',
+          CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS
+        )
       }
       const urlReferencedIds = findCanvasTargetItemIdsBySourceUrl(
         mediaUrlSafety.url,
@@ -684,7 +699,11 @@ async function executeCanvasTargetCanvasAction(
           currentItems: options.semanticState.items
         })
         if (!verdict.allowed) {
-          return buildCanvasTargetSourceReferenceRefusal(`Canvas ${action.action}`, verdict.refusal)
+          return buildCanvasTargetSourceReferenceRefusal(
+            `Canvas ${action.action}`,
+            verdict.refusal,
+            CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS
+          )
         }
       }
       const mediaType =

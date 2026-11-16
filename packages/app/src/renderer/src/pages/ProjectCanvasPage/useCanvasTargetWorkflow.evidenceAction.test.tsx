@@ -277,6 +277,8 @@ describe('Canvas Target evidence action gate', () => {
     expect(f.extract).not.toHaveBeenCalled()
     expect(f.commits).not.toHaveBeenCalled()
     expect(extractedInChat()).toBe(false)
+    // The refusal is shown in the Agent conversation.
+    expect(f.chat.mock.calls.some(([message]) => /Image extraction skipped because a source was not selected/.test(message.content || ''))).toBe(true)
   })
 
   it('refuses a selected_sources extraction from a selected source the run changed after selection', async () => {
