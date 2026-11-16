@@ -55,6 +55,7 @@ import {
 import { REPORT_BUNDLE_VERIFY_MAX_ITEMS } from '@shared/reportBundle'
 import type { ReportBundlesSvc, VerifyReportBundlesResp } from '@shared/api/svcReportBundles'
 import { api } from '@renderer/utils/windowUtils'
+import { noteReportBundleVerifyResults } from './reportBundleRefusals'
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference } from '@shared/mediaReference'
 import {
@@ -1184,11 +1185,37 @@ const withoutReportBundleBinding = (attachment: ChatAttachment): ChatAttachment 
   delete copy.reportBundleBinding
   return copy
 }
+
+/**
+ * Outbound, for a destination that is not the local MAIN chat boundary. The binding is
+ * removed, and a bound primary report (MAIN verified it earlier in this request, which refuses
+ * otherwise; its text is inlined and its images expanded by now) goes as a plain file
+ * attachment: a remote MagicPot server's own MAIN chat boundary refuses every unbound
+ * primary-report descriptor, and nothing but this app's MAIN can check a binding. A primary
+ * without a well-formed binding keeps its role, so every boundary still refuses it. Never used
+ * for attachments that arrive in a reply: those only lose the binding.
+ */
+const asUnboundOutboundAttachment = (attachment: ChatAttachment): ChatAttachment => {
+  if (attachment.reportBundleBinding === undefined) return attachment
+  const copy = withoutReportBundleBinding(attachment)
+  if (isPrimaryReportFileDescriptor(attachment) && hasWellFormedReportBundleBinding(attachment)) {
+    delete copy.reportBundleRole
+    delete copy.reportBundleManifestUrl
+    delete copy.reportBundleImageCount
+  }
+  return copy
+}
 const withoutReportBundleBindings = (
   attachments: ChatAttachment[] | undefined
 ): ChatAttachment[] | undefined =>
   attachments?.some((attachment) => attachment.reportBundleBinding !== undefined)
     ? attachments.map(withoutReportBundleBinding)
+    : attachments
+const asUnboundOutboundAttachments = (
+  attachments: ChatAttachment[] | undefined
+): ChatAttachment[] | undefined =>
+  attachments?.some((attachment) => attachment.reportBundleBinding !== undefined)
+    ? attachments.map(asUnboundOutboundAttachment)
     : attachments
 
 /**
@@ -1229,7 +1256,7 @@ const buildChatRequestPayload = (
         content: projected.content,
         attachments: keepReportBundleBinding
           ? message.attachments
-          : withoutReportBundleBindings(message.attachments),
+          : asUnboundOutboundAttachments(message.attachments),
         ...(projected.toolHistory !== undefined ? { toolHistory: projected.toolHistory } : {})
       }
     }),
@@ -1629,6 +1656,12 @@ const verifyPrimaryReportBundles = async (
   }
   throwIfAborted(signal)
   const verified = new Map<string, VerifiedReportBundle>()
+  // Per-binding outcome for the cards: a report MAIN refused is shown unavailable.
+  noteReportBundleVerifyResults(
+    (Array.isArray(response?.results) ? response.results : []).filter(
+      (result) => typeof result?.binding === 'string' && items.has(result.binding)
+    )
+  )
   for (const result of Array.isArray(response?.results) ? response.results : []) {
     if (
       !result ||

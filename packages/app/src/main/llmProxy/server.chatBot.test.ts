@@ -733,6 +733,36 @@ describe('LLM proxy server legacy compatibility', () => {
     })
   })
 
+  it('forwards a remote-mode client’s verified report as the plain file it sent, which the chat boundary accepts', async () => {
+    const { assertNoUnverifiedPrimaryReports } = await import('@shared/llm/unverifiedReport')
+    // The renderer's remote body for a verified report (chatRequestUtils
+    // withoutReportBundleBinding): no binding and no primary-report role.
+    const attachments = [
+      { type: 'file', url: 'data:text/plain;base64,QQ==', fileName: 'report.txt' }
+    ]
+    chatRequestCapture = null
+    const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer proxy-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profileId: 'profile-1',
+        messages: [{ role: 'user', content: 'synthetic', attachments }]
+      })
+    })
+    expect(response.status).toBe(200)
+    const forwarded = chatRequestCapture as { messages: Array<{ attachments?: unknown }> }
+    expect(forwarded.messages).toEqual([
+      expect.objectContaining({ role: 'user', content: 'synthetic', attachments })
+    ])
+    expect(() => assertNoUnverifiedPrimaryReports(forwarded.messages as never)).not.toThrow()
+    // The descriptor a client sent before, unbound, is what MAIN's boundary refuses.
+    expect(() =>
+      assertNoUnverifiedPrimaryReports([
+        { attachments: [{ ...attachments[0], reportBundleRole: 'primary-report' }] }
+      ])
+    ).toThrow()
+  })
+
   it('streams SSE when OpenAI-compatible clients request streaming', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
       method: 'POST',

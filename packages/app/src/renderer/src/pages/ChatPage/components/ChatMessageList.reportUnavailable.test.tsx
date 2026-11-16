@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
@@ -7,6 +7,10 @@ import enUS from '@shared/locales/en-US/renderer.json'
 import zhCN from '@shared/locales/zh-CN/renderer.json'
 import type { ChatSession } from '../chatStorage'
 import ChatMessageList from './ChatMessageList'
+import {
+  clearReportBundleRefusalsForTest,
+  noteReportBundleVerifyResults
+} from '../reportBundleRefusals'
 
 // The real list; only translation and notifications are doubles. The translation double
 // returns the key, so the caption is asserted by its i18n key.
@@ -116,6 +120,7 @@ const expectAvailable = (card: HTMLElement) => {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  clearReportBundleRefusalsForTest()
 })
 
 describe('ChatMessageList unavailable report chip', () => {
@@ -161,6 +166,33 @@ describe('ChatMessageList unavailable report chip', () => {
     expectDownloadNotAriaDisabled(card)
     fireEvent.click(within(card).getByRole('button', { name: 'chat.download_attachment' }))
     expect(onDownloadAttachment).toHaveBeenCalledWith(expect.objectContaining(legacyReport))
+  })
+
+  it('mutes a bound report once MAIN refused it, and restores it once MAIN verifies it again', () => {
+    const session: ChatSession = {
+      id: 'refused',
+      title: 'fixture',
+      messages: [{ role: 'user', content: 'mine', attachments: [boundReport, ordinaryFile] }]
+    }
+    renderList(session)
+    expectAvailable(cardOf('bound-report.md'))
+    act(() =>
+      noteReportBundleVerifyResults([
+        { binding: boundReport.reportBundleBinding, status: 'refused' }
+      ])
+    )
+    expectUnavailable(cardOf('bound-report.md'))
+    expectAvailable(cardOf('notes.md'))
+    act(() =>
+      noteReportBundleVerifyResults([
+        { binding: boundReport.reportBundleBinding, status: 'verified' }
+      ])
+    )
+    expectAvailable(cardOf('bound-report.md'))
+    // The stored attachment keeps its binding throughout.
+    expect(session.messages[0].attachments![0].reportBundleBinding).toBe(
+      boundReport.reportBundleBinding
+    )
   })
 
   it('has a short caption in every renderer locale file', () => {

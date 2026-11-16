@@ -2,27 +2,89 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type CustomSkill } from '@shared/config/config'
 import type { ChatMessage } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
-import { UNVERIFIED_REPORT_BUNDLE_MESSAGE } from '@shared/llm/unverifiedReport'
+import {
+  UNVERIFIED_REPORT_BUNDLE_MESSAGE,
+  isPrimaryReportFileDescriptor
+} from '@shared/llm/unverifiedReport'
 import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 
-const agent: CustomSkill = { id: 'fixture', type: 'agent', category: 'fixture', skillName: 'Fixture', prompt: 'Analyze', apiAddress: 'https://synthetic.invalid', apiKey: '' }
-const config: Config = { ...DEFAULT_CONFIG, use_remote_llm: false, llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [{ id: 'fixture-profile', provider: 'openai', deployment: 'cloud', model_use: 'chat', model_name: 'fixture-model', base_url: 'https://synthetic.invalid/v1', api_key: 'synthetic', api_mode: 'chat-completions', attachment_transports: ['request-data-url', 'accessible-url'] }] } }
-const primary = (extra: Record<string, unknown> = {}) => ({ type: 'file' as const, url: 'data:text/plain;base64,QQ==', fileName: 'report.txt', reportBundleRole: 'primary-report' as const, ...extra })
-const picture = { type: 'image' as const, url: 'local-media:///synthetic/image.png', mimeType: 'image/png' }
+const agent: CustomSkill = {
+  id: 'fixture',
+  type: 'agent',
+  category: 'fixture',
+  skillName: 'Fixture',
+  prompt: 'Analyze',
+  apiAddress: 'https://synthetic.invalid',
+  apiKey: ''
+}
+const config: Config = {
+  ...DEFAULT_CONFIG,
+  use_remote_llm: false,
+  llm_config: {
+    ...DEFAULT_CONFIG.llm_config,
+    api_profiles: [
+      {
+        id: 'fixture-profile',
+        provider: 'openai',
+        deployment: 'cloud',
+        model_use: 'chat',
+        model_name: 'fixture-model',
+        base_url: 'https://synthetic.invalid/v1',
+        api_key: 'synthetic',
+        api_mode: 'chat-completions',
+        attachment_transports: ['request-data-url', 'accessible-url']
+      }
+    ]
+  }
+}
+const primary = (extra: Record<string, unknown> = {}) => ({
+  type: 'file' as const,
+  url: 'data:text/plain;base64,QQ==',
+  fileName: 'report.txt',
+  reportBundleRole: 'primary-report' as const,
+  ...extra
+})
+const picture = {
+  type: 'image' as const,
+  url: 'local-media:///synthetic/image.png',
+  mimeType: 'image/png'
+}
 function fixture() {
-  const fetch = vi.fn(async () => new Response('synthetic', { headers: { 'content-type': 'text/plain' } }))
+  const fetch = vi.fn(
+    async () => new Response('synthetic', { headers: { 'content-type': 'text/plain' } })
+  )
   const materialize = vi.fn()
   const chat = vi.fn(async () => ({ content: 'synthetic' }))
-  const chatStream = vi.fn(async (_payload, receiver: { onData: (event: unknown) => void }) => receiver.onData({ type: 'done', content: 'synthetic' }))
-  const remoteFetch = vi.fn(async () => ({ status: 200, statusText: 'OK', body: JSON.stringify({ content: 'synthetic' }) }))
-  const externalAgentStream = vi.fn(async (_payload, receiver: { onData: (event: unknown) => void }) => receiver.onData({ type: 'done', content: 'synthetic' }))
+  const chatStream = vi.fn(async (_payload, receiver: { onData: (event: unknown) => void }) =>
+    receiver.onData({ type: 'done', content: 'synthetic' })
+  )
+  const remoteFetch = vi.fn(async () => ({
+    status: 200,
+    statusText: 'OK',
+    body: JSON.stringify({ content: 'synthetic' })
+  }))
+  const externalAgentStream = vi.fn(
+    async (_payload, receiver: { onData: (event: unknown) => void }) =>
+      receiver.onData({ type: 'done', content: 'synthetic' })
+  )
   vi.stubGlobal('fetch', fetch)
-  window.api = { svcManagedMedia: { materializeForRequest: materialize }, svcLLMProxy: { chat, chatStream, remoteFetch, externalAgentStream } } as unknown as Window['api']
+  window.api = {
+    svcManagedMedia: { materializeForRequest: materialize },
+    svcLLMProxy: { chat, chatStream, remoteFetch, externalAgentStream }
+  } as unknown as Window['api']
   return { fetch, materialize, chat, chatStream, remoteFetch, externalAgentStream }
 }
 function run(messages: ChatMessage[], stream = false, external = false, latest = false) {
-  const input = { config, messages, profileId: 'fixture-profile', ...(external ? { externalAgentSkill: agent } : {}), ...(latest ? { imageHistoryPolicy: 'latest-user-turn' as const } : {}) }
-  return stream ? requestChatCompletionStream({ ...input, onEvent: vi.fn() }) : requestChatCompletion(input)
+  const input = {
+    config,
+    messages,
+    profileId: 'fixture-profile',
+    ...(external ? { externalAgentSkill: agent } : {}),
+    ...(latest ? { imageHistoryPolicy: 'latest-user-turn' as const } : {})
+  }
+  return stream
+    ? requestChatCompletionStream({ ...input, onEvent: vi.fn() })
+    : requestChatCompletion(input)
 }
 beforeEach(() => localStorage.clear())
 afterEach(() => vi.unstubAllGlobals())
@@ -30,13 +92,41 @@ afterEach(() => vi.unstubAllGlobals())
 describe('unverified primary-report request preflight', () => {
   it.each([
     ['missing manifest', {}, false, false, false],
-    ['self claimed hint', { reportBundleId: 'claimed', reportBundleImageCount: 1 }, false, false, true],
-    ['present manifest', { reportBundleManifestUrl: 'local-media:///synthetic/manifest.json', reportBundleId: 'claimed', reportBundleImageCount: 1 }, true, false, true],
-    ['external route', { reportBundleManifestUrl: 'local-media:///synthetic/manifest.json' }, false, true, false],
+    [
+      'self claimed hint',
+      { reportBundleId: 'claimed', reportBundleImageCount: 1 },
+      false,
+      false,
+      true
+    ],
+    [
+      'present manifest',
+      {
+        reportBundleManifestUrl: 'local-media:///synthetic/manifest.json',
+        reportBundleId: 'claimed',
+        reportBundleImageCount: 1
+      },
+      true,
+      false,
+      true
+    ],
+    [
+      'external route',
+      { reportBundleManifestUrl: 'local-media:///synthetic/manifest.json' },
+      false,
+      true,
+      false
+    ],
     ['external streaming', {}, true, true, true]
   ] as const)('rejects %s before I/O', async (_name, metadata, stream, external, withImage) => {
     const f = fixture()
-    const messages: ChatMessage[] = [{ role: 'user', content: 'synthetic', attachments: [primary(metadata), ...(withImage ? [picture] : [])] }]
+    const messages: ChatMessage[] = [
+      {
+        role: 'user',
+        content: 'synthetic',
+        attachments: [primary(metadata), ...(withImage ? [picture] : [])]
+      }
+    ]
     const before = JSON.stringify(messages)
     await expect(run(messages, stream, external)).rejects.toThrow()
     expect(JSON.stringify(messages)).toBe(before)
@@ -44,7 +134,17 @@ describe('unverified primary-report request preflight', () => {
   })
   it('rejects an old primary file even under latest-user-turn image policy', async () => {
     const f = fixture()
-    const messages: ChatMessage[] = [{ role: 'user', content: 'old', attachments: [primary({ reportBundleManifestUrl: 'local-media:///synthetic/manifest.json' }), picture] }, { role: 'user', content: 'new' }]
+    const messages: ChatMessage[] = [
+      {
+        role: 'user',
+        content: 'old',
+        attachments: [
+          primary({ reportBundleManifestUrl: 'local-media:///synthetic/manifest.json' }),
+          picture
+        ]
+      },
+      { role: 'user', content: 'new' }
+    ]
     const before = JSON.stringify(messages)
     await expect(run(messages, false, false, true)).rejects.toThrow()
     expect(JSON.stringify(messages)).toBe(before)
@@ -52,7 +152,20 @@ describe('unverified primary-report request preflight', () => {
   })
   it('allows an ordinary file without a report role', async () => {
     const f = fixture()
-    const messages: ChatMessage[] = [{ role: 'user', content: 'synthetic', attachments: [{ type: 'file', url: 'data:text/plain;base64,QQ==', fileName: 'ordinary.txt', mimeType: 'text/plain' }] }]
+    const messages: ChatMessage[] = [
+      {
+        role: 'user',
+        content: 'synthetic',
+        attachments: [
+          {
+            type: 'file',
+            url: 'data:text/plain;base64,QQ==',
+            fileName: 'ordinary.txt',
+            mimeType: 'text/plain'
+          }
+        ]
+      }
+    ]
     await expect(run(messages)).resolves.toBeDefined()
     expect(f.chat).toHaveBeenCalledOnce()
   })
@@ -350,6 +463,38 @@ describe('registered primary-report request verification', () => {
     )
   }
 
+  it('marks exactly the bound report MAIN refused, and clears it once MAIN verifies it again', async () => {
+    const { isReportBundleBindingRefused, clearReportBundleRefusalsForTest } =
+      await import('./reportBundleRefusals')
+    clearReportBundleRefusalsForTest()
+    const f = boundFixture()
+    const kept = f.reports.register(primary(), conversationId)
+    const refusedElsewhere = f.reports.register(
+      primary({ url: 'local-media:///synthetic/other.md' }),
+      'another-conversation'
+    )
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'synthetic', attachments: [kept, refusedElsewhere] }
+    ]
+    await expect(runBound(messages, false, false, { conversationId })).rejects.toThrow(
+      UNVERIFIED_REPORT_BUNDLE_MESSAGE
+    )
+    expect(isReportBundleBindingRefused(refusedElsewhere.reportBundleBinding)).toBe(true)
+    expect(isReportBundleBindingRefused(kept.reportBundleBinding)).toBe(false)
+    // The stored descriptor is not changed: the binding stays for a later verification.
+    expect(messages[0].attachments![1].reportBundleBinding).toBe(
+      refusedElsewhere.reportBundleBinding
+    )
+    await runBound(
+      [{ role: 'user', content: 'synthetic', attachments: [refusedElsewhere] }],
+      false,
+      false,
+      { conversationId: 'another-conversation' }
+    ).catch(() => undefined)
+    expect(isReportBundleBindingRefused(refusedElsewhere.reportBundleBinding)).toBe(false)
+    clearReportBundleRefusalsForTest()
+  })
+
   it('refuses more distinct bound reports than one verify call takes, without calling verify', async () => {
     const f = boundFixture()
     const attachments = Array.from({ length: 65 }, () =>
@@ -458,6 +603,24 @@ describe('registered primary-report request verification', () => {
         expect(body).not.toContain(bound.reportBundleBinding)
         expect(body).not.toContain('reportBundleBinding')
       }
+      // The remote server's own MAIN chat boundary refuses every unbound primary-report
+      // descriptor, so the verified primary goes as a plain file attachment.
+      const chatBody = JSON.parse(remoteBodies[remoteBodies.length - 1])
+      const sentAttachments = chatBody.messages.flatMap(
+        (message: { attachments?: Record<string, unknown>[] }) => message.attachments ?? []
+      )
+      expect(sentAttachments).toEqual([
+        expect.objectContaining({ type: 'file', fileName: 'report.txt' })
+      ])
+      for (const field of [
+        'reportBundleRole',
+        'reportBundleBinding',
+        'reportBundleManifestUrl',
+        'reportBundleImageCount'
+      ]) {
+        expect(sentAttachments[0]).not.toHaveProperty(field)
+      }
+      expect(isPrimaryReportFileDescriptor(sentAttachments[0])).toBe(false)
       for (const fn of [f.chat, f.chatStream, f.remoteFetch, f.externalAgentStream])
         expect(fn).not.toHaveBeenCalled()
     }
@@ -627,7 +790,10 @@ describe('registered primary-report request verification', () => {
         )
       ).resolves.toBeDefined()
       const manifestCalls = f.fetch.mock.calls
-        .map(([url], index) => ({ url: String(url), order: f.fetch.mock.invocationCallOrder[index] }))
+        .map(([url], index) => ({
+          url: String(url),
+          order: f.fetch.mock.invocationCallOrder[index]
+        }))
         .filter(({ url }) => url === owned)
       expect(manifestCalls).toHaveLength(1)
       // The report capability probe is the first chat call; the bundle is read after it.

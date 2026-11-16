@@ -268,4 +268,30 @@ describe('cloneChatSessionForReplay', () => {
     expect(plan.originalMessages).toEqual(before.messages)
     expect(source).toEqual(before)
   })
+
+  it('drops report bindings from the copy, which is another conversation, and keeps the source', async () => {
+    const { isUnavailablePrimaryReportFile } = await import('@shared/llm/unverifiedReport')
+    const binding = `rb1.${'B'.repeat(43)}`
+    const report: ChatAttachment = {
+      type: 'file',
+      url: 'local-media:///C:/demo/.report_bundles/b/report.md',
+      fileName: 'report.md',
+      reportBundleId: 'b',
+      reportBundleRole: 'primary-report',
+      reportBundleBinding: binding
+    }
+    const source = makeSession()
+    source.messages.push({ role: 'assistant', content: 'report', attachments: [report] })
+    const before = realStructuredClone(source)
+    for (const messages of [undefined, source.messages.slice(-1)]) {
+      const copy = cloneChatSessionForReplay(source, messages)
+      const copied = copy.messages.at(-1)!.attachments![0]
+      expect(copied).not.toHaveProperty('reportBundleBinding')
+      expect(copied).toMatchObject({ reportBundleRole: 'primary-report', reportBundleId: 'b' })
+      expect(isUnavailablePrimaryReportFile(copied)).toBe(true)
+      expect(JSON.stringify(copy)).not.toContain(binding)
+    }
+    expect(source).toEqual(before)
+    expect(source.messages.at(-1)!.attachments![0].reportBundleBinding).toBe(binding)
+  })
 })

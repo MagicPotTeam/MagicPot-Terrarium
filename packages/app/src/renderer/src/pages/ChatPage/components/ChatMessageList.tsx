@@ -57,6 +57,7 @@ import {
   isUnavailablePrimaryReportFile
 } from '@shared/llm/unverifiedReport'
 import { normalizeLocalMediaUrl, getDownloadFileNameFromUrl } from '../chatPageShared'
+import { useReportBundleBindingRefused } from '../reportBundleRefusals'
 import {
   buildAssistantReplyDownloadBaseName,
   extractAssistantReplyTextContent,
@@ -1902,7 +1903,11 @@ const FileAttachmentCard: React.FC<{
   // A report the request path refuses (no MAIN binding) is shown muted, with a short caption in
   // place of the meta label; opening, dragging and downloading the file itself stay as they are.
   // No aria-disabled on the card: it would expose the working Download button as disabled.
-  const reportUnavailable = isUnavailablePrimaryReportFile(attachment)
+  // So is a bound report that MAIN refused at the last verification in this window.
+  const refusedByMain = useReportBundleBindingRefused(attachment.reportBundleBinding)
+  const reportUnavailable =
+    isUnavailablePrimaryReportFile(attachment) ||
+    (refusedByMain && isPrimaryReportFileDescriptor(attachment))
 
   return (
     <Box

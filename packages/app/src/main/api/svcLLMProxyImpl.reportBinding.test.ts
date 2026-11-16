@@ -213,6 +213,41 @@ describe.each(['unary', 'stream'] as const)('MAIN report-bundle binding check (%
     expect(body).not.toContain('reportBundleBinding')
   })
 
+  it('accepts the plain file a remote-mode client sends for its verified primary, and still refuses an unbound primary descriptor', async () => {
+    // The body a MagicPot client in remote-LLM mode sends after its own MAIN verified and
+    // inlined the report (chatRequestUtils withoutReportBundleBinding): a plain file.
+    const remoteClientAttachment = {
+      type: 'file' as const,
+      url: dataUrlOf(reportText),
+      fileName: 'report.md',
+      mimeType: 'text/markdown',
+      reportBundleId: 'canvas-target-synthetic'
+    }
+    const remoteReq: LLMChatReq = {
+      profileId: 'fixture',
+      conversationId: 'conv-remote',
+      messages: [{ role: 'user', content: 'synthetic', attachments: [remoteClientAttachment] }]
+    }
+    const outcome = await run(mode, remoteReq)
+    expect(outcome.error).toBeUndefined()
+    expect(outcome.streamError).toBeUndefined()
+    expect(h.fetch).toHaveBeenCalledOnce()
+    h.fetch.mockClear()
+    // What the client sent before: the unbound primary descriptor, refused here.
+    expectRefused(
+      await run(mode, {
+        ...remoteReq,
+        messages: [
+          {
+            role: 'user',
+            content: 'synthetic',
+            attachments: [{ ...remoteClientAttachment, reportBundleRole: 'primary-report' }]
+          }
+        ]
+      })
+    )
+  })
+
   it('refuses the same binding with other primary bytes', async () => {
     const binding = await sealBundle('conv-1')
     expectRefused(await run(mode, makeReq(binding, dataUrlOf('# Another report\n'), 'conv-1')))
