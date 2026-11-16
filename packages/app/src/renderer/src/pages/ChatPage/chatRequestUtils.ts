@@ -1624,11 +1624,13 @@ const expandMessagesForImagePreflight = async (
   imageHistoryPolicy: LLMImageHistoryPolicy | undefined,
   maxImages: number | undefined,
   signal?: AbortSignal
-): Promise<ChatMessage[]> => {
+): Promise<{ messages: ChatMessage[]; expandedIndexes: ReadonlySet<number> }> => {
   // Metadata may reveal more images. Check the aggregate again before report
   // capability probes, uploads or image materialization, and do not resurrect
   // images excluded by the history policy when expanding an older bundle.
   const expandedMessages: ChatMessage[] = []
+  // Indexes are stable: the history policy selection maps messages one to one.
+  const expandedIndexes = new Set<number>()
   const messagesSelectedForExpansion = selectMessagesForImageHistoryPolicy(
     messages,
     imageHistoryPolicy
@@ -1636,12 +1638,13 @@ const expandMessagesForImagePreflight = async (
   const latestUserIndex = messagesSelectedForExpansion.findLastIndex((message) => message.role === 'user')
   for (const [index, message] of messagesSelectedForExpansion.entries()) {
     throwIfAborted(signal)
-    // Preserve the existing preparation policy for routes without a provider
-    // count: latest user only, unless all image history was explicitly selected.
-    // Routes with a provider limit retain their existing preflight expansion.
+    // Expand before the probe only what the count checks need: every user message
+    // when the route has a provider limit, otherwise the latest user message (its
+    // explicit lower bound). Older all-history bundles on routes without a limit are
+    // expanded by prepareMessagesForRequest, after the probe.
     const canExpandReportBundle =
-      message.role === 'user' &&
-      (maxImages !== undefined || imageHistoryPolicy === 'all' || index === latestUserIndex)
+      message.role === 'user' && (maxImages !== undefined || index === latestUserIndex)
+    if (canExpandReportBundle) expandedIndexes.add(index)
     expandedMessages.push({
       ...message,
       attachments: canExpandReportBundle
@@ -1661,7 +1664,7 @@ const expandMessagesForImagePreflight = async (
       throw new Error(`Too many images; the limit is ${maxImages}.`)
     }
   }
-  return selectedMessages
+  return { messages: selectedMessages, expandedIndexes }
 }
 
 const prepareMessagesForRequest = async (
@@ -1678,7 +1681,8 @@ const prepareMessagesForRequest = async (
     allowAccessibleUrl?: boolean
     preserveRemoteUrl?: boolean
     imageHistoryPolicy?: LLMImageHistoryPolicy
-    reportBundlesExpanded?: boolean
+    /** Messages whose report bundles the preflight already expanded; never read twice. */
+    expandedReportBundleIndexes?: ReadonlySet<number>
     signal?: AbortSignal
   } = {}
 ): Promise<ChatMessage[]> => {
@@ -1691,7 +1695,7 @@ const prepareMessagesForRequest = async (
     const canExpandReportBundle =
       message.role === 'user' && (options.imageHistoryPolicy === 'all' || index === latestUserIndex)
     const attachments =
-      canExpandReportBundle && !options.reportBundlesExpanded
+      canExpandReportBundle && !options.expandedReportBundleIndexes?.has(index)
         ? await expandReportBundleAttachmentsForRequest(message.attachments, options.signal)
         : message.attachments
     const normalizedAttachments = await normalizeChatAttachmentsForRequest(attachments, options)
@@ -2900,7 +2904,7 @@ const requestChatCompletionInStages = async (
       requestInput.signal
     )
   }
-  const preflightMessages = await expandMessagesForImagePreflight(
+  const { messages: preflightMessages, expandedIndexes } = await expandMessagesForImagePreflight(
     verifiedInput.messages,
     verifiedInput.imageHistoryPolicy,
     maxImages,
@@ -2917,7 +2921,7 @@ const requestChatCompletionInStages = async (
   const skipAttachmentContentAugmentation =
     getBaseProfileId(verifiedInput.profileId) === HUNYUAN_3D_PROFILE_ID
   const requestMessages = await prepareMessagesForRequest(preflightMessages, {
-    reportBundlesExpanded: true,
+    expandedReportBundleIndexes: expandedIndexes,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
     ...resolveManagedMediaRequestOptions(verifiedInput),
@@ -2966,7 +2970,7 @@ const requestChatCompletionStreamInStages = async (
       requestInput.signal
     )
   }
-  const preflightMessages = await expandMessagesForImagePreflight(
+  const { messages: preflightMessages, expandedIndexes } = await expandMessagesForImagePreflight(
     verifiedInput.messages,
     verifiedInput.imageHistoryPolicy,
     maxImages,
@@ -2983,7 +2987,7 @@ const requestChatCompletionStreamInStages = async (
   const skipAttachmentContentAugmentation =
     getBaseProfileId(verifiedInput.profileId) === HUNYUAN_3D_PROFILE_ID
   const requestMessages = await prepareMessagesForRequest(preflightMessages, {
-    reportBundlesExpanded: true,
+    expandedReportBundleIndexes: expandedIndexes,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
     ...resolveManagedMediaRequestOptions(verifiedInput),

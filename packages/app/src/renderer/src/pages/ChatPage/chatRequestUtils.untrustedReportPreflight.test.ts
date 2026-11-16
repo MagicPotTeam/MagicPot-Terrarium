@@ -444,6 +444,59 @@ describe('registered primary-report request verification', () => {
     expect(urls).not.toContain(forged)
   })
 
+  it.each([false, true])(
+    'reads a history bundle under the all-history policy exactly once, after the probe, on a route without an image limit (stream=%s)',
+    async (stream) => {
+      const f = boundFixture()
+      const owned = 'local-media:///synthetic/main-deferred/manifest.json'
+      f.fetch.mockImplementation(async (url: string | URL | Request) => {
+        if (String(url) === owned)
+          return new Response(
+            JSON.stringify({
+              version: 1,
+              bundleId: 'deferred',
+              title: 'Deferred',
+              entries: [
+                {
+                  role: 'report-image',
+                  fileName: 'fig.png',
+                  mimeType: 'image/png',
+                  sourceUrl: 'data:image/png;base64,aW1hZ2U='
+                }
+              ]
+            })
+          )
+        return new Response('synthetic', { headers: { 'content-type': 'text/plain' } })
+      })
+      const bound = f.reports.register(primary({ reportBundleId: 'deferred' }), conversationId, {
+        manifestUrl: owned,
+        imageCount: 1
+      })
+      await expect(
+        runBound(
+          [
+            { role: 'user', content: 'old', attachments: [bound] },
+            { role: 'user', content: 'new' }
+          ],
+          stream,
+          false,
+          { conversationId, imageHistoryPolicy: 'all' }
+        )
+      ).resolves.toBeDefined()
+      const manifestCalls = f.fetch.mock.calls
+        .map(([url], index) => ({ url: String(url), order: f.fetch.mock.invocationCallOrder[index] }))
+        .filter(({ url }) => url === owned)
+      expect(manifestCalls).toHaveLength(1)
+      // The report capability probe is the first chat call; the bundle is read after it.
+      expect(f.chat.mock.invocationCallOrder[0]).toBeLessThan(manifestCalls[0].order)
+      const ipc = stream ? f.chatStream : f.chat
+      const sent = (ipc.mock.calls.at(-1) as unknown[])[0] as { messages: ChatMessage[] }
+      expect(
+        sent.messages[0].attachments?.filter((attachment) => attachment.type === 'image')
+      ).toHaveLength(1)
+    }
+  )
+
   it("counts MAIN's image count, not a forged low hint, against a finite image limit", async () => {
     const f = boundFixture()
     const limited: Config = {
