@@ -141,8 +141,11 @@ describe('canvas snapshot atomic staged fake', () => {
       const oldMetadata = records.get('atomic-fixture')
       expect(oldMetadata).toBeDefined()
       const oldBlobKey = `atomic-fixture::canvas::asset::${recordedAssetKey()}`
-      expect([...blobs.keys()]).toEqual([oldBlobKey])
+      // The per-item blob the previous release reads (dual write for one release).
+      const legacyBlobKey = 'atomic-fixture::canvas::image'
+      expect([...blobs.keys()].sort()).toEqual([oldBlobKey, legacyBlobKey].sort())
       expect(bytesOf(blobs.get(oldBlobKey))).toEqual([1, 2])
+      expect(bytesOf(blobs.get(legacyBlobKey))).toEqual([1, 2])
 
       fake.setMode(mode)
       fake.transactions.length = 0
@@ -150,10 +153,11 @@ describe('canvas snapshot atomic staged fake', () => {
       if (mode === 'success') await expect(pending).resolves.toBeUndefined()
       else await expect(pending).rejects.toThrow(/synthetic/)
 
-      // The new bytes are written before, and in a different transaction than, the record.
+      // The new bytes are written before, and in a different transaction than, the record;
+      // only the per-item copy of the previous release is written together with the record.
       const metadataTx = fake.transactions.find((tx) => tx.puts.includes('canvas-items'))!
       expect(metadataTx.mode).toBe('readwrite')
-      expect(metadataTx.puts).toEqual(['canvas-items'])
+      expect(metadataTx.puts.filter((store) => store === 'canvas-items')).toEqual(['canvas-items'])
       const assetTx = fake.transactions.find((tx) => tx.puts.includes('canvas-blobs'))!
       expect(assetTx.committed).toBe(true)
       expect(fake.transactions.indexOf(assetTx)).toBeLessThan(fake.transactions.indexOf(metadataTx))
@@ -164,18 +168,21 @@ describe('canvas snapshot atomic staged fake', () => {
         const newBlobKey = `atomic-fixture::canvas::asset::${recordedAssetKey()}`
         expect(newBlobKey).not.toBe(oldBlobKey)
         expect(bytesOf(blobs.get(newBlobKey))).toEqual([7, 8, 9])
+        expect(bytesOf(blobs.get(legacyBlobKey))).toEqual([7, 8, 9])
         // The replaced asset is unreferenced after the commit and is pruned.
-        expect([...blobs.keys()]).toEqual([newBlobKey])
+        expect([...blobs.keys()].sort()).toEqual([newBlobKey, legacyBlobKey].sort())
       } else {
         expect(metadataTx.aborted).toBe(true)
         expect(metadataTx.committed).toBe(false)
         // The previous board is intact: same record, and the bytes it names are untouched.
         expect(records.get('atomic-fixture')).toEqual(oldMetadata)
         expect(bytesOf(blobs.get(oldBlobKey))).toEqual([1, 2])
+        // The per-item blob the previous release reads went down with the record.
+        expect(bytesOf(blobs.get(legacyBlobKey))).toEqual([1, 2])
         // Nothing was deleted, and no stored key was rewritten: the failed save only left
         // an unreferenced blob behind.
-        expect(fake.transactions.some((tx) => tx.stores.includes('canvas-blobs') && tx !== assetTx && tx.puts.includes('canvas-blobs'))).toBe(false)
-        expect([...blobs.keys()].filter((key) => key !== oldBlobKey)).toHaveLength(1)
+        expect(fake.transactions.some((tx) => tx.stores.includes('canvas-blobs') && tx !== assetTx && tx !== metadataTx && tx.puts.includes('canvas-blobs'))).toBe(false)
+        expect([...blobs.keys()].filter((key) => key !== oldBlobKey && key !== legacyBlobKey)).toHaveLength(1)
       }
     }
   )

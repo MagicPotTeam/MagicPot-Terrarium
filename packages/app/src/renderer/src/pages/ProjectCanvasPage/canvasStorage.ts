@@ -41,6 +41,46 @@ interface CanvasPersistedData {
   groups?: CanvasGroup[]
   groupBranches?: CanvasGroupBranch[]
   figmaBinding?: CanvasFigmaBinding | null
+  /**
+   * CANVAS_RECORD_ASSET_FORMAT on every record this version commits. Earlier
+   * versions build their record afresh and drop it, so a record without it was
+   * written (last) by a version that may have changed an image while carrying
+   * the item's old `assetKey` through.
+   */
+  assetFormat?: number
+  /**
+   * Item id or model texture key -> the content key whose bytes the legacy
+   * per-item blob (<storeKey>::canvas::<logicalKey>) holds. Only meaningful
+   * on a record that carries `assetFormat`.
+   */
+  legacyBlobAssetKeys?: Record<string, string>
+}
+
+// Records with content-keyed items that also keep a per-item blob for the
+// previous release (see the dual write in storeCanvasAssetBlobs).
+const CANVAS_RECORD_ASSET_FORMAT = 2
+
+function isCurrentFormatCanvasRecord(
+  persisted: CanvasPersistedData | SerializableCanvasItem[] | undefined
+): persisted is CanvasPersistedData {
+  return (
+    !!persisted &&
+    !Array.isArray(persisted) &&
+    (persisted as CanvasPersistedData).assetFormat === CANVAS_RECORD_ASSET_FORMAT
+  )
+}
+
+function readCanvasRecordLegacyBlobAssetKeys(
+  persisted: CanvasPersistedData | SerializableCanvasItem[] | undefined
+): Map<string, string> {
+  const keys = new Map<string, string>()
+  if (!isCurrentFormatCanvasRecord(persisted)) return keys
+  const raw = persisted.legacyBlobAssetKeys
+  if (!raw || typeof raw !== 'object') return keys
+  for (const [logicalKey, assetKey] of Object.entries(raw)) {
+    if (isCanvasAssetKey(assetKey)) keys.set(logicalKey, assetKey)
+  }
+  return keys
 }
 
 type CanvasSnapshot = {
@@ -356,6 +396,30 @@ const canvasAmbiguousObjectUrls = new Set<string>()
 // Last key seen for a path-backed source. Only ever used to keep assets
 // (a wider set is always safe), never to decide that bytes need no writing.
 const canvasAssetKeyHintBySource = new Map<string, string>()
+// Object URLs made from the per-item blob of one item (`<storeKey>\n<logicalKey>`
+// plus the generation of that blob): their bytes are that blob's bytes, so the
+// save that keys them needs no second per-item copy for the previous release.
+const canvasLegacyBlobByObjectUrl = new Map<string, string>()
+// Bumped whenever this session rewrites a per-item blob; older object URLs then no longer match it.
+const canvasLegacyBlobGeneration = new Map<string, number>()
+
+function getCanvasLegacyBlobId(storeKey: string, logicalKey: string): string {
+  const id = `${storeKey}\n${logicalKey}`
+  return `${id}\n${canvasLegacyBlobGeneration.get(id) ?? 0}`
+}
+
+function rememberCanvasLegacyBlobObjectUrl(url: string, storeKey: string, logicalKey: string): void {
+  rememberBoundedCanvasAssetKey(
+    canvasLegacyBlobByObjectUrl,
+    url,
+    getCanvasLegacyBlobId(storeKey, logicalKey)
+  )
+}
+
+function noteCanvasLegacyBlobRewritten(storeKey: string, logicalKey: string): void {
+  const id = `${storeKey}\n${logicalKey}`
+  canvasLegacyBlobGeneration.set(id, (canvasLegacyBlobGeneration.get(id) ?? 0) + 1)
+}
 
 function rememberBoundedCanvasAssetKey(cache: Map<string, string>, id: string, key: string): void {
   cache.delete(id)
@@ -1101,7 +1165,8 @@ function queueLegacyCanvasBlobSnapshotRead(
   store: IDBObjectStore,
   storeKey: string,
   logicalKey: string,
-  target: Map<string, CanvasStoredBinary>
+  target: Map<string, CanvasStoredBinary>,
+  onResult: (found: boolean) => void = () => {}
 ): void {
   const scopedRequest = store.get(getScopedCanvasBlobKey(storeKey, logicalKey))
   const legacyRequest = store.get(logicalKey)
@@ -1112,6 +1177,7 @@ function queueLegacyCanvasBlobSnapshotRead(
     if (++completed !== 2) return
     const result = scopedResult || legacyResult
     if (result) target.set(logicalKey, result)
+    onResult(!!result)
   }
   scopedRequest.onsuccess = () => {
     scopedResult = scopedRequest.result as CanvasStoredBinary | undefined
@@ -1128,25 +1194,52 @@ function queueLegacyCanvasBlobSnapshotRead(
 // Blob URLs are created only after the combined readonly transaction commits.
 // A content-keyed blob is read once however many items share it; an item
 // without a key, or whose keyed blob is missing, falls back to the per-item
-// blobs written by earlier versions.
+// blobs written by earlier versions. With `preferLegacy` (a record written
+// last by an earlier version, which may have changed an image while carrying
+// the old key through) the per-item blob comes first and the keyed blob is
+// only the fallback.
 function queueCanvasBlobSnapshotReads(
   store: IDBObjectStore,
   storeKey: string,
   reads: readonly CanvasBlobSnapshotRead[],
   target: Map<string, CanvasStoredBinary>,
-  resolvedByAssetKey: Set<string>
+  resolvedByAssetKey: Set<string>,
+  resolvedByLegacyBlob: Set<string>,
+  preferLegacy: boolean
 ): void {
   const logicalKeysByAssetKey = new Map<string, string[]>()
   const queuedLegacyKeys = new Set<string>()
-  const queueLegacy = (logicalKey: string): void => {
+  const queueLegacy = (logicalKey: string, onMissing?: () => void): void => {
     if (queuedLegacyKeys.has(logicalKey)) return
     queuedLegacyKeys.add(logicalKey)
-    queueLegacyCanvasBlobSnapshotRead(store, storeKey, logicalKey, target)
+    queueLegacyCanvasBlobSnapshotRead(store, storeKey, logicalKey, target, (found) => {
+      if (found) resolvedByLegacyBlob.add(logicalKey)
+      else onMissing?.()
+    })
+  }
+  const queueKeyed = (assetKey: string, logicalKeys: readonly string[], fallBack: boolean): void => {
+    const request = store.get(getScopedCanvasAssetBlobKey(storeKey, assetKey))
+    request.onsuccess = () => {
+      const result = request.result as CanvasStoredBinary | undefined
+      if (!result) {
+        if (fallBack) for (const logicalKey of logicalKeys) queueLegacy(logicalKey)
+        return
+      }
+      for (const logicalKey of logicalKeys) {
+        target.set(logicalKey, result)
+        resolvedByAssetKey.add(logicalKey)
+      }
+    }
   }
 
   for (const read of reads) {
     if (!read.assetKey) {
       queueLegacy(read.logicalKey)
+      continue
+    }
+    if (preferLegacy) {
+      const assetKey = read.assetKey
+      queueLegacy(read.logicalKey, () => queueKeyed(assetKey, [read.logicalKey], false))
       continue
     }
     const sharers = logicalKeysByAssetKey.get(read.assetKey)
@@ -1158,18 +1251,7 @@ function queueCanvasBlobSnapshotReads(
   }
 
   for (const [assetKey, logicalKeys] of logicalKeysByAssetKey) {
-    const request = store.get(getScopedCanvasAssetBlobKey(storeKey, assetKey))
-    request.onsuccess = () => {
-      const result = request.result as CanvasStoredBinary | undefined
-      if (!result) {
-        for (const logicalKey of logicalKeys) queueLegacy(logicalKey)
-        return
-      }
-      for (const logicalKey of logicalKeys) {
-        target.set(logicalKey, result)
-        resolvedByAssetKey.add(logicalKey)
-      }
-    }
+    queueKeyed(assetKey, logicalKeys, true)
   }
 }
 
@@ -1181,13 +1263,16 @@ async function readIndexedDbCanvasSnapshot(
   binaries: Map<string, CanvasStoredBinary>
   /** Logical keys whose binary was read through the content key recorded on the item. */
   resolvedByAssetKey: Set<string>
+  /** Logical keys whose binary was read from the per-item blob of that very item. */
+  resolvedByLegacyBlob: Set<string>
 }> {
   return await new Promise((resolve, reject) => {
     const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readonly')
     const binaries = new Map<string, CanvasStoredBinary>()
     const resolvedByAssetKey = new Set<string>()
+    const resolvedByLegacyBlob = new Set<string>()
     let persisted: CanvasPersistedData | SerializableCanvasItem[] | undefined
-    tx.oncomplete = () => resolve({ persisted, binaries, resolvedByAssetKey })
+    tx.oncomplete = () => resolve({ persisted, binaries, resolvedByAssetKey, resolvedByLegacyBlob })
     tx.onabort = () => rejectCanvasStorageError(reject, 'canvas snapshot read transaction', tx.error)
     tx.onerror = () => rejectCanvasStorageError(reject, 'canvas snapshot read transaction', tx.error)
     try {
@@ -1219,7 +1304,9 @@ async function readIndexedDbCanvasSnapshot(
             storeKey,
             reads,
             binaries,
-            resolvedByAssetKey
+            resolvedByAssetKey,
+            resolvedByLegacyBlob,
+            !isCurrentFormatCanvasRecord(persisted)
           )
         } catch (error) {
           try { tx.abort() } catch { /* Already inactive. */ }
@@ -1573,20 +1660,36 @@ function listCanvasBlobKeys(
   // Request errors abort the transaction; do not prevent their default action.
 }
 
-async function readCanvasBlobKeyIndex(
+type CanvasSaveBaseline = {
+  index: CanvasBlobKeyIndex | null
+  /** From the committed record: which content key each per-item blob holds. */
+  legacyBlobAssetKeys: Map<string, string>
+}
+
+async function readCanvasSaveBaseline(
   db: IDBDatabase,
   storeKey: string
-): Promise<CanvasBlobKeyIndex | null> {
+): Promise<CanvasSaveBaseline> {
   return await new Promise((resolve, reject) => {
-    const tx = db.transaction([BLOB_STORE_NAME], 'readonly')
+    const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readonly')
     let index: CanvasBlobKeyIndex | null = null
-    tx.oncomplete = () => resolve(index)
+    let legacyBlobAssetKeys = new Map<string, string>()
+    tx.oncomplete = () => resolve({ index, legacyBlobAssetKeys })
     tx.onabort = () => rejectCanvasStorageError(reject, 'blob key index transaction', tx.error)
     tx.onerror = () => rejectCanvasStorageError(reject, 'blob key index transaction', tx.error)
     try {
       listCanvasBlobKeys(tx.objectStore(BLOB_STORE_NAME), storeKey, (result) => {
         index = result
       })
+      const itemStore = tx.objectStore(STORE_NAME)
+      if (typeof (itemStore as Partial<IDBObjectStore>).get === 'function') {
+        const request = itemStore.get(storeKey)
+        request.onsuccess = () => {
+          legacyBlobAssetKeys = readCanvasRecordLegacyBlobAssetKeys(
+            request.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
+          )
+        }
+      }
     } catch (error) {
       try { tx.abort() } catch { /* Already inactive. */ }
       rejectCanvasStorageError(reject, 'blob key index transaction', error)
@@ -1595,6 +1698,8 @@ async function readCanvasBlobKeyIndex(
 }
 
 type CanvasAssetBlobWrite = { assetKey: string; data: ArrayBuffer; mimeType: string }
+/** A per-item blob of the previous release, copied from the keyed blob of `assetKey`. */
+type CanvasLegacyBlobWrite = { logicalKey: string; assetKey: string }
 
 async function writeCanvasAssetBlobBatch(
   db: IDBDatabase,
@@ -1629,27 +1734,43 @@ async function writeCanvasAssetBlobBatch(
  * the metadata. That is safe because a key is never rewritten: the record that
  * is still committed cannot point at any of them, and a save that fails later
  * only leaves unreferenced blobs for the next prune.
+ *
+ * Dual write for the previous release (remove one release after this one,
+ * together with the protection of legacy keys in pruneCanvasAssetBlobs): that
+ * release looks binaries up only by item id (<storeKey>::canvas::<itemId>, and
+ * <itemId>::tex::<name> for model textures). Every slot therefore also gets
+ * that per-item blob, copied once from its keyed blob when it is missing or
+ * holds other bytes (`legacyWrites`, done by commitCanvasMetadata together
+ * with the record); a later save of the unchanged slot moves nothing.
  */
 async function storeCanvasAssetBlobs(
   db: IDBDatabase,
   storeKey: string,
   slots: readonly CanvasBlobStoreSlot[],
-  existing: CanvasBlobKeyIndex | null,
+  baseline: CanvasSaveBaseline | null,
   allowByteReads = true
 ): Promise<{
   assetKeyByLogicalKey: Map<string, string>
+  /** Logical key -> content key whose bytes its per-item blob holds after this save. */
+  legacyBlobAssetKeys: Map<string, string>
+  /** Per-item blobs to copy from their keyed blob in the commit. */
+  legacyWrites: CanvasLegacyBlobWrite[]
   missingLogicalKeys: string[]
   /** Only with `allowByteReads` false: a slot needs its bytes read, nothing was written. */
   needsBytes: boolean
   /** Bytes read during this save, by logical key, for the mirror that follows. */
   readEntries: ResolvedCanvasBinaryAsset[]
 }> {
+  const existing = baseline?.index ?? null
+  const previousLegacyBlobAssetKeys = baseline?.legacyBlobAssetKeys ?? new Map<string, string>()
   const assetKeyByLogicalKey = new Map<string, string>()
+  const legacyBlobAssetKeys = new Map<string, string>()
   const missingLogicalKeys: string[] = []
   const readEntries: ResolvedCanvasBinaryAsset[] = []
   const storedKeys = new Set(existing?.assetKeys ?? [])
   let needsBytes = false
   const pendingByAssetKey = new Map<string, Promise<boolean>>()
+  const legacyWrites: CanvasLegacyBlobWrite[] = []
 
   let batch: CanvasAssetBlobWrite[] = []
   let batchBytes = 0
@@ -1667,6 +1788,17 @@ async function storeCanvasAssetBlobs(
     if (batch.length >= CANVAS_BLOB_BATCH_MAX_ENTRIES || batchBytes >= CANVAS_BLOB_BATCH_MAX_BYTES) {
       await flush()
     }
+  }
+  /** Does the per-item blob of this slot already hold the bytes of `assetKey`? */
+  const legacyBlobHolds = (slot: CanvasBlobStoreSlot, assetKey: string): boolean => {
+    if (!existing?.legacyKeys.has(slot.logicalKey)) return false
+    const recorded = previousLegacyBlobAssetKeys.get(slot.logicalKey)
+    if (recorded !== undefined) return recorded === assetKey
+    // A slot restored from that very blob in this session (a board of an earlier version).
+    return (
+      !getCanvasAssetSlotSourceFile(slot.owner, slot.slotId) &&
+      canvasLegacyBlobByObjectUrl.get(slot.src) === getCanvasLegacyBlobId(storeKey, slot.logicalKey)
+    )
   }
 
   const storeSlot = async (slot: CanvasBlobStoreSlot): Promise<void> => {
@@ -1698,10 +1830,11 @@ async function storeCanvasAssetBlobs(
     if (!storedKeys.has(assetKey)) {
       let pending = pendingByAssetKey.get(assetKey)
       if (!pending) {
+        const key = assetKey
         pending = (async () => {
           const data = await readBytes()
           if (!data || !bytes) return false
-          await enqueue({ assetKey, data, mimeType: bytes.mimeType })
+          await enqueue({ assetKey: key, data, mimeType: bytes.mimeType })
           return true
         })()
         pendingByAssetKey.set(assetKey, pending)
@@ -1712,6 +1845,15 @@ async function storeCanvasAssetBlobs(
       }
     }
     assetKeyByLogicalKey.set(slot.logicalKey, assetKey)
+
+    if (!legacyBlobHolds(slot, assetKey)) {
+      if (!allowByteReads) {
+        needsBytes = true
+        return
+      }
+      legacyWrites.push({ logicalKey: slot.logicalKey, assetKey })
+    }
+    legacyBlobAssetKeys.set(slot.logicalKey, assetKey)
   }
 
   // Slots that share one object URL wait for the first of them: its key is then known
@@ -1745,8 +1887,23 @@ async function storeCanvasAssetBlobs(
     }
   )
   await Promise.all(workers)
+
   await flush()
-  return { assetKeyByLogicalKey, missingLogicalKeys, readEntries, needsBytes }
+  // Per-item blobs of items that are not saved now (deleted, still in the undo
+  // history) keep their entry while the blob exists, so an undo moves nothing.
+  for (const [logicalKey, assetKey] of previousLegacyBlobAssetKeys) {
+    if (!legacyBlobAssetKeys.has(logicalKey) && existing?.legacyKeys.has(logicalKey)) {
+      legacyBlobAssetKeys.set(logicalKey, assetKey)
+    }
+  }
+  return {
+    assetKeyByLogicalKey,
+    legacyBlobAssetKeys,
+    legacyWrites,
+    missingLogicalKeys,
+    readEntries,
+    needsBytes
+  }
 }
 
 /**
@@ -1754,18 +1911,27 @@ async function storeCanvasAssetBlobs(
  * every content key the record points at is still stored (another window may
  * have pruned it since this save looked); if one is gone nothing is written
  * and the caller stores the bytes again. Resolves false in that case.
+ * The per-item blobs of the previous release (`legacyWrites`) are copied from
+ * their keyed blobs in this transaction too, so a per-item blob never holds
+ * bytes the committed record does not name.
  */
 async function commitCanvasMetadata(
   db: IDBDatabase,
   storeKey: string,
   payload: CanvasPersistedData,
   requiredAssetKeys: ReadonlySet<string>,
-  verifyAssetKeys: boolean
+  verifyAssetKeys: boolean,
+  legacyWrites: readonly CanvasLegacyBlobWrite[] = []
 ): Promise<boolean> {
   return await new Promise<boolean>((resolve, reject) => {
     const tx = db.transaction([BLOB_STORE_NAME, STORE_NAME], 'readwrite')
     let assetKeyVanished = false
-    tx.oncomplete = () => resolve(!assetKeyVanished)
+    tx.oncomplete = () => {
+      if (!assetKeyVanished) {
+        for (const write of legacyWrites) noteCanvasLegacyBlobRewritten(storeKey, write.logicalKey)
+      }
+      resolve(!assetKeyVanished)
+    }
     tx.onabort = () => {
       if (assetKeyVanished) resolve(false)
       else rejectCanvasStorageError(reject, 'canvas snapshot save transaction', tx.error)
@@ -1778,21 +1944,56 @@ async function commitCanvasMetadata(
       try { tx.abort() } catch { /* Already inactive. */ }
       rejectCanvasStorageError(reject, 'canvas snapshot save transaction', error)
     }
+    const vanish = (): void => {
+      if (assetKeyVanished) return
+      assetKeyVanished = true
+      try { tx.abort() } catch { /* Completes without the metadata write. */ }
+    }
     try {
+      const blobStore = tx.objectStore(BLOB_STORE_NAME)
       const putMetadata = (): void => {
+        // The previous release reads these per-item blobs (remove one release after this one).
+        // Each keyed blob is read once; the puts are issued from its request callback,
+        // while the transaction is still active.
+        const logicalKeysByAssetKey = new Map<string, string[]>()
+        for (const write of legacyWrites) {
+          const logicalKeys = logicalKeysByAssetKey.get(write.assetKey)
+          if (logicalKeys) logicalKeys.push(write.logicalKey)
+          else logicalKeysByAssetKey.set(write.assetKey, [write.logicalKey])
+        }
+        for (const [assetKey, logicalKeys] of logicalKeysByAssetKey) {
+          const request = blobStore.get(getScopedCanvasAssetBlobKey(storeKey, assetKey))
+          request.onsuccess = () => {
+            try {
+              const binary = request.result as CanvasStoredBinary | undefined
+              if (!binary) {
+                vanish()
+                return
+              }
+              for (const logicalKey of logicalKeys) {
+                blobStore.put(
+                  { data: binary.data, mimeType: binary.mimeType },
+                  getScopedCanvasBlobKey(storeKey, logicalKey)
+                )
+              }
+            } catch (error) {
+              fail(error)
+            }
+          }
+          // Request errors abort the transaction; do not prevent their default action.
+        }
         tx.objectStore(STORE_NAME).put(payload, storeKey)
       }
       if (!verifyAssetKeys || requiredAssetKeys.size === 0) {
         putMetadata()
         return
       }
-      listCanvasBlobKeys(tx.objectStore(BLOB_STORE_NAME), storeKey, (index) => {
+      listCanvasBlobKeys(blobStore, storeKey, (index) => {
         try {
           if (index) {
             for (const assetKey of requiredAssetKeys) {
               if (index.assetKeys.has(assetKey)) continue
-              assetKeyVanished = true
-              try { tx.abort() } catch { /* Completes without the metadata write. */ }
+              vanish()
               return
             }
           }
@@ -1847,10 +2048,12 @@ export type CanvasSaveOutcome = void | 'needs-bytes'
 /** Content keys of in-memory items this session knows, without reading anything. */
 function collectKnownCanvasAssetKeys(
   itemLists: Iterable<readonly CanvasItem[]>,
-  target: Set<string>
+  target: Set<string>,
+  itemIds?: Set<string>
 ): void {
   for (const list of itemLists) {
     for (const item of list) {
+      itemIds?.add(item.id)
       if (!isBlobPersistableCanvasItem(item)) continue
       const blobItem = item as BlobPersistableCanvasItem
       if (blobItem.src) {
@@ -1875,52 +2078,27 @@ function collectKnownCanvasAssetKeys(
   }
 }
 
-/**
- * The per-item blob keys (item id, model texture key) that loading this record
- * would fall back to: the same items the loader queues reads for, minus those
- * whose content-keyed blob is stored.
- */
-function collectLegacyCanvasBlobKeysStillRead(
-  persistedItems: readonly SerializableCanvasItem[],
-  storedAssetKeys: ReadonlySet<string>
-): Set<string> {
-  const stillRead = new Set<string>()
-  for (const item of persistedItems) {
-    if (!item || typeof item !== 'object' || !isBlobPersistableCanvasItem(item)) continue
-    const persistedKeys = readPersistedCanvasAssetKeys(item)
-    const loaderReadsBlob =
-      !item.src || hasLocallyPersistableCanvasSrc(item) || isRelativeCanvasAssetReference(item.src)
-    if (
-      loaderReadsBlob &&
-      !(persistedKeys.assetKey && storedAssetKeys.has(persistedKeys.assetKey))
-    ) {
-      stillRead.add(item.id)
-    }
-    if (item.type === 'model3d' && item.textures) {
-      for (const textureName of Object.keys(item.textures)) {
-        const textureAssetKey = persistedKeys.textureAssetKeys[textureName]
-        if (loaderReadsBlob && !(textureAssetKey && storedAssetKeys.has(textureAssetKey))) {
-          stillRead.add(getModelTextureKey(item.id, textureName))
-        }
-      }
-    }
-  }
-  return stillRead
+/** The item id a per-item blob key belongs to (an item id or `<itemId>::tex::<name>`). */
+function getLegacyCanvasBlobItemId(logicalKey: string): string {
+  const textureSeparator = logicalKey.indexOf('::tex::')
+  return textureSeparator === -1 ? logicalKey : logicalKey.slice(0, textureSeparator)
 }
 
 /**
- * Deletes the content-keyed blobs of one canvas that nothing references any
- * more. The referenced set is read from the committed record inside the same
+ * Deletes the blobs of one canvas that nothing can need any more. The
+ * referenced set is read from the committed record inside the same
  * transaction, so a blob the stored canvas needs can never be removed; keys of
  * `protectedAssetKeys` (the items just saved, undo history, redo stack) are
- * kept as well. Without a committed record, or where the store cannot be
- * enumerated, nothing is deleted.
+ * kept as well. Per-item blobs (the previous release's keys) are kept for every
+ * item of the committed record and every item of `protectedItemIds`; only the
+ * blobs of items that are in neither are swept. Without a committed record, or
+ * where the store cannot be enumerated, nothing is deleted.
  */
 async function pruneCanvasAssetBlobs(
   db: IDBDatabase,
   storeKey: string,
   protectedAssetKeys: ReadonlySet<string>,
-  deleteMigratedLegacyBlobs: boolean
+  protectedItemIds: ReadonlySet<string>
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readwrite')
@@ -1943,21 +2121,22 @@ async function pruneCanvasAssetBlobs(
           | SerializableCanvasItem[]
           | undefined
         if (persisted === undefined) return
-        const referenced = countCanvasAssetKeyReferences(extractPersistedCanvasData(persisted).items)
         const persistedItems = extractPersistedCanvasData(persisted).items
+        const referenced = countCanvasAssetKeyReferences(persistedItems)
+        const liveItemIds = new Set(protectedItemIds)
+        for (const item of persistedItems) {
+          if (item && typeof item === 'object' && typeof item.id === 'string') liveItemIds.add(item.id)
+        }
         listCanvasBlobKeys(blobStore, storeKey, (index) => {
           if (!index) return
           for (const assetKey of index.assetKeys) {
             if (referenced.has(assetKey) || protectedAssetKeys.has(assetKey)) continue
             blobStore.delete(getScopedCanvasAssetBlobKey(storeKey, assetKey))
           }
-          if (!deleteMigratedLegacyBlobs) return
-          // Per-item blobs written by earlier versions: kept only while loading the
-          // committed record would still read them, that is for an item without a
-          // content key or whose keyed blob is not stored.
-          const stillRead = collectLegacyCanvasBlobKeysStillRead(persistedItems, index.assetKeys)
+          // The previous release reads these (remove one release after this one).
           for (const legacyKey of index.legacyKeys) {
-            if (legacyKey.startsWith(CANVAS_ASSET_BLOB_KEY_PREFIX) || stillRead.has(legacyKey)) continue
+            if (legacyKey.startsWith(CANVAS_ASSET_BLOB_KEY_PREFIX)) continue
+            if (liveItemIds.has(getLegacyCanvasBlobItemId(legacyKey))) continue
             blobStore.delete(getScopedCanvasBlobKey(storeKey, legacyKey))
           }
         })
@@ -2530,8 +2709,9 @@ async function saveCanvasItemsExclusive(
     let readEntries: ResolvedCanvasBinaryAsset[] = []
     let mirrorPlan: CanvasMirrorPlan | null | undefined
     for (let attempt = 1; ; attempt += 1) {
-      const existing = slots.length > 0 ? await readCanvasBlobKeyIndex(db, storeKey) : null
-      const stored = await storeCanvasAssetBlobs(db, storeKey, slots, existing, !metadataOnly)
+      const baseline = slots.length > 0 ? await readCanvasSaveBaseline(db, storeKey) : null
+      const existing = baseline?.index ?? null
+      const stored = await storeCanvasAssetBlobs(db, storeKey, slots, baseline, !metadataOnly)
       if (stored.needsBytes) return 'needs-bytes'
       if (stored.missingLogicalKeys.length > 0) {
         throw new Error(
@@ -2574,14 +2754,17 @@ async function saveCanvasItemsExclusive(
         items: persistedItems,
         groups,
         groupBranches,
-        figmaBinding
+        figmaBinding,
+        assetFormat: CANVAS_RECORD_ASSET_FORMAT,
+        legacyBlobAssetKeys: Object.fromEntries(stored.legacyBlobAssetKeys)
       }
       const committed = await commitCanvasMetadata(
         db,
         storeKey,
         payload,
         new Set(assetKeyByLogicalKey.values()),
-        existing !== null
+        existing !== null,
+        stored.legacyWrites
       )
       if (committed) break
       if (attempt >= CANVAS_SAVE_MAX_ATTEMPTS) {
@@ -2593,16 +2776,12 @@ async function saveCanvasItemsExclusive(
 
     // 3. The mirror: missing asset files, the project file, then its own cleanup.
     // Its failure does not fail the save; IndexedDB already holds the board.
-    // Blobs of earlier versions are only given up once the board is also safe
-    // in the mirror (or there is no mirror in this environment at all).
-    let mirrorIsCurrent = false
     try {
       if (mirrorPlan === undefined) {
         mirrorPlan = await planCanvasMirrorSave(storeKey, items, assetKeyByLogicalKey, true)
       }
-      if (mirrorPlan === null) mirrorIsCurrent = true
       if (mirrorPlan) {
-        mirrorIsCurrent = await executeCanvasMirrorSave(
+        await executeCanvasMirrorSave(
           mirrorPlan,
           storeKey,
           items,
@@ -2621,8 +2800,13 @@ async function saveCanvasItemsExclusive(
     // only delays the cleanup to a later save.
     try {
       const protectedAssetKeys = new Set(assetKeyByLogicalKey.values())
-      collectKnownCanvasAssetKeys(options.getProtectedItems?.() ?? [], protectedAssetKeys)
-      await pruneCanvasAssetBlobs(db, storeKey, protectedAssetKeys, mirrorIsCurrent)
+      const protectedItemIds = new Set(items.map((item) => item.id))
+      collectKnownCanvasAssetKeys(
+        options.getProtectedItems?.() ?? [],
+        protectedAssetKeys,
+        protectedItemIds
+      )
+      await pruneCanvasAssetBlobs(db, storeKey, protectedAssetKeys, protectedItemIds)
     } catch (error) {
       console.warn('[Canvas Storage] Failed to prune unreferenced canvas assets:', error)
     }
@@ -2651,10 +2835,8 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
   let createdUrls: Map<string, string> | undefined
   try {
     db = await openDB()
-    const { persisted, binaries, resolvedByAssetKey } = await readIndexedDbCanvasSnapshot(
-      db,
-      storeKey
-    )
+    const { persisted, binaries, resolvedByAssetKey, resolvedByLegacyBlob } =
+      await readIndexedDbCanvasSnapshot(db, storeKey)
     db.close()
     db = undefined
 
@@ -2698,6 +2880,10 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
       createdUrls = undefined
       const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups, groupBranches, figmaBinding }
+    }
+    for (const logicalKey of resolvedByLegacyBlob) {
+      const url = restoredBlobUrls.get(logicalKey)
+      if (url) rememberCanvasLegacyBlobObjectUrl(url, storeKey, logicalKey)
     }
     createdUrls = undefined // Ownership passes to the returned canvas items.
     return { items: restoredItems, groups, groupBranches, figmaBinding }

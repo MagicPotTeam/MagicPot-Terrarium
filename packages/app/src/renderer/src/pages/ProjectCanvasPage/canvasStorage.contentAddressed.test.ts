@@ -350,6 +350,11 @@ describe('canvas content keys', () => {
 
 const assetBlobKey = (storeKey: string, bytes: number[]): string =>
   `${storeKey}::canvas::asset::${contentKey(bytes)}`
+// The per-item blob the previous release reads (dual write for one release).
+const legacyBlobKey = (storeKey: string, logicalKey: string): string =>
+  `${storeKey}::canvas::${logicalKey}`
+const keyedBlobKeys = (): string[] => fake.blobKeys().filter((key) => key.includes('::canvas::asset::'))
+const keyedBlobPuts = () => fake.blobPuts().filter((put) => put.key.includes('::canvas::asset::'))
 
 describe('content-addressed canvas blob store', () => {
   it('stores the bytes once: saving the same board again writes metadata only', async () => {
@@ -358,10 +363,18 @@ describe('content-addressed canvas blob store', () => {
       imageItem('b', registerSource('blob:twice-b', [2, 2, 2, 2, 2]))
     ]
     await saveCanvasItems(items, 'twice')
+    // Each binary once under its content key, and once per item for the previous release.
     expect(fake.blobPuts().map((put) => put.key).sort()).toEqual(
-      [assetBlobKey('twice', [1, 1, 1, 1]), assetBlobKey('twice', [2, 2, 2, 2, 2])].sort()
+      [
+        assetBlobKey('twice', [1, 1, 1, 1]),
+        assetBlobKey('twice', [2, 2, 2, 2, 2]),
+        legacyBlobKey('twice', 'a'),
+        legacyBlobKey('twice', 'b')
+      ].sort()
     )
-    expect(fake.blobPuts().reduce((sum, put) => sum + put.bytes, 0)).toBe(9)
+    expect(keyedBlobPuts().reduce((sum, put) => sum + put.bytes, 0)).toBe(9)
+    expect(fake.blobBytes(legacyBlobKey('twice', 'a'))).toEqual([1, 1, 1, 1])
+    expect(fake.blobBytes(legacyBlobKey('twice', 'b'))).toEqual([2, 2, 2, 2, 2])
 
     fake.resetLog()
     fetchCalls = []
@@ -408,7 +421,12 @@ describe('content-addressed canvas blob store', () => {
     const item = imageItem('ref', 'local-media:///D:/refs/ref.png', { sourceIdentity })
     await saveCanvasItems([item], 'path-backed')
     expect(readFileFromPath).toHaveBeenCalledTimes(1)
-    expect(fake.blobPuts()).toHaveLength(1)
+    expect(fake.blobPuts().map((put) => put.key).sort()).toEqual(
+      [
+        `path-backed::canvas::asset::${fake.record('path-backed')!.items[0].assetKey}`,
+        legacyBlobKey('path-backed', 'ref')
+      ].sort()
+    )
 
     fake.resetLog()
     readFileFromPath.mockClear()
@@ -425,14 +443,14 @@ describe('content-addressed canvas blob store', () => {
     const copy = imageItem('copy', src, { x: 80 })
     await saveCanvasItems([first, copy], 'shared')
 
-    expect(fake.blobKeys()).toEqual([assetBlobKey('shared', [3, 3, 3])])
+    expect(keyedBlobKeys()).toEqual([assetBlobKey('shared', [3, 3, 3])])
     expect(countCanvasAssetKeyReferences(fake.record('shared')!.items)).toEqual(
       new Map([[contentKey([3, 3, 3]), 2]])
     )
 
     // Deleting one of the two must not take the blob the other still uses.
     await saveCanvasItems([copy], 'shared')
-    expect(fake.blobKeys()).toEqual([assetBlobKey('shared', [3, 3, 3])])
+    expect(keyedBlobKeys()).toEqual([assetBlobKey('shared', [3, 3, 3])])
     expect(countCanvasAssetKeyReferences(fake.record('shared')!.items)).toEqual(
       new Map([[contentKey([3, 3, 3]), 1]])
     )
@@ -464,7 +482,7 @@ describe('content-addressed canvas blob store', () => {
     await saveCanvasItems([keep], 'undo', [], [], null, { getProtectedItems: () => [[item, keep]] })
     expect(fake.blobKeys()).toContain(assetBlobKey('undo', [5, 4, 3, 2, 1]))
     await saveCanvasItems([keep], 'undo', [], [], null, { getProtectedItems: () => [[keep]] })
-    expect(fake.blobKeys()).toEqual([assetBlobKey('undo', [8])])
+    expect(fake.blobKeys()).toEqual([assetBlobKey('undo', [8]), legacyBlobKey('undo', 'keep')].sort())
   })
 
   it('stores the bytes again when a pruned asset comes back', async () => {
@@ -474,7 +492,7 @@ describe('content-addressed canvas blob store', () => {
     expect(fake.blobKeys()).toEqual([])
 
     await saveCanvasItems([item], 'back')
-    expect(fake.blobKeys()).toEqual([assetBlobKey('back', [9, 8, 7])])
+    expect(fake.blobKeys()).toEqual([assetBlobKey('back', [9, 8, 7]), legacyBlobKey('back', 'back')].sort())
     expect(fake.blobBytes(assetBlobKey('back', [9, 8, 7]))).toEqual([9, 8, 7])
   })
 
@@ -488,7 +506,9 @@ describe('content-addressed canvas blob store', () => {
     })
 
     expect(fake.record('history-fail')!.items).toEqual([])
-    expect(fake.blobKeys()).toEqual([assetBlobKey('history-fail', [1, 2])])
+    expect(fake.blobKeys()).toEqual(
+      [assetBlobKey('history-fail', [1, 2]), legacyBlobKey('history-fail', 'gone')].sort()
+    )
   })
 
   it('never deletes blobs of another canvas, unscoped blobs or foreign keys', async () => {
@@ -547,7 +567,9 @@ describe('content-addressed canvas blob store', () => {
     )
 
     expect(fake.record('refuse')).toEqual(before)
-    expect(fake.blobKeys()).toEqual([assetBlobKey('refuse', [1, 2, 3])])
+    expect(fake.blobKeys()).toEqual(
+      [assetBlobKey('refuse', [1, 2, 3]), legacyBlobKey('refuse', 'stable')].sort()
+    )
   })
 
   it('restores every item from its keyed blob and recognises the restored sources on the next save', async () => {
@@ -575,7 +597,7 @@ describe('content-addressed canvas blob store', () => {
 
     expect(fetchCalls).toEqual([])
     expect(fake.blobPuts()).toEqual([])
-    expect(fake.blobKeys()).toEqual(
+    expect(keyedBlobKeys()).toEqual(
       [assetBlobKey('restore', [7, 7, 7]), assetBlobKey('restore', [1, 0, 1])].sort()
     )
     expect(fake.record('restore')!.items.map((item) => item.assetKey)).toEqual([
@@ -619,7 +641,7 @@ describe('content-addressed canvas blob store', () => {
     await saveCanvasItems([{ ...restored, x: 5 } as CanvasItem], 'model-rt')
     expect(fetchCalls).toEqual([])
     expect(fake.blobPuts()).toEqual([])
-    expect(fake.blobKeys()).toEqual(
+    expect(keyedBlobKeys()).toEqual(
       [assetBlobKey('model-rt', [2, 4, 6]), assetBlobKey('model-rt', [9, 9])].sort()
     )
   })
@@ -908,8 +930,8 @@ describe('content-addressed autosave mirror', () => {
     const mirrorKeys = mirror.assetFiles().map((name) => name.split('.')[0])
     const pathRecord = fake.record('mirror-posix')!.items.find((item) => item.id === 'path')!
     expect(mirrorKeys).toContain(pathRecord.assetKey)
-    expect(fake.blobKeys()).toHaveLength(1)
-    for (const key of fake.blobKeys()) {
+    expect(keyedBlobKeys()).toHaveLength(1)
+    for (const key of keyedBlobKeys()) {
       expect(mirrorKeys.some((mirrorKey) => key.endsWith(`::canvas::asset::${mirrorKey}`))).toBe(true)
     }
 
@@ -1198,7 +1220,9 @@ describe('boards saved by an earlier version', () => {
       expect((item as { src: string }).src).toMatch(/^blob:restored-/)
     }
 
+    fake.resetLog()
     await saveCanvasItems(loaded.items, 'migrate')
+    expect(fake.blobPuts().every((put) => put.key.includes('::canvas::asset::'))).toBe(true)
 
     // Every binary is now stored under its content key, byte for byte...
     const record = fake.record('migrate')!
@@ -1213,8 +1237,17 @@ describe('boards saved by an earlier version', () => {
     for (const bytes of [[1, 1, 1], [2, 2], [3], [4, 4, 4, 4]]) {
       expect(fake.blobBytes(assetBlobKey('migrate', bytes))).toEqual(bytes)
     }
-    // ...and only then the per-item blobs of this board are gone. Nothing else is touched.
-    expect(legacyKeysOf('migrate')).toEqual([])
+    // ...while the per-item blobs of its items stay for the previous release; only
+    // the orphan of an item no record holds any more is swept. Nothing else is touched.
+    expect(legacyKeysOf('migrate')).toEqual(
+      [
+        'migrate::canvas::old-a',
+        'migrate::canvas::old-b',
+        'migrate::canvas::old-model',
+        'migrate::canvas::old-model::tex::diffuse'
+      ].sort()
+    )
+    expect(fake.blobBytes('migrate::canvas::old-a')).toEqual([1, 1, 1])
     expect(fake.blobKeys()).toContain('another-board::canvas::old-a')
     expect(fake.blobKeys()).toContain('old-a')
 
@@ -1244,7 +1277,7 @@ describe('boards saved by an earlier version', () => {
     expect(reopened.items.map((item) => item.id)).toEqual(['old-a', 'old-b', 'old-model', 'note'])
   })
 
-  it('keeps the old blobs until the mirror has acknowledged the board as well', async () => {
+  it('keeps the old blobs whether or not the mirror has acknowledged the board', async () => {
     seedLegacyBoard('migrate-mirror')
     const mirror = createFakeMirror()
     mirror.state.failProjectFileWrite = true
@@ -1253,11 +1286,15 @@ describe('boards saved by an earlier version', () => {
 
     await saveCanvasItems(loaded.items, 'migrate-mirror')
     expect(fake.record('migrate-mirror')!.items[0].assetKey).toBe(contentKey([1, 1, 1]))
-    expect(legacyKeysOf('migrate-mirror')).toEqual(legacyBefore)
+    expect(legacyKeysOf('migrate-mirror')).toEqual(
+      legacyBefore.filter((key) => !key.endsWith('::deleted-long-ago'))
+    )
 
     mirror.state.failProjectFileWrite = false
     await saveCanvasItems(loaded.items, 'migrate-mirror')
-    expect(legacyKeysOf('migrate-mirror')).toEqual([])
+    expect(legacyKeysOf('migrate-mirror')).toEqual(
+      legacyBefore.filter((key) => !key.endsWith('::deleted-long-ago'))
+    )
     expect(mirror.project().items).toHaveLength(4)
   })
 
@@ -1280,5 +1317,195 @@ describe('boards saved by an earlier version', () => {
     await saveCanvasItems([managed as unknown as CanvasItem], 'migrate-managed')
     expect(fake.record('migrate-managed')!.items[0].assetKey).toBeUndefined()
     expect(fake.blobKeys()).toEqual(['migrate-managed::canvas::managed-old'])
+  })
+})
+
+// ─── Rollback to the previous release ───────────────────────────────────────
+// The previous release (3339aece) restores a blob-backed item only when its
+// record entry has no src and a blob is stored under <storeKey>::canvas::<id>
+// (model textures: <id>::tex::<name>). This mirrors that loader's look-up.
+function loadLikePreviousRelease(storeKey: string): Map<string, number[]> {
+  const record = fake.record(storeKey) as
+    | { items: Array<Record<string, unknown> & { id: string }> }
+    | undefined
+  const restored = new Map<string, number[]>()
+  for (const item of record?.items ?? []) {
+    if (!['image', 'model3d', 'video', 'file'].includes(item.type as string)) continue
+    if (item.src) continue
+    const blob = fake.committed.get('canvas-blobs')!.get(legacyBlobKey(storeKey, item.id)) as
+      | { data: ArrayBuffer }
+      | undefined
+    if (blob) restored.set(item.id, Array.from(new Uint8Array(blob.data)))
+    const textures = item.textures as Record<string, string> | undefined
+    for (const name of Object.keys(textures ?? {})) {
+      const texture = fake.committed
+        .get('canvas-blobs')!
+        .get(legacyBlobKey(storeKey, `${item.id}::tex::${name}`)) as { data: ArrayBuffer } | undefined
+      if (texture) restored.set(`${item.id}::tex::${name}`, Array.from(new Uint8Array(texture.data)))
+    }
+  }
+  return restored
+}
+
+function readBlobBytes(blob: Blob): Promise<number[]> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(Array.from(new Uint8Array(reader.result as ArrayBuffer)))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsArrayBuffer(blob)
+  })
+}
+
+describe('rollback to the previous release', () => {
+  const modelItem = (id: string, src: string, textures: Record<string, string>): CanvasItem =>
+    ({ ...(imageItem(id, src) as object), type: 'model3d', fileName: `${id}.glb`, textures }) as unknown as CanvasItem
+
+  it('gives every blob item a per-item blob with the bytes of its keyed blob', async () => {
+    const shared = registerSource('blob:rb-shared', [1, 2, 3])
+    const items = [
+      imageItem('a', shared),
+      imageItem('a-copy', shared, { x: 30 }),
+      imageItem('b', registerSource('blob:rb-b', [4, 5])),
+      modelItem('m', registerSource('blob:rb-m', [6]), { 'skin.png': registerSource('blob:rb-tex', [7, 7]) }),
+      { id: 'note', type: 'text', text: 'hi', x: 0, y: 0, zIndex: 2 } as unknown as CanvasItem
+    ]
+    await saveCanvasItems(items, 'rb-pairs')
+
+    const record = fake.record('rb-pairs')! as unknown as {
+      assetFormat: number
+      legacyBlobAssetKeys: Record<string, string>
+      items: Array<Record<string, unknown> & { id: string }>
+    }
+    expect(record.assetFormat).toBe(2)
+    for (const item of record.items.filter((entry) => entry.type !== 'text')) {
+      expect(item.src).toBe('')
+      const keyed = fake.blobBytes(`rb-pairs::canvas::asset::${item.assetKey as string}`)
+      expect(fake.blobBytes(legacyBlobKey('rb-pairs', item.id))).toEqual(keyed)
+      expect(record.legacyBlobAssetKeys[item.id]).toBe(item.assetKey)
+    }
+    expect(fake.blobBytes(legacyBlobKey('rb-pairs', 'm::tex::skin.png'))).toEqual(
+      fake.blobBytes(assetBlobKey('rb-pairs', [7, 7]))
+    )
+    // The previous release's loader finds every image, the copy and the texture included.
+    expect(Object.fromEntries(loadLikePreviousRelease('rb-pairs'))).toEqual({
+      a: [1, 2, 3],
+      'a-copy': [1, 2, 3],
+      b: [4, 5],
+      m: [6],
+      'm::tex::skin.png': [7, 7]
+    })
+
+    // Never more than once per item: later saves, also after a reopen, move nothing.
+    for (let round = 0; round < 3; round += 1) {
+      fake.resetLog()
+      fetchCalls = []
+      await saveCanvasItems(items.map((item) => ({ ...item, y: round }) as CanvasItem), 'rb-pairs')
+      expect(fake.blobPuts()).toEqual([])
+      expect(fetchCalls).toEqual([])
+    }
+    const reopened = await loadCanvasItems('rb-pairs')
+    fake.resetLog()
+    fetchCalls = []
+    await saveCanvasItems(reopened.items, 'rb-pairs', [], [], null, { metadataOnly: true })
+    expect(fake.blobPuts()).toEqual([])
+    expect(fetchCalls).toEqual([])
+  })
+
+  it('writes the per-item blob of a new item once, from the stored bytes when they need no read', async () => {
+    const original = imageItem('first', registerSource('blob:rb-dup', [8, 8, 8]))
+    await saveCanvasItems([original], 'rb-dup')
+
+    // A duplicate shares the stored content key: its per-item copy comes from the keyed blob.
+    fake.resetLog()
+    fetchCalls = []
+    const duplicate = { ...original, id: 'second', x: 50 } as CanvasItem
+    await saveCanvasItems([original, duplicate], 'rb-dup')
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobPuts().map((put) => put.key)).toEqual([legacyBlobKey('rb-dup', 'second')])
+    expect(fake.blobBytes(legacyBlobKey('rb-dup', 'second'))).toEqual([8, 8, 8])
+
+    // A metadata-only flush cannot write it: it asks for a full save instead.
+    const third = { ...original, id: 'third', x: 90 } as CanvasItem
+    fake.resetLog()
+    await expect(
+      saveCanvasItems([original, duplicate, third], 'rb-dup', [], [], null, { metadataOnly: true })
+    ).resolves.toBe('needs-bytes')
+    expect(fake.log.puts).toEqual([])
+  })
+
+  it('rewrites the per-item blob when the image of an item is replaced', async () => {
+    const item = imageItem('edited', registerSource('blob:rb-old', [1, 1]))
+    await saveCanvasItems([item], 'rb-replace')
+    const replaced = { ...item, src: registerSource('blob:rb-new', [2, 2, 2]) } as CanvasItem
+    await saveCanvasItems([replaced], 'rb-replace')
+
+    expect(fake.blobBytes(legacyBlobKey('rb-replace', 'edited'))).toEqual([2, 2, 2])
+    expect(loadLikePreviousRelease('rb-replace').get('edited')).toEqual([2, 2, 2])
+    fake.resetLog()
+    await saveCanvasItems([{ ...replaced, x: 4 } as CanvasItem], 'rb-replace')
+    expect(fake.blobPuts()).toEqual([])
+  })
+
+  it('restores the bytes the previous release changed when its record carries no format marker', async () => {
+    const item = imageItem('pic', registerSource('blob:rb-v2', [3, 3, 3]))
+    await saveCanvasItems([item], 'rb-unmarked')
+    const keyedBefore = fake.record('rb-unmarked')!.items[0].assetKey as string
+
+    // The previous release replaced the image of 'pic' and saved: it carried the
+    // item's old assetKey through, wrote the per-item blob and dropped the marker.
+    const record = fake.record('rb-unmarked')! as unknown as Record<string, unknown>
+    fake.committed.get('canvas-items')!.set('rb-unmarked', {
+      items: record.items,
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    fake.committed.get('canvas-blobs')!.set(legacyBlobKey('rb-unmarked', 'pic'), {
+      data: new Uint8Array([9, 9]).buffer,
+      mimeType: 'image/png'
+    })
+
+    const loaded = await loadCanvasItems('rb-unmarked')
+    const restored = loaded.items[0] as CanvasItem & { src: string }
+    const blob = restoredBlobs.get(restored.src)!
+    expect(await readBlobBytes(blob)).toEqual([9, 9])
+    expect(restored).not.toHaveProperty('assetKeySource')
+
+    // The next save re-keys from those bytes and moves no other byte.
+    fake.resetLog()
+    await saveCanvasItems(loaded.items, 'rb-unmarked')
+    const saved = fake.record('rb-unmarked')!.items[0]
+    expect(saved.assetKey).toBe(contentKey([9, 9]))
+    expect(saved.assetKey).not.toBe(keyedBefore)
+    expect(fake.blobPuts().map((put) => put.key)).toEqual([assetBlobKey('rb-unmarked', [9, 9])])
+    expect(fake.blobBytes(legacyBlobKey('rb-unmarked', 'pic'))).toEqual([9, 9])
+  })
+
+  it('still opens an unmarked record whose per-item blob is missing from its keyed blob', async () => {
+    const item = imageItem('only-keyed', registerSource('blob:rb-keyed-only', [5, 6]))
+    await saveCanvasItems([item], 'rb-keyed-only')
+    const record = fake.record('rb-keyed-only')! as unknown as Record<string, unknown>
+    fake.committed.get('canvas-items')!.set('rb-keyed-only', { items: record.items })
+    fake.committed.get('canvas-blobs')!.delete(legacyBlobKey('rb-keyed-only', 'only-keyed'))
+
+    const loaded = await loadCanvasItems('rb-keyed-only')
+    expect(loaded.items).toHaveLength(1)
+    const blob = restoredBlobs.get((loaded.items[0] as { src: string }).src)!
+    expect(await readBlobBytes(blob)).toEqual([5, 6])
+  })
+
+  it('sweeps the keyed and the per-item blobs of deleted items once they leave the history', async () => {
+    const a = imageItem('del-a', registerSource('blob:rb-del-a', [1]))
+    const b = imageItem('del-b', registerSource('blob:rb-del-b', [2]))
+    await saveCanvasItems([a, b], 'rb-delete')
+    expect(fake.blobKeys()).toHaveLength(4)
+
+    // Delete all: the undo history still holds both items, so all four blobs stay.
+    await saveCanvasItems([], 'rb-delete', [], [], null, { getProtectedItems: () => [[a, b]] })
+    expect(fake.blobKeys()).toHaveLength(4)
+    // The history window moved on: nothing can bring them back.
+    await saveCanvasItems([], 'rb-delete', [], [], null, { getProtectedItems: () => [[]] })
+    await saveCanvasItems([], 'rb-delete', [], [], null, { getProtectedItems: () => [[]] })
+    expect(fake.blobKeys()).toEqual([])
   })
 })
