@@ -31,6 +31,37 @@ function resolveGroupIds(
   return []
 }
 
+// The existing groups a group action would change or remove, resolved the
+// same way the executors below resolve them. create_group changes every group
+// that already holds one of its source items (it moves them out); delete_group
+// and rename_group act on the groups they match.
+export function resolveCanvasTargetGroupActionTargetGroups(
+  action: CanvasTargetCanvasAction,
+  state: CanvasTargetSemanticCanvasActionState,
+  sourceIds: string[]
+): CanvasGroup[] {
+  const groups = state.groups || []
+  let groupIds: string[]
+  switch (action.action) {
+    case 'create_group': {
+      const sourceIdSet = new Set(sourceIds)
+      return groups.filter((group) => group.itemIds.some((itemId) => sourceIdSet.has(itemId)))
+    }
+    case 'delete_group':
+      groupIds = resolveGroupIds(action, state, sourceIds)
+      break
+    case 'rename_group':
+      groupIds = resolveGroupIds(action, state, sourceIds, {
+        allowNameMatch: Boolean(!action.groupId && sourceIds.length === 0 && action.itemLabel)
+      })
+      break
+    default:
+      return []
+  }
+  const groupIdSet = new Set(groupIds)
+  return groups.filter((group) => groupIdSet.has(group.id))
+}
+
 export function createCanvasGroup(
   action: CanvasTargetCanvasAction,
   state: CanvasTargetSemanticCanvasActionState,

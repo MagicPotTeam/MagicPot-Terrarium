@@ -109,6 +109,7 @@ import {
 import {
   executeCanvasTargetSemanticCanvasAction,
   isCanvasTargetSemanticCanvasActionName,
+  resolveCanvasTargetSemanticCanvasActionSourceIds,
   resolveCropRectangleForImage,
   type CanvasTargetSemanticCanvasActionState,
   type CanvasTargetSemanticCanvasActionResult
@@ -139,6 +140,7 @@ import {
 import { createCanvasImageItemDraft, createCanvasItemId } from './canvasAssetDraftFactories'
 import { collectCanvasTargetCanvasActionReferencedIds } from './canvasTargetCanvasActionSources'
 import {
+  authorizeCanvasTargetCanvasWrite,
   authorizeCanvasTargetSourceReferences,
   canvasTargetEvidenceAllowsSelectionSnapshot,
   canvasTargetSelectionHasUnverifiedCrop,
@@ -555,6 +557,11 @@ const CANVAS_TARGET_EXTRACT_REFUSAL_REASONS = {
   selection: 'Source image extraction requires explicitly selected items.'
 }
 
+const CANVAS_TARGET_WRITE_REFUSAL_REASONS = {
+  evidenceMode: 'Canvas edits by a run are limited to selected items and items the run created.',
+  selection: 'Canvas edits by a run are limited to selected items and items the run created.'
+}
+
 const CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS = {
   evidenceMode: 'Placing a canvas source requires selected source assets.',
   selection: 'Placing a canvas source requires explicitly selected items.',
@@ -571,6 +578,7 @@ async function executeCanvasTargetCanvasAction(
     selectionAuthority: CanvasTargetSelectionAuthority | null
     knownCanvasUrlKeys?: ReadonlySet<string>
     runOutputUrls?: ReadonlyMap<string, string>
+    runCreatedItemIds?: ReadonlySet<string>
     semanticState?: CanvasTargetSemanticCanvasActionState
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
@@ -595,6 +603,22 @@ async function executeCanvasTargetCanvasAction(
         canvasDispatchCount: 0,
         fallbackReason: 'Semantic canvas state unavailable.'
       }
+    }
+
+    // A run may change or remove only the items the user selected and the
+    // items it created itself (canvasTargetSelectionAuthority).
+    const write = authorizeCanvasTargetCanvasWrite({
+      action,
+      state: options.semanticState,
+      authority: options.selectionAuthority,
+      runCreatedItemIds: options.runCreatedItemIds || new Set<string>()
+    })
+    if (!write.allowed) {
+      return buildCanvasTargetSourceReferenceRefusal(
+        `Canvas ${action.action}`,
+        write.refusal,
+        CANVAS_TARGET_WRITE_REFUSAL_REASONS
+      )
     }
 
     const semanticResult = executeCanvasTargetSemanticCanvasAction(action, options.semanticState)
@@ -1955,6 +1979,9 @@ export function useCanvasTargetWorkflow({
         collectCanvasTargetCanvasBlobUrlKeys(items, new Set<string>())
       )
       const runOutputUrls = new Map<string, string>()
+      // Items this run created (semantic createdIds and placed items). With
+      // the selected items, these are the only items the run may change.
+      const runCreatedItemIds = new Set<string>()
       let runtimeCanvasGroups = groups
       let runtimeCanvasVersion = 1
       let runtimeSelectedIds = new Set(selectedIds)
@@ -2138,7 +2165,19 @@ export function useCanvasTargetWorkflow({
       const executionPlanPreview = buildCanvasTargetExecutionPlanPreview({
         controlPlan,
         controlModelLabel,
-        isChineseUi
+        isChineseUi,
+        // Known only for actions that name canvas items directly; a stage or
+        // artifact reference resolves later in the run.
+        resolveCanvasActionTargetCount: (action) => {
+          if (action.action === 'clear_canvas') return items.length
+          if (action.sourceStageId || action.sourceStageIds?.length) return null
+          if (action.artifactId || action.artifactIds?.length) return null
+          return resolveCanvasTargetSemanticCanvasActionSourceIds(action, {
+            items,
+            selectedIds,
+            nextZIndex: nextZIndexRef.current
+          }).length
+        }
       })
       appendMessageToExternalChat({
         scope: agentScope,
@@ -2251,6 +2290,11 @@ export function useCanvasTargetWorkflow({
         placedItems: CanvasItem[],
         source?: 'quick_app' | 'canvas'
       ) => {
+        // Only ids the run's view of the canvas did not hold yet are new items.
+        const knownIds = new Set(runtimeCanvasItems.map((item) => item.id))
+        placedItems.forEach((item) => {
+          if (!knownIds.has(item.id)) runCreatedItemIds.add(item.id)
+        })
         mergeRuntimeCanvasItems(placedItems)
         registerCanvasItemIds(
           stageId,
@@ -2606,6 +2650,7 @@ export function useCanvasTargetWorkflow({
         stageId: string,
         result: CanvasTargetSemanticCanvasActionResult
       ) => {
+        result.createdIds.forEach((itemId) => runCreatedItemIds.add(itemId))
         const itemsChanged = result.items !== runtimeCanvasItems
         const groupsChanged = Boolean(result.groups && result.groups !== runtimeCanvasGroups)
         const selectionChanged = !areCanvasTargetIdSetsEqual(runtimeSelectedIds, result.selectedIds)
@@ -2863,6 +2908,7 @@ export function useCanvasTargetWorkflow({
             selectionAuthority: runSelectionAuthority,
             knownCanvasUrlKeys: runKnownCanvasUrlKeys,
             runOutputUrls,
+            runCreatedItemIds,
             semanticState,
             commitSemanticResult: (result) => commitSemanticCanvasResult(stageId, result),
             resolveCanvasTargetItemBounds

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import { collectCanvasTargetCanvasActionReferencedIds } from './canvasTargetCanvasActionSources'
 import type { CanvasTargetCanvasAction } from './canvasTargetCapabilityTypes'
+import type { CanvasTargetSemanticCanvasActionState } from './canvasTargetCanvasActionTypes'
 import {
+  authorizeCanvasTargetCanvasWrite,
   authorizeCanvasTargetMediaPlacementUrl,
   authorizeCanvasTargetSourceReferences,
   canvasItemMediaSourceUrls,
@@ -260,5 +262,62 @@ describe('collectCanvasTargetCanvasActionReferencedIds', () => {
   it('expands all_canvas and current_selection to what the action would read', () => {
     expect(collectCanvasTargetCanvasActionReferencedIds(action({ source: 'all_canvas' }), state).ids).toEqual(['A', 'B'])
     expect(collectCanvasTargetCanvasActionReferencedIds(action({ source: 'current_selection' }), state).ids).toEqual(['A'])
+  })
+})
+
+describe('authorizeCanvasTargetCanvasWrite', () => {
+  const c: CanvasImageItem = { ...a, id: 'C', src: 'data:image/png;base64,Qw==', x: 400 }
+  const group = (id: string, itemIds: string[]) => ({ id, name: id, itemIds, createdAt: '2026-01-01' })
+  const state = (overrides: Partial<CanvasTargetSemanticCanvasActionState> = {}): CanvasTargetSemanticCanvasActionState => ({
+    items: [a, b, c],
+    groups: [group('g-selected', ['A']), group('g-board', ['B']), group('g-mixed', ['A', 'B'])],
+    selectedIds: new Set(['A']),
+    nextZIndex: 4,
+    ...overrides
+  })
+  const action = (fields: Partial<CanvasTargetCanvasAction>) =>
+    ({ type: 'canvas', id: 'x', phase: 'before_model_stages', outputTarget: 'canvas', ...fields }) as CanvasTargetCanvasAction
+  // A is selected, C was created by the run, B is the user's and unselected.
+  const write = (fields: Partial<CanvasTargetCanvasAction>, overrides: Partial<CanvasTargetSemanticCanvasActionState> = {}, runCreated: string[] = ['C']) =>
+    authorizeCanvasTargetCanvasWrite({ action: action(fields), state: state(overrides), authority: createCanvasTargetSelectionAuthority([a]), runCreatedItemIds: new Set(runCreated) })
+
+  const itemWrites = ['delete_items', 'transform_items', 'flip_items', 'crop_image', 'arrange_items', 'set_z_order', 'update_text', 'update_annotation', 'set_media_playback'] as const
+  it.each(itemWrites)('%s may change selected and run-created items only', (name) => {
+    expect(write({ action: name, source: 'item_ids', itemIds: ['A', 'C'] })).toEqual({ allowed: true })
+    expect(write({ action: name, source: 'item_ids', itemIds: ['A', 'B'] })).toEqual({ allowed: false, refusal: 'not_selected', references: ['B'] })
+    expect(write({ action: name, source: 'all_canvas' })).toEqual({ allowed: false, refusal: 'not_selected', references: ['B'] })
+    expect(write({ action: name, source: 'all_canvas' }, { items: [a, c] })).toEqual({ allowed: true })
+    expect(write({ action: name, source: 'current_selection' }, { selectedIds: new Set(['B']) })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(write({ action: name, sourceStageId: 'stage-1' }, { stageCanvasItemIds: new Map([['stage-1', ['B']]]) })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(write({ action: name, itemIds: ['C'] }, {}, [])).toMatchObject({ allowed: false, references: ['C'] })
+  })
+
+  it('refuses clear_canvas whenever the canvas holds an item that is neither selected nor run-created', () => {
+    expect(write({ action: 'clear_canvas', explicitUserIntent: true })).toEqual({ allowed: false, refusal: 'not_selected', references: ['B'] })
+    expect(write({ action: 'clear_canvas', explicitUserIntent: true }, { items: [a, c] })).toEqual({ allowed: true })
+  })
+
+  it('refuses a group action that would change a group holding an unselected item', () => {
+    expect(write({ action: 'delete_group', groupId: 'g-board' })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(write({ action: 'delete_group', groupId: 'g-mixed' })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(write({ action: 'delete_group', groupName: 'g-board' })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(write({ action: 'rename_group', groupId: 'g-board', groupName: 'renamed' })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(write({ action: 'rename_group', groupName: 'g-board', itemLabel: 'renamed' })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(write({ action: 'delete_group', groupId: 'g-selected' })).toEqual({ allowed: true })
+    expect(write({ action: 'rename_group', groupId: 'g-selected', groupName: 'renamed' })).toEqual({ allowed: true })
+    // create_group moves its items out of every group that holds them.
+    expect(write({ action: 'create_group', itemIds: ['A'] })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(write({ action: 'create_group', itemIds: ['A'] }, { groups: [group('g-selected', ['A'])] })).toEqual({ allowed: true })
+    expect(write({ action: 'create_group', itemIds: ['B'] }, { groups: [] })).toMatchObject({ allowed: false, references: ['B'] })
+  })
+
+  it('leaves actions that do not change existing items alone', () => {
+    for (const name of ['select_items', 'focus_items', 'duplicate_items', 'add_text', 'add_annotation', 'set_canvas_background', 'set_grid_visibility', 'set_canvas_tool'] as const) {
+      expect(write({ action: name, source: 'item_ids', itemIds: ['B'] })).toEqual({ allowed: true })
+    }
+  })
+
+  it('refuses every write to an existing item without an authority', () => {
+    expect(authorizeCanvasTargetCanvasWrite({ action: action({ action: 'delete_items', itemIds: ['A'] }), state: state(), authority: null, runCreatedItemIds: new Set() })).toMatchObject({ allowed: false, references: ['A'] })
   })
 })

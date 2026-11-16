@@ -503,6 +503,64 @@ describe('Canvas Target evidence action gate', () => {
     ])
   })
 
+  // Write side: a run may change or remove only the items the user selected
+  // and the items it created itself. Everything else on the board, and the
+  // user's groups around it, stays as it was.
+  describe('canvas write authority', () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const board: CanvasImageItem = { ...plain, id: 'board', src: 'data:image/png;base64,BOARD', x: 300 }
+    const userGroups = [{ id: 'g-board', name: 'Client moodboard', itemIds: ['board'], createdAt: '2026-01-01' }, { id: 'g-source', name: 'Source', itemIds: ['source'], createdAt: '2026-01-01' }]
+    const runPlan = async (mode: 'selected_sources' | 'structured_only', capabilityActions: unknown[]) => {
+      const setGroups = vi.fn()
+      f.plan.mockResolvedValue({ id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [], capabilityActions })
+      const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain, board], groups: userGroups, setGroups }))
+      await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+      act(() => { result.current.setCanvasTargetEvidenceMode(mode); result.current.setCanvasTargetUserIntent('fixture') })
+      await act(async () => { await result.current.handleRunCanvasTarget() })
+      expect(f.plan).toHaveBeenCalledOnce()
+      return { setGroups }
+    }
+    const committedIds = () => f.commits.mock.calls.map(([next]) => (next as CanvasImageItem[]).map((item) => item.id))
+    const shown = (pattern: RegExp) => f.chat.mock.calls.some(([message]) => pattern.test(message.content || ''))
+
+    describe.each(['selected_sources', 'structured_only'] as const)('in %s', (mode) => {
+      it.each([
+        ['delete_items item_ids', { action: 'delete_items', source: 'item_ids', itemIds: ['board'] }],
+        ['delete_items all_canvas', { action: 'delete_items', source: 'all_canvas' }],
+        ['clear_canvas', { action: 'clear_canvas', explicitUserIntent: true }],
+        ['transform_items', { action: 'transform_items', source: 'item_ids', itemIds: ['board'], deltaX: 50 }],
+        ['arrange_items all_canvas', { action: 'arrange_items', source: 'all_canvas' }],
+        ['delete_group', { action: 'delete_group', groupId: 'g-board' }]
+      ])('refuses %s on an unselected item and leaves it and its group unchanged', async (_label, fields) => {
+        const { setGroups } = await runPlan(mode, [{ type: 'canvas', id: 'write', phase: 'before_model_stages', outputTarget: 'canvas', label: 'tidy', ...fields }])
+        expect(f.commits).not.toHaveBeenCalled()
+        expect(setGroups).not.toHaveBeenCalled()
+        expect(shown(new RegExp(`Canvas ${fields.action} skipped because a source was not selected`))).toBe(true)
+        // The run goes on after the refusal, as for a refused read.
+        expect(f.summary).toHaveBeenCalledOnce()
+      })
+    })
+
+    it('deletes a selected item without pruning its group, so undo restores both', async () => {
+      const { setGroups } = await runPlan('selected_sources', [{ type: 'canvas', id: 'delete', action: 'delete_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'item_ids', itemIds: ['source'], label: 'remove source' }])
+      expect(committedIds()).toEqual([['board']])
+      expect(setGroups).not.toHaveBeenCalled()
+      // The confirmation names how many items the delete removes.
+      expect(shown(/Canvas delete_items: remove source \(before_model_stages, 1 item\(s\)\)/)).toBe(true)
+    })
+
+    it('may change the items the run created itself (a duplicate of the selected item)', async () => {
+      await runPlan('structured_only', [
+        { type: 'canvas', id: 'copy', action: 'duplicate_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'item_ids', itemIds: ['source'], count: 1 },
+        { type: 'canvas', id: 'move', action: 'transform_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'current_selection', deltaX: 40 },
+        { type: 'canvas', id: 'delete', action: 'delete_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'current_selection' }
+      ])
+      expect(f.commits).toHaveBeenCalledTimes(3)
+      expect(committedIds().at(-1)).toEqual(['source', 'board'])
+      expect(shown(/skipped because a source was not selected/)).toBe(false)
+    })
+  })
+
   it('stops a structured_only run when the user starts a new selection while the plan is pending', async () => {
     const plain: CanvasImageItem = { ...image, crop: undefined }
     let finishPlan!: (plan: unknown) => void

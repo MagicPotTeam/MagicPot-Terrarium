@@ -1,5 +1,9 @@
 import type { CanvasTargetEvidenceMode } from '@shared/canvasTarget'
 
+import { resolveCanvasTargetGroupActionTargetGroups } from './canvasTargetCanvasActionGroups'
+import { resolveCanvasTargetSemanticCanvasActionSourceIds } from './canvasTargetCanvasActionSources'
+import type { CanvasTargetSemanticCanvasActionState } from './canvasTargetCanvasActionTypes'
+import type { CanvasTargetCanvasAction } from './canvasTargetCapabilityTypes'
 import { normalizeCanvasTargetEvidenceMode } from './canvasTargetEvidence'
 import { sanitizeCanvasItemForCheckContext } from './canvasTargetWorkflowAssetMetadata'
 import type { CanvasItem } from './types'
@@ -397,4 +401,68 @@ export function authorizeCanvasTargetMediaPlacementUrl(options: {
   const runOutputUrl = options.runOutputUrls.get(key)
   if (runOutputUrl) return { allowed: true, url: runOutputUrl }
   return { allowed: false, refusal: 'not_run_output', references: [] }
+}
+
+// Semantic canvas actions that change or remove items (or groups) that
+// already exist. Creating items, selecting, focusing, duplicating and the
+// canvas surface state (background, grid, tool) leave existing items as
+// they are and are not listed.
+const CANVAS_TARGET_ITEM_WRITE_ACTIONS: ReadonlySet<CanvasTargetCanvasAction['action']> = new Set([
+  'arrange_items',
+  'transform_items',
+  'set_z_order',
+  'delete_items',
+  'clear_canvas',
+  'flip_items',
+  'crop_image',
+  'update_text',
+  'update_annotation',
+  'set_media_playback',
+  'create_group',
+  'delete_group',
+  'rename_group'
+])
+
+export function canvasTargetCanvasActionWritesExistingItems(
+  action: Pick<CanvasTargetCanvasAction, 'action'>
+): boolean {
+  return CANVAS_TARGET_ITEM_WRITE_ACTIONS.has(action.action)
+}
+
+export type CanvasTargetCanvasWriteVerdict =
+  | { allowed: true }
+  | { allowed: false; refusal: 'not_selected'; references: string[] }
+
+// Decide whether a model-planned semantic canvas action may change or remove
+// the existing items (and groups) it targets. A run may change only the items
+// the user selected when the target dialog opened and the items the run
+// created itself; everything else on the board is refused by default. Unlike
+// a source read, this does not depend on the evidence mode or on the item
+// being unchanged: the run's own earlier edits of a selected item are fine.
+// clear_canvas (and a source of 'all_canvas', which resolves to every item)
+// is refused whenever the canvas holds any other item. A group action is
+// refused when a group it would change holds any other item.
+export function authorizeCanvasTargetCanvasWrite(options: {
+  action: CanvasTargetCanvasAction
+  state: CanvasTargetSemanticCanvasActionState
+  authority: CanvasTargetSelectionAuthority | null | undefined
+  runCreatedItemIds: ReadonlySet<string>
+}): CanvasTargetCanvasWriteVerdict {
+  const { action, state } = options
+  if (!canvasTargetCanvasActionWritesExistingItems(action)) return { allowed: true }
+  const selected = new Set(options.authority?.itemIds || [])
+  const writable = (itemId: string) => selected.has(itemId) || options.runCreatedItemIds.has(itemId)
+
+  const targetIds =
+    action.action === 'clear_canvas'
+      ? state.items.map((item) => item.id)
+      : resolveCanvasTargetSemanticCanvasActionSourceIds(action, state)
+  const groupMemberIds = resolveCanvasTargetGroupActionTargetGroups(action, state, targetIds).flatMap(
+    (group) => group.itemIds
+  )
+  const outside = Array.from(new Set([...targetIds, ...groupMemberIds])).filter(
+    (itemId) => !writable(itemId)
+  )
+  if (outside.length > 0) return { allowed: false, refusal: 'not_selected', references: outside }
+  return { allowed: true }
 }

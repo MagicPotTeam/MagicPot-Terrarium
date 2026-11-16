@@ -743,7 +743,10 @@ describe('executeCanvasTargetSemanticCanvasAction', () => {
     expect(result.nextZIndex).toBe(4)
   })
 
-  it('deletes resolved items and prunes group membership', () => {
+  // Updated (K8b): a run's delete no longer prunes groups. Groups are not in
+  // the undo history, so a pruned group could not be restored; like a manual
+  // delete, the group keeps naming the item and undo brings it back in.
+  it('deletes resolved items and leaves group membership for undo', () => {
     const first = createTextItem('item-1', 0, 0, 1)
     const second = createTextItem('item-2', 100, 0, 2)
 
@@ -760,8 +763,17 @@ describe('executeCanvasTargetSemanticCanvasAction', () => {
     )
 
     expect(result.items.map((item) => item.id)).toEqual([second.id])
-    expect(result.groups).toEqual([expect.objectContaining({ itemIds: [second.id] })])
+    expect(result.groups).toBeUndefined()
     expect(Array.from(result.selectedIds)).toEqual([second.id])
+  })
+
+  it('clears the canvas only with explicit intent and leaves groups for undo', () => {
+    const first = createTextItem('item-1', 0, 0, 1)
+    const state = { items: [first], groups: [createGroup('group-1', [first.id])], selectedIds: new Set<string>(), nextZIndex: 2 }
+    expect(executeCanvasTargetSemanticCanvasAction(createCanvasAction('clear_canvas', {}), state).items).toEqual([first])
+    const cleared = executeCanvasTargetSemanticCanvasAction(createCanvasAction('clear_canvas', { explicitUserIntent: true }), state)
+    expect(cleared.items).toEqual([])
+    expect(cleared.groups).toBeUndefined()
   })
 
   it('flips selected items while preserving their world center', () => {

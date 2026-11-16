@@ -10,7 +10,7 @@ import {
   getCanvasItemsBounds,
   translateCanvasItem
 } from './projectCanvasPageShared'
-import type { CanvasGroup, CanvasItem } from './types'
+import type { CanvasItem } from './types'
 import {
   buildFallbackResult,
   clampDuplicateCount,
@@ -313,19 +313,6 @@ export function setCanvasItemsZOrder(
   }
 }
 
-function pruneCanvasGroupsByDeletedIds(
-  groups: CanvasGroup[] | undefined,
-  deletedIds: Set<string>
-): CanvasGroup[] {
-  if (!groups) return []
-  return groups
-    .map((group) => ({
-      ...group,
-      itemIds: group.itemIds.filter((itemId) => !deletedIds.has(itemId))
-    }))
-    .filter((group) => group.itemIds.length > 0)
-}
-
 export function deleteCanvasItems(
   action: CanvasTargetCanvasAction,
   state: CanvasTargetSemanticCanvasActionState,
@@ -335,8 +322,10 @@ export function deleteCanvasItems(
     return buildFallbackResult(action, state, 'No source items were available to delete.')
   }
 
+  // Like a manual delete, a run's delete leaves groups as they are: groups
+  // live outside the undo history, so pruning them here could not be undone.
+  // Undo brings the items back into the groups that still name them.
   const { deletedIds, nextItems } = removeCanvasItemsWithAttachedCaptions(state.items, sourceIds)
-  const nextGroups = pruneCanvasGroupsByDeletedIds(state.groups, deletedIds)
   const selectedIds = new Set(
     Array.from(state.selectedIds).filter((selectedId) => !deletedIds.has(selectedId))
   )
@@ -344,7 +333,6 @@ export function deleteCanvasItems(
 
   return {
     items: nextItems,
-    groups: nextGroups,
     selectedIds,
     nextZIndex: resolveNextZIndex(nextItems, state.nextZIndex),
     affectedIds,
@@ -367,9 +355,9 @@ export function clearCanvas(
     )
   }
 
+  // Groups are kept, as for deleteCanvasItems, so undo restores the board.
   return {
     items: [],
-    groups: [],
     selectedIds: new Set(),
     nextZIndex: 1,
     affectedIds: state.items.map((item) => item.id),
