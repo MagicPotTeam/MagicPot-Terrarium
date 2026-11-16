@@ -311,6 +311,7 @@ import AgentThreadSkillsPanel from './components/AgentThreadSkillsPanel'
 import { useAgentArchiveResponder } from './useAgentArchiveResponder'
 import { useManagedFirstRunPane } from './useManagedFirstRunPane'
 import AgentThreadSidesPanel from './components/AgentThreadSidesPanel'
+import AgentTeamThreadRows, { type AgentTeamThreadRowsTeam } from './components/AgentTeamThreadRows'
 import { isAgentSideCommand, parseAgentSideCommand, type AgentSideCommandHandle } from './agentSideCommand'
 import { AgentProcessDetails, getAgentThreadProcessScope, useAgentThreadProcesses } from './components/AgentThreadProcessesPanel'
 import { AgentThreadJobRow, useAgentThreadJobs } from './components/AgentThreadJobsPanel'
@@ -8240,6 +8241,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // The observer is reset for each team identity, but the process-area host stays mounted.
   const imagePlacementKey = JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, teamEnabled, teamLead?.id, messageGeneration])
   const teamImagePlacement = useTeamImagePlacement(route?.scopeId ?? '', teamEnabled && teamLead ? teamMembers : [], imagePlacementKey)
+  // The thread list shows the lead and the members as indented rows under this thread's row.
+  const teamRowsTeam: AgentTeamThreadRowsTeam | null = compact && teamEnabled && teamLead && teamMembers.length
+    ? { leadId: teamLead.id, members: teamMembers.map(member => ({ id: member.id, name: member.teamMemberName || member.title })) }
+    : null
+  const [sideRowsHost, setSideRowsHost] = useState<HTMLDivElement | null>(null)
+  const [openSideTitle, setOpenSideTitle] = useState<string | null>(null)
+  // The toolbar summary names the open member (and the open side conversation after it).
+  const openMemberName = teamRowsTeam && currentSession?.teamLeadId ? currentSession.teamMemberName || currentSession.title : null
+  const openSubRowTitle = [openMemberName, openSideTitle].filter(Boolean).join(' · ') || null
+  useLayoutEffect(() => { onThreadSubRowChange?.(openSubRowTitle) }, [openSubRowTitle, onThreadSubRowChange])
+  useLayoutEffect(() => () => onThreadSubRowChange?.(null), [onThreadSubRowChange])
   const teamTaskClaimsRef = useRef(new Set<string>())
   const dispatchSelectedTeamTask = async (taskId: string): Promise<void> => {
     const scope = storageScope
@@ -9862,7 +9874,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={goalCommandAvailable} remote={!config || Boolean(config.use_remote_llm)} open={active && goalViewScope === inspectionScope} onClose={closeGoalView} cardHost={compact ? (goalCardOpen ? tailPanelHosts.goal : null) : undefined} />
           <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} onResult={compact ? handleScratchpadResult : undefined} />
           <AgentThreadSkillsPanel ref={skillCommandRef} visible={compact ? skillsCardOpen : skillDetailsOpen} onClose={() => setSkillDetailsOpen(false)} cardHost={compact ? (skillsCardOpen ? tailPanelHosts.skills : null) : undefined} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
-          <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} subRowsHost={threadSubRowsHost} onOpenSubRowChange={onThreadSubRowChange} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
+          <AgentTeamThreadRows host={threadSubRowsHost} team={teamRowsTeam} currentId={currentSessionId || null} onSelect={selectSession} sideRowsHostRef={setSideRowsHost} />
+          <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} subRowsHost={threadSubRowsHost ? sideRowsHost : threadSubRowsHost} onOpenSubRowChange={setOpenSideTitle} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
             const id = currentSessionIdRef.current
             if (!id || id !== currentSessionId || storageScopeRef.current !== storageScope || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) throw new Error('Side snapshot no longer belongs to the current conversation.')
             return sessionsRef.current.find((session) => session.id === id)?.messages || []
