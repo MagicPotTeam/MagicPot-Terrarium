@@ -259,4 +259,133 @@ describe('Canvas Target evidence action gate', () => {
     expect.soft(f.commits).not.toHaveBeenCalled()
     expect.soft(f.chat.mock.calls.some(([message]) => message.attachments?.some((attachment: { url: string }) => attachment.url === 'blob:extracted-fixture'))).toBe(false)
   })
+
+  // Selection authority (canvasTargetSelectionAuthority): every source a model
+  // plan reads must be a selected original, unchanged since selection.
+  const extractAction = { id: 'extract', kind: 'canvas', action: 'extract_image_region', phase: 'before_model_stages', outputTarget: 'both', source: 'item_ids', coordinateSpace: 'source_image_pixels', x: 0, y: 0, width: 20, height: 20 }
+  const extractedInChat = () => f.chat.mock.calls.some(([message]) => message.attachments?.some((attachment: { url: string }) => attachment.url === 'blob:extracted-fixture'))
+
+  it('refuses a selected_sources extraction that also names an id missing from the canvas', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    f.plan.mockResolvedValue({ id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [], capabilityActions: [{ ...extractAction, itemIds: ['source', 'ghost'] }] })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selected_sources'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    expect(f.plan).toHaveBeenCalledOnce()
+    expect(f.load).not.toHaveBeenCalled()
+    expect(f.extract).not.toHaveBeenCalled()
+    expect(f.commits).not.toHaveBeenCalled()
+    expect(extractedInChat()).toBe(false)
+  })
+
+  it('refuses a selected_sources extraction from a selected source the run changed after selection', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    f.plan.mockResolvedValue({
+      id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [],
+      capabilityActions: [
+        { type: 'canvas', id: 'crop', action: 'crop_image', phase: 'before_model_stages', outputTarget: 'canvas', source: 'item_ids', itemIds: ['source'], coordinateSpace: 'source_item_normalized', cropX: 0, cropY: 0, cropWidth: 0.5, cropHeight: 1 },
+        { ...extractAction, itemIds: ['source'] }
+      ]
+    })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selected_sources'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    expect(f.plan).toHaveBeenCalledOnce()
+    // The crop itself is a canvas edit and is committed; the extraction that
+    // would read the changed source is not.
+    expect(f.commits).toHaveBeenCalledTimes(1)
+    expect((f.commits.mock.calls[0][0] as CanvasImageItem[])[0].crop).toBeDefined()
+    expect(f.load).not.toHaveBeenCalled()
+    expect(f.extract).not.toHaveBeenCalled()
+    expect(extractedInChat()).toBe(false)
+  })
+
+  it('refuses a structured_only run whose selection changed (undo) after the dialog opened', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const undone: CanvasImageItem = { ...plain, src: 'data:image/png;base64,BEFORE_UNDO' }
+    const snapshot = vi.fn(async () => 'data:image/png;base64,SNAPSHOT')
+    const { result, rerender } = renderHook(({ current }) => useCanvasTargetWorkflow({
+      ...options, items: [current], renderCanvasItemsImageDataUrl: snapshot
+    }), { initialProps: { current: plain } })
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('structured_only'); result.current.setCanvasTargetUserIntent('fixture') })
+    rerender({ current: undone })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    expect(snapshot).not.toHaveBeenCalled()
+    expect(f.plan).not.toHaveBeenCalled()
+    expect(result.current.canvasTargetError).toMatch(/selection|changed/i)
+  })
+
+  it('stops a running target when the user starts a new selection before the model request', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    let finish!: (url: string) => void
+    const snapshot = vi.fn(() => new Promise<string>((resolve) => { finish = resolve }))
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain], renderCanvasItemsImageDataUrl: snapshot }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selection_region'); result.current.setCanvasTargetUserIntent('fixture') })
+    let pending!: Promise<void>
+    await act(async () => { pending = result.current.handleRunCanvasTarget(); await Promise.resolve() })
+    expect(snapshot).toHaveBeenCalledOnce()
+    act(() => { result.current.handleBeginCanvasTargetSelection() })
+    await act(async () => { finish('data:image/png;base64,SNAPSHOT'); await pending })
+    expect(f.plan).not.toHaveBeenCalled()
+    expect(f.chat).not.toHaveBeenCalled()
+  })
+
+  it('renders only the selected item into a selection_region screenshot when a neighbour lies inside the box', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const neighbour: CanvasImageItem = { ...plain, id: 'neighbour', src: 'data:image/png;base64,NEIGHBOUR', x: 10, y: 10 }
+    const snapshot = vi.fn(async () => 'data:image/png;base64,SNAPSHOT')
+    f.plan.mockResolvedValue({ id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [], capabilityActions: [] })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain, neighbour], selectedIds: new Set(['source']), renderCanvasItemsImageDataUrl: snapshot }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 100, height: 100 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selection_region'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    expect(f.plan).toHaveBeenCalledOnce()
+    expect(snapshot).toHaveBeenCalledTimes(1)
+    expect(snapshot).toHaveBeenCalledWith([plain], false, { x: 0, y: 0, width: 100, height: 100 })
+    expect(JSON.stringify(f.plan.mock.calls[0][0])).not.toContain('NEIGHBOUR')
+  })
+
+  it.each(['selected_sources', 'selection_region', 'structured_only'] as const)('refuses an add_image whose model-authored URL is the source of an unselected item (%s)', async (mode) => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const other: CanvasImageItem = { ...plain, id: 'unselected', src: 'blob:unselected-source', x: 200 }
+    const added = vi.fn()
+    window.addEventListener('canvas:add-image', added)
+    f.plan.mockResolvedValue({
+      id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [],
+      capabilityActions: [{ type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: other.src, fileName: 'b.png' }]
+    })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain, other] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode(mode); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    window.removeEventListener('canvas:add-image', added)
+    expect(f.plan).toHaveBeenCalledOnce()
+    expect(added).not.toHaveBeenCalled()
+    // The plan's own text may echo the URL; no attachment may carry it.
+    const attachmentUrls = [...f.chat.mock.calls, ...f.summary.mock.calls].flatMap(([request]) => (request?.attachments || []).map((attachment: { url: string }) => attachment.url))
+    expect(attachmentUrls).not.toContain(other.src)
+  })
+
+  it('positive control: add_image with a URL no canvas item carries is still placed', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const added = vi.fn((event: Event) => {
+      const detail = (event as CustomEvent<{ onAdded?: (item: unknown) => void }>).detail
+      detail.onAdded?.({ ...plain, id: 'placed', src: 'blob:fresh-result' })
+    })
+    window.addEventListener('canvas:add-image', added)
+    f.plan.mockResolvedValue({
+      id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [],
+      capabilityActions: [{ type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: 'blob:fresh-result', fileName: 'r.png' }]
+    })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('structured_only'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    window.removeEventListener('canvas:add-image', added)
+    expect(added).toHaveBeenCalledOnce()
+  })
 })

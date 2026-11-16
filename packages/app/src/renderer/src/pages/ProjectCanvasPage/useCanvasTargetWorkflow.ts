@@ -110,7 +110,6 @@ import {
   executeCanvasTargetSemanticCanvasAction,
   isCanvasTargetSemanticCanvasActionName,
   resolveCropRectangleForImage,
-  resolveCanvasTargetSemanticCanvasActionSourceIds,
   type CanvasTargetSemanticCanvasActionState,
   type CanvasTargetSemanticCanvasActionResult
 } from './canvasTargetCanvasActions'
@@ -138,7 +137,18 @@ import {
   type CanvasTargetArtifactType
 } from './canvasTargetArtifactGraph'
 import { createCanvasImageItemDraft, createCanvasItemId } from './canvasAssetDraftFactories'
-import { sanitizeCanvasItemForCheckContext } from './canvasTargetWorkflowAssetMetadata'
+import { collectCanvasTargetCanvasActionReferencedIds } from './canvasTargetCanvasActionSources'
+import {
+  authorizeCanvasTargetSourceReferences,
+  canvasTargetEvidenceAllowsSelectionSnapshot,
+  canvasTargetSelectionHasUnverifiedCrop,
+  createCanvasTargetSelectionAuthority,
+  findCanvasTargetItemIdsBySourceUrl,
+  isCanvasTargetSelectionUnchanged,
+  type CanvasTargetSelectionAuthority,
+  type CanvasTargetSourceReferenceRefusal,
+  type CanvasTargetSourceReferenceVerdict
+} from './canvasTargetSelectionAuthority'
 import { hydrateCanvasImageItemForCanvas, loadImageFromSrc } from './canvasAssetIntakeHelpers'
 import { createMagicPotNativeProvenance } from './canvasProvenanceUtils'
 import { extractImageRegionLocally } from './localImageExtract'
@@ -233,16 +243,6 @@ type CanvasTargetProfileSelectOption = {
   sourceType?: 'api' | 'local'
   executionBackend?: 'llm' | 'local_model'
   localVisualModelId?: string
-}
-
-// Record the serializable scene content presented when the user opens the
-// target dialog. This detects later edits; it does not authenticate bytes
-// behind mutable URLs or prove pixel provenance.
-function canvasTargetSelectionSignature(items: CanvasItem[]): string {
-  return JSON.stringify(
-    [...items].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
-      .map((item) => sanitizeCanvasItemForCheckContext(item))
-  )
 }
 
 function normalizeCanvasTargetSelectionBounds(
@@ -370,6 +370,9 @@ function resolveCanvasTargetNextZIndex(items: CanvasItem[], fallback: number): n
 async function executeCanvasTargetExtractImageRegionAction(
   action: CanvasTargetCanvasAction,
   options: {
+    // Only items the selection authority has already approved; nothing else
+    // is ever loaded here.
+    authorizedSourceItems: CanvasItem[]
     semanticState?: CanvasTargetSemanticCanvasActionState
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
@@ -384,9 +387,7 @@ async function executeCanvasTargetExtractImageRegionAction(
     }
   }
 
-  const sourceIds = resolveCanvasTargetSemanticCanvasActionSourceIds(action, options.semanticState)
-  const itemById = new Map(options.semanticState.items.map((item) => [item.id, item] as const))
-  const sourceItems = sourceIds.map((id) => itemById.get(id)).filter(isCanvasTargetImageItem)
+  const sourceItems = options.authorizedSourceItems.filter(isCanvasTargetImageItem)
 
   if (sourceItems.length === 0) {
     return {
@@ -518,6 +519,31 @@ async function executeCanvasTargetExtractImageRegionAction(
   }
 }
 
+function buildCanvasTargetSourceReferenceRefusal(
+  subject: string,
+  refusal: CanvasTargetSourceReferenceRefusal
+): CanvasTargetCanvasActionResult {
+  if (refusal === 'evidence_mode') {
+    return {
+      content: `${subject} skipped by the current evidence policy.`,
+      canvasDispatchCount: 0,
+      fallbackReason: 'Reading a canvas source requires selected source assets.'
+    }
+  }
+  if (refusal === 'not_selected') {
+    return {
+      content: `${subject} skipped because a source was not selected.`,
+      canvasDispatchCount: 0,
+      fallbackReason: 'Reading a canvas source requires explicitly selected items.'
+    }
+  }
+  return {
+    content: `${subject} skipped because a referenced source could not be verified against the selection.`,
+    canvasDispatchCount: 0,
+    fallbackReason: `Source reference refused (${refusal}).`
+  }
+}
+
 async function executeCanvasTargetCanvasAction(
   action: CanvasTargetCanvasAction,
   options: {
@@ -525,7 +551,7 @@ async function executeCanvasTargetCanvasAction(
     fallbackText?: string
     generationSessionId?: string
     evidenceMode: CanvasTargetEvidenceMode
-    authorizedSourceItemIds: ReadonlySet<string>
+    selectionAuthority: CanvasTargetSelectionAuthority | null
     semanticState?: CanvasTargetSemanticCanvasActionState
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
@@ -574,29 +600,32 @@ async function executeCanvasTargetCanvasAction(
   }
 
   switch (action.action) {
-    case 'extract_image_region':
+    case 'extract_image_region': {
       // The restricted evidence modes do not authorize reading arbitrary
-      // original pixels for a model-planned extraction. Until the action can
-      // be bounded to the user's visible selection, reject it rather than
-      // creating an artifact that a later stage or chat can consume.
-      if (options.evidenceMode !== 'selected_sources') {
-        return {
-          content: 'Image extraction skipped by the current evidence policy.',
-          canvasDispatchCount: 0,
-          fallbackReason: 'Source image extraction requires selected source assets.'
-        }
+      // original pixels for a model-planned extraction (and nothing outside a
+      // crop is ever read for them). In selected_sources every referenced
+      // item must be a selected original that is unchanged since selection;
+      // a reference that cannot be resolved refuses the whole action.
+      const references = options.semanticState
+        ? collectCanvasTargetCanvasActionReferencedIds(action, options.semanticState)
+        : null
+      const verdict: CanvasTargetSourceReferenceVerdict = references
+        ? authorizeCanvasTargetSourceReferences({
+            authority: options.selectionAuthority,
+            evidenceMode: options.evidenceMode,
+            referencedItemIds: references.ids,
+            unresolvedReferences: references.unresolved,
+            currentItems: options.semanticState?.items || []
+          })
+        : { allowed: false, refusal: 'no_authority', references: [] }
+      if (!verdict.allowed) {
+        return buildCanvasTargetSourceReferenceRefusal('Image extraction', verdict.refusal)
       }
-      if (options.semanticState) {
-        const sourceIds = resolveCanvasTargetSemanticCanvasActionSourceIds(action, options.semanticState)
-        if (sourceIds.some((id) => !options.authorizedSourceItemIds.has(id))) {
-          return {
-            content: 'Image extraction skipped because a source was not selected.',
-            canvasDispatchCount: 0,
-            fallbackReason: 'Source image extraction requires explicitly selected items.'
-          }
-        }
-      }
-      return executeCanvasTargetExtractImageRegionAction(action, options)
+      return executeCanvasTargetExtractImageRegionAction(action, {
+        ...options,
+        authorizedSourceItems: verdict.items
+      })
+    }
     case 'add_text': {
       if (!text) {
         return {
@@ -635,6 +664,27 @@ async function executeCanvasTargetCanvasAction(
           content: `Canvas ${action.action} action skipped because sourceUrl is not safe for direct canvas placement.`,
           canvasDispatchCount: 0,
           fallbackReason: mediaUrlSafety.reason
+        }
+      }
+      // A model-authored URL that is the source of a canvas item is a
+      // reference to that item: placing it would hand its bytes back to the
+      // run as a stage result. It needs the same authority as any reference.
+      if (!options.semanticState) {
+        return buildCanvasTargetSourceReferenceRefusal(`Canvas ${action.action}`, 'no_authority')
+      }
+      const urlReferencedIds = findCanvasTargetItemIdsBySourceUrl(
+        mediaUrlSafety.url,
+        options.semanticState.items
+      )
+      if (urlReferencedIds.length > 0) {
+        const verdict = authorizeCanvasTargetSourceReferences({
+          authority: options.selectionAuthority,
+          evidenceMode: options.evidenceMode,
+          referencedItemIds: urlReferencedIds,
+          currentItems: options.semanticState.items
+        })
+        if (!verdict.allowed) {
+          return buildCanvasTargetSourceReferenceRefusal(`Canvas ${action.action}`, verdict.refusal)
         }
       }
       const mediaType =
@@ -1013,7 +1063,9 @@ export function useCanvasTargetWorkflow({
   const [canvasTargetReport, setCanvasTargetReport] = useState<CanvasTargetReport | null>(null)
   const canvasTargetActiveRunIdRef = useRef<string | null>(null)
   const canvasTargetExternalChatRef = useRef<CanvasTargetExternalChatRun | null>(null)
-  const canvasTargetSelectionSignatureRef = useRef<string | null>(null)
+  // What the user selected when the target dialog was opened. Cleared when a
+  // new selection starts; a run keeps going only while it is still in place.
+  const canvasTargetSelectionAuthorityRef = useRef<CanvasTargetSelectionAuthority | null>(null)
   const latestItemsRef = useRef(items)
   const latestSelectedIdsRef = useRef(selectedIds)
 
@@ -1110,7 +1162,7 @@ export function useCanvasTargetWorkflow({
     setCanvasTargetContextPack(null)
     setCanvasTargetReport(null)
     setCanvasTargetTargetItemIds([])
-    canvasTargetSelectionSignatureRef.current = null
+    canvasTargetSelectionAuthorityRef.current = null
     setCanvasTargetSelectionBounds(null)
     setCanvasTargetSelectedTraceIds([])
     setSelectionRect(null)
@@ -1128,7 +1180,7 @@ export function useCanvasTargetWorkflow({
       if (targetItems.length === 0) return
       // Capture before asynchronous dialog setup, not after the selection may
       // already have changed under the user.
-      const openedSelectionSignature = canvasTargetSelectionSignature(targetItems)
+      const openedSelectionAuthority = createCanvasTargetSelectionAuthority(targetItems)
 
       try {
         const projectTraceRef = await resolveCanvasProjectTraceProjectRef(canvasId, projectName)
@@ -1222,7 +1274,7 @@ export function useCanvasTargetWorkflow({
         setCanvasTargetReferenceTraces(traceDocuments)
         setCanvasTargetProfileOptions(profiles)
         setCanvasTargetQuickAppOptions(quickAppOptions)
-        canvasTargetSelectionSignatureRef.current = openedSelectionSignature
+        canvasTargetSelectionAuthorityRef.current = openedSelectionAuthority
         setCanvasTargetTargetItemIds(targetItems.map((item) => item.id))
         setCanvasTargetSelectionBounds(normalizeCanvasTargetSelectionBounds(selectionBounds))
         setCanvasTargetTargetName('')
@@ -1487,20 +1539,19 @@ export function useCanvasTargetWorkflow({
       return
     }
 
-    const selectionIsUnchanged = () => {
-      const expectedIds = new Set(canvasTargetTargetItemIds)
-      const currentTargetItems = latestItemsRef.current.filter((item) => expectedIds.has(item.id))
-      return (
-        expectedIds.size === canvasTargetTargetItemIds.length &&
-        currentTargetItems.length === expectedIds.size &&
-        canvasTargetSelectionSignatureRef.current !== null &&
-        canvasTargetSelectionSignature(currentTargetItems) === canvasTargetSelectionSignatureRef.current
-      )
-    }
-    if (
-      normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only' &&
-      !selectionIsUnchanged()
-    ) {
+    // The authority this run was confirmed with. A run continues only while
+    // that same authority is in place (a new selection clears it), it names
+    // exactly the dialog's target items, and those items are unchanged.
+    const runSelectionAuthority = canvasTargetSelectionAuthorityRef.current
+    const selectionIsUnchanged = () =>
+      runSelectionAuthority !== null &&
+      canvasTargetSelectionAuthorityRef.current === runSelectionAuthority &&
+      runSelectionAuthority.itemIds.length === canvasTargetTargetItemIds.length &&
+      canvasTargetTargetItemIds.every((id) => runSelectionAuthority.itemSignatures.has(id)) &&
+      isCanvasTargetSelectionUnchanged(runSelectionAuthority, latestItemsRef.current)
+    // Every mode, structured_only included, starts only from the selection the
+    // user confirmed: an undo / redo or edit since then is refused here.
+    if (!selectionIsUnchanged()) {
       setCanvasTargetError(
         isChineseUi
           ? '选区内容已更改，请重新选择后再运行目标。'
@@ -1512,10 +1563,7 @@ export function useCanvasTargetWorkflow({
     // A restricted selection snapshot cannot safely re-interpret a legacy
     // crop whose coordinate space is not authenticated against its source.
     // Full selected_sources is a distinct, explicitly authorized contract.
-    if (
-      normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) === 'selection_region' &&
-      targetItems.some((item) => item.type === 'image' && item.crop)
-    ) {
+    if (canvasTargetSelectionHasUnverifiedCrop(canvasTargetEvidenceMode, targetItems)) {
       setCanvasTargetError(
         isChineseUi
           ? '选区包含无法验证坐标的裁剪图片。请移除该裁剪图片，或明确选择完整源素材模式。'
@@ -1604,7 +1652,7 @@ export function useCanvasTargetWorkflow({
       let snapshotDataUrl: string | null = null
       // Structured-only runs must not construct a visual snapshot, including
       // for in-memory context or a possible diagnostic failure archive.
-      if (normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only') {
+      if (canvasTargetEvidenceAllowsSelectionSnapshot(canvasTargetEvidenceMode)) {
         try {
           snapshotDataUrl = await renderCanvasItemsImageDataUrl(
             targetItems,
@@ -2367,24 +2415,23 @@ export function useCanvasTargetWorkflow({
       // QuickApp input IDs may name originals, copies of unrelated canvas items,
       // or stage-created media. A fresh ID is not provenance. Until complete
       // lineage is available, only the exact selected originals in the explicit
-      // full-source mode are eligible for item-backed references.
-      const authorizedQuickAppOriginals = new Map(
-        normalizedEvidenceMode === 'selected_sources'
-          ? targetItems.map((item) => [item.id, item] as const)
-          : []
-      )
+      // full-source mode are eligible for item-backed references; the selection
+      // authority checks all of them before any is honoured.
       const getCanvasItemQuickAppAttachments = (itemIds: string[]): ChatAttachment[] => {
-        const itemById = new Map(runtimeCanvasItems.map((item) => [item.id, item] as const))
-        return itemIds.map((itemId) => {
-          const original = authorizedQuickAppOriginals.get(itemId)
-          const current = itemById.get(itemId)
-          if (!original || !current ||
-            canvasTargetSelectionSignature([original]) !== canvasTargetSelectionSignature([current])) {
-            throw new Error(isChineseUi
-              ? '快应用引用了未经授权或已更改的画布素材，已停止执行。'
-              : 'QuickApp referenced an unauthorized or changed canvas source; execution stopped.')
-          }
-          const attachment = canvasItemToQuickAppAttachment(original)
+        if (itemIds.length === 0) return []
+        const verdict = authorizeCanvasTargetSourceReferences({
+          authority: runSelectionAuthority,
+          evidenceMode: normalizedEvidenceMode,
+          referencedItemIds: itemIds,
+          currentItems: runtimeCanvasItems
+        })
+        if (!verdict.allowed) {
+          throw new Error(isChineseUi
+            ? '快应用引用了未经授权或已更改的画布素材，已停止执行。'
+            : 'QuickApp referenced an unauthorized or changed canvas source; execution stopped.')
+        }
+        return verdict.items.map((item) => {
+          const attachment = canvasItemToQuickAppAttachment(item)
           if (!attachment) {
             throw new Error(isChineseUi
               ? '快应用引用的画布素材无法解析，已停止执行。'
@@ -2767,7 +2814,7 @@ export function useCanvasTargetWorkflow({
             fallbackText: options?.fallbackText,
             generationSessionId: stageId,
             evidenceMode: normalizedEvidenceMode,
-            authorizedSourceItemIds: new Set(targetItems.map((item) => item.id)),
+            selectionAuthority: runSelectionAuthority,
             semanticState,
             commitSemanticResult: (result) => commitSemanticCanvasResult(stageId, result),
             resolveCanvasTargetItemBounds
