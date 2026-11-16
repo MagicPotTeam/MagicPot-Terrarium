@@ -9,11 +9,12 @@ import { ChatSessionSaveBaseline } from './chatSaveBaseline'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 import ChatPage from './ChatPage'
 
-const h = vi.hoisted(() => ({ sessions: [] as ChatSession[], notify: vi.fn(), load: vi.fn(), save: vi.fn(), fetch: vi.fn() }))
+const h = vi.hoisted(() => ({ sessions: [] as ChatSession[], notify: vi.fn(), notifyWarning: vi.fn(), notifySuccess: vi.fn(), notifyInfo: vi.fn(), updateConfig: vi.fn(), load: vi.fn(), save: vi.fn(), fetch: vi.fn() }))
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, opts?: { defaultValue?: string }) => opts?.defaultValue || key, i18n: { language: 'en', resolvedLanguage: 'en' } }) }))
-vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: { ...DEFAULT_CONFIG, use_remote_llm: false, llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [], customSkills: [], customSkillCategories: [] } } as Config, isReady: true, buildEnv: { ...DEFAULT_BUILD_ENV }, configUtils: {}, updateConfig: vi.fn() }) }))
+vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: { ...DEFAULT_CONFIG, use_remote_llm: false, llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [], customSkills: [], customSkillCategories: [] } } as Config, isReady: true, buildEnv: { ...DEFAULT_BUILD_ENV }, configUtils: {}, updateConfig: h.updateConfig }) }))
 vi.mock('@renderer/hooks/useRuntimeMcpStatus', () => ({ useRuntimeMcpStatus: () => ({ runtimeMcpStatus: null }) }))
-vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifyError: h.notify, notifyWarning: vi.fn(), notifySuccess: vi.fn(), notifyInfo: vi.fn() }) }))
+// Stable callbacks, as the real hook returns them (hooks/useMessage.ts); h.notify stays swappable.
+vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifyError: h.notify, notifyWarning: h.notifyWarning, notifySuccess: h.notifySuccess, notifyInfo: h.notifyInfo }) }))
 vi.mock('./hooks/useChatProfiles', () => ({ useChatProfiles: () => ({ availableProfiles: [{ id: 'base-model', model_name: 'Base', model_use: 'chat' }], remoteProfiles: [] }) }))
 vi.mock('./chatStorage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./chatStorage')>()

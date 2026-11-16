@@ -1221,6 +1221,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const sessionPersistenceRetryCountRef = useRef(0)
   const pendingDeleteRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const sessionPersistenceGateRef = useRef(true)
+  // Sessions whose object changed while the persistence gate was on (a load or refresh read is
+  // pending, or a failed load left the gate on). setSessions bumps the mutation epoch only while
+  // the gate is off, so the reads that end the gated window use these ids to keep the local copy.
+  const gatedMutationIdsRef = useRef<Set<string>>(new Set())
+  const gatedMutationCountRef = useRef(0)
   const persistedSessionsRef = useRef<Map<string, ChatSession>>(new Map())
   const dirtySessionSnapshotsRef = useRef<Map<string, ChatSession>>(new Map())
   const chatSaveBaselineRef = useRef<ChatSessionSaveBaseline>(new ChatSessionSaveBaseline())
@@ -1265,6 +1270,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
     if (teamAuthorityChanged) setTeamAuthorityRevision(revision => revision + 1)
     if (next !== previous && !sessionPersistenceGateRef.current) {
       sessionMutationEpochRef.current += 1
+    } else if (next !== previous) {
+      const before = new Map(previous.map(session => [session.id, session]))
+      for (const session of next) {
+        if (before.get(session.id) !== session) gatedMutationIdsRef.current.add(session.id)
+      }
+      gatedMutationCountRef.current += 1
     }
     sessionsRef.current = next
     setSessionsState(next)
@@ -1653,7 +1664,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     sessionMutationEpochRef.current += 1
     const loadMutationEpoch = sessionMutationEpochRef.current
     const loadSaveAcknowledgementEpoch = sessionSaveAcknowledgementEpochRef.current
-    const sessionsAtLoadStart = new Map(sessionsRef.current.map((session) => [session.id, session]))
+    let sessionsAtLoadStart = new Map(sessionsRef.current.map((session) => [session.id, session]))
     if (sessionPersistenceRetryTimerRef.current) {
       clearTimeout(sessionPersistenceRetryTimerRef.current)
       sessionPersistenceRetryTimerRef.current = null
@@ -1664,6 +1675,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // Old-scope dirty data remains in its own keyed snapshot, never in the new scope UI.
       const restoredDirty = getDirtySessionSnapshots(storageScope)
       setSessions(restoredDirty)
+      // The load's own write is not a local edit; gated edits of the old scope do not belong here.
+      gatedMutationIdsRef.current.clear()
+      sessionsAtLoadStart = new Map(sessionsRef.current.map((session) => [session.id, session]))
       setSessionSaveError(
         restoredDirty.length
           ? 'This thread has unsaved changes. Retry saving before closing it.'
@@ -1725,7 +1739,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           sortedStoredSessions,
           sessionsRef.current,
           [pendingSessionIdRef.current, currentSessionIdRef.current],
-          [...locallyMutatedSessionIds, ...getDirtySessionIds(storageScope)]
+          [...locallyMutatedSessionIds, ...gatedMutationIdsRef.current, ...getDirtySessionIds(storageScope)]
         )
         for (const local of merged) {
           if (!sortedStoredSessions.some(stored => stored.id === local.id && stored !== local)) continue
@@ -1735,6 +1749,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         merged = reconcileLoadedTeamEnd(storageScope, merged, sortedStoredSessions)
         replacePersistedSessions(storageScope, sortedStoredSessions, merged)
         setSessions(merged)
+        // The merge kept every gated edit (dirty, or new and saved once the gate opens).
+        gatedMutationIdsRef.current.clear()
       } catch (e) {
         if (loadEpoch === sessionLoadEpochRef.current && initialReadCurrent()) {
           const message = e instanceof Error ? e.message : String(e)
@@ -1778,6 +1794,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const generation = beginSessionRead()
     const refreshEpoch = sessionLoadEpochRef.current
     const mutationEpoch = sessionMutationEpochRef.current
+    const gatedMutationCount = gatedMutationCountRef.current
     const currentRead = () => !openInputRef.current || (
       generation.readSequence === readSequenceRef.current &&
       generation.activationGeneration === activationGenerationRef.current
@@ -1798,6 +1815,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (
         refreshEpoch !== sessionLoadEpochRef.current ||
         mutationEpoch !== sessionMutationEpochRef.current ||
+        gatedMutationCount !== gatedMutationCountRef.current ||
         storageScope !== storageScopeRef.current || !currentRead()
       ) {
         return null
@@ -1806,18 +1824,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const visibleStored = stored.filter(
         (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
       )
-      if (mutationEpoch !== sessionMutationEpochRef.current || !currentRead()) {
+      if (mutationEpoch !== sessionMutationEpochRef.current || gatedMutationCount !== gatedMutationCountRef.current || !currentRead()) {
         return null
       }
       let merged = mergeLoadedSessionsWithLocal(
         visibleStored,
         sessionsRef.current,
         [pendingSessionIdRef.current, currentSessionIdRef.current],
-        getDirtySessionIds(storageScope)
+        [...gatedMutationIdsRef.current, ...getDirtySessionIds(storageScope)]
       )
       merged = reconcileLoadedTeamEnd(storageScope, merged, visibleStored)
       replacePersistedSessions(storageScope, visibleStored, merged)
       setSessions(merged)
+      gatedMutationIdsRef.current.clear()
       setSessionLoadError(null)
       sessionPersistenceGateRef.current = false
       openInitialLoadRecoveryRef.current = false
