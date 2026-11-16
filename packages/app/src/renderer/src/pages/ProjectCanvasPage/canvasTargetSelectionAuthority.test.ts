@@ -5,6 +5,7 @@ import type { CanvasTargetCanvasAction } from './canvasTargetCapabilityTypes'
 import {
   authorizeCanvasTargetMediaPlacementUrl,
   authorizeCanvasTargetSourceReferences,
+  canvasItemMediaSourceUrls,
   canvasTargetMediaUrlKey,
   collectCanvasTargetCanvasBlobUrlKeys,
   canvasTargetEvidenceAllowsSelectionSnapshot,
@@ -139,6 +140,74 @@ describe('canvasTargetSelectionAuthority media placement URLs', () => {
   it('places a selected, unchanged source as its canonical URL', () => {
     expect(place('blob:http://localhost/selected#frag')).toEqual({ allowed: true, url: 'blob:http://localhost/selected' })
     expect(place('blob:http://localhost/selected', { currentItems: [{ ...selected, x: 5 }, other] })).toMatchObject({ allowed: false, refusal: 'changed' })
+  })
+
+  // A selected item that merely holds a blob URL in a field that is not its
+  // media source (text, label, caption, original-URL metadata, file fields)
+  // must not let the run place that blob: it may be media nobody selected
+  // (another canvas tab, a deleted image whose blob is still alive).
+  const elsewhere = 'blob:http://localhost/image-on-another-canvas'
+  const base = { x: 0, y: 0, width: 10, height: 10, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+  const mentionRows: Array<[string, CanvasItem]> = [
+    ['text item text', { ...base, id: 'T', type: 'text', text: elsewhere, fontSize: 12, fontFamily: 'x', fill: '#000' } as CanvasItem],
+    ['annotation label', { ...base, id: 'N', type: 'annotation', shape: 'rect', stroke: '#000', fillOpacity: 0, strokeWidth: 1, label: elsewhere } as CanvasItem],
+    ['annotation text', { ...base, id: 'N2', type: 'annotation', shape: 'text-anno', stroke: '#000', fillOpacity: 0, strokeWidth: 1, label: '', text: elsewhere } as CanvasItem],
+    ['file previewText', { ...base, id: 'F', type: 'file', src: 'blob:http://localhost/file', fileName: 'f.txt', mimeType: 'text/plain', fileKind: 'text', previewText: elsewhere } as CanvasItem],
+    ['file content', { ...base, id: 'F2', type: 'file', src: 'blob:http://localhost/file2', fileName: elsewhere, mimeType: 'text/plain', fileKind: 'text', content: elsewhere } as CanvasItem],
+    ['image media.originalUrl', { ...selected, id: 'I', media: { originalUrl: elsewhere } } as unknown as CanvasItem],
+    ['image tagging caption', { ...selected, id: 'I2', tagging: { tags: [], tagsText: elsewhere, caption: elsewhere, updatedAt: 'x', source: 'agent' } } as CanvasItem],
+    ['image thumbnail level', { ...selected, id: 'I3', thumbnailSet: { levels: [{ url: elsewhere }] } } as unknown as CanvasItem]
+  ]
+  it.each(mentionRows)('never places a blob URL that a selected item holds only in its %s', (_label, holder) => {
+    for (const mode of ['selected_sources', 'structured_only', 'selection_region'] as const) {
+      const verdict = authorizeCanvasTargetMediaPlacementUrl({
+        url: elsewhere,
+        authority: createCanvasTargetSelectionAuthority([holder]),
+        evidenceMode: mode,
+        currentItems: [holder],
+        knownCanvasUrlKeys: collectCanvasTargetCanvasBlobUrlKeys([holder], new Set()),
+        runOutputUrls: new Map()
+      })
+      expect(verdict.allowed).toBe(false)
+    }
+    // The broad walk still counts the holder as touching the URL (refusal side).
+    expect(findCanvasTargetItemIdsBySourceUrl(elsewhere, [holder])).toEqual([holder.id])
+  })
+
+  it('places a selected item only by its media source fields, and returns that source entry', () => {
+    const model = { ...base, id: 'M', type: 'model3d', src: 'blob:http://localhost/model', fileName: 'm.glb', textures: { 'skin.png': 'blob:http://localhost/texture' } } as CanvasItem
+    const file = { ...base, id: 'F', type: 'file', src: 'blob:http://localhost/file', fileName: 'f.pdf', mimeType: 'application/pdf', fileKind: 'generic', previewImages: [{ id: 'p', src: 'blob:http://localhost/preview', mimeType: 'image/png', fileName: 'p.png' }] } as CanvasItem
+    const video = { ...base, id: 'V', type: 'video', src: 'blob:http://localhost/video', fileName: 'v.mp4', playing: false, muted: true, volume: 1 } as CanvasItem
+    const items = [model, file, video]
+    expect(canvasItemMediaSourceUrls(model)).toEqual(['blob:http://localhost/model', 'blob:http://localhost/texture'])
+    expect(canvasItemMediaSourceUrls(file)).toEqual(['blob:http://localhost/file', 'blob:http://localhost/preview'])
+    expect(canvasItemMediaSourceUrls(mentionRows[0][1])).toEqual([])
+    for (const url of ['blob:http://localhost/model', 'blob:http://localhost/texture', 'blob:http://localhost/file', 'blob:http://localhost/preview', 'blob:http://localhost/video']) {
+      expect(
+        authorizeCanvasTargetMediaPlacementUrl({
+          url: `${url.toUpperCase()}#x`,
+          authority: createCanvasTargetSelectionAuthority(items),
+          evidenceMode: 'selected_sources',
+          currentItems: items,
+          knownCanvasUrlKeys: collectCanvasTargetCanvasBlobUrlKeys(items, new Set()),
+          runOutputUrls: new Map()
+        })
+      ).toEqual({ allowed: true, url })
+    }
+  })
+
+  it('places a selected source even when a selected note also mentions it, as the source entry', () => {
+    const note = { ...base, id: 'T', type: 'text', text: 'blob:http://localhost/selected#from-note', fontSize: 12, fontFamily: 'x', fill: '#000' } as CanvasItem
+    expect(
+      authorizeCanvasTargetMediaPlacementUrl({
+        url: 'blob:http://localhost/selected',
+        authority: createCanvasTargetSelectionAuthority([note, selected]),
+        evidenceMode: 'selected_sources',
+        currentItems: [note, selected],
+        knownCanvasUrlKeys: collectCanvasTargetCanvasBlobUrlKeys([note, selected], new Set()),
+        runOutputUrls: new Map()
+      })
+    ).toEqual({ allowed: true, url: 'blob:http://localhost/selected' })
   })
 
   it('refuses the URL of an item that left the canvas during the run, even if the run also produced it', () => {

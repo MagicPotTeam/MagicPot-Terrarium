@@ -447,6 +447,32 @@ describe('Canvas Target evidence action gate', () => {
     expect((added.mock.calls[0][0] as CustomEvent<{ src: string }>).detail.src).toBe(selected.src)
   })
 
+  // A selected text note that holds the blob URL of media nobody selected
+  // (another canvas tab, a deleted image whose blob is alive) is not that
+  // media's source: the run must not place it or send its bytes.
+  it('refuses an add_image whose URL a selected text note only mentions (selected_sources)', async () => {
+    const offCanvas = 'blob:http://localhost/image-on-another-canvas'
+    const note = { id: 'note', type: 'text', text: offCanvas, fontSize: 12, fontFamily: 'x', fill: '#000', x: 0, y: 0, width: 100, height: 20, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false } as const
+    const added = vi.fn((event: Event) => {
+      const detail = (event as CustomEvent<{ src: string; onAdded?: (item: unknown) => void }>).detail
+      detail.onAdded?.({ ...image, id: 'placed', src: detail.src })
+    })
+    window.addEventListener('canvas:add-image', added)
+    f.plan.mockResolvedValue({
+      id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [],
+      capabilityActions: [{ type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: offCanvas, fileName: 'x.png' }]
+    })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [note], selectedIds: new Set(['note']) }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([note], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selected_sources'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    window.removeEventListener('canvas:add-image', added)
+    expect(f.plan).toHaveBeenCalledOnce()
+    expect(added).not.toHaveBeenCalled()
+    expect([...placedUrlsIn(f.chat.mock.calls), ...placedUrlsIn(f.stage.mock.calls), ...placedUrlsIn(f.summary.mock.calls)]).not.toContain(offCanvas)
+    expect(f.chat.mock.calls.some(([message]) => /Canvas add_image skipped/.test(message.content || ''))).toBe(true)
+  })
+
   // Positive control (re-expressed from 'add_image with a URL no canvas item
   // carries is still placed'): add_* may place a blob this run produced, here
   // a model stage output. The canvas reports its own copy of each placed

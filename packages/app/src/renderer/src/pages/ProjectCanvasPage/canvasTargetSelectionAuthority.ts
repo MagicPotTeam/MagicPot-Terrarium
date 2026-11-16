@@ -211,9 +211,13 @@ export function canvasTargetMediaUrlKey(value: string): string | null {
   return stripControlsAndSpaces(decoded).toLowerCase()
 }
 
-// Calls visit for every string an item carries in plain data (src, textures,
-// preview images, thumbnail levels). Decoded images, blobs and other runtime
-// objects are not URL carriers here.
+// Calls visit for EVERY string an item carries in plain data, up to a fixed
+// depth: not only its media sources (src, textures, preview images,
+// thumbnail levels) but also text, labels, captions, file metadata and any
+// other string field. Decoded images, blobs and other runtime objects are not
+// visited. Because it over-matches, it is used only where a match refuses
+// more (which items a URL touches, which blob URLs the canvas knows), never
+// to decide that a URL is an item's source; see canvasItemMediaSourceUrls.
 function visitCanvasItemStrings(
   value: unknown,
   depth: number,
@@ -230,6 +234,47 @@ function visitCanvasItemStrings(
 }
 
 const CANVAS_ITEM_URL_DEPTH = 5
+
+// The fields that are an item's media source: what a placement of the item's
+// URL would put on the canvas and hand back as a stage result. Image
+// thumbnail levels are left out: they are derived from src, are not part of
+// the selection signature and are never shown to the model as a source.
+// Text, labels, captions, original-URL metadata and file fields are not
+// sources, even when they hold a URL.
+export function canvasItemMediaSourceUrls(item: CanvasItem): string[] {
+  const urls: string[] = []
+  const push = (value: unknown) => {
+    if (typeof value === 'string' && value) urls.push(value)
+  }
+  switch (item.type) {
+    case 'image':
+    case 'video':
+      push(item.src)
+      break
+    case 'model3d':
+      push(item.src)
+      for (const value of Object.values(item.textures || {})) push(value)
+      break
+    case 'file':
+      push(item.src)
+      for (const image of item.previewImages || []) push(image?.src)
+      break
+    default:
+      break
+  }
+  return urls
+}
+
+function findCanvasItemMediaSourceMatch(
+  item: CanvasItem,
+  scheme: string,
+  key: string
+): string | null {
+  for (const entry of canvasItemMediaSourceUrls(item)) {
+    if (urlSchemeOf(entry) === scheme && canvasTargetMediaUrlKey(entry) === key) return entry
+  }
+  return null
+}
 
 function findCanvasItemUrlMatch(item: CanvasItem, scheme: string, key: string): string | null {
   let match: string | null = null
@@ -256,9 +301,10 @@ function findCanvasTargetItemUrlMatches(
   return matches
 }
 
-// A model-authored media URL that resolves to any URL a canvas item carries
-// (its src, a texture, a preview image, a thumbnail) is a reference to that
-// item, whatever action carries it.
+// A model-authored media URL that resolves to any string a canvas item
+// carries (its src, a texture, a preview image, a thumbnail, but also a text
+// or label that holds the URL) is treated as a reference to that item,
+// whatever action carries it. Over-matching here only refuses more.
 export function findCanvasTargetItemIdsBySourceUrl(
   url: string,
   items: readonly CanvasItem[]
@@ -302,8 +348,10 @@ export type CanvasTargetMediaPlacementVerdict =
 // Decide whether a model-authored add_image / add_video / add_model3d may
 // place a URL. Only two kinds of URL may be placed, and the canonical URL is
 // returned so that a variant spelling is never what reaches the canvas:
-// - a URL of a selected item that is unchanged since selection, and only in
-//   an evidence mode that may read sources;
+// - the media source (canvasItemMediaSourceUrls) of a selected item that is
+//   unchanged since selection, and only in an evidence mode that may read
+//   sources. A URL that a selected item merely mentions (in its text, label,
+//   caption or metadata) is not that item's source and is not placed;
 // - a blob: URL this run produced itself that no canvas item carries or has
 //   carried during the run.
 // Anything else, including a URL that does not parse, a non-blob URL, and
@@ -330,7 +378,14 @@ export function authorizeCanvasTargetMediaPlacementUrl(options: {
       currentItems: options.currentItems
     })
     if (!verdict.allowed) return verdict
-    return { allowed: true, url: matches[0].url }
+    // Every item that touches the URL passed; the URL is placed only as the
+    // media source of one of them, never as a string from another field.
+    const scheme = urlSchemeOf(options.url)!
+    for (const item of verdict.items) {
+      const source = findCanvasItemMediaSourceMatch(item, scheme, key)
+      if (source !== null) return { allowed: true, url: source }
+    }
+    return { allowed: false, refusal: 'not_run_output', references: [] }
   }
 
   // Carried by a canvas item earlier in the run, but not by any item now:
