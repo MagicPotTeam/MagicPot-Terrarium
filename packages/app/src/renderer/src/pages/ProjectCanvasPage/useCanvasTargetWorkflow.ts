@@ -141,6 +141,7 @@ import { createCanvasImageItemDraft, createCanvasItemId } from './canvasAssetDra
 import { collectCanvasTargetCanvasActionReferencedIds } from './canvasTargetCanvasActionSources'
 import {
   authorizeCanvasTargetCanvasWrite,
+  collectCanvasTargetAttachedCaptions,
   authorizeCanvasTargetSourceReferences,
   canvasTargetEvidenceAllowsSelectionSnapshot,
   canvasTargetMediaUrlKey,
@@ -592,6 +593,7 @@ async function executeCanvasTargetCanvasAction(
     // The live groups, which may hold members the run's view lacks; a group
     // action is checked against both (a stale entry can only refuse).
     liveGroups?: readonly CanvasGroup[]
+    runStartAttachedCaptions?: ReadonlyMap<string, string>
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
   }
@@ -623,6 +625,7 @@ async function executeCanvasTargetCanvasAction(
       action,
       state: options.semanticState,
       liveGroups: options.liveGroups,
+      runStartAttachedCaptions: options.runStartAttachedCaptions,
       authority: options.selectionAuthority,
       runCreatedItemIds: options.runCreatedItemIds || new Set<string>()
     })
@@ -2001,6 +2004,10 @@ export function useCanvasTargetWorkflow({
       const executedCapabilityActionIds = new Set<string>()
       let capabilityActionStageIndex = 0
       let runtimeCanvasItems = items
+      // Captions attached when the run starts are part of their item: a
+      // delete of the item may take them along (a caption attached during
+      // the run refuses it).
+      const runStartAttachedCaptions = collectCanvasTargetAttachedCaptions(items)
       // Every blob: URL a canvas item carried at any point of the run, and
       // the media URLs the run produced itself. A model-authored add_* URL is
       // checked against both (authorizeCanvasTargetMediaPlacementUrl).
@@ -3042,6 +3049,7 @@ export function useCanvasTargetWorkflow({
             runPlacedItemIds,
             semanticState,
             liveGroups: latestGroupsRef.current,
+            runStartAttachedCaptions,
             commitSemanticResult: (result) =>
               commitSemanticCanvasResult(stageId, result, semanticState),
             resolveCanvasTargetItemBounds

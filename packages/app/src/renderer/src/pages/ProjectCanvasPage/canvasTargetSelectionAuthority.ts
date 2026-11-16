@@ -1,5 +1,9 @@
 import type { CanvasTargetEvidenceMode } from '@shared/canvasTarget'
 
+import {
+  collectCascadeDeletedCanvasItemIds,
+  isAttachedCaptionAnnotation
+} from './canvasAttachedCaptionUtils'
 import { resolveCanvasTargetGroupActionTargetGroups } from './canvasTargetCanvasActionGroups'
 import { resolveCanvasTargetSemanticCanvasActionSourceIds } from './canvasTargetCanvasActionSources'
 import type { CanvasTargetSemanticCanvasActionState } from './canvasTargetCanvasActionTypes'
@@ -453,10 +457,18 @@ export type CanvasTargetCanvasWriteVerdict =
 // refused when a group it would change holds any other item, in the run's
 // view or on the live canvas (liveGroups): the members of both are checked,
 // so a view entry that lags behind the live board can only refuse.
+//
+// Captions attached to an item are part of it: a delete removes them with
+// the item, as a manual delete does, and undo restores both. A caption the
+// delete takes along is writable when it is selected or run-created, or when
+// it was already attached to the same item when the run started
+// (runStartAttachedCaptions: caption id -> the item it was attached to). A
+// caption attached during the run (the user's new text) refuses the delete.
 export function authorizeCanvasTargetCanvasWrite(options: {
   action: CanvasTargetCanvasAction
   state: CanvasTargetSemanticCanvasActionState
   liveGroups?: readonly CanvasGroup[]
+  runStartAttachedCaptions?: ReadonlyMap<string, string>
   authority: CanvasTargetSelectionAuthority | null | undefined
   runCreatedItemIds: ReadonlySet<string>
 }): CanvasTargetCanvasWriteVerdict {
@@ -488,6 +500,35 @@ export function authorizeCanvasTargetCanvasWrite(options: {
   const outside = Array.from(new Set([...targetIds, ...groupMemberIds])).filter(
     (itemId) => !writable(itemId)
   )
+  if (action.action === 'delete_items') {
+    const targetIdSet = new Set(targetIds)
+    const itemById = new Map(state.items.map((item) => [item.id, item] as const))
+    const attachedAtRunStart = (itemId: string) => {
+      const parentId = options.runStartAttachedCaptions?.get(itemId)
+      const caption = itemById.get(itemId)
+      return Boolean(
+        parentId && caption && isAttachedCaptionAnnotation(caption) && caption.attachedToId === parentId
+      )
+    }
+    collectCascadeDeletedCanvasItemIds(state.items, targetIds).forEach((itemId) => {
+      if (targetIdSet.has(itemId) || writable(itemId) || attachedAtRunStart(itemId)) return
+      if (!outside.includes(itemId)) outside.push(itemId)
+    })
+  }
   if (outside.length > 0) return { allowed: false, refusal: 'not_selected', references: outside }
   return { allowed: true }
+}
+
+// The captions attached to an item when a run starts (caption id -> the id
+// of the item it is attached to). See authorizeCanvasTargetCanvasWrite.
+export function collectCanvasTargetAttachedCaptions(
+  items: readonly CanvasItem[]
+): Map<string, string> {
+  const captions = new Map<string, string>()
+  for (const item of items) {
+    if (isAttachedCaptionAnnotation(item) && item.attachedToId) {
+      captions.set(item.id, item.attachedToId)
+    }
+  }
+  return captions
 }

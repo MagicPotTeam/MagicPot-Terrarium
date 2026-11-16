@@ -17,6 +17,7 @@ vi.mock('./localImageExtract', () => ({ extractImageRegionLocally: f.extract }))
 vi.mock('./canvasTargetExternalAgentBridge', () => ({ waitForCanvasTargetProgressPaint: async () => {}, appendMessageToExternalChat: f.chat, openExternalAgentPane: async () => ({}), openExternalChatSession: async () => 'fixture-session', requestExternalChatConfirmation: async () => true, setExternalChatSessionLoading: vi.fn(), terminateExternalChatSession: vi.fn() }))
 vi.mock('./canvasTargetWorkflow', async (importOriginal) => ({ ...await importOriginal<object>(), requestCanvasTargetControlPlan: f.plan, requestCanvasTargetStageExecution: f.stage, requestCanvasTargetSummaryExecution: f.summary }))
 import { useCanvasTargetWorkflow } from './useCanvasTargetWorkflow'
+import { useProjectCanvasPageRuntimeState } from './useProjectCanvasPageRuntimeState'
 
 const source = 'data:image/png;base64,SYNTHETIC_SOURCE'
 const image: CanvasImageItem = { id: 'source', type: 'image', src: source, sourceWidth: 200, sourceHeight: 200, crop: { x: 50, y: 50, width: 100, height: 100 }, x: 0, y: 0, width: 100, height: 100, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
@@ -675,6 +676,16 @@ describe('Canvas Target evidence action gate', () => {
         })
       })
 
+      // A caption the user attached to the selected item during the run is
+      // the user's new text, not part of what the run may delete.
+      it('refuses to delete the selected item once the user attached a caption to it during the run', async () => {
+        const userCaption = { id: 'cap-user', type: 'annotation', shape: 'text-anno', attachedToId: 'source', label: 'my private caption', text: 'my private caption', x: 0, y: 110, width: 100, height: 20, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 3, locked: false, stroke: '#000', fillOpacity: 0, strokeWidth: 1 } as never as CanvasImageItem
+        const { live } = await runWithMidRunCanvas([plain, board, userCaption], [canvasAction({ action: 'delete_items', source: 'item_ids', itemIds: ['source'] })])
+        expect(f.commits).not.toHaveBeenCalled()
+        expect(live().map((item) => item.id)).toEqual(['source', 'board', 'cap-user'])
+        expect(shown(/Canvas delete_items skipped because a source was not selected/)).toBe(true)
+      })
+
       // The user deleted the selected item while the run went on (a
       // structured_only run keeps going): the run's view drops it, so no
       // later action copies it back or places anything on it.
@@ -787,6 +798,13 @@ describe('Canvas Target evidence action gate', () => {
 
     it('counts the captions a delete removes with the deleted image', async () => {
       expect(await confirmation([plain, caption], ['source'])).toMatch(/Canvas delete_items: rm \(before_model_stages, 2 item\(s\)\)/)
+    })
+
+    // Captions attached to the selected item when the run starts are part of
+    // it: the run's delete takes them along, as a manual delete does.
+    it('deletes the selected item with the captions attached when the run started', async () => {
+      expect(await confirmation([plain, caption], ['source'])).toMatch(/2 item\(s\)/)
+      expect(replayCommits([plain, caption]).at(-1)).toEqual([])
     })
 
     it('shows no count when the delete names an item the run has not created yet', async () => {
@@ -923,5 +941,25 @@ describe('Canvas Target evidence action gate', () => {
       expect(groups).toEqual([expect.objectContaining({ name: 'My refs', itemIds: ['source', 'board'] })])
       expect(f.chat.mock.calls.some(([message]) => /Canvas delete_group skipped because a source was not selected/.test(message.content || ''))).toBe(true)
     })
+  })
+
+  // The real canvas state (undo history included) around a run's delete.
+  it('restores the deleted item with its captions on undo after a run deleted it', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const caption = { id: 'cap', type: 'annotation', shape: 'text-anno', attachedToId: 'source', label: 'caption', text: 'caption', x: 0, y: 110, width: 100, height: 20, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 2, locked: false, stroke: '#000', fillOpacity: 0, strokeWidth: 1 } as never as CanvasImageItem
+    const board: CanvasImageItem = { ...plain, id: 'board', src: 'data:image/png;base64,BOARD', x: 300, zIndex: 3 }
+    f.plan.mockResolvedValue({ id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [], capabilityActions: [{ type: 'canvas', id: 'd', action: 'delete_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'item_ids', itemIds: ['source'], label: 'rm' }] })
+    const { result } = renderHook(() => {
+      const canvas = useProjectCanvasPageRuntimeState()
+      const workflow = useCanvasTargetWorkflow({ ...options, items: canvas.items as CanvasImageItem[], groups: canvas.groups, setItemsWithHistory: canvas.setItemsWithHistory, setGroups: canvas.setGroups })
+      return { canvas, workflow }
+    })
+    act(() => { result.current.canvas.setItems([plain, caption, board]) })
+    await act(async () => { await result.current.workflow.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.workflow.setCanvasTargetEvidenceMode('structured_only'); result.current.workflow.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.workflow.handleRunCanvasTarget() })
+    expect(result.current.canvas.items.map((item) => item.id)).toEqual(['board'])
+    act(() => { result.current.canvas.handleUndo() })
+    expect(result.current.canvas.items.map((item) => item.id)).toEqual(['source', 'cap', 'board'])
   })
 })

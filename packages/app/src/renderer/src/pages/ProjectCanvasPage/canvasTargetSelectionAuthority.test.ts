@@ -5,6 +5,7 @@ import type { CanvasTargetCanvasAction } from './canvasTargetCapabilityTypes'
 import type { CanvasTargetSemanticCanvasActionState } from './canvasTargetCanvasActionTypes'
 import {
   authorizeCanvasTargetCanvasWrite,
+  collectCanvasTargetAttachedCaptions,
   authorizeCanvasTargetMediaPlacementUrl,
   authorizeCanvasTargetSourceReferences,
   canvasItemMediaSourceUrls,
@@ -345,6 +346,38 @@ describe('authorizeCanvasTargetCanvasWrite', () => {
     expect(writeLive({ action: 'delete_group', groupId: 'g-selected' }, [group('g-selected', ['A', 'C'])])).toEqual({ allowed: true })
     expect(write({ action: 'delete_group', groupId: 'g-board' })).toMatchObject({ allowed: false, references: ['B'] })
     expect(authorizeCanvasTargetCanvasWrite({ action: action({ action: 'delete_group', groupId: 'g-board' }), state: state(), liveGroups: [], authority: createCanvasTargetSelectionAuthority([a]), runCreatedItemIds: new Set() })).toMatchObject({ allowed: false, references: ['B'] })
+  })
+
+  // Captions attached to an item are part of it: a delete takes them along
+  // when they were attached when the run started (or are selected or
+  // run-created). A caption attached during the run refuses the delete.
+  it('lets a delete take along the captions attached when the run started, and only those', () => {
+    const caption = (id: string, attachedToId: string) =>
+      ({ id, type: 'annotation', shape: 'text-anno', attachedToId, x: 0, y: 110, width: 100, height: 20, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 5, locked: false, stroke: '#000', fillOpacity: 0, strokeWidth: 1, label: '' }) as CanvasItem
+    const atStart = caption('cap-start', 'A')
+    const midRun = caption('cap-user', 'A')
+    const onRunItem = caption('cap-c', 'C')
+    const deleteWith = (items: CanvasItem[], runStart: Map<string, string> | undefined, itemIds = ['A'], runCreated = ['C']) =>
+      authorizeCanvasTargetCanvasWrite({
+        action: action({ action: 'delete_items', source: 'item_ids', itemIds }),
+        state: state({ items: [a, b, c, ...items] }),
+        runStartAttachedCaptions: runStart,
+        authority: createCanvasTargetSelectionAuthority([a]),
+        runCreatedItemIds: new Set(runCreated)
+      })
+    const runStart = collectCanvasTargetAttachedCaptions([a, b, c, atStart, onRunItem])
+    expect(runStart).toEqual(new Map([['cap-start', 'A'], ['cap-c', 'C']]))
+    expect(deleteWith([atStart], runStart)).toEqual({ allowed: true })
+    expect(deleteWith([onRunItem], runStart, ['C'])).toEqual({ allowed: true })
+    expect(deleteWith([atStart, midRun], runStart)).toEqual({ allowed: false, refusal: 'not_selected', references: ['cap-user'] })
+    // Attached to another item when the run started, moved onto A since.
+    expect(deleteWith([caption('cap-start', 'A')], new Map([['cap-start', 'B']]))).toMatchObject({ allowed: false, references: ['cap-start'] })
+    // Without the run-start list, an unselected caption refuses the delete.
+    expect(deleteWith([atStart], undefined)).toMatchObject({ allowed: false, references: ['cap-start'] })
+    // A caption the run created goes along.
+    expect(deleteWith([midRun], runStart, ['A'], ['C', 'cap-user'])).toEqual({ allowed: true })
+    // Other writes leave captions alone and do not check them.
+    expect(authorizeCanvasTargetCanvasWrite({ action: action({ action: 'transform_items', source: 'item_ids', itemIds: ['A'] }), state: state({ items: [a, b, c, midRun] }), authority: createCanvasTargetSelectionAuthority([a]), runCreatedItemIds: new Set() })).toEqual({ allowed: true })
   })
 
   it('leaves actions that do not change existing items alone', () => {
