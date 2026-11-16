@@ -312,6 +312,7 @@ import { useAgentArchiveResponder } from './useAgentArchiveResponder'
 import { useManagedFirstRunPane } from './useManagedFirstRunPane'
 import AgentThreadSidesPanel from './components/AgentThreadSidesPanel'
 import AgentTeamThreadRows, { type AgentTeamThreadRowsTeam } from './components/AgentTeamThreadRows'
+import AgentTeamTargetSelect from './components/AgentTeamTargetSelect'
 import { isAgentSideCommand, parseAgentSideCommand, type AgentSideCommandHandle } from './agentSideCommand'
 import { AgentProcessDetails, getAgentThreadProcessScope, useAgentThreadProcesses } from './components/AgentThreadProcessesPanel'
 import { AgentThreadJobRow, useAgentThreadJobs } from './components/AgentThreadJobsPanel'
@@ -354,6 +355,11 @@ interface ChatPageProps {
    * its pill into the host.
    */
   modelPillHost?: HTMLElement | null
+  /**
+   * Host in the Agent column's header before the model pill. The active conversation of a
+   * thread with a team renders the team target select (lead and members) into it.
+   */
+  teamTargetHost?: HTMLElement | null
 }
 
 export interface ChatPageWorkspaceMenu {
@@ -1024,7 +1030,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   workspaceMenu,
   threadSubRowsHost,
   onThreadSubRowChange,
-  modelPillHost
+  modelPillHost,
+  teamTargetHost
 }) => {
   const queueResumeNoticeId = React.useId()
   // The Agent column shows the model in its header instead of inside the composer.
@@ -10194,6 +10201,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         {/* Only the active conversation shows its model pill in the column header. */}
         {modelInHeader && active && modelPillHost
           ? createPortal(chatComposerControlSlot, modelPillHost)
+          : null}
+        {/* For a thread with a team the header also lists the lead and the members. */}
+        {active && teamTargetHost && teamRowsTeam
+          ? createPortal(<AgentTeamTargetSelect team={teamRowsTeam} currentId={currentSessionId || null} onSelect={selectSession} />, teamTargetHost)
           : null}
 
         {/* 图片右键菜单 */}

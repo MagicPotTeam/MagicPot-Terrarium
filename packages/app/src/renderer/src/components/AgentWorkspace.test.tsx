@@ -226,6 +226,7 @@ describe('AgentWorkspace', () => {
     expect(header.querySelector('button, [role="button"]')).toBeNull()
     expect(Array.from(header.children)).toEqual([
       heading.parentElement,
+      screen.getByTestId('agent-workspace-target-host'),
       screen.getByTestId('agent-workspace-model-host')
     ])
     expect(header).toHaveTextContent(/^agent_workspace\.title海报项目$/)
@@ -241,15 +242,25 @@ describe('AgentWorkspace', () => {
     expect(getComputedStyle(header).padding).toBe('10px 12px')
     expect(getComputedStyle(host).maxWidth).toBe('100%')
     expect(host).toBeEmptyDOMElement()
+    expect(screen.getByTestId('agent-workspace-target-host')).toBeEmptyDOMElement()
 
     await waitFor(() => {
-      type PaneProps = { storageScope: string; modelPillHost: HTMLElement | null; active: boolean }
+      type PaneProps = {
+        storageScope: string
+        modelPillHost: HTMLElement | null
+        teamTargetHost: HTMLElement | null
+        active: boolean
+      }
       const latest = new Map<string, PaneProps>()
       for (const [props] of chatPageMock.mock.calls) {
         latest.set((props as PaneProps).storageScope, props as PaneProps)
       }
       expect([...latest.keys()]).toEqual(['project-1.agent-1', 'project-1.agent-2'])
       for (const props of latest.values()) expect(props.modelPillHost).toBe(host)
+      // The team target select of a thread with a team goes into the slot before the pill.
+      for (const props of latest.values()) {
+        expect(props.teamTargetHost).toBe(screen.getByTestId('agent-workspace-target-host'))
+      }
       // Only one of them is active, so only one conversation fills the slot.
       expect([...latest.values()].filter((props) => props.active)).toHaveLength(1)
     })

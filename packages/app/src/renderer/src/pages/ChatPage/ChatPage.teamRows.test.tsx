@@ -129,15 +129,18 @@ const member = (id: string, name: string) => ({
 
 function Harness({ compact = true, onThreadSubRowChange }: { compact?: boolean; onThreadSubRowChange?: (title: string | null) => void }) {
   const [host, setHost] = React.useState<HTMLDivElement | null>(null)
+  const [targetHost, setTargetHost] = React.useState<HTMLDivElement | null>(null)
   return (
     <MemoryRouter>
       <ThemeProvider theme={createTheme()}>
+        <div data-testid="target-host" ref={setTargetHost} />
         <div data-testid="sub-rows" ref={setHost} />
         <ChatPage
           compact={compact}
           storageScope="team-rows-fixture"
           route={route}
           threadSubRowsHost={host}
+          teamTargetHost={targetHost}
           onThreadSubRowChange={onThreadSubRowChange}
         />
       </ThemeProvider>
@@ -201,16 +204,41 @@ describe('ChatPage team rows in the thread list', () => {
     expect(rows.getByRole('button', { name: 'Lead' })).toHaveAttribute('aria-current', 'true')
   })
 
-  it('shows no team rows for a thread without members', async () => {
+  it('puts a target select with the lead and the members in the header host', async () => {
+    const onThreadSubRowChange = vi.fn()
+    render(<Harness onThreadSubRowChange={onThreadSubRowChange} />)
+    const select = await within(screen.getByTestId('target-host')).findByTestId('agent-team-target-select')
+    expect(select).toHaveTextContent(/^Lead$/)
+    expect(select).toHaveAttribute('aria-haspopup', 'menu')
+
+    fireEvent.click(select)
+    const menu = await screen.findByRole('menu', { name: 'Team members' })
+    expect(within(menu).getAllByRole('menuitemradio').map((item) => item.textContent)).toEqual(['Lead', '设计师', '文案'])
+    expect(within(menu).getByRole('menuitemradio', { name: 'Lead' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: '设计师' }))
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('designer'))
+    await waitFor(() => expect(select).toHaveTextContent(/^设计师$/))
+    expect(onThreadSubRowChange).toHaveBeenLastCalledWith('设计师')
+    expect(within(screen.getByTestId('sub-rows')).getByRole('button', { name: '设计师' })).toHaveAttribute('aria-current', 'true')
+
+    fireEvent.click(select)
+    fireEvent.click(within(await screen.findByRole('menu', { name: 'Team members' })).getByRole('menuitemradio', { name: 'Lead' }))
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    await waitFor(() => expect(select).toHaveTextContent(/^Lead$/))
+  })
+
+  it('shows no team rows and no target select for a thread without members', async () => {
     h.sessions.value = [lead]
     render(<Harness />)
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     await waitFor(() => expect(rowLabels()).toEqual(['side-row']))
+    expect(screen.getByTestId('target-host')).toBeEmptyDOMElement()
   })
 
-  it('shows no team rows outside the Agent column', async () => {
+  it('shows no team rows and no target select outside the Agent column', async () => {
     render(<Harness compact={false} />)
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     await waitFor(() => expect(rowLabels()).toEqual(['side-row']))
+    expect(screen.getByTestId('target-host')).toBeEmptyDOMElement()
   })
 })

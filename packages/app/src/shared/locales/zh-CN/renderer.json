@@ -898,6 +898,8 @@
     "team_menu_add_member": "添加成员…",
     "team_menu_manage": "团队…",
     "team_lead_row": "组长",
+    "team_target_label": "团队成员：{{name}}",
+    "team_target_list": "团队成员",
     "goal_close": "收起目标",
     "model_none": "没有可用模型",
     "reasoning_label": "推理强度",

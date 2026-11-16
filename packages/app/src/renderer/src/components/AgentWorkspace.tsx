@@ -609,6 +609,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const [subRowHosts, setSubRowHosts] = useState<Record<string, HTMLElement | null>>({})
   // Header slot of the model pill; the active pane's chat page renders its pill into it.
   const [modelPillHost, setModelPillHost] = useState<HTMLElement | null>(null)
+  // Header slot before the pill for the team target select of a thread with a team.
+  const [teamTargetHost, setTeamTargetHost] = useState<HTMLElement | null>(null)
   const [paneSubRowTitles, setPaneSubRowTitles] = useState<Record<string, string | null>>({})
   const [paneSubRowCounts, setPaneSubRowCounts] = useState<Record<string, number>>({})
   const subRowHostRefs = useRef(new Map<string, (element: HTMLElement | null) => void>())
@@ -1214,7 +1216,17 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           WebkitAppRegion: 'no-drag'
         })}
       >
-        <Box sx={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <Box
+          sx={{
+            flex: '1 1 auto',
+            minWidth: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            // In a narrow column the title block takes the first line and the target select and
+            // the model pill share the second one, each as wide as it needs.
+            '@container (max-width: 560px)': { flexBasis: '100%' }
+          }}
+        >
           <Typography
             variant="caption"
             sx={{
@@ -1248,6 +1260,11 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         </Box>
         {/* Filled by the active pane's chat page; empty (and out of the layout) without one. */}
         <Box
+          ref={setTeamTargetHost}
+          data-testid="agent-workspace-target-host"
+          sx={{ display: 'flex', flex: 'none', '&:empty': { display: 'none' } }}
+        />
+        <Box
           ref={setModelPillHost}
           data-testid="agent-workspace-model-host"
           sx={{
@@ -1255,9 +1272,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
             flex: '0 1 auto',
             minWidth: 0,
             maxWidth: '100%',
-            '&:empty': { display: 'none' },
-            // In a narrow column the pill always takes its own line, as wide as it needs.
-            '@container (max-width: 560px)': { flex: '1 1 100%' }
+            '&:empty': { display: 'none' }
           }}
         />
       </Box>
@@ -1519,6 +1534,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 workspaceMenu={workspaceMenu}
                 threadSubRowsHost={subRowHosts[pane.id] ?? null}
                 modelPillHost={modelPillHost}
+                teamTargetHost={teamTargetHost}
                 onThreadSubRowChange={getSubRowChangeHandler(pane.id)}
               />
               </AgentThreadSubRowPresenceContext.Provider>
