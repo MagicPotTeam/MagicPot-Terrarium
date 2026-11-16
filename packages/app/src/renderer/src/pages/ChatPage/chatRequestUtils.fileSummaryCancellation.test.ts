@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
 import { augmentMessageContentWithFileAttachments } from './chatAttachmentPromptUtils'
+import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void
@@ -40,9 +41,13 @@ describe.each([false, true])('file summary cancellation (stream=%s)', (stream) =
       const chat = vi.fn()
       const chatStream = vi.fn()
       const cancelConversation = vi.fn()
+      // The fixture registry verifies these blob: primaries; production MAIN would refuse any
+      // primary that is not the registered file (or its exact bytes as a data: URL).
+      const reports = createReportBundleRegistryFixture()
       vi.stubGlobal('api', {
         svcManagedMedia: {},
-        svcLLMProxy: { chat, chatStream, cancelConversation }
+        svcLLMProxy: { chat, chatStream, cancelConversation },
+        svcReportBundles: reports.svcReportBundles
       })
       const controller = new AbortController()
       const request = {
@@ -82,13 +87,16 @@ describe.each([false, true])('file summary cancellation (stream=%s)', (stream) =
           {
             role: 'user' as const,
             content: 'Summarize',
-            attachments: [0, 1].map((index) => ({
-              type: 'file' as const,
-              url: `blob:summary-${index}.txt`,
-              fileName: `summary-${index}.txt`,
-              mimeType: 'text/plain',
-              ...(kind === 'report' ? { reportBundleRole: 'primary-report' as const } : {})
-            }))
+            attachments: [0, 1].map((index) => {
+              const attachment = {
+                type: 'file' as const,
+                url: `blob:summary-${index}.txt`,
+                fileName: `summary-${index}.txt`,
+                mimeType: 'text/plain',
+                ...(kind === 'report' ? { reportBundleRole: 'primary-report' as const } : {})
+              }
+              return kind === 'report' ? reports.register(attachment, 'summary-owner') : attachment
+            })
           }
         ]
       }

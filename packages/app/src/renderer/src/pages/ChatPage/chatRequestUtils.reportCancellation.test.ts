@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
 import { expandReportBundleAttachments } from './chatAttachmentPromptUtils'
+import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void
@@ -44,9 +45,11 @@ describe.each([false, true])('report expansion cancellation (stream=%s)', (strea
       const chat = vi.fn()
       const chatStream = vi.fn()
       const cancelConversation = vi.fn()
+      const reports = createReportBundleRegistryFixture()
       vi.stubGlobal('api', {
         svcManagedMedia: {},
-        svcLLMProxy: { chat, chatStream, cancelConversation }
+        svcLLMProxy: { chat, chatStream, cancelConversation },
+        svcReportBundles: reports.svcReportBundles
       })
       const profile = {
         id: 'report-cancel-fixture',
@@ -74,14 +77,19 @@ describe.each([false, true])('report expansion cancellation (stream=%s)', (strea
           {
             role: 'user' as const,
             content: 'Read the reports',
-            attachments: [0, 1].map((index) => ({
-              type: 'file' as const,
-              url: 'data:text/plain;base64,YQ==',
-              fileName: `report-${index}.txt`,
-              reportBundleRole: 'primary-report' as const,
-              reportBundleId: `report-${index}`,
-              reportBundleManifestUrl: `local-media:///fixture/manifest-${index}.json`
-            }))
+            attachments: [0, 1].map((index) =>
+              reports.register(
+                {
+                  type: 'file' as const,
+                  url: 'data:text/plain;base64,YQ==',
+                  fileName: `report-${index}.txt`,
+                  reportBundleRole: 'primary-report' as const,
+                  reportBundleId: `report-${index}`,
+                  reportBundleManifestUrl: `local-media:///fixture/manifest-${index}.json`
+                },
+                'report-cancel'
+              )
+            )
           }
         ]
       }

@@ -10,6 +10,7 @@ import {
   supportsStreamingChatCompletion
 } from './chatRequestUtils'
 import { HUNYUAN_3D_PROFILE_ID } from './chatPageShared'
+import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 import type {
   ChatAttachment,
   ChatMessage
@@ -2177,8 +2178,11 @@ describe('requestChatCompletion', () => {
       .fn()
       .mockResolvedValueOnce({ content: '15000' })
       .mockResolvedValueOnce({ content: 'bundle reply' })
+    // The report is a bundle registered for this conversation.
+    const reports = createReportBundleRegistryFixture()
     ;(window as typeof window & { api: unknown }).api = {
-      svcLLMProxy: { chat }
+      svcLLMProxy: { chat },
+      svcReportBundles: reports.svcReportBundles
     } as unknown as Window['api']
 
     const fetchMock = vi.fn(async (url: string) => {
@@ -2239,22 +2243,26 @@ describe('requestChatCompletion', () => {
       requestChatCompletion({
         config,
         profileId: 'profile-report',
+        conversationId: 'report-conversation',
         messages: [
           {
             role: 'user',
             content: 'Please review this report bundle.',
             attachments: [
-              {
-                type: 'file',
-                url: 'local-media:///cache/report-bundles/bundle-1/canvas-target-report.md',
-                fileName: 'canvas-target-report.md',
-                mimeType: 'text/markdown',
-                reportBundleId: 'bundle-1',
-                reportBundleRole: 'primary-report',
-                reportBundleRefName: 'canvas-target-report.md',
-                reportBundleManifestUrl:
-                  'local-media:///cache/report-bundles/bundle-1/manifest.json'
-              }
+              reports.register(
+                {
+                  type: 'file',
+                  url: 'local-media:///cache/report-bundles/bundle-1/canvas-target-report.md',
+                  fileName: 'canvas-target-report.md',
+                  mimeType: 'text/markdown',
+                  reportBundleId: 'bundle-1',
+                  reportBundleRole: 'primary-report',
+                  reportBundleRefName: 'canvas-target-report.md',
+                  reportBundleManifestUrl:
+                    'local-media:///cache/report-bundles/bundle-1/manifest.json'
+                },
+                'report-conversation'
+              )
             ]
           }
         ]

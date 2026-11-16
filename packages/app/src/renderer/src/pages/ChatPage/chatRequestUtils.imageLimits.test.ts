@@ -12,8 +12,14 @@ import type {
   ChatAttachment,
   ChatMessage
 } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
+import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 
 const formerImageLimit = 10
+// Primary reports are bundles registered for this conversation; fixture() recreates the registry.
+const reportConversation = { conversationId: 'image-limits-report' }
+let reports = createReportBundleRegistryFixture()
+const registered = (primary: ChatAttachment): ChatAttachment =>
+  reports.register(primary, reportConversation.conversationId)
 const imageDataUrl = 'data:image/png;base64,aW1hZ2U='
 const makeConfig = (apiMode: LLMOpenAIApiMode = 'responses'): Config => ({
   ...DEFAULT_CONFIG,
@@ -66,6 +72,7 @@ const managedImage = (sizeBytes = 5): NonNullable<ChatAttachment['media']> => ({
   originalFileName: 'fixture.png'
 })
 const fixture = () => {
+  reports = createReportBundleRegistryFixture()
   const fetchMock = vi.fn().mockRejectedValue(new Error('Owned fetch sentinel'))
   const materializeForRequest = vi.fn().mockRejectedValue(new Error('Owned IPC sentinel'))
   const chat = vi
@@ -97,7 +104,8 @@ const fixture = () => {
   vi.stubGlobal('fetch', fetchMock)
   window.api = {
     svcManagedMedia: { materializeForRequest },
-    svcLLMProxy: { chat, chatStream, remoteFetch }
+    svcLLMProxy: { chat, chatStream, remoteFetch },
+    svcReportBundles: reports.svcReportBundles
   } as unknown as Window['api']
   return { fetchMock, materializeForRequest, chat, chatStream, remoteFetch }
 }
@@ -163,13 +171,15 @@ describe('default Responses image policy', () => {
       const f = fixture()
       const message = inlineTurn(formerImageLimit + 1)
       const manifestUrl = 'local-media:///fixture/report.manifest.json'
-      message.attachments!.push({
-        type: 'file',
-        url: 'data:text/plain;base64,b3duZWQ=',
-        fileName: 'report.txt',
-        reportBundleRole: 'primary-report',
-        reportBundleManifestUrl: manifestUrl
-      })
+      message.attachments!.push(
+        registered({
+          type: 'file',
+          url: 'data:text/plain;base64,b3duZWQ=',
+          fileName: 'report.txt',
+          reportBundleRole: 'primary-report',
+          reportBundleManifestUrl: manifestUrl
+        })
+      )
       f.fetchMock.mockImplementation(async (url) => {
         if (url === manifestUrl)
           return {
@@ -185,7 +195,9 @@ describe('default Responses image policy', () => {
           }
         throw new Error('Unexpected attachment fetch')
       })
-      await expect(request(stream, makeConfig(), [message])).resolves.toBeDefined()
+      await expect(
+        request(stream, makeConfig(), [message], reportConversation)
+      ).resolves.toBeDefined()
       expect(f.fetchMock).toHaveBeenCalledWith(manifestUrl)
       expect(dispatchedImages(f)).toHaveLength(formerImageLimit + 1)
       expect(f.remoteFetch).not.toHaveBeenCalled()
@@ -324,13 +336,15 @@ describe('default Responses image policy', () => {
       const f = fixture(),
         message = turn(1)
       const manifestUrl = 'local-media:///fixture/report.manifest.json'
-      message.attachments!.push({
-        type: 'file',
-        url: 'data:text/plain;base64,b3duZWQ=',
-        fileName: 'report.txt',
-        reportBundleRole: 'primary-report',
-        reportBundleManifestUrl: manifestUrl
-      })
+      message.attachments!.push(
+        registered({
+          type: 'file',
+          url: 'data:text/plain;base64,b3duZWQ=',
+          fileName: 'report.txt',
+          reportBundleRole: 'primary-report',
+          reportBundleManifestUrl: manifestUrl
+        })
+      )
       f.fetchMock.mockImplementation(async (url) => {
         if (url === 'data:text/plain;base64,b3duZWQ=')
           return {
@@ -354,7 +368,9 @@ describe('default Responses image policy', () => {
             })
         }
       })
-      await expect(request(stream, makeConfig(), [message])).resolves.toBeDefined()
+      await expect(
+        request(stream, makeConfig(), [message], reportConversation)
+      ).resolves.toBeDefined()
       expect(f.fetchMock.mock.calls[0][0]).toBe(manifestUrl)
       expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith('.png'))).toHaveLength(
         formerImageLimit + 1
@@ -371,10 +387,10 @@ describe('default Responses image policy', () => {
     const f = fixture()
     const message = turn(1)
     const manifestUrl = 'local-media:///fixture/over-limit.manifest.json'
-    message.attachments!.push({
+    message.attachments!.push(registered({
       type: 'file', url: 'data:text/plain;base64,b3duZWQ=', fileName: 'report.txt',
       reportBundleRole: 'primary-report', reportBundleManifestUrl: manifestUrl
-    })
+    }))
     f.fetchMock.mockImplementation(async url => {
       if (url === manifestUrl) return {
         ok: true,
@@ -390,7 +406,7 @@ describe('default Responses image policy', () => {
       return { ok: true, text: async () => 'fixture', headers: { get: () => 'text/plain' } }
     })
     const original = JSON.stringify(message)
-    await expect(request(stream, makeConfig(), [message])).rejects.toThrow('本次图片数量超过限制，请分批发送')
+    await expect(request(stream, makeConfig(), [message], reportConversation)).rejects.toThrow('本次图片数量超过限制，请分批发送')
     expect(f.fetchMock.mock.calls.map(([url]) => url)).toEqual([manifestUrl])
     expect(f.materializeForRequest).not.toHaveBeenCalled()
     expect(f.chat).not.toHaveBeenCalled()
@@ -404,13 +420,15 @@ describe('default Responses image policy', () => {
       old = turn(0),
       latest = inlineTurn(1)
     const manifestUrl = 'local-media:///fixture/old.manifest.json'
-    old.attachments!.push({
-      type: 'file',
-      url: 'data:text/plain;base64,b3duZWQ=',
-      fileName: 'report.txt',
-      reportBundleRole: 'primary-report',
-      reportBundleManifestUrl: manifestUrl
-    })
+    old.attachments!.push(
+      registered({
+        type: 'file',
+        url: 'data:text/plain;base64,b3duZWQ=',
+        fileName: 'report.txt',
+        reportBundleRole: 'primary-report',
+        reportBundleManifestUrl: manifestUrl
+      })
+    )
     const messages = [old, latest],
       before = JSON.stringify(messages)
     f.fetchMock.mockImplementation(async (url) => {
@@ -433,7 +451,10 @@ describe('default Responses image policy', () => {
       }
     })
     await expect(
-      request(false, makeConfig(), messages, { imageHistoryPolicy: 'latest-user-turn' })
+      request(false, makeConfig(), messages, {
+        ...reportConversation,
+        imageHistoryPolicy: 'latest-user-turn'
+      })
     ).resolves.toMatchObject({ content: 'Owned fixture answer.' })
     expect(f.fetchMock.mock.calls.map(([url]) => url)).toEqual([
       manifestUrl,
@@ -519,13 +540,15 @@ describe('provider-declared finite Responses image limits', () => {
     async (stream) => {
       const f = fixture()
       const message = turn(3)
-      message.attachments!.push({
-        type: 'file',
-        url: 'data:text/plain;base64,b3duZWQ=',
-        fileName: 'report.txt',
-        reportBundleRole: 'primary-report',
-        reportBundleManifestUrl: 'local-media:///fixture/report.manifest.json'
-      })
+      message.attachments!.push(
+        registered({
+          type: 'file',
+          url: 'data:text/plain;base64,b3duZWQ=',
+          fileName: 'report.txt',
+          reportBundleRole: 'primary-report',
+          reportBundleManifestUrl: 'local-media:///fixture/report.manifest.json'
+        })
+      )
       await expect(
         request(stream, finiteConfig(2), [message], { imageHistoryPolicy: 'all' })
       ).rejects.toThrow('Too many images; the limit is 2.')
@@ -540,13 +563,15 @@ describe('provider-declared finite Responses image limits', () => {
       const f = fixture()
       const manifestUrl = 'local-media:///fixture/report.manifest.json'
       const message = turn(1)
-      message.attachments!.push({
-        type: 'file',
-        url: 'data:text/plain;base64,b3duZWQ=',
-        fileName: 'report.txt',
-        reportBundleRole: 'primary-report',
-        reportBundleManifestUrl: manifestUrl
-      })
+      message.attachments!.push(
+        registered({
+          type: 'file',
+          url: 'data:text/plain;base64,b3duZWQ=',
+          fileName: 'report.txt',
+          reportBundleRole: 'primary-report',
+          reportBundleManifestUrl: manifestUrl
+        })
+      )
       f.fetchMock.mockImplementation(async (url) => {
         if (url !== manifestUrl) throw new Error('Image materialized before count validation')
         return {
@@ -565,7 +590,10 @@ describe('provider-declared finite Responses image limits', () => {
         }
       })
       await expect(
-        request(stream, finiteConfig(2), [message], { imageHistoryPolicy: 'all' })
+        request(stream, finiteConfig(2), [message], {
+          ...reportConversation,
+          imageHistoryPolicy: 'all'
+        })
       ).rejects.toThrow('Too many images; the limit is 2.')
       expect(f.fetchMock.mock.calls.map(([url]) => url)).toEqual([manifestUrl])
       expect(f.materializeForRequest).not.toHaveBeenCalled()
@@ -605,7 +633,7 @@ describe('provider-declared finite Responses image limits', () => {
 
   it.each([false, true])('rejects cross-message bundle ID collisions before I/O (stream=%s)', async (stream) => {
     const f = fixture()
-    const primary = (manifest: string): ChatAttachment => ({ type: 'file', url: imageDataUrl, fileName: 'report.md', reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6, reportBundleManifestUrl: manifest })
+    const primary = (manifest: string): ChatAttachment => registered({ type: 'file', url: imageDataUrl, fileName: 'report.md', reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6, reportBundleManifestUrl: manifest })
     const reportImage: ChatAttachment = { ...image(0), reportBundleId: 'X', reportBundleRole: 'report-image' }
     const messages: ChatMessage[] = [
       { role: 'user', content: 'A', attachments: [primary('local-media:///a.json')] },
@@ -622,20 +650,21 @@ describe('provider-declared finite Responses image limits', () => {
   })
 
   it('does not let system report images suppress user bundle hints, or incomplete same-message images suppress hints', () => {
-    const primary: ChatAttachment = { type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6 }
+    const primary: ChatAttachment = registered({ type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6 })
     const reportImage: ChatAttachment = { ...image(0), reportBundleId: 'X', reportBundleRole: 'report-image' }
     const messages: ChatMessage[] = [{ role: 'system', content: '', attachments: [reportImage] }, { role: 'user', content: '', attachments: [primary, reportImage] }]
     expect(() => preflightChatRequestImages({ config: finiteConfig(5), messages, imageHistoryPolicy: 'all' })).toThrow('Too many images; the limit is 5.')
   })
 
   it('fails closed for ambiguous multiple primary manifests sharing an ID in one message', () => {
-    const primary: ChatAttachment = { type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6, reportBundleManifestUrl: 'local-media:///a.json' }
+    const primary: ChatAttachment = registered({ type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6, reportBundleManifestUrl: 'local-media:///a.json' })
     const messages: ChatMessage[] = [{ role: 'user', content: '', attachments: [primary, { ...primary, reportBundleManifestUrl: 'local-media:///b.json' }, { ...image(0), reportBundleId: 'X', reportBundleRole: 'report-image' }] }]
-    expect(() => preflightChatRequestImages({ config: finiteConfig(10), messages, imageHistoryPolicy: 'all' })).toThrow()
+    // Strengthened: with registered primaries this must fail on the count, not on the report refusal.
+    expect(() => preflightChatRequestImages({ config: finiteConfig(10), messages, imageHistoryPolicy: 'all' })).toThrow('Too many images; the limit is 10.')
   })
 
   it('keeps ambiguous hints outside finite Responses preflight', () => {
-    const primary: ChatAttachment = { type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6 }
+    const primary: ChatAttachment = registered({ type: 'file', url: imageDataUrl, reportBundleId: 'X', reportBundleRole: 'primary-report', reportBundleImageCount: 6 })
     const messages: ChatMessage[] = [{ role: 'user', content: '', attachments: [primary, { ...primary }] }]
     const nonResponses = finiteConfig(10)
     nonResponses.llm_config.api_profiles[0].api_mode = 'chat-completions'
@@ -650,14 +679,14 @@ describe('provider-declared finite Responses image limits', () => {
       role: 'user',
       content: 'Use the report image.',
       attachments: [
-        {
+        registered({
           type: 'file',
           url: imageDataUrl,
           fileName: 'report.md',
           reportBundleId: 'fixture-bundle',
           reportBundleRole: 'primary-report',
           reportBundleImageCount: 1
-        },
+        }),
         {
           ...image(0),
           reportBundleId: 'fixture-bundle',

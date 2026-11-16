@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
 import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
+import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 
 const config: Config = {
   ...DEFAULT_CONFIG,
@@ -24,8 +25,10 @@ const installService = () => {
     done()
     response.onData({ type: 'done', delta: '', done: true, fullContent: 'fixture response' })
   })
-  vi.stubGlobal('api', { svcLLMProxy: { chat, chatStream, cancelConversation: vi.fn() } })
-  return { chat, chatStream, done }
+  // Report primaries below are bundles registered for the 'fixture' conversation of base().
+  const reports = createReportBundleRegistryFixture()
+  vi.stubGlobal('api', { svcLLMProxy: { chat, chatStream, cancelConversation: vi.fn() }, svcReportBundles: reports.svcReportBundles })
+  return { chat, chatStream, done, reports }
 }
 const request = (streaming: boolean, input: Parameters<typeof requestChatCompletion>[0]) =>
   streaming ? requestChatCompletionStream({ ...input, onEvent: vi.fn() }) : requestChatCompletion(input)
@@ -66,7 +69,7 @@ describe.each([false, true])('local team dispatch callbacks, stream=%s', streami
     }))
     const revision = 'a'.repeat(64)
     await request(streaming, { ...base(), expectedProfileRevision: revision, imageHistoryPolicy: 'all', messages: [
-      { role: 'user', content: 'history', attachments: [{ type: 'file', url: 'local-media:///fixture/report.md', fileName: 'report.md', mimeType: 'text/markdown', reportBundleId: 'fixture-report-revision', reportBundleRole: 'primary-report', reportBundleRefName: 'report.md', reportBundleManifestUrl: 'local-media:///fixture/manifest.json' }] }
+      { role: 'user', content: 'history', attachments: [service.reports.register({ type: 'file', url: 'local-media:///fixture/report.md', fileName: 'report.md', mimeType: 'text/markdown', reportBundleId: 'fixture-report-revision', reportBundleRole: 'primary-report', reportBundleRefName: 'report.md', reportBundleManifestUrl: 'local-media:///fixture/manifest.json' }, 'fixture')] }
     ] })
     expect(service.chat).toHaveBeenCalledTimes(streaming ? 0 : 1)
     expect(service.chatStream).toHaveBeenCalledTimes(streaming ? 1 : 0)
@@ -87,7 +90,7 @@ describe.each([false, true])('local team dispatch callbacks, stream=%s', streami
     }))
     const before = vi.fn()
     await request(streaming, { ...base(), ...routing, beforeLocalDispatch: before, imageHistoryPolicy: 'all', messages: [
-      { role: 'user', content: 'history', attachments: [{ type: 'file', url: 'local-media:///fixture/report.md', fileName: 'report.md', mimeType: 'text/markdown', reportBundleId: 'fixture-report-member', reportBundleRole: 'primary-report', reportBundleRefName: 'report.md', reportBundleManifestUrl: 'local-media:///fixture/manifest.json' }] }
+      { role: 'user', content: 'history', attachments: [service.reports.register({ type: 'file', url: 'local-media:///fixture/report.md', fileName: 'report.md', mimeType: 'text/markdown', reportBundleId: 'fixture-report-member', reportBundleRole: 'primary-report', reportBundleRefName: 'report.md', reportBundleManifestUrl: 'local-media:///fixture/manifest.json' }, 'fixture')] }
     ] })
     expect(service.chat).toHaveBeenCalledTimes(streaming ? 0 : 1)
     expect(service.chatStream).toHaveBeenCalledTimes(streaming ? 1 : 0)
@@ -200,7 +203,7 @@ describe.each([false, true])('local team dispatch callbacks, stream=%s', streami
     }))
     const started = vi.fn(), before = vi.fn()
     const pending = request(streaming, { ...base(), imageHistoryPolicy: 'all', ...(teamHop ? team : {}), beforeLocalDispatch: before, onLocalDispatch: started, messages: [
-      { role: 'user', content: 'history', attachments: [{ type: 'file', url: 'local-media:///fixture/report.md', fileName: 'report.md', mimeType: 'text/markdown', reportBundleId: 'fixture-report', reportBundleRole: 'primary-report', reportBundleRefName: 'report.md', reportBundleManifestUrl: 'local-media:///fixture/manifest.json' }] },
+      { role: 'user', content: 'history', attachments: [service.reports.register({ type: 'file', url: 'local-media:///fixture/report.md', fileName: 'report.md', mimeType: 'text/markdown', reportBundleId: 'fixture-report', reportBundleRole: 'primary-report', reportBundleRefName: 'report.md', reportBundleManifestUrl: 'local-media:///fixture/manifest.json' }, 'fixture')] },
       { role: 'user', content: 'next request' }
     ] })
     await seen

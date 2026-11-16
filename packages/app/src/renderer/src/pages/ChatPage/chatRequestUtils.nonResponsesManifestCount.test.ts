@@ -3,8 +3,12 @@ import { DEFAULT_CONFIG } from '@shared/config/config'
 import type { Config, CustomSkill, LLMOpenAIApiMode } from '@shared/config/config'
 import type { ChatMessage } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
+import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 
 const manifestUrl = 'local-media:///fixture/manifest.json'
+const conversationId = 'manifest-count-fixture'
+// Recreated by fixture(): every primary report below is registered with it for conversationId.
+let reports = createReportBundleRegistryFixture()
 const reportUrl = 'data:text/plain;base64,b3duZWQ='
 const agent: CustomSkill = {
   id: 'owned',
@@ -40,13 +44,16 @@ const message = (): ChatMessage => ({
   content: 'Analyze selected references.',
   attachments: [
     { type: 'image', url: 'local-media:///fixture/selected.png', mimeType: 'image/png' },
-    {
-      type: 'file',
-      url: reportUrl,
-      fileName: 'report.txt',
-      reportBundleRole: 'primary-report',
-      reportBundleManifestUrl: manifestUrl
-    }
+    reports.register(
+      {
+        type: 'file',
+        url: reportUrl,
+        fileName: 'report.txt',
+        reportBundleRole: 'primary-report',
+        reportBundleManifestUrl: manifestUrl
+      },
+      conversationId
+    )
   ]
 })
 const request = (
@@ -59,6 +66,7 @@ const request = (
     config: config(external ? 'responses' : 'chat-completions'),
     messages,
     profileId: 'fixture-profile',
+    conversationId,
     ...(imageHistoryPolicy ? { imageHistoryPolicy } : {}),
     ...(external ? { externalAgentSkill: agent } : {})
   }
@@ -68,6 +76,7 @@ const request = (
 }
 
 const fixture = (entries: number) => {
+  reports = createReportBundleRegistryFixture()
   let completedManifestReads = 0
   const fetchMock = vi.fn(async (url: string | URL | Request) => {
     if (String(url) === manifestUrl) {
@@ -123,7 +132,8 @@ const fixture = (entries: number) => {
   vi.stubGlobal('fetch', fetchMock)
   window.api = {
     svcManagedMedia: { materializeForRequest },
-    svcLLMProxy: { chat, chatStream, remoteFetch, externalAgentStream }
+    svcLLMProxy: { chat, chatStream, remoteFetch, externalAgentStream },
+    svcReportBundles: reports.svcReportBundles
   } as unknown as Window['api']
   return {
     fetchMock,
@@ -268,12 +278,19 @@ describe('non-Responses report expansion: current explicit image lower bound', (
       const f = fixture(50)
       const selected = message()
       const failedManifest = 'local-media:///fixture/fails.json'
-      selected.attachments!.splice(1, 0, {
-        type: 'file',
-        url: reportUrl,
-        reportBundleRole: 'primary-report',
-        reportBundleManifestUrl: failedManifest
-      })
+      selected.attachments!.splice(
+        1,
+        0,
+        reports.register(
+          {
+            type: 'file',
+            url: reportUrl,
+            reportBundleRole: 'primary-report',
+            reportBundleManifestUrl: failedManifest
+          },
+          conversationId
+        )
+      )
       const originalFetch = f.fetchMock.getMockImplementation()!
       f.fetchMock.mockImplementation(async (url) => {
         if (String(url) === failedManifest) throw new Error('fixture first manifest unavailable')

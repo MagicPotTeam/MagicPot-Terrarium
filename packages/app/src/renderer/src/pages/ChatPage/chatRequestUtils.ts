@@ -41,7 +41,14 @@ import {
 } from '@renderer/utils/llmProfileUtils'
 import { normalizeLocalMediaUrl } from './chatPageShared'
 import { assertExplicitUserImageCount } from './chatExplicitImageCount'
-import { assertNoUnverifiedPrimaryReports } from '@shared/llm/unverifiedReport'
+import {
+  assertNoUnverifiedPrimaryReports,
+  hasWellFormedReportBundleBinding,
+  isPrimaryReportFileDescriptor,
+  UNVERIFIED_REPORT_BUNDLE_MESSAGE
+} from '@shared/llm/unverifiedReport'
+import { REPORT_BUNDLE_VERIFY_MAX_ITEMS } from '@shared/reportBundle'
+import type { ReportBundlesSvc, VerifyReportBundlesResp } from '@shared/api/svcReportBundles'
 import { api } from '@renderer/utils/windowUtils'
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference } from '@shared/mediaReference'
@@ -1150,6 +1157,18 @@ const projectToolHistoryForProvider = (
     toolHistory: preservedToolHistory
   }
 }
+const withoutReportBundleBindings = (
+  attachments: ChatAttachment[] | undefined
+): ChatAttachment[] | undefined =>
+  attachments?.some((attachment) => attachment.reportBundleBinding !== undefined)
+    ? attachments.map((attachment) => {
+        if (attachment.reportBundleBinding === undefined) return attachment
+        const copy = { ...attachment }
+        delete copy.reportBundleBinding
+        return copy
+      })
+    : attachments
+
 const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequestPayload => {
   const resolvedSystemPrompt =
     input.externalAgentSkill?.type === 'agent'
@@ -1168,13 +1187,18 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
       (explicitApiMode === 'auto' ? undefined : explicitApiMode))
     : undefined
 
+  // A report binding is a bearer secret for the local MAIN boundary only: never send it to
+  // an external agent endpoint.
+  const external = input.externalAgentSkill?.type === 'agent'
   return {
     messages: input.messages.map((message) => {
       const projected = projectToolHistoryForProvider(message)
       return {
         role: message.role,
         content: projected.content,
-        attachments: message.attachments,
+        attachments: external
+          ? withoutReportBundleBindings(message.attachments)
+          : message.attachments,
         ...(projected.toolHistory !== undefined ? { toolHistory: projected.toolHistory } : {})
       }
     }),
@@ -1465,6 +1489,134 @@ const expandReportBundleAttachmentsForRequest = async (
     throwIfAborted(signal)
     throw error
   }
+}
+
+type VerifiedReportBundle = { manifestUrl?: string; imageCount: number }
+
+const refuseUnverifiedReportBundle = (): never => {
+  throw new Error(UNVERIFIED_REPORT_BUNDLE_MESSAGE)
+}
+
+/**
+ * Copy of the messages in which every verified primary report carries only what MAIN vouched
+ * for: MAIN's own manifest URL (the descriptor's is never read) and MAIN's image count, and no
+ * `media` / `binary` payload that could replace the verified url as the report body. The
+ * caller's messages are not mutated.
+ */
+const projectVerifiedPrimaryReports = (
+  messages: ChatMessage[],
+  verified: ReadonlyMap<string, VerifiedReportBundle>
+): ChatMessage[] =>
+  messages.map((message) => {
+    if (!message.attachments?.some(isPrimaryReportFileDescriptor)) return message
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) => {
+        if (!isPrimaryReportFileDescriptor(attachment)) return attachment
+        const bundle = verified.get(attachment.reportBundleBinding ?? '')
+        if (!bundle) return refuseUnverifiedReportBundle()
+        const projected: ChatAttachment = {
+          ...attachment,
+          reportBundleImageCount: bundle.imageCount
+        }
+        delete projected.media
+        delete projected.binary
+        if (bundle.manifestUrl) projected.reportBundleManifestUrl = bundle.manifestUrl
+        else delete projected.reportBundleManifestUrl
+        return projected
+      })
+    }
+  })
+
+/**
+ * Authoritative step for primary reports of every role, after the synchronous shape guard and
+ * before any manifest, report or image is read. MAIN verifies each distinct binding against
+ * this conversation, the registered primary and the unchanged bundle files. Every failure is
+ * the same refusal: no conversation, a primary carrying `media` / `binary`, more than
+ * REPORT_BUNDLE_VERIFY_MAX_ITEMS distinct bindings, one binding with two urls, a missing
+ * service, an IPC error, a missing result or any status other than 'verified'. An abort keeps
+ * its own reason. Returns the projection every later stage uses; without primaries it returns
+ * the messages unchanged and never touches the bridge. The binding never enters an error.
+ */
+const verifyPrimaryReportBundles = async (
+  messages: ChatMessage[],
+  conversation: { conversationId?: string; storageScope?: string },
+  signal?: AbortSignal
+): Promise<ChatMessage[]> => {
+  const items = new Map<string, string>()
+  for (const message of messages) {
+    for (const attachment of message.attachments ?? []) {
+      if (!isPrimaryReportFileDescriptor(attachment)) continue
+      const binding = attachment.reportBundleBinding
+      if (
+        !hasWellFormedReportBundleBinding(attachment) ||
+        typeof binding !== 'string' ||
+        attachment.media !== undefined ||
+        attachment.binary !== undefined ||
+        typeof attachment.url !== 'string' ||
+        !attachment.url
+      ) {
+        return refuseUnverifiedReportBundle()
+      }
+      const knownUrl = items.get(binding)
+      if (knownUrl !== undefined && knownUrl !== attachment.url)
+        return refuseUnverifiedReportBundle()
+      items.set(binding, attachment.url)
+    }
+  }
+  if (items.size === 0) return messages
+  const { conversationId, storageScope } = conversation
+  if (typeof conversationId !== 'string' || !conversationId) return refuseUnverifiedReportBundle()
+  if (items.size > REPORT_BUNDLE_VERIFY_MAX_ITEMS) return refuseUnverifiedReportBundle()
+  const service = (api() as unknown as { svcReportBundles?: Partial<ReportBundlesSvc> } | undefined)
+    ?.svcReportBundles
+  const verify = service?.verify
+  if (typeof verify !== 'function') return refuseUnverifiedReportBundle()
+  throwIfAborted(signal)
+  let response: VerifyReportBundlesResp | undefined
+  try {
+    response = await awaitWithAbort(
+      Promise.resolve().then(() =>
+        verify.call(service, {
+          conversation: {
+            conversationId,
+            ...(typeof storageScope === 'string' && storageScope ? { storageScope } : {})
+          },
+          items: Array.from(items, ([binding, primaryUrl]) => ({ binding, primaryUrl }))
+        })
+      ),
+      signal
+    )
+  } catch {
+    throwIfAborted(signal)
+    return refuseUnverifiedReportBundle()
+  }
+  throwIfAborted(signal)
+  const verified = new Map<string, VerifiedReportBundle>()
+  for (const result of Array.isArray(response?.results) ? response.results : []) {
+    if (
+      !result ||
+      result.status !== 'verified' ||
+      typeof result.binding !== 'string' ||
+      !items.has(result.binding) ||
+      typeof result.imageCount !== 'number' ||
+      !Number.isSafeInteger(result.imageCount) ||
+      result.imageCount < 0 ||
+      (result.manifestUrl !== undefined &&
+        (typeof result.manifestUrl !== 'string' ||
+          !result.manifestUrl.startsWith('local-media://')))
+    ) {
+      continue
+    }
+    verified.set(result.binding, {
+      ...(result.manifestUrl ? { manifestUrl: result.manifestUrl } : {}),
+      imageCount: result.imageCount
+    })
+  }
+  for (const binding of items.keys()) {
+    if (!verified.has(binding)) return refuseUnverifiedReportBundle()
+  }
+  return projectVerifiedPrimaryReports(messages, verified)
 }
 
 const expandMessagesForImagePreflight = async (
@@ -2671,7 +2823,8 @@ export const preflightChatRequestImages = (
   assertExplicitUserImageCount(
     input.messages.findLast((message) => message.role === 'user')?.attachments
   )
-  // Non-image report files remain in history when image history is narrowed.
+  // Non-image report files remain in history when image history is narrowed. Shape only:
+  // the request path still has MAIN verify every bound primary before reading it.
   assertNoUnverifiedPrimaryReports(input.messages)
   validateCustomSkillForSend(input.externalAgentSkill)
   return preflightRequestImageCount(input, resolveSelectedRequestProfile(input))
@@ -2733,40 +2886,50 @@ const requestChatCompletionInStages = async (
   assertExplicitUserImageCount(
     requestInput.messages.findLast((message) => message.role === 'user')?.attachments
   )
-  // Reject marked reports before manifest expansion, attachment I/O or probes.
+  // Shape only: refuse primary reports without a binding before any IPC, I/O or probe.
   assertNoUnverifiedPrimaryReports(requestInput.messages)
   const profile = resolveSelectedRequestProfile(requestInput)
   const maxImages = preflightRequestImageCount(requestInput, profile)
+  // MAIN verifies every bound primary report before any manifest is read. Every later stage
+  // (preflight expansion, probe, preparation and dispatch) sees only its projection.
+  const verifiedInput = {
+    ...requestInput,
+    messages: await verifyPrimaryReportBundles(
+      requestInput.messages,
+      requestInput,
+      requestInput.signal
+    )
+  }
   const preflightMessages = await expandMessagesForImagePreflight(
-    requestInput.messages,
-    requestInput.imageHistoryPolicy,
+    verifiedInput.messages,
+    verifiedInput.imageHistoryPolicy,
     maxImages,
-    requestInput.signal
+    verifiedInput.signal
   )
-  throwIfAborted(requestInput.signal)
+  throwIfAborted(verifiedInput.signal)
   reportChatSendStage('images-checked', preflightMessages)
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
-    !useNativeOpenAIFileSearch && !requestInput.teamMember && !requestInput.teamMessageHop && requestInput.expectedProfileRevision === undefined && hasPrimaryReportBundleInMessages(requestInput.messages)
-      ? await ensureReportInlineCapability({ ...requestInput, expectedProfileRevision: undefined, beforeLocalDispatch: undefined, onLocalDispatch: undefined })
+    !useNativeOpenAIFileSearch && !verifiedInput.teamMember && !verifiedInput.teamMessageHop && verifiedInput.expectedProfileRevision === undefined && hasPrimaryReportBundleInMessages(verifiedInput.messages)
+      ? await ensureReportInlineCapability({ ...verifiedInput, expectedProfileRevision: undefined, beforeLocalDispatch: undefined, onLocalDispatch: undefined })
       : null
   const skipAttachmentContentAugmentation =
-    getBaseProfileId(requestInput.profileId) === HUNYUAN_3D_PROFILE_ID
+    getBaseProfileId(verifiedInput.profileId) === HUNYUAN_3D_PROFILE_ID
   const requestMessages = await prepareMessagesForRequest(preflightMessages, {
     reportBundlesExpanded: true,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
-    ...resolveManagedMediaRequestOptions(requestInput),
-    imageHistoryPolicy: requestInput.imageHistoryPolicy,
-    signal: requestInput.signal,
+    ...resolveManagedMediaRequestOptions(verifiedInput),
+    imageHistoryPolicy: verifiedInput.imageHistoryPolicy,
+    signal: verifiedInput.signal,
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
   reportChatSendStage('request-built', requestMessages)
   const result = await dispatchChatCompletionRequest({
-    ...requestInput,
+    ...verifiedInput,
     messages: requestMessages
   })
   reportChatSendStage('reply-finished', requestMessages)
@@ -2789,47 +2952,57 @@ const requestChatCompletionStreamInStages = async (
   assertExplicitUserImageCount(
     requestInput.messages.findLast((message) => message.role === 'user')?.attachments
   )
-  // Reject marked reports before manifest expansion, attachment I/O or probes.
+  // Shape only: refuse primary reports without a binding before any IPC, I/O or probe.
   assertNoUnverifiedPrimaryReports(requestInput.messages)
   const profile = resolveSelectedRequestProfile(requestInput)
   const maxImages = preflightRequestImageCount(requestInput, profile)
+  // MAIN verifies every bound primary report before any manifest is read. Every later stage
+  // (preflight expansion, probe, preparation and dispatch) sees only its projection.
+  const verifiedInput = {
+    ...requestInput,
+    messages: await verifyPrimaryReportBundles(
+      requestInput.messages,
+      requestInput,
+      requestInput.signal
+    )
+  }
   const preflightMessages = await expandMessagesForImagePreflight(
-    requestInput.messages,
-    requestInput.imageHistoryPolicy,
+    verifiedInput.messages,
+    verifiedInput.imageHistoryPolicy,
     maxImages,
-    requestInput.signal
+    verifiedInput.signal
   )
-  throwIfAborted(requestInput.signal)
+  throwIfAborted(verifiedInput.signal)
   reportChatSendStage('images-checked', preflightMessages)
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
-    !useNativeOpenAIFileSearch && !requestInput.teamMember && !requestInput.teamMessageHop && requestInput.expectedProfileRevision === undefined && hasPrimaryReportBundleInMessages(requestInput.messages)
-      ? await ensureReportInlineCapability({ ...requestInput, expectedProfileRevision: undefined, beforeLocalDispatch: undefined, onLocalDispatch: undefined })
+    !useNativeOpenAIFileSearch && !verifiedInput.teamMember && !verifiedInput.teamMessageHop && verifiedInput.expectedProfileRevision === undefined && hasPrimaryReportBundleInMessages(verifiedInput.messages)
+      ? await ensureReportInlineCapability({ ...verifiedInput, expectedProfileRevision: undefined, beforeLocalDispatch: undefined, onLocalDispatch: undefined })
       : null
   const skipAttachmentContentAugmentation =
-    getBaseProfileId(requestInput.profileId) === HUNYUAN_3D_PROFILE_ID
+    getBaseProfileId(verifiedInput.profileId) === HUNYUAN_3D_PROFILE_ID
   const requestMessages = await prepareMessagesForRequest(preflightMessages, {
     reportBundlesExpanded: true,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
-    ...resolveManagedMediaRequestOptions(requestInput),
-    imageHistoryPolicy: requestInput.imageHistoryPolicy,
-    signal: requestInput.signal,
+    ...resolveManagedMediaRequestOptions(verifiedInput),
+    imageHistoryPolicy: verifiedInput.imageHistoryPolicy,
+    signal: verifiedInput.signal,
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
   reportChatSendStage('request-built', requestMessages)
   const result = await dispatchChatCompletionStreamRequest({
-    ...requestInput,
+    ...verifiedInput,
     messages: requestMessages
   })
   reportChatSendStage('reply-finished', requestMessages)
 
   const normalizedResult = applySkillOutputModeContract(
     result.result,
-    requestInput.skillRuntime?.execution?.outputMode
+    verifiedInput.skillRuntime?.execution?.outputMode
   )
 
   return {
