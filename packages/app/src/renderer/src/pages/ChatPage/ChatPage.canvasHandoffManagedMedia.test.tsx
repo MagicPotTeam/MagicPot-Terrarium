@@ -417,7 +417,8 @@ describe('canvas hand-off into managed media', () => {
     )
   })
 
-  it('treats the same managed content as a duplicate and reports a failed import', async () => {
+  // Owner decision 5: the same image delivered by two separate events is two occurrences.
+  it('keeps the same managed content delivered twice as two occurrences and reports a failed import', async () => {
     await renderPage()
     f.importDataUrl.mockImplementation(async ({ originalFileName }: { originalFileName: string }) =>
       managed('d', originalFileName)
@@ -429,10 +430,11 @@ describe('canvas hand-off into managed media', () => {
     await dispatch({
       attachment: { type: 'image', url: 'blob:same-pixels', fileName: 'same.png' }
     })
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    })
-    expect(pending()).toHaveLength(1)
+    await waitFor(() => expect(pending()).toHaveLength(2))
+    expect(pending().map((item) => item.media)).toEqual([
+      expect.objectContaining({ sha256: sha('d') }),
+      expect.objectContaining({ sha256: sha('d') })
+    ])
 
     f.importDataUrl.mockRejectedValueOnce(new Error('store full'))
     vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -440,7 +442,7 @@ describe('canvas hand-off into managed media', () => {
       attachment: { type: 'image', url: 'data:image/png;base64,AQID', fileName: 'broken.png' }
     })
     await waitFor(() => expect(f.error).toHaveBeenCalledWith('canvas.send_to_agent_failed'))
-    expect(pending().map((item) => item.fileName)).toEqual(['same.png'])
+    expect(pending().map((item) => item.fileName)).toEqual(['same.png', 'same.png'])
   })
 
   it('imports a blob: image from an internal canvas drag instead of inlining it', async () => {
@@ -536,7 +538,8 @@ describe('canvas hand-off into managed media', () => {
     expect(pending()).toEqual([])
   })
 
-  it('keeps two selected files with identical bytes and different names, and skips a true repeat', async () => {
+  // Owner decision 5: a file delivered again is one more occurrence, not a repeat to drop.
+  it('keeps two selected files with identical bytes and different names, and a repeated file as another occurrence', async () => {
     await renderPage()
     // ref-A.png and ref-B.png are copies of one picture: the store gives both one reference.
     f.importFile.mockImplementation(async ({ originalFileName }: { originalFileName: string }) =>
@@ -552,13 +555,14 @@ describe('canvas hand-off into managed media', () => {
     expect(pending()[1].media).toMatchObject({ sha256: sha('a') })
     expect(f.error).not.toHaveBeenCalled()
 
-    // The same file again (same name, same content) is still one occurrence.
+    // The same file again (same name, same content) is a fourth occurrence.
     await dispatch({ attachment: localImage('ref-A.png') })
     await dispatch({ text: 'after the repeat' })
     await waitFor(() =>
       expect(screen.getByTestId('composer')).toHaveValue('draft\nafter the repeat')
     )
-    expect(pending().map((item) => item.fileName)).toEqual(selection)
+    expect(pending().map((item) => item.fileName)).toEqual([...selection, 'ref-A.png'])
+    expect(pending()[3].media).toMatchObject({ sha256: sha('a') })
   })
 
   it('gives the edit form the images in arrival order when the first import finishes last', async () => {

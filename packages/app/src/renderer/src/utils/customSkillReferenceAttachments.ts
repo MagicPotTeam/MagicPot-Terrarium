@@ -75,6 +75,12 @@ export const toChatAttachmentFromSkillReference = (
   hiddenFromChatView: true
 })
 
+/**
+ * The user's attachments followed by the skill's reference attachments. Every user attachment
+ * is kept, also two equal ones: each is its own occurrence (owner decision 5), and the composer
+ * removes them by index. Reference attachments are de-duplicated among themselves and against
+ * the user's attachments.
+ */
 export const mergeChatAttachmentsWithSkillReferenceAttachments = (
   attachments: ChatAttachment[] | undefined,
   referenceAttachments: SkillReferenceAttachment[] | undefined
@@ -83,9 +89,7 @@ export const mergeChatAttachmentsWithSkillReferenceAttachments = (
   const seenKeys = new Set<string>()
 
   ;(attachments || []).forEach((attachment) => {
-    const key = buildSkillReferenceAttachmentKey(attachment)
-    if (seenKeys.has(key)) return
-    seenKeys.add(key)
+    seenKeys.add(buildSkillReferenceAttachmentKey(attachment))
     mergedAttachments.push(attachment)
   })
 
