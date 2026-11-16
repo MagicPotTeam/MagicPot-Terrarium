@@ -422,6 +422,25 @@ function noteCanvasLegacyBlobRewritten(storeKey: string, logicalKey: string): vo
   canvasLegacyBlobGeneration.set(id, (canvasLegacyBlobGeneration.get(id) ?? 0) + 1)
 }
 
+// File-identity keys -> the size they were derived from: bytes read later with
+// another size belong to another version of the file and are keyed by content.
+const canvasFileIdentitySizeByKey = new Map<string, number>()
+
+function rememberCanvasFileIdentitySize(key: string, sizeBytes: number): void {
+  canvasFileIdentitySizeByKey.delete(key)
+  canvasFileIdentitySizeByKey.set(key, Math.floor(sizeBytes))
+  while (canvasFileIdentitySizeByKey.size > CANVAS_ASSET_KEY_CACHE_LIMIT) {
+    const oldest = canvasFileIdentitySizeByKey.keys().next().value
+    if (oldest === undefined) break
+    canvasFileIdentitySizeByKey.delete(oldest)
+  }
+}
+
+/** Image, video and model bytes are never empty: an empty read is a file still being written. */
+function refusesEmptyCanvasBytes(owner: { type?: unknown }): boolean {
+  return owner.type === 'image' || owner.type === 'video' || owner.type === 'model3d'
+}
+
 function rememberBoundedCanvasAssetKey(cache: Map<string, string>, id: string, key: string): void {
   cache.delete(id)
   cache.set(id, key)
@@ -597,7 +616,8 @@ async function readCanvasLocalSourceFileIdentity(
     if (
       !metadata?.exists ||
       !metadata.canonicalPath ||
-      !(metadata.sizeBytes >= 0) ||
+      // An empty file is treated as unreadable (it may be being written right now).
+      !(metadata.sizeBytes > 0) ||
       !(metadata.lastModifiedMs > 0)
     ) {
       return null
@@ -678,6 +698,7 @@ async function resolveCanvasFileIdentityAssetKey(
       key
     )
     rememberCanvasAssetKey(owner, slotId, src, key, 'file-identity')
+    rememberCanvasFileIdentitySize(key, itemIdentity.sizeBytes)
     return key
   }
 
@@ -691,6 +712,7 @@ async function resolveCanvasFileIdentityAssetKey(
     fileIdentity.lastModifiedMs
   )
   rememberCanvasAssetKey(owner, slotId, src, key, 'file-identity')
+  rememberCanvasFileIdentitySize(key, fileIdentity.sizeBytes)
   return key
 }
 
@@ -1804,7 +1826,7 @@ async function storeCanvasAssetBlobs(
   const readEntries: ResolvedCanvasBinaryAsset[] = []
   const storedKeys = new Set(existing?.assetKeys ?? [])
   let needsBytes = false
-  const pendingByAssetKey = new Map<string, Promise<boolean>>()
+  const pendingByAssetKey = new Map<string, Promise<string | null>>()
   const legacyWrites: CanvasLegacyBlobWrite[] = []
 
   let batch: CanvasAssetBlobWrite[] = []
@@ -1838,6 +1860,7 @@ async function storeCanvasAssetBlobs(
 
   const storeSlot = async (slot: CanvasBlobStoreSlot): Promise<void> => {
     let bytes: ResolvedCanvasBinaryAsset | null | undefined
+    let readEmpty = false
     const readBytes = async (): Promise<ArrayBuffer | null> => {
       if (!allowByteReads) {
         needsBytes = true
@@ -1845,6 +1868,10 @@ async function storeCanvasAssetBlobs(
       }
       if (bytes === undefined) {
         bytes = await readCanvasBlobStoreSlotBytes(slot, storeKey)
+        if (bytes && bytes.data.byteLength === 0 && refusesEmptyCanvasBytes(slot.owner)) {
+          readEmpty = true
+          bytes = null
+        }
         if (bytes) readEntries.push(bytes)
       }
       return bytes ? bytes.data : null
@@ -1858,8 +1885,15 @@ async function storeCanvasAssetBlobs(
       const lastKnownKey = canvasAssetKeyHintBySource.get(slot.src)
       if (lastKnownKey && storedKeys.has(lastKnownKey)) assetKey = lastKnownKey
     }
-    if (!assetKey) {
+    const leaveOnSource = (): void => {
+      // An empty local file (still being written): the item keeps its source in the
+      // record and the slot is tried again at the next save. Anything else unreadable
+      // refuses the save, as the record would point at bytes it does not hold.
+      if (readEmpty && resolveLocalFilePathFromSource(slot.src) !== null) return
       missingLogicalKeys.push(slot.logicalKey)
+    }
+    if (!assetKey) {
+      leaveOnSource()
       return
     }
     if (!storedKeys.has(assetKey)) {
@@ -1868,16 +1902,40 @@ async function storeCanvasAssetBlobs(
         const key = assetKey
         pending = (async () => {
           const data = await readBytes()
-          if (!data || !bytes) return false
-          await enqueue({ assetKey: key, data, mimeType: bytes.mimeType })
-          return true
+          if (!data || !bytes) return null
+          let storedKey = key
+          const expectedSize = canvasFileIdentitySizeByKey.get(key)
+          if (expectedSize !== undefined && expectedSize !== data.byteLength) {
+            // The file changed between its stat and the read: these bytes are another
+            // version than the key names. Key them by their content instead.
+            storedKey = await buildCanvasContentAssetKey(data)
+            rememberCanvasAssetKey(slot.owner, slot.slotId, slot.src, storedKey, 'content')
+            // The item's own (stale) identity now stands for these bytes, so copies of
+            // the item do not read the file again.
+            const identity = getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src)
+            if (identity && identity.sizeBytes === expectedSize) {
+              rememberCanvasImmutableAssetKey(
+                getCanvasFileIdentityCacheId(
+                  identity.canonicalPath,
+                  identity.sizeBytes,
+                  identity.lastModifiedMs
+                ),
+                storedKey
+              )
+            }
+            if (storedKeys.has(storedKey)) return storedKey
+          }
+          await enqueue({ assetKey: storedKey, data, mimeType: bytes.mimeType })
+          return storedKey
         })()
         pendingByAssetKey.set(assetKey, pending)
       }
-      if (!(await pending)) {
-        missingLogicalKeys.push(slot.logicalKey)
+      const storedKey = await pending
+      if (!storedKey) {
+        leaveOnSource()
         return
       }
+      assetKey = storedKey
     }
     assetKeyByLogicalKey.set(slot.logicalKey, assetKey)
 
@@ -2303,8 +2361,11 @@ type CanvasMirrorSlotPlan = {
 type CanvasMirrorTransport = {
   /** Asset file names in the folder. */
   list(): Promise<Set<string>>
-  /** File-to-file copy in the main process; null when the bridge has no such call. */
-  copy: ((assetFileName: string, sourcePath: string) => Promise<boolean>) | null
+  /**
+   * File-to-file copy in the main process: the size of the published file, or
+   * null when it failed. The member is null when the bridge has no such call.
+   */
+  copy: ((assetFileName: string, sourcePath: string) => Promise<number | null>) | null
   write(assetFileName: string, data: ArrayBuffer): Promise<void>
   prune: ((keepAssetKeys: string[], keepEntryNames: string[]) => Promise<void>) | null
 }
@@ -2400,24 +2461,29 @@ async function readCanvasMirrorSlotBytes(
     allowIndexedDbFallback: true,
     indexedDbAssetKey: assetKey
   }
-  return slot.slotId === CANVAS_ASSET_SOURCE_SLOT
-    ? await resolveCanvasBinaryAssetForItem(
-        slot.owner,
-        slot.logicalKey,
-        slot.src,
-        slot.fileName,
-        slot.fallbackMimeType,
-        storeKey,
-        options
-      )
-    : await resolveCanvasBinaryAsset(
-        slot.logicalKey,
-        slot.src,
-        slot.fileName,
-        slot.fallbackMimeType,
-        storeKey,
-        options
-      )
+  const resolved =
+    slot.slotId === CANVAS_ASSET_SOURCE_SLOT
+      ? await resolveCanvasBinaryAssetForItem(
+          slot.owner,
+          slot.logicalKey,
+          slot.src,
+          slot.fileName,
+          slot.fallbackMimeType,
+          storeKey,
+          options
+        )
+      : await resolveCanvasBinaryAsset(
+          slot.logicalKey,
+          slot.src,
+          slot.fileName,
+          slot.fallbackMimeType,
+          storeKey,
+          options
+        )
+  // An empty image, video or model is a file still being written: not mirrored now.
+  return resolved && resolved.data.byteLength === 0 && refusesEmptyCanvasBytes(slot.owner)
+    ? null
+    : resolved
 }
 
 /**
@@ -2467,9 +2533,11 @@ function createCanvasMirrorTransport(
             sourcePath
           })
           return receipt?.status === 'written' || receipt?.status === 'exists'
+            ? receipt.sizeBytes
+            : null
         } catch {
           // Not authorized for a direct copy, or unreadable: the bytes go through the renderer.
-          return false
+          return null
         }
       },
       write: async (assetFileName, data) => {
@@ -2626,10 +2694,13 @@ async function stageCanvasMirrorAsset(
       localPath &&
       plan.transport.copy &&
       (!getCanvasAssetSlotSourceFile(slot.owner, slot.slotId) ||
-        getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src)) &&
-      (await plan.transport.copy(assetFileName, localPath))
+        getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src))
     ) {
-      return true
+      const copiedBytes = await plan.transport.copy(assetFileName, localPath)
+      // An empty copy of an image, video or model is listed as missing and redone later.
+      if (copiedBytes !== null && (copiedBytes > 0 || !refusesEmptyCanvasBytes(slot.owner))) {
+        return true
+      }
     }
 
     const assetKey = assetFileName.split('.')[0]

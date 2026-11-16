@@ -1825,3 +1825,65 @@ describe('save-time cost on big boards', () => {
     expect(mirror.calls.prune).toHaveLength(1)
   })
 })
+
+describe('empty and changing source files', () => {
+  it('stores a file that is empty at the first save with its full bytes once it is complete', async () => {
+    const mirror = createFakeMirror()
+    const generated = '/home/u/comfy/output/ComfyUI_00001_.png'
+    mirror.localFiles.set(generated, new Uint8Array(0))
+    // An Agent / ComfyUI result added by URL, while the generator is still writing it.
+    const item = imageItem('gen', `local-media://${generated}`)
+    await saveCanvasItems([item], 'empty-first')
+
+    const first = fake.record('empty-first')!.items[0]
+    expect(first.assetKey).toBeUndefined()
+    expect(first.src).toBe(`local-media://${generated}`)
+    expect(keyedBlobKeys()).toEqual([])
+    expect(mirror.assetFiles()).toEqual([])
+    expect(mirror.project().items[0].src).toBe(`local-media://${generated}`)
+
+    // The file is complete now; the item object never changed.
+    mirror.localFiles.set(generated, new Uint8Array([1, 2, 3, 4]))
+    await saveCanvasItems([item], 'empty-first')
+    const second = fake.record('empty-first')!.items[0]
+    expect(second.assetKey).toMatch(/^f-[0-9a-f]{40}$/)
+    expect(second.src).toBe('')
+    expect(fake.blobBytes(`empty-first::canvas::asset::${second.assetKey as string}`)).toEqual([1, 2, 3, 4])
+    expect(fake.blobBytes(legacyBlobKey('empty-first', 'gen'))).toEqual([1, 2, 3, 4])
+    const [assetFile] = mirror.assetFiles()
+    expect([...mirror.files.get(`${mirror.projectDir()}/assets/${assetFile}`)!]).toEqual([1, 2, 3, 4])
+    expect(mirror.project().items[0].src).toBe(`assets/${assetFile}`)
+  })
+
+  it('never stores an empty blob for an image', async () => {
+    const item = imageItem('void', registerSource('blob:empty-image', []))
+    await expect(saveCanvasItems([item], 'empty-blob')).rejects.toThrow('could not be persisted: void')
+    expect(fake.blobKeys()).toEqual([])
+  })
+
+  it('keys by content the bytes of a file whose size changed since its key was derived', async () => {
+    const mirror = createFakeMirror()
+    mirror.localFiles.set('/home/u/pics/grown.png', new Uint8Array([5, 5, 5]))
+    const sourceIdentity = {
+      version: 1,
+      kind: 'local-file',
+      canonicalPath: '/home/u/pics/grown.png',
+      sizeBytes: 9,
+      lastModifiedMs: 1_700_000_000_000,
+      cacheKey: 'k'
+    }
+    const item = imageItem('grown', 'local-media:///home/u/pics/grown.png', { sourceIdentity })
+    await saveCanvasItems([item], 'resized')
+    const saved = fake.record('resized')!.items[0]
+    expect(saved.assetKey).toBe(contentKey([5, 5, 5]))
+    expect(fake.blobBytes(assetBlobKey('resized', [5, 5, 5]))).toEqual([5, 5, 5])
+    expect(keyedBlobKeys()).toEqual([assetBlobKey('resized', [5, 5, 5])])
+
+    // The next save of the unchanged item moves nothing.
+    fake.resetLog()
+    mirror.resetCalls()
+    await saveCanvasItems([{ ...item, x: 1 } as CanvasItem], 'resized')
+    expect(fake.blobPuts()).toEqual([])
+    expect(mirror.calls.readFileFromPath).toEqual([])
+  })
+})
