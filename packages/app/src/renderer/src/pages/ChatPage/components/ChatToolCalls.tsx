@@ -287,7 +287,15 @@ export const DelegatedResult: React.FC<{ text: string; raw?: boolean; error?: bo
         '& > div ul': { listStyle: 'disc' },
         '& > div ol': { listStyle: 'decimal' },
         '& > div li + li': { mt: '0.2em' },
-        '& > div pre': { whiteSpace: 'pre-wrap' }
+        '& > div pre': { whiteSpace: 'pre-wrap' },
+        '& > div :not(pre) > code': {
+          px: '0.35em',
+          py: '0.15em',
+          borderRadius: `${tokens.radius.control}px`,
+          bgcolor: tokens.surface,
+          fontFamily: tokens.monoFont,
+          fontSize: '0.9em'
+        }
       }}
     >
       {raw || error ? (
