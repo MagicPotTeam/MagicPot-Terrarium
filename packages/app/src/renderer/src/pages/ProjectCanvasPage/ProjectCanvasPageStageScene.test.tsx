@@ -13,6 +13,7 @@ import type {
   CanvasVideoItem
 } from './types'
 import type { ProjectCanvasImagePreview } from './projectCanvasRenderBoundary'
+import { emitCanvasLayoutResizeInteraction } from './canvasLayoutResizeInteraction'
 import {
   createProjectCanvasWebGLRuntimeMetrics,
   type ProjectCanvasWebGLRuntimeMetrics
@@ -790,6 +791,52 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       root.setAttribute('data-project-canvas-marquee-active', 'true')
     })
     expect(getComputedStyle(highResLayer as HTMLElement).display).not.toBe('none')
+  })
+
+  it('keeps the high-resolution source layer mounted through a gesture and a panel resize', async () => {
+    const item = {
+      ...createImageItem('image-jumbo-gesture-source'),
+      width: 6_000,
+      height: 2_000,
+      sourceWidth: 6_000,
+      sourceHeight: 2_000,
+      image: createImageItem('image-jumbo-gesture-preview').image
+    }
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    const baseProps = createBaseProps([item])
+
+    const { rerender } = render(<ProjectCanvasPageStageScene {...baseProps} />)
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    await waitFor(() => {
+      expect(root).toHaveAttribute('data-project-canvas-high-res-dom-image-count', '1')
+    })
+    const highResItem = document.querySelector(
+      `[data-project-canvas-high-res-image-item-id="${item.id}"]`
+    )
+    expect(highResItem).not.toBeNull()
+
+    rerender(<ProjectCanvasPageStageScene {...baseProps} isViewportInteracting />)
+    expect(root).toHaveAttribute('data-project-canvas-high-res-dom-image-count', '1')
+    expect(
+      document.querySelector(`[data-project-canvas-high-res-image-item-id="${item.id}"]`)
+    ).toBe(highResItem)
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(true, 'right')
+    })
+    try {
+      expect(root).toHaveAttribute('data-project-canvas-high-res-dom-image-count', '1')
+    } finally {
+      act(() => {
+        emitCanvasLayoutResizeInteraction(false)
+      })
+    }
+
+    rerender(<ProjectCanvasPageStageScene {...baseProps} isViewportInteracting={false} />)
+    expect(
+      document.querySelector(`[data-project-canvas-high-res-image-item-id="${item.id}"]`)
+    ).toBe(highResItem)
   })
 
   it('budgets jumbo source overlays by visible pixels instead of a four item cap', async () => {

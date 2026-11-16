@@ -1466,7 +1466,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
     [canvas2DFallbackImageIdSet, canvas2DResolvedImageIds]
   )
   const highResolutionDomImagePreviewItems = React.useMemo(() => {
-    if (isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting) {
+    // Kept through pan, zoom and panel resizes: the layer moves with the viewport transform, and
+    // emptying it at a gesture start meant unmounting and decoding the source images again at the
+    // end. It is only recomputed from the committed viewport.
+    if (isCanvasPerformanceThrottled) {
       return []
     }
 
@@ -1567,9 +1570,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     return budgetedItems
   }, [
     imageRuntimeRouteById,
-    isCanvasLayoutResizeInteracting,
     isCanvasPerformanceThrottled,
-    isViewportInteracting,
     selectedIds,
     stagePos,
     stagePosRef,
