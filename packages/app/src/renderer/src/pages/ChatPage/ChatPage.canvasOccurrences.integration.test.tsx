@@ -68,7 +68,9 @@ describe('canvas to ChatPage occurrence seam', () => {
     hook.unmount(); events.mockRestore()
   })
 
-  it('rejects a same-source batch without changing an existing composer draft', async () => {
+  // Owner decision 5: the same image delivered eight times is eight occurrences.
+  // Replaces the interim 'rejects a same-source batch without changing an existing composer draft'.
+  it('appends a same-source batch after an existing composer draft', async () => {
     const original: ChatAttachment = { type: 'image', url: 'data:image/png;base64,Qg==', fileName: 'existing.png' }
     f.sessions[0].draft = { inputValue: 'existing draft', pendingAttachments: [original], pendingHiddenContext: '', updatedAt: 1 }
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), 'fixture-session')
@@ -78,17 +80,33 @@ describe('canvas to ChatPage occurrence seam', () => {
       expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toEqual([original])
     })
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 260)) })
-    const before = screen.getByTestId('attachments').textContent
     const images: CanvasImageItem[] = Array.from({ length: 8 }, (_, i) => ({ id: `image-${i}`, type: 'image', src: 'data:image/png;base64,QQ==', fileName: `${i}.png`, x: i * 100, y: 0, width: 100, height: 100, rotation: 0, scaleX: 1, scaleY: 1, zIndex: i, locked: false }))
+    const before = structuredClone(images)
     const events = vi.spyOn(window, 'dispatchEvent')
-    const hook = renderHook(() => useCanvasBridgeActions({ canvasId: 'fixture', projectName: 'Fixture', items: images, groups: [], notifyError: f.error, notifySuccess: f.noop, extractPromptTextFromCanvasItems: () => 'synthetic prompt', renderCanvasItemsImageDataUrl: vi.fn(async () => ''), renderCanvasItemsSvgMarkup: vi.fn(async () => '') }))
+    const renderOverview = vi.fn(async () => '')
+    const hook = renderHook(() => useCanvasBridgeActions({ canvasId: 'fixture', projectName: 'Fixture', items: images, groups: [], notifyError: f.error, notifySuccess: f.noop, extractPromptTextFromCanvasItems: () => 'synthetic prompt', renderCanvasItemsImageDataUrl: renderOverview, renderCanvasItemsSvgMarkup: vi.fn(async () => '') }))
     let accepted: boolean | undefined
-    await act(async () => { accepted = await hook.result.current.handleSendCanvasItemsToAgent(images, { targetScope: scope }); await new Promise(resolve => setTimeout(resolve, 260)) })
-    expect.soft(accepted).toBe(false)
-    expect.soft(f.error).toHaveBeenCalledWith('canvas.agent_send_duplicate_selection')
-    expect.soft(events.mock.calls.map(([event]) => event.type).filter(type => type === 'send-to-agent' || type === 'chat:focus-composer')).toEqual([])
-    expect.soft(screen.getByTestId('input')).toHaveValue('existing draft')
-    expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
+    await act(async () => { accepted = await hook.result.current.handleSendCanvasItemsToAgent(images, { targetScope: scope }) })
+    expect(accepted).toBe(true)
+    // The sender materializes each selected item once, in selection order, before its delivery timer.
+    expect(f.materialize.mock.calls.map(([item]) => item.fileName)).toEqual(images.map(item => item.fileName))
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 260)) })
+    expect(f.error).not.toHaveBeenCalled()
+    expect(renderOverview).not.toHaveBeenCalled()
+    expect(f.dispatch).toHaveBeenCalledOnce()
+    const sent = events.mock.calls.map(([event]) => event as CustomEvent<{ attachment?: ChatAttachment }>).filter(event => event.type === 'send-to-agent' && event.detail.attachment)
+    expect(sent.map(event => event.detail.attachment?.url)).toEqual(images.map(item => item.src))
+    expect(sent.map(event => event.detail.attachment?.fileName)).toEqual(images.map(item => item.fileName))
+    // The test double is a single-line <input>, whose value property drops the newline; read the rendered attribute.
+    await waitFor(() => expect(screen.getByTestId('input').getAttribute('value')).toBe('existing draft\nsynthetic prompt'))
+    await waitFor(() => expect((JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]).map(item => item.fileName)).toEqual(['existing.png', ...images.map(item => item.fileName)]))
+    const pending = JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
+    expect(pending[0]).toEqual(original)
+    const added = pending.slice(1)
+    // Same bytes give one content-addressed managed URL, kept once per occurrence.
+    expect(added.every(item => item.url.startsWith('local-media:') && item.media?.kind === 'managed')).toBe(true)
+    expect(new Set(added.map(item => item.url)).size).toBe(1)
+    expect(images).toEqual(before)
     expect(f.request).not.toHaveBeenCalled()
     hook.unmount(); events.mockRestore()
   })

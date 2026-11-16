@@ -1964,7 +1964,6 @@
     "agent_send_overview_failed": "Could not create the canvas overview. Select a smaller area or reduce the distance between items, then try again.",
     "send_to_agent_failed": "Some images could not be read. Re-import them and try again.",
     "agent_edit_input_unavailable": "Cannot add this whole input while editing a message. Finish or cancel editing, then try again.",
-    "agent_send_duplicate_selection": "Some selected items would be treated as duplicates, so this selection was not added. Use distinct files and check the Agent draft before sending.",
     "untitled": "Untitled canvas",
     "save_changed_retry": "The canvas changed while it was being saved. Try again."
   },

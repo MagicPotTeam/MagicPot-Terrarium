@@ -26,21 +26,6 @@ import type { CanvasExportBounds } from './groupPlaybackUtils'
 
 type NotifyFn = (message: string) => unknown
 
-// Mirrors ChatPage's current duplicate rule; this only covers a single
-// sender-side selection, not the destination's existing or in-flight draft.
-function hasAttachmentCollision(
-  previous: ChatAttachment[],
-  candidate: ChatAttachment
-): boolean {
-  return previous.some(
-    (item) =>
-      item.url === candidate.url ||
-      (Boolean(item.fileName) &&
-        item.fileName === candidate.fileName &&
-        item.sizeBytes === candidate.sizeBytes)
-  )
-}
-
 type UseCanvasBridgeActionsOptions = {
   canvasId: string
   projectName: string
@@ -168,17 +153,6 @@ export function useCanvasBridgeActions({
           return false
         }
 
-        // The receiver currently collapses identical URLs or equal filename/size
-        // pairs. Reject collisions visible within this selection before creating
-        // an overview or sending any of its items; this is not a receiver ACK.
-        const selectionAttachments = buildCanvasAgentAttachments(expandedTargetItems)
-        const hasSelectionCollision = selectionAttachments.some((candidate, index) =>
-          hasAttachmentCollision(selectionAttachments.slice(0, index), candidate)
-        )
-        if (hasSelectionCollision) {
-          notifyError(t('canvas.agent_send_duplicate_selection'))
-          return false
-        }
         const attachmentItems = expandedTargetItems
         const baseAttachments = buildCanvasAgentAttachments(attachmentItems)
         const attachmentManifest = buildCanvasAgentAttachmentManifest(attachmentItems)
@@ -191,10 +165,6 @@ export function useCanvasBridgeActions({
           if (!isCurrentDelivery()) return false
           if (!materialized) {
             notifyError(t('canvas.send_to_agent_failed'))
-            return false
-          }
-          if (hasAttachmentCollision(materializedAttachments, materialized)) {
-            notifyError(t('canvas.agent_send_duplicate_selection'))
             return false
           }
           materializedAttachments.push(materialized)

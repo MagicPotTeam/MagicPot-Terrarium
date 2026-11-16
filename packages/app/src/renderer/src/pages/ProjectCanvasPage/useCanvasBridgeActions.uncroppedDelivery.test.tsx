@@ -56,22 +56,33 @@ describe('uncropped agent delivery lifecycle', () => {
     expect(targets).toEqual(before)
   })
 
-  it.each(['same-url', 'same-name-size'] as const)('rejects %s collision before any delivery side effect', async scenario => {
+  // Owner decision 5: two selected items that share a source, or a name and
+  // size, are two occurrences. These cases replace the interim pre-rejection.
+  it.each(['same-url', 'same-name-size'] as const)('delivers a %s pair as two occurrences with the overview', async scenario => {
     const first = { ...image, sizeBytes: 123 }
     const second = { ...first, id: 'img-2', src: scenario === 'same-url' ? first.src : 'local-media:///fixture/other.png' }
     const targets: CanvasItem[] = [first, second, text]
     const before = structuredClone(targets)
-    const hook = setup(async () => 'data:image/png;base64,c25hcA==')
-    const allEvents = vi.spyOn(window, 'dispatchEvent')
+    const snapshot = 'data:image/png;base64,c25hcA=='
+    const hook = setup(async () => snapshot)
+    let result: boolean | undefined
     await act(async () => {
-      await hook.result.current.handleSendCanvasItemsToAgent(targets, 'canvas-a.agent-1')
+      result = await hook.result.current.handleSendCanvasItemsToAgent(targets, 'canvas-a.agent-1')
       await vi.runAllTimersAsync()
     })
-    expect.soft(hook.notifyError).toHaveBeenCalled()
-    expect.soft(mocks.materialize).not.toHaveBeenCalled()
-    expect.soft(hook.renderSnapshot).not.toHaveBeenCalled()
-    expect.soft(mocks.dispatch).not.toHaveBeenCalled()
-    expect.soft(allEvents).not.toHaveBeenCalled()
+    expect(result).toBe(true)
+    expect(hook.notifyError).not.toHaveBeenCalled()
+    // Explicit items in selection order, then the derived overview (text is selected).
+    expect(mocks.materialize.mock.calls.map(([attachment]) => attachment.url)).toEqual([first.src, second.src, snapshot])
+    expect(hook.renderSnapshot).toHaveBeenCalledOnce()
+    expect(hook.renderSnapshot.mock.calls[0][0]).toEqual(targets)
+    expect(mocks.dispatch).toHaveBeenCalledOnce()
+    const events = hook.delivered().filter(event => event.type === 'send-to-agent')
+    const attachments = events.filter(event => event.detail.attachment)
+    expect(attachments.map(event => event.detail.attachment.url)).toEqual([first.src, second.src, snapshot])
+    expect(attachments.map(event => event.detail.attachment.fileName)).toEqual([first.fileName, first.fileName, 'canvas-selection.png'])
+    expect(events.filter(event => event.detail.text === 'fixture text')).toHaveLength(1)
+    expect(events.every(event => event.detail.targetScope === 'canvas-a.agent-1')).toBe(true)
     expect(targets).toEqual(before)
   })
 

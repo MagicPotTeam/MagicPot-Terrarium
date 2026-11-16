@@ -69,21 +69,27 @@ describe('canvas bridge boolean local scheduling contract', () => {
       expect(hook.notifyError).not.toHaveBeenCalled()
     } finally { gate.resolve(null); if (send) await act(async () => { await send }) }
   })
-  it.each(['url', 'filename-size'] as const)('rejects duplicate %s before any preparation side effect', async collision => {
+  // Owner decision 5: the same image selected twice is two occurrences. These
+  // cases replace the interim pre-rejection of same-url / same-name-size pairs.
+  it.each(['url', 'filename-size'] as const)('delivers duplicate %s as two occurrences in selection order', async collision => {
     const first = image(1)
     const second = collision === 'url' ? { ...image(2), src: first.src } : { ...image(2), fileName: first.fileName, sizeBytes: first.sizeBytes }
     const items = [first, second]
+    const before = structuredClone(items)
     const hook = setup(items)
     let result: boolean | undefined
     await act(async () => { result = await hook.result.current.handleSendCanvasItemsToAgent(items); await vi.runAllTimersAsync() })
-    expect(result).toBe(false)
-    expect(hook.notifyError).toHaveBeenCalled()
-    expect(m.materialize).not.toHaveBeenCalled()
+    expect(result).toBe(true)
+    expect(hook.notifyError).not.toHaveBeenCalled()
+    expect(m.materialize.mock.calls.map(([attachment]) => attachment.url)).toEqual([first.src, second.src])
     expect(hook.overview).not.toHaveBeenCalled()
-    expect(m.dispatch).not.toHaveBeenCalled()
-    expect(hook.events).not.toHaveBeenCalled()
+    expect(m.dispatch).toHaveBeenCalledOnce()
+    const delivered = hook.events.mock.calls.map(([event]) => event as CustomEvent).filter(event => event.type === 'send-to-agent' && event.detail.attachment)
+    expect(delivered.map(event => event.detail.attachment.url)).toEqual(collision === 'url' ? [first.src, first.src] : [first.src, second.src])
+    expect(delivered.map(event => event.detail.attachment.fileName)).toEqual(collision === 'url' ? ['1.png', '2.png'] : ['1.png', '1.png'])
+    expect(items).toEqual(before)
   })
-  it.each(['url', 'filename-size'] as const)('rejects materialized duplicate %s before third item or delivery', async collision => {
+  it.each(['url', 'filename-size'] as const)('delivers a materialized duplicate %s as its own occurrence with the third item', async collision => {
     const items = [image(1), image(2), image(3)]
     const before = structuredClone(items)
     m.materialize.mockImplementation(async (attachment: ChatAttachment) => {
@@ -95,12 +101,14 @@ describe('canvas bridge boolean local scheduling contract', () => {
     const hook = setup(items)
     let result: boolean | undefined
     await act(async () => { result = await hook.result.current.handleSendCanvasItemsToAgent(items); await vi.runAllTimersAsync() })
-    expect.soft(result).toBe(false)
-    expect.soft(hook.notifyError).toHaveBeenCalledWith('canvas.agent_send_duplicate_selection')
-    expect.soft(m.materialize).toHaveBeenCalledTimes(2)
-    expect.soft(m.materialize.mock.calls.map(([attachment]) => attachment.url)).toEqual([items[0].src, items[1].src])
-    expect.soft(m.dispatch).not.toHaveBeenCalled()
-    expect.soft(hook.events).not.toHaveBeenCalled()
+    expect(result).toBe(true)
+    expect(hook.notifyError).not.toHaveBeenCalled()
+    expect(m.materialize.mock.calls.map(([attachment]) => attachment.url)).toEqual([items[0].src, items[1].src, items[2].src])
+    expect(hook.overview).not.toHaveBeenCalled()
+    expect(m.dispatch).toHaveBeenCalledOnce()
+    const delivered = hook.events.mock.calls.map(([event]) => event as CustomEvent).filter(event => event.type === 'send-to-agent' && event.detail.attachment)
+    expect(delivered.map(event => event.detail.attachment.url)).toEqual(collision === 'url' ? [items[0].src, items[0].src, items[2].src] : [items[0].src, items[1].src, items[2].src])
+    expect(delivered.map(event => event.detail.attachment.fileName)).toEqual(collision === 'url' ? ['1.png', '2.png', '3.png'] : ['1.png', '1.png', '3.png'])
     expect(items).toEqual(before)
   })
 
@@ -118,19 +126,25 @@ describe('canvas bridge boolean local scheduling contract', () => {
     expect(delivered.filter(event => event.detail.attachment.url === frame)).toHaveLength(2)
     // These events are not an ACK; the real receiver can still coalesce the derived frames.
   })
-  it('rejects a materialized explicit collision before overview or later video extraction', async () => {
+  it('delivers a materialized explicit collision together with the overview and the video', async () => {
     const items = [image(1), image(2), video()]
+    const before = structuredClone(items)
     m.materialize.mockImplementation(async (attachment: ChatAttachment) => attachment.url === items[1].src ? { ...attachment, url: items[0].src } : attachment)
     const hook = setup(items)
     let result: boolean | undefined
     await act(async () => { result = await hook.result.current.handleSendCanvasItemsToAgent(items); await vi.runAllTimersAsync() })
-    expect(result).toBe(false)
-    expect(hook.notifyError).toHaveBeenCalledWith('canvas.agent_send_duplicate_selection')
-    expect(m.materialize).toHaveBeenCalledTimes(2)
-    expect(hook.overview).not.toHaveBeenCalled()
-    expect(m.extractFrames).not.toHaveBeenCalled()
-    expect(m.dispatch).not.toHaveBeenCalled()
-    expect(hook.events).not.toHaveBeenCalled()
+    expect(result).toBe(true)
+    expect(hook.notifyError).not.toHaveBeenCalled()
+    // Explicit items in selection order, then the derived overview.
+    expect(m.materialize.mock.calls.map(([attachment]) => attachment.url)).toEqual([items[0].src, items[1].src, items[2].src, 'data:image/png;base64,c25hcA=='])
+    expect(hook.overview).toHaveBeenCalledOnce()
+    expect(m.extractFrames).toHaveBeenCalledOnce()
+    expect(m.extractFrames).toHaveBeenCalledWith(items[2].src)
+    expect(m.dispatch).toHaveBeenCalledOnce()
+    const delivered = hook.events.mock.calls.map(([event]) => event as CustomEvent).filter(event => event.type === 'send-to-agent' && event.detail.attachment)
+    expect(delivered.map(event => event.detail.attachment.url)).toEqual([items[0].src, items[0].src, items[2].src, 'data:image/png;base64,c25hcA=='])
+    expect(delivered.map(event => event.detail.attachment.fileName)).toEqual(['1.png', '2.png', 'video.mp4', 'canvas-selection.png'])
+    expect(items).toEqual(before)
   })
 
   it('materializes three distinct images serially and dispatches in order', async () => {

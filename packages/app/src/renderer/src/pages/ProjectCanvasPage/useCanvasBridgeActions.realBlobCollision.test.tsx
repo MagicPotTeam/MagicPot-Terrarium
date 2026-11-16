@@ -25,7 +25,9 @@ beforeEach(() => { m.dispatch.mockReset() })
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('canvas bridge real blob materialization collision', () => {
-  it.each([true, false])('detects same bytes=%s after materialization', async same => {
+  // Owner decision 5: equal bytes from two selected items are two occurrences;
+  // the same=true case replaces the interim post-materialization rejection.
+  it.each([true, false])('delivers both items when same bytes=%s after materialization', async same => {
     const blobs = new Map([
       ['blob:fixture-1', new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })],
       ['blob:fixture-2', new Blob([new Uint8Array(same ? [1, 2, 3] : [4, 5, 6])], { type: 'image/png' })]
@@ -42,21 +44,15 @@ describe('canvas bridge real blob materialization collision', () => {
     await act(async () => { result = await hook.result.current.handleSendCanvasItemsToAgent(hook.items) })
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['blob:fixture-1', 'blob:fixture-2'])
     expect(hook.items).toEqual(before)
-    if (same) {
-      expect(result).toBe(false)
-      expect(hook.notifyError).toHaveBeenCalledWith('canvas.agent_send_duplicate_selection')
-      expect(m.dispatch).not.toHaveBeenCalled()
-      expect(hook.events).not.toHaveBeenCalled()
-    } else {
-      expect(result).toBe(true)
-      expect(hook.notifyError).not.toHaveBeenCalled()
-      expect(m.dispatch).toHaveBeenCalledOnce()
-      expect(hook.events).not.toHaveBeenCalled()
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 250)) })
-      const delivered = hook.events.mock.calls.map(([event]) => event as CustomEvent).filter(event => event.type === 'send-to-agent' && event.detail.attachment)
-      expect(delivered.map(event => event.detail.attachment.url)).toEqual(['data:image/png;base64,AQID', 'data:image/png;base64,BAUG'])
-      expect(delivered.map(event => event.detail.attachment.fileName)).toEqual(['1.png', '2.png'])
-    }
+    expect(result).toBe(true)
+    expect(hook.notifyError).not.toHaveBeenCalled()
+    expect(m.dispatch).toHaveBeenCalledOnce()
+    expect(hook.events).not.toHaveBeenCalled()
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 250)) })
+    const delivered = hook.events.mock.calls.map(([event]) => event as CustomEvent).filter(event => event.type === 'send-to-agent' && event.detail.attachment)
+    expect(delivered.map(event => event.detail.attachment.url)).toEqual(same ? ['data:image/png;base64,AQID', 'data:image/png;base64,AQID'] : ['data:image/png;base64,AQID', 'data:image/png;base64,BAUG'])
+    expect(delivered.map(event => event.detail.attachment.fileName)).toEqual(['1.png', '2.png'])
+    expect(hook.overview).not.toHaveBeenCalled()
     hook.unmount()
   })
 })

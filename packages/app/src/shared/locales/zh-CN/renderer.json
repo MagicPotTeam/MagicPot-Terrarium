@@ -1689,7 +1689,6 @@
     "agent_send_overview_failed": "无法生成画布概览。请缩小选区或减小元素之间的距离后重试。",
     "send_to_agent_failed": "部分图片无法读取，请重新导入后重试。",
     "agent_edit_input_unavailable": "编辑消息时无法完整加入这组内容。请先完成或取消编辑，再重试。",
-    "agent_send_duplicate_selection": "所选内容中有项目会被视为重复，本次未添加。请使用不同文件，并在发送前检查 Agent 草稿。",
     "untitled": "未命名画布",
     "save_changed_retry": "画布在保存过程中发生了新的更改，请重试。"
   },
