@@ -4916,24 +4916,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
 
           if (materializedAttachments.length > 0) {
-            setPendingAttachments((prev) => {
-              const seen = new Set(
-                prev.map(
-                  (attachment) =>
-                    `${attachment.type}:${getAttachmentIdentityKey(attachment)}:${attachment.fileName || ''}`
-                )
-              )
-              const merged = [...prev]
-
-              for (const attachment of materializedAttachments) {
-                const key = `${attachment.type}:${getAttachmentIdentityKey(attachment)}:${attachment.fileName || ''}`
-                if (seen.has(key)) continue
-                seen.add(key)
-                merged.push(attachment)
-              }
-
-              return merged
-            })
+            // Every dragged image is its own occurrence, in drag order, also when it repeats
+            // a source already in the draft (owner decision 5); the count is checked above.
+            setPendingAttachments((prev) => [...prev, ...materializedAttachments])
           }
 
           if (droppedText) {
