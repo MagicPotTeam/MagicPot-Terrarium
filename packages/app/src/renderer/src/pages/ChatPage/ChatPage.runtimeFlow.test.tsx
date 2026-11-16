@@ -14,6 +14,7 @@ import type {
 import { createTeamMemberInDB, saveSessionToDB, type ChatSession, type ChatSessionDraft } from './chatStorage'
 import type { ChatLoadingStatus } from './chatLoadingStatus'
 import ChatPage from './ChatPage'
+import { TeamMessageDispatcher } from './teamMessageDispatcher'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
@@ -990,6 +991,10 @@ const teamRowsHost = document.createElement('div')
 teamRowsHost.setAttribute('data-testid', 'team-rows-host')
 const teamRows = () => within(teamRowsHost)
 
+/** The states of the delegated-agent lines at the end of the open transcript. */
+const delegatedLineStates = () =>
+  screen.queryAllByTestId('team-delegated-row').map(row => row.getAttribute('data-chat-delegated-line'))
+
 const renderChatPage = (
   storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean; team?: boolean; rows?: boolean } = 'runtime-flow'
 ) => {
@@ -1467,6 +1472,13 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       await waitFor(() => expect(hoisted.storedSessions.value.find(session => session.id === member.id)?.messages.some(message => message.content === 'fixture completed')).toBe(true))
       expect(teamRows().getByRole('button', { name: 'Alice' })).toBeVisible()
+      // The lead's transcript shows the member's work as a delegated line that opens to the reply.
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['completed']))
+      const line = screen.getByTestId('team-delegated-row')
+      expect(line).toHaveTextContent('run')
+      fireEvent.click(within(line).getByRole('button'))
+      expect(within(line).getByTestId('chat-delegated-result')).toHaveTextContent('fixture completed')
+      expect(readCurrentSessionState()?.messages.some(message => message.content === 'fixture completed')).toBe(false)
       // Nothing runs any more: the composer offers no stop.
       await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
       expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
@@ -5204,6 +5216,8 @@ describe('ChatPage runtime workflow integration', () => {
       // The lead itself is idle, but its composer offers stop while members run.
       expect(readCurrentSessionState()?.id).toBe(lead.id)
       await waitFor(() => expect(screen.getByTestId('chat-composer-stop-mock')).toBeVisible())
+      // The lead's transcript ends with one delegated line per running member.
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['running', 'running']))
       for (const member of [alice, bob]) {
         fireEvent.click(teamRows().getByRole('button', { name: member.teamMemberName! }))
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
@@ -5219,6 +5233,8 @@ describe('ChatPage runtime workflow integration', () => {
       expect(signals.get(bob.id)?.aborted).toBe(true)
       await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
       expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
+      // The stopped members say so in the lead's view.
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['cancelled', 'cancelled']))
       fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
       expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
@@ -6313,13 +6329,22 @@ describe('ChatPage runtime workflow integration', () => {
     let queued = true
     hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({intents:queued ? [intent] : []}))
     hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {queued = false; return {intent}})
+    // The dispatcher records the claimed message; its record must say it was not sent.
+    const dispatchers: TeamMessageDispatcher[] = []
+    const enqueue = TeamMessageDispatcher.prototype.enqueue
+    const enqueueSpy = vi.spyOn(TeamMessageDispatcher.prototype, 'enqueue').mockImplementation(function (this: TeamMessageDispatcher, input) {
+      dispatchers.push(this)
+      return enqueue.call(this, input)
+    })
     const page = renderChatPage({team:true})
     try {
       await waitFor(() => expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalled())
+      await waitFor(() => expect(dispatchers).toHaveLength(1))
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect(dispatchers[0].entries()).toEqual([expect.objectContaining({ intent: expect.objectContaining({ id: 'missing', recipient: 'missing-bob' }), status: 'unavailable' })])
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { page.unmount() }
+    } finally { enqueueSpy.mockRestore(); page.unmount() }
   })
 
   it('does not send a claimed member message when End occurs while the claim is pending', async () => {

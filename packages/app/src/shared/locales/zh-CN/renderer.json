@@ -1453,7 +1453,9 @@
     "delegated": {
       "helper_label": "[sub] {{name}}",
       "running": "(运行中…)",
-      "interrupted": "(已中断)"
+      "interrupted": "(已中断)",
+      "member_label": "[成员] {{name}}",
+      "status_waiting": "等待批准"
     }
   },
   "agent_workspace": {

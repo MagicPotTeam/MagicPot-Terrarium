@@ -1626,7 +1626,9 @@
     "delegated": {
       "helper_label": "[sub] {{name}}",
       "running": "(running...)",
-      "interrupted": "(interrupted)"
+      "interrupted": "(interrupted)",
+      "member_label": "[member] {{name}}",
+      "status_waiting": "Waiting for approval"
     }
   },
   "agent_workspace": {

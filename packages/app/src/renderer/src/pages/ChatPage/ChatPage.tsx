@@ -1,6 +1,5 @@
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
-import { reduceTeamActivity } from './teamMessageActivityState'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
 import { setTeamTaskStatus, validateTeamTasks } from './agentTeamTasks'
 import { createTeamLiveActivity } from './teamLiveActivity'
@@ -310,6 +309,8 @@ import { useAgentArchiveResponder } from './useAgentArchiveResponder'
 import { useManagedFirstRunPane } from './useManagedFirstRunPane'
 import AgentThreadSidesPanel from './components/AgentThreadSidesPanel'
 import AgentTeamThreadRows, { type AgentTeamThreadRowsTeam } from './components/AgentTeamThreadRows'
+import AgentTeamDelegatedRows from './components/AgentTeamDelegatedRows'
+import { hasDelegatedWork } from './agentTeamDelegatedWork'
 import AgentTeamTargetSelect from './components/AgentTeamTargetSelect'
 import { isAgentSideCommand, parseAgentSideCommand, type AgentSideCommandHandle } from './agentSideCommand'
 import { AgentProcessDetails, getAgentThreadProcessScope, useAgentThreadProcesses } from './components/AgentThreadProcessesPanel'
@@ -8239,10 +8240,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const teamEnabled = active && isReady && !config.use_remote_llm && route?.channel==='canvas' && route.scopeType==='thread'
   // The thread has a team to manage: members, or a lead that still carries team records.
   const threadHasTeam = Boolean(teamLead && (teamMembers.length > 0 || teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length))
-  const [, dispatchTeamActivity] = React.useReducer(reduceTeamActivity, { owner: 0, key: '', entries: [], activeKey: '', live: false, closedFor: null })
-  const teamMessageActivityOwnerRef = useRef(0)
   const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{ key: string; ids: readonly string[] }>({ key: '', ids: [] })
-  const teamMessageDispatcherRef = useRef<{ key: string; owner: number; dispatcher: TeamMessageDispatcher; pump: () => void; scopeEpoch: number; visibilityEpoch: number } | null>(null)
+  const teamMessageDispatcherRef = useRef<{ key: string; dispatcher: TeamMessageDispatcher; pump: () => void; scopeEpoch: number; visibilityEpoch: number } | null>(null)
   const messageLeadId = teamLead?.id
   const messageGeneration = teamLead?.teamGeneration ?? 0
   const messageKey = JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration])
@@ -8355,8 +8354,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const scopeEpoch = sessionLoadEpochRef.current
     const visibilityEpoch = teamVisibilityRef.current.epoch
     const key = messageKey
-    const activityOwner = ++teamMessageActivityOwnerRef.current
-    dispatchTeamActivity({ type: 'begin', owner: activityOwner, key })
     let alive = true, polling = false
     const teamKey = `${scope}\u0000${leadId}`
     const scopeRoute = { channel: route.channel, scopeType: route.scopeType, scopeId: route.scopeId, threadId: thread }
@@ -8378,7 +8375,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         await sendMessageRef.current?.({ content, targetSessionId: delivery.recipient, queueKey: `team-message:${delivery.id}`, teamMessageHop: hop,
           isTeamMessageCurrent: () => isCurrent() && (source.kind === 'user' || isMember(source.member)) && isMember(delivery.recipient),
           onTeamRequestStarted: () => stage('request_started'), onTeamResponseReceived: () => stage('response_received') })
-      }, entries => { if (alive) dispatchTeamActivity({ type: 'observe', owner: activityOwner, key, entries }) }, 1000,
+      }, undefined, 1000,
       id => loadingSessionIdsRef.current.has(id) || sendingSessionIdsRef.current.has(id))
     const knownMembers = new Set<string>()
     const syncSubscriptions = () => {
@@ -8395,7 +8392,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         try { const work = dispatcher.pump(member.id); if (work) void work.finally(pump) } catch { /* End or membership changed. */ }
       }
     }
-    teamMessageDispatcherRef.current = { key, owner: activityOwner, dispatcher, pump, scopeEpoch, visibilityEpoch }
+    teamMessageDispatcherRef.current = { key, dispatcher, pump, scopeEpoch, visibilityEpoch }
     const tick = async () => {
       if (polling || !isCurrent()) return
       polling = true
@@ -8417,7 +8414,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
     void tick()
     const timer = window.setInterval(() => { pump(); void tick() }, 500)
-    return () => { alive = false; window.clearInterval(timer); dispatchTeamActivity({ type: 'end', owner: activityOwner, key }); dispatcher.end(); if (teamMessageDispatcherRef.current?.dispatcher === dispatcher) teamMessageDispatcherRef.current = null }
+    return () => { alive = false; window.clearInterval(timer); dispatcher.end(); if (teamMessageDispatcherRef.current?.dispatcher === dispatcher) teamMessageDispatcherRef.current = null }
   }, [teamEnabled, sessionsLoaded, sessionLoadError, storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, messageKey, teamLead?.teamEnded, teamLead?.archived])
   const reconcileTeamLifecycle = useCallback((records: ChatSession[]) => {
     let conflict = false
@@ -9083,7 +9080,26 @@ const ChatPage: React.FC<ChatPageProps> = ({
       <AgentTeamMemberImages member={openTeamMember} placeImage={(...args) => teamImagePlaceRef.current(...args)} />
     </Box>
   }, [openTeamMember])
-  const transcriptTail = useMemo(() => memberImagesTail ? <>{transcriptCards.tail}{memberImagesTail}</> : transcriptCards.tail, [transcriptCards.tail, memberImagesTail])
+  // The lead's view of its members' work: one delegated-agent line per member that has been
+  // given work, first in the lead's transcript tail. Read only: nothing is written to the lead.
+  // Running and waiting for an approval are the same facts the lead's stop button uses.
+  const delegatedWaitingKey = [...teamWaiting].sort().join('\u0000')
+  const delegatedWaiting = useMemo(() => new Set(delegatedWaitingKey ? delegatedWaitingKey.split('\u0000') : []), [delegatedWaitingKey])
+  const delegatedCandidates = compact && teamRowsTeam && currentSession && !currentSession.teamLeadId
+    ? [...teamMembers].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)).filter(member => hasDelegatedWork(member, loadingSessionIds, delegatedWaiting))
+    : []
+  // Kept while the same member records are listed: a reply of the lead does not redraw the lines.
+  const delegatedMembersRef = useRef<readonly ChatSession[]>([])
+  if (delegatedMembersRef.current.length !== delegatedCandidates.length || delegatedCandidates.some((member, index) => member !== delegatedMembersRef.current[index])) {
+    delegatedMembersRef.current = delegatedCandidates
+  }
+  const delegatedMembers = delegatedMembersRef.current
+  const delegatedRowsTail = useMemo(() => delegatedMembers.length
+    ? <AgentTeamDelegatedRows members={delegatedMembers} scope={storageScope} running={loadingSessionIds} waiting={delegatedWaiting} />
+    : null, [delegatedMembers, storageScope, loadingSessionIds, delegatedWaiting])
+  const transcriptTail = useMemo(() => delegatedRowsTail || transcriptCards.tail || memberImagesTail
+    ? <>{delegatedRowsTail}{transcriptCards.tail}{memberImagesTail}</>
+    : null, [delegatedRowsTail, transcriptCards.tail, memberImagesTail])
 
   // ==================== Hunyuan 3D SidePanel generate event ====================
   useEffect(() => {
@@ -9739,8 +9755,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             if (!expectedLead || expectedLead.teamLeadId || expectedLead.archived || expectedLead.teamEnded || !route?.threadId) { notifyWarning('团队已更改'); return }
             if (teamEndPendingRef.current.has(teamKey)) return
             teamEndPendingRef.current.add(teamKey)
-            const activityOwner = teamMessageDispatcherRef.current
-            if (activityOwner?.key === messageKey) dispatchTeamActivity({ type: 'close', owner: activityOwner.owner, key: activityOwner.key })
             teamEndEpochsRef.current.set(teamKey, (teamEndEpochsRef.current.get(teamKey) ?? 0) + 1)
             setTeamEndRevision(revision => revision + 1)
             let mainEnded = teamEndedMainRef.current.has(teamKey)
