@@ -69,6 +69,28 @@ describe('Windows release packaging entrypoints', () => {
     expect(scripts['build:bridge-child']).toBe('node scripts/build-bridge-child.mjs')
   })
 
+  // The SQLite preview worker was retired, but out/ is not cleaned between
+  // builds, so a stale out/sqlite-preview-worker would otherwise ship.
+  it.each(['pure', 'embedded'])(
+    'never packages a stale retired SQLite preview worker (%s)',
+    async (mode) => {
+      vi.stubEnv('PACKAGE_MODE', mode)
+      vi.resetModules()
+      try {
+        const loaded = (await import('../config/electron/electron-builder.config.js')) as {
+          default?: { files: string[] }
+          files?: string[]
+        }
+        const files = (loaded.default || loaded).files as string[]
+        expect(files).toContain('out')
+        expect(files).toContain('!out/sqlite-preview-worker/**')
+        expect(files.indexOf('!out/sqlite-preview-worker/**')).toBeGreaterThan(files.indexOf('out'))
+      } finally {
+        vi.unstubAllEnvs()
+      }
+    }
+  )
+
   it('keeps local Pure and Embedded release commands on that same packaging path', () => {
     for (const mode of ['pure', 'embedded']) {
       expect(scripts[`release:${mode}:win`]).toContain(

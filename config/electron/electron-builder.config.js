@@ -126,6 +126,9 @@ const config = {
   },
   files: [
     'out',
+    // Retired SQLite preview worker: a stale build of it may still sit in
+    // out/ on a machine that built before its removal; never package it.
+    '!out/sqlite-preview-worker/**',
     'README.md',
     'LICENSE',
     '!**/*.map',
