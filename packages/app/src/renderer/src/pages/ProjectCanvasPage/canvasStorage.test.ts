@@ -629,6 +629,15 @@ describe('canvasStorage provenance metadata', () => {
           y: 0,
           width: 82,
           height: 82
+        },
+        // The crop was confirmed on these exact bytes ('AAAA' = three zero bytes).
+        cropSource: {
+          version: 1,
+          origin: 'confirm',
+          width: 82,
+          height: 82,
+          sizeBytes: 3,
+          sha256: createHash('sha256').update(Buffer.from('AAAA', 'base64')).digest('hex')
         }
       } as CanvasItem
     ]
@@ -652,7 +661,10 @@ describe('canvasStorage provenance metadata', () => {
     const items: CanvasItem[] = [
       { ...common, id: 'unknown-source-crop', crop },
       { ...common, id: 'known-identity', sourceWidth: 200, sourceHeight: 200,
-        crop: { x: 0, y: 0, width: 200, height: 200 } },
+        crop: { x: 0, y: 0, width: 200, height: 200 },
+        // Confirmed on the synthetic bytes: only a record proves an identity crop.
+        cropSource: { version: 1, origin: 'confirm', width: 200, height: 200, sizeBytes: 9,
+          sha256: createHash('sha256').update(Buffer.from('c3ludGhldGlj', 'base64')).digest('hex') } },
       { ...common, id: 'uncropped' }
     ]
     await saveCanvasItems(items, 'isolated-unknown-source-crop')
@@ -665,6 +677,112 @@ describe('canvasStorage provenance metadata', () => {
     expect(uncropped).toMatchObject({ id: 'uncropped', src: originalSrc })
     expect(unknown).toMatchObject({ id: 'unknown-source-crop', src: originalSrc, crop })
     expect(items[0]).toMatchObject({ src: originalSrc, crop })
+  })
+
+  describe('crop source records on save', () => {
+    // 'c3ludGhldGlj' = the 9 bytes "synthetic"; the 200x200 size is synthetic, nothing is decoded.
+    const syntheticSrc = 'data:image/png;base64,c3ludGhldGlj'
+    const syntheticSha256 = createHash('sha256').update('synthetic').digest('hex')
+    const fullCrop = { x: 0, y: 0, width: 200, height: 200 }
+    const createRecord = (overrides: Record<string, unknown> = {}) => ({
+      version: 1 as const,
+      origin: 'confirm' as const,
+      width: 200,
+      height: 200,
+      sizeBytes: 9,
+      sha256: syntheticSha256,
+      ...overrides
+    })
+    const createCroppedImage = (overrides: Record<string, unknown> = {}): CanvasItem =>
+      ({
+        id: 'record-image',
+        type: 'image',
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        zIndex: 0,
+        locked: false,
+        src: syntheticSrc,
+        fileName: 'synthetic.png',
+        sourceWidth: 200,
+        sourceHeight: 200,
+        crop: fullCrop,
+        cropSource: createRecord(),
+        ...overrides
+      }) as unknown as CanvasItem
+
+    async function saveAndLoad(item: CanvasItem, storeKey: string): Promise<CanvasItem> {
+      await saveCanvasItems([item], storeKey)
+      const restored = await loadCanvasItems(storeKey)
+      expect(restored.items).toHaveLength(1)
+      return restored.items[0]
+    }
+
+    it('keeps an identity crop whose record has origin reopen, with the record', async () => {
+      const record = createRecord({ origin: 'reopen' })
+      const restored = await saveAndLoad(
+        createCroppedImage({ cropSource: record }),
+        'record-reopen-identity'
+      )
+      expect(restored).toMatchObject({ src: syntheticSrc, crop: fullCrop, cropSource: record })
+    })
+
+    it('keeps a confirmed identity crop on an item without an explicit source size', async () => {
+      const {
+        sourceWidth: _sourceWidth,
+        sourceHeight: _sourceHeight,
+        ...withoutSourceSize
+      } = createCroppedImage() as CanvasItem & { sourceWidth?: number; sourceHeight?: number }
+      const restored = await saveAndLoad(
+        withoutSourceSize as CanvasItem,
+        'record-identity-without-source-size'
+      )
+      expect(restored).toMatchObject({
+        src: syntheticSrc,
+        crop: fullCrop,
+        cropSource: createRecord()
+      })
+      expect(restored).not.toHaveProperty('sourceWidth')
+    })
+
+    it('keeps a confirmed identity crop whose source size differs from the record', async () => {
+      const restored = await saveAndLoad(
+        createCroppedImage({ sourceWidth: 400, sourceHeight: 400 }),
+        'record-identity-other-source-size'
+      )
+      expect(restored).toMatchObject({ crop: fullCrop, cropSource: createRecord() })
+    })
+
+    it('keeps a confirmed partial crop and its record verbatim', async () => {
+      const crop = { x: 10, y: 20, width: 50, height: 60 }
+      const restored = await saveAndLoad(createCroppedImage({ crop }), 'record-partial-crop')
+      expect(restored).toMatchObject({ src: syntheticSrc, crop, cropSource: createRecord() })
+    })
+
+    it('drops a malformed record on save and keeps the crop unverified', async () => {
+      const malformedRecords: unknown[] = [
+        createRecord({ version: 2 }),
+        createRecord({ origin: 'import' }),
+        createRecord({ width: 0 }),
+        createRecord({ sizeBytes: 1.5 }),
+        createRecord({ sha256: syntheticSha256.toUpperCase() }),
+        createRecord({ extra: true }),
+        null,
+        'confirm'
+      ]
+      for (const [index, cropSource] of malformedRecords.entries()) {
+        const restored = await saveAndLoad(
+          createCroppedImage({ cropSource }),
+          `record-malformed-save-${index}`
+        )
+        expect(restored).toMatchObject({ src: syntheticSrc, crop: fullCrop })
+        expect(restored).not.toHaveProperty('cropSource')
+      }
+    })
   })
 
   it('preserves persisted stale-hint crops despite a thumbnail matching the stale dimensions', async () => {

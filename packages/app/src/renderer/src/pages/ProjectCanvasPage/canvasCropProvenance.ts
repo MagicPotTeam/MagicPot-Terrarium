@@ -58,6 +58,32 @@ export function isCropSourceRecordValid(value: unknown): value is CanvasImageCro
   )
 }
 
+/**
+ * Drops a `cropSource` that does not have the exact record shape. The crop
+ * itself is kept and stays unverified: sinks refuse it until a record proves it.
+ * Stored and imported items pass through here, since the import preflight has
+ * no allow-list on item keys.
+ */
+export function dropMalformedCropSource<T extends object>(item: T): T {
+  if (!Object.prototype.hasOwnProperty.call(item, 'cropSource')) return item
+  const { cropSource, ...rest } = item as T & { cropSource?: unknown }
+  return isCropSourceRecordValid(cropSource) ? item : (rest as T)
+}
+
+/**
+ * The persisted form of an image's crop: a full-image crop confirmed on
+ * recorded bytes (isConfirmedIdentityCrop) is dropped together with its
+ * record; any other crop is kept verbatim, with its record only when the
+ * record has the exact shape. Size hints alone never remove a crop.
+ */
+export function toPersistedCropFields<T extends CanvasImageItem>(item: T): T {
+  if (isConfirmedIdentityCrop(item)) {
+    const { crop: _identityCrop, cropSource: _identityCropSource, ...uncropped } = item
+    return uncropped as T
+  }
+  return dropMalformedCropSource(item)
+}
+
 function isCropInsideRecord(crop: CanvasCrop | undefined, record: CanvasImageCropSource): boolean {
   if (!crop) return false
   const { x, y, width, height } = crop

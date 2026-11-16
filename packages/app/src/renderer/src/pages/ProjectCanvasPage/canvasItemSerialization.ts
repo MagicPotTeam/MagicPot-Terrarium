@@ -1,6 +1,7 @@
 // packages/app/src/renderer/src/pages/ProjectCanvasPage/canvasItemSerialization.ts
 // The persisted form of canvas items, and the dirty signature derived from it.
 import type { CanvasFigmaBinding } from '@shared/figma'
+import { toPersistedCropFields } from './canvasCropProvenance'
 import type { CanvasGroup, CanvasGroupBranch, CanvasItem } from './types'
 
 // Serializable canvas items without DOM-only fields.
@@ -44,12 +45,16 @@ export function serializeCanvasItem(item: CanvasItem): SerializableCanvasItem {
     const persistedSourceIdentity =
       sourceIdentity?.kind === 'local-file' ? sourceIdentity : undefined
     // Source-size hints may come from stale thumbnail or display metadata.
-    // Without pixel provenance, even a geometrical identity can be a crop.
-    // Persist it verbatim; source and crop remain separate in project mirrors.
-    return stripCanvasAssetKeyTags({
-      ...rest,
-      ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
-    }) as SerializableCanvasItem
+    // Without pixel provenance, even a geometrical identity can be a crop, so
+    // only a full-image crop confirmed on recorded bytes is dropped; any other
+    // crop is persisted verbatim (with its record when well formed). Source
+    // and crop remain separate in project mirrors.
+    return toPersistedCropFields(
+      stripCanvasAssetKeyTags({
+        ...rest,
+        ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
+      }) as typeof item
+    ) as SerializableCanvasItem
   }
   if (item.type === 'model3d') {
     const { deferRender, sourceFile, ...rest } = item as CanvasItem & {
