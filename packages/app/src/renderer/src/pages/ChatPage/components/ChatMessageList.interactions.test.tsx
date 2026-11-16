@@ -318,6 +318,8 @@ describe('ChatMessageList real edit-form interactions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
     expect(onSendEditedMessage.mock.calls[0][1]).toEqual([...images, hidden, ...base.messages[2].attachments!])
   })
+  // Explicit bound, not a duration assertion: the over-limit branch (count=51) runs 51 extra getByRole queries over
+  // MUI styles in jsdom, 1.3 s for count=50 vs 5.2 s for count=51. This is test cost, not production cost.
   it.each([50, 51])('preserves editing state for %i images and submits at the limit', (count) => {
     const base = editingSession()
     const images = Array.from({ length: count }, (_, index) => imageAttachment(`image-${index}.png`))
@@ -345,7 +347,7 @@ describe('ChatMessageList real edit-form interactions', () => {
       base.messages[2].hiddenContext,
       base.messages.slice(0, 2)
     )
-  })
+  }, 20_000)
   it('rejects 51 native images before import while preserving the edit draft and allowing cancel', () => {
     const onDropImageAttachments = vi.fn().mockResolvedValue([])
     renderSession(editingSession(), { onDropImageAttachments })

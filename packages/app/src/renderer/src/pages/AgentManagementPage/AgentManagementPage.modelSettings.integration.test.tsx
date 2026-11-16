@@ -53,6 +53,8 @@ const modelAction = () => screen.getByRole('button', { name: 'Open model-profile
 const openManagement = async () => { fireEvent.click(screen.getByRole('button', { name: 'Agent management' })); expect(await screen.findByRole('heading', { name: 'Agent management' })).toBeVisible() }
 
 describe('actual router/Layout/MainArea/Settings/PanelLLM model-profile handoff, public empty extension fallback', () => {
+  // Explicit bound, not a duration assertion: two full Layout/Settings round trips with jsdom role queries over MUI
+  // styles measured 5.0-5.4 s. The global 5 s hang guard stays for the other tests.
   it('selects actual LLM despite stale Environment tab and legacy state, reconciles delayed Layout and repeats model/source/Back returns without extra tabs or hidden effects', async () => {
     const store = mount(); expect(await screen.findByRole('heading', { name: 'Agent management' })).toBeVisible(); await settle()
     expect(screen.queryByLabelText('llm.base_url')).toBeNull(); expect(h.environment).not.toHaveBeenCalled(); expect(h.general).not.toHaveBeenCalled(); expect(h.api).not.toHaveBeenCalled(); expect(h.save).not.toHaveBeenCalled()
@@ -77,7 +79,7 @@ describe('actual router/Layout/MainArea/Settings/PanelLLM model-profile handoff,
     expect(await screen.findByText('General destination fixture')).toBeVisible(); await settle()
     expect(window.location.hash).toBe('#/settings'); expect(store.getState().layout.openTabs.filter(tab => tab.id === 'tab-settings')).toHaveLength(1)
     expect(h.api).not.toHaveBeenCalled(); expect(h.save).not.toHaveBeenCalled()
-  })
+  }, 20_000)
   it('hands off without saving; an actual PanelLLM Base URL input immediately submits canonical config via existing context update rather than waiting for Save', async () => {
     mount(); fireEvent.click(await screen.findByRole('button', { name: 'Open model-profile settings' }))
     const input = await screen.findByLabelText('llm.base_url'); await settle()

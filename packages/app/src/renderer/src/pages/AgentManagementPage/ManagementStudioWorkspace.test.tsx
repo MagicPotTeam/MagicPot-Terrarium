@@ -34,6 +34,8 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('Studio basic workspace', () => {
+  // Explicit bound, not a duration assertion: jsdom role queries over MUI styles dominate (19 queries = 3.4 s of 6.5 s
+  // measured). The global 5 s hang guard stays for the other tests.
   it('keeps mount passive, then saves/edits/deletes creature and node metadata through the existing config path', async () => {
     render(<AgentManagementPage />)
     expect(h.save).not.toHaveBeenCalled(); expect(h.api).not.toHaveBeenCalled()
@@ -62,7 +64,7 @@ describe('Studio basic workspace', () => {
     expect(h.save).toHaveBeenLastCalledWith({ studio_workspace: emptyStudioWorkspace() })
     expect(document.body.innerHTML).not.toContain(secret)
     expect(h.api).not.toHaveBeenCalled()
-  })
+  }, 20_000)
 
   it('exposes only configured unverified account labels and hands off to existing plugin/skill destinations on click', () => {
     open()
@@ -78,6 +80,8 @@ describe('Studio basic workspace', () => {
     expect(h.save).not.toHaveBeenCalled(); expect(h.api).not.toHaveBeenCalled()
   })
 
+  // Explicit bound, not a duration assertion: jsdom role queries over MUI styles, measured 4.2 s under load.
+  // The global 5 s hang guard stays for the other tests.
   it('exports only Studio data and restores only after confirmation; invalid files never save', async () => {
     config.studio_workspace = existing()
     const blobs: Blob[] = []
@@ -107,7 +111,7 @@ describe('Studio basic workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm Studio restore' }))
     await waitFor(() => expect(h.save).toHaveBeenCalledExactlyOnceWith({ studio_workspace: emptyStudioWorkspace() }))
     expect(h.api).not.toHaveBeenCalled()
-  })
+  }, 20_000)
 
   it('exports a selected manual node bundle without credentials, network, Start or permission fields', async () => {
     config.studio_workspace = existing()
