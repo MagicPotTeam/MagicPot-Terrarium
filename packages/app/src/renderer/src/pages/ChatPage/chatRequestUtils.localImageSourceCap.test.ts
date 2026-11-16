@@ -31,7 +31,7 @@ const config = {
   llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [profile] }
 }
 
-const stubImageFetch = (values: Uint8Array[]) => {
+const stubImageFetch = (values: Uint8Array[], contentType = 'image/png') => {
   let cursor = 0
   const cancel = vi.fn()
   const blob = vi.fn()
@@ -48,7 +48,7 @@ const stubImageFetch = (values: Uint8Array[]) => {
         },
         { highWaterMark: 0 }
       ),
-      { headers: { 'content-type': 'image/png' } }
+      { headers: { 'content-type': contentType } }
     )
     Object.defineProperty(response, 'blob', { value: blob })
     Object.defineProperty(response, 'arrayBuffer', { value: arrayBuffer })
@@ -85,6 +85,14 @@ describe('per-image source cap for un-managed request images', () => {
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.arrayBuffer).not.toHaveBeenCalled()
     expect(f.cancel).not.toHaveBeenCalled()
+  })
+
+  it('builds a canonical data URL when the source content-type carries parameters', async () => {
+    stubImageFetch([new Uint8Array([1, 2, 3])], 'image/PNG; charset=binary')
+    const attachments: ChatAttachment[] = [{ type: 'image', url: 'local-media:///fixture.png', fileName: 'fixture.png' }]
+    const [result] = (await normalizeChatAttachmentsForRequest(attachments, { allowRequestDataUrl: true }))!
+    expect(result.url).toBe('data:image/png;base64,AQID')
+    expect(result.mimeType).toBe('image/png')
   })
 
   it('refuses a stream over the cap, cancels the reader once and leaves the input unchanged', async () => {

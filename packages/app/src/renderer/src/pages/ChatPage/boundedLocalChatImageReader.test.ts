@@ -45,6 +45,20 @@ describe('bounded local chat source reader', () => {
     expect(cancel).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['image/png; charset=binary', 'image/png'],
+    ['Image/PNG', 'image/png'],
+    [' image/jpeg ;q=1', 'image/jpeg'],
+    ['text/html, image/webp', 'image/webp'],
+    ['image/png, bogus', 'image/png'],
+    ['not a mime', ''],
+    ['*/*', '']
+  ])('types the blob with the MIME essence of %j, as response.blob() does', async (header, expected) => {
+    const { response } = makeResponse([new Uint8Array([1])], header)
+    const blob = await readBoundedLocalChatImageBlob(response, { maxBytes: 3 })
+    expect(blob.type).toBe(expected)
+  })
+
   it('cancels before accepting a chunk that exceeds the remaining bytes', async () => {
     const { response, cancel } = makeResponse([new Uint8Array([1, 2]), new Uint8Array([3, 4])])
     await expect(readBoundedLocalChatImageBlob(response, { maxBytes: 3 })).rejects.toThrow('Image source exceeds')

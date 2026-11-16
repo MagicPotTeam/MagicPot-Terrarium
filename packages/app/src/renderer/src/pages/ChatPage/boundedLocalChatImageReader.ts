@@ -15,6 +15,21 @@ const typedArrayTag = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype),
   Symbol.toStringTag
 )?.get
+// The Blob type is the MIME essence (type/subtype, lowercase, no parameters), as
+// response.blob() gives it: a raw 'image/png; charset=binary' header would otherwise
+// become a non-canonical data: URL prefix that MAIN refuses. Of several combined
+// values the last valid one wins; an unusable header gives '' (no type).
+const MIME_TOKEN = "[!#$%&'*+.^_`|~0-9a-z-]+"
+const MIME_ESSENCE = new RegExp(`^${MIME_TOKEN}/${MIME_TOKEN}$`)
+const mimeEssence = (header: string | null | undefined): string => {
+  const values = String(header ?? '').split(',')
+  for (let index = values.length - 1; index >= 0; index--) {
+    const essence = values[index].split(';', 1)[0].trim().toLowerCase()
+    if (MIME_ESSENCE.test(essence) && essence !== '*/*') return essence
+  }
+  return ''
+}
+
 const isUint8ArrayChunk = (chunk: unknown): chunk is Uint8Array => {
   try {
     return typedArrayTag?.call(chunk) === 'Uint8Array'
@@ -102,7 +117,7 @@ export async function readBoundedLocalChatImageBlob(
       size += chunk.byteLength
     }
     check()
-    const blob = new Blob(chunks, { type: response.headers?.get('content-type') || '' })
+    const blob = new Blob(chunks, { type: mimeEssence(response.headers?.get('content-type')) })
     check()
     return blob
   } finally {
