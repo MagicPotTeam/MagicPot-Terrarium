@@ -523,12 +523,46 @@ function getMatchingLocalFileIdentity(
     : null
 }
 
+const CANVAS_MANAGED_MEDIA_SHA256_PATTERN = /^[0-9a-f]{64}$/
+
+/**
+ * The content key of a managed image, from the SHA-256 its media reference
+ * records: it does not depend on the managed file still existing. Only for the
+ * source of a managed image whose src still is that managed file (its path
+ * ends with the reference's relative path).
+ */
+function getManagedMediaCanvasAssetKey(owner: object, slotId: string, src: string): string | null {
+  if (slotId !== CANVAS_ASSET_SOURCE_SLOT) return null
+  const candidate = owner as { type?: unknown; media?: { kind?: unknown; sha256?: unknown; relativePath?: unknown } }
+  const media = candidate.media
+  if (
+    candidate.type !== 'image' ||
+    !media ||
+    media.kind !== 'managed' ||
+    typeof media.sha256 !== 'string' ||
+    !CANVAS_MANAGED_MEDIA_SHA256_PATTERN.test(media.sha256.toLowerCase()) ||
+    typeof media.relativePath !== 'string' ||
+    !media.relativePath
+  ) {
+    return null
+  }
+  const localPath = resolveLocalFilePathFromSource(src)
+  if (!localPath) return null
+  const comparable = (value: string): string => value.replace(/[\\/]+/g, '/').toLowerCase()
+  if (!comparable(localPath).endsWith(`/${comparable(media.relativePath).replace(/^\/+/, '')}`)) {
+    return null
+  }
+  return `b-${media.sha256.toLowerCase().slice(0, CANVAS_ASSET_KEY_HEX_LENGTH)}`
+}
+
 /**
  * A key this session already knows for the slot; never reads bytes and never
  * waits. Order: the file identity of a path-backed image, the item object
  * itself, an attached source file, the tag of a restored item, the object URL.
  */
 function peekCanvasAssetKey(owner: object, slotId: string, src: string): string | null {
+  const managedKey = getManagedMediaCanvasAssetKey(owner, slotId, src)
+  if (managedKey) return managedKey
   const identity = getMatchingLocalFileIdentity(owner, slotId, src)
   if (identity) {
     return (
@@ -2526,6 +2560,68 @@ async function stageCanvasMirrorAsset(
 }
 
 /**
+ * The "assets/..." reference of every slot in the project file currently on
+ * disk, by item id or model texture key (absolute references into the asset
+ * folder are turned into that form). Null when the file cannot be read; an
+ * empty map when there is none.
+ */
+async function readPreviousCanvasMirrorRefs(plan: CanvasMirrorPlan): Promise<Map<string, string> | null> {
+  const refs = new Map<string, string>()
+  const toRef = (value: unknown): string | null => {
+    if (typeof value !== 'string' || !value) return null
+    const normalized = value.replace(/[\\/]+/g, '/').replace(/^\.\//, '')
+    if (normalized.startsWith(`${PROJECT_ASSET_DIRNAME}/`)) return normalized
+    const entry = getCanvasMirrorEntryForSource(plan.assetDir, value)
+    if (!entry) return null
+    const localPath = resolveLocalFilePathFromSource(value)!
+    const trimmed = localPath.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '')
+    const dir = plan.assetDir.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '')
+    return `${PROJECT_ASSET_DIRNAME}/${trimmed.slice(dir.length + 1)}`
+  }
+  let content: string
+  try {
+    content = (
+      await window.api.svcFs.readTextFile({
+        fullPath: window.path.join(plan.projectDir, AUTOSAVE_CANVAS_FILENAME)
+      })
+    ).content
+  } catch (error) {
+    return isMissingMirrorFileError(error) ? refs : null
+  }
+  try {
+    const parsed = JSON.parse(content) as { items?: unknown }
+    if (!Array.isArray(parsed?.items)) return null
+    for (const item of parsed.items as Array<Record<string, unknown>>) {
+      if (!item || typeof item !== 'object' || typeof item.id !== 'string') continue
+      const sourceRef = toRef(item.src)
+      if (sourceRef) refs.set(item.id, sourceRef)
+      if (item.textures && typeof item.textures === 'object') {
+        for (const [textureName, textureUrl] of Object.entries(item.textures as Record<string, unknown>)) {
+          const textureRef = toRef(textureUrl)
+          if (textureRef) refs.set(getModelTextureKey(item.id, textureName), textureRef)
+        }
+      }
+    }
+    return refs
+  } catch {
+    return null
+  }
+}
+
+/** The entry directly under assets/ that an "assets/..." reference names. */
+function getCanvasMirrorRefEntryName(ref: string): string | null {
+  const segments = ref.split('/')
+  if (
+    segments.length < 2 ||
+    segments[0] !== PROJECT_ASSET_DIRNAME ||
+    segments.slice(1).some((segment) => !segment || segment === '.' || segment === '..')
+  ) {
+    return null
+  }
+  return segments[1]
+}
+
+/**
  * Writes the missing asset files, then the project file that references them,
  * and after that write is acknowledged removes what is no longer referenced.
  * Returns false when the mirror could not be written; the previous project
@@ -2562,15 +2658,39 @@ async function executeCanvasMirrorSave(
     )
     await Promise.all(workers)
 
-    // 2. The project file. A slot whose asset could not be staged keeps its original source.
+    // 2. The project file. A slot whose asset could not be staged (its key cannot be
+    // computed now, or its bytes cannot be read) is unsafe: the copy the previous
+    // project file names for it may be the last one. It keeps that reference, and the
+    // entry it names is kept; with no such reference it keeps its original source and
+    // nothing is pruned in this save.
     const refBySlot = new Map<string, string>()
+    const unsafeSlotPlans: CanvasMirrorSlotPlan[] = []
     for (const slotPlan of plan.slotPlans) {
-      if (!slotPlan.assetFileName) continue
-      if (slotPlan.staged || stagedFileNames.has(slotPlan.assetFileName)) {
+      if (
+        slotPlan.assetFileName &&
+        (slotPlan.staged || stagedFileNames.has(slotPlan.assetFileName))
+      ) {
         refBySlot.set(
           slotPlan.slot.logicalKey,
           `${PROJECT_ASSET_DIRNAME}/${slotPlan.assetFileName}`
         )
+      } else {
+        unsafeSlotPlans.push(slotPlan)
+      }
+    }
+    const carriedEntryNames = new Set<string>()
+    let pruneIsSafe = true
+    if (unsafeSlotPlans.length > 0) {
+      const previousRefs = await readPreviousCanvasMirrorRefs(plan)
+      for (const slotPlan of unsafeSlotPlans) {
+        const previousRef = previousRefs?.get(slotPlan.slot.logicalKey)
+        const entryName = previousRef ? getCanvasMirrorRefEntryName(previousRef) : null
+        if (previousRef && entryName) {
+          refBySlot.set(slotPlan.slot.logicalKey, previousRef)
+          carriedEntryNames.add(entryName)
+        } else {
+          pruneIsSafe = false
+        }
       }
     }
     const projectItems = serializeItems(items).map((serializedItem) => {
@@ -2616,10 +2736,10 @@ async function executeCanvasMirrorSave(
 
     // 3. Cleanup, only now. Main keeps whatever the project file on disk references;
     // on top of that: everything the saved, live, undo and redo items can still need.
-    if (plan.transport.prune) {
+    if (plan.transport.prune && pruneIsSafe) {
       try {
         const keepAssetKeys = new Set<string>()
-        const keepEntryNames = new Set<string>()
+        const keepEntryNames = new Set<string>(carriedEntryNames)
         for (const fileName of refBySlot.values()) {
           keepAssetKeys.add(fileName.slice(PROJECT_ASSET_DIRNAME.length + 1).split('.')[0])
         }

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { countCanvasAssetKeyReferences, loadCanvasItems, saveCanvasItems } from './canvasStorage'
 import type { CanvasItem } from './types'
+import { buildProjectStorageDirName } from '@shared/projectStorage'
 
 // A small transactional model of IndexedDB: writes are staged per transaction and
 // applied on completion, an abort drops them. It is a test double, not evidence
@@ -682,7 +683,9 @@ function createFakeMirror() {
     readFileFromPath: [] as string[],
     saveImageToPath: [] as string[]
   }
-  const state = { failProjectFileWrite: false, refuseCopy: false }
+  // applyPrune: delete like main does (no grace period): every entry directly under
+  // assets/ that the project file on disk does not reference and the caller does not keep.
+  const state = { failProjectFileWrite: false, refuseCopy: false, applyPrune: false }
   const assetPath = (projectDirName: string, assetFileName: string): string =>
     `${autoSaveRoot}/${projectDirName}/assets/${assetFileName}`
   const publish = (target: string, data: Uint8Array) => {
@@ -730,7 +733,22 @@ function createFakeMirror() {
     }) => {
       events.push('prune')
       calls.prune.push({ keepAssetKeys: req.keepAssetKeys, keepEntryNames: req.keepEntryNames })
-      return { removedAssetFileNames: [], removedSnapshotDirNames: [] }
+      const removed = { removedAssetFileNames: [] as string[], removedSnapshotDirNames: [] as string[] }
+      if (!state.applyPrune) return removed
+      const content = text.get(`${autoSaveRoot}/${req.projectDirName}/project.mpcanvas`)
+      if (content === undefined) return removed
+      const keep = new Set(req.keepEntryNames)
+      for (const match of content.matchAll(/"assets[\\/]+([^"\\/]+)/g)) keep.add(match[1])
+      const prefix = assetPath(req.projectDirName, '')
+      for (const fullPath of [...files.keys()]) {
+        if (!fullPath.startsWith(prefix)) continue
+        const entry = fullPath.slice(prefix.length).split('/')[0]
+        if (keep.has(entry) || req.keepAssetKeys.includes(entry.split('.')[0])) continue
+        files.delete(fullPath)
+        if (entry.startsWith('snapshot-')) removed.removedSnapshotDirNames.push(entry)
+        else removed.removedAssetFileNames.push(entry)
+      }
+      return removed
     },
     pruneAutoSaveProjects: async () => ({ removedProjectDirs: [] }),
     writeTextFile: async (req: { outputPath: string; filename: string; content: string }) => {
@@ -1507,5 +1525,141 @@ describe('rollback to the previous release', () => {
     await saveCanvasItems([], 'rb-delete', [], [], null, { getProtectedItems: () => [[]] })
     await saveCanvasItems([], 'rb-delete', [], [], null, { getProtectedItems: () => [[]] })
     expect(fake.blobKeys()).toEqual([])
+  })
+})
+
+// ─── The mirror never prunes the last copy of an asset ──────────────────────
+describe('mirror prune with assets that cannot be staged', () => {
+  const MANAGED_SHA = 'a1'.repeat(32)
+
+  it('keeps the old mirror copy of a managed image whose managed file is gone', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.applyPrune = true
+    const managedPath = '/home/u/userData/managed/canvas/m1.png'
+    mirror.localFiles.set(managedPath, new Uint8Array([8, 8, 8]))
+    const managed = imageItem('managed', `local-media://${managedPath}`, {
+      media: {
+        version: 1,
+        kind: 'managed',
+        relativePath: 'canvas/m1.png',
+        sha256: MANAGED_SHA,
+        sizeBytes: 3,
+        mimeType: 'image/png',
+        originalFileName: 'm1.png'
+      }
+    })
+    const note = { id: 'note', type: 'text', text: 'hi', x: 0, y: 0, zIndex: 2 } as unknown as CanvasItem
+    await saveCanvasItems([managed, note], 'managed-gone')
+    const copyName = `b-${MANAGED_SHA.slice(0, 40)}.png`
+    expect(mirror.assetFiles()).toEqual([copyName])
+    expect(mirror.project().items[0].src).toBe(`assets/${copyName}`)
+
+    // The managed store loses the file; the app restarts (no session caches) and the board is edited.
+    mirror.localFiles.delete(managedPath)
+    vi.resetModules()
+    const restarted = await import('./canvasStorage')
+    const reopened = await restarted.loadCanvasItems('managed-gone')
+    expect((reopened.items[0] as { src: string }).src).toBe(`local-media://${managedPath}`)
+    mirror.resetCalls()
+    await restarted.saveCanvasItems(
+      reopened.items.map((item) => ({ ...item, x: 12 }) as CanvasItem),
+      'managed-gone'
+    )
+
+    expect(mirror.assetFiles()).toEqual([copyName])
+    expect([...mirror.files.get(`${mirror.projectDir()}/assets/${copyName}`)!]).toEqual([8, 8, 8])
+    expect(mirror.project().items[0]).toMatchObject({ x: 12, src: `assets/${copyName}` })
+  })
+
+  it('carries the previous reference of a managed image without a recorded hash', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.applyPrune = true
+    const managedPath = '/home/u/userData/managed/m2.png'
+    mirror.localFiles.set(managedPath, new Uint8Array([6, 6]))
+    const managed = imageItem('managed', `local-media://${managedPath}`, {
+      media: { kind: 'managed', id: 'media-2' }
+    })
+    await saveCanvasItems([managed], 'managed-nohash')
+    const [copyName] = mirror.assetFiles()
+    expect(copyName).toMatch(/^f-[0-9a-f]{40}\.png$/)
+
+    mirror.localFiles.delete(managedPath)
+    vi.resetModules()
+    const restarted = await import('./canvasStorage')
+    const reopened = await restarted.loadCanvasItems('managed-nohash')
+    await restarted.saveCanvasItems(
+      reopened.items.map((item) => ({ ...item, y: 4 }) as CanvasItem),
+      'managed-nohash'
+    )
+
+    // The key cannot be computed now; the new project file keeps pointing at the old copy.
+    expect(mirror.assetFiles()).toEqual([copyName])
+    expect(mirror.project().items[0]).toMatchObject({ y: 4, src: `assets/${copyName}` })
+    expect(mirror.calls.prune.at(-1)!.keepEntryNames).toContain(copyName)
+  })
+
+  it('keeps the snapshot folder of a board saved by an earlier version whose remote source is down', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.applyPrune = true
+    const remoteUrl = 'http://127.0.0.1:8188/view?filename=ComfyUI_00042_.png&type=output'
+    const snapshotDir = 'snapshot-11111111-2222-3333-4444-555555555555'
+    const projectDir = `${mirror.autoSaveRoot}/${buildProjectStorageDirName('old-board', 'old-board')}`
+    // Saved by the earlier version: IndexedDB holds the remote URL, the mirror its only offline copy.
+    fake.committed.get('canvas-items')!.set('old-board', {
+      items: [{ ...(imageItem('remote', remoteUrl) as object) }],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    mirror.text.set(
+      `${projectDir}/project.mpcanvas`,
+      JSON.stringify({
+        magic: 'MAGICPOT_CANVAS',
+        version: 8,
+        storageMode: 'project',
+        items: [{ ...(imageItem('remote', `assets/${snapshotDir}/images/remote.png`) as object) }],
+        groups: [],
+        groupBranches: []
+      })
+    )
+    mirror.files.set(`${projectDir}/assets/${snapshotDir}/images/remote.png`, new Uint8Array([4, 2]))
+    mirror.files.set(`${projectDir}/assets/snapshot-99999999-2222-3333-4444-555555555555/images/x.png`, new Uint8Array([1]))
+
+    // First save after the upgrade, with the server down.
+    const loaded = await loadCanvasItems('old-board')
+    expect((loaded.items[0] as { src: string }).src).toBe(remoteUrl)
+    await saveCanvasItems(loaded.items.map((item) => ({ ...item, x: 3 }) as CanvasItem), 'old-board')
+
+    expect(mirror.project().items[0]).toMatchObject({
+      x: 3,
+      src: `assets/${snapshotDir}/images/remote.png`
+    })
+    expect(mirror.files.has(`${projectDir}/assets/${snapshotDir}/images/remote.png`)).toBe(true)
+    // An unreferenced old snapshot nothing needs is still cleaned up.
+    expect([...mirror.files.keys()].some((key) => key.includes('snapshot-99999999'))).toBe(false)
+
+    // IndexedDB is lost: the board comes back from the mirror alone, with its image.
+    fake = createFakeIndexedDb()
+    vi.stubGlobal('indexedDB', fake.api)
+    const recovered = await loadCanvasItems('old-board')
+    expect(recovered.items.map((item) => item.id)).toEqual(['remote'])
+    expect((recovered.items[0] as { src: string }).src).toBe(
+      `local-media://${projectDir}/assets/${snapshotDir}/images/remote.png`
+    )
+  })
+
+  it('prunes nothing when an unstaged asset has no earlier copy to fall back to', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.applyPrune = true
+    const keep = imageItem('keep', registerSource('blob:unsafe-keep', [1, 2]))
+    await saveCanvasItems([keep], 'unsafe-new')
+    const orphan = `${mirror.projectDir()}/assets/b-${'0'.repeat(40)}.png`
+    mirror.files.set(orphan, new Uint8Array([9]))
+
+    mirror.resetCalls()
+    await saveCanvasItems([keep, imageItem('down', 'https://example.invalid/down.png')], 'unsafe-new')
+    expect(mirror.calls.prune).toEqual([])
+    expect(mirror.files.has(orphan)).toBe(true)
+    expect(mirror.project().items[1].src).toBe('https://example.invalid/down.png')
   })
 })
