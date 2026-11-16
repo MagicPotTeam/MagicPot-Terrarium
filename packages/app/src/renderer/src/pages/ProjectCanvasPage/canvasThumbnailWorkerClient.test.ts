@@ -521,6 +521,55 @@ describe('canvasThumbnailWorkerClient', () => {
     expect(bridge.createNativeThumbnail).toHaveBeenCalledTimes(5)
   })
 
+  it('draws thumbnail levels on a CPU canvas and keeps no pixels in the idle canvas', async () => {
+    setGlobalCreateImageBitmap(
+      vi.fn(async () => ({
+        width: 2048,
+        height: 2048,
+        close: vi.fn()
+      }))
+    )
+    const contextCalls: Array<{ canvas: HTMLCanvasElement; settings: unknown }> = []
+    const drawImage = vi.fn()
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
+      this: HTMLCanvasElement,
+      _contextId: string,
+      settings?: unknown
+    ) {
+      contextCalls.push({ canvas: this, settings })
+      return {
+        clearRect: vi.fn(),
+        drawImage,
+        imageSmoothingEnabled: false,
+        imageSmoothingQuality: 'low'
+      } as unknown as CanvasRenderingContext2D
+    } as typeof HTMLCanvasElement.prototype.getContext)
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (callback) {
+      callback(new Blob(['encoded'], { type: 'image/webp' }))
+    })
+
+    await expect(
+      generateCanvasThumbnailLevelsInScope({
+        source: new Blob(['source'], { type: 'image/jpeg' }),
+        levels: [512, 2048]
+      })
+    ).resolves.toHaveLength(2)
+
+    expect(drawImage).toHaveBeenCalledTimes(2)
+    expect(contextCalls.length).toBeGreaterThan(0)
+    // An accelerated canvas would stage every full-size source upload in GPU shared memory
+    // that the worker keeps until it ends; a CPU canvas has no GPU context at all.
+    expect(
+      contextCalls.every(
+        ({ settings }) =>
+          (settings as { willReadFrequently?: boolean })?.willReadFrequently === true
+      )
+    ).toBe(true)
+    // The canvas kept for the next level holds no 2048 x 2048 pixels while it waits.
+    const pooled = contextCalls[contextCalls.length - 1].canvas
+    expect(pooled.width * pooled.height).toBe(1)
+  })
+
   it('reuses one canvas only after async encoding completes and returns it after errors', async () => {
     const pendingEncodes: Array<(blob: Blob | null) => void> = []
     const contextCanvases: HTMLCanvasElement[] = []

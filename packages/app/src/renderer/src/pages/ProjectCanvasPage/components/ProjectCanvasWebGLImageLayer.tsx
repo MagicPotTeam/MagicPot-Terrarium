@@ -293,7 +293,8 @@ export const PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET = 128
 // Measured on a fitted 100 x 2048 px board: the fit burst of 512 px previews (1 MiB each,
 // uploaded by Pixi on their first draw, one sprite batch per frame) stays in the transfer
 // buffer and adds no chunk; the layer's context holds 0 bytes of chunks after it. The ~104 MB
-// seen right after an import belongs to the thumbnail workers' canvases, not to this layer.
+// once seen right after an import belonged to the thumbnail workers' accelerated canvases,
+// not to this layer; the workers now draw on CPU canvases and no longer hold it.
 export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_BYTES = 16 * 1024 * 1024
 // If the GPU never reports the previous frame's uploads as finished (no fence support, a lost
 // fence), the next frame's uploads wait at most this long.

@@ -10,7 +10,18 @@ import {
 type CanvasLike = OffscreenCanvas | HTMLCanvasElement
 
 const MAX_IDLE_THUMBNAIL_CANVASES = 2
-const MAX_RETAINED_THUMBNAIL_CANVAS_PIXELS = 4096 * 4096
+// An idle canvas keeps its object (and context) for the next level, but not its pixels: the
+// next level resizes it anyway, which reallocates them.
+const MAX_RETAINED_IDLE_THUMBNAIL_CANVAS_PIXELS = 1
+// A thumbnail level is drawn once and then read back by the encoder, so it is made on a CPU
+// canvas. An accelerated canvas gives each worker a GPU context of its own: every full-size
+// source is uploaded through Chromium's upload staging, which keeps its largest chunks until
+// the worker ends (two workers held 104 MB of it from the first seconds of a 100 x 2048 px
+// import until 30 s after it, next to a GPU decode cache of up to 1.1 GB), only to read the
+// pixels back for encoding.
+const THUMBNAIL_CANVAS_CONTEXT_SETTINGS: CanvasRenderingContext2DSettings = {
+  willReadFrequently: true
+}
 
 class ThumbnailCanvasPool {
   private readonly idle: CanvasLike[] = []
@@ -27,13 +38,11 @@ class ThumbnailCanvasPool {
   }
 
   release(canvas: CanvasLike): void {
-    const pixels = canvas.width * canvas.height
-    if (
-      pixels > MAX_RETAINED_THUMBNAIL_CANVAS_PIXELS ||
-      this.idle.length >= MAX_IDLE_THUMBNAIL_CANVASES
-    ) {
+    if (canvas.width * canvas.height > MAX_RETAINED_IDLE_THUMBNAIL_CANVAS_PIXELS) {
       canvas.width = 1
       canvas.height = 1
+    }
+    if (this.idle.length >= MAX_IDLE_THUMBNAIL_CANVASES) {
       return
     }
 
@@ -91,7 +100,8 @@ function createThumbnailCanvas(width: number, height: number): CanvasLike | null
 function get2dContext(
   canvas: CanvasLike
 ): OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null {
-  const context = canvas.getContext('2d')
+  const context = canvas.getContext('2d', THUMBNAIL_CANVAS_CONTEXT_SETTINGS) as
+    OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null
   if (!context) {
     return null
   }
