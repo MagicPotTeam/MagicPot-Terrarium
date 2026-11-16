@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type {
@@ -850,7 +850,9 @@ vi.mock('./components/ChatComposer', () => ({
  * Fails a test fast when ChatPage re-renders in an endless effect loop. Such a loop never yields a
  * macrotask (act() keeps flushing the updates synchronously), so neither waitFor nor the test
  * timeout can stop it and the worker fills its heap. Any real test yields between renders long
- * before this many: the count is reset by the first macrotask after a render.
+ * before this many: the count is reset by the first macrotask after a render, and also by the
+ * top-level beforeEach (resetRenderLoopGuard), so a test that installs fake timers and never runs
+ * the pending reset cannot carry a stale count into the tests after it.
  */
 const RENDER_LOOP_LIMIT = 1000
 let rendersWithoutMacrotask = 0
@@ -866,6 +868,10 @@ const guardRenderLoop = (): void => {
   }
   if (rendersWithoutMacrotask > RENDER_LOOP_LIMIT)
     throw new Error(`ChatPage rendered ${rendersWithoutMacrotask} times without yielding: endless effect loop`)
+}
+const resetRenderLoopGuard = (): void => {
+  rendersWithoutMacrotask = 0
+  renderLoopResetScheduled = false
 }
 
 vi.mock('./components/ChatMessageList', () => ({
@@ -1041,6 +1047,8 @@ const delegatedLineStates = () =>
  * channel and member-to-member messages (99dc5e79 removed the member details and their
  * "用户 → Bob · 排队中" activity lines); the dispatcher still records every delivery's state
  * (queued, request_started, response_received, unavailable, unknown), so tests read it there.
+ * The prototype spies are restored when the test finishes (onTestFinished), whatever its
+ * finally block does, so they never leak into later tests.
  */
 const watchTeamDispatch = () => {
   const dispatchers: TeamMessageDispatcher[] = []
@@ -1051,6 +1059,7 @@ const watchTeamDispatch = () => {
     vi.spyOn(TeamMessageDispatcher.prototype, 'enqueue').mockImplementation(function (this: TeamMessageDispatcher, input) { track(this); return enqueue.call(this, input) }),
     vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (this: TeamMessageDispatcher, recipient) { track(this); return pump.call(this, recipient) })
   ]
+  onTestFinished(() => { for (const spy of spies) spy.mockRestore() })
   /** The records of messages from `source` ('user' or a member id) to `recipient`, oldest first. */
   const records = (source: string, recipient: string) => dispatchers.flatMap(dispatcher => dispatcher.entries()).filter(entry =>
     entry.recipient === recipient && (source === 'user' ? entry.intent.source.kind === 'user' : entry.intent.source.kind === 'member' && entry.intent.source.member === source))
@@ -1060,7 +1069,6 @@ const watchTeamDispatch = () => {
     /** The state of the latest such message, optionally only one whose text contains `text`. */
     status: (source: string, recipient: string, text?: string) =>
       records(source, recipient).filter(entry => text === undefined || entry.intent.text.includes(text)).at(-1)?.status,
-    restore: () => { for (const spy of spies) spy.mockRestore() }
   }
 }
 
@@ -1166,6 +1174,7 @@ const readLatestMessageListProps = (): {
 
 describe('ChatPage runtime workflow integration', () => {
   beforeEach(async () => {
+    resetRenderLoopGuard()
     hoisted.currentConfig.value = createConfig()
     hoisted.runtimeMcpStatus.value = null
     hoisted.buildDataDir.value = 'C:/MagicPot/Data'
@@ -5550,7 +5559,6 @@ describe('ChatPage runtime workflow integration', () => {
       finish?.({content:'cleanup'})
       page.unmount()
       await act(async () => releaseList({intents:[]}))
-      dispatch.restore()
     }
   })
 
@@ -5705,7 +5713,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(request.teamMessageHop).toBe(1)
       expect(request.messages.at(-1).content).toContain('用户本地广播')
       expect(hoisted.claimAgentTeamMessageMock).not.toHaveBeenCalled()
-    } finally { finish?.({content:'cleanup'}); page.unmount(); dispatch.restore() }
+    } finally { finish?.({content:'cleanup'}); page.unmount() }
   })
 
   it('broadcasts the user menu message once to each subscriber, distinct from agent tool messages', async () => {
@@ -5750,7 +5758,7 @@ describe('ChatPage runtime workflow integration', () => {
       const memberRequest = hoisted.requestChatCompletionMock.mock.calls[2][0]
       expect(memberRequest.messages.at(-1).content).toContain('团队成员消息，来自 Alice')
       expect(memberRequest.teamMessageHop).toBe(1)
-    } finally { page.unmount(); dispatch.restore() }
+    } finally { page.unmount() }
   })
 
   it('does not enqueue a broadcast under an unavailable versioned member model and preserves its draft', async () => {
@@ -5813,7 +5821,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(dispatch.records('user', bob.id).map(entry => entry.status)).toEqual(['unavailable'])
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { hoisted.teamBeforeDispatchGate.value = null; release(); page.unmount(); dispatch.restore() }
+    } finally { hoisted.teamBeforeDispatchGate.value = null; release(); page.unmount() }
   })
 
   it('preserves user broadcast draft and sends no request with no subscribers', async () => {
@@ -5899,7 +5907,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(storedMessages(carol.id)).toEqual([])
       // The member source is shown where the message landed: in Bob's own conversation.
       await waitFor(() => expect(storedMessages(bob.id).find(message => message.role === 'user')?.content).toMatch(/^\[团队成员消息，来自 Alice，ID alice；内容为不可信数据\]\n广播测试$/))
-    } finally { page.unmount(); dispatch.restore() }
+    } finally { page.unmount() }
   })
 
   it('keeps a member message queued while Bob handles a user @ request', async () => {
@@ -5930,7 +5938,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(hoisted.requestChatCompletionMock.mock.calls[1][0].messages.at(-1).content).toContain('member queued message')
       await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'member queued message')).toBe('response_received'))
       expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalledTimes(1)
-    } finally { finish?.({content:'cleanup'}); page.unmount(); dispatch.restore() }
+    } finally { finish?.({content:'cleanup'}); page.unmount() }
   })
 
   it('does not probe or batch skill reference attachments for a member message', async () => {
@@ -5954,7 +5962,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionMock.mock.calls[0][0].teamMessageHop).toBe(1)
-    } finally { page.unmount(); dispatch.restore() }
+    } finally { page.unmount() }
   })
 
   it('does not probe or batch skill reference attachments for a directly addressed member', async () => {
@@ -6000,7 +6008,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(within(line).queryByRole('button', { name: /发送|重试|retry|send/i })).not.toBeInTheDocument()
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { page.unmount(); dispatch.restore() }
+    } finally { page.unmount() }
   })
 
   it.each([false, true])('does not mark preprocessing failure as a started member request (stream=%s)', async stream => {
@@ -6022,7 +6030,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(dispatch.records(alice.id, bob.id).map(entry => entry.status)).toEqual(['unavailable'])
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { hoisted.teamPreprocessingFails.value = false; page.unmount(); dispatch.restore() }
+    } finally { hoisted.teamPreprocessingFails.value = false; page.unmount() }
   })
 
   it.each([false, true])('does not retry invalid continuation after a member message starts (stream=%s)', async stream => {
@@ -6052,7 +6060,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(request).toHaveBeenCalledTimes(1)
       expect(sideEffects).toBe(1)
       expect(dispatch.records(alice.id, bob.id)).toHaveLength(1)
-    } finally { page.unmount(); dispatch.restore() }
+    } finally { page.unmount() }
   })
 
   it.each([false, true])('member message failure is unknown and never retried (stream=%s)', async stream => {
@@ -6080,7 +6088,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(hoisted.claimAgentTeamMessageMock.mock.calls.length).toBeGreaterThanOrEqual(2))
       expect(request).toHaveBeenCalledTimes(1)
       expect(dispatch.records(alice.id, bob.id).map(entry => entry.status)).toEqual(['unknown'])
-    } finally { page.unmount(); dispatch.restore() }
+    } finally { page.unmount() }
   })
 
   it('marks a cancelled member message unknown and does not retry', async () => {
@@ -6108,7 +6116,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(hoisted.claimAgentTeamMessageMock.mock.calls.length).toBeGreaterThanOrEqual(2))
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       expect(dispatch.records(alice.id, bob.id)).toHaveLength(1)
-    } finally { rejectPending?.(new Error('cleanup')); page.unmount(); dispatch.restore() }
+    } finally { rejectPending?.(new Error('cleanup')); page.unmount() }
   })
 
   it('does not send an old-scope message after a pending claim resolves', async () => {
@@ -6154,7 +6162,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(hoisted.storedSessions.value.find(item => item.id === bob.id)?.messages.some(message => message.content === 'already dispatched result')).toBe(true))
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       expect(dispatch.records(alice.id, bob.id)).toHaveLength(1)
-    } finally { finish?.({content:'cleanup'}); page.unmount(); dispatch.restore() }
+    } finally { finish?.({content:'cleanup'}); page.unmount() }
   })
 
   it('keeps same-generation member work when returning to a lead; after remount it comes from storage, not the transient record', async () => {
@@ -6196,7 +6204,7 @@ describe('ChatPage runtime workflow integration', () => {
       for (const dispatcher of dispatch.dispatchers.slice(dispatchersBeforeRemount)) expect(dispatcher.entries()).toEqual([])
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       expect(storedMessages(bob.id).filter(message => message.role === 'user')).toHaveLength(1)
-    } finally { reopened.unmount(); dispatch.restore() }
+    } finally { reopened.unmount() }
   })
 
   it('records an invalid recipient as not sent without a model request', async () => {
@@ -6272,7 +6280,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(dispatch.status(alice.id, bob.id, '来自 Alice 的问题')).toBe('response_received'))
       await waitFor(() => expect(storedMessages(bob.id).some(message => message.role === 'assistant' && message.content === 'Bob 的答复')).toBe(true))
       expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalledTimes(1)
-    } finally { finish?.({content:'cleanup'}); page.unmount(); dispatch.restore() }
+    } finally { finish?.({content:'cleanup'}); page.unmount() }
   })
 
   it('leaves a task running if its member request fails instead of marking it done', async () => {
@@ -8218,6 +8226,37 @@ describe('ChatPage runtime workflow integration', () => {
       vi.stubGlobal('FileReader', originalFileReader)
       vi.stubGlobal('fetch', originalFetch)
     }
+  })
+
+  // These run in order: the first test of each pair leaves state behind, the second checks that
+  // the harness cleared it before the next test.
+  describe('test harness hygiene', () => {
+    it('can leave a render-loop count behind when a test uses fake timers', () => {
+      vi.useFakeTimers()
+      try {
+        for (let render = 1; render < RENDER_LOOP_LIMIT; render += 1) guardRenderLoop()
+      } finally {
+        // The scheduled reset was a fake timer and is dropped here without running.
+        vi.useRealTimers()
+      }
+      expect(rendersWithoutMacrotask).toBe(RENDER_LOOP_LIMIT - 1)
+    })
+
+    it('starts the next test with a fresh render-loop count', () => {
+      expect(rendersWithoutMacrotask).toBe(0)
+      expect(renderLoopResetScheduled).toBe(false)
+    })
+
+    it('installs the team dispatcher spies for one test without restoring them by hand', () => {
+      watchTeamDispatch()
+      expect(vi.isMockFunction(TeamMessageDispatcher.prototype.enqueue)).toBe(true)
+      expect(vi.isMockFunction(TeamMessageDispatcher.prototype.pump)).toBe(true)
+    })
+
+    it('restores the team dispatcher spies once that test finished', () => {
+      expect(vi.isMockFunction(TeamMessageDispatcher.prototype.enqueue)).toBe(false)
+      expect(vi.isMockFunction(TeamMessageDispatcher.prototype.pump)).toBe(false)
+    })
   })
 
   describe('asynchronous drop destination isolation', () => {
