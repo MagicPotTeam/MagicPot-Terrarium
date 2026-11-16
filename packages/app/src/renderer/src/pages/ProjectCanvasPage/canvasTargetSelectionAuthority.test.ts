@@ -229,6 +229,23 @@ describe('canvasTargetSelectionAuthority media placement URLs', () => {
     expect(place('data:image/png;base64,QQ==', { runOutputUrls })).toMatchObject({ allowed: false, refusal: 'not_run_output' })
   })
 
+  it('re-places the run\'s own output that only items the run placed carry, as the recorded URL', () => {
+    const output: CanvasImageItem = { ...a, id: 'P', src: 'blob:http://localhost/stage-output' }
+    const copy: CanvasImageItem = { ...output, id: 'Q' }
+    const runOutputUrls = new Map<string, string>()
+    recordCanvasTargetRunOutputUrl('blob:http://localhost/stage-output', runOutputUrls)
+    const items = [selected, other, output]
+    const base = { knownCanvasUrlKeys: collectCanvasTargetCanvasBlobUrlKeys([...items, copy], new Set()), runOutputUrls }
+    for (const mode of ['selected_sources', 'structured_only', 'selection_region'] as const) {
+      expect(place('BLOB:http://localhost/stage-output#x', { ...base, evidenceMode: mode, currentItems: items, runPlacedItemIds: new Set(['P']) })).toEqual({ allowed: true, url: 'blob:http://localhost/stage-output' })
+    }
+    // Not placed by the run as its output, or also carried by another item.
+    expect(place('blob:http://localhost/stage-output', { ...base, currentItems: items, runPlacedItemIds: new Set() })).toMatchObject({ allowed: false, refusal: 'not_selected' })
+    expect(place('blob:http://localhost/stage-output', { ...base, currentItems: [...items, copy], runPlacedItemIds: new Set(['P']) })).toMatchObject({ allowed: false, refusal: 'not_selected', references: ['P', 'Q'] })
+    // Placed by the run, but the URL is not a recorded run output (a re-placed source).
+    expect(place('blob:http://localhost/stage-output', { ...base, runOutputUrls: new Map(), currentItems: items, runPlacedItemIds: new Set(['P']) })).toMatchObject({ allowed: false, refusal: 'not_selected' })
+  })
+
   it('collects the blob URLs carried by src, textures and preview images, not data: URLs', () => {
     const model = { ...a, id: 'M', type: 'model3d', src: 'blob:model', textures: { 'skin.png': 'BLOB:texture#t' } } as unknown as CanvasItem
     const file = { ...a, id: 'F', type: 'file', src: 'blob:file', fileName: 'f.pdf', mimeType: 'application/pdf', previewImages: [{ id: 'p', src: 'blob:preview', mimeType: 'image/png', fileName: 'p.png' }] } as unknown as CanvasItem

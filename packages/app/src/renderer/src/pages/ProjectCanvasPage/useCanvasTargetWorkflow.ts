@@ -143,6 +143,7 @@ import {
   authorizeCanvasTargetCanvasWrite,
   authorizeCanvasTargetSourceReferences,
   canvasTargetEvidenceAllowsSelectionSnapshot,
+  canvasTargetMediaUrlKey,
   canvasTargetSelectionHasUnverifiedCrop,
   createCanvasTargetSelectionAuthority,
   authorizeCanvasTargetMediaPlacementUrl,
@@ -579,6 +580,7 @@ async function executeCanvasTargetCanvasAction(
     knownCanvasUrlKeys?: ReadonlySet<string>
     runOutputUrls?: ReadonlyMap<string, string>
     runCreatedItemIds?: ReadonlySet<string>
+    runPlacedItemIds?: ReadonlySet<string>
     semanticState?: CanvasTargetSemanticCanvasActionState
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
@@ -732,7 +734,8 @@ async function executeCanvasTargetCanvasAction(
         evidenceMode: options.evidenceMode,
         currentItems: options.semanticState.items,
         knownCanvasUrlKeys: options.knownCanvasUrlKeys,
-        runOutputUrls: options.runOutputUrls
+        runOutputUrls: options.runOutputUrls,
+        runPlacedItemIds: options.runPlacedItemIds
       })
       if (!placement.allowed) {
         return buildCanvasTargetSourceReferenceRefusal(
@@ -1982,6 +1985,11 @@ export function useCanvasTargetWorkflow({
       // Items this run created (semantic createdIds and placed items). With
       // the selected items, these are the only items the run may change.
       const runCreatedItemIds = new Set<string>()
+      // Items the run placed on the canvas as its own output (model,
+      // QuickApp, extraction or final results). An add_* placement of a
+      // canvas source is not an output, so it is not listed here and its URL
+      // is not recorded in runOutputUrls.
+      const runPlacedItemIds = new Set<string>()
       let runtimeCanvasGroups = groups
       let runtimeCanvasVersion = 1
       let runtimeSelectedIds = new Set(selectedIds)
@@ -2288,12 +2296,15 @@ export function useCanvasTargetWorkflow({
       const registerPlacedCanvasItems = (
         stageId: string,
         placedItems: CanvasItem[],
-        source?: 'quick_app' | 'canvas'
+        source?: 'quick_app' | 'canvas',
+        runOutput = true
       ) => {
         // Only ids the run's view of the canvas did not hold yet are new items.
         const knownIds = new Set(runtimeCanvasItems.map((item) => item.id))
         placedItems.forEach((item) => {
-          if (!knownIds.has(item.id)) runCreatedItemIds.add(item.id)
+          if (knownIds.has(item.id)) return
+          runCreatedItemIds.add(item.id)
+          if (runOutput) runPlacedItemIds.add(item.id)
         })
         mergeRuntimeCanvasItems(placedItems)
         registerCanvasItemIds(
@@ -2325,10 +2336,11 @@ export function useCanvasTargetWorkflow({
       const registerStageAttachmentArtifacts = (
         stageId: string,
         source: string,
-        attachments: ChatAttachment[] | undefined
+        attachments: ChatAttachment[] | undefined,
+        runOutput = true
       ): string[] => {
         return (attachments || []).map((attachment, index) => {
-          recordCanvasTargetRunOutputUrl(attachment.url, runOutputUrls)
+          if (runOutput) recordCanvasTargetRunOutputUrl(attachment.url, runOutputUrls)
           const artifactId = createCanvasTargetArtifactId(stageId, `attachment-${index + 1}`)
           registerArtifact({
             id: artifactId,
@@ -2909,22 +2921,40 @@ export function useCanvasTargetWorkflow({
             knownCanvasUrlKeys: runKnownCanvasUrlKeys,
             runOutputUrls,
             runCreatedItemIds,
+            runPlacedItemIds,
             semanticState,
             commitSemanticResult: (result) => commitSemanticCanvasResult(stageId, result),
             resolveCanvasTargetItemBounds
           })
           ensureCanvasTargetRunActive()
           if (!isCanvasTargetSemanticCanvasActionName(executableCanvasAction.action)) {
+            // add_* places an existing URL. It is a run output only when that
+            // URL already was one; a re-placed canvas source is not.
+            const placedExistingUrl = ['add_image', 'add_video', 'add_model3d'].includes(
+              executableCanvasAction.action
+            )
+            const placedRunOutput =
+              !placedExistingUrl ||
+              (canvasResult.attachments || []).every((attachment) => {
+                const key = canvasTargetMediaUrlKey(attachment.url)
+                return Boolean(key && runOutputUrls.has(key))
+              })
             const canvasAttachmentArtifactIds = registerStageAttachmentArtifacts(
               stageId,
               'canvas',
-              canvasResult.attachments
+              canvasResult.attachments,
+              placedRunOutput
             )
             ;(canvasResult.placedCanvasItems || []).forEach((item, index) => {
               const artifactId = canvasAttachmentArtifactIds[index]
               if (artifactId) linkArtifactToCanvasItem(artifactId, item.id)
             })
-            registerPlacedCanvasItems(stageId, canvasResult.placedCanvasItems || [], 'canvas')
+            registerPlacedCanvasItems(
+              stageId,
+              canvasResult.placedCanvasItems || [],
+              'canvas',
+              placedRunOutput
+            )
           }
           registerStageTextArtifact(stageId, 'canvas', canvasResult.content)
           const outputCanvasVersion = runtimeCanvasVersion

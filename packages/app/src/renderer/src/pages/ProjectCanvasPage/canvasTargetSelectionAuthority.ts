@@ -356,8 +356,10 @@ export type CanvasTargetMediaPlacementVerdict =
 //   unchanged since selection, and only in an evidence mode that may read
 //   sources. A URL that a selected item merely mentions (in its text, label,
 //   caption or metadata) is not that item's source and is not placed;
-// - a blob: URL this run produced itself that no canvas item carries or has
-//   carried during the run.
+// - a blob: URL this run produced itself (runOutputUrls) that no canvas item
+//   carries or has carried during the run, or that only items the run placed
+//   as its own output carry (runPlacedItemIds: a model, QuickApp or
+//   extraction output materialized on the canvas; not a re-placed source).
 // Anything else, including a URL that does not parse, a non-blob URL, and
 // the URL of an item that is no longer on the canvas, is refused.
 export function authorizeCanvasTargetMediaPlacementUrl(options: {
@@ -367,6 +369,7 @@ export function authorizeCanvasTargetMediaPlacementUrl(options: {
   currentItems: readonly CanvasItem[]
   knownCanvasUrlKeys: ReadonlySet<string>
   runOutputUrls: ReadonlyMap<string, string>
+  runPlacedItemIds?: ReadonlySet<string>
 }): CanvasTargetMediaPlacementVerdict {
   const key = canvasTargetMediaUrlKey(options.url)
   if (!key || urlSchemeOf(options.url) !== 'blob' || !key.startsWith('blob:')) {
@@ -374,7 +377,14 @@ export function authorizeCanvasTargetMediaPlacementUrl(options: {
   }
 
   const matches = findCanvasTargetItemUrlMatches(options.url, options.currentItems)
+  const runOutputUrl = options.runOutputUrls.get(key)
   if (matches.length > 0) {
+    // The run's own output, already on the canvas only as the items the run
+    // placed for it: re-placing it reads nothing the run did not produce.
+    const runPlaced = options.runPlacedItemIds
+    if (runOutputUrl && runPlaced && matches.every((match) => runPlaced.has(match.id))) {
+      return { allowed: true, url: runOutputUrl }
+    }
     const verdict = authorizeCanvasTargetSourceReferences({
       authority: options.authority,
       evidenceMode: options.evidenceMode,
@@ -398,7 +408,6 @@ export function authorizeCanvasTargetMediaPlacementUrl(options: {
     return { allowed: false, refusal: 'missing', references: [] }
   }
 
-  const runOutputUrl = options.runOutputUrls.get(key)
   if (runOutputUrl) return { allowed: true, url: runOutputUrl }
   return { allowed: false, refusal: 'not_run_output', references: [] }
 }

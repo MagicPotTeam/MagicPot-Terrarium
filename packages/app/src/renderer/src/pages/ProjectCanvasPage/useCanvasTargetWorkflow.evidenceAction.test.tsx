@@ -475,13 +475,14 @@ describe('Canvas Target evidence action gate', () => {
 
   // Positive control (re-expressed from 'add_image with a URL no canvas item
   // carries is still placed'): add_* may place a blob this run produced, here
-  // a model stage output. The canvas reports its own copy of each placed
-  // image, so no canvas item carries the stage output URL itself.
+  // a model stage output. Like the real addImageToCanvas, the canvas keeps
+  // the blob src, so the stage output is already on the canvas as the item
+  // the run placed for it when the add action runs.
   it('positive control: add_image with a blob URL this run produced is placed', async () => {
     const plain: CanvasImageItem = { ...image, crop: undefined }
     const added = vi.fn((event: Event) => {
-      const detail = (event as CustomEvent<{ onAdded?: (item: unknown) => void }>).detail
-      detail.onAdded?.({ ...plain, id: `placed-${added.mock.calls.length}`, src: `blob:http://localhost/canvas-copy-${added.mock.calls.length}` })
+      const detail = (event as CustomEvent<{ src: string; onAdded?: (item: unknown) => void }>).detail
+      detail.onAdded?.({ ...plain, id: `placed-${added.mock.calls.length}`, src: detail.src })
     })
     window.addEventListener('canvas:add-image', added)
     f.stage.mockResolvedValue({ content: 'fixture', attachments: [{ type: 'image', url: 'blob:http://localhost/stage-output', fileName: 'out.png' }] })
@@ -559,6 +560,34 @@ describe('Canvas Target evidence action gate', () => {
       expect(committedIds().at(-1)).toEqual(['source', 'board'])
       expect(shown(/skipped because a source was not selected/)).toBe(false)
     })
+  })
+
+  // An add_* placement of a canvas source is not a run output: once the
+  // selected source is gone, the run's copy of it does not make its URL
+  // placeable again.
+  it('does not treat a re-placed selected source as a run output after the source is deleted', async () => {
+    const selected: CanvasImageItem = { ...image, crop: undefined, src: 'blob:http://localhost/selected-source' }
+    const added = vi.fn((event: Event) => {
+      const detail = (event as CustomEvent<{ src: string; onAdded?: (item: unknown) => void }>).detail
+      detail.onAdded?.({ ...selected, id: `copy-${added.mock.calls.length}`, src: detail.src })
+    })
+    window.addEventListener('canvas:add-image', added)
+    f.plan.mockResolvedValue({
+      id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [],
+      capabilityActions: [
+        { type: 'canvas', id: 'add-1', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: selected.src, fileName: 'a.png' },
+        { type: 'canvas', id: 'delete', action: 'delete_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'item_ids', itemIds: ['source'] },
+        { type: 'canvas', id: 'add-2', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: selected.src, fileName: 'a.png' }
+      ]
+    })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [selected] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([selected], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selected_sources'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    window.removeEventListener('canvas:add-image', added)
+    expect(f.commits).toHaveBeenCalledOnce()
+    expect(added).toHaveBeenCalledOnce()
+    expect(f.chat.mock.calls.some(([message]) => /Canvas add_image skipped/.test(message.content || ''))).toBe(true)
   })
 
   it('stops a structured_only run when the user starts a new selection while the plan is pending', async () => {
