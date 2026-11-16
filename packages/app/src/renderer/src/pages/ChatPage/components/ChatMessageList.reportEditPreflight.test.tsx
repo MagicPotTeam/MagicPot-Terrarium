@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
@@ -81,5 +81,57 @@ describe('real ChatMessageList report edit preflight', () => {
   it('refuses when the projector keeps the report', () => {
     const session: ChatSession = { id: 'projected-kept', title: 'fixture', messages: [{ role: 'user', content: 'earlier', attachments: [report] }, { role: 'assistant', content: 'reply' }, { role: 'user', content: 'original' }] }
     assertRejected(setup(session, 1, { projectEditHistory: (prefix) => prefix.slice(-2) }))
+  })
+})
+
+describe('real ChatMessageList async MAIN report preflight for edits', () => {
+  const bound: ChatAttachment = { ...report, reportBundleBinding: `rb1.${'C'.repeat(43)}` }
+  const historySession = (): ChatSession => ({ id: 'bound-history', title: 'fixture', messages: [{ role: 'user', content: 'earlier', attachments: [bound] }, { role: 'assistant', content: 'reply' }, { role: 'user', content: 'original' }] })
+
+  it('keeps the edit form with the typed text and the fixed message when MAIN refuses a bound history report', async () => {
+    const session = historySession()
+    const preflightEditReports = vi.fn<NonNullable<Props['preflightEditReports']>>(async () => { throw new Error(fixedMessage) })
+    const f = setup(session, 1, { preflightEditReports })
+    await waitFor(() => expect(screen.getByText(fixedMessage)).toBeInTheDocument())
+    expect(preflightEditReports).toHaveBeenCalledOnce()
+    expect(preflightEditReports).toHaveBeenCalledWith(session.messages.slice(0, 2), undefined)
+    assertRejected(f)
+  })
+
+  it('submits the edit once MAIN verifies the bound history report', async () => {
+    const session = historySession()
+    let accept: () => void = () => undefined
+    const preflightEditReports = vi.fn<NonNullable<Props['preflightEditReports']>>(() => new Promise<void>(resolve => { accept = resolve }))
+    const f = setup(session, 1, { preflightEditReports })
+    await waitFor(() => expect(preflightEditReports).toHaveBeenCalledOnce())
+    // Nothing is given up while MAIN is still deciding, and a second click starts no second check.
+    expect(f.onSendEditedMessage).not.toHaveBeenCalled()
+    expect(screen.getByRole('textbox')).toHaveValue('changed text')
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+    expect(preflightEditReports).toHaveBeenCalledOnce()
+    accept()
+    await waitFor(() => expect(f.onSendEditedMessage).toHaveBeenCalledOnce())
+    expect(f.onSendEditedMessage.mock.calls[0][0]).toBe('changed text')
+    expect(f.onSendEditedMessage.mock.calls[0][3]).toEqual(session.messages.slice(0, 2))
+    expect(screen.queryByText(fixedMessage)).not.toBeInTheDocument()
+    expect(f.session).toEqual(f.before)
+  })
+
+  it('passes the edited bound report itself to the preflight', async () => {
+    const session: ChatSession = { id: 'bound-current', title: 'fixture', messages: [{ role: 'user', content: 'original', attachments: [bound] }] }
+    const preflightEditReports = vi.fn<NonNullable<Props['preflightEditReports']>>(async () => undefined)
+    const f = setup(session, 0, { preflightEditReports })
+    await waitFor(() => expect(f.onSendEditedMessage).toHaveBeenCalledOnce())
+    expect(preflightEditReports).toHaveBeenCalledWith([], [bound])
+    expect(f.onSendEditedMessage.mock.calls[0][1]).toEqual([bound])
+  })
+
+  it('does not call the preflight for an edit without any primary report', () => {
+    const { reportBundleRole: _role, ...ordinary } = report
+    const session: ChatSession = { id: 'plain', title: 'fixture', messages: [{ role: 'user', content: 'original', attachments: [ordinary] }] }
+    const preflightEditReports = vi.fn<NonNullable<Props['preflightEditReports']>>(async () => undefined)
+    const f = setup(session, 0, { preflightEditReports })
+    expect(preflightEditReports).not.toHaveBeenCalled()
+    expect(f.onSendEditedMessage).toHaveBeenCalledOnce()
   })
 })

@@ -51,7 +51,10 @@ import {
 import { type ChatSession } from '../chatStorage'
 import { DEFAULT_CHAT_IMAGE_COUNT_LIMIT } from '@shared/llm/chatImageCountLimit'
 import { assertExplicitUserImageCount } from '../chatExplicitImageCount'
-import { assertNoUnverifiedPrimaryReports } from '@shared/llm/unverifiedReport'
+import {
+  assertNoUnverifiedPrimaryReports,
+  isPrimaryReportFileDescriptor
+} from '@shared/llm/unverifiedReport'
 import { normalizeLocalMediaUrl, getDownloadFileNameFromUrl } from '../chatPageShared'
 import {
   buildAssistantReplyDownloadBaseName,
@@ -152,6 +155,16 @@ interface ChatMessageListProps {
    * message, which can only refuse more than the send path does.
    */
   projectEditHistory?: (prefix: ChatMessage[]) => ChatMessage[]
+  /**
+   * MAIN's verify of the bound report bundles an edit keeps (projected history plus the
+   * edited attachments), awaited before the form gives up the edited text. A rejection keeps
+   * the form open with its message. Only called when a primary report is present; without
+   * it the synchronous shape guard is the only check before submit.
+   */
+  preflightEditReports?: (
+    prefix: ChatMessage[],
+    attachments: ChatAttachment[] | undefined
+  ) => Promise<void>
   onPreviewImage: (url: string) => void
   onImageContextMenu: (event: React.MouseEvent, imageUrl: string) => void
   onDownloadAttachment: (attachment: ChatAttachment) => void
@@ -838,6 +851,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   onRegisterEditingAttachmentReceiver,
   onSendEditedMessage,
   projectEditHistory,
+  preflightEditReports,
   onPreviewImage,
   onImageContextMenu,
   onDownloadAttachment,
@@ -1316,6 +1330,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     onSetEditingContent={onSetEditingContent}
                     onDropImageAttachments={onDropImageAttachments}
                     onRegisterEditingAttachmentReceiver={onRegisterEditingAttachmentReceiver}
+                    preflightReports={preflightEditReports}
                     onCancel={() => {
                       onSetEditingIndex(null)
                       onSetEditingContent('')
@@ -2112,6 +2127,10 @@ const UserMessageEditForm: React.FC<{
   onRegisterEditingAttachmentReceiver?: (
     receiver: ((attachment: ChatAttachment) => void) | null
   ) => void
+  preflightReports?: (
+    prefix: ChatMessage[],
+    attachments: ChatAttachment[] | undefined
+  ) => Promise<void>
   onCancel: () => void
   onSubmit: (content: string, attachments?: ChatAttachment[]) => void
   savedChatScrollPositionRef: React.MutableRefObject<{
@@ -2127,6 +2146,7 @@ const UserMessageEditForm: React.FC<{
   onSetEditingContent,
   onDropImageAttachments,
   onRegisterEditingAttachmentReceiver,
+  preflightReports,
   onCancel,
   onSubmit,
   savedChatScrollPositionRef,
@@ -2146,6 +2166,14 @@ const UserMessageEditForm: React.FC<{
   const sourceChanged = !isEqual(editingSource, message)
   const editingAttachments = editingEntries.map((entry) => entry.attachment)
   const [attachmentError, setAttachmentError] = React.useState<string | null>(null)
+  // One MAIN report preflight at a time; a result that arrives after the form closed is ignored.
+  const reportPreflightRef = React.useRef<symbol | null>(null)
+  React.useEffect(
+    () => () => {
+      reportPreflightRef.current = null
+    },
+    []
+  )
   const [isDraggingImage, setIsDraggingImage] = React.useState(false)
   const pendingImageImportsRef = React.useRef(new Set<symbol>())
   const [pendingImageImportCount, setPendingImageImportCount] = React.useState(0)
@@ -2551,7 +2579,34 @@ const UserMessageEditForm: React.FC<{
                 setAttachmentError(error instanceof Error ? error.message : String(error))
                 return
               }
-              onSubmit(newContent, editingAttachments.length > 0 ? editingAttachments : undefined)
+              const submittedAttachments =
+                editingAttachments.length > 0 ? editingAttachments : undefined
+              if (
+                preflightReports &&
+                [...historyPrefix, { attachments: editingAttachments }].some((entry) =>
+                  entry.attachments?.some(isPrimaryReportFileDescriptor)
+                )
+              ) {
+                if (reportPreflightRef.current) return
+                const preflight = Symbol('edit-report-preflight')
+                reportPreflightRef.current = preflight
+                void Promise.resolve()
+                  .then(() => preflightReports(historyPrefix, submittedAttachments))
+                  .then(
+                    () => {
+                      if (reportPreflightRef.current !== preflight) return
+                      reportPreflightRef.current = null
+                      onSubmit(newContent, submittedAttachments)
+                    },
+                    (error: unknown) => {
+                      if (reportPreflightRef.current !== preflight) return
+                      reportPreflightRef.current = null
+                      setAttachmentError(error instanceof Error ? error.message : String(error))
+                    }
+                  )
+                return
+              }
+              onSubmit(newContent, submittedAttachments)
             }}
             sx={editButtonSx}
           >

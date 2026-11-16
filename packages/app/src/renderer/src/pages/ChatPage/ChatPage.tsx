@@ -9106,6 +9106,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [config, currentSession, customSkills, resolveAvailableSkillId, selectedSkillId]
   )
 
+  // MAIN verifies the bound reports an edit keeps (the projected prefix and the edited
+  // attachments) before the edit form gives up the edited text. The full send path repeats
+  // it, with the route's image count check, after the form submitted.
+  const preflightEditReports = useCallback(
+    async (prefix: ChatMessage[], attachments: ChatAttachment[] | undefined): Promise<void> => {
+      await preflightChatRequestReports({
+        messages: [...prefix, { role: 'user', content: '', attachments }],
+        conversationId: currentSession?.id,
+        storageScope
+      })
+    },
+    [currentSession?.id, storageScope]
+  )
+
   const handleSelectSkill = useCallback(
     (skillId: string | null) => {
       void selectSkill(skillId)
@@ -10019,6 +10033,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 onRegisterEditingAttachmentReceiver={registerEditingAttachmentReceiver}
                 onSendEditedMessage={handleSendEditedMessage}
                 projectEditHistory={projectEditHistory}
+                preflightEditReports={preflightEditReports}
                 onPreviewImage={imagePreview.setPreviewImage}
                 onImageContextMenu={handleImageContextMenu}
                 onDownloadAttachment={downloadAttachment}
