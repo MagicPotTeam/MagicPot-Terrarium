@@ -34,6 +34,8 @@ const f = vi.hoisted(() => ({
   config: null as Config | null,
   sessions: [] as ChatSession[],
   props: null as null | ListProps,
+  composer: null as null | { onInputChange: (value: string) => void },
+  selectSession: null as null | ((id: string) => void),
   receive: vi.fn(),
   materialize: vi.fn(),
   augment: vi.fn(),
@@ -123,26 +125,33 @@ vi.mock('./components/ImageContextMenu', () => ({ default: () => null }))
 vi.mock('./components/AgentLocalFilesPanel', () => ({ default: () => null }))
 vi.mock('./components/ChatImageGenerationSettings', () => ({ default: () => null }))
 vi.mock('./components/SessionSidebar', () => ({
-  default: ({
+  default: function Sidebar({
     sessions,
     onSelectSession
   }: {
     sessions: ChatSession[]
     onSelectSession: (id: string) => void
-  }) => (
-    <div>
-      {sessions.map((session) => (
-        <button key={session.id} onClick={() => onSelectSession(session.id)}>
-          Open {session.id}
-        </button>
-      ))}
-    </div>
-  )
+  }) {
+    f.selectSession = onSelectSession
+    return (
+      <div>
+        {sessions.map((session) => (
+          <button key={session.id} onClick={() => onSelectSession(session.id)}>
+            Open {session.id}
+          </button>
+        ))}
+      </div>
+    )
+  }
 }))
 vi.mock('./components/ChatComposer', () => ({
-  default: ({ inputValue }: { inputValue: string }) => (
-    <input data-testid="composer-input" value={inputValue} readOnly />
-  )
+  default: function Composer(props: {
+    inputValue: string
+    onInputChange: (value: string) => void
+  }) {
+    f.composer = props
+    return <input data-testid="composer-input" value={props.inputValue} readOnly />
+  }
 }))
 // Like the real list, the edit form exists only while an index is being edited (one mount
 // per thread and message) and, like UserMessageEditForm, creates its receiver inside an
@@ -239,8 +248,8 @@ const requestCount = () => f.request.mock.calls.length + f.stream.mock.calls.len
 const staleWarnings = () =>
   f.warning.mock.calls.filter(([message]) => message === 'chat.edit_submit_stale').length
 
-const renderPage = async () => {
-  f.sessions = [makeSession('session-a'), makeSession('session-b')]
+const renderPage = async (sessions = [makeSession('session-a'), makeSession('session-b')]) => {
+  f.sessions = sessions
   localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), 'session-a')
   const view = render(
     <ThemeProvider theme={theme}>
@@ -287,6 +296,8 @@ beforeEach(() => {
   f.config = clone(DEFAULT_CONFIG)
   f.config.use_remote_llm = false
   f.props = null
+  f.composer = null
+  f.selectSession = null
   f.sessions = []
   f.request.mockResolvedValue({ content: 'fixture reply' })
   f.stream.mockResolvedValue({ response: 'fixture reply', result: { content: 'fixture reply' } })
@@ -589,6 +600,67 @@ describe('ChatPage edit form thread ownership', () => {
         'session-c reply 0',
         'session-c message 1'
       ])
+    })
+  })
+
+  describe('composer draft ownership across a thread switch', () => {
+    const storedDraft = (id: string) =>
+      f.sessions.find((session) => session.id === id)?.draft?.inputValue
+    const nextMacrotask = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+    it("never shows or stores A's draft as B's when A's render effects are still pending at the switch", async () => {
+      const older = makeSession('session-b')
+      older.draft = { ...older.draft!, updatedAt: Date.now() - 60_000 }
+      await renderPage([makeSession('session-a'), older])
+      // Typing in A commits A's draft through its debounced timers, outside any act scope,
+      // so the render that carries A's new draft leaves its passive effects pending for a
+      // later task. The switch to B is clicked in exactly that window.
+      f.composer!.onInputChange('session-a typed draft')
+      const deadline = Date.now() + 5000
+      while (f.props?.currentSession?.draft?.inputValue !== 'session-a typed draft') {
+        if (Date.now() > deadline)
+          throw new Error("A's typed draft never reached the session state")
+        await nextMacrotask()
+      }
+      fireEvent.click(screen.getByRole('button', { name: 'Open session-b' }))
+      await waitFor(() => expect(sessionId()).toBe('session-b'))
+      await waitFor(() =>
+        expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
+      )
+      // Past the draft persistence delay: B keeps its own draft, A keeps the typed one.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      })
+      expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
+      expect(storedDraft('session-b')).toBe('session-b composer draft')
+      expect(storedDraft('session-a')).toBe('session-a typed draft')
+      fireEvent.click(screen.getByRole('button', { name: 'Open session-a' }))
+      await waitFor(() =>
+        expect(screen.getByTestId('composer-input')).toHaveValue('session-a typed draft')
+      )
+      expect(storedDraft('session-b')).toBe('session-b composer draft')
+      expect(requestCount()).toBe(0)
+    })
+
+    it("does not save A's composer text as B's draft when a flush runs before B's draft is loaded", async () => {
+      await renderPage()
+      // A switch made outside a discrete user event (as from async code) commits in a later
+      // task; a window blur in between flushes the composer, which still holds A's draft.
+      f.selectSession!('session-b')
+      window.dispatchEvent(new Event('blur'))
+      await waitFor(() => expect(sessionId()).toBe('session-b'))
+      await waitFor(() =>
+        expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
+      )
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      })
+      expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
+      expect(storedDraft('session-b')).toBe('session-b composer draft')
+      await selectSession('session-a')
+      expect(storedDraft('session-a')).toBe('session-a composer draft')
+      await selectSession('session-b')
+      expect(storedDraft('session-b')).toBe('session-b composer draft')
     })
   })
 })

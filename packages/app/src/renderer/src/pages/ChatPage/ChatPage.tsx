@@ -2774,9 +2774,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const applyDraftToComposerState = useCallback(
-    (draft?: ChatSessionDraft | null) => {
-      const normalizedDraft = cloneChatSessionDraft(normalizeChatSessionDraft(draft))
+    (draft: ChatSessionDraft | null | undefined, ownerSessionId: string | null) => {
       const targetSessionId = currentSessionIdRef.current
+      // The draft belongs to ownerSessionId. A switch can already have moved the selection
+      // (the ref) while an effect of the earlier render still runs with the previous
+      // thread's draft: never put that draft into, or stamp it as, the selected thread's
+      // composer. The selected thread's own effect run applies its draft.
+      if (ownerSessionId !== targetSessionId) return
+      const normalizedDraft = cloneChatSessionDraft(normalizeChatSessionDraft(draft))
       const localMutation = composerDraftMutationRef.current
       if (
         composerDraftSessionIdRef.current === targetSessionId &&
@@ -3003,6 +3008,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const flushSessionDraft = useCallback(
     (sessionId: string | null = currentSessionIdRef.current) => {
       clearScheduledDraftPersistence()
+      // The live composer holds the draft of the thread it was last loaded or edited for.
+      // Between a switch and that thread's draft being applied it still holds the previous
+      // thread's text: never persist it as another thread's draft.
+      if (sessionId !== composerDraftSessionIdRef.current) return Promise.resolve()
       return persistDraftSnapshot(sessionId, buildCurrentDraftSnapshot(Date.now()))
     },
     [buildCurrentDraftSnapshot, clearScheduledDraftPersistence, persistDraftSnapshot]
@@ -3018,6 +3027,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     clearScheduledDraftPersistence()
     draftPersistTimerRef.current = window.setTimeout(() => {
       draftPersistTimerRef.current = null
+      if (composerDraftSessionIdRef.current !== currentSessionId) return
       void persistDraftSnapshot(currentSessionId, buildCurrentDraftSnapshot(updatedAt))
     }, CHAT_DRAFT_PERSIST_DELAY_MS)
 
@@ -3448,7 +3458,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       : undefined
     applyDraftToComposerState(transientDraft
       ? transientDraft.draft
-      : resolvePreferredSessionDraft(currentSessionId, currentSession?.draft, storageScope))
+      : resolvePreferredSessionDraft(currentSessionId, currentSession?.draft, storageScope), currentSessionId)
   }, [
     applyDraftToComposerState,
     currentSession?.draft,
@@ -9277,7 +9287,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (!branch.draft || storageScopeRef.current!==storageScope || currentSessionIdRef.current!==branch.id) return
         const restoredDraft={...branch.draft,updatedAt:Date.now()}
         await persistDraftSnapshot(branch.id,restoredDraft)
-        if (storageScopeRef.current===storageScope && currentSessionIdRef.current===branch.id) applyDraftToComposerState(restoredDraft)
+        if (storageScopeRef.current===storageScope && currentSessionIdRef.current===branch.id) applyDraftToComposerState(restoredDraft, branch.id)
       }).catch(()=>notifyWarning(t('chat.could_not_save_branch', { defaultValue: 'Could not save branch. Original conversation remains.' }))).finally(()=>{replayBusyRef.current=false})
       return true
     } catch { notifyWarning(t('chat.cannot_plan_replay', { defaultValue: 'Cannot plan this replay. Original conversation unchanged.' })); return false }
