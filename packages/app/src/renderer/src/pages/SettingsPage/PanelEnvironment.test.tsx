@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import PanelEnvironment from './PanelEnvironment'
+import { rememberPendingCanvasSave } from '@renderer/pages/ProjectCanvasPage/canvasPendingSaves'
 
 const translations: Record<string, string> = {
   'llm.proxy_mode_title': '魔壶代理模式',
@@ -98,11 +99,13 @@ vi.mock('@renderer/hooks/useConfig', () => ({
   })
 }))
 
+const layoutState = vi.hoisted(() => ({ lastActiveProjectId: null as string | null }))
+
 vi.mock('@renderer/store', () => ({
   useAppSelector: (selector: (state: unknown) => unknown) =>
     selector({
       layout: {
-        lastActiveProjectId: null,
+        lastActiveProjectId: layoutState.lastActiveProjectId,
         openTabs: []
       }
     })
@@ -167,6 +170,7 @@ vi.mock('@renderer/pages/ProjectCanvasPage/projectCanvasPageShared', () => ({
 }))
 
 beforeEach(() => {
+  layoutState.lastActiveProjectId = null
   ;(
     window as typeof window & {
       path: {
@@ -185,6 +189,28 @@ beforeEach(() => {
 })
 
 describe('PanelEnvironment', () => {
+  it('reads the canvas for the Figma binding only after the canvas page\'s save run has landed', async () => {
+    const { loadCanvasItems } = await import('@renderer/pages/ProjectCanvasPage/canvasStorage')
+    const load = vi.mocked(loadCanvasItems)
+    load.mockClear()
+    layoutState.lastActiveProjectId = 'board-1'
+    let finishSave!: () => void
+    rememberPendingCanvasSave(
+      'board-1',
+      new Promise<void>((resolve) => {
+        finishSave = resolve
+      })
+    )
+
+    render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={vi.fn()} />)
+    expect(await screen.findByText('Data storage')).toBeTruthy()
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    expect(load).not.toHaveBeenCalled()
+
+    finishSave()
+    await waitFor(() => expect(load).toHaveBeenCalledWith('board-1'))
+  }, 20_000)
+
   it('shows the proxy mode section and bridge sections in Chinese UI', async () => {
     render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={vi.fn()} />)
 

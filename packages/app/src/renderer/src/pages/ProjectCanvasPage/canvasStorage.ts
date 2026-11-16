@@ -1940,11 +1940,16 @@ async function storeCanvasAssetBlobs(
   }
 }
 
+type CanvasCommitOutcome =
+  | { committed: false }
+  | { committed: true; replaced: CanvasPersistedData | SerializableCanvasItem[] | undefined }
+
 /**
  * Commits the metadata record. Inside the same transaction it re-checks that
  * every content key the record points at is still stored (another window may
  * have pruned it since this save looked); if one is gone nothing is written
- * and the caller stores the bytes again. Resolves false in that case.
+ * and the caller stores the bytes again. Resolves `committed: false` in that
+ * case; otherwise with the record it replaced.
  * The per-item blobs of the previous release (`legacyWrites`) are copied from
  * their keyed blobs in this transaction too, so a per-item blob never holds
  * bytes the committed record does not name.
@@ -1956,22 +1961,25 @@ async function commitCanvasMetadata(
   requiredAssetKeys: ReadonlySet<string>,
   verifyAssetKeys: boolean,
   legacyWrites: readonly CanvasLegacyBlobWrite[] = []
-): Promise<boolean> {
-  return await new Promise<boolean>((resolve, reject) => {
+): Promise<CanvasCommitOutcome> {
+  return await new Promise<CanvasCommitOutcome>((resolve, reject) => {
     const tx = db.transaction([BLOB_STORE_NAME, STORE_NAME], 'readwrite')
     let assetKeyVanished = false
+    let replaced: CanvasPersistedData | SerializableCanvasItem[] | undefined
     tx.oncomplete = () => {
-      if (!assetKeyVanished) {
-        for (const write of legacyWrites) noteCanvasLegacyBlobRewritten(storeKey, write.logicalKey)
+      if (assetKeyVanished) {
+        resolve({ committed: false })
+        return
       }
-      resolve(!assetKeyVanished)
+      for (const write of legacyWrites) noteCanvasLegacyBlobRewritten(storeKey, write.logicalKey)
+      resolve({ committed: true, replaced })
     }
     tx.onabort = () => {
-      if (assetKeyVanished) resolve(false)
+      if (assetKeyVanished) resolve({ committed: false })
       else rejectCanvasStorageError(reject, 'canvas snapshot save transaction', tx.error)
     }
     tx.onerror = () => {
-      if (assetKeyVanished) resolve(false)
+      if (assetKeyVanished) resolve({ committed: false })
       else rejectCanvasStorageError(reject, 'canvas snapshot save transaction', tx.error)
     }
     const fail = (error: unknown): void => {
@@ -2016,7 +2024,23 @@ async function commitCanvasMetadata(
           }
           // Request errors abort the transaction; do not prevent their default action.
         }
-        tx.objectStore(STORE_NAME).put(payload, storeKey)
+        const itemStore = tx.objectStore(STORE_NAME)
+        // The record this commit replaces, read in the same transaction before the put:
+        // the prune keeps what it references for one more save.
+        if (typeof (itemStore as Partial<IDBObjectStore>).get !== 'function') {
+          itemStore.put(payload, storeKey)
+          return
+        }
+        const previous = itemStore.get(storeKey)
+        previous.onsuccess = () => {
+          try {
+            replaced = previous.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
+            itemStore.put(payload, storeKey)
+          } catch (error) {
+            fail(error)
+          }
+        }
+        // Request errors abort the transaction; do not prevent their default action.
       }
       if (!verifyAssetKeys || requiredAssetKeys.size === 0) {
         putMetadata()
@@ -2123,9 +2147,11 @@ function getLegacyCanvasBlobItemId(logicalKey: string): string {
  * referenced set is read from the committed record inside the same
  * transaction, so a blob the stored canvas needs can never be removed; keys of
  * `protectedAssetKeys` (the items just saved, undo history, redo stack) are
- * kept as well. Per-item blobs (the previous release's keys) are kept for every
- * item of the committed record and every item of `protectedItemIds`; only the
- * blobs of items that are in neither are swept. Without a committed record, or
+ * kept as well (the caller adds what the record replaced by this save named:
+ * one save of grace against a writer that saved a stale snapshot). Per-item
+ * blobs (the previous release's keys) are kept for every item of the committed
+ * record and every item of `protectedItemIds`; only the blobs of items that are
+ * in neither are swept. Without a committed record, or
  * where the store cannot be enumerated, nothing is deleted.
  */
 async function pruneCanvasAssetBlobs(
@@ -2828,6 +2854,7 @@ async function saveCanvasItemsExclusive(
     let assetKeyByLogicalKey = new Map<string, string>()
     let readEntries: ResolvedCanvasBinaryAsset[] = []
     let mirrorPlan: CanvasMirrorPlan | null | undefined
+    let replacedRecord: CanvasPersistedData | SerializableCanvasItem[] | undefined
     for (let attempt = 1; ; attempt += 1) {
       const baseline = slots.length > 0 ? await readCanvasSaveBaseline(db, storeKey) : null
       const existing = baseline?.index ?? null
@@ -2878,7 +2905,7 @@ async function saveCanvasItemsExclusive(
         assetFormat: CANVAS_RECORD_ASSET_FORMAT,
         legacyBlobAssetKeys: Object.fromEntries(stored.legacyBlobAssetKeys)
       }
-      const committed = await commitCanvasMetadata(
+      const commit = await commitCanvasMetadata(
         db,
         storeKey,
         payload,
@@ -2886,7 +2913,10 @@ async function saveCanvasItemsExclusive(
         existing !== null,
         stored.legacyWrites
       )
-      if (committed) break
+      if (commit.committed) {
+        replacedRecord = commit.replaced
+        break
+      }
       if (attempt >= CANVAS_SAVE_MAX_ATTEMPTS) {
         throw new Error(
           '[Canvas Storage] Refusing to save canvas metadata because stored binary data disappeared during the save.'
@@ -2921,6 +2951,15 @@ async function saveCanvasItemsExclusive(
     try {
       const protectedAssetKeys = new Set(assetKeyByLogicalKey.values())
       const protectedItemIds = new Set(items.map((item) => item.id))
+      // One save of grace: what the replaced record referenced survives this save, so a
+      // writer that saved a stale snapshot over newer work cannot take its bytes at once.
+      const replacedItems = replacedRecord ? extractPersistedCanvasData(replacedRecord).items : []
+      for (const assetKey of countCanvasAssetKeyReferences(replacedItems).keys()) {
+        protectedAssetKeys.add(assetKey)
+      }
+      for (const item of replacedItems) {
+        if (item && typeof item === 'object' && typeof item.id === 'string') protectedItemIds.add(item.id)
+      }
       collectKnownCanvasAssetKeys(
         options.getProtectedItems?.() ?? [],
         protectedAssetKeys,
@@ -2945,7 +2984,18 @@ async function saveCanvasItemsExclusive(
  * Image items still need their HTMLImageElement rebuilt later.
  * image / model3d / video / file items restore object URLs from the blob store.
  */
-export async function loadCanvasItems(storeKey: string = KEY): Promise<{
+export function loadCanvasItems(storeKey: string = KEY): Promise<{
+  items: CanvasItem[]
+  groups: CanvasGroup[]
+  groupBranches: CanvasGroupBranch[]
+  figmaBinding: CanvasFigmaBinding | null
+}> {
+  // After any save of this canvas already queued: a snapshot that is written back
+  // (a Figma binding, a restore) must never be older than a save in flight.
+  return runExclusiveCanvasStoreOperation(storeKey, () => loadCanvasItemsExclusive(storeKey))
+}
+
+async function loadCanvasItemsExclusive(storeKey: string): Promise<{
   items: CanvasItem[]
   groups: CanvasGroup[]
   groupBranches: CanvasGroupBranch[]

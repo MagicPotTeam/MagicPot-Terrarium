@@ -55,6 +55,7 @@ import { useTranslation } from 'react-i18next'
 import { useAppSelector } from '@renderer/store'
 import FigmaBindingDialog from '@renderer/pages/ProjectCanvasPage/Dialogs/FigmaBindingDialog'
 import { loadCanvasItems, saveCanvasItems } from '@renderer/pages/ProjectCanvasPage/canvasStorage'
+import { waitForPendingCanvasSave } from '@renderer/pages/ProjectCanvasPage/canvasPendingSaves'
 import { getCanvasItemsBounds } from '@renderer/pages/ProjectCanvasPage/projectCanvasPageShared'
 import ComfyBatchProfileEditor, {
   ComfyBatchProfileTestButton
@@ -616,7 +617,10 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
       }
     }
 
-    void loadCanvasItems(lastActiveProjectId)
+    // This snapshot is saved back by a Figma bind / unbind: never take it before the
+    // canvas page's last save (the unmount save of the board just left) has landed.
+    void waitForPendingCanvasSave(lastActiveProjectId)
+      .then(() => loadCanvasItems(lastActiveProjectId))
       .then((saved) => {
         if (cancelled) return
         setManagedCanvasSnapshot({
@@ -738,6 +742,7 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
       return
     }
 
+    await waitForPendingCanvasSave(lastActiveProjectId)
     const saved = await loadCanvasItems(lastActiveProjectId)
     const snapshot: ManagedCanvasSnapshot = {
       canvasId: lastActiveProjectId,

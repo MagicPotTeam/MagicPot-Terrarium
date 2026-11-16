@@ -12,6 +12,7 @@ import i18next from 'i18next'
 import type { Config } from '@shared/config/config'
 import type { CanvasFigmaBinding } from '@shared/figma'
 import { clearCanvasItems, loadCanvasItems, saveCanvasItems } from './canvasStorage'
+import { rememberPendingCanvasSave, waitForPendingCanvasSave } from './canvasPendingSaves'
 import {
   areCanvasPersistenceSignaturesEqual,
   buildCanvasPersistenceSignature,
@@ -110,32 +111,6 @@ function strongerCanvasSaveMode(
   return left !== null && CANVAS_SAVE_MODE_STRENGTH[left] >= CANVAS_SAVE_MODE_STRENGTH[right]
     ? left
     : right
-}
-
-const pendingCanvasSaveById = new Map<string, Promise<void>>()
-
-function rememberPendingCanvasSave(canvasId: string, promise: Promise<void>) {
-  pendingCanvasSaveById.set(canvasId, promise)
-  void promise
-    .finally(() => {
-      if (pendingCanvasSaveById.get(canvasId) === promise) {
-        pendingCanvasSaveById.delete(canvasId)
-      }
-    })
-    .catch(() => {
-      // waitForPendingCanvasSave handles the original promise; this only consumes finally().
-    })
-}
-
-async function waitForPendingCanvasSave(canvasId: string): Promise<void> {
-  const pendingSave = pendingCanvasSaveById.get(canvasId)
-  if (!pendingSave) return
-
-  try {
-    await pendingSave
-  } catch {
-    // saveCanvasItems normalizes failures internally; keep restore best-effort if that changes.
-  }
 }
 
 function areArrayItemsSame<T>(left: readonly T[], right: readonly T[]): boolean {

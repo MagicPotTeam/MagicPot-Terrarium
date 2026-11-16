@@ -169,7 +169,10 @@ describe('canvas snapshot atomic staged fake', () => {
         expect(newBlobKey).not.toBe(oldBlobKey)
         expect(bytesOf(blobs.get(newBlobKey))).toEqual([7, 8, 9])
         expect(bytesOf(blobs.get(legacyBlobKey))).toEqual([7, 8, 9])
-        // The replaced asset is unreferenced after the commit and is pruned.
+        // The replaced asset is unreferenced after the commit; it is kept for one
+        // more save (the replaced record named it) and then pruned.
+        expect([...blobs.keys()].sort()).toEqual([newBlobKey, oldBlobKey, legacyBlobKey].sort())
+        await saveCanvasItems([item('new', 'blob:synthetic-new')], 'atomic-fixture')
         expect([...blobs.keys()].sort()).toEqual([newBlobKey, legacyBlobKey].sort())
       } else {
         expect(metadataTx.aborted).toBe(true)

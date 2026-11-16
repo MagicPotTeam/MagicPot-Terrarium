@@ -456,7 +456,9 @@ describe('content-addressed canvas blob store', () => {
       new Map([[contentKey([3, 3, 3]), 1]])
     )
 
-    // With the last reference gone the blob is deleted.
+    // With the last reference gone the blob is deleted (after one save of grace).
+    await saveCanvasItems([], 'shared')
+    expect(keyedBlobKeys()).toEqual([assetBlobKey('shared', [3, 3, 3])])
     await saveCanvasItems([], 'shared')
     expect(fake.blobKeys()).toEqual([])
   })
@@ -489,6 +491,7 @@ describe('content-addressed canvas blob store', () => {
   it('stores the bytes again when a pruned asset comes back', async () => {
     const item = imageItem('back', registerSource('blob:back-1', [9, 8, 7]))
     await saveCanvasItems([item], 'back')
+    await saveCanvasItems([], 'back')
     await saveCanvasItems([], 'back')
     expect(fake.blobKeys()).toEqual([])
 
@@ -523,6 +526,7 @@ describe('content-addressed canvas blob store', () => {
 
     const item = imageItem('scoped', registerSource('blob:scope-1', [4, 2]))
     await saveCanvasItems([item], 'prune-scope')
+    await saveCanvasItems([], 'prune-scope')
     await saveCanvasItems([], 'prune-scope')
 
     // Only the per-item blob of this canvas that no stored item reads any more is gone.
@@ -1661,5 +1665,80 @@ describe('mirror prune with assets that cannot be staged', () => {
     expect(mirror.calls.prune).toEqual([])
     expect(mirror.files.has(orphan)).toBe(true)
     expect(mirror.project().items[1].src).toBe('https://example.invalid/down.png')
+  })
+})
+
+// ─── Stale writers ──────────────────────────────────────────────────────────
+describe('writers that load a board and save it back', () => {
+  it('load waits for a save already queued for the same canvas', async () => {
+    const a = imageItem('a', registerSource('blob:queue-a', [1]))
+    const b = imageItem('b', registerSource('blob:queue-b', [2, 2]))
+    await saveCanvasItems([a], 'queued')
+    const saving = saveCanvasItems([a, b], 'queued')
+    const loaded = await loadCanvasItems('queued')
+    await saving
+    expect(loaded.items.map((item) => item.id)).toEqual(['a', 'b'])
+  })
+
+  it('keeps the bytes a stale snapshot dropped for one more save', async () => {
+    const a = imageItem('a', registerSource('blob:stale-a', [1, 1]))
+    const b = imageItem('b', registerSource('blob:stale-b', [2, 2]))
+    await saveCanvasItems([a, b], 'stale')
+
+    // A writer saves a snapshot it took before b was added.
+    await saveCanvasItems([a], 'stale')
+    expect(fake.blobKeys()).toEqual(
+      [
+        assetBlobKey('stale', [1, 1]),
+        assetBlobKey('stale', [2, 2]),
+        legacyBlobKey('stale', 'a'),
+        legacyBlobKey('stale', 'b')
+      ].sort()
+    )
+    // Nothing references b for a whole save: now it goes.
+    await saveCanvasItems([a], 'stale')
+    expect(fake.blobKeys()).toEqual(
+      [assetBlobKey('stale', [1, 1]), legacyBlobKey('stale', 'a')].sort()
+    )
+  })
+
+  it('an unmount save in flight plus a Figma bind save keeps the new images', async () => {
+    const { rememberPendingCanvasSave, waitForPendingCanvasSave } = await import('./canvasPendingSaves')
+    const old = imageItem('old', registerSource('blob:figma-old', [3]))
+    await saveCanvasItems([old], 'figma')
+
+    // The canvas page leaves with two new images: its run tries metadata only, then saves in full.
+    const added = [
+      imageItem('new-1', registerSource('blob:figma-new-1', [4, 4])),
+      imageItem('new-2', registerSource('blob:figma-new-2', [5, 5, 5]))
+    ]
+    const board = [old, ...added]
+    const run = (async () => {
+      const outcome = await saveCanvasItems(board, 'figma', [], [], null, { metadataOnly: true })
+      expect(outcome).toBe('needs-bytes')
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      await saveCanvasItems(board, 'figma')
+    })()
+    rememberPendingCanvasSave('figma', run)
+
+    // Settings opens the Figma binding at the same time and saves the binding back.
+    await waitForPendingCanvasSave('figma')
+    const snapshot = await loadCanvasItems('figma')
+    const binding = { fileKey: 'k', fileName: 'f', fileUrl: 'k', pages: [] } as unknown as Parameters<
+      typeof saveCanvasItems
+    >[4]
+    await saveCanvasItems(snapshot.items, 'figma', snapshot.groups, snapshot.groupBranches, binding)
+    await run
+
+    const record = fake.record('figma')! as unknown as {
+      figmaBinding: unknown
+      items: Array<{ id: string; assetKey: string }>
+    }
+    expect(record.items.map((item) => item.id)).toEqual(['old', 'new-1', 'new-2'])
+    expect(record.figmaBinding).toMatchObject({ fileKey: 'k' })
+    for (const [id, bytes] of [['new-1', [4, 4]], ['new-2', [5, 5, 5]]] as const) {
+      expect(fake.blobBytes(assetBlobKey('figma', [...bytes]))).toEqual(bytes)
+      expect(fake.blobBytes(legacyBlobKey('figma', id))).toEqual(bytes)
+    }
   })
 })
