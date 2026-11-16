@@ -246,10 +246,25 @@ function buildAttachmentKey(attachment: ChatAttachment): string {
   ].join('::')
 }
 
+/** Identity of a bundle image within its bundle: bundle id and reference name. */
+function buildBundleImageIdentity(bundleId: string, refName: string): string {
+  return JSON.stringify([bundleId, refName])
+}
+
 export async function expandReportBundleAttachments(
   attachments: ChatAttachment[] | undefined,
   readAttachmentText: AttachmentTextReader = readAttachmentTextFromUrl,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: {
+    /**
+     * Every primary in `attachments` was verified by MAIN (the request path's projection).
+     * An explicit report image of the same bundle and reference name is then treated as
+     * already present, whatever its URL: since images arriving by hand-off get a managed URL,
+     * the URL-based key no longer matches and the picture would be sent twice. Only within
+     * this one message; the same image in another message stays a separate occurrence.
+     */
+    verifiedBundles?: boolean
+  } = {}
 ): Promise<ChatAttachment[] | undefined> {
   signal?.throwIfAborted()
   if (!attachments?.length) {
@@ -258,6 +273,18 @@ export async function expandReportBundleAttachments(
 
   const expanded = [...attachments]
   const seenKeys = new Set(expanded.map(buildAttachmentKey))
+  const explicitBundleImages = new Set(
+    options.verifiedBundles
+      ? attachments.flatMap((attachment) =>
+          attachment.type === 'image' &&
+          attachment.reportBundleRole === 'report-image' &&
+          attachment.reportBundleId &&
+          attachment.reportBundleRefName
+            ? [buildBundleImageIdentity(attachment.reportBundleId, attachment.reportBundleRefName)]
+            : []
+        )
+      : []
+  )
   const manifestUrls = Array.from(
     new Set(
       attachments
@@ -281,6 +308,15 @@ export async function expandReportBundleAttachments(
         }
         const key = buildAttachmentKey(attachment)
         if (seenKeys.has(key)) {
+          continue
+        }
+        if (
+          attachment.reportBundleId &&
+          attachment.reportBundleRefName &&
+          explicitBundleImages.has(
+            buildBundleImageIdentity(attachment.reportBundleId, attachment.reportBundleRefName)
+          )
+        ) {
           continue
         }
         seenKeys.add(key)

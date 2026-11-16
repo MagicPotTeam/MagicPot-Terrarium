@@ -1487,10 +1487,12 @@ const expandReportBundleAttachmentsForRequest = async (
   signal?: AbortSignal
 ): Promise<ChatMessage['attachments']> => {
   try {
+    // Only projected messages reach here: every primary was verified by MAIN.
     return await expandReportBundleAttachments(
       attachments,
       (url) => readAttachmentTextForRequest(url, signal),
-      signal
+      signal,
+      { verifiedBundles: true }
     )
   } catch (error) {
     // The generic helper preserves the raw AbortSignal reason; requests use
