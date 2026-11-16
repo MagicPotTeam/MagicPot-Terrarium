@@ -2043,7 +2043,17 @@
     "empty_state_title": "Empty Canvas",
     "empty_state_desc": "Drag and drop files, images or videos here",
     "model_load_failed": "Load failed or format unsupported",
-    "video_load_failed": "Video load failed"
+    "video_load_failed": "Video load failed",
+    "target_run": {
+      "selection_changed": "The selection changed. Please select it again before running the target.",
+      "unverified_crop": "The selection contains a cropped image with unverified coordinates. Remove it or explicitly select the full source assets mode.",
+      "quick_app_source_refused": "QuickApp referenced an unauthorized or changed canvas source; execution stopped.",
+      "quick_app_source_unresolved": "QuickApp canvas source could not be resolved; execution stopped.",
+      "final_evidence_missing": "Final canvas visual evidence was not sent, so final visual acceptance is unverified. Please inspect the result."
+    },
+    "generation": {
+      "delivery_scheduled": "Delivery to the default Agent is scheduled; receipt is not confirmed yet"
+    }
   },
   "figplugin": {
     "planningHistory": {
@@ -2483,6 +2493,25 @@
       "body": "The display process stopped unexpectedly, so the window was reloaded. If a reply was being generated, it was interrupted and has not been resent. Your drafts are kept.",
       "details": "Reason: {{reason}} · exit code {{exitCode}} · {{time}}",
       "dismiss": "Dismiss"
+    },
+    "existing_conversation_open": {
+      "region": "Existing conversation Open",
+      "opening": "Opening existing conversation",
+      "opened": "Existing conversation opened",
+      "open_failed": "Existing conversation could not be opened",
+      "target": "Project: {{projectId}} · Pane: {{paneId}} · ID: {{sessionId}}",
+      "cancel": "Cancel Open",
+      "dismiss": "Dismiss Open result",
+      "failure_cancelled": "Open cancelled",
+      "failure_expired": "Open timed out",
+      "failure_membership_unavailable": "Current ownership or persisted conversation unavailable",
+      "failure_load_failed": "Conversation load unavailable",
+      "failure_destination_lost": "Existing destination tab, pane or presentation changed or unavailable",
+      "failure_superseded": "Replaced by another Open request",
+      "failure_unavailable": "Open unavailable"
     }
+  },
+  "agent_management": {
+    "title": "Agent management"
   }
 }

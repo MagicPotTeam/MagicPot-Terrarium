@@ -47,7 +47,12 @@ vi.mock('@renderer/components/MainArea', async original => {
 })
 vi.mock('../MainPage/MainPage', () => ({ default: () => <main>Fixture home</main> }))
 vi.mock('../ProjectCanvasPage/ProjectCanvasPage', () => ({ default: () => <main>Fixture project canvas</main> }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en', resolvedLanguage: 'en' }, t: (key: string) => key }) }))
+// The Open feedback's copy comes from the en-US locale; every other key stays raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator('en', ['app_shell.existing_conversation_open.'], (key) => key)
+  return { useTranslation: () => ({ i18n: { language: 'en', resolvedLanguage: 'en' }, t: (key: string, options?: Record<string, unknown>) => translate(key, options) }) }
+})
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config, isReady: true, buildEnv: { ...DEFAULT_BUILD_ENV, pathMap: { ...DEFAULT_BUILD_ENV.pathMap, data: '' } }, configUtils: {}, updateConfig: vi.fn() }) }))
 vi.mock('@renderer/hooks/useRuntimeMcpStatus', () => ({ useRuntimeMcpStatus: () => ({ runtimeMcpStatus: null }) }))
 vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifySuccess: vi.fn(), notifyInfo: vi.fn(), notifyError: f.error, notifyWarning: f.warning }) }))

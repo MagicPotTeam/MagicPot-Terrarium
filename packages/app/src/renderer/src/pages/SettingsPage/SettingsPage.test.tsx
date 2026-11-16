@@ -21,12 +21,17 @@ let translations: Record<string, string> = {
   'general.close': '\u5173\u95ed'
 }
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    i18n: { language: currentLanguage },
-    t: (key: string) => translations[key] ?? key
-  })
-}))
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return {
+    useTranslation: () => ({
+      i18n: { language: currentLanguage },
+      // The management entry reads the locale files; the other keys use the fixture map.
+      t: (key: string) =>
+        scopedLocaleTranslator(currentLanguage, ['agent_management.'], (raw) => translations[raw] ?? raw)(key)
+    })
+  }
+})
 
 vi.mock('react-router-dom', () => ({
   useLocation: () => ({ state: {}, search: '' }),

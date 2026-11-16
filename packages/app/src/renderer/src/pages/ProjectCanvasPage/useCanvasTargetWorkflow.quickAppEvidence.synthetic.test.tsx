@@ -5,6 +5,11 @@ import type { CanvasImageItem } from './types'
 
 const f = vi.hoisted(() => ({ plan: vi.fn(), quickApp: vi.fn(), stage: vi.fn(), summary: vi.fn(), chat: vi.fn() }))
 vi.mock('react-redux', () => ({ useDispatch: () => vi.fn() }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  const t = localeTranslator('en-US')
+  return { useTranslation: () => ({ t, i18n: { language: 'en-US' } }) }
+})
 vi.mock('../../hooks/useConfig', () => ({ useConfig: () => ({ config: { llm_config: { api_profiles: [] }, plugin_config: {}, download_dir: '' }, buildEnv: { pathMap: { data: '' } } }) }))
 vi.mock('../../utils/windowUtils', () => ({ api: () => ({ svcTargetScheme: { listTargetSchemes: async () => ({ schemes: [{ id: 'scheme', name: 'Scheme', description: 'fixture', files: [], enabled: true, createdAt: '2026-01-01', updatedAt: '2026-01-01' }] }), listTargetHistoryTargets: async () => ({ targets: [] }), saveTargetHistoryTarget: async () => ({}) }, svcLLMProxy: { listProfiles: async () => ({ profiles: [{ id: 'vision', model_name: 'Vision', is_vision_model: true }] }) }, svcQApp: {} }) }))
 vi.mock('@renderer/features/projectTrace/projectTraceRuntime', () => ({ emitProjectTraceRuntimeEvent: vi.fn(), writeProjectTraceTargetReferenceState: vi.fn() }))

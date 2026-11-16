@@ -2043,7 +2043,17 @@
     "empty_state_title": "暂无元素",
     "empty_state_desc": "拖拽文件、图片或视频至此处",
     "model_load_failed": "加载失败或格式不支持",
-    "video_load_failed": "视频加载失败"
+    "video_load_failed": "视频加载失败",
+    "target_run": {
+      "selection_changed": "选区内容已更改，请重新选择后再运行目标。",
+      "unverified_crop": "选区包含无法验证坐标的裁剪图片。请移除该裁剪图片，或明确选择完整源素材模式。",
+      "quick_app_source_refused": "快应用引用了未经授权或已更改的画布素材，已停止执行。",
+      "quick_app_source_unresolved": "快应用引用的画布素材无法解析，已停止执行。",
+      "final_evidence_missing": "未发送最终画布的视觉证据，最终视觉验收尚未验证。请自行检查结果。"
+    },
+    "generation": {
+      "delivery_scheduled": "已安排向默认 Agent 投递，尚未确认接收"
+    }
   },
   "figplugin": {
     "planningHistory": {
@@ -2483,6 +2493,25 @@
       "body": "显示进程意外停止，窗口已重新加载。如果当时正在生成回复，该回复已中断，且没有自动重新发送。草稿已保留。",
       "details": "原因：{{reason}} · 退出码 {{exitCode}} · {{time}}",
       "dismiss": "知道了"
+    },
+    "existing_conversation_open": {
+      "region": "打开已有会话状态",
+      "opening": "正在打开已有会话",
+      "opened": "已打开已有会话",
+      "open_failed": "未能打开已有会话",
+      "target": "项目: {{projectId}} · 面板: {{paneId}} · ID: {{sessionId}}",
+      "cancel": "取消打开",
+      "dismiss": "关闭打开结果",
+      "failure_cancelled": "已取消打开",
+      "failure_expired": "打开请求已超时",
+      "failure_membership_unavailable": "当前归属或已存储会话不可用",
+      "failure_load_failed": "会话加载不可用",
+      "failure_destination_lost": "已有目标标签页、面板或可见状态已变化或不可用",
+      "failure_superseded": "已被另一个打开请求替代",
+      "failure_unavailable": "打开不可用"
     }
+  },
+  "agent_management": {
+    "title": "Agent 管理"
   }
 }

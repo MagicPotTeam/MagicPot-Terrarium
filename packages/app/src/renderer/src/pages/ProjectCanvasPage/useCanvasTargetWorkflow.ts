@@ -9,6 +9,7 @@
   type SetStateAction
 } from 'react'
 import { useDispatch } from 'react-redux'
+import { useTranslation } from 'react-i18next'
 import type { ChatAttachment, LLMListProfilesResp, OCRResult } from '@shared/api/svcLLMProxy'
 import type { ProjectTraceSvc } from '@shared/api/svcProjectTrace'
 import type { DuplicateCheckVisualModelConfig } from '@shared/duplicateCheck/types'
@@ -1091,6 +1092,7 @@ export function useCanvasTargetWorkflow({
   openTargetManager
 }: UseCanvasTargetWorkflowOptions) {
   const dispatch = useDispatch()
+  const { t } = useTranslation()
   const { config, buildEnv } = useConfig()
   const [targetSchemes, setTargetSchemes] = useState<TargetScheme[]>([])
   const [canvasTargetHistoryTargets, setCanvasTargetHistoryTargets] = useState<
@@ -1631,11 +1633,7 @@ export function useCanvasTargetWorkflow({
     // Every mode, structured_only included, starts only from the selection the
     // user confirmed: an undo / redo or edit since then is refused here.
     if (!selectionIsUnchanged()) {
-      setCanvasTargetError(
-        isChineseUi
-          ? '选区内容已更改，请重新选择后再运行目标。'
-          : 'The selection changed. Please select it again before running the target.'
-      )
+      setCanvasTargetError(t('project_canvas.target_run.selection_changed'))
       return
     }
 
@@ -1643,11 +1641,7 @@ export function useCanvasTargetWorkflow({
     // crop whose coordinate space is not authenticated against its source.
     // Full selected_sources is a distinct, explicitly authorized contract.
     if (canvasTargetSelectionHasUnverifiedCrop(canvasTargetEvidenceMode, targetItems)) {
-      setCanvasTargetError(
-        isChineseUi
-          ? '选区包含无法验证坐标的裁剪图片。请移除该裁剪图片，或明确选择完整源素材模式。'
-          : 'The selection contains a cropped image with unverified coordinates. Remove it or explicitly select the full source assets mode.'
-      )
+      setCanvasTargetError(t('project_canvas.target_run.unverified_crop'))
       return
     }
 
@@ -1708,11 +1702,7 @@ export function useCanvasTargetWorkflow({
         (normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only' &&
           !selectionIsUnchanged())
       ) {
-        throw new Error(
-          isChineseUi
-            ? '选区内容已更改，请重新选择后再运行目标。'
-            : 'The selection changed. Please select it again before running the target.'
-        )
+        throw new Error(t('project_canvas.target_run.selection_changed'))
       }
     }
 
@@ -2601,16 +2591,12 @@ export function useCanvasTargetWorkflow({
           currentItems: runtimeCanvasItems
         })
         if (!verdict.allowed) {
-          throw new Error(isChineseUi
-            ? '快应用引用了未经授权或已更改的画布素材，已停止执行。'
-            : 'QuickApp referenced an unauthorized or changed canvas source; execution stopped.')
+          throw new Error(t('project_canvas.target_run.quick_app_source_refused'))
         }
         return verdict.items.map((item) => {
           const attachment = canvasItemToQuickAppAttachment(item)
           if (!attachment) {
-            throw new Error(isChineseUi
-              ? '快应用引用的画布素材无法解析，已停止执行。'
-              : 'QuickApp canvas source could not be resolved; execution stopped.')
+            throw new Error(t('project_canvas.target_run.quick_app_source_unresolved'))
           }
           return attachment
         })
@@ -3580,9 +3566,7 @@ export function useCanvasTargetWorkflow({
         }
       }
 
-      const finalAcceptanceCaveat = isChineseUi
-        ? '未发送最终画布的视觉证据，最终视觉验收尚未验证。请自行检查结果。'
-        : 'Final canvas visual evidence was not sent, so final visual acceptance is unverified. Please inspect the result.'
+      const finalAcceptanceCaveat = t('project_canvas.target_run.final_evidence_missing')
       appendMessageToExternalChat({
         scope: agentScope,
         sessionId: agentSessionId,
@@ -3735,7 +3719,8 @@ export function useCanvasTargetWorkflow({
     setItemsWithHistory,
     setSelectedIds,
     setShowGrid,
-    setTool
+    setTool,
+    t
   ])
 
   useEffect(() => {

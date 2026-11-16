@@ -11,6 +11,13 @@ import { upsertProjectStyleModel } from './projectStyleModelRegistry'
 import type { CanvasFileItem, CanvasImageItem, CanvasItem, CanvasTextItem } from './types'
 import { useCanvasGenerationWorkflow } from './useCanvasGenerationWorkflow'
 
+// Translated with the locale files; the existing assertions read the zh-CN copy.
+const i18nState = vi.hoisted(() => ({ language: 'zh-CN' }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ t: localeTranslator(i18nState.language), i18n: { language: i18nState.language } }) }
+})
+
 type WorkflowProbeProps = {
   items: CanvasItem[]
   notifySuccess: (message: string) => unknown
@@ -157,6 +164,20 @@ describe('generation delivery result contract', () => {
     expect(screen.getByTestId('dialog-state')).toHaveTextContent('closed')
     expect(notifySuccess).not.toHaveBeenCalled()
     expect(notifyWarning).toHaveBeenCalledWith('已安排向默认 Agent 投递，尚未确认接收')
+  })
+
+  it('reports the scheduled delivery in English when the app language is en-US', async () => {
+    i18nState.language = 'en-US'
+    try {
+      const notifyWarning = vi.fn()
+      render(<WorkflowProbe items={[createImageItem()]} notifySuccess={vi.fn()} notifyWarning={notifyWarning} sendCanvasItemsToAgent={vi.fn().mockResolvedValue(true)} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
+      await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' })) })
+      expect(notifyWarning).toHaveBeenCalledExactlyOnceWith('Delivery to the default Agent is scheduled; receipt is not confirmed yet')
+    } finally {
+      i18nState.language = 'zh-CN'
+    }
   })
 })
 

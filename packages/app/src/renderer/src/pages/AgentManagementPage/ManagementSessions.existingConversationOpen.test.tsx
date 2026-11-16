@@ -9,7 +9,10 @@ import type { ExistingConversationTarget, OpenRequestHandle } from '@renderer/ut
 const f = vi.hoisted(() => ({ read: vi.fn(), metadata: vi.fn(), validate: vi.fn<(target: ExistingConversationTarget, signal: AbortSignal) => Promise<boolean>>(), language: 'en' }))
 vi.mock('./managementPaneMetadata', () => ({ readManagementPaneSnapshot: f.metadata }))
 vi.mock('../ChatPage/chatStorage', () => ({ readExistingSessionSummaries: f.read }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: f.language } }) }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ i18n: { language: f.language }, t: (key: string, options?: Record<string, unknown>) => localeTranslator(f.language)(key, options) }) }
+})
 vi.mock('@renderer/utils/existingConversationOpenStore', async () => {
   const { useSyncExternalStore } = await import('react')
   const { createExistingConversationOpenCoordinator } = await import('@renderer/utils/existingConversationOpen')

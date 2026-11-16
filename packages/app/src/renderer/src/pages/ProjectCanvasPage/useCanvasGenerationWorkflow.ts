@@ -1,5 +1,6 @@
 /* @refresh reset */
 import { useCallback, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   buildCanvasGenerationTaskPack,
   buildCanvasGenerationTaskPackPrompt,
@@ -152,6 +153,7 @@ export function useCanvasGenerationWorkflow({
   notifyWarning,
   sendCanvasItemsToAgent
 }: UseCanvasGenerationWorkflowOptions) {
+  const { t } = useTranslation()
   const [generationTaskDialogOpen, setGenerationTaskDialogOpen] = useState(false)
   const [generationTargetItemIds, setGenerationTargetItemIds] = useState<string[]>([])
   const [generationTargetScope, setGenerationTargetScope] = useState<string | null>(null)
@@ -254,7 +256,7 @@ export function useCanvasGenerationWorkflow({
     })
 
     if (!scheduled) return
-    notifyWarning('已安排向默认 Agent 投递，尚未确认接收')
+    notifyWarning(t('project_canvas.generation.delivery_scheduled'))
     handleCloseGenerationTaskDialog()
   }, [
     canvasId,
@@ -265,7 +267,8 @@ export function useCanvasGenerationWorkflow({
     linkFollowUpTraceRecord,
     notifyWarning,
     projectName,
-    sendCanvasItemsToAgent
+    sendCanvasItemsToAgent,
+    t
   ])
 
   const handleGenerateCanvasItems = useCallback(

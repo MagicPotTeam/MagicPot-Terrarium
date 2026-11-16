@@ -81,7 +81,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
     dispatch(
       openTab({
         id: 'tab-agent-management',
-        label: isChineseUi ? 'Agent 管理' : 'Agent management',
+        label: t('agent_management.title'),
         routePath: '/agent-management',
         closable: true
       })
@@ -224,7 +224,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <Button size="small" onClick={openManagement}>
-              {isChineseUi ? 'Agent 管理' : 'Agent management'}
+              {t('agent_management.title')}
             </Button>
             <Typography sx={{ fontSize: 12, fontWeight: 500, color: settingsMetaColor }}>
               MagicPot-Terrarium {PACKAGE_VERSION}
