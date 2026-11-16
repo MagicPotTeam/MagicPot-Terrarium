@@ -61,4 +61,6 @@ const MainArea: React.FC = () => {
   )
 }
 
-export default MainArea
+// MainArea takes no props and follows the route through useLocation. Memoised so that Layout
+// state (panel widths and heights, panel visibility) does not re-render the active page.
+export default React.memo(MainArea)
