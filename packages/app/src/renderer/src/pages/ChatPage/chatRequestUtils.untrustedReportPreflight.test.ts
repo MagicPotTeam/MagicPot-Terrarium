@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type CustomSkill } from '@shared/config/config'
 import type { ChatMessage } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
-import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
+import {
+  preflightChatRequestImages,
+  preflightChatRequestReports,
+  requestChatCompletion,
+  requestChatCompletionStream
+} from './chatRequestUtils'
 import {
   UNVERIFIED_REPORT_BUNDLE_MESSAGE,
   isPrimaryReportFileDescriptor
@@ -842,6 +847,89 @@ describe('registered primary-report request verification', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+
+  it.each(['latest-user-turn', 'all'] as const)(
+    "counts an older report's images only when the image history policy sends them (%s)",
+    async (imageHistoryPolicy) => {
+      const f = boundFixture()
+      const limited: Config = {
+        ...config,
+        llm_config: {
+          ...config.llm_config,
+          api_profiles: [
+            { ...config.llm_config.api_profiles[0], api_mode: 'responses', max_input_images: 5 }
+          ]
+        }
+      }
+      const owned = 'local-media:///synthetic/older/manifest.json'
+      f.fetch.mockImplementation(async (url: string | URL | Request) =>
+        String(url) === owned
+          ? new Response('unavailable', { status: 404 })
+          : new Response('synthetic', { headers: { 'content-type': 'text/plain' } })
+      )
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        const older = f.reports.register(
+          primary({
+            reportBundleId: 'older',
+            reportBundleImageCount: 4,
+            reportBundleManifestUrl: owned
+          }),
+          conversationId,
+          { imageCount: 4 }
+        )
+        const messages: ChatMessage[] = [
+          { role: 'user', content: 'older report', attachments: [older] },
+          { role: 'assistant', content: 'synthetic' },
+          {
+            role: 'user',
+            content: 'two pictures',
+            attachments: [picture, { ...picture, url: 'local-media:///synthetic/second.png' }]
+          }
+        ]
+        const route = { config: limited, profileId: 'fixture-profile', imageHistoryPolicy }
+        const sync = () => preflightChatRequestImages({ ...route, messages })
+        const verified = () =>
+          Promise.resolve().then(
+            () => preflightChatRequestReports({ ...route, messages, conversationId }) ?? undefined
+          )
+        if (imageHistoryPolicy === 'all') {
+          // Every image is sent: 4 + 2 is over the limit of 5.
+          expect(sync).toThrow('Too many images; the limit is 5.')
+          await expect(verified()).rejects.toThrow('Too many images; the limit is 5.')
+        } else {
+          // Only the two new pictures are sent.
+          expect(sync()).toBe(5)
+          await expect(verified()).resolves.toBeUndefined()
+          expect(f.reports.verify).toHaveBeenCalledOnce()
+        }
+      } finally {
+        warn.mockRestore()
+      }
+    }
+  )
+
+  it('refuses the page preflight when MAIN does not answer in time, and keeps an abort an abort', async () => {
+    const f = boundFixture()
+    const bound = f.reports.register(primary(), conversationId)
+    f.reports.verify.mockImplementation(() => new Promise(() => undefined))
+    const messages: ChatMessage[] = [{ role: 'user', content: 'synthetic', attachments: [bound] }]
+    await expect(
+      preflightChatRequestReports({ messages, conversationId, timeoutMs: 20 })
+    ).rejects.toThrow('Checking the report took too long. Your message was kept; try again.')
+    const controller = new AbortController()
+    const pending = preflightChatRequestReports({
+      messages,
+      conversationId,
+      timeoutMs: 60_000,
+      signal: controller.signal
+    })
+    controller.abort('user stop')
+    const error = await pending?.catch((caught: unknown) => caught)
+    expect((error as Error).name).toBe('AbortError')
+    expect(String(error)).not.toContain('took too long')
+    expect(String(error)).not.toContain('rb1.')
   })
 
   it("counts a verified primary without a bundle id once, by its expanded children, not also by MAIN's count", async () => {

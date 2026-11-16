@@ -1,3 +1,4 @@
+import i18next from 'i18next'
 import { normalizeModelRetryStatus, type LLMRetryStatus } from '@shared/llm/modelCapacityRetry'
 import type { Config, CustomSkill, LLMAPIProfile, LLMOpenAIApiMode } from '@shared/config/config'
 import type {
@@ -62,7 +63,10 @@ import {
   applySkillOutputModeContract,
   resolveSkillOutputImageGenerationOptions
 } from './chatSkillOutputMode'
-import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
+import {
+  DEFAULT_LLM_IMAGE_HISTORY_POLICY,
+  selectMessagesForImageHistoryPolicy
+} from '@shared/llm/imageHistory'
 import { isOpencodeZenUrl, isRunnableProfile, usesOpenAIResponsesImagePolicy } from '@shared/llm/utils'
 import {
   DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY,
@@ -1752,7 +1756,7 @@ const expandMessagesForImagePreflight = async (
   // that the true bundle count or its authorization is safe.
   assertExplicitUserImageCount(selectedMessages.findLast(message => message.role === 'user')?.attachments)
   if (maxImages !== undefined && maxImages !== Infinity) {
-    const imageCount = countProviderBoundImages(selectedMessages)
+    const imageCount = countProviderBoundImages(selectedMessages, imageHistoryPolicy)
     if (imageCount > maxImages) {
       throw new Error(`Too many images; the limit is ${maxImages}.`)
     }
@@ -2818,10 +2822,23 @@ const resolveRemoteResponsesImagePolicy = (
   return undefined
 }
 
-const countProviderBoundImages = (messages: readonly ChatMessage[]): number => {
+/**
+ * Images the request sends, from `messages` as selectMessagesForImageHistoryPolicy left them
+ * for `imageHistoryPolicy`. A primary report's image-count hint counts only for a message whose
+ * images the policy sends (the latest user message, every user message under 'all', assistant
+ * messages only under 'all'): an older bundle whose images were left out sends none.
+ */
+const countProviderBoundImages = (
+  messages: readonly ChatMessage[],
+  imageHistoryPolicy: LLMImageHistoryPolicy = DEFAULT_LLM_IMAGE_HISTORY_POLICY
+): number => {
   let total = 0
-  for (const message of messages) {
+  const latestUserIndex = messages.findLastIndex((message) => message.role === 'user')
+  for (const [index, message] of messages.entries()) {
     if (message.role === 'system') continue
+    const sendsBundleImages =
+      (message.role === 'user' && (imageHistoryPolicy === 'all' || index === latestUserIndex)) ||
+      (message.role === 'assistant' && imageHistoryPolicy === 'all')
     const groups = new Map<string, { images: number; hint: number; primaries: number }>()
     for (const attachment of message.attachments || []) {
       const id = attachment.reportBundleId
@@ -2831,11 +2848,11 @@ const countProviderBoundImages = (messages: readonly ChatMessage[]): number => {
         else {
           group.primaries++
           const hint = attachment.reportBundleImageCount
-          if (typeof hint === 'number' && Number.isSafeInteger(hint) && hint >= 0) group.hint = Math.max(group.hint, hint)
+          if (sendsBundleImages && typeof hint === 'number' && Number.isSafeInteger(hint) && hint >= 0) group.hint = Math.max(group.hint, hint)
         }
         groups.set(id, group)
       } else if (attachment.type === 'image') total++
-      else {
+      else if (sendsBundleImages) {
         const hint = attachment.reportBundleImageCount
         if (typeof hint === 'number' && Number.isSafeInteger(hint) && hint >= 0) total += hint
       }
@@ -2871,7 +2888,7 @@ const preflightRequestImageCount = (
       message.role !== 'system' &&
       message.attachments?.some((attachment) => attachment.type === 'image')
   )
-  const knownImageCount = countProviderBoundImages(selectedMessages)
+  const knownImageCount = countProviderBoundImages(selectedMessages, input.imageHistoryPolicy)
   const hasSelectedReportBundle = selectedUserMessages.some((message) =>
     message.attachments?.some((attachment) => attachment.reportBundleRole === 'primary-report')
   )
@@ -3148,7 +3165,45 @@ export type PreflightChatRequestReportsInput = Pick<
   RequestChatCompletionInput,
   'messages' | 'conversationId' | 'storageScope' | 'signal'
 > &
-  Partial<ChatRequestReportRoute>
+  Partial<ChatRequestReportRoute> & {
+    /** Bound on MAIN's verify and the manifest reads; the default is REPORT_PREFLIGHT_TIMEOUT_MS. */
+    timeoutMs?: number
+  }
+
+/**
+ * The page holds the conversation's send lock (or the edit form its Save) while MAIN verifies,
+ * and MAIN may be rehashing files on a slow or disconnected network share. Past this bound the
+ * send is refused and the draft is kept.
+ */
+export const REPORT_PREFLIGHT_TIMEOUT_MS = 30_000
+
+const REPORT_PREFLIGHT_TIMED_OUT_FALLBACK =
+  'Checking the report took too long. Your message was kept; try again.'
+// i18next returns nothing, not the default value, before it is initialised.
+const reportPreflightTimedOutMessage = (): string =>
+  i18next.t('chat.report_check_timed_out', { defaultValue: REPORT_PREFLIGHT_TIMED_OUT_FALLBACK }) ||
+  REPORT_PREFLIGHT_TIMED_OUT_FALLBACK
+
+/** `signal` aborted by the caller's signal or after `timeoutMs`; `expired` tells which. */
+const createPreflightDeadline = (outer: AbortSignal | undefined, timeoutMs: number) => {
+  const controller = new AbortController()
+  let expired = false
+  const onOuterAbort = () => controller.abort(outer?.reason)
+  if (outer?.aborted) onOuterAbort()
+  else outer?.addEventListener('abort', onOuterAbort, { once: true })
+  const timer = setTimeout(() => {
+    expired = true
+    controller.abort(createAbortError(reportPreflightTimedOutMessage()))
+  }, timeoutMs)
+  return {
+    signal: controller.signal,
+    expired: () => expired,
+    dispose: () => {
+      clearTimeout(timer)
+      outer?.removeEventListener('abort', onOuterAbort)
+    }
+  }
+}
 
 /**
  * The first stage of the request path for primary reports, run by the page before it gives up
@@ -3180,16 +3235,28 @@ export const preflightChatRequestReports = (
     validateCustomSkillForSend(routeInput.externalAgentSkill)
     maxImages = preflightRequestImageCount(routeInput, resolveSelectedRequestProfile(routeInput))
   }
+  const deadline = createPreflightDeadline(
+    input.signal,
+    Math.max(1, input.timeoutMs ?? REPORT_PREFLIGHT_TIMEOUT_MS)
+  )
   return (async () => {
-    const verifiedMessages = await verifyPrimaryReportBundles(messages, input, input.signal)
-    if (!routeInput) return
-    await expandMessagesForImagePreflight(
-      verifiedMessages,
-      routeInput.imageHistoryPolicy,
-      maxImages,
-      input.signal
-    )
-    throwIfAborted(input.signal)
+    try {
+      const verifiedMessages = await verifyPrimaryReportBundles(messages, input, deadline.signal)
+      if (!routeInput) return
+      await expandMessagesForImagePreflight(
+        verifiedMessages,
+        routeInput.imageHistoryPolicy,
+        maxImages,
+        deadline.signal
+      )
+      throwIfAborted(deadline.signal)
+    } catch (error) {
+      if (deadline.expired() && !input.signal?.aborted)
+        throw new Error(reportPreflightTimedOutMessage())
+      throw error
+    } finally {
+      deadline.dispose()
+    }
   })()
 }
 

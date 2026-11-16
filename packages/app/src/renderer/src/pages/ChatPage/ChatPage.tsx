@@ -162,6 +162,7 @@ import { getLocalizedConversationTitle } from './chatLocaleUtils'
 import {
   preflightChatRequestImages,
   preflightChatRequestReports,
+  REPORT_PREFLIGHT_TIMEOUT_MS,
   requestChatCompletion,
   requestChatCompletionStream,
   isInvalidSessionContinuationError,
@@ -435,6 +436,8 @@ type SendMessageOverrides = {
   onComposerSubmissionAccepted?: () => void
   /** Guard for one in-memory queued composer item; never an IPC or delivery token. */
   isQueuedComposerCurrent?: () => boolean
+  /** The image or report preflight refused this send before its text was given up. */
+  onPreflightRefused?: () => void
   onQueuedComposerAccepted?: () => void
   /** A structured response was received; not a durable delivery receipt. */
   onTeamResponseReceived?: () => void
@@ -6496,6 +6499,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         })
       } catch (error) {
         notifyError(error instanceof Error ? error.message : String(error))
+        overrides?.onPreflightRefused?.()
         return
       }
       // MAIN verifies every bound report bundle (and the expanded image count is checked)
@@ -6513,10 +6517,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
             externalAgentSkill: activeExternalAgentSkill,
             imageHistoryPolicy: provisionalImageHistoryPolicy,
             conversationId: targetSessionId,
-            storageScope
+            storageScope,
+            // The send lock is held meanwhile: bounded, and a timeout keeps the draft.
+            timeoutMs: REPORT_PREFLIGHT_TIMEOUT_MS
           })
         } catch (error) {
           notifyError(error instanceof Error ? error.message : String(error))
+          overrides?.onPreflightRefused?.()
           return false
         }
         if (!pending) return true
@@ -6524,6 +6531,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           () => isPreflightCurrent(),
           (error: unknown) => {
             notifyError(error instanceof Error ? error.message : String(error))
+            if (isPreflightCurrent()) overrides?.onPreflightRefused?.()
             return false
           }
         )
@@ -6577,6 +6585,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           })
         } catch (error) {
           notifyError(error instanceof Error ? error.message : String(error))
+          overrides?.onPreflightRefused?.()
           return
         }
         const resolvedReportPreflight = startReportPreflight([...historyMessages, userMessage])
@@ -9206,6 +9215,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       registerEditingAttachmentReceiver(receiver)
     }
   }, [isEditOwnerCurrent, registerEditingAttachmentReceiver])
+  const editingMessageIndexRef = useRef(editingMessageIndex)
+  editingMessageIndexRef.current = editingMessageIndex
   const handleSendEditedMessage = useCallback(
     (
       content: string,
@@ -9220,6 +9231,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
       const ownerScope = storageScope
+      // The form closed on submit. When the send's own image or report preflight (the route's
+      // image count, MAIN's verify) refuses the edit, the form comes back with the edited text,
+      // provided the edit's thread is still the selected one, it still holds the edited message
+      // and no other edit is open.
+      const editedIndex = baseMessages.length
+      const editedMessage = sessionsRef.current.find((session) => session.id === ownerSessionId)
+        ?.messages[editedIndex]
+      const onPreflightRefused = () => {
+        const session = sessionsRef.current.find((item) => item.id === ownerSessionId)
+        if (
+          !editedMessage ||
+          !isEditOwnerCurrent() ||
+          session?.messages[editedIndex] !== editedMessage ||
+          editingMessageIndexRef.current !== null
+        ) {
+          return
+        }
+        editingMessageIndexRef.current = editedIndex
+        setEditingMessageIndex(editedIndex)
+        setEditingContent(content)
+      }
       let accepted = false
       let queued = false
       let warned = false
@@ -9252,7 +9284,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         // It does not touch the composer: composerSubmission stays unset.
         onComposerSubmissionAccepted: () => {
           accepted = true
-        }
+        },
+        onPreflightRefused
       }
       void sendMessage(editOverrides)
       // sendMessage decides synchronously, before its first await, whether the owning thread
@@ -9301,7 +9334,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       await preflightChatRequestReports({
         messages: [...prefix, { role: 'user', content: '', attachments }],
         conversationId: currentSession?.id,
-        storageScope
+        storageScope,
+        timeoutMs: REPORT_PREFLIGHT_TIMEOUT_MS
       })
     },
     [currentSession?.id, storageScope]

@@ -2182,6 +2182,8 @@ const UserMessageEditForm: React.FC<{
   const [attachmentError, setAttachmentError] = React.useState<string | null>(null)
   // One MAIN report preflight at a time; a result that arrives after the form closed is ignored.
   const reportPreflightRef = React.useRef<symbol | null>(null)
+  // Save shows busy while MAIN verifies (bounded by the preflight's own timeout).
+  const [reportChecking, setReportChecking] = React.useState(false)
   React.useEffect(
     () => () => {
       reportPreflightRef.current = null
@@ -2579,9 +2581,16 @@ const UserMessageEditForm: React.FC<{
           <Button
             variant="contained"
             size="small"
-            disabled={sourceChanged || !editingContent.trim() || pendingImageImportCount > 0}
+            disabled={
+              sourceChanged ||
+              !editingContent.trim() ||
+              pendingImageImportCount > 0 ||
+              reportChecking
+            }
             startIcon={
-              pendingImageImportCount > 0 ? <CircularProgress size={12} color="inherit" /> : null
+              pendingImageImportCount > 0 || reportChecking ? (
+                <CircularProgress size={12} color="inherit" />
+              ) : null
             }
             onClick={() => {
               const newContent = editingContent.trim()
@@ -2612,12 +2621,14 @@ const UserMessageEditForm: React.FC<{
                 if (reportPreflightRef.current) return
                 const preflight = Symbol('edit-report-preflight')
                 reportPreflightRef.current = preflight
+                setReportChecking(true)
                 void Promise.resolve()
                   .then(() => preflightReports(historyPrefix, submittedAttachments))
                   .then(
                     () => {
                       if (reportPreflightRef.current !== preflight) return
                       reportPreflightRef.current = null
+                      setReportChecking(false)
                       // Changed while MAIN answered: keep the form, a new Save checks again.
                       const latest = latestEditStateRef.current
                       if (
@@ -2633,6 +2644,7 @@ const UserMessageEditForm: React.FC<{
                     (error: unknown) => {
                       if (reportPreflightRef.current !== preflight) return
                       reportPreflightRef.current = null
+                      setReportChecking(false)
                       setAttachmentError(error instanceof Error ? error.message : String(error))
                     }
                   )

@@ -117,6 +117,22 @@ describe('real ChatMessageList async MAIN report preflight for edits', () => {
     expect(f.session).toEqual(f.before)
   })
 
+  it('shows Save busy while MAIN verifies and frees it with the refusal, keeping the text', async () => {
+    const session = historySession()
+    let refuse: () => void = () => undefined
+    const preflightEditReports = vi.fn<NonNullable<Props['preflightEditReports']>>(() => new Promise<void>((_resolve, reject) => { refuse = () => reject(new Error(fixedMessage)) }))
+    const f = setup(session, 1, { preflightEditReports })
+    await waitFor(() => expect(preflightEditReports).toHaveBeenCalledOnce())
+    const save = screen.getByRole('button', { name: 'Save & Rerun' })
+    expect(save).toBeDisabled()
+    expect(within(save).getByRole('progressbar')).toBeInTheDocument()
+    refuse()
+    await waitFor(() => expect(screen.getByText(fixedMessage)).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Save & Rerun' })).toBeEnabled()
+    expect(within(screen.getByRole('button', { name: 'Save & Rerun' })).queryByRole('progressbar')).toBeNull()
+    assertRejected(f)
+  })
+
   it('keeps the form when the text changes while MAIN answers, and a new Save checks the new text', async () => {
     const session = historySession()
     let accept: () => void = () => undefined

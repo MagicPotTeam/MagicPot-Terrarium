@@ -11,7 +11,7 @@ import ChatPage from './ChatPage'
 import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 import { UNVERIFIED_REPORT_BUNDLE_MESSAGE } from '@shared/llm/unverifiedReport'
 
-const f = vi.hoisted(() => ({ config: null as Config | null, sessions: [] as ChatSession[], fetch: vi.fn(), request: vi.fn(), stream: vi.fn(), batch: vi.fn(), supportsStreaming: vi.fn(), read: vi.fn(), write: vi.fn(), save: vi.fn(), materialize: vi.fn(), probe: vi.fn(), video: vi.fn(), error: vi.fn(), warning: vi.fn(), verify: vi.fn() }))
+const f = vi.hoisted(() => ({ config: null as Config | null, sessions: [] as ChatSession[], fetch: vi.fn(), request: vi.fn(), stream: vi.fn(), batch: vi.fn(), supportsStreaming: vi.fn(), read: vi.fn(), write: vi.fn(), save: vi.fn(), materialize: vi.fn(), probe: vi.fn(), video: vi.fn(), error: vi.fn(), warning: vi.fn(), verify: vi.fn(), listProps: null as null | Record<string, unknown> }))
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en', resolvedLanguage: 'en' }, t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue || key }) }))
 vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: f.config, isReady: true, buildEnv: DEFAULT_BUILD_ENV, configUtils: {}, updateConfig: vi.fn() }) }))
 vi.mock('@renderer/hooks/useRuntimeMcpStatus', () => ({ useRuntimeMcpStatus: () => ({ runtimeMcpStatus: null }) }))
@@ -23,7 +23,7 @@ vi.mock('./chatStorage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./chatStorage')>()
   return { ...actual, loadAllSessions: () => Promise.resolve(f.sessions), saveSessionToDB: async (session: ChatSession) => { const i = f.sessions.findIndex(s => s.id === session.id); if (i >= 0) f.sessions[i] = structuredClone(session); else f.sessions.push(structuredClone(session)) }, debouncedSaveSessions: () => undefined, cancelDebouncedSessionSave: () => undefined, saveChatSessions: (sessions: ChatSession[]) => { f.sessions = structuredClone(sessions) }, loadChatSessionBackups: () => ({}), saveChatSessionBackups: () => undefined }
 })
-vi.mock('./chatRequestUtils', async (importOriginal) => { const actual = await importOriginal<typeof import('./chatRequestUtils')>(); return { ...actual, resolveAttachmentBatchCapability: f.batch, supportsStreamingChatCompletion: f.supportsStreaming } })
+vi.mock('./chatRequestUtils', async (importOriginal) => { const actual = await importOriginal<typeof import('./chatRequestUtils')>(); return { ...actual, REPORT_PREFLIGHT_TIMEOUT_MS: 200, resolveAttachmentBatchCapability: f.batch, supportsStreamingChatCompletion: f.supportsStreaming } })
 vi.mock('./chatVideoAttachmentUtils', async (importOriginal) => { const actual = await importOriginal<typeof import('./chatVideoAttachmentUtils')>(); return { ...actual, augmentAttachmentsWithVideoBoundaryFrames: (...args: Parameters<typeof actual.augmentAttachmentsWithVideoBoundaryFrames>) => { f.video(); return actual.augmentAttachmentsWithVideoBoundaryFrames(...args) } } })
 vi.mock('@renderer/utils/droppedImageUtils', async (importOriginal) => { const actual = await importOriginal<typeof import('@renderer/utils/droppedImageUtils')>(); return { ...actual, materializeInternalImageDragAttachment: async (attachment: ChatAttachment) => { f.materialize(); return attachment } } })
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
@@ -32,7 +32,7 @@ vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
 vi.mock('./components/ImagePreviewOverlay', () => ({ default: () => null }))
 vi.mock('./components/ImageContextMenu', () => ({ default: () => null }))
 vi.mock('./components/AgentLocalFilesPanel', () => ({ default: () => null }))
-vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession }: { currentSession?: ChatSession }) => <pre data-testid="session">{JSON.stringify(currentSession ?? null)}</pre> }))
+vi.mock('./components/ChatMessageList', () => ({ default: (props: { currentSession?: ChatSession }) => { f.listProps = props; return <pre data-testid="session">{JSON.stringify(props.currentSession ?? null)}</pre> } }))
 vi.mock('./components/ChatComposer', () => ({ default: ({ inputValue, onInputChange, onSend, pendingAttachments }: { inputValue: string; onInputChange: (value: string) => void; onSend: () => void; pendingAttachments: ChatAttachment[] }) => <div><input data-testid="input" value={inputValue} onChange={event => onInputChange(event.target.value)} /><pre data-testid="attachments">{JSON.stringify(pendingAttachments)}</pre><button data-testid="send" onClick={onSend}>Send</button></div> }))
 const scope = 'report-preflight-fixture'
 const report = (extra: Partial<ChatAttachment> = {}): ChatAttachment => ({ type: 'file', url: 'local-media:///synthetic/report.md', fileName: 'report.md', reportBundleRole: 'primary-report', ...extra })
@@ -202,6 +202,45 @@ describe('registered report bundles in ChatPage (MAIN verify before the draft is
     expect(f.request.mock.calls.some(call => JSON.stringify(call).includes('Queued follow-up'))).toBe(false)
     const stored = JSON.parse(screen.getByTestId('session').textContent || 'null')
     expect(stored.messages.some((message: { content?: string }) => message.content === 'Queued follow-up')).toBe(false)
+  })
+})
+
+describe('no hang and no lost text around MAIN report verify', () => {
+  const timeoutMessage = 'Checking the report took too long. Your message was kept; try again.'
+  const bound = (registry: ReturnType<typeof createReportBundleRegistryFixture>, conversationId = 'fixture-session') =>
+    registry.register(report({ reportBundleId: 'bundle-1' }), conversationId, { manifestUrl: null, imageCount: 0 })
+
+  it('refuses a send whose MAIN verify does not answer in time, keeps the draft and frees the conversation', async () => {
+    const registry = createReportBundleRegistryFixture()
+    f.verify.mockImplementation(() => new Promise(() => undefined))
+    const attachments = [bound(registry)]
+    await setup(attachments, false)
+    fireEvent.click(screen.getByTestId('send'))
+    await waitFor(() => expect(f.error).toHaveBeenCalledWith(timeoutMessage), { timeout: 3000 })
+    expect(screen.getByTestId('input')).toHaveValue('Draft text')
+    expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toEqual(attachments)
+    for (const fn of [f.request, f.stream, f.materialize]) expect(fn).not.toHaveBeenCalled()
+    // The send lock was released: the next send asks MAIN again and goes out.
+    f.verify.mockImplementation(registry.verify)
+    fireEvent.click(screen.getByTestId('send'))
+    await waitFor(() => expect(f.request).toHaveBeenCalled())
+    expect(f.verify).toHaveBeenCalledTimes(3)
+  })
+
+  it.each(['image count', 'MAIN refusal'] as const)('reopens the edit form with the edited text when the send refuses the edit (%s)', async (cause) => {
+    const registry = createReportBundleRegistryFixture()
+    f.verify.mockImplementation(registry.verify)
+    const history: ChatSession['messages'] = [{ role: 'user', content: 'original question' }, { role: 'assistant', content: 'synthetic answer' }]
+    await setup([], false, history, false, { max_input_images: 1 })
+    const props = () => f.listProps as { editingMessageIndex: number | null; editingContent: string; onSendEditedMessage: (content: string, attachments: ChatAttachment[] | undefined, hidden: string | undefined, base: ChatSession['messages']) => void }
+    expect(props().editingMessageIndex).toBeNull()
+    const attachments = cause === 'image count' ? [image, { ...image, url: 'blob:synthetic-second' }] : [bound(registry, 'another-session')]
+    await act(async () => { props().onSendEditedMessage('edited question', attachments, undefined, []) })
+    await waitFor(() => expect(props().editingMessageIndex).toBe(0))
+    expect(props().editingContent).toBe('edited question')
+    expect(f.error).toHaveBeenCalledWith(cause === 'image count' ? 'Too many images; the limit is 1.' : UNVERIFIED_REPORT_BUNDLE_MESSAGE)
+    for (const fn of [f.request, f.stream]) expect(fn).not.toHaveBeenCalled()
+    expect(JSON.parse(screen.getByTestId('session').textContent || 'null')?.messages).toEqual(history)
   })
 })
 
