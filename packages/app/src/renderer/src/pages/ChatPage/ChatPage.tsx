@@ -1608,6 +1608,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // Synchronously invalidates captured cross-conversation UI actions on A→B→A,
   // even if React batches both session selections into a single render.
   const sessionSelectionEpochRef = useRef(0)
+  // Render mirror of sessionSelectionEpochRef: the edit form's callbacks are rebuilt per
+  // selection, and a callback captured under an earlier selection does nothing.
+  const [sessionSelectionEpoch, setSessionSelectionEpoch] = useState(0)
   const attachmentDropTargetEpochRef = useRef(0)
   const isMountedRef = useRef(true)
   const selectSessionRef = useRef<(sessionId: string) => void>(() => {})
@@ -1677,6 +1680,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         rememberedSessionId = null
       }
       sessionSelectionEpochRef.current += 1
+      setSessionSelectionEpoch(sessionSelectionEpochRef.current)
       // The edit form of the previous scope's thread does not belong to this scope.
       setEditingMessageIndex(null)
       setEditingContent('')
@@ -1933,6 +1937,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (currentSessionIdRef.current !== sessionId) {
         sessionSelectionEpochRef.current += 1
         attachmentDropTargetEpochRef.current += 1
+        setSessionSelectionEpoch(sessionSelectionEpochRef.current)
         // An edit form belongs to the thread it was opened in: close it in the same batch,
         // so no frame shows another thread with this edit. Re-selecting the thread keeps it.
         setEditingMessageIndex(null)
@@ -9089,6 +9094,31 @@ const ChatPage: React.FC<ChatPageProps> = ({
     void sendMessage()
   }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, appendTailCard, showTailPanel, handleCompressCurrentContext, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
 
+  // The edit form belongs to the thread, selection and scope it was rendered for. The
+  // callbacks below are rebuilt on every selection; one captured earlier does nothing.
+  // Clearing the form does not change the selection, so the real form's order (clear,
+  // then submit in the same handler) stays valid.
+  const isEditOwnerCurrent = useCallback(
+    (): boolean =>
+      isMountedRef.current &&
+      currentSessionId !== null &&
+      sessionSelectionEpochRef.current === sessionSelectionEpoch &&
+      currentSessionIdRef.current === currentSessionId &&
+      storageScopeRef.current === storageScope,
+    [currentSessionId, sessionSelectionEpoch, storageScope]
+  )
+  const handleSetEditingIndex = useCallback(
+    (index: number | null) => {
+      if (isEditOwnerCurrent()) setEditingMessageIndex(index)
+    },
+    [isEditOwnerCurrent]
+  )
+  const handleSetEditingContent = useCallback(
+    (content: string) => {
+      if (isEditOwnerCurrent()) setEditingContent(content)
+    },
+    [isEditOwnerCurrent]
+  )
   const handleSendEditedMessage = useCallback(
     (
       content: string,
@@ -9096,9 +9126,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       hiddenContext: string | undefined,
       baseMessages: ChatMessage[]
     ) => {
+      // Fails closed: a submit from an earlier selection, another thread or scope sends nothing.
+      if (!isEditOwnerCurrent()) {
+        notifyWarning(t('chat.edit_submit_stale'))
+        return
+      }
       void sendMessage({ content, attachments, hiddenContext, baseMessages })
     },
-    [sendMessage]
+    [isEditOwnerCurrent, notifyWarning, sendMessage, t]
   )
 
   // The edit form's report preflight looks at the history the edited send will
@@ -10117,8 +10152,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 pendingConfirmation={currentPendingConfirmation}
                 editingMessageIndex={editingMessageIndex}
                 editingContent={editingContent}
-                onSetEditingIndex={setEditingMessageIndex}
-                onSetEditingContent={setEditingContent}
+                onSetEditingIndex={handleSetEditingIndex}
+                onSetEditingContent={handleSetEditingContent}
                 onDropImageAttachments={handleDropEditingImages}
                 onRegisterEditingAttachmentReceiver={registerEditingAttachmentReceiver}
                 onSendEditedMessage={handleSendEditedMessage}

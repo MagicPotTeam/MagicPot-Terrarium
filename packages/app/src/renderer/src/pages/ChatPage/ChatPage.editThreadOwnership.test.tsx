@@ -166,7 +166,7 @@ vi.mock('./components/ChatMessageList', () => ({
         <pre data-testid="messages">{JSON.stringify(currentSession?.messages ?? [])}</pre>
         <span data-testid="edit-index">{String(editingMessageIndex)}</span>
         <pre data-testid="edit-content">{editingContent}</pre>
-        {[0, 1].map((index) => (
+        {[0, 2].map((index) => (
           <button
             key={index}
             onClick={() => {
@@ -248,7 +248,7 @@ const selectSession = async (id: string): Promise<void> => {
   )
 }
 
-const startEdit = async (index: 0 | 1): Promise<void> => {
+const startEdit = async (index: 0 | 2): Promise<void> => {
   fireEvent.click(screen.getByRole('button', { name: `Edit ${index}` }))
   await waitFor(() => expect(editIndex()).toBe(String(index)))
 }
@@ -268,7 +268,7 @@ beforeEach(() => {
   f.props = null
   f.sessions = []
   f.request.mockResolvedValue({ content: 'fixture reply' })
-  f.stream.mockResolvedValue({ content: 'fixture reply' })
+  f.stream.mockResolvedValue({ response: 'fixture reply', result: { content: 'fixture reply' } })
   f.materialize.mockImplementation(async (attachment: ChatAttachment) => attachment)
   f.fetch.mockRejectedValue(new Error('Unexpected network access in edit ownership test'))
   localStorage.clear()
@@ -290,10 +290,10 @@ afterEach(async () => {
 describe('ChatPage edit form thread ownership', () => {
   it('closes the edit on a thread switch, keeps it on re-selection and keeps both composer drafts', async () => {
     await renderPage()
-    await startEdit(1)
+    await startEdit(2)
     await selectSession('session-a')
-    expect(editIndex()).toBe('1')
-    expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 1')
+    expect(editIndex()).toBe('2')
+    expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 2')
 
     await selectSession('session-b')
     expect(editIndex()).toBe('null')
@@ -321,5 +321,75 @@ describe('ChatPage edit form thread ownership', () => {
     })
     await waitFor(() => expect(f.materialize).toHaveBeenCalledOnce())
     expect(f.receive).not.toHaveBeenCalled()
+  })
+
+  it('refuses a submit captured in A when called in B, and again after A to B to A, warning once each time', async () => {
+    await renderPage()
+    await startEdit(2)
+    const submitFromA = f.props!.onSendEditedMessage
+    await selectSession('session-b')
+    act(() => submitFromA('Edited in A', undefined, undefined, []))
+    expect(staleWarnings()).toBe(1)
+
+    await selectSession('session-a')
+    expect(editIndex()).toBe('null')
+    act(() => submitFromA('Edited in A', undefined, undefined, []))
+    expect(staleWarnings()).toBe(2)
+
+    await act(async () => {})
+    expect(requestCount()).toBe(0)
+    expect(messages().map((message) => message.content)).toEqual([
+      'session-a message 0',
+      'session-a reply 0',
+      'session-a message 1'
+    ])
+    expect(f.sessions.map((session) => session.messages.length)).toEqual([3, 3])
+  })
+
+  it('does not let a setter captured in A clear or overwrite an edit started in B', async () => {
+    await renderPage()
+    await startEdit(0)
+    const { onSetEditingIndex, onSetEditingContent } = f.props!
+    await selectSession('session-b')
+    await startEdit(2)
+    act(() => {
+      onSetEditingIndex(null)
+      onSetEditingContent('')
+    })
+    expect(editIndex()).toBe('2')
+    expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 2')
+    act(() => {
+      onSetEditingIndex(0)
+      onSetEditingContent('Stale text from A')
+    })
+    expect(editIndex()).toBe('2')
+    expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 2')
+  })
+
+  it('sends the real form order (clear, then submit) once into the thread that owns the edit', async () => {
+    await renderPage()
+    await selectSession('session-b')
+    await selectSession('session-a')
+    await startEdit(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Submit edit' }))
+    await waitFor(() => expect(requestCount()).toBe(1))
+    await waitFor(() =>
+      expect(messages().map((message) => message.content)).toEqual([
+        'session-a message 0',
+        'session-a reply 0',
+        'Edit draft 2',
+        'fixture reply'
+      ])
+    )
+    expect(editIndex()).toBe('null')
+    expect(staleWarnings()).toBe(0)
+    expect(sessionId()).toBe('session-a')
+    await selectSession('session-b')
+    expect(messages().map((message) => message.content)).toEqual([
+      'session-b message 0',
+      'session-b reply 0',
+      'session-b message 1'
+    ])
+    expect(requestCount()).toBe(1)
   })
 })
