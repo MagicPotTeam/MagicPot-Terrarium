@@ -68,6 +68,8 @@ export const REPORT_BUNDLE_TICKET_TTL_MS = 10 * 60_000
 export const REPORT_BUNDLE_CTIME_TOLERANCE_MS = 250
 export const REPORT_BUNDLE_MAX_MANIFEST_BYTES = 256 * 1024
 export const REPORT_BUNDLE_MAX_RECORDS = 2_000
+/** A record not verified for this long is dropped with its snapshot (next to the count cap). */
+export const REPORT_BUNDLE_MAX_RECORD_AGE_MS = 180 * 24 * 60 * 60_000
 export const REPORT_BUNDLE_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 const MAX_OUTSTANDING_TICKETS = 64
 const REGISTRY_VERSION = 1
@@ -149,6 +151,7 @@ type RegistryState = {
   registryPath: string
   now: () => number
   maxRecords: number
+  maxRecordAgeMs: number
   flushDelayMs: number
   maxRegistryBytes: number
   records: Map<string, RegistryRecord>
@@ -168,6 +171,7 @@ export type ReportBundleRegistryOptions = {
   userDataDir: string
   now?: () => number
   maxRecords?: number
+  maxRecordAgeMs?: number
   flushDelayMs?: number
   maxRegistryBytes?: number
 }
@@ -401,6 +405,14 @@ function recordsByRecency(current: RegistryState): RegistryRecord[] {
 }
 
 function evictOverCap(current: RegistryState, keepHash: string | null): void {
+  // Age bound: records nobody verified for maxRecordAgeMs go first.
+  const cutoff = current.now() - current.maxRecordAgeMs
+  for (const record of Array.from(current.records.values())) {
+    if (record.bindingHash !== keepHash && record.lastVerifiedAt < cutoff) {
+      dropRecord(current, record.bindingHash)
+      current.dirty = true
+    }
+  }
   if (current.records.size <= current.maxRecords) return
   for (const victim of recordsByRecency(current)) {
     if (current.records.size <= current.maxRecords) break
@@ -552,6 +564,10 @@ export function initializeReportBundleRegistry(options: ReportBundleRegistryOpti
       registryPath: path.join(snapshotRoot, REGISTRY_FILE_NAME),
       now: options.now ?? Date.now,
       maxRecords: Math.max(1, Math.floor(options.maxRecords ?? REPORT_BUNDLE_MAX_RECORDS)),
+      maxRecordAgeMs: Math.max(
+        60_000,
+        Math.floor(options.maxRecordAgeMs ?? REPORT_BUNDLE_MAX_RECORD_AGE_MS)
+      ),
       flushDelayMs: Math.max(0, options.flushDelayMs ?? REGISTRY_FLUSH_DELAY_MS),
       maxRegistryBytes: Math.max(
         1024,
@@ -1118,6 +1134,30 @@ async function primaryUrlMatches(record: RegistryRecord, primaryUrl: string): Pr
   }
 }
 
+const isMissingError = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/**
+ * The registered primary is gone while the `.report_bundles` directory that held its bundle is
+ * still there. An unreachable volume (a disconnected network drive, an unmounted disk) has no
+ * such directory either, so its records are kept.
+ */
+async function isPrimaryDeleted(record: RegistryRecord): Promise<boolean> {
+  try {
+    await fsp.lstat(record.primary.path)
+    return false
+  } catch (error) {
+    if (!isMissingError(error)) return false
+  }
+  try {
+    return (await fsp.lstat(path.dirname(record.bundleDir))).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 async function verifyOne(
   current: RegistryState,
   binding: string,
@@ -1128,7 +1168,14 @@ async function verifyOne(
   const bindingHash = sha256Hex(binding)
   const record = current.records.get(bindingHash)
   if (!record || !conversationMatches(record, conversation)) return refused
-  if (!(await primaryUrlMatches(record, primaryUrl))) return refused
+  if (!(await primaryUrlMatches(record, primaryUrl))) {
+    // The user deleted the report: its record and snapshot follow.
+    if ((await isPrimaryDeleted(record)) && current.records.get(bindingHash) === record) {
+      dropRecord(current, bindingHash)
+      schedulePersist(current)
+    }
+    return refused
+  }
 
   const snapshotPath = path.join(snapshotDirFor(current, bindingHash), SNAPSHOT_MANIFEST_NAME)
   try {
@@ -1197,6 +1244,87 @@ export async function verifyReportBundles(
     }
   }
   return { results }
+}
+
+/* ------------------------------------------------------------------ purge */
+
+export type ReportBundlePurgeCriteria = {
+  /** Records of these conversations (in `storageScope` when given, else in any scope). */
+  conversationIds?: readonly string[]
+  storageScope?: string
+  /** Records whose storage scope starts with this prefix (a deleted project's panes). */
+  storageScopePrefix?: string
+  /** Records whose bundle lies under `<bundleRoot>/.report_bundles`. */
+  bundleRoot?: string
+}
+
+export type ReportBundlePurgeResult = {
+  purged: number
+  /** False when registry.json could not be read, so records on disk could not be purged. */
+  complete: boolean
+}
+
+const recordMatchesPurge = (
+  record: RegistryRecord,
+  criteria: ReportBundlePurgeCriteria,
+  containers: readonly string[]
+): boolean => {
+  const { conversationId, storageScope } = record.conversation
+  if (criteria.conversationIds?.length) {
+    if (!criteria.conversationIds.includes(conversationId)) return false
+    if (
+      criteria.storageScope !== undefined &&
+      storageScope !== undefined &&
+      storageScope !== criteria.storageScope
+    )
+      return false
+    return true
+  }
+  if (criteria.storageScopePrefix)
+    return storageScope !== undefined && storageScope.startsWith(criteria.storageScopePrefix)
+  if (criteria.storageScope !== undefined) return storageScope === criteria.storageScope
+  if (containers.length > 0)
+    return containers.some((container) => samePath(path.dirname(record.bundleDir), container))
+  return false
+}
+
+/**
+ * Removes the records (and MAIN's snapshots) of deleted conversations, projects or bundle roots.
+ * Never touches the bundle files themselves. Registry writes keep the atomic,
+ * never-overwrite-an-unreadable-registry rules. Never throws.
+ */
+export async function purgeReportBundleRecords(
+  criteria: ReportBundlePurgeCriteria
+): Promise<ReportBundlePurgeResult> {
+  const current = state
+  if (!current) return { purged: 0, complete: false }
+  const containers: string[] = []
+  if (typeof criteria.bundleRoot === 'string' && path.isAbsolute(criteria.bundleRoot)) {
+    const configured = path.resolve(criteria.bundleRoot, REPORT_BUNDLES_ROOT_DIR_NAME)
+    containers.push(configured)
+    containers.push(await canonicalPath(configured).catch(() => configured))
+  }
+  if (
+    !criteria.conversationIds?.length &&
+    !criteria.storageScopePrefix &&
+    criteria.storageScope === undefined &&
+    containers.length === 0
+  ) {
+    return { purged: 0, complete: true }
+  }
+  const complete = ensureLoaded(current)
+  if (state !== current) return { purged: 0, complete: false }
+  let purged = 0
+  for (const record of Array.from(current.records.values())) {
+    if (!recordMatchesPurge(record, criteria, containers)) continue
+    dropRecord(current, record.bindingHash)
+    purged += 1
+  }
+  if (purged > 0) {
+    current.dirty = true
+    flushNow(current)
+  }
+  return { purged, complete }
 }
 
 /* ------------------------------------------------------------------ MAIN chat boundary */

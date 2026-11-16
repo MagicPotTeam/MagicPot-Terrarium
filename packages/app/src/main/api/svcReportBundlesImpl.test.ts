@@ -199,6 +199,43 @@ describe('ReportBundlesSvcImpl', () => {
     )
   })
 
+  it('purges records only for the main window main frame', async () => {
+    const f = fixture()
+    const bundleDir = path.join(root, '.report_bundles', 'b4')
+    const { ticket } = await f.service.beginBundle(
+      { bundleDir, conversation },
+      f.context('beginBundle')
+    )
+    writeBundle(bundleDir)
+    const sealed = await f.service.register({ ticket }, f.context('register'))
+    const verifyReq = {
+      conversation,
+      items: [
+        { binding: sealed.binding, primaryUrl: toLocalMediaUrl(path.join(bundleDir, 'report.md'))! }
+      ]
+    }
+    const purgeReq = { conversationIds: ['conv-1'] }
+    await expect(f.service.purge(purgeReq)).rejects.toThrow('Report bundle access denied.')
+    await expect(
+      f.service.purge(purgeReq, f.context('purge', { isMainFrame: false }))
+    ).rejects.toThrow('Report bundle access denied.')
+    await expect(f.service.purge(purgeReq, f.context('verify'))).rejects.toThrow(
+      'Report bundle access denied.'
+    )
+    expect((await f.service.verify(verifyReq, f.context('verify'))).results[0].status).toBe(
+      'verified'
+    )
+    expect(await f.service.purge(purgeReq, f.context('purge'))).toEqual({
+      purged: 1,
+      complete: true
+    })
+    expect((await f.service.verify(verifyReq, f.context('verify'))).results[0].status).toBe(
+      'refused'
+    )
+    // The bundle files stay.
+    expect(fs.existsSync(path.join(bundleDir, 'report.md'))).toBe(true)
+  })
+
   it('uses only MAIN-owned roots: config download_dir and the build data path', () => {
     getConfigMock.mockReturnValue({ download_dir: ' /projects ' })
     getBuildEnvMock.mockReturnValue({ pathMap: { data: '/data' } })

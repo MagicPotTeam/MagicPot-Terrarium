@@ -4,6 +4,8 @@ import {
   reportBundlesSvcDef,
   validateBeginReportBundleReq,
   validateBeginReportBundleResp,
+  validatePurgeReportBundlesReq,
+  validatePurgeReportBundlesResp,
   validateRegisterReportBundleReq,
   validateRegisterReportBundleResp,
   validateVerifyReportBundlesReq,
@@ -137,6 +139,42 @@ describe('svcReportBundles contract', () => {
       expect(() => validateVerifyReportBundlesResp({ results: [bad] })).toThrow(
         ServiceValidationError
       )
+    }
+  })
+
+  it('accepts purge by conversations (optionally in one scope) or by scope prefix only', () => {
+    expect(reportBundlesSvcDef.purge.type).toBe('unary')
+    expect(validatePurgeReportBundlesReq({ conversationIds: ['conv-1'] })).toEqual({
+      conversationIds: ['conv-1']
+    })
+    expect(
+      validatePurgeReportBundlesReq({ conversationIds: ['a', 'b'], storageScope: 'p.agent-1' })
+    ).toEqual({ conversationIds: ['a', 'b'], storageScope: 'p.agent-1' })
+    expect(validatePurgeReportBundlesReq({ storageScopePrefix: 'project-1.' })).toEqual({
+      storageScopePrefix: 'project-1.'
+    })
+    for (const bad of [
+      undefined,
+      {},
+      { conversationIds: [] },
+      { conversationIds: [''] },
+      { conversationIds: ['x'.repeat(257)] },
+      { conversationIds: Array.from({ length: 257 }, (_, i) => `c${i}`) },
+      { conversationIds: ['a'], storageScope: '' },
+      { conversationIds: ['a'], storageScopePrefix: 'p.' },
+      { storageScopePrefix: '' },
+      { storageScopePrefix: 'p.', storageScope: 'p.a' },
+      { bundleRoot: '/tmp' },
+      { conversationIds: 'conv-1' }
+    ]) {
+      expect(() => validatePurgeReportBundlesReq(bad)).toThrow(ServiceValidationError)
+    }
+    expect(validatePurgeReportBundlesResp({ purged: 2, complete: true })).toEqual({
+      purged: 2,
+      complete: true
+    })
+    for (const bad of [{ purged: -1, complete: true }, { purged: 1 }, { purged: 1, complete: 1 }]) {
+      expect(() => validatePurgeReportBundlesResp(bad)).toThrow(ServiceValidationError)
     }
   })
 })

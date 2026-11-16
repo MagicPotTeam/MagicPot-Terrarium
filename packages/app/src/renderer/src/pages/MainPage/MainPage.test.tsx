@@ -16,15 +16,16 @@ import {
   PROJECTS_STORAGE_KEY
 } from './projectStore'
 
-const { listProfiles, chat, runTools } = vi.hoisted(() => ({
+const { listProfiles, chat, runTools, purge } = vi.hoisted(() => ({
   listProfiles: vi.fn(),
   chat: vi.fn(),
-  runTools: vi.fn()
+  runTools: vi.fn(),
+  purge: vi.fn(async () => ({ purged: 0, complete: true }))
 }))
 const navigateMock = vi.fn()
 
 vi.mock('../../utils/windowUtils', () => ({
-  api: () => ({ svcLLMProxy: { listProfiles, chat, runTools } })
+  api: () => ({ svcLLMProxy: { listProfiles, chat, runTools }, svcReportBundles: { purge } })
 }))
 vi.mock('../ProjectCanvasPage/ProjectCanvasPage', () => ({ default: () => null }))
 vi.mock('react-i18next', () => ({
@@ -230,10 +231,17 @@ describe('MainPage immediate project creation', () => {
     expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(raw)
     expect(localStorage.getItem('confirmDeleteProject')).toBeNull()
     expect(store.getState().layout.openTabs).toEqual([])
+    // MAIN's report-bundle records are purged only once the deletion is saved.
+    await Promise.resolve()
+    expect(purge).not.toHaveBeenCalled()
     writes.mockRestore()
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(listProjects()).toEqual([])
+    await waitFor(() =>
+      expect(purge).toHaveBeenCalledWith({ storageScopePrefix: 'delete-failure.' })
+    )
+    expect(purge).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem('confirmDeleteProject')).toBe('false')
   })
 

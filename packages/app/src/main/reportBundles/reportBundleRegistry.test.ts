@@ -6,12 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { toLocalMediaUrl } from '@shared/localMediaUrl'
 import { REPORT_BUNDLE_BINDING_PATTERN } from '@shared/reportBundle'
 import {
+  REPORT_BUNDLE_MAX_RECORD_AGE_MS,
   REPORT_BUNDLE_TICKET_TTL_MS,
   ReportBundleRefusedError,
   beginReportBundle,
   flushReportBundleRegistry,
   initializeReportBundleRegistry,
   isBoundTo,
+  purgeReportBundleRecords,
   registerReportBundle,
   resetReportBundleRegistryForTest,
   verifyReportBundles
@@ -854,5 +856,151 @@ describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => 
     expect(fs.readdirSync(bundleDir).filter((name) => name.startsWith('.magicpot-begin-'))).toEqual(
       []
     )
+  })
+})
+
+describe('records follow the user’s deletes', () => {
+  const snapshotRoot = () => path.join(userData, 'report-bundles')
+  const registryPath = () => path.join(snapshotRoot(), 'registry.json')
+  const snapshotOf = (binding: string) => path.join(snapshotRoot(), sha256(binding))
+  const recordedHashes = (): string[] =>
+    JSON.parse(fs.readFileSync(registryPath(), 'utf8')).records.map(
+      (record: { bindingHash: string }) => record.bindingHash
+    )
+  const reinit = (options: { maxRecordAgeMs?: number } = {}) => {
+    flushReportBundleRegistry()
+    resetReportBundleRegistryForTest()
+    initializeReportBundleRegistry({ userDataDir: userData, now, ...options })
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('drops the record and its snapshot when verify finds the primary deleted', async () => {
+    const { resp, bundleDir, primaryUrl } = await seal()
+    fs.rmSync(path.join(bundleDir, 'report.md'))
+    expect((await verifyOne(resp.binding, primaryUrl)).status).toBe('refused')
+    expect(fs.existsSync(snapshotOf(resp.binding))).toBe(false)
+    reinit()
+    expect(recordedHashes()).not.toContain(sha256(resp.binding))
+
+    // A whole deleted bundle directory goes the same way.
+    const second = await seal('canvas-target-s2')
+    fs.rmSync(second.bundleDir, { recursive: true })
+    expect((await verifyOne(second.resp.binding, second.primaryUrl)).status).toBe('refused')
+    expect(fs.existsSync(snapshotOf(second.resp.binding))).toBe(false)
+  })
+
+  it('keeps the record while the volume holding the bundle is unreachable', async () => {
+    const { resp, primaryUrl } = await seal()
+    // A disconnected drive or unmounted disk: the whole project root is missing.
+    const away = path.join(tmp, 'project-away')
+    fs.renameSync(root, away)
+    expect((await verifyOne(resp.binding, primaryUrl)).status).toBe('refused')
+    expect(fs.existsSync(snapshotOf(resp.binding))).toBe(true)
+    fs.renameSync(away, root)
+    expect((await verifyOne(resp.binding, primaryUrl)).status).toBe('verified')
+  })
+
+  it('keeps the record when another conversation asks about a deleted primary', async () => {
+    const { resp, bundleDir, primaryUrl } = await seal()
+    fs.rmSync(path.join(bundleDir, 'report.md'))
+    expect(
+      (await verifyOne(resp.binding, primaryUrl, { ...conversation, conversationId: 'conv-2' }))
+        .status
+    ).toBe('refused')
+    expect(fs.existsSync(snapshotOf(resp.binding))).toBe(true)
+  })
+
+  it('purges by conversation and storage scope, and writes the registry at once', async () => {
+    const kept = await seal('kept', { conversation: { ...conversation, conversationId: 'conv-2' } })
+    const gone = await seal('gone')
+    // The same conversation id in another scope is not this conversation.
+    expect(
+      await purgeReportBundleRecords({ conversationIds: ['conv-1'], storageScope: 'other.pane' })
+    ).toEqual({ purged: 0, complete: true })
+    expect(
+      await purgeReportBundleRecords({ conversationIds: ['conv-1'], storageScope: 'project.pane' })
+    ).toEqual({ purged: 1, complete: true })
+    expect(fs.existsSync(snapshotOf(gone.resp.binding))).toBe(false)
+    expect(recordedHashes()).toEqual([sha256(kept.resp.binding)])
+    expect((await verifyOne(gone.resp.binding, gone.primaryUrl)).status).toBe('refused')
+    expect(
+      (
+        await verifyOne(kept.resp.binding, kept.primaryUrl, {
+          ...conversation,
+          conversationId: 'conv-2'
+        })
+      ).status
+    ).toBe('verified')
+    // The bundle files are never touched.
+    expect(fs.existsSync(path.join(gone.bundleDir, 'report.md'))).toBe(true)
+  })
+
+  it('purges a deleted project’s panes by storage-scope prefix and a bundle root', async () => {
+    const inProject = await seal('in-project', {
+      conversation: { conversationId: 'a', storageScope: 'project-1.agent-1' }
+    })
+    const otherProject = await seal('other-project', {
+      conversation: { conversationId: 'b', storageScope: 'project-10.agent-1' }
+    })
+    expect(await purgeReportBundleRecords({ storageScopePrefix: 'project-1.' })).toEqual({
+      purged: 1,
+      complete: true
+    })
+    expect(fs.existsSync(snapshotOf(inProject.resp.binding))).toBe(false)
+    expect(fs.existsSync(snapshotOf(otherProject.resp.binding))).toBe(true)
+
+    expect(await purgeReportBundleRecords({ bundleRoot: path.join(tmp, 'elsewhere') })).toEqual({
+      purged: 0,
+      complete: true
+    })
+    expect(await purgeReportBundleRecords({ bundleRoot: root })).toEqual({
+      purged: 1,
+      complete: true
+    })
+    expect(fs.existsSync(snapshotOf(otherProject.resp.binding))).toBe(false)
+    // No criterion purges nothing.
+    expect(await purgeReportBundleRecords({})).toEqual({ purged: 0, complete: true })
+  })
+
+  it('never overwrites an unreadable registry while purging', async () => {
+    const a = await seal('bundle-a')
+    flushReportBundleRegistry()
+    const before = fs.readFileSync(registryPath(), 'utf8')
+    const realRead = fs.readFileSync
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((
+      file: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (String(file) === registryPath()) throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+      return (realRead as (...args: unknown[]) => unknown)(file, ...rest)
+    }) as typeof fs.readFileSync)
+    resetReportBundleRegistryForTest()
+    initializeReportBundleRegistry({ userDataDir: userData, now })
+    expect(await purgeReportBundleRecords({ conversationIds: ['conv-1'] })).toEqual({
+      purged: 0,
+      complete: false
+    })
+    vi.restoreAllMocks()
+    expect(fs.readFileSync(registryPath(), 'utf8')).toBe(before)
+    expect(fs.existsSync(snapshotOf(a.resp.binding))).toBe(true)
+  })
+
+  it('drops records nobody verified within the age bound', async () => {
+    const old = await seal('old')
+    clockOffset = REPORT_BUNDLE_MAX_RECORD_AGE_MS + 60_000
+    const fresh = await seal('fresh')
+    // Registering refreshes nothing else; the old record is past the bound now.
+    expect(fs.existsSync(snapshotOf(old.resp.binding))).toBe(false)
+    expect(recordedHashes()).toEqual([sha256(fresh.resp.binding)])
+    expect((await verifyOne(fresh.resp.binding, fresh.primaryUrl)).status).toBe('verified')
+
+    // And at startup, with a shorter bound.
+    clockOffset += 2 * 60_000
+    reinit({ maxRecordAgeMs: 60_000 })
+    expect(fs.existsSync(snapshotOf(fresh.resp.binding))).toBe(false)
+    expect(recordedHashes()).toEqual([])
   })
 })

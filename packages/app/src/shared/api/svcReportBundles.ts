@@ -52,10 +52,20 @@ export type VerifyReportBundleResult = {
 }
 export type VerifyReportBundlesResp = { results: VerifyReportBundleResult[] }
 
+/**
+ * Removes MAIN's records and snapshots for deleted conversations (`conversationIds`, in
+ * `storageScope` when given) or for a deleted project's panes (`storageScopePrefix`). Bundle
+ * files are never touched.
+ */
+export type PurgeReportBundlesReq =
+  { conversationIds: string[]; storageScope?: string } | { storageScopePrefix: string }
+export type PurgeReportBundlesResp = { purged: number; complete: boolean }
+
 export type ReportBundlesSvc = {
   beginBundle(req: BeginReportBundleReq): Promise<BeginReportBundleResp>
   register(req: RegisterReportBundleReq): Promise<RegisterReportBundleResp>
   verify(req: VerifyReportBundlesReq): Promise<VerifyReportBundlesResp>
+  purge(req: PurgeReportBundlesReq): Promise<PurgeReportBundlesResp>
 }
 
 export const REPORT_BUNDLE_MAX_PATH_CHARS = 4096
@@ -63,6 +73,7 @@ export const REPORT_BUNDLE_MAX_URL_CHARS = 16384
 export const REPORT_BUNDLE_MAX_CONVERSATION_ID_CHARS = 256
 export const REPORT_BUNDLE_MAX_STORAGE_SCOPE_CHARS = 512
 export const REPORT_BUNDLE_MAX_BUNDLE_ID_CHARS = 255
+export const REPORT_BUNDLE_PURGE_MAX_CONVERSATIONS = 256
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -216,6 +227,45 @@ export function validateVerifyReportBundlesResp(value: unknown): VerifyReportBun
   return { results }
 }
 
+export function validatePurgeReportBundlesReq(value: unknown): PurgeReportBundlesReq {
+  const label = 'svcReportBundles.purge request'
+  if (isRecord(value) && hasAllowedKeys(value, ['storageScopePrefix'])) {
+    if (!isBoundedText(value.storageScopePrefix, REPORT_BUNDLE_MAX_STORAGE_SCOPE_CHARS))
+      throw new ServiceValidationError(label)
+    return { storageScopePrefix: value.storageScopePrefix }
+  }
+  if (
+    !isRecord(value) ||
+    !hasAllowedKeys(value, ['conversationIds'], ['storageScope']) ||
+    !Array.isArray(value.conversationIds) ||
+    value.conversationIds.length === 0 ||
+    value.conversationIds.length > REPORT_BUNDLE_PURGE_MAX_CONVERSATIONS ||
+    !value.conversationIds.every((id) =>
+      isBoundedText(id, REPORT_BUNDLE_MAX_CONVERSATION_ID_CHARS)
+    ) ||
+    (value.storageScope !== undefined &&
+      !isBoundedText(value.storageScope, REPORT_BUNDLE_MAX_STORAGE_SCOPE_CHARS))
+  ) {
+    throw new ServiceValidationError(label)
+  }
+  return {
+    conversationIds: [...(value.conversationIds as string[])],
+    ...(value.storageScope !== undefined ? { storageScope: value.storageScope as string } : {})
+  }
+}
+
+export function validatePurgeReportBundlesResp(value: unknown): PurgeReportBundlesResp {
+  if (
+    !isRecord(value) ||
+    !hasAllowedKeys(value, ['purged', 'complete']) ||
+    !isCount(value.purged, Number.MAX_SAFE_INTEGER) ||
+    typeof value.complete !== 'boolean'
+  ) {
+    throw new ServiceValidationError('svcReportBundles.purge response')
+  }
+  return { purged: value.purged, complete: value.complete }
+}
+
 export const reportBundlesSvcDef: ServiceDefSheet<ReportBundlesSvc> = {
   beginBundle: {
     type: 'unary',
@@ -231,5 +281,10 @@ export const reportBundlesSvcDef: ServiceDefSheet<ReportBundlesSvc> = {
     type: 'unary',
     request: validateVerifyReportBundlesReq,
     response: validateVerifyReportBundlesResp
+  },
+  purge: {
+    type: 'unary',
+    request: validatePurgeReportBundlesReq,
+    response: validatePurgeReportBundlesResp
   }
 }

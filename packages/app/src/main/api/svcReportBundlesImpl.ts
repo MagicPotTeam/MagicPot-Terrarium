@@ -4,6 +4,8 @@ import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvoc
 import type {
   BeginReportBundleReq,
   BeginReportBundleResp,
+  PurgeReportBundlesReq,
+  PurgeReportBundlesResp,
   RegisterReportBundleReq,
   RegisterReportBundleResp,
   ReportBundlesSvc,
@@ -15,6 +17,7 @@ import { getConfig } from '../config/config'
 import { getBuildEnv } from '../config/buildEnv'
 import {
   beginReportBundle,
+  purgeReportBundleRecords,
   registerReportBundle,
   verifyReportBundles
 } from '../reportBundles/reportBundleRegistry'
@@ -75,6 +78,19 @@ export class ReportBundlesSvcImpl implements ReportBundlesSvc {
   ): Promise<VerifyReportBundlesResp> => {
     this.authorize('verify', invocation)
     return await verifyReportBundles(req)
+  }
+
+  /** Records only: the user deleted these conversations or this project. */
+  purge = async (
+    req: PurgeReportBundlesReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<PurgeReportBundlesResp> => {
+    this.authorize('purge', invocation)
+    return await purgeReportBundleRecords(
+      'storageScopePrefix' in req
+        ? { storageScopePrefix: req.storageScopePrefix }
+        : { conversationIds: req.conversationIds, storageScope: req.storageScope }
+    )
   }
 
   /**

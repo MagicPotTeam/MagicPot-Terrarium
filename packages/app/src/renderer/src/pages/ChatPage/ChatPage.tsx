@@ -44,6 +44,7 @@ import { useConfig } from '@renderer/hooks/useConfig'
 import { useRuntimeMcpStatus } from '@renderer/hooks/useRuntimeMcpStatus'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
+import { purgeReportBundlesOfDeletedConversation } from './reportBundlePurge'
 import { resolveAvailableChatProfileId } from '@renderer/utils/llmProfileUtils'
 import { DccBridgeTarget, isSupportedDccBridgeModelSourceFormat } from '@shared/api/svcDccBridge'
 import {
@@ -5716,6 +5717,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (timer) clearTimeout(timer)
         pendingDeleteRetryTimersRef.current.delete(retryKey)
         deletedSessionKeysRef.current.delete(`${scope}\u0000${sessionId}`)
+        purgeReportBundlesOfDeletedConversation(sessionId, scope)
       },
       (error) => {
         console.error('[ChatPage] deleteSessionFromDB failed:', error)

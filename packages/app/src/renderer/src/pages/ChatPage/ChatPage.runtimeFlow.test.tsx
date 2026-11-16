@@ -251,6 +251,12 @@ vi.mock('@renderer/hooks/useMessage', () => ({
   })
 }))
 
+const { purgeDeletedConversationMock } = vi.hoisted(() => ({ purgeDeletedConversationMock: vi.fn() }))
+vi.mock('./reportBundlePurge', () => ({
+  purgeReportBundlesOfDeletedConversation: purgeDeletedConversationMock,
+  purgeReportBundlesOfDeletedProject: vi.fn()
+}))
+
 vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcMagicAgentPlatform: { listPendingApprovals: hoisted.listPendingApprovalsMock, resolvePendingApproval: hoisted.resolvePendingApprovalMock },
@@ -2633,6 +2639,53 @@ describe('ChatPage runtime workflow integration', () => {
     })
 
     expect(readCurrentSessionState()?.id).toBe(remainingSession.id)
+  })
+
+  it('purges MAIN report-bundle records of a conversation once its deletion is stored', async () => {
+    const doomed: ChatSession = {
+      id: 'purge-on-delete-session',
+      title: 'Doomed',
+      messages: [{ role: 'user', content: 'delete me' }],
+      createdAt: 300
+    }
+    const kept: ChatSession = {
+      id: 'purge-on-delete-kept',
+      title: 'Kept',
+      messages: [{ role: 'user', content: 'keep me' }],
+      createdAt: 200
+    }
+    hoisted.storedSessions.value = [doomed, kept]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), doomed.id)
+    const storage = await import('./chatStorage')
+    let finishDelete: () => void = () => undefined
+    vi.mocked(storage.deleteSessionFromDB).mockImplementationOnce(
+      (sessionId: string) =>
+        new Promise<void>((resolve) => {
+          finishDelete = () => {
+            hoisted.storedSessions.value = hoisted.storedSessions.value.filter(
+              (session) => session.id !== sessionId
+            )
+            resolve()
+          }
+        })
+    )
+    purgeDeletedConversationMock.mockClear()
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(doomed.id))
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:deleteSession', { detail: { scope: 'runtime-flow', sessionId: doomed.id } })
+      )
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(kept.id))
+    // Not before the deletion is stored.
+    expect(purgeDeletedConversationMock).not.toHaveBeenCalled()
+    await act(async () => finishDelete())
+    await waitFor(() =>
+      expect(purgeDeletedConversationMock).toHaveBeenCalledWith(doomed.id, 'runtime-flow')
+    )
+    expect(purgeDeletedConversationMock).toHaveBeenCalledTimes(1)
   })
 
   it('does not rerender the message list synchronously while typing in the composer', async () => {

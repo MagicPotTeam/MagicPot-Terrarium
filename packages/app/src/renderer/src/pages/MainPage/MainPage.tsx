@@ -23,6 +23,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAppDispatch } from '../../store'
 import { openTab, setActiveTab, updateTabLabel, closeTab } from '../../store/slices/layoutSlice'
 import { toProjectCanvasRoutePath } from '../ProjectCanvasPage/projectCanvasRouting'
+import { purgeReportBundlesOfDeletedProject } from '../ChatPage/reportBundlePurge'
 import {
   createProjectRecord,
   listProjects,
@@ -404,6 +405,7 @@ const MainPage: React.FC = () => {
     setProjectSaveError(false)
     setProjects(saved)
     dispatch(closeTab(id))
+    purgeReportBundlesOfDeletedProject(id)
     return true
   }
 
