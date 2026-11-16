@@ -1677,6 +1677,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         rememberedSessionId = null
       }
       sessionSelectionEpochRef.current += 1
+      // The edit form of the previous scope's thread does not belong to this scope.
+      setEditingMessageIndex(null)
+      setEditingContent('')
+      editingAttachmentReceiverRef.current = null
       currentSessionIdRef.current = rememberedSessionId
       setCurrentSessionId(rememberedSessionId)
     }
@@ -1929,6 +1933,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (currentSessionIdRef.current !== sessionId) {
         sessionSelectionEpochRef.current += 1
         attachmentDropTargetEpochRef.current += 1
+        // An edit form belongs to the thread it was opened in: close it in the same batch,
+        // so no frame shows another thread with this edit. Re-selecting the thread keeps it.
+        setEditingMessageIndex(null)
+        setEditingContent('')
+        editingAttachmentReceiverRef.current = null
       }
       currentSessionIdRef.current = sessionId
       setCurrentSessionId(sessionId)
