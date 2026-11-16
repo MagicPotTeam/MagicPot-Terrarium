@@ -1303,6 +1303,7 @@
     "attachment_preview": "附件预览",
     "paste_image_hint": "可以粘贴剪贴板中的图片（Ctrl+V）",
     "download_attachment": "下载附件",
+    "report_unavailable": "不可用：来源未验证",
     "model3d_file": "3D 模型文件",
     "start_listening": "开始语音输入",
     "stop_listening": "停止语音输入",

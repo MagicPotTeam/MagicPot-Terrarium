@@ -38,15 +38,21 @@ export function hasWellFormedReportBundleBinding(attachment: ReportAttachmentDes
   return isReportBundleBinding(attachment.reportBundleBinding)
 }
 
+/**
+ * True for a primary-report file that the synchronous guard refuses (no well-formed binding):
+ * the thread shows it as unavailable. A bound report that MAIN refuses later is not detected
+ * here; the send-time message covers it.
+ */
+export function isUnavailablePrimaryReportFile(attachment: ReportAttachmentDescriptor): boolean {
+  return isPrimaryReportFileDescriptor(attachment) && !hasWellFormedReportBundleBinding(attachment)
+}
+
 export function assertNoUnverifiedPrimaryReports(
   messages: readonly ReportMessageDescriptor[]
 ): void {
   if (
     messages.some((message) =>
-      message.attachments?.some(
-        (attachment) =>
-          isPrimaryReportFileDescriptor(attachment) && !hasWellFormedReportBundleBinding(attachment)
-      )
+      message.attachments?.some((attachment) => isUnavailablePrimaryReportFile(attachment))
     )
   ) {
     throw new Error(UNVERIFIED_REPORT_BUNDLE_MESSAGE)

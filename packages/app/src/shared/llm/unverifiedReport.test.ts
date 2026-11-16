@@ -3,7 +3,8 @@ import {
   UNVERIFIED_REPORT_BUNDLE_MESSAGE,
   assertNoUnverifiedPrimaryReports,
   hasWellFormedReportBundleBinding,
-  isPrimaryReportFileDescriptor
+  isPrimaryReportFileDescriptor,
+  isUnavailablePrimaryReportFile
 } from './unverifiedReport'
 
 const valid = `rb1.${'Ab0_-'.repeat(8)}xyz`
@@ -75,5 +76,24 @@ describe('assertNoUnverifiedPrimaryReports', () => {
     expect(isPrimaryReportFileDescriptor({ type: 'file', reportBundleRole: 'report-image' })).toBe(
       false
     )
+  })
+})
+
+describe('isUnavailablePrimaryReportFile', () => {
+  it('marks only primary report files without a well-formed binding', () => {
+    const primary = { type: 'file', reportBundleRole: 'primary-report' }
+    expect(isUnavailablePrimaryReportFile(primary)).toBe(true)
+    expect(isUnavailablePrimaryReportFile({ ...primary, reportBundleBinding: '' })).toBe(true)
+    expect(
+      isUnavailablePrimaryReportFile({ ...primary, reportBundleBinding: `rb1.${'a'.repeat(42)}` })
+    ).toBe(true)
+    expect(isUnavailablePrimaryReportFile({ ...primary, reportBundleBinding: valid })).toBe(false)
+    expect(isUnavailablePrimaryReportFile({ type: 'file' })).toBe(false)
+    expect(isUnavailablePrimaryReportFile({ type: 'file', reportBundleRole: 'report-image' })).toBe(
+      false
+    )
+    expect(
+      isUnavailablePrimaryReportFile({ type: 'image', reportBundleRole: 'primary-report' })
+    ).toBe(false)
   })
 })

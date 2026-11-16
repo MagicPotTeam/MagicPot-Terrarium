@@ -53,7 +53,8 @@ import { DEFAULT_CHAT_IMAGE_COUNT_LIMIT } from '@shared/llm/chatImageCountLimit'
 import { assertExplicitUserImageCount } from '../chatExplicitImageCount'
 import {
   assertNoUnverifiedPrimaryReports,
-  isPrimaryReportFileDescriptor
+  isPrimaryReportFileDescriptor,
+  isUnavailablePrimaryReportFile
 } from '@shared/llm/unverifiedReport'
 import { normalizeLocalMediaUrl, getDownloadFileNameFromUrl } from '../chatPageShared'
 import {
@@ -1898,9 +1899,18 @@ const FileAttachmentCard: React.FC<{
 }> = ({ attachment, ocrResult, onDownloadAttachment, t, theme }) => {
   const folderBodyColor = theme.palette.mode === 'light' ? '#f8fafc' : '#1f2937'
   const folderTabColor = theme.palette.mode === 'light' ? '#eef2ff' : '#111827'
+  // A report the request path refuses (no MAIN binding) is shown muted with a short caption;
+  // opening, dragging and downloading the file itself stay as they are.
+  const reportUnavailable = isUnavailablePrimaryReportFile(attachment)
+  const metaLabel = buildFileMetaLabel({
+    fileName: attachment.fileName,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes
+  })
 
   return (
     <Box
+      aria-disabled={reportUnavailable || undefined}
       draggable={Boolean(attachment.url)}
       onDragStart={(event) => {
         if (!attachment.url) return
@@ -1923,6 +1933,7 @@ const FileAttachmentCard: React.FC<{
         boxShadow: '0 10px 24px rgba(15,23,42,0.14)',
         cursor: 'default',
         overflow: 'visible',
+        ...(reportUnavailable ? { opacity: getAgentColumnTokens(theme).disabledOpacity } : null),
         '&::before': {
           content: '""',
           position: 'absolute',
@@ -1952,11 +1963,14 @@ const FileAttachmentCard: React.FC<{
             color="text.secondary"
             sx={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
           >
-            {buildFileMetaLabel({
-              fileName: attachment.fileName,
-              mimeType: attachment.mimeType,
-              sizeBytes: attachment.sizeBytes
-            })}
+            {reportUnavailable
+              ? [
+                  t('chat.report_unavailable', { defaultValue: 'Unavailable: unverified source' }),
+                  metaLabel
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
+              : metaLabel}
           </Typography>
         </Box>
         <Typography
