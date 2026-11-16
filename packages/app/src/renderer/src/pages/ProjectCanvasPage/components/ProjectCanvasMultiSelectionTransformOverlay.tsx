@@ -855,13 +855,14 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
         zIndex: 6
       }}
     >
+      {/* Plain elements: one drag surface per selected item, so no styled wrapper per item. */}
       {itemDragSurfaces.map((surface) => (
-        <Box
+        <div
           key={surface.id}
           data-canvas-multi-select-drag-surface="true"
           data-canvas-multi-select-drag-surface-item-id={surface.id}
           onPointerDown={startDrag}
-          sx={{
+          style={{
             position: 'absolute',
             left: surface.left,
             top: surface.top,
@@ -901,4 +902,41 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
   )
 }
 
-export default React.memo(ProjectCanvasMultiSelectionTransformOverlay)
+/**
+ * A pan only moves the overlay box, and the registered viewport callback already writes its
+ * position. So a committed stagePos change alone does not re-render the overlay when that callback
+ * and the stage refs are present. A scale change still re-renders it: the drag surfaces are sized in
+ * screen pixels.
+ */
+function areMultiSelectionTransformOverlayPropsEqual(
+  previousProps: Readonly<ProjectCanvasMultiSelectionTransformOverlayProps>,
+  nextProps: Readonly<ProjectCanvasMultiSelectionTransformOverlayProps>
+) {
+  const followsViewportImperatively =
+    nextProps.registerViewportCallback != null &&
+    nextProps.stagePosRef != null &&
+    nextProps.stageScaleRef != null
+  const stagePosEqual =
+    previousProps.stagePos === nextProps.stagePos ||
+    followsViewportImperatively ||
+    (previousProps.stagePos.x === nextProps.stagePos.x &&
+      previousProps.stagePos.y === nextProps.stagePos.y)
+
+  return (
+    stagePosEqual &&
+    previousProps.canvasContainerRef === nextProps.canvasContainerRef &&
+    previousProps.items === nextProps.items &&
+    previousProps.livePreviewSyncItemIds === nextProps.livePreviewSyncItemIds &&
+    previousProps.onPreviewBoundsChange === nextProps.onPreviewBoundsChange &&
+    previousProps.registerViewportCallback === nextProps.registerViewportCallback &&
+    previousProps.stagePosRef === nextProps.stagePosRef &&
+    previousProps.stageScale === nextProps.stageScale &&
+    previousProps.stageScaleRef === nextProps.stageScaleRef &&
+    previousProps.onTransformEnd === nextProps.onTransformEnd
+  )
+}
+
+export default React.memo(
+  ProjectCanvasMultiSelectionTransformOverlay,
+  areMultiSelectionTransformOverlayPropsEqual
+)

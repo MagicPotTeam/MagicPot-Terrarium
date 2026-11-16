@@ -828,6 +828,50 @@ describe('ProjectCanvasMultiSelectionTransformOverlay', () => {
     })
   })
 
+  it('does not re-render for a committed pan when it follows the viewport imperatively, but does for a zoom', () => {
+    const registerViewportCallback = vi.fn(
+      (_callback: (pos: { x: number; y: number }, scale: number) => void) => vi.fn()
+    )
+    const firstItem = createImageItem('image-1', 100, 140, 200, 120)
+    const secondItem = createImageItem('image-2', 360, 180, 100, 80)
+    const items = [firstItem, secondItem]
+    const canvasContainerRef = React.createRef<HTMLDivElement>()
+    const stagePosRef = { current: { x: 0, y: 0 } }
+    const stageScaleRef = { current: 1 }
+    const onTransformEnd = vi.fn()
+    const renderOverlay = (stagePos: { x: number; y: number }, stageScale: number) => (
+      <div data-testid="canvas-root" ref={canvasContainerRef}>
+        <ProjectCanvasMultiSelectionTransformOverlay
+          canvasContainerRef={canvasContainerRef}
+          items={items}
+          registerViewportCallback={registerViewportCallback}
+          stagePos={stagePos}
+          stagePosRef={stagePosRef}
+          stageScale={stageScale}
+          stageScaleRef={stageScaleRef}
+          onTransformEnd={onTransformEnd}
+        />
+      </div>
+    )
+
+    const { rerender } = render(renderOverlay({ x: 0, y: 0 }, 1))
+    expect(registerViewportCallback).toHaveBeenCalledTimes(1)
+
+    // A pan commits a new position object; the overlay already follows it through the callback.
+    stagePosRef.current = { x: 40, y: 25 }
+    rerender(renderOverlay({ x: 40, y: 25 }, 1))
+    expect(registerViewportCallback).toHaveBeenCalledTimes(1)
+
+    // A zoom changes the screen size of the drag surfaces, so the overlay renders again.
+    stageScaleRef.current = 2
+    rerender(renderOverlay({ x: 40, y: 25 }, 2))
+    expect(registerViewportCallback).toHaveBeenCalledTimes(2)
+    const surface = document.querySelector<HTMLElement>(
+      `[data-canvas-multi-select-drag-surface-item-id="${secondItem.id}"]`
+    )
+    expect(surface).toHaveStyle({ left: '520px', top: '80px', width: '200px', height: '160px' })
+  })
+
   it('disables resize handles when the multi-selection includes rotation', () => {
     const onTransformEnd = vi.fn()
     const rotatedItem = { ...createImageItem('image-1', 100, 140, 200, 120), rotation: 18 }

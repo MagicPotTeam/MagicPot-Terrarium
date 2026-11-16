@@ -96,8 +96,33 @@ const PROJECT_CANVAS_STAGE_LAYER_ROOT_SX = {
   height: '100%',
   [`&.${PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS} [data-project-canvas-proxy-layer="dom"] *`]: {
     pointerEvents: 'none !important'
+  },
+  // The multi-selection outline stays visible while the viewport moves; its handles are hidden
+  // and its drag surfaces are inert until the gesture ends (as when the overlay was unmounted).
+  [`&.${PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS} [data-canvas-multi-select-drag-surface]`]: {
+    pointerEvents: 'none !important'
+  },
+  [`&.${PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS} [data-canvas-multi-select-handle]`]: {
+    visibility: 'hidden',
+    pointerEvents: 'none !important'
   }
 } as const
+const PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE: React.CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  overflow: 'visible',
+  pointerEvents: 'none',
+  transformOrigin: '0 0'
+}
+
+function areCanvasItemListsShallowEqual(left: readonly CanvasItem[], right: readonly CanvasItem[]) {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false
+  }
+  return true
+}
 
 function getProjectCanvasDomImageDeviceScale() {
   return Math.min(4, Math.max(1, window.devicePixelRatio || 1))
@@ -1199,6 +1224,44 @@ export default function ProjectCanvasPageStageScene(props: any) {
       )
     }
   }, [flushPendingWebglRuntimeState, webglImageLayerReady])
+  // The scene overlay (group outlines, drawing preview, marquee) stays mounted through a gesture.
+  // It is laid out for the committed viewport, so while the viewport moves its wrapper gets the
+  // transform from the committed to the live viewport. Only done when it shows something.
+  const sceneOverlayFollowerRef = React.useRef<HTMLDivElement | null>(null)
+  const sceneOverlayCommittedViewportRef = React.useRef({
+    x: stagePos.x,
+    y: stagePos.y,
+    scale: stageScale
+  })
+  const sceneOverlayLiveViewportRef = React.useRef<{ x: number; y: number; scale: number } | null>(
+    null
+  )
+  const sceneOverlayHasContentRef = React.useRef(false)
+  const syncSceneOverlayFollowerTransform = React.useCallback(() => {
+    const follower = sceneOverlayFollowerRef.current
+    if (!follower) {
+      return
+    }
+
+    const committed = sceneOverlayCommittedViewportRef.current
+    const live = sceneOverlayLiveViewportRef.current
+    if (
+      !sceneOverlayHasContentRef.current ||
+      !live ||
+      !(committed.scale > 0) ||
+      (live.x === committed.x && live.y === committed.y && live.scale === committed.scale)
+    ) {
+      if (follower.style.transform) {
+        follower.style.removeProperty('transform')
+      }
+      return
+    }
+
+    const relativeScale = live.scale / committed.scale
+    follower.style.transform = `translate3d(${live.x - relativeScale * committed.x}px, ${
+      live.y - relativeScale * committed.y
+    }px, 0) scale(${relativeScale})`
+  }, [])
   React.useEffect(() => {
     if (!registerViewportCallback) {
       return
@@ -1210,8 +1273,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
         syncViewport(pos, scale)
       }
       canvas2DFallbackLayerRef.current?.syncViewport(pos, scale)
+      sceneOverlayLiveViewportRef.current = { x: pos.x, y: pos.y, scale }
+      syncSceneOverlayFollowerTransform()
     })
-  }, [registerViewportCallback])
+  }, [registerViewportCallback, syncSceneOverlayFollowerTransform])
   const stageLayerRootRef = React.useRef<HTMLDivElement | null>(null)
   const isViewportInteractingClassActiveRef = React.useRef(isViewportInteracting)
   const syncViewportInteractingClass = React.useCallback((active: boolean) => {
@@ -1707,10 +1772,36 @@ export default function ProjectCanvasPageStageScene(props: any) {
       onLiveMultiSelectionBoundsChange?.(null)
     }
   }, [multiSelectionTransformItems.length, onLiveMultiSelectionBoundsChange, tool])
+  // visibleItems is a new array after every committed viewport change; keep the same selection
+  // array when it holds the same items so the selection chrome does not re-render at gesture end.
+  const stableMultiSelectionTransformItemsRef = React.useRef<CanvasItem[]>(
+    multiSelectionTransformItems
+  )
+  if (
+    !areCanvasItemListsShallowEqual(
+      stableMultiSelectionTransformItemsRef.current,
+      multiSelectionTransformItems
+    )
+  ) {
+    stableMultiSelectionTransformItemsRef.current = multiSelectionTransformItems
+  }
+  const stableMultiSelectionTransformItems = stableMultiSelectionTransformItemsRef.current
+  const handleMultiSelectionTransformEnd = React.useCallback(
+    (updates: Array<{ id: string; attrs: Partial<CanvasItem> }>) => {
+      const updateById = new Map(updates.map((update) => [update.id, update]))
+      setItemsWithHistory((prev: CanvasItem[]) =>
+        prev.map((item) => {
+          const update = updateById.get(item.id)
+          return update ? ({ ...item, ...update.attrs } as CanvasItem) : item
+        })
+      )
+    },
+    [setItemsWithHistory]
+  )
   const multiSelectionLivePreviewSyncItemIds = React.useMemo(() => {
     const itemIds = new Set<string>()
 
-    for (const item of multiSelectionTransformItems) {
+    for (const item of stableMultiSelectionTransformItems) {
       if (item.type === 'image') {
         if (domPreviewSyncParentIdSet.has(item.id)) {
           itemIds.add(item.id)
@@ -1724,7 +1815,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     }
 
     return itemIds
-  }, [domPreviewSyncParentIdSet, multiSelectionTransformItems])
+  }, [domPreviewSyncParentIdSet, stableMultiSelectionTransformItems])
   const selectedSinglePlaceholderItem = React.useMemo<CanvasPlaceholderItem | null>(() => {
     if (
       tool !== 'select' ||
@@ -2281,6 +2372,18 @@ export default function ProjectCanvasPageStageScene(props: any) {
     stageRef,
     stageScale
   })
+  const sceneOverlayHasContent = liveSelectionOverlayGroups.length > 0 || drawingState != null
+  React.useLayoutEffect(() => {
+    sceneOverlayCommittedViewportRef.current = { x: stagePos.x, y: stagePos.y, scale: stageScale }
+    sceneOverlayHasContentRef.current = sceneOverlayHasContent
+    syncSceneOverlayFollowerTransform()
+  }, [
+    sceneOverlayHasContent,
+    stagePos.x,
+    stagePos.y,
+    stageScale,
+    syncSceneOverlayFollowerTransform
+  ])
   const isHandToolCaptureRef = React.useRef(false)
   React.useEffect(() => {
     const container = canvasContainerRef.current
@@ -3762,12 +3865,11 @@ export default function ProjectCanvasPageStageScene(props: any) {
             />
           </div>
           {tool === 'select' &&
-            !isViewportInteracting &&
             !suppressSelectionChromeAfterMarquee &&
-            multiSelectionTransformItems.length > 1 && (
+            stableMultiSelectionTransformItems.length > 1 && (
               <ProjectCanvasMultiSelectionTransformOverlay
                 canvasContainerRef={canvasContainerRef}
-                items={multiSelectionTransformItems}
+                items={stableMultiSelectionTransformItems}
                 livePreviewSyncItemIds={multiSelectionLivePreviewSyncItemIds}
                 onPreviewBoundsChange={onLiveMultiSelectionBoundsChange}
                 registerViewportCallback={registerViewportCallback}
@@ -3775,17 +3877,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
                 stagePosRef={stagePosRef}
                 stageScale={stageScale}
                 stageScaleRef={stageScaleRef}
-                onTransformEnd={(updates) => {
-                  setItemsWithHistory((prev: CanvasItem[]) =>
-                    prev.map((item) => {
-                      const update = updates.find((candidate) => candidate.id === item.id)
-                      return update ? ({ ...item, ...update.attrs } as CanvasItem) : item
-                    })
-                  )
-                }}
+                onTransformEnd={handleMultiSelectionTransformEnd}
               />
             )}
-          {!isViewportInteracting && (
+          <div
+            ref={sceneOverlayFollowerRef}
+            data-project-canvas-scene-overlay-follower="true"
+            style={PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE}
+          >
             <ProjectCanvasPageSceneOverlay
               annotationColor={annotationColor}
               annotationFillOpacity={annotationFillOpacity}
@@ -3800,7 +3899,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
               stageScale={stageScale}
               tool={tool}
             />
-          )}
+          </div>
         </Box>
       </MaxSizeLayout>
     </Box>

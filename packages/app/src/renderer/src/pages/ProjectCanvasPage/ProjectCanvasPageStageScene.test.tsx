@@ -1425,7 +1425,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(updateSelection?.(new Set())).toEqual(new Set([items[0].id]))
   })
 
-  it('keeps WebGL image hit proxies mounted during viewport interaction and suspends multi-selection transform chrome', async () => {
+  it('keeps WebGL image hit proxies and multi-selection transform chrome mounted during viewport interaction', async () => {
     const selectedItem = createImageItem('image-selected')
     const siblingItem = createImageItem('image-sibling')
     siblingItem.x = 420
@@ -1455,7 +1455,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       'data-project-canvas-proxy-layer-candidate-count',
       '2'
     )
-    expect(screen.queryByTestId('mock-multi-selection-transform-overlay')).toBeNull()
+    expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBeInTheDocument()
 
     rerender(
       <ProjectCanvasPageStageScene
@@ -1524,6 +1524,159 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(screen.getByTestId(`canvas-placeholder-${firstItem.id}`)).toBe(firstProxyNode)
     expect(isForcedPointerEventsNone(firstProxyNode)).toBe(false)
     expect(canvasPlaceholderRenderCounts.get(firstItem.id)).toBe(rendersBeforeGesture)
+  })
+
+  it('keeps the selection overlays mounted through a gesture and only makes the multi-selection handles inert', async () => {
+    const firstItem = createImageItem('image-selection-gesture-first')
+    const secondItem = createImageItem('image-selection-gesture-second')
+    secondItem.x = 420
+    setMockWebGLRuntime({ loadedIds: [firstItem.id, secondItem.id] })
+    const selectedIds = new Set([firstItem.id, secondItem.id])
+    const baseProps = createBaseProps([firstItem, secondItem])
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={selectedIds} />
+    )
+
+    const overlayNode = await screen.findByTestId('mock-multi-selection-transform-overlay')
+    const sceneOverlayNode = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-scene-overlay="dom"]')
+    expect(sceneOverlayNode).not.toBeNull()
+    const overlayItems = latestMultiSelectionTransformOverlayProps?.items
+    const overlayTransformEnd = latestMultiSelectionTransformOverlayProps?.onTransformEnd
+    const dragSurface = overlayNode.querySelector(
+      '[data-canvas-multi-select-drag-surface="true"]'
+    ) as HTMLElement
+    dragSurface.style.pointerEvents = 'auto'
+    expect(isForcedPointerEventsNone(dragSurface)).toBe(false)
+
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} isViewportInteracting selectedIds={selectedIds} />
+    )
+
+    expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBe(overlayNode)
+    expect(
+      screen
+        .getByTestId('project-canvas-stage-root')
+        .querySelector('[data-project-canvas-scene-overlay="dom"]')
+    ).toBe(sceneOverlayNode)
+    expect(isForcedPointerEventsNone(dragSurface)).toBe(true)
+
+    // Gesture end: same items in a new visibleItems array and a new committed position.
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        visibleItems={[...baseProps.visibleItems]}
+        isViewportInteracting={false}
+        selectedIds={selectedIds}
+        stagePos={{ x: 30, y: -10 }}
+      />
+    )
+
+    expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBe(overlayNode)
+    expect(latestMultiSelectionTransformOverlayProps?.items).toBe(overlayItems)
+    expect(latestMultiSelectionTransformOverlayProps?.onTransformEnd).toBe(overlayTransformEnd)
+    expect(isForcedPointerEventsNone(dragSurface)).toBe(false)
+
+    const handle = document.createElement('div')
+    handle.setAttribute('data-canvas-multi-select-handle', 'top-left')
+    handle.style.pointerEvents = 'auto'
+    overlayNode.appendChild(handle)
+    expect(isForcedPointerEventsNone(handle)).toBe(false)
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting
+        selectedIds={selectedIds}
+        stagePos={{ x: 30, y: -10 }}
+      />
+    )
+    expect(isForcedPointerEventsNone(handle)).toBe(true)
+  })
+
+  it('commits a multi-selection transform through one history update', async () => {
+    const firstItem = createImageItem('image-multi-commit-first')
+    const secondItem = createImageItem('image-multi-commit-second')
+    secondItem.x = 420
+    setMockWebGLRuntime({ loadedIds: [firstItem.id, secondItem.id] })
+    const baseProps = createBaseProps([firstItem, secondItem])
+
+    render(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        selectedIds={new Set([firstItem.id, secondItem.id])}
+      />
+    )
+    await screen.findByTestId('mock-multi-selection-transform-overlay')
+
+    const onTransformEnd = latestMultiSelectionTransformOverlayProps?.onTransformEnd as (
+      updates: Array<{ id: string; attrs: Partial<CanvasItem> }>
+    ) => void
+    onTransformEnd([{ id: secondItem.id, attrs: { x: 500, y: 12 } }])
+
+    const historyUpdate = (baseProps.setItemsWithHistory as ReturnType<typeof vi.fn>).mock.calls.at(
+      -1
+    )?.[0] as (previous: CanvasItem[]) => CanvasItem[]
+    const [nextFirst, nextSecond] = historyUpdate([firstItem, secondItem])
+    expect(nextFirst).toBe(firstItem)
+    expect(nextSecond).toEqual({ ...secondItem, x: 500, y: 12 })
+  })
+
+  it('moves the mounted scene overlay with the live viewport and resets it at the committed one', async () => {
+    const item = createImageItem('image-scene-overlay-follow')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    const viewportCallbacks = new Set<(pos: { x: number; y: number }, scale: number) => void>()
+    const registerViewportCallback = vi.fn(
+      (callback: (pos: { x: number; y: number }, scale: number) => void) => {
+        viewportCallbacks.add(callback)
+        callback({ x: 0, y: 0 }, 1)
+        return () => {
+          viewportCallbacks.delete(callback)
+        }
+      }
+    )
+    const drawingState = { shape: 'rect', startX: 0, startY: 0, x: 10, y: 10, w: 40, h: 30 }
+    const baseProps = {
+      ...createBaseProps([item]),
+      drawingState,
+      tool: 'annotate',
+      selectedIds: new Set<string>(),
+      registerViewportCallback
+    }
+
+    const { rerender } = render(<ProjectCanvasPageStageScene {...baseProps} />)
+    await waitFor(() => {
+      expect(viewportCallbacks.size).toBeGreaterThan(0)
+    })
+    const follower = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-scene-overlay-follower="true"]') as HTMLElement
+    expect(follower.style.transform).toBe('')
+
+    act(() => {
+      viewportCallbacks.forEach((callback) => callback({ x: 50, y: 20 }, 2))
+    })
+    expect(follower.style.transform).toBe('translate3d(50px, 20px, 0) scale(2)')
+
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} stagePos={{ x: 50, y: 20 }} stageScale={2} />
+    )
+    expect(follower.style.transform).toBe('')
+
+    // Nothing to show: the overlay is not moved at all.
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        drawingState={null}
+        stagePos={{ x: 50, y: 20 }}
+        stageScale={2}
+      />
+    )
+    act(() => {
+      viewportCallbacks.forEach((callback) => callback({ x: 90, y: 20 }, 2))
+    })
+    expect(follower.style.transform).toBe('')
   })
 
   it('makes proxies inert as soon as the viewport driver reports a gesture, before React commits it', async () => {
