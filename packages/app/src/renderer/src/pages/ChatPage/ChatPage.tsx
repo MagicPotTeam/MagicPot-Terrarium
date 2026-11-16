@@ -2472,14 +2472,31 @@ const ChatPage: React.FC<ChatPageProps> = ({
     updatedAt: 0
   })
 
-  const markComposerDraftMutated = useCallback(() => {
-    if (isApplyingDraftRef.current) return
-    composerDraftSessionIdRef.current = currentSessionIdRef.current
-    composerDraftMutationRef.current = {
-      sessionId: currentSessionIdRef.current,
-      updatedAt: Date.now()
-    }
-  }, [])
+  // How often each thread's composer content was changed by the user or an input (not by
+  // loading its draft). A composer send compares it to tell whether the thread's draft is
+  // still the text it submitted.
+  const composerDraftEditCountRef = useRef(new Map<string, number>())
+
+  // The owner and the applying flag are read when the setter is called: a setState updater
+  // can run later, in a render after a thread switch, and must not stamp the new thread.
+  const markComposerDraftMutated = useCallback(
+    (
+      ownerSessionId: string | null = currentSessionIdRef.current,
+      applyingDraft: boolean = isApplyingDraftRef.current
+    ) => {
+      if (applyingDraft) return
+      composerDraftSessionIdRef.current = ownerSessionId
+      composerDraftMutationRef.current = {
+        sessionId: ownerSessionId,
+        updatedAt: Date.now()
+      }
+      if (ownerSessionId) {
+        const edits = composerDraftEditCountRef.current
+        edits.set(ownerSessionId, (edits.get(ownerSessionId) ?? 0) + 1)
+      }
+    },
+    []
+  )
 
   const clearScheduledInputValueCommit = useCallback(() => {
     if (inputValueCommitTimerRef.current != null) {
@@ -2543,11 +2560,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useEffect(() => clearScheduledInputValueCommit, [clearScheduledInputValueCommit])
   const setPendingAttachments = useCallback<React.Dispatch<React.SetStateAction<ChatAttachment[]>>>(
     (value) => {
+      const ownerSessionId = currentSessionIdRef.current
+      const applyingDraft = isApplyingDraftRef.current
       setPendingAttachmentsState((prev) => {
         const next = typeof value === 'function' ? value(prev) : value
         pendingAttachmentsRef.current = next
         if (next !== prev) {
-          markComposerDraftMutated()
+          markComposerDraftMutated(ownerSessionId, applyingDraft)
         }
         return next
       })
@@ -2556,11 +2575,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
   const setPendingHiddenContext = useCallback<React.Dispatch<React.SetStateAction<string>>>(
     (value) => {
+      const ownerSessionId = currentSessionIdRef.current
+      const applyingDraft = isApplyingDraftRef.current
       setPendingHiddenContextState((prev) => {
         const next = typeof value === 'function' ? value(prev) : value
         pendingHiddenContextRef.current = next
         if (next !== prev) {
-          markComposerDraftMutated()
+          markComposerDraftMutated(ownerSessionId, applyingDraft)
         }
         return next
       })
@@ -6187,6 +6208,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const msgHiddenContext = (
         overrides ? overrides.hiddenContext : pendingHiddenContextRef.current
       )?.trim()
+      // A composer submission was read from the visible composer of targetSessionId. Read
+      // before the first await: whether the selection moved and whether the user changed
+      // this thread's draft while the send was being prepared.
+      const isComposerSubmission = !overrides || overrides.composerSubmission === true
+      const composerSelectionEpoch = sessionSelectionEpochRef.current
+      const composerDraftEditCount = targetSessionId
+        ? (composerDraftEditCountRef.current.get(targetSessionId) ?? 0)
+        : 0
 
       if (!cs || !targetSessionId) return
       if (overrides?.isTeamMessageCurrent && !overrides.isTeamMessageCurrent()) return
@@ -6831,22 +6860,49 @@ const ChatPage: React.FC<ChatPageProps> = ({
           throw new Error('Team ended or changed before dispatch.')
         }
       }
-      const userMsgUpdater = withLatestContextCompression((prev: ChatSession[]) =>
-        applyUserMessageToSession(prev, {
+      // Who owns what once the turn is accepted. Without a thread switch since Send, the
+      // composer is the submission's, as before. After a switch, the visible composer may
+      // belong to another thread: it is cleared only when it shows targetSessionId again
+      // and the user did not change that thread's draft meanwhile (the switch saved the
+      // submitted text as its draft, and loading it back put the same text there).
+      // Likewise targetSessionId's stored draft is consumed only when it is still the
+      // submitted text; a newer draft the user wrote after Send is kept.
+      const composerNotSwitched =
+        currentSessionIdRef.current === targetSessionId &&
+        sessionSelectionEpochRef.current === composerSelectionEpoch
+      const targetDraftUnchanged =
+        (composerDraftEditCountRef.current.get(targetSessionId) ?? 0) === composerDraftEditCount
+      const consumesTargetDraft =
+        isComposerSubmission && (composerNotSwitched || targetDraftUnchanged)
+      const clearsLiveComposer =
+        consumesTargetDraft &&
+        currentSessionIdRef.current === targetSessionId &&
+        (composerNotSwitched || composerDraftSessionIdRef.current === targetSessionId)
+      const keepsTargetDraft = isComposerSubmission && !consumesTargetDraft
+      const userMsgUpdater = withLatestContextCompression((prev: ChatSession[]) => {
+        const next = applyUserMessageToSession(prev, {
           sessionId: targetSessionId,
           userMessage,
           baseMessages: overrides?.baseMessages,
           titleSource: userMessage.content || msgContent
         })
-      )
+        const keptDraft = keepsTargetDraft
+          ? prev.find((session) => session.id === targetSessionId)?.draft
+          : undefined
+        return keptDraft
+          ? next.map((session) =>
+              session.id === targetSessionId ? { ...session, draft: keptDraft } : session
+            )
+          : next
+      })
       // The previous async preparation already checked preflight; from run creation
       // through accepting the local user turn this path has no await.
       // Only the active composer owner may cancel its scheduled draft save;
       // background/team sends can target a different session with unsent text.
-      if (!overrides || overrides.composerSubmission) clearScheduledDraftPersistence()
+      if (clearsLiveComposer) clearScheduledDraftPersistence()
       if (targetSessionId) {
         // A non-composer send does not own the unsent composer backup or its in-flight guard.
-        if (!overrides || overrides.composerSubmission) {
+        if (consumesTargetDraft) {
           markTransientDraftCleared(storageScope, targetSessionId)
           writeSessionDraftBackup(targetSessionId, Date.now(), undefined, storageScope)
         }
@@ -6854,7 +6910,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setSessions(userMsgUpdater)
       overrides?.onComposerSubmissionAccepted?.()
       overrides?.onQueuedComposerAccepted?.()
-      if (!overrides || overrides.composerSubmission) {
+      if (clearsLiveComposer) {
         inputValueRef.current = ''
         setInputValue('')
         // The debounced parent value can still be empty after a rapid send.

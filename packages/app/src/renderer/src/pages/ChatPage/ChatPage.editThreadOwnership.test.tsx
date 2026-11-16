@@ -34,7 +34,12 @@ const f = vi.hoisted(() => ({
   config: null as Config | null,
   sessions: [] as ChatSession[],
   props: null as null | ListProps,
-  composer: null as null | { onInputChange: (value: string) => void },
+  composer: null as null | {
+    onInputChange: (value: string) => void
+    onSend: () => void
+    onRemoveAttachment: (index: number) => void
+    pendingAttachments: ChatAttachment[]
+  },
   selectSession: null as null | ((id: string) => void),
   receive: vi.fn(),
   materialize: vi.fn(),
@@ -148,6 +153,9 @@ vi.mock('./components/ChatComposer', () => ({
   default: function Composer(props: {
     inputValue: string
     onInputChange: (value: string) => void
+    onSend: () => void
+    onRemoveAttachment: (index: number) => void
+    pendingAttachments: ChatAttachment[]
   }) {
     f.composer = props
     return <input data-testid="composer-input" value={props.inputValue} readOnly />
@@ -612,6 +620,9 @@ describe('ChatPage edit form thread ownership', () => {
       const older = makeSession('session-b')
       older.draft = { ...older.draft!, updatedAt: Date.now() - 60_000 }
       await renderPage([makeSession('session-a'), older])
+      // This pins a React scheduling window as jsdom runs it (passive effects of a render
+      // committed outside act run in a later task). If a React upgrade closes that window,
+      // the test passes without exercising the guard: re-check it against the old code.
       // Typing in A commits A's draft through its debounced timers, outside any act scope,
       // so the render that carries A's new draft leaves its passive effects pending for a
       // later task. The switch to B is clicked in exactly that window.
@@ -661,6 +672,165 @@ describe('ChatPage edit form thread ownership', () => {
       expect(storedDraft('session-a')).toBe('session-a composer draft')
       await selectSession('session-b')
       expect(storedDraft('session-b')).toBe('session-b composer draft')
+    })
+
+    it("does not stamp B's composer with an attachment change made in A whose update runs after the switch", async () => {
+      const image = (name: string): ChatAttachment => ({
+        type: 'image',
+        url: `data:image/png;base64,${btoa(name)}`,
+        mimeType: 'image/png',
+        fileName: name
+      })
+      const a = makeSession('session-a')
+      a.draft = { ...a.draft!, pendingAttachments: [image('a-1.png'), image('a-2.png')] }
+      const b = makeSession('session-b')
+      b.draft = { ...b.draft!, updatedAt: Date.now() - 60_000 }
+      await renderPage([a, b])
+      await waitFor(() => expect(f.composer!.pendingAttachments).toHaveLength(2))
+      // React computes the second removal's state update only in the next render, which
+      // runs after the switch has already moved the selection to B.
+      act(() => {
+        f.composer!.onRemoveAttachment(0)
+        f.composer!.onRemoveAttachment(0)
+        f.selectSession!('session-b')
+      })
+      await waitFor(() => expect(sessionId()).toBe('session-b'))
+      await waitFor(() =>
+        expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
+      )
+      expect(f.composer!.pendingAttachments).toEqual([])
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      })
+      expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
+      expect(f.composer!.pendingAttachments).toEqual([])
+      expect(storedDraft('session-b')).toBe('session-b composer draft')
+      expect(
+        f.sessions.find((session) => session.id === 'session-b')?.draft?.pendingAttachments
+      ).toEqual([])
+    })
+  })
+
+  // An ordinary composer send reads its text, images and hidden context from the visible
+  // composer, then prepares them across several awaits (here: video-frame extraction).
+  // When the turn is accepted, the composer is cleared only if it still holds that
+  // submission: a send for A never clears B's composer or B's stored draft, and a draft
+  // the user changed in A after pressing Send is kept.
+  describe('a composer send prepared in A while the selection moves', () => {
+    const storedDraft = (id: string) => f.sessions.find((session) => session.id === id)?.draft
+    const composerValue = () => (screen.getByTestId('composer-input') as HTMLInputElement).value
+    const sentInA = [
+      'session-a message 0',
+      'session-a reply 0',
+      'session-a message 1',
+      'session-a composer draft',
+      'fixture reply'
+    ]
+    const untouchedB = ['session-b message 0', 'session-b reply 0', 'session-b message 1']
+    const holdPreparation = () => {
+      const gate = deferred<void>()
+      f.augment.mockImplementation(async (attachments: unknown, content: string) => {
+        await gate.promise
+        return { attachments, content }
+      })
+      return gate
+    }
+    const sendFromComposer = async () => {
+      act(() => f.composer!.onSend())
+      await waitFor(() => expect(f.augment).toHaveBeenCalledOnce())
+    }
+    const release = async (gate: { resolve: (value: void) => void }) => {
+      await act(async () => gate.resolve())
+      await waitFor(() => expect(storedContents('session-a')).toEqual(sentInA))
+      // Past the draft persistence delay, so an empty composer would have been saved.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      })
+    }
+    const openA = async (composer: string) => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open session-a' }))
+      await waitFor(() => expect(sessionId()).toBe('session-a'))
+      await waitFor(() => expect(composerValue()).toBe(composer))
+    }
+
+    it("sends A's text into A and leaves B's composer and stored draft as they were", async () => {
+      await renderPage()
+      const gate = holdPreparation()
+      await sendFromComposer()
+      await selectSession('session-b')
+      await release(gate)
+      expect(requestCount()).toBe(1)
+      expect(sessionId()).toBe('session-b')
+      expect(composerValue()).toBe('session-b composer draft')
+      expect(storedDraft('session-b')?.inputValue).toBe('session-b composer draft')
+      expect(storedContents('session-b')).toEqual(untouchedB)
+      // A's draft was exactly the sent text: it is consumed, not shown again for a resend.
+      expect(storedDraft('session-a')).toBeUndefined()
+      await openA('')
+      await selectSession('session-b')
+      expect(storedDraft('session-b')?.inputValue).toBe('session-b composer draft')
+      expect(requestCount()).toBe(1)
+    })
+
+    it("keeps the images and hidden context of B's composer and stored draft", async () => {
+      const image: ChatAttachment = {
+        type: 'image',
+        url: 'data:image/png;base64,iVBORw0KGgo=',
+        mimeType: 'image/png',
+        fileName: 'session-b.png'
+      }
+      const b = makeSession('session-b')
+      b.draft = {
+        ...b.draft!,
+        pendingAttachments: [image],
+        pendingHiddenContext: 'session-b hidden'
+      }
+      await renderPage([makeSession('session-a'), b])
+      const gate = holdPreparation()
+      await sendFromComposer()
+      await selectSession('session-b')
+      await waitFor(() => expect(f.composer!.pendingAttachments).toHaveLength(1))
+      await release(gate)
+      expect(composerValue()).toBe('session-b composer draft')
+      expect(f.composer!.pendingAttachments.map((attachment) => attachment.fileName)).toEqual([
+        'session-b.png'
+      ])
+      expect(storedDraft('session-b')).toMatchObject({
+        inputValue: 'session-b composer draft',
+        pendingAttachments: [{ fileName: 'session-b.png', url: image.url }],
+        pendingHiddenContext: 'session-b hidden'
+      })
+      expect(storedContents('session-b')).toEqual(untouchedB)
+    })
+
+    it("keeps the newer text the user typed in A after pressing Send, as A's draft", async () => {
+      await renderPage()
+      const gate = holdPreparation()
+      await sendFromComposer()
+      act(() => f.composer!.onInputChange('session-a newer text'))
+      await selectSession('session-b')
+      await release(gate)
+      expect(composerValue()).toBe('session-b composer draft')
+      expect(storedDraft('session-b')?.inputValue).toBe('session-b composer draft')
+      expect(storedDraft('session-a')?.inputValue).toBe('session-a newer text')
+      await openA('session-a newer text')
+      expect(requestCount()).toBe(1)
+    })
+
+    it("clears A's composer after A to B to A, where it shows the text being sent again", async () => {
+      await renderPage()
+      const gate = holdPreparation()
+      await sendFromComposer()
+      await selectSession('session-b')
+      await selectSession('session-a')
+      await release(gate)
+      expect(sessionId()).toBe('session-a')
+      expect(composerValue()).toBe('')
+      expect(storedDraft('session-a')).toBeUndefined()
+      await selectSession('session-b')
+      expect(storedDraft('session-b')?.inputValue).toBe('session-b composer draft')
+      expect(storedContents('session-b')).toEqual(untouchedB)
+      expect(requestCount()).toBe(1)
     })
   })
 })
