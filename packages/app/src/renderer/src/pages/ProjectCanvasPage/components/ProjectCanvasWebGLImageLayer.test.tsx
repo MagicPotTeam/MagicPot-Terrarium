@@ -1582,6 +1582,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const preview = { x: item.x, y: item.y, width: item.width, height: item.height, rotation: 0 }
 
       act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 0.01, scaleY: 0.01 }))
+      // The GPU copy is really gone (what Pixi's unload leaves behind): only then is the
+      // released level decoded again.
+      ;(oldSource as unknown as { _gpuData: object })._gpuData = Object.create(null)
       act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 1, scaleY: 1 }))
 
       expect(oldSource.unload).not.toHaveBeenCalled()
@@ -2528,7 +2531,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(sprite.scale.y).toBe(2)
   }, 15000)
 
-  it('decodes a released level again instead of unloading it when a tiny preview grows back', async () => {
+  it('decodes a released level again when its GPU copy is gone and a tiny preview grows back', async () => {
     vi.stubGlobal('electronFile', {
       resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
     })
@@ -2567,6 +2570,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const preview = { x: 24, y: 36, width: 200, height: 120, rotation: 0 }
 
       act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 0.1, scaleY: 0.1 }))
+      // Only a real loss of the GPU copy (what Pixi's unload leaves behind) needs a re-acquire.
+      ;(oldSource as unknown as { _gpuData: object })._gpuData = Object.create(null)
       act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 1, scaleY: 1 }))
 
       // Unloading would make Pixi upload the closed bitmap again. The level is decoded again
@@ -2593,6 +2598,190 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       vi.unstubAllGlobals()
     }
   }, 15000)
+
+  describe('zoom cycles', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    })
+
+    const stubLocalMediaFetch = () => {
+      vi.stubGlobal('electronFile', {
+        resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+      })
+      const fetchMock = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(['image'], { type: 'image/png' })
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+      return fetchMock
+    }
+
+    const lastMetrics = (metrics: ReturnType<typeof vi.fn>) =>
+      metrics.mock.calls[metrics.mock.calls.length - 1]?.[0] as
+        ProjectCanvasWebGLRuntimeMetrics | undefined
+
+    it('reads no file and swaps no texture when images zoom out to tiny and back', async () => {
+      const fetchMock = stubLocalMediaFetch()
+      const decode = vi.fn(async () => createBitmap(640, 360))
+      vi.stubGlobal('createImageBitmap', decode)
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      // Small images: 20 px wide on screen (tiny) at 50 %, 50 px at 125 %. Both zooms keep the
+      // same decoded level, so a zoom cycle has nothing to read.
+      const items = Array.from({ length: 8 }, (_, index) =>
+        createNamedItem(`zoom-${index + 1}`, {
+          src: `local-media:///C:/images/zoom-${index + 1}.png`,
+          x: 24 + (index % 4) * 60,
+          y: 36 + Math.floor(index / 4) * 40,
+          width: 40,
+          height: 22,
+          sourceWidth: 640,
+          sourceHeight: 360,
+          image: undefined as unknown as HTMLImageElement
+        })
+      )
+      const metrics = vi.fn()
+      const view = (stageScale: number) => (
+        <Layer
+          items={items}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={stageScale}
+          onMetricsChange={metrics}
+        />
+      )
+      const { rerender, unmount } = render(view(1.25))
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      })
+      const sprites = items.map((item) => getLiveSpriteByLabel(item.id))
+      const decodes = decode.mock.calls.length
+      const fetches = fetchMock.mock.calls.length
+      const uploads = eagerTextureUploads.length
+      expect(decodes).toBe(8)
+
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        rerender(view(0.5))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        })
+        rerender(view(1.25))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        })
+      }
+
+      expect(decode.mock.calls.length).toBe(decodes)
+      expect(fetchMock.mock.calls.length).toBe(fetches)
+      expect(eagerTextureUploads.length).toBe(uploads)
+      items.forEach((item, index) => expect(getLiveSpriteByLabel(item.id)).toBe(sprites[index]))
+      expect(lastMetrics(metrics)).toMatchObject({
+        imageFileReadCount: 8,
+        textureReacquireCount: 0
+      })
+      unmount()
+    }, 20000)
+
+    it('does not unload a texture with a live input when only the zoom changes', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const item = createItem()
+      const view = (stageScale: number) => (
+        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={stageScale} />
+      )
+      const { rerender, unmount } = render(view(1))
+      await waitFor(() => expect(getLiveSpriteByLabel(item.id)).not.toBeNull())
+      const source = getLiveSpriteByLabel(item.id)!.texture.source as MockTextureSource
+      for (let cycle = 0; cycle < 2; cycle += 1) {
+        rerender(view(0.05))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        })
+        rerender(view(1))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        })
+      }
+      expect(source.unload).not.toHaveBeenCalled()
+      unmount()
+    }, 20000)
+
+    it('keeps an image element decode counted and uploads it again instead of fetching it again', async () => {
+      // A source that createImageBitmap rejects decodes through an image element, which
+      // cannot be closed: it is never marked released.
+      vi.stubGlobal('electronFile', {
+        resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+      })
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => {
+          throw new Error('no bounded fetch here')
+        })
+      )
+      const element = createImage(640, 360)
+      const loads: string[] = []
+      vi.stubGlobal(
+        'Image',
+        class {
+          onload: (() => void) | null = null
+          onerror: (() => void) | null = null
+          decoding = 'async'
+          crossOrigin: string | null = null
+          naturalWidth = 640
+          naturalHeight = 360
+          width = 640
+          height = 360
+          set src(value: string) {
+            loads.push(value)
+            setTimeout(() => this.onload?.(), 0)
+          }
+          decode() {
+            return Promise.resolve()
+          }
+        }
+      )
+      void element
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const item = createItem({
+        src: 'local-media:///C:/images/element.png',
+        sourceWidth: 640,
+        sourceHeight: 360,
+        image: undefined as unknown as HTMLImageElement
+      })
+      const metrics = vi.fn()
+      const { unmount } = render(
+        <Layer
+          ref={ref}
+          items={[item]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          onMetricsChange={metrics}
+        />
+      )
+      await waitFor(() => expect(getLiveSpriteByLabel(item.id)).not.toBeNull())
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+      const sprite = getLiveSpriteByLabel(item.id)!
+      const source = sprite.texture.source as MockTextureSource
+      const loadsAfterFirst = loads.length
+      expect(loadsAfterFirst).toBeGreaterThan(0)
+      await waitFor(() =>
+        expect(lastMetrics(metrics)?.decodedResidentBytes ?? 0).toBeGreaterThan(0)
+      )
+
+      const preview = { x: 24, y: 36, width: 200, height: 120, rotation: 0 }
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 0.1, scaleY: 0.1 }))
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 1, scaleY: 1 }))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      })
+      // The element is still the texture's input: Pixi uploads it again, nothing is fetched.
+      expect(source.unload).toHaveBeenCalledTimes(1)
+      expect(loads.length).toBe(loadsAfterFirst)
+      expect(getLiveSpriteByLabel(item.id)).toBe(sprite)
+      expect(lastMetrics(metrics)?.textureReacquireCount ?? 0).toBe(0)
+      unmount()
+    }, 20000)
+  })
 
   it('recreates sprite state when the texture key changes', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -2956,6 +3145,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       lastSpriteReconcileDurationMs: null,
       lastSpriteSortDurationMs: null,
       spriteSortCount: 0,
+      textureReacquireCount: 0,
+      imageFileReadCount: 0,
       lastSpriteReconcileCandidateCount: 0,
       lastSpriteReconcileTargetCount: 0,
       lastSpriteReconcileCreatedCount: 0,

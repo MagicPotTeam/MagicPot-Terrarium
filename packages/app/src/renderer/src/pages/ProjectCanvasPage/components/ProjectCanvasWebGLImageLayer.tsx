@@ -843,16 +843,41 @@ function isProjectCanvasTinyPreview(preview: ProjectCanvasImagePreview, stageSca
 }
 
 /**
- * A texture that was drawn tiny and grows back is refreshed (a fix for textures that turned
- * black after a rapid resize). A texture whose input is still alive is unloaded, and Pixi
- * uploads it again on the next draw. A texture whose decoded input was released after its
- * upload cannot be uploaded again: for that one the function returns true, and the caller
- * has the level decoded again and swaps the texture when the new one is ready.
+ * False only when the GPU copy of a texture is known to be gone: Pixi keeps one entry per
+ * renderer in `_gpuData` from the upload until an unload. Without that field (another Pixi
+ * build, a test double) nothing is known, and the copy counts as intact.
+ */
+function hasProjectCanvasTextureGpuCopy(textureSource: object): boolean {
+  const gpuData = (textureSource as { _gpuData?: unknown })._gpuData
+  if (!gpuData || typeof gpuData !== 'object') {
+    return true
+  }
+  for (const key in gpuData) {
+    if ((gpuData as Record<string, unknown>)[key]) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Tracks an image drawn tiny (24 px or less on screen) that grows back (48 px or more).
+ *
+ * A texture whose decoded pixels were released after the upload lives only on the GPU, and
+ * nothing unloads it there (Pixi's collector is off): it is kept. Only when its GPU copy is
+ * really gone does the function return true; the caller then has the level decoded again and
+ * swaps the texture when the new one is ready. A zoom cycle therefore reads no file.
+ *
+ * A texture whose input is still alive (a provided image, an image element) is unloaded and
+ * uploaded again from that input on the next draw, but only on the preview path: that is the
+ * fix for textures that turned black after a rapid resize (a resize preview). A zoom through
+ * the stage scale leaves it alone.
  */
 function refreshProjectCanvasTextureAfterTinyPreview(
   record: SpriteRecord,
   preview: ProjectCanvasImagePreview,
-  stageScale: number
+  stageScale: number,
+  path: 'preview' | 'reconcile'
 ): boolean {
   const screenMaxEdge = getProjectCanvasPreviewScreenMaxEdge(preview, stageScale)
   if (screenMaxEdge <= PROJECT_CANVAS_WEBGL_TINY_PREVIEW_SCREEN_EDGE_PX) {
@@ -874,9 +899,9 @@ function refreshProjectCanvasTextureAfterTinyPreview(
     return false
   }
   if (isProjectCanvasDecodedImageReleased(textureSource.resource)) {
-    return true
+    return !hasProjectCanvasTextureGpuCopy(textureSource)
   }
-  if (typeof textureSource.unload === 'function') {
+  if (path === 'preview' && typeof textureSource.unload === 'function') {
     textureSource.unload()
   }
   return false
@@ -1476,6 +1501,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     new CanvasImageAsyncSharedResourcePool<CanvasImageAsset | null>()
   )
   const sharedDecodeBudgetReservationsRef = useRef(new CanvasImageSharedReservationTracker())
+  // Lifetime counters for the metrics snapshot: textures re-acquired after a loss, and image
+  // loads started (each one reads a file or URL and decodes it).
+  const textureReacquireCountRef = useRef(0)
+  const imageFileReadCountRef = useRef(0)
   const runtimeGenerationRef = useRef(0)
   const releaseManagerRef = useRef(new CanvasImageReleaseManager())
   const objectUrlReleaseHandlesRef = useRef(new Map<string, CanvasImageReleaseHandle>())
@@ -1659,6 +1688,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      textureReacquireCountRef.current += 1
       pendingTextureReacquireIdsRef.current.add(itemId)
       textureGenerationByIdRef.current.set(
         itemId,
@@ -3536,7 +3566,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         const applyPreviewTransform = (transform: ProjectCanvasImagePreview) => {
           const hadTinyPreview = record.sawTinyPreview
           if (
-            refreshProjectCanvasTextureAfterTinyPreview(record, transform, stageScaleRef.current)
+            refreshProjectCanvasTextureAfterTinyPreview(
+              record,
+              transform,
+              stageScaleRef.current,
+              'preview'
+            )
           ) {
             requestTextureReacquire(itemId)
           }
@@ -3880,6 +3915,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return false
       }
       const loadDecodedAsset = async (signal: AbortSignal): Promise<CanvasImageAsset | null> => {
+        imageFileReadCountRef.current += 1
         const releaseProducerDecodeBudgetReservation = beginDecodeBudgetReservation(
           sharedDecodedKey,
           mode,
@@ -4205,6 +4241,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         const abortController = new AbortController()
         thumbnailLoadAbortByIdRef.current.get(queued.itemId)?.abort()
         thumbnailLoadAbortByIdRef.current.set(queued.itemId, abortController)
+        imageFileReadCountRef.current += 1
         void loadImageElement(queued.src, {
           crossOrigin: shouldUseAnonymousCrossOrigin(queued.src) ? 'anonymous' : null,
           signal: abortController.signal
@@ -5502,7 +5539,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           refreshProjectCanvasTextureAfterTinyPreview(
             existingRecord,
             transformState,
-            stageScaleRef.current
+            stageScaleRef.current,
+            'reconcile'
           )
         ) {
           requestTextureReacquire(item.id)
@@ -5631,6 +5669,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           // One copy per image: upload the decoded pixels now and close the bitmap, instead
           // of keeping a decoded twin next to the texture for as long as the texture lives.
           const alreadyUploaded = eagerlyUploadedTexturesRef.current.has(baseTexture)
+          const holdDecodedAssetForTexture = () => {
+            const cachedSource = imageCacheRef.current.get(item.id)
+            const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+            const decodedAsset = cachedSource?.image === image ? cachedSource : cachedThumbnail
+            if (decodedAsset?.image === image && decodedAsset.decodedAssetReleaseId) {
+              decodedAsset.decodedAssetRefCount += 1
+              textureDecodedAssetRef.current.set(baseTexture!, decodedAsset)
+            }
+          }
           if (alreadyUploaded || uploadProjectCanvasTextureNow(appRef.current, baseTexture)) {
             if (
               !alreadyUploaded &&
@@ -5644,17 +5691,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               armLargeTextureUploadFrame()
             }
             eagerlyUploadedTexturesRef.current.add(baseTexture)
-            releaseDecodedImagePixelsAfterUpload(image)
-          } else if (createdSharedTexture) {
-            const cachedSource = imageCacheRef.current.get(item.id)
-            const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
-            const decodedAsset = cachedSource?.image === image ? cachedSource : cachedThumbnail
-            if (decodedAsset?.image === image && decodedAsset.decodedAssetReleaseId) {
-              // No eager upload on this renderer: Pixi uploads on a later draw, so the
-              // texture keeps its actual input alive until it is destroyed.
-              decodedAsset.decodedAssetRefCount += 1
-              textureDecodedAssetRef.current.set(baseTexture, decodedAsset)
+            if (isCanvasImageBitmapLike(image)) {
+              releaseDecodedImagePixelsAfterUpload(image)
+            } else if (createdSharedTexture) {
+              // An image element (a remote or blob: source, a format createImageBitmap
+              // rejects) cannot be closed: its encoded and decoded data stay alive as the
+              // texture's resource. Keep its record, so the decoded budget still counts it
+              // and a refresh uploads the element again instead of fetching it again.
+              holdDecodedAssetForTexture()
             }
+          } else if (createdSharedTexture) {
+            // No eager upload on this renderer: Pixi uploads on a later draw, so the
+            // texture keeps its actual input alive until it is destroyed.
+            holdDecodedAssetForTexture()
           }
         }
         ;(baseTexture.source as { scaleMode?: 'nearest' | 'linear' }).scaleMode =
@@ -5819,6 +5868,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         lastSpriteReconcileRemovedCount: removedSpriteCount,
         lastSpriteReconcileDeferredCount: deferredNewSpriteCount,
         spriteSortCount,
+        textureReacquireCount: textureReacquireCountRef.current,
+        imageFileReadCount: imageFileReadCountRef.current,
         ...(lastSpriteSortDurationMs === null ? {} : { lastSpriteSortDurationMs }),
         ...imageHealthCounts
       },

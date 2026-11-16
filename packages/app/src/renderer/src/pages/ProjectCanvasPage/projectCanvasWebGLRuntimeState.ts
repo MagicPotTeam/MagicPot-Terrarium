@@ -31,6 +31,10 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   lastSpriteReconcileDurationMs?: number | null
   lastSpriteSortDurationMs?: number | null
   spriteSortCount?: number
+  // Textures re-acquired (decoded again) because their GPU copy was lost; lifetime count.
+  textureReacquireCount?: number
+  // Image loads started (each reads a file or URL and decodes it); lifetime count.
+  imageFileReadCount?: number
   lastSpriteReconcileCandidateCount?: number
   lastSpriteReconcileTargetCount?: number
   lastSpriteReconcileCreatedCount?: number
@@ -167,6 +171,8 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   lastSpriteReconcileDurationMs: null,
   lastSpriteSortDurationMs: null,
   spriteSortCount: 0,
+  textureReacquireCount: 0,
+  imageFileReadCount: 0,
   lastSpriteReconcileCandidateCount: 0,
   lastSpriteReconcileTargetCount: 0,
   lastSpriteReconcileCreatedCount: 0,
@@ -250,6 +256,8 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'lastSpriteReconcileDurationMs',
   'lastSpriteSortDurationMs',
   'spriteSortCount',
+  'textureReacquireCount',
+  'imageFileReadCount',
   'lastSpriteReconcileCandidateCount',
   'lastSpriteReconcileTargetCount',
   'lastSpriteReconcileCreatedCount',
