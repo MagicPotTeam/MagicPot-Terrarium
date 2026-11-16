@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CanvasImageItem } from './types'
 
@@ -572,6 +573,16 @@ describe('Canvas Target evidence action gate', () => {
       expect(shown(/skipped because a source was not selected/)).toBe(false)
     })
 
+    // The live list has not rendered the run's first commit when the second
+    // action runs (here it never does): the run keeps its own value.
+    it('applies two moves of the same item when the live canvas has not rendered the first', async () => {
+      await runPlan('structured_only', [
+        { type: 'canvas', id: 'move-1', action: 'transform_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'item_ids', itemIds: ['source'], deltaX: 10 },
+        { type: 'canvas', id: 'move-2', action: 'transform_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'item_ids', itemIds: ['source'], deltaX: 10 }
+      ])
+      expect(replayCommits([plain, board]).at(-1)?.find((item) => item.id === 'source')?.x).toBe(20)
+    })
+
     // The user keeps working on the canvas while the run goes on (here while
     // the plan is pending). Their new item is neither selected nor created by
     // the run, and no commit of the run may drop it.
@@ -640,6 +651,39 @@ describe('Canvas Target evidence action gate', () => {
         const groupsAfter = replay(setGroups.mock.calls, liveGroups).at(-1) ?? []
         expect(groupsAfter.map((group) => group.name)).toEqual(['Client moodboard', 'Made during the run', 'Run group'])
         expect(groupsAfter.find((group) => group.id === 'g-user')).toBe(userGroup)
+      })
+
+      // Before each action the run's view takes the live value of every
+      // group it knows: a group whose members the user changed during the
+      // run is checked with its current members, and a run may not change a
+      // group that now holds an item it may not change.
+      describe('a group whose members the user changed during the run', () => {
+        const userExtract: CanvasImageItem = { ...plain, id: 'user-extract', src: 'data:image/png;base64,USEREXTRACT', x: 700 }
+        const liveGroups = [userGroups[0], { ...userGroups[1], name: 'My refs', itemIds: ['source', 'user-extract'] }]
+        it.each([
+          ['delete_group', { action: 'delete_group', groupId: 'g-source' }],
+          ['rename_group', { action: 'rename_group', groupId: 'g-source', groupName: 'Renamed by run' }],
+          ['create_group', { action: 'create_group', source: 'item_ids', itemIds: ['source'], groupName: 'Run group' }]
+        ])('refuses %s and leaves the live groups unchanged', async (_label, fields) => {
+          const { setGroups } = await runWithMidRunCanvas([plain, board, userExtract], [canvasAction(fields)], { liveGroups })
+          expect(setGroups).not.toHaveBeenCalled()
+          expect(f.commits).not.toHaveBeenCalled()
+          expect(shown(new RegExp(`Canvas ${fields.action} skipped because a source was not selected`))).toBe(true)
+        })
+      })
+
+      // The user deleted the selected item while the run went on (a
+      // structured_only run keeps going): the run's view drops it, so no
+      // later action copies it back or places anything on it.
+      it.each([
+        ['duplicate_items', { action: 'duplicate_items', source: 'item_ids', itemIds: ['source'], count: 1 }],
+        ['add_annotation', { action: 'add_annotation', source: 'item_ids', itemIds: ['source'], text: 'note' }]
+      ])('does not bring back an item the user deleted during the run with %s', async (_label, fields) => {
+        const { live } = await runWithMidRunCanvas([board], [canvasAction(fields)])
+        expect(live().map((item) => item.id)).not.toContain('source')
+        expect(live().filter((item) => item.type === 'image').map((item) => item.src)).toEqual([board.src])
+        // An annotation is not drawn over where the deleted item was.
+        expect(live().filter((item) => (item as { type: string }).type === 'annotation').map((item) => [item.x, item.y, item.width, item.height])).not.toContainEqual([0, 0, 100, 100])
       })
     })
   })
@@ -763,5 +807,107 @@ describe('Canvas Target evidence action gate', () => {
       await pending
     })
     expect(f.summary).not.toHaveBeenCalled()
+  })
+
+  // A canvas that applies the run's commits as the real page does (a
+  // functional update of live state). The run pauses in its model stage
+  // after its first action, so the user can change the board in between.
+  describe('on a live canvas the user changes between two of the run\'s actions', () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const board: CanvasImageItem = { ...plain, id: 'board', src: 'data:image/png;base64,BOARD', x: 300, zIndex: 2 }
+    type Groups = NonNullable<Parameters<typeof useCanvasTargetWorkflow>[0]['groups']>
+    const runOnLiveCanvas = async (
+      capabilityActions: unknown[],
+      userEdit: (canvas: { setItems: (update: (items: CanvasImageItem[]) => CanvasImageItem[]) => void; setGroups: (update: (groups: Groups) => Groups) => void }) => void,
+      { startItems = [plain, board], startGroups = [] as Groups } = {}
+    ) => {
+      let finishPlan!: (plan: unknown) => void
+      let finishStage!: (response: unknown) => void
+      f.plan.mockImplementation(() => new Promise((resolve) => { finishPlan = resolve }))
+      f.stage.mockImplementation(() => new Promise((resolve) => { finishStage = resolve }))
+      const { result } = renderHook(() => {
+        const [items, setItems] = useState<CanvasImageItem[]>(startItems)
+        const [groups, setGroups] = useState<Groups>(startGroups)
+        const workflow = useCanvasTargetWorkflow({ ...options, items, groups, setItemsWithHistory: setItems as never, setGroups })
+        return { workflow, items, groups, setItems, setGroups }
+      })
+      await act(async () => { await result.current.workflow.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+      act(() => { result.current.workflow.setCanvasTargetEvidenceMode('structured_only'); result.current.workflow.setCanvasTargetUserIntent('fixture') })
+      let pending!: Promise<void>
+      await act(async () => { pending = result.current.workflow.handleRunCanvasTarget() })
+      await waitFor(() => expect(f.plan).toHaveBeenCalledOnce())
+      await act(async () => {
+        finishPlan({ id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [{ id: 'stage-1', label: 'Stage', modelId: 'vision', prompt: 'fixture' }], capabilityActions })
+        await vi.waitFor(() => expect(f.stage).toHaveBeenCalledOnce())
+      })
+      act(() => { userEdit({ setItems: result.current.setItems, setGroups: result.current.setGroups }) })
+      await act(async () => {
+        finishStage({ content: 'fixture', attachments: [] })
+        await pending
+      })
+      expect(f.summary).toHaveBeenCalledOnce()
+      return result.current
+    }
+    const step = (id: string, phase: string, fields: Record<string, unknown>) => ({ type: 'canvas', id, phase, outputTarget: 'canvas', label: id, ...fields })
+    const moveSource = (fields: Partial<CanvasImageItem>) => ({ setItems }: { setItems: (update: (items: CanvasImageItem[]) => CanvasImageItem[]) => void }) =>
+      setItems((items) => items.map((item) => (item.id === 'source' ? { ...item, ...fields } : item)))
+    const firstMove = step('first', 'before_model_stages', { action: 'transform_items', source: 'item_ids', itemIds: ['source'], deltaY: 5 })
+
+    it('moves the item from where the user put it after the run\'s last commit', async () => {
+      const { items } = await runOnLiveCanvas(
+        [firstMove, step('second', 'after_model_stages', { action: 'transform_items', source: 'item_ids', itemIds: ['source'], deltaX: 10 })],
+        moveSource({ x: 500, y: 40 })
+      )
+      expect(items.find((item) => item.id === 'source')).toMatchObject({ x: 510, y: 40 })
+    })
+
+    it('flips the item the user moved and resized from its live geometry', async () => {
+      const { items } = await runOnLiveCanvas(
+        [firstMove, step('second', 'after_model_stages', { action: 'flip_items', source: 'item_ids', itemIds: ['source'], flipAxis: 'horizontal' })],
+        moveSource({ x: 500, y: 40, width: 200 })
+      )
+      expect(items.find((item) => item.id === 'source')).toMatchObject({ x: 700, y: 40, width: 200, scaleX: -1 })
+    })
+
+    it('crops the item the user moved from its live position', async () => {
+      const { items } = await runOnLiveCanvas(
+        [firstMove, step('second', 'after_model_stages', { action: 'crop_image', source: 'item_ids', itemIds: ['source'], coordinateSpace: 'source_image_pixels', x: 50, y: 0, width: 100, height: 100 })],
+        moveSource({ x: 500, y: 40 })
+      )
+      // The crop starts 50 source pixels (25 canvas units) right of the live left edge.
+      expect(items.find((item) => item.id === 'source')).toMatchObject({ x: 525, y: 40, crop: { x: 50, y: 0, width: 100, height: 100 } })
+    })
+
+    it('keeps the run\'s own earlier move when the user changed something else', async () => {
+      const { items } = await runOnLiveCanvas(
+        [firstMove, step('second', 'after_model_stages', { action: 'transform_items', source: 'item_ids', itemIds: ['source'], deltaX: 10 })],
+        ({ setItems }) => setItems((items) => items.map((item) => (item.id === 'board' ? { ...item, x: 900 } : item)))
+      )
+      expect(items.find((item) => item.id === 'source')).toMatchObject({ x: 10, y: 5 })
+      expect(items.find((item) => item.id === 'board')).toMatchObject({ x: 900 })
+    })
+
+    it('does not copy back an item the run created that the user deleted', async () => {
+      const { items } = await runOnLiveCanvas(
+        [
+          step('first', 'before_model_stages', { action: 'add_text', text: 'draft the user throws away', outputTarget: 'both' }),
+          step('second', 'after_model_stages', { action: 'duplicate_items', source: 'current_selection', count: 1 })
+        ],
+        ({ setItems }) => setItems((items) => items.filter((item) => item.type === 'image'))
+      )
+      expect(items.map((item) => item.id)).toEqual(['source', 'board'])
+    })
+
+    it('refuses a group change once the user added an unselected item to the group the run created', async () => {
+      const { groups } = await runOnLiveCanvas(
+        [
+          step('first', 'before_model_stages', { action: 'create_group', source: 'item_ids', itemIds: ['source'], groupName: 'Run group' }),
+          step('second', 'after_model_stages', { action: 'delete_group', source: 'item_ids', itemIds: ['source'] })
+        ],
+        ({ setGroups }) => setGroups((groups) => groups.map((group) => ({ ...group, name: 'My refs', itemIds: [...group.itemIds, 'board'] })))
+      )
+      expect(groups).toEqual([expect.objectContaining({ name: 'My refs', itemIds: ['source', 'board'] })])
+      expect(f.chat.mock.calls.some(([message]) => /Canvas delete_group skipped because a source was not selected/.test(message.content || ''))).toBe(true)
+    })
   })
 })

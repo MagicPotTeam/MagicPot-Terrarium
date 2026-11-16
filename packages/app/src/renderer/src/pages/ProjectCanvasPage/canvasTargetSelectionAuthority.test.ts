@@ -328,6 +328,25 @@ describe('authorizeCanvasTargetCanvasWrite', () => {
     expect(write({ action: 'create_group', itemIds: ['B'] }, { groups: [] })).toMatchObject({ allowed: false, references: ['B'] })
   })
 
+  // The run's view of a group can lag behind the live canvas (the user added
+  // a member during the run). The members of the live group are checked too,
+  // so a stale view entry can only refuse, never allow.
+  it('refuses a group action when the live group holds an unselected item the run view lacks', () => {
+    const view = { groups: [group('g-selected', ['A'])] }
+    const liveGroups = [{ ...group('g-selected', ['A', 'B']), name: 'My refs' }]
+    const writeLive = (fields: Partial<CanvasTargetCanvasAction>, live = liveGroups) =>
+      authorizeCanvasTargetCanvasWrite({ action: action(fields), state: state(view), liveGroups: live, authority: createCanvasTargetSelectionAuthority([a]), runCreatedItemIds: new Set(['C']) })
+    expect(writeLive({ action: 'delete_group', groupId: 'g-selected' })).toEqual({ allowed: false, refusal: 'not_selected', references: ['B'] })
+    expect(writeLive({ action: 'rename_group', groupId: 'g-selected', groupName: 'renamed' })).toEqual({ allowed: false, refusal: 'not_selected', references: ['B'] })
+    expect(writeLive({ action: 'create_group', itemIds: ['A'] })).toEqual({ allowed: false, refusal: 'not_selected', references: ['B'] })
+    // A group that holds the selected item only on the live canvas.
+    expect(writeLive({ action: 'create_group', itemIds: ['A'] }, [group('g-user', ['A', 'B'])])).toEqual({ allowed: false, refusal: 'not_selected', references: ['B'] })
+    // The live groups never allow what the view refuses, nor refuse what both allow.
+    expect(writeLive({ action: 'delete_group', groupId: 'g-selected' }, [group('g-selected', ['A', 'C'])])).toEqual({ allowed: true })
+    expect(write({ action: 'delete_group', groupId: 'g-board' })).toMatchObject({ allowed: false, references: ['B'] })
+    expect(authorizeCanvasTargetCanvasWrite({ action: action({ action: 'delete_group', groupId: 'g-board' }), state: state(), liveGroups: [], authority: createCanvasTargetSelectionAuthority([a]), runCreatedItemIds: new Set() })).toMatchObject({ allowed: false, references: ['B'] })
+  })
+
   it('leaves actions that do not change existing items alone', () => {
     for (const name of ['select_items', 'focus_items', 'duplicate_items', 'add_text', 'add_annotation', 'set_canvas_background', 'set_grid_visibility', 'set_canvas_tool'] as const) {
       expect(write({ action: name, source: 'item_ids', itemIds: ['B'] })).toEqual({ allowed: true })

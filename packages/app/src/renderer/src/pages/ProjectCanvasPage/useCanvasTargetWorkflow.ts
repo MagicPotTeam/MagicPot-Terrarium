@@ -158,7 +158,12 @@ import { hydrateCanvasImageItemForCanvas, loadImageFromSrc } from './canvasAsset
 import { createMagicPotNativeProvenance } from './canvasProvenanceUtils'
 import { extractImageRegionLocally } from './localImageExtract'
 import { collectCascadeDeletedCanvasItemIds } from './canvasAttachedCaptionUtils'
-import { mergeCanvasTargetRunChange, withLiveOnlyCanvasEntries } from './canvasTargetRunCanvasMerge'
+import {
+  collectCanvasTargetRunWrittenIds,
+  createCanvasTargetRunPendingWrites,
+  mergeCanvasTargetRunChange,
+  rebaseCanvasTargetRunView
+} from './canvasTargetRunCanvasMerge'
 import {
   appendMessageToExternalChat,
   openExternalAgentPane,
@@ -584,6 +589,9 @@ async function executeCanvasTargetCanvasAction(
     runCreatedItemIds?: ReadonlySet<string>
     runPlacedItemIds?: ReadonlySet<string>
     semanticState?: CanvasTargetSemanticCanvasActionState
+    // The live groups, which may hold members the run's view lacks; a group
+    // action is checked against both (a stale entry can only refuse).
+    liveGroups?: readonly CanvasGroup[]
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
   }
@@ -614,6 +622,7 @@ async function executeCanvasTargetCanvasAction(
     const write = authorizeCanvasTargetCanvasWrite({
       action,
       state: options.semanticState,
+      liveGroups: options.liveGroups,
       authority: options.selectionAuthority,
       runCreatedItemIds: options.runCreatedItemIds || new Set<string>()
     })
@@ -1129,9 +1138,14 @@ export function useCanvasTargetWorkflow({
   const latestItemsRef = useRef(items)
   const latestGroupsRef = useRef(groups)
   const latestSelectedIdsRef = useRef(selectedIds)
+  // Counts the renders that handed this hook the live canvas. A run's write
+  // the live list may not show yet is stamped with this count when React
+  // processes it (createCanvasTargetRunPendingWrites).
+  const canvasRenderCountRef = useRef(0)
 
   latestItemsRef.current = items
   latestGroupsRef.current = groups
+  canvasRenderCountRef.current += 1
   latestSelectedIdsRef.current = selectedIds
 
   useEffect(() => {
@@ -2009,6 +2023,15 @@ export function useCanvasTargetWorkflow({
       // into the run's view from it.
       const runRemovedItemIds = new Set<string>()
       const runRemovedGroupIds = new Set<string>()
+      // Items the user removed from the live canvas during the run (dropped
+      // from the run's view by a rebase). A stage whose placed media the user
+      // deleted is not placed again.
+      const runUserRemovedItemIds = new Set<string>()
+      // The run's own writes the live canvas may not have rendered yet; the
+      // rebase before each action keeps the run's value for them.
+      const readCanvasRenderCount = () => canvasRenderCountRef.current
+      const runPendingItemWrites = createCanvasTargetRunPendingWrites(readCanvasRenderCount)
+      const runPendingGroupWrites = createCanvasTargetRunPendingWrites(readCanvasRenderCount)
       // add_* stages that re-placed a canvas source (not a run output). A
       // later materialization of such a stage is not a run output either.
       const runSourceCopyStageIds = new Set<string>()
@@ -2337,6 +2360,7 @@ export function useCanvasTargetWorkflow({
           runCreatedItemIds.add(item.id)
           if (runOutput) runPlacedItemIds.add(item.id)
         })
+        runPendingItemWrites.addPlaced(placedItems.map((item) => item.id))
         mergeRuntimeCanvasItems(placedItems)
         registerCanvasItemIds(
           stageId,
@@ -2521,7 +2545,9 @@ export function useCanvasTargetWorkflow({
 
       const hasResolvedStageCanvasItems = (stageId: string): boolean => {
         const existingItemIds = new Set(runtimeCanvasItems.map((item) => item.id))
-        return (stageCanvasItemIds.get(stageId) || []).some((itemId) => existingItemIds.has(itemId))
+        return (stageCanvasItemIds.get(stageId) || []).some(
+          (itemId) => existingItemIds.has(itemId) || runUserRemovedItemIds.has(itemId)
+        )
       }
 
       const materializeStageMediaOutputIfNeeded = async (stageId: string): Promise<boolean> => {
@@ -2732,7 +2758,11 @@ export function useCanvasTargetWorkflow({
           })
           const before = base.items
           const after = result.items
-          setItemsWithHistory((live) => mergeCanvasTargetRunChange(live, before, after))
+          const pending = runPendingItemWrites.addCommitted(collectCanvasTargetRunWrittenIds(before, after))
+          setItemsWithHistory((live) => {
+            runPendingItemWrites.stamp(pending)
+            return mergeCanvasTargetRunChange(live, before, after)
+          })
         }
         if (result.groups) {
           runtimeCanvasGroups = result.groups
@@ -2742,7 +2772,13 @@ export function useCanvasTargetWorkflow({
               if (!resultGroupIds.has(group.id)) runRemovedGroupIds.add(group.id)
             })
             const after = result.groups
-            setGroups((live) => mergeCanvasTargetRunChange(live, baseGroups, after))
+            const pending = runPendingGroupWrites.addCommitted(
+              collectCanvasTargetRunWrittenIds(baseGroups, after)
+            )
+            setGroups((live) => {
+              runPendingGroupWrites.stamp(pending)
+              return mergeCanvasTargetRunChange(live, baseGroups, after)
+            })
           }
         }
         if (result.bgColor) {
@@ -2961,18 +2997,27 @@ export function useCanvasTargetWorkflow({
             continue
           }
 
-          // Rebase the run's view on the live canvas: what the user added
-          // while the run was going on is part of the board the write
-          // authority checks (it is neither selected nor run-created).
-          runtimeCanvasItems = withLiveOnlyCanvasEntries(
+          // Rebase the run's view on the live canvas, so the write authority,
+          // the executor and the merge base see the current board: the
+          // user's edits, moves, deletions and group changes, and what the
+          // user added (neither selected nor run-created). Only the run's own
+          // writes the live canvas has not rendered yet keep the run's value.
+          const rebasedCanvasItems = rebaseCanvasTargetRunView(
             runtimeCanvasItems,
             latestItemsRef.current,
-            runRemovedItemIds
+            { removedByRun: runRemovedItemIds, keepFromView: runPendingItemWrites.unrendered() }
           )
-          runtimeCanvasGroups = withLiveOnlyCanvasEntries(
+          if (rebasedCanvasItems !== runtimeCanvasItems) {
+            const rebasedItemIds = new Set(rebasedCanvasItems.map((item) => item.id))
+            runtimeCanvasItems.forEach((item) => {
+              if (!rebasedItemIds.has(item.id)) runUserRemovedItemIds.add(item.id)
+            })
+          }
+          runtimeCanvasItems = rebasedCanvasItems
+          runtimeCanvasGroups = rebaseCanvasTargetRunView(
             runtimeCanvasGroups,
             latestGroupsRef.current,
-            runRemovedGroupIds
+            { removedByRun: runRemovedGroupIds, keepFromView: runPendingGroupWrites.unrendered() }
           )
           const semanticState: CanvasTargetSemanticCanvasActionState = {
             items: runtimeCanvasItems,
@@ -2996,6 +3041,7 @@ export function useCanvasTargetWorkflow({
             runCreatedItemIds,
             runPlacedItemIds,
             semanticState,
+            liveGroups: latestGroupsRef.current,
             commitSemanticResult: (result) =>
               commitSemanticCanvasResult(stageId, result, semanticState),
             resolveCanvasTargetItemBounds

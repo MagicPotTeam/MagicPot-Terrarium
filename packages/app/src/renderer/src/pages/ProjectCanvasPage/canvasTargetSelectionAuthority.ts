@@ -6,7 +6,7 @@ import type { CanvasTargetSemanticCanvasActionState } from './canvasTargetCanvas
 import type { CanvasTargetCanvasAction } from './canvasTargetCapabilityTypes'
 import { normalizeCanvasTargetEvidenceMode } from './canvasTargetEvidence'
 import { sanitizeCanvasItemForCheckContext } from './canvasTargetWorkflowAssetMetadata'
-import type { CanvasItem } from './types'
+import type { CanvasGroup, CanvasItem } from './types'
 
 // The one place that decides which canvas items a Canvas Target run may let
 // the model, a QuickApp runtime or a tool result see. The authority is the
@@ -450,10 +450,13 @@ export type CanvasTargetCanvasWriteVerdict =
 // being unchanged: the run's own earlier edits of a selected item are fine.
 // clear_canvas (and a source of 'all_canvas', which resolves to every item)
 // is refused whenever the canvas holds any other item. A group action is
-// refused when a group it would change holds any other item.
+// refused when a group it would change holds any other item, in the run's
+// view or on the live canvas (liveGroups): the members of both are checked,
+// so a view entry that lags behind the live board can only refuse.
 export function authorizeCanvasTargetCanvasWrite(options: {
   action: CanvasTargetCanvasAction
   state: CanvasTargetSemanticCanvasActionState
+  liveGroups?: readonly CanvasGroup[]
   authority: CanvasTargetSelectionAuthority | null | undefined
   runCreatedItemIds: ReadonlySet<string>
 }): CanvasTargetCanvasWriteVerdict {
@@ -466,9 +469,22 @@ export function authorizeCanvasTargetCanvasWrite(options: {
     action.action === 'clear_canvas'
       ? state.items.map((item) => item.id)
       : resolveCanvasTargetSemanticCanvasActionSourceIds(action, state)
-  const groupMemberIds = resolveCanvasTargetGroupActionTargetGroups(action, state, targetIds).flatMap(
-    (group) => group.itemIds
-  )
+  const targetGroups = resolveCanvasTargetGroupActionTargetGroups(action, state, targetIds)
+  const liveTargetGroups = options.liveGroups
+    ? resolveCanvasTargetGroupActionTargetGroups(
+        action,
+        { ...state, groups: [...options.liveGroups] },
+        targetIds
+      )
+    : []
+  const targetGroupIds = new Set(targetGroups.map((group) => group.id))
+  const groupMemberIds = [
+    ...targetGroups,
+    ...liveTargetGroups,
+    // The live value of every group the view resolved, even when the live
+    // group no longer resolves the same way (renamed, membership changed).
+    ...(options.liveGroups || []).filter((group) => targetGroupIds.has(group.id))
+  ].flatMap((group) => group.itemIds)
   const outside = Array.from(new Set([...targetIds, ...groupMemberIds])).filter(
     (itemId) => !writable(itemId)
   )
