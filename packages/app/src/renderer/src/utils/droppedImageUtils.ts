@@ -24,6 +24,58 @@ export const INTERNAL_IMAGE_DRAG_PREFIX = 'MAGICPOT_DRAG::'
 export const CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY = 'magicpotCanvasCropSource'
 export const UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE = '提交的元素含有该功能不知道格式，请重新选择。'
 
+/**
+ * A report's MAIN binding (a bearer secret) never enters a DataTransfer: a drag of a bound
+ * report carries only a short-lived token under the app-private MIME, and a drop in this same
+ * window swaps the token back for the binding. Drops from anywhere else (another app, another
+ * window, text/plain) never bring a binding in.
+ */
+const REPORT_BUNDLE_DRAG_TOKEN_TTL_MS = 2 * 60_000
+const REPORT_BUNDLE_DRAG_TOKEN_LIMIT = 8
+const reportBundleDragTokens = new Map<
+  string,
+  { binding: string; url: string; expiresAt: number }
+>()
+
+const pruneReportBundleDragTokens = (now: number): void => {
+  for (const [token, entry] of reportBundleDragTokens) {
+    if (entry.expiresAt <= now) reportBundleDragTokens.delete(token)
+  }
+  while (reportBundleDragTokens.size >= REPORT_BUNDLE_DRAG_TOKEN_LIMIT) {
+    const oldest = reportBundleDragTokens.keys().next().value
+    if (oldest === undefined) break
+    reportBundleDragTokens.delete(oldest)
+  }
+}
+
+/** Keeps `binding` in this window's memory for a drag of `url`; returns the token to carry. */
+export const createReportBundleDragToken = (binding: string, url: string): string => {
+  const now = Date.now()
+  pruneReportBundleDragTokens(now)
+  const token = `rbd.${crypto.randomUUID()}`
+  reportBundleDragTokens.set(token, {
+    binding,
+    url,
+    expiresAt: now + REPORT_BUNDLE_DRAG_TOKEN_TTL_MS
+  })
+  return token
+}
+
+const resolveReportBundleDragToken = (token: unknown, url: string): string | undefined => {
+  if (typeof token !== 'string') return undefined
+  const entry = reportBundleDragTokens.get(token)
+  if (!entry) return undefined
+  if (entry.expiresAt <= Date.now()) {
+    reportBundleDragTokens.delete(token)
+    return undefined
+  }
+  return entry.url === url ? entry.binding : undefined
+}
+
+export const clearReportBundleDragTokensForTest = (): void => {
+  reportBundleDragTokens.clear()
+}
+
 type InternalDragItemType = 'annotation' | 'file' | 'html' | 'image' | 'model3d' | 'text' | 'video'
 type InternalAttachmentType = ChatAttachment['type']
 
@@ -224,7 +276,10 @@ const parseHy3dParams = (value: unknown): Hy3dParams | undefined => {
   }
 }
 
-const parsePayload = (raw: string): InternalImageDragPayload | null => {
+const parsePayload = (
+  raw: string,
+  source: 'app-private' | 'text' = 'text'
+): InternalImageDragPayload | null => {
   try {
     const parsed = JSON.parse(raw) as InternalImageDragPayload
     if (!parsed || typeof parsed !== 'object') return null
@@ -290,11 +345,17 @@ const parsePayload = (raw: string): InternalImageDragPayload | null => {
                 typeof (attachment as ChatAttachment).reportBundleLabel === 'string'
                   ? (attachment as ChatAttachment).reportBundleLabel
                   : undefined,
-              // A report dragged from a bubble into the composer of the same conversation keeps
-              // its MAIN binding; MAIN still checks it against the conversation and the files.
-              ...(typeof (attachment as ChatAttachment).reportBundleBinding === 'string'
-                ? { reportBundleBinding: (attachment as ChatAttachment).reportBundleBinding }
-                : {}),
+              // A report dragged from a bubble into the composer of this window keeps its MAIN
+              // binding through the in-memory drag token; MAIN still checks it against the
+              // conversation and the files. A binding inside the drag data is never accepted.
+              ...(() => {
+                if (source !== 'app-private') return {}
+                const binding = resolveReportBundleDragToken(
+                  (attachment as { reportBundleDragToken?: unknown }).reportBundleDragToken,
+                  attachment.url
+                )
+                return binding ? { reportBundleBinding: binding } : {}
+              })(),
               ...(isPlainRecord((attachment as ChatAttachment).metadata)
                 ? { metadata: { ...(attachment as ChatAttachment).metadata } }
                 : {})
@@ -354,7 +415,7 @@ export const parseInternalImageDragPayload = (
   dataTransfer: DragDataReader
 ): InternalImageDragPayload | null => {
   const directPayload = dataTransfer.getData(QAPP_IMAGE_DRAG_MIME).trim()
-  if (directPayload) return parsePayload(directPayload)
+  if (directPayload) return parsePayload(directPayload, 'app-private')
 
   const textPayload = dataTransfer.getData('text/plain').trim()
   if (!textPayload.startsWith(INTERNAL_IMAGE_DRAG_PREFIX)) return null

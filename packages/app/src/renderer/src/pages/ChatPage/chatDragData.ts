@@ -2,7 +2,11 @@ import type {
   ChatAttachment,
   ChatMessage
 } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
-import { INTERNAL_IMAGE_DRAG_PREFIX, QAPP_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
+import {
+  INTERNAL_IMAGE_DRAG_PREFIX,
+  QAPP_IMAGE_DRAG_MIME,
+  createReportBundleDragToken
+} from '@renderer/utils/droppedImageUtils'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from './chatPageShared'
 
 export const AGENT_IMAGE_DRAG_MIME = 'application/x-ai-image'
@@ -72,8 +76,11 @@ export const setAgentAttachmentDragPayload = (
   }
 ): void => {
   const normalizedUrl = normalizeLocalMediaUrl(attachment.url)
+  // The MAIN binding is a bearer secret: it never enters the drag data (see
+  // createReportBundleDragToken). Only the app-private payload carries a token for it.
+  const { reportBundleBinding, ...unboundAttachment } = attachment
   const normalizedAttachment: ChatAttachment = {
-    ...attachment,
+    ...unboundAttachment,
     url: normalizedUrl,
     ...(attachment.ocrResult || options?.ocrResult
       ? {
@@ -89,13 +96,22 @@ export const setAgentAttachmentDragPayload = (
         : attachment.type === 'image'
           ? 'image'
           : 'file'
-  const payload = JSON.stringify({
-    itemTypes: [itemType],
-    attachments: [normalizedAttachment],
-    ...(normalizedAttachment.ocrResult ? { ocrResult: normalizedAttachment.ocrResult } : {})
-  })
+  const buildPayload = (dragAttachment: ChatAttachment & { reportBundleDragToken?: string }) =>
+    JSON.stringify({
+      itemTypes: [itemType],
+      attachments: [dragAttachment],
+      ...(normalizedAttachment.ocrResult ? { ocrResult: normalizedAttachment.ocrResult } : {})
+    })
+  const payload = buildPayload(normalizedAttachment)
+  const privatePayload =
+    typeof reportBundleBinding === 'string' && reportBundleBinding
+      ? buildPayload({
+          ...normalizedAttachment,
+          reportBundleDragToken: createReportBundleDragToken(reportBundleBinding, normalizedUrl)
+        })
+      : payload
 
-  dataTransfer.setData(QAPP_IMAGE_DRAG_MIME, payload)
+  dataTransfer.setData(QAPP_IMAGE_DRAG_MIME, privatePayload)
   dataTransfer.setData('text/plain', `${INTERNAL_IMAGE_DRAG_PREFIX}${payload}`)
   dataTransfer.setData('text/uri-list', normalizedUrl)
   dataTransfer.effectAllowed = 'copy'

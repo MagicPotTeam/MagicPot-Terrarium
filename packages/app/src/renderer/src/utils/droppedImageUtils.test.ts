@@ -300,7 +300,7 @@ describe('droppedImageUtils', () => {
     ])
   })
 
-  it('keeps the MAIN binding of a report dragged from a bubble', () => {
+  it('keeps the MAIN binding of a report dragged from a bubble only for a drop in this window', () => {
     const binding = `rb1.${'D'.repeat(43)}`
     const report = {
       type: 'file' as const,
@@ -314,28 +314,74 @@ describe('droppedImageUtils', () => {
       reportBundleLabel: 'Canvas Check',
       reportBundleBinding: binding
     }
+    const { reportBundleBinding: _binding, ...unbound } = report
     const data: Record<string, string> = {}
     setAgentAttachmentDragPayload(
       { setData: (type: string, value: string) => void (data[type] = value), effectAllowed: 'all' },
       report
     )
-    for (const transfer of [createDataTransfer(data), createDataTransfer({ 'text/plain': data['text/plain'] })]) {
-      expect(parseInternalImageDragPayload(transfer)?.attachments?.[0]).toEqual({
-        ...report,
-        sizeBytes: undefined,
-        ocrResult: undefined
-      })
-    }
-    // Only a string is carried; anything else is dropped like the other report fields.
-    const malformed = parseInternalImageDragPayload(
+    // The binding itself is in no drag format.
+    for (const value of Object.values(data)) expect(value).not.toContain(binding)
+    // A drop in this window (the app-private payload) swaps the in-memory token back.
+    expect(parseInternalImageDragPayload(createDataTransfer(data))?.attachments?.[0]).toEqual({
+      ...report,
+      sizeBytes: undefined,
+      ocrResult: undefined
+    })
+    // text/plain alone (another app, a text field) is unbound.
+    expect(
+      parseInternalImageDragPayload(createDataTransfer({ 'text/plain': data['text/plain'] }))
+        ?.attachments?.[0]
+    ).toEqual({ ...unbound, sizeBytes: undefined, ocrResult: undefined })
+    // A token from text/plain, an unknown token or one for another file brings nothing in.
+    const token = JSON.parse(data[QAPP_IMAGE_DRAG_MIME]).attachments[0].reportBundleDragToken
+    expect(token).toEqual(expect.stringMatching(/^rbd\./))
+    const forgedText = `${INTERNAL_IMAGE_DRAG_PREFIX}${JSON.stringify({
+      itemTypes: ['file'],
+      attachments: [{ ...unbound, reportBundleDragToken: token }]
+    })}`
+    for (const transfer of [
+      createDataTransfer({ 'text/plain': forgedText }),
       createDataTransfer({
         [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
           itemTypes: ['file'],
-          attachments: [{ ...report, reportBundleBinding: { forged: true } }]
+          attachments: [{ ...unbound, reportBundleDragToken: 'rbd.unknown' }]
+        })
+      }),
+      createDataTransfer({
+        [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
+          itemTypes: ['file'],
+          attachments: [
+            { ...unbound, url: 'local-media:///C:/demo/other.md', reportBundleDragToken: token }
+          ]
         })
       })
-    )
-    expect(malformed?.attachments?.[0]).not.toHaveProperty('reportBundleBinding')
+    ]) {
+      expect(parseInternalImageDragPayload(transfer)?.attachments?.[0]).not.toHaveProperty(
+        'reportBundleBinding'
+      )
+    }
+  })
+
+  it('never accepts a binding carried inside drag data from outside the window', () => {
+    const binding = `rb1.${'E'.repeat(43)}`
+    const forged = {
+      type: 'file',
+      url: 'local-media:///C:/demo/report.md',
+      fileName: 'report.md',
+      reportBundleId: 'bundle-1',
+      reportBundleRole: 'primary-report',
+      reportBundleBinding: binding
+    }
+    const json = JSON.stringify({ itemTypes: ['file'], attachments: [forged] })
+    for (const transfer of [
+      createDataTransfer({ [QAPP_IMAGE_DRAG_MIME]: json }),
+      createDataTransfer({ 'text/plain': `${INTERNAL_IMAGE_DRAG_PREFIX}${json}` })
+    ]) {
+      const attachment = parseInternalImageDragPayload(transfer)?.attachments?.[0]
+      expect(attachment).toMatchObject({ reportBundleRole: 'primary-report' })
+      expect(attachment).not.toHaveProperty('reportBundleBinding')
+    }
   })
 
   it('parses OCR result metadata from internal drag payloads when provided', () => {
