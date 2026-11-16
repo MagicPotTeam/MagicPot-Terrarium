@@ -1,4 +1,4 @@
-import React, { useId, useMemo, useState } from 'react'
+import React, { useId, useMemo, useRef, useState } from 'react'
 import { Box, InputBase } from '@mui/material'
 import { alpha, useTheme } from '@mui/material/styles'
 import { useTranslation } from 'react-i18next'
@@ -9,6 +9,8 @@ import { getAgentColumnTokens } from '@renderer/components/agentColumnTokens'
 export type ChatModelSwitcherProfile = {
   id: string
   model_name: string
+  /** The muted second line: where the model runs (provider, or the API host). Never the id. */
+  detail?: string
   /** The reasoning efforts this model offers (empty: none) and the one that is in use. */
   efforts: LLMReasoningEffort[]
   effort: LLMReasoningEffort | null
@@ -70,12 +72,38 @@ const ChatModelSwitcher: React.FC<ChatModelSwitcherProps> = ({
         ? profiles.filter(
             (profile) =>
               profile.model_name.toLowerCase().includes(needle) ||
-              profile.id.toLowerCase().includes(needle)
+              (profile.detail ?? '').toLowerCase().includes(needle)
           )
         : profiles,
     [needle, profiles]
   )
   const chosen = profiles.find((profile) => profile.id === draft.profileId) ?? null
+  const groupRef = useRef<HTMLDivElement | null>(null)
+  const chosenIndex = visible.findIndex((profile) => profile.id === draft.profileId)
+  const tabStopIndex = chosenIndex >= 0 ? chosenIndex : 0
+  const choose = (profile: ChatModelSwitcherProfile) =>
+    setDraft({ profileId: profile.id, effort: profile.effort })
+  // A radio group: the arrow keys (and Home / End) move to a row and choose it.
+  const handleRowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const keys = ['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End']
+    if (!keys.includes(event.key) || visible.length === 0) return
+    const rows = Array.from(
+      groupRef.current?.querySelectorAll<HTMLElement>('[role="radio"]') ?? []
+    )
+    const from = rows.findIndex((row) => row === document.activeElement)
+    const base = from >= 0 ? from : tabStopIndex
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? visible.length - 1
+          : event.key === 'ArrowDown' || event.key === 'ArrowRight'
+            ? (base + 1) % visible.length
+            : (base - 1 + visible.length) % visible.length
+    event.preventDefault()
+    choose(visible[next])
+    rows[next]?.focus()
+  }
   const changed =
     chosen !== null &&
     (chosen.id !== current?.id || (draft.effort ?? null) !== (chosen.effort ?? null))
@@ -210,8 +238,13 @@ const ChatModelSwitcher: React.FC<ChatModelSwitcherProps> = ({
           {t('chat.model_switcher.empty')}
         </Box>
       ) : (
-        <Box role="radiogroup" aria-labelledby={modelLabelId}>
-          {visible.map((profile) => {
+        <Box
+          role="radiogroup"
+          aria-labelledby={modelLabelId}
+          ref={groupRef}
+          onKeyDown={handleRowKeyDown}
+        >
+          {visible.map((profile, index) => {
             const checked = profile.id === draft.profileId
             return (
               <Box
@@ -219,9 +252,12 @@ const ChatModelSwitcher: React.FC<ChatModelSwitcherProps> = ({
                 type="button"
                 role="radio"
                 key={profile.id}
+                data-profile-id={profile.id}
                 aria-checked={checked}
+                // One Tab stop for the list (the chosen row, else the first); arrows move in it.
+                tabIndex={index === tabStopIndex ? 0 : -1}
                 title={profile.model_name}
-                onClick={() => setDraft({ profileId: profile.id, effort: profile.effort })}
+                onClick={() => choose(profile)}
                 sx={{
                   boxSizing: 'border-box',
                   display: 'flex',
@@ -271,7 +307,7 @@ const ChatModelSwitcher: React.FC<ChatModelSwitcherProps> = ({
                     color: tokens.muted
                   }}
                 >
-                  {profile.id}
+                  {profile.detail ?? ''}
                 </Box>
               </Box>
             )

@@ -39,24 +39,34 @@ export function useAgentColumnToasts(rootRef: React.RefObject<HTMLElement | null
         // stack: the snackbar shows above it.
         const dialogs = Array.from(document.querySelectorAll('.MuiDialog-root'))
         if (dialogs.some((dialog) => !root.contains(dialog))) return null
+        const lifetime =
+          duration === null
+            ? null
+            : Math.min(
+                duration === undefined || duration <= 0 ? AGENT_COLUMN_TOAST_DEFAULT_MS : duration,
+                MAX_DURATION_MS
+              )
         const duplicate = toastsRef.current.find(
           (toast) => toast.severity === severity && toast.message === message
         )
-        if (duplicate) return duplicate.key
+        // The same message raised again stays one toast whose lifetime starts over.
+        if (duplicate) {
+          const next = toastsRef.current.map((toast) =>
+            toast === duplicate
+              ? { ...toast, duration: lifetime, revision: toast.revision + 1 }
+              : toast
+          )
+          toastsRef.current = next
+          setToasts(next)
+          return duplicate.key
+        }
         nextKeyRef.current += 1
         const toast: Toast = {
           key: `agent-column-toast-${nextKeyRef.current}`,
           severity,
           message,
-          duration:
-            duration === null
-              ? null
-              : Math.min(
-                  duration === undefined || duration <= 0
-                    ? AGENT_COLUMN_TOAST_DEFAULT_MS
-                    : duration,
-                  MAX_DURATION_MS
-                )
+          duration: lifetime,
+          revision: 0
         }
         const next = [...toastsRef.current, toast].slice(-MAX_TOASTS)
         toastsRef.current = next

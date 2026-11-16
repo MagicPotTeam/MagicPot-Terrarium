@@ -12,8 +12,9 @@ import {
 } from '@shared/llm'
 import { getAgentColumnTokens } from '@renderer/components/agentColumnTokens'
 import ChatModelSwitcher, { type ChatModelSwitcherProfile } from './ChatModelSwitcher'
+import { getModelSwitcherDetail, type ChatModelSwitcherSource } from './chatModelSwitcherDetail'
 
-export type ChatPrimarySelectionProfile = {
+export type ChatPrimarySelectionProfile = ChatModelSwitcherSource & {
   id: string
   model_name: string
 }
@@ -239,12 +240,13 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           null)
       : selectedProfileId
     const switcherProfiles: ChatModelSwitcherProfile[] = pickableProfiles.map((profile) => {
+      const row = { id: profile.id, model_name: profile.model_name, detail: getModelSwitcherDetail(profile) }
       if (profile.id === currentProfileId) {
-        return { ...profile, efforts: pickableEfforts, effort: normalizedSelectedEffort ?? null }
+        return { ...row, efforts: pickableEfforts, effort: normalizedSelectedEffort ?? null }
       }
       // Another model's efforts can only be set through the per-model preference.
       const other = onSelectProfileReasoningEffort ? getProfileReasoning?.(profile.id) : undefined
-      return { ...profile, efforts: other?.efforts ?? [], effort: other?.effort ?? null }
+      return { ...row, efforts: other?.efforts ?? [], effort: other?.effort ?? null }
     })
     // Only the efforts are pickable (a member that cannot change its model): list its model.
     if (
@@ -255,7 +257,9 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
       const own = availableProfiles.find((profile) => profile.id === currentProfileId)
       if (own) {
         switcherProfiles.push({
-          ...own,
+          id: own.id,
+          model_name: own.model_name,
+          detail: getModelSwitcherDetail(own),
           efforts: pickableEfforts,
           effort: normalizedSelectedEffort ?? null
         })

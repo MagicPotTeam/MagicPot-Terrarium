@@ -86,6 +86,7 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
   const wasOpenRef = useRef(false)
   const onReturnFocusRef = useRef(onReturnFocus)
   onReturnFocusRef.current = onReturnFocus
+  const closeRef = useRef<() => void>(() => undefined)
 
   const returnFocus = () => {
     if (onReturnFocusRef.current) onReturnFocusRef.current()
@@ -114,6 +115,21 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
     }
     document.addEventListener('focusin', track, true)
     return () => document.removeEventListener('focusin', track, true)
+  }, [open])
+
+  // Escape with the focus nowhere (the focused control went away) still closes the topmost sheet.
+  useEffect(() => {
+    if (!open) return
+    const handle = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return
+      if (!isPlainBody(document.activeElement)) return
+      const root = dialogRef.current?.parentElement
+      if (!root || root.parentElement?.lastElementChild !== root) return
+      event.preventDefault()
+      closeRef.current()
+    }
+    document.addEventListener('keydown', handle)
+    return () => document.removeEventListener('keydown', handle)
   }, [open])
 
   // Unmounted while open (its owner went away or was re-keyed) while it held the focus: the
@@ -164,12 +180,27 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
   // Closing from inside the sheet (Escape, Cancel, the dimmed area) hands the focus back first.
   const close = () => {
     if (cancelDisabled) return
-    if (dialogRef.current?.contains(document.activeElement)) {
+    const held = Boolean(dialogRef.current?.contains(document.activeElement))
+    if (held) {
       focusInsideRef.current = false
       returnFocus()
     }
     onClose()
+    // An opener in the column header cannot take the focus while the open sheet keeps the
+    // header inert: it gets the focus once the sheet has gone.
+    const opener = openerRef.current
+    if (held && !onReturnFocusRef.current && opener?.closest('[inert]')) {
+      const focusOpener = (attempt = 0) => {
+        if (!opener.isConnected || !isPlainBody(document.activeElement)) return
+        opener.focus()
+        if (document.activeElement !== opener && attempt < 20) {
+          window.setTimeout(() => focusOpener(attempt + 1), 50)
+        }
+      }
+      window.setTimeout(() => focusOpener(), 0)
+    }
   }
+  closeRef.current = close
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const dialog = event.currentTarget
@@ -233,7 +264,10 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
         aria-hidden
         data-testid="agent-column-overlay-scrim"
         onMouseDown={(event) => {
-          if (event.target === event.currentTarget) close()
+          if (event.target !== event.currentTarget) return
+          // The press would move the focus to the page body after the focus went back.
+          event.preventDefault()
+          close()
         }}
         sx={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)' }}
       />
@@ -248,7 +282,8 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
           left: 0,
           right: 0,
           bottom: 0,
-          height: '85%',
+          // 85% of the column body: the host also covers the header, whose height it gives.
+          height: 'calc((100% - var(--agent-column-header-height, 0px)) * 0.85)',
           display: 'flex',
           flexDirection: 'column',
           minWidth: 0,

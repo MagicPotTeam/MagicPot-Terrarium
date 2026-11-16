@@ -82,7 +82,9 @@ describe('AgentColumnOverlay', () => {
     render(<Harness />)
     fireEvent.click(screen.getByRole('button', { name: 'open' }))
     const dialog = screen.getByRole('dialog')
-    fireEvent.keyDown(document.body, { key: 'Escape' })
+    const outside = screen.getByRole('button', { name: 'open' })
+    act(() => outside.focus())
+    fireEvent.keyDown(outside, { key: 'Escape' })
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'search' }), {
       key: 'Escape',
       isComposing: true
@@ -94,12 +96,31 @@ describe('AgentColumnOverlay', () => {
     expect(screen.getByRole('dialog')).toBe(dialog)
   })
 
+  it('closes the topmost sheet on Escape when the focus is nowhere', async () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    try {
+      render(<Harness host={host} />)
+      fireEvent.click(screen.getByRole('button', { name: 'open' }))
+      const dialog = screen.getByRole('dialog')
+      await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement))
+      // The focused control goes away (re-rendered content): the focus falls to the body.
+      act(() => (document.activeElement as HTMLElement).blur())
+      expect(document.activeElement).toBe(document.body)
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    } finally {
+      host.remove()
+    }
+  })
+
   it('closes on a click on the dimmed column but not on the sheet', () => {
     render(<Harness />)
     fireEvent.click(screen.getByRole('button', { name: 'open' }))
     fireEvent.mouseDown(screen.getByRole('dialog'))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
-    fireEvent.mouseDown(screen.getByTestId('agent-column-overlay-scrim'))
+    // The press does not move the focus to the page body after it went back to the opener.
+    expect(fireEvent.mouseDown(screen.getByTestId('agent-column-overlay-scrim'))).toBe(false)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 

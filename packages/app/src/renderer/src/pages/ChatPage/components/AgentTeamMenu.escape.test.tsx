@@ -91,7 +91,9 @@ describe('AgentTeamMenu Escape interaction', () => {
     try {
       fireEvent.click(trigger, { detail: 1 })
       const dialog = screen.getByRole('dialog', { name: '团队管理' })
-      fireEvent.keyDown(document.body, { key: 'Escape' })
+      // The focus on a control outside the drawer (with the focus nowhere, Escape closes it).
+      act(() => trigger.focus())
+      fireEvent.keyDown(trigger, { key: 'Escape' })
       expect(screen.getByRole('dialog', { name: '团队管理' })).toBe(dialog)
       const draft = screen.getByLabelText('频道消息')
       fireEvent.keyDown(draft, { key: 'Escape', isComposing: true })

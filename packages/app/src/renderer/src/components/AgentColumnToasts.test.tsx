@@ -128,6 +128,29 @@ describe('Agent column toasts', () => {
     ])
   })
 
+  it('starts the lifetime over when a shown message is raised again', () => {
+    vi.useFakeTimers()
+    renderColumn()
+    act(() => {
+      notify.notifyWarning('同一条消息')
+    })
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    act(() => {
+      notify.notifyWarning('同一条消息')
+    })
+    expect(toasts()).toHaveLength(1)
+    act(() => {
+      vi.advanceTimersByTime(3999)
+    })
+    expect(toasts().map((item) => item.textContent)).toEqual(['警告：同一条消息×'])
+    act(() => {
+      vi.advanceTimersByTime(1)
+    })
+    expect(toasts()).toHaveLength(0)
+  })
+
   it('keeps a sticky message until it is dismissed and closes on Escape', () => {
     vi.useFakeTimers()
     renderColumn()

@@ -621,6 +621,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const [overlayHost, setOverlayHost] = useState<HTMLElement | null>(null)
   const headerRef = useRef<HTMLDivElement | null>(null)
   const [headerHeight, setHeaderHeight] = useState(50)
+  // A drawer is open in the overlay host: the header under its dimmed layer takes no input.
+  const [overlayOpen, setOverlayOpen] = useState(false)
   const [paneSubRowTitles, setPaneSubRowTitles] = useState<Record<string, string | null>>({})
   const [paneSubRowCounts, setPaneSubRowCounts] = useState<Record<string, number>>({})
   const subRowHostRefs = useRef(new Map<string, (element: HTMLElement | null) => void>())
@@ -1170,12 +1172,23 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : t('agent_workspace.trace_stop_failed')
-      console.error('[Error]', message)
-      if (!columnToasts.push('error', message)) notifyError(message)
+      // notifyError logs the message itself; the column toast is logged here, once.
+      if (columnToasts.push('error', message)) console.error('[Error]', message)
+      else notifyError(message)
     }
   }
 
-  // The overlay host starts right under the header, which wraps onto two lines when narrow.
+  useEffect(() => {
+    if (!overlayHost) return
+    const update = () => setOverlayOpen(overlayHost.childElementCount > 0)
+    update()
+    if (typeof MutationObserver === 'undefined') return
+    const observer = new MutationObserver(update)
+    observer.observe(overlayHost, { childList: true })
+    return () => observer.disconnect()
+  }, [overlayHost])
+
+  // The drawer's sheet starts right under the header, which wraps onto two lines when narrow.
   useLayoutEffect(() => {
     const header = headerRef.current
     if (!header) return
@@ -1238,6 +1251,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
       <Box
         ref={headerRef}
         data-testid="agent-workspace-header"
+        inert={overlayOpen || undefined}
         sx={(theme) => ({
           // A wrapping row: the model pill drops onto its own line when it does not fit.
           display: 'flex',
@@ -1642,13 +1656,16 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         </Box>
       )}
 
-      {/* Covers the column below the header; empty (and click-through) while nothing is open. */}
+      {/* Covers the whole column, header included (a drawer's dimmed layer makes the header
+          unclickable as upstream's modal drawer does); the sheet itself stays below the header.
+          Empty (and click-through) while nothing is open. */}
       <Box
         ref={setOverlayHost}
         data-testid="agent-workspace-overlay-host"
+        style={{ '--agent-column-header-height': `${headerHeight}px` } as React.CSSProperties}
         sx={{
           position: 'absolute',
-          top: headerHeight,
+          top: 0,
           left: 0,
           right: 0,
           bottom: 0,

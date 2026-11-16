@@ -185,7 +185,7 @@ export default function AgentTeamMenu({
     title={t('agent_workspace.team_overlay.title')}
     onClose={() => setOpen(false)}
     cancelLabel={t('agent_workspace.overlay.close')}
-    cancelAriaLabel="关闭团队管理"
+    cancelAriaLabel={t('agent_workspace.team_overlay.close_aria', { defaultValue: '关闭团队管理' })}
     initialFocus="cancel"
     onReturnFocus={onReturnFocus}
     data-testid="agent-team-overlay"

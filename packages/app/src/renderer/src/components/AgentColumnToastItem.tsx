@@ -11,6 +11,8 @@ export type Toast = {
   message: string
   /** null: stays until dismissed. */
   duration: number | null
+  /** Bumped when the same message is raised again: its lifetime starts over. */
+  revision: number
 }
 
 const AgentColumnToastItem: React.FC<{ toast: Toast; onDismiss: (key: string) => void }> = ({
@@ -27,7 +29,7 @@ const AgentColumnToastItem: React.FC<{ toast: Toast; onDismiss: (key: string) =>
     if (paused || toast.duration === null) return
     const timer = window.setTimeout(() => onDismiss(toast.key), toast.duration)
     return () => window.clearTimeout(timer)
-  }, [onDismiss, paused, toast.duration, toast.key])
+  }, [onDismiss, paused, toast.duration, toast.key, toast.revision])
 
   const stripe = {
     info: theme.palette.info.main,

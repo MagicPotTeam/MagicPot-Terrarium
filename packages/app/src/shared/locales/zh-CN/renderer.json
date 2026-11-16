@@ -1490,11 +1490,13 @@
       "close": "关闭"
     },
     "team_overlay": {
-      "title": "团队"
+      "title": "团队",
+      "close_aria": "关闭团队管理"
     },
     "member_form": {
       "title": "添加成员",
-      "create": "创建"
+      "create": "创建",
+      "create_aria": "确认创建成员"
     },
     "trace_realtime_stopped": "实时追踪已停止。",
     "trace_draft_ready": "追踪草稿已生成：{{name}}，请保存或删除后再创建新的追踪。",

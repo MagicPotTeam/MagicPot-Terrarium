@@ -258,16 +258,19 @@ describe('AgentWorkspace', () => {
     expect(header).toHaveTextContent(/^agent_workspace\.title海报项目$/)
   })
 
-  it('hands every pane one overlay layer that covers the column below the header', async () => {
+  it('hands every pane one overlay layer that covers the column, header included', async () => {
     storePanes(2)
     renderWorkspace('海报项目')
     const host = screen.getByTestId('agent-workspace-overlay-host')
     const header = screen.getByTestId('agent-workspace-header')
-    // Outside the header, over everything under it, and click-through while it is empty.
+    // Outside the header, over the whole column (a drawer's dimmed layer covers the header as
+    // upstream's modal drawer does), and click-through while it is empty.
     expect(header).not.toContainElement(host)
     const style = getComputedStyle(host)
     expect(style.position).toBe('absolute')
-    expect([style.left, style.right, style.bottom]).toEqual(['0px', '0px', '0px'])
+    expect([style.top, style.left, style.right, style.bottom]).toEqual(['0px', '0px', '0px', '0px'])
+    // The sheet itself starts below the header, whose height the layer hands on.
+    expect(host.style.getPropertyValue('--agent-column-header-height')).toMatch(/^\d+(\.\d+)?px$/)
     expect(style.pointerEvents).toBe('none')
     expect(host).toBeEmptyDOMElement()
     await waitFor(() => {
@@ -279,6 +282,14 @@ describe('AgentWorkspace', () => {
       expect(latest.size).toBe(2)
       for (const props of latest.values()) expect(props.overlayHost).toBe(host)
     })
+    // While a drawer is open the header (model pill, target select) takes no input, so no
+    // second drawer can be opened from it.
+    expect(header).not.toHaveAttribute('inert')
+    const drawer = document.createElement('div')
+    act(() => host.append(drawer))
+    await waitFor(() => expect(header).toHaveAttribute('inert'))
+    act(() => drawer.remove())
+    await waitFor(() => expect(header).not.toHaveAttribute('inert'))
   })
 
   it('wraps the header and hands every pane the same model slot, which stays empty without a pill', async () => {

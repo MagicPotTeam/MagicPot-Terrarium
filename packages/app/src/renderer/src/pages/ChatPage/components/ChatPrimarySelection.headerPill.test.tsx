@@ -25,8 +25,8 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate }) }))
 
 type Props = ComponentProps<typeof ChatPrimarySelection>
 const profiles = [
-  { id: 'sonnet', model_name: 'anthropic/claude-sonnet' },
-  { id: 'gpt', model_name: 'openai/gpt-5.5' }
+  { id: 'sonnet', model_name: 'anthropic/claude-sonnet', provider: 'claude' as const },
+  { id: 'gpt', model_name: 'openai/gpt-5.5', provider: 'openai' as const }
 ]
 const efforts: LLMReasoningEffort[] = ['medium', 'high']
 
@@ -99,13 +99,13 @@ describe('ChatPrimarySelection header pill', () => {
     await user.keyboard('{Enter}')
     const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
     expect(pill()).toHaveAttribute('aria-expanded', 'true')
-    // Search first, then the models as two-line rows (name, id) with the one in use chosen.
+    // Search first, then the models as two-line rows (name, provider) with the one in use chosen.
     const search = within(sheet).getByRole('searchbox', { name: 'Search models…' })
     await waitFor(() => expect(search).toHaveFocus())
     const rows = within(sheet).getAllByRole('radio')
     expect(rows.map((row) => row.textContent)).toEqual([
-      'anthropic/claude-sonnetsonnet',
-      'openai/gpt-5.5gpt'
+      'anthropic/claude-sonnetclaude',
+      'openai/gpt-5.5openai'
     ])
     expect(rows.map((row) => row.getAttribute('aria-checked'))).toEqual(['true', 'false'])
     // The efforts of the chosen model as pill chips, the one in use pressed.
@@ -130,7 +130,7 @@ describe('ChatPrimarySelection header pill', () => {
     expect(await screen.findByRole('dialog', { name: 'Switch model' })).toBeInTheDocument()
   })
 
-  it('filters the models by name or id and says when none matches', async () => {
+  it('filters the models by name or provider and says when none matches', async () => {
     const user = userEvent.setup()
     renderPill()
     await user.click(pill())
@@ -141,11 +141,67 @@ describe('ChatPrimarySelection header pill', () => {
       within(sheet)
         .getAllByRole('radio')
         .map((row) => row.textContent)
-    ).toEqual(['openai/gpt-5.5gpt'])
+    ).toEqual(['openai/gpt-5.5openai'])
     await user.clear(search)
     await user.type(search, 'nothing')
     expect(within(sheet).queryAllByRole('radio')).toHaveLength(0)
     expect(within(sheet).getByText('No matching models.')).toBeInTheDocument()
+  })
+
+  it('never shows or searches the random profile id; the second line says where the model runs', async () => {
+    const user = userEvent.setup()
+    const uuid = '3f2a9c1e-5b7d-4c1a-9e2f-0a1b2c3d4e5f'
+    renderPill({
+      selectedProfileId: uuid,
+      availableProfiles: [
+        { id: uuid, model_name: 'gpt-5.5', provider: 'openai' },
+        { id: 'local-one', model_name: 'llama3', call_type: 'local' },
+        { id: 'proxy', model_name: 'qwen-max', base_url: 'https://llm.example.test/v1' }
+      ]
+    })
+    await user.click(pill())
+    const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    const rows = within(sheet).getAllByRole('radio')
+    expect(rows.map((row) => Array.from(row.children).map((line) => line.textContent))).toEqual([
+      ['gpt-5.5', 'openai'],
+      ['llama3', 'local'],
+      ['qwen-max', 'llm.example.test']
+    ])
+    expect(sheet).not.toHaveTextContent(uuid)
+    const search = within(sheet).getByRole('searchbox')
+    await user.type(search, '3f2a9c1e')
+    expect(within(sheet).queryAllByRole('radio')).toHaveLength(0)
+    await user.clear(search)
+    await user.type(search, 'example')
+    expect(within(sheet).getAllByRole('radio').map((row) => row.textContent)).toEqual([
+      'qwen-maxllm.example.test'
+    ])
+  })
+
+  it('makes the model list one Tab stop whose arrow keys choose a row', async () => {
+    const user = userEvent.setup()
+    renderPill({
+      availableProfiles: [...profiles, { id: 'third', model_name: 'third-model', provider: 'gemini' }]
+    })
+    await user.click(pill())
+    const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    await waitFor(() => expect(within(sheet).getByRole('searchbox')).toHaveFocus())
+    const rows = () => within(sheet).getAllByRole('radio')
+    expect(rows().map((row) => row.tabIndex)).toEqual([0, -1, -1])
+    await user.tab()
+    expect(rows()[0]).toHaveFocus()
+    await user.keyboard('{ArrowDown}')
+    expect(rows()[1]).toHaveFocus()
+    expect(rows().map((row) => row.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false'])
+    expect(within(sheet).getByRole('button', { name: 'Switch' })).toBeEnabled()
+    await user.keyboard('{ArrowUp}{ArrowUp}')
+    expect(rows()[2]).toHaveFocus()
+    await user.keyboard('{Home}')
+    expect(rows()[0]).toHaveFocus()
+    expect(rows().map((row) => row.tabIndex)).toEqual([0, -1, -1])
+    // Tab leaves the list for the footer.
+    await user.tab()
+    expect(within(sheet).getByRole('button', { name: 'Cancel' })).toHaveFocus()
   })
 
   it('switches the model, the effort, or both, with Switch', async () => {
@@ -295,8 +351,8 @@ describe('ChatPrimarySelection header pill', () => {
     const rows = within(sheet).getAllByRole('radio')
     // No way back to inheriting: the stored member choice cannot be cleared.
     expect(rows.map((row) => row.textContent)).toEqual([
-      'anthropic/claude-sonnetsonnet',
-      'openai/gpt-5.5gpt'
+      'anthropic/claude-sonnetclaude',
+      'openai/gpt-5.5openai'
     ])
     expect(rows[1]).toHaveAttribute('aria-checked', 'true')
     await user.click(rows[0])

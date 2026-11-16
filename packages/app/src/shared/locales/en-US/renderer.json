@@ -1663,11 +1663,13 @@
       "close": "Close"
     },
     "team_overlay": {
-      "title": "Team"
+      "title": "Team",
+      "close_aria": "Close team management"
     },
     "member_form": {
       "title": "Add member",
-      "create": "Create"
+      "create": "Create",
+      "create_aria": "Create member"
     },
     "trace_realtime_stopped": "Live trace stopped.",
     "trace_draft_ready": "Trace draft created: {{name}}. Save or delete it before starting a new trace.",

@@ -37,7 +37,8 @@ export function AgentTeamMemberForm({ lead, members, creating, onClose, onCreate
     onReturnFocus={onReturnFocus}
     primary={{
       label: t('agent_workspace.member_form.create'),
-      ariaLabel: '确认创建成员',
+      // The accessible name keeps the visible label in it (voice control) and says more.
+      ariaLabel: t('agent_workspace.member_form.create_aria', { defaultValue: '确认创建成员' }),
       busy,
       disabled: !valid || atLimit || invalidLimit || Boolean(lead.teamEnded),
       onClick: () => {
