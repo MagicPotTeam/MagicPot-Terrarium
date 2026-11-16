@@ -903,6 +903,40 @@ describe('content-addressed autosave mirror', () => {
       restoredSources.map((src) => src.slice('local-media://'.length)).sort()
     )
     expect(fake.record('mirror-posix')!.items).toHaveLength(2)
+    // The bytes go back into IndexedDB under the mirror's own keys, so the
+    // board does not get a second set of keys (and a second mirror copy).
+    const mirrorKeys = mirror.assetFiles().map((name) => name.split('.')[0])
+    const pathRecord = fake.record('mirror-posix')!.items.find((item) => item.id === 'path')!
+    expect(mirrorKeys).toContain(pathRecord.assetKey)
+    expect(fake.blobKeys()).toHaveLength(1)
+    for (const key of fake.blobKeys()) {
+      expect(mirrorKeys.some((mirrorKey) => key.endsWith(`::canvas::asset::${mirrorKey}`))).toBe(true)
+    }
+
+    // Next session: restored from IndexedDB, saved again: still no copy, no new file.
+    const reopened = await loadCanvasItems('mirror-posix')
+    mirror.resetCalls()
+    fake.resetLog()
+    await saveCanvasItems(
+      reopened.items.map((item) => ({ ...item, x: 9 }) as CanvasItem),
+      'mirror-posix'
+    )
+    expect(fake.blobPuts()).toEqual([])
+    expect(mirror.calls.copy).toEqual([])
+    expect(mirror.calls.write).toEqual([])
+    expect(mirror.calls.readFileFromPath).toEqual([])
+    expect(mirror.assetFiles()).toHaveLength(2)
+  })
+
+  it('keys only content-keyed files directly in a mirror asset folder by their name', async () => {
+    const mirror = createFakeMirror()
+    // Same name shape, but outside <autoSaveRoot>/<project>/assets/: keyed by its file identity.
+    const outsidePath = `/home/u/pics/assets/${contentKey([5, 5])}.png`
+    mirror.localFiles.set(outsidePath, new Uint8Array([5, 5]))
+    await saveCanvasItems([imageItem('outside', `local-media://${outsidePath}`)], 'mirror-name')
+    const outsideKey = fake.record('mirror-name')!.items[0].assetKey
+    expect(outsideKey).toMatch(/^f-[0-9a-f]{40}$/)
+    expect(outsideKey).not.toBe(contentKey([5, 5]))
   })
 
   it('sends the bytes through the renderer when main refuses the direct copy', async () => {

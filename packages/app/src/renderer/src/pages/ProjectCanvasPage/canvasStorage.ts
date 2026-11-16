@@ -513,6 +513,34 @@ async function readCanvasLocalSourceFileIdentity(
   }
 }
 
+const CANVAS_MIRROR_ASSET_PATH_PATTERN = /[\\/]assets[\\/]([bfu]-[0-9a-f]{40})(?:\.[a-z0-9]{1,16})?$/
+
+/**
+ * The content key of a file written by the mirror save, i.e. a path of the
+ * form <autoSaveRoot>/<projectDir>/assets/<key>[.ext]. Such a file is
+ * published once under its key and never replaced, so its name is its key.
+ */
+async function readCanvasMirrorAssetKeyFromPath(localPath: string): Promise<string | null> {
+  const match = CANVAS_MIRROR_ASSET_PATH_PATTERN.exec(localPath)
+  if (!match) return null
+  const autoSaveRoot = await resolveAutoSaveRootPath()
+  if (!autoSaveRoot) return null
+  const comparable = (value: string): string =>
+    value.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase()
+  const root = comparable(autoSaveRoot)
+  const file = comparable(localPath)
+  if (!root || !file.startsWith(`${root}/`)) return null
+  const segments = file.slice(root.length + 1).split('/')
+  if (
+    segments.length !== 3 ||
+    segments[1] !== 'assets' ||
+    segments.some((segment) => !segment || segment === '.' || segment === '..')
+  ) {
+    return null
+  }
+  return match[1]
+}
+
 /**
  * The key of a path-backed slot, from the item's own local-file identity or a
  * stat of the file. Returns null for sources that are not local files (their
@@ -525,6 +553,15 @@ async function resolveCanvasFileIdentityAssetKey(
 ): Promise<string | null> {
   const localPath = resolveLocalFilePathFromSource(src)
   if (!localPath) return null
+
+  // A board restored from the autosave mirror points at the mirror's own
+  // content-keyed files: keep their keys instead of keying the copy afresh,
+  // so the next save neither stores nor mirrors those bytes a second time.
+  const mirrorKey = await readCanvasMirrorAssetKeyFromPath(localPath)
+  if (mirrorKey) {
+    rememberCanvasAssetKey(owner, slotId, src, mirrorKey, 'file-identity')
+    return mirrorKey
+  }
 
   const itemIdentity = getMatchingLocalFileIdentity(owner, slotId, src)
   if (itemIdentity) {
