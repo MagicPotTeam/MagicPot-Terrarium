@@ -42,6 +42,15 @@ let canvasStartSystemDragRegistered = false
  */
 export const MAIN_WINDOW_BACKGROUND_COLOR = '#1a1a1a'
 
+/**
+ * Listener limit of the main window's WebContents. Its 'render-process-gone' / 'destroyed' /
+ * 'did-start-navigation' listeners are bounded by design, not leaked: measured in the real app,
+ * 10 'render-process-gone' listeners right after the start, unchanged after 2 more threads and 5
+ * reloads. Each running send adds a few and removes them when it ends, so Node's default of 10 warns
+ * on an ordinary send; a listener that really leaks per reload or per request still warns here.
+ */
+export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS = 50
+
 function sanitizeDragFileName(fileName: string): string {
   const trimmed = (fileName || '').trim()
   const baseName = [...basename(trimmed || 'canvas-selection.png')]
@@ -165,6 +174,9 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
       devTools: !app.isPackaged
     }
   })
+
+  // Electron's forwarder, renderer diagnostics, both read admissions, one per open IPC stream and one per Agent thread interaction lease (scope bindings + running requests).
+  mainWindow.webContents.setMaxListeners(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
 
   const trustedRendererUrl = resolveMainWindowRendererUrl()
   const disposeCatalogBinding = installInstalledCatalogReadBinding(mainWindow, trustedRendererUrl, () => winController.getMainWindow())

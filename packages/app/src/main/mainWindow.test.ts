@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import { BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
-import { createMainWindow, MAIN_WINDOW_BACKGROUND_COLOR } from './mainWindow'
+import { createMainWindow, MAIN_WINDOW_BACKGROUND_COLOR, MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS } from './mainWindow'
 import { getAuthoritativeMainWindow, winController } from './winControls'
 import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
 import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
@@ -124,6 +124,27 @@ describe('createMainWindow teardown', () => {
       expect(catalogDisposers.get(otherWindow)).not.toHaveBeenCalled()
     }
   )
+  it('raises the listener limit of its WebContents before anything subscribes to it', async () => {
+    const limitsAtInstall: number[] = []
+    storageInstall.mockImplementation((window: FakeWindow) => { limitsAtInstall.push(window.webContents.getMaxListeners()); return vi.fn() })
+    const window = createMainWindow() as unknown as FakeWindow
+    expect(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).toBeGreaterThan(10)
+    expect(window.webContents.getMaxListeners()).toBe(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
+    expect(limitsAtInstall).toEqual([MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS])
+    // Eleven 'render-process-gone' listeners (what the running app has during a send) do not warn.
+    const warnings: Error[] = []
+    const onWarning = (warning: Error) => warnings.push(warning)
+    process.on('warning', onWarning)
+    try {
+      for (let index = 0; index < 11; index += 1) window.webContents.on('render-process-gone', () => undefined)
+      // Node emits the warning on a later tick.
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.off('warning', onWarning)
+    }
+    expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toEqual([])
+  })
+
   it('paints the dark theme background, never white, while no page is shown', async () => {
     createMainWindow()
     const options = vi.mocked(BrowserWindow).mock.calls[0]?.[0]
