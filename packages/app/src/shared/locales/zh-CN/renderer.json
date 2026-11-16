@@ -1495,6 +1495,18 @@
     "member_form": {
       "title": "添加成员",
       "create": "创建"
+    },
+    "trace_realtime_stopped": "实时追踪已停止。",
+    "trace_draft_ready": "追踪草稿已生成：{{name}}，请保存或删除后再创建新的追踪。",
+    "trace_none_active": "当前没有正在进行的追踪。",
+    "trace_stop_failed": "停止追踪失败。",
+    "toast": {
+      "region": "通知",
+      "dismiss": "关闭通知",
+      "prefix_info": "提示：",
+      "prefix_success": "成功：",
+      "prefix_warning": "警告：",
+      "prefix_error": "错误："
     }
   },
   "custom_app": {

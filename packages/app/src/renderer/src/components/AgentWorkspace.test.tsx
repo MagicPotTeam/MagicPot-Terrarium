@@ -21,10 +21,17 @@ import {
   updateScopedExternalLoadingSessionId
 } from '@renderer/pages/ChatPage/chatPageShared'
 import { PROJECT_TRACE_CAPTURE_STATE_EVENT } from '@renderer/features/projectTrace/projectTraceRuntime'
+import {
+  AgentColumnToastContext,
+  type AgentColumnToastSink
+} from '@renderer/hooks/agentColumnToastContext'
 
 const chatPageUnmountMock = vi.fn()
 /** Sub-rows the mocked chat page of a scope renders into its thread-list host (as ChatPage does). */
 const mockSubRowLabels: { current: Record<string, string[]> } = { current: {} }
+// The toast sink the last rendered pane sees through the column's context.
+const paneToastSink: { current: AgentColumnToastSink | null } = { current: null }
+const toastSinkOfPane = () => paneToastSink.current
 const chatPageMock = vi.fn((props?: unknown) => {
   const typedProps = props as {
     active?: boolean
@@ -32,6 +39,7 @@ const chatPageMock = vi.fn((props?: unknown) => {
     threadSubRowsHost?: HTMLElement | null
   }
   const subRowLabels = mockSubRowLabels.current[typedProps.storageScope ?? ''] ?? []
+  paneToastSink.current = React.useContext(AgentColumnToastContext)
 
   React.useEffect(
     () => () => {
@@ -76,6 +84,15 @@ vi.mock('react-i18next', () => ({
       if (key === 'agent_workspace.trace_recording') {
         return zhRenderer.agent_workspace.trace_recording
       }
+      // The column's toasts and trace messages read as a Chinese user reads them.
+      if (key.startsWith('agent_workspace.toast.') || key.startsWith('agent_workspace.trace_')) {
+        const value = key
+          .split('.')
+          .reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], zhRenderer)
+        if (typeof value === 'string') {
+          return value.replace(/{{(\w+)}}/g, (_match, name: string) => String(options?.[name] ?? ''))
+        }
+      }
       return key
     },
     i18n: {
@@ -102,17 +119,26 @@ vi.mock('@renderer/features/projectTrace/projectTraceCapture', () => ({
   finalizeActiveProjectTraceCapture: vi.fn()
 }))
 
-vi.mock('@renderer/features/projectTrace/ProjectTraceManagerPanel', () => ({
-  default: (props: { projectId?: string; projectName?: string }) => (
-    <div
-      data-testid="mock-trace-panel"
-      data-project-id={props.projectId}
-      data-project-name={props.projectName}
-    >
-      mock trace panel
-    </div>
-  )
-}))
+vi.mock('@renderer/features/projectTrace/ProjectTraceManagerPanel', async () => {
+  const { AgentColumnToastContext: ToastContext } = await vi.importActual<
+    typeof import('@renderer/hooks/agentColumnToastContext')
+  >('@renderer/hooks/agentColumnToastContext')
+  return {
+    default: function MockTracePanel(props: { projectId?: string; projectName?: string }) {
+      const sink = React.useContext(ToastContext)
+      return (
+        <div
+          data-testid="mock-trace-panel"
+          data-project-id={props.projectId}
+          data-project-name={props.projectName}
+          data-toast-sink={sink ? 'column' : 'none'}
+        >
+          mock trace panel
+        </div>
+      )
+    }
+  }
+})
 
 // The thread list reads a pane's stored conversations as summaries (this mock, named for the
 // reader it replaced) and reads again only when the scope revision of the chat store moves.
@@ -879,6 +905,25 @@ describe('AgentWorkspace', () => {
     expect(screen.queryByTestId('agent-workspace-status-line')).not.toBeInTheDocument()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(latestWorkspaceMenu().traceRecording).toBe(false)
+    // The result is a toast at the top of the column, not an app-wide snackbar.
+    const toasts = screen.getByRole('region', { name: '通知' })
+    expect(toasts.closest('[data-agent-workspace-root]')).not.toBeNull()
+    expect(within(toasts).getByRole('status')).toHaveTextContent(/^提示：实时追踪已停止。×$/)
+    expect(enRenderer.agent_workspace.trace_realtime_stopped).toBe('Live trace stopped.')
+  })
+
+  it('shows the messages its conversations raise as toasts of the column, outside its trace dialog', async () => {
+    renderWorkspace()
+    await waitFor(() => expect(chatPageMock).toHaveBeenCalled())
+    // Each pane is rendered inside the column's toast context.
+    const sink = toastSinkOfPane()
+    expect(sink).not.toBeNull()
+    act(() => {
+      sink?.push('warning', '团队状态冲突，已保留本地更改')
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent(/^警告：团队状态冲突，已保留本地更改×$/)
+    act(() => latestWorkspaceMenu().onToggleTrace())
+    expect(screen.getByTestId('mock-trace-panel')).toHaveAttribute('data-toast-sink', 'none')
   })
 
   it('keeps opened chat panes mounted and switches visibility without a reload', async () => {

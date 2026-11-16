@@ -49,6 +49,8 @@ import {
 } from '@renderer/pages/ProjectCanvasPage/canvasPageLocalStateUtils'
 import ProjectTraceManagerPanel from '@renderer/features/projectTrace/ProjectTraceManagerPanel'
 import { useMessage } from '@renderer/hooks/useMessage'
+import { AgentColumnToastContext } from '@renderer/hooks/agentColumnToastContext'
+import { useAgentColumnToasts } from './AgentColumnToasts'
 import { finalizeActiveProjectTraceCapture } from '@renderer/features/projectTrace/projectTraceCapture'
 import {
   PROJECT_TRACE_CAPTURE_STATE_EVENT,
@@ -579,6 +581,9 @@ interface AgentWorkspaceProps {
 const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName, existingConversationOpen }) => {
   const { t } = useTranslation()
   const { notifyError, notifyInfo } = useMessage()
+  // Messages raised in the column (its own and its conversations') are the column's toasts.
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const { sink: columnToasts, stack: columnToastStack } = useAgentColumnToasts(rootRef)
   const storageKey = buildWorkspaceStorageKey(projectId)
   const activeStorageKey = buildActivePaneStorageKey(projectId)
   const collapsedStorageKey = buildThreadsCollapsedStorageKey(projectId)
@@ -1142,25 +1147,31 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     setDragOverPaneId(null)
   }
 
+  const showColumnInfo = (message: string, duration: number) => {
+    if (!columnToasts.push('info', message, duration)) notifyInfo(message, duration)
+  }
+
   const handleStopTraceCapture = async () => {
     try {
       if (activeTraceState.mode === 'realtime') {
         clearActiveProjectTraceRealtime(projectId)
         setActiveTraceState({ id: '', mode: null })
-        notifyInfo('实时追踪已停止。', 6000)
+        showColumnInfo(t('agent_workspace.trace_realtime_stopped'), 6000)
         return
       }
       const finalized = await finalizeActiveProjectTraceCapture(projectId)
       setActiveTraceState({ id: '', mode: null })
       setTracePanelOpen(Boolean(finalized))
-      notifyInfo(
+      showColumnInfo(
         finalized
-          ? `追踪草稿已生成：${finalized.trace.manifest.name}，请保存或删除后再创建新的追踪。`
-          : '当前没有正在进行的追踪。',
+          ? t('agent_workspace.trace_draft_ready', { name: finalized.trace.manifest.name })
+          : t('agent_workspace.trace_none_active'),
         6000
       )
     } catch (error) {
-      notifyError(error instanceof Error ? error.message : '停止追踪失败。')
+      const message = error instanceof Error ? error.message : t('agent_workspace.trace_stop_failed')
+      console.error('[Error]', message)
+      if (!columnToasts.push('error', message)) notifyError(message)
     }
   }
 
@@ -1209,7 +1220,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   )
 
   return (
+    <AgentColumnToastContext.Provider value={columnToasts}>
     <Box
+      ref={rootRef}
       data-agent-workspace-root={projectId}
       sx={(theme) => ({
         width: '100%',
@@ -1645,6 +1658,10 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         }}
       />
 
+      {columnToastStack}
+
+      {/* The trace dialog is not part of the column: its messages stay app-wide. */}
+      <AgentColumnToastContext.Provider value={null}>
       <Dialog
         open={tracePanelOpen}
         onClose={() => setTracePanelOpen(false)}
@@ -1670,7 +1687,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           />
         </DialogContent>
       </Dialog>
+      </AgentColumnToastContext.Provider>
     </Box>
+    </AgentColumnToastContext.Provider>
   )
 }
 

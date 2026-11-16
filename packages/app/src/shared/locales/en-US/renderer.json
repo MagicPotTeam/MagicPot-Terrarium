@@ -1668,6 +1668,18 @@
     "member_form": {
       "title": "Add member",
       "create": "Create"
+    },
+    "trace_realtime_stopped": "Live trace stopped.",
+    "trace_draft_ready": "Trace draft created: {{name}}. Save or delete it before starting a new trace.",
+    "trace_none_active": "No trace is being recorded.",
+    "trace_stop_failed": "Could not stop the trace.",
+    "toast": {
+      "region": "Notifications",
+      "dismiss": "Dismiss notification",
+      "prefix_info": "Info: ",
+      "prefix_success": "Success: ",
+      "prefix_warning": "Warning: ",
+      "prefix_error": "Error: "
     }
   },
   "custom_app": {
