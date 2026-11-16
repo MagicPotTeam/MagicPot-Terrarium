@@ -366,6 +366,11 @@ interface ChatPageProps {
    * thread with a team renders the team target select (lead and members) into it.
    */
   teamTargetHost?: HTMLElement | null
+  /**
+   * The Agent column's overlay layer below its header. The active conversation draws its
+   * overlay drawer (model switcher, member form, team management) into it.
+   */
+  overlayHost?: HTMLElement | null
 }
 
 export interface ChatPageWorkspaceMenu {

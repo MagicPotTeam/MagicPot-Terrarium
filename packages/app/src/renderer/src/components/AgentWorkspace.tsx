@@ -611,6 +611,11 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const [modelPillHost, setModelPillHost] = useState<HTMLElement | null>(null)
   // Header slot before the pill for the team target select of a thread with a team.
   const [teamTargetHost, setTeamTargetHost] = useState<HTMLElement | null>(null)
+  // The layer over the column below the header; the active pane's chat page draws its overlay
+  // drawer (model switcher, member form, team management) into it.
+  const [overlayHost, setOverlayHost] = useState<HTMLElement | null>(null)
+  const headerRef = useRef<HTMLDivElement | null>(null)
+  const [headerHeight, setHeaderHeight] = useState(50)
   const [paneSubRowTitles, setPaneSubRowTitles] = useState<Record<string, string | null>>({})
   const [paneSubRowCounts, setPaneSubRowCounts] = useState<Record<string, number>>({})
   const subRowHostRefs = useRef(new Map<string, (element: HTMLElement | null) => void>())
@@ -1159,6 +1164,18 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
     }
   }
 
+  // The overlay host starts right under the header, which wraps onto two lines when narrow.
+  useLayoutEffect(() => {
+    const header = headerRef.current
+    if (!header) return
+    const measure = () => setHeaderHeight(header.offsetHeight)
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(header)
+    return () => observer.disconnect()
+  }, [])
+
   const traceRecording = Boolean(activeTraceState.id)
   const workspaceMenuHandlers = {
     onToggleTrace: () => {
@@ -1206,6 +1223,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
       })}
     >
       <Box
+        ref={headerRef}
         data-testid="agent-workspace-header"
         sx={(theme) => ({
           // A wrapping row: the model pill drops onto its own line when it does not fit.
@@ -1553,6 +1571,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 threadSubRowsHost={subRowHosts[pane.id] ?? null}
                 modelPillHost={modelPillHost}
                 teamTargetHost={teamTargetHost}
+                overlayHost={overlayHost}
                 onThreadSubRowChange={getSubRowChangeHandler(pane.id)}
                 onActivate={getPaneActivateHandler(pane.id)}
               />
@@ -1609,6 +1628,22 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           </Box>
         </Box>
       )}
+
+      {/* Covers the column below the header; empty (and click-through) while nothing is open. */}
+      <Box
+        ref={setOverlayHost}
+        data-testid="agent-workspace-overlay-host"
+        sx={{
+          position: 'absolute',
+          top: headerHeight,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 4,
+          pointerEvents: 'none',
+          '&:empty': { display: 'none' }
+        }}
+      />
 
       <Dialog
         open={tracePanelOpen}

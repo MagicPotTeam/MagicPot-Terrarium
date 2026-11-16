@@ -1651,7 +1651,10 @@
     "status_failed": "Failed",
     "status_cancelled": "Cancelled",
     "status_interrupted": "Interrupted",
-    "status_idle": "Idle"
+    "status_idle": "Idle",
+    "overlay": {
+      "cancel": "Cancel"
+    }
   },
   "custom_app": {
     "enable_custom_node_urls": "Set Custom Node URLs",

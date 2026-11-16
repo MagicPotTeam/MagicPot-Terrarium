@@ -232,6 +232,29 @@ describe('AgentWorkspace', () => {
     expect(header).toHaveTextContent(/^agent_workspace\.title海报项目$/)
   })
 
+  it('hands every pane one overlay layer that covers the column below the header', async () => {
+    storePanes(2)
+    renderWorkspace('海报项目')
+    const host = screen.getByTestId('agent-workspace-overlay-host')
+    const header = screen.getByTestId('agent-workspace-header')
+    // Outside the header, over everything under it, and click-through while it is empty.
+    expect(header).not.toContainElement(host)
+    const style = getComputedStyle(host)
+    expect(style.position).toBe('absolute')
+    expect([style.left, style.right, style.bottom]).toEqual(['0px', '0px', '0px'])
+    expect(style.pointerEvents).toBe('none')
+    expect(host).toBeEmptyDOMElement()
+    await waitFor(() => {
+      const latest = new Map<string, { overlayHost: HTMLElement | null }>()
+      for (const [props] of chatPageMock.mock.calls) {
+        const paneProps = props as { storageScope: string; overlayHost: HTMLElement | null }
+        latest.set(paneProps.storageScope, paneProps)
+      }
+      expect(latest.size).toBe(2)
+      for (const props of latest.values()) expect(props.overlayHost).toBe(host)
+    })
+  })
+
   it('wraps the header and hands every pane the same model slot, which stays empty without a pill', async () => {
     storePanes(2)
     renderWorkspace('海报项目')

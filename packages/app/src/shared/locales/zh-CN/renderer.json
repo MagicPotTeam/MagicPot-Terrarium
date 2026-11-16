@@ -1478,7 +1478,10 @@
     "status_failed": "运行失败",
     "status_cancelled": "已取消",
     "status_interrupted": "已中断",
-    "status_idle": "空闲"
+    "status_idle": "空闲",
+    "overlay": {
+      "cancel": "取消"
+    }
   },
   "custom_app": {
     "enable_custom_node_urls": "是否设置自定义节点 URL",
