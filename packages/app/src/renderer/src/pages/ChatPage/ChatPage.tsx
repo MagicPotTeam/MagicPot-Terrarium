@@ -1085,6 +1085,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useMessage()
   const notifyWarningRef = useRef(notifyWarning)
   notifyWarningRef.current = notifyWarning
+  const notifyErrorRef = useRef(notifyError)
+  notifyErrorRef.current = notifyError
   // Read through a ref so the hand-off callbacks keep their identity.
   const notifyInfoRef = useRef(notifyInfo)
   notifyInfoRef.current = notifyInfo
@@ -1344,10 +1346,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
     })
     if (conflict) {
       setSessionSaveError('团队状态冲突：本地更改未覆盖已保存的会话，请保留并检查。')
-      notifyWarning('团队状态冲突，已保留本地更改')
+      notifyWarningRef.current('团队状态冲突，已保留本地更改')
     }
     return result
-  }, [getSessionStorageKey, notifyWarning, setDirtySessionSnapshot])
+  }, [getSessionStorageKey, setDirtySessionSnapshot])
   const replacePersistedSessions = useCallback(
     (scope: string, sessions: ChatSession[], preservedLocal: readonly ChatSession[] = []): void => {
       // Freeze before adopting loaded baselines for any local snapshot retained by the merge.
@@ -2889,7 +2891,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         : []
       if (normalizedSnapshot && serializedAttachments.length !== normalizedSnapshot.pendingAttachments.length) {
         if (isMountedRef.current && storageScopeRef.current === storageScope && sessionLoadEpochRef.current === draftScopeEpoch && currentSessionIdRef.current === sessionId && !isStaleCurrentComposerSnapshot(normalizedSnapshot.updatedAt)) {
-          notifyWarning('草稿附件无法保存，请检查会话并重新添加附件')
+          notifyWarningRef.current('草稿附件无法保存，请检查会话并重新添加附件')
         }
         return
       }
@@ -2983,15 +2985,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const message = error instanceof Error ? error.message : String(error)
         const detail = `Failed to save chat draft: ${message}`
         setSessionLoadError(detail)
-        notifyError(detail)
+        notifyErrorRef.current(detail)
         console.error('[ChatPage] Failed to persist session draft:', error)
       }
     },
     [
       clearDirtySessionSnapshotIfCurrent,
       getSessionStorageKey,
-      notifyError,
-      notifyWarning,
       persistSessionWithBaseline,
       setDirtySessionSnapshot,
       storageScope
