@@ -2,7 +2,10 @@
 // A renderer exit the app itself is about to cause (today: the forced end of a hung renderer
 // that the user chose to reload). The window's recovery code announces it here before it ends
 // the process; the death recorder takes it, so the line in process-events.jsonl says that this
-// exit was the user's reload and not a crash. An announcement nobody takes expires by itself.
+// exit was the user's reload and not a crash. The announcement lives as long as the user's request
+// (minutes: the forced end can be reported late) and is cancelled when the renderer answers again,
+// when the next page finishes loading or when the window closes; one that nobody takes or cancels
+// expires by itself. At most one entry per window.
 import { performance } from 'node:perf_hooks'
 
 export type ExpectedRendererExit = 'reload-after-hang'
