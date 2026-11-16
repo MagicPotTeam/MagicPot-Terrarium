@@ -1621,14 +1621,16 @@
       "branch_prompt": "Copy every message of this conversation into a new one. The original stays.",
       "regen_prompt": "Create a new conversation that keeps everything before the last user message and puts that message back in the input. The original stays.",
       "edit_prompt": "Create a new conversation that keeps everything before message {{number}} and puts the edited text in the input. The original stays.",
-      "repair_prompt": "Replace {{count}} missing local image(s) with a placeholder note in later requests? The original history stays unchanged."
+      "repair_prompt": "Replace {{count}} missing local image(s) with a placeholder note in later requests? The original history stays unchanged.",
+      "no_jobs": "No background jobs or processes."
     },
     "delegated": {
       "helper_label": "[sub] {{name}}",
       "running": "(running...)",
       "interrupted": "(interrupted)",
       "member_label": "[member] {{name}}",
-      "status_waiting": "Waiting for approval"
+      "status_waiting": "Waiting for approval",
+      "background_result": "background task result delivered: {{label}}"
     }
   },
   "agent_workspace": {

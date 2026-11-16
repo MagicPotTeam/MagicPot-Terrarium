@@ -7,8 +7,6 @@ import { claimTeamTaskInDB } from './agentTeamTaskDispatch'
 import AgentTeamMenu from './components/AgentTeamMenu'
 import { registerTeamApprovalSurface } from '../../components/teamApprovalSurface'
 import { AgentTeamMemberForm, AgentTeamMemberImages } from './components/AgentTeamTree'
-import AgentProcessArea, { type ProcessEntry } from './components/AgentProcessArea'
-import TeamLeadJobEntries, { type TeamLeadJobEntriesValue } from './components/TeamLeadJobEntries'
 import { useTeamImagePlacement } from './components/useTeamImagePlacement'
 import { createTeamMember, readMemberModelChoice, resolveTeamRecipient, resolveTeamRequestSettings } from './agentTeam'
 import { isReplayUserCommand, parseReplayUserCommand, planReplay, type ReplayUserCommand } from './replayUserCommand'
@@ -313,8 +311,9 @@ import AgentTeamDelegatedRows from './components/AgentTeamDelegatedRows'
 import { hasDelegatedWork } from './agentTeamDelegatedWork'
 import AgentTeamTargetSelect from './components/AgentTeamTargetSelect'
 import { isAgentSideCommand, parseAgentSideCommand, type AgentSideCommandHandle } from './agentSideCommand'
-import { AgentProcessDetails, getAgentThreadProcessScope, useAgentThreadProcesses } from './components/AgentThreadProcessesPanel'
-import { AgentThreadJobRow, useAgentThreadJobs } from './components/AgentThreadJobsPanel'
+import { getAgentThreadProcessScope, useAgentThreadProcesses } from './components/AgentThreadProcessesPanel'
+import { useAgentThreadJobs } from './components/AgentThreadJobsPanel'
+import { useBackgroundCompletions } from './useBackgroundCompletions'
 import AgentThreadInteractionPanel from './components/AgentThreadInteractionPanel'
 import ChatComposer from './components/ChatComposer'
 import ImagePreviewOverlay from './components/ImagePreviewOverlay'
@@ -8473,50 +8472,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // End changes refs synchronously; also re-render to suspend/restart the observer.
   const [, setTeamEndRevision] = useState(0)
   useEffect(() => { setCreatingTeamMember(false) }, [storageScope, messageLeadId, messageGeneration, active])
-  const leadJobsTeamKey = teamLead ? `${storageScope}\u0000${teamLead.id}` : ''
-  const leadJobsEndEpoch = teamEndEpochsRef.current.get(leadJobsTeamKey) ?? 0
-  const leadJobsSelectionEpoch = sessionSelectionEpochRef.current
-  const leadJobsLeadAuthorityEpoch = teamLead ? (teamAuthorityEpochsRef.current.get(teamLead.id) ?? 0) : 0
-  const leadJobsMemberAuthorityEpoch = currentSession ? (teamAuthorityEpochsRef.current.get(currentSession.id) ?? 0) : 0
-  const teamLeadJobsKey = teamEnabled && !!route?.threadId && sessionsLoaded && !sessionLoadError && storageScopeRef.current === storageScope &&
-    currentSession?.teamLeadId && teamLead && !teamLead.teamLeadId && !teamLead.archived && !teamLead.teamEnded &&
-    !currentSession.archived && teamMembers.some(member => member.id === currentSession.id) &&
-    !teamEndPendingRef.current.has(leadJobsTeamKey) && !teamEndedMainRef.current.has(leadJobsTeamKey) &&
-    !hasSessionDeleteTombstone(teamLead.id, storageScope) && !hasSessionDeleteTombstone(currentSession.id, storageScope) &&
-    !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, teamLead.id)) && !deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSession.id))
-      ? JSON.stringify([storageScope, route.channel, route.scopeType, route.scopeId, route.threadId, teamLead.id, currentSession.id, messageGeneration, leadJobsEndEpoch, leadJobsSelectionEpoch, leadJobsLeadAuthorityEpoch, leadJobsMemberAuthorityEpoch, sessionLoadEpochRef.current, teamVisibilityRef.current.epoch]) : null
-  const committedLeadJobsKeyRef = useRef<string | null>(null)
-  const leadJobsAuthority = teamLeadJobsKey && teamLead && currentSession ? {
-    leadId: teamLead.id, memberId: currentSession.id,
-    leadEpoch: teamAuthorityEpochsRef.current.get(teamLead.id) ?? 0,
-    memberEpoch: teamAuthorityEpochsRef.current.get(currentSession.id) ?? 0
-  } : null
-  useLayoutEffect(() => {
-    if (!teamLeadJobsKey || !leadJobsAuthority) return
-    if (!teamAuthorityEpochsRef.current.has(leadJobsAuthority.leadId)) teamAuthorityEpochsRef.current.set(leadJobsAuthority.leadId, 0)
-    if (!teamAuthorityEpochsRef.current.has(leadJobsAuthority.memberId)) teamAuthorityEpochsRef.current.set(leadJobsAuthority.memberId, 0)
-    committedLeadJobsKeyRef.current = teamLeadJobsKey
-    return () => { committedLeadJobsKeyRef.current = null }
-  }, [teamLeadJobsKey])
-  const leadJobsScopeEpoch = sessionLoadEpochRef.current
-  const leadJobsVisibilityEpoch = teamVisibilityRef.current.epoch
-  const isLeadJobsLive = () => {
-    if (!teamLeadJobsKey || committedLeadJobsKeyRef.current !== teamLeadJobsKey || !leadJobsAuthority || !teamLead || !currentSession ||
-      !isMountedRef.current || !teamVisibilityRef.current.active || teamVisibilityRef.current.epoch !== leadJobsVisibilityEpoch ||
-      storageScopeRef.current !== storageScope || sessionLoadEpochRef.current !== leadJobsScopeEpoch || currentSessionIdRef.current !== currentSession.id ||
-      sessionSelectionEpochRef.current !== leadJobsSelectionEpoch ||
-      (teamAuthorityEpochsRef.current.get(leadJobsAuthority.leadId) ?? 0) !== leadJobsAuthority.leadEpoch ||
-      (teamAuthorityEpochsRef.current.get(leadJobsAuthority.memberId) ?? 0) !== leadJobsAuthority.memberEpoch ||
-      teamEndPendingRef.current.has(leadJobsTeamKey) || teamEndedMainRef.current.has(leadJobsTeamKey) ||
-      (teamEndEpochsRef.current.get(leadJobsTeamKey) ?? 0) !== leadJobsEndEpoch ||
-      hasSessionDeleteTombstone(teamLead.id, storageScope) || hasSessionDeleteTombstone(currentSession.id, storageScope) ||
-      deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, teamLead.id)) || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, currentSession.id))) return false
-    const liveLead = sessionsRef.current.find(session => session.id === teamLead.id)
-    const liveMember = sessionsRef.current.find(session => session.id === currentSession.id)
-    return !!liveLead && !liveLead.teamLeadId && !liveLead.archived && !liveLead.teamEnded &&
-      !!liveMember && !liveMember.archived && liveMember.teamLeadId === liveLead.id &&
-      (liveLead.teamGeneration ?? 0) === messageGeneration && (liveMember.teamMemberGeneration ?? 0) === messageGeneration
-  }
   const jobController = useAgentThreadJobs({ route, conversationId: currentSessionId || undefined, active })
   const processScope = getAgentThreadProcessScope(route, currentSessionId || undefined, active)
   const processController = useAgentThreadProcesses(processScope)
@@ -8578,6 +8533,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
     setTailScrollToken(token => token + 1)
     return id
   }, [])
+  // When a background helper job or process of the open conversation finishes, the column's
+  // transcript gets the "background result" divider. The lists are the ones the page already
+  // polls for these jobs; nothing else is read.
+  const announceBackgroundResult = (label: string) => {
+    if (compact) appendTailCard(inspectionScope, { kind: 'background', command: '', text: t('chat.delegated.background_result', { label }) })
+  }
+  useBackgroundCompletions(jobController.scopeKey || null, jobController.jobs, job => job.id, job => job.status !== 'running', job => announceBackgroundResult(job.kind))
+  useBackgroundCompletions(processScope, processController.jobs, job => job.id, job => job.operationSettled, job => announceBackgroundResult(job.kind))
   /** Shows the one card of a live view (goal records, thread skills) at the end; an older card of that view leaves. */
   const showTailPanel = useCallback((scope: string, panel: 'goal' | 'skills', command: string, title?: string) => {
     const owner = tailOwnerRef.current
@@ -8810,10 +8773,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
             // The card carries the list as it is now; running "/jobs" again adds a fresh card.
             const scope = inspectionScope
             const conversationRoute = route!
-            void Promise.resolve().then(() => api().svcLLMProxy.listAgentJobs({ route: conversationRoute, conversationId: id })).then(result => {
-              appendTailCard(scope, result.jobs.length
-                ? { kind: 'list', command: '/jobs', items: result.jobs.map(job => ({ key: job.id, label: job.kind, description: `${job.status} · ${job.id}` })) }
-                : { kind: 'text', command: '/jobs', text: t('chat.no_helper_jobs', { defaultValue: 'No helper jobs.' }), muted: true })
+            // Helper jobs, then the background processes of the conversation.
+            void Promise.resolve().then(() => Promise.all([
+              api().svcLLMProxy.listAgentJobs({ route: conversationRoute, conversationId: id }),
+              api().svcLLMProxy.listAgentProcesses({ route: conversationRoute, conversationId: id })
+            ])).then(([helpers, processes]) => {
+              const items = [
+                ...helpers.jobs.map(job => ({ key: job.id, label: job.kind, description: `${job.status} · ${job.id}` })),
+                ...processes.jobs.map(job => ({ key: `process:${job.id}`, label: job.kind, description: `${job.status} · ${job.id}` }))
+              ]
+              appendTailCard(scope, items.length
+                ? { kind: 'list', command: '/jobs', items }
+                : { kind: 'text', command: '/jobs', text: t('chat.command_card.no_jobs'), muted: true })
             }).catch(() => appendTailCard(scope, { kind: 'text', command: '/jobs', text: t('chat.command_card.jobs_failed'), error: true }))
           } else {
             setBasicJobsText('')
@@ -9537,33 +9508,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     )
   }
 
-  // Helper jobs and background processes of the open conversation. The team is listed in the
-  // thread list and the header select instead.
-  const renderProcessArea = (leadJobs: TeamLeadJobEntriesValue) => {
-          const helperEntries: ProcessEntry[] = jobController.jobs.map(job => ({
-            id: JSON.stringify(['current-helper', jobController.scopeKey, job.id]), kind: 'job', name: job.kind,
-            status: job.status === 'running' ? 'running' : job.status === 'completed' ? 'completed' : job.status === 'cancelled' ? 'cancelled' : 'failed',
-            detail: <AgentThreadJobRow key={`${jobController.scopeKey}:${job.id}`} job={job} controller={jobController}/>,
-            onStop: () => { void jobController.stop(job.id).catch(() => notifyWarning('无法停止后台助手，请重试')) }
-          }))
-          const leadHelperEntries: ProcessEntry[] = leadJobs.entries.map(entry => ({
-            id: `lead:${entry.key}`, kind: 'job', name: entry.name,
-            status: entry.job.status === 'running' ? 'running' : entry.job.status === 'completed' ? 'completed' : entry.job.status === 'cancelled' ? 'cancelled' : 'failed',
-            detail: entry.detail,
-            onStop: () => { void entry.stop().catch(() => notifyWarning('无法停止组长后台助手，请重试')) }
-          }))
-          const processEntries: ProcessEntry[] = processController.jobs.map(job => ({
-            id: JSON.stringify(['process', processScope, job.id]), kind: 'job', name: job.kind,
-            status: job.status === 'unknown' ? 'unknown' : !job.operationSettled ? 'running' : job.status === 'completed' ? 'completed' : job.status === 'stopped' ? 'cancelled' : 'failed',
-            canStop: !job.operationSettled || job.status === 'unknown',
-            detail: processScope ? <AgentProcessDetails job={job} scope={processScope}/> : undefined,
-            onStop: () => { void processController.stop(job).catch(() => notifyWarning('无法停止后台进程，请重试')) }
-          }))
-          return <AgentProcessArea entries={[...helperEntries, ...leadHelperEntries, ...processEntries]} showStaticWhenEmpty={Boolean(jobController.error || processController.error || leadJobs.error)} staticSlot={<>
-            {(jobController.error || processController.error) && <Typography variant="caption" color="warning.main">当前对话后台进程状态刷新失败{((jobController.error && jobController.jobs.length > 0) || (processController.error && processController.jobs.length > 0)) ? '，部分显示的状态可能已过期。' : ''}</Typography>}
-            {leadJobs.error && <Typography variant="caption" color="warning.main">组长后台助手状态刷新失败{leadJobs.entries.length > 0 ? '，部分显示的状态可能已过期。' : ''}</Typography>}
-          </>} />
-        }
 
   return (
     <>
@@ -9836,7 +9780,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }
               setSessions(previous=>previous.some(session=>session.id===result.member.id) ? previous : [...previous,result.member])
             }}/>}
-          <TeamLeadJobEntries route={route} currentId={currentSessionId} leadId={teamLead?.id} activeTeamKey={teamLeadJobsKey} isLive={isLeadJobsLive} currentIds={new Set(jobController.jobs.map(job => job.id))}>{leadJobs => renderProcessArea(leadJobs)}</TeamLeadJobEntries>
           <Box sx={{ display: 'contents' }}>
           {active && replayView?.scope === inspectionScope && <Box data-testid="replay-confirmation" sx={{p:2}}>
             <Typography variant="subtitle2">{t('chat.confirm_replay', { kind: replayView.command.kind, defaultValue: `Confirm /${replayView.command.kind}` })}</Typography>

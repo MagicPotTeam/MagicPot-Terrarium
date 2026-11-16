@@ -1,6 +1,7 @@
 import React from 'react'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import {
+  BackgroundResultDivider,
   ChatCommandResultCard,
   CommandCardActions,
   CommandCardList,
@@ -69,6 +70,11 @@ export type ChatTailCard<Target = unknown> =
       panel: string
       title?: string
     })
+  | (TailCardBase & {
+      /** A background job or process of the conversation finished: a divider with the text. */
+      kind: 'background'
+      text: string
+    })
 
 export type ChatTailConfirmCard = Extract<ChatTailCard, { kind: 'confirm' }>
 
@@ -129,6 +135,9 @@ export function ChatCommandTail<Target>({
               <PanelCardBody host={panelHosts[card.panel]} />
             </ChatCommandResultCard>
           )
+        }
+        if (card.kind === 'background') {
+          return <BackgroundResultDivider key={card.id} text={card.text} />
         }
         if (card.kind === 'confirm') {
           return (

@@ -1489,296 +1489,42 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { fetchGuard.mockRestore() }
   })
 
-  it('shows a process refresh failure when no entries exist and hides it after recovery', async () => {
-    const lead: ChatSession = { id: 'empty-process-failure', title: 'Lead', messages: [], profileId: 'base-model' }
-    hoisted.storedSessions.value = [lead]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    let release!: (value: { jobs: [] }) => void
-    const recovered = new Promise<{ jobs: [] }>(resolve => { release = resolve })
-    hoisted.listAgentProcessesMock.mockRejectedValueOnce(new Error('synthetic list failure')).mockImplementation(() => recovered)
-    const page = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(hoisted.listAgentProcessesMock).toHaveBeenCalled())
-      const warning = await screen.findByText('当前对话后台进程状态刷新失败')
-      expect(warning).toBeVisible()
-      const area = screen.getByRole('region', { name: '进程区' })
-      expect(within(area).queryByRole('button', { name: /进程 ·/ })).not.toBeInTheDocument()
-      expect(within(area).queryByRole('list', { name: '进程列表' })).not.toBeInTheDocument()
-      expect(within(area).queryByRole('button', { name: /停止/ })).not.toBeInTheDocument()
-      await waitFor(() => expect(hoisted.listAgentProcessesMock.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 2500 })
-      await act(async () => release({ jobs: [] }))
-      await waitFor(() => expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument())
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { release({ jobs: [] }); page.unmount() }
-  })
-
-  it.each(['jobs', 'processes'] as const)('warns that retained %s states may be stale until a later poll succeeds', async kind => {
-    const lead: ChatSession = { id: `stale-${kind}`, title: 'Lead', messages: [], profileId: 'base-model' }
+  it.each(['jobs', 'processes'] as const)('marks a finished background %s entry with a divider at the end of the transcript', async kind => {
+    const lead: ChatSession = { id: `finished-${kind}`, title: 'Lead', messages: [], profileId: 'base-model' }
     hoisted.storedSessions.value = [lead]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
     const now = Date.now()
     const running = kind === 'jobs'
-      ? { id: 'stale-helper', kind: 'explore', task: 'synthetic', status: 'running', createdAt: now, expiresAt: now + 60000 }
-      : { id: 'stale-process', kind: 'python', status: 'running', createdAt: now, expiresAt: now + 60000, outcome: 'known', stdoutBytes: 0, stderrBytes: 0, truncated: false, operationSettled: false, cancellationRequested: false }
+      ? { id: 'finished-helper', kind: 'explore', task: 'synthetic', status: 'running', createdAt: now, expiresAt: now + 60000 }
+      : { id: 'finished-process', kind: 'python', status: 'running', createdAt: now, expiresAt: now + 60000, outcome: 'known', stdoutBytes: 0, stderrBytes: 0, truncated: false, operationSettled: false, cancellationRequested: false }
     const completed = { ...running, status: 'completed', ...(kind === 'processes' ? { operationSettled: true, exitCode: 0 } : {}) }
-    let release!: (value: { jobs: typeof completed[] }) => void
-    const recovered = new Promise<{ jobs: typeof completed[] }>(resolve => { release = resolve })
+    const old = { ...completed, id: 'finished-before' }
+    let release!: () => void
+    const finished = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
     const list = kind === 'jobs' ? hoisted.listAgentJobsMock : hoisted.listAgentProcessesMock
-    list.mockResolvedValueOnce({ jobs: [running] }).mockRejectedValueOnce(new Error('synthetic list failure')).mockImplementation(() => recovered)
-    const page = renderChatPage({ team: true })
-    try {
-      const rowName = kind === 'jobs' ? '展开 explore 详情' : '展开 python 详情'
-      const row = await screen.findByRole('button', { name: rowName })
-      expect(row).toHaveTextContent('运行中')
-      expect(await screen.findByText('当前对话后台进程状态刷新失败，部分显示的状态可能已过期。', {}, { timeout: 3500 })).toBeVisible()
-      expect(row).toHaveTextContent('运行中')
-      await waitFor(() => expect(list.mock.calls.length).toBeGreaterThanOrEqual(3), { timeout: 3500 })
-      await act(async () => release({ jobs: [completed] }))
-      await waitFor(() => expect(screen.queryByText('当前对话后台进程状态刷新失败，部分显示的状态可能已过期。')).not.toBeInTheDocument())
-      await waitFor(() => expect(screen.getByRole('button', { name: rowName })).toHaveTextContent('已完成'))
-      expect(hoisted.stopAgentJobMock).not.toHaveBeenCalled()
-      expect(hoisted.stopAgentProcessMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { release({ jobs: [completed] }); page.unmount() }
-  })
-
-  it.each(['jobs', 'processes'] as const)('does not mark a successful %s controller stale when the other controller fails with no entries', async kind => {
-    const lead: ChatSession = { id: `fresh-${kind}`, title: 'Lead', messages: [], profileId: 'base-model' }
-    hoisted.storedSessions.value = [lead]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const now = Date.now()
-    const running = kind === 'jobs'
-      ? { id: 'fresh-helper', kind: 'explore', task: 'synthetic', status: 'running', createdAt: now, expiresAt: now + 60000 }
-      : { id: 'fresh-process', kind: 'python', status: 'running', createdAt: now, expiresAt: now + 60000, outcome: 'known', stdoutBytes: 0, stderrBytes: 0, truncated: false, operationSettled: false, cancellationRequested: false }
-    const successful = kind === 'jobs' ? hoisted.listAgentJobsMock : hoisted.listAgentProcessesMock
-    const failing = kind === 'jobs' ? hoisted.listAgentProcessesMock : hoisted.listAgentJobsMock
-    successful.mockResolvedValue({ jobs: [running] })
-    failing.mockRejectedValue(new Error('synthetic other-controller failure'))
-    const page = renderChatPage({ team: true })
-    try {
-      const rowName = kind === 'jobs' ? '展开 explore 详情' : '展开 python 详情'
-      expect(await screen.findByRole('button', { name: rowName })).toHaveTextContent('运行中')
-      expect(await screen.findByText('当前对话后台进程状态刷新失败')).toBeVisible()
-      expect(screen.queryByText('当前对话后台进程状态刷新失败，部分显示的状态可能已过期。')).not.toBeInTheDocument()
-      expect(hoisted.stopAgentJobMock).not.toHaveBeenCalled()
-      expect(hoisted.stopAgentProcessMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { page.unmount() }
-  })
-
-  it('keeps the same process area and collapsed state across teams and an ordinary session in one pane', async () => {
-    const leadA: ChatSession = { id: 'stable-lead-a', title: 'Lead A', messages: [] }
-    const alice: ChatSession = { id: 'stable-alice', title: 'Alice', messages: [], teamLeadId: leadA.id, teamMemberName: 'Alice' }
-    const leadB: ChatSession = { id: 'stable-lead-b', title: 'Lead B', messages: [] }
-    const bob: ChatSession = { id: 'stable-bob', title: 'Bob', messages: [], teamLeadId: leadB.id, teamMemberName: 'Bob' }
-    const ordinary: ChatSession = { id: 'stable-ordinary', title: 'Ordinary', messages: [] }
-    hoisted.storedSessions.value = [leadA, alice, leadB, bob, ordinary]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), alice.id)
-    const now = Date.now()
-    const job = (id: string, kind: 'explore' | 'python') => ({ id, kind, task: id, status: 'running', createdAt: now, expiresAt: now + 60000 })
-    const aliceJob = job('alice-job', 'explore'), bobJob = job('bob-job', 'python'), ordinaryJob = job('ordinary-job', 'python')
-    let releaseOrdinary!: (result: { jobs: typeof ordinaryJob[] }) => void
-    hoisted.listAgentJobsMock.mockImplementation(({ conversationId }: { conversationId: string }) => {
-      if (conversationId === ordinary.id) return new Promise(resolve => { releaseOrdinary = resolve })
-      return Promise.resolve({ jobs: conversationId === alice.id ? [aliceJob] : conversationId === bob.id ? [bobJob] : [] })
-    })
-    const view = renderChatPage({ team: true, rows: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
-      const area = await screen.findByRole('region', { name: '进程区' })
-      await within(area).findByRole('button', { name: '展开 explore 详情' })
-      expect(teamRows().getByRole('button', { name: 'Alice' })).toHaveAttribute('aria-current', 'true')
-      fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
-      const assertSameArea = () => {
-        expect(area.isConnected).toBe(true)
-        expect(document.querySelector('section[aria-label="进程区"]')).toBe(area)
-      }
-      const assertCollapsed = () => expect(within(area).getByRole('button', { name: /进程 ·/ })).toHaveAttribute('aria-expanded', 'false')
-      assertCollapsed()
-      await dispatchSwitchSession(bob.id)
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(bob.id))
-      await waitFor(() => expect(area.textContent).toContain('python'))
-      assertSameArea(); assertCollapsed()
-      fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
-      expect(teamRows().getByRole('button', { name: 'Bob' })).toHaveAttribute('aria-current', 'true')
-      expect(within(area).getByRole('button', { name: '展开 python 详情' })).toBeVisible()
-      expect(within(area).queryByRole('button', { name: '展开 explore 详情' })).not.toBeInTheDocument()
-      fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
-      await dispatchSwitchSession(ordinary.id)
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(ordinary.id))
-      await waitFor(() => expect(releaseOrdinary).toBeDefined())
-      assertSameArea()
-      expect(area).toHaveAttribute('hidden')
-      expect(area).toBeEmptyDOMElement()
-      await act(async () => releaseOrdinary({ jobs: [ordinaryJob] }))
-      await waitFor(() => expect(area.textContent).toContain('python'))
-      assertSameArea(); assertCollapsed()
-      fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
-      expect(within(area).getByRole('button', { name: '展开 python 详情' })).toBeVisible()
-      expect(teamRows().queryByRole('button', { name: 'Bob' })).not.toBeInTheDocument()
-      fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
-      await dispatchSwitchSession(alice.id)
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
-      await waitFor(() => expect(area.textContent).toContain('explore'))
-      assertSameArea(); assertCollapsed()
-      fireEvent.click(within(area).getByRole('button', { name: /进程 ·/ }))
-      expect(teamRows().getByRole('button', { name: 'Alice' })).toHaveAttribute('aria-current', 'true')
-      expect(within(area).getByRole('button', { name: '展开 explore 详情' })).toBeVisible()
-      expect(within(area).queryByRole('button', { name: '展开 python 详情' })).not.toBeInTheDocument()
-      expect(hoisted.listAgentJobsMock).toHaveBeenCalledWith({ route: { channel: 'canvas', scopeType: 'thread', scopeId: 'runtime-project', threadId: 'runtime-pane' }, conversationId: ordinary.id })
-    } finally { view.unmount() }
-  })
-
-  it('warns that retained lead job states may be stale until the lead poll succeeds', async () => {
-    const lead: ChatSession = { id: 'stale-lead', title: 'Lead', messages: [], profileId: 'base-model' }
-    const member: ChatSession = { id: 'stale-lead-member', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), member.id)
-    const running = { id: 'stale-lead-job', kind: 'explore', task: 'synthetic', status: 'running', createdAt: Date.now(), expiresAt: Date.now() + 60000 }
-    const completed = { ...running, status: 'completed' }
-    let release!: (value: { jobs: typeof completed[] }) => void
-    const recovered = new Promise<{ jobs: typeof completed[] }>(resolve => { release = resolve })
-    let leadPolls = 0
-    hoisted.listAgentJobsMock.mockImplementation(({ conversationId }: { conversationId: string }) => {
-      if (conversationId !== lead.id) return Promise.resolve({ jobs: [] })
-      leadPolls++
-      if (leadPolls === 1) return Promise.resolve({ jobs: [running] })
-      if (leadPolls === 2) return Promise.reject(new Error('synthetic lead list failure'))
-      return recovered
+    // The first poll sees it running (an entry that had already finished is not announced),
+    // the next polls see it finished once released.
+    list.mockImplementation(async () => {
+      polls++
+      if (polls === 1) return { jobs: [running, old] }
+      await finished
+      return { jobs: [completed, old] }
     })
     const page = renderChatPage({ team: true })
     try {
-      const rowName = '展开 组长 · explore 详情'
-      const row = await screen.findByRole('button', { name: rowName })
-      expect(row).toHaveTextContent('运行中')
-      expect(await screen.findByText('组长后台助手状态刷新失败，部分显示的状态可能已过期。', {}, { timeout: 3500 })).toBeVisible()
-      expect(row).toHaveTextContent('运行中')
-      await waitFor(() => expect(leadPolls).toBeGreaterThanOrEqual(3), { timeout: 3500 })
-      await act(async () => release({ jobs: [completed] }))
-      await waitFor(() => expect(screen.queryByText('组长后台助手状态刷新失败，部分显示的状态可能已过期。')).not.toBeInTheDocument())
-      await waitFor(() => expect(screen.getByRole('button', { name: rowName })).toHaveTextContent('已完成'))
-      expect(hoisted.stopAgentJobMock).not.toHaveBeenCalled()
-      expect(hoisted.stopAgentProcessMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally { release({ jobs: [completed] }); page.unmount() }
-  })
-
-  it('offline member process area keeps current and lead job scopes distinct and current wins collisions', async () => {
-    const lead: ChatSession = { id: 'jobs-scope-lead', title: 'Lead', messages: [], profileId: 'base-model' }
-    const member: ChatSession = { id: 'jobs-scope-member', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), member.id)
-    const now = Date.now()
-    const job = (id: string, kind: 'explore' | 'python') => ({ id, kind, task: id, status: 'running', createdAt: now, expiresAt: now + 60000 })
-    hoisted.listAgentJobsMock.mockImplementation(async ({ conversationId }: { conversationId: string }) => ({ jobs: conversationId === member.id ? [job('shared', 'explore')] : conversationId === lead.id ? [job('shared', 'explore'), job('lead-only', 'python')] : [] }))
-    hoisted.readAgentJobMock.mockResolvedValue({ job: job('lead-only', 'python'), text: 'LEAD JOB DATA', nextOffset: 13, totalCharacters: 13 })
-    hoisted.stopAgentJobMock.mockResolvedValue({ stopped: true })
-    const view = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
-      const area = await screen.findByRole('region', { name: '进程区' })
-      await within(area).findByRole('button', { name: '展开 组长 · python 详情' })
-      expect(within(area).getAllByRole('button', { name: '展开 explore 详情' })).toHaveLength(1)
-      expect(within(area).queryByRole('button', { name: '展开 组长 · explore 详情' })).not.toBeInTheDocument()
-      expect(new Set(hoisted.listAgentJobsMock.mock.calls.map(([arg]) => arg.conversationId))).toEqual(new Set([member.id, lead.id]))
-      fireEvent.click(within(area).getByRole('button', { name: '展开 组长 · python 详情' }))
-      fireEvent.click(within(area).getByRole('button', { name: 'chat.agent_jobs.read' }))
-      await waitFor(() => expect(hoisted.readAgentJobMock).toHaveBeenCalledWith(expect.objectContaining({ conversationId: lead.id, jobId: 'lead-only', offset: 0, limit: 16000 })))
-      expect(await within(area).findByText('LEAD JOB DATA')).toBeVisible()
-      fireEvent.click(within(area).getByRole('button', { name: '停止 组长 · python' }))
-      await waitFor(() => expect(hoisted.stopAgentJobMock).toHaveBeenCalledWith(expect.objectContaining({ conversationId: lead.id, jobId: 'lead-only' })))
-    } finally { view.unmount() }
-  })
-
-  it('offline member lead jobs are fenced while End is pending and recover after End fails', async () => {
-    const lead: ChatSession = { id: 'pending-end-lead', title: 'Lead', messages: [], profileId: 'base-model' }
-    const member: ChatSession = { id: 'pending-end-member', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), member.id)
-    const job = { id: 'lead-pending-job', kind: 'explore', task: 'pending', status: 'running', createdAt: Date.now(), expiresAt: Date.now() + 60000 }
-    hoisted.listAgentJobsMock.mockImplementation(async ({ conversationId }: { conversationId: string }) => ({ jobs: conversationId === lead.id ? [job] : [] }))
-    let rejectEnd!: (reason: Error) => void
-    hoisted.endTeamMock.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectEnd = reject }))
-    const view = renderChatPage({ team: true })
-    try {
-      await screen.findByRole('button', { name: '展开 组长 · explore 详情' })
-      chooseAddMenuEntry('chat-composer-menu-team')
-      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
-      await waitFor(() => expect(rejectEnd).toBeDefined())
-      const count = hoisted.listAgentJobsMock.mock.calls.filter(([arg]) => arg.conversationId === lead.id).length
+      await waitFor(() => expect(polls).toBeGreaterThanOrEqual(2), { timeout: 3500 })
+      // No process area above the transcript, and nothing announced while it runs.
+      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
+      expect(screen.queryByTestId('chat-background-result')).not.toBeInTheDocument()
+      await act(async () => release())
+      const divider = await screen.findByTestId('chat-background-result', {}, { timeout: 3500 })
+      expect(divider).toHaveTextContent('chat.delegated.background_result')
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 1200)) })
-      expect(hoisted.listAgentJobsMock.mock.calls.filter(([arg]) => arg.conversationId === lead.id)).toHaveLength(count)
-      expect(screen.queryByRole('button', { name: '展开 组长 · explore 详情' })).not.toBeInTheDocument()
-      expect(hoisted.readAgentJobMock).not.toHaveBeenCalled()
-      expect(hoisted.stopAgentJobMock).not.toHaveBeenCalled()
-      await act(async () => rejectEnd(new Error('fixture end failed')))
-      expect(await screen.findByRole('button', { name: '展开 组长 · explore 详情' })).toBeVisible()
-      await waitFor(() => expect(hoisted.listAgentJobsMock.mock.calls.filter(([arg]) => arg.conversationId === lead.id).length).toBeGreaterThan(count))
-    } finally { view.unmount() }
-  })
-
-  it('offline lead job read settling during pending End cannot restore stale output', async () => {
-    const lead: ChatSession = { id: 'late-read-lead', title: 'Lead', messages: [], profileId: 'base-model' }
-    const member: ChatSession = { id: 'late-read-member', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), member.id)
-    const job = { id: 'late-read', kind: 'explore', task: 'fixture', status: 'running', createdAt: Date.now(), expiresAt: Date.now() + 60000 }
-    hoisted.listAgentJobsMock.mockImplementation(async ({ conversationId }: { conversationId: string }) => ({ jobs: conversationId === lead.id ? [job] : [] }))
-    let finishRead!: (value: unknown) => void
-    let rejectEnd!: (error: Error) => void
-    hoisted.readAgentJobMock.mockImplementation(() => new Promise(resolve => { finishRead = resolve }))
-    hoisted.endTeamMock.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectEnd = reject }))
-    const view = renderChatPage({ team: true })
-    try {
-      fireEvent.click(await screen.findByRole('button', { name: '展开 组长 · explore 详情' }))
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_jobs.read' }))
-      await waitFor(() => expect(finishRead).toBeDefined())
-      chooseAddMenuEntry('chat-composer-menu-team')
-      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
-      await waitFor(() => expect(rejectEnd).toBeDefined())
-      await act(async () => finishRead({ job, text: 'STALE LEAD OUTPUT', nextOffset: 17, totalCharacters: 17 }))
-      expect(screen.queryByText('STALE LEAD OUTPUT')).not.toBeInTheDocument()
-      await act(async () => rejectEnd(new Error('fixture failed end')))
-      fireEvent.click(await screen.findByRole('button', { name: '展开 组长 · explore 详情' }))
-      expect(screen.queryByText('STALE LEAD OUTPUT')).not.toBeInTheDocument()
-    } finally { view.unmount() }
-  })
-
-  it('offline stale lead list cannot revive after switching scope away and back with the same ids', async () => {
-    const a = 'runtime-flow', b = 'jobs-other-scope'
-    const lead: ChatSession = { id: 'same-lead', title: 'Lead', messages: [], profileId: 'base-model' }
-    const member: ChatSession = { id: 'same-member', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
-    hoisted.scopedTestSessions.value = { [a]: [lead, member], [b]: [lead, member] }
-    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) => cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? []))
-    for (const scope of [a, b]) localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), member.id)
-    const routeA = { channel: 'canvas', scopeType: 'thread', scopeId: 'project-a', threadId: 'pane-a' } as const
-    const routeB = { channel: 'canvas', scopeType: 'thread', scopeId: 'project-b', threadId: 'pane-b' } as const
-    const job = (id: string) => ({ id, kind: 'explore', task: id, status: 'running', createdAt: Date.now(), expiresAt: Date.now() + 60000 })
-    let oldList!: (value: unknown) => void
-    let aLeadCalls = 0
-    hoisted.listAgentJobsMock.mockImplementation(({ route, conversationId }: { route: typeof routeA; conversationId: string }) => {
-      if (conversationId !== lead.id) return Promise.resolve({ jobs: [] })
-      if (route.scopeId === routeA.scopeId && ++aLeadCalls === 1) return new Promise(resolve => { oldList = resolve })
-      return Promise.resolve({ jobs: [job(route.scopeId === routeA.scopeId ? 'fresh-a' : 'fresh-b')] })
-    })
-    const page = renderWithProviders(<ChatPage compact storageScope={a} route={routeA} />)
-    try {
-      await waitFor(() => expect(oldList).toBeDefined())
-      page.rerender(<MemoryRouter><ThemeProvider theme={theme}><ChatPage compact storageScope={b} route={routeB} /></ThemeProvider></MemoryRouter>)
-      fireEvent.click(await screen.findByRole('button', { name: '展开 组长 · explore 详情' }))
-      expect(await screen.findByText('explore: fresh-b')).toBeVisible()
-      page.rerender(<MemoryRouter><ThemeProvider theme={theme}><ChatPage compact storageScope={a} route={routeA} /></ThemeProvider></MemoryRouter>)
-      await waitFor(() => expect(aLeadCalls).toBeGreaterThanOrEqual(2))
-      fireEvent.click(await screen.findByRole('button', { name: '展开 组长 · explore 详情' }))
-      expect(await screen.findByText('explore: fresh-a')).toBeVisible()
-      await act(async () => oldList({ jobs: [job('stale-a')] }))
-      expect(screen.queryByText('explore: stale-a')).not.toBeInTheDocument()
-      expect(screen.getByText('explore: fresh-a')).toBeVisible()
-    } finally { page.unmount() }
+      expect(screen.getAllByTestId('chat-background-result')).toHaveLength(1)
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally { release(); page.unmount() }
   })
 
   it.each(['text-delta', 'tool-status'] as const)('does not apply an old scope stream %s to a different scope with the same session id', async (kind) => {
@@ -3551,7 +3297,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(screen.getByTestId('chat-command-card')).toHaveTextContent('"messages"'))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/jobs' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      expect(await screen.findByText('No helper jobs.')).toBeVisible()
+      expect(await screen.findByText('chat.command_card.no_jobs')).toBeVisible()
       expect(screen.getAllByTestId('chat-command-card').map(card => card.getAttribute('data-command'))).toEqual(['/status', '/jobs'])
       expect(screen.queryByRole('button', { name: 'Refresh thread jobs' })).toBeNull()
       expect(hoisted.listAgentJobsMock).toHaveBeenCalledWith({ route, conversationId: readCurrentSessionState()!.id })

@@ -112,12 +112,12 @@ export async function waitForIsolatedTeamPane(page, identity) {
 export async function inspectIsolatedTeamPane(page, identity) {
   await waitForIsolatedTeamPane(page, identity)
   return page.locator(selector(identity)).evaluate(pane => {
-    const process = pane.querySelector('section[aria-label="进程区"]')
+    // The lead's view of its members' work: the delegated lines at the end of its transcript.
+    const delegated = pane.querySelector('[data-testid="team-delegated-rows"]')
     const approvals = pane.querySelector('[data-testid="team-inline-approvals"]')
     return {
       composerPresent: Boolean(pane.querySelector('[data-testid="chat-composer-input"]')),
-      processVisible: Boolean(process && !process.hidden),
-      processText: process?.innerText ?? null,
+      delegatedText: delegated?.innerText ?? null,
       approvalText: approvals?.innerText ?? null
     }
   })

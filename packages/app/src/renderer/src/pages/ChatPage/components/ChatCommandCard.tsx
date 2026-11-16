@@ -2,6 +2,7 @@ import React from 'react'
 import { Box } from '@mui/material'
 import { alpha, useTheme } from '@mui/material/styles'
 import TerminalIcon from '@mui/icons-material/Terminal'
+import SouthWest from '@mui/icons-material/SouthWest'
 import { getAgentColumnTokens, type AgentColumnTokens } from '../../../components/agentColumnTokens'
 
 /** Bodies of a command result card scroll on their own above this height (16rem). */
@@ -323,3 +324,41 @@ export const CommandCardPanelBody = React.forwardRef<
     </Box>
   )
 })
+
+/**
+ * The notice that a background job or process finished: a centred dashed divider in the
+ * accent colour with a small arrow and the text, 12px.
+ */
+export const BackgroundResultDivider: React.FC<{ text: string }> = ({ text }) => {
+  const tokens = useColumnTokens()
+  const line = {
+    flex: 1,
+    minWidth: 12,
+    borderTop: `1px dashed ${alpha(tokens.accent, 0.25)}`
+  } as const
+  return (
+    <Box
+      data-testid="chat-background-result"
+      sx={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, py: '2px' }}
+    >
+      <Box aria-hidden="true" sx={line} />
+      <Box
+        component="span"
+        sx={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '2px',
+          minWidth: 0,
+          fontSize: tokens.fontSize.small,
+          lineHeight: '16px',
+          color: alpha(tokens.accent, 0.8),
+          overflowWrap: 'anywhere'
+        }}
+      >
+        <SouthWest aria-hidden="true" sx={{ fontSize: tokens.fontSize.micro, flexShrink: 0 }} />
+        {text}
+      </Box>
+      <Box aria-hidden="true" sx={line} />
+    </Box>
+  )
+}

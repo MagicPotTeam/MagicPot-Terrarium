@@ -315,27 +315,45 @@ describe('slash-command results in the Agent column', () => {
     expectNothingAboveTheTranscript()
   })
 
-  it('lists the jobs as rows without a refresh button; running /jobs again adds a fresh card', async () => {
-    // The thread's job poller reads the same service, so the answer is a value, not a queue.
+  it('lists the helper jobs and processes as rows without a refresh button; running /jobs again adds a fresh card', async () => {
+    // The thread's job pollers read the same services, so the answers are values, not queues.
     let answer: () => Promise<unknown> = async () => ({
       jobs: [{ id: 'job-1', kind: 'explore', status: 'running', expiresAt: Date.now() + 60_000 }]
     })
+    let processes: () => Promise<unknown> = async () => ({
+      jobs: [
+        {
+          id: 'process-1',
+          kind: 'python',
+          status: 'completed',
+          operationSettled: true,
+          expiresAt: Date.now() + 60_000
+        }
+      ]
+    })
     const listAgentJobs = vi.fn((_scope: unknown) => answer())
-    useServices({ 'svcLLMProxy.listAgentJobs': listAgentJobs })
+    const listAgentProcesses = vi.fn((_scope: unknown) => processes())
+    useServices({
+      'svcLLMProxy.listAgentJobs': listAgentJobs,
+      'svcLLMProxy.listAgentProcesses': listAgentProcesses
+    })
     await renderPage()
 
     run('/jobs')
     await waitFor(() => expect(commands()).toEqual(['/jobs']))
     expect(listAgentJobs).toHaveBeenCalledWith({ route, conversationId: 'lead' })
+    expect(listAgentProcesses).toHaveBeenCalledWith({ route, conversationId: 'lead' })
     const rows = within(cards()[0]).getAllByRole('listitem')
-    expect(rows).toHaveLength(1)
+    expect(rows).toHaveLength(2)
     expect(rows[0]).toHaveTextContent('explorerunning · job-1')
+    expect(rows[1]).toHaveTextContent('pythoncompleted · process-1')
     expect(within(cards()[0]).queryByRole('button')).toBeNull()
 
     answer = async () => ({ jobs: [] })
+    processes = async () => ({ jobs: [] })
     run('/jobs')
     await waitFor(() => expect(commands()).toEqual(['/jobs', '/jobs']))
-    expect(cards()[1]).toHaveTextContent(zh.chat.no_helper_jobs)
+    expect(cards()[1]).toHaveTextContent(zh.chat.command_card.no_jobs)
     // The first card still shows what it showed.
     expect(cards()[0]).toHaveTextContent('explore')
 
@@ -347,7 +365,6 @@ describe('slash-command results in the Agent column', () => {
     expect(cards()[2]).toHaveAttribute('data-error', 'true')
     expect(within(cards()[2]).getByRole('alert')).toHaveTextContent(zh.chat.command_card.jobs_failed)
     expect(en.chat.command_card.jobs_failed).toBe('Could not read the jobs.')
-    // (The process area, which lists the same jobs above the transcript, leaves with a later item.)
     expectCardsInTheTranscriptOnly()
   })
 

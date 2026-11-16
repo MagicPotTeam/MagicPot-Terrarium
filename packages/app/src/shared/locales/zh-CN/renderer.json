@@ -1448,14 +1448,16 @@
       "branch_prompt": "把当前对话的全部消息复制到一个新对话。原对话保留。",
       "regen_prompt": "新建一个对话，保留最后一条用户消息之前的内容，并把那条消息放回输入框。原对话保留。",
       "edit_prompt": "新建一个对话，保留第 {{number}} 条消息之前的内容，并把修改后的文字放入输入框。原对话保留。",
-      "repair_prompt": "在之后的请求中用占位说明代替 {{count}} 张缺失的本地图片？原始记录不变。"
+      "repair_prompt": "在之后的请求中用占位说明代替 {{count}} 张缺失的本地图片？原始记录不变。",
+      "no_jobs": "没有后台任务或进程。"
     },
     "delegated": {
       "helper_label": "[sub] {{name}}",
       "running": "(运行中…)",
       "interrupted": "(已中断)",
       "member_label": "[成员] {{name}}",
-      "status_waiting": "等待批准"
+      "status_waiting": "等待批准",
+      "background_result": "后台任务结果已送达：{{label}}"
     }
   },
   "agent_workspace": {
