@@ -801,27 +801,6 @@ const getAttachmentIdentityKey = (attachment: ChatAttachment): string => {
 }
 
 /**
- * Managed content is shared by every file with the same bytes, so two managed attachments
- * are the same occurrence only when their file names match as well: two selected files
- * with identical bytes and different names both stay attached (as they did by URL).
- */
-const hasDuplicateAttachment = (
-  attachments: ChatAttachment[],
-  candidate: ChatAttachment
-): boolean => {
-  const candidateKey = getAttachmentIdentityKey(candidate)
-  const candidateIsManaged = candidateKey.startsWith('managed:')
-  return attachments.some(
-    (attachment) =>
-      (getAttachmentIdentityKey(attachment) === candidateKey &&
-        (!candidateIsManaged || (attachment.fileName || '') === (candidate.fileName || ''))) ||
-      (Boolean(attachment.fileName) &&
-        attachment.fileName === candidate.fileName &&
-        attachment.sizeBytes === candidate.sizeBytes)
-  )
-}
-
-/**
  * Apply the composer's per-image limit to an incoming image: one above it is replaced by
  * the managed store's bounded derivative (reported in `downscaled`) or refused with
  * ChatImageTooLargeError when it cannot be reduced.
@@ -2725,8 +2704,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
           setPendingAttachments((prev) => {
             if (!isDestinationCurrent()) return prev
             let next = prev
+            // Every delivered image is its own occurrence, also when an earlier event
+            // delivered the same source (owner decision 5); the counts are checked above.
             for (const item of resolvedAttachments) {
-              if (!item.url || hasDuplicateAttachment(next, item)) continue
+              if (!item.url) continue
               if (next === prev) next = [...prev]
               next.push(item)
             }
