@@ -9119,6 +9119,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [isEditOwnerCurrent]
   )
+  // A register from an earlier selection is ignored. An unregister is always honoured as
+  // compare-and-clear: the form unregisters from an effect cleanup that runs with the old
+  // prop after a switch, and must neither leave its dead receiver behind (an incoming image
+  // would be lost in it) nor clear the receiver of a newer form.
+  const handleRegisterEditingAttachmentReceiver = useMemo(() => {
+    let registered: ((attachment: ChatAttachment) => void) | null = null
+    return (receiver: ((attachment: ChatAttachment) => void) | null) => {
+      if (!receiver) {
+        if (registered && editingAttachmentReceiverRef.current === registered) {
+          registerEditingAttachmentReceiver(null)
+        }
+        registered = null
+        return
+      }
+      if (!isEditOwnerCurrent()) return
+      registered = receiver
+      registerEditingAttachmentReceiver(receiver)
+    }
+  }, [isEditOwnerCurrent, registerEditingAttachmentReceiver])
   const handleSendEditedMessage = useCallback(
     (
       content: string,
@@ -10155,7 +10174,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 onSetEditingIndex={handleSetEditingIndex}
                 onSetEditingContent={handleSetEditingContent}
                 onDropImageAttachments={handleDropEditingImages}
-                onRegisterEditingAttachmentReceiver={registerEditingAttachmentReceiver}
+                onRegisterEditingAttachmentReceiver={handleRegisterEditingAttachmentReceiver}
                 onSendEditedMessage={handleSendEditedMessage}
                 projectEditHistory={projectEditHistory}
                 preflightEditReports={preflightEditReports}

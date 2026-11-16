@@ -392,4 +392,23 @@ describe('ChatPage edit form thread ownership', () => {
     ])
     expect(requestCount()).toBe(1)
   })
+
+  it('routes an image to the edit form of B after A\'s form unmounted, despite a stale register or unregister from A', async () => {
+    await renderPage()
+    await startEdit(0)
+    const registerFromA = f.props!.onRegisterEditingAttachmentReceiver
+    await selectSession('session-b')
+    await startEdit(2)
+    const deadReceiver = vi.fn()
+    act(() => registerFromA(null))
+    act(() => registerFromA(deadReceiver))
+    const attachment: ChatAttachment = { type: 'image', url: 'local-media:///fixture/for-b.png', fileName: 'for-b.png' }
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment } }))
+    })
+    await waitFor(() => expect(f.receive).toHaveBeenCalledOnce())
+    expect(f.receive).toHaveBeenCalledWith({ sessionId: 'session-b', index: 2, attachment })
+    expect(deadReceiver).not.toHaveBeenCalled()
+    expect(f.error).not.toHaveBeenCalled()
+  })
 })
