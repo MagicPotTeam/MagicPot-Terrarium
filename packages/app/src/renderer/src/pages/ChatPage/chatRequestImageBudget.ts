@@ -5,6 +5,7 @@ import {
 } from '@shared/llm/chatAttachmentTransportLimits'
 import { DEFAULT_PROVIDER_JSON_MAX_BYTES } from '@shared/llm/providerJsonBudget'
 import { normalizeMediaReference } from '@shared/mediaReference'
+import i18next from 'i18next'
 import type { ChatAttachment } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 
 /**
@@ -22,14 +23,14 @@ export type ChatRequestImageByteBudgetRoute = 'prepared-source' | 'provider-json
 
 export const CHAT_REQUEST_IMAGE_BUDGET_EXCEEDED = 'CHAT_REQUEST_IMAGE_BUDGET_EXCEEDED'
 
-const DEFAULT_IMAGE_BUDGET_MESSAGE =
-  'The images in this conversation exceed what one request can carry. Remove older images or start a new conversation.'
-
-/** A request that MAIN would certainly refuse for the size of its images; nothing was read or sent. */
+/**
+ * A request that MAIN would certainly refuse for the size of its images; nothing was read or
+ * sent. Its message is the one short line the send path shows through its existing notice.
+ */
 export class ChatRequestImageBudgetError extends Error {
   readonly code = CHAT_REQUEST_IMAGE_BUDGET_EXCEEDED
   readonly retryBlocked = true
-  constructor(message: string = DEFAULT_IMAGE_BUDGET_MESSAGE) {
+  constructor(message: string = i18next.t('chat.request_images_too_large')) {
     super(message)
     this.name = 'ChatRequestImageBudgetError'
   }

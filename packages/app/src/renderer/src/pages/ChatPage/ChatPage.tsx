@@ -9414,7 +9414,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
         : 'image'
     const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
     if (!checkFileSize(file, maxSizeMB)) {
-      alert(`File is too large. Max ${maxSizeMB}MB, current size ${formatFileSize(file.size)}.`)
+      // The composer's existing size notice; a native alert() is not shown reliably.
+      notifyError(t('chat.incoming_image_too_large', {
+        fileName: file.name,
+        maxMB: maxSizeMB,
+        size: formatFileSize(file.size)
+      }))
       return undefined
     }
 

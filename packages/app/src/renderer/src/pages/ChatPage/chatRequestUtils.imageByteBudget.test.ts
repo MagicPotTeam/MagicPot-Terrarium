@@ -514,3 +514,16 @@ describe.each([false, true])('images of a report bundle MAIN verified, stream=%s
     expect(bundle.fetchMock).not.toHaveBeenCalled()
   })
 })
+
+describe('refusal message', () => {
+  it('is the one short localized line for the conversation images', async () => {
+    const { default: i18n } = await import('@renderer/i18n')
+    const en = (await import('@shared/locales/en-US/renderer.json')).default
+    const zh = (await import('@shared/locales/zh-CN/renderer.json')).default
+    await i18n.changeLanguage('zh-CN')
+    expect(new ChatRequestImageBudgetError().message).toBe(zh.chat.request_images_too_large)
+    await i18n.changeLanguage('en-US')
+    expect(new ChatRequestImageBudgetError().message).toBe(en.chat.request_images_too_large)
+    expect(en.chat.request_images_too_large.length).toBeLessThan(140)
+  })
+})

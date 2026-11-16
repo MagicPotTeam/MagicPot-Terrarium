@@ -1007,6 +1007,7 @@
     "drop_folder_has_no_supported_images": "The dropped folder does not contain any supported images.",
     "incoming_image_downscaled": "{{fileName}} is larger than {{maxMB}} MB, so a {{width}} × {{height}} copy was attached instead.",
     "incoming_image_too_large": "{{fileName}} is too large. Max {{maxMB}} MB, current size {{size}}.",
+    "request_images_too_large": "The images in this conversation exceed what one request can carry. Remove older images or start a new conversation.",
     "drop_folder_process_failed": "Failed to process the dropped folder.",
     "external_confirmation_prompt": "Please confirm whether to continue.",
     "external_confirmation_confirm": "Confirm execution",

@@ -9,6 +9,7 @@ import type { ChatSession, ChatSessionDraft } from './chatStorage'
 import { UNVERIFIED_REPORT_BUNDLE_MESSAGE } from '@shared/llm/unverifiedReport'
 import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 import ChatPage from './ChatPage'
+import { ChatRequestImageBudgetError } from './chatRequestImageBudget'
 import {
   buildChatWorkspaceControlsPortalId,
   scopedStorageKey,
@@ -33,6 +34,8 @@ const fixture = vi.hoisted(() => ({
   importDataUrl: vi.fn(),
   notifyError: vi.fn(),
   notifyWarning: vi.fn(),
+  selectFile: vi.fn(),
+  fileTooLarge: false,
   discoverVideoFrames: vi.fn(),
   videoExpansionOverride: null as null | ((attachments: ChatAttachment[] | undefined, content: string) => Promise<{ content: string; attachments: ChatAttachment[] }>),
   useRealVideoHelper: false,
@@ -105,8 +108,9 @@ vi.mock('@renderer/utils/windowUtils', () => ({
 vi.mock('@renderer/utils/fileUtils', () => ({
   fileToDataUrl: (file: File) => fixture.fileToDataUrl(file),
   fileToBlobUrl: vi.fn(() => 'blob:fixture-preview'),
-  selectFile: vi.fn(),
-  checkFileSize: () => true,
+  selectFile: (...args: unknown[]) => fixture.selectFile(...args),
+  checkFileSize: () => !fixture.fileTooLarge,
+  formatFileSize: (bytes: number) => `${bytes} B`,
   isImageFile: () => true
 }))
 
@@ -235,12 +239,14 @@ vi.mock('./components/ChatComposer', () => ({
     onInputChange,
     onSend,
     onRemoveAttachment,
+    onUploadFile,
     pendingAttachments
   }: {
     inputValue: string
     onInputChange: (value: string) => void
     onSend: () => void
     onRemoveAttachment: (index: number) => void
+    onUploadFile?: () => void
     pendingAttachments: ChatAttachment[]
   }) => (
     <div>
@@ -262,6 +268,9 @@ vi.mock('./components/ChatComposer', () => ({
       ))}
       <button type="button" data-testid="composer-send" onClick={onSend}>
         Send
+      </button>
+      <button type="button" data-testid="composer-upload" onClick={onUploadFile}>
+        Upload
       </button>
     </div>
   )
@@ -401,6 +410,7 @@ beforeEach(() => {
   fixture.videoExpansionFrames = 0
   fixture.useRealCompletion = false
   fixture.requestApi = null
+  fixture.fileTooLarge = false
   localStorage.clear()
   sessionStorage.clear()
   vi.stubGlobal('fetch', fixture.fetch)
@@ -1345,5 +1355,72 @@ describe('video boundary discovery as the second image-limit boundary', () => {
         (message) => message.role === 'user' && message.attachments?.length === 4
       )
     ).toBe(true)
+  })
+})
+
+describe('ChatPage request image size preflight', () => {
+  const managedImage = (sizeBytes: number): ChatAttachment => {
+    const sha256 = 'b'.repeat(64)
+    return {
+      type: 'image',
+      url: `local-media:///fixture/${sha256}.png`,
+      fileName: 'large.png',
+      mimeType: 'image/png',
+      media: {
+        version: 1,
+        kind: 'managed',
+        relativePath: `originals/bb/${sha256}.png`,
+        sha256,
+        sizeBytes,
+        mimeType: 'image/png',
+        originalFileName: 'large.png'
+      }
+    } as ChatAttachment
+  }
+  const configureProvider = (provider: 'gemini' | 'openai'): void => {
+    configure()
+    fixture.config!.llm_config.api_profiles = [
+      { ...fixture.config!.llm_config.api_profiles[0], provider, ...(provider === 'gemini' ? { api_mode: undefined } : {}) } as LLMAPIProfile
+    ]
+    fixture.profiles = fixture.config!.llm_config.api_profiles
+  }
+
+  it('refuses a new message whose images exceed the provider JSON budget and keeps the draft', async () => {
+    configureProvider('gemini')
+    const attachment = managedImage(22 * 1024 * 1024)
+    await renderPage(makeSession([attachment]))
+    await settleInitialDraftPersistence()
+    fireEvent.click(screen.getByTestId('composer-send'))
+    await waitFor(() => expect(fixture.notifyError).toHaveBeenCalledOnce())
+    expect(fixture.notifyError.mock.calls[0][0]).toBe(new ChatRequestImageBudgetError().message)
+    expect(fixture.request).not.toHaveBeenCalled()
+    expect(fixture.stream).not.toHaveBeenCalled()
+    expect(fixture.fetch).not.toHaveBeenCalled()
+    expect(screen.getByTestId('composer-input')).toHaveValue(draftText)
+    expect(pendingAttachments()).toEqual([attachment])
+    expect(currentSession().messages).toEqual([])
+  })
+
+  it('sends the same message on the Responses route, whose limit is checked at the request entry', async () => {
+    configureProvider('openai')
+    await renderPage(makeSession([managedImage(22 * 1024 * 1024)]))
+    await settleInitialDraftPersistence()
+    fireEvent.click(screen.getByTestId('composer-send'))
+    await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
+    expect(fixture.notifyError).not.toHaveBeenCalled()
+  })
+
+  it('shows the size notice when the file chooser returns a file above the limit', async () => {
+    configure()
+    const alert = vi.fn()
+    vi.stubGlobal('alert', alert)
+    await renderPage(makeSession([]))
+    await settleInitialDraftPersistence()
+    fixture.fileTooLarge = true
+    fixture.selectFile.mockResolvedValue(new File(['x'], 'huge.png', { type: 'image/png' }))
+    fireEvent.click(screen.getByTestId('composer-upload'))
+    await waitFor(() => expect(fixture.notifyError).toHaveBeenCalledWith('chat.incoming_image_too_large'))
+    expect(alert).not.toHaveBeenCalled()
+    expect(pendingAttachments()).toEqual([])
   })
 })
