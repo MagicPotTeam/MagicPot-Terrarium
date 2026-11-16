@@ -13,6 +13,7 @@ import type {
   ChatMessage
 } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
+import { createImageResponse } from '../../testUtils/imageResponse'
 
 const formerImageLimit = 10
 // Primary reports are bundles registered for this conversation; fixture() recreates the registry.
@@ -124,11 +125,7 @@ const dispatchedImages = (f: ReturnType<typeof fixture>) =>
     .at(-1)![0]
     .messages.flatMap((message) => message.attachments || [])
     .filter((attachment) => attachment.type === 'image')
-const imageResponse = () => ({
-  ok: true,
-  headers: { get: () => 'image/png' },
-  arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer
-})
+const imageResponse = () => createImageResponse(new Uint8Array([1, 2, 3]))
 
 describe('direct request explicit image descriptor guard', () => {
   const agent = { id: 'owned', type: 'agent' as const, category: 'owned' as const, skillName: 'Owned', prompt: 'Analyze', apiAddress: 'https://never-called.invalid', apiKey: '' }

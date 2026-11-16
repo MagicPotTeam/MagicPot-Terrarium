@@ -4,6 +4,7 @@ import type { Config, CustomSkill, LLMOpenAIApiMode } from '@shared/config/confi
 import type { ChatMessage } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
 import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
+import { createImageResponse } from '../../testUtils/imageResponse'
 
 const manifestUrl = 'local-media:///fixture/manifest.json'
 const conversationId = 'manifest-count-fixture'
@@ -100,11 +101,7 @@ const fixture = (entries: number) => {
     if (String(url) === reportUrl) {
       return { ok: true, text: async () => 'fixture', headers: { get: () => 'text/plain' } }
     }
-    return {
-      ok: true,
-      headers: { get: () => 'image/png' },
-      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer
-    }
+    return createImageResponse(new Uint8Array([1, 2, 3]))
   })
   const materializeForRequest = vi.fn()
   const dispatches: Array<{ transport: string; payload: unknown }> = []
