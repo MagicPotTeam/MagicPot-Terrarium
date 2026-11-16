@@ -224,7 +224,7 @@ describe('Canvas Target evidence action gate', () => {
     expect(f.chat.mock.calls.some(([message]) => message.attachments?.some((attachment: { url: string }) => attachment.url === 'blob:extracted-fixture'))).toBe(false)
   })
 
-  it.each([['structured_only', 'canvas'], ['structured_only', 'both'], ['selection_region', 'canvas'], ['selection_region', 'both']] as const)('blocks extract in %s with %s output', async (mode, output) => {
+  it.each([['structured_only', 'canvas'], ['structured_only', 'both']] as const)('blocks extract in %s with %s output', async (mode, output) => {
     f.target = output
     const { result } = renderHook(() => useCanvasTargetWorkflow(options))
     await act(async () => { await result.current.handleOpenCanvasTargetDialog([image], { x: 0, y: 0, width: 50, height: 50 }) })
@@ -237,5 +237,26 @@ describe('Canvas Target evidence action gate', () => {
     expect.soft(f.commits).not.toHaveBeenCalled()
     expect.soft(f.chat.mock.calls.some(([message]) => message.attachments?.some((attachment: { url: string }) => attachment.url === 'blob:extracted-fixture'))).toBe(false)
     // No model stage is configured in this fixture; downstream model transmission is not covered.
+  })
+
+  // Re-expressed under owner decision 2: this fixture is a legacy crop with no
+  // recorded source size or hash, so selection_region refuses it before
+  // planning (the same contract as 'does not transmit an unverified cropped
+  // selection screenshot in selection_region mode' above). The post-plan
+  // extraction gate stays covered by the uncropped selection_region rows. A
+  // verified-crop variant that reaches the plan arrives with crop provenance.
+  it.each([['selection_region', 'canvas'], ['selection_region', 'both']] as const)('blocks extract in %s with %s output', async (mode, output) => {
+    f.target = output
+    const { result } = renderHook(() => useCanvasTargetWorkflow(options))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([image], { x: 0, y: 0, width: 50, height: 50 }) })
+    expect(result.current.canvasTargetDialogOpen).toBe(true)
+    act(() => { result.current.setCanvasTargetEvidenceMode(mode); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    expect(f.plan).not.toHaveBeenCalled()
+    expect(result.current.canvasTargetError).toMatch(/crop/i)
+    expect.soft(f.load).not.toHaveBeenCalledWith(source)
+    expect.soft(f.extract).not.toHaveBeenCalled()
+    expect.soft(f.commits).not.toHaveBeenCalled()
+    expect.soft(f.chat.mock.calls.some(([message]) => message.attachments?.some((attachment: { url: string }) => attachment.url === 'blob:extracted-fixture'))).toBe(false)
   })
 })
