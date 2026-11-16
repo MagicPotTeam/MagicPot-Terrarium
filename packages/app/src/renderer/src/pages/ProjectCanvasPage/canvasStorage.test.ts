@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'crypto'
 import * as path from 'path'
 import {
   CANVAS_FILE_VERSION,
@@ -297,6 +298,101 @@ function createCanvasGroupBranch(overrides: Partial<CanvasGroupBranch> = {}): Ca
     createdAt: '2026-03-28T06:45:02.000Z',
     ...overrides
   }
+}
+
+/**
+ * The main-side autosave mirror calls (copyCanvasMirrorAsset, writeCanvasMirrorAsset,
+ * listCanvasMirrorAssets, pruneCanvasMirrorAssets) over an in-memory win32 file map.
+ * Like main, they resolve <autoSaveRoot>/<projectDirName>/assets/<assetFileName> and
+ * publish an asset file once: a file that is already there is kept, never rewritten.
+ * Prune removes nothing (main keeps freshly written files for a grace period).
+ */
+function createMainSideCanvasMirrorCalls(
+  binaryFiles: Map<string, Uint8Array>,
+  autoSaveRoot: string
+) {
+  const assetPath = (projectDirName: string, assetFileName: string): string =>
+    path.win32.join(autoSaveRoot, projectDirName, 'assets', assetFileName)
+  const publish = (target: string, data: Uint8Array) => {
+    const existing = binaryFiles.get(target)
+    if (existing) return { status: 'exists' as const, sizeBytes: existing.byteLength }
+    binaryFiles.set(target, new Uint8Array(data))
+    return { status: 'written' as const, sizeBytes: data.byteLength }
+  }
+  return {
+    copyCanvasMirrorAsset: vi.fn(
+      async ({
+        projectDirName,
+        assetFileName,
+        sourcePath
+      }: {
+        projectDirName: string
+        assetFileName: string
+        sourcePath: string
+      }) => {
+        const data = binaryFiles.get(path.win32.normalize(sourcePath.replaceAll('/', '\\')))
+        if (!data) throw new Error(`File not found: ${sourcePath}`)
+        return publish(assetPath(projectDirName, assetFileName), data)
+      }
+    ),
+    writeCanvasMirrorAsset: vi.fn(
+      async ({
+        projectDirName,
+        assetFileName,
+        data
+      }: {
+        projectDirName: string
+        assetFileName: string
+        data: Uint8Array
+      }) => publish(assetPath(projectDirName, assetFileName), data)
+    ),
+    listCanvasMirrorAssets: vi.fn(async ({ projectDirName }: { projectDirName: string }) => {
+      const prefix = `${path.win32.join(autoSaveRoot, projectDirName, 'assets')}\\`
+      return {
+        assetFileNames: [...binaryFiles.keys()]
+          .filter(
+            (fullPath) =>
+              fullPath.startsWith(prefix) && !fullPath.slice(prefix.length).includes('\\')
+          )
+          .map((fullPath) => fullPath.slice(prefix.length))
+      }
+    }),
+    pruneCanvasMirrorAssets: vi.fn(async () => ({
+      removedAssetFileNames: [],
+      removedSnapshotDirNames: []
+    }))
+  }
+}
+
+/** sha256 hex of bytes, computed independently of the code under test. */
+function sha256HexOfBytes(bytes: Uint8Array | ArrayBuffer): string {
+  return createHash('sha256')
+    .update(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes))
+    .digest('hex')
+}
+
+/**
+ * Asserts that a project-file asset reference is C1's content-addressed name for
+ * these bytes: assets/b-<first 40 hex digits of their SHA-256><source extension>,
+ * which is neither the source itself nor the old per-item name that was overwritten
+ * in place.
+ */
+function expectContentAddressedAssetRef(
+  ref: string | undefined,
+  expected: { bytes: Uint8Array | ArrayBuffer; extension: string; sourceSrc: string }
+): string {
+  expect(ref).toMatch(/^assets\/[bfu]-[0-9a-f]{40}\.[a-z0-9]{1,16}$/)
+  expect(ref?.endsWith(expected.extension)).toBe(true)
+  expect(ref).not.toBe(expected.sourceSrc)
+  expect(ref).not.toContain('assets/images/')
+  const digest = sha256HexOfBytes(expected.bytes)
+  expect(ref).toBe(`assets/b-${digest.slice(0, 40)}${expected.extension}`)
+  return ref as string
+}
+
+/** local-media URL of a win32 path, in the form the loader restores (forward slashes). */
+function toExpectedLocalMediaUrl(win32Path: string): string {
+  return `local-media:///${win32Path.replaceAll('\\', '/')}`
 }
 
 describe('canvasStorage provenance metadata', () => {
@@ -1315,6 +1411,10 @@ describe('canvasStorage provenance metadata', () => {
     const textFiles = new Map<string, string>()
     const binaryFiles = new Map<string, Uint8Array>()
     const userDataDir = 'C:\\mock-user-data'
+    const mirrorCalls = createMainSideCanvasMirrorCalls(
+      binaryFiles,
+      path.win32.join(userDataDir, 'AutoSave')
+    )
 
     Object.defineProperty(window, 'path', {
       configurable: true,
@@ -1375,7 +1475,8 @@ describe('canvasStorage provenance metadata', () => {
               data,
               filename: path.win32.basename(fullPath)
             }
-          })
+          }),
+          ...mirrorCalls
         }
       } as unknown as Window['api']
     })
@@ -1403,26 +1504,46 @@ describe('canvasStorage provenance metadata', () => {
 
     await saveCanvasItems(items, 'mirror-fallback-test')
 
-    const projectCanvasPath = path.win32.join(
+    const projectDir = path.win32.join(
       userDataDir,
       'AutoSave',
-      '.mirror-fallback-test__mirror-fallback-test',
-      'project.mpcanvas'
+      '.mirror-fallback-test__mirror-fallback-test'
     )
-    const projectCanvasJson = JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
-      storageMode?: string
-      blobs?: Record<string, unknown>
-      items?: Array<{ src?: string }>
-      currentQAppKey?: string
-      qAppCache?: Record<string, unknown>
-    }
+    const projectCanvasPath = path.win32.join(projectDir, 'project.mpcanvas')
+    const readProjectCanvasJson = () =>
+      JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
+        storageMode?: string
+        blobs?: Record<string, unknown>
+        items?: Array<{ src?: string }>
+        currentQAppKey?: string
+        qAppCache?: Record<string, unknown>
+      }
+    const projectCanvasJson = readProjectCanvasJson()
     expect(projectCanvasJson.storageMode).toBe('project')
     expect(projectCanvasJson.blobs).toBeUndefined()
     expect(projectCanvasJson.currentQAppKey).toBeUndefined()
     expect(projectCanvasJson.qAppCache).toBeUndefined()
-    expect(projectCanvasJson.items?.[0]?.src).toBe(
-      'assets/images/image-blob-mirror-1__generated-image.png'
+    // Re-expressed for canvas plan C1 (content-addressed mirror): the asset location is
+    // read from the committed project file and must be the content key of the bytes.
+    const assetRef = expectContentAddressedAssetRef(projectCanvasJson.items?.[0]?.src, {
+      bytes: blobPayload,
+      extension: '.png',
+      sourceSrc: 'blob:mirror-image-source'
+    })
+    const mirroredAssetPath = path.win32.join(projectDir, ...assetRef.split('/'))
+    expect(Array.from(binaryFiles.get(mirroredAssetPath) || [])).toEqual(
+      Array.from(new Uint8Array(blobPayload))
     )
+    expect(mirrorCalls.writeCanvasMirrorAsset).toHaveBeenCalledTimes(1)
+    const binaryFilesAfterFirstSave = new Map(binaryFiles)
+
+    // Saving the same board again keeps the same location and writes no asset bytes.
+    await saveCanvasItems(items, 'mirror-fallback-test')
+    expect(readProjectCanvasJson().items?.[0]?.src).toBe(assetRef)
+    expect(mirrorCalls.writeCanvasMirrorAsset).toHaveBeenCalledTimes(1)
+    expect(mirrorCalls.copyCanvasMirrorAsset).not.toHaveBeenCalled()
+    expect(window.api.svcFs.saveImageToPath).not.toHaveBeenCalled()
+    expect(binaryFiles).toEqual(binaryFilesAfterFirstSave)
 
     Object.defineProperty(globalThis, 'indexedDB', {
       configurable: true,
@@ -1438,7 +1559,7 @@ describe('canvasStorage provenance metadata', () => {
       id: 'image-blob-mirror-1',
       type: 'image',
       fileName: 'generated-image.png',
-      src: 'local-media:///C:/mock-user-data/AutoSave/.mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
+      src: toExpectedLocalMediaUrl(mirroredAssetPath)
     })
   })
 
@@ -1448,6 +1569,10 @@ describe('canvasStorage provenance metadata', () => {
     const originalBytes = new TextEncoder().encode('imported-photo-binary')
     const binaryFiles = new Map<string, Uint8Array>([[originalFilePath, originalBytes]])
     const textFiles = new Map<string, string>()
+    const mirrorCalls = createMainSideCanvasMirrorCalls(
+      binaryFiles,
+      path.win32.join(userDataDir, 'AutoSave')
+    )
 
     Object.defineProperty(window, 'path', {
       configurable: true,
@@ -1493,7 +1618,8 @@ describe('canvasStorage provenance metadata', () => {
             const fullPath = path.win32.join(outputPath, filename)
             textFiles.set(fullPath, content)
             return { success: true, fullPath }
-          })
+          }),
+          ...mirrorCalls
         }
       } as unknown as Window['api']
     })
@@ -1519,14 +1645,25 @@ describe('canvasStorage provenance metadata', () => {
       'local-import-persistence-test'
     )
 
-    const mirroredAssetPath = path.win32.join(
+    // Re-expressed for canvas plan C1 (content-addressed mirror): the mirrored asset is the
+    // one the committed project file names, under the content key of the imported bytes.
+    const projectDir = path.win32.join(
       userDataDir,
       'AutoSave',
-      '.local-import-persistence-test__local-import-persistence-test',
-      'assets',
-      'images',
-      'local-import-image-1__imported-photo.png'
+      '.local-import-persistence-test__local-import-persistence-test'
     )
+    const projectCanvasJson = JSON.parse(
+      textFiles.get(path.win32.join(projectDir, 'project.mpcanvas')) || '{}'
+    ) as {
+      items?: Array<{ src?: string }>
+    }
+    const assetRef = expectContentAddressedAssetRef(projectCanvasJson.items?.[0]?.src, {
+      bytes: originalBytes,
+      extension: '.png',
+      sourceSrc: 'local-media:///C:/external/imported-photo.png'
+    })
+    const mirroredAssetPath = path.win32.join(projectDir, ...assetRef.split('/'))
+    expect(mirroredAssetPath).not.toBe(originalFilePath)
     expect(Array.from(binaryFiles.get(mirroredAssetPath) || [])).toEqual(Array.from(originalBytes))
 
     binaryFiles.delete(originalFilePath)
@@ -2072,6 +2209,10 @@ describe('canvasStorage provenance metadata', () => {
     const textFiles = new Map<string, string>()
     const binaryFiles = new Map<string, Uint8Array>()
     const userDataDir = 'C:\\mock-user-data-crop'
+    const mirrorCalls = createMainSideCanvasMirrorCalls(
+      binaryFiles,
+      path.win32.join(userDataDir, 'AutoSave')
+    )
 
     Object.defineProperty(window, 'path', {
       configurable: true,
@@ -2141,7 +2282,8 @@ describe('canvasStorage provenance metadata', () => {
               data,
               filename: path.win32.basename(fullPath)
             }
-          })
+          }),
+          ...mirrorCalls
         }
       } as unknown as Window['api']
     })
@@ -2197,15 +2339,29 @@ describe('canvasStorage provenance metadata', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(drawImageMock).toHaveBeenCalledWith(expect.anything(), 120, 80, 320, 180, 0, 0, 320, 180)
     expect(toBlobMock).toHaveBeenCalledWith(expect.any(Function), 'image/jpeg')
+    // Re-expressed for canvas plan C1 (content-addressed mirror): the flattened asset is the
+    // one the committed project file names, under the content key of the flattened bytes
+    // that toBlob produced, with the source's .jpg extension kept.
+    const flattenedBytes = new Uint8Array([1, 2, 3, 4])
+    const assetRef = expectContentAddressedAssetRef(projectCanvasJson.items?.[0]?.src, {
+      bytes: flattenedBytes,
+      extension: '.jpg',
+      sourceSrc: 'blob:crop-image-source'
+    })
     expect(projectCanvasJson.items?.[0]).toMatchObject({
-      src: 'assets/images/image-crop-1__photo.jpg',
+      src: assetRef,
       sourceWidth: 320,
       sourceHeight: 180
     })
     expect(projectCanvasJson.items?.[0]?.crop).toBeUndefined()
-    expect(
-      [...binaryFiles.keys()].some((fullPath) => fullPath.endsWith('image-crop-1__photo.jpg'))
-    ).toBe(true)
+    const mirroredAssetPath = path.win32.join(
+      userDataDir,
+      'AutoSave',
+      '.project-crop-cache-test__project-crop-cache-test',
+      ...assetRef.split('/')
+    )
+    expect(binaryFiles.has(mirroredAssetPath)).toBe(true)
+    expect(Array.from(binaryFiles.get(mirroredAssetPath) || [])).toEqual(Array.from(flattenedBytes))
 
     Object.defineProperty(globalThis, 'indexedDB', {
       configurable: true,
@@ -2218,7 +2374,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items[0]).toMatchObject({
       id: 'image-crop-1',
       type: 'image',
-      src: 'local-media:///C:/mock-user-data-crop/AutoSave/.project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
+      src: toExpectedLocalMediaUrl(mirroredAssetPath),
       sourceWidth: 320,
       sourceHeight: 180
     })
@@ -2250,6 +2406,10 @@ describe('canvasStorage provenance metadata', () => {
     const textFiles = new Map<string, string>()
     const binaryFiles = new Map<string, Uint8Array>()
     const userDataDir = 'C:\\mock-user-data-missing'
+    const mirrorCalls = createMainSideCanvasMirrorCalls(
+      binaryFiles,
+      path.win32.join(userDataDir, 'AutoSave')
+    )
 
     Object.defineProperty(window, 'path', {
       configurable: true,
@@ -2319,7 +2479,8 @@ describe('canvasStorage provenance metadata', () => {
               data,
               filename: path.win32.basename(fullPath)
             }
-          })
+          }),
+          ...mirrorCalls
         }
       } as unknown as Window['api']
     })
@@ -2345,6 +2506,28 @@ describe('canvasStorage provenance metadata', () => {
       'project-missing-test'
     )
 
+    // Re-expressed for canvas plan C1 (content-addressed mirror): the missing asset is the
+    // one the committed project file names, under the content key of the saved bytes.
+    const projectDir = path.win32.join(
+      userDataDir,
+      'AutoSave',
+      '.project-missing-test__project-missing-test'
+    )
+    const projectCanvasJson = JSON.parse(
+      textFiles.get(path.win32.join(projectDir, 'project.mpcanvas')) || '{}'
+    ) as {
+      items?: Array<{ src?: string }>
+    }
+    const assetRef = expectContentAddressedAssetRef(projectCanvasJson.items?.[0]?.src, {
+      bytes: blobPayload,
+      extension: '.png',
+      sourceSrc: 'blob:project-only-image-source'
+    })
+    const mirroredAssetPath = path.win32.join(projectDir, ...assetRef.split('/'))
+    expect(Array.from(binaryFiles.get(mirroredAssetPath) || [])).toEqual(
+      Array.from(new Uint8Array(blobPayload))
+    )
+
     binaryFiles.clear()
     Object.defineProperty(globalThis, 'indexedDB', {
       configurable: true,
@@ -2358,7 +2541,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items).toHaveLength(1)
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       '[Canvas Storage] Project asset missing:',
-      'c:/mock-user-data-missing/autosave/.project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
+      mirroredAssetPath.replace(/[\\/]+/g, '/').toLowerCase()
     )
   })
 
