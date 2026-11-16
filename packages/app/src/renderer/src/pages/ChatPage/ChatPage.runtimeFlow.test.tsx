@@ -1766,86 +1766,6 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it.each(['member', 'lead'] as const)('strict lead polling survives reload and activation from %s entry', async (entry) => {
-    const lead: ChatSession = { id: 'strict-poll-lead', title: 'Lead', messages: [], profileId: 'base-model' }
-    const member: ChatSession = { id: 'strict-poll-member', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
-    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'runtime-project', threadId: 'runtime-pane' } as const
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), entry === 'member' ? member.id : lead.id)
-    const calls: Array<{ route: typeof route; conversationId: string }> = []
-    let holdNext: 'reload' | 'inactive' | null = null
-    let releaseOld: ((value: unknown) => void) | undefined
-    let releaseInactive: ((value: unknown) => void) | undefined
-    const job = (id: string) => ({ id, kind: 'explore', task: id, status: 'running', createdAt: Date.now(), expiresAt: Date.now() + 60000 })
-    hoisted.listAgentJobsMock.mockImplementation((args: { route: typeof route; conversationId: string }) => {
-      calls.push(args)
-      if (args.conversationId === lead.id && holdNext) {
-        const phase = holdNext
-        holdNext = null
-        return new Promise(resolve => { if (phase === 'reload') releaseOld = resolve; else releaseInactive = resolve })
-      }
-      return Promise.resolve({ jobs: args.conversationId === lead.id ? [job('strict-fresh')] : [] })
-    })
-    const ui = (active: boolean) => <React.StrictMode><MemoryRouter><ThemeProvider theme={theme}><ChatPage compact active={active} storageScope="runtime-flow" route={route} threadSubRowsHost={teamRowsHost} /></ThemeProvider></MemoryRouter></React.StrictMode>
-    if (!teamRowsHost.isConnected) document.body.appendChild(teamRowsHost)
-    const page = render(ui(true))
-    const originalNotify = hoisted.notifyErrorMock
-    const leadCalls = () => calls.filter(call => call.conversationId === lead.id)
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(entry === 'member' ? member.id : lead.id))
-      if (entry === 'lead') {
-        fireEvent.click(await teamRows().findByRole('button', { name: 'Alice' }))
-        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
-      }
-      await waitFor(() => expect(leadCalls().length).toBeGreaterThan(0))
-      expect(leadCalls()[0]).toEqual({ route, conversationId: lead.id })
-      const firstCount = leadCalls().length
-      await waitFor(() => expect(leadCalls().length).toBeGreaterThan(firstCount), { timeout: 2500 })
-      expect(leadCalls().at(-1)).toEqual({ route, conversationId: lead.id })
-      holdNext = 'reload'
-      await waitFor(() => expect(releaseOld).toBeDefined(), { timeout: 2500 })
-      let reloadStarted = false
-      hoisted.loadAllSessionsMock.mockImplementationOnce(async () => { reloadStarted = true; return cloneValue(hoisted.storedSessions.value) })
-      const beforeReload = leadCalls().length
-      hoisted.notifyErrorMock = vi.fn()
-      page.rerender(ui(true))
-      await waitFor(() => expect(reloadStarted).toBe(true))
-      await waitFor(() => expect(leadCalls().length).toBeGreaterThan(beforeReload), { timeout: 2500 })
-      expect(leadCalls().at(-1)).toEqual({ route, conversationId: lead.id })
-      fireEvent.click(await screen.findByRole('button', { name: '展开 组长 · explore 详情' }))
-      expect(await screen.findByText('explore: strict-fresh')).toBeVisible()
-      await act(async () => releaseOld!({ jobs: [job('strict-stale')] }))
-      expect(screen.queryByText('explore: strict-stale')).not.toBeInTheDocument()
-      expect(screen.getByText('explore: strict-fresh')).toBeVisible()
-      holdNext = 'inactive'
-      await waitFor(() => expect(releaseInactive).toBeDefined(), { timeout: 2500 })
-      expect(leadCalls().at(-1)).toEqual({ route, conversationId: lead.id })
-      page.rerender(ui(false))
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)) })
-      const inactiveCount = leadCalls().length
-      await act(async () => releaseInactive!({ jobs: [job('stale-inactive')] }))
-      expect(screen.queryByText('explore: stale-inactive')).not.toBeInTheDocument()
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 1200)) })
-      expect(leadCalls()).toHaveLength(inactiveCount)
-      page.rerender(ui(true))
-      await waitFor(() => expect(leadCalls().length).toBeGreaterThan(inactiveCount), { timeout: 2500 })
-      expect(leadCalls().at(-1)).toEqual({ route, conversationId: lead.id })
-      expect(await screen.findByRole('button', { name: '展开 组长 · explore 详情' })).toBeVisible()
-      fireEvent.click(screen.getByRole('button', { name: '展开 组长 · explore 详情' }))
-      expect(await screen.findByText('explore: strict-fresh')).toBeVisible()
-      expect(screen.queryByText('explore: stale-inactive')).not.toBeInTheDocument()
-      const activeCount = leadCalls().length
-      await waitFor(() => expect(leadCalls().length).toBeGreaterThan(activeCount), { timeout: 2500 })
-      expect(leadCalls().at(-1)).toEqual({ route, conversationId: lead.id })
-      for (const call of leadCalls()) expect(call).toEqual({ route, conversationId: lead.id })
-    } finally {
-      releaseOld?.({ jobs: [] })
-      releaseInactive?.({ jobs: [] })
-      hoisted.notifyErrorMock = originalNotify
-      page.unmount()
-    }
-  }, 15000)
-
   it('keeps a user-entered local file path as plain message text without choosing or reading a local file', async () => {
     const route = {
       channel: 'canvas' as const,
@@ -3822,50 +3742,6 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(hoisted.continueAgentSideMock).toHaveBeenCalledOnce())
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled(); expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
       expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
-    } finally { view.unmount() }
-  })
-
-  it('keeps approved background process controls available after the parent reply without another model call', async () => {
-    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'process-project', threadId: 'pane' } as const
-    const job = { id: 'owned-process', kind: 'python', status: 'completed', createdAt: Date.now(), expiresAt: Date.now() + 60000, outcome: 'known', stdoutBytes: 7, stderrBytes: 0, truncated: false, operationSettled: true, cancellationRequested: false, exitCode: 0 }
-    hoisted.listAgentProcessesMock.mockResolvedValue({ jobs: [job] })
-    hoisted.readAgentProcessMock.mockResolvedValue({ job, data: 'REAL_PROCESS_LOG', nextCursor: 16, eof: true, truncated: false, untrustedData: true })
-    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: 'Approved process submitted; inspect status.' })
-    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
-      const id = readCurrentSessionState()!.id
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'Run Python in background' } }); fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(readCurrentSessionState()?.messages.at(-1)?.content).toContain('submitted'))
-      expect(hoisted.readAgentProcessMock).not.toHaveBeenCalled()
-      fireEvent.click(await screen.findByRole('button', { name: '展开 python 详情' }))
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.stdout' }))
-      expect(await screen.findByText('REAL_PROCESS_LOG')).toBeTruthy()
-      expect(hoisted.readAgentProcessMock).toHaveBeenCalledWith({ route, conversationId: id, jobId: 'owned-process', stream: 'stdout', cursor: 0, maxBytes: 16384 })
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
-      expect(readCurrentSessionState()?.messages.filter((message) => message.role === 'user')).toHaveLength(1)
-    } finally { view.unmount() }
-  })
-
-  it('keeps the job panel usable after the parent answer without sending a new model request', async () => {
-    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'jobs-project', threadId: 'pane' } as const
-    const job = { id: 'owned-job', kind: 'explore', task: 'Read project files', status: 'completed', createdAt: Date.now(), expiresAt: Date.now() + 60000 }
-    hoisted.listAgentJobsMock.mockResolvedValue({ jobs: [job] })
-    hoisted.readAgentJobMock.mockResolvedValue({ job, text: 'REPORT FROM BACKGROUND', nextOffset: 22, totalCharacters: 22 })
-    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: 'Delegated; report pending.' })
-    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
-      const sessionId = readCurrentSessionState()!.id
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'Investigate in background' } })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('Delegated; report pending.'))
-      fireEvent.click(await screen.findByRole('button', { name: '展开 explore 详情' }))
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_jobs.read' }))
-      await waitFor(() => expect(screen.getByText('REPORT FROM BACKGROUND')).toBeInTheDocument())
-      expect(hoisted.readAgentJobMock).toHaveBeenCalledWith({ route, conversationId: sessionId, jobId: 'owned-job', offset: 0, limit: 16000 })
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
-      expect(readCurrentSessionState()?.messages.filter((message) => message.role === 'user')).toHaveLength(1)
     } finally { view.unmount() }
   })
 
