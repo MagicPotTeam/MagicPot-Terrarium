@@ -56,7 +56,8 @@ vi.mock('./chatStorage', async original => {
 })
 vi.mock('./chatRequestUtils', async original => ({ ...(await original<typeof import('./chatRequestUtils')>()), supportsStreamingChatCompletion: () => false }))
 vi.mock('./components/ChatComposer', () => ({ default: ({ inputValue, onInputChange, onSend, addMenuSlot }: any) => <><ul data-testid="add-menu">{addMenuSlot?.(() => undefined)}</ul><input data-testid="input" value={inputValue} onChange={e => onInputChange(e.target.value)} /><button onClick={onSend}>send fixture</button></> }))
-vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession }: any) => <pre data-testid="session">{JSON.stringify(currentSession)}</pre> }))
+// The column draws the member approval cards after the transcript tail (`tailEnd`).
+vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession, tailEnd }: any) => <><pre data-testid="session">{JSON.stringify(currentSession)}</pre>{tailEnd}</> }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
 
