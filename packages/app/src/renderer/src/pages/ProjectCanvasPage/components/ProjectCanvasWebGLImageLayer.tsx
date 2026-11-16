@@ -5591,6 +5591,21 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      if (
+        isProjectCanvasDecodedImageReleased(image) &&
+        sharedTexturePoolRef.current.getRefCount(sharedTextureKey) === 0
+      ) {
+        // The same check as before the eviction loop, again: making room can destroy the
+        // texture this released decode was a handle for (a duplicate's sprite holding it was
+        // the oldest). A closed bitmap must never become a new texture; decode again.
+        dropDecodedRecordsForImage(item.id, image)
+        scheduleImageVersionUpdate()
+        if (existingRecord) {
+          preserveExistingRenderItem()
+        }
+        return
+      }
+
       let baseTexture: Texture | null = null
       let texture: Texture | null = null
       let unregisteredDisplayObject: ReturnType<

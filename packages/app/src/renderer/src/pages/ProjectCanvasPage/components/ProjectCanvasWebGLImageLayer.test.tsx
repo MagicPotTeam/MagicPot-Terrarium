@@ -718,6 +718,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     afterEach(() => {
       vi.unstubAllGlobals()
       vi.restoreAllMocks()
+      vi.doUnmock('../canvasImageResourceLifecycle')
       expect(bitmapClosedWithLiveTexture).toEqual([])
     })
 
@@ -1079,6 +1080,63 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       unmount()
       expect(first.close).toHaveBeenCalledTimes(1)
       expect(second.close).toHaveBeenCalledTimes(1)
+    })
+
+    it('decodes again instead of making a texture from a closed bitmap whose holder went away', async () => {
+      // The 'released decode without a live texture' check runs before the eviction loop of
+      // a pass, and that loop can destroy the texture. The pool below goes on reporting the
+      // gone holder for the two reads before that loop (the stale-handle check of the load
+      // and the first check of the pass): the check right before acquire must catch it.
+      let staleKeyReports = 0
+      let staleReportsLeft = 0
+      vi.doMock('../canvasImageResourceLifecycle', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('../canvasImageResourceLifecycle')>()
+        class StalePool<T> extends actual.CanvasImageSharedResourcePool<T> {
+          getRefCount(key: string) {
+            const refs = super.getRefCount(key)
+            if (staleReportsLeft > 0 && refs === 0 && key.includes('decoded-variant:source')) {
+              staleReportsLeft -= 1
+              staleKeyReports += 1
+              return 1
+            }
+            return refs
+          }
+        }
+        return { ...actual, CanvasImageSharedResourcePool: StalePool }
+      })
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const shared = createBitmap(640, 360)
+      const fresh = createBitmap(640, 360)
+      // The second consumer gets the decode the first one already uploaded and released
+      // (what the shared decode pool hands out while two loads of one source overlap).
+      const decode = vi
+        .fn()
+        .mockResolvedValueOnce(shared)
+        .mockResolvedValueOnce(shared)
+        .mockResolvedValue(fresh)
+      vi.stubGlobal('createImageBitmap', decode)
+      const { sourceIdentity } = createThumbnailSetFixture('evicted-holder')
+      const holder = localSourceItem({ id: 'holder-a', sourceIdentity })
+      const { rerender, unmount } = render(
+        <Layer items={[holder]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(holder.id))).toBe(shared))
+      expect(isBitmapClosed(shared)).toBe(true)
+
+      const warn = vi.spyOn(console, 'warn')
+      staleReportsLeft = 2
+      const duplicate = { ...holder, id: 'duplicate-b' }
+      rerender(<Layer items={[duplicate]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(duplicate.id))).toBe(fresh))
+      expect(staleKeyReports).toBe(2)
+      // No texture was ever made from the closed bitmap after its first upload.
+      const textureFromClosedBitmap = warn.mock.calls.some((call) =>
+        String(call[2] ?? '').includes('closed ImageBitmap')
+      )
+      expect(textureFromClosedBitmap).toBe(false)
+      expect(eagerTextureUploads).toEqual([shared, fresh])
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+      unmount()
     })
 
     it('reuses the uploaded texture for a new crop without touching the released decode', async () => {
