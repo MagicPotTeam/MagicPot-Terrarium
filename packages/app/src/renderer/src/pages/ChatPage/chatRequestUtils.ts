@@ -31,8 +31,13 @@ import type {
 } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import {
   augmentMessageContentWithFileAttachments,
-  expandReportBundleAttachments
+  expandReportBundleAttachments,
+  previewAugmentedMessageContentWithoutReads
 } from './chatAttachmentPromptUtils'
+import {
+  assertRequestImageBytesWithinBudget,
+  type ChatRequestImageByteBudgetRoute
+} from './chatRequestImageBudget'
 import { generateUUID, getBaseProfileId, HUNYUAN_3D_PROFILE_ID } from './chatPageShared'
 import {
   buildRemoteLlmServerErrorMessage,
@@ -57,8 +62,11 @@ import {
   resolveSkillOutputImageGenerationOptions
 } from './chatSkillOutputMode'
 import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
-import { isRunnableProfile, usesOpenAIResponsesImagePolicy } from '@shared/llm/utils'
-import { DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY } from '@shared/llm/openaiResponses'
+import { isOpencodeZenUrl, isRunnableProfile, usesOpenAIResponsesImagePolicy } from '@shared/llm/utils'
+import {
+  DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY,
+  shouldUseOpenAIImageGeneration
+} from '@shared/llm/openaiResponses'
 import {
   MAX_LLM_CHUNKED_BINARY_BYTES,
   MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES
@@ -1651,14 +1659,27 @@ const expandMessagesForImagePreflight = async (
   messages: ChatMessage[],
   imageHistoryPolicy: LLMImageHistoryPolicy | undefined,
   maxImages: number | undefined,
-  signal?: AbortSignal
-): Promise<{ messages: ChatMessage[]; expandedIndexes: ReadonlySet<number> }> => {
+  signal?: AbortSignal,
+  options: {
+    /**
+     * Also expand the history bundles that prepareMessagesForRequest would expand later
+     * (all-history policy), so that the request image byte budget counts their images.
+     */
+    expandHistoryBundles?: boolean
+  } = {}
+): Promise<{
+  messages: ChatMessage[]
+  expandedIndexes: ReadonlySet<number>
+  /** Image attachments this expansion added from manifests MAIN verified for this send. */
+  verifiedManifestImages: ReadonlySet<ChatAttachment>
+}> => {
   // Metadata may reveal more images. Check the aggregate again before report
   // capability probes, uploads or image materialization, and do not resurrect
   // images excluded by the history policy when expanding an older bundle.
   const expandedMessages: ChatMessage[] = []
   // Indexes are stable: the history policy selection maps messages one to one.
   const expandedIndexes = new Set<number>()
+  const verifiedManifestImages = new Set<ChatAttachment>()
   const messagesSelectedForExpansion = selectMessagesForImageHistoryPolicy(
     messages,
     imageHistoryPolicy
@@ -1669,16 +1690,27 @@ const expandMessagesForImagePreflight = async (
     // Expand before the probe only what the count checks need: every user message
     // when the route has a provider limit, otherwise the latest user message (its
     // explicit lower bound). Older all-history bundles on routes without a limit are
-    // expanded by prepareMessagesForRequest, after the probe.
+    // expanded by prepareMessagesForRequest, after the probe, unless the request image
+    // byte budget must count their images (the same bundles, only read earlier).
     const canExpandReportBundle =
-      message.role === 'user' && (maxImages !== undefined || index === latestUserIndex)
+      message.role === 'user' &&
+      (maxImages !== undefined ||
+        index === latestUserIndex ||
+        (options.expandHistoryBundles === true && imageHistoryPolicy === 'all'))
     if (canExpandReportBundle) expandedIndexes.add(index)
-    expandedMessages.push({
-      ...message,
-      attachments: canExpandReportBundle
-        ? await expandReportBundleAttachmentsForRequest(message.attachments, signal)
-        : message.attachments
-    })
+    const attachments = canExpandReportBundle
+      ? await expandReportBundleAttachmentsForRequest(message.attachments, signal)
+      : message.attachments
+    if (attachments !== message.attachments && attachments?.length) {
+      // Only verified primaries reach the expansion (projectVerifiedPrimaryReports), and it
+      // only appends: every attachment that is not one of the message's own came from
+      // MAIN's verified manifest.
+      const own = new Set(message.attachments ?? [])
+      for (const attachment of attachments) {
+        if (attachment.type === 'image' && !own.has(attachment)) verifiedManifestImages.add(attachment)
+      }
+    }
+    expandedMessages.push({ ...message, attachments })
   }
   throwIfAborted(signal)
   const selectedMessages = selectMessagesForImageHistoryPolicy(expandedMessages, imageHistoryPolicy)
@@ -1692,7 +1724,7 @@ const expandMessagesForImagePreflight = async (
       throw new Error(`Too many images; the limit is ${maxImages}.`)
     }
   }
-  return { messages: selectedMessages, expandedIndexes }
+  return { messages: selectedMessages, expandedIndexes, verifiedManifestImages }
 }
 
 const prepareMessagesForRequest = async (
@@ -2842,6 +2874,198 @@ const preflightRequestImageCount = (
   return maxImages
 }
 
+type RequestImageByteBudgetInput = Pick<
+  RequestChatCompletionInput,
+  | 'config'
+  | 'messages'
+  | 'profileId'
+  | 'remoteProfile'
+  | 'externalAgentSkill'
+  | 'imageHistoryPolicy'
+  | 'apiMode'
+  | 'imageGenerationOptions'
+  | 'imageRequest'
+  | 'skillRuntime'
+  | 'goalProgressToken'
+  | 'sessionUrl'
+>
+
+/** How the request image byte budget applies to one request; see resolveRequestImageByteBudget. */
+type RequestImageByteBudget = {
+  route: ChatRequestImageByteBudgetRoute
+  /** Count only the latest user message (a continuation, or the composer preflight). */
+  latestUserOnly: boolean
+  /** Managed media travels as chunked binary, outside the forwarded JSON. */
+  skipManagedMedia: boolean
+  imageHistoryPolicy: LLMImageHistoryPolicy | undefined
+}
+
+// The attachment exactly as normalizeChatAttachmentsForRequest will hand it to the content
+// augmentation, or undefined when that depends on bytes not yet read.
+const projectRequestImageForAugmentation = (
+  attachment: ChatAttachment
+): ChatAttachment | undefined => {
+  if (attachment.type !== 'image') return undefined
+  const media = normalizeMediaReference(attachment.media)
+  if (media?.kind === 'managed') {
+    const projected: ChatAttachment = {
+      ...attachment,
+      mimeType: media.mimeType,
+      sizeBytes: media.sizeBytes
+    }
+    delete projected.media
+    return projected
+  }
+  return !media && attachment.url && isRequestDataImageUrl(attachment.url) ? attachment : undefined
+}
+
+// MAIN's OpenAI client switches to hosted image generation (which skips the image
+// preparation and its limits) when the final text of the latest user message asks for an
+// image. Recompute that text from descriptors; when it cannot be known (a report or text
+// file whose content is inlined, an image of unknown shape), assume it may.
+const mayUseAutomaticImageGeneration = (
+  input: RequestImageByteBudgetInput,
+  modelUse: ReturnType<typeof resolveProfileModelUse>,
+  imageGenerationOptions: OpenAIImageGenerationOptions | undefined
+): boolean => {
+  const latestUser = input.messages.findLast((message) => message.role === 'user')
+  if (!latestUser) return false
+  let content = latestUser.content
+  if (latestUser.attachments?.length) {
+    const projected: ChatAttachment[] = []
+    for (const attachment of latestUser.attachments) {
+      const requestAttachment = projectRequestImageForAugmentation(attachment)
+      if (!requestAttachment) return true
+      projected.push(requestAttachment)
+    }
+    const preview = previewAugmentedMessageContentWithoutReads(projected, content, { role: 'user' })
+    if (preview === undefined) return true
+    content = preview
+  }
+  return shouldUseOpenAIImageGeneration({
+    messages: [{ ...latestUser, content: mergeHiddenContextIntoMessageContent(latestUser, content) }],
+    modelUse,
+    imageGenerationOptions
+  })
+}
+
+// The route on which MAIN certainly applies a size limit to this request's images, or
+// undefined when no limit applies with certainty. Image-generation requests, external
+// agents, goal progress, skill runtimes (tool commands and special routes) and every
+// route not listed here keep today's behaviour.
+const resolveRequestImageByteBudgetRoute = (
+  input: RequestImageByteBudgetInput,
+  profile: RemoteRequestProfile | undefined,
+  dispatch: 'stream' | 'unary' | 'preflight'
+): ChatRequestImageByteBudgetRoute | undefined => {
+  if (
+    input.externalAgentSkill?.type === 'agent' ||
+    input.goalProgressToken !== undefined ||
+    input.skillRuntime ||
+    input.imageRequest ||
+    !profile
+  ) {
+    return undefined
+  }
+  const imageGenerationOptions = input.imageGenerationOptions
+  const modelUse = resolveProfileModelUse(profile)
+  if (
+    modelUse === 'image' ||
+    modelUse === 'video' ||
+    modelUse === 'ocr' ||
+    imageGenerationOptions?.enabled === true ||
+    isGPTImageProfile(profile, input.apiMode) ||
+    shouldUseOpenAIImageGeneration({
+      messages: [],
+      modelUse,
+      imageGenerationOptions,
+      disableAutomaticImageGeneration: true
+    })
+  ) {
+    return undefined
+  }
+  if (input.config.use_remote_llm) {
+    // Only a streamed remote request goes through MAIN; the unary one is fetched here.
+    return dispatch !== 'unary' && supportsStreamingChatCompletion(input) ? 'remote-stream' : undefined
+  }
+  // Without an explicit profile MAIN picks its own default, which may differ from ours.
+  if (!getBaseProfileId(input.profileId)) return undefined
+  const baseUrl = profile.base_url || ''
+  if (isOpencodeZenUrl(baseUrl) || (profile.model_name || '').toLowerCase().includes('glm-ocr')) {
+    return undefined
+  }
+  const provider = resolveProfileProvider(profile)
+  if (provider === 'gemini' || provider === 'claude') return 'provider-json'
+  if (provider === 'openai' && usesOpenAIResponsesImagePolicy(profile, input.apiMode)) {
+    return mayUseAutomaticImageGeneration(input, modelUse, imageGenerationOptions)
+      ? undefined
+      : 'prepared-source'
+  }
+  return undefined
+}
+
+/**
+ * Whether and how MAIN certainly limits the size of this request's images (see
+ * chatRequestImageBudget.ts), decided from descriptors before anything is read. The route
+ * depends only on the request's own descriptors, so the same decision holds for the
+ * messages after MAIN's report verification and the manifest expansion.
+ */
+const resolveRequestImageByteBudget = (
+  input: RequestImageByteBudgetInput,
+  profile: RemoteRequestProfile | undefined,
+  dispatch: 'stream' | 'unary' | 'preflight'
+): RequestImageByteBudget | undefined => {
+  const route = resolveRequestImageByteBudgetRoute(input, profile, dispatch)
+  // The composer preflight runs before the message's final text is known, and the
+  // Responses preparation limit depends on it: that one is left to the request entry.
+  if (!route || (dispatch === 'preflight' && route === 'prepared-source')) return undefined
+  return {
+    route,
+    // With a continuation MAIN may send only the newest turn; the composer preflight runs
+    // before context compression may replace older turns.
+    latestUserOnly: dispatch === 'preflight' || Boolean(input.sessionUrl?.trim()),
+    skipManagedMedia:
+      route === 'remote-stream' &&
+      resolveAttachmentRequestCapabilities(
+        input.config,
+        input.profileId,
+        input.apiMode,
+        input.remoteProfile
+      ).allowManagedChunkedBinary === true,
+    imageHistoryPolicy: input.imageHistoryPolicy
+  }
+}
+
+/**
+ * Refuses, before any image is fetched, materialized or base64-encoded and before the chat
+ * IPC, a request whose images MAIN would certainly refuse for their size. Counts every
+ * occurrence of an image that will certainly be sent: user messages the history policy
+ * keeps (only the latest one when later steps may still drop history). Run once on the
+ * descriptors, and again on the expanded messages, where the images from MAIN's verified
+ * report manifests (`verifiedManifestImages`) count with the sizes MAIN recorded.
+ */
+const assertRequestImageBytes = (
+  messages: ChatMessage[],
+  budget: RequestImageByteBudget | undefined,
+  verifiedManifestImages?: ReadonlySet<ChatAttachment>
+): void => {
+  if (!budget) return
+  const selectedMessages = selectMessagesForImageHistoryPolicy(messages, budget.imageHistoryPolicy)
+  const latestUserIndex = selectedMessages.findLastIndex((message) => message.role === 'user')
+  const images: ChatAttachment[] = []
+  for (const [index, message] of selectedMessages.entries()) {
+    if (message.role !== 'user' || (budget.latestUserOnly && index !== latestUserIndex)) continue
+    for (const attachment of message.attachments || []) {
+      if (attachment.type !== 'image') continue
+      if (budget.skipManagedMedia && normalizeMediaReference(attachment.media)?.kind === 'managed') {
+        continue
+      }
+      images.push(attachment)
+    }
+  }
+  assertRequestImageBytesWithinBudget(images, budget.route, { verifiedManifestImages })
+}
+
 // Pure descriptor-only guard for UI planning before blob persistence or resource reads.
 // Request entrypoints still recheck their final selected/expanded attachments.
 export const preflightChatRequestImages = (
@@ -2854,7 +3078,16 @@ export const preflightChatRequestImages = (
     | 'externalAgentSkill'
     | 'imageHistoryPolicy'
     | 'apiMode'
-  >
+  > & {
+    /**
+     * Also refuse, from descriptors, images of the new message that MAIN would certainly
+     * refuse for their size. Only for a caller that sends this message's images in one
+     * model request (no attachment batching, no tool command, no image generation, no
+     * skill runtime); history images are left to the request entry, which sees the
+     * messages after context compression.
+     */
+    checkNewMessageImageBytes?: boolean
+  }
 ): number | undefined => {
   // An already known oversized explicit selection is rejected independently of
   // report availability, without reading either images or the manifest.
@@ -2865,7 +3098,12 @@ export const preflightChatRequestImages = (
   // the request path still has MAIN verify every bound primary before reading it.
   assertNoUnverifiedPrimaryReports(input.messages)
   validateCustomSkillForSend(input.externalAgentSkill)
-  return preflightRequestImageCount(input, resolveSelectedRequestProfile(input))
+  const profile = resolveSelectedRequestProfile(input)
+  const maxImages = preflightRequestImageCount(input, profile)
+  if (input.checkNewMessageImageBytes) {
+    assertRequestImageBytes(input.messages, resolveRequestImageByteBudget(input, profile, 'preflight'))
+  }
+  return maxImages
 }
 
 type ChatRequestReportRoute = Pick<
@@ -2982,6 +3220,10 @@ const requestChatCompletionInStages = async (
   assertNoUnverifiedPrimaryReports(requestInput.messages)
   const profile = resolveSelectedRequestProfile(requestInput)
   const maxImages = preflightRequestImageCount(requestInput, profile)
+  // Nothing is verified, read or sent for a request MAIN would refuse for the size of its
+  // images: first from the descriptors, before MAIN's report verification.
+  const imageByteBudget = resolveRequestImageByteBudget(requestInput, profile, 'unary')
+  assertRequestImageBytes(requestInput.messages, imageByteBudget)
   // MAIN verifies every bound primary report before any manifest is read. Every later stage
   // (preflight expansion, probe, preparation and dispatch) sees only its projection.
   const verifiedInput = {
@@ -2992,13 +3234,20 @@ const requestChatCompletionInStages = async (
       requestInput.signal
     )
   }
-  const { messages: preflightMessages, expandedIndexes } = await expandMessagesForImagePreflight(
+  const {
+    messages: preflightMessages,
+    expandedIndexes,
+    verifiedManifestImages
+  } = await expandMessagesForImagePreflight(
     verifiedInput.messages,
     verifiedInput.imageHistoryPolicy,
     maxImages,
-    verifiedInput.signal
+    verifiedInput.signal,
+    { expandHistoryBundles: imageByteBudget !== undefined && !imageByteBudget.latestUserOnly }
   )
   throwIfAborted(verifiedInput.signal)
+  // Again with the images of MAIN's verified report manifests, before any image is read.
+  assertRequestImageBytes(preflightMessages, imageByteBudget, verifiedManifestImages)
   reportChatSendStage('images-checked', preflightMessages)
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
@@ -3048,6 +3297,10 @@ const requestChatCompletionStreamInStages = async (
   assertNoUnverifiedPrimaryReports(requestInput.messages)
   const profile = resolveSelectedRequestProfile(requestInput)
   const maxImages = preflightRequestImageCount(requestInput, profile)
+  // Nothing is verified, read or sent for a request MAIN would refuse for the size of its
+  // images: first from the descriptors, before MAIN's report verification.
+  const imageByteBudget = resolveRequestImageByteBudget(requestInput, profile, 'stream')
+  assertRequestImageBytes(requestInput.messages, imageByteBudget)
   // MAIN verifies every bound primary report before any manifest is read. Every later stage
   // (preflight expansion, probe, preparation and dispatch) sees only its projection.
   const verifiedInput = {
@@ -3058,13 +3311,20 @@ const requestChatCompletionStreamInStages = async (
       requestInput.signal
     )
   }
-  const { messages: preflightMessages, expandedIndexes } = await expandMessagesForImagePreflight(
+  const {
+    messages: preflightMessages,
+    expandedIndexes,
+    verifiedManifestImages
+  } = await expandMessagesForImagePreflight(
     verifiedInput.messages,
     verifiedInput.imageHistoryPolicy,
     maxImages,
-    verifiedInput.signal
+    verifiedInput.signal,
+    { expandHistoryBundles: imageByteBudget !== undefined && !imageByteBudget.latestUserOnly }
   )
   throwIfAborted(verifiedInput.signal)
+  // Again with the images of MAIN's verified report manifests, before any image is read.
+  assertRequestImageBytes(preflightMessages, imageByteBudget, verifiedManifestImages)
   reportChatSendStage('images-checked', preflightMessages)
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)

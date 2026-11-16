@@ -1,12 +1,17 @@
 import { inspectOpenAIResponsesImageDataUrl, type OpenAIResponsesInputMessage } from '../../shared/llm/openaiResponses'
+import {
+  MAX_CHAT_IMAGE_PREPARATION_BATCH_SOURCE_BYTES,
+  MAX_CHAT_IMAGE_PREPARATION_SOURCE_BYTES
+} from '../../shared/llm/chatAttachmentTransportLimits'
 
 /** Transform a private Responses projection. This is not an IPC boundary:
  * callers supply trusted, already selected plain projection data and a trusted
  * preparer. It grants no media/URL access and cannot prevent an earlier renderer
  * from materializing originals. HTTP URLs and budgeted GIFs remain untouched. */
 const MAX_OCCURRENCES = 50
-const MAX_INPUT = 20 * 1024 * 1024
-const MAX_BATCH_INPUT = 32 * 1024 * 1024
+// Shared with the renderer's descriptor preflight, which must refuse exactly what this refuses.
+const MAX_INPUT = MAX_CHAT_IMAGE_PREPARATION_SOURCE_BYTES
+const MAX_BATCH_INPUT = MAX_CHAT_IMAGE_PREPARATION_BATCH_SOURCE_BYTES
 const MAX_OUTPUT = 512_000
 const MAX_BATCH_OUTPUT = MAX_OCCURRENCES * MAX_OUTPUT
 const HTTP_URL = /^https?:\/\/\S+$/i

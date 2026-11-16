@@ -540,3 +540,49 @@ export async function augmentMessageContentWithFileAttachments(
 }
 
 export const augmentContentWithFileAttachmentSummaries = augmentMessageContentWithFileAttachments
+
+/**
+ * The text augmentMessageContentWithFileAttachments returns for these attachments,
+ * computed synchronously and without reading anything. Returns undefined when that
+ * function would read an attachment's text (a text-like file, or a primary report on
+ * a user message), because the result then depends on bytes not yet read.
+ */
+export function previewAugmentedMessageContentWithoutReads(
+  attachments: ChatAttachment[] | undefined,
+  content: string,
+  options: Pick<AugmentAttachmentOptions, 'role' | 'skipAttachment'> = {}
+): string | undefined {
+  if (!attachments?.length) {
+    return content
+  }
+
+  const additions: string[] = []
+  for (const attachment of attachments) {
+    if (options.skipAttachment?.(attachment)) {
+      continue
+    }
+
+    if (hasEmbeddedFileSummary(content, attachment)) {
+      continue
+    }
+
+    if (isPrimaryReportBundleAttachment(attachment)) {
+      if (options.role === 'user') return undefined
+    } else if (attachment.type === 'file' && isTextLikeFileAttachment(attachment)) {
+      return undefined
+    }
+
+    additions.push(
+      `[${buildAttachmentHeading(attachment)}] ${buildAttachmentLabel(attachment)}\n${buildAttachmentSummaryBlock(
+        attachment,
+        buildFallbackSummary(attachment)
+      )}`
+    )
+  }
+
+  if (additions.length === 0) {
+    return content
+  }
+
+  return [content.trim(), additions.join('\n\n')].filter(Boolean).join('\n\n')
+}

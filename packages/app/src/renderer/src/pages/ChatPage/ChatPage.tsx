@@ -6662,6 +6662,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !inheritedTeamSettings && !overrides?.teamMessageHop && !shouldPreserveMultiAttachmentRequest &&
         shouldUseExplicitAttachmentBatching(rawAttachments, requestedSkillId, activeSkillRuntime)
       if (goalProgressToken && (explicitToolCommand || isImageGenerationRequest || useAttachmentBatching || serializedSkillRuntime || activeExternalAgentSkill || requestImageGenerationOptions?.enabled)) { notifyWarning(t('chat.agent_goal.share_unavailable')); return }
+      // Only such a send puts every image of the new message into one model request.
+      const checkNewMessageImageBytes = !explicitToolCommand && !isImageGenerationRequest && !useAttachmentBatching && !serializedSkillRuntime && !goalProgressToken && !requestImageGenerationOptions?.enabled
 
       try {
         preflightChatRequestImages({
@@ -6677,7 +6679,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           profileId,
           remoteProfile: remoteRequestProfile,
           externalAgentSkill: activeExternalAgentSkill,
-          imageHistoryPolicy: preflightImageHistoryPolicy
+          imageHistoryPolicy: preflightImageHistoryPolicy,
+          checkNewMessageImageBytes
         })
       } catch (error) {
         notifyError(error instanceof Error ? error.message : String(error))
@@ -6698,7 +6701,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             profileId,
             remoteProfile: remoteRequestProfile,
             externalAgentSkill: activeExternalAgentSkill,
-            imageHistoryPolicy: preflightImageHistoryPolicy
+            imageHistoryPolicy: preflightImageHistoryPolicy,
+            checkNewMessageImageBytes
           })
         } catch (error) {
           notifyError(error instanceof Error ? error.message : String(error))

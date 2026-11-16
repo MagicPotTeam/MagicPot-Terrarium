@@ -50,7 +50,10 @@ import {
   UNVERIFIED_REPORT_BUNDLE_MESSAGE
 } from '@shared/llm/unverifiedReport'
 import { isBoundTo } from '../reportBundles/reportBundleRegistry'
-import { MAX_LLM_CHUNKED_BINARY_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
+import {
+  MAX_LLM_CHUNKED_BINARY_BYTES,
+  MAX_REMOTE_CHAT_STREAM_REQUEST_BYTES
+} from '@shared/llm/chatAttachmentTransportLimits'
 import type { ProviderRawWorkRetainer } from '@shared/llm/providerRawWork'
 import { goalDispatchEndpoint } from './agentThreadGoalDispatchProfile'
 import { createMainProcessElectronFetch, createMainProcessManagedElectronFetch } from '../llmProxy/electronRequestFetch'
@@ -286,7 +289,7 @@ const REMOTE_STREAM_ENDPOINTS = [
   '/api/message'
 ] as const
 export const REMOTE_STREAM_DEADLINE_MS = 2 * 60 * 1000
-const REMOTE_STREAM_MAX_REQUEST_BYTES = 16 * 1024 * 1024
+const REMOTE_STREAM_MAX_REQUEST_BYTES = MAX_REMOTE_CHAT_STREAM_REQUEST_BYTES
 const REMOTE_STREAM_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 const REMOTE_STREAM_MAX_FRAME_BYTES = 512 * 1024
 const REMOTE_STREAM_MAX_EVENTS = 4096

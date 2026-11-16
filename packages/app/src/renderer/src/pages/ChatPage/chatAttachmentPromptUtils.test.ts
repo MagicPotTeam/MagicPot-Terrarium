@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { augmentMessageContentWithFileAttachments, expandReportBundleAttachments, expandReportBundleAttachmentsStrict } from './chatAttachmentPromptUtils'
+import {
+  augmentMessageContentWithFileAttachments,
+  expandReportBundleAttachments,
+  expandReportBundleAttachmentsStrict,
+  previewAugmentedMessageContentWithoutReads
+} from './chatAttachmentPromptUtils'
 import type { ChatAttachment } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 
 describe('expandReportBundleAttachmentsStrict', () => {
@@ -290,5 +295,37 @@ describe('augmentMessageContentWithFileAttachments', () => {
 
     expect(nextContent).toBe('Keep only the user instruction.')
     expect(readAttachmentText).not.toHaveBeenCalled()
+  })
+})
+
+describe('previewAugmentedMessageContentWithoutReads', () => {
+  const reader = vi.fn(async () => {
+    throw new Error('must not read')
+  })
+
+  it.each<[string, ChatAttachment[], string]>([
+    ['images', [
+      { type: 'image', url: 'data:image/png;base64,YQ==', fileName: 'a.png', mimeType: 'image/png', sizeBytes: 1 },
+      { type: 'image', url: 'local-media:///b.png', fileName: 'design-b.png', sourceWidth: 10, sourceHeight: 20 }
+    ], 'look at these'],
+    ['an image already summarized in the text', [
+      { type: 'image', url: 'data:image/png;base64,YQ==', fileName: 'a.png' }
+    ], '[Attached image] a.png'],
+    ['a video and a binary file', [
+      { type: 'video', url: 'local-media:///v.mp4', fileName: 'v.mp4' },
+      { type: 'file', url: 'local-media:///m.bin', fileName: 'm.bin', mimeType: 'application/octet-stream' }
+    ], ''],
+    ['no attachments', [], 'plain']
+  ])('matches the augmentation for %s without reading anything', async (_label, attachments, content) => {
+    const expected = await augmentMessageContentWithFileAttachments(attachments, content, reader, { role: 'user' })
+    expect(previewAugmentedMessageContentWithoutReads(attachments, content, { role: 'user' })).toBe(expected)
+    expect(reader).not.toHaveBeenCalled()
+  })
+
+  it('is unknown when the augmentation would read a text file or a user report', () => {
+    expect(previewAugmentedMessageContentWithoutReads([{ type: 'file', url: 'local-media:///n.txt', fileName: 'n.txt' }], 'x')).toBeUndefined()
+    const report: ChatAttachment = { type: 'file', url: 'local-media:///r.html', fileName: 'r.html', reportBundleRole: 'primary-report', reportBundleId: 'r' }
+    expect(previewAugmentedMessageContentWithoutReads([report], 'x', { role: 'user' })).toBeUndefined()
+    expect(previewAugmentedMessageContentWithoutReads([report], 'x', { role: 'assistant' })).toContain('[Attached report]')
   })
 })
