@@ -8248,7 +8248,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const teamImagePlacement = useTeamImagePlacement(route?.scopeId ?? '', teamEnabled && teamLead ? teamMembers : [], imagePlacementKey)
   // The thread list shows the lead and the members as indented rows under this thread's row.
   const teamRowsTeam: AgentTeamThreadRowsTeam | null = compact && teamEnabled && teamLead && teamMembers.length
-    ? { leadId: teamLead.id, members: teamMembers.map(member => ({ id: member.id, name: member.teamMemberName || member.title })) }
+    // In the order the members were created: a reply must not move a row.
+    ? { leadId: teamLead.id, members: [...teamMembers].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)).map(member => ({ id: member.id, name: member.teamMemberName || member.title })) }
     : null
   const [sideRowsHost, setSideRowsHost] = useState<HTMLDivElement | null>(null)
   const [openSideTitle, setOpenSideTitle] = useState<string | null>(null)

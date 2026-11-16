@@ -81,7 +81,16 @@ vi.mock('./components/AgentThreadSidesPanel', async () => {
   }
 })
 vi.mock('./components/ChatMessageList', () => ({
-  default: ({ currentSession }: any) => <pre data-testid="session">{currentSession?.id}</pre>
+  default: ({ currentSession, tail }: any) => (
+    <>
+      <pre data-testid="session">{currentSession?.id}</pre>
+      <div data-testid="transcript-tail">{tail}</div>
+    </>
+  )
+}))
+const dispatchToCanvas = vi.hoisted(() => vi.fn(async () => ({ dispatched: true, placedCanvasItems: [] })))
+vi.mock('../ProjectCanvasPage/canvasTargetMediaDispatch', () => ({
+  dispatchCanvasTargetMediaAttachmentToCanvas: dispatchToCanvas
 }))
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
@@ -117,8 +126,9 @@ const lead = {
   messages: [],
   teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
 }
-const member = (id: string, name: string) => ({
+const member = (id: string, name: string, createdAt = 0) => ({
   id,
+  createdAt,
   title: name,
   profileId: 'fixture-profile',
   messages: [],
@@ -171,7 +181,7 @@ describe('ChatPage team rows in the thread list', () => {
     ]
     h.api.value = everyService()
     Object.defineProperty(window, 'api', { configurable: true, value: h.api.value })
-    h.sessions.value = [lead, member('designer', '设计师'), member('writer', '文案')]
+    h.sessions.value = [lead, member('designer', '设计师', 1), member('writer', '文案', 2)]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'team-rows-fixture'), 'lead')
   })
   afterEach(() => {
@@ -225,6 +235,42 @@ describe('ChatPage team rows in the thread list', () => {
     fireEvent.click(within(await screen.findByRole('menu', { name: 'Team members' })).getByRole('menuitemradio', { name: 'Lead' }))
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     await waitFor(() => expect(select).toHaveTextContent(/^Lead$/))
+  })
+
+  it('keeps the rows in the order the members were created, whatever the stored order', async () => {
+    // The page lists conversations by their last change; the team rows do not move with it.
+    h.sessions.value = [lead, member('writer', '文案', 2), member('designer', '设计师', 1)]
+    render(<Harness />)
+    await waitFor(() => expect(rowLabels()).toEqual(['Lead', '设计师', '文案', 'side-row']))
+  })
+
+  it('keeps the canvas placement buttons of a member image at the end of that member transcript', async () => {
+    const image = { type: 'image', url: 'data:image/png;base64,QQ==', fileName: 'poster.png' }
+    h.sessions.value = [
+      lead,
+      { ...member('designer', '设计师', 1), messages: [{ role: 'assistant', content: '设计结果', attachments: [image] }] },
+      member('writer', '文案', 2)
+    ]
+    render(<Harness />)
+    await waitFor(() => expect(rowLabels()).toContain('设计师'))
+    // The lead's transcript has no member buttons.
+    expect(within(screen.getByTestId('transcript-tail')).queryByRole('button')).toBeNull()
+    fireEvent.click(within(screen.getByTestId('sub-rows')).getByRole('button', { name: '设计师' }))
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('designer'))
+    const place = await within(screen.getByTestId('transcript-tail')).findByRole('button', { name: '投放 设计师·图1' })
+    expect(dispatchToCanvas).not.toHaveBeenCalled()
+    fireEvent.click(place)
+    await waitFor(() => expect(dispatchToCanvas).toHaveBeenCalledTimes(1))
+    expect(dispatchToCanvas).toHaveBeenCalledWith(
+      expect.objectContaining({ url: image.url }),
+      route.scopeId,
+      'designer',
+      { teamImageLabel: '设计师·图1' }
+    )
+    // Another member without images shows none.
+    fireEvent.click(within(screen.getByTestId('sub-rows')).getByRole('button', { name: '文案' }))
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('writer'))
+    expect(within(screen.getByTestId('transcript-tail')).queryByRole('button')).toBeNull()
   })
 
   it('shows no team rows and no target select for a thread without members', async () => {
