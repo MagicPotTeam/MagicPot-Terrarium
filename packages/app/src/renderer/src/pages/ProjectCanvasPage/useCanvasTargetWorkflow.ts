@@ -1954,7 +1954,16 @@ export function useCanvasTargetWorkflow({
               includeReportFile: options?.includeReportFile ?? shouldCreateDocumentDeliverable,
               bundleRootDir: reportBundleRootDir,
               saveImageToPath: (req) => api().svcFs.saveImageToPath(req),
-              writeTextFile: (req) => api().svcFs.writeTextFile(req)
+              writeTextFile: (req) => api().svcFs.writeTextFile(req),
+              // MAIN binds the bundle to the conversation it is posted to. Without a
+              // conversation the message is dropped anyway, so nothing is registered.
+              ...(agentSessionId
+                ? {
+                    beginReportBundle: (req) => api().svcReportBundles.beginBundle(req),
+                    registerReportBundle: (req) => api().svcReportBundles.register(req),
+                    conversation: { conversationId: agentSessionId, storageScope: agentScope }
+                  }
+                : {})
             })
           : buildCanvasTargetAgentMessagePayload({
               report: nextReport,
