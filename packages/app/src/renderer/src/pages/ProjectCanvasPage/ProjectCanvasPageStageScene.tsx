@@ -37,7 +37,7 @@ import ProjectCanvasCanvas2DFallbackLayer, {
 } from './components/ProjectCanvasCanvas2DFallbackLayer'
 import {
   CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
-  useCanvasLayoutResizeInteractionActive,
+  getCanvasLayoutResizeInteractionState,
   type CanvasLayoutResizeInteractionDetail
 } from './canvasLayoutResizeInteraction'
 import {
@@ -1032,7 +1032,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const canvas2DFallbackLayerRef = React.useRef<ProjectCanvasCanvas2DFallbackLayerHandle | null>(
     null
   )
-  const isCanvasLayoutResizeInteracting = useCanvasLayoutResizeInteractionActive()
+  // A layout panel drag (Agent column, side or bottom panel) is followed through refs and the
+  // layers' imperative setViewportInteracting, not React state: its start and end must not
+  // re-render the stage.
+  const isCanvasLayoutResizeInteracting = getCanvasLayoutResizeInteractionState().active
   const isCanvasPerformanceThrottledRef = React.useRef(isCanvasPerformanceThrottled)
   const isCanvasLayoutResizeInteractionActiveRef = React.useRef(isCanvasLayoutResizeInteracting)
   const isViewportInteractionActiveRef = React.useRef(isViewportInteracting)
@@ -1172,20 +1175,16 @@ export default function ProjectCanvasPageStageScene(props: any) {
   )
   React.useEffect(() => {
     isCanvasPerformanceThrottledRef.current = isCanvasPerformanceThrottled
-    isCanvasLayoutResizeInteractionActiveRef.current = isCanvasLayoutResizeInteracting
     isViewportInteractionActiveRef.current = isViewportInteracting
     const shouldDeferRuntimeState =
-      isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting
+      isViewportInteracting ||
+      isCanvasPerformanceThrottled ||
+      isCanvasLayoutResizeInteractionActiveRef.current
     isWebglRuntimeStateDeferredRef.current = shouldDeferRuntimeState
     if (!shouldDeferRuntimeState) {
       flushPendingWebglRuntimeState()
     }
-  }, [
-    flushPendingWebglRuntimeState,
-    isCanvasLayoutResizeInteracting,
-    isCanvasPerformanceThrottled,
-    isViewportInteracting
-  ])
+  }, [flushPendingWebglRuntimeState, isCanvasPerformanceThrottled, isViewportInteracting])
   React.useEffect(() => {
     const handleCanvasLayoutResizeInteraction = (event: Event) => {
       const detail = (event as CustomEvent<CanvasLayoutResizeInteractionDetail>).detail
@@ -3397,7 +3396,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
             stagePos={stagePos}
             stageScale={stageScale}
             stageSize={stageSize}
-            isViewportInteracting={isViewportInteracting || isCanvasLayoutResizeInteracting}
+            isViewportInteracting={isViewportInteracting}
             isPerformanceThrottled={isCanvasPerformanceThrottled}
             onReadyChange={setWebglImageLayerReady}
             onResidentIdsChange={handleWebglResidentIdsChange}
@@ -3413,7 +3412,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
               stagePos={stagePos}
               stageScale={stageScale}
               stageSize={stageSize}
-              isViewportInteracting={isViewportInteracting || isCanvasLayoutResizeInteracting}
+              isViewportInteracting={isViewportInteracting}
               isPerformanceThrottled={isCanvasPerformanceThrottled}
               onResolvedIdsChange={handleCanvas2DResolvedIdsChange}
               onFailedIdsChange={handleCanvas2DFailedIdsChange}

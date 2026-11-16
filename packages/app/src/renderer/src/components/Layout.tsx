@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 // packages/app/src/renderer/src/components/Layout.tsx
 import React, { Suspense, useState, useCallback, useRef, useEffect } from 'react'
+import { flushSync } from 'react-dom'
 import { Box } from '@mui/material'
 import TitleBar from './TitleBar'
 import ActivityBar from './ActivityBar'
@@ -28,6 +29,7 @@ import {
   isProjectCanvasRoutePath,
   normalizeProjectCanvasRoutePath
 } from '../pages/ProjectCanvasPage/projectCanvasRouting'
+import { emitCanvasLayoutResizeInteraction } from '../pages/ProjectCanvasPage/canvasLayoutResizeInteraction'
 
 const SidePanel = lazyWithRetry(() => import('./SidePanel'))
 const BottomPanel = lazyWithRetry(() => import('./BottomPanel'))
@@ -502,6 +504,37 @@ const Layout: React.FC = () => {
   const startSizeRef = useRef(0)
   const pendingResizeSizeRef = useRef<number | null>(null)
   const resizeFrameRef = useRef<number | null>(null)
+  // While the Agent column is dragged its width is written straight to the three elements that
+  // depend on it, and committed to state once at the end: no React render per mouse move.
+  const mainAreaElementRef = useRef<HTMLDivElement | null>(null)
+  const rightPanelElementRef = useRef<HTMLDivElement | null>(null)
+  const bottomPanelElementRef = useRef<HTMLDivElement | null>(null)
+  const liveRightPanelWidthRef = useRef<number | null>(null)
+
+  const writeLiveRightPanelWidth = useCallback((width: number | null) => {
+    const rightPanel = rightPanelElementRef.current
+    const mainArea = mainAreaElementRef.current
+    const bottomPanel = bottomPanelElementRef.current
+    if (width === null) {
+      rightPanel?.style.removeProperty('width')
+      rightPanel?.style.removeProperty('min-width')
+      mainArea?.style.removeProperty('right')
+      bottomPanel?.style.removeProperty('right')
+      return
+    }
+
+    const px = `${width}px`
+    if (rightPanel) {
+      rightPanel.style.width = px
+      rightPanel.style.minWidth = px
+    }
+    if (mainArea) {
+      mainArea.style.right = px
+    }
+    if (bottomPanel) {
+      bottomPanel.style.right = px
+    }
+  }, [])
 
   const applyPendingResizeSize = useCallback(() => {
     resizeFrameRef.current = null
@@ -515,13 +548,14 @@ const Layout: React.FC = () => {
     if (dir === 'side') {
       setSidePanelWidth((previousWidth) => (previousWidth === nextSize ? previousWidth : nextSize))
     } else if (dir === 'right') {
-      setRightPanelWidth((previousWidth) => (previousWidth === nextSize ? previousWidth : nextSize))
+      liveRightPanelWidthRef.current = nextSize
+      writeLiveRightPanelWidth(nextSize)
     } else if (dir === 'bottom') {
       setBottomPanelHeight((previousHeight) =>
         previousHeight === nextSize ? previousHeight : nextSize
       )
     }
-  }, [])
+  }, [writeLiveRightPanelWidth])
 
   const scheduleResizeSizeUpdate = useCallback(
     (nextSize: number) => {
@@ -539,20 +573,41 @@ const Layout: React.FC = () => {
     [applyPendingResizeSize]
   )
 
-  const finishResizeInteraction = useCallback(() => {
-    const dir = resizingRef.current
-    if (!dir) {
-      return
-    }
+  const finishResizeInteraction = useCallback(
+    (options: { flush?: boolean } = {}) => {
+      const dir = resizingRef.current
+      if (!dir) {
+        return
+      }
 
-    if (resizeFrameRef.current !== null) {
-      window.cancelAnimationFrame(resizeFrameRef.current)
-      resizeFrameRef.current = null
-    }
-    applyPendingResizeSize()
-    resizingRef.current = null
-    pendingResizeSizeRef.current = null
-  }, [applyPendingResizeSize])
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current)
+        resizeFrameRef.current = null
+      }
+      applyPendingResizeSize()
+      resizingRef.current = null
+      pendingResizeSizeRef.current = null
+      if (dir === 'right') {
+        const finalWidth = liveRightPanelWidthRef.current
+        liveRightPanelWidthRef.current = null
+        if (finalWidth !== null) {
+          const commitWidth = () =>
+            setRightPanelWidth((previousWidth) =>
+              previousWidth === finalWidth ? previousWidth : finalWidth
+            )
+          // Commit before the inline width is dropped, so no frame shows the old width.
+          if (options.flush === false) {
+            commitWidth()
+          } else {
+            flushSync(commitWidth)
+          }
+        }
+        writeLiveRightPanelWidth(null)
+      }
+      emitCanvasLayoutResizeInteraction(false)
+    },
+    [applyPendingResizeSize, writeLiveRightPanelWidth]
+  )
 
   const handleMouseDown = useCallback(
     (dir: ResizeDirection) => (e: React.MouseEvent) => {
@@ -561,6 +616,10 @@ const Layout: React.FC = () => {
       }
 
       e.preventDefault()
+      if (resizingRef.current) {
+        // A press without a release seen in between: close the earlier drag first.
+        finishResizeInteraction()
+      }
       resizingRef.current = dir
       if (dir === 'side' || dir === 'right') {
         startPosRef.current = e.clientX
@@ -569,14 +628,20 @@ const Layout: React.FC = () => {
         startPosRef.current = e.clientY
         startSizeRef.current = bottomPanelHeight
       }
+      emitCanvasLayoutResizeInteraction(true, dir)
     },
-    [sidePanelWidth, rightPanelWidth, bottomPanelHeight]
+    [finishResizeInteraction, sidePanelWidth, rightPanelWidth, bottomPanelHeight]
   )
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       const dir = resizingRef.current
       if (!dir) return
+      if (e.buttons === 0) {
+        // The button was released where this window did not see the mouseup.
+        finishResizeInteraction()
+        return
+      }
 
       if (dir === 'side') {
         const delta = e.clientX - startPosRef.current
@@ -592,12 +657,16 @@ const Layout: React.FC = () => {
       }
     }
 
+    const handleMouseUp = () => finishResizeInteraction()
+    const handleWindowBlur = () => finishResizeInteraction()
     window.addEventListener('mousemove', handleMouseMove)
-    window.addEventListener('mouseup', finishResizeInteraction)
+    window.addEventListener('mouseup', handleMouseUp)
+    window.addEventListener('blur', handleWindowBlur)
     return () => {
       window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', finishResizeInteraction)
-      finishResizeInteraction()
+      window.removeEventListener('mouseup', handleMouseUp)
+      window.removeEventListener('blur', handleWindowBlur)
+      finishResizeInteraction({ flush: false })
     }
   }, [finishResizeInteraction, scheduleResizeSizeUpdate])
 
@@ -700,6 +769,7 @@ const Layout: React.FC = () => {
 
         <Box sx={{ position: 'relative', flex: 1, overflow: 'hidden', minWidth: 0, minHeight: 0 }}>
           <Box
+            ref={mainAreaElementRef}
             sx={{
               position: 'absolute',
               ...mainAreaInsets,
@@ -739,6 +809,7 @@ const Layout: React.FC = () => {
 
           {bottomPanelVisible && (
             <Box
+              ref={bottomPanelElementRef}
               data-canvas-document-drop-bypass="bottom-panel"
               sx={{
                 position: 'absolute',
@@ -769,6 +840,7 @@ const Layout: React.FC = () => {
 
           {effectRightPanelVisible && (
             <Box
+              ref={rightPanelElementRef}
               data-canvas-document-drop-bypass="right-panel"
               sx={(theme) => ({
                 width: rightPanelWidth,

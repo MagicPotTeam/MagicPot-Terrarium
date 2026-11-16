@@ -35,6 +35,7 @@ const {
   measureCanvasTextBoxHeightMock,
   syncItemPreviewSpy,
   syncViewportSpy,
+  setViewportInteractingSpy,
   scheduleCanvasSyncMock,
   cancelCanvasSyncMock
 } = vi.hoisted(() => ({
@@ -62,6 +63,7 @@ const {
   ),
   syncItemPreviewSpy: vi.fn(),
   syncViewportSpy: vi.fn(),
+  setViewportInteractingSpy: vi.fn(),
   scheduleCanvasSyncMock: vi.fn(),
   cancelCanvasSyncMock: vi.fn()
 }))
@@ -227,6 +229,7 @@ vi.mock('./components/ProjectCanvasWebGLImageLayer', async () => {
         ref: React.ForwardedRef<{
           syncItemPreview: typeof syncItemPreviewSpy
           syncViewport: typeof syncViewportSpy
+          setViewportInteracting: typeof setViewportInteractingSpy
         }>
       ) {
         webglLayerRenderCount += 1
@@ -235,7 +238,8 @@ vi.mock('./components/ProjectCanvasWebGLImageLayer', async () => {
 
         ReactModule.useImperativeHandle(ref, () => ({
           syncItemPreview: syncItemPreviewSpy,
-          syncViewport: syncViewportSpy
+          syncViewport: syncViewportSpy,
+          setViewportInteracting: setViewportInteractingSpy
         }))
 
         ReactModule.useEffect(() => {
@@ -506,6 +510,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   beforeEach(() => {
     syncItemPreviewSpy.mockReset()
     syncViewportSpy.mockReset()
+    setViewportInteractingSpy.mockReset()
     measureCanvasAnnotationTextHeightMock.mockClear()
     measureCanvasTextBoxHeightMock.mockClear()
     scheduleCanvasSyncMock.mockReset()
@@ -837,6 +842,33 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(
       document.querySelector(`[data-project-canvas-high-res-image-item-id="${item.id}"]`)
     ).toBe(highResItem)
+  })
+
+  it('follows a layout panel drag without re-rendering the stage', async () => {
+    const item = createImageItem('image-layout-resize')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+
+    render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    await waitFor(() => {
+      expect(root).toHaveAttribute('data-project-canvas-webgl-primary-image-count', '1')
+    })
+    const webglRendersBefore = webglLayerRenderCount
+    const stageCommitsBefore = root.getAttribute('data-project-canvas-react-commit-count')
+    setViewportInteractingSpy.mockClear()
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(true, 'right')
+    })
+    expect(setViewportInteractingSpy).toHaveBeenLastCalledWith(true)
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(false)
+    })
+    expect(setViewportInteractingSpy).toHaveBeenLastCalledWith(false)
+    expect(root.getAttribute('data-project-canvas-react-commit-count')).toBe(stageCommitsBefore)
+    expect(webglLayerRenderCount).toBe(webglRendersBefore)
   })
 
   it('budgets jumbo source overlays by visible pixels instead of a four item cap', async () => {
