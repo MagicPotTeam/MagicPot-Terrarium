@@ -4527,7 +4527,7 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { page.unmount() }
   })
 
-  it.each(['remote', 'inactive', 'no-route', 'archived'] as const)('hides manual goal records for %s', async mode => {
+  it.each(['remote', 'inactive', 'no-route', 'archived'] as const)('refuses /goal for %s without opening or loading goal records', async mode => {
     if (mode === 'remote') hoisted.currentConfig.value!.use_remote_llm = true
     const session: ChatSession = { id: 'goal-ineligible', title: 'Ineligible', messages: [], archived: mode === 'archived' }
     hoisted.storedSessions.value = [session]
@@ -4536,7 +4536,14 @@ describe('ChatPage runtime workflow integration', () => {
     const page = renderWithProviders(<ChatPage compact active={mode !== 'inactive'} storageScope="runtime-flow" route={route} />)
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
-      expect(screen.queryByRole('button', { name: 'Goals' })).not.toBeInTheDocument()
+      // The 'Goals' button became the /goal command card (4d767b14): ask for it the way a user does.
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/goal' } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Command unavailable for the current conversation.'))
+      expect(screen.queryByLabelText('Thread goals')).not.toBeInTheDocument()
+      expect(screen.queryByText('Thread goals')).not.toBeInTheDocument()
+      expect(hoisted.listAgentGoalsMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.agentGoalScopeRevisionMock).not.toHaveBeenCalled()
       expect(hoisted.setAgentGoalScopeMock).not.toHaveBeenCalled()
     } finally { page.unmount() }
