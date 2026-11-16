@@ -157,6 +157,8 @@ import {
 import { hydrateCanvasImageItemForCanvas, loadImageFromSrc } from './canvasAssetIntakeHelpers'
 import { createMagicPotNativeProvenance } from './canvasProvenanceUtils'
 import { extractImageRegionLocally } from './localImageExtract'
+import { collectCascadeDeletedCanvasItemIds } from './canvasAttachedCaptionUtils'
+import { mergeCanvasTargetRunChange, withLiveOnlyCanvasEntries } from './canvasTargetRunCanvasMerge'
 import {
   appendMessageToExternalChat,
   openExternalAgentPane,
@@ -1125,9 +1127,11 @@ export function useCanvasTargetWorkflow({
   // new selection starts; a run keeps going only while it is still in place.
   const canvasTargetSelectionAuthorityRef = useRef<CanvasTargetSelectionAuthority | null>(null)
   const latestItemsRef = useRef(items)
+  const latestGroupsRef = useRef(groups)
   const latestSelectedIdsRef = useRef(selectedIds)
 
   latestItemsRef.current = items
+  latestGroupsRef.current = groups
   latestSelectedIdsRef.current = selectedIds
 
   useEffect(() => {
@@ -1991,6 +1995,14 @@ export function useCanvasTargetWorkflow({
       // is not recorded in runOutputUrls.
       const runPlacedItemIds = new Set<string>()
       let runtimeCanvasGroups = groups
+      // Items and groups the run's own semantic commits removed. The live
+      // canvas can lag behind those commits, so they are never taken back
+      // into the run's view from it.
+      const runRemovedItemIds = new Set<string>()
+      const runRemovedGroupIds = new Set<string>()
+      // add_* stages that re-placed a canvas source (not a run output). A
+      // later materialization of such a stage is not a run output either.
+      const runSourceCopyStageIds = new Set<string>()
       let runtimeCanvasVersion = 1
       let runtimeSelectedIds = new Set(selectedIds)
       let lastCanvasItemIds: string[] = []
@@ -2176,15 +2188,23 @@ export function useCanvasTargetWorkflow({
         isChineseUi,
         // Known only for actions that name canvas items directly; a stage or
         // artifact reference resolves later in the run.
+        // An id the canvas does not hold yet (an item the run will create)
+        // leaves the count unknown. A delete also removes the captions
+        // attached to the deleted items, as a manual delete does.
         resolveCanvasActionTargetCount: (action) => {
           if (action.action === 'clear_canvas') return items.length
           if (action.sourceStageId || action.sourceStageIds?.length) return null
           if (action.artifactId || action.artifactIds?.length) return null
-          return resolveCanvasTargetSemanticCanvasActionSourceIds(action, {
+          const canvasItemIds = new Set(items.map((item) => item.id))
+          if ((action.itemIds || []).some((itemId) => !canvasItemIds.has(itemId))) return null
+          const targetIds = resolveCanvasTargetSemanticCanvasActionSourceIds(action, {
             items,
             selectedIds,
             nextZIndex: nextZIndexRef.current
-          }).length
+          })
+          return action.action === 'delete_items'
+            ? collectCascadeDeletedCanvasItemIds(items, targetIds).size
+            : targetIds.length
         }
       })
       appendMessageToExternalChat({
@@ -2393,17 +2413,28 @@ export function useCanvasTargetWorkflow({
           canvasDispatchCount = placedCanvasItems.length
         }
 
+        // Placing a stage's media again keeps what that stage's media was:
+        // the outputs of a model or QuickApp stage are run outputs, a copy
+        // of a canvas source placed by add_* is not.
+        const materializedRunOutput = !runSourceCopyStageIds.has(options.sourceStage.id)
+        if (!materializedRunOutput) runSourceCopyStageIds.add(stageId)
         const mediaArtifactIds = registerStageAttachmentArtifacts(
           options.sourceStage.id,
           options.sourceStage.kind === 'quick-app' ? 'quickapp' : 'model',
-          mediaAttachments
+          mediaAttachments,
+          materializedRunOutput
         )
         placedCanvasItems.forEach((item, index) => {
           const artifactId = mediaArtifactIds[index]
           if (artifactId) linkArtifactToCanvasItem(artifactId, item.id)
         })
-        registerPlacedCanvasItems(options.sourceStage.id, placedCanvasItems, 'canvas')
-        registerPlacedCanvasItems(stageId, placedCanvasItems, 'canvas')
+        registerPlacedCanvasItems(
+          options.sourceStage.id,
+          placedCanvasItems,
+          'canvas',
+          materializedRunOutput
+        )
+        registerPlacedCanvasItems(stageId, placedCanvasItems, 'canvas', materializedRunOutput)
 
         const outputCanvasVersion = runtimeCanvasVersion
         const fallbackReason =
@@ -2662,11 +2693,13 @@ export function useCanvasTargetWorkflow({
 
       const commitSemanticCanvasResult = (
         stageId: string,
-        result: CanvasTargetSemanticCanvasActionResult
+        result: CanvasTargetSemanticCanvasActionResult,
+        base: CanvasTargetSemanticCanvasActionState
       ) => {
         result.createdIds.forEach((itemId) => runCreatedItemIds.add(itemId))
-        const itemsChanged = result.items !== runtimeCanvasItems
-        const groupsChanged = Boolean(result.groups && result.groups !== runtimeCanvasGroups)
+        const itemsChanged = result.items !== base.items
+        const baseGroups = base.groups || []
+        const groupsChanged = Boolean(result.groups && result.groups !== baseGroups)
         const selectionChanged = !areCanvasTargetIdSetsEqual(runtimeSelectedIds, result.selectedIds)
         const surfaceStateChanged = Boolean(
           result.bgColor ||
@@ -2680,12 +2713,28 @@ export function useCanvasTargetWorkflow({
         runtimeCanvasItems = result.items
         runtimeSelectedIds = new Set(result.selectedIds)
         nextZIndexRef.current = result.nextZIndex
+        // The user may have changed the canvas since the run built its view
+        // (base). Only what this action changed is applied to the live
+        // canvas; everything else keeps its live value.
         if (itemsChanged) {
-          setItemsWithHistory(result.items)
+          const resultItemIds = new Set(result.items.map((item) => item.id))
+          base.items.forEach((item) => {
+            if (!resultItemIds.has(item.id)) runRemovedItemIds.add(item.id)
+          })
+          const before = base.items
+          const after = result.items
+          setItemsWithHistory((live) => mergeCanvasTargetRunChange(live, before, after))
         }
         if (result.groups) {
           runtimeCanvasGroups = result.groups
-          setGroups(result.groups)
+          if (groupsChanged) {
+            const resultGroupIds = new Set(result.groups.map((group) => group.id))
+            baseGroups.forEach((group) => {
+              if (!resultGroupIds.has(group.id)) runRemovedGroupIds.add(group.id)
+            })
+            const after = result.groups
+            setGroups((live) => mergeCanvasTargetRunChange(live, baseGroups, after))
+          }
         }
         if (result.bgColor) {
           handleBgColorChange(result.bgColor)
@@ -2903,6 +2952,19 @@ export function useCanvasTargetWorkflow({
             continue
           }
 
+          // Rebase the run's view on the live canvas: what the user added
+          // while the run was going on is part of the board the write
+          // authority checks (it is neither selected nor run-created).
+          runtimeCanvasItems = withLiveOnlyCanvasEntries(
+            runtimeCanvasItems,
+            latestItemsRef.current,
+            runRemovedItemIds
+          )
+          runtimeCanvasGroups = withLiveOnlyCanvasEntries(
+            runtimeCanvasGroups,
+            latestGroupsRef.current,
+            runRemovedGroupIds
+          )
           const semanticState: CanvasTargetSemanticCanvasActionState = {
             items: runtimeCanvasItems,
             groups: runtimeCanvasGroups,
@@ -2925,7 +2987,8 @@ export function useCanvasTargetWorkflow({
             runCreatedItemIds,
             runPlacedItemIds,
             semanticState,
-            commitSemanticResult: (result) => commitSemanticCanvasResult(stageId, result),
+            commitSemanticResult: (result) =>
+              commitSemanticCanvasResult(stageId, result, semanticState),
             resolveCanvasTargetItemBounds
           })
           ensureCanvasTargetRunActive()
@@ -2941,6 +3004,7 @@ export function useCanvasTargetWorkflow({
                 const key = canvasTargetMediaUrlKey(attachment.url)
                 return Boolean(key && runOutputUrls.has(key))
               })
+            if (!placedRunOutput) runSourceCopyStageIds.add(stageId)
             const canvasAttachmentArtifactIds = registerStageAttachmentArtifacts(
               stageId,
               'canvas',
