@@ -9443,10 +9443,70 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }
 
+  /**
+   * Whether `url` is still used by something other than the composer item at `excludeIndex` of
+   * `pending`: another composer item, a queued send (also one held back with its scope), the
+   * transient draft of another session, or a message. A blob: URL is revoked only when this says
+   * it is unused, so a URL shared by several occurrences (owner decision 5) lives until its last
+   * user is gone. It answers true when it cannot tell: a queued send whose attachments are
+   * resolved only when it is sent, or an error.
+   */
+  const isChatAttachmentUrlInUseBy = useCallback(
+    (url: string, pending: readonly ChatAttachment[], excludeIndex: number): boolean => {
+      try {
+        const holds = (attachments?: readonly ChatAttachment[]): boolean =>
+          Boolean(attachments?.some((attachment) => attachment?.url === url))
+        if (
+          pending.some((attachment, index) => index !== excludeIndex && attachment?.url === url)
+        ) {
+          return true
+        }
+        const queueHolds = (queues: Map<string, QueuedSessionSend[]>): boolean => {
+          for (const queue of queues.values()) {
+            for (const item of queue) {
+              const overrides = item.overrides
+              if (!overrides) continue
+              if (holds(overrides.attachments)) return true
+              if (!overrides.attachments && overrides.resolveAttachments) return true
+            }
+          }
+          return false
+        }
+        if (queueHolds(queuedSessionSendsRef.current)) return true
+        for (const queues of suspendedSessionSendsByScopeRef.current.values()) {
+          if (queueHolds(queues)) return true
+        }
+        // The current session's own transient draft is an older copy of this composer. Stored
+        // drafts never hold a blob: URL: a draft is stored only once its blobs are serialized.
+        const currentSessionId = currentSessionIdRef.current
+        const currentDraftKey = currentSessionId
+          ? getSessionStorageKey(storageScopeRef.current, currentSessionId)
+          : null
+        for (const [key, entry] of transientDraftsRef.current) {
+          if (key !== currentDraftKey && holds(entry.draft?.pendingAttachments)) return true
+        }
+        return sessionsRef.current.some((session) =>
+          session.messages?.some((message) => holds(message.attachments))
+        )
+      } catch {
+        return true
+      }
+    },
+    [getSessionStorageKey]
+  )
+  const isChatAttachmentUrlInUse = useCallback(
+    (url: string, excludeIndex: number): boolean =>
+      isChatAttachmentUrlInUseBy(url, pendingAttachmentsRef.current, excludeIndex),
+    [isChatAttachmentUrlInUseBy]
+  )
+
   const removeAttachment = (index: number) => {
     setPendingAttachments((prev) => {
       const attachment = prev[index]
-      revokeBlobUrl(attachment?.url)
+      // Revoke a blob: URL only with its last user; a second revoke of it is harmless.
+      if (attachment && !isChatAttachmentUrlInUseBy(attachment.url, prev, index)) {
+        revokeBlobUrl(attachment.url)
+      }
       return prev.filter((_, i) => i !== index)
     })
   }
@@ -10222,6 +10282,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 pendingAttachments={composerPendingAttachments}
                 uploadProgress={uploadProgress}
                 onRemoveAttachment={removeAttachment}
+                isChatAttachmentUrlInUse={isChatAttachmentUrlInUse}
                 isLoading={composerRunning}
                 conversationBusy={isLoading}
                 sideCommandEnabled={active && route?.channel === 'canvas' && route.scopeType === 'thread' && !config?.use_remote_llm}

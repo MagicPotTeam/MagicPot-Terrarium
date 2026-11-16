@@ -96,6 +96,12 @@ interface ChatComposerProps {
   pendingAttachments: ChatAttachment[]
   uploadProgress: { [key: number]: number }
   onRemoveAttachment: (index: number) => void
+  /**
+   * Whether a removed item's URL is still used elsewhere (the page's queued sends and other
+   * drafts too); a blob: URL is revoked only when it is not. Without it only this composer's own
+   * pending list counts.
+   */
+  isChatAttachmentUrlInUse?: (url: string, excludeIndex: number) => boolean
   sideCommandEnabled?: boolean
   isLoading: boolean
   /**
@@ -574,6 +580,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   pendingAttachments,
   uploadProgress,
   onRemoveAttachment,
+  isChatAttachmentUrlInUse,
   isLoading,
   conversationBusy = isLoading,
   sideCommandEnabled = false,
@@ -1256,7 +1263,14 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
             defaultValue: 'Remove attachment'
           })}
           onClick={() => {
-            if (attachment.url.startsWith('blob:')) {
+            if (
+              attachment.url.startsWith('blob:') &&
+              !(isChatAttachmentUrlInUse
+                ? isChatAttachmentUrlInUse(attachment.url, originalIndex)
+                : pendingAttachments.some(
+                    (item, index) => index !== originalIndex && item.url === attachment.url
+                  ))
+            ) {
               URL.revokeObjectURL(attachment.url)
             }
             onRemoveAttachment(originalIndex)
@@ -1576,7 +1590,16 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   title={attachment.fileName || undefined}
                   removeLabel={t('chat.composer_column.remove_attachment', { name })}
                   onRemove={() => {
-                    if (attachment.url.startsWith('blob:')) URL.revokeObjectURL(attachment.url)
+                    if (
+                      attachment.url.startsWith('blob:') &&
+                      !(isChatAttachmentUrlInUse
+                        ? isChatAttachmentUrlInUse(attachment.url, originalIndex)
+                        : pendingAttachments.some(
+                            (item, index) => index !== originalIndex && item.url === attachment.url
+                          ))
+                    ) {
+                      URL.revokeObjectURL(attachment.url)
+                    }
                     onRemoveAttachment(originalIndex)
                   }}
                 />

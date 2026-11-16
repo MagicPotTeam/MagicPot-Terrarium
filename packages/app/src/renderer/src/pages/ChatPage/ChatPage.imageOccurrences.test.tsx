@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
+import type { ReactElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
@@ -14,7 +15,8 @@ import {
 } from './chatPageShared'
 
 // Owner decision 5: the same image delivered twice is two occurrences. These cases follow the
-// occurrences past the composer, into the provider payload built by the real chatRequestUtils.
+// occurrences past the composer: into the provider payload built by the real chatRequestUtils,
+// and through the blob URL lifetime, where a shared blob: URL is revoked only with its last user.
 const fixture = vi.hoisted(() => ({
   config: null as Config | null,
   sessions: [] as ChatSession[],
@@ -31,9 +33,7 @@ const fixture = vi.hoisted(() => ({
   notifyWarning: vi.fn(),
   useRealCompletion: false,
   useRealComposer: false,
-  requestApi: null as null | {
-    svcManagedMedia: { materializeForRequest: (...args: unknown[]) => unknown }
-  }
+  requestApi: null as null | { svcManagedMedia: Record<string, unknown> }
 }))
 
 const cloneValue = <T,>(value: T): T => {
@@ -181,7 +181,7 @@ type ComposerProps = {
 // The stand-in composer, or the real one when a case needs the composer's own revoke calls.
 vi.mock('./components/ChatComposer', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./components/ChatComposer')>()
-  const RealComposer = actual.default as unknown as (props: ComposerProps) => JSX.Element
+  const RealComposer = actual.default as unknown as (props: ComposerProps) => ReactElement
   return {
     default: (props: ComposerProps) =>
       fixture.useRealComposer ? (
@@ -320,7 +320,7 @@ const selectSession = async (id: string): Promise<void> => {
   await waitFor(() => expect(currentSession().id).toBe(id))
 }
 
-type WindowWithApi = Window & { api?: unknown }
+type WindowWithApi = { api?: unknown }
 
 beforeEach(() => {
   vi.resetAllMocks()
@@ -358,7 +358,7 @@ afterEach(async () => {
   cleanup()
   await act(async () => {})
   vi.unstubAllGlobals()
-  delete (window as WindowWithApi).api
+  delete (window as unknown as WindowWithApi).api
   document.body.innerHTML = ''
 })
 
@@ -390,7 +390,7 @@ describe('ChatPage image occurrences in the provider payload', () => {
         }
       )
       fixture.requestApi = { svcManagedMedia: { materializeForRequest } }
-      ;(window as WindowWithApi).api = {
+      ;(window as unknown as WindowWithApi).api = {
         svcLLMProxy: { chat, chatStream, cancelConversation: vi.fn(async () => undefined) }
       }
       await renderPage([makeSession('session-a', [])])
@@ -419,4 +419,61 @@ describe('ChatPage image occurrences in the provider payload', () => {
       )
     }
   )
+})
+
+describe('ChatPage shared blob URL lifetime', () => {
+  it('does not revoke a shared blob URL while a queued send still holds it', async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    await renderPage([makeSession('session-a', [blobImage()])])
+    // A reply that does not finish keeps the session busy, so the next send is queued.
+    fixture.request.mockImplementationOnce(() => new Promise(() => {}))
+    await dispatchSendToAgent({ text: 'keep the thread busy', autoSend: true })
+    await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
+    // An automatic send carrying the same blob URL waits in the queue with it.
+    await dispatchSendToAgent({ attachment: blobImage('queued.png'), autoSend: true })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(fixture.request).toHaveBeenCalledOnce()
+    expect(pendingAttachments()).toEqual([blobImage()])
+
+    fireEvent.click(screen.getByTestId('mock-remove-0'))
+    await waitFor(() => expect(pendingAttachments()).toEqual([]))
+    expect(revoke).not.toHaveBeenCalledWith(sharedBlobUrl)
+  })
+
+  it("does not revoke a shared blob URL while another session's transient draft still holds it", async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    await renderPage(
+      [makeSession('session-a', [blobImage()]), makeSession('session-b', [blobImage()])],
+      'session-a'
+    )
+    // Leaving A keeps A's draft (with the blob URL) as a transient draft: its serialization
+    // does not finish.
+    await selectSession('session-b')
+    await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('session-b draft'))
+    expect(pendingAttachments()).toEqual([blobImage()])
+
+    fireEvent.click(screen.getByTestId('mock-remove-0'))
+    await waitFor(() => expect(pendingAttachments()).toEqual([]))
+    expect(revoke).not.toHaveBeenCalledWith(sharedBlobUrl)
+  })
+
+  it('with the real composer, removing one of two shared-blob occurrences does not revoke the URL', async () => {
+    fixture.useRealComposer = true
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    await renderPage([makeSession('session-a', [blobImage(), blobImage()])])
+    const removeButtons = () => screen.getAllByRole('button', { name: 'Remove attachment' })
+    await waitFor(() => expect(removeButtons()).toHaveLength(2))
+
+    fireEvent.click(removeButtons()[0])
+    await waitFor(() => expect(pendingAttachments()).toEqual([blobImage()]))
+    expect(revoke).not.toHaveBeenCalledWith(sharedBlobUrl)
+
+    // The last occurrence takes the URL with it.
+    await waitFor(() => expect(removeButtons()).toHaveLength(1))
+    fireEvent.click(removeButtons()[0])
+    await waitFor(() => expect(pendingAttachments()).toEqual([]))
+    expect(revoke).toHaveBeenCalledWith(sharedBlobUrl)
+  })
 })
