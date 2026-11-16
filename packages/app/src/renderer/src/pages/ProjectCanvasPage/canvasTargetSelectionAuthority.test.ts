@@ -3,13 +3,17 @@ import { describe, expect, it } from 'vitest'
 import { collectCanvasTargetCanvasActionReferencedIds } from './canvasTargetCanvasActionSources'
 import type { CanvasTargetCanvasAction } from './canvasTargetCapabilityTypes'
 import {
+  authorizeCanvasTargetMediaPlacementUrl,
   authorizeCanvasTargetSourceReferences,
+  canvasTargetMediaUrlKey,
+  collectCanvasTargetCanvasBlobUrlKeys,
   canvasTargetEvidenceAllowsSelectionSnapshot,
   canvasTargetEvidenceAllowsSourceReads,
   canvasTargetSelectionHasUnverifiedCrop,
   createCanvasTargetSelectionAuthority,
   findCanvasTargetItemIdsBySourceUrl,
-  isCanvasTargetSelectionUnchanged
+  isCanvasTargetSelectionUnchanged,
+  recordCanvasTargetRunOutputUrl
 } from './canvasTargetSelectionAuthority'
 import type { CanvasImageItem, CanvasItem, CanvasModel3DItem } from './types'
 
@@ -95,6 +99,78 @@ describe('canvasTargetSelectionAuthority', () => {
     expect(findCanvasTargetItemIdsBySourceUrl('blob:preview', items)).toEqual(['F'])
     expect(findCanvasTargetItemIdsBySourceUrl('blob:fresh', items)).toEqual([])
     expect(findCanvasTargetItemIdsBySourceUrl('', items)).toEqual([])
+  })
+})
+
+describe('canvasTargetSelectionAuthority media placement URLs', () => {
+  const selected: CanvasImageItem = { ...a, id: 'S', src: 'blob:http://localhost/selected' }
+  const other: CanvasImageItem = { ...a, id: 'U', src: 'blob:http://localhost/unselected', x: 200 }
+  const place = (url: string, overrides: Partial<Parameters<typeof authorizeCanvasTargetMediaPlacementUrl>[0]> = {}) => {
+    const currentItems = overrides.currentItems || [selected, other]
+    return authorizeCanvasTargetMediaPlacementUrl({
+      url,
+      authority: createCanvasTargetSelectionAuthority([selected]),
+      evidenceMode: 'selected_sources',
+      currentItems,
+      knownCanvasUrlKeys: collectCanvasTargetCanvasBlobUrlKeys([selected, other], new Set()),
+      runOutputUrls: new Map(),
+      ...overrides
+    })
+  }
+
+  it('gives every spelling that resolves to one blob the same key', () => {
+    const key = canvasTargetMediaUrlKey('blob:http://localhost/unselected')
+    expect(key).toBe('blob:http://localhost/unselected')
+    for (const variant of ['blob:http://localhost/unselected#x', 'BLOB:http://localhost/unselected', ' \u0001blob:http://localhost/unselected ', 'blob:http://local\thost/unselected', 'blob:http://localhost/%75nselected', 'blob:HTTP://LOCALHOST/unselected', 'blob:http://localhost/unselected%00']) {
+      expect(canvasTargetMediaUrlKey(variant)).toBe(key)
+    }
+    expect(canvasTargetMediaUrlKey('not a url')).toBeNull()
+    expect(canvasTargetMediaUrlKey('blob:http://localhost/%E0%A4%A')).toBeNull()
+  })
+
+  it('refuses an unselected item\'s URL in any spelling, and a selected one outside selected_sources', () => {
+    for (const url of ['blob:http://localhost/unselected', 'blob:http://localhost/unselected#x', 'BLOB:http://localhost/unselected']) {
+      expect(place(url)).toEqual({ allowed: false, refusal: 'not_selected', references: ['U'] })
+    }
+    expect(place('blob:http://localhost/selected', { evidenceMode: 'structured_only' })).toMatchObject({ allowed: false, refusal: 'evidence_mode' })
+    expect(place('blob:http://localhost/selected', { authority: null })).toMatchObject({ allowed: false, refusal: 'no_authority' })
+  })
+
+  it('places a selected, unchanged source as its canonical URL', () => {
+    expect(place('blob:http://localhost/selected#frag')).toEqual({ allowed: true, url: 'blob:http://localhost/selected' })
+    expect(place('blob:http://localhost/selected', { currentItems: [{ ...selected, x: 5 }, other] })).toMatchObject({ allowed: false, refusal: 'changed' })
+  })
+
+  it('refuses the URL of an item that left the canvas during the run, even if the run also produced it', () => {
+    const runOutputUrls = new Map<string, string>()
+    recordCanvasTargetRunOutputUrl('blob:http://localhost/unselected', runOutputUrls)
+    expect(place('blob:http://localhost/unselected', { currentItems: [selected], runOutputUrls })).toEqual({ allowed: false, refusal: 'missing', references: [] })
+  })
+
+  it('places a blob this run produced, and refuses unknown, unparseable or non-blob URLs', () => {
+    const runOutputUrls = new Map<string, string>()
+    recordCanvasTargetRunOutputUrl('blob:http://localhost/output', runOutputUrls)
+    recordCanvasTargetRunOutputUrl('data:image/png;base64,QQ==', runOutputUrls)
+    expect(runOutputUrls.size).toBe(1)
+    expect(place('blob:http://localhost/output#x', { runOutputUrls })).toEqual({ allowed: true, url: 'blob:http://localhost/output' })
+    expect(place('blob:http://localhost/unknown', { runOutputUrls })).toMatchObject({ allowed: false, refusal: 'not_run_output' })
+    expect(place('blob:http://localhost/%E0%A4%A', { runOutputUrls })).toMatchObject({ allowed: false, refusal: 'not_run_output' })
+    expect(place('data:image/png;base64,QQ==', { runOutputUrls })).toMatchObject({ allowed: false, refusal: 'not_run_output' })
+  })
+
+  it('collects the blob URLs carried by src, textures and preview images, not data: URLs', () => {
+    const model = { ...a, id: 'M', type: 'model3d', src: 'blob:model', textures: { 'skin.png': 'BLOB:texture#t' } } as unknown as CanvasItem
+    const file = { ...a, id: 'F', type: 'file', src: 'blob:file', fileName: 'f.pdf', mimeType: 'application/pdf', previewImages: [{ id: 'p', src: 'blob:preview', mimeType: 'image/png', fileName: 'p.png' }] } as unknown as CanvasItem
+    expect([...collectCanvasTargetCanvasBlobUrlKeys([a, model, file], new Set())].sort()).toEqual(['blob:file', 'blob:model', 'blob:preview', 'blob:texture'])
+  })
+
+  it('counts a replaced texture or preview image URL as a changed source', () => {
+    const model = { ...a, id: 'M', type: 'model3d', src: 'blob:model', textures: { 'skin.png': 'blob:texture-1' } } as unknown as CanvasItem
+    const file = { ...a, id: 'F', type: 'file', src: 'blob:file', fileName: 'f.pdf', mimeType: 'application/pdf', previewImages: [{ id: 'p', src: 'blob:preview-1', mimeType: 'image/png', fileName: 'p.png' }] } as unknown as CanvasItem
+    const authority = createCanvasTargetSelectionAuthority([model, file])
+    expect(isCanvasTargetSelectionUnchanged(authority, [model, file])).toBe(true)
+    expect(isCanvasTargetSelectionUnchanged(authority, [{ ...model, textures: { 'skin.png': 'blob:texture-2' } } as unknown as CanvasItem, file])).toBe(false)
+    expect(isCanvasTargetSelectionUnchanged(authority, [model, { ...file, previewImages: [{ id: 'p', src: 'blob:preview-2', mimeType: 'image/png', fileName: 'p.png' }] } as unknown as CanvasItem])).toBe(false)
   })
 })
 

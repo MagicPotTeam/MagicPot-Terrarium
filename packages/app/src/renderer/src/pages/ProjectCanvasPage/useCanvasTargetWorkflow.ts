@@ -143,10 +143,12 @@ import {
   canvasTargetEvidenceAllowsSelectionSnapshot,
   canvasTargetSelectionHasUnverifiedCrop,
   createCanvasTargetSelectionAuthority,
-  findCanvasTargetItemIdsBySourceUrl,
+  authorizeCanvasTargetMediaPlacementUrl,
+  collectCanvasTargetCanvasBlobUrlKeys,
   isCanvasTargetSelectionUnchanged,
+  recordCanvasTargetRunOutputUrl,
+  type CanvasTargetMediaPlacementRefusal,
   type CanvasTargetSelectionAuthority,
-  type CanvasTargetSourceReferenceRefusal,
   type CanvasTargetSourceReferenceVerdict
 } from './canvasTargetSelectionAuthority'
 import { hydrateCanvasImageItemForCanvas, loadImageFromSrc } from './canvasAssetIntakeHelpers'
@@ -521,9 +523,16 @@ async function executeCanvasTargetExtractImageRegionAction(
 
 function buildCanvasTargetSourceReferenceRefusal(
   subject: string,
-  refusal: CanvasTargetSourceReferenceRefusal,
-  fallbackReasons: { evidenceMode: string; selection: string }
+  refusal: CanvasTargetMediaPlacementRefusal,
+  fallbackReasons: { evidenceMode: string; selection: string; notRunOutput?: string }
 ): CanvasTargetCanvasActionResult {
+  if (refusal === 'not_run_output') {
+    return {
+      content: `${subject} skipped because its URL is neither a selected source nor a result of this run.`,
+      canvasDispatchCount: 0,
+      fallbackReason: fallbackReasons.notRunOutput || fallbackReasons.selection
+    }
+  }
   if (refusal === 'evidence_mode') {
     return {
       content: `${subject} skipped by the current evidence policy.`,
@@ -548,7 +557,8 @@ const CANVAS_TARGET_EXTRACT_REFUSAL_REASONS = {
 
 const CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS = {
   evidenceMode: 'Placing a canvas source requires selected source assets.',
-  selection: 'Placing a canvas source requires explicitly selected items.'
+  selection: 'Placing a canvas source requires explicitly selected items.',
+  notRunOutput: 'Canvas media actions only place selected sources or results of this run.'
 }
 
 async function executeCanvasTargetCanvasAction(
@@ -559,6 +569,8 @@ async function executeCanvasTargetCanvasAction(
     generationSessionId?: string
     evidenceMode: CanvasTargetEvidenceMode
     selectionAuthority: CanvasTargetSelectionAuthority | null
+    knownCanvasUrlKeys?: ReadonlySet<string>
+    runOutputUrls?: ReadonlyMap<string, string>
     semanticState?: CanvasTargetSemanticCanvasActionState
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
@@ -677,35 +689,35 @@ async function executeCanvasTargetCanvasAction(
           fallbackReason: mediaUrlSafety.reason
         }
       }
-      // A model-authored URL that is the source of a canvas item is a
-      // reference to that item: placing it would hand its bytes back to the
-      // run as a stage result. It needs the same authority as any reference.
-      if (!options.semanticState) {
+      // A model-authored URL that resolves to the source of a canvas item is
+      // a reference to that item: placing it would hand its bytes back to the
+      // run as a stage result. Only a selected, unchanged source (where the
+      // evidence mode allows source reads) or a blob this run produced itself
+      // may be placed; every other URL is refused, and the canonical URL, not
+      // the model's spelling of it, is what reaches the canvas.
+      if (!options.semanticState || !options.knownCanvasUrlKeys || !options.runOutputUrls) {
         return buildCanvasTargetSourceReferenceRefusal(
           `Canvas ${action.action}`,
           'no_authority',
           CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS
         )
       }
-      const urlReferencedIds = findCanvasTargetItemIdsBySourceUrl(
-        mediaUrlSafety.url,
-        options.semanticState.items
-      )
-      if (urlReferencedIds.length > 0) {
-        const verdict = authorizeCanvasTargetSourceReferences({
-          authority: options.selectionAuthority,
-          evidenceMode: options.evidenceMode,
-          referencedItemIds: urlReferencedIds,
-          currentItems: options.semanticState.items
-        })
-        if (!verdict.allowed) {
-          return buildCanvasTargetSourceReferenceRefusal(
-            `Canvas ${action.action}`,
-            verdict.refusal,
-            CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS
-          )
-        }
+      const placement = authorizeCanvasTargetMediaPlacementUrl({
+        url: mediaUrlSafety.url,
+        authority: options.selectionAuthority,
+        evidenceMode: options.evidenceMode,
+        currentItems: options.semanticState.items,
+        knownCanvasUrlKeys: options.knownCanvasUrlKeys,
+        runOutputUrls: options.runOutputUrls
+      })
+      if (!placement.allowed) {
+        return buildCanvasTargetSourceReferenceRefusal(
+          `Canvas ${action.action}`,
+          placement.refusal,
+          CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS
+        )
       }
+      const placementUrl = placement.url
       const mediaType =
         action.action === 'add_image'
           ? 'image'
@@ -715,7 +727,7 @@ async function executeCanvasTargetCanvasAction(
       const dispatchResult = await dispatchCanvasTargetMediaAttachmentToCanvas(
         {
           type: mediaType,
-          url: mediaUrlSafety.url,
+          url: placementUrl,
           fileName: action.fileName
         },
         options.projectId,
@@ -736,7 +748,7 @@ async function executeCanvasTargetCanvasAction(
         attachments: [
           {
             type: mediaType,
-            url: mediaUrlSafety.url,
+            url: placementUrl,
             fileName: action.fileName
           }
         ]
@@ -1640,9 +1652,13 @@ export function useCanvasTargetWorkflow({
       if (canvasTargetActiveRunIdRef.current !== runId) {
         throw new CanvasTargetCancelledError()
       }
+      // A replaced authority (a new selection) stops the run in every mode.
+      // structured_only reads no source, so it does not also require the
+      // selected items to stay unchanged while the run edits the canvas.
       if (
-        normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only' &&
-        !selectionIsUnchanged()
+        canvasTargetSelectionAuthorityRef.current !== runSelectionAuthority ||
+        (normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only' &&
+          !selectionIsUnchanged())
       ) {
         throw new Error(
           isChineseUi
@@ -1931,6 +1947,14 @@ export function useCanvasTargetWorkflow({
       const executedCapabilityActionIds = new Set<string>()
       let capabilityActionStageIndex = 0
       let runtimeCanvasItems = items
+      // Every blob: URL a canvas item carried at any point of the run, and
+      // the media URLs the run produced itself. A model-authored add_* URL is
+      // checked against both (authorizeCanvasTargetMediaPlacementUrl).
+      const runKnownCanvasUrlKeys = collectCanvasTargetCanvasBlobUrlKeys(
+        latestItemsRef.current,
+        collectCanvasTargetCanvasBlobUrlKeys(items, new Set<string>())
+      )
+      const runOutputUrls = new Map<string, string>()
       let runtimeCanvasGroups = groups
       let runtimeCanvasVersion = 1
       let runtimeSelectedIds = new Set(selectedIds)
@@ -2260,6 +2284,7 @@ export function useCanvasTargetWorkflow({
         attachments: ChatAttachment[] | undefined
       ): string[] => {
         return (attachments || []).map((attachment, index) => {
+          recordCanvasTargetRunOutputUrl(attachment.url, runOutputUrls)
           const artifactId = createCanvasTargetArtifactId(stageId, `attachment-${index + 1}`)
           registerArtifact({
             id: artifactId,
@@ -2828,12 +2853,16 @@ export function useCanvasTargetWorkflow({
             stageCanvasItemIds
           }
           const executableCanvasAction = action
+          collectCanvasTargetCanvasBlobUrlKeys(runtimeCanvasItems, runKnownCanvasUrlKeys)
+          collectCanvasTargetCanvasBlobUrlKeys(latestItemsRef.current, runKnownCanvasUrlKeys)
           const canvasResult = await executeCanvasTargetCanvasAction(executableCanvasAction, {
             projectId: canvasId,
             fallbackText: options?.fallbackText,
             generationSessionId: stageId,
             evidenceMode: normalizedEvidenceMode,
             selectionAuthority: runSelectionAuthority,
+            knownCanvasUrlKeys: runKnownCanvasUrlKeys,
+            runOutputUrls,
             semanticState,
             commitSemanticResult: (result) => commitSemanticCanvasResult(stageId, result),
             resolveCanvasTargetItemBounds

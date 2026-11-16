@@ -372,22 +372,126 @@ describe('Canvas Target evidence action gate', () => {
     expect(attachmentUrls).not.toContain(other.src)
   })
 
-  it('positive control: add_image with a URL no canvas item carries is still placed', async () => {
+  // A model-authored add_* URL may name only a selected, unchanged source (in
+  // selected_sources) or a blob this run produced. The URL guard matches what
+  // the browser resolves (fragment, scheme case, escapes, control characters)
+  // and remembers sources the run deleted, so none of these variants of an
+  // unselected item's blob URL reaches the canvas, the Agent conversation, a
+  // stage or the summary model request.
+  const unselectedBlob = 'blob:http://localhost/unselected-source'
+  const blobVariants = [
+    ['fragment', `${unselectedBlob}#x`],
+    ['scheme case', `BLOB:${unselectedBlob.slice(5)}`],
+    ['percent escape', 'blob:http://localhost/%75nselected-source'],
+    ['tab inside', 'blob:http://local\thost/unselected-source'],
+    ['upper-case origin', 'blob:HTTP://LOCALHOST/unselected-source']
+  ] as const
+  const placedUrlsIn = (calls: unknown[][]) => calls.flatMap(([request]) => ((request as { attachments?: Array<{ url: string }> })?.attachments || []).map((attachment) => attachment.url))
+  const leakedUnselectedBlob = () => [...placedUrlsIn(f.chat.mock.calls), ...placedUrlsIn(f.stage.mock.calls), ...placedUrlsIn(f.summary.mock.calls)].some((url) => url.toLowerCase().replace(/%75/g, 'u').replace(/\s/g, '').includes('localhost/unselected-source'))
+  const runAddPlan = async (mode: 'selected_sources' | 'structured_only', capabilityActions: unknown[], extraItems: CanvasImageItem[] = []) => {
     const plain: CanvasImageItem = { ...image, crop: undefined }
+    const other: CanvasImageItem = { ...plain, id: 'unselected', src: unselectedBlob, x: 200 }
+    const added = vi.fn()
+    window.addEventListener('canvas:add-image', added)
+    f.plan.mockResolvedValue({ id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [], capabilityActions })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain, other, ...extraItems] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode(mode); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    window.removeEventListener('canvas:add-image', added)
+    expect(f.plan).toHaveBeenCalledOnce()
+    return { added }
+  }
+
+  describe.each(['selected_sources', 'structured_only'] as const)('add_image URL guard in %s', (mode) => {
+    it.each(blobVariants)('refuses a %s variant of an unselected item\'s blob URL', async (_label, sourceUrl) => {
+      const { added } = await runAddPlan(mode, [{ type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl, fileName: 'b.png' }])
+      expect(added).not.toHaveBeenCalled()
+      expect(leakedUnselectedBlob()).toBe(false)
+      expect(f.chat.mock.calls.some(([message]) => /Canvas add_image skipped/.test(message.content || ''))).toBe(true)
+    })
+
+    it('refuses to re-add an unselected item\'s blob URL after the plan deleted the item', async () => {
+      const { added } = await runAddPlan(mode, [
+        { type: 'canvas', id: 'delete', action: 'delete_items', phase: 'before_model_stages', outputTarget: 'canvas', source: 'item_ids', itemIds: ['unselected'] },
+        { type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: unselectedBlob, fileName: 'b.png' }
+      ])
+      expect(added).not.toHaveBeenCalled()
+      expect(leakedUnselectedBlob()).toBe(false)
+    })
+
+    it('refuses an add_image whose URL is neither a selected source nor a result of this run', async () => {
+      const { added } = await runAddPlan(mode, [{ type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: 'blob:http://localhost/unknown-origin', fileName: 'r.png' }])
+      expect(added).not.toHaveBeenCalled()
+      expect(f.chat.mock.calls.some(([message]) => /neither a selected source nor a result of this run/.test(message.content || ''))).toBe(true)
+    })
+  })
+
+  it('places a selected source named by a variant URL in selected_sources, as its canonical URL', async () => {
+    const selected: CanvasImageItem = { ...image, crop: undefined, src: 'blob:http://localhost/selected-source' }
     const added = vi.fn((event: Event) => {
       const detail = (event as CustomEvent<{ onAdded?: (item: unknown) => void }>).detail
-      detail.onAdded?.({ ...plain, id: 'placed', src: 'blob:fresh-result' })
+      detail.onAdded?.({ ...selected, id: 'placed' })
     })
     window.addEventListener('canvas:add-image', added)
     f.plan.mockResolvedValue({
       id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [],
-      capabilityActions: [{ type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: 'blob:fresh-result', fileName: 'r.png' }]
+      capabilityActions: [{ type: 'canvas', id: 'add', action: 'add_image', phase: 'before_model_stages', outputTarget: 'both', sourceUrl: `${selected.src}#copy`, fileName: 'a.png' }]
+    })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [selected] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([selected], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selected_sources'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    window.removeEventListener('canvas:add-image', added)
+    expect(added).toHaveBeenCalledOnce()
+    expect((added.mock.calls[0][0] as CustomEvent<{ src: string }>).detail.src).toBe(selected.src)
+  })
+
+  // Positive control (re-expressed from 'add_image with a URL no canvas item
+  // carries is still placed'): add_* may place a blob this run produced, here
+  // a model stage output. The canvas reports its own copy of each placed
+  // image, so no canvas item carries the stage output URL itself.
+  it('positive control: add_image with a blob URL this run produced is placed', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    const added = vi.fn((event: Event) => {
+      const detail = (event as CustomEvent<{ onAdded?: (item: unknown) => void }>).detail
+      detail.onAdded?.({ ...plain, id: `placed-${added.mock.calls.length}`, src: `blob:http://localhost/canvas-copy-${added.mock.calls.length}` })
+    })
+    window.addEventListener('canvas:add-image', added)
+    f.stage.mockResolvedValue({ content: 'fixture', attachments: [{ type: 'image', url: 'blob:http://localhost/stage-output', fileName: 'out.png' }] })
+    f.plan.mockResolvedValue({
+      id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture',
+      stageInstructions: [{ id: 'stage-1', label: 'Stage', modelId: 'vision', prompt: 'fixture' }],
+      capabilityActions: [{ type: 'canvas', id: 'add', action: 'add_image', phase: 'after_model_stages', outputTarget: 'both', sourceUrl: 'blob:http://localhost/stage-output', fileName: 'r.png' }]
     })
     const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain] }))
     await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
     act(() => { result.current.setCanvasTargetEvidenceMode('structured_only'); result.current.setCanvasTargetUserIntent('fixture') })
     await act(async () => { await result.current.handleRunCanvasTarget() })
     window.removeEventListener('canvas:add-image', added)
-    expect(added).toHaveBeenCalledOnce()
+    expect(f.stage).toHaveBeenCalledOnce()
+    const addDetails = added.mock.calls.map(([event]) => (event as CustomEvent<{ src: string; generationSessionId?: string }>).detail)
+    // One dispatch materializes the stage output, the other is the add action.
+    expect(addDetails.filter((detail) => !String(detail.generationSessionId).includes('media-output'))).toEqual([
+      expect.objectContaining({ src: 'blob:http://localhost/stage-output' })
+    ])
+  })
+
+  it('stops a structured_only run when the user starts a new selection while the plan is pending', async () => {
+    const plain: CanvasImageItem = { ...image, crop: undefined }
+    let finishPlan!: (plan: unknown) => void
+    f.plan.mockImplementation(() => new Promise((resolve) => { finishPlan = resolve }))
+    const { result } = renderHook(() => useCanvasTargetWorkflow({ ...options, items: [plain] }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([plain], { x: 0, y: 0, width: 50, height: 50 }) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('structured_only'); result.current.setCanvasTargetUserIntent('fixture') })
+    let pending!: Promise<void>
+    await act(async () => { pending = result.current.handleRunCanvasTarget() })
+    await waitFor(() => expect(f.plan).toHaveBeenCalledOnce())
+    act(() => { result.current.handleBeginCanvasTargetSelection() })
+    await act(async () => {
+      finishPlan({ id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [], capabilityActions: [{ type: 'canvas', id: 'text', action: 'add_text', phase: 'before_model_stages', outputTarget: 'both', text: 'fixture' }] })
+      await pending
+    })
+    expect(f.summary).not.toHaveBeenCalled()
   })
 })
