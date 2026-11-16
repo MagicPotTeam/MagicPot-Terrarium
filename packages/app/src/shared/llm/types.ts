@@ -38,6 +38,11 @@ export interface ChatAttachment {
   reportBundleLabel?: string
   /** Optional pre-discovered image count for a provider-owned report bundle; no I/O is implied. */
   reportBundleImageCount?: number
+  /**
+   * MAIN-issued bearer secret for a registered primary report (see shared/reportBundle.ts).
+   * Only MAIN's verification honours it; it must never enter prompt text, logs or errors.
+   */
+  reportBundleBinding?: string
   /** Optional content-addressed binary payload used at the main-process LLM boundary. */
   binary?: {
     transport: 'chunked-binary-v1'

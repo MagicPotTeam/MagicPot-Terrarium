@@ -44,7 +44,12 @@ import type { AgentThreadInteractionScope, ResolveAgentThreadInteractionReq } fr
 
 import { OpenAIAPICli } from '@shared/llm/clients'
 import { isTrustedProviderJsonBudgetError } from '@shared/llm/providerJsonBudget'
-import { assertNoUnverifiedPrimaryReports } from '@shared/llm/unverifiedReport'
+import {
+  assertNoUnverifiedPrimaryReports,
+  isPrimaryReportFileDescriptor,
+  UNVERIFIED_REPORT_BUNDLE_MESSAGE
+} from '@shared/llm/unverifiedReport'
+import { isBoundTo } from '../reportBundles/reportBundleRegistry'
 import { MAX_LLM_CHUNKED_BINARY_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
 import type { ProviderRawWorkRetainer } from '@shared/llm/providerRawWork'
 import { goalDispatchEndpoint } from './agentThreadGoalDispatchProfile'
@@ -1536,6 +1541,47 @@ type RestrictedChatLoop = Readonly<{
   assertCurrent: () => void
 }>
 
+/**
+ * MAIN chat boundary for report bundles. The shape check refuses legacy primary reports that
+ * carry no binding. Then every primary report must be bound, in MAIN's registry, to this
+ * conversation and to these primary bytes: the registered file's own URL, or a data: URL whose
+ * decoded bytes hash to the registered primary. This is a consistency check on binding,
+ * conversation and primary bytes only; the bytes of child images are checked by the
+ * renderer-side svcReportBundles.verify before it reads them, not here. Any failure throws the
+ * fixed message, which never names a path. The binding is a bearer secret, so it is removed
+ * from the request once checked and never reaches a provider, a remote server or a log.
+ */
+function assertBoundPrimaryReports<T extends Pick<LLMChatReq, 'messages' | 'conversationId'>>(
+  req: T
+): T {
+  assertNoUnverifiedPrimaryReports(req.messages)
+  let changed = false
+  const messages = req.messages.map((message) => {
+    if (!message.attachments?.some((attachment) => 'reportBundleBinding' in attachment))
+      return message
+    changed = true
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) => {
+        if (!('reportBundleBinding' in attachment)) return attachment
+        const { reportBundleBinding: _binding, ...rest } = attachment
+        return rest
+      })
+    }
+  })
+  for (const message of req.messages) {
+    for (const attachment of message.attachments ?? []) {
+      if (
+        isPrimaryReportFileDescriptor(attachment) &&
+        !isBoundTo(attachment.reportBundleBinding, req.conversationId, attachment.url)
+      ) {
+        throw new Error(UNVERIFIED_REPORT_BUNDLE_MESSAGE)
+      }
+    }
+  }
+  return changed ? { ...req, messages } : req
+}
+
 export class LLMProxySvcImpl implements LLMProxySvc {
   static createManagedRealChatService(): Pick<LLMProxySvc, 'chat'> {
     const implementation = new LLMProxySvcImpl({ retryModelCapacity: false })
@@ -2349,9 +2395,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let successful = false
     let goalProgress: AgentGoalProgressContext | undefined
     try {
-      // This is a temporary deny rule for marked reports, not a substitute for
-      // authenticating source bytes, child manifests or renderer submissions.
-      assertNoUnverifiedPrimaryReports(req.messages)
+      // Before goal progress, provider, worker or canvas tool set-up.
+      req = assertBoundPrimaryReports(req)
       goalProgress = req.goalProgressToken === undefined ? undefined : agentThreadGoalProgress.claim(req, options?.methodName ? options as ServiceInvocationContext : undefined, abortContext.signal)
       if (goalProgress) req = { ...req, goalProgressToken: undefined, systemPrompt: [req.systemPrompt, goalProgress.prompt].filter(Boolean).join('\n\n') }
       const readExternalFile = getConfig().use_remote_llm
@@ -3997,8 +4042,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     }
 
     try {
-      // Apply the same descriptor-only denial before any streaming dispatch.
-      assertNoUnverifiedPrimaryReports(req.messages)
+      // The same report-bundle check before any streaming dispatch or tool set-up.
+      req = assertBoundPrimaryReports(req)
       const closeRenderer = () => {
         streamClosed = true
         cleanupRemoteStream?.()
