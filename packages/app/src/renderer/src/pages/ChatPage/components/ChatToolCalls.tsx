@@ -278,7 +278,16 @@ export const DelegatedResult: React.FC<{ text: string; raw?: boolean; error?: bo
         overflowWrap: 'anywhere',
         userSelect: 'text',
         // The shared formatting-only body brings its own sizes; the box keeps 12px text.
-        '& > div': { fontSize: 'inherit', lineHeight: 'inherit', my: 0 }
+        '& > div': { fontSize: 'inherit', lineHeight: 'inherit', my: 0 },
+        // Markdown keeps only the spacing of its blocks (plain text keeps its line breaks).
+        '& > div:has(> p, > ul, > ol, > pre, > blockquote, > table)': { whiteSpace: 'normal' },
+        '& > div p': { m: '0 0 0.5em' },
+        '& > div p:last-child': { mb: 0 },
+        '& > div ul, & > div ol': { m: '0.4em 0', pl: '1.5em' },
+        '& > div ul': { listStyle: 'disc' },
+        '& > div ol': { listStyle: 'decimal' },
+        '& > div li + li': { mt: '0.2em' },
+        '& > div pre': { whiteSpace: 'pre-wrap' }
       }}
     >
       {raw || error ? (
