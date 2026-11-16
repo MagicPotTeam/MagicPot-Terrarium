@@ -9038,6 +9038,36 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [sendMessage]
   )
 
+  // The edit form's report preflight looks at the history the edited send will
+  // carry: sendMessage projects baseMessages through the same skill context
+  // (isolated / last-N) before its own report check. Edits never force a skill.
+  const projectEditHistory = useCallback(
+    (prefix: ChatMessage[]): ChatMessage[] => {
+      if (!currentSession) return prefix
+      let requestedSkillId: string | null | undefined
+      if (currentSession.teamLeadId) {
+        const lead = sessionsRef.current.find((session) => session.id === currentSession.teamLeadId)
+        // An unavailable team refuses the send anyway; keep the whole prefix.
+        try {
+          requestedSkillId = resolveTeamRequestSettings(currentSession, lead).skillId
+        } catch {
+          return prefix
+        }
+      } else {
+        requestedSkillId = currentSession.skillId ?? selectedSkillId
+      }
+      const skillId = resolveAvailableSkillId(requestedSkillId)
+      return resolveSkillExecutionContext({
+        skillId,
+        skill: findCustomSkillById(customSkills, skillId),
+        config,
+        sessionMessages: prefix,
+        overrideBaseMessages: prefix
+      }).historyMessages
+    },
+    [config, currentSession, customSkills, resolveAvailableSkillId, selectedSkillId]
+  )
+
   const handleSelectSkill = useCallback(
     (skillId: string | null) => {
       void selectSkill(skillId)
@@ -9950,6 +9980,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 onDropImageAttachments={handleDropEditingImages}
                 onRegisterEditingAttachmentReceiver={registerEditingAttachmentReceiver}
                 onSendEditedMessage={handleSendEditedMessage}
+                projectEditHistory={projectEditHistory}
                 onPreviewImage={imagePreview.setPreviewImage}
                 onImageContextMenu={handleImageContextMenu}
                 onDownloadAttachment={downloadAttachment}

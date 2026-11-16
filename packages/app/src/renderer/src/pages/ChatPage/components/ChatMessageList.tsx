@@ -146,6 +146,12 @@ interface ChatMessageListProps {
     hiddenContext: string | undefined,
     baseMessages: ChatMessage[]
   ) => void
+  /**
+   * Projects the history an edited message keeps onto the history its send
+   * will actually carry (isolated / last-N skills). The default keeps every
+   * message, which can only refuse more than the send path does.
+   */
+  projectEditHistory?: (prefix: ChatMessage[]) => ChatMessage[]
   onPreviewImage: (url: string) => void
   onImageContextMenu: (event: React.MouseEvent, imageUrl: string) => void
   onDownloadAttachment: (attachment: ChatAttachment) => void
@@ -831,6 +837,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   onDropImageAttachments,
   onRegisterEditingAttachmentReceiver,
   onSendEditedMessage,
+  projectEditHistory,
   onPreviewImage,
   onImageContextMenu,
   onDownloadAttachment,
@@ -1301,6 +1308,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     key={messageIdentities[index]}
                     message={message}
                     index={index}
+                    historyPrefix={(() => {
+                      const prefix = currentSession?.messages.slice(0, index) ?? []
+                      return projectEditHistory ? projectEditHistory(prefix) : prefix
+                    })()}
                     editingContent={editingContent}
                     onSetEditingContent={onSetEditingContent}
                     onDropImageAttachments={onDropImageAttachments}
@@ -2093,6 +2104,8 @@ const buildAttachmentDownloadMenuLabel = (
 const UserMessageEditForm: React.FC<{
   message: ChatMessage
   index: number
+  /** History the send of this edit keeps (already projected for the skill). */
+  historyPrefix: ChatMessage[]
   editingContent: string
   onSetEditingContent: (content: string) => void
   onDropImageAttachments?: (files: File[]) => Promise<ChatAttachment[]>
@@ -2109,6 +2122,7 @@ const UserMessageEditForm: React.FC<{
   columnTokens?: AgentColumnTokens
 }> = ({
   message,
+  historyPrefix,
   editingContent,
   onSetEditingContent,
   onDropImageAttachments,
@@ -2529,7 +2543,10 @@ const UserMessageEditForm: React.FC<{
                 return
               }
               try {
-                assertNoUnverifiedPrimaryReports([{ attachments: editingAttachments }])
+                assertNoUnverifiedPrimaryReports([
+                  ...historyPrefix,
+                  { attachments: editingAttachments }
+                ])
               } catch (error) {
                 setAttachmentError(error instanceof Error ? error.message : String(error))
                 return

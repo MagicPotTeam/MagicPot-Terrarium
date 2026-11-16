@@ -13,7 +13,7 @@ type Props = React.ComponentProps<typeof ChatMessageList>
 const report: ChatAttachment = { type: 'file', url: 'local-media:///report.txt', fileName: 'report.txt', reportBundleId: 'fixture', reportBundleManifestUrl: 'local-media:///manifest.json', reportBundleRole: 'primary-report' }
 const fixedMessage = 'Report bundles are temporarily unavailable because their source cannot be verified. Remove the report from your current draft where possible, or start a new empty conversation without it. A new conversation does not carry over previous context.'
 const theme = createTheme()
-function setup(session: ChatSession, target: number) {
+function setup(session: ChatSession, target: number, extra: Partial<Props> = {}) {
   const before = structuredClone(session)
   const onSendEditedMessage = vi.fn<Props['onSendEditedMessage']>()
   const Harness = () => {
@@ -23,7 +23,7 @@ function setup(session: ChatSession, target: number) {
     return <ThemeProvider theme={theme}><ChatMessageList currentSession={session} isLoading={false}
       editingMessageIndex={index} editingContent={content} onSetEditingIndex={setIndex} onSetEditingContent={setContent}
       onSendEditedMessage={onSendEditedMessage} onPreviewImage={vi.fn()} onImageContextMenu={vi.fn()}
-      onDownloadAttachment={vi.fn()} onSendModelToDcc={vi.fn()} chatContainerRef={container} messagesEndRef={end} /></ThemeProvider>
+      onDownloadAttachment={vi.fn()} onSendModelToDcc={vi.fn()} chatContainerRef={container} messagesEndRef={end} {...extra} /></ThemeProvider>
   }
   render(<Harness />)
   fireEvent.click(within(screen.getAllByTestId('user-message-actions')[target]).getByRole('button', { name: 'chat.edit_message' }))
@@ -57,5 +57,29 @@ describe('real ChatMessageList report edit preflight', () => {
   it('rejects a report in the history prefix and keeps the current edit open', () => {
     const session: ChatSession = { id: 'history', title: 'fixture', messages: [{ role: 'user', content: 'earlier', attachments: [report] }, { role: 'assistant', content: 'reply' }, { role: 'user', content: 'original' }] }
     assertRejected(setup(session, 1))
+  })
+  it('rejects a prefix whose only report is in an assistant message', () => {
+    const session: ChatSession = { id: 'assistant-report', title: 'fixture', messages: [{ role: 'user', content: 'earlier' }, { role: 'assistant', content: 'reply', attachments: [report] }, { role: 'user', content: 'original' }] }
+    assertRejected(setup(session, 1))
+  })
+  it('checks the projected history: a projector that drops the history lets the edit submit', () => {
+    const session: ChatSession = { id: 'projected', title: 'fixture', messages: [{ role: 'user', content: 'earlier', attachments: [report] }, { role: 'assistant', content: 'reply' }, { role: 'user', content: 'original' }] }
+    const projectEditHistory = vi.fn<NonNullable<Props['projectEditHistory']>>(() => [])
+    const f = setup(session, 1, { projectEditHistory })
+    expect(projectEditHistory).toHaveBeenCalledWith(session.messages.slice(0, 2))
+    expect(screen.queryByText(fixedMessage)).not.toBeInTheDocument()
+    expect(f.onSendEditedMessage).toHaveBeenCalledOnce()
+    expect(f.onSendEditedMessage.mock.calls[0][0]).toBe('changed text')
+    // The send still carries the full kept history; only the preflight looks at the projection.
+    expect(f.onSendEditedMessage.mock.calls[0][3]).toEqual(session.messages.slice(0, 2))
+    expect(f.session).toEqual(f.before)
+  })
+  it('still refuses a report in the edited message when the projector drops the history', () => {
+    const session: ChatSession = { id: 'projected-current', title: 'fixture', messages: [{ role: 'user', content: 'earlier' }, { role: 'assistant', content: 'reply' }, { role: 'user', content: 'original', attachments: [report] }] }
+    assertRejected(setup(session, 1, { projectEditHistory: () => [] }))
+  })
+  it('refuses when the projector keeps the report', () => {
+    const session: ChatSession = { id: 'projected-kept', title: 'fixture', messages: [{ role: 'user', content: 'earlier', attachments: [report] }, { role: 'assistant', content: 'reply' }, { role: 'user', content: 'original' }] }
+    assertRejected(setup(session, 1, { projectEditHistory: (prefix) => prefix.slice(-2) }))
   })
 })
