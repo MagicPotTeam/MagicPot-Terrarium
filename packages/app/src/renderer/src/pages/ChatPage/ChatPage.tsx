@@ -9146,13 +9146,39 @@ const ChatPage: React.FC<ChatPageProps> = ({
       baseMessages: ChatMessage[]
     ) => {
       // Fails closed: a submit from an earlier selection, another thread or scope sends nothing.
-      if (!isEditOwnerCurrent()) {
+      const ownerSessionId = currentSessionId
+      if (!ownerSessionId || !isEditOwnerCurrent()) {
         notifyWarning(t('chat.edit_submit_stale'))
         return
       }
-      void sendMessage({ content, attachments, hiddenContext, baseMessages })
+      let accepted = false
+      let warned = false
+      void sendMessage({
+        content,
+        attachments,
+        hiddenContext,
+        baseMessages,
+        // The edit belongs to its thread; a preparing or queued edit never follows the selection.
+        targetSessionId: ownerSessionId,
+        // Re-checked by the send preflight after every await: a switch before the edited turn
+        // is accepted locally sends nothing and warns once.
+        isComposerSubmissionCurrent: () => {
+          if (accepted || isEditOwnerCurrent()) return true
+          if (!warned && isMountedRef.current) {
+            warned = true
+            notifyWarning(t('chat.edit_submit_stale'))
+          }
+          return false
+        },
+        // Only latches the acceptance, so that a later switch cannot refuse the dispatch of an
+        // already accepted turn (team member requests re-check preflight before dispatch).
+        // It does not touch the composer: composerSubmission stays unset.
+        onComposerSubmissionAccepted: () => {
+          accepted = true
+        }
+      })
     },
-    [isEditOwnerCurrent, notifyWarning, sendMessage, t]
+    [currentSessionId, isEditOwnerCurrent, notifyWarning, sendMessage, t]
   )
 
   // The edit form's report preflight looks at the history the edited send will

@@ -411,4 +411,59 @@ describe('ChatPage edit form thread ownership', () => {
     expect(deadReceiver).not.toHaveBeenCalled()
     expect(f.error).not.toHaveBeenCalled()
   })
+
+  it('sends nothing when the thread changes while the edit submit waits for video-frame extraction', async () => {
+    await renderPage()
+    const extraction = deferred<{ attachments: ChatAttachment[] | undefined; content: string }>()
+    f.augment.mockImplementation(() => extraction.promise)
+    await startEdit(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Submit edit' }))
+    await waitFor(() => expect(f.augment).toHaveBeenCalled())
+    await selectSession('session-b')
+    await act(async () => {
+      extraction.resolve({ attachments: undefined, content: 'Edit draft 2' })
+      await extraction.promise
+    })
+    await act(async () => {})
+    expect(requestCount()).toBe(0)
+    expect(staleWarnings()).toBe(1)
+    expect(f.augment).toHaveBeenCalledOnce()
+    expect(messages().map((message) => message.content)).toEqual([
+      'session-b message 0',
+      'session-b reply 0',
+      'session-b message 1'
+    ])
+    await selectSession('session-a')
+    expect(messages().map((message) => message.content)).toEqual([
+      'session-a message 0',
+      'session-a reply 0',
+      'session-a message 1'
+    ])
+    expect(f.sessions.map((session) => session.messages.length)).toEqual([3, 3])
+    expect(requestCount()).toBe(0)
+  })
+
+  it('delivers nothing to B when an edit-form image import from A completes after the switch', async () => {
+    await renderPage()
+    await startEdit(0)
+    const pending = deferred<ChatAttachment>()
+    const attachment: ChatAttachment = { type: 'image', url: 'local-media:///fixture/late.png', fileName: 'late.png' }
+    f.materialize.mockReturnValueOnce(pending.promise)
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment } }))
+      await Promise.resolve()
+    })
+    expect(f.materialize).toHaveBeenCalledWith(attachment)
+    await selectSession('session-b')
+    await startEdit(2)
+    await act(async () => {
+      pending.resolve(attachment)
+      await pending.promise
+    })
+    await act(async () => {})
+    expect(f.receive).not.toHaveBeenCalled()
+    expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
+    expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 2')
+    expect(requestCount()).toBe(0)
+  })
 })
