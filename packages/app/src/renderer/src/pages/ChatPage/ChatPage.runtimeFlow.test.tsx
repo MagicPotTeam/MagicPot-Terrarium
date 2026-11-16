@@ -5985,7 +5985,7 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { page.unmount() }
   })
 
-  it('offline shows the unknown-result check without offering an extra send', async () => {
+  it('records a failed member request as unknown and shows its delegated row failed without offering an extra send', async () => {
     const lead: ChatSession = {id:'unknown-hint-lead',title:'Lead',messages:[],profileId:'base-model'}
     const alice: ChatSession = {id:'unknown-hint-alice',title:'Alice',messages:[],teamLeadId:lead.id,teamMemberName:'Alice'}
     const bob: ChatSession = {id:'unknown-hint-bob',title:'Bob',messages:[],teamLeadId:lead.id,teamMemberName:'Bob'}
@@ -6000,7 +6000,8 @@ describe('ChatPage runtime workflow integration', () => {
     const page = renderChatPage({team:true})
     try {
       await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'unknown hint fixture')).toBe('unknown'))
-      // The check now lives in the lead's transcript: Bob's delegated line shows the failed run
+      // No unknown-result check is shown any more (d3e35c51 removed the hint): the dispatcher
+      // record is 'unknown', and Bob's delegated line in the lead's transcript shows the failed run
       // and its task, and offers no send of its own.
       await waitFor(() => expect(delegatedLineStates()).toEqual(['failed']))
       const line = screen.getByTestId('team-delegated-row')
