@@ -52,4 +52,29 @@ describe('useBackgroundCompletions', () => {
     view.rerender({ scope: 'a', items: [{ id: '1', done: true }] })
     expect(onFinish).not.toHaveBeenCalled()
   })
+
+  it('announces a short job that finished between two reads, but not one that had finished before', () => {
+    const onFinish = vi.fn()
+    type Timed = { id: string; done: boolean; finishedAt?: number }
+    const opened = Date.now()
+    const view = renderHook(
+      ({ items }: { items: Timed[] }) =>
+        useBackgroundCompletions(
+          'a',
+          items,
+          (job) => job.id,
+          (job) => job.done,
+          onFinish,
+          (job) => job.finishedAt
+        ),
+      { initialProps: { items: [{ id: 'before', done: true, finishedAt: opened - 60_000 }] as Timed[] } }
+    )
+    expect(onFinish).not.toHaveBeenCalled()
+    const quick = { id: 'quick', done: true, finishedAt: Date.now() + 5 }
+    view.rerender({ items: [{ id: 'before', done: true, finishedAt: opened - 60_000 }, quick] })
+    expect(onFinish).toHaveBeenCalledTimes(1)
+    expect(onFinish).toHaveBeenCalledWith(quick)
+    view.rerender({ items: [quick] })
+    expect(onFinish).toHaveBeenCalledTimes(1)
+  })
 })

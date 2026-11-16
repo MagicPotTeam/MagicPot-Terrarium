@@ -126,6 +126,32 @@ describe('member work as delegated-agent lines in the lead transcript', () => {
     )
   })
 
+  it('opens a failed member on its error text in the error colour, without the run reference', () => {
+    const theme = createTheme({ palette: { mode: 'dark' } })
+    const b = member('b', 'B', [
+      user('two'),
+      assistant('Error sending message: Terminal execution was denied by the user. (Run: 0f3c-77aa)')
+    ])
+    startScopedChatRun(SCOPE, 'b', 'run-b')
+    dispatchScopedChatRunEvent(SCOPE, 'b', { runId: 'run-b', status: 'failed' })
+    render(
+      <ThemeProvider theme={theme}>
+        <AgentTeamDelegatedRows members={[b]} scope={SCOPE} running={none} waiting={none} />
+      </ThemeProvider>
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: 'chat.delegated.member_label:B — chat.tool_call.status_failed' })
+    )
+    const result = screen.getByTestId('chat-delegated-result')
+    expect(result).toHaveTextContent(
+      'Error sending message: Terminal execution was denied by the user.'
+    )
+    expect(result).not.toHaveTextContent('Run:')
+    const [r, g, b2] = [1, 3, 5].map((at) => parseInt(theme.palette.error.main.slice(at, at + 2), 16))
+    expect(getComputedStyle(result).color).toBe(`rgb(${r}, ${g}, ${b2})`)
+    expect(result.querySelector('pre')).not.toBeNull()
+  })
+
   it('redraws when a member run is stopped elsewhere', () => {
     const c = member('c', 'C', [user('three')])
     startScopedChatRun(SCOPE, 'c', 'run-c')

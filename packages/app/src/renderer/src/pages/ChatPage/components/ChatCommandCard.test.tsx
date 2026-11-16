@@ -102,6 +102,40 @@ describe('ChatCommandResultCard', () => {
     expect(screen.getByTestId('chat-command-card-note')).toHaveStyle({ fontSize: '11px' })
   })
 
+  it('gives a row its own text links under its lines', async () => {
+    const stop = vi.fn()
+    const read = vi.fn()
+    show(
+      <ChatCommandResultCard command="/jobs">
+        <CommandCardList
+          items={[
+            {
+              key: 'a',
+              label: 'explore',
+              description: 'running · a1',
+              actions: [{ key: 'stop', label: 'Stop', onClick: stop }]
+            },
+            {
+              key: 'b',
+              label: 'critic',
+              description: 'done · b1\nsecond line',
+              actions: [{ key: 'read', label: 'Read result', onClick: read }]
+            }
+          ]}
+        />
+      </ChatCommandResultCard>
+    )
+    const rows = within(screen.getByRole('list')).getAllByRole('listitem')
+    expect(within(rows[0]).getByTestId('chat-command-card-item-actions')).toHaveStyle({ flexWrap: 'wrap' })
+    expect(within(rows[1]).getByText(/done · b1/)).toHaveStyle({ whiteSpace: 'pre-line' })
+    fireEvent.click(within(rows[0]).getByRole('button', { name: 'Stop' }))
+    expect(stop).toHaveBeenCalledTimes(1)
+    within(rows[1]).getByRole('button', { name: 'Read result' }).focus()
+    await userEvent.keyboard('{Enter}')
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
   it('offers where a command hands over as text buttons in a wrapping row', async () => {
     const open = vi.fn()
     show(

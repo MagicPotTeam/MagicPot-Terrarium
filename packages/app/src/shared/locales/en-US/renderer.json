@@ -1372,11 +1372,8 @@
       "status_budget_exhausted": "Budget exhausted"
     },
     "agent_process": {
-      "title": "Approved background processes",
-      "notice": "Python/shell jobs keep their approved runtime limits and survive only successful parent completion. Reload/Stop/failure cancels them. Logs are read on demand, retained here for 15 minutes; no automatic model follow-up or restart recovery. An exit code is not business-task verification.",
       "stdout": "Read stdout",
       "stderr": "Read stderr",
-      "more": "Read next log chunk",
       "stop": "Stop / confirm cleanup",
       "truncated": "Output is limited; this preview retains only its last 32 Ki characters.",
       "failed": "Could not access this process or its logs. Refresh status before retrying.",
@@ -1391,15 +1388,11 @@
       "status_unknown": "Unknown outcome"
     },
     "agent_jobs": {
-      "title": "Background read-only tasks",
-      "notice": "Results are retained for 15 minutes, not automatically sent to the model. Reloading stops tasks and clears results.",
       "read": "Read result",
-      "more": "Read next part",
       "truncated": "The report was truncated to the retention limit.",
       "stop": "Stop this task",
       "no_result": "No report yet; check the task status.",
       "failed": "Action failed; the task may have expired or been revoked.",
-      "refresh_failed": "Could not refresh task status; the display may be stale.",
       "status_running": "Running",
       "status_completed": "Completed",
       "status_incomplete": "Incomplete report",
@@ -1622,7 +1615,8 @@
       "regen_prompt": "Create a new conversation that keeps everything before the last user message and puts that message back in the input. The original stays.",
       "edit_prompt": "Create a new conversation that keeps everything before message {{number}} and puts the edited text in the input. The original stays.",
       "repair_prompt": "Replace {{count}} missing local image(s) with a placeholder note in later requests? The original history stays unchanged.",
-      "no_jobs": "No background jobs or processes."
+      "no_jobs": "No background jobs or processes.",
+      "no_output": "No output."
     },
     "delegated": {
       "helper_label": "[sub] {{name}}",

@@ -332,7 +332,13 @@ export const isHelperToolCall = (entry: ToolHistoryEntry): boolean =>
 export function helperToolCallResult(
   entry: ToolHistoryEntry
 ): { kind: 'report' | 'raw'; text: string } | undefined {
-  const content = entry.content
+  return helperResultText(entry.content)
+}
+
+/** The report of a helper's result (the advisory JSON's `content`), or the raw text. */
+export function helperResultText(
+  content: string | undefined
+): { kind: 'report' | 'raw'; text: string } | undefined {
   if (content === undefined || content === '') return undefined
   if (content.length <= MAX_TEXT && content.trimStart().startsWith('{')) {
     try {

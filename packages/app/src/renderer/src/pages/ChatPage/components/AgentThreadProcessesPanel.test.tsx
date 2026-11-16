@@ -1,93 +1,85 @@
 import React from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentProcessJob } from '@shared/api/agentThreadProcessJob'
-import AgentThreadProcessesPanel, { AgentProcessDetails, getAgentThreadProcessScope, useAgentThreadProcesses } from './AgentThreadProcessesPanel'
+import { getAgentThreadProcessScope, useAgentThreadProcesses } from './AgentThreadProcessesPanel'
 const mocks = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), stop: vi.fn() }))
 vi.mock('../../../utils/windowUtils', () => ({ api: () => ({ svcLLMProxy: { listAgentProcesses: mocks.list, readAgentProcess: mocks.read, stopAgentProcess: mocks.stop } }) }))
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'p', threadId: 't' } as const
 const job = (status: AgentProcessJob['status'] = 'running'): AgentProcessJob => ({ id: 'owned', kind: 'python', status, createdAt: Date.now(), expiresAt: Date.now() + 60000, outcome: status === 'completed' ? 'known' : 'unknown', stdoutBytes: 5, stderrBytes: 0, truncated: false, operationSettled: ['completed', 'unknown', 'stopped'].includes(status), cancellationRequested: false })
-const mount = async (item = job()) => { mocks.list.mockResolvedValue({ jobs: [item] }); const view = render(<AgentThreadProcessesPanel route={route} conversationId="chat" active />); await act(async () => { await Promise.resolve() }); return view }
+// The /jobs card of the Agent column reads logs and stops processes through this hook; the harness shows its list.
+let processes!: ReturnType<typeof useAgentThreadProcesses>
+const Harness = ({ conversationId, active = true }: { conversationId: string; active?: boolean }) => {
+  processes = useAgentThreadProcesses(getAgentThreadProcessScope(route, conversationId, active))
+  return <ul>{processes.jobs.map((item) => <li key={item.id}>{`${item.id}:${item.status}`}</li>)}</ul>
+}
+const mount = async (item = job()) => { mocks.list.mockResolvedValue({ jobs: [item] }); const view = render(<Harness conversationId="chat" />); await act(async () => { await Promise.resolve() }); return view }
 beforeEach(() => { vi.useFakeTimers(); Object.values(mocks).forEach((m) => m.mockReset()); mocks.stop.mockResolvedValue({ job: job('stopped') }); mocks.read.mockResolvedValue({ job: job(), data: 'first', nextCursor: 5, eof: false, truncated: false }) })
 afterEach(() => { cleanup(); vi.useRealTimers() })
-describe('owned background process UI', () => {
-  it('polls only metadata and reads logs on demand with byte cursors and no new turns', async () => {
+describe('owned background processes of a thread', () => {
+  it('polls only metadata and reads a whole log on demand with byte cursors and no new turns', async () => {
     await mount(); expect(mocks.read).not.toHaveBeenCalled()
     expect(mocks.list).toHaveBeenCalledWith({ route, conversationId: 'chat' })
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.stdout' })))
-    expect(mocks.read).toHaveBeenCalledWith({ route, conversationId: 'chat', jobId: 'owned', stream: 'stdout', cursor: 0, maxBytes: 16384 })
-    mocks.read.mockResolvedValueOnce({ job: job(), data: 'second', nextCursor: 11, eof: true })
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.more' })))
+    mocks.read.mockResolvedValueOnce({ job: job(), data: 'first', nextCursor: 5, eof: false, truncated: false })
+      .mockResolvedValueOnce({ job: job(), data: 'second', nextCursor: 11, eof: true, truncated: false })
+    let log: Awaited<ReturnType<typeof processes.readLog>>
+    await act(async () => { log = await processes.readLog('owned', 'stdout') })
+    expect(mocks.read).toHaveBeenNthCalledWith(1, { route, conversationId: 'chat', jobId: 'owned', stream: 'stdout', cursor: 0, maxBytes: 16384 })
     expect(mocks.read).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 5 }))
-    expect(screen.getByText('firstsecond')).toBeTruthy()
+    expect(log!).toEqual({ text: 'firstsecond', truncated: false })
   })
-  it('does not report stopped before refreshed actual status and labels unknown closure', async () => {
+  it('does not report stopped before a poll saw it and keeps an unknown closure stoppable', async () => {
     await mount()
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.stop' })))
+    await act(async () => { await processes.stop(processes.jobs[0]) })
     expect(mocks.stop).toHaveBeenCalledWith({ route, conversationId: 'chat', jobId: 'owned' })
-    expect(screen.getByText(/status_running/)).toBeTruthy()
+    expect(screen.getByText('owned:running')).toBeTruthy()
     mocks.list.mockResolvedValue({ jobs: [job('unknown')] })
     await act(async () => vi.advanceTimersByTimeAsync(1000))
-    expect(screen.getByText('chat.agent_process.unknown_notice')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'chat.agent_process.stop' })).toBeTruthy()
+    expect(screen.getByText('owned:unknown')).toBeTruthy()
+    await act(async () => { await processes.stop(processes.jobs[0]) })
+    expect(mocks.stop).toHaveBeenCalledTimes(2)
   })
-  it('discards old log replies and old polls after a scope switch', async () => {
+  it('discards a log read that finishes after a scope switch', async () => {
     const view = await mount()
     let finish!: (value: unknown) => void
     mocks.read.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
-    fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.stdout' }))
-    view.rerender(<AgentThreadProcessesPanel route={route} conversationId="other" active />)
-    await act(async () => { finish({ job: job(), data: 'OLD_SECRET', nextCursor: 10, eof: true }); await Promise.resolve() })
-    expect(screen.queryByText('OLD_SECRET')).toBeNull()
-    expect(screen.getByRole('button', { name: 'chat.agent_process.stdout' })).not.toBeDisabled()
+    const pending = processes.readLog('owned', 'stdout')
+    view.rerender(<Harness conversationId="other" />)
+    await act(async () => { finish({ job: job(), data: 'OLD_SECRET', nextCursor: 10, eof: true, truncated: false }); await Promise.resolve() })
+    await expect(pending).resolves.toBeUndefined()
   })
-  it('shows plain text only and bounds retained preview', async () => {
+  it('keeps only the end of a long log, as plain text', async () => {
     await mount(job('completed'))
-    mocks.read.mockResolvedValue({ job: job('completed'), data: '<script>not executed</script>' + 'x'.repeat(16000), nextCursor: 16000, eof: false })
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.stdout' })))
+    let cursor = 0
+    mocks.read.mockImplementation(async () => { cursor += 16000; return { job: job('completed'), data: '<script>not executed</script>' + 'x'.repeat(16000), nextCursor: cursor, eof: false, truncated: false } })
+    let log: Awaited<ReturnType<typeof processes.readLog>>
+    await act(async () => { log = await processes.readLog('owned', 'stdout') })
+    expect(log!.text.length).toBeLessThanOrEqual(32768)
+    expect(log!.truncated).toBe(true)
     expect(document.querySelector('script')).toBeNull()
-    for (let i = 0; i < 3; i++) await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.more' })))
-    expect(document.querySelector('pre')!.textContent!.length).toBeLessThanOrEqual(32768)
-    expect(screen.queryByRole('button', { name: 'chat.agent_process.stop' })).toBeNull()
   })
-  it('exposes scoped hook and keyed detail without leaking late polls or logs across scopes', async () => {
+  it('exposes the scoped hook without leaking late polls across scopes', async () => {
     let finishPoll!: (value: unknown) => void
     mocks.list.mockImplementationOnce(() => new Promise((resolve) => { finishPoll = resolve }))
     mocks.list.mockResolvedValue({ jobs: [job()] })
-    const Consumer = ({ conversationId }: { conversationId: string }) => {
-      const scope = getAgentThreadProcessScope(route, conversationId, true)
-      const { jobs, error } = useAgentThreadProcesses(scope)
-      return <><span>{error ? 'error' : 'ok'}</span>{scope && jobs.map((item) => <AgentProcessDetails key={item.id} job={item} scope={scope} />)}</>
-    }
-    const view = render(<Consumer conversationId="old" />)
-    view.rerender(<Consumer conversationId="new" />)
+    const view = render(<Harness conversationId="old" />)
+    view.rerender(<Harness conversationId="new" />)
     await act(async () => { await Promise.resolve(); finishPoll({ jobs: [{ ...job(), id: 'old-process' }] }); await Promise.resolve() })
     expect(screen.queryByText(/old-process/)).toBeNull()
     expect(screen.getByText(/owned/)).toBeTruthy()
-    let finishRead!: (value: unknown) => void
-    mocks.read.mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve }))
-    fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.stderr' }))
-    view.rerender(<Consumer conversationId="third" />)
-    await act(async () => { finishRead({ data: 'OLD_OUTPUT', nextCursor: 10, eof: true }); await Promise.resolve() })
-    expect(screen.queryByText('OLD_OUTPUT')).toBeNull()
-    expect(screen.getByRole('button', { name: 'chat.agent_process.stdout' })).not.toBeDisabled()
     expect(getAgentThreadProcessScope(route, 'third', false)).toBeNull()
   })
-  it('supports shell stderr, pagination and settled versus unknown stop semantics in exported detail', async () => {
+  it('reads stderr of a settled shell process, which cannot be stopped any more', async () => {
     const shell = { ...job(), kind: 'shell' as const, operationSettled: true }
-    const scope = JSON.stringify({ route, conversationId: 'chat' })
-    const view = render(<AgentProcessDetails job={shell} scope={scope} />)
-    expect(screen.queryByRole('button', { name: 'chat.agent_process.stop' })).toBeNull()
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.stderr' })))
+    await mount(shell)
+    await expect(processes.stop(processes.jobs[0])).rejects.toThrow('Process is no longer stoppable in this scope')
+    mocks.read.mockResolvedValueOnce({ job: shell, data: 'warning', nextCursor: 7, eof: true, truncated: false })
+    let log: Awaited<ReturnType<typeof processes.readLog>>
+    await act(async () => { log = await processes.readLog(shell.id, 'stderr') })
     expect(mocks.read).toHaveBeenLastCalledWith(expect.objectContaining({ jobId: shell.id, stream: 'stderr', cursor: 0 }))
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.more' })))
-    expect(mocks.read).toHaveBeenLastCalledWith(expect.objectContaining({ stream: 'stderr', cursor: 5 }))
-    view.rerender(<AgentProcessDetails job={{ ...shell, status: 'unknown' }} scope={scope} />)
-    expect(screen.getByText('chat.agent_process.unknown_notice')).toBeTruthy()
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_process.stop' })))
-    expect(mocks.stop).toHaveBeenCalledWith({ route, conversationId: 'chat', jobId: shell.id })
-    expect(screen.getByText(/status_unknown/)).toBeTruthy()
+    expect(log!).toEqual({ text: 'warning', truncated: false })
+    expect(mocks.stop).not.toHaveBeenCalled()
+    await expect(processes.readLog('missing', 'stdout')).resolves.toBeUndefined()
   })
   it('validates controller stop scope and current job and propagates IPC errors', async () => {
     const unknown = job('unknown')
@@ -177,8 +169,8 @@ describe('owned background process UI', () => {
   it('expires stale metadata even if IPC is unavailable and never polls an inactive surface', async () => {
     const view = await mount(); mocks.list.mockRejectedValue(new Error('offline'))
     await act(async () => vi.advanceTimersByTimeAsync(61000))
-    expect(screen.queryByRole('region')).toBeNull()
-    view.rerender(<AgentThreadProcessesPanel route={route} conversationId="chat" active={false} />)
+    expect(screen.queryByRole('listitem')).toBeNull()
+    view.rerender(<Harness conversationId="chat" active={false} />)
     const calls = mocks.list.mock.calls.length
     await act(async () => vi.advanceTimersByTimeAsync(2000)); expect(mocks.list).toHaveBeenCalledTimes(calls)
   })

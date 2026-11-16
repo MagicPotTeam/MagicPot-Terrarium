@@ -298,7 +298,7 @@ import { isRepairImagesCommand, parseRepairImagesCommand, scanMissingLocalImages
 import { isAgentConfigurationCommand, parseAgentConfigurationCommand } from './agentConfigurationCommand'
 import { isAgentInspectionCommand, parseAgentInspectionCommand, formatAgentEnvironment } from './agentInspectionCommand'
 import AgentThreadScratchpadView, { type AgentScratchpadResult } from './components/AgentThreadScratchpadView'
-import ChatCommandTail, { type ChatTailCard, type ChatTailCardDraft, type ChatTailConfirmCard } from './components/ChatCommandTail'
+import ChatCommandTail, { type ChatTailCard, type ChatTailCardDraft, type ChatTailConfirmCard, type ChatTailListItem } from './components/ChatCommandTail'
 import AgentThreadGoalEntry from './components/AgentThreadGoalEntry'
 import { isAgentScratchpadCommand, parseAgentScratchpadCommand, type AgentScratchpadCommandHandle } from './agentScratchpadCommand'
 import { isAgentSkillCommand, parseAgentSkillCommand, type AgentSkillCommandHandle } from './agentSkillCommand'
@@ -314,6 +314,7 @@ import { isAgentSideCommand, parseAgentSideCommand, type AgentSideCommandHandle 
 import { getAgentThreadProcessScope, useAgentThreadProcesses } from './components/AgentThreadProcessesPanel'
 import { useAgentThreadJobs } from './components/AgentThreadJobsPanel'
 import { useBackgroundCompletions } from './useBackgroundCompletions'
+import { helperResultText } from './chatToolCallDisplay'
 import AgentThreadInteractionPanel from './components/AgentThreadInteractionPanel'
 import ChatComposer from './components/ChatComposer'
 import ImagePreviewOverlay from './components/ImagePreviewOverlay'
@@ -369,8 +370,20 @@ export interface ChatPageWorkspaceMenu {
   onOpenCanvasTarget: () => void
 }
 
-/** Where a link of a command card leads. */
-type CommandTailTarget = { path: string; state: unknown }
+/**
+ * Where a link of a command card leads: another place of the app, or an action on a helper job
+ * or a background process that `/jobs` listed (read its result or a log into a new card, stop it).
+ */
+type CommandTailTarget =
+  | { path: string; state: unknown }
+  | { job: 'read' | 'stop'; id: string }
+  | { process: 'stdout' | 'stderr' | 'stop'; id: string }
+type CommandTailJobTarget = Exclude<CommandTailTarget, { path: string }>
+
+/** Helper jobs that ended with a result to read (not stopped, not failed). */
+const JOB_RESULT_STATUSES: ReadonlySet<string> = new Set(['completed', 'incomplete', 'budget_exhausted', 'timeout'])
+/** Background processes that ran to their end (not stopped, not failed, not unknown). */
+const PROCESS_RESULT_STATUSES: ReadonlySet<string> = new Set(['completed', 'timed-out'])
 
 type ExternalSendToAgentDetail = {
   image?: string
@@ -8539,8 +8552,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const announceBackgroundResult = (label: string) => {
     if (compact) appendTailCard(inspectionScope, { kind: 'background', command: '', text: t('chat.delegated.background_result', { label }) })
   }
-  useBackgroundCompletions(jobController.scopeKey || null, jobController.jobs, job => job.id, job => job.status !== 'running', job => announceBackgroundResult(job.kind))
-  useBackgroundCompletions(processScope, processController.jobs, job => job.id, job => job.operationSettled, job => announceBackgroundResult(job.kind))
+  // A job or process that was stopped or failed has no result: it ends without the divider.
+  // A job that ran between two reads of the list is known by when it finished.
+  useBackgroundCompletions(jobController.scopeKey || null, jobController.jobs, job => job.id, job => job.status !== 'running', job => { if (JOB_RESULT_STATUSES.has(job.status)) announceBackgroundResult(job.kind) }, job => job.finishedAt)
+  useBackgroundCompletions(processScope, processController.jobs, job => job.id, job => job.operationSettled, job => { if (PROCESS_RESULT_STATUSES.has(job.status)) announceBackgroundResult(job.kind) }, job => job.finishedAt)
   /** Shows the one card of a live view (goal records, thread skills) at the end; an older card of that view leaves. */
   const showTailPanel = useCallback((scope: string, panel: 'goal' | 'skills', command: string, title?: string) => {
     const owner = tailOwnerRef.current
@@ -8559,7 +8574,63 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const tailConfirmActionsRef = useRef(new Map<number,
     | { type: 'replay'; view: NonNullable<typeof replayView> }
     | { type: 'repair'; session: ChatSession; scan: ImageRepairScan }>())
-  const openCommandTailTarget = useCallback((target: CommandTailTarget) => navigate(target.path, { state: target.state }), [navigate])
+  const tailFocusReturnRef = useRef(false)
+  useLayoutEffect(() => {
+    if (!tailFocusReturnRef.current) return
+    tailFocusReturnRef.current = false
+    const current = document.activeElement
+    if (!current || current === document.body) composerInputRef.current?.focus()
+  }, [tailCards])
+  // The links of a /jobs card act on the job or process through the lists the page already polls.
+  // A result or a log is shown as a new card; a stop leaves the status to the next /jobs.
+  const jobTailActionRef = useRef<(target: CommandTailJobTarget) => Promise<void>>(async () => undefined)
+  jobTailActionRef.current = async (target) => {
+    const scope = tailOwnerRef.current.scope
+    const failed = (key: 'chat.agent_jobs.failed' | 'chat.agent_process.failed') => appendTailCard(scope, { kind: 'text', command: '/jobs', text: t(key), error: true })
+    // A stopped item keeps its row; only its stop link goes.
+    const dropStopLink = (itemKey: string) => {
+      // The link that had the keyboard leaves; the keyboard goes back to the composer.
+      tailFocusReturnRef.current = true
+      setTailCards(previous => previous.map(card => card.kind !== 'list' || card.scope !== scope ? card : {
+        ...card, items: card.items.map(item => item.key === itemKey && item.links ? { ...item, links: item.links.filter(link => link.key !== 'stop') } : item)
+      }))
+    }
+    if ('job' in target) {
+      try {
+        if (target.job === 'stop') {
+          if (await jobController.stop(target.id)) dropStopLink(target.id)
+          else failed('chat.agent_jobs.failed')
+          return
+        }
+        const result = await jobController.readAll(target.id)
+        if (!result) { failed('chat.agent_jobs.failed'); return }
+        // The report of the helper, as the helper line of the transcript shows it; other output stays raw.
+        const shown = helperResultText(result.text)
+        appendTailCard(scope, {
+          kind: 'text', command: '/jobs', title: `${result.job.kind} · ${t(`chat.agent_jobs.status_${result.job.status}`)}`,
+          text: shown?.text || t('chat.agent_jobs.no_result'), mono: shown?.kind === 'raw', muted: !shown,
+          note: result.job.resultTruncated ? t('chat.agent_jobs.truncated') : undefined
+        })
+      } catch { failed('chat.agent_jobs.failed') }
+      return
+    }
+    const job = processController.jobs.find(item => item.id === target.id)
+    try {
+      if (!job) { failed('chat.agent_process.failed'); return }
+      if (target.process === 'stop') { await processController.stop(job); dropStopLink(`process:${job.id}`); return }
+      const log = await processController.readLog(job.id, target.process)
+      if (!log) { failed('chat.agent_process.failed'); return }
+      appendTailCard(scope, {
+        kind: 'text', command: '/jobs', title: `${job.kind} · ${target.process}`,
+        text: log.text || t('chat.command_card.no_output'), mono: Boolean(log.text), muted: !log.text,
+        note: log.truncated ? t('chat.agent_process.truncated') : undefined
+      })
+    } catch { failed('chat.agent_process.failed') }
+  }
+  const openCommandTailTarget = useCallback((target: CommandTailTarget) => {
+    if ('path' in target) navigate(target.path, { state: target.state })
+    else void jobTailActionRef.current(target)
+  }, [navigate])
   const configurationTailCard = (kind: 'plugin' | 'module' | 'video_gen'): ChatTailCardDraft<CommandTailTarget> => ({
     kind: 'links', command: `/${kind}`, text: t(`chat.command_card.${kind}_hint`),
     links: kind === 'video_gen'
@@ -8778,9 +8849,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
               api().svcLLMProxy.listAgentJobs({ route: conversationRoute, conversationId: id }),
               api().svcLLMProxy.listAgentProcesses({ route: conversationRoute, conversationId: id })
             ])).then(([helpers, processes]) => {
-              const items = [
-                ...helpers.jobs.map(job => ({ key: job.id, label: job.kind, description: `${job.status} · ${job.id}` })),
-                ...processes.jobs.map(job => ({ key: `process:${job.id}`, label: job.kind, description: `${job.status} · ${job.id}` }))
+              // Each row has the links of what can be done with it now: read a finished job's result,
+              // read a process's logs, stop what still runs.
+              const items: ChatTailListItem<CommandTailTarget>[] = [
+                ...helpers.jobs.map(job => ({
+                  key: job.id, label: job.kind, description: `${t(`chat.agent_jobs.status_${job.status}`)} · ${job.id}`,
+                  links: job.status === 'running'
+                    ? [{ key: 'stop', label: t('chat.agent_jobs.stop'), target: { job: 'stop' as const, id: job.id } }]
+                    : [{ key: 'read', label: t('chat.agent_jobs.read'), target: { job: 'read' as const, id: job.id } }]
+                })),
+                ...processes.jobs.map(job => ({
+                  key: `process:${job.id}`, label: job.kind,
+                  // An unknown end keeps its warning: the host has not confirmed the process is gone.
+                  description: [`${t(`chat.agent_process.status_${job.status}`)} · ${job.id}`, job.status === 'unknown' ? t('chat.agent_process.unknown_notice') : ''].filter(Boolean).join('\n'),
+                  links: [
+                    { key: 'stdout', label: t('chat.agent_process.stdout'), target: { process: 'stdout' as const, id: job.id } },
+                    { key: 'stderr', label: t('chat.agent_process.stderr'), target: { process: 'stderr' as const, id: job.id } },
+                    ...(!job.operationSettled || job.status === 'unknown'
+                      ? [{ key: 'stop', label: t('chat.agent_process.stop'), target: { process: 'stop' as const, id: job.id } }]
+                      : [])
+                  ]
+                }))
               ]
               appendTailCard(scope, items.length
                 ? { kind: 'list', command: '/jobs', items }
@@ -9070,9 +9159,33 @@ const ChatPage: React.FC<ChatPageProps> = ({
     : null, [delegatedMembers, storageScope, loadingSessionIds, delegatedWaiting])
   // In the column the member approval cards are prompt cards at the end of the transcript:
   // their host follows the tail (the full-page chat keeps it above the transcript).
+  // A card that arrives is announced; a card that leaves after 批准 / 拒绝 gives the keyboard
+  // back to the composer instead of dropping it on the page.
   const approvalTailEnd = useMemo(() => teamEnabled && compact
-    ? <Box ref={setTeamApprovalHost} data-testid="team-inline-approvals" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }} />
+    ? <Box ref={setTeamApprovalHost} data-testid="team-inline-approvals" aria-live="polite" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }} />
     : null, [teamEnabled, compact])
+  useEffect(() => {
+    if (!compact || !teamApprovalHost) return
+    let focused: Element | null = null
+    const onFocusIn = (event: FocusEvent) => { focused = event.target instanceof Element ? event.target : null }
+    const onFocusOut = (event: FocusEvent) => {
+      if (event.relatedTarget instanceof Node && !teamApprovalHost.contains(event.relatedTarget)) focused = null
+    }
+    const observer = new MutationObserver(() => {
+      if (!focused || focused.isConnected) return
+      focused = null
+      const current = document.activeElement
+      if (!current || current === document.body) composerInputRef.current?.focus()
+    })
+    teamApprovalHost.addEventListener('focusin', onFocusIn)
+    teamApprovalHost.addEventListener('focusout', onFocusOut)
+    observer.observe(teamApprovalHost, { childList: true, subtree: true })
+    return () => {
+      observer.disconnect()
+      teamApprovalHost.removeEventListener('focusin', onFocusIn)
+      teamApprovalHost.removeEventListener('focusout', onFocusOut)
+    }
+  }, [compact, teamApprovalHost])
   const transcriptTail = useMemo(() => delegatedRowsTail || transcriptCards.tail || memberImagesTail
     ? <>{delegatedRowsTail}{transcriptCards.tail}{memberImagesTail}</>
     : null, [delegatedRowsTail, transcriptCards.tail, memberImagesTail])

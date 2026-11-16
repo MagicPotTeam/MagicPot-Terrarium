@@ -345,9 +345,14 @@ describe('slash-command results in the Agent column', () => {
     expect(listAgentProcesses).toHaveBeenCalledWith({ route, conversationId: 'lead' })
     const rows = within(cards()[0]).getAllByRole('listitem')
     expect(rows).toHaveLength(2)
-    expect(rows[0]).toHaveTextContent('explorerunning · job-1')
-    expect(rows[1]).toHaveTextContent('pythoncompleted · process-1')
-    expect(within(cards()[0]).queryByRole('button')).toBeNull()
+    expect(rows[0]).toHaveTextContent(`explore${zh.chat.agent_jobs.status_running} · job-1`)
+    expect(rows[1]).toHaveTextContent(`python${zh.chat.agent_process.status_completed} · process-1`)
+    // No refresh button: only the links of each row (stop what runs, read what is there).
+    expect(within(cards()[0]).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      zh.chat.agent_jobs.stop,
+      zh.chat.agent_process.stdout,
+      zh.chat.agent_process.stderr
+    ])
 
     answer = async () => ({ jobs: [] })
     processes = async () => ({ jobs: [] })
@@ -425,6 +430,78 @@ describe('slash-command results in the Agent column', () => {
     // Following a link leaves the card where it is.
     expect(commands()).toEqual(['/plugin', '/module', '/video_gen'])
     expectNothingAboveTheTranscript()
+  })
+
+  it('reads and stops the listed jobs and processes from the links of their rows', async () => {
+    const now = Date.now()
+    let helpers = [
+      { id: 'job-run', kind: 'explore', task: 't', status: 'running', createdAt: now, expiresAt: now + 60_000 },
+      { id: 'job-done', kind: 'critic', task: 't', status: 'completed', createdAt: now, expiresAt: now + 60_000, resultTruncated: true }
+    ]
+    const process = {
+      id: 'proc-1', kind: 'shell', status: 'running', createdAt: now, expiresAt: now + 60_000, outcome: 'unknown',
+      stdoutBytes: 4, stderrBytes: 0, truncated: false, operationSettled: false, cancellationRequested: false
+    }
+    const listAgentJobs = vi.fn(async (_scope: unknown) => ({ jobs: helpers }))
+    const listAgentProcesses = vi.fn(async (_scope: unknown) => ({ jobs: [process] }))
+    const report = JSON.stringify({ kind: 'critic', status: 'completed', content: 'found **3** files', advisoryOnly: true })
+    const readAgentJob = vi.fn(async (_request: unknown) => ({ job: helpers[1], text: report, nextOffset: report.length, totalCharacters: report.length }))
+    const stopAgentJob = vi.fn(async (_request: unknown) => ({ job: { ...helpers[0], status: 'cancelled' } }))
+    const readAgentProcess = vi.fn(async (_request: unknown) => ({ job: process, data: 'hello', nextCursor: 5, eof: true, truncated: false }))
+    const stopAgentProcess = vi.fn(async (_request: unknown) => ({ job: process }))
+    useServices({
+      'svcLLMProxy.listAgentJobs': listAgentJobs,
+      'svcLLMProxy.listAgentProcesses': listAgentProcesses,
+      'svcLLMProxy.readAgentJob': readAgentJob,
+      'svcLLMProxy.stopAgentJob': stopAgentJob,
+      'svcLLMProxy.readAgentProcess': readAgentProcess,
+      'svcLLMProxy.stopAgentProcess': stopAgentProcess
+    })
+    await renderPage()
+    // The page's own job lists have seen the items before /jobs lists them.
+    await waitFor(() => expect(listAgentProcesses).toHaveBeenCalled())
+    run('/jobs')
+    await waitFor(() => expect(commands()).toEqual(['/jobs']))
+    const list = cards()[0]
+    const [running, done, shell] = within(list).getAllByRole('listitem')
+    expect(within(running).getByRole('button').textContent).toBe(zh.chat.agent_jobs.stop)
+    expect(within(done).getByRole('button').textContent).toBe(zh.chat.agent_jobs.read)
+
+    // Reading a finished job's result adds a card with it.
+    fireEvent.click(within(done).getByRole('button', { name: zh.chat.agent_jobs.read }))
+    await waitFor(() => expect(commands()).toEqual(['/jobs', '/jobs']))
+    expect(readAgentJob).toHaveBeenCalledWith({ route, conversationId: 'lead', jobId: 'job-done', offset: 0, limit: 16000 })
+    // The helper's report, not the advisory JSON around it.
+    expect(within(cards()[1]).getByTestId('chat-command-card-text')).toHaveTextContent(/^found \*\*3\*\* files$/)
+    expect(within(cards()[1]).getByTestId('chat-command-card-title')).toHaveTextContent(`critic · ${zh.chat.agent_jobs.status_completed}`)
+    expect(within(cards()[1]).getByTestId('chat-command-card-note')).toHaveTextContent(zh.chat.agent_jobs.truncated)
+
+    // Reading a process's output adds a card with the log.
+    fireEvent.click(within(shell).getByRole('button', { name: zh.chat.agent_process.stdout }))
+    await waitFor(() => expect(commands()).toHaveLength(3))
+    expect(readAgentProcess).toHaveBeenCalledWith({ route, conversationId: 'lead', jobId: 'proc-1', stream: 'stdout', cursor: 0, maxBytes: 16384 })
+    expect(cards()[2]).toHaveTextContent('hello')
+
+    // Stopping asks the host and takes the stop link away; the status is left to the next /jobs.
+    fireEvent.click(within(running).getByRole('button', { name: zh.chat.agent_jobs.stop }))
+    await waitFor(() => expect(stopAgentJob).toHaveBeenCalledWith({ route, conversationId: 'lead', jobId: 'job-run' }))
+    await waitFor(() => expect(within(running).queryByRole('button')).toBeNull())
+    expect(running).toHaveTextContent(zh.chat.agent_jobs.status_running)
+    fireEvent.click(within(shell).getByRole('button', { name: zh.chat.agent_process.stop }))
+    await waitFor(() => expect(stopAgentProcess).toHaveBeenCalledWith({ route, conversationId: 'lead', jobId: 'proc-1' }))
+    await waitFor(() => expect(within(shell).queryByRole('button', { name: zh.chat.agent_process.stop })).toBeNull())
+    expect(commands()).toHaveLength(3)
+
+    // A job that is gone by now gives an error card instead of a result.
+    helpers = []
+    const polled = listAgentJobs.mock.calls.length
+    await waitFor(() => expect(listAgentJobs.mock.calls.length).toBeGreaterThan(polled), { timeout: 3000 })
+    fireEvent.click(within(done).getByRole('button', { name: zh.chat.agent_jobs.read }))
+    await waitFor(() => expect(commands()).toHaveLength(4))
+    expect(cards()[3]).toHaveAttribute('data-error', 'true')
+    expect(cards()[3]).toHaveTextContent(zh.chat.agent_jobs.failed)
+    expect(h.navigate).not.toHaveBeenCalled()
+    expectCardsInTheTranscriptOnly()
   })
 
   it('drops the cards with the conversation and a late result of the conversation that was left', async () => {

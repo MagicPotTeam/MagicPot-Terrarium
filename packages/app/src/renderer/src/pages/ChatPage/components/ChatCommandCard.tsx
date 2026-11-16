@@ -152,7 +152,45 @@ export const CommandCardNote: React.FC<{ children: React.ReactNode }> = ({ child
   )
 }
 
-export type CommandCardListItem = { key: string; label: string; description?: string }
+export type CommandCardAction = { key: string; label: string; onClick: () => void }
+
+/** One text link of a card: the accent colour, underlined on hover. */
+const CommandCardLink: React.FC<{ action: CommandCardAction }> = ({ action }) => {
+  const tokens = useColumnTokens()
+  return (
+    <Box
+      component="button"
+      type="button"
+      onClick={action.onClick}
+      sx={{
+        m: 0,
+        p: 0,
+        border: 0,
+        bgcolor: 'transparent',
+        color: tokens.accent,
+        cursor: 'pointer',
+        font: 'inherit',
+        fontSize: tokens.fontSize.small,
+        lineHeight: '18px',
+        textAlign: 'left',
+        '&:hover': { textDecoration: 'underline' },
+        '&:focus-visible': { ...tokens.focusRing, outlineOffset: '2px' }
+      }}
+    >
+      {action.label}
+    </Box>
+  )
+}
+
+const linkRowSx = { display: 'flex', flexWrap: 'wrap', gap: '4px 12px' } as const
+
+export type CommandCardListItem = {
+  key: string
+  label: string
+  description?: string
+  /** Text links of the row (what can be done with this item), under its lines. */
+  actions?: readonly CommandCardAction[]
+}
 
 /** List body: one row per item, a second muted line for its description; no rules between rows. */
 export const CommandCardList: React.FC<{ items: readonly CommandCardListItem[] }> = ({ items }) => {
@@ -181,6 +219,7 @@ export const CommandCardList: React.FC<{ items: readonly CommandCardListItem[] }
             <Box
               sx={{
                 overflowWrap: 'anywhere',
+                whiteSpace: 'pre-line',
                 fontSize: tokens.fontSize.caption,
                 lineHeight: '16px',
                 color: tokens.muted
@@ -189,51 +228,29 @@ export const CommandCardList: React.FC<{ items: readonly CommandCardListItem[] }
               {item.description}
             </Box>
           ) : null}
+          {item.actions?.length ? (
+            <Box data-testid="chat-command-card-item-actions" sx={{ ...linkRowSx, mt: '2px' }}>
+              {item.actions.map((action) => (
+                <CommandCardLink key={action.key} action={action} />
+              ))}
+            </Box>
+          ) : null}
         </Box>
       ))}
     </Box>
   )
 }
-
-export type CommandCardAction = { key: string; label: string; onClick: () => void }
 
 /** A wrapping row of text links: where a command hands over to another place of the app. */
 export const CommandCardActions: React.FC<{ actions: readonly CommandCardAction[] }> = ({
   actions
-}) => {
-  const tokens = useColumnTokens()
-  return (
-    <Box
-      data-testid="chat-command-card-actions"
-      sx={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', padding: '0 12px 8px' }}
-    >
-      {actions.map((action) => (
-        <Box
-          component="button"
-          type="button"
-          key={action.key}
-          onClick={action.onClick}
-          sx={{
-            m: 0,
-            p: 0,
-            border: 0,
-            bgcolor: 'transparent',
-            color: tokens.accent,
-            cursor: 'pointer',
-            font: 'inherit',
-            fontSize: tokens.fontSize.small,
-            lineHeight: '18px',
-            textAlign: 'left',
-            '&:hover': { textDecoration: 'underline' },
-            '&:focus-visible': { ...tokens.focusRing, outlineOffset: '2px' }
-          }}
-        >
-          {action.label}
-        </Box>
-      ))}
-    </Box>
-  )
-}
+}) => (
+  <Box data-testid="chat-command-card-actions" sx={{ ...linkRowSx, padding: '0 12px 8px' }}>
+    {actions.map((action) => (
+      <CommandCardLink key={action.key} action={action} />
+    ))}
+  </Box>
+)
 
 /**
  * Body for an existing interactive view (goal records, thread skills) shown inside a command

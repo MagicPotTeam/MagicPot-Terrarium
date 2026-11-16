@@ -29,6 +29,11 @@ type TailCardBase = {
 /** Where a link of a card leads; the page that owns the tail knows how to go there. */
 export type ChatTailLink<Target> = { key: string; label: string; target: Target }
 
+/** A row of a list card; its links act on that item (stop a job, read its result). */
+export type ChatTailListItem<Target = unknown> = Omit<CommandCardListItem, 'actions'> & {
+  links?: ChatTailLink<Target>[]
+}
+
 /**
  * One command card of the transcript: the result of a slash command. Cards are view state of
  * the open conversation; they are never stored.
@@ -45,7 +50,7 @@ export type ChatTailCard<Target = unknown> =
       /** One muted line under the text. */
       note?: string
     })
-  | (TailCardBase & { kind: 'list'; title?: string; items: CommandCardListItem[] })
+  | (TailCardBase & { kind: 'list'; title?: string; items: ChatTailListItem<Target>[] })
   | (TailCardBase & { kind: 'links'; text: string; links: ChatTailLink<Target>[] })
   | (TailCardBase & {
       /** A command that asks before it acts: a prompt card with a default and a cancel button. */
@@ -181,7 +186,16 @@ export function ChatCommandTail<Target>({
         if (card.kind === 'list') {
           return (
             <ChatCommandResultCard key={card.id} command={card.command} title={card.title}>
-              <CommandCardList items={card.items} />
+              <CommandCardList
+                items={card.items.map(({ links, ...item }) => ({
+                  ...item,
+                  actions: links?.map((link) => ({
+                    key: link.key,
+                    label: link.label,
+                    onClick: () => onLink(link.target)
+                  }))
+                }))}
+              />
             </ChatCommandResultCard>
           )
         }

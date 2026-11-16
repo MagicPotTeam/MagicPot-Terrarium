@@ -142,6 +142,8 @@ it.each(['approve', 'end', 'deny'] as const)('two members with real MAIN scratch
     await waitFor(() => expect(h.sessions.value.find(s => s.id === 'designer')?.messages.some((m: any) => m.content === '设计结果')).toBe(true))
     send('@writer 保存工作笔记')
     expect(await screen.findByText('writer 想保存一条笔记', {}, { timeout: 6000 })).toBeVisible()
+    // The card that arrives at the end of the transcript is announced.
+    expect(screen.getByTestId('team-inline-approvals')).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByText('approved-value')).toBeVisible()
     expect(store.get(scope)).toMatchObject({ revision: 0, notes: [] })
     expect(model.mock.calls.filter(([call]) => call.conversationId === 'writer')).toHaveLength(1)

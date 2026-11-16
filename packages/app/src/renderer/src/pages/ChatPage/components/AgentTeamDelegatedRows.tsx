@@ -16,6 +16,9 @@ import {
   type DelegatedRowStatus
 } from './ChatToolCalls'
 
+/** The failure text without the "(Run: <id>)" reference that names the stored failure record. */
+const withoutRunReference = (text: string): string => text.replace(/\s*\(Run: [^()\s]+\)\s*$/, '')
+
 const MemberRow: React.FC<{ member: ChatSession; status: DelegatedRowStatus }> = ({
   member,
   status
@@ -43,7 +46,9 @@ const MemberRow: React.FC<{ member: ChatSession; status: DelegatedRowStatus }> =
       open={open}
       onToggle={() => setOpen((value) => !value)}
     >
-      {reply ? (
+      {reply && status === 'failed' ? (
+        <DelegatedResult text={withoutRunReference(reply)} error />
+      ) : reply ? (
         <DelegatedResult text={reply} />
       ) : placeholder ? (
         <DelegatedNote

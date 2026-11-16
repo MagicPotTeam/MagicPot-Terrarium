@@ -1489,7 +1489,7 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { fetchGuard.mockRestore() }
   })
 
-  it.each(['jobs', 'processes'] as const)('marks a finished background %s entry with a divider at the end of the transcript', async kind => {
+  it.each(['jobs', 'processes'] as const)('marks a finished background %s entry with a divider at the end of the transcript, and a stopped one without', async kind => {
     const lead: ChatSession = { id: `finished-${kind}`, title: 'Lead', messages: [], profileId: 'base-model' }
     hoisted.storedSessions.value = [lead]
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
@@ -1499,6 +1499,9 @@ describe('ChatPage runtime workflow integration', () => {
       : { id: 'finished-process', kind: 'python', status: 'running', createdAt: now, expiresAt: now + 60000, outcome: 'known', stdoutBytes: 0, stderrBytes: 0, truncated: false, operationSettled: false, cancellationRequested: false }
     const completed = { ...running, status: 'completed', ...(kind === 'processes' ? { operationSettled: true, exitCode: 0 } : {}) }
     const old = { ...completed, id: 'finished-before' }
+    // Stopped while it ran: it has no result, so it leaves no divider.
+    const stoppable = { ...running, id: 'stopped-entry' }
+    const stopped = { ...stoppable, status: kind === 'jobs' ? 'cancelled' : 'stopped', ...(kind === 'processes' ? { operationSettled: true } : {}) }
     let release!: () => void
     const finished = new Promise<void>(resolve => { release = resolve })
     let polls = 0
@@ -1507,9 +1510,9 @@ describe('ChatPage runtime workflow integration', () => {
     // the next polls see it finished once released.
     list.mockImplementation(async () => {
       polls++
-      if (polls === 1) return { jobs: [running, old] }
+      if (polls === 1) return { jobs: [running, stoppable, old] }
       await finished
-      return { jobs: [completed, old] }
+      return { jobs: [completed, stopped, old] }
     })
     const page = renderChatPage({ team: true })
     try {

@@ -1199,11 +1199,8 @@
       "status_budget_exhausted": "预算已用尽"
     },
     "agent_process": {
-      "title": "已审批的后台进程",
-      "notice": "Python／Shell 作业保留审批的执行限额，仅在父请求成功结束后继续。重载、停止或失败会取消。日志按需读取，此面板保留15分钟；不自动续聊或重启恢复。退出码不证明业务任务完成。",
       "stdout": "读取标准输出",
       "stderr": "读取错误输出",
-      "more": "读取下一段日志",
       "stop": "停止／确认清理",
       "truncated": "输出有上限；预览仅保留最后32 Ki字符。",
       "failed": "无法访问此进程或日志，请先刷新状态。",
@@ -1218,15 +1215,11 @@
       "status_unknown": "结果未知"
     },
     "agent_jobs": {
-      "title": "后台只读子任务",
-      "notice": "结果临时保留15分钟，不会自动发送给模型。刷新页面会终止任务并清除结果。",
       "read": "查看结果",
-      "more": "读取下一段",
       "truncated": "报告因保留上限已截断。",
       "stop": "停止此任务",
       "no_result": "暂无报告，请查看任务状态。",
       "failed": "操作未完成，任务可能已过期或被撤销。",
-      "refresh_failed": "任务状态刷新失败，当前显示可能已过时。",
       "status_running": "运行中",
       "status_completed": "已完成",
       "status_incomplete": "报告未完成",
@@ -1449,7 +1442,8 @@
       "regen_prompt": "新建一个对话，保留最后一条用户消息之前的内容，并把那条消息放回输入框。原对话保留。",
       "edit_prompt": "新建一个对话，保留第 {{number}} 条消息之前的内容，并把修改后的文字放入输入框。原对话保留。",
       "repair_prompt": "在之后的请求中用占位说明代替 {{count}} 张缺失的本地图片？原始记录不变。",
-      "no_jobs": "没有后台任务或进程。"
+      "no_jobs": "没有后台任务或进程。",
+      "no_output": "没有输出。"
     },
     "delegated": {
       "helper_label": "[sub] {{name}}",
