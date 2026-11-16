@@ -6,6 +6,8 @@ import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import type { ChatAttachment } from '@shared/llm'
 import type { ChatSession, ChatSessionDraft } from './chatStorage'
+import { UNVERIFIED_REPORT_BUNDLE_MESSAGE } from '@shared/llm/unverifiedReport'
+import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 import ChatPage from './ChatPage'
 import {
   buildChatWorkspaceControlsPortalId,
@@ -43,6 +45,7 @@ const fixture = vi.hoisted(() => ({
       chatStream: (...args: unknown[]) => unknown
       remoteFetch: (...args: unknown[]) => unknown
     }
+    svcReportBundles?: { verify: (...args: unknown[]) => unknown }
   }
 }))
 
@@ -90,7 +93,12 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcLLMProxy: { signHy3DModel: vi.fn(), ...fixture.requestApi?.svcLLMProxy },
     svcHyper: { saveImageToDir: fixture.saveImageToDir },
-    svcManagedMedia: fixture.requestApi?.svcManagedMedia ?? { importDataUrl: fixture.importDataUrl }
+    svcManagedMedia: fixture.requestApi?.svcManagedMedia ?? {
+      importDataUrl: fixture.importDataUrl
+    },
+    ...(fixture.requestApi?.svcReportBundles
+      ? { svcReportBundles: fixture.requestApi.svcReportBundles }
+      : {})
   })
 }))
 
@@ -489,14 +497,21 @@ describe('ChatPage image preflight at the send boundary', () => {
       configure()
       fixture.useRealCompletion = true
       fixture.supportsStreaming.mockReturnValue(stream)
+      // A bundle MAIN registered for this conversation. manifestUrl is MAIN's own snapshot
+      // manifest, which verify returns; the descriptor's manifest URL is never read.
       const manifestUrl = 'local-media:///fixture/owned.manifest.json'
-      const primary: ChatAttachment = {
-        type: 'file',
-        url: 'data:text/plain;base64,cmVwb3J0',
-        fileName: 'report.txt',
-        reportBundleRole: 'primary-report',
-        reportBundleManifestUrl: manifestUrl
-      }
+      const reports = createReportBundleRegistryFixture()
+      const primary: ChatAttachment = reports.register(
+        {
+          type: 'file',
+          url: 'data:text/plain;base64,cmVwb3J0',
+          fileName: 'report.txt',
+          reportBundleRole: 'primary-report',
+          reportBundleManifestUrl: 'local-media:///fixture/descriptor-only.manifest.json'
+        },
+        'fixture-session',
+        { manifestUrl, imageCount: 50 }
+      )
       await renderPage(makeSession([image(1), primary]))
       await settleInitialDraftPersistence()
       const draftBefore = pendingAttachments()
@@ -506,7 +521,8 @@ describe('ChatPage image preflight at the send boundary', () => {
       const materializeForRequest = vi.fn()
       fixture.requestApi = {
         svcManagedMedia: { materializeForRequest },
-        svcLLMProxy: { chat: dispatch, chatStream: dispatchStream, remoteFetch }
+        svcLLMProxy: { chat: dispatch, chatStream: dispatchStream, remoteFetch },
+        svcReportBundles: reports.svcReportBundles
       }
       fixture.fetch.mockImplementation(async (url: string) => {
         if (String(url) === manifestUrl) {
@@ -535,6 +551,55 @@ describe('ChatPage image preflight at the send boundary', () => {
         expect(fixture.notifyError).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
       )
       expect(fixture.fetch.mock.calls.map(([url]) => String(url))).toEqual([manifestUrl])
+      expect(reports.verify).toHaveBeenCalledOnce()
+      expect(reports.verify).toHaveBeenCalledWith({
+        conversation: { conversationId: 'fixture-session' },
+        items: [{ binding: primary.reportBundleBinding, primaryUrl: primary.url }]
+      })
+      expect(fixture.saveImageToDir).not.toHaveBeenCalled()
+      expect(materializeForRequest).not.toHaveBeenCalled()
+      expect(dispatch).not.toHaveBeenCalled()
+      expect(dispatchStream).not.toHaveBeenCalled()
+      expect(remoteFetch).not.toHaveBeenCalled()
+      expect(screen.getByTestId('composer-input')).toHaveValue(draftText)
+      expect(pendingAttachments()).toEqual(draftBefore)
+      expect(currentSession().messages).toEqual([])
+    }
+  )
+
+  it.each([false, true])(
+    'refuses an unregistered 50-image report before any read, save or dispatch and preserves the draft (stream=%s)',
+    async (stream) => {
+      configure()
+      fixture.useRealCompletion = true
+      fixture.supportsStreaming.mockReturnValue(stream)
+      const reports = createReportBundleRegistryFixture()
+      const primary: ChatAttachment = {
+        type: 'file',
+        url: 'data:text/plain;base64,cmVwb3J0',
+        fileName: 'report.txt',
+        reportBundleRole: 'primary-report',
+        reportBundleManifestUrl: 'local-media:///fixture/owned.manifest.json',
+        reportBundleImageCount: 50
+      }
+      await renderPage(makeSession([image(1), primary]))
+      await settleInitialDraftPersistence()
+      const draftBefore = pendingAttachments()
+      const dispatch = vi.fn(async () => ({ content: 'unexpected dispatch' }))
+      const dispatchStream = vi.fn(async () => undefined)
+      const remoteFetch = vi.fn()
+      const materializeForRequest = vi.fn()
+      fixture.requestApi = {
+        svcManagedMedia: { materializeForRequest },
+        svcLLMProxy: { chat: dispatch, chatStream: dispatchStream, remoteFetch },
+        svcReportBundles: reports.svcReportBundles
+      }
+      fireEvent.click(screen.getByTestId('composer-send'))
+      await waitFor(() =>
+        expect(fixture.notifyError).toHaveBeenCalledWith(UNVERIFIED_REPORT_BUNDLE_MESSAGE)
+      )
+      expect(fixture.fetch).not.toHaveBeenCalled()
+      expect(reports.verify).not.toHaveBeenCalled()
       expect(fixture.saveImageToDir).not.toHaveBeenCalled()
       expect(materializeForRequest).not.toHaveBeenCalled()
       expect(dispatch).not.toHaveBeenCalled()
