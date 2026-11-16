@@ -1796,3 +1796,108 @@ describe('chatStorage', () => {
     })
   })
 })
+
+describe('chatStorage queued sends kept with the draft', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.unstubAllGlobals()
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    localStorage.clear()
+  })
+
+  const queued = (id: string, content = id) => ({ id, content, queuedAt: 1 })
+
+  it('keeps the queue when the composer writes its backup, and the composer when the queue writes', async () => {
+    const storage = await import('./chatStorage')
+    storage.writeSessionDraftBackup(
+      's1',
+      100,
+      { inputValue: 'typing', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 100 },
+      'workspace-a'
+    )
+    expect(storage.writeSessionQueuedSendsBackup('s1', [queued('q1'), queued('q2')], 200, 'workspace-a')).toBe(true)
+    expect(storage.readSessionDraftBackup('s1', 'workspace-a')).toEqual({
+      updatedAt: 100,
+      draft: { inputValue: 'typing', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 100 },
+      queuedSends: [queued('q1'), queued('q2')],
+      queuedSendsUpdatedAt: 200
+    })
+
+    // The composer is cleared after a send: the queue stays, and the composer timestamp is its own.
+    storage.writeSessionDraftBackup('s1', 300, undefined, 'workspace-a')
+    expect(storage.readSessionDraftBackup('s1', 'workspace-a')).toEqual({
+      updatedAt: 300,
+      queuedSends: [queued('q1'), queued('q2')],
+      queuedSendsUpdatedAt: 200
+    })
+
+    // An older queue write never replaces a newer one; an empty list is kept as a removal marker.
+    expect(storage.writeSessionQueuedSendsBackup('s1', [queued('stale')], 150, 'workspace-a')).toBe(false)
+    expect(storage.writeSessionQueuedSendsBackup('s1', [], 400, 'workspace-a')).toBe(true)
+    expect(storage.readSessionDraftBackup('s1', 'workspace-a')).toEqual({
+      updatedAt: 300,
+      queuedSends: [],
+      queuedSendsUpdatedAt: 400
+    })
+    // Deleting the session's backup removes its queue as well.
+    storage.deleteSessionDraftBackup('s1', 'workspace-a')
+    expect(storage.readSessionDraftBackup('s1', 'workspace-a')).toBeUndefined()
+  })
+
+  it('reads blob and over-cap inline attachments of a stored queue back as unavailable', async () => {
+    const storage = await import('./chatStorage')
+    const { isUnavailableQueuedAttachment } = await import('./chatQueuedSendPersistence')
+    localStorage.setItem(
+      'magicpot-chat-draft:workspace-a:s1',
+      JSON.stringify({
+        updatedAt: 0,
+        queuedSendsUpdatedAt: 5,
+        queuedSends: [
+          {
+            id: 'q1',
+            content: 'with images',
+            queuedAt: 1,
+            attachments: [
+              { type: 'image', url: 'blob:file:///dead', fileName: 'dead.png' },
+              { type: 'image', url: `data:image/png;base64,${'A'.repeat(70 * 1024)}`, fileName: 'large.png' },
+              { type: 'image', url: 'local-media:///C:/images/kept.png', fileName: 'kept.png' }
+            ]
+          }
+        ]
+      })
+    )
+    const attachments = storage.readSessionDraftBackup('s1', 'workspace-a')?.queuedSends?.[0].attachments
+    expect(attachments?.map((attachment) => attachment.fileName)).toEqual(['dead.png', 'large.png', 'kept.png'])
+    expect(attachments?.map(isUnavailableQueuedAttachment)).toEqual([true, true, false])
+    expect(JSON.stringify(attachments)).not.toContain('AAAA')
+  })
+
+  it('round-trips a draft that holds only queued sends through the session record', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    type S = import('./chatStorage').ChatSession
+    const session = {
+      id: 'queue-only',
+      title: 'queue-only',
+      messages: [],
+      draft: {
+        inputValue: '',
+        pendingAttachments: [],
+        pendingHiddenContext: '',
+        updatedAt: 0,
+        queuedSends: [queued('q1', 'first'), queued('q2', 'second')],
+        queuedSendsUpdatedAt: 9
+      }
+    } as unknown as S
+    await storage.saveSessionToDB(session, 'workspace-a', { expectedSession: null })
+    const loaded = await storage.loadSessionFromDB('queue-only', 'workspace-a')
+    expect(loaded?.draft?.queuedSends).toEqual([queued('q1', 'first'), queued('q2', 'second')])
+    expect(loaded?.draft?.queuedSendsUpdatedAt).toBe(9)
+    expect(storage.normalizedSessionsEqual(loaded!, session, 'workspace-a')).toBe(true)
+  })
+})

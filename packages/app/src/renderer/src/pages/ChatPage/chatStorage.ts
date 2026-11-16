@@ -17,17 +17,32 @@ import type { ChatContextCompressionSummary } from './chatContextCompression'
 import { CHAT_ATTACHMENT_STORAGE } from './chatManagedMediaAttachments'
 import { readMemberModelChoice, resolveMemberModelSelection } from './agentTeam'
 import { markTeamMessageReceiptsUnknown } from './teamMessageReceipt'
+import type { ChatDraftQueuedSend } from '@renderer/features/chat/chatDraftUtils'
+import { normalizeStoredQueuedSends } from './chatQueuedSendPersistence'
+
+export type { ChatDraftQueuedSend }
 
 export interface ChatSessionDraft {
   inputValue: string
   pendingAttachments: ChatAttachment[]
   pendingHiddenContext: string
+  /** The composer's own timestamp; a queue write never changes it. */
   updatedAt: number
+  /** Unaccepted user-authored queued sends, restored paused after a reload. */
+  queuedSends?: ChatDraftQueuedSend[]
+  queuedSendsUpdatedAt?: number
 }
 
 export interface ChatSessionDraftBackupRecord {
+  /** The composer draft's timestamp. */
   updatedAt: number
   draft?: ChatSessionDraft
+  /**
+   * The session's queued sends, written by the queue only. An empty list with a timestamp is a
+   * removal marker: it outranks an older copy in the session record.
+   */
+  queuedSends?: ChatDraftQueuedSend[]
+  queuedSendsUpdatedAt?: number
 }
 
 /** Chat session with all messages. */
@@ -547,6 +562,9 @@ const normalizeDraftAttachments = (value: unknown): ChatAttachment[] => {
   })
 }
 
+const readFiniteTimestamp = (value: unknown): number =>
+  typeof value === 'number' && Number.isFinite(value) ? value : 0
+
 const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => {
   if (!value || typeof value !== 'object') {
     return undefined
@@ -561,8 +579,10 @@ const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => 
     typeof candidate.updatedAt === 'number' && Number.isFinite(candidate.updatedAt)
       ? candidate.updatedAt
       : 0
+  const queuedSends = normalizeStoredQueuedSends(candidate.queuedSends, normalizeDraftAttachments)
 
-  if (!inputValue && !pendingHiddenContext && pendingAttachments.length === 0) {
+  // A draft that holds only queued sends is kept: they must survive a reload.
+  if (!inputValue && !pendingHiddenContext && pendingAttachments.length === 0 && queuedSends.length === 0) {
     return undefined
   }
 
@@ -570,7 +590,10 @@ const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => 
     inputValue,
     pendingAttachments,
     pendingHiddenContext,
-    updatedAt
+    updatedAt,
+    ...(queuedSends.length
+      ? { queuedSends, queuedSendsUpdatedAt: readFiniteTimestamp(candidate.queuedSendsUpdatedAt) }
+      : {})
   }
 }
 
@@ -644,15 +667,27 @@ const normalizeDraftBackupRecord = (value: unknown): ChatSessionDraftBackupRecor
     typeof candidate.updatedAt === 'number' && Number.isFinite(candidate.updatedAt)
       ? candidate.updatedAt
       : 0
-  const draft = normalizeSessionDraft(candidate.draft)
+  // The backup's composer draft never carries the queue: the queue is a record-level field.
+  const normalizedDraft = normalizeSessionDraft(candidate.draft)
+  const { queuedSends: _draftQueue, queuedSendsUpdatedAt: _draftQueueAt, ...composerDraft } =
+    normalizedDraft ?? ({} as ChatSessionDraft)
+  const draft = normalizedDraft
+    ? normalizeSessionDraft(composerDraft)
+    : undefined
+  const queuedSendsUpdatedAt = readFiniteTimestamp(candidate.queuedSendsUpdatedAt)
+  const queuedSends =
+    queuedSendsUpdatedAt > 0
+      ? normalizeStoredQueuedSends(candidate.queuedSends, normalizeDraftAttachments)
+      : []
 
-  if (updatedAt <= 0 && !draft) {
+  if (updatedAt <= 0 && !draft && queuedSendsUpdatedAt <= 0) {
     return undefined
   }
 
   return {
     updatedAt: Math.max(updatedAt, draft?.updatedAt || 0),
-    ...(draft ? { draft } : {})
+    ...(draft ? { draft } : {}),
+    ...(queuedSendsUpdatedAt > 0 ? { queuedSends, queuedSendsUpdatedAt } : {})
   }
 }
 
@@ -681,16 +716,23 @@ export function writeSessionDraftBackup(
 ): void {
   try {
     const normalizedDraft = normalizeSessionDraft(draft)
+    const existingRecord = readSessionDraftBackup(sessionId, scope)
+    // The composer writes its own part only: the record's queued sends stay as they are.
     const nextRecord = normalizeDraftBackupRecord({
       updatedAt,
-      ...(normalizedDraft ? { draft: normalizedDraft } : {})
+      ...(normalizedDraft ? { draft: normalizedDraft } : {}),
+      ...(existingRecord?.queuedSendsUpdatedAt
+        ? {
+            queuedSends: existingRecord.queuedSends ?? [],
+            queuedSendsUpdatedAt: existingRecord.queuedSendsUpdatedAt
+          }
+        : {})
     })
     if (!nextRecord) {
       localStorage.removeItem(getDraftBackupStorageKey(sessionId, scope))
       return
     }
 
-    const existingRecord = readSessionDraftBackup(sessionId, scope)
     if (existingRecord && existingRecord.updatedAt > nextRecord.updatedAt) {
       return
     }
@@ -698,6 +740,37 @@ export function writeSessionDraftBackup(
     localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), JSON.stringify(nextRecord))
   } catch (error) {
     console.warn('[ChatStorage] Failed to write session draft backup:', error)
+  }
+}
+
+/**
+ * Writes a session's queued sends into its draft backup, keeping the composer part. An empty list
+ * is kept as a removal marker. An older write never replaces a newer one. False when the write
+ * did not happen (storage unavailable or full).
+ */
+export function writeSessionQueuedSendsBackup(
+  sessionId: string,
+  queuedSends: readonly ChatDraftQueuedSend[],
+  queuedSendsUpdatedAt: number,
+  scope = 'default'
+): boolean {
+  try {
+    const existingRecord = readSessionDraftBackup(sessionId, scope)
+    if (existingRecord && (existingRecord.queuedSendsUpdatedAt ?? 0) > queuedSendsUpdatedAt) {
+      return false
+    }
+    const nextRecord = normalizeDraftBackupRecord({
+      updatedAt: existingRecord?.updatedAt ?? 0,
+      ...(existingRecord?.draft ? { draft: existingRecord.draft } : {}),
+      queuedSends,
+      queuedSendsUpdatedAt
+    })
+    if (!nextRecord) return false
+    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), JSON.stringify(nextRecord))
+    return true
+  } catch (error) {
+    console.warn('[ChatStorage] Failed to write the queued sends backup:', error)
+    return false
   }
 }
 

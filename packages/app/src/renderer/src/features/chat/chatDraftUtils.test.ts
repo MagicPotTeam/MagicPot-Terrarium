@@ -5,8 +5,10 @@ import {
   areChatSessionDraftsEqual,
   cloneChatSessionDraft,
   normalizeChatSessionDraft,
+  resolvePreferredQueuedSends,
   resolvePreferredSessionDraft,
-  stripSessionDraft
+  stripSessionDraft,
+  withDraftQueuedSends
 } from './chatDraftUtils'
 
 const imageAttachment = (url: string): ChatAttachment => ({
@@ -141,5 +143,97 @@ describe('chatDraftUtils', () => {
         readSessionDraftBackup: () => ({ updatedAt: 90, draft: backupDraft })
       })
     ).toMatchObject({ inputValue: 'session draft' })
+  })
+
+  describe('queued sends kept with the draft', () => {
+    const queued = (id: string, content = id) => ({ id, content, queuedAt: 10 })
+    const composer: ChatSessionDraftModel = {
+      inputValue: 'typing',
+      pendingHiddenContext: '',
+      pendingAttachments: [],
+      updatedAt: 100
+    }
+
+    it('sees a queue change in the draft equality helper', () => {
+      const one = { ...composer, queuedSends: [queued('q1')], queuedSendsUpdatedAt: 5 }
+      const two = { ...composer, queuedSends: [queued('q1'), queued('q2')], queuedSendsUpdatedAt: 6 }
+      expect(areChatSessionDraftsEqual(one, two)).toBe(false)
+      expect(areChatSessionDraftsEqual(composer, one)).toBe(false)
+      expect(areChatSessionDraftsEqual(one, { ...one, queuedSendsUpdatedAt: 7 })).toBe(true)
+      expect(areChatSessionDraftsEqual(composer, { ...composer, queuedSends: [] })).toBe(true)
+    })
+
+    it('keeps a draft that holds only queued sends and clones the queue', () => {
+      const draft = {
+        inputValue: '',
+        pendingHiddenContext: '',
+        pendingAttachments: [],
+        updatedAt: 0,
+        queuedSends: [{ ...queued('q1'), attachments: [imageAttachment('local-media:///a.png')] }],
+        queuedSendsUpdatedAt: 9
+      }
+      const normalized = normalizeChatSessionDraft(draft)
+      expect(normalized?.queuedSends).toEqual(draft.queuedSends)
+      expect(normalized?.queuedSendsUpdatedAt).toBe(9)
+      const cloned = cloneChatSessionDraft(draft)
+      draft.queuedSends[0].attachments![0].fileName = 'mutated.png'
+      expect(normalized?.queuedSends?.[0].attachments?.[0].fileName).toBe('image.png')
+      expect(cloned?.queuedSends?.[0].attachments?.[0].fileName).toBe('image.png')
+    })
+
+    it('strips only the composer part of a draft and keeps its queue', () => {
+      const withQueue = { ...composer, queuedSends: [queued('q1')], queuedSendsUpdatedAt: 5 }
+      const session = { id: 's1', title: 'Chat', messages: [], draft: withQueue }
+      expect(stripSessionDraft(session)).toEqual({
+        id: 's1',
+        title: 'Chat',
+        messages: [],
+        draft: {
+          inputValue: '',
+          pendingHiddenContext: '',
+          pendingAttachments: [],
+          updatedAt: 0,
+          queuedSends: [queued('q1')],
+          queuedSendsUpdatedAt: 5
+        }
+      })
+      // A queue-only draft has no composer part to strip: same identity, no rewrite.
+      const queueOnly = stripSessionDraft(session) as typeof session
+      expect(stripSessionDraft(queueOnly)).toBe(queueOnly)
+    })
+
+    it('merges the composer part of one draft with the queue part of another', () => {
+      const stored = { ...composer, inputValue: 'old', queuedSends: [queued('q1')], queuedSendsUpdatedAt: 5 }
+      expect(withDraftQueuedSends({ ...composer, inputValue: 'new' }, stored)).toEqual({
+        ...composer,
+        inputValue: 'new',
+        queuedSends: [queued('q1')],
+        queuedSendsUpdatedAt: 5
+      })
+      expect(withDraftQueuedSends(undefined, stored)).toMatchObject({
+        inputValue: '',
+        updatedAt: 0,
+        queuedSends: [queued('q1')]
+      })
+      expect(withDraftQueuedSends(stored, undefined)).toEqual({ ...composer, inputValue: 'old' })
+      expect(withDraftQueuedSends(undefined, composer)).toBeUndefined()
+    })
+
+    it('prefers the fresher queue copy, the backup on a tie, and honours an empty removal marker', () => {
+      const sessionDraft = { ...composer, queuedSends: [queued('accepted'), queued('q2')], queuedSendsUpdatedAt: 50 }
+      expect(resolvePreferredQueuedSends(sessionDraft, { queuedSends: [queued('q2')], queuedSendsUpdatedAt: 50 })).toEqual({
+        queuedSends: [queued('q2')],
+        queuedSendsUpdatedAt: 50
+      })
+      expect(resolvePreferredQueuedSends(sessionDraft, { queuedSends: [], queuedSendsUpdatedAt: 60 })).toEqual({
+        queuedSends: [],
+        queuedSendsUpdatedAt: 60
+      })
+      expect(resolvePreferredQueuedSends(sessionDraft, { queuedSends: [queued('q0')], queuedSendsUpdatedAt: 40 }).queuedSends).toEqual([
+        queued('accepted'),
+        queued('q2')
+      ])
+      expect(resolvePreferredQueuedSends(undefined, undefined)).toEqual({ queuedSends: [], queuedSendsUpdatedAt: 0 })
+    })
   })
 })

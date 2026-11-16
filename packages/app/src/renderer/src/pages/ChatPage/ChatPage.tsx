@@ -93,6 +93,7 @@ import {
   debouncedSaveSessions,
   setSessionDeleteTombstone,
   writeSessionDraftBackup,
+  writeSessionQueuedSendsBackup,
   type ChatSession,
   type ChatSessionDraft
 } from './chatStorage'
@@ -271,8 +272,11 @@ import {
   cloneChatAttachment,
   cloneChatSessionDraft,
   normalizeChatSessionDraft,
+  readDraftQueuedSends,
+  resolvePreferredQueuedSends,
   resolvePreferredSessionDraft as resolvePreferredSessionDraftFromFeature,
-  stripSessionDraft
+  stripSessionDraft,
+  withDraftQueuedSends
 } from '@renderer/features/chat/chatDraftUtils'
 import {
   buildChatFailureArchivePayload,
@@ -325,6 +329,11 @@ import {
   settleQueueOnStop,
   withoutLease
 } from './chatQueuedSends'
+import {
+  isUnavailableQueuedAttachment,
+  restoreQueuedSends,
+  serializeQueuedSends
+} from './chatQueuedSendPersistence'
 import { hasDelegatedWork } from './agentTeamDelegatedWork'
 import AgentTeamTargetSelect from './components/AgentTeamTargetSelect'
 import { isAgentSideCommand, parseAgentSideCommand, type AgentSideCommandHandle } from './agentSideCommand'
@@ -474,6 +483,9 @@ type QueuedSessionSend = {
   leaseId?: number
   /** Kept back by a manual Stop until the user's own composer send to this session is accepted. */
   heldByStop?: number
+  /** Identity of a user item in the draft record; stable across reloads. */
+  persistId?: string
+  queuedAt?: number
 }
 
 /** A send to this session is in its preflight (a leased queue item included): Stop can stop it. */
@@ -1186,6 +1198,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // ==================== Sessions 状态 ====================
   const [sessions, setSessionsState] = useState<ChatSession[]>([])
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  /** The scope whose sessions are loaded in sessionsRef; null while a load is running. */
+  const sessionsLoadedScopeRef = useRef<string | null>(null)
   const [sessionLoadError, setSessionLoadError] = useState<string | null>(null)
   const [sessionSaveError, setSessionSaveError] = useState<string | null>(null)
   const storageScopeRef = useRef(storageScope)
@@ -1678,6 +1692,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       initialRead.activationGeneration === activationGenerationRef.current
     )
     setSessionsLoaded(false)
+    sessionsLoadedScopeRef.current = null
     setSessionLoadError(null)
     sessionPersistenceGateRef.current = true
     const persistedBaselinesBeforeLoad = scopeChanged ? new Map<string, ChatSession>() : new Map(persistedSessionsRef.current)
@@ -1784,6 +1799,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (loadEpoch === sessionLoadEpochRef.current && storedSessions !== null && initialReadCurrent()) {
           sessionPersistenceGateRef.current = false
           openInitialLoadRecoveryRef.current = false
+          sessionsLoadedScopeRef.current = storageScope
           setSessionsLoaded(true)
         }
       }
@@ -1861,6 +1877,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setSessionLoadError(null)
       sessionPersistenceGateRef.current = false
       openInitialLoadRecoveryRef.current = false
+      sessionsLoadedScopeRef.current = storageScope
       setSessionsLoaded(true)
       const receipt: ExistingConversationReadReceipt = Object.freeze({
         storageScope, token: Object.freeze({}), generation: Object.freeze(generation),
@@ -2009,9 +2026,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const queuedSessionSendsRef = useRef<Map<string, QueuedSessionSend[]>>(queuedSessionSends)
   const suspendedSessionSendsByScopeRef = useRef(new Map<string, Map<string, QueuedSessionSend[]>>())
   const queuedSessionSendIdRef = useRef(0)
+  // Keeps the draft backup of every changed queue in step at once (see syncQueuedSendDrafts).
+  const queuedSendDraftSyncRef = useRef<(options: { updateSessions: boolean }) => void>(() => undefined)
   const updateQueuedSessionSends = useCallback((next: Map<string, QueuedSessionSend[]>) => {
     queuedSessionSendsRef.current = next
     setQueuedSessionSends(next)
+    queuedSendDraftSyncRef.current({ updateSessions: false })
   }, [])
   // Render mirror of sendingSessionIdsRef: a session in its send preflight can be stopped.
   const [sendingSessionIds, setSendingSessionIds] = useState<ReadonlySet<string>>(() => new Set())
@@ -3023,13 +3043,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
-      if (areChatSessionDraftsEqual(currentSession.draft, persistedDraft)) {
+      // The composer writes its own fields only: the session's queued sends stay as they are.
+      const persistedSessionDraft = withDraftQueuedSends(persistedDraft, currentSession.draft)
+      if (areChatSessionDraftsEqual(currentSession.draft, persistedSessionDraft)) {
         clearCompletedTransientDraft()
         return
       }
 
-      const updatedSession = persistedDraft
-        ? { ...currentSession, draft: persistedDraft }
+      const updatedSession = persistedSessionDraft
+        ? { ...currentSession, draft: persistedSessionDraft }
         : stripSessionDraft(currentSession)
       const nextSessions = currentSessions.map((session, index) =>
         index === currentSessionIndex ? updatedSession : session
@@ -3097,6 +3119,97 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [buildCurrentDraftSnapshot, clearScheduledDraftPersistence, persistDraftSnapshot]
   )
+
+  // ==================== Queued sends kept with the draft ====================
+  // Unaccepted user-authored queued items are stored with their session's draft: in the draft
+  // backup at once, in the session record through its normal save. After a reload or restart they
+  // come back paused and held: never sent by themselves, resumed only through Edit, so every
+  // send-time check runs again. Keyed by scope and session: what this instance last stored, and
+  // which sessions it has already restored.
+  const queuedSendDraftStateRef = useRef(new Map<string, { signature: string; updatedAt: number }>())
+  const queuedSendRestoredKeysRef = useRef(new Set<string>())
+  queuedSendDraftSyncRef.current = ({ updateSessions }) => {
+    const scope = sessionsLoadedScopeRef.current
+    if (!scope || !isMountedRef.current || storageScopeRef.current !== scope || committedRunScopeRef.current !== scope) return
+    const loadedSessions = sessionsRef.current
+    const isGone = (key: string, sessionId: string): boolean =>
+      deletedSessionKeysRef.current.has(key) || hasSessionDeleteTombstone(sessionId, scope)
+
+    // Restore once per loaded session, in front of what the in-memory queue already holds.
+    let queues = queuedSessionSendsRef.current
+    for (const session of loadedSessions) {
+      const key = getSessionStorageKey(scope, session.id)
+      if (queuedSendRestoredKeysRef.current.has(key)) continue
+      queuedSendRestoredKeysRef.current.add(key)
+      if (isGone(key, session.id)) continue
+      const stored = resolvePreferredQueuedSends(session.draft, readSessionDraftBackup(session.id, scope))
+      queuedSendDraftStateRef.current.set(key, {
+        signature: JSON.stringify(stored.queuedSends),
+        updatedAt: stored.queuedSendsUpdatedAt
+      })
+      const restored = restoreQueuedSends(stored.queuedSends, queues.get(session.id), (fields) => ({
+        id: ++queuedSessionSendIdRef.current,
+        overrides: {
+          content: fields.content,
+          ...(fields.attachments ? { attachments: fields.attachments } : {}),
+          ...(fields.originalComposerHiddenContext ? { hiddenContext: fields.originalComposerHiddenContext } : {})
+        },
+        ...(fields.originalComposerHiddenContext ? { originalComposerHiddenContext: fields.originalComposerHiddenContext } : {}),
+        persistId: fields.persistId,
+        queuedAt: fields.queuedAt,
+        paused: true,
+        inFlight: false,
+        blocksFollowing: false,
+        heldByStop: ++stopHoldEpochRef.current
+      }))
+      if (!restored) continue
+      if (queues === queuedSessionSendsRef.current) queues = new Map(queues)
+      queues.set(session.id, restored)
+    }
+    if (queues !== queuedSessionSendsRef.current) {
+      queuedSessionSendsRef.current = queues
+      setQueuedSessionSends(queues)
+    }
+
+    // Store every restored session whose queue changed: accepted and removed items leave the record.
+    const sessionUpdates = new Map<string, { queuedSends: ReturnType<typeof serializeQueuedSends>; updatedAt: number }>()
+    for (const session of loadedSessions) {
+      const key = getSessionStorageKey(scope, session.id)
+      if (!queuedSendRestoredKeysRef.current.has(key) || isGone(key, session.id)) continue
+      const queue = queues.get(session.id)
+      let state = queuedSendDraftStateRef.current.get(key)
+      if (!queue?.length && (!state || state.signature === '[]') && !session.draft?.queuedSends?.length) continue
+      const queuedSends = serializeQueuedSends(queue)
+      const signature = JSON.stringify(queuedSends)
+      if (!state || state.signature !== signature) {
+        const updatedAt = Math.max(Date.now(), (state?.updatedAt ?? 0) + 1)
+        writeSessionQueuedSendsBackup(session.id, queuedSends, updatedAt, scope)
+        state = { signature, updatedAt }
+        queuedSendDraftStateRef.current.set(key, state)
+      }
+      if (updateSessions && JSON.stringify(readDraftQueuedSends(session.draft)?.queuedSends ?? []) !== signature) {
+        sessionUpdates.set(session.id, { queuedSends, updatedAt: state.updatedAt })
+      }
+    }
+    if (!sessionUpdates.size) return
+    setSessions((previous) => previous.map((session) => {
+      const update = sessionUpdates.get(session.id)
+      if (!update) return session
+      const draft = withDraftQueuedSends(
+        session.draft,
+        update.queuedSends.length ? { queuedSends: update.queuedSends, queuedSendsUpdatedAt: update.updatedAt } : undefined
+      )
+      if (draft && (draft.inputValue || draft.pendingHiddenContext || draft.pendingAttachments.length || draft.queuedSends?.length)) {
+        return { ...session, draft }
+      }
+      if (!Object.hasOwn(session, 'draft')) return session
+      const { draft: _draft, ...rest } = session
+      return rest
+    }))
+  }
+  useEffect(() => {
+    if (sessionsLoaded) queuedSendDraftSyncRef.current({ updateSessions: true })
+  }, [queuedSessionSends, sessions, sessionsLoaded, storageScope])
 
   useEffect(() => {
     if (!sessionsLoaded || !currentSessionId) {
@@ -6292,6 +6405,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // of origin. History and later skill references need a separate provider cap.
       try { assertExplicitUserImageCount(provisionalAttachments) }
       catch (error) { notifyError(error instanceof Error ? error.message : String(error)); return }
+      // An attachment that could not be kept across a reload is never sent; the user removes it.
+      if (provisionalAttachments.some(isUnavailableQueuedAttachment)) {
+        notifyWarning(t('chat.image_unavailable', { defaultValue: 'Image unavailable' }))
+        return
+      }
       if (memberModelChoicePendingRef.current.has(`${storageScope}\u0000${targetSessionId}`)) {
         notifyWarning(t('chat.member_model_save_busy'))
         return
@@ -8271,6 +8389,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         // A rejected queued send must not clear the composer's only copy.
         try { assertExplicitUserImageCount(queuedOverrides?.attachments) }
         catch (error) { notifyError(error instanceof Error ? error.message : String(error)); return }
+        if (queuedOverrides?.attachments?.some(isUnavailableQueuedAttachment)) {
+          notifyWarning(t('chat.image_unavailable', { defaultValue: 'Image unavailable' }))
+          return
+        }
         if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
         const queue = [
           ...(queuedSessionSendsRef.current.get(targetSessionId) ?? []),
@@ -8279,6 +8401,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             overrides: queuedOverrides,
             queueKey,
             fromComposer,
+            persistId: crypto.randomUUID(),
+            queuedAt: Date.now(),
             ...(fromComposer && overrides?.composerSubmission
               ? { originalComposerHiddenContext: pendingHiddenContextRef.current }
               : {})
