@@ -3567,8 +3567,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           changed = applyPreviewTransform(preview)
         }
         markSpriteRecordUsed(record)
-        if (changed) {
+        if (!changed) {
+          return
+        }
+        if (preview) {
           renderImmediateOrSchedule()
+        } else {
+          // A preview ends when the move it showed is committed. The committed item reaches
+          // this layer in the reconcile pass that follows; until then the last reconciled
+          // place is the old one. Drawing it now would show the image back where it was
+          // (for a whole throttle interval while a ComfyUI job runs), so let the coming
+          // frame draw whatever the reconcile pass left.
+          scheduleRender()
         }
       }
     }),
@@ -3577,6 +3587,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       markSpriteRecordUsed,
       renderImmediateOrSchedule,
       requestTextureReacquire,
+      scheduleRender,
       scheduleViewportReconcile,
       setViewportInteractingState,
       syncSpriteRecordEdgeAntialias
@@ -5396,10 +5407,52 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const textureKey = `${getProjectCanvasRenderTextureKey(renderItem)}|${sourceRevisionKey}`
       const transformState = preview ?? renderItem
       const transformKey = getProjectCanvasRenderTransformKey(transformState)
+      const targetRenderItem = renderItem
+      /**
+       * The item keeps the sprite it has while its new texture waits (a large upload in
+       * flight, the creation batch of this pass, a decode again, the texture budget). The
+       * sprite still has to follow a move, a layer change or a rotation of the item meanwhile;
+       * only its texture stays the old one.
+       */
       const preserveExistingRenderItem = () => {
         const previousRenderItem = renderItemsRef.current.get(item.id)
+        if (!existingRecord || spriteRecordsRef.current.get(item.id) !== existingRecord) {
+          if (previousRenderItem) {
+            nextRenderItems.set(item.id, previousRenderItem)
+          }
+          return
+        }
+        if (syncSpriteRecordEdgeAntialias(existingRecord, transformState.rotation)) {
+          worldOrderDirty = true
+        }
+        if (existingRecord.sprite.zIndex !== item.zIndex) {
+          existingRecord.sprite.zIndex = item.zIndex
+          worldOrderDirty = true
+        }
+        if (existingRecord.transformKey !== transformKey) {
+          applySpriteTransform(
+            existingRecord.sprite,
+            {
+              textureWidth: existingRecord.textureWidth,
+              textureHeight: existingRecord.textureHeight
+            },
+            transformState
+          )
+          existingRecord.transformKey = transformKey
+        }
         if (previousRenderItem) {
-          nextRenderItems.set(item.id, previousRenderItem)
+          // Old texture, new place: what clearing a preview later restores.
+          nextRenderItems.set(item.id, {
+            ...previousRenderItem,
+            x: targetRenderItem.x,
+            y: targetRenderItem.y,
+            width: targetRenderItem.width,
+            height: targetRenderItem.height,
+            scaleX: targetRenderItem.scaleX,
+            scaleY: targetRenderItem.scaleY,
+            rotation: targetRenderItem.rotation,
+            zIndex: targetRenderItem.zIndex
+          })
         }
       }
       const needsNewSpriteRecord = !existingRecord || existingRecord.textureKey !== textureKey

@@ -895,6 +895,125 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(new Set(uploadFrames).size).toBe(1)
     })
 
+    it('moves, re-layers and rotates an image whose large upload is held back', async () => {
+      mockWebGLFences = true
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async () => createBitmap(2048, 2048))
+      )
+      const items = ['big-a', 'big-b'].map((id, index) =>
+        createNamedItem(id, {
+          src: `local-media:///C:/images/${id}.png`,
+          x: 24 + index * 400,
+          sourceWidth: 2048,
+          sourceHeight: 2048,
+          image: createImage(16, 16)
+        })
+      )
+      const selectedIds = new Set(items.map((item) => item.id))
+      const { rerender, unmount } = render(
+        <Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={selectedIds} />
+      )
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      })
+      // One source upload went through; the other one waits for the first fence and the
+      // image is still drawn from its preview.
+      expect(eagerTextureUploads).toHaveLength(1)
+      const held = items.find(
+        (item) => getTextureImage(getLiveSpriteByLabel(item.id))?.constructor === HTMLImageElement
+      )!
+      expect(held).toBeDefined()
+      const heldSprite = getLiveSpriteByLabel(held.id)!
+      const movedItems = items.map((item) =>
+        item.id === held.id ? { ...item, x: item.x + 333, zIndex: 50 } : item
+      )
+      rerender(
+        <Layer items={movedItems} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={selectedIds} />
+      )
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      })
+      expect(eagerTextureUploads).toHaveLength(1)
+      expect(getLiveSpriteByLabel(held.id)).toBe(heldSprite)
+      expect(heldSprite.position.x).toBe(held.x + 333)
+      expect(heldSprite.zIndex).toBe(50)
+
+      // A rotation while the upload still waits: the edge-antialiased mesh takes over in place.
+      const rotatedItems = movedItems.map((item) =>
+        item.id === held.id ? { ...item, rotation: 15 } : item
+      )
+      rerender(
+        <Layer items={rotatedItems} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={selectedIds} />
+      )
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      })
+      expect(eagerTextureUploads).toHaveLength(1)
+      const rotated = getLiveSpriteByLabel(held.id)!
+      expect(rotated.kind).toBe('mesh')
+      expect(rotated.position.x).toBe(held.x + 333)
+      expect(rotated.rotation).toBeCloseTo(Math.PI / 12)
+
+      createdWebGLFences[0].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(2))
+      await waitFor(() =>
+        expect(getTextureImage(getLiveSpriteByLabel(held.id))).not.toBeInstanceOf(HTMLImageElement)
+      )
+      expect(getLiveSpriteByLabel(held.id)!.position.x).toBe(held.x + 333)
+      unmount()
+    })
+
+    it('moves an image whose new sprite waits for the next creation batch', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      // 40 previews (more than two batches of 16 near 100 %) get sources at once: the pass
+      // creates 16 new sprites and leaves the others on their preview for later passes.
+      const items = Array.from({ length: 40 }, (_, index) =>
+        createNamedItem(`batch-${index + 1}`, {
+          x: (index % 8) * 150,
+          y: Math.floor(index / 8) * 130,
+          width: 140,
+          height: 120,
+          zIndex: index
+        })
+      )
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const { rerender, unmount } = render(
+        <Layer ref={ref} items={items} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+      const app = createdApplications[0]
+      // Every image gets a new decoded object (a new texture key) and is moved in the same
+      // commit. Hold the frames that would run the follow-up creation batches.
+      const frames: FrameRequestCallback[] = []
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        frames.push(callback)
+        return frames.length
+      })
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      const nextItems = items.map((item) => ({
+        ...item,
+        x: item.x + 7,
+        image: createImage(100, 60)
+      }))
+      rerender(<Layer ref={ref} items={nextItems} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      const replaced = nextItems.filter(
+        (item) => getTextureImage(getLiveSpriteByLabel(item.id)) === item.image
+      )
+      const waiting = nextItems.filter(
+        (item) => getTextureImage(getLiveSpriteByLabel(item.id)) !== item.image
+      )
+      expect(replaced.length).toBeGreaterThan(0)
+      expect(waiting.length).toBeGreaterThan(0)
+      // The images that still wait for their new sprite moved with the others.
+      waiting.forEach((item) => expect(getLiveSpriteByLabel(item.id)!.position.x).toBe(item.x))
+      expect(app).toBeDefined()
+      vi.unstubAllGlobals()
+      unmount()
+    })
+
     it('keeps the bitmap for the texture lifetime when the renderer cannot upload eagerly', async () => {
       mockRendererSupportsEagerUpload = false
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -2197,7 +2316,65 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(restored.scale.x).toBe(2)
     expect(restored.scale.y).toBe(2)
     expect(restored.rotation).toBe(0)
-    expect(app.render).toHaveBeenCalledTimes(renderCountBeforeClear + 1)
+    // Clearing a preview draws in the coming frame, after the commit that ended it reached
+    // the layer (see 'never draws a committed move back at its old place').
+    expect(app.render).toHaveBeenCalledTimes(renderCountBeforeClear)
+    await waitFor(() =>
+      expect(app.render.mock.calls.length).toBeGreaterThan(renderCountBeforeClear)
+    )
+  }, 15000)
+
+  it('never draws a committed move back at its old place while a job runs', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    // Stands in for the interaction overlay: it clears the preview in a layout effect as soon
+    // as the committed transform arrives, before the layer's own reconcile pass runs.
+    function Host({ item }: { item: CanvasImageItem }) {
+      const committedX = React.useRef(item.x)
+      React.useLayoutEffect(() => {
+        if (committedX.current !== item.x) {
+          committedX.current = item.x
+          ref.current?.syncItemPreview(item.id, null)
+        }
+      }, [item.id, item.x])
+      return (
+        <Layer ref={ref} items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} isPerformanceThrottled />
+      )
+    }
+    const item = createItem()
+    const { rerender, unmount } = render(<Host item={item} />)
+    await waitFor(() => expect(getLiveSpriteByLabel(item.id)).not.toBeNull())
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+    const app = createdApplications[0]
+    const drawnX: number[] = []
+    const draw = app.render.getMockImplementation() as (() => void) | undefined
+    app.render.mockImplementation(() => {
+      drawnX.push(getLiveSpriteByLabel(item.id)!.position.x)
+      draw?.()
+    })
+
+    act(() =>
+      ref.current?.syncItemPreview(item.id, {
+        x: 500,
+        y: item.y,
+        width: item.width,
+        height: item.height,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0
+      })
+    )
+    rerender(<Host item={{ ...item, x: 500 }} />)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+
+    expect(drawnX[0]).toBe(500)
+    expect(drawnX).not.toContain(item.x)
+    expect(getLiveSpriteByLabel(item.id)!.position.x).toBe(500)
+    unmount()
   }, 15000)
 
   it('drops preview state when an item is removed before its id is reused', async () => {
@@ -4269,11 +4446,17 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       act(() => ref.current?.syncItemPreview('first', { ...canonical, x: 64 }))
       expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
 
-      // Clearing the preview moves the image back: one render, then nothing.
+      // Clearing the preview moves the image back and asks for one render in a coming frame
+      // (the commit that ends a preview reaches the layer just after it); again, nothing.
       act(() => ref.current?.syncItemPreview('first', null))
-      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
       expect(getLiveSpriteByLabel('first')?.position.x).toBe(20)
       act(() => ref.current?.syncItemPreview('first', null))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+      act(() => ref.current?.setViewportInteracting(false))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60))
+      })
+      act(() => frames.flush())
       expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
       expect(frames.pending()).toBe(0)
     })
