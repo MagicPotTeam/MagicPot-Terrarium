@@ -115,6 +115,19 @@ describe('RendererRecoveryNotice', () => {
     }
   })
 
+  it('is a no-drag region, so its close button is clickable next to the title bar\'s drag strip', async () => {
+    // jsdom ignores -webkit-app-region, so look at the rule Emotion generated for the notice's
+    // classes; that the real drag region lets the click through is checked in the running app.
+    const { listeners } = await renderNotice('en-US')
+    act(() => listeners[0]?.({ reason: 'crashed', exitCode: 5, diedAt: Date.now() }))
+    const notice = screen.getByTestId('renderer-recovery-notice')
+    const css = Array.from(document.querySelectorAll('style'), (style) => style.textContent ?? '').join('\n')
+    const noDragClasses = Array.from(notice.classList).filter((name) =>
+      new RegExp(`\\.${name}\\{[^}]*-webkit-app-region:\\s*no-drag`).test(css)
+    )
+    expect(noDragClasses).not.toHaveLength(0)
+  })
+
   it('renders without the bridge (tests, browser preview)', () => {
     delete (window as unknown as { appEvents?: unknown }).appEvents
     expect(() => render(<RendererRecoveryNotice />)).not.toThrow()

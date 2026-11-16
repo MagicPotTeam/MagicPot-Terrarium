@@ -29,6 +29,10 @@ vi.mock('./components/ComfyBatchJobCenter', () => ({
   default: () => null
 }))
 
+vi.mock('./components/RendererRecoveryNotice', () => ({
+  default: () => <div data-testid="renderer-recovery-notice-mount" />
+}))
+
 vi.mock('./components/Layout', () => ({
   default: () => <div data-testid="app-shell">App shell</div>
 }))
@@ -132,6 +136,13 @@ describe('App startup', () => {
     expect(bridgeMounts.comfyExecutionActivityBridge).toBe(1)
     expect(bridgeMounts.comfyLogBridge).toBe(1)
     expect(bridgeMounts.managedComfyProcessBridge).toBe(1)
+  })
+
+  it('mounts the renderer recovery notice with the shell, so a recovery reload is announced', () => {
+    render(<App />)
+
+    expect(screen.getByTestId('renderer-recovery-notice-mount')).toBeInTheDocument()
+    expect(screen.getByTestId('app-shell')).toBeInTheDocument()
   })
 
   it('uses requestIdleCallback when available before starting Comfy bridge work', async () => {

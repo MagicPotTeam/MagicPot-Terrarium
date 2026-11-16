@@ -135,10 +135,11 @@ vi.mock('./subprocess/subprocess', () => ({
 }))
 
 vi.mock('./utils/loggingOverride', () => ({}))
-vi.mock('./processDiagnostics', () => ({
+const processDiagnosticsMock = vi.hoisted(() => ({
   startLocalCrashDumps: vi.fn(),
-  startProcessDiagnostics: vi.fn()
+  startProcessDiagnostics: vi.fn<(options: { getMainWindow: () => unknown }) => void>()
 }))
+vi.mock('./processDiagnostics', () => processDiagnosticsMock)
 
 function createWindow(id: string) {
   const windowListeners = new Map<string, (...args: unknown[]) => void>()
@@ -295,6 +296,33 @@ describe('main process startup window opening', () => {
     expect(startQAppWatcherMock).toHaveBeenCalledTimes(1)
     expect(initScreenshotManagerMock).toHaveBeenCalledWith(initialWindow)
     expect(startQAppWatcherMock).toHaveBeenCalledWith(initialWindow)
+  })
+
+  it('starts local crash dumps before the app is ready and gives the diagnostics the created window', async () => {
+    let ready!: () => void
+    appMock.whenReady.mockImplementationOnce(() => new Promise<void>((resolve) => (ready = resolve)))
+    const initialWindow = { id: 'diagnosed-window' }
+    createMainWindowMock.mockReset()
+    createMainWindowMock.mockReturnValue(initialWindow)
+
+    await loadModule()
+
+    // Crash dumps must be set up before Electron is ready, or early native crashes are not dumped.
+    expect(processDiagnosticsMock.startLocalCrashDumps).toHaveBeenCalledOnce()
+    expect(processDiagnosticsMock.startLocalCrashDumps.mock.invocationCallOrder[0]).toBeLessThan(
+      appMock.whenReady.mock.invocationCallOrder[0]
+    )
+    expect(processDiagnosticsMock.startProcessDiagnostics).not.toHaveBeenCalled()
+
+    ready()
+    await settle()
+    await settle()
+
+    expect(createMainWindowMock).toHaveBeenCalledTimes(1)
+    expect(processDiagnosticsMock.startProcessDiagnostics).toHaveBeenCalledOnce()
+    // Without the window, no breadcrumb is accepted and every death record has no send stage.
+    const [{ getMainWindow }] = processDiagnosticsMock.startProcessDiagnostics.mock.calls[0]
+    expect(getMainWindow()).toBe(initialWindow)
   })
 
   it('creates window with automated startup mode', async () => {
