@@ -1,5 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Box, Button, Checkbox, FormControlLabel, MenuItem, TextField, Typography } from '@mui/material'
+import { useTheme } from '@mui/material/styles'
+import { useTranslation } from 'react-i18next'
+import AgentColumnOverlay from '@renderer/components/AgentColumnOverlay'
+import { getAgentColumnTokens } from '@renderer/components/agentColumnTokens'
 import type { ChatSession } from '../chatStorage'
 import { resolveTeamRequestSettings } from '../agentTeam'
 import { canSetTeamTaskStatus, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, validateTeamTasks } from '../agentTeamTasks'
@@ -10,16 +14,17 @@ const normalizeAccessibleName = (value: string) => value.replace(/\s+/g, ' ').tr
 const normalizePerceivedName = (value: string) => normalizeAccessibleName(value.replace(/[\u200b\u2060]/gu, ''))
 
 export default function AgentTeamMenu({
-  lead, members, models, onSave, onEnd, onDispatch, subscriptions, onSubscriptionChange, onBroadcast, onAddMember, openRequest, onReturnFocus
+  lead, members, models, onSave, onEnd, onDispatch, subscriptions, onSubscriptionChange, onBroadcast, openRequest, onReturnFocus, overlayHost
 }: {
   /** Opens the dialog each time it changes (the composer "+" menu entry "团队…"). */
   openRequest?: number
   /** The dialog closed while it held the focus: the focus goes back to the conversation. */
   onReturnFocus?(): void
+  /** The Agent column's overlay layer; the dialog is drawn in place without one. */
+  overlayHost?: HTMLElement | null
   models: { id: string; name: string }[]
   onBroadcast?(input: Readonly<{ id: string; text: string }>): { queued: number } | Promise<{ queued: number }>
   onEnd(): void
-  onAddMember?(): void
   onDispatch?(taskId: string): void
   subscriptions?: readonly string[]
   onSubscriptionChange?(memberId: string, subscribed: boolean): void
@@ -31,25 +36,16 @@ export default function AgentTeamMenu({
   const endDraftDescriptionId = useId()
   const channelLimitDescriptionId = useId()
   const subscriptionGroupLabelId = useId()
+  const { t } = useTranslation()
+  const tokens = getAgentColumnTokens(useTheme())
   const [open, setOpen] = useState(false)
   const initialOpenRequest = useRef(openRequest)
-  const focusOpenRequestRef = useRef(false)
-  const dialogCloseButtonRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     if (openRequest !== undefined && initialOpenRequest.current !== openRequest) {
       initialOpenRequest.current = openRequest
-      focusOpenRequestRef.current = true
       setOpen(true)
     }
   }, [openRequest])
-  useEffect(() => {
-    if (!open || !focusOpenRequestRef.current) return
-    const timer = window.setTimeout(() => {
-      focusOpenRequestRef.current = false
-      dialogCloseButtonRef.current?.focus()
-    }, 0)
-    return () => window.clearTimeout(timer)
-  }, [open, openRequest])
   const [task, setTask] = useState('')
   const [owner, setOwner] = useState('')
   const [ownerNeedsReselection, setOwnerNeedsReselection] = useState(false)
@@ -170,19 +166,30 @@ export default function AgentTeamMenu({
   const currentIds = new Set(tasks.map(item => item.id))
   const durablePendingReceipts = (lead.teamMessageReceipts ?? []).filter(receipt => receipt.state === 'queued' || receipt.state === 'unknown').length
   const selected = dependencies.filter(id => currentIds.has(id))
-  const closeDialog = (restoreFocus: boolean) => {
-    if (restoreFocus) onReturnFocus?.()
-    focusOpenRequestRef.current = false
-    setOpen(false)
-  }
-  return <Box>
-    {open && <Box role="dialog" aria-label="团队管理" onKeyDown={event => {
-      if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || !event.currentTarget.contains(event.target as Node)) return
-      event.stopPropagation()
-      closeDialog(event.currentTarget.contains(document.activeElement))
-    }} sx={{ p: 1, maxHeight: 300, maxWidth: 'min(480px, 95%)', overflow: 'auto', position: 'absolute', top: 8, right: 8, zIndex: 1200, bgcolor: 'background.paper', boxShadow: 3, borderRadius: 1 }}>
-      <Button ref={dialogCloseButtonRef} size="small" onClick={() => closeDialog(document.activeElement === dialogCloseButtonRef.current)}>关闭团队管理</Button>
-      {onAddMember && <Button disabled={Boolean(lead.teamEnded) || draftLocked} onClick={() => { setOpen(false); onAddMember() }}>组建团队 / 添加成员</Button>}
+  // Upstream's drawer look: section labels, 12px text and compact controls.
+  const contentSx = {
+    fontSize: tokens.fontSize.small,
+    '& .MuiTypography-subtitle2': { m: '14px 0 4px', fontSize: tokens.fontSize.micro, fontWeight: 600, lineHeight: '16px', letterSpacing: '0.025em', textTransform: 'uppercase', color: tokens.muted },
+    '& > .MuiTypography-subtitle2:first-of-type': { mt: 0 },
+    '& .MuiTypography-caption, & .MuiFormControlLabel-label': { fontSize: tokens.fontSize.small, lineHeight: 1.5 },
+    '& .MuiButton-root': { minHeight: 24, py: '2px', fontSize: tokens.fontSize.small, textTransform: 'none' },
+    '& .MuiTextField-root': { my: '6px', mr: '6px' },
+    '& .MuiInputBase-input, & .MuiInputLabel-root': { fontSize: tokens.fontSize.small },
+    '& details': { fontSize: tokens.fontSize.small }
+  } as const
+  return <AgentColumnOverlay
+    open={open}
+    container={overlayHost}
+    label="团队管理"
+    title={t('agent_workspace.team_overlay.title')}
+    onClose={() => setOpen(false)}
+    cancelLabel={t('agent_workspace.overlay.close')}
+    cancelAriaLabel="关闭团队管理"
+    initialFocus="cancel"
+    onReturnFocus={onReturnFocus}
+    data-testid="agent-team-overlay"
+  >
+    <Box sx={contentSx}>
       <Typography variant="subtitle2">共享任务</Typography>
       {validTasks && tasks.length === 0 && <Typography variant="caption" component="div">暂无共享任务</Typography>}
       <Typography variant="caption" component="div">{onDispatch ? '依赖完成后可手动执行' : '任务执行尚未接入'}</Typography>
@@ -280,6 +287,6 @@ export default function AgentTeamMenu({
       {message && !lead.teamEnded && <Typography id={endDraftDescriptionId} variant="caption" component="div">结束团队前请复制未发送的频道草稿，结束后不保证保留。</Typography>}
       <Button aria-describedby={message && !lead.teamEnded ? endDraftDescriptionId : undefined} disabled={draftLocked || Boolean(lead.teamEnded)} onClick={endTeam}>{lead.teamEnded ? '团队已结束' : '结束团队'}</Button>
       <Typography variant="caption">嵌套深度 1</Typography>
-    </Box>}
-  </Box>
+    </Box>
+  </AgentColumnOverlay>
 }

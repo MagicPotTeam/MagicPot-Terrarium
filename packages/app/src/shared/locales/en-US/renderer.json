@@ -1659,7 +1659,15 @@
     "status_interrupted": "Interrupted",
     "status_idle": "Idle",
     "overlay": {
-      "cancel": "Cancel"
+      "cancel": "Cancel",
+      "close": "Close"
+    },
+    "team_overlay": {
+      "title": "Team"
+    },
+    "member_form": {
+      "title": "Add member",
+      "create": "Create"
     }
   },
   "custom_app": {

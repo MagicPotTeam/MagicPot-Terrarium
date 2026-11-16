@@ -9,13 +9,14 @@ const deferred = () => {
  return {promise,resolve,reject}
 }
 describe('team menu summaries',()=>{
- it('does not hand the focus back to the page when add member or End closes nothing',()=>{
-  const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onEnd=vi.fn(),onAddMember=vi.fn(),onReturnFocus=vi.fn()
-  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={vi.fn()} onEnd={onEnd} onAddMember={onAddMember} onReturnFocus={onReturnFocus}/>)
+ it('does not hand the focus back to the page when End closes nothing, and offers no add-member button',()=>{
+  const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onEnd=vi.fn(),onReturnFocus=vi.fn()
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={vi.fn()} onEnd={onEnd} onReturnFocus={onReturnFocus}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    fireEvent.click(screen.getByRole('button',{name:'结束团队'}));expect(onEnd).toHaveBeenCalledOnce()
-   fireEvent.click(screen.getByRole('button',{name:'组建团队 / 添加成员'}));expect(onAddMember).toHaveBeenCalledOnce()
+   // Members are added from the composer's "+" menu only.
+   expect(screen.queryByRole('button',{name:'组建团队 / 添加成员'})).not.toBeInTheDocument()
    expect(onReturnFocus).not.toHaveBeenCalled()
   }finally{view.unmount()}
  })

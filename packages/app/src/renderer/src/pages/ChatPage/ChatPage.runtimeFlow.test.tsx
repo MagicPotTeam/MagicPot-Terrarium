@@ -1416,8 +1416,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(alice.textContent).toBe('Alice')
       expect(teamRows().getAllByRole('button').map(row => row.textContent)).toEqual(['Lead', 'Alice'])
       expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
-      chooseAddMenuEntry('chat-composer-menu-team')
-      fireEvent.click(screen.getByRole('button', { name: '组建团队 / 添加成员' }))
+      chooseAddMenuEntry('chat-composer-menu-add-member')
       fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Bob' } })
       fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Writer' } })
       fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
@@ -4660,12 +4659,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
       const lead = readCurrentSessionState()!.id
       for (const [name, role, count] of [[designerName, '设计师', '1'], [writerName, '文案', '2']] as const) {
-        if (count === '1') {
-          chooseAddMenuEntry('chat-composer-menu-add-member')
-        } else {
-          await openTeamManagement()
-          fireEvent.click(screen.getByRole('button', { name: '组建团队 / 添加成员' }))
-        }
+        chooseAddMenuEntry('chat-composer-menu-add-member')
         fireEvent.change(screen.getByLabelText('成员名'), { target: { value: name } })
         fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: role } })
         fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))

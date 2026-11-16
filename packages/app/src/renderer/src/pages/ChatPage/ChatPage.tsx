@@ -9894,7 +9894,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
             <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
           </Box>}
-          {teamEnabled && teamLead && <AgentTeamMenu openRequest={teamManagementOpenRequest} onReturnFocus={focusComposerInput} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
+          {teamEnabled && teamLead && <AgentTeamMenu openRequest={teamManagementOpenRequest} overlayHost={overlayHost} onReturnFocus={focusComposerInput} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
             const current = teamMessageDispatcherRef.current
             if (!current || current.key !== messageKey || !route?.threadId || !messageLeadId || !teamEnabled) throw new Error('Team channel unavailable.')
             // Avoid consuming the broadcast draft for a known-unavailable model setting.
@@ -9996,7 +9996,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               return false
             }
           }}/>}
-          {teamEnabled && teamLead && <AgentTeamMemberForm key={imagePlacementKey} placement={teamImagePlacement} lead={teamLead} members={teamMembers} creating={creatingTeamMember} onClose={() => setCreatingTeamMember(false)} onCreate={async(name,role,onCommittedEmpty)=>{
+          {teamEnabled && teamLead && <AgentTeamMemberForm key={imagePlacementKey} placement={teamImagePlacement} lead={teamLead} members={teamMembers} creating={creatingTeamMember} overlayHost={overlayHost} onReturnFocus={focusComposerInput} onClose={() => setCreatingTeamMember(false)} onCreate={async(name,role,onCommittedEmpty)=>{
               const lead=sessionsRef.current.find(session=>session.id===teamLead.id)
               const teamKey = `${storageScope}\u0000${teamLead.id}`
               const endEpoch = teamEndEpochsRef.current.get(teamKey) ?? 0
