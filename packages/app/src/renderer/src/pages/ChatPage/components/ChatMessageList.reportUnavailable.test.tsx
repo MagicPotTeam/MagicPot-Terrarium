@@ -95,7 +95,7 @@ const cardOf = (fileName: string): HTMLElement => {
 const expectUnavailable = (card: HTMLElement) => {
   expect(card).toHaveAttribute('aria-disabled', 'true')
   expect(card).toHaveStyle({ opacity: '0.55' })
-  expect(within(card).getByText((text) => text.startsWith(CAPTION_KEY))).toBeInTheDocument()
+  expect(within(card).getByText((text) => text === CAPTION_KEY)).toBeInTheDocument()
 }
 
 const expectAvailable = (card: HTMLElement) => {
@@ -130,11 +130,11 @@ describe('ChatMessageList unavailable report chip', () => {
       expectAvailable(cardOf('bound-report.md'))
       expectAvailable(cardOf('notes.md'))
       expectAvailable(cardOf('legacy-ocr.json'))
-      expect(screen.getAllByText((text) => text.startsWith(CAPTION_KEY))).toHaveLength(2)
+      expect(screen.getAllByText((text) => text === CAPTION_KEY)).toHaveLength(2)
     }
   )
 
-  it('keeps the file meta label and the download of an unavailable report', () => {
+  it('shows the caption in place of the meta label and keeps the download and drag', () => {
     const session: ChatSession = {
       id: 'legacy',
       title: 'fixture',
@@ -144,8 +144,10 @@ describe('ChatMessageList unavailable report chip', () => {
     }
     const { onDownloadAttachment } = renderList(session)
     const card = cardOf('legacy-report.md')
-    const caption = within(card).getByText((text) => text.startsWith(CAPTION_KEY))
-    expect(caption.textContent).toMatch(/^chat\.report_unavailable · .+/)
+    // The caption replaces the meta line (kind and size), so the card does not grow wider.
+    expect(within(card).getByText((text) => text === CAPTION_KEY)).toBeInTheDocument()
+    expect(within(card).queryByText(/KB/)).not.toBeInTheDocument()
+    expect(within(card).getByText('legacy-report.md')).toBeInTheDocument()
     expect(card).toHaveAttribute('draggable', 'true')
     fireEvent.click(within(card).getByRole('button', { name: 'chat.download_attachment' }))
     expect(onDownloadAttachment).toHaveBeenCalledWith(expect.objectContaining(legacyReport))

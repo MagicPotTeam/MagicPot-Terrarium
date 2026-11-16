@@ -1899,14 +1899,9 @@ const FileAttachmentCard: React.FC<{
 }> = ({ attachment, ocrResult, onDownloadAttachment, t, theme }) => {
   const folderBodyColor = theme.palette.mode === 'light' ? '#f8fafc' : '#1f2937'
   const folderTabColor = theme.palette.mode === 'light' ? '#eef2ff' : '#111827'
-  // A report the request path refuses (no MAIN binding) is shown muted with a short caption;
-  // opening, dragging and downloading the file itself stay as they are.
+  // A report the request path refuses (no MAIN binding) is shown muted, with a short caption in
+  // place of the meta label; opening, dragging and downloading the file itself stay as they are.
   const reportUnavailable = isUnavailablePrimaryReportFile(attachment)
-  const metaLabel = buildFileMetaLabel({
-    fileName: attachment.fileName,
-    mimeType: attachment.mimeType,
-    sizeBytes: attachment.sizeBytes
-  })
 
   return (
     <Box
@@ -1964,13 +1959,12 @@ const FileAttachmentCard: React.FC<{
             sx={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
           >
             {reportUnavailable
-              ? [
-                  t('chat.report_unavailable', { defaultValue: 'Unavailable: unverified source' }),
-                  metaLabel
-                ]
-                  .filter(Boolean)
-                  .join(' · ')
-              : metaLabel}
+              ? t('chat.report_unavailable', { defaultValue: 'Unavailable: unverified source' })
+              : buildFileMetaLabel({
+                  fileName: attachment.fileName,
+                  mimeType: attachment.mimeType,
+                  sizeBytes: attachment.sizeBytes
+                })}
           </Typography>
         </Box>
         <Typography
