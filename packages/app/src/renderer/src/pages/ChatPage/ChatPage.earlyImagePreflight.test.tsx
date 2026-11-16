@@ -553,7 +553,7 @@ describe('ChatPage image preflight at the send boundary', () => {
       expect(fixture.fetch.mock.calls.map(([url]) => String(url))).toEqual([manifestUrl])
       expect(reports.verify).toHaveBeenCalledOnce()
       expect(reports.verify).toHaveBeenCalledWith({
-        conversation: { conversationId: 'fixture-session' },
+        conversation: { conversationId: 'fixture-session', storageScope: scope },
         items: [{ binding: primary.reportBundleBinding, primaryUrl: primary.url }]
       })
       expect(fixture.saveImageToDir).not.toHaveBeenCalled()
