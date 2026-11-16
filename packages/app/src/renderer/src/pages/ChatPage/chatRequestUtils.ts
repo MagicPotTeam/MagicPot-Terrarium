@@ -59,7 +59,11 @@ import {
 import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
 import { isRunnableProfile, usesOpenAIResponsesImagePolicy } from '@shared/llm/utils'
 import { DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY } from '@shared/llm/openaiResponses'
-import { MAX_LLM_CHUNKED_BINARY_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
+import {
+  MAX_LLM_CHUNKED_BINARY_BYTES,
+  MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES
+} from '@shared/llm/chatAttachmentTransportLimits'
+import { readBoundedLocalChatImageBlob } from './boundedLocalChatImageReader'
 import { summarizeChatSendStage, type ChatSendStage } from '@shared/utils/chatSendStageBreadcrumb'
 export { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
@@ -563,7 +567,16 @@ const normalizeImageAttachmentForRequest = async (
       throw new Error(`Failed to load image attachment (${response.status})`)
     }
 
-    const blob = await responseToBlob(response, options.signal)
+    // A response with a body is read chunk by chunk under a hard per-image cap;
+    // a body without getReader is refused by the reader, never sent to blob().
+    // Only a bodyless response still takes the uncapped fallback.
+    const blob =
+      response.body
+        ? await readBoundedLocalChatImageBlob(response, {
+            maxBytes: MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES,
+            ...(options.signal ? { signal: options.signal } : {})
+          })
+        : await responseToBlob(response, options.signal)
     throwIfAborted(options.signal)
     const dataUrl = await blobToDataUrl(blob, options.signal)
     throwIfAborted(options.signal)
