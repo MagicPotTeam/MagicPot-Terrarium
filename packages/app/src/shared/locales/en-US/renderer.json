@@ -1552,7 +1552,7 @@
     "reply_copied": "Reply copied",
     "drag_reply_to_canvas": "Drag reply to canvas",
     "edit_message": "Edit",
-    "edit_submit_stale": "The edited message was not sent because you switched to another thread. Open the thread and edit the message again.",
+    "edit_submit_stale": "The edited message was not sent because the thread changed before it was sent. Open the thread and edit the message again.",
     "response_interrupted": "(Response interrupted)",
     "copy_code": "Copy code",
     "code_copied": "Code copied",

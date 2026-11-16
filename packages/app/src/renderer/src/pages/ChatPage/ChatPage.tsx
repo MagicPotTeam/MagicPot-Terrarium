@@ -9151,9 +9151,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyWarning(t('chat.edit_submit_stale'))
         return
       }
+      const ownerScope = storageScope
       let accepted = false
+      let queued = false
       let warned = false
-      void sendMessage({
+      const editOverrides: SendMessageOverrides = {
         content,
         attachments,
         hiddenContext,
@@ -9161,9 +9163,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
         // The edit belongs to its thread; a preparing or queued edit never follows the selection.
         targetSessionId: ownerSessionId,
         // Re-checked by the send preflight after every await: a switch before the edited turn
-        // is accepted locally sends nothing and warns once.
+        // is accepted locally sends nothing and warns once. An edit admitted to its busy
+        // thread's queue is owned by that queue like any queued send of the thread: it is
+        // shown there, may be removed there, and is sent into its pinned thread when the
+        // queue drains, whatever thread is selected then. It still requires its scope.
         isComposerSubmissionCurrent: () => {
-          if (accepted || isEditOwnerCurrent()) return true
+          if (accepted) return true
+          const owned = queued
+            ? isMountedRef.current && storageScopeRef.current === ownerScope
+            : isEditOwnerCurrent()
+          if (owned) return true
           if (!warned && isMountedRef.current) {
             warned = true
             notifyWarning(t('chat.edit_submit_stale'))
@@ -9176,9 +9185,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
         onComposerSubmissionAccepted: () => {
           accepted = true
         }
-      })
+      }
+      void sendMessage(editOverrides)
+      // sendMessage decides synchronously, before its first await, whether the owning thread
+      // is busy; if so it has queued exactly these overrides under the owning thread.
+      const ownerQueue = queuedSessionSendsRef.current.get(ownerSessionId)
+      queued = Boolean(ownerQueue?.some((item) => item.overrides === editOverrides))
     },
-    [currentSessionId, isEditOwnerCurrent, notifyWarning, sendMessage, t]
+    [currentSessionId, isEditOwnerCurrent, notifyWarning, sendMessage, storageScope, t]
   )
 
   // The edit form's report preflight looks at the history the edited send will

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
-import { useEffect, useMemo } from 'react'
+import { useEffect } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
@@ -99,7 +99,8 @@ vi.mock('./chatVideoAttachmentUtils', async (importOriginal) => {
 })
 vi.mock('./chatStorage', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./chatStorage')>()),
-  loadAllSessions: async () => clone(f.sessions),
+  loadAllSessions: async (storageScope?: string) =>
+    clone(f.sessions.filter((session) => session.storageScope === storageScope)),
   saveSessionToDB: async (session: ChatSession) => {
     const index = f.sessions.findIndex((candidate) => candidate.id === session.id)
     if (index < 0) f.sessions.push(clone(session))
@@ -143,25 +144,40 @@ vi.mock('./components/ChatComposer', () => ({
     <input data-testid="composer-input" value={inputValue} readOnly />
   )
 }))
-// Like the real list, the edit form exists only while an index is being edited and
-// registers its receiver from an effect whose cleanup runs with the old prop.
+// Like the real list, the edit form exists only while an index is being edited (one mount
+// per thread and message) and, like UserMessageEditForm, creates its receiver inside an
+// effect keyed on the register prop whose cleanup unregisters with the old prop.
+function EditForm({
+  sessionId,
+  index,
+  register
+}: {
+  sessionId: string | undefined
+  index: number
+  register: (receiver: Receiver | null) => void
+}) {
+  useEffect(() => {
+    const receiver: Receiver = (attachment) => f.receive({ sessionId, index, attachment })
+    register(receiver)
+    return () => register(null)
+  }, [register, sessionId, index])
+  return null
+}
 vi.mock('./components/ChatMessageList', () => ({
   default: function MessageList(props: ListProps) {
     f.props = props
     const { currentSession, editingMessageIndex, editingContent } = props
     const sessionId = currentSession?.id
-    const receiver = useMemo<Receiver>(
-      () => (attachment) => f.receive({ sessionId, index: editingMessageIndex, attachment }),
-      [sessionId, editingMessageIndex]
-    )
-    const register = props.onRegisterEditingAttachmentReceiver
-    useEffect(() => {
-      if (editingMessageIndex === null) return
-      register(receiver)
-      return () => register(null)
-    }, [editingMessageIndex, receiver, register])
     return (
       <div>
+        {editingMessageIndex !== null ? (
+          <EditForm
+            key={`${sessionId}:${editingMessageIndex}`}
+            sessionId={sessionId}
+            index={editingMessageIndex}
+            register={props.onRegisterEditingAttachmentReceiver}
+          />
+        ) : null}
         <span data-testid="session-id">{sessionId ?? ''}</span>
         <pre data-testid="messages">{JSON.stringify(currentSession?.messages ?? [])}</pre>
         <span data-testid="edit-index">{String(editingMessageIndex)}</span>
@@ -252,6 +268,11 @@ const startEdit = async (index: 0 | 2): Promise<void> => {
   fireEvent.click(screen.getByRole('button', { name: `Edit ${index}` }))
   await waitFor(() => expect(editIndex()).toBe(String(index)))
 }
+
+const storedContents = (id: string) =>
+  f.sessions.find((session) => session.id === id)?.messages.map((message) => message.content)
+const queuedItems = () =>
+  screen.queryAllByTestId('chat-queue-item').map((item) => item.textContent ?? '')
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void
@@ -465,5 +486,109 @@ describe('ChatPage edit form thread ownership', () => {
     expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
     expect(screen.getByTestId('edit-content')).toHaveTextContent('Edit draft 2')
     expect(requestCount()).toBe(0)
+  })
+
+  describe('an edit queued while its thread is busy', () => {
+    // A's first edited turn hangs, so the second edit submitted in A is queued under A.
+    const queueEditInBusyA = async () => {
+      const reply = deferred<{ content: string }>()
+      const streamReply = deferred<{ response: string; result: { content: string } }>()
+      f.request.mockImplementationOnce(() => reply.promise)
+      f.stream.mockImplementationOnce(() => streamReply.promise)
+      await startEdit(0)
+      fireEvent.click(screen.getByRole('button', { name: 'Submit edit' }))
+      await waitFor(() => expect(requestCount()).toBe(1))
+      await startEdit(2)
+      fireEvent.click(screen.getByRole('button', { name: 'Submit edit' }))
+      await waitFor(() => expect(queuedItems()).toEqual([expect.stringContaining('Edit draft 2')]))
+      expect(editIndex()).toBe('null')
+      return async () => {
+        await act(async () => {
+          reply.resolve({ content: 'first reply' })
+          streamReply.resolve({ response: 'first reply', result: { content: 'first reply' } })
+          await Promise.resolve()
+        })
+      }
+    }
+
+    it('is delivered into its thread after A to B to A, without a warning', async () => {
+      await renderPage()
+      const finishFirstTurn = await queueEditInBusyA()
+      await selectSession('session-b')
+      expect(queuedItems()).toEqual([])
+      await selectSession('session-a')
+      expect(queuedItems()).toEqual([expect.stringContaining('Edit draft 2')])
+      await finishFirstTurn()
+      await waitFor(() => expect(requestCount()).toBe(2))
+      await waitFor(() =>
+        expect(messages().map((message) => message.content)).toContain('Edit draft 2')
+      )
+      await waitFor(() => expect(queuedItems()).toEqual([]))
+      expect(messages().at(-1)?.content).toBe('fixture reply')
+      expect(staleWarnings()).toBe(0)
+      expect(storedContents('session-b')).toEqual([
+        'session-b message 0',
+        'session-b reply 0',
+        'session-b message 1'
+      ])
+    })
+
+    it('is sent into its own thread, never into B, when the queue drains while B is selected', async () => {
+      await renderPage()
+      const finishFirstTurn = await queueEditInBusyA()
+      await selectSession('session-b')
+      await finishFirstTurn()
+      await waitFor(() => expect(requestCount()).toBe(2))
+      await waitFor(() => expect(storedContents('session-a')).toContain('Edit draft 2'))
+      await act(async () => {})
+      expect(storedContents('session-a')?.at(-1)).toBe('fixture reply')
+      expect(staleWarnings()).toBe(0)
+      expect(sessionId()).toBe('session-b')
+      expect(screen.getByTestId('composer-input')).toHaveValue('session-b composer draft')
+      const bContents = ['session-b message 0', 'session-b reply 0', 'session-b message 1']
+      expect(messages().map((message) => message.content)).toEqual(bContents)
+      expect(storedContents('session-b')).toEqual(bContents)
+      await selectSession('session-a')
+      expect(messages().map((message) => message.content)).toContain('Edit draft 2')
+      expect(queuedItems()).toEqual([])
+    })
+
+    it("stays in its thread's queue, paused and unsent, across a storage scope round trip", async () => {
+      const view = await renderPage()
+      await queueEditInBusyA()
+      const otherScope = 'edit-thread-ownership-other'
+      f.sessions.push({ ...makeSession('session-c'), storageScope: otherScope })
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, otherScope),
+        'session-c'
+      )
+      const renderScope = (storageScope: string) =>
+        view.rerender(
+          <ThemeProvider theme={theme}>
+            <MemoryRouter>
+              <ChatPage storageScope={storageScope} />
+            </MemoryRouter>
+          </ThemeProvider>
+        )
+      renderScope(otherScope)
+      await waitFor(() => expect(sessionId()).toBe('session-c'))
+      expect(queuedItems()).toEqual([])
+      renderScope(scope)
+      await waitFor(() => expect(sessionId()).toBe('session-a'))
+      await waitFor(() => expect(queuedItems()).toEqual([expect.stringContaining('Edit draft 2')]))
+      await act(async () => {})
+      expect(requestCount()).toBe(1)
+      expect(staleWarnings()).toBe(0)
+      expect(storedContents('session-b')).toEqual([
+        'session-b message 0',
+        'session-b reply 0',
+        'session-b message 1'
+      ])
+      expect(storedContents('session-c')).toEqual([
+        'session-c message 0',
+        'session-c reply 0',
+        'session-c message 1'
+      ])
+    })
   })
 })
