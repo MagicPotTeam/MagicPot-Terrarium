@@ -429,11 +429,18 @@ const resolveAbsoluteCanvasMirrorRef = (value: string, assetDir: string): string
   } else if (!path.isAbsolute(candidate) && !/^[a-zA-Z]:[\\/]/.test(candidate)) {
     return null
   }
-  const dir = toComparableCanvasMirrorPath(assetDir)
-  const file = toComparableCanvasMirrorPath(candidate)
-  if (!dir || !file.startsWith(`${dir}/`)) return null
-  const rest = candidate.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').slice(dir.length + 1)
-  const segments = rest.split('/')
+  // Compared segment by segment: a lower-case form can have another length than the
+  // original, so a prefix length of one must never be used to cut the other.
+  const dirSegments = toComparableCanvasMirrorPath(assetDir).split('/')
+  const fileSegments = candidate.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').split('/')
+  if (
+    !dirSegments[0] ||
+    fileSegments.length <= dirSegments.length ||
+    dirSegments.some((segment, index) => toComparableCanvasMirrorPath(fileSegments[index]) !== segment)
+  ) {
+    return null
+  }
+  const segments = fileSegments.slice(dirSegments.length)
   if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null
   return `${CANVAS_MIRROR_ASSET_DIRNAME}/${segments.join('/')}`
 }

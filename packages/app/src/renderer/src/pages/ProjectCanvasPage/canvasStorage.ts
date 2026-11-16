@@ -441,6 +441,17 @@ function refusesEmptyCanvasBytes(owner: { type?: unknown }): boolean {
   return owner.type === 'image' || owner.type === 'video' || owner.type === 'model3d'
 }
 
+/**
+ * Whether an empty read of this slot is treated as unreadable (not stored, tried
+ * again at the next save). Only a source that can still change (a file being
+ * written, a server) is retried; an immutable one (blob:, data:, bytes restored
+ * from IndexedDB) holds what it holds and is stored as it is, as earlier
+ * versions did, so it never blocks the save of the whole board.
+ */
+function refusesEmptyCanvasRead(owner: { type?: unknown }, src: string): boolean {
+  return refusesEmptyCanvasBytes(owner) && !/^(blob|data):/i.test(src.trim())
+}
+
 function rememberBoundedCanvasAssetKey(cache: Map<string, string>, id: string, key: string): void {
   cache.delete(id)
   cache.set(id, key)
@@ -515,11 +526,20 @@ function readCanvasAssetKeyTag(owner: object, slotId: string, src: string): stri
   return isCanvasAssetKey(key) && sources[textureName] === src ? key : null
 }
 
+type CanvasLocalFileIdentity = { canonicalPath: string; sizeBytes: number; lastModifiedMs: number }
+
+// Per identity object (undo snapshots copy an item but share its identity object) and
+// source: whether the identity describes that source. Saves walk every snapshot.
+const canvasLocalFileIdentityMatches = new WeakMap<
+  object,
+  { canonicalPath: string; src: string; matches: boolean }
+>()
+
 function getMatchingLocalFileIdentity(
   owner: object,
   slotId: string,
   src: string
-): { canonicalPath: string; sizeBytes: number; lastModifiedMs: number } | null {
+): CanvasLocalFileIdentity | null {
   if (slotId !== CANVAS_ASSET_SOURCE_SLOT) return null
   const identity = (owner as { sourceIdentity?: CanvasImageItem['sourceIdentity'] }).sourceIdentity
   if (
@@ -531,16 +551,16 @@ function getMatchingLocalFileIdentity(
   ) {
     return null
   }
+  const matched = { canonicalPath: identity.canonicalPath, sizeBytes: identity.sizeBytes, lastModifiedMs: identity.lastModifiedMs }
+  const cached = canvasLocalFileIdentityMatches.get(identity)
+  if (cached && cached.src === src && cached.canonicalPath === identity.canonicalPath) {
+    return cached.matches ? matched : null
+  }
   const localPath = resolveLocalFilePathFromSource(src)
-  if (!localPath) return null
   const comparable = (value: string): string => normalizeComparablePath(value).replace(/^\/+/, '')
-  return comparable(localPath) === comparable(identity.canonicalPath)
-    ? {
-        canonicalPath: identity.canonicalPath,
-        sizeBytes: identity.sizeBytes,
-        lastModifiedMs: identity.lastModifiedMs
-      }
-    : null
+  const matches = !!localPath && comparable(localPath) === comparable(identity.canonicalPath)
+  canvasLocalFileIdentityMatches.set(identity, { canonicalPath: identity.canonicalPath, src, matches })
+  return matches ? matched : null
 }
 
 const CANVAS_MANAGED_MEDIA_SHA256_PATTERN = /^[0-9a-f]{64}$/
@@ -1721,6 +1741,8 @@ type CanvasSaveBaseline = {
   index: CanvasBlobKeyIndex | null
   /** From the committed record: which content key each per-item blob holds. */
   legacyBlobAssetKeys: Map<string, string>
+  /** Ids of the items of the committed record; null when it could not be read. */
+  recordItemIds: Set<string> | null
 }
 
 async function readCanvasSaveBaseline(
@@ -1731,7 +1753,8 @@ async function readCanvasSaveBaseline(
     const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readonly')
     let index: CanvasBlobKeyIndex | null = null
     let legacyBlobAssetKeys = new Map<string, string>()
-    tx.oncomplete = () => resolve({ index, legacyBlobAssetKeys })
+    let recordItemIds: Set<string> | null = null
+    tx.oncomplete = () => resolve({ index, legacyBlobAssetKeys, recordItemIds })
     tx.onabort = () => rejectCanvasStorageError(reject, 'blob key index transaction', tx.error)
     tx.onerror = () => rejectCanvasStorageError(reject, 'blob key index transaction', tx.error)
     try {
@@ -1742,9 +1765,13 @@ async function readCanvasSaveBaseline(
       if (typeof (itemStore as Partial<IDBObjectStore>).get === 'function') {
         const request = itemStore.get(storeKey)
         request.onsuccess = () => {
-          legacyBlobAssetKeys = readCanvasRecordLegacyBlobAssetKeys(
-            request.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
-          )
+          const record = request.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
+          legacyBlobAssetKeys = readCanvasRecordLegacyBlobAssetKeys(record)
+          const ids = new Set<string>()
+          for (const item of record ? extractPersistedCanvasData(record).items : []) {
+            if (item && typeof item === 'object' && typeof item.id === 'string') ids.add(item.id)
+          }
+          recordItemIds = ids
         }
       }
     } catch (error) {
@@ -1754,7 +1781,13 @@ async function readCanvasSaveBaseline(
   })
 }
 
-type CanvasAssetBlobWrite = { assetKey: string; data: ArrayBuffer; mimeType: string }
+type CanvasAssetBlobWrite = {
+  assetKey: string
+  data: ArrayBuffer
+  mimeType: string
+  /** Per-item blobs written from the same bytes (items the committed record does not hold). */
+  legacyLogicalKeys?: readonly string[]
+}
 /** A per-item blob of the previous release, copied from the keyed blob of `assetKey`. */
 type CanvasLegacyBlobWrite = { logicalKey: string; assetKey: string }
 
@@ -1766,7 +1799,14 @@ async function writeCanvasAssetBlobBatch(
   if (batch.length === 0) return
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction([BLOB_STORE_NAME], 'readwrite')
-    tx.oncomplete = () => resolve()
+    tx.oncomplete = () => {
+      for (const entry of batch) {
+        for (const logicalKey of entry.legacyLogicalKeys ?? []) {
+          noteCanvasLegacyBlobRewritten(storeKey, logicalKey)
+        }
+      }
+      resolve()
+    }
     tx.onabort = () => rejectCanvasStorageError(reject, 'canvas asset save transaction', tx.error)
     tx.onerror = () => rejectCanvasStorageError(reject, 'canvas asset save transaction', tx.error)
     try {
@@ -1776,6 +1816,12 @@ async function writeCanvasAssetBlobBatch(
           { data: entry.data, mimeType: entry.mimeType },
           getScopedCanvasAssetBlobKey(storeKey, entry.assetKey)
         )
+        for (const logicalKey of entry.legacyLogicalKeys ?? []) {
+          store.put(
+            { data: entry.data, mimeType: entry.mimeType },
+            getScopedCanvasBlobKey(storeKey, logicalKey)
+          )
+        }
       }
     } catch (error) {
       try { tx.abort() } catch { /* Already inactive. */ }
@@ -1796,9 +1842,11 @@ async function writeCanvasAssetBlobBatch(
  * together with the protection of legacy keys in pruneCanvasAssetBlobs): that
  * release looks binaries up only by item id (<storeKey>::canvas::<itemId>, and
  * <itemId>::tex::<name> for model textures). Every slot therefore also gets
- * that per-item blob, copied once from its keyed blob when it is missing or
- * holds other bytes (`legacyWrites`, done by commitCanvasMetadata together
- * with the record); a later save of the unchanged slot moves nothing.
+ * that per-item blob, written once when it is missing or holds other bytes:
+ * from the bytes in hand, next to the keyed blob, for a new item the committed
+ * record does not hold; otherwise copied from the keyed blob by
+ * commitCanvasMetadata together with the record (`legacyWrites`). A later save
+ * of the unchanged slot moves nothing.
  */
 async function storeCanvasAssetBlobs(
   db: IDBDatabase,
@@ -1828,6 +1876,18 @@ async function storeCanvasAssetBlobs(
   let needsBytes = false
   const pendingByAssetKey = new Map<string, Promise<string | null>>()
   const legacyWrites: CanvasLegacyBlobWrite[] = []
+  /** Per-item blobs written in the asset batches, from the bytes read for their keyed blob. */
+  const legacyWrittenWithAsset = new Set<string>()
+  // A per-item blob that does not exist yet, of an item the committed record does not
+  // hold, can be written right away from the bytes in hand: whatever happens to this
+  // save, the previous release never reads it for the committed record. Every other
+  // per-item copy is made inside the commit, so it never holds bytes the committed
+  // record does not name.
+  const canWriteLegacyWithAsset = (slot: CanvasBlobStoreSlot): boolean =>
+    existing !== null &&
+    baseline?.recordItemIds != null &&
+    !existing.legacyKeys.has(slot.logicalKey) &&
+    !baseline.recordItemIds.has(getLegacyCanvasBlobItemId(slot.logicalKey))
 
   let batch: CanvasAssetBlobWrite[] = []
   let batchBytes = 0
@@ -1841,7 +1901,7 @@ async function storeCanvasAssetBlobs(
   }
   const enqueue = async (entry: CanvasAssetBlobWrite): Promise<void> => {
     batch.push(entry)
-    batchBytes += entry.data.byteLength
+    batchBytes += entry.data.byteLength * (1 + (entry.legacyLogicalKeys?.length ?? 0))
     if (batch.length >= CANVAS_BLOB_BATCH_MAX_ENTRIES || batchBytes >= CANVAS_BLOB_BATCH_MAX_BYTES) {
       await flush()
     }
@@ -1868,7 +1928,7 @@ async function storeCanvasAssetBlobs(
       }
       if (bytes === undefined) {
         bytes = await readCanvasBlobStoreSlotBytes(slot, storeKey)
-        if (bytes && bytes.data.byteLength === 0 && refusesEmptyCanvasBytes(slot.owner)) {
+        if (bytes && bytes.data.byteLength === 0 && refusesEmptyCanvasRead(slot.owner, slot.src)) {
           readEmpty = true
           bytes = null
         }
@@ -1925,7 +1985,14 @@ async function storeCanvasAssetBlobs(
             }
             if (storedKeys.has(storedKey)) return storedKey
           }
-          await enqueue({ assetKey: storedKey, data, mimeType: bytes.mimeType })
+          const withLegacy = canWriteLegacyWithAsset(slot)
+          if (withLegacy) legacyWrittenWithAsset.add(slot.logicalKey)
+          await enqueue({
+            assetKey: storedKey,
+            data,
+            mimeType: bytes.mimeType,
+            legacyLogicalKeys: withLegacy ? [slot.logicalKey] : undefined
+          })
           return storedKey
         })()
         pendingByAssetKey.set(assetKey, pending)
@@ -1939,7 +2006,7 @@ async function storeCanvasAssetBlobs(
     }
     assetKeyByLogicalKey.set(slot.logicalKey, assetKey)
 
-    if (!legacyBlobHolds(slot, assetKey)) {
+    if (!legacyBlobHolds(slot, assetKey) && !legacyWrittenWithAsset.has(slot.logicalKey)) {
       if (!allowByteReads) {
         needsBytes = true
         return
@@ -2167,18 +2234,126 @@ type ProtectedCanvasState = {
   /** Content keys this session knows for them, without reading anything. */
   assetKeys: Set<string>
   itemIds: Set<string>
-  /** Entries directly under the mirror's assets/ folder that their sources point into. */
+  /** Entries directly under the mirror's assets/ folder that their sources point into or that hold their last mirrored copy. */
   mirrorEntryNames: Set<string>
+  /** Their slots whose last mirrored copy this session does not know yet (see CanvasMirrorSlotEntries). */
+  unknownMirrorSlots: Array<{ logicalKey: string; src: string }>
 }
 
-/** Unique item objects visited by the last collectProtectedCanvasState call (for tests). */
-export const canvasProtectedStateWalkStats = { visitedItems: 0 }
+/** The last mirrored copy of one slot ("assets/..." reference and its entry under assets/; null: the mirror holds none). */
+type CanvasMirrorSlotEntry = { ref: string | null; entryName: string | null; seen: number }
+
+/**
+ * For one mirror project folder: where the last mirrored copy of each slot is,
+ * by logical key (item id or model texture key) and source. An item that is
+ * only in the undo or redo history keeps that copy, so it is never pruned while
+ * an undo can still bring the item back, even when its source (a remote server,
+ * a managed file) cannot be read any more. `seen` is the save generation that
+ * last needed the entry; entries no save needs any more are dropped.
+ */
+type CanvasMirrorSlotEntries = {
+  generation: number
+  bySlot: Map<string, Map<string, CanvasMirrorSlotEntry>>
+}
+
+const CANVAS_MIRROR_SLOT_ENTRIES_PROJECT_LIMIT = 16
+const canvasMirrorSlotEntriesByProjectDir = new Map<string, CanvasMirrorSlotEntries>()
+
+function getCanvasMirrorSlotEntries(projectDir: string): CanvasMirrorSlotEntries {
+  let entries = canvasMirrorSlotEntriesByProjectDir.get(projectDir)
+  if (entries) {
+    canvasMirrorSlotEntriesByProjectDir.delete(projectDir)
+  } else {
+    entries = { generation: 0, bySlot: new Map() }
+  }
+  canvasMirrorSlotEntriesByProjectDir.set(projectDir, entries)
+  while (canvasMirrorSlotEntriesByProjectDir.size > CANVAS_MIRROR_SLOT_ENTRIES_PROJECT_LIMIT) {
+    const oldest = canvasMirrorSlotEntriesByProjectDir.keys().next().value
+    if (oldest === undefined) break
+    canvasMirrorSlotEntriesByProjectDir.delete(oldest)
+  }
+  return entries
+}
+
+function recordCanvasMirrorSlotEntry(
+  entries: CanvasMirrorSlotEntries,
+  logicalKey: string,
+  src: string,
+  ref: string | null
+): void {
+  let bySource = entries.bySlot.get(logicalKey)
+  if (!bySource) {
+    bySource = new Map()
+    entries.bySlot.set(logicalKey, bySource)
+  }
+  const entryName = ref ? getCanvasMirrorRefEntryName(ref) : null
+  bySource.set(src, { ref: entryName ? ref : null, entryName, seen: entries.generation })
+}
+
+/** Drops the entries that the current save generation did not need. */
+function sweepCanvasMirrorSlotEntries(entries: CanvasMirrorSlotEntries): void {
+  for (const [logicalKey, bySource] of entries.bySlot) {
+    for (const [src, entry] of bySource) {
+      if (entry.seen !== entries.generation) bySource.delete(src)
+    }
+    if (bySource.size === 0) entries.bySlot.delete(logicalKey)
+  }
+}
+
+/**
+ * Unique item objects visited by the last collectProtectedCanvasState call, and
+ * how many of them it had to examine (the others were copies of one already
+ * examined). For tests.
+ */
+export const canvasProtectedStateWalkStats = { visitedItems: 0, examinedItems: 0 }
+
+// Everything the walk reads from an item that has no key remembered for the object
+// itself. Two such items with the same values protect exactly the same things.
+const CANVAS_PROTECTION_SIGNATURE_FIELDS = [
+  'type',
+  'src',
+  'sourceIdentity',
+  'media',
+  'sourceFile',
+  'textures',
+  'assetKey',
+  'assetKeySource',
+  'textureAssetKeys',
+  'textureAssetKeySources'
+] as const
+
+function hasSameCanvasProtectionSignature(item: object, other: object): boolean {
+  const a = item as Record<string, unknown>
+  const b = other as Record<string, unknown>
+  for (const field of CANVAS_PROTECTION_SIGNATURE_FIELDS) {
+    if (a[field] !== b[field]) return false
+  }
+  return true
+}
 
 // Per item object: the mirror entries its sources point into, for one asset folder.
 const canvasMirrorEntryNamesByItem = new WeakMap<
   object,
   { assetDir: string; src: string | undefined; textures: unknown; entryNames: readonly string[] }
 >()
+
+// By asset folder and source: undo snapshots copy their items, so the per-object
+// cache above misses once per snapshot while the sources repeat.
+const canvasMirrorEntryNameBySource = new Map<string, string | null>()
+
+function getCachedCanvasMirrorEntryName(assetDir: string, source: string): string | null {
+  const id = `${assetDir}\n${source}`
+  const cached = canvasMirrorEntryNameBySource.get(id)
+  if (cached !== undefined) return cached
+  const entryName = getCanvasMirrorEntryForSource(assetDir, source)?.entryName ?? null
+  canvasMirrorEntryNameBySource.set(id, entryName)
+  while (canvasMirrorEntryNameBySource.size > CANVAS_ASSET_KEY_CACHE_LIMIT) {
+    const oldest = canvasMirrorEntryNameBySource.keys().next().value
+    if (oldest === undefined) break
+    canvasMirrorEntryNameBySource.delete(oldest)
+  }
+  return entryName
+}
 
 function getCanvasItemMirrorEntryNames(item: BlobPersistableCanvasItem, assetDir: string): readonly string[] {
   const textures = item.type === 'model3d' ? item.textures : undefined
@@ -2189,8 +2364,8 @@ function getCanvasItemMirrorEntryNames(item: BlobPersistableCanvasItem, assetDir
   const entryNames: string[] = []
   const add = (source: string | undefined): void => {
     if (!source) return
-    const entry = getCanvasMirrorEntryForSource(assetDir, source)
-    if (entry && !entryNames.includes(entry.entryName)) entryNames.push(entry.entryName)
+    const entryName = getCachedCanvasMirrorEntryName(assetDir, source)
+    if (entryName && !entryNames.includes(entryName)) entryNames.push(entryName)
   }
   add(item.src)
   for (const textureUrl of Object.values(textures ?? {})) add(textureUrl)
@@ -2205,15 +2380,38 @@ function getCanvasItemMirrorEntryNames(item: BlobPersistableCanvasItem, assetDir
  */
 function collectProtectedCanvasState(
   itemLists: Iterable<readonly CanvasItem[]>,
-  assetDir: string | null
+  assetDir: string | null,
+  mirrorSlotEntries?: CanvasMirrorSlotEntries
 ): ProtectedCanvasState {
   const state: ProtectedCanvasState = {
     assetKeys: new Set(),
     itemIds: new Set(),
-    mirrorEntryNames: new Set()
+    mirrorEntryNames: new Set(),
+    unknownMirrorSlots: []
+  }
+  // History snapshots copy their image items, so the same slot comes back once per
+  // snapshot: each visit costs two map look-ups and nothing is parsed or allocated.
+  const unknownSeen = new Set<string>()
+  const lookUpMirrorCopy = (logicalKey: string, src: string | undefined): void => {
+    if (!mirrorSlotEntries || !src) return
+    const entry = mirrorSlotEntries.bySlot.get(logicalKey)?.get(src)
+    if (!entry) {
+      const id = `${logicalKey}\n${src}`
+      if (unknownSeen.has(id)) return
+      unknownSeen.add(id)
+      state.unknownMirrorSlots.push({ logicalKey, src })
+      return
+    }
+    entry.seen = mirrorSlotEntries.generation
+    if (entry.entryName) state.mirrorEntryNames.add(entry.entryName)
   }
   const visited = new WeakSet<object>()
+  // Undo snapshots copy every image item (createCanvasHistorySnapshot), so object
+  // identity alone does not deduplicate them: a copy whose fields are the same values
+  // as an item already examined (and that has no key remembered for itself) is skipped.
+  const examinedById = new Map<string, object[]>()
   let visitedItems = 0
+  let examinedItems = 0
   for (const list of itemLists) {
     for (const item of list) {
       if (!item || typeof item !== 'object' || visited.has(item)) continue
@@ -2222,6 +2420,13 @@ function collectProtectedCanvasState(
       state.itemIds.add(item.id)
       if (!isBlobPersistableCanvasItem(item)) continue
       const blobItem = item as BlobPersistableCanvasItem
+      if (!canvasAssetKeyBySlot.has(blobItem)) {
+        const examined = examinedById.get(blobItem.id)
+        if (examined?.some((other) => hasSameCanvasProtectionSignature(blobItem, other))) continue
+        if (examined) examined.push(blobItem)
+        else examinedById.set(blobItem.id, [blobItem])
+      }
+      examinedItems += 1
       if (blobItem.src) {
         const key = peekCanvasAssetKey(blobItem, CANVAS_ASSET_SOURCE_SLOT, blobItem.src)
         if (key) state.assetKeys.add(key)
@@ -2245,9 +2450,16 @@ function collectProtectedCanvasState(
           state.mirrorEntryNames.add(entryName)
         }
       }
+      lookUpMirrorCopy(blobItem.id, blobItem.src)
+      if (blobItem.type === 'model3d' && blobItem.textures) {
+        for (const [textureName, textureUrl] of Object.entries(blobItem.textures)) {
+          lookUpMirrorCopy(getModelTextureKey(blobItem.id, textureName), textureUrl)
+        }
+      }
     }
   }
   canvasProtectedStateWalkStats.visitedItems = visitedItems
+  canvasProtectedStateWalkStats.examinedItems = examinedItems
   return state
 }
 
@@ -2481,7 +2693,7 @@ async function readCanvasMirrorSlotBytes(
           options
         )
   // An empty image, video or model is a file still being written: not mirrored now.
-  return resolved && resolved.data.byteLength === 0 && refusesEmptyCanvasBytes(slot.owner)
+  return resolved && resolved.data.byteLength === 0 && refusesEmptyCanvasRead(slot.owner, slot.src)
     ? null
     : resolved
 }
@@ -2494,19 +2706,26 @@ async function readCanvasMirrorSlotBytes(
 function getCanvasMirrorEntryForSource(
   assetDir: string,
   src: string
-): { entryName: string; isTopLevelFile: boolean } | null {
+): { entryName: string; isTopLevelFile: boolean; relativePath: string } | null {
   const localPath = resolveLocalFilePathFromSource(src)
   if (!localPath) return null
   // Compared without the leading separators: URLs written by earlier versions lost them.
   const trim = (value: string): string => value.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '')
-  const dir = trim(assetDir)
-  const file = trim(localPath)
-  if (!dir || !file.toLowerCase().startsWith(`${dir.toLowerCase()}/`)) return null
-  const segments = file.slice(dir.length + 1).split('/')
+  // Compared segment by segment: a lower-case form can have another length than the original.
+  const dirSegments = trim(assetDir).split('/')
+  const fileSegments = trim(localPath).split('/')
+  if (
+    !dirSegments[0] ||
+    fileSegments.length <= dirSegments.length ||
+    dirSegments.some((segment, index) => segment.toLowerCase() !== fileSegments[index].toLowerCase())
+  ) {
+    return null
+  }
+  const segments = fileSegments.slice(dirSegments.length)
   if (segments.length === 0 || segments.some((segment) => !segment || segment === '.' || segment === '..')) {
     return null
   }
-  return { entryName: segments[0], isTopLevelFile: segments.length === 1 }
+  return { entryName: segments[0], isTopLevelFile: segments.length === 1, relativePath: segments.join('/') }
 }
 
 function createCanvasMirrorTransport(
@@ -2689,23 +2908,32 @@ async function stageCanvasMirrorAsset(
   try {
     const { slot } = slotPlan
     const localPath = resolveLocalFilePathFromSource(slot.src)
+    const assetKey = assetFileName.split('.')[0]
+    const seeded =
+      seedEntries.get(slot.logicalKey) ?? plan.bytesByLogicalKey.get(slot.logicalKey)
+    // A content key names exact bytes. When this save already holds them (a file whose
+    // size changed was re-keyed by its content), they are written as they are: a copy
+    // by path could publish a version the file changed to since.
+    const writesSeededContent =
+      !!seeded &&
+      assetKey.startsWith('b-') &&
+      seeded.data.byteLength > 0 &&
+      seeded.data.byteLength <= MAX_FULL_FILE_BYTES
     // A file the main process may read is copied there; its bytes never enter the renderer.
     if (
       localPath &&
       plan.transport.copy &&
+      !writesSeededContent &&
       (!getCanvasAssetSlotSourceFile(slot.owner, slot.slotId) ||
         getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src))
     ) {
       const copiedBytes = await plan.transport.copy(assetFileName, localPath)
       // An empty copy of an image, video or model is listed as missing and redone later.
-      if (copiedBytes !== null && (copiedBytes > 0 || !refusesEmptyCanvasBytes(slot.owner))) {
+      if (copiedBytes !== null && (copiedBytes > 0 || !refusesEmptyCanvasRead(slot.owner, slot.src))) {
         return true
       }
     }
 
-    const assetKey = assetFileName.split('.')[0]
-    const seeded =
-      seedEntries.get(slot.logicalKey) ?? plan.bytesByLogicalKey.get(slot.logicalKey)
     if (!seeded && localPath) {
       // Never pull a file through the renderer (and IPC) that main refuses to take back.
       const sizeBytes =
@@ -2742,11 +2970,7 @@ async function readPreviousCanvasMirrorRefs(plan: CanvasMirrorPlan): Promise<Map
     const normalized = value.replace(/[\\/]+/g, '/').replace(/^\.\//, '')
     if (normalized.startsWith(`${PROJECT_ASSET_DIRNAME}/`)) return normalized
     const entry = getCanvasMirrorEntryForSource(plan.assetDir, value)
-    if (!entry) return null
-    const localPath = resolveLocalFilePathFromSource(value)!
-    const trimmed = localPath.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '')
-    const dir = plan.assetDir.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '')
-    return `${PROJECT_ASSET_DIRNAME}/${trimmed.slice(dir.length + 1)}`
+    return entry ? `${PROJECT_ASSET_DIRNAME}/${entry.relativePath}` : null
   }
   let content: string
   try {
@@ -2829,10 +3053,13 @@ async function executeCanvasMirrorSave(
     await Promise.all(workers)
 
     // 2. The project file. A slot whose asset could not be staged (its key cannot be
-    // computed now, or its bytes cannot be read) is unsafe: the copy the previous
-    // project file names for it may be the last one. It keeps that reference, and the
-    // entry it names is kept; with no such reference it keeps its original source and
-    // nothing is pruned in this save.
+    // computed now, or its bytes cannot be read) is unsafe: the copy the mirror last
+    // held for it may be the last one. It keeps that reference (the one this session
+    // last wrote or carried for the same source, else the one the previous project
+    // file names), and the entry it names is kept; with no such reference it keeps
+    // its original source and nothing is pruned in this save.
+    const slotEntries = getCanvasMirrorSlotEntries(plan.projectDir)
+    slotEntries.generation += 1
     const refBySlot = new Map<string, string>()
     const unsafeSlotPlans: CanvasMirrorSlotPlan[] = []
     for (const slotPlan of plan.slotPlans) {
@@ -2840,26 +3067,60 @@ async function executeCanvasMirrorSave(
         slotPlan.assetFileName &&
         (slotPlan.staged || stagedFileNames.has(slotPlan.assetFileName))
       ) {
-        refBySlot.set(
-          slotPlan.slot.logicalKey,
-          `${PROJECT_ASSET_DIRNAME}/${slotPlan.assetFileName}`
-        )
+        const ref = `${PROJECT_ASSET_DIRNAME}/${slotPlan.assetFileName}`
+        refBySlot.set(slotPlan.slot.logicalKey, ref)
+        recordCanvasMirrorSlotEntry(slotEntries, slotPlan.slot.logicalKey, slotPlan.slot.src, ref)
       } else {
         unsafeSlotPlans.push(slotPlan)
       }
     }
     const carriedEntryNames = new Set<string>()
     let pruneIsSafe = true
-    if (unsafeSlotPlans.length > 0) {
-      const previousRefs = await readPreviousCanvasMirrorRefs(plan)
-      for (const slotPlan of unsafeSlotPlans) {
-        const previousRef = previousRefs?.get(slotPlan.slot.logicalKey)
-        const entryName = previousRef ? getCanvasMirrorRefEntryName(previousRef) : null
-        if (previousRef && entryName) {
-          refBySlot.set(slotPlan.slot.logicalKey, previousRef)
-          carriedEntryNames.add(entryName)
-        } else {
-          pruneIsSafe = false
+    let previousRefs: Map<string, string> | null | undefined
+    const readPreviousRefsOnce = async (): Promise<Map<string, string> | null> => {
+      if (previousRefs === undefined) previousRefs = await readPreviousCanvasMirrorRefs(plan)
+      return previousRefs
+    }
+    for (const slotPlan of unsafeSlotPlans) {
+      const { logicalKey, src } = slotPlan.slot
+      const known = slotEntries.bySlot.get(logicalKey)?.get(src)
+      const ref = known ? known.ref : ((await readPreviousRefsOnce())?.get(logicalKey) ?? null)
+      const entryName = ref ? getCanvasMirrorRefEntryName(ref) : null
+      if (ref && entryName) {
+        refBySlot.set(logicalKey, ref)
+        carriedEntryNames.add(entryName)
+        recordCanvasMirrorSlotEntry(slotEntries, logicalKey, src, ref)
+      } else {
+        pruneIsSafe = false
+        if (previousRefs !== null) recordCanvasMirrorSlotEntry(slotEntries, logicalKey, src, null)
+      }
+    }
+
+    // What the saved, live, undo and redo items can still need. An item that is only in
+    // the history keeps the last mirrored copy of each of its slots: its source may be
+    // unreachable now, so that copy can be the only one an undo can bring back.
+    let protectedState: ProtectedCanvasState | null = null
+    if (plan.transport.prune && pruneIsSafe) {
+      try {
+        protectedState =
+          getProtectedState?.() ?? collectProtectedCanvasState([items], plan.assetDir, slotEntries)
+      } catch (error) {
+        console.warn('[Canvas Storage] Failed to read the canvas history; the mirror is not pruned:', error)
+        pruneIsSafe = false
+      }
+    }
+    if (protectedState && protectedState.unknownMirrorSlots.length > 0) {
+      // Not saved in this session yet (deleted before the first save): the previous
+      // project file names their copy.
+      const refs = await readPreviousRefsOnce()
+      if (refs === null) {
+        pruneIsSafe = false
+      } else {
+        for (const { logicalKey, src } of protectedState.unknownMirrorSlots) {
+          const ref = refs.get(logicalKey) ?? null
+          const entryName = ref ? getCanvasMirrorRefEntryName(ref) : null
+          if (entryName) carriedEntryNames.add(entryName)
+          recordCanvasMirrorSlotEntry(slotEntries, logicalKey, src, entryName ? ref : null)
         }
       }
     }
@@ -2906,15 +3167,15 @@ async function executeCanvasMirrorSave(
 
     // 3. Cleanup, only now. Main keeps whatever the project file on disk references;
     // on top of that: everything the saved, live, undo and redo items can still need.
-    if (plan.transport.prune && pruneIsSafe) {
+    if (plan.transport.prune && pruneIsSafe && protectedState) {
+      // Entries of slots that no list holds any more are forgotten.
+      sweepCanvasMirrorSlotEntries(slotEntries)
       try {
         const keepAssetKeys = new Set<string>()
         const keepEntryNames = new Set<string>(carriedEntryNames)
         for (const fileName of refBySlot.values()) {
           keepAssetKeys.add(fileName.slice(PROJECT_ASSET_DIRNAME.length + 1).split('.')[0])
         }
-        const protectedState =
-          getProtectedState?.() ?? collectProtectedCanvasState([items], plan.assetDir)
         for (const key of protectedState.assetKeys) keepAssetKeys.add(key)
         for (const entryName of protectedState.mirrorEntryNames) keepEntryNames.add(entryName)
         await plan.transport.prune(
@@ -3077,7 +3338,8 @@ async function saveCanvasItemsExclusive(
         try {
           protectedState = collectProtectedCanvasState(
             [items, ...(options.getProtectedItems?.() ?? [])],
-            mirrorPlan?.assetDir ?? null
+            mirrorPlan?.assetDir ?? null,
+            mirrorPlan ? getCanvasMirrorSlotEntries(mirrorPlan.projectDir) : undefined
           )
         } catch (error) {
           protectedStateError = error ?? new Error('protected items unavailable')

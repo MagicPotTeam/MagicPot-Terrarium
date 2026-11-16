@@ -502,6 +502,36 @@ describe('FsSvcImpl canvas mirror assets', () => {
       )
     })
 
+    it('cuts an absolute reference by segments where case is ignored and a lower-case form is longer', async () => {
+      // 'İ'.toLowerCase() has two code units: a prefix length taken from the lower-case
+      // form would cut one character too many from the original path.
+      const originalBase = roots.base
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+      try {
+        roots.base = path.join(originalBase, 'İstanbul')
+        const caseAssetDir = path.join(roots.base, 'AutoSave', PROJECT, 'assets')
+        const keyed = `u-${'e'.repeat(40)}.png`
+        writeFile(path.join(caseAssetDir, keyed), 'absolute')
+        writeFile(path.join(caseAssetDir, `${KEY_A}.png`), 'unreferenced')
+        writeFile(
+          path.join(roots.base, 'AutoSave', PROJECT, 'project.mpcanvas'),
+          JSON.stringify({
+            magic: 'MAGICPOT_CANVAS',
+            storageMode: 'project',
+            items: [{ id: '1', type: 'image', src: `local-media://${caseAssetDir}/${keyed}` }]
+          })
+        )
+        Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' })
+        afterGrace()
+        const result = await prune()
+        expect(result).toEqual({ removedAssetFileNames: [`${KEY_A}.png`], removedSnapshotDirNames: [] })
+        expect(fs.readdirSync(caseAssetDir)).toEqual([keyed])
+      } finally {
+        Object.defineProperty(process, 'platform', platform)
+        roots.base = originalBase
+      }
+    })
+
     it('keeps the entries the caller names, by key and by entry name', async () => {
       afterGrace()
       const result = await prune([KEY_B, KEY_C], [SNAPSHOT_OLD])
