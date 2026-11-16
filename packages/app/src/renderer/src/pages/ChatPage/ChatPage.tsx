@@ -4230,12 +4230,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const imagePreview = useImagePreview(aiImageList, active)
   const speechRecognition = useSpeechRecognition(setInputValue, t, active)
 
+  // A team member's selection is derived by the selection sync effect from its own choice or the lead's
+  // model, and null means "unavailable" (its sends fail closed). Never replace it with another profile:
+  // that would show a model the member will not use and ping-pong with the sync effect forever.
+  const currentIsTeamMember = Boolean(currentSession?.teamLeadId)
   useEffect(() => {
+    if (currentIsTeamMember) return
     const normalizedProfileId = resolveAvailableProfileId(selectedProfileId)
     if (normalizedProfileId !== selectedProfileId) {
       setSelectedProfileId(normalizedProfileId)
     }
-  }, [resolveAvailableProfileId, selectedProfileId])
+  }, [currentIsTeamMember, resolveAvailableProfileId, selectedProfileId])
 
   useEffect(() => {
     const normalizedSkillId = resolveAvailableSkillId(selectedSkillId)
