@@ -1529,6 +1529,20 @@ describe('rollback to the previous release', () => {
     expect(await readBlobBytes(blob)).toEqual([5, 6])
   })
 
+  it('moves no byte when delete-all is undone', async () => {
+    const a = imageItem('undo-all-a', registerSource('blob:rb-undo-all-a', [1, 3]))
+    const b = imageItem('undo-all-b', registerSource('blob:rb-undo-all-b', [2, 4]))
+    await saveCanvasItems([a, b], 'rb-undo-all')
+    await saveCanvasItems([], 'rb-undo-all', [], [], null, { getProtectedItems: () => [[a, b]] })
+
+    fake.resetLog()
+    fetchCalls = []
+    await saveCanvasItems([a, b], 'rb-undo-all', [], [], null, { getProtectedItems: () => [[]] })
+    expect(fake.blobPuts()).toEqual([])
+    expect(fetchCalls).toEqual([])
+    expect(fake.blobBytes(legacyBlobKey('rb-undo-all', 'undo-all-a'))).toEqual([1, 3])
+  })
+
   it('sweeps the keyed and the per-item blobs of deleted items once they leave the history', async () => {
     const a = imageItem('del-a', registerSource('blob:rb-del-a', [1]))
     const b = imageItem('del-b', registerSource('blob:rb-del-b', [2]))

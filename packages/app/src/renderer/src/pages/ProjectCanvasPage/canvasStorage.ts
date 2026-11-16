@@ -2996,7 +2996,9 @@ async function saveCanvasItemsExclusive(
     let mirrorPlan: CanvasMirrorPlan | null | undefined
     let replacedRecord: CanvasPersistedData | SerializableCanvasItem[] | undefined
     for (let attempt = 1; ; attempt += 1) {
-      const baseline = slots.length > 0 ? await readCanvasSaveBaseline(db, storeKey) : null
+      // Also read with no slot to store: a board emptied by delete-all keeps the record of
+      // which per-item blobs it still holds, so an undo moves nothing.
+      const baseline = await readCanvasSaveBaseline(db, storeKey)
       const existing = baseline?.index ?? null
       const stored = await storeCanvasAssetBlobs(db, storeKey, slots, baseline, !metadataOnly)
       if (stored.needsBytes) return 'needs-bytes'
