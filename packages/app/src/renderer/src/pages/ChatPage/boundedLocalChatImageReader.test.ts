@@ -119,6 +119,34 @@ describe('bounded local chat source reader', () => {
     expect(read).toHaveBeenCalledOnce()
   })
 
+  it('accepts and copies the chunk of a platform Response even when it is not an instance of this realm', async () => {
+    const bytes = new Uint8Array([7, 8, 9])
+    const probe = await new Response(bytes).body!.getReader().read()
+    // Under jsdom the platform fetch types come from the Node realm: instanceof fails.
+    expect(probe.value instanceof Uint8Array).toBe(false)
+    const response = new Response(bytes, { headers: { 'content-type': 'image/png' } })
+    const blob = await readBoundedLocalChatImageBlob(response, { maxBytes: 3 })
+    expect(blob.type).toBe('image/png')
+    expect(blob.size).toBe(3)
+    expect(await readBytes(blob)).toEqual(new Uint8Array([7, 8, 9]))
+  })
+
+  it.each([
+    ['a string', () => 'abc'],
+    ['a DataView', () => new DataView(new ArrayBuffer(2))],
+    ['a Uint16Array', () => new Uint16Array([1])],
+    ['a DataView with a forged own Symbol.toStringTag', () => {
+      const view = new DataView(new ArrayBuffer(2))
+      Object.defineProperty(view, Symbol.toStringTag, { value: 'Uint8Array' })
+      return view
+    }],
+    ['a plain object posing as a Uint8Array', () => ({ byteLength: 1, [Symbol.toStringTag]: 'Uint8Array' })]
+  ])('refuses and cancels on %s chunk', async (_label, makeChunk) => {
+    const { response, cancel } = makeResponse([makeChunk() as unknown as Uint8Array])
+    await expect(readBoundedLocalChatImageBlob(response, { maxBytes: 3 })).rejects.toThrow('invalid chunk')
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
   it('does not retain mutable chunk views supplied by an adapter', async () => {
     const first = new Uint8Array([1, 2])
     let step = 0

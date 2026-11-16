@@ -1,9 +1,27 @@
 /**
- * Bounded reading of an already-fetched response. This is an unconnected
- * candidate: it does not classify URLs, authorize their use, constrain a
- * producer's prefetch, count multiple images, or bound later base64/JSON copies.
+ * Bounded reading of an already-fetched response. chatRequestUtils uses it for
+ * every un-managed request image whose response has a body, with a hard
+ * per-image byte cap counted on bytes received. It does not classify URLs,
+ * authorize their use, constrain a producer's prefetch, count multiple images,
+ * or bound later base64/IPC/JSON copies.
  */
 const MAX_SOURCE_CHUNKS = 8192
+
+// %TypedArray%.prototype[Symbol.toStringTag] reads the internal [[TypedArrayName]]
+// slot: it works across realms (a platform Response's chunk can come from another
+// realm, where instanceof fails) and, unlike Object.prototype.toString, cannot be
+// forged with an own Symbol.toStringTag. If it is missing, every chunk is refused.
+const typedArrayTag = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  Symbol.toStringTag
+)?.get
+const isUint8ArrayChunk = (chunk: unknown): chunk is Uint8Array => {
+  try {
+    return typedArrayTag?.call(chunk) === 'Uint8Array'
+  } catch {
+    return false
+  }
+}
 
 export async function readBoundedLocalChatImageBlob(
   response: Response,
@@ -75,7 +93,7 @@ export async function readBoundedLocalChatImageBlob(
       if (result.done) { completed = true; break }
       if (++chunkCount > MAX_SOURCE_CHUNKS) throw new Error('Image source exceeds the chunk limit.')
       const chunk = result.value
-      if (!(chunk instanceof Uint8Array)) throw new Error('Image source returned an invalid chunk.')
+      if (!isUint8ArrayChunk(chunk)) throw new Error('Image source returned an invalid chunk.')
       if (chunk.byteLength > maxBytes - size) throw new Error('Image source exceeds the per-image byte limit.')
       if (!chunk.byteLength) continue
       const owned = new ArrayBuffer(chunk.byteLength)
