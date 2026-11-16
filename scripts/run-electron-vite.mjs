@@ -53,10 +53,9 @@ const args = [
 // The document worker is an independent build, not an electron-vite main input.
 // Keep npm dev scripts chain-free while ensuring its assets exist before launch.
 if (command === 'dev') {
-  for (const script of ['build-document-worker.mjs', 'build-sqlite-preview-worker.mjs']) {
   const build = spawnSync(
     process.execPath,
-    [path.join(process.cwd(), 'scripts', script)],
+    [path.join(process.cwd(), 'scripts/build-document-worker.mjs')],
     {
       cwd: process.cwd(),
       env,
@@ -73,7 +72,6 @@ if (command === 'dev') {
     process.exit(1)
   }
   if (build.status !== 0) process.exit(build.status ?? 1)
-  }
 }
 
 const child = spawn(electronViteBin, args, {
