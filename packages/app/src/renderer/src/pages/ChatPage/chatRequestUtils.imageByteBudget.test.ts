@@ -11,6 +11,7 @@ import {
 import { DEFAULT_PROVIDER_JSON_MAX_BYTES } from '@shared/llm/providerJsonBudget'
 import {
   preflightChatRequestImages,
+  preflightChatRequestReports,
   requestChatCompletion,
   requestChatCompletionStream
 } from './chatRequestUtils'
@@ -412,6 +413,26 @@ describe.each([false, true])('images of a report bundle MAIN verified, stream=%s
     expect(stream ? bundle.chatStream : bundle.chat).toHaveBeenCalled()
   })
 
+  it('refuses oversized bundle images already in the page preflight, before the draft is given up', async () => {
+    const bundle = installBundle([6 * MiB, 6 * MiB, 6 * MiB, 6 * MiB])
+    const route = { config: gemini(), profileId: 'fixture', conversationId }
+    const messages: ChatMessage[] = [{ role: 'user', content: 'look', attachments: [bundle.primary] }]
+    await expect(preflightChatRequestReports({ ...route, messages })).rejects.toBeInstanceOf(
+      ChatRequestImageBudgetError
+    )
+    expect(bundle.fetchedUrls()).toEqual([manifestUrl])
+    expect(bundle.imageReads()).toEqual([])
+    // The same bundle within the budget passes the page preflight.
+    const fits = installBundle([4 * MiB, 4 * MiB, 4 * MiB, 4 * MiB])
+    await expect(
+      preflightChatRequestReports({
+        ...route,
+        messages: [{ role: 'user', content: 'look', attachments: [fits.primary] }]
+      })
+    ).resolves.toBeUndefined()
+    expect(fits.imageReads()).toEqual([])
+  })
+
   it('adds the bundle images to the other images of the request', async () => {
     // 4 x 4 MiB of bundle images fit alone, with one 6 MiB managed image they do not.
     const bundle = installBundle([4 * MiB, 4 * MiB, 4 * MiB, 4 * MiB])
@@ -516,6 +537,13 @@ describe.each([false, true])('images of a report bundle MAIN verified, stream=%s
 })
 
 describe('refusal message', () => {
+  it('has a short fallback where i18next is not initialised', async () => {
+    const i18next = (await import('i18next')).default
+    vi.spyOn(i18next, 't').mockReturnValue(undefined as never)
+    const message = new ChatRequestImageBudgetError().message
+    expect(message).toBe('The images are too large for one request.')
+  })
+
   it('is the one short localized line for the conversation images', async () => {
     const { default: i18n } = await import('@renderer/i18n')
     const en = (await import('@shared/locales/en-US/renderer.json')).default

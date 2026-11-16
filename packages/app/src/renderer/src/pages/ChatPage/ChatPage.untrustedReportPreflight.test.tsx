@@ -164,6 +164,28 @@ describe('registered report bundles in ChatPage (MAIN verify before the draft is
     expect(JSON.parse(screen.getByTestId('session').textContent || 'null')?.messages).toEqual([])
   })
 
+  it('refuses a bound report whose images are too large for the request in the page preflight and keeps the draft', async () => {
+    const registry = createReportBundleRegistryFixture()
+    f.verify.mockImplementation(registry.verify)
+    const attachments = [boundReport(registry)]
+    await setup(attachments, false, [], false, { provider: 'gemini', api_mode: undefined, base_url: 'https://provider.invalid', ...dataUrlProfile })
+    const MiB = 1024 * 1024
+    f.fetch.mockImplementation(async (url: string) => {
+      if (String(url) === mainManifestUrl) return { ok: true, text: async () => JSON.stringify({ version: 1, bundleId: 'bundle-1', title: 'Synthetic', entries: [0, 1, 2, 3].map(index => ({ role: 'report-image', fileName: `fig-${index}.png`, mimeType: 'image/png', refName: `fig-${index}`, sourceUrl: `local-media:///synthetic/fig-${index}.png`, sizeBytes: 6 * MiB })) }) }
+      throw new Error(`unexpected fake fetch: ${String(url)}`)
+    })
+    fireEvent.click(screen.getByTestId('send'))
+    await waitFor(() => expect(f.error).toHaveBeenCalledWith('The images are too large for one request.'))
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+    // Refused by the page preflight: MAIN was asked once, no image was read, nothing was sent.
+    expect(registry.verify).toHaveBeenCalledOnce()
+    expect(fetchedUrls()).toEqual([mainManifestUrl])
+    for (const fn of [f.request, f.stream, f.materialize, f.save]) expect(fn).not.toHaveBeenCalled()
+    expect(screen.getByTestId('input')).toHaveValue('Draft text')
+    expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toEqual(attachments)
+    expect(JSON.parse(screen.getByTestId('session').textContent || 'null')?.messages).toEqual([])
+  })
+
   it('lets a plain follow-up through when the history holds an assistant-role bound report', async () => {
     const registry = createReportBundleRegistryFixture()
     f.verify.mockImplementation(registry.verify)

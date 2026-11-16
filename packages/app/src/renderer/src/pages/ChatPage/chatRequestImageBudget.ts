@@ -27,10 +27,18 @@ export const CHAT_REQUEST_IMAGE_BUDGET_EXCEEDED = 'CHAT_REQUEST_IMAGE_BUDGET_EXC
  * A request that MAIN would certainly refuse for the size of its images; nothing was read or
  * sent. Its message is the one short line the send path shows through its existing notice.
  */
+const REQUEST_IMAGES_TOO_LARGE_FALLBACK = 'The images are too large for one request.'
+
+// i18next returns nothing, not even the default value, before it is initialised.
+const requestImagesTooLargeMessage = (): string =>
+  i18next.t('chat.request_images_too_large', {
+    defaultValue: REQUEST_IMAGES_TOO_LARGE_FALLBACK
+  }) || REQUEST_IMAGES_TOO_LARGE_FALLBACK
+
 export class ChatRequestImageBudgetError extends Error {
   readonly code = CHAT_REQUEST_IMAGE_BUDGET_EXCEEDED
   readonly retryBlocked = true
-  constructor(message: string = i18next.t('chat.request_images_too_large')) {
+  constructor(message: string = requestImagesTooLargeMessage()) {
     super(message)
     this.name = 'ChatRequestImageBudgetError'
   }

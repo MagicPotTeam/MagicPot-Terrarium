@@ -3231,9 +3231,14 @@ export const preflightChatRequestReports = (
     return null
   }
   let maxImages: number | undefined
+  let imageByteBudget: RequestImageByteBudget | undefined
   if (routeInput) {
     validateCustomSkillForSend(routeInput.externalAgentSkill)
-    maxImages = preflightRequestImageCount(routeInput, resolveSelectedRequestProfile(routeInput))
+    const profile = resolveSelectedRequestProfile(routeInput)
+    maxImages = preflightRequestImageCount(routeInput, profile)
+    // The composer's byte check, now with the images of MAIN's verified manifests: a refusal
+    // for their size comes here, before the draft is given up, not at the request entry.
+    imageByteBudget = resolveRequestImageByteBudget(routeInput, profile, 'preflight')
   }
   const deadline = createPreflightDeadline(
     input.signal,
@@ -3243,13 +3248,15 @@ export const preflightChatRequestReports = (
     try {
       const verifiedMessages = await verifyPrimaryReportBundles(messages, input, deadline.signal)
       if (!routeInput) return
-      await expandMessagesForImagePreflight(
-        verifiedMessages,
-        routeInput.imageHistoryPolicy,
-        maxImages,
-        deadline.signal
-      )
+      const { messages: preflightMessages, verifiedManifestImages } =
+        await expandMessagesForImagePreflight(
+          verifiedMessages,
+          routeInput.imageHistoryPolicy,
+          maxImages,
+          deadline.signal
+        )
       throwIfAborted(deadline.signal)
+      assertRequestImageBytes(preflightMessages, imageByteBudget, verifiedManifestImages)
     } catch (error) {
       if (deadline.expired() && !input.signal?.aborted)
         throw new Error(reportPreflightTimedOutMessage())
