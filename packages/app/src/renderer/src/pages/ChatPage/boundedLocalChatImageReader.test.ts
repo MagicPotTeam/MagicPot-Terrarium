@@ -71,6 +71,45 @@ describe('bounded local chat source reader', () => {
     expect(cancel).toHaveBeenCalledOnce()
   })
 
+  it('accepts a valid image delivered by a slow producer in many tiny chunks', async () => {
+    // 9000 one-byte chunks is more than the 8192 floor, but under a 9 MiB cap the
+    // chunk limit scales with the cap; response.blob() accepted such a source too.
+    const values = Array.from({ length: 9000 }, (_, index) => new Uint8Array([index % 251]))
+    const { response, cancel } = makeResponse(values)
+    const blob = await readBoundedLocalChatImageBlob(response, { maxBytes: 9 * 1024 * 1024 })
+    expect(blob.size).toBe(9000)
+    expect(await readBytes(blob)).toEqual(Uint8Array.from(values, value => value[0]))
+    expect(cancel).not.toHaveBeenCalled()
+  })
+
+  it('still refuses excessive chunks above the limit scaled to the cap', async () => {
+    // maxBytes 4 MiB scales the limit to 16384 chunks; one more is refused.
+    const { response, cancel } = makeResponse(Array.from({ length: 16385 }, () => new Uint8Array(0)))
+    await expect(readBoundedLocalChatImageBlob(response, { maxBytes: 4 * 1024 * 1024 })).rejects.toThrow('chunk limit')
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('keeps byte order when coalescing small chunks around large ones', async () => {
+    const fill = (length: number, seed: number) => Uint8Array.from({ length }, (_, index) => (index * 7 + seed) % 256)
+    const values = [fill(40_000, 1), fill(40_000, 2), fill(70_000, 3), fill(5, 4), fill(65_536, 5), fill(3, 6)]
+    const { response } = makeResponse(values)
+    const total = values.reduce((sum, value) => sum + value.byteLength, 0)
+    const blob = await readBoundedLocalChatImageBlob(response, { maxBytes: total })
+    const expected = new Uint8Array(total)
+    let offset = 0
+    for (const value of values) { expected.set(value, offset); offset += value.byteLength }
+    expect(blob.size).toBe(total)
+    expect(await readBytes(blob)).toEqual(expected)
+  })
+
+  it('counts a chunk by its internal length, not by a forged own byteLength', async () => {
+    const chunk = new Uint8Array([1, 2, 3, 4])
+    Object.defineProperty(chunk, 'byteLength', { value: 1 })
+    const { response, cancel } = makeResponse([chunk])
+    await expect(readBoundedLocalChatImageBlob(response, { maxBytes: 3 })).rejects.toThrow('per-image byte limit')
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
   it('does not start a pre-aborted stream read', async () => {
     const abort = makeController()
     abort.abort('fixture cancellation')

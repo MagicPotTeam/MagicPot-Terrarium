@@ -5,16 +5,26 @@
  * authorize their use, constrain a producer's prefetch, count multiple images,
  * or bound later base64/IPC/JSON copies.
  */
-const MAX_SOURCE_CHUNKS = 8192
+// The chunk limit bounds the read loop's work, not memory (small chunks are
+// coalesced below). It scales with the byte cap so that a slow producer which
+// delivers small chunks (a slow link: TCP-segment sized or smaller) still gets a
+// valid image through, as response.blob() did; 8192 is the floor.
+const MIN_SOURCE_CHUNKS = 8192
+const MIN_AVERAGE_CHUNK_BYTES = 256
+// Chunks below this size are copied into shared owned segments of this size, so
+// many tiny chunks do not cost one ArrayBuffer each.
+const SEGMENT_BYTES = 64 * 1024
 
 // %TypedArray%.prototype[Symbol.toStringTag] reads the internal [[TypedArrayName]]
 // slot: it works across realms (a platform Response's chunk can come from another
 // realm, where instanceof fails) and, unlike Object.prototype.toString, cannot be
 // forged with an own Symbol.toStringTag. If it is missing, every chunk is refused.
-const typedArrayTag = Object.getOwnPropertyDescriptor(
-  Object.getPrototypeOf(Uint8Array.prototype),
-  Symbol.toStringTag
-)?.get
+// The byteLength getter likewise reads the internal length, which is what set()
+// copies, so an own byteLength property cannot make the byte count disagree with
+// the bytes kept.
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype)
+const typedArrayTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)?.get
+const typedArrayByteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')?.get
 // The Blob type is the MIME essence (type/subtype, lowercase, no parameters), as
 // response.blob() gives it: a raw 'image/png; charset=binary' header would otherwise
 // become a non-canonical data: URL prefix that MAIN refuses. Of several combined
@@ -30,11 +40,14 @@ const mimeEssence = (header: string | null | undefined): string => {
   return ''
 }
 
-const isUint8ArrayChunk = (chunk: unknown): chunk is Uint8Array => {
+// The chunk's internal byte length, or -1 unless it is a genuine Uint8Array.
+const uint8ArrayChunkLength = (chunk: unknown): number => {
   try {
-    return typedArrayTag?.call(chunk) === 'Uint8Array'
+    if (!typedArrayByteLength || typedArrayTag?.call(chunk) !== 'Uint8Array') return -1
+    const length: unknown = typedArrayByteLength.call(chunk)
+    return typeof length === 'number' && Number.isSafeInteger(length) && length >= 0 ? length : -1
   } catch {
-    return false
+    return -1
   }
 }
 
@@ -44,6 +57,7 @@ export async function readBoundedLocalChatImageBlob(
 ): Promise<Blob> {
   const { maxBytes, signal } = options
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new RangeError('Invalid image source limit.')
+  const maxChunks = Math.max(MIN_SOURCE_CHUNKS, Math.ceil(maxBytes / MIN_AVERAGE_CHUNK_BYTES))
 
   const cancellation = (): Error => {
     const reason = signal?.reason
@@ -99,25 +113,43 @@ export async function readBoundedLocalChatImageBlob(
 
   try {
     check()
-    const chunks: ArrayBuffer[] = []
+    const parts: Uint8Array<ArrayBuffer>[] = []
+    let segment: Uint8Array<ArrayBuffer> | null = null
+    let segmentUsed = 0
+    const flushSegment = (): void => {
+      if (segment && segmentUsed) parts.push(segment.subarray(0, segmentUsed))
+      segment = null
+      segmentUsed = 0
+    }
     let size = 0
     let chunkCount = 0
     while (true) {
       const result = await read()
       check()
       if (result.done) { completed = true; break }
-      if (++chunkCount > MAX_SOURCE_CHUNKS) throw new Error('Image source exceeds the chunk limit.')
+      if (++chunkCount > maxChunks) throw new Error('Image source exceeds the chunk limit.')
       const chunk = result.value
-      if (!isUint8ArrayChunk(chunk)) throw new Error('Image source returned an invalid chunk.')
-      if (chunk.byteLength > maxBytes - size) throw new Error('Image source exceeds the per-image byte limit.')
-      if (!chunk.byteLength) continue
-      const owned = new ArrayBuffer(chunk.byteLength)
-      new Uint8Array(owned).set(chunk)
-      chunks.push(owned)
-      size += chunk.byteLength
+      const length = uint8ArrayChunkLength(chunk)
+      if (length < 0) throw new Error('Image source returned an invalid chunk.')
+      if (length > maxBytes - size) throw new Error('Image source exceeds the per-image byte limit.')
+      if (!length) continue
+      // Every accepted byte is copied into a buffer the reader owns.
+      if (length >= SEGMENT_BYTES) {
+        flushSegment()
+        const owned = new Uint8Array(length)
+        owned.set(chunk)
+        parts.push(owned)
+      } else {
+        if (segment && SEGMENT_BYTES - segmentUsed < length) flushSegment()
+        if (!segment) segment = new Uint8Array(SEGMENT_BYTES)
+        segment.set(chunk, segmentUsed)
+        segmentUsed += length
+      }
+      size += length
     }
+    flushSegment()
     check()
-    const blob = new Blob(chunks, { type: mimeEssence(response.headers?.get('content-type')) })
+    const blob = new Blob(parts, { type: mimeEssence(response.headers?.get('content-type')) })
     check()
     return blob
   } finally {
