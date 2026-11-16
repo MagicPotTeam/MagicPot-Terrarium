@@ -54,7 +54,7 @@ const fixtureImage: ChatAttachment = {
 }
 
 const installFixtureLocalMediaFetch = () => {
-  const fetchMock = vi.fn(async (url: string) => {
+  const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url !== fixtureImage.url) {
       throw new Error(`unexpected fixture URL: ${url}`)
     }
@@ -188,7 +188,10 @@ describe('external agent continuity fixture', () => {
     try {
       // Image materialization is asynchronous; wait for the stream RPC, not one microtask.
       await vi.waitFor(() => expect(externalAgentStream).toHaveBeenCalledOnce())
-      expect(mediaFetch).toHaveBeenCalledWith(fixtureImage.url)
+      expect(mediaFetch).toHaveBeenCalledExactlyOnceWith(fixtureImage.url, {
+        signal: controller.signal
+      })
+      expect(mediaFetch.mock.calls[0][1]?.signal).toBe(controller.signal)
       expect(remoteFetch).not.toHaveBeenCalled()
       const payload = JSON.parse(externalAgentStream.mock.calls[0][0].body!)
       expect(payload.stream).toBe(true)
