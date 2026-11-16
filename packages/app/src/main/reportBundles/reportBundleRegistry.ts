@@ -126,10 +126,22 @@ type RegistryRecord = {
 
 type WriteTicket = {
   canonicalDir: string
+  /**
+   * The bundle directory as the producer named it, under the root as configured (for example
+   * a mapped drive `Z:\...`, where `canonicalDir` may be its `\\server\share\...` form). The
+   * snapshot's source URLs use it, so the local-media protocol serves them like the producer's
+   * own URLs; the canonical path is kept only for the file checks.
+   */
+  configuredDir: string
   container: string
   bundleId: string
   conversation: ReportBundleConversation
   issuedAt: number
+  /**
+   * Change time of a reference file MAIN wrote into the bundle directory when the session
+   * opened, on the bundle's own file-system clock (a NAS clock can differ from MAIN's).
+   */
+  referenceCtimeNs: bigint
 }
 
 type RegistryState = {
@@ -170,6 +182,17 @@ const pathKey = (filePath: string): string =>
   process.platform === 'win32' ? filePath.toLowerCase() : filePath
 
 const samePath = (left: string, right: string): boolean => pathKey(left) === pathKey(right)
+
+/**
+ * The one canonicalisation of this module. fs.promises.realpath and fs.realpathSync.native are
+ * both libuv's realpath (never the JavaScript fs.realpathSync, which keeps mapped and subst
+ * drives and 8.3 names as spelled), so every recorded path and every comparison agree.
+ */
+const canonicalPath = async (filePath: string): Promise<string> =>
+  path.resolve(await fsp.realpath(filePath))
+
+const canonicalPathSync = (filePath: string): string =>
+  path.resolve(fs.realpathSync.native(filePath))
 
 const sha256Hex = (value: string | Uint8Array): string =>
   crypto.createHash('sha256').update(value).digest('hex')
@@ -638,15 +661,35 @@ async function fingerprintFile(
   }
 }
 
+/**
+ * A file is fresh when it changed after the write session opened, measured on the bundle's own
+ * file-system clock: the reference file MAIN wrote at begin, not MAIN's wall clock.
+ */
 function assertFresh(stats: BigStats, ticket: WriteTicket): void {
-  const ctimeMs = Number(stats.ctimeNs / 1_000_000n)
-  if (ctimeMs < ticket.issuedAt - REPORT_BUNDLE_CTIME_TOLERANCE_MS) refuse('stale-file')
+  const toleranceNs = BigInt(REPORT_BUNDLE_CTIME_TOLERANCE_MS) * 1_000_000n
+  if (stats.ctimeNs < ticket.referenceCtimeNs - toleranceNs) refuse('stale-file')
+}
+
+/** Writes, stats and removes a reference file in `dirPath`; returns its change time. */
+async function readReferenceCtime(dirPath: string): Promise<bigint> {
+  const referencePath = path.join(
+    dirPath,
+    `.magicpot-begin-${crypto.randomBytes(8).toString('hex')}.tmp`
+  )
+  try {
+    await fsp.writeFile(referencePath, '', { flag: 'wx', mode: 0o600 })
+    const stats = await fsp.lstat(referencePath, { bigint: true })
+    if (!stats.isFile() || stats.ctimeNs <= 0n) refuse('reference-file')
+    return stats.ctimeNs
+  } finally {
+    await fsp.rm(referencePath, { force: true }).catch(() => undefined)
+  }
 }
 
 async function assertCanonicalDirectory(dirPath: string): Promise<string> {
   const stats = await fsp.lstat(dirPath)
   if (!stats.isDirectory() || stats.isSymbolicLink()) refuse('linked-directory')
-  const real = path.resolve(await fsp.realpath(dirPath))
+  const real = await canonicalPath(dirPath)
   if (!samePath(real, dirPath)) refuse('linked-directory')
   return real
 }
@@ -667,7 +710,7 @@ async function resolveEntryPath(bundleDir: string, relativePath: string): Promis
     refuse('bad-relative-path')
   const full = path.join(bundleDir, ...segments)
   if (!isStrictlyInside(bundleDir, full)) refuse('bad-relative-path')
-  const real = path.resolve(await fsp.realpath(full))
+  const real = await canonicalPath(full)
   if (!samePath(real, full) || !isStrictlyInside(bundleDir, real)) refuse('linked-entry')
   return real
 }
@@ -806,7 +849,7 @@ async function beginReportBundleUnchecked(
 
   const containerPath = path.resolve(root, REPORT_BUNDLES_ROOT_DIR_NAME)
   await fsp.mkdir(containerPath, { recursive: true })
-  const container = path.resolve(await fsp.realpath(containerPath))
+  const container = await canonicalPath(containerPath)
   if (!(await fsp.stat(container)).isDirectory()) refuse('bad-directory')
   const dirPath = path.join(container, bundleId)
   try {
@@ -816,6 +859,7 @@ async function beginReportBundleUnchecked(
   }
   const canonicalDir = await assertCanonicalDirectory(dirPath)
   if (!samePath(path.dirname(canonicalDir), container)) refuse('outside-root')
+  const referenceCtimeNs = await readReferenceCtime(canonicalDir)
 
   const issuedAt = current.now()
   for (const [ticket, entry] of current.tickets) {
@@ -829,10 +873,12 @@ async function beginReportBundleUnchecked(
   const ticket = `rbt1.${crypto.randomBytes(32).toString('base64url')}`
   current.tickets.set(ticket, {
     canonicalDir,
+    configuredDir: path.join(containerPath, path.basename(canonicalDir)),
     container,
     bundleId: path.basename(canonicalDir),
     conversation: { ...req.conversation },
-    issuedAt
+    issuedAt,
+    referenceCtimeNs
   })
   return { ticket }
 }
@@ -859,7 +905,7 @@ async function registerReportBundleUnchecked(
   if (startedAt < ticket.issuedAt || startedAt - ticket.issuedAt > REPORT_BUNDLE_TICKET_TTL_MS)
     refuse('expired-ticket')
 
-  const container = path.resolve(await fsp.realpath(ticket.container))
+  const container = await canonicalPath(ticket.container)
   if (!samePath(container, ticket.container)) refuse('linked-directory')
   const bundleDir = await assertCanonicalDirectory(ticket.canonicalDir)
   if (!samePath(path.dirname(bundleDir), container)) refuse('outside-root')
@@ -903,6 +949,8 @@ async function registerReportBundleUnchecked(
   const binding = `rb1.${crypto.randomBytes(32).toString('base64url')}`
   const bindingHash = sha256Hex(binding)
   const snapshotBytes = buildSnapshotManifest({
+    bundleDir,
+    configuredDir: ticket.configuredDir,
     bundleId: ticket.bundleId,
     title: manifest.title,
     createdAt: startedAt,
@@ -958,6 +1006,8 @@ async function registerReportBundleUnchecked(
 }
 
 function buildSnapshotManifest(input: {
+  bundleDir: string
+  configuredDir: string
   bundleId: string
   title?: string
   createdAt: number
@@ -967,7 +1017,12 @@ function buildSnapshotManifest(input: {
   const toEntry = (verified: VerifiedEntry, role: 'primary-report' | 'report-image') => {
     const { entry, fingerprint } = verified
     const fileName = entry.fileName?.trim() || path.basename(fingerprint.path)
-    const sourceUrl = toLocalMediaUrl(fingerprint.path) ?? refuse('snapshot-url')
+    // The path under the root as configured: the local-media protocol allows it like the
+    // producer's own URLs, while a canonical network path (\\server\share) is refused there.
+    const relative = path.relative(input.bundleDir, fingerprint.path)
+    const sourcePath = path.join(input.configuredDir, relative)
+    if (!isStrictlyInside(input.configuredDir, sourcePath)) refuse('snapshot-url')
+    const sourceUrl = toLocalMediaUrl(sourcePath) ?? refuse('snapshot-url')
     return {
       role,
       fileName,
@@ -1013,12 +1068,29 @@ const fingerprintMatchesStats = (fingerprint: FileFingerprint, stats: BigStats):
   fingerprint.ino === stats.ino.toString() &&
   fingerprint.dev === stats.dev.toString()
 
+/**
+ * Whether `stats` (an lstat of the requested path) is the registered file itself. Compares the
+ * file identity (device and inode, or the Windows volume serial and file index) rather than a
+ * path spelling, which differs between a mapped, subst or 8.3 path and its canonical form.
+ * A file system that reports no inode falls back to the canonical path.
+ */
+function isRegisteredFile(
+  stats: BigStats,
+  fingerprint: FileFingerprint,
+  canonical: () => string
+): boolean {
+  if (!isSingleLinkRegularFile(stats)) return false
+  if (stats.dev.toString() !== fingerprint.dev || stats.ino.toString() !== fingerprint.ino)
+    return false
+  return stats.ino !== 0n || samePath(canonical(), fingerprint.path)
+}
+
 /** Same regular single-link file at the same canonical path; rehash on any metadata change. */
 async function checkUnchanged(fingerprint: FileFingerprint): Promise<FileFingerprint | null> {
   try {
     const stats = await fsp.lstat(fingerprint.path, { bigint: true })
     if (!isSingleLinkRegularFile(stats)) return null
-    const real = path.resolve(await fsp.realpath(fingerprint.path))
+    const real = await canonicalPath(fingerprint.path)
     if (!samePath(real, fingerprint.path)) return null
     if (fingerprintMatchesStats(fingerprint, stats)) return fingerprint
     const reread = await fingerprintFile(fingerprint.path, MAX_FULL_FILE_BYTES)
@@ -1036,14 +1108,11 @@ async function primaryUrlMatches(record: RegistryRecord, primaryUrl: string): Pr
   if (!filePath) return false
   try {
     // The URL must name the file itself, not a link to it (only ancestors may be links,
-    // e.g. /var -> /private/var): a link could be retargeted after verification.
-    if (!isSingleLinkRegularFile(await fsp.lstat(filePath, { bigint: true }))) return false
-    const real = path.resolve(await fsp.realpath(filePath))
-    if (!samePath(real, record.primary.path)) return false
-    const stats = await fsp.lstat(real, { bigint: true })
-    return (
-      stats.ino.toString() === record.primary.ino && stats.dev.toString() === record.primary.dev
-    )
+    // e.g. /var -> /private/var or a mapped drive): a link could be retargeted after
+    // verification.
+    const stats = await fsp.lstat(filePath, { bigint: true })
+    const real = stats.ino === 0n ? await canonicalPath(filePath) : ''
+    return isRegisteredFile(stats, record.primary, () => real)
   } catch {
     return false
   }
@@ -1203,9 +1272,11 @@ export function isBoundTo(binding: unknown, conversation: unknown, primaryUrl: u
   const filePath = parseLocalFileUrl(primaryUrl)
   if (!filePath) return false
   try {
-    if (!isSingleLinkRegularFile(fs.lstatSync(filePath, { bigint: true }))) return false
-    const real = path.resolve(fs.realpathSync.native(filePath))
-    return samePath(real, record.primary.path) && isUnchangedSync(record.primary)
+    const stats = fs.lstatSync(filePath, { bigint: true })
+    return (
+      isRegisteredFile(stats, record.primary, () => canonicalPathSync(filePath)) &&
+      isUnchangedSync(record.primary)
+    )
   } catch {
     return false
   }

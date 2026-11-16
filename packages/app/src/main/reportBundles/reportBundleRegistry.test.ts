@@ -37,6 +37,8 @@ type BundleOptions = {
   rawManifest?: string
 }
 
+/** Real time between writing files and opening a session: freshness uses the file-system clock. */
+const elapse = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 const sha256 = (value: string | Buffer) => crypto.createHash('sha256').update(value).digest('hex')
 const bundleDirFor = (name: string) => path.join(root, '.report_bundles', name)
 const primaryUrlFor = (bundleDir: string) => toLocalMediaUrl(path.join(bundleDir, 'report.md'))!
@@ -210,7 +212,7 @@ describe('report bundle registration', () => {
   it('never re-signs a legacy bundle whose files predate the ticket', async () => {
     const legacy = bundleDirFor('legacy')
     writeBundleFiles(legacy, 'legacy')
-    clockOffset += 60_000
+    await elapse(400)
     const { ticket } = await beginReportBundle({ bundleDir: legacy, conversation }, [root])
     await expect(registerReportBundle({ ticket })).rejects.toBeInstanceOf(ReportBundleRefusedError)
 
@@ -708,7 +710,7 @@ describe('report bundle registry durability', () => {
   it('refuses files written shortly before the write session opened', async () => {
     const early = bundleDirFor('early')
     writeBundleFiles(early, 'early')
-    clockOffset += 1_000
+    await elapse(400)
     const { ticket } = await beginReportBundle({ bundleDir: early, conversation }, [root])
     await expect(registerReportBundle({ ticket })).rejects.toBeInstanceOf(ReportBundleRefusedError)
   })
@@ -776,5 +778,81 @@ describe('isBoundTo', () => {
     expect((await verifyOne(resp.binding, aliasUrl)).status).toBe('refused')
     expect(isBoundTo(resp.binding, 'conv-1', aliasUrl)).toBe(false)
     expect(isBoundTo(resp.binding, conversation, aliasUrl)).toBe(false)
+  })
+})
+
+describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => {
+  /**
+   * `alias` is a second spelling of the project root (a link here; a mapped drive, a subst
+   * drive, an 8.3 name or another letter case on the owner's machines).
+   */
+  async function sealUnderAlias(name = 'canvas-target-alias') {
+    const alias = path.join(tmp, 'alias')
+    fs.symlinkSync(root, alias, 'dir')
+    const configuredDir = path.join(alias, '.report_bundles', name)
+    const { ticket } = await beginReportBundle({ bundleDir: configuredDir, conversation }, [alias])
+    writeBundleFiles(bundleDirFor(name), name)
+    const resp = await registerReportBundle({ ticket })
+    return { alias, configuredDir, resp }
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('isBoundTo accepts the registered primary when the native realpath spells it differently', async () => {
+    const { resp, primaryUrl, bundleDir } = await seal()
+    const alias = path.join(tmp, 'alias')
+    fs.symlinkSync(root, alias, 'dir')
+    const otherSpelling = path.join(alias, path.relative(root, path.join(bundleDir, 'report.md')))
+    vi.spyOn(fs.realpathSync, 'native').mockImplementation((() => otherSpelling) as never)
+    expect((await verifyOne(resp.binding, primaryUrl)).status).toBe('verified')
+    expect(isBoundTo(resp.binding, conversation, primaryUrl)).toBe(true)
+    // Identity, not spelling: another file is still refused.
+    expect(
+      isBoundTo(resp.binding, conversation, toLocalMediaUrl(path.join(bundleDir, 'ocr.json'))!)
+    ).toBe(false)
+  })
+
+  it('verify and isBoundTo accept the producer’s spelling of a primary the realpath does not canonicalise', async () => {
+    const { alias, configuredDir, resp } = await sealUnderAlias()
+    const configuredUrl = toLocalMediaUrl(path.join(configuredDir, 'report.md'))!
+    const fsp = (await import('node:fs/promises')).default
+    const realRealpath = fsp.realpath.bind(fsp)
+    vi.spyOn(fsp, 'realpath').mockImplementation((async (target: string) =>
+      String(target).startsWith(alias) ? target : realRealpath(target)) as never)
+    vi.spyOn(fs.realpathSync, 'native').mockImplementation(((target: string) => target) as never)
+    expect((await verifyOne(resp.binding, configuredUrl)).status).toBe('verified')
+    expect(isBoundTo(resp.binding, conversation, configuredUrl)).toBe(true)
+  })
+
+  it('writes the snapshot’s source URLs under the root as configured', async () => {
+    const { configuredDir, resp } = await sealUnderAlias()
+    const snapshotPath = path.join(
+      userData,
+      'report-bundles',
+      sha256(resp.binding),
+      'manifest.json'
+    )
+    const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'))
+    expect(snapshot.entries.map((entry: { sourceUrl: string }) => entry.sourceUrl)).toEqual([
+      toLocalMediaUrl(path.join(configuredDir, 'report.md')),
+      toLocalMediaUrl(path.join(configuredDir, 'images', 'fig-01.png')),
+      toLocalMediaUrl(path.join(configuredDir, 'images', 'fig-02.png'))
+    ])
+    const configuredUrl = toLocalMediaUrl(path.join(configuredDir, 'report.md'))!
+    expect((await verifyOne(resp.binding, configuredUrl)).status).toBe('verified')
+  })
+
+  it('judges freshness on the bundle’s file-system clock, not MAIN’s wall clock', async () => {
+    // MAIN's clock is an hour ahead of the share's clock (a NAS with another time).
+    clockOffset = 60 * 60_000
+    const { resp, bundleDir, primaryUrl } = await seal('canvas-target-skew')
+    expect(resp.binding).toMatch(REPORT_BUNDLE_BINDING_PATTERN)
+    expect((await verifyOne(resp.binding, primaryUrl)).status).toBe('verified')
+    // The reference file is gone.
+    expect(fs.readdirSync(bundleDir).filter((name) => name.startsWith('.magicpot-begin-'))).toEqual(
+      []
+    )
   })
 })
