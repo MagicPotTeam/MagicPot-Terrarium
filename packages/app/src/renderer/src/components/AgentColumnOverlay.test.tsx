@@ -142,4 +142,43 @@ describe('AgentColumnOverlay', () => {
       outside.remove()
     }
   })
+
+  it('gives the focus back when its owner closes or drops it while it holds the focus', async () => {
+    const composer = document.createElement('textarea')
+    document.body.append(composer)
+    const onReturnFocus = vi.fn(() => composer.focus())
+    const view = (open: boolean, mounted = true) =>
+      mounted ? (
+        <AgentColumnOverlay
+          open={open}
+          label="Form"
+          onClose={vi.fn()}
+          onReturnFocus={onReturnFocus}
+        >
+          <input aria-label="name" />
+        </AgentColumnOverlay>
+      ) : (
+        <p>gone</p>
+      )
+    const page = render(view(true))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'name' })).toHaveFocus())
+    // Closed by its owner (a finished creation): the focused field goes away with it.
+    page.rerender(view(false))
+    expect(onReturnFocus).toHaveBeenCalledTimes(1)
+    page.rerender(view(true))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'name' })).toHaveFocus())
+    // Dropped while open (the owner is re-keyed or unmounted).
+    vi.useFakeTimers()
+    try {
+      page.rerender(view(true, false))
+      act(() => {
+        vi.runOnlyPendingTimers()
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(onReturnFocus).toHaveBeenCalledTimes(2)
+    expect(composer).toHaveFocus()
+    composer.remove()
+  })
 })

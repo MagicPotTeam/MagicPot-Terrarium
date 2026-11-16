@@ -111,7 +111,7 @@ const AgentColumnToastItem: React.FC<{ toast: Toast; onDismiss: (key: string) =>
           backgroundColor: 'transparent',
           color: tokens.muted,
           cursor: 'pointer',
-          font: 'inherit',
+          fontFamily: 'inherit',
           fontSize: 16,
           lineHeight: 1,
           '&:hover': { color: tokens.text, backgroundColor: tokens.hover },

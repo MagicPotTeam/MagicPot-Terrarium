@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef } from 'react'
+import React, { useEffect, useLayoutEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Box } from '@mui/material'
 import { alpha, useTheme } from '@mui/material/styles'
@@ -87,6 +87,50 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
   const onReturnFocusRef = useRef(onReturnFocus)
   onReturnFocusRef.current = onReturnFocus
 
+  const returnFocus = () => {
+    if (onReturnFocusRef.current) onReturnFocusRef.current()
+    else if (openerRef.current?.isConnected) openerRef.current.focus()
+  }
+  // After the sheet went away with the focus: the target may not take it yet (a composer that
+  // is re-enabled a moment later), so try again briefly while the focus is still nowhere.
+  const returnLostFocus = (attempt = 0) => {
+    if (!isPlainBody(document.activeElement)) return
+    returnFocus()
+    if (attempt < 20 && isPlainBody(document.activeElement)) {
+      window.setTimeout(() => returnLostFocus(attempt + 1), 50)
+    }
+  }
+
+  // Every focus change of the page while open tells whether the sheet holds the focus (a
+  // focused control that goes away with the sheet leaves the focus nowhere).
+  useEffect(() => {
+    if (!open) return
+    const track = (event: FocusEvent) => {
+      focusInsideRef.current = Boolean(
+        dialogRef.current &&
+        event.target instanceof Node &&
+        dialogRef.current.contains(event.target)
+      )
+    }
+    document.addEventListener('focusin', track, true)
+    return () => document.removeEventListener('focusin', track, true)
+  }, [open])
+
+  // Unmounted while open (its owner went away or was re-keyed) while it held the focus: the
+  // focus would be left nowhere, so it goes back as on a close.
+  useLayoutEffect(
+    () => () => {
+      if (!wasOpenRef.current) return
+      const dialog = dialogRef.current
+      const held = focusInsideRef.current || Boolean(dialog?.contains(document.activeElement))
+      if (!held) return
+      window.setTimeout(() => returnLostFocus(), 0)
+    },
+    // Runs once, on unmount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  )
+
   useLayoutEffect(() => {
     if (open) {
       wasOpenRef.current = true
@@ -108,10 +152,7 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
     if (!wasOpenRef.current) return
     wasOpenRef.current = false
     // Closed while it held the focus (the focused control went away with it): give it back.
-    if (focusInsideRef.current && isPlainBody(document.activeElement)) {
-      if (onReturnFocusRef.current) onReturnFocusRef.current()
-      else if (openerRef.current?.isConnected) openerRef.current.focus()
-    }
+    if (focusInsideRef.current && isPlainBody(document.activeElement)) returnLostFocus()
     focusInsideRef.current = false
     return undefined
     // The focus target is chosen once per opening.
@@ -119,6 +160,16 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
   }, [open])
 
   if (!open) return null
+
+  // Closing from inside the sheet (Escape, Cancel, the dimmed area) hands the focus back first.
+  const close = () => {
+    if (cancelDisabled) return
+    if (dialogRef.current?.contains(document.activeElement)) {
+      focusInsideRef.current = false
+      returnFocus()
+    }
+    onClose()
+  }
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const dialog = event.currentTarget
@@ -133,7 +184,7 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
         return
       }
       event.stopPropagation()
-      onClose()
+      close()
       return
     }
     if (event.key !== 'Tab') return
@@ -159,7 +210,7 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
     padding: '3px 14px',
     borderRadius: `${tokens.radius.control}px`,
     cursor: 'pointer',
-    font: 'inherit',
+    fontFamily: 'inherit',
     fontSize: tokens.fontSize.small,
     lineHeight: '20px',
     whiteSpace: 'nowrap',
@@ -182,7 +233,7 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
         aria-hidden
         data-testid="agent-column-overlay-scrim"
         onMouseDown={(event) => {
-          if (event.target === event.currentTarget) onClose()
+          if (event.target === event.currentTarget) close()
         }}
         sx={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)' }}
       />
@@ -192,14 +243,6 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
         aria-modal="true"
         aria-label={label}
         onKeyDown={handleKeyDown}
-        onFocus={() => {
-          focusInsideRef.current = true
-        }}
-        onBlur={(event) => {
-          const next = event.relatedTarget as Node | null
-          // Focus moved to another element outside the sheet (not lost to the page).
-          if (next && !event.currentTarget.contains(next)) focusInsideRef.current = false
-        }}
         sx={{
           position: 'absolute',
           left: 0,
@@ -271,7 +314,7 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
             ref={cancelRef}
             aria-label={cancelAriaLabel}
             disabled={cancelDisabled}
-            onClick={onClose}
+            onClick={close}
             sx={{
               ...buttonSx,
               border: `1px solid ${tokens.border}`,

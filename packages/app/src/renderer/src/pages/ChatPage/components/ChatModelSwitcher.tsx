@@ -1,5 +1,5 @@
 import React, { useId, useMemo, useState } from 'react'
-import { Box } from '@mui/material'
+import { Box, InputBase } from '@mui/material'
 import { alpha, useTheme } from '@mui/material/styles'
 import { useTranslation } from 'react-i18next'
 import { getReasoningEffortLabel, type LLMReasoningEffort } from '@shared/llm'
@@ -90,30 +90,26 @@ const ChatModelSwitcher: React.FC<ChatModelSwitcherProps> = ({
     color: tokens.muted
   } as const
 
+  // An InputBase: the app's global style for plain inputs (14px, its own border) skips it.
   const search = (
-    <Box
-      component="input"
-      type="search"
+    <InputBase
       value={query}
       placeholder={t('chat.model_switcher.search')}
-      aria-label={t('chat.model_switcher.search')}
-      onChange={(event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.target.value)}
+      inputProps={{ type: 'search', 'aria-label': t('chat.model_switcher.search') }}
+      onChange={(event) => setQuery(event.target.value)}
       sx={{
-        boxSizing: 'border-box',
+        display: 'flex',
         width: '100%',
         minWidth: 0,
         height: 28,
-        m: 0,
-        padding: '4px 8px',
+        padding: '0 8px',
         border: `1px solid ${tokens.border}`,
         borderRadius: `${tokens.radius.control}px`,
-        backgroundColor: 'transparent',
         color: tokens.text,
-        font: 'inherit',
         fontSize: tokens.fontSize.small,
-        outline: 'none',
-        '&::placeholder': { color: tokens.muted, opacity: 1 },
-        '&:focus': { borderColor: tokens.accent }
+        '&.Mui-focused': { borderColor: tokens.accent },
+        '& .MuiInputBase-input': { padding: 0, height: '100%' },
+        '& .MuiInputBase-input::placeholder': { color: tokens.muted, opacity: 1 }
       }}
     />
   )
@@ -159,7 +155,7 @@ const ChatModelSwitcher: React.FC<ChatModelSwitcherProps> = ({
                   backgroundColor: pressed ? alpha(tokens.accent, 0.18) : 'transparent',
                   color: pressed ? tokens.accent : tokens.text,
                   cursor: 'pointer',
-                  font: 'inherit',
+                  fontFamily: 'inherit',
                   fontSize: tokens.fontSize.caption,
                   fontWeight: pressed ? 500 : 400,
                   lineHeight: '16px',
@@ -240,7 +236,7 @@ const ChatModelSwitcher: React.FC<ChatModelSwitcherProps> = ({
                   backgroundColor: checked ? alpha(tokens.accent, 0.12) : 'transparent',
                   color: tokens.text,
                   cursor: 'pointer',
-                  font: 'inherit',
+                  fontFamily: 'inherit',
                   textAlign: 'left',
                   '&:hover': {
                     backgroundColor: checked ? alpha(tokens.accent, 0.12) : tokens.hover

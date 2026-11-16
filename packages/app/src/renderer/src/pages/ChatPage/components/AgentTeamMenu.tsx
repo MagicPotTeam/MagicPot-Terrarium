@@ -173,7 +173,8 @@ export default function AgentTeamMenu({
     '& > .MuiTypography-subtitle2:first-of-type': { mt: 0 },
     '& .MuiTypography-caption, & .MuiFormControlLabel-label': { fontSize: tokens.fontSize.small, lineHeight: 1.5 },
     '& .MuiButton-root': { minHeight: 24, py: '2px', fontSize: tokens.fontSize.small, textTransform: 'none' },
-    '& .MuiTextField-root': { my: '6px', mr: '6px' },
+    // One field per line, as in a drawer form; the buttons that act on a field follow it.
+    '& .MuiTextField-root': { display: 'flex', width: '100%', my: '6px' },
     '& .MuiInputBase-input, & .MuiInputLabel-root': { fontSize: tokens.fontSize.small },
     '& details': { fontSize: tokens.fontSize.small }
   } as const
