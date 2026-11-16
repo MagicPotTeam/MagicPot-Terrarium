@@ -73,7 +73,10 @@ export const areChatSessionDraftsEqual = (
   JSON.stringify(buildChatDraftComparableValue(left || undefined)) ===
   JSON.stringify(buildChatDraftComparableValue(right || undefined))
 
+// A session without its own draft is returned as is: a new identity would make the page save the whole
+// unchanged conversation again.
 export const stripSessionDraft = <T extends { draft?: unknown }>(session: T): Omit<T, 'draft'> => {
+  if (!Object.hasOwn(session, 'draft')) return session
   const { draft, ...rest } = session
   void draft
   return rest

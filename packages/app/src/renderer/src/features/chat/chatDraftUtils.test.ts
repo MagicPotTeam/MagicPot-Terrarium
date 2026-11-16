@@ -72,6 +72,44 @@ describe('chatDraftUtils', () => {
     })
   })
 
+  it('keeps the identity of a session without a draft so stripping it never rewrites the session', () => {
+    const messages = [{ role: 'user', content: 'hello' }]
+    const session: {
+      id: string
+      title: string
+      messages: typeof messages
+      draft?: ChatSessionDraftModel
+    } = {
+      id: 's1',
+      title: 'Chat',
+      messages
+    }
+    expect(stripSessionDraft(session)).toBe(session)
+  })
+
+  it('returns a new session without the draft key when a draft exists, leaving the input untouched', () => {
+    const draft: ChatSessionDraftModel = {
+      inputValue: 'hello',
+      pendingHiddenContext: '',
+      pendingAttachments: [],
+      updatedAt: 100
+    }
+    const messages = [{ role: 'user', content: 'hello' }]
+    const withDraft = { id: 's1', title: 'Chat', messages, draft }
+    const stripped = stripSessionDraft(withDraft)
+    expect(stripped).not.toBe(withDraft)
+    expect(Object.hasOwn(stripped, 'draft')).toBe(false)
+    expect(stripped).toEqual({ id: 's1', title: 'Chat', messages })
+    expect(stripped.messages).toBe(messages)
+    expect(withDraft.draft).toBe(draft)
+
+    // An own key holding undefined is still a key: it is removed too.
+    const withUndefinedDraft = { id: 's2', title: 'Chat', messages, draft: undefined }
+    const strippedUndefined = stripSessionDraft(withUndefinedDraft)
+    expect(strippedUndefined).not.toBe(withUndefinedDraft)
+    expect(Object.hasOwn(strippedUndefined, 'draft')).toBe(false)
+  })
+
   it('chooses the freshest backup draft when one is available', () => {
     const sessionDraft: ChatSessionDraftModel = {
       inputValue: 'session draft',
