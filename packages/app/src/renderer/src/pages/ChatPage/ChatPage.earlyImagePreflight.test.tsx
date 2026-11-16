@@ -45,7 +45,7 @@ const fixture = vi.hoisted(() => ({
       chatStream: (...args: unknown[]) => unknown
       remoteFetch: (...args: unknown[]) => unknown
     }
-    svcReportBundles?: { verify: (...args: unknown[]) => unknown }
+    svcReportBundles?: { verify: (...args: never[]) => unknown }
   }
 }))
 
