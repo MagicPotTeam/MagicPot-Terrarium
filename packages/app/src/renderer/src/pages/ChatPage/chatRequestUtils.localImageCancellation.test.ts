@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
+import { createImageResponse } from '../../testUtils/imageResponse'
 import {
   normalizeChatAttachmentsForRequest,
   requestChatCompletion,
@@ -66,13 +67,19 @@ describe.each([false, true])('ordinary local-image cancellation (stream: %s)', (
         }
       }
       vi.stubGlobal('FileReader', FakeReader)
-      const blob = vi.fn(() => (phase === 'blob' ? blobGate.promise : Promise.resolve(fixtureBlob)))
+      const streamed = phase === 'fetch' || phase === 'file-reader'
+      const streamResponse = createImageResponse('a')
+      const blob = streamed
+        ? vi.spyOn(streamResponse, 'blob')
+        : vi.fn(() => (phase === 'blob' ? blobGate.promise : Promise.resolve(fixtureBlob)))
       const arrayBuffer = vi.fn(() => bufferGate.promise)
-      const response = {
-        ok: true,
-        headers: { get: () => 'image/png' },
-        ...(phase === 'array-buffer' ? { arrayBuffer } : { blob })
-      } as unknown as Response
+      const response = streamed
+        ? streamResponse
+        : ({
+            ok: true,
+            headers: { get: () => 'image/png' },
+            ...(phase === 'array-buffer' ? { arrayBuffer } : { blob })
+          } as unknown as Response)
       const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
         phase === 'fetch' ? fetchGate.promise : Promise.resolve(response)
       )
@@ -177,10 +184,7 @@ describe.each([false, true])('ordinary local-image cancellation (stream: %s)', (
 
   it('keeps a completed read successful when its old signal is aborted afterwards', async () => {
     const controller = new AbortController()
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      blob: async () => new Blob(['a'], { type: 'image/png' })
-    }))
+    const fetchMock = vi.fn(async () => createImageResponse('a'))
     vi.stubGlobal('fetch', fetchMock)
     const result = await normalizeChatAttachmentsForRequest(
       [{ type: 'image', url: 'local-media:///fixture.png' }],
@@ -196,12 +200,15 @@ describe.each([false, true])('ordinary local-image cancellation (stream: %s)', (
     const controller = new AbortController()
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        blob: async () => {
-          throw new Error('fixture body failure')
-        }
-      }))
+      vi.fn(async () =>
+        createImageResponse(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(new Error('fixture body failure'))
+            }
+          })
+        )
+      )
     )
     await expect(
       normalizeChatAttachmentsForRequest(

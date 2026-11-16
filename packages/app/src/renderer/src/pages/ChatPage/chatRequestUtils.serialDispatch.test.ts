@@ -3,6 +3,7 @@ import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import type { ChatMessage } from '@shared/llm'
 import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
+import { createImageResponse } from '../../testUtils/imageResponse'
 import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
 
 const config: Config = { ...DEFAULT_CONFIG, use_remote_llm: false, llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [{ id: 'fixture', provider: 'openai', deployment: 'cloud', model_use: 'chat', model_name: 'fixture', base_url: 'https://fixture.example/v1', api_key: 'fixture', api_mode: 'responses', call_type: 'api', attachment_transports: ['request-data-url'] }] } }
@@ -12,7 +13,7 @@ const messages = (): ChatMessage[] => [{ role: 'user', content: 'fixture', attac
   { type: 'image', url: 'local-media:///fixture/third.png', fileName: 'third.png' }
 ] }]
 const materialized = { transport: 'request-data-url' as const, dataUrl: 'data:image/png;base64,YQ==', mimeType: 'image/png', sizeBytes: 1 }
-const imageResponse = () => ({ ok: true, blob: async () => new Blob(['a'], { type: 'image/png' }) })
+const imageResponse = () => createImageResponse('a')
 
 afterEach(() => vi.unstubAllGlobals())
 

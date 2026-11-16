@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatAttachment } from '@shared/llm'
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
+import { createImageResponse } from '../../testUtils/imageResponse'
 import { normalizeChatAttachmentsForRequest } from './chatRequestUtils'
 
 const deferred = <T,>() => {
@@ -15,7 +16,7 @@ const managed: ChatAttachment = {
 }
 const image = (name: string): ChatAttachment => ({ type: 'image', url: `local-media:///fixture/${name}.png`, fileName: `${name}.png` })
 const materialized = { transport: 'request-data-url' as const, dataUrl: 'data:image/png;base64,YQ==', mimeType: 'image/png', sizeBytes: 1 }
-const response = () => ({ ok: true, blob: async () => new Blob(['a'], { type: 'image/png' }) }) as Response
+const response = () => createImageResponse('a')
 
 afterEach(() => vi.unstubAllGlobals())
 
