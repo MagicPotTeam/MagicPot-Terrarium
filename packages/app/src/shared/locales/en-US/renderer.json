@@ -1071,6 +1071,7 @@
     "team_menu_add_member": "Add member…",
     "team_menu_manage": "Team…",
     "team_lead_row": "Lead",
+    "team_member_image_place": "Place {{name}} · image {{index}}",
     "team_target_label": "Team member: {{name}}",
     "team_target_list": "Team members",
     "goal_close": "Close goals",

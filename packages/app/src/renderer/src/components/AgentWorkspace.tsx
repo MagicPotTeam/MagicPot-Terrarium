@@ -616,6 +616,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const subRowHostRefs = useRef(new Map<string, (element: HTMLElement | null) => void>())
   const subRowChangeHandlers = useRef(new Map<string, (title: string | null) => void>())
   const subRowPresenceHandlers = useRef(new Map<string, (delta: 1 | -1) => void>())
+  const paneActivateHandlers = useRef(new Map<string, () => void>())
   // Callbacks stay the same for a pane's whole life: a new ref identity would detach and
   // re-attach the host on every render.
   const getSubRowHostRef = (paneId: string) => {
@@ -649,6 +650,14 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
           [paneId]: Math.max(0, (prev[paneId] ?? 0) + delta)
         }))
       subRowPresenceHandlers.current.set(paneId, handler)
+    }
+    return handler
+  }
+  const getPaneActivateHandler = (paneId: string) => {
+    let handler = paneActivateHandlers.current.get(paneId)
+    if (!handler) {
+      handler = () => setActivePaneId(paneId)
+      paneActivateHandlers.current.set(paneId, handler)
     }
     return handler
   }
@@ -1438,7 +1447,16 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 }}
               />
               {/* The pane's chat page renders the conversations inside this thread here. */}
-              <Box ref={getSubRowHostRef(pane.id)} data-agent-thread-sub-rows={pane.id} />
+              <Box
+                ref={getSubRowHostRef(pane.id)}
+                data-agent-thread-sub-rows={pane.id}
+                role={(paneSubRowCounts[pane.id] ?? 0) > 0 ? 'group' : undefined}
+                aria-label={
+                  (paneSubRowCounts[pane.id] ?? 0) > 0
+                    ? resolveThreadTitle(panePreviews[pane.id], index, t)
+                    : undefined
+                }
+              />
               </React.Fragment>
             ))}
             {activePane && (
@@ -1536,6 +1554,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 modelPillHost={modelPillHost}
                 teamTargetHost={teamTargetHost}
                 onThreadSubRowChange={getSubRowChangeHandler(pane.id)}
+                onActivate={getPaneActivateHandler(pane.id)}
               />
               </AgentThreadSubRowPresenceContext.Provider>
             </Box>

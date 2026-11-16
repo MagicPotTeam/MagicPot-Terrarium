@@ -5,6 +5,16 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import type { ChatSession } from '../chatStorage'
 import { AgentTeamMemberImages } from './AgentTeamTree'
+// The image buttons read their label from the Chinese locale, as a Chinese user sees it.
+vi.mock('react-i18next', async () => {
+  const zh = (await import('@shared/locales/zh-CN/renderer.json')).default as Record<string, unknown>
+  const t = (key: string, options?: Record<string, unknown>) => {
+    const value = key.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], zh)
+    const template = typeof value === 'string' ? value : ((options?.defaultValue as string | undefined) ?? key)
+    return template.replace(/{{(\w+)}}/g, (_match, name: string) => String(options?.[name] ?? ''))
+  }
+  return { useTranslation: () => ({ t, i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' } }) }
+})
 
 function member(attachments: ChatAttachment[]): ChatSession {
   return { id: 'member', title: 'Member', teamMemberName: 'Designer', messages: [{ role: 'assistant', content: '', attachments }] }

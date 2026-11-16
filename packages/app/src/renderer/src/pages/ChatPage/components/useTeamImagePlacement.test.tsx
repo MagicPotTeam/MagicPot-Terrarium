@@ -4,6 +4,16 @@ import { AgentTeamMemberForm, AgentTeamMemberImages } from './AgentTeamTree'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatSession } from '../chatStorage'
 import { useTeamImagePlacement } from './useTeamImagePlacement'
+// The image buttons read their label from the Chinese locale, as a Chinese user sees it.
+vi.mock('react-i18next', async () => {
+  const zh = (await import('@shared/locales/zh-CN/renderer.json')).default as Record<string, unknown>
+  const t = (key: string, options?: Record<string, unknown>) => {
+    const value = key.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], zh)
+    const template = typeof value === 'string' ? value : ((options?.defaultValue as string | undefined) ?? key)
+    return template.replace(/{{(\w+)}}/g, (_match, name: string) => String(options?.[name] ?? ''))
+  }
+  return { useTranslation: () => ({ t, i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' } }) }
+})
 
 const dispatch = vi.hoisted(() => vi.fn())
 vi.mock('../../ProjectCanvasPage/canvasTargetMediaDispatch', () => ({ dispatchCanvasTargetMediaAttachmentToCanvas: dispatch }))

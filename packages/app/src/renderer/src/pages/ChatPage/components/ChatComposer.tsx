@@ -98,6 +98,11 @@ interface ChatComposerProps {
   onRemoveAttachment: (index: number) => void
   sideCommandEnabled?: boolean
   isLoading: boolean
+  /**
+   * This conversation itself is generating. Defaults to isLoading; differs when the stop button
+   * also covers other work (a team lead's composer stops the running members too).
+   */
+  conversationBusy?: boolean
   onStopGenerating: () => void
   disabled: boolean
   composerInputRef: React.RefObject<HTMLTextAreaElement | HTMLInputElement | null>
@@ -570,6 +575,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   uploadProgress,
   onRemoveAttachment,
   isLoading,
+  conversationBusy = isLoading,
   sideCommandEnabled = false,
   onStopGenerating,
   disabled,
@@ -1024,7 +1030,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   }
 
   const canCompressFromStatusSlot = Boolean(
-    onCompressContext && !disabled && !isLoading && !disableCompressContext
+    onCompressContext && !disabled && !conversationBusy && !disableCompressContext
   )
 
   const handleStatusSlotCompressClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -1432,7 +1438,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
             borderRadius: isColumn ? `${columnTokens.radius.control}px` : '50%',
             color: 'text.secondary',
             cursor: canCompressFromStatusSlot ? 'pointer' : 'default',
-            opacity: disabled || isLoading ? 0.5 : 1,
+            opacity: disabled || conversationBusy ? 0.5 : 1,
             outline: 'none',
             '&:focus-visible': isColumn
               ? columnTokens.focusRing

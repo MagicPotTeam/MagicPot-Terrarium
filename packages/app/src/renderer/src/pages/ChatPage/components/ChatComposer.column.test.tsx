@@ -267,6 +267,18 @@ describe('ChatComposer column shell', () => {
     expect(onCompress).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps compaction while the stop covers other work, and blocks it while this conversation runs', () => {
+    const view = render(
+      <ColumnComposer isLoading conversationBusy={false} statusSlot={<span />} onCompressContext={vi.fn()} />
+    )
+    // A team lead whose members run: Stop is shown, the lead's own context can still be compressed.
+    expect(screen.getByRole('button', { name: 'Stop generating' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Compress context' })).toHaveAttribute('aria-disabled', 'false')
+    view.unmount()
+    render(<ColumnComposer isLoading statusSlot={<span />} onCompressContext={vi.fn()} />)
+    expect(screen.getByRole('button', { name: 'Compress context' })).toHaveAttribute('aria-disabled', 'true')
+  })
+
   it('disables the controls but still renders the shell without a conversation', () => {
     render(<ColumnComposer disabled />)
     expect(input()).toBeDisabled()

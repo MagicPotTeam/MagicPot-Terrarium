@@ -347,6 +347,8 @@ interface ChatPageProps {
   threadSubRowsHost?: HTMLElement | null
   /** Reports the sub-row that is open (its title), or null for the main conversation. */
   onThreadSubRowChange?: (title: string | null) => void
+  /** Makes this pane the active one (a sub-row of an inactive pane was chosen). */
+  onActivate?: () => void
   /**
    * Host in the Agent column's header for the model pill (null until it is mounted). When the
    * prop is given, the model selector leaves the composer and the active conversation renders
@@ -1028,6 +1030,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   workspaceMenu,
   threadSubRowsHost,
   onThreadSubRowChange,
+  onActivate,
   modelPillHost,
   teamTargetHost
 }) => {
@@ -8246,15 +8249,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // The observer is reset for each team identity, but the process-area host stays mounted.
   const imagePlacementKey = JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, teamEnabled, teamLead?.id, messageGeneration])
   const teamImagePlacement = useTeamImagePlacement(route?.scopeId ?? '', teamEnabled && teamLead ? teamMembers : [], imagePlacementKey)
-  // The thread list shows the lead and the members as indented rows under this thread's row.
-  const teamRowsTeam: AgentTeamThreadRowsTeam | null = compact && teamEnabled && teamLead && teamMembers.length
+  // The thread list shows the lead and the members as indented rows under this thread's row,
+  // for every thread with a team, not only the active one (the header select stays active-only).
+  const teamListRows: AgentTeamThreadRowsTeam | null = compact && isReady && !config.use_remote_llm && route?.channel==='canvas' && route.scopeType==='thread' && teamLead && teamMembers.length
     // In the order the members were created: a reply must not move a row.
     ? { leadId: teamLead.id, members: [...teamMembers].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)).map(member => ({ id: member.id, name: member.teamMemberName || member.title })) }
     : null
+  const teamRowsTeam: AgentTeamThreadRowsTeam | null = teamEnabled ? teamListRows : null
   const [sideRowsHost, setSideRowsHost] = useState<HTMLDivElement | null>(null)
   const [openSideTitle, setOpenSideTitle] = useState<string | null>(null)
   // The toolbar summary names the open member (and the open side conversation after it).
-  const openMemberName = teamRowsTeam && currentSession?.teamLeadId ? currentSession.teamMemberName || currentSession.title : null
+  const openMemberName = !teamRowsTeam ? null : currentSession?.teamLeadId ? currentSession.teamMemberName || currentSession.title : t('chat.team_lead_row', { defaultValue: 'Lead' })
   const openSubRowTitle = [openMemberName, openSideTitle].filter(Boolean).join(' · ') || null
   useLayoutEffect(() => { onThreadSubRowChange?.(openSubRowTitle) }, [openSubRowTitle, onThreadSubRowChange])
   useLayoutEffect(() => () => onThreadSubRowChange?.(null), [onThreadSubRowChange])
@@ -9849,7 +9854,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           <AgentThreadGoalEntry route={route} conversationId={currentSession?.id} active={goalCommandAvailable} remote={!config || Boolean(config.use_remote_llm)} open={active && goalViewScope === inspectionScope} onClose={closeGoalView} cardHost={compact ? (goalCardOpen ? tailPanelHosts.goal : null) : undefined} />
           <AgentThreadScratchpadView ref={scratchpadCommandRef} route={route} conversationId={currentSessionId || undefined} storageScope={storageScope} active={scratchpadAvailable} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} onResult={compact ? handleScratchpadResult : undefined} />
           <AgentThreadSkillsPanel ref={skillCommandRef} visible={compact ? skillsCardOpen : skillDetailsOpen} onClose={() => setSkillDetailsOpen(false)} cardHost={compact ? (skillsCardOpen ? tailPanelHosts.skills : null) : undefined} commandEnabled={!pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} />
-          <AgentTeamThreadRows host={threadSubRowsHost} team={teamRowsTeam} currentId={currentSessionId || null} onSelect={selectSession} sideRowsHostRef={setSideRowsHost} />
+          <AgentTeamThreadRows host={threadSubRowsHost} team={teamListRows} currentId={active ? currentSessionId || null : null} onSelect={id => { if (!active) onActivate?.(); selectSession(id) }} sideRowsHostRef={setSideRowsHost} />
           <AgentThreadSidesPanel ref={sideCommandRef} onViewChange={setShowingSide} subRowsHost={threadSubRowsHost ? sideRowsHost : threadSubRowsHost} onOpenSubRowChange={setOpenSideTitle} commandEnabled={!config?.use_remote_llm && !pendingAttachments.length && !pendingHiddenContext} route={route} conversationId={currentSessionId || undefined} active={active && !config?.use_remote_llm} profileId={selectedProfileId || undefined} getMessages={() => {
             const id = currentSessionIdRef.current
             if (!id || id !== currentSessionId || storageScopeRef.current !== storageScope || deletedSessionKeysRef.current.has(getSessionStorageKey(storageScope, id)) || hasSessionDeleteTombstone(id, storageScope)) throw new Error('Side snapshot no longer belongs to the current conversation.')
@@ -10043,6 +10048,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 uploadProgress={uploadProgress}
                 onRemoveAttachment={removeAttachment}
                 isLoading={composerRunning}
+                conversationBusy={isLoading}
                 sideCommandEnabled={active && route?.channel === 'canvas' && route.scopeType === 'thread' && !config?.use_remote_llm}
                 onStopGenerating={handleStopGenerating}
                 disabled={!currentSession}

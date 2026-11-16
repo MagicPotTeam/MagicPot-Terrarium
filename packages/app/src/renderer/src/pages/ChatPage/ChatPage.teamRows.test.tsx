@@ -21,7 +21,8 @@ const h = vi.hoisted(() => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' },
-    t: (key: string, opts?: { defaultValue?: string }) => opts?.defaultValue || key
+    t: (key: string, opts?: Record<string, unknown>) =>
+      String(opts?.defaultValue || key).replace(/{{(\w+)}}/g, (_match, name: string) => String(opts?.[name] ?? ''))
   })
 }))
 vi.mock('@renderer/hooks/useConfig', () => ({
@@ -137,7 +138,17 @@ const member = (id: string, name: string, createdAt = 0) => ({
   teamRole: name
 })
 
-function Harness({ compact = true, onThreadSubRowChange }: { compact?: boolean; onThreadSubRowChange?: (title: string | null) => void }) {
+function Harness({
+  compact = true,
+  active = true,
+  onActivate,
+  onThreadSubRowChange
+}: {
+  compact?: boolean
+  active?: boolean
+  onActivate?: () => void
+  onThreadSubRowChange?: (title: string | null) => void
+}) {
   const [host, setHost] = React.useState<HTMLDivElement | null>(null)
   const [targetHost, setTargetHost] = React.useState<HTMLDivElement | null>(null)
   return (
@@ -147,6 +158,8 @@ function Harness({ compact = true, onThreadSubRowChange }: { compact?: boolean; 
         <div data-testid="sub-rows" ref={setHost} />
         <ChatPage
           compact={compact}
+          active={active}
+          onActivate={onActivate}
           storageScope="team-rows-fixture"
           route={route}
           threadSubRowsHost={host}
@@ -199,19 +212,45 @@ describe('ChatPage team rows in the thread list', () => {
     const rows = within(screen.getByTestId('sub-rows'))
     expect(rows.getByRole('button', { name: 'Lead' })).toHaveAttribute('aria-current', 'true')
     expect(rows.getByRole('button', { name: '文案' })).not.toHaveAttribute('aria-current')
-    expect(onThreadSubRowChange).toHaveBeenLastCalledWith(null)
+    // The toolbar summary reads "<thread> · <target>", the lead included.
+    await waitFor(() => expect(onThreadSubRowChange).toHaveBeenLastCalledWith('Lead'))
 
     fireEvent.click(rows.getByRole('button', { name: '文案' }))
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('writer'))
     await waitFor(() => expect(rows.getByRole('button', { name: '文案' })).toHaveAttribute('aria-current', 'true'))
     expect(rows.getByRole('button', { name: 'Lead' })).not.toHaveAttribute('aria-current')
-    // The toolbar summary reads "<thread> · <member>".
     expect(onThreadSubRowChange).toHaveBeenLastCalledWith('文案')
 
     fireEvent.click(rows.getByRole('button', { name: 'Lead' }))
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    await waitFor(() => expect(onThreadSubRowChange).toHaveBeenLastCalledWith(null))
+    await waitFor(() => expect(onThreadSubRowChange).toHaveBeenLastCalledWith('Lead'))
     expect(rows.getByRole('button', { name: 'Lead' })).toHaveAttribute('aria-current', 'true')
+  })
+
+  it('keeps the team rows of an inactive pane, unmarked, and activates the pane on a click', async () => {
+    const onActivate = vi.fn()
+    const view = render(<Harness onActivate={onActivate} />)
+    await waitFor(() => expect(rowLabels()).toEqual(['Lead', '设计师', '文案', 'side-row']))
+    // Another thread is opened: this pane is no longer the active one.
+    view.rerender(<Harness active={false} onActivate={onActivate} />)
+    const rows = within(screen.getByTestId('sub-rows'))
+    await waitFor(() => expect(rows.getByRole('button', { name: 'Lead' })).not.toHaveAttribute('aria-current'))
+    expect(rowLabels().slice(0, 3)).toEqual(['Lead', '设计师', '文案'])
+    expect(rows.getByRole('button', { name: '文案' })).not.toHaveAttribute('aria-current')
+    // The header select belongs to the active pane only.
+    expect(screen.getByTestId('target-host')).toBeEmptyDOMElement()
+    expect(onActivate).not.toHaveBeenCalled()
+
+    fireEvent.click(rows.getByRole('button', { name: '文案' }))
+    expect(onActivate).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('writer'))
+    view.rerender(<Harness active onActivate={onActivate} />)
+    await waitFor(() => expect(rows.getByRole('button', { name: '文案' })).toHaveAttribute('aria-current', 'true'))
+    expect(screen.getByTestId('session')).toHaveTextContent('writer')
+    // A row of the active pane does not ask to activate it again.
+    fireEvent.click(rows.getByRole('button', { name: 'Lead' }))
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
+    expect(onActivate).toHaveBeenCalledTimes(1)
   })
 
   it('puts a target select with the lead and the members in the header host', async () => {
@@ -257,7 +296,7 @@ describe('ChatPage team rows in the thread list', () => {
     expect(within(screen.getByTestId('transcript-tail')).queryByRole('button')).toBeNull()
     fireEvent.click(within(screen.getByTestId('sub-rows')).getByRole('button', { name: '设计师' }))
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('designer'))
-    const place = await within(screen.getByTestId('transcript-tail')).findByRole('button', { name: '投放 设计师·图1' })
+    const place = await within(screen.getByTestId('transcript-tail')).findByRole('button', { name: 'Place 设计师 · image 1' })
     expect(dispatchToCanvas).not.toHaveBeenCalled()
     fireEvent.click(place)
     await waitFor(() => expect(dispatchToCanvas).toHaveBeenCalledTimes(1))

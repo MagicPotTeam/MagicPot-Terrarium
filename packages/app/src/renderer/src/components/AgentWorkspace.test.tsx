@@ -478,6 +478,35 @@ describe('AgentWorkspace', () => {
     expect(container.querySelector('[data-status="unread"]')).toBeNull()
   })
 
+  it('keeps the sub-rows of an inactive thread as a named group and lets its page activate it', async () => {
+    storePanes(2)
+    mockSubRowLabels.current = { 'project-1.agent-1': ['组长', '设计师'] }
+    renderWorkspaceWithThreadList()
+    await waitForThreadSummary('画布检查')
+    const host = () => document.querySelector<HTMLElement>('[data-agent-thread-sub-rows="agent-1"]')!
+    await waitFor(() => expect(host().querySelectorAll('[data-agent-thread-sub-row]')).toHaveLength(2))
+    // The group is named after its thread, so the rows of two team threads can be told apart.
+    expect(host()).toHaveAttribute('role', 'group')
+    expect(host()).toHaveAccessibleName('画布检查')
+    expect(document.querySelector('[data-agent-thread-sub-rows="agent-2"]')).not.toHaveAttribute('role')
+
+    fireEvent.click(getThreadRows()[1])
+    await waitFor(() => expect(getThreadRows()[1]).toHaveAttribute('aria-current', 'true'))
+    // The inactive thread keeps its rows and its bold label row.
+    expect(host().querySelectorAll('[data-agent-thread-sub-row]')).toHaveLength(2)
+    expect(getComputedStyle(screen.getAllByTestId('agent-thread-title')[0]).fontWeight).toBe('600')
+
+    const firstPaneProps = () =>
+      chatPageMock.mock.calls
+        .map((call) => call[0] as { storageScope: string; active: boolean; onActivate: () => void })
+        .filter((props) => props.storageScope === 'project-1.agent-1')
+        .at(-1)!
+    expect(firstPaneProps().active).toBe(false)
+    act(() => firstPaneProps().onActivate())
+    await waitFor(() => expect(getThreadRows()[0]).toHaveAttribute('aria-current', 'true'))
+    expect(firstPaneProps().active).toBe(true)
+  })
+
   it('makes a thread row bold only while conversations are listed under it', async () => {
     storePanes(2)
     mockSubRowLabels.current = { 'project-1.agent-1': ['主对话', '配色疑问'] }
