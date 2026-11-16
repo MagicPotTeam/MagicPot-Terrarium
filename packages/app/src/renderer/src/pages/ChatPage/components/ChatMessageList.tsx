@@ -117,6 +117,11 @@ interface ChatMessageListProps {
    */
   tail?: React.ReactNode
   /**
+   * Agent column only: an element drawn right after the tail, also while it is empty (the
+   * host of the member approval cards). Unlike the tail it does not replace the empty state.
+   */
+  tailEnd?: React.ReactNode
+  /**
    * Agent column only: command cards that newer messages have followed. They stay where they
    * were created, inside the measured row of the message they follow.
    */
@@ -776,10 +781,43 @@ const MeasuredChatRow: React.FC<{
   )
 }
 
+/**
+ * A row at the end of the column transcript that grows afterwards keeps a list that stood at
+ * its end there. Whether it stood at the end is read from the geometry before the growth: the
+ * scroll event of the frame in which the row grew has already seen the taller content.
+ */
+function useKeepEndOnGrowth(
+  elementRef: React.RefObject<HTMLDivElement | null>,
+  enabled: boolean,
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  wasNearBottomRef: React.MutableRefObject<boolean>
+): void {
+  const heightRef = React.useRef(0)
+  React.useEffect(() => {
+    const element = elementRef.current
+    if (!enabled || !element || typeof ResizeObserver === 'undefined') return
+    heightRef.current = 0
+    const observer = new ResizeObserver(() => {
+      const height = element.getBoundingClientRect().height
+      const growth = height - heightRef.current
+      heightRef.current = height
+      const container = containerRef.current
+      if (!container || growth <= 0) return
+      const end = Math.max(0, container.scrollHeight - container.clientHeight)
+      if (end - container.scrollTop - growth > CHAT_STICK_TO_BOTTOM_THRESHOLD_PX) return
+      container.scrollTop = end
+      wasNearBottomRef.current = true
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [elementRef, enabled, containerRef, wasNearBottomRef])
+}
+
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
   active = true,
   columnStyle = false,
   tail,
+  tailEnd,
   anchoredTail,
   tailScrollToken,
   currentSession,
@@ -813,6 +851,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const messages = React.useMemo(() => currentSession?.messages ?? [], [currentSession?.messages])
   const hasTail = columnStyle && tail !== undefined && tail !== null && tail !== false
   const tailRef = React.useRef<HTMLDivElement | null>(null)
+  const hasTailEnd = columnStyle && tailEnd !== undefined && tailEnd !== null && tailEnd !== false
+  const tailEndRef = React.useRef<HTMLDivElement | null>(null)
   // The cards of each row: by the index of the message they follow, -1 for those before the
   // first message. A place past the last message falls back to the last message.
   const anchoredTailByRow = React.useMemo(() => {
@@ -1063,27 +1103,9 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     setScroll({ top: container.scrollTop, viewport: container.clientHeight })
   }, [chatContainerRef, hasTail, tailScrollToken])
   // A tail row that grows afterwards (its content arrives) keeps a list that stood at its end
-  // there. Whether it stood at the end is read from the geometry before the growth: the scroll
-  // event of the frame in which the row grew has already seen the taller content.
-  const tailHeightRef = React.useRef(0)
-  React.useEffect(() => {
-    const tailElement = tailRef.current
-    if (!hasTail || !tailElement || typeof ResizeObserver === 'undefined') return
-    tailHeightRef.current = 0
-    const observer = new ResizeObserver(() => {
-      const height = tailElement.getBoundingClientRect().height
-      const growth = height - tailHeightRef.current
-      tailHeightRef.current = height
-      const container = chatContainerRef.current
-      if (!container || growth <= 0) return
-      const end = Math.max(0, container.scrollHeight - container.clientHeight)
-      if (end - container.scrollTop - growth > CHAT_STICK_TO_BOTTOM_THRESHOLD_PX) return
-      container.scrollTop = end
-      wasNearBottomRef.current = true
-    })
-    observer.observe(tailElement)
-    return () => observer.disconnect()
-  }, [chatContainerRef, hasTail])
+  // there; so does an approval card that arrives after the tail.
+  useKeepEndOnGrowth(tailRef, hasTail, chatContainerRef, wasNearBottomRef)
+  useKeepEndOnGrowth(tailEndRef, hasTailEnd, chatContainerRef, wasNearBottomRef)
 
   const handleStartEditing = React.useCallback(
     (index: number, content: string) => {
@@ -1386,6 +1408,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           }}
         >
           {hasTail ? tail : null}
+        </Box>
+      ) : null}
+      {hasTailEnd ? (
+        <Box ref={tailEndRef} sx={{ flexShrink: 0, minWidth: 0 }}>
+          {tailEnd}
         </Box>
       ) : null}
       {pendingConfirmation ? (

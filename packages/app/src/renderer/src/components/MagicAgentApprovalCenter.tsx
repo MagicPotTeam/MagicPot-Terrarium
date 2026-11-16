@@ -10,7 +10,9 @@ import {
   DialogTitle,
   Typography
 } from '@mui/material'
+import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import type { MagicAgentPlatformPendingApproval } from '@shared/api/svcMagicAgentPlatform'
+import { ChatPromptCard } from '../pages/ChatPage/components/ChatPromptCard'
 import { api } from '../utils/windowUtils'
 
 const POLL_MS = 1000
@@ -162,11 +164,23 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
     const input = isRecord(request.input) ? request.input : {}
     const isNote = shown.toolName === 'scratchpad' && input.action === 'set'
     const member = surface!.members.get(matchTeamApproval(pending.request,surface!)!)
-    return createPortal(<Box key={pending.approvalId} data-approval-id={pending.approvalId} data-approval-revision={pending.revision} sx={{p:1.5,mb:1,border:1,borderColor:'divider',borderRadius:2,bgcolor:'background.paper'}}>
-      <Typography variant="body2" fontWeight={600} sx={{overflowWrap:'anywhere'}}>{isNote ? `${member} 想保存一条笔记` : `${member} 请求操作`}</Typography>
-      {isNote ? <Typography variant="body2" color="text.secondary" title={typeof input.value === 'string' ? input.value : undefined} sx={{mt:0.5,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{typeof input.value === 'string' ? input.value : '笔记内容未提供'}</Typography> : <Box><Typography variant="body2" color="text.secondary" sx={{mt:0.5,overflowWrap:'anywhere'}}>{shown.action}</Typography>{shown.parameters.map(parameter => <Typography key={parameter.key} variant="caption" component="pre" sx={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',m:0}}>{parameter.label}: {parameter.text}</Typography>)}</Box>}
-      <Box component="details" sx={{mt:1,color:'text.secondary','& summary':{cursor:'pointer',typography:'caption'}}}><summary>详情</summary><Typography component="pre" variant="caption" sx={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:300,overflow:'auto',m:0,mt:1}}>{JSON.stringify(pending.request,null,2)}</Typography></Box>
-      <Box sx={{display:'flex',gap:1,mt:1}}><Button size="small" variant="contained" disabled={busy} onClick={()=>void resolve(true,pending)}>批准</Button><Button size="small" variant="outlined" disabled={busy} onClick={()=>void resolve(false,pending)}>拒绝</Button></Box>
+    // Presentation only: a prompt card at the end of the member's team transcript. Which
+    // approval is shown here and what the buttons resolve are decided above.
+    return createPortal(<Box key={pending.approvalId} data-approval-id={pending.approvalId} data-approval-revision={pending.revision} sx={{minWidth:0}}>
+      <ChatPromptCard
+        testId="team-approval-card"
+        icon={<WarningAmberIcon aria-hidden="true" />}
+        accent="warning"
+        title={isNote ? `${member} 想保存一条笔记` : `${member} 请求操作`}
+        prompt={isNote ? <Box component="span" title={typeof input.value === 'string' ? input.value : undefined} sx={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{typeof input.value === 'string' ? input.value : '笔记内容未提供'}</Box> : shown.action}
+        detail={isNote || !shown.parameters.length ? undefined : <>{shown.parameters.map(parameter => <Box key={parameter.key} component="span" sx={{display:'block'}}>{parameter.label}: {parameter.text}</Box>)}</>}
+        options={[
+          { key: 'approve', label: '批准', primary: true, disabled: busy, onSelect: () => void resolve(true, pending) },
+          { key: 'deny', label: '拒绝', disabled: busy, onSelect: () => void resolve(false, pending) }
+        ]}
+      >
+        <Box component="details" sx={{px:'4px',pb:'8px',color:'text.secondary',fontSize:12,'& summary':{cursor:'pointer',fontSize:12,lineHeight:'16px'}}}><summary>详情</summary><Typography component="pre" sx={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'16rem',overflow:'auto',m:0,mt:'4px',fontFamily:'monospace',fontSize:11,lineHeight:'16px'}}>{JSON.stringify(pending.request,null,2)}</Typography></Box>
+      </ChatPromptCard>
     </Box>,surface!.element,pending.approvalId)
   })
   if(inline.some(item=>item.approval===approval))return <>{inlineCards}</>

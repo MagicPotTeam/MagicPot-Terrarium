@@ -20,6 +20,7 @@ afterEach(cleanup)
 type Options = {
   columnStyle?: boolean
   tail?: React.ReactNode
+  tailEnd?: React.ReactNode
   anchoredTail?: readonly ChatAnchoredTailGroup[]
   tailScrollToken?: number
   isLoading?: boolean
@@ -31,6 +32,7 @@ const list = (session: ChatSession, options: Options = {}): React.ReactElement =
     <ChatMessageList
       columnStyle={options.columnStyle ?? true}
       tail={options.tail}
+      tailEnd={options.tailEnd}
       anchoredTail={options.anchoredTail}
       tailScrollToken={options.tailScrollToken}
       currentSession={session}
@@ -212,6 +214,23 @@ describe('the transcript tail of the Agent column', () => {
     expect(screen.getByTestId('card')).toBeInTheDocument()
   })
 
+  it('draws the element after the tail without replacing the empty state, in the column only', () => {
+    const host = <div data-testid="approval-host" />
+    const empty: ChatSession = { id: 'empty', title: 'Empty', messages: [] }
+    const view = render(list(empty, { tailEnd: host }))
+    expect(screen.getByTestId('chat-empty-state')).toBeInTheDocument()
+    expect(screen.getByTestId('approval-host')).toBeInTheDocument()
+    view.rerender(list(short, { tail: card, tailEnd: host }))
+    const tail = screen.getByTestId('chat-transcript-tail')
+    const after = screen.getByTestId('approval-host')
+    // After the tail (outside its live region), inside the scroll content.
+    expect(tail.contains(after)).toBe(false)
+    expect(tail.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByTestId('chat-message-list').contains(after)).toBe(true)
+    view.rerender(list(short, { columnStyle: false, tailEnd: host }))
+    expect(screen.queryByTestId('approval-host')).toBeNull()
+  })
+
   it('scrolls to the end when a row was just added, and only then', () => {
     const view = render(list(short, { tailScrollToken: 0 }))
     const scroller = layOut(900, 300)
@@ -284,6 +303,43 @@ describe('the transcript tail of the Agent column', () => {
       tailHeight(300)
       observer.notify()
       expect(scroller.scrollTop).toBe(1000)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('follows a card that arrives after the tail while the list stands at its end', () => {
+    const observers: { target: Element | null; notify: () => void }[] = []
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        private entry: { target: Element | null; notify: () => void }
+        constructor(callback: () => void) {
+          this.entry = { target: null, notify: callback }
+          observers.push(this.entry)
+        }
+        observe(target: Element) {
+          this.entry.target = target
+        }
+        unobserve() {
+          this.entry.target = null
+        }
+        disconnect() {
+          this.entry.target = null
+        }
+      }
+    )
+    try {
+      render(list(short, { tailEnd: <div data-testid="approval-host" /> }))
+      const scroller = layOut(900, 300)
+      scroller.scrollTop = 600
+      scroller.dispatchEvent(new Event('scroll'))
+      const wrapper = screen.getByTestId('approval-host').parentElement!
+      const observer = observers.find((entry) => entry.target === wrapper)!
+      vi.spyOn(wrapper, 'getBoundingClientRect').mockReturnValue({ height: 150 } as DOMRect)
+      layOut(1050, 300)
+      observer.notify()
+      expect(scroller.scrollTop).toBe(750)
     } finally {
       vi.unstubAllGlobals()
     }

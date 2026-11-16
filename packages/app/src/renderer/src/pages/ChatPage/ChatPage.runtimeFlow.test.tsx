@@ -845,6 +845,8 @@ vi.mock('./components/ChatMessageList', () => ({
     onResolvePendingConfirmation?: (requestId: string, confirmed: boolean) => void
     /** Agent column: the command cards that follow the last message. */
     tail?: React.ReactNode
+    /** Agent column: the host of the member approval cards, after the tail. */
+    tailEnd?: React.ReactNode
     /** Agent column: the command cards that stay after an older message. */
     anchoredTail?: readonly { after: number; node: React.ReactNode }[]
   }) => {
@@ -856,6 +858,7 @@ vi.mock('./components/ChatMessageList', () => ({
         </pre>
         {props.anchoredTail?.map(group => <React.Fragment key={group.after}>{group.node}</React.Fragment>)}
         {props.tail}
+        {props.tailEnd}
         {props.pendingConfirmation ? (
           <div data-testid="chat-pending-confirmation-mock">
             <span>{props.pendingConfirmation.prompt}</span>
@@ -5068,6 +5071,11 @@ describe('ChatPage runtime workflow integration', () => {
         expect(screen.getByText('shell.execute')).toBeVisible()
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
         const inlineApproval = screen.getByTestId('team-inline-approvals')
+        // In the column the approval host follows the transcript tail, where the lead's
+        // delegated lines say who is done and who waits for the approval.
+        expect(hoisted.chatMessageListMock).toHaveBeenLastCalledWith(expect.objectContaining({ tailEnd: expect.anything() }))
+        expect(within(inlineApproval).getByTestId('team-approval-card')).toBeVisible()
+        await waitFor(() => expect(delegatedLineStates()).toEqual(['completed', 'waiting']))
         expect(within(inlineApproval).getByRole('button', { name: '批准' })).toBeVisible()
         expect(within(inlineApproval).getByRole('button', { name: '拒绝' })).toBeVisible()
         // The waiting member is not listed in a process area; its approval card is the only surface.

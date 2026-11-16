@@ -9097,6 +9097,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const delegatedRowsTail = useMemo(() => delegatedMembers.length
     ? <AgentTeamDelegatedRows members={delegatedMembers} scope={storageScope} running={loadingSessionIds} waiting={delegatedWaiting} />
     : null, [delegatedMembers, storageScope, loadingSessionIds, delegatedWaiting])
+  // In the column the member approval cards are prompt cards at the end of the transcript:
+  // their host follows the tail (the full-page chat keeps it above the transcript).
+  const approvalTailEnd = useMemo(() => teamEnabled && compact
+    ? <Box ref={setTeamApprovalHost} data-testid="team-inline-approvals" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }} />
+    : null, [teamEnabled, compact])
   const transcriptTail = useMemo(() => delegatedRowsTail || transcriptCards.tail || memberImagesTail
     ? <>{delegatedRowsTail}{transcriptCards.tail}{memberImagesTail}</>
     : null, [delegatedRowsTail, transcriptCards.tail, memberImagesTail])
@@ -9869,12 +9874,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
             return sessionsRef.current.find((session) => session.id === id)?.messages || []
           }} />
               <Box hidden={showingSide} sx={{ flex: 1, minWidth: 0, minHeight: 0, display: showingSide ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              {teamEnabled && <Box sx={{maxHeight:'30%',overflow:'auto',minWidth:0,display:'flex',flexDirection:'column'}}><Box ref={setTeamApprovalHost} data-testid="team-inline-approvals" sx={{px:1}}/></Box>}
+              {teamEnabled && !compact && <Box sx={{maxHeight:'30%',overflow:'auto',minWidth:0,display:'flex',flexDirection:'column'}}><Box ref={setTeamApprovalHost} data-testid="team-inline-approvals" sx={{px:1}}/></Box>}
               <Box sx={{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               <ChatMessageList
                 active={active}
                 columnStyle={compact}
                 tail={transcriptTail}
+                tailEnd={approvalTailEnd}
                 anchoredTail={transcriptCards.anchored}
                 tailScrollToken={tailScrollToken}
                 currentSession={currentSession}
