@@ -2104,24 +2104,73 @@ export type SaveCanvasItemsOptions = {
 /** `undefined`: saved. 'needs-bytes': a metadata-only save was asked for and was not possible. */
 export type CanvasSaveOutcome = void | 'needs-bytes'
 
-/** Content keys of in-memory items this session knows, without reading anything. */
-function collectKnownCanvasAssetKeys(
+/** What the saved, live, undo and redo items can still need, computed once per save. */
+type ProtectedCanvasState = {
+  /** Content keys this session knows for them, without reading anything. */
+  assetKeys: Set<string>
+  itemIds: Set<string>
+  /** Entries directly under the mirror's assets/ folder that their sources point into. */
+  mirrorEntryNames: Set<string>
+}
+
+/** Unique item objects visited by the last collectProtectedCanvasState call (for tests). */
+export const canvasProtectedStateWalkStats = { visitedItems: 0 }
+
+// Per item object: the mirror entries its sources point into, for one asset folder.
+const canvasMirrorEntryNamesByItem = new WeakMap<
+  object,
+  { assetDir: string; src: string | undefined; textures: unknown; entryNames: readonly string[] }
+>()
+
+function getCanvasItemMirrorEntryNames(item: BlobPersistableCanvasItem, assetDir: string): readonly string[] {
+  const textures = item.type === 'model3d' ? item.textures : undefined
+  const cached = canvasMirrorEntryNamesByItem.get(item)
+  if (cached && cached.assetDir === assetDir && cached.src === item.src && cached.textures === textures) {
+    return cached.entryNames
+  }
+  const entryNames: string[] = []
+  const add = (source: string | undefined): void => {
+    if (!source) return
+    const entry = getCanvasMirrorEntryForSource(assetDir, source)
+    if (entry && !entryNames.includes(entry.entryName)) entryNames.push(entry.entryName)
+  }
+  add(item.src)
+  for (const textureUrl of Object.values(textures ?? {})) add(textureUrl)
+  canvasMirrorEntryNamesByItem.set(item, { assetDir, src: item.src, textures, entryNames })
+  return entryNames
+}
+
+/**
+ * One walk over every item of the given lists. The undo and redo lists share
+ * almost all of their item objects, so each object is visited once (about
+ * N + H visits for N items and H history steps, not N x H).
+ */
+function collectProtectedCanvasState(
   itemLists: Iterable<readonly CanvasItem[]>,
-  target: Set<string>,
-  itemIds?: Set<string>
-): void {
+  assetDir: string | null
+): ProtectedCanvasState {
+  const state: ProtectedCanvasState = {
+    assetKeys: new Set(),
+    itemIds: new Set(),
+    mirrorEntryNames: new Set()
+  }
+  const visited = new WeakSet<object>()
+  let visitedItems = 0
   for (const list of itemLists) {
     for (const item of list) {
-      itemIds?.add(item.id)
+      if (!item || typeof item !== 'object' || visited.has(item)) continue
+      visited.add(item)
+      visitedItems += 1
+      state.itemIds.add(item.id)
       if (!isBlobPersistableCanvasItem(item)) continue
       const blobItem = item as BlobPersistableCanvasItem
       if (blobItem.src) {
         const key = peekCanvasAssetKey(blobItem, CANVAS_ASSET_SOURCE_SLOT, blobItem.src)
-        if (key) target.add(key)
+        if (key) state.assetKeys.add(key)
         const hint = canvasAssetKeyHintBySource.get(blobItem.src)
-        if (hint) target.add(hint)
+        if (hint) state.assetKeys.add(hint)
         const bySourceString = canvasAssetKeyByShortSource.get(blobItem.src)
-        if (bySourceString) target.add(bySourceString)
+        if (bySourceString) state.assetKeys.add(bySourceString)
       }
       if (blobItem.type === 'model3d' && blobItem.textures) {
         for (const [textureName, textureUrl] of Object.entries(blobItem.textures)) {
@@ -2130,11 +2179,18 @@ function collectKnownCanvasAssetKeys(
             getCanvasTextureAssetSlot(textureName),
             textureUrl
           )
-          if (key) target.add(key)
+          if (key) state.assetKeys.add(key)
+        }
+      }
+      if (assetDir) {
+        for (const entryName of getCanvasItemMirrorEntryNames(blobItem, assetDir)) {
+          state.mirrorEntryNames.add(entryName)
         }
       }
     }
   }
+  canvasProtectedStateWalkStats.visitedItems = visitedItems
+  return state
 }
 
 /** The item id a per-item blob key belongs to (an item id or `<itemId>::tex::<name>`). */
@@ -2678,7 +2734,7 @@ async function executeCanvasMirrorSave(
   groupBranches: CanvasGroupBranch[],
   figmaBinding: CanvasFigmaBinding | null,
   seedEntries: ReadonlyMap<string, ResolvedCanvasBinaryAsset>,
-  getProtectedItems: (() => Iterable<readonly CanvasItem[]>) | undefined
+  getProtectedState: (() => ProtectedCanvasState) | undefined
 ): Promise<boolean> {
   try {
     await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
@@ -2786,14 +2842,10 @@ async function executeCanvasMirrorSave(
         for (const fileName of refBySlot.values()) {
           keepAssetKeys.add(fileName.slice(PROJECT_ASSET_DIRNAME.length + 1).split('.')[0])
         }
-        const protectedLists: Array<readonly CanvasItem[]> = [items, ...(getProtectedItems?.() ?? [])]
-        collectKnownCanvasAssetKeys(protectedLists, keepAssetKeys)
-        for (const list of protectedLists) {
-          for (const slot of collectCanvasMirrorSlots(list)) {
-            const ownEntry = getCanvasMirrorEntryForSource(plan.assetDir, slot.src)
-            if (ownEntry) keepEntryNames.add(ownEntry.entryName)
-          }
-        }
+        const protectedState =
+          getProtectedState?.() ?? collectProtectedCanvasState([items], plan.assetDir)
+        for (const key of protectedState.assetKeys) keepAssetKeys.add(key)
+        for (const entryName of protectedState.mirrorEntryNames) keepEntryNames.add(entryName)
         await plan.transport.prune(
           [...keepAssetKeys].filter((key) => isCanvasAssetKey(key)),
           [...keepEntryNames]
@@ -2941,6 +2993,27 @@ async function saveCanvasItemsExclusive(
       }
     }
 
+    // What the saved items, the live items and the undo / redo lists can still need:
+    // one walk, shared by the mirror's cleanup and the IndexedDB sweep. A history that
+    // cannot be read fails both, so neither deletes anything.
+    let protectedState: ProtectedCanvasState | undefined
+    let protectedStateError: unknown
+    const getProtectedState = (): ProtectedCanvasState => {
+      if (protectedStateError !== undefined) throw protectedStateError
+      if (!protectedState) {
+        try {
+          protectedState = collectProtectedCanvasState(
+            [items, ...(options.getProtectedItems?.() ?? [])],
+            mirrorPlan?.assetDir ?? null
+          )
+        } catch (error) {
+          protectedStateError = error ?? new Error('protected items unavailable')
+          throw protectedStateError
+        }
+      }
+      return protectedState
+    }
+
     // 3. The mirror: missing asset files, the project file, then its own cleanup.
     // Its failure does not fail the save; IndexedDB already holds the board.
     try {
@@ -2956,7 +3029,7 @@ async function saveCanvasItemsExclusive(
           groupBranches,
           figmaBinding,
           new Map(readEntries.map((entry) => [entry.key, entry])),
-          options.getProtectedItems
+          getProtectedState
         )
       }
     } catch (error) {
@@ -2977,11 +3050,9 @@ async function saveCanvasItemsExclusive(
       for (const item of replacedItems) {
         if (item && typeof item === 'object' && typeof item.id === 'string') protectedItemIds.add(item.id)
       }
-      collectKnownCanvasAssetKeys(
-        options.getProtectedItems?.() ?? [],
-        protectedAssetKeys,
-        protectedItemIds
-      )
+      const known = getProtectedState()
+      for (const key of known.assetKeys) protectedAssetKeys.add(key)
+      for (const id of known.itemIds) protectedItemIds.add(id)
       await pruneCanvasAssetBlobs(db, storeKey, protectedAssetKeys, protectedItemIds)
     } catch (error) {
       console.warn('[Canvas Storage] Failed to prune unreferenced canvas assets:', error)

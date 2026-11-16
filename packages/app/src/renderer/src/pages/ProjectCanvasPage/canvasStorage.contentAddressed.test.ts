@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { countCanvasAssetKeyReferences, loadCanvasItems, saveCanvasItems } from './canvasStorage'
+import {
+  canvasProtectedStateWalkStats,
+  countCanvasAssetKeyReferences,
+  loadCanvasItems,
+  saveCanvasItems
+} from './canvasStorage'
 import type { CanvasItem } from './types'
 import { buildProjectStorageDirName } from '@shared/projectStorage'
 
@@ -1791,5 +1796,32 @@ describe('mirror staging failures', () => {
     expect(fetchCalls.filter((url) => url.includes('huge'))).toEqual([])
     expect(mirror.calls.write.map((call) => call.assetFileName)).toEqual([`${contentKey([9])}.png`])
     expect(mirror.project().items[0].src).toBe(`local-media://${bigPath}`)
+  })
+})
+
+describe('save-time cost on big boards', () => {
+  it('visits each item object once across 50 history lists of a 2000-item board', async () => {
+    const mirror = createFakeMirror()
+    const N = 2000
+    const H = 50
+    const items = Array.from({ length: N }, (_, index) =>
+      imageItem(`big-${index}`, `local-media://${mirror.autoSaveRoot}/elsewhere/${index}.png`, {
+        x: index
+      })
+    )
+    // Undo history with structural sharing: every step moved one item.
+    const history: CanvasItem[][] = []
+    let current = items
+    for (let step = 0; step < H; step += 1) {
+      current = current.map((item, index) =>
+        index === step ? ({ ...item, y: step } as CanvasItem) : item
+      )
+      history.push(current)
+    }
+    // No source can be read, so the saves stay cheap: only the walk is measured.
+    await saveCanvasItems([], 'big-board', [], [], null, { getProtectedItems: () => history })
+    expect(canvasProtectedStateWalkStats.visitedItems).toBeLessThanOrEqual(N + H)
+    expect(canvasProtectedStateWalkStats.visitedItems).toBeGreaterThanOrEqual(N)
+    expect(mirror.calls.prune).toHaveLength(1)
   })
 })
