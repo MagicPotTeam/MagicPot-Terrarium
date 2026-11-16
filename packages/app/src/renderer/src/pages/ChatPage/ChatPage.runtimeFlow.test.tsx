@@ -5227,6 +5227,85 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  it('stops the running members from the lead composer and drops their queued sends', async () => {
+    const lead: ChatSession = { id: 'stop-all-lead', title: 'Lead', messages: [], profileId: 'base-model' }
+    const alice: ChatSession = { id: 'stop-all-alice', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
+    const bob: ChatSession = { id: 'stop-all-bob', title: 'Bob', messages: [], teamLeadId: lead.id, teamMemberName: 'Bob' }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const signals = new Map<string, AbortSignal>()
+    hoisted.requestChatCompletionMock.mockImplementation(({ conversationId, signal }: { conversationId: string; signal: AbortSignal }) => new Promise((_resolve, reject) => {
+      signals.set(conversationId, signal)
+      signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+    }))
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      for (const name of ['Alice', 'Bob']) {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: `@${name} running` } })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(signals.has(name === 'Alice' ? alice.id : bob.id)).toBe(true))
+      }
+      // The lead itself is idle, but its composer offers stop while members run.
+      expect(readCurrentSessionState()?.id).toBe(lead.id)
+      await waitFor(() => expect(screen.getByTestId('chat-composer-stop-mock')).toBeVisible())
+      for (const member of [alice, bob]) {
+        fireEvent.click(teamRows().getByRole('button', { name: member.teamMemberName! }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: `queued for ${member.teamMemberName}` } })
+        fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+        await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(`queued for ${member.teamMemberName}`))
+      }
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      expect(signals.get(alice.id)?.aborted).toBe(true)
+      expect(signals.get(bob.id)?.aborted).toBe(true)
+      await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
+      expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
+      expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+    } finally { page.unmount() }
+  })
+
+  it('stops only the open member from its own conversation, not the lead or another member', async () => {
+    const lead: ChatSession = { id: 'stop-one-lead', title: 'Lead', messages: [], profileId: 'base-model' }
+    const alice: ChatSession = { id: 'stop-one-alice', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
+    const bob: ChatSession = { id: 'stop-one-bob', title: 'Bob', messages: [], teamLeadId: lead.id, teamMemberName: 'Bob' }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const signals = new Map<string, AbortSignal>()
+    hoisted.requestChatCompletionMock.mockImplementation(({ conversationId, signal }: { conversationId: string; signal: AbortSignal }) => new Promise((_resolve, reject) => {
+      signals.set(conversationId, signal)
+      signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+    }))
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      for (const name of ['Alice', 'Bob']) {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: `@${name} running` } })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(signals.has(name === 'Alice' ? alice.id : bob.id)).toBe(true))
+      }
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      expect(signals.get(alice.id)?.aborted).toBe(true)
+      expect(signals.get(bob.id)?.aborted).toBe(false)
+      await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
+      // Back in the lead, the stop still covers Bob.
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.click(await screen.findByTestId('chat-composer-stop-mock'))
+      expect(signals.get(bob.id)?.aborted).toBe(true)
+    } finally { page.unmount() }
+  })
+
   it('creates a member with empty history and switches back to its lead without enabling execution', async () => {
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'), 'base-model')
     renderChatPage({ team: true, rows: true })

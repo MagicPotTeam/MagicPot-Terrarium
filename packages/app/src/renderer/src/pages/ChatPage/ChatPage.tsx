@@ -9402,10 +9402,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [config.download_dir, notifyError, t]
   )
 
+  // In the lead conversation the composer's stop also covers the members that run or wait for
+  // an approval, and stops them as the old "stop members" button did (their queued sends dropped).
+  const activeTeamMemberIds = (ids: { has(id: string): boolean }) =>
+    teamRowsTeam && !currentSession?.teamLeadId
+      ? teamMembers.filter(member => ids.has(member.id) || teamWaiting.has(member.id)).map(member => member.id)
+      : []
+  const composerRunning = isLoading || activeTeamMemberIds(loadingSessionIds).length > 0
   const handleStopGenerating = () => {
-    if (currentSessionId) {
+    const members = activeTeamMemberIds(loadingSessionIdsRef.current)
+    if (currentSessionId && (isLoading || !members.length)) {
       terminateSession(currentSessionId)
     }
+    for (const memberId of members) terminateSession(memberId, { dropQueued: true })
   }
 
   // ==================== 渲染 ====================
@@ -10032,7 +10041,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 pendingAttachments={composerPendingAttachments}
                 uploadProgress={uploadProgress}
                 onRemoveAttachment={removeAttachment}
-                isLoading={isLoading}
+                isLoading={composerRunning}
                 sideCommandEnabled={active && route?.channel === 'canvas' && route.scopeType === 'thread' && !config?.use_remote_llm}
                 onStopGenerating={handleStopGenerating}
                 disabled={!currentSession}
