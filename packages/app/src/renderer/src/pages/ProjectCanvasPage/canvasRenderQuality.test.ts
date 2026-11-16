@@ -8,6 +8,7 @@ import {
   PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_COUNT,
   PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_RATIO,
   createProjectCanvasRenderQualityGovernor,
+  estimateProjectCanvasDisplayIntervalMs,
   isProjectCanvasAdaptiveQualityEnabled,
   PROJECT_CANVAS_WEBGL_RENDER_GROUP_MAX_SCREEN_REACH_PX,
   resolveProjectCanvasRenderDpr,
@@ -237,6 +238,55 @@ describe('canvasRenderQuality', () => {
     expect(mixed.getQuality()).toBe('full')
     runFrames(mixed, now, 1, slowFrameMs)
     expect(mixed.getQuality()).toBe('interactive')
+  })
+
+  it('does not lower the resolution on a 30 Hz display that keeps up', () => {
+    const displayMs = 1000 / 30
+    const gesture = (
+      governor: ReturnType<typeof createProjectCanvasRenderQualityGovernor>,
+      frameMs: number
+    ) => {
+      governor.update({ now: 0, interactionActive: true })
+      // Every display frame carries a draw, and the frame sampler runs whenever asked.
+      let now = 0
+      for (let frame = 0; frame < 60; frame += 1) {
+        now += frameMs
+        governor.recordGestureFrame({ now })
+        if (governor.shouldMeasureFrames(now)) {
+          governor.recordFrame({ now, renderDurationMs: 2 })
+        }
+      }
+      return governor.getQuality()
+    }
+
+    // Without a measured interval, 33 ms frames count as slow (the old 60 Hz budget).
+    expect(gesture(createProjectCanvasRenderQualityGovernor(), displayMs)).toBe('interactive')
+    // With the measured 30 Hz interval they are on time...
+    const thirtyHz = createProjectCanvasRenderQualityGovernor()
+    thirtyHz.setDisplayIntervalMs(displayMs)
+    expect(thirtyHz.getSlowFrameThresholdMs()).toBeCloseTo(displayMs * 1.5)
+    expect(gesture(thirtyHz, displayMs)).toBe('full')
+    // ...and frames that miss even the 30 Hz interval by half still lower it.
+    const slowOnThirtyHz = createProjectCanvasRenderQualityGovernor()
+    slowOnThirtyHz.setDisplayIntervalMs(displayMs)
+    expect(gesture(slowOnThirtyHz, displayMs * 2)).toBe('interactive')
+    // A fast display does not make the budget stricter than 60 Hz.
+    const fast = createProjectCanvasRenderQualityGovernor()
+    fast.setDisplayIntervalMs(1000 / 144)
+    expect(fast.getSlowFrameThresholdMs()).toBeCloseTo(slowFrameMs - 1)
+    expect(gesture(fast, budget)).toBe('full')
+  })
+
+  it('estimates the display interval from the on-time frames among the deltas', () => {
+    const deltas = [33.3, 33.4, 33.3, 120, 33.3, 33.2, 66.7, 33.3, 33.4, 33.3, 33.3]
+    expect(estimateProjectCanvasDisplayIntervalMs(deltas)).toBeCloseTo(33.3)
+    expect(estimateProjectCanvasDisplayIntervalMs([16.7, 16.6, 16.7, 16.7, 33.4])).toBeCloseTo(16.7)
+    // A busy 60 Hz page: most frames late by one or two intervals, a few on time.
+    const busy = [33.4, 16.7, 50, 33.3, 16.6, 33.4, 33.3, 16.7, 50.1, 33.3, 33.4, 33.3]
+    expect(estimateProjectCanvasDisplayIntervalMs(busy)).toBeCloseTo(16.7)
+    // A hidden window (no frames for seconds) or too few samples: unknown.
+    expect(estimateProjectCanvasDisplayIntervalMs([1000, 1000, 1000, 16.7])).toBeNull()
+    expect(estimateProjectCanvasDisplayIntervalMs([16.7, 16.7])).toBeNull()
   })
 
   it('ignores frames outside a gesture', () => {

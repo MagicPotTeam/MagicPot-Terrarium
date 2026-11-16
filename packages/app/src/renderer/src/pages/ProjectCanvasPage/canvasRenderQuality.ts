@@ -4,7 +4,9 @@ export type ProjectCanvasRenderQuality = 'full' | 'interactive'
 // switching the resolution at the start and end of every gesture showed as a blur followed by
 // a sharp pop, and reallocated the drawing buffer twice. The resolution is lowered only when
 // the gesture measurably cannot keep up: this many display frames in a row took longer than
-// the frame budget times the ratio. It comes back after the gesture has ended.
+// the frame budget times the ratio. It comes back after the gesture has ended. The budget is
+// the display's measured frame interval (a 30 Hz output draws every 33 ms however fast the
+// layer is), and never less than this: a fast display does not make the governor stricter.
 export const PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_BUDGET_MS = 1000 / 60
 export const PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_RATIO = 1.5
 export const PROJECT_CANVAS_ADAPTIVE_QUALITY_SLOW_FRAME_COUNT = 10
@@ -18,6 +20,33 @@ export const PROJECT_CANVAS_ADAPTIVE_QUALITY_FRAME_PAUSE_MS = 250
 export const PROJECT_CANVAS_ADAPTIVE_QUALITY_LATE_GESTURE_FRAME_COUNT = 3
 export const PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS = 180
 export const PROJECT_CANVAS_INTERACTIVE_DPR = 1
+
+// The display interval is measured on this many idle display frames.
+export const PROJECT_CANVAS_DISPLAY_INTERVAL_PROBE_FRAMES = 12
+// Display intervals outside this range are not a refresh rate (a busy frame, a hidden window).
+const PROJECT_CANVAS_DISPLAY_INTERVAL_MIN_MS = 4
+const PROJECT_CANVAS_DISPLAY_INTERVAL_MAX_MS = 100
+
+/**
+ * The display's frame interval from the time between consecutive requestAnimationFrame
+ * callbacks. Frames delayed by other work are a whole number of intervals apart, never less
+ * than one, so the lower quartile is taken: it holds as long as a quarter of the frames was
+ * on time. Null when too few deltas look like a refresh rate.
+ */
+export function estimateProjectCanvasDisplayIntervalMs(deltasMs: readonly number[]): number | null {
+  const valid = deltasMs
+    .filter(
+      (delta) =>
+        Number.isFinite(delta) &&
+        delta >= PROJECT_CANVAS_DISPLAY_INTERVAL_MIN_MS &&
+        delta <= PROJECT_CANVAS_DISPLAY_INTERVAL_MAX_MS
+    )
+    .sort((a, b) => a - b)
+  if (valid.length < Math.max(3, Math.ceil(deltasMs.length / 2))) {
+    return null
+  }
+  return valid[Math.floor((valid.length - 1) / 4)]
+}
 
 export type ProjectCanvasAdaptiveQualityGlobal = typeof globalThis & {
   __MAGICPOT_PROJECT_CANVAS_ADAPTIVE_QUALITY__?: boolean
@@ -73,6 +102,9 @@ export function createProjectCanvasRenderQualityGovernor({
   let slowFrameStreak = 0
   let lastGestureFrameAt: number | null = null
   let lateGestureFrameStreak = 0
+  let displayIntervalMs: number | null = null
+  const getSlowFrameThresholdMs = () =>
+    Math.max(frameBudgetMs, displayIntervalMs ?? 0) * slowFrameRatio
 
   const resetFrameMeasurement = () => {
     lastFrameAt = null
@@ -153,7 +185,7 @@ export function createProjectCanvasRenderQualityGovernor({
     lastGestureFrameAt = now
     if (
       Number.isFinite(sinceLastGestureFrameMs) &&
-      sinceLastGestureFrameMs > frameBudgetMs * slowFrameRatio &&
+      sinceLastGestureFrameMs > getSlowFrameThresholdMs() &&
       sinceLastGestureFrameMs <= framePauseMs
     ) {
       lateGestureFrameStreak += 1
@@ -187,7 +219,7 @@ export function createProjectCanvasRenderQualityGovernor({
       typeof renderDurationMs === 'number' && Number.isFinite(renderDurationMs)
         ? Math.max(0, renderDurationMs)
         : 0
-    if (Math.max(frameIntervalMs, renderMs) > frameBudgetMs * slowFrameRatio) {
+    if (Math.max(frameIntervalMs, renderMs) > getSlowFrameThresholdMs()) {
       slowFrameStreak += 1
     } else {
       slowFrameStreak = 0
@@ -198,8 +230,22 @@ export function createProjectCanvasRenderQualityGovernor({
     return quality
   }
 
+  /**
+   * The measured display frame interval (see estimateProjectCanvasDisplayIntervalMs), or null
+   * when it is unknown. Kept across gestures and resets.
+   */
+  const setDisplayIntervalMs = (intervalMs: number | null) => {
+    displayIntervalMs =
+      typeof intervalMs === 'number' && Number.isFinite(intervalMs) && intervalMs > 0
+        ? intervalMs
+        : null
+  }
+
   return {
     getQuality: () => quality,
+    getDisplayIntervalMs: () => displayIntervalMs,
+    getSlowFrameThresholdMs,
+    setDisplayIntervalMs,
     reset,
     update,
     recordGestureFrame,

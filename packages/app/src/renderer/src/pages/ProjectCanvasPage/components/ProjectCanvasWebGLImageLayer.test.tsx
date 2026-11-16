@@ -4119,6 +4119,61 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       }
     }
 
+    it('measures the display interval, so a 30 Hz display that keeps up stays sharp', async () => {
+      const resolutionListeners: (() => void)[] = []
+      vi.stubGlobal(
+        'matchMedia',
+        vi.fn((media: string) => ({
+          media,
+          matches: true,
+          addEventListener: (_type: string, listener: () => void) =>
+            resolutionListeners.push(listener),
+          removeEventListener: () => {}
+        }))
+      )
+      const { ref, app, displayFrames, wait } = await renderLayerWithManualFrames(2)
+      const thirtyHz = 1000 / 30
+
+      // Before the interval is known, 33 ms frames count as slow (a 60 Hz budget): lowered.
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(60, thirtyHz)
+      expect(app.renderer.resolution).toBe(1)
+      act(() => ref.current?.setViewportInteracting(false))
+      wait(200)
+      expect(app.renderer.resolution).toBe(2)
+
+      // The window lands on the 30 Hz output; the layer measures idle display frames there.
+      act(() => resolutionListeners.at(-1)?.())
+      wait(1000)
+      displayFrames(14, thirtyHz, false)
+
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(60, thirtyHz)
+      expect(app.renderer.resolution).toBe(2)
+      // Frames twice that long are slow on that display too.
+      displayFrames(20, thirtyHz * 2)
+      expect(app.renderer.resolution).toBe(1)
+      act(() => ref.current?.setViewportInteracting(false))
+    })
+
+    it('follows a device pixel ratio change (another monitor) by the end of the next gesture', async () => {
+      const { ref, app, displayFrames } = await renderLayerWithManualFrames(1)
+      // The window moved to a 200 % monitor; its size in CSS pixels did not change.
+      setWindowDevicePixelRatio(2)
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(90, 1000 / 60)
+      act(() => ref.current?.setViewportInteracting(false))
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1280, 720)
+
+      // And back to 100 %: four times fewer pixels again.
+      setWindowDevicePixelRatio(1)
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(10, 1000 / 60)
+      act(() => ref.current?.setViewportInteracting(false))
+      expect(app.renderer.resolution).toBe(1)
+    })
+
     it('keeps the full device pixel ratio through a gesture: no resize, no blur and pop', async () => {
       const { ref, app, displayFrames, wait, requestedFrames } = await renderLayerWithManualFrames()
       const resizesBefore = app.renderer.resize.mock.calls.length
@@ -4389,6 +4444,83 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     })
   })
 
+  it('follows a device pixel ratio change at once, and watches the new ratio afterwards', async () => {
+    const queries: { media: string; listeners: (() => void)[]; removed: number }[] = []
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((media: string) => {
+        const query = { media, listeners: [] as (() => void)[], removed: 0 }
+        queries.push(query)
+        return {
+          media,
+          matches: true,
+          addEventListener: (_type: string, listener: () => void) => query.listeners.push(listener),
+          removeEventListener: () => {
+            query.removed += 1
+          }
+        }
+      })
+    )
+    setWindowDevicePixelRatio(1)
+    try {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const { unmount } = render(<Layer items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdSprites).toHaveLength(1))
+      const app = createdApplications[0]
+      await waitFor(() => expect(queries).toHaveLength(1))
+      expect(queries[0].media).toBe('(resolution: 1dppx)')
+      expect(app.renderer.resolution).toBe(1)
+
+      setWindowDevicePixelRatio(2)
+      act(() => queries[0].listeners.forEach((listener) => listener()))
+      expect(app.renderer.resolution).toBe(2)
+      expect(queries.at(-1)?.media).toBe('(resolution: 2dppx)')
+      expect(queries[0].removed).toBe(1)
+
+      setWindowDevicePixelRatio(1.5)
+      act(() => queries.at(-1)?.listeners.forEach((listener) => listener()))
+      expect(app.renderer.resolution).toBe(1.5)
+      unmount()
+      expect(queries.at(-1)?.removed).toBe(1)
+    } finally {
+      setWindowDevicePixelRatio(originalDevicePixelRatio)
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('holds a timed error check that comes due in a gesture until the gesture ends', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    const first = [createItem()]
+    const { rerender } = render(<Layer ref={ref} items={first} {...TEST_STAGE_VIEWPORT_1280_720} />)
+    await waitFor(() => expect(createdSprites).toHaveLength(1))
+    const app = createdApplications[0]
+    // Let the timed check of the first texture pass.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+    })
+
+    act(() => ref.current?.setViewportInteracting(true))
+    const checksBefore = app.renderer.gl.getError.mock.calls.length
+    // A thumbnail that was on its way arrives in the middle of the pan: a new texture.
+    rerender(
+      <Layer
+        ref={ref}
+        items={[...first, createNamedItem('arrives-mid-pan', { x: 400 })]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+      />
+    )
+    await waitFor(() => expect(createdBaseTextures).toHaveLength(2))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1300))
+    })
+    // Its timed check came due while the view was still moving: not now.
+    expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore)
+
+    act(() => ref.current?.setViewportInteracting(false))
+    await waitFor(() => expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore + 1))
+  }, 30000)
+
   describe('panel resize next to the canvas', () => {
     afterEach(async () => {
       const { emitCanvasLayoutResizeInteraction } = await import('../canvasLayoutResizeInteraction')
@@ -4484,6 +4616,57 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       act(() => emit(false))
       expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
       expect(app.canvas.style.width).toBe('100%')
+    })
+
+    it('stops waiting for a drag end that got lost on window blur or pointer release', async () => {
+      const { app, resizeHost, emit } = await renderObservedLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => emit(true, 'right'))
+      resizeHost(1000)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+      // The window loses focus before the mouse button comes up: no end event will come.
+      act(() => window.dispatchEvent(new Event('blur')))
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1000, 720)
+      expect(app.canvas.style.width).toBe('100%')
+      // The emitter still says that a drag runs; the canvas follows its host all the same.
+      resizeHost(1200)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1200, 720)
+
+      // The next drag defers again, and a pointer release ends that one too.
+      act(() => emit(true, 'right'))
+      resizeHost(1100)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1200, 720)
+      act(() => window.dispatchEvent(new Event('pointerup')))
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1100, 720)
+      act(() => emit(false))
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1100, 720)
+    })
+
+    it('stops waiting for a lost drag end after a few seconds without a resize', async () => {
+      const { app, resizeHost, emit } = await renderObservedLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        act(() => emit(true, 'right'))
+        resizeHost(1000)
+        act(() => {
+          vi.advanceTimersByTime(2000)
+        })
+        // Still dragging: each resize starts the wait again.
+        resizeHost(990)
+        act(() => {
+          vi.advanceTimersByTime(2900)
+        })
+        expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+        act(() => {
+          vi.advanceTimersByTime(200)
+        })
+        expect(app.renderer.resize).toHaveBeenLastCalledWith(990, 720)
+        expect(app.canvas.style.width).toBe('100%')
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('restores the canvas style when the layer goes away in the middle of a drag', async () => {

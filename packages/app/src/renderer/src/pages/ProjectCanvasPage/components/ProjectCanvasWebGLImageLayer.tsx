@@ -58,7 +58,9 @@ import type { CanvasImageThumbnailLevel, CanvasImageThumbnailSet } from '../canv
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
 import {
   PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS,
+  PROJECT_CANVAS_DISPLAY_INTERVAL_PROBE_FRAMES,
   createProjectCanvasRenderQualityGovernor,
+  estimateProjectCanvasDisplayIntervalMs,
   isProjectCanvasAdaptiveQualityEnabled,
   resolveProjectCanvasRenderDpr,
   shouldUseProjectCanvasWorldRenderGroup,
@@ -291,6 +293,14 @@ export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_BYTES = 16 * 1024 * 1024
 // If the GPU never reports the previous frame's uploads as finished (no fence support, a lost
 // fence), the next frame's uploads wait at most this long.
 export const PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_MAX_WAIT_MS = 1000
+// The display interval is measured once, this long after the layer started (when the first
+// images are on screen and the page is calmer), again after a monitor change, and after a
+// gesture when a probe was interrupted or found no refresh rate.
+export const PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS = 5000
+export const PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_RETRY_DELAY_MS = 1000
+// A panel drag whose end event got lost stops deferring renderer resizes after this long
+// without a resize.
+export const PROJECT_CANVAS_WEBGL_LAYOUT_RESIZE_DEFERRAL_MAX_IDLE_MS = 3000
 export const PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT = 64
 export const PROJECT_CANVAS_WEBGL_SELECTED_PROTECTED_LIMIT = 32
 // Decoded images that no texture needs right now (a decode that finished after the zoom or
@@ -1580,6 +1590,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const webglErrorLastCheckedAtRef = useRef(Number.NEGATIVE_INFINITY)
   const webglErrorCheckRequestedRef = useRef(true)
   const webglErrorCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The timed check came due in the middle of a gesture; the first render after it checks.
+  const webglErrorCheckAfterGestureRef = useRef(false)
+  const displayIntervalProbeFrameRef = useRef<number | null>(null)
+  const displayIntervalProbeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const displayIntervalProbeStateRef = useRef<'waiting' | 'running' | 'done' | 'failed'>('waiting')
   const activeItemCountRef = useRef(0)
   const stagePosRef = useRef(stagePos)
   const stageScaleRef = useRef(stageScale)
@@ -2583,6 +2598,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       webglErrorCheckRequestedRef.current || renderCount === 1 || isPeriodicSampleDue
     if (shouldCheckWebGLRuntimeError) {
       webglErrorCheckRequestedRef.current = false
+      webglErrorCheckAfterGestureRef.current = false
       webglErrorLastCheckedRenderRef.current = renderCount
       webglErrorLastCheckedAtRef.current = finishedAt
       if (webglErrorCheckTimerRef.current !== null) {
@@ -2736,6 +2752,17 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     [resizeRendererToStage]
   )
 
+  /** Resizes the renderer when its resolution no longer matches the device pixel ratio. */
+  const resyncRendererResolution = useCallback(() => {
+    const renderer = (appRef.current as ResizablePixiApplication | null)?.renderer
+    if (
+      renderer &&
+      renderer.resolution !== getProjectCanvasRenderDeviceScale(renderQualityRef.current)
+    ) {
+      resizeRendererToStage(stageSizeRef.current)
+    }
+  }, [resizeRendererToStage])
+
   const stopRenderQualityFrameSampler = useCallback(() => {
     if (renderQualityFrameSamplerRef.current !== null) {
       window.cancelAnimationFrame(renderQualityFrameSamplerRef.current)
@@ -2787,6 +2814,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
     if (!isViewportInteractingRef.current) {
       stopRenderQualityFrameSampler()
+      // The device pixel ratio may have changed while nothing was resized (the window moved
+      // to another monitor); a no-op when it did not.
+      resyncRendererResolution()
     }
 
     const governor = renderQualityGovernorRef.current
@@ -2815,7 +2845,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         )
       }, PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS)
     }
-  }, [applyRenderQuality, stopRenderQualityFrameSampler])
+  }, [applyRenderQuality, resyncRendererResolution, stopRenderQualityFrameSampler])
 
   /**
    * A texture was created. Its upload may fail (out of memory), which only gl.getError
@@ -2833,6 +2863,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       webglErrorCheckTimerRef.current = null
       const app = appRef.current
       if (!app) {
+        return
+      }
+      if (isViewportInteractingRef.current) {
+        // gl.getError waits for the GPU process: in a pan or zoom that is a late frame. The
+        // first render after the gesture checks instead.
+        webglErrorCheckAfterGestureRef.current = true
         return
       }
 
@@ -2912,6 +2948,59 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }, PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_VIEWPORT_IDLE_DELAY_MS)
   }, [])
 
+  const cancelDisplayIntervalProbe = useCallback(() => {
+    if (displayIntervalProbeTimerRef.current !== null) {
+      clearTimeout(displayIntervalProbeTimerRef.current)
+      displayIntervalProbeTimerRef.current = null
+    }
+    if (displayIntervalProbeFrameRef.current !== null) {
+      window.cancelAnimationFrame(displayIntervalProbeFrameRef.current)
+      displayIntervalProbeFrameRef.current = null
+    }
+  }, [])
+
+  /**
+   * Measures the display's frame interval on a few display frames outside any gesture, for
+   * the quality governor's frame budget. A gesture interrupts it; the end of the next gesture
+   * then schedules another one.
+   */
+  const scheduleDisplayIntervalProbe = useCallback(
+    (delayMs: number) => {
+      cancelDisplayIntervalProbe()
+      displayIntervalProbeStateRef.current = 'waiting'
+      displayIntervalProbeTimerRef.current = setTimeout(() => {
+        displayIntervalProbeTimerRef.current = null
+        let lastFrameAt: number | null = null
+        const deltas: number[] = []
+        const probeFrame = (frameTime: number) => {
+          displayIntervalProbeFrameRef.current = null
+          if (!appRef.current || isViewportInteractingRef.current) {
+            displayIntervalProbeStateRef.current = 'failed'
+            return
+          }
+          if (lastFrameAt !== null) {
+            deltas.push(frameTime - lastFrameAt)
+          }
+          lastFrameAt = frameTime
+          if (deltas.length < PROJECT_CANVAS_DISPLAY_INTERVAL_PROBE_FRAMES) {
+            displayIntervalProbeFrameRef.current = window.requestAnimationFrame(probeFrame)
+            return
+          }
+          const intervalMs = estimateProjectCanvasDisplayIntervalMs(deltas)
+          if (intervalMs === null) {
+            displayIntervalProbeStateRef.current = 'failed'
+            return
+          }
+          renderQualityGovernorRef.current.setDisplayIntervalMs(intervalMs)
+          displayIntervalProbeStateRef.current = 'done'
+        }
+        displayIntervalProbeStateRef.current = 'running'
+        displayIntervalProbeFrameRef.current = window.requestAnimationFrame(probeFrame)
+      }, delayMs)
+    },
+    [cancelDisplayIntervalProbe]
+  )
+
   const setViewportInteractingState = useCallback(
     (active: boolean) => {
       if (isViewportInteractingRef.current === active) {
@@ -2938,6 +3027,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         })
         clearSourceUpgradeQueue()
         return
+      }
+
+      if (webglErrorCheckAfterGestureRef.current) {
+        webglErrorCheckAfterGestureRef.current = false
+        webglErrorCheckRequestedRef.current = true
+        scheduleRender()
+      }
+      if (displayIntervalProbeStateRef.current === 'failed') {
+        scheduleDisplayIntervalProbe(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_RETRY_DELAY_MS)
       }
 
       if (renderThrottleTimerRef.current !== null) {
@@ -2970,6 +3068,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       scheduleRender,
       clearSourceUpgradeQueue,
       scheduleSourceUpgradeIdleReconcile,
+      scheduleDisplayIntervalProbe,
       syncRenderQualityToInteraction
     ]
   )
@@ -3670,6 +3769,13 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     // is resized once when the drag ends.
     let hasSkippedResize = false
     let pinnedCanvas: HTMLCanvasElement | null = null
+    // The end event of a drag can get lost (the window lost focus before the mouse button
+    // came up). Then the deferral ends by itself on the next pointer release, on window blur
+    // or after a while without a resize, and resizes follow the host again until the next
+    // drag starts.
+    let ignoresLayoutResizeInteraction = false
+    let deferralTimer: ReturnType<typeof setTimeout> | null = null
+    let listensForDeferralEnd = false
     const pinCanvasSize = () => {
       const canvas = appRef.current?.canvas as HTMLCanvasElement | undefined
       const size = rendererSizeRef.current
@@ -3692,10 +3798,48 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       resizeRendererToStage()
       scheduleViewportReconcile()
     }
+    const stopDeferralSafetyNet = () => {
+      if (deferralTimer !== null) {
+        clearTimeout(deferralTimer)
+        deferralTimer = null
+      }
+      if (listensForDeferralEnd) {
+        listensForDeferralEnd = false
+        window.removeEventListener('pointerup', abandonDeferral, true)
+        window.removeEventListener('blur', abandonDeferral)
+      }
+    }
+    const endDeferral = () => {
+      stopDeferralSafetyNet()
+      unpinCanvasSize()
+      if (hasSkippedResize) {
+        hasSkippedResize = false
+        resizeToHost()
+      }
+    }
+    function abandonDeferral() {
+      ignoresLayoutResizeInteraction = true
+      endDeferral()
+    }
+    const armDeferralSafetyNet = () => {
+      if (deferralTimer !== null) {
+        clearTimeout(deferralTimer)
+      }
+      deferralTimer = setTimeout(
+        abandonDeferral,
+        PROJECT_CANVAS_WEBGL_LAYOUT_RESIZE_DEFERRAL_MAX_IDLE_MS
+      )
+      if (!listensForDeferralEnd) {
+        listensForDeferralEnd = true
+        window.addEventListener('pointerup', abandonDeferral, true)
+        window.addEventListener('blur', abandonDeferral)
+      }
+    }
     const observer = new ResizeObserver(() => {
-      if (getCanvasLayoutResizeInteractionState().active) {
+      if (getCanvasLayoutResizeInteractionState().active && !ignoresLayoutResizeInteraction) {
         hasSkippedResize = true
         pinCanvasSize()
+        armDeferralSafetyNet()
         return
       }
       unpinCanvasSize()
@@ -3703,14 +3847,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     })
     const handleLayoutResizeInteraction = (event: Event) => {
       const detail = (event as CustomEvent<CanvasLayoutResizeInteractionDetail>).detail
+      // A new drag (or the end of one) brings the emitter's state back in charge.
+      ignoresLayoutResizeInteraction = false
       if (detail?.active) {
         return
       }
-      unpinCanvasSize()
-      if (hasSkippedResize) {
-        hasSkippedResize = false
-        resizeToHost()
-      }
+      endDeferral()
     }
     observer.observe(host)
     window.addEventListener(CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT, handleLayoutResizeInteraction)
@@ -3718,6 +3860,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
     return () => {
       observer.disconnect()
+      stopDeferralSafetyNet()
       window.removeEventListener(
         CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
         handleLayoutResizeInteraction
@@ -3725,6 +3868,46 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       unpinCanvasSize()
     }
   }, [isInitialized, resizeRendererToStage, scheduleViewportReconcile])
+
+  // A change of the device pixel ratio (the window moved to a monitor with another scale)
+  // resizes no element, so nothing else would re-read it: follow it here. The query matches
+  // one ratio only, so it is made again for the new ratio after each change. The new monitor
+  // may also have another refresh rate: measure the display interval again.
+  useEffect(() => {
+    if (!isInitialized) {
+      return
+    }
+
+    scheduleDisplayIntervalProbe(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS)
+    if (typeof window.matchMedia !== 'function') {
+      return cancelDisplayIntervalProbe
+    }
+
+    let query: MediaQueryList | null = null
+    const handleResolutionChange = () => {
+      watchResolution()
+      resyncRendererResolution()
+      renderQualityGovernorRef.current.setDisplayIntervalMs(null)
+      scheduleDisplayIntervalProbe(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_RETRY_DELAY_MS)
+    }
+    function watchResolution() {
+      query?.removeEventListener?.('change', handleResolutionChange)
+      query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+      query?.addEventListener?.('change', handleResolutionChange)
+    }
+    watchResolution()
+
+    return () => {
+      query?.removeEventListener?.('change', handleResolutionChange)
+      query = null
+      cancelDisplayIntervalProbe()
+    }
+  }, [
+    cancelDisplayIntervalProbe,
+    isInitialized,
+    resyncRendererResolution,
+    scheduleDisplayIntervalProbe
+  ])
 
   useLayoutEffect(() => {
     applyViewportTransform({ x: stagePosX, y: stagePosY }, stageScale)
