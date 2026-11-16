@@ -163,6 +163,8 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     async (reason) => {
       for (const response of [0, 1]) {
         const window = createWindow()
+        // A dead renderer: a confirmed reload is only carried out while it is still dead.
+        window.webContents.isCrashed.mockReturnValue(true)
         const recoverRenderer = vi.fn()
         vi.spyOn(console, 'error').mockImplementation(() => undefined)
         vi.mocked(dialog.showMessageBox)
@@ -451,6 +453,7 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     'only honors manual reload while the owner is alive: %s',
     async (state) => {
       const window = createWindow()
+      window.webContents.isCrashed.mockReturnValue(true)
       const recoverRenderer = vi.fn()
       vi.spyOn(console, 'error').mockImplementation(() => undefined)
       let resolvePrompt!: (result: { response: number; checkboxChecked: boolean }) => void
@@ -665,6 +668,7 @@ describe('rendererDiagnostics recovery notice', () => {
   it('sends the notice after a reload confirmed in the dialog, and nothing when the dialog is declined', async () => {
     for (const response of [0, 1]) {
       const window = createWindow()
+      window.webContents.isCrashed.mockReturnValue(true)
       vi.spyOn(console, 'error').mockImplementation(() => undefined)
       vi.spyOn(console, 'info').mockImplementation(() => undefined)
       vi.spyOn(console, 'warn').mockImplementation(() => undefined)
@@ -687,6 +691,23 @@ describe('rendererDiagnostics recovery notice', () => {
         expect(window.webContents.send).not.toHaveBeenCalled()
       }
     }
+  })
+
+  it('drops a confirmed reload when the page came back while the dialog was open (no reload of a healthy page)', async () => {
+    const window = createWindow()
+    window.webContents.isCrashed.mockReturnValue(true)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    let answer!: (response: number) => void
+    vi.mocked(dialog.showMessageBox).mockReset().mockImplementation(
+      () => new Promise((resolve) => (answer = (response) => resolve({ response, checkboxChecked: false })))
+    )
+    attachRendererDiagnostics(window as never)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    window.webContents.isCrashed.mockReturnValue(false)
+    answer(0)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(window.webContents.reload).not.toHaveBeenCalled()
   })
 
   it('reloads once per death up to the budget and asks on the fourth death within 60 s', () => {
@@ -1062,5 +1083,230 @@ describe('rendererDiagnostics unresponsive renderer', () => {
     markAppQuitting()
     vi.advanceTimersByTime(30_000)
     expect(dialog.showMessageBox).not.toHaveBeenCalled()
+  })
+})
+
+describe('rendererDiagnostics dead window after a declined recovery dialog', () => {
+  type Answer = { resolve: (response: number) => void; signal?: AbortSignal; message?: string }
+  let answers: Answer[] = []
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    answers = []
+    vi.mocked(dialog.showMessageBox).mockReset().mockImplementation(((
+      _window: unknown,
+      options: { signal?: AbortSignal; message?: string }
+    ) =>
+      new Promise((resolve) => {
+        const answer: Answer = {
+          resolve: (response) => resolve({ response, checkboxChecked: false }),
+          signal: options.signal,
+          message: options.message
+        }
+        answers.push(answer)
+        // Like Electron: an aborted dialog closes as if cancelled (cancelId 1 for recovery dialogs).
+        options.signal?.addEventListener('abort', () => answer.resolve(1))
+      })) as never)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    resetAppQuittingForTests()
+    resetExpectedRendererExitsForTests()
+  })
+
+  const flush = async () => {
+    for (let index = 0; index < 6; index += 1) await Promise.resolve()
+  }
+  const windowListener = (window: TestWindow, event: string) => {
+    const listener = window.on.mock.calls.find(([name]) => name === event)?.[1]
+    return () => listener?.()
+  }
+  const deadWindow = () => {
+    const window = createWindow()
+    window.webContents.isCrashed.mockReturnValue(true)
+    attachRendererDiagnostics(window as never, { wallClockNow: () => 5 })
+    return {
+      window,
+      blur: windowListener(window, 'blur'),
+      focus: windowListener(window, 'focus'),
+      close: windowListener(window, 'close'),
+      closed: windowListener(window, 'closed')
+    }
+  }
+
+  it('asks once more when the user comes back to the dead window, and Reload then brings it back', async () => {
+    const { window, blur, focus } = deadWindow()
+    listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    expect(answers).toHaveLength(1)
+    answers[0].resolve(1)
+    await flush()
+
+    // The focus that comes back when the dialog closes is not a return: no loop.
+    focus()
+    focus()
+    expect(answers).toHaveLength(1)
+
+    blur()
+    focus()
+    expect(answers).toHaveLength(2)
+    expect(answers[1].message).toBe('窗口的显示进程已意外停止。')
+    // While that dialog is open nothing else is asked.
+    blur()
+    focus()
+    expect(answers).toHaveLength(2)
+
+    answers[1].resolve(0)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    window.webContents.isCrashed.mockReturnValue(false)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'killed',
+      exitCode: 9,
+      diedAt: 5
+    })
+    blur()
+    focus()
+    expect(answers).toHaveLength(2)
+  })
+
+  it('asks at most once per return, also when every answer is Cancel', async () => {
+    const { window, blur, focus } = deadWindow()
+    listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    for (let round = 1; round <= 3; round += 1) {
+      answers.at(-1)!.resolve(1)
+      await flush()
+      // The closing dialog hands the focus back several times: still no new question.
+      for (let index = 0; index < 5; index += 1) focus()
+      expect(answers).toHaveLength(round)
+      blur()
+      focus()
+      expect(answers).toHaveLength(round + 1)
+    }
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+  })
+
+  it('does not ask on focus while quitting, after a close request, once closed, or when the renderer is alive again', async () => {
+    const quitting = deadWindow()
+    listenerOf(quitting.window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    answers[0].resolve(1)
+    await flush()
+    markAppQuitting()
+    quitting.blur()
+    quitting.focus()
+    resetAppQuittingForTests()
+    expect(answers).toHaveLength(1)
+
+    const closing = deadWindow()
+    listenerOf(closing.window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    answers[1].resolve(1)
+    await flush()
+    closing.blur()
+    closing.close()
+    closing.focus()
+    expect(answers).toHaveLength(2)
+    closing.closed()
+    closing.window.isDestroyed.mockReturnValue(true)
+    closing.blur()
+    closing.focus()
+    expect(answers).toHaveLength(2)
+
+    const alive = deadWindow()
+    listenerOf(alive.window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    answers[2].resolve(1)
+    await flush()
+    alive.window.webContents.isCrashed.mockReturnValue(false)
+    alive.blur()
+    alive.focus()
+    expect(answers).toHaveLength(3)
+    expect(dialog.showMessageBox).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not ask on focus while an automatic reload is still being checked', () => {
+    const { window, blur, focus } = deadWindow()
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    blur()
+    focus()
+    expect(answers).toHaveLength(0)
+  })
+
+  it('withdraws the "did not recover" dialog when the page loads after the check, without a second reload', async () => {
+    const { window, blur, focus } = deadWindow()
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    vi.advanceTimersByTime(10_000)
+    expect(answers).toHaveLength(1)
+    expect(answers[0].message).toBe('窗口重新加载后仍未恢复。')
+    expect(answers[0].signal?.aborted).toBe(false)
+
+    // The slow reload finally comes up.
+    window.webContents.isCrashed.mockReturnValue(false)
+    listenerOf(window, 'did-finish-load')()
+    expect(answers[0].signal?.aborted).toBe(true)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    expect(window.webContents.send).toHaveBeenCalledTimes(1)
+    // The withdrawn dialog is not an answer: nothing is asked again later.
+    blur()
+    focus()
+    vi.advanceTimersByTime(60_000)
+    expect(answers).toHaveLength(1)
+  })
+
+  it('withdraws the recovery dialog when the renderer is no longer dead, before the page has loaded', async () => {
+    const { window } = deadWindow()
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    vi.advanceTimersByTime(10_000)
+    expect(answers).toHaveLength(1)
+    vi.advanceTimersByTime(5_000)
+    expect(answers[0].signal?.aborted).toBe(false)
+    window.webContents.isCrashed.mockReturnValue(false)
+    vi.advanceTimersByTime(1_000)
+    expect(answers[0].signal?.aborted).toBe(true)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    // A new death after that gets its own answer.
+    window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops looking once the window is closed', () => {
+    const { window, closed } = deadWindow()
+    listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    expect(vi.getTimerCount()).toBe(1)
+    closed()
+    expect(answers[0].signal?.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps the reason "unresponsive" when a hang reload has to be retried from the dialog', async () => {
+    const window = createWindow()
+    attachRendererDiagnostics(window as never, { wallClockNow: () => 66 })
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    answers[0].resolve(1)
+    await flush()
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(10_000)
+    expect(answers[1].message).toBe('窗口重新加载后仍未恢复。')
+    answers[1].resolve(0)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(2)
+    window.webContents.isCrashed.mockReturnValue(false)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'unresponsive',
+      exitCode: 0,
+      diedAt: 66
+    })
   })
 })

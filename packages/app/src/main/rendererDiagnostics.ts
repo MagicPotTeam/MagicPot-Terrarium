@@ -48,6 +48,12 @@ export const HANG_TERMINATION_TIMEOUT_MS = 5_000
 export const RELOAD_CHECK_DELAY_MS = 10_000
 /** How long a renderer may be unresponsive before the user is offered wait / reload. */
 export const UNRESPONSIVE_PROMPT_DELAY_MS = 15_000
+/** How often an open recovery dialog checks whether the dead renderer came back by itself. */
+export const RECOVERY_PROMPT_POLL_MS = 1_000
+
+/** What the page brought up by a recovery reload is told about the death. */
+type RecoveryNotice = Pick<RendererRecoveredEvent, 'reason' | 'exitCode'>
+type RecoveryPrompt = { controller: AbortController; poll: ReturnType<typeof setInterval> | null }
 
 /** True when the exit may be answered with an automatic reload. */
 export function shouldRecoverRendererProcess(details: RenderProcessGoneDetails): boolean {
@@ -83,12 +89,15 @@ const RECOVERY_PROMPT_MESSAGES: Record<RendererRecoveryPromptKind, string> = {
 /**
  * The recovery dialog. Reload is the default button: after a renderer death the window shows
  * nothing, so pressing Enter must bring the app back. Returns false when it could not be shown.
+ * An aborted dialog is closed by Electron as if cancelled; that is not the user's answer, so
+ * onDecision is not called for it.
  */
 function showRendererRecoveryPrompt(
   window: BrowserWindow,
   kind: RendererRecoveryPromptKind,
   onDecision: (reload: boolean) => void,
-  onSettled: () => void
+  onSettled: () => void,
+  signal?: AbortSignal
 ): boolean {
   try {
     void dialog
@@ -100,9 +109,11 @@ function showRendererRecoveryPrompt(
         buttons: ['重新加载', '取消'],
         defaultId: 0,
         cancelId: 1,
-        noLink: true
+        noLink: true,
+        ...(signal ? { signal } : {})
       })
       .then(({ response }) => {
+        if (signal?.aborted) return
         onDecision(response === 0)
       })
       .catch(() => {
@@ -208,7 +219,19 @@ export function attachRendererDiagnostics(
   let pendingRecoveryNotice: RendererRecoveredEvent | null = null
   let lastObservedTime = 0
   let automaticRecoveryTimes: number[] = []
-  let recoveryPromptPending = false
+  // The open recovery dialog of this window, if any (at most one at a time).
+  let recoveryPrompt: RecoveryPrompt | null = null
+  // The last recovery dialog the user answered with 取消 / Esc while the renderer stayed dead. The
+  // frameless window then has no controls of its own, so the question is asked again the next time
+  // the user comes back to the window (see 'focus' below).
+  let declinedRecovery: {
+    details: RenderProcessGoneDetails
+    kind: RendererRecoveryPromptKind
+    notice: RecoveryNotice
+  } | null = null
+  // 'focus' asks again only after the window lost the focus since that answer: the focus that comes
+  // back when the dialog itself closes must not reopen it (no dialog loop).
+  let blurredSinceDeclined = false
 
   const isWindowUsable = () => canUseWindow(window)
   const isShuttingDown = () =>
@@ -229,7 +252,9 @@ export function attachRendererDiagnostics(
     if (reloadCheckTimer) clearTimeout(reloadCheckTimer)
     reloadCheckTimer = null
   }
-  const checkReloadLater = (details: RenderProcessGoneDetails) => {
+  // The notice keeps the reason of the first death of a recovery, e.g. 'unresponsive' when the
+  // user asked to reload a hung window, also when that reload is retried from a dialog.
+  const checkReloadLater = (details: RenderProcessGoneDetails, notice: RecoveryNotice) => {
     clearReloadCheck()
     reloadCheckTimer = setTimeout(() => {
       reloadCheckTimer = null
@@ -238,48 +263,75 @@ export function attachRendererDiagnostics(
         reason: details.reason,
         exitCode: details.exitCode
       })
-      promptForManualRecovery(window, details, 'reload-failed')
+      promptForManualRecovery(window, details, 'reload-failed', notice)
     }, RELOAD_CHECK_DELAY_MS)
     reloadCheckTimer.unref?.()
   }
   /** Starts a recovery reload and remembers what the page it brings up is told. */
-  const startRecoveryReload = (
-    details: RenderProcessGoneDetails,
-    notice: Pick<RendererRecoveredEvent, 'reason' | 'exitCode'> = details
-  ) => {
+  const startRecoveryReload = (details: RenderProcessGoneDetails, notice: RecoveryNotice = details) => {
+    declinedRecovery = null
     pendingRecoveryNotice = {
       reason: notice.reason,
       exitCode: notice.exitCode,
       diedAt: wallClockNow()
     }
     reloadWindow(window, details)
-    checkReloadLater(details)
+    checkReloadLater(details, { reason: notice.reason, exitCode: notice.exitCode })
   }
   const recoverRenderer = (_window: BrowserWindow, details: RenderProcessGoneDetails) => {
     startRecoveryReload(details)
   }
+  /** Closes the open recovery dialog without an answer: its question no longer applies. */
+  const withdrawRecoveryPrompt = () => {
+    const prompt = recoveryPrompt
+    if (!prompt) return
+    recoveryPrompt = null
+    if (prompt.poll) clearInterval(prompt.poll)
+    prompt.controller.abort()
+  }
   const promptForManualRecovery = (
     _window: BrowserWindow,
     details: RenderProcessGoneDetails,
-    kind: RendererRecoveryPromptKind
+    kind: RendererRecoveryPromptKind,
+    notice: RecoveryNotice = details
   ) => {
-    if (recoveryPromptPending || isShuttingDown()) return
-    recoveryPromptPending = true
+    if (recoveryPrompt || isShuttingDown()) return
+    const prompt: RecoveryPrompt = { controller: new AbortController(), poll: null }
+    recoveryPrompt = prompt
+    // A dead renderer that comes back by itself (e.g. a slow reload finally started) makes the
+    // question moot: look once a second while the dialog is open.
+    if (isRendererDead()) {
+      prompt.poll = setInterval(() => {
+        if (recoveryPrompt === prompt && !isRendererDead()) withdrawRecoveryPrompt()
+      }, RECOVERY_PROMPT_POLL_MS)
+      prompt.poll.unref?.()
+    }
     showRendererRecoveryPrompt(
       window,
       kind,
       (reload) => {
         // The answer can arrive long after the question: check again that nothing is closing.
-        if (reload && !isShuttingDown()) recoverRenderer(window, details)
+        if (isShuttingDown()) return
+        if (reload) {
+          // Never reload a page that came back meanwhile (the 1 s look above may not have run yet).
+          if (kind !== 'hang-not-ended' && !isRendererDead()) return
+          startRecoveryReload(details, notice)
+        } else {
+          declinedRecovery = { details, kind, notice }
+          blurredSinceDeclined = false
+        }
       },
       () => {
-        recoveryPromptPending = false
-      }
+        if (recoveryPrompt !== prompt) return
+        if (prompt.poll) clearInterval(prompt.poll)
+        recoveryPrompt = null
+      },
+      prompt.controller.signal
     )
   }
 
   const recoverWithinBudget = (_window: BrowserWindow, details: RenderProcessGoneDetails) => {
-    if (!isWindowUsable() || recoveryPromptPending) return
+    if (!isWindowUsable() || recoveryPrompt) return
     const observedTime = now()
     // A faulty/backward clock must not make previous attempts disappear early.
     lastObservedTime = Math.max(
@@ -320,6 +372,9 @@ export function attachRendererDiagnostics(
   window.webContents.on('did-finish-load', () => {
     console.info('[App] Renderer finished loading')
     clearReloadCheck()
+    // The page is up: a dialog that asks whether to reload a dead window no longer applies.
+    withdrawRecoveryPrompt()
+    declinedRecovery = null
     const notice = pendingRecoveryNotice
     if (!notice || !isWindowUsable()) return
     pendingRecoveryNotice = null
@@ -387,7 +442,7 @@ export function attachRendererDiagnostics(
     if (
       !unresponsive ||
       unresponsivePrompt ||
-      recoveryPromptPending ||
+      recoveryPrompt ||
       hangTerminationTimer ||
       isShuttingDown()
     ) {
@@ -432,6 +487,7 @@ export function attachRendererDiagnostics(
     unresponsivePrompt = null
     // Whatever was being checked belongs to the process before this exit; this exit gets its own answer.
     clearReloadCheck()
+    declinedRecovery = null
     if (hangTerminationTimer) {
       // The forced end of a hung renderer the user chose to reload: not a new crash, so no dialog
       // and no use of the crash budget. Now that the old process is gone the reload can work.
@@ -456,6 +512,36 @@ export function attachRendererDiagnostics(
     clearUnresponsiveTimer()
     clearHangTermination()
     clearReloadCheck()
+    withdrawRecoveryPrompt()
+    declinedRecovery = null
+  })
+
+  // A recovery dialog answered with 取消 leaves a dark frameless window without controls. Ask once
+  // more each time the user comes back to it (focus after the window had lost the focus), as long
+  // as the renderer is still dead and nothing else is being asked or done.
+  window.on('blur', () => {
+    if (declinedRecovery) blurredSinceDeclined = true
+  })
+  window.on('close', () => {
+    // Closing (the unsaved-changes question may follow): the next focus is not a return.
+    blurredSinceDeclined = false
+  })
+  window.on('focus', () => {
+    const declined = declinedRecovery
+    if (!declined || !blurredSinceDeclined) return
+    blurredSinceDeclined = false
+    if (
+      recoveryPrompt ||
+      unresponsivePrompt ||
+      reloadCheckTimer ||
+      hangTerminationTimer ||
+      isShuttingDown() ||
+      !isRendererDead()
+    ) {
+      return
+    }
+    console.warn('[App] The window still shows a dead renderer; asking again how to recover')
+    promptForManualRecovery(window, declined.details, declined.kind, declined.notice)
   })
 
   window.webContents.on('unresponsive', () => {
