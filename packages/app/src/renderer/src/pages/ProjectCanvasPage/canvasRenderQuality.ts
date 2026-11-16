@@ -26,12 +26,22 @@ export const PROJECT_CANVAS_DISPLAY_INTERVAL_PROBE_FRAMES = 12
 // Display intervals outside this range are not a refresh rate (a busy frame, a hidden window).
 const PROJECT_CANVAS_DISPLAY_INTERVAL_MIN_MS = 4
 const PROJECT_CANVAS_DISPLAY_INTERVAL_MAX_MS = 100
+// Deltas within this fraction of each other belong to the same interval (timestamp jitter).
+const PROJECT_CANVAS_DISPLAY_INTERVAL_TOLERANCE = 0.1
+// The refresh rates displays run at. A measured interval that matches none of them is the
+// pace of a busy page, not of the display (24 fps frames on a 60 Hz output: 42 ms).
+export const PROJECT_CANVAS_DISPLAY_REFRESH_RATES_HZ = [
+  240, 165, 144, 120, 100, 90, 75, 60, 50, 30
+] as const
 
 /**
  * The display's frame interval from the time between consecutive requestAnimationFrame
  * callbacks. Frames delayed by other work are a whole number of intervals apart, never less
- * than one, so the lower quartile is taken: it holds as long as a quarter of the frames was
- * on time. Null when too few deltas look like a refresh rate.
+ * than one, so the lower quartile is taken. It is accepted only when it is the interval of a
+ * known refresh rate (and returned as exactly that), when a quarter of the deltas (at least
+ * three) lie within 10 % of it, and when no delta is clearly shorter: a shorter delta means
+ * that the cluster is a busy page's pace, a multiple of the real interval. Null otherwise,
+ * also when too few deltas look like a refresh rate.
  */
 export function estimateProjectCanvasDisplayIntervalMs(deltasMs: readonly number[]): number | null {
   const valid = deltasMs
@@ -45,7 +55,30 @@ export function estimateProjectCanvasDisplayIntervalMs(deltasMs: readonly number
   if (valid.length < Math.max(3, Math.ceil(deltasMs.length / 2))) {
     return null
   }
-  return valid[Math.floor((valid.length - 1) / 4)]
+  const candidate = valid[Math.floor((valid.length - 1) / 4)]
+  const low = candidate * (1 - PROJECT_CANVAS_DISPLAY_INTERVAL_TOLERANCE)
+  const high = candidate * (1 + PROJECT_CANVAS_DISPLAY_INTERVAL_TOLERANCE)
+  if (valid[0] < low) {
+    return null
+  }
+  const cluster = valid.filter((delta) => delta <= high)
+  if (cluster.length < Math.max(3, Math.ceil(valid.length / 4))) {
+    return null
+  }
+  const clusterMedian = cluster[Math.floor((cluster.length - 1) / 2)]
+  let nearestIntervalMs: number | null = null
+  for (const rateHz of PROJECT_CANVAS_DISPLAY_REFRESH_RATES_HZ) {
+    const intervalMs = 1000 / rateHz
+    if (
+      Math.abs(clusterMedian - intervalMs) <=
+        intervalMs * PROJECT_CANVAS_DISPLAY_INTERVAL_TOLERANCE &&
+      (nearestIntervalMs === null ||
+        Math.abs(clusterMedian - intervalMs) < Math.abs(clusterMedian - nearestIntervalMs))
+    ) {
+      nearestIntervalMs = intervalMs
+    }
+  }
+  return nearestIntervalMs
 }
 
 export type ProjectCanvasAdaptiveQualityGlobal = typeof globalThis & {

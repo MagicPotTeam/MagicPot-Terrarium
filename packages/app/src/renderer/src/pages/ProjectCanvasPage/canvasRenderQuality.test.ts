@@ -279,14 +279,53 @@ describe('canvasRenderQuality', () => {
 
   it('estimates the display interval from the on-time frames among the deltas', () => {
     const deltas = [33.3, 33.4, 33.3, 120, 33.3, 33.2, 66.7, 33.3, 33.4, 33.3, 33.3]
-    expect(estimateProjectCanvasDisplayIntervalMs(deltas)).toBeCloseTo(33.3)
-    expect(estimateProjectCanvasDisplayIntervalMs([16.7, 16.6, 16.7, 16.7, 33.4])).toBeCloseTo(16.7)
+    expect(estimateProjectCanvasDisplayIntervalMs(deltas)).toBeCloseTo(1000 / 30)
+    expect(estimateProjectCanvasDisplayIntervalMs([16.7, 16.6, 16.7, 16.7, 33.4])).toBeCloseTo(
+      1000 / 60
+    )
     // A busy 60 Hz page: most frames late by one or two intervals, a few on time.
     const busy = [33.4, 16.7, 50, 33.3, 16.6, 33.4, 33.3, 16.7, 50.1, 33.3, 33.4, 33.3]
-    expect(estimateProjectCanvasDisplayIntervalMs(busy)).toBeCloseTo(16.7)
+    expect(estimateProjectCanvasDisplayIntervalMs(busy)).toBeCloseTo(1000 / 60)
     // A hidden window (no frames for seconds) or too few samples: unknown.
     expect(estimateProjectCanvasDisplayIntervalMs([1000, 1000, 1000, 16.7])).toBeNull()
     expect(estimateProjectCanvasDisplayIntervalMs([16.7, 16.7])).toBeNull()
+  })
+
+  it('does not take a busy page for a slow display', () => {
+    // A 60 Hz display, the page busier still: only 2 of 12 frames on time. The lower quartile
+    // is then 33 ms, a 30 Hz interval, but the two on-time frames show the real one.
+    const twoOnTime = [33.3, 16.7, 33.4, 50, 33.3, 33.3, 16.6, 33.4, 50.1, 33.3, 33.4, 33.3]
+    expect(estimateProjectCanvasDisplayIntervalMs(twoOnTime)).toBeNull()
+    // Every frame a little late (24 fps work on a 60 Hz output): no display runs at 40 ms.
+    const everyFrameLate = [41, 44, 39, 47, 42, 40, 45, 43, 38, 46, 41, 44]
+    expect(estimateProjectCanvasDisplayIntervalMs(everyFrameLate)).toBeNull()
+    // Frames scattered without a cluster: no estimate either.
+    expect(
+      estimateProjectCanvasDisplayIntervalMs([17, 24, 31, 38, 45, 52, 59, 66, 73, 80, 87, 94])
+    ).toBeNull()
+    // A real 30 Hz display with timestamp jitter, and a 144 Hz one, are still recognised.
+    expect(
+      estimateProjectCanvasDisplayIntervalMs([33, 34, 33.5, 32.8, 33.6, 33.1, 66.6, 33.4, 33.2])
+    ).toBeCloseTo(1000 / 30)
+    expect(
+      estimateProjectCanvasDisplayIntervalMs([6.9, 7, 6.9, 13.9, 6.9, 7, 6.9, 6.9, 7, 6.9])
+    ).toBeCloseTo(1000 / 144)
+
+    // With such an estimate refused, the governor keeps the 60 Hz budget, and a 24 fps
+    // gesture on that 60 Hz display lowers the resolution as it did before measuring.
+    const governor = createProjectCanvasRenderQualityGovernor()
+    governor.setDisplayIntervalMs(estimateProjectCanvasDisplayIntervalMs(everyFrameLate))
+    expect(governor.getSlowFrameThresholdMs()).toBeCloseTo(slowFrameMs - 1)
+    governor.update({ now: 0, interactionActive: true })
+    let now = 0
+    for (let frame = 0; frame < 60; frame += 1) {
+      now += 1000 / 24
+      governor.recordGestureFrame({ now })
+      if (governor.shouldMeasureFrames(now)) {
+        governor.recordFrame({ now, renderDurationMs: 2 })
+      }
+    }
+    expect(governor.getQuality()).toBe('interactive')
   })
 
   it('ignores frames outside a gesture', () => {

@@ -2561,6 +2561,28 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(sprite.scale.y).toBe(2)
   }, 15000)
 
+  it('relies on the GPU copy record of the real Pixi texture source', async () => {
+    // The layer reads Pixi's private `TextureSource._gpuData` to tell an intact GPU copy from
+    // a lost one; without the field it counts every copy as intact and never re-acquires.
+    // Pin it, so that a Pixi upgrade that renames it shows up here.
+    const pixi = await vi.importActual<typeof import('pixi.js')>('pixi.js')
+    const source = new pixi.TextureSource({ width: 4, height: 4 })
+    const gpuData = (source as unknown as { _gpuData?: unknown })._gpuData
+    expect(gpuData).toBeTypeOf('object')
+    expect(gpuData).not.toBeNull()
+    expect(Object.keys(gpuData as object)).toEqual([])
+    // The WebGL texture system keeps its texture there, per renderer...
+    const glTextureSystem = pixi.GlTextureSystem.prototype as unknown as Record<string, unknown>
+    expect(String(glTextureSystem._initSource)).toContain('_gpuData[this._renderer.uid]')
+    // ...and an unload empties it.
+    const glTexture = { destroy: vi.fn() }
+    ;(source as unknown as { _gpuData: Record<number, unknown> })._gpuData[1] = glTexture
+    source.unload()
+    expect(glTexture.destroy).toHaveBeenCalled()
+    expect(Object.keys((source as unknown as { _gpuData: object })._gpuData)).toEqual([])
+    source.destroy()
+  })
+
   it('decodes a released level again when its GPU copy is gone and a tiny preview grows back', async () => {
     vi.stubGlobal('electronFile', {
       resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
@@ -4156,6 +4178,45 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       act(() => ref.current?.setViewportInteracting(false))
     })
 
+    it('does not take the pace of a busy board for the display interval', async () => {
+      const resolutionListeners: (() => void)[] = []
+      vi.stubGlobal(
+        'matchMedia',
+        vi.fn((media: string) => ({
+          media,
+          matches: true,
+          addEventListener: (_type: string, listener: () => void) =>
+            resolutionListeners.push(listener),
+          removeEventListener: () => {}
+        }))
+      )
+      const { PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS } =
+        await import('./ProjectCanvasWebGLImageLayer')
+      const { ref, app, displayFrames, wait } = await renderLayerWithManualFrames(2)
+      const thirtyHz = 1000 / 30
+      const gestureAtThirtyHz = () => {
+        act(() => ref.current?.setViewportInteracting(true))
+        displayFrames(60, thirtyHz)
+        const resolution = app.renderer.resolution
+        act(() => ref.current?.setViewportInteracting(false))
+        wait(200)
+        return resolution
+      }
+
+      // The probe's frames come at 30 Hz, but because the layer draws in every one of them
+      // (a board still filling, a live preview), not because of the display: no interval.
+      act(() => resolutionListeners.at(-1)?.())
+      wait(1000)
+      displayFrames(14, thirtyHz, true)
+      expect(gestureAtThirtyHz()).toBe(1)
+      expect(app.renderer.resolution).toBe(2)
+
+      // The probe is repeated later; on idle frames it measures the 30 Hz display.
+      wait(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS)
+      displayFrames(14, thirtyHz, false)
+      expect(gestureAtThirtyHz()).toBe(2)
+    })
+
     it('follows a device pixel ratio change (another monitor) by the end of the next gesture', async () => {
       const { ref, app, displayFrames } = await renderLayerWithManualFrames(1)
       // The window moved to a 200 % monitor; its size in CSS pixels did not change.
@@ -4664,6 +4725,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         })
         expect(app.renderer.resize).toHaveBeenLastCalledWith(990, 720)
         expect(app.canvas.style.width).toBe('100%')
+
+        // The drag had only paused: its next moves are deferred again, until it ends.
+        const resizesAfterWait = app.renderer.resize.mock.calls.length
+        resizeHost(970)
+        resizeHost(950)
+        expect(app.renderer.resize.mock.calls.length).toBe(resizesAfterWait)
+        expect(app.canvas.style.width).toBe('990px')
+        act(() => emit(false))
+        expect(app.renderer.resize.mock.calls.length).toBe(resizesAfterWait + 1)
+        expect(app.renderer.resize).toHaveBeenLastCalledWith(950, 720)
       } finally {
         vi.useRealTimers()
       }

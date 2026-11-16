@@ -298,6 +298,9 @@ export const PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_MAX_WAIT_MS = 1000
 // gesture when a probe was interrupted or found no refresh rate.
 export const PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS = 5000
 export const PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_RETRY_DELAY_MS = 1000
+// A probe during which the layer drew or reconciled measured the page's pace, not the
+// display's: it is thrown away and tried again this many times, a probe delay apart.
+export const PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_BUSY_RETRY_LIMIT = 12
 // A panel drag whose end event got lost stops deferring renderer resizes after this long
 // without a resize.
 export const PROJECT_CANVAS_WEBGL_LAYOUT_RESIZE_DEFERRAL_MAX_IDLE_MS = 3000
@@ -1595,6 +1598,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const displayIntervalProbeFrameRef = useRef<number | null>(null)
   const displayIntervalProbeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const displayIntervalProbeStateRef = useRef<'waiting' | 'running' | 'done' | 'failed'>('waiting')
+  const displayIntervalProbeBusyRetryCountRef = useRef(0)
   const activeItemCountRef = useRef(0)
   const stagePosRef = useRef(stagePos)
   const stageScaleRef = useRef(stageScale)
@@ -2962,41 +2966,72 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   /**
    * Measures the display's frame interval on a few display frames outside any gesture, for
    * the quality governor's frame budget. A gesture interrupts it; the end of the next gesture
-   * then schedules another one.
+   * then schedules another one. The frames must be idle ones: when the layer drew, reconciled
+   * or waited to upload during the probe, its frames came at the page's pace (a board still
+   * filling), and the probe is repeated later. A probe never raises an interval measured
+   * before on the same monitor (a monitor change forgets it first).
    */
   const scheduleDisplayIntervalProbe = useCallback(
     (delayMs: number) => {
-      cancelDisplayIntervalProbe()
-      displayIntervalProbeStateRef.current = 'waiting'
-      displayIntervalProbeTimerRef.current = setTimeout(() => {
-        displayIntervalProbeTimerRef.current = null
-        let lastFrameAt: number | null = null
-        const deltas: number[] = []
-        const probeFrame = (frameTime: number) => {
-          displayIntervalProbeFrameRef.current = null
-          if (!appRef.current || isViewportInteractingRef.current) {
-            displayIntervalProbeStateRef.current = 'failed'
-            return
+      displayIntervalProbeBusyRetryCountRef.current = 0
+      const schedule = (probeDelayMs: number) => {
+        cancelDisplayIntervalProbe()
+        displayIntervalProbeStateRef.current = 'waiting'
+        displayIntervalProbeTimerRef.current = setTimeout(() => {
+          displayIntervalProbeTimerRef.current = null
+          let lastFrameAt: number | null = null
+          const deltas: number[] = []
+          const getLayerWorkStamp = () =>
+            `${webglRenderCountRef.current}:${spriteReconcileGenerationRef.current}`
+          let layerWorkStamp = ''
+          const probeFrame = (frameTime: number) => {
+            displayIntervalProbeFrameRef.current = null
+            if (!appRef.current || isViewportInteractingRef.current) {
+              displayIntervalProbeStateRef.current = 'failed'
+              return
+            }
+            if (lastFrameAt !== null) {
+              deltas.push(frameTime - lastFrameAt)
+            } else {
+              layerWorkStamp = getLayerWorkStamp()
+            }
+            lastFrameAt = frameTime
+            if (deltas.length < PROJECT_CANVAS_DISPLAY_INTERVAL_PROBE_FRAMES) {
+              displayIntervalProbeFrameRef.current = window.requestAnimationFrame(probeFrame)
+              return
+            }
+            if (
+              getLayerWorkStamp() !== layerWorkStamp ||
+              largeTextureUploadPacerRef.current.waiting
+            ) {
+              if (
+                displayIntervalProbeBusyRetryCountRef.current <
+                PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_BUSY_RETRY_LIMIT
+              ) {
+                displayIntervalProbeBusyRetryCountRef.current += 1
+                schedule(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS)
+              } else {
+                displayIntervalProbeStateRef.current = 'failed'
+              }
+              return
+            }
+            const intervalMs = estimateProjectCanvasDisplayIntervalMs(deltas)
+            if (intervalMs === null) {
+              displayIntervalProbeStateRef.current = 'failed'
+              return
+            }
+            const governor = renderQualityGovernorRef.current
+            const previousIntervalMs = governor.getDisplayIntervalMs()
+            if (previousIntervalMs === null || intervalMs < previousIntervalMs) {
+              governor.setDisplayIntervalMs(intervalMs)
+            }
+            displayIntervalProbeStateRef.current = 'done'
           }
-          if (lastFrameAt !== null) {
-            deltas.push(frameTime - lastFrameAt)
-          }
-          lastFrameAt = frameTime
-          if (deltas.length < PROJECT_CANVAS_DISPLAY_INTERVAL_PROBE_FRAMES) {
-            displayIntervalProbeFrameRef.current = window.requestAnimationFrame(probeFrame)
-            return
-          }
-          const intervalMs = estimateProjectCanvasDisplayIntervalMs(deltas)
-          if (intervalMs === null) {
-            displayIntervalProbeStateRef.current = 'failed'
-            return
-          }
-          renderQualityGovernorRef.current.setDisplayIntervalMs(intervalMs)
-          displayIntervalProbeStateRef.current = 'done'
-        }
-        displayIntervalProbeStateRef.current = 'running'
-        displayIntervalProbeFrameRef.current = window.requestAnimationFrame(probeFrame)
-      }, delayMs)
+          displayIntervalProbeStateRef.current = 'running'
+          displayIntervalProbeFrameRef.current = window.requestAnimationFrame(probeFrame)
+        }, probeDelayMs)
+      }
+      schedule(delayMs)
     },
     [cancelDisplayIntervalProbe]
   )
@@ -3770,9 +3805,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     let hasSkippedResize = false
     let pinnedCanvas: HTMLCanvasElement | null = null
     // The end event of a drag can get lost (the window lost focus before the mouse button
-    // came up). Then the deferral ends by itself on the next pointer release, on window blur
-    // or after a while without a resize, and resizes follow the host again until the next
-    // drag starts.
+    // came up). Then the deferral ends by itself on the next pointer release or on window
+    // blur, and resizes follow the host again until the next drag starts. After a while
+    // without a resize the renderer catches up with the host as well; a drag that only
+    // paused defers again at its next move.
     let ignoresLayoutResizeInteraction = false
     let deferralTimer: ReturnType<typeof setTimeout> | null = null
     let listensForDeferralEnd = false
@@ -3826,7 +3862,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(deferralTimer)
       }
       deferralTimer = setTimeout(
-        abandonDeferral,
+        endDeferral,
         PROJECT_CANVAS_WEBGL_LAYOUT_RESIZE_DEFERRAL_MAX_IDLE_MS
       )
       if (!listensForDeferralEnd) {
