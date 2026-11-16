@@ -150,26 +150,27 @@ describe('Hono Node adapter production security', () => {
     const npmLock = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package-lock.json'), 'utf8'))
     const pnpm = parse(fs.readFileSync(path.join(projectRoot, 'pnpm-lock.yaml'), 'utf8'))
     expect(pnpm.importers['.'].dependencies['@hono/node-server']).toEqual({
-      specifier: '2.1.5',
-      version: '2.1.5(hono@4.13.11)'
+      specifier: '2.1.8',
+      version: '2.1.8(hono@4.13.18)'
     })
-    expect(pnpm.packages['@hono/node-server@2.1.5'].resolution.integrity).toBe(
+    expect(pnpm.packages['@hono/node-server@2.1.8'].resolution.integrity).toBe(
       npmLock.packages['node_modules/@hono/node-server'].integrity
     )
     expect(
       pnpm.snapshots['@modelcontextprotocol/sdk@1.32.2(zod@4.6.7)'].dependencies[
         '@hono/node-server'
       ]
-    ).toBe('2.1.5(hono@4.13.11)')
+    ).toBe('2.1.8(hono@4.13.18)')
     expect(pnpm.packages).not.toHaveProperty('@hono/node-server@2.1.0')
+    expect(pnpm.packages).not.toHaveProperty('@hono/node-server@2.1.5')
   })
 
   it('pins the patched adapter in the manifest, lock and actual MCP resolution', () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'))
     const lock = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package-lock.json'), 'utf8'))
-    expect(manifest.dependencies['@hono/node-server']).toBe('2.1.5')
-    expect(lock.packages[''].dependencies['@hono/node-server']).toBe('2.1.5')
-    expect(lock.packages['node_modules/@hono/node-server'].version).toBe('2.1.5')
+    expect(manifest.dependencies['@hono/node-server']).toBe('2.1.8')
+    expect(lock.packages[''].dependencies['@hono/node-server']).toBe('2.1.8')
+    expect(lock.packages['node_modules/@hono/node-server'].version).toBe('2.1.8')
     const require = createRequire(import.meta.url)
     const sdkRequire = createRequire(
       require.resolve('@modelcontextprotocol/sdk/server/streamableHttp.js')
@@ -177,7 +178,7 @@ describe('Hono Node adapter production security', () => {
     const adapterRoot = path.dirname(path.dirname(sdkRequire.resolve('@hono/node-server')))
     expect(
       JSON.parse(fs.readFileSync(path.join(adapterRoot, 'package.json'), 'utf8')).version
-    ).toBe('2.1.5')
+    ).toBe('2.1.8')
   })
 
   it.each(['/static/admin/secret.txt', '/static/%61dmin/secret.txt'])(
