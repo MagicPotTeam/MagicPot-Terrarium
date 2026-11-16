@@ -141,6 +141,9 @@ let mockRendererSupportsEagerUpload = true
 let eagerTextureUploads: unknown[] = []
 // 1 simulates a WebGL 1 context, which cannot run the edge-antialias program.
 let mockWebGLVersion = 2
+// true gives the mock context WebGL 2 fences; each one passes when the test sets `signaled`.
+let mockWebGLFences = false
+let createdWebGLFences: { signaled: boolean; deleted: boolean }[] = []
 let createdEdgeAntialiasShaders: { destroyed: boolean; resources: Record<string, unknown> }[] = []
 const originalDevicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio
 
@@ -452,7 +455,23 @@ function installPixiMock() {
           INVALID_OPERATION: 1282,
           INVALID_FRAMEBUFFER_OPERATION: 1286,
           OUT_OF_MEMORY: 1285,
-          CONTEXT_LOST_WEBGL: 37442
+          CONTEXT_LOST_WEBGL: 37442,
+          ...(mockWebGLFences
+            ? {
+                fenceSync: vi.fn(() => {
+                  const fence = { signaled: false, deleted: false }
+                  createdWebGLFences.push(fence)
+                  return fence
+                }),
+                getSyncParameter: vi.fn((fence: { signaled: boolean }, pname: number) =>
+                  pname === 0x9114 && fence.signaled ? 0x9119 : 0x9118
+                ),
+                deleteSync: vi.fn((fence: { deleted: boolean }) => {
+                  fence.deleted = true
+                }),
+                flush: vi.fn()
+              }
+            : {})
         }
       }
       render = vi.fn(() => {
@@ -674,6 +693,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     mockRendererSupportsEagerUpload = true
     eagerTextureUploads = []
     mockWebGLVersion = 2
+    mockWebGLFences = false
+    createdWebGLFences = []
     createdEdgeAntialiasShaders = []
     setWindowDevicePixelRatio(originalDevicePixelRatio)
     installPixiMock()
@@ -769,6 +790,109 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           return source.destroyed && source.resource === null
         })
       ).toBe(true)
+    })
+
+    // Three images whose decodes (2048 x 2048, 16 MiB each) finish in the same task.
+    const renderThreeLargeDecodes = async (side = 2048) => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const pending = [deferredBitmap(), deferredBitmap(), deferredBitmap()]
+      const bitmaps = pending.map(() => createBitmap(side, side))
+      let decodeIndex = 0
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(() => pending[Math.min(decodeIndex++, pending.length - 1)].promise)
+      )
+      const items = ['large-a', 'large-b', 'large-c'].map((id, index) =>
+        localSourceItem({
+          id,
+          src: `local-media:///C:/images/${id}.png`,
+          x: 24 + index * 260,
+          sourceWidth: side,
+          sourceHeight: side
+        })
+      )
+      const utils = render(<Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(decodeIndex).toBe(3))
+      const app = createdApplications[0]
+      const uploadFrames: number[] = []
+      let displayFrame = 0
+      const requestFrame = window.requestAnimationFrame.bind(window)
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+        requestFrame((time) => {
+          displayFrame += 1
+          callback(time)
+        })
+      )
+      const upload = app.renderer.texture!.initSource
+      const uploadImplementation = upload.getMockImplementation() as (
+        source: MockTextureSource
+      ) => void
+      upload.mockImplementation((source: MockTextureSource) => {
+        uploadFrames.push(displayFrame)
+        uploadImplementation(source)
+      })
+      await act(async () => {
+        pending.forEach((entry, index) => entry.resolve(bitmaps[index]))
+        await Promise.resolve()
+      })
+      const settle = (ms: number) =>
+        act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, ms))
+        })
+      return { ...utils, app, items, bitmaps, uploadFrames, settle }
+    }
+
+    it('starts a large upload only after the previous one finished on the GPU', async () => {
+      mockWebGLFences = true
+      const { items, bitmaps, settle, unmount } = await renderThreeLargeDecodes()
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+      await settle(250)
+      // The first upload is still in flight: the others keep their decodes and wait.
+      expect(eagerTextureUploads).toHaveLength(1)
+      expect(createdWebGLFences).toHaveLength(1)
+      expect(items.filter((item) => getLiveSpriteByLabel(item.id))).toHaveLength(1)
+      const waiting = bitmaps.filter((bitmap) => !eagerTextureUploads.includes(bitmap))
+      expect(waiting).toHaveLength(2)
+      expect(waiting.some(isBitmapClosed)).toBe(false)
+
+      createdWebGLFences[0].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(2))
+      expect(createdWebGLFences[0].deleted).toBe(true)
+      await settle(250)
+      expect(eagerTextureUploads).toHaveLength(2)
+
+      createdWebGLFences[1].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(3))
+      await waitFor(() =>
+        expect(items.filter((item) => getLiveSpriteByLabel(item.id))).toHaveLength(3)
+      )
+      expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
+      expect(bitmaps.every(isBitmapClosed)).toBe(true)
+
+      unmount()
+      expect(createdWebGLFences.every((fence) => fence.deleted)).toBe(true)
+    })
+
+    it('uploads at most one large texture per display frame without fences', async () => {
+      const { items, bitmaps, uploadFrames, settle } = await renderThreeLargeDecodes()
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(3))
+      await settle(100)
+      expect(eagerTextureUploads).toHaveLength(3)
+      expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
+      // Each large upload ran in a display frame of its own.
+      expect(new Set(uploadFrames).size).toBe(3)
+      expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true)
+    })
+
+    it('keeps uploading small textures of one pass together', async () => {
+      // 1024 x 1024 is 4 MiB: below the size that is staged in a chunk of its own.
+      const { bitmaps, uploadFrames } = await renderThreeLargeDecodes(1024)
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(3))
+      expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
+      expect(new Set(uploadFrames).size).toBe(1)
     })
 
     it('keeps the bitmap for the texture lifetime when the renderer cannot upload eagerly', async () => {

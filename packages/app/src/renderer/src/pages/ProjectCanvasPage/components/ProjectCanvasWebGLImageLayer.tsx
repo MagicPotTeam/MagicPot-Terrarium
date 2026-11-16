@@ -280,6 +280,16 @@ export const PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT = 512
 export const PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES = 768 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES = 128 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET = 128
+// Chromium stages an upload larger than its transfer buffer (16 MiB at most) in a shared-memory
+// chunk of exactly that size, and keeps every chunk it ever needed at once for the life of the
+// context. Eager uploads of several full-size decodes in one pass (5 x 48 MiB for 4096 x 3072)
+// therefore stay as staging memory. A texture above this size is uploaded only when no other
+// large upload ran in this display frame and the previous one has finished on the GPU, so one
+// chunk is reused instead.
+export const PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_BYTES = 8 * 1024 * 1024
+// If the GPU never reports the previous large upload as finished (no fence support, a lost
+// fence), the next one waits at most this long.
+export const PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_MAX_WAIT_MS = 1000
 export const PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT = 64
 export const PROJECT_CANVAS_WEBGL_SELECTED_PROTECTED_LIMIT = 32
 // Decoded images that no texture needs right now (a decode that finished after the zoom or
@@ -487,6 +497,98 @@ function pinProjectCanvasDecodedImageSize(image: CanvasImageAsset): boolean {
 
   const pinned = getCanvasImageAssetSize(image)
   return pinned.width === width && pinned.height === height
+}
+
+type ProjectCanvasWebGLFenceContext = {
+  fenceSync?: (condition: number, flags: number) => unknown
+  getSyncParameter?: (sync: unknown, pname: number) => unknown
+  deleteSync?: (sync: unknown) => void
+  flush?: () => void
+}
+
+// WebGL 2 constants (also on WebGL2RenderingContext; spelled out for contexts that lack them).
+const PROJECT_CANVAS_WEBGL_SYNC_GPU_COMMANDS_COMPLETE = 0x9117
+const PROJECT_CANVAS_WEBGL_SYNC_STATUS = 0x9114
+const PROJECT_CANVAS_WEBGL_SIGNALED = 0x9119
+
+type ProjectCanvasLargeTextureUploadPacer = {
+  // Fence after the last large upload; null when it finished or no fence could be made.
+  sync: unknown
+  startedAt: number
+  // A large upload ran since the last display frame.
+  uploadedThisFrame: boolean
+  // A large upload was held back and waits for the next reconcile pass.
+  waiting: boolean
+}
+
+function getProjectCanvasWebGLFenceContext(app: Application | null) {
+  const renderer = app?.renderer as PixiRendererWithWebGLContext | null | undefined
+  return (renderer?.gl ?? renderer?.context?.gl ?? null) as ProjectCanvasWebGLFenceContext | null
+}
+
+function releaseProjectCanvasLargeUploadFence(
+  gl: ProjectCanvasWebGLFenceContext | null,
+  pacer: ProjectCanvasLargeTextureUploadPacer
+) {
+  if (pacer.sync !== null) {
+    try {
+      gl?.deleteSync?.(pacer.sync)
+    } catch {
+      // The context is gone; so is the fence.
+    }
+  }
+  pacer.sync = null
+}
+
+/**
+ * True when a large texture may be uploaded now: none was uploaded since the last display
+ * frame, and the previous one finished on the GPU (or waited long enough).
+ */
+function isProjectCanvasLargeTextureUploadReady(
+  gl: ProjectCanvasWebGLFenceContext | null,
+  pacer: ProjectCanvasLargeTextureUploadPacer,
+  now: number
+) {
+  if (pacer.uploadedThisFrame) {
+    return false
+  }
+  if (pacer.sync === null) {
+    return true
+  }
+  let finished = false
+  try {
+    finished =
+      typeof gl?.getSyncParameter !== 'function' ||
+      gl.getSyncParameter(pacer.sync, PROJECT_CANVAS_WEBGL_SYNC_STATUS) ===
+        PROJECT_CANVAS_WEBGL_SIGNALED
+  } catch {
+    finished = true
+  }
+  if (!finished && now - pacer.startedAt < PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_MAX_WAIT_MS) {
+    return false
+  }
+  releaseProjectCanvasLargeUploadFence(gl, pacer)
+  return true
+}
+
+function noteProjectCanvasLargeTextureUpload(
+  gl: ProjectCanvasWebGLFenceContext | null,
+  pacer: ProjectCanvasLargeTextureUploadPacer,
+  now: number
+) {
+  releaseProjectCanvasLargeUploadFence(gl, pacer)
+  pacer.uploadedThisFrame = true
+  pacer.startedAt = now
+  try {
+    pacer.sync =
+      typeof gl?.fenceSync === 'function'
+        ? (gl.fenceSync(PROJECT_CANVAS_WEBGL_SYNC_GPU_COMMANDS_COMPLETE, 0) ?? null)
+        : null
+    // Send the upload now, so that the fence can pass before the next frame.
+    gl?.flush?.()
+  } catch {
+    pacer.sync = null
+  }
 }
 
 type PixiRendererWithEagerTextureUpload = {
@@ -1348,12 +1450,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const imageIdentityIdsRef = useRef(new WeakMap<object, number>())
   const nextImageIdentityIdRef = useRef(1)
   const sharedTexturePoolRef = useRef(new CanvasImageSharedResourcePool<Texture>())
-  // Set when the renderer can run the edge-antialias program (WebGL 2).
+  // Set when the renderer can run the edge-antialias program (WebGL 2). On a WebGL 1 context
+  // it stays null: the drawing buffer has no multisampling, so rotated images keep hard edges.
   const edgeAntialiasGeometryRef = useRef<MeshGeometry | null>(null)
   // Only used when the renderer cannot upload eagerly: the texture then keeps its decoded
   // input alive, because Pixi uploads it on a later draw.
   const textureDecodedAssetRef = useRef(new WeakMap<Texture, CachedImageRecord>())
   const eagerlyUploadedTexturesRef = useRef(new WeakSet<Texture>())
+  const largeTextureUploadPacerRef = useRef<ProjectCanvasLargeTextureUploadPacer>({
+    sync: null,
+    startedAt: 0,
+    uploadedThisFrame: false,
+    waiting: false
+  })
+  const largeTextureUploadFrameRef = useRef<number | null>(null)
   // Items whose texture has to be replaced by a fresh decode of the same level, and the
   // generation that the replacing cache record gets.
   const pendingTextureReacquireIdsRef = useRef(new Set<string>())
@@ -1509,6 +1619,36 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     hasDeferredImageVersionUpdateRef.current = false
     queueImageVersionFrame()
   }, [queueImageVersionFrame])
+
+  // One display frame after a large upload: the next one may start (once the GPU finished the
+  // previous one). A held-back upload asks for a reconcile pass then.
+  const armLargeTextureUploadFrame = useCallback(() => {
+    if (largeTextureUploadFrameRef.current !== null) {
+      return
+    }
+
+    largeTextureUploadFrameRef.current = window.requestAnimationFrame(() => {
+      largeTextureUploadFrameRef.current = null
+      const pacer = largeTextureUploadPacerRef.current
+      pacer.uploadedThisFrame = false
+      // A gesture ends with a reconcile pass of its own, which retries the held-back upload.
+      if (!pacer.waiting || isViewportInteractingRef.current) {
+        return
+      }
+      if (
+        !isProjectCanvasLargeTextureUploadReady(
+          getProjectCanvasWebGLFenceContext(appRef.current),
+          pacer,
+          window.performance.now()
+        )
+      ) {
+        armLargeTextureUploadFrame()
+        return
+      }
+      pacer.waiting = false
+      setViewportVersion((version) => version + 1)
+    })
+  }, [])
 
   // The texture of this item cannot be uploaded again (its decoded input was released).
   // Ask the next reconcile pass to decode the level again; the texture on screen stays
@@ -3104,6 +3244,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         window.cancelAnimationFrame(spriteReconcileFrameRef.current)
         spriteReconcileFrameRef.current = null
       }
+      if (largeTextureUploadFrameRef.current !== null) {
+        window.cancelAnimationFrame(largeTextureUploadFrameRef.current)
+        largeTextureUploadFrameRef.current = null
+      }
+      releaseProjectCanvasLargeUploadFence(
+        getProjectCanvasWebGLFenceContext(appRef.current),
+        largeTextureUploadPacerRef.current
+      )
+      largeTextureUploadPacerRef.current.uploadedThisFrame = false
+      largeTextureUploadPacerRef.current.waiting = false
       if (imageVersionFrameRef.current !== null) {
         window.cancelAnimationFrame(imageVersionFrameRef.current)
         imageVersionFrameRef.current = null
@@ -4799,6 +4949,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         : 0
       : Number.POSITIVE_INFINITY
     let deferredNewSpriteCount = 0
+    const largeTextureUploadGl = getProjectCanvasWebGLFenceContext(appRef.current)
+    const canUploadEagerly =
+      typeof (appRef.current?.renderer as PixiRendererWithEagerTextureUpload | null | undefined)
+        ?.texture?.initSource === 'function'
     let residentCandidateTextureBytes = 0
     let worldOrderDirty = false
     const nextRenderItems = new Map<string, ProjectCanvasRenderableImage>()
@@ -5305,6 +5459,28 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      if (
+        canUploadEagerly &&
+        textureByteSize > PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_BYTES &&
+        sharedTexturePoolRef.current.getRefCount(sharedTextureKey) === 0 &&
+        decodedRecordsByImageRef.current.has(image) &&
+        !isProjectCanvasDecodedImageReleased(image) &&
+        !isProjectCanvasLargeTextureUploadReady(
+          largeTextureUploadGl,
+          largeTextureUploadPacerRef.current,
+          window.performance.now()
+        )
+      ) {
+        // Another large upload is still in flight: keep the decode (it is wanted by this pass,
+        // so the decoded budget keeps it) and what is on screen, and upload in a later frame.
+        largeTextureUploadPacerRef.current.waiting = true
+        armLargeTextureUploadFrame()
+        if (existingRecord) {
+          preserveExistingRenderItem()
+        }
+        return
+      }
+
       const protectedResidentIds = new Set<string>()
       previewStateRef.current.forEach((_preview, previewItemId) => {
         if (residentCandidateIds.has(previewItemId)) {
@@ -5386,10 +5562,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         ) {
           // One copy per image: upload the decoded pixels now and close the bitmap, instead
           // of keeping a decoded twin next to the texture for as long as the texture lives.
-          if (
-            eagerlyUploadedTexturesRef.current.has(baseTexture) ||
-            uploadProjectCanvasTextureNow(appRef.current, baseTexture)
-          ) {
+          const alreadyUploaded = eagerlyUploadedTexturesRef.current.has(baseTexture)
+          if (alreadyUploaded || uploadProjectCanvasTextureNow(appRef.current, baseTexture)) {
+            if (
+              !alreadyUploaded &&
+              textureByteSize > PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_BYTES
+            ) {
+              noteProjectCanvasLargeTextureUpload(
+                largeTextureUploadGl,
+                largeTextureUploadPacerRef.current,
+                window.performance.now()
+              )
+              armLargeTextureUploadFrame()
+            }
             eagerlyUploadedTexturesRef.current.add(baseTexture)
             releaseDecodedImagePixelsAfterUpload(image)
           } else if (createdSharedTexture) {
@@ -5607,6 +5792,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     pruneDecodedImageCacheForResidentTargets,
     pruneDecodedPixelRecords,
     releaseDecodedImagePixelsAfterUpload,
+    armLargeTextureUploadFrame,
     requestTextureReacquire,
     removeTextureBudgetReservation,
     cancelScheduledRender,
@@ -5620,6 +5806,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     selectedIds,
     requestSampledWebGLErrorCheck,
     syncSpriteRecordEdgeAntialias,
+    queueImageVersionFrame,
     viewportVersion
   ])
 
