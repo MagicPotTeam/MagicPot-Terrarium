@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 const base = (tasks: NonNullable<ChatSession['teamTasks']>): ChatSession => ({ id: 'lead', title: 'Lead', messages: [], teamTasks: tasks })
@@ -11,7 +11,7 @@ describe('team task dependency accessible names', () => {
     const tasks = [t('a', '同名'), t('b', '同名'), t('c', '另一个')]
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true), onDispatch = vi.fn()
     const props = { lead: base(tasks), members: [], models: [], onSave, onDispatch, onEnd: vi.fn() }
-    const view = render(<AgentTeamMenu {...props} />)
+    const view = render(<TeamMenuHarness {...props} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const dialog = screen.getByRole('dialog', { name: '团队管理' })
@@ -29,7 +29,7 @@ describe('team task dependency accessible names', () => {
       const saved = { ...tasks[0], dependsOn: ['b'] }
       expect(onSave.mock.calls[0][0].teamTasks).toEqual([saved, tasks[1], tasks[2]])
       await waitFor(() => expect(firstDependsSecond).toBeEnabled())
-      view.rerender(<AgentTeamMenu {...props} lead={base([tasks[1], saved, tasks[2]])} />)
+      view.rerender(<TeamMenuHarness {...props} lead={base([tasks[1], saved, tasks[2]])} />)
       const afterReorder = within(dialog).getByRole('checkbox', { name: '第 2 项任务依赖第 1 项（位置随列表变化）：同名 依赖 同名' })
       expect(afterReorder).toBeChecked()
       fireEvent.click(afterReorder)
@@ -42,7 +42,7 @@ describe('team task dependency accessible names', () => {
   it('disambiguates colliding composite names even when every title is unique', () => {
     const tasks = [t('a', 'A'), t('bc', 'B 依赖 C'), t('ab', 'A 依赖 B'), t('c', 'C'), t('crafted', 'A 依赖 B 依赖 C')]
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)
-    const view = render(<AgentTeamMenu lead={base(tasks)} members={[]} models={[]} onSave={onSave} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={base(tasks)} members={[]} models={[]} onSave={onSave} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       fireEvent.click(screen.getByText('编辑依赖 · A'))
@@ -62,7 +62,7 @@ describe('team task dependency accessible names', () => {
     const tasks = [t('a', 'A'), t('b', 'A'), t('c', 'B'), t('d', crafted)]
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)
     const onDispatch = vi.fn(), onEnd = vi.fn()
-    const view = render(<AgentTeamMenu lead={base(tasks)} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={onEnd} />)
+    const view = render(<TeamMenuHarness lead={base(tasks)} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={onEnd} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const dialog = screen.getByRole('dialog', { name: '团队管理' })
@@ -81,7 +81,7 @@ describe('team task dependency accessible names', () => {
   it('distinguishes newly created task prerequisites by current position without changing their ids', () => {
     const tasks = [t('a', '同名'), t('b', '同名')]
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true), onDispatch = vi.fn()
-    const view = render(<AgentTeamMenu lead={base(tasks)} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={base(tasks)} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       fireEvent.change(screen.getByLabelText('任务'), { target: { value: '新任务' } })

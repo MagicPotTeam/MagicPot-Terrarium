@@ -1,7 +1,7 @@
 // Synthetic narrow container only: jsdom does not measure real layout or overflow.
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 describe('team menu accessibility in a synthetic narrow container', () => {
@@ -13,7 +13,7 @@ describe('team menu accessibility in a synthetic narrow container', () => {
     const onSubscriptionChange = vi.fn()
     const onBroadcast = vi.fn(async (_input: { id: string; text: string }) => ({ queued: 1 }))
     const onSave = vi.fn()
-    const view = render(<div style={{ width: 240 }}><AgentTeamMenu lead={lead} members={[member]} models={[]} onEnd={vi.fn()} onSave={onSave} subscriptions={[]} onSubscriptionChange={onSubscriptionChange} onBroadcast={onBroadcast} /></div>)
+    const view = render(<div style={{ width: 240 }}><TeamMenuHarness lead={lead} members={[member]} models={[]} onEnd={vi.fn()} onSave={onSave} subscriptions={[]} onSubscriptionChange={onSubscriptionChange} onBroadcast={onBroadcast} /></div>)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const dialog = screen.getByRole('dialog', { name: '团队管理' })

@@ -1,5 +1,4 @@
-import { createPortal } from 'react-dom'
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Box, Button, Checkbox, FormControlLabel, MenuItem, TextField, Typography } from '@mui/material'
 import type { ChatSession } from '../chatStorage'
 import { resolveTeamRequestSettings } from '../agentTeam'
@@ -11,12 +10,11 @@ const normalizeAccessibleName = (value: string) => value.replace(/\s+/g, ' ').tr
 const normalizePerceivedName = (value: string) => normalizeAccessibleName(value.replace(/[\u200b\u2060]/gu, ''))
 
 export default function AgentTeamMenu({
-  lead, members, models, buttonHost, hideTriggerWithoutHost, onSave, onEnd, onDispatch, subscriptions, onSubscriptionChange, onBroadcast, onAddMember, openRequest, onReturnFocus
+  lead, members, models, onSave, onEnd, onDispatch, subscriptions, onSubscriptionChange, onBroadcast, onAddMember, openRequest, onReturnFocus
 }: {
-  buttonHost?: HTMLElement | null
-  hideTriggerWithoutHost?: boolean
+  /** Opens the dialog each time it changes (the composer "+" menu entry "团队…"). */
   openRequest?: number
-  /** The dialog closed while it held the focus and there is no trigger to hand the focus back to. */
+  /** The dialog closed while it held the focus: the focus goes back to the conversation. */
   onReturnFocus?(): void
   models: { id: string; name: string }[]
   onBroadcast?(input: Readonly<{ id: string; text: string }>): { queued: number } | Promise<{ queued: number }>
@@ -37,20 +35,9 @@ export default function AgentTeamMenu({
   const initialOpenRequest = useRef(openRequest)
   const focusOpenRequestRef = useRef(false)
   const dialogCloseButtonRef = useRef<HTMLButtonElement>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
-  const keyboardOriginRef = useRef<HTMLButtonElement | null>(null)
-  const pendingTriggerFocusRef = useRef(false)
-  useLayoutEffect(() => {
-    if (!open || !pendingTriggerFocusRef.current) return
-    pendingTriggerFocusRef.current = false
-    const origin = keyboardOriginRef.current
-    if (origin?.isConnected && document.activeElement === origin) dialogCloseButtonRef.current?.focus()
-  }, [open])
   useEffect(() => {
     if (openRequest !== undefined && initialOpenRequest.current !== openRequest) {
       initialOpenRequest.current = openRequest
-      keyboardOriginRef.current = null
-      pendingTriggerFocusRef.current = false
       focusOpenRequestRef.current = true
       setOpen(true)
     }
@@ -134,12 +121,6 @@ export default function AgentTeamMenu({
     onEnd()
   }
   const draftLocked = pendingDraft || pendingOther || draftUnconfirmed || broadcastPending
-  const trigger = <Button ref={triggerRef} size="small" aria-label="团队管理" aria-expanded={open} aria-haspopup="dialog" onClick={event => {
-    focusOpenRequestRef.current = false
-    pendingTriggerFocusRef.current = !open && event.detail === 0 && document.activeElement === event.currentTarget
-    keyboardOriginRef.current = pendingTriggerFocusRef.current ? event.currentTarget : null
-    setOpen(value => !value)
-  }} sx={{ minWidth: 28, px: 0.5, fontWeight: 700, color: open ? 'primary.main' : 'text.secondary' }}>⋯</Button>
   const tasks = lead.teamTasks ?? []
   let validTasks = true
   try { validateTeamTasks(tasks) } catch { validTasks = false }
@@ -190,23 +171,11 @@ export default function AgentTeamMenu({
   const durablePendingReceipts = (lead.teamMessageReceipts ?? []).filter(receipt => receipt.state === 'queued' || receipt.state === 'unknown').length
   const selected = dependencies.filter(id => currentIds.has(id))
   const closeDialog = (restoreFocus: boolean) => {
-    const origin = keyboardOriginRef.current
-    const visible = origin?.isConnected && origin === triggerRef.current && !origin.disabled && !origin.closest('[hidden], [inert], [aria-hidden="true"]') && (() => {
-      for (let node: HTMLElement | null = origin; node; node = node.parentElement) {
-        const style = window.getComputedStyle(node)
-        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || (style.opacity !== '' && Number(style.opacity) === 0)) return false
-      }
-      return true
-    })()
-    if (visible && restoreFocus) origin.focus()
-    else if (restoreFocus) onReturnFocus?.()
-    keyboardOriginRef.current = null
-    pendingTriggerFocusRef.current = false
+    if (restoreFocus) onReturnFocus?.()
     focusOpenRequestRef.current = false
     setOpen(false)
   }
   return <Box>
-    {buttonHost ? createPortal(trigger, buttonHost) : !hideTriggerWithoutHost && trigger}
     {open && <Box role="dialog" aria-label="团队管理" onKeyDown={event => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || !event.currentTarget.contains(event.target as Node)) return
       event.stopPropagation()

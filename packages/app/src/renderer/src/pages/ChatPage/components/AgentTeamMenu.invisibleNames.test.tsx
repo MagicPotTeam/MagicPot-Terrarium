@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 describe('team task invisible name collisions', () => {
@@ -16,7 +16,7 @@ describe('team task invisible name collisions', () => {
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)
     const onEnd = vi.fn(), onBroadcast = vi.fn()
     const props = { lead, members: [member], models: [], onDispatch, onSave, onEnd, onBroadcast }
-    const view = render(<AgentTeamMenu {...props} />)
+    const view = render(<TeamMenuHarness {...props} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       for (const [index, title] of titles.entries()) {
@@ -26,7 +26,7 @@ describe('team task invisible name collisions', () => {
         fireEvent.click(button)
       }
       expect(onDispatch.mock.calls).toEqual([['task-0'], ['task-1'], ['task-2']])
-      view.rerender(<AgentTeamMenu {...props} lead={{ ...lead, teamTasks: [tasks[1], tasks[0], tasks[2]] }} />)
+      view.rerender(<TeamMenuHarness {...props} lead={{ ...lead, teamTasks: [tasks[1], tasks[0], tasks[2]] }} />)
       fireEvent.click(screen.getByRole('button', { name: `当前列表第 1 项（位置随列表变化），执行：${titles[1]}` }))
       expect(onDispatch).toHaveBeenLastCalledWith('task-1')
       expect(onSave).not.toHaveBeenCalled()
@@ -41,7 +41,7 @@ describe('team task invisible name collisions', () => {
     const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [], teamTasks: tasks }
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)
     const onDispatch = vi.fn(), onEnd = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onDispatch={onDispatch} onSave={onSave} onEnd={onEnd} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onDispatch={onDispatch} onSave={onSave} onEnd={onEnd} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const summary = screen.getByText('编辑依赖 · AB', { selector: 'summary' })
@@ -67,7 +67,7 @@ describe('team task invisible name collisions', () => {
     const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [], teamTasks: tasks }
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)
     const onDispatch = vi.fn(), onEnd = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onDispatch={onDispatch} onSave={onSave} onEnd={onEnd} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onDispatch={onDispatch} onSave={onSave} onEnd={onEnd} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       fireEvent.click(screen.getByText('编辑依赖 · A', { selector: 'summary' }))
@@ -90,7 +90,7 @@ describe('team task invisible name collisions', () => {
     const tasks = titles.map((title, index) => ({ id: `task-${index}`, title, ownerId: '', status: 'pending' as const, dependsOn: [] as string[] }))
     const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [], teamTasks: tasks }
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)
-    const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={onSave} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={onSave} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       fireEvent.click(screen.getByText('编辑依赖 · A\u200b', { selector: 'summary' }))
@@ -111,7 +111,7 @@ describe('team task invisible name collisions', () => {
       { id: 'other', title: 'other', ownerId: member.id, status: 'pending', dependsOn: [] }
     ] }
     const onDispatch = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       fireEvent.click(screen.getByRole('button', { name: '执行 only\u200bname' }))

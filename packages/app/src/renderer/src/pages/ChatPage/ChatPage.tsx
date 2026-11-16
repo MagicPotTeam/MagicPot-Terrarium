@@ -9688,7 +9688,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
             <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
           </Box>}
-          {teamEnabled && teamLead && <AgentTeamMenu hideTriggerWithoutHost openRequest={teamManagementOpenRequest} onReturnFocus={focusComposerInput} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
+          {teamEnabled && teamLead && <AgentTeamMenu openRequest={teamManagementOpenRequest} onReturnFocus={focusComposerInput} onAddMember={() => setCreatingTeamMember(true)} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
             const current = teamMessageDispatcherRef.current
             if (!current || current.key !== messageKey || !route?.threadId || !messageLeadId || !teamEnabled) throw new Error('Team channel unavailable.')
             // Avoid consuming the broadcast draft for a known-unavailable model setting.

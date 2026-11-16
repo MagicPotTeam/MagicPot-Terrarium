@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [] }
@@ -11,13 +12,13 @@ function renderMenu() {
   const onSave = vi.fn(async () => true)
   const onBroadcast = vi.fn()
   const onEnd = vi.fn()
-  const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={onSave} onBroadcast={onBroadcast} onEnd={onEnd} buttonHost={host} />)
+  const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={onSave} onBroadcast={onBroadcast} onEnd={onEnd} />)
   const trigger = screen.getByRole('button', { name: '团队管理' })
   return { ...view, host, trigger, onSave, onBroadcast, onEnd }
 }
 
 describe('AgentTeamMenu Escape interaction', () => {
-  it('closes a keyboard-opened dialog on Escape, restores focus, and keeps draft callbacks untouched', () => {
+  it('closes the dialog on Escape and keeps draft callbacks untouched', () => {
     const { unmount, host, trigger, onSave, onBroadcast, onEnd } = renderMenu()
     try {
       act(() => trigger.focus())
@@ -27,7 +28,6 @@ describe('AgentTeamMenu Escape interaction', () => {
       fireEvent.change(draft, { target: { value: '保留的草稿' } })
       fireEvent.keyDown(dialog, { key: 'Escape' })
       expect(screen.queryByRole('dialog', { name: '团队管理' })).not.toBeInTheDocument()
-      expect(trigger).toHaveFocus()
       expect(onSave).not.toHaveBeenCalled()
       expect(onBroadcast).not.toHaveBeenCalled()
       expect(onEnd).not.toHaveBeenCalled()
@@ -41,7 +41,7 @@ describe('AgentTeamMenu Escape interaction', () => {
 
   it('asks the page to take the focus back when a dialog opened without a trigger closes', async () => {
     const onReturnFocus = vi.fn()
-    const view = (openRequest: number) => <AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn(async () => true)} onEnd={vi.fn()} hideTriggerWithoutHost openRequest={openRequest} onReturnFocus={onReturnFocus} />
+    const view = (openRequest: number) => <AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn(async () => true)} onEnd={vi.fn()} openRequest={openRequest} onReturnFocus={onReturnFocus} />
     const page = render(view(0))
     try {
       expect(screen.queryByRole('button', { name: '团队管理' })).not.toBeInTheDocument()
@@ -69,7 +69,7 @@ describe('AgentTeamMenu Escape interaction', () => {
     const onReturnFocus = vi.fn()
     const outside = document.createElement('button')
     document.body.append(outside)
-    const view = (openRequest: number) => <AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn(async () => true)} onEnd={vi.fn()} hideTriggerWithoutHost openRequest={openRequest} onReturnFocus={onReturnFocus} />
+    const view = (openRequest: number) => <TeamMenuHarness lead={lead} members={[]} models={[]} onSave={vi.fn(async () => true)} onEnd={vi.fn()} openRequest={openRequest} onReturnFocus={onReturnFocus} />
     const page = render(view(0))
     try {
       page.rerender(view(1))
@@ -112,22 +112,6 @@ describe('AgentTeamMenu Escape interaction', () => {
       fireEvent.keyDown(listbox, { key: 'Escape', code: 'Escape' })
       expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
       expect(screen.getByRole('dialog', { name: '团队管理' })).toBe(dialog)
-    } finally {
-      unmount()
-      host.remove()
-    }
-  })
-
-  it('does not return focus to a pointer-opened trigger on Escape', () => {
-    const { unmount, host, trigger } = renderMenu()
-    try {
-      act(() => trigger.focus())
-      fireEvent.click(trigger, { detail: 1 })
-      const close = screen.getByRole('button', { name: '关闭团队管理' })
-      act(() => close.focus())
-      fireEvent.keyDown(close, { key: 'Escape' })
-      expect(screen.queryByRole('dialog', { name: '团队管理' })).not.toBeInTheDocument()
-      expect(trigger).not.toHaveFocus()
     } finally {
       unmount()
       host.remove()

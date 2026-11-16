@@ -16,7 +16,6 @@ export type ProcessEntry = {
 
 export type AgentProcessAreaProps = {
   entries: ProcessEntry[]
-  managementSlot?: ReactNode
   staticSlot?: ReactNode
   showStaticWhenEmpty?: boolean
   footerSlot?: ReactNode
@@ -66,7 +65,7 @@ function ProcessRow({ entry, position, duplicateName }: { entry: ProcessEntry; p
   )
 }
 
-export default function AgentProcessArea({ entries, managementSlot, staticSlot, showStaticWhenEmpty = false, footerSlot, children, defaultExpanded = true }: AgentProcessAreaProps) {
+export default function AgentProcessArea({ entries, staticSlot, showStaticWhenEmpty = false, footerSlot, children, defaultExpanded = true }: AgentProcessAreaProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
   const listId = useId()
   const running = entries.filter(entry => entry.status === 'running').length
@@ -88,9 +87,6 @@ export default function AgentProcessArea({ entries, managementSlot, staticSlot, 
         <Button type="button" aria-expanded={expanded} aria-controls={listId} onClick={() => setExpanded(value => !value)} sx={{ minWidth: 0, fontSize: 12, textTransform: 'none', color: 'text.secondary' }}>
           <Typography component="span" sx={{ fontSize: 'inherit' }}>进程 · {summary}</Typography>
         </Button>
-        <Box sx={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
-          {managementSlot}
-        </Box>
       </Box>
       {staticSlot}
       <Box id={listId} hidden={!expanded}>

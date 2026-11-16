@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import userEvent, { PointerEventsCheckLevel } from '@testing-library/user-event'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [] }
@@ -24,7 +24,7 @@ function props() {
 describe('team channel subscription group semantics', () => {
   it('associates the existing heading with the controlled checkboxes and preserves their id callbacks after reorder', () => {
     const input = props()
-    const view = render(<AgentTeamMenu {...input} />)
+    const view = render(<TeamMenuHarness {...input} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const group = screen.getByRole('group', { name: '成员频道订阅（本次会话）' })
@@ -36,7 +36,7 @@ describe('team channel subscription group semantics', () => {
       fireEvent.click(writerBox)
       fireEvent.click(designerBox)
       expect(input.onSubscriptionChange.mock.calls).toEqual([['writer-id', true], ['designer-id', false]])
-      view.rerender(<AgentTeamMenu {...input} members={[writer, designer]} subscriptions={['writer-id']} />)
+      view.rerender(<TeamMenuHarness {...input} members={[writer, designer]} subscriptions={['writer-id']} />)
       expect(within(group).getAllByRole('checkbox')).toEqual([writerBox, designerBox])
       expect(writerBox).toBeChecked()
       expect(designerBox).not.toBeChecked()
@@ -51,7 +51,7 @@ describe('team channel subscription group semantics', () => {
   it('keeps subscriptions disabled after the team ends and omits the group when the callback is absent', async () => {
     const input = props()
     const user = userEvent.setup({ pointerEventsCheck: PointerEventsCheckLevel.Never })
-    const view = render(<AgentTeamMenu {...input} lead={{ ...lead, teamEnded: true }} />)
+    const view = render(<TeamMenuHarness {...input} lead={{ ...lead, teamEnded: true }} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const group = screen.getByRole('group', { name: '成员频道订阅（本次会话）' })
@@ -60,7 +60,7 @@ describe('team channel subscription group semantics', () => {
         await user.click(checkbox)
       }
       expect(input.onSubscriptionChange).not.toHaveBeenCalled()
-      view.rerender(<AgentTeamMenu {...input} onSubscriptionChange={undefined} />)
+      view.rerender(<TeamMenuHarness {...input} onSubscriptionChange={undefined} />)
       expect(screen.queryByRole('group', { name: '成员频道订阅（本次会话）' })).not.toBeInTheDocument()
       expect(input.onSave).not.toHaveBeenCalled()
       expect(input.onBroadcast).not.toHaveBeenCalled()

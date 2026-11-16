@@ -25,9 +25,10 @@ describe('conversation process area structure', () => {
     expect(names).not.toContain('AgentThreadJobsPanel')
     expect(names).not.toContain('AgentThreadProcessesPanel')
     // Team management has no trigger of its own; the composer "+" menu opens it and the member form.
+    // The process area lists no members: they are rows of the thread list.
     expect(source).not.toContain('buttonHost=')
     expect(source).not.toContain('managementSlot=')
-    expect(source).toContain('hideTriggerWithoutHost')
+    expect(source).not.toContain('hideTriggerWithoutHost')
     expect(source).toContain('key="team-management"')
     expect(source).toContain('key="team-add-member"')
     expect(source).toContain('setCreatingTeamMember(true)')

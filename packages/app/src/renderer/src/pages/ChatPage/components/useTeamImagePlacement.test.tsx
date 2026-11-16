@@ -1,6 +1,6 @@
 import { StrictMode, useLayoutEffect } from 'react'
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
-import AgentTeamTree from './AgentTeamTree'
+import { AgentTeamMemberForm, AgentTeamMemberImages } from './AgentTeamTree'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatSession } from '../chatStorage'
 import { useTeamImagePlacement } from './useTeamImagePlacement'
@@ -9,6 +9,18 @@ const dispatch = vi.hoisted(() => vi.fn())
 vi.mock('../../ProjectCanvasPage/canvasTargetMediaDispatch', () => ({ dispatchCanvasTargetMediaAttachmentToCanvas: dispatch }))
 const image = { type: 'image' as const, url: 'data:image/png;base64,AA==' }
 const member = (attachments = [image]): ChatSession => ({ id: 'member', title: 'Fixture', createdAt: 1, messages: [{ role: 'assistant', content: '', attachments }] })
+
+// As the page mounts them: one placement observer for the team, its image buttons and the member form.
+function TeamImages({ projectId, lead, members, creating = false, onCreate = vi.fn() }: {
+  projectId: string; lead: ChatSession; members: ChatSession[]; creating?: boolean
+  onCreate?: (name: string, role: string, committed: (id: string) => void) => Promise<void>
+}) {
+  const placement = useTeamImagePlacement(projectId, members)
+  return <>
+    {members.map(person => <AgentTeamMemberImages key={person.id} member={person} placeImage={placement.place} />)}
+    <AgentTeamMemberForm lead={lead} members={members} creating={creating} onClose={() => undefined} onCreate={onCreate} placement={placement} />
+  </>
+}
 
 describe('team image placement', () => {
   beforeEach(() => { dispatch.mockReset(); dispatch.mockResolvedValue({ dispatched: true, placedCanvasItems: [] }) })
@@ -90,11 +102,9 @@ describe('team image placement', () => {
   })
 
   it('uses the clicked historical slot for the label while retaining URL deduplication', async () => {
-    const host = document.createElement('div')
-    document.body.appendChild(host)
     const lead: ChatSession = { id: 'lead', title: 'Lead', createdAt: 1, messages: [] }
     const person = { ...member([image, image]), teamMemberName: '设计师' }
-    const view = render(<AgentTeamTree projectId="project" activityHost={host} lead={lead} currentId="lead" members={[person]} running={new Set()} waiting={new Set()} onSelect={vi.fn()} onCreate={vi.fn()} onStop={vi.fn()} />)
+    const view = render(<TeamImages projectId="project" lead={lead} members={[person]} />)
     fireEvent.click(screen.getByText('投放 设计师·图2'))
     await waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1))
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining(image), 'project', 'member', { teamImageLabel: '设计师·图2' })
@@ -102,7 +112,6 @@ describe('team image placement', () => {
     fireEvent.click(screen.getByText('投放 设计师·图1'))
     expect(dispatch).toHaveBeenCalledTimes(1)
     view.unmount()
-    host.remove()
   })
 
   it('does not redispatch a pending image when autosave rewrites its URL, but places a new image', async () => {
@@ -188,14 +197,13 @@ describe('team image placement', () => {
   it('passes the creation callback through the tree before the first member snapshot', async () => {
     const lead: ChatSession = { id: 'lead', title: 'Lead', createdAt: 1, messages: [] }
     const onCreate = vi.fn(async (_name: string, _role: string, committed: (id: string) => void) => { committed('member') })
-    const props = { projectId: 'project', activityHost: null, lead, currentId: 'lead', running: new Set<string>(), waiting: new Set<string>(), onSelect: vi.fn(), onCreate, onStop: vi.fn() }
-    const view = render(<AgentTeamTree {...props} members={[]} />)
-    fireEvent.click(screen.getByRole('button', { name: '组建团队 / 添加成员' }))
+    const props = { projectId: 'project', lead, creating: true, onCreate }
+    const view = render(<TeamImages {...props} members={[]} />)
     fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'creator' } })
     fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'design' } })
     fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
     expect(onCreate).toHaveBeenCalledTimes(1)
-    view.rerender(<AgentTeamTree {...props} members={[member()]} />)
+    view.rerender(<TeamImages {...props} members={[member()]} />)
     await waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1))
   })
   it('does not reuse registration after project switch or remount, including a late callback', () => {

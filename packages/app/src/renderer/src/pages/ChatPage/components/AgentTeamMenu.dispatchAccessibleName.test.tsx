@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 describe('team task dispatch accessible names', () => {
@@ -15,7 +15,7 @@ describe('team task dispatch accessible names', () => {
     const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [], teamTasks: tasks }
     const onDispatch = vi.fn(), onSave = vi.fn(), onEnd = vi.fn(), onBroadcast = vi.fn()
     const props = { lead, members: [member], models: [], onDispatch, onSave, onEnd, onBroadcast }
-    const view = render(<AgentTeamMenu {...props} />)
+    const view = render(<TeamMenuHarness {...props} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const first = screen.getByRole('button', { name: '执行 同名（当前列表第 1 项，位置随列表变化）' })
@@ -27,7 +27,7 @@ describe('team task dispatch accessible names', () => {
       expect(onDispatch).not.toHaveBeenCalled()
       fireEvent.click(first); fireEvent.click(second)
       expect(onDispatch.mock.calls).toEqual([['a'], ['b']])
-      view.rerender(<AgentTeamMenu {...props} lead={{ ...lead, teamTasks: [tasks[1], tasks[0], ...tasks.slice(2)] }} />)
+      view.rerender(<TeamMenuHarness {...props} lead={{ ...lead, teamTasks: [tasks[1], tasks[0], ...tasks.slice(2)] }} />)
       fireEvent.click(screen.getByRole('button', { name: '执行 同名（当前列表第 1 项，位置随列表变化）' }))
       fireEvent.click(screen.getByRole('button', { name: '执行 同名（当前列表第 2 项，位置随列表变化）' }))
       expect(onDispatch.mock.calls).toEqual([['a'], ['b'], ['b'], ['a']])
@@ -43,7 +43,7 @@ describe('team task dispatch accessible names', () => {
       { id: 'c', title: '同名（当前列表第 1 项，位置随列表变化）', ownerId: 'member', status: 'pending', dependsOn: [] }
     ] }
     const onDispatch = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn()} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn()} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       fireEvent.click(screen.getByRole('button', { name: '当前列表第 1 项（位置随列表变化），执行：同名' }))
@@ -58,7 +58,7 @@ describe('team task dispatch accessible names', () => {
     const titles = ['A', 'A', 'A（当前列表第 1 项，位置随列表变化）', 'A（当前列表第 1 项，位置随列表变化）']
     const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [], teamTasks: titles.map((title, i) => ({ id: `t${i}`, title, ownerId: 'member', status: 'pending', dependsOn: [] })) }
     const onDispatch = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn()} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn()} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       for (let i = 0; i < titles.length; i++) {
@@ -76,7 +76,7 @@ describe('team task dispatch accessible names', () => {
       { id: 'b', title, ownerId: 'member', status: 'pending', dependsOn: [] }
     ] }
     const onDispatch = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn()} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn()} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       for (const [i, id] of ['a', 'b'].entries()) {
@@ -93,7 +93,7 @@ describe('team task dispatch accessible names', () => {
       { id: 'a', title: 7 as unknown as string, ownerId: '', status: 'pending', dependsOn: [] }
     ] }
     const onDispatch = vi.fn(), onSave = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onDispatch={onDispatch} onSave={onSave} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onDispatch={onDispatch} onSave={onSave} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       expect(screen.getByText('任务依赖无效')).toBeVisible()
@@ -109,7 +109,7 @@ describe('team task dispatch accessible names', () => {
       { id: 'b', title: '检查 项目', ownerId: 'member', status: 'pending', dependsOn: [] }
     ] }
     const onDispatch = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn()} onEnd={vi.fn()} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[member]} models={[]} onDispatch={onDispatch} onSave={vi.fn()} onEnd={vi.fn()} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       fireEvent.click(screen.getByRole('button', { name: '执行 检查 项目（当前列表第 1 项，位置随列表变化）' }))

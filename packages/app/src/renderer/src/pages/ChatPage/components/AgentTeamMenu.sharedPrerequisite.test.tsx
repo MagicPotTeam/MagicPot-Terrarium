@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 describe('shared prerequisite dependency edits', () => {
@@ -23,7 +23,7 @@ describe('shared prerequisite dependency edits', () => {
       let view: ReturnType<typeof render> | undefined
       try {
         Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: fetchGuard })
-        view = render(<AgentTeamMenu {...props} />)
+        view = render(<TeamMenuHarness {...props} />)
         fireEvent.click(screen.getByRole('button', { name: '团队管理' }), { detail: 1 })
         const reopen = () => within(screen.getByText(/前置A ·/).parentElement!).getByRole('button', { name: '当前列表第 1 项（位置随列表变化），重开：前置A' })
         expect(reopen()).toBeDisabled()
@@ -41,7 +41,7 @@ describe('shared prerequisite dependency edits', () => {
         fireEvent.click(reopen())
         expect(onSave).toHaveBeenCalledTimes(1)
         await act(async () => { resolveSave(true); await pendingSave })
-        view.rerender(<AgentTeamMenu {...props} lead={editedLead} />)
+        view.rerender(<TeamMenuHarness {...props} lead={editedLead} />)
         await waitFor(() => expect(screen.getByRole('checkbox', { name: '后继B 依赖 前置A' })).toBeEnabled())
         expect(screen.getByRole('checkbox', { name: '后继B 依赖 前置A' })).not.toBeChecked()
         if (status === 'pending') {

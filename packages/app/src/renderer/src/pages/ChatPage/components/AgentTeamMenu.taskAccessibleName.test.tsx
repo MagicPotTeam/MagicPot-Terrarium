@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 describe('team task accessible action names', () => {
@@ -21,7 +21,7 @@ describe('team task accessible action names', () => {
     try {
       for (const key of keys) Object.defineProperty(globalThis, key, { configurable: true, get: () => { throw Error(`Unexpected ${key}`) } })
       Object.defineProperty(window, 'api', { configurable: true, get: () => { throw Error('Unexpected IPC') } })
-      view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={onEnd} onBroadcast={onBroadcast} />)
+      view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={onEnd} onBroadcast={onBroadcast} />)
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const first = screen.getByRole('button', { name: '当前列表第 1 项（位置随列表变化），完成：同名' })
       const second = screen.getByRole('button', { name: '当前列表第 2 项（位置随列表变化），重开：同名' })
@@ -44,7 +44,7 @@ describe('team task accessible action names', () => {
       await waitFor(() => expect(onSave).toHaveBeenCalledTimes(3))
       expect(onSave.mock.calls[2][0].teamTasks).toEqual(tasks.map(task => task.id === 'c' ? { ...task, status: 'done' } : task))
       await waitFor(() => expect(first).toBeEnabled())
-      view.rerender(<AgentTeamMenu lead={{ ...lead, teamTasks: [tasks[1], tasks[0], ...tasks.slice(2)] }} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={onEnd} onBroadcast={onBroadcast} />)
+      view.rerender(<TeamMenuHarness lead={{ ...lead, teamTasks: [tasks[1], tasks[0], ...tasks.slice(2)] }} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={onEnd} onBroadcast={onBroadcast} />)
       expect(screen.getByRole('button', { name: '当前列表第 1 项（位置随列表变化），重开：同名' })).toBeEnabled()
       expect(within(screen.getByRole('dialog', { name: '团队管理' })).getByRole('button', { name: '当前列表第 2 项（位置随列表变化），完成：同名' })).toBeEnabled()
       const reordered = screen.getByRole('button', { name: '当前列表第 2 项（位置随列表变化），完成：同名' })
@@ -55,7 +55,7 @@ describe('team task accessible action names', () => {
       await waitFor(() => expect(reordered).toBeEnabled())
       // The fake onSave does not update props: each click starts from this explicit fixture.
       const sameStatusTasks = [{ ...tasks[1], status: 'pending' as const }, tasks[0], ...tasks.slice(2)]
-      view.rerender(<AgentTeamMenu lead={{ ...lead, teamTasks: sameStatusTasks }} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={onEnd} onBroadcast={onBroadcast} />)
+      view.rerender(<TeamMenuHarness lead={{ ...lead, teamTasks: sameStatusTasks }} members={[]} models={[]} onSave={onSave} onDispatch={onDispatch} onEnd={onEnd} onBroadcast={onBroadcast} />)
       const sameFirst = screen.getByRole('button', { name: '当前列表第 1 项（位置随列表变化），完成：同名' })
       const sameSecond = screen.getByRole('button', { name: '当前列表第 2 项（位置随列表变化），完成：同名' })
       fireEvent.click(sameFirst)

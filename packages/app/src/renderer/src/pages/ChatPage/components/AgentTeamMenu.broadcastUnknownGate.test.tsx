@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [] }
@@ -11,7 +11,7 @@ describe('broadcast unknown gate', () => {
   it.each(['reject', 'invalid'] as const)('holds %s until explicit acknowledgement without sending', async mode => {
     const onBroadcast = vi.fn().mockImplementationOnce(mode === 'reject' ? async () => { throw Error('unknown') } : async () => ({ queued: -1 })).mockResolvedValue({ queued: 1 })
     const onSave = vi.fn()
-    const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={onSave} onEnd={vi.fn()} onBroadcast={onBroadcast} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={onSave} onEnd={vi.fn()} onBroadcast={onBroadcast} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       const input = screen.getByLabelText('频道消息')
@@ -41,7 +41,7 @@ describe('broadcast unknown gate', () => {
 
   it.each([0, 1])('does not gate a known queued count %s', async queued => {
     const onBroadcast = vi.fn().mockResolvedValue({ queued })
-    const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn()} onEnd={vi.fn()} onBroadcast={onBroadcast} />)
+    const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={vi.fn()} onEnd={vi.fn()} onBroadcast={onBroadcast} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       fireEvent.change(screen.getByLabelText('频道消息'), { target: { value: '内容' } })

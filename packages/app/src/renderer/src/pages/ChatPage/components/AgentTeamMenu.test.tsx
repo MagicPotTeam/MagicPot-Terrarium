@@ -1,6 +1,7 @@
 import {act,render,screen,fireEvent,waitFor,within} from '@testing-library/react'
 import {describe,it,expect,vi} from 'vitest'
 import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type {ChatSession} from '../chatStorage'
 const deferred = () => {
  let resolve!: (value:boolean)=>void, reject!: (reason?:unknown)=>void
@@ -8,72 +9,19 @@ const deferred = () => {
  return {promise,resolve,reject}
 }
 describe('team menu summaries',()=>{
- it('closes the keyboard-opened team dialog on Escape and restores focus to the trigger',()=>{
-  const host=document.createElement('div');document.body.append(host)
-  const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onSave=vi.fn(),onEnd=vi.fn()
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={onSave} onEnd={onEnd} buttonHost={host}/>)
+ it('does not hand the focus back to the page when add member or End closes nothing',()=>{
+  const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onEnd=vi.fn(),onAddMember=vi.fn(),onReturnFocus=vi.fn()
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={vi.fn()} onEnd={onEnd} onAddMember={onAddMember} onReturnFocus={onReturnFocus}/>)
   try{
-   const trigger=screen.getByRole('button',{name:'团队管理'});act(()=>trigger.focus());fireEvent.click(trigger,{detail:0})
-   const close=screen.getByRole('button',{name:'关闭团队管理'});expect(close).toHaveFocus()
-   fireEvent.keyDown(close,{key:'Escape',code:'Escape'})
-   expect(screen.queryByRole('dialog',{name:'团队管理'})).not.toBeInTheDocument()
-   expect(trigger).toHaveFocus();expect(onSave).not.toHaveBeenCalled();expect(onEnd).not.toHaveBeenCalled()
-  }finally{view.unmount();host.remove()}
- })
- it('moves focus for detail-zero trigger activation and restores only on explicit close while focused',()=>{
-  const host=document.createElement('div');document.body.append(host)
-  const lead:ChatSession={id:'lead',title:'Lead',messages:[]}
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn()} onEnd={vi.fn()} buttonHost={host}/>)
-  try{
-   const trigger=screen.getByRole('button',{name:'团队管理'});act(()=>trigger.focus())
-   fireEvent.click(trigger,{detail:0})
-   const close=screen.getByRole('button',{name:'关闭团队管理'})
-   expect(close).toHaveFocus()
-   fireEvent.click(close,{detail:0});expect(trigger).toHaveFocus()
-   fireEvent.click(trigger,{detail:0});expect(screen.getByRole('button',{name:'关闭团队管理'})).toHaveFocus()
-   const outside=document.createElement('button');document.body.append(outside);act(()=>outside.focus())
-   fireEvent.click(screen.getByRole('button',{name:'关闭团队管理'}));expect(outside).toHaveFocus();outside.remove()
-  }finally{view.unmount();host.remove()}
- })
- it('does not move or restore focus for pointer activation or detached triggers',()=>{
-  const host=document.createElement('div');document.body.append(host)
-  const lead:ChatSession={id:'lead',title:'Lead',messages:[]}
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn()} onEnd={vi.fn()} buttonHost={host}/>)
-  try{
-   const trigger=screen.getByRole('button',{name:'团队管理'});act(()=>trigger.focus())
-   fireEvent.click(trigger,{detail:1});expect(trigger).toHaveFocus()
-   const close=screen.getByRole('button',{name:'关闭团队管理'});act(()=>close.focus());fireEvent.click(close);expect(trigger).not.toHaveFocus()
-   act(()=>trigger.focus());fireEvent.click(trigger,{detail:0});expect(screen.getByRole('button',{name:'关闭团队管理'})).toHaveFocus()
-   host.remove();fireEvent.click(screen.getByRole('button',{name:'关闭团队管理'}));expect(trigger).not.toHaveFocus()
-  }finally{view.unmount();host.remove()}
- })
- it('does not restore to a hidden origin or navigate focus on add and End',()=>{
-  const host=document.createElement('div');document.body.append(host)
-  const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onEnd=vi.fn(),onAddMember=vi.fn()
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn()} onEnd={onEnd} onAddMember={onAddMember} buttonHost={host}/>)
-  try{
-   const trigger=screen.getByRole('button',{name:'团队管理'});act(()=>trigger.focus());fireEvent.click(trigger,{detail:0})
-   host.hidden=true;fireEvent.click(screen.getByRole('button',{name:'关闭团队管理'}));expect(trigger).not.toHaveFocus();host.hidden=false
-   act(()=>trigger.focus());fireEvent.click(trigger,{detail:0});fireEvent.click(screen.getByRole('button',{name:'结束团队'}));expect(onEnd).toHaveBeenCalledOnce();expect(trigger).not.toHaveFocus()
-   fireEvent.click(screen.getByRole('button',{name:'组建团队 / 添加成员'}));expect(onAddMember).toHaveBeenCalledOnce();expect(trigger).not.toHaveFocus()
-  }finally{view.unmount();host.remove()}
- })
- it('does not restore focus to a trigger hidden by a transparent ancestor',()=>{
-  const host=document.createElement('div');document.body.append(host)
-  const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onSave=vi.fn(),onEnd=vi.fn()
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={onSave} onEnd={onEnd} buttonHost={host}/>)
-  try{
-   const trigger=screen.getByRole('button',{name:'团队管理'});act(()=>trigger.focus());fireEvent.click(trigger,{detail:0})
-   const close=screen.getByRole('button',{name:'关闭团队管理'});expect(close).toHaveFocus()
-   host.style.opacity='0'
-   fireEvent.click(close,{detail:0})
-   expect(trigger).not.toHaveFocus()
-   expect(onSave).not.toHaveBeenCalled();expect(onEnd).not.toHaveBeenCalled()
-  }finally{view.unmount();host.remove()}
+   fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
+   fireEvent.click(screen.getByRole('button',{name:'结束团队'}));expect(onEnd).toHaveBeenCalledOnce()
+   fireEvent.click(screen.getByRole('button',{name:'组建团队 / 添加成员'}));expect(onAddMember).toHaveBeenCalledOnce()
+   expect(onReturnFocus).not.toHaveBeenCalled()
+  }finally{view.unmount()}
  })
  it('opens from an explicit zero-member request without adding a top trigger or reopening after close',async()=>{
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],teamSettings:{maxMembers:6,defaultModel:null,autoCleanup:false}}
-  const props={lead,members:[] as ChatSession[],models:[],onSave:vi.fn(),onEnd:vi.fn(),hideTriggerWithoutHost:true}
+  const props={lead,members:[] as ChatSession[],models:[],onSave:vi.fn(),onEnd:vi.fn()}
   const view=render(<AgentTeamMenu {...props} openRequest={0}/>)
   try {
    expect(screen.queryByRole('button',{name:'团队管理'})).not.toBeInTheDocument()
@@ -91,7 +39,7 @@ describe('team menu summaries',()=>{
  })
  it('warns that a channel draft should be copied before ending, without blocking or sending it',()=>{
   const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onSave=vi.fn(),onEnd=vi.fn(),onBroadcast=vi.fn()
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onSave={onSave} onEnd={onEnd} onBroadcast={onBroadcast}/> )
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={onSave} onEnd={onEnd} onBroadcast={onBroadcast}/> )
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const end=screen.getByRole('button',{name:'结束团队'}),draft=screen.getByLabelText('频道消息')
@@ -109,16 +57,16 @@ describe('team menu summaries',()=>{
  it('shows current member capacity and empty states only while applicable',()=>{
   const onSave=vi.fn(), onEnd=vi.fn(), lead:ChatSession={id:'lead',title:'Lead',messages:[]}
   const props={lead,members:[] as ChatSession[],models:[],onSave,onEnd}
-  const view=render(<AgentTeamMenu {...props}/>)
+  const view=render(<TeamMenuHarness {...props}/>)
   try {
    expect(screen.queryByText('暂无共享任务')).not.toBeInTheDocument()
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.getByText('成员总数 0 · 上限 6')).toBeVisible()
    expect(screen.getByText('暂无共享任务')).toBeVisible();expect(screen.getByText('暂无频道记录')).toBeVisible()
-   view.rerender(<AgentTeamMenu {...props} members={[{id:'m',title:'Member',messages:[],teamLeadId:'lead'}]} lead={{...lead,teamSettings:{maxMembers:3,defaultModel:null,autoCleanup:false},teamTasks:[{id:'t',title:'Task',ownerId:'',status:'pending',dependsOn:[]}],teamChannel:[{id:'c',senderId:'user',text:'Hello',createdAt:1}]}} />)
+   view.rerender(<TeamMenuHarness {...props} members={[{id:'m',title:'Member',messages:[],teamLeadId:'lead'}]} lead={{...lead,teamSettings:{maxMembers:3,defaultModel:null,autoCleanup:false},teamTasks:[{id:'t',title:'Task',ownerId:'',status:'pending',dependsOn:[]}],teamChannel:[{id:'c',senderId:'user',text:'Hello',createdAt:1}]}} />)
    expect(screen.getByText('成员总数 1 · 上限 3')).toBeVisible()
    expect(screen.queryByText('暂无共享任务')).not.toBeInTheDocument();expect(screen.queryByText('暂无频道记录')).not.toBeInTheDocument()
-   view.rerender(<AgentTeamMenu {...props} lead={{...lead,teamSettings:{maxMembers:7,defaultModel:null,autoCleanup:false},teamTasks:[{id:'t',title:'Task',ownerId:'',status:'pending',dependsOn:['missing']}]}} />)
+   view.rerender(<TeamMenuHarness {...props} lead={{...lead,teamSettings:{maxMembers:7,defaultModel:null,autoCleanup:false},teamTasks:[{id:'t',title:'Task',ownerId:'',status:'pending',dependsOn:['missing']}]}} />)
    expect(screen.getByText('成员总数 0 · 上限 设置无效')).toBeVisible()
    expect(screen.getByText('任务依赖无效')).toBeVisible();expect(screen.queryByText('暂无共享任务')).not.toBeInTheDocument()
    expect(screen.getByText('暂无频道记录')).toBeVisible()
@@ -129,11 +77,11 @@ describe('team menu summaries',()=>{
   const records=Object.freeze(Array.from({length:52},(_,index)=>Object.freeze({id:`record-${index}`,senderId:'user',text:`独立记录${index}`,createdAt:index})))
   const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onSave=vi.fn(),onBroadcast=vi.fn(),onEnd=vi.fn()
   const props={lead,members:[] as ChatSession[],models:[],onSave,onBroadcast,onEnd}
-  const view=render(<AgentTeamMenu {...props} lead={{...lead,teamChannel:records.slice(0,50)}}/>)
+  const view=render(<TeamMenuHarness {...props} lead={{...lead,teamChannel:records.slice(0,50)}}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.queryByText('此处仅显示最近 50 条频道记录。')).not.toBeInTheDocument()
-   view.rerender(<AgentTeamMenu {...props} lead={{...lead,teamChannel:records.slice()}}/>)
+   view.rerender(<TeamMenuHarness {...props} lead={{...lead,teamChannel:records.slice()}}/>)
    expect(screen.getByText('此处仅显示最近 50 条频道记录。')).toBeVisible()
    expect(screen.queryByText('用户 · 独立记录0')).not.toBeInTheDocument()
    expect(screen.queryByText('用户 · 独立记录1')).not.toBeInTheDocument()
@@ -142,7 +90,7 @@ describe('team menu summaries',()=>{
    expect(records).toHaveLength(52)
    expect(records.map(item=>item.text)).toEqual(Array.from({length:52},(_,index)=>`独立记录${index}`))
    expect(onSave).not.toHaveBeenCalled();expect(onBroadcast).not.toHaveBeenCalled();expect(onEnd).not.toHaveBeenCalled()
-   view.rerender(<AgentTeamMenu {...props} lead={{...lead,teamChannel:records.slice(0,50)}}/>)
+   view.rerender(<TeamMenuHarness {...props} lead={{...lead,teamChannel:records.slice(0,50)}}/>)
    expect(screen.queryByText('此处仅显示最近 50 条频道记录。')).not.toBeInTheDocument()
   }finally{view.unmount()}
  })
@@ -150,16 +98,16 @@ describe('team menu summaries',()=>{
   const records=Object.freeze(Array.from({length:201},(_,index)=>Object.freeze({id:`record-limit-${index}`,senderId:'user',text:`记录${index}`,createdAt:index})))
   const lead:ChatSession={id:'lead',title:'Lead',messages:[]},onSave=vi.fn(async(_value:ChatSession)=>true),onBroadcast=vi.fn(),onEnd=vi.fn()
   const props={lead,members:[] as ChatSession[],models:[],onSave,onBroadcast,onEnd}
-  const view=render(<AgentTeamMenu {...props} lead={{...lead,teamChannel:records.slice(0,199)}}/>)
+  const view=render(<TeamMenuHarness {...props} lead={{...lead,teamChannel:records.slice(0,199)}}/>)
   const warning='根据当前记录，添加新记录时只提交最后 199 条旧记录和新记录，较早记录不会包含在此次保存内容中；请先另存重要记录。'
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.queryByText(warning)).not.toBeInTheDocument()
-   view.rerender(<AgentTeamMenu {...props} lead={{...lead,teamChannel:records.slice()}}/>)
+   view.rerender(<TeamMenuHarness {...props} lead={{...lead,teamChannel:records.slice()}}/>)
    const add=screen.getByRole('button',{name:'添加到频道记录'})
    expect(screen.getByText(warning)).toBeVisible()
    expect(add).toHaveAccessibleDescription(warning)
-   view.rerender(<AgentTeamMenu {...props} lead={{...lead,teamChannel:records.slice(0,200)}}/>)
+   view.rerender(<TeamMenuHarness {...props} lead={{...lead,teamChannel:records.slice(0,200)}}/>)
    expect(screen.getByText(warning)).toBeVisible()
    expect(onSave).not.toHaveBeenCalled();expect(onBroadcast).not.toHaveBeenCalled()
    fireEvent.change(screen.getByLabelText('频道消息'),{target:{value:'新记录'}})
@@ -176,11 +124,11 @@ describe('team menu summaries',()=>{
  it('labels an optimistic setting unconfirmed until the save resolves',async()=>{
   const pending=deferred(),lead:ChatSession={id:'lead',title:'Lead',messages:[]}
   const props={lead,members:[],models:[],onEnd:vi.fn(),onSave:vi.fn(()=>pending.promise)}
-  const view=render(<AgentTeamMenu {...props}/>)
+  const view=render(<TeamMenuHarness {...props}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    fireEvent.change(screen.getByLabelText('最大成员数'),{target:{value:'3'}})
-   view.rerender(<AgentTeamMenu {...props} lead={{...lead,teamSettings:{maxMembers:3,defaultModel:null,autoCleanup:false}}}/>)
+   view.rerender(<TeamMenuHarness {...props} lead={{...lead,teamSettings:{maxMembers:3,defaultModel:null,autoCleanup:false}}}/>)
    expect(screen.getByText('成员总数 0 · 上限 3（待确认）')).toBeVisible()
    await act(async()=>pending.resolve(false))
    expect(screen.getByText('成员总数 0 · 上限 3（待确认）')).toBeVisible()
@@ -192,7 +140,7 @@ describe('user channel broadcast', () => {
  const lead:ChatSession={id:'lead',title:'Lead',messages:[]}
  it.each([0,2])('reports %i queued without saving the record',async queued=>{
   const onSave=vi.fn(),onBroadcast=vi.fn(async(_input:{id:string;text:string})=>({queued}))
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast}/>)
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast}/>)
   try {
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const input=screen.getByLabelText('频道消息')
@@ -207,7 +155,7 @@ describe('user channel broadcast', () => {
  })
  it('does not invoke a scheduled broadcast after unmount',async()=>{
   const onBroadcast=vi.fn(async()=>({queued:1}))
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={vi.fn()} onBroadcast={onBroadcast}/>)
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={vi.fn()} onBroadcast={onBroadcast}/>)
   fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
   fireEvent.change(screen.getByLabelText('频道消息'),{target:{value:'hello'}})
   fireEvent.click(screen.getByRole('button',{name:'广播给订阅成员'}))
@@ -219,7 +167,7 @@ describe('user channel broadcast', () => {
   let reject!:(error:Error)=>void
   const onBroadcast=vi.fn(()=>new Promise<{queued:number}>((_resolve,rej)=>{reject=rej}))
   const onSave=vi.fn()
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast}/>)
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast}/>)
   try {
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const input=screen.getByLabelText('频道消息'),button=screen.getByRole('button',{name:'广播给订阅成员'})
@@ -233,7 +181,7 @@ describe('user channel broadcast', () => {
  })
  it.each([undefined, null, {}, {queued:-1}, {queued:1.5}, {queued:'1'}, {queued:false}, {queued:null}, {queued:'0'}, {queued:NaN}, {queued:Infinity}, {queued:Number.MAX_SAFE_INTEGER + 1}])('retains the broadcast draft and reports unknown for invalid results %#',async result=>{
   const onSave=vi.fn(),onBroadcast=vi.fn(async()=>result)
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast as unknown as (input:{id:string;text:string})=>Promise<{queued:number}>}/>)
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast as unknown as (input:{id:string;text:string})=>Promise<{queued:number}>}/>)
   try {
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const input=screen.getByLabelText('频道消息')
@@ -244,7 +192,7 @@ describe('user channel broadcast', () => {
  })
  it.each([0,Number.MAX_SAFE_INTEGER])('handles a synchronous result %s without saving the record',async queued=>{
   const onSave=vi.fn(),onBroadcast=vi.fn(()=>({queued}))
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast}/>)
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast}/>)
   try {
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const input=screen.getByLabelText('频道消息')
@@ -255,7 +203,7 @@ describe('user channel broadcast', () => {
  })
  it('retains the draft and reports unknown when the broadcast callback throws synchronously',async()=>{
   const onSave=vi.fn(),onBroadcast=vi.fn(()=>{throw Error('unknown side effect')})
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast}/>)
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onBroadcast={onBroadcast}/>)
   try {
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const input=screen.getByLabelText('频道消息')
@@ -273,7 +221,7 @@ describe('reopen dependency explanation', () => {
  ] })
  it.each(['running', 'done'] as const)('explains blocked reopen when successor is %s', status => {
   const onSave = vi.fn(async (_value: ChatSession) => true), onDispatch = vi.fn()
-  const view = render(<AgentTeamMenu lead={makeLead(status)} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
+  const view = render(<TeamMenuHarness lead={makeLead(status)} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    const row = screen.getByText(/前置 ·/).parentElement!
@@ -289,7 +237,7 @@ describe('reopen dependency explanation', () => {
  })
  it('allows reopening when the successor is pending', async () => {
   const lead = makeLead('pending'), onSave = vi.fn(async (_value: ChatSession) => true), onDispatch = vi.fn()
-  const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
+  const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    const button = within(screen.getByText(/前置 ·/).parentElement!).getByRole('button', { name: '当前列表第 1 项（位置随列表变化），重开：前置' })
@@ -302,7 +250,7 @@ describe('reopen dependency explanation', () => {
  })
  it('does not attribute a pending save lock to dependencies', async () => {
   const pending = deferred(), lead = makeLead('pending'), onSave = vi.fn(() => pending.promise), onDispatch = vi.fn()
-  const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
+  const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    fireEvent.change(screen.getByLabelText('最大成员数'), { target: { value: '3' } })
@@ -323,18 +271,18 @@ describe('running task result guidance', () => {
   const onSave = vi.fn(async (_value: ChatSession) => true), onDispatch = vi.fn()
   const props = { lead, members: [member], models: [], onEnd: vi.fn(), onSave, onDispatch }
   const text = '任务状态不等于执行结果，请查看对应会话确认。'
-  const view = render(<AgentTeamMenu {...props} />)
+  const view = render(<TeamMenuHarness {...props} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    expect(screen.queryByText(text)).not.toBeInTheDocument()
    fireEvent.click(screen.getByRole('button', { name: '执行 任务一' }))
    expect(onDispatch).toHaveBeenCalledExactlyOnceWith('task'); expect(onSave).not.toHaveBeenCalled()
-   view.rerender(<AgentTeamMenu {...props} lead={{ ...lead, teamTasks: [{ ...task, status: 'running' }] }} />)
+   view.rerender(<TeamMenuHarness {...props} lead={{ ...lead, teamTasks: [{ ...task, status: 'running' }] }} />)
    expect(screen.getByText(text)).toBeVisible()
    expect(screen.getByRole('button', { name: '执行 任务一' })).toBeDisabled()
    expect(onSave).not.toHaveBeenCalled(); expect(onDispatch).toHaveBeenCalledTimes(1)
    const doneLead: ChatSession = { ...lead, teamTasks: [{ ...task, status: 'done' }] }
-   view.rerender(<AgentTeamMenu {...props} lead={doneLead} />)
+   view.rerender(<TeamMenuHarness {...props} lead={doneLead} />)
    expect(screen.queryByText(text)).not.toBeInTheDocument()
    fireEvent.click(screen.getByRole('button', { name: '当前列表第 1 项（位置随列表变化），重开：任务一' }))
    await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
@@ -345,7 +293,7 @@ describe('running task result guidance', () => {
  it('uses the same neutral guidance for a running lead-owned task', () => {
   const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [], teamTasks: [{ id: 'task', title: '组长任务', ownerId: '', status: 'running', dependsOn: [] }] }
   const onSave = vi.fn(), onDispatch = vi.fn()
-  const view = render(<AgentTeamMenu lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
+  const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    expect(screen.getByText('任务状态不等于执行结果，请查看对应会话确认。')).toBeVisible()
@@ -365,14 +313,14 @@ describe('manual task dispatch prototype', () => {
  ] }
  it('dispatches the selected task id only after dependencies are done', () => {
   const onDispatch = vi.fn(), props = { lead, members: [member], models: [], onEnd: vi.fn(), onSave: vi.fn(), onDispatch }
-  const view = render(<AgentTeamMenu {...props} />)
+  const view = render(<TeamMenuHarness {...props} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    const blocked = screen.getByRole('button', { name: '执行 后续' })
    expect(blocked).toBeDisabled(); fireEvent.click(blocked); expect(onDispatch).not.toHaveBeenCalled()
    fireEvent.click(screen.getByRole('button', { name: '执行 前置' }))
    expect(onDispatch).toHaveBeenCalledExactlyOnceWith('a')
-   view.rerender(<AgentTeamMenu {...props} lead={{ ...lead, teamTasks: lead.teamTasks!.map(task => task.id === 'a' ? { ...task, status: 'done' } : task) }} />)
+   view.rerender(<TeamMenuHarness {...props} lead={{ ...lead, teamTasks: lead.teamTasks!.map(task => task.id === 'a' ? { ...task, status: 'done' } : task) }} />)
    fireEvent.click(screen.getByRole('button', { name: '执行 后续' }))
    expect(onDispatch).toHaveBeenLastCalledWith('b'); expect(onDispatch).toHaveBeenCalledTimes(2)
   } finally { view.unmount() }
@@ -386,7 +334,7 @@ describe('manual task dispatch prototype', () => {
   { name: 'running task', lead: { ...lead, teamTasks: lead.teamTasks!.map(task => task.id === 'a' ? { ...task, status: 'running' as const } : task) }, members: [member] }
  ])('does not dispatch for $name', ({ lead: testLead, members }) => {
   const onDispatch = vi.fn()
-  const view = render(<AgentTeamMenu lead={testLead} members={members} models={[]} onEnd={vi.fn()} onSave={vi.fn()} onDispatch={onDispatch} />)
+  const view = render(<TeamMenuHarness lead={testLead} members={members} models={[]} onEnd={vi.fn()} onSave={vi.fn()} onDispatch={onDispatch} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    const button = screen.getByRole('button', { name: '执行 前置' })
@@ -396,7 +344,7 @@ describe('manual task dispatch prototype', () => {
  it('explains that lead tasks cannot be dispatched and completion is only a status change', async () => {
   const task = { id: 'lead-task', title: '组长准备', ownerId: '', status: 'pending' as const, dependsOn: [] }
   const onDispatch = vi.fn(), onSave = vi.fn(async (_value: ChatSession) => true)
-  const view = render(<AgentTeamMenu lead={{ ...lead, teamTasks: [task] }} members={[member]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
+  const view = render(<TeamMenuHarness lead={{ ...lead, teamTasks: [task] }} members={[member]} models={[]} onEnd={vi.fn()} onSave={onSave} onDispatch={onDispatch} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    expect(screen.getByText('组长任务暂不支持执行')).toBeVisible()
@@ -409,7 +357,7 @@ describe('manual task dispatch prototype', () => {
   } finally { view.unmount() }
  })
  it('disables dispatch when callback is absent', () => {
-  const view = render(<AgentTeamMenu lead={lead} members={[member]} models={[]} onEnd={vi.fn()} onSave={vi.fn()} />)
+  const view = render(<TeamMenuHarness lead={lead} members={[member]} models={[]} onEnd={vi.fn()} onSave={vi.fn()} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    expect(screen.getByRole('button', { name: '执行 前置' })).toBeDisabled()
@@ -424,14 +372,14 @@ describe('draft save confirmation',()=>{
  it.each(drafts)('locks double submissions and clears $label only after confirmation',async({label,button})=>{
   const pending=deferred(),save=vi.fn((_value:ChatSession)=>pending.promise)
   const props={lead,members:[],models:[],onEnd:vi.fn(),onSave:save}
-  const view=render(<AgentTeamMenu {...props}/>)
+  const view=render(<TeamMenuHarness {...props}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const input=screen.getByLabelText(label),submit=screen.getByRole('button',{name:button})
    fireEvent.change(input,{target:{value:'待保存草稿'}})
    act(()=>{submit.click();submit.click()})
    expect(save).toHaveBeenCalledTimes(1)
-   view.rerender(<AgentTeamMenu {...props} lead={save.mock.calls[0][0]}/>)
+   view.rerender(<TeamMenuHarness {...props} lead={save.mock.calls[0][0]}/>)
    const marked=label==='任务'?'待保存草稿 · 未确认 · 组长 · 待处理 · 依赖 无':'未确认 · 用户 · 待保存草稿'
    const confirmed=label==='任务'?'待保存草稿 · 组长 · 待处理 · 依赖 无':'用户 · 待保存草稿'
    expect(screen.getByText(marked,{exact:true})).toBeVisible()
@@ -446,13 +394,13 @@ describe('draft save confirmation',()=>{
   const pending=deferred(),save=vi.fn((_value:ChatSession)=>pending.promise)
   const initial:ChatSession={...lead,teamTasks:[{id:'prior-task',title:'保留草稿',ownerId:'',status:'pending',dependsOn:[]}],teamChannel:[{id:'prior-message',senderId:'user',text:'保留草稿',createdAt:1}]}
   const props={lead:initial,members:[],models:[],onEnd:vi.fn(),onSave:save}
-  const view=render(<AgentTeamMenu {...props}/>)
+  const view=render(<TeamMenuHarness {...props}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const input=screen.getByLabelText(label),submit=screen.getByRole('button',{name:button})
    fireEvent.change(input,{target:{value:'保留草稿'}});fireEvent.click(submit)
    const candidate=save.mock.calls[0][0] as ChatSession
-   view.rerender(<AgentTeamMenu {...props} lead={candidate}/>)
+   view.rerender(<TeamMenuHarness {...props} lead={candidate}/>)
    await act(async()=>{if(outcome==='reject')pending.reject(new Error('unconfirmed'));else pending.resolve(false)})
    expect(input).toHaveValue('保留草稿');expect(input).toBeVisible();expect(input).toHaveAttribute('readonly');expect(input).toBeEnabled()
    const marked=label==='任务'?'保留草稿 · 未确认 · 组长 · 待处理 · 依赖 无':'未确认 · 用户 · 保留草稿'
@@ -466,7 +414,7 @@ describe('draft save confirmation',()=>{
  it.each(drafts)('locks task transitions, dependencies and settings while $label is saving then restores them',async({label,button})=>{
   const pending=deferred(),save=vi.fn(()=>pending.promise),onEnd=vi.fn()
   const taskLead:ChatSession={...lead,profileId:'base',teamTasks:[{id:'a',title:'Alpha',ownerId:'',status:'pending',dependsOn:[]},{id:'b',title:'Beta',ownerId:'',status:'pending',dependsOn:[]}]}
-  const view=render(<AgentTeamMenu lead={taskLead} members={[]} models={[{id:'base',name:'组长模型'}]} onEnd={onEnd} onSave={save}/>)
+  const view=render(<TeamMenuHarness lead={taskLead} members={[]} models={[{id:'base',name:'组长模型'}]} onEnd={onEnd} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    fireEvent.click(screen.getByText('编辑依赖 · Alpha'))
@@ -490,12 +438,12 @@ describe('draft save confirmation',()=>{
  it.each(drafts)('does not clear a new keyed scope $label when the old save resolves',async({label,button})=>{
   const pending=deferred(),save=vi.fn(()=>pending.promise)
   const props={lead,members:[],models:[],onEnd:vi.fn(),onSave:save}
-  const view=render(<AgentTeamMenu key="a" {...props}/>)
+  const view=render(<TeamMenuHarness key="a" {...props}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    fireEvent.change(screen.getByLabelText(label),{target:{value:'旧草稿'}})
    fireEvent.click(screen.getByRole('button',{name:button}))
-   view.rerender(<AgentTeamMenu key="b" {...props} lead={{...lead,id:'other'}}/>)
+   view.rerender(<TeamMenuHarness key="b" {...props} lead={{...lead,id:'other'}}/>)
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const input=screen.getByLabelText(label)
    fireEvent.change(input,{target:{value:'新草稿'}})
@@ -510,7 +458,7 @@ describe('unconfirmed safety regression',()=>{
  const lead:ChatSession={id:'lead',title:'Lead',messages:[],profileId:'base',teamTasks:[{id:'a',title:'Alpha',ownerId:'',status:'pending',dependsOn:[]},{id:'b',title:'Beta',ownerId:'',status:'pending',dependsOn:[]}]}
  it.each([{label:'任务',button:'添加任务'},{label:'频道消息',button:'添加到频道记录'}].flatMap(d=>['false','reject'].map(outcome=>({...d,outcome}))))('locks all writes after unconfirmed $label $outcome',async({label,button,outcome})=>{
   const pending=deferred(),save=vi.fn(()=>pending.promise),end=vi.fn()
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[{id:'base',name:'Base'}]} onEnd={end} onSave={save}/>)
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[{id:'base',name:'Base'}]} onEnd={end} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}));fireEvent.click(screen.getByText('编辑依赖 · Alpha'))
    const input=screen.getByLabelText(label) as HTMLInputElement
@@ -530,7 +478,7 @@ describe('unconfirmed safety regression',()=>{
  })
  it.each(['true','false','reject'])('serializes different setting saves and handles %s confirmation',async outcome=>{
   const pending=deferred(),save=vi.fn(()=>pending.promise)
-  const view=render(<AgentTeamMenu lead={lead} members={[]} models={[{id:'base',name:'Base'}]} onEnd={vi.fn()} onSave={save}/>)
+  const view=render(<TeamMenuHarness lead={lead} members={[]} models={[{id:'base',name:'Base'}]} onEnd={vi.fn()} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const count=screen.getByLabelText('最大成员数'),archive=screen.getByRole('checkbox',{name:'结束后归档成员'})
@@ -548,7 +496,7 @@ describe('unconfirmed safety regression',()=>{
 describe('compact team menu',()=>{
  it('starts collapsed and records task ownership without running a model',()=>{
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],createdAt:1},save=vi.fn(async()=>true)
-  const view=render(<AgentTeamMenu models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/> )
+  const view=render(<TeamMenuHarness models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/> )
   try{
    expect(screen.queryByLabelText('任务')).toBeNull()
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
@@ -562,20 +510,20 @@ describe('compact team menu',()=>{
   const former:ChatSession={id:'former',title:'Former',messages:[],teamMemberName:'原成员'}
   const replacement:ChatSession={id:'new',title:'New',messages:[],teamMemberName:'新人'}
   const props={models:[],onEnd:vi.fn(),lead,onSave:save}
-  const view=render(<AgentTeamMenu {...props} members={[former,replacement]}/>)
+  const view=render(<TeamMenuHarness {...props} members={[former,replacement]}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    fireEvent.change(screen.getByLabelText('任务'),{target:{value:'保留草稿'}})
    fireEvent.mouseDown(screen.getByRole('combobox',{name:'负责人'}))
    fireEvent.click(screen.getByRole('option',{name:'原成员'}))
    expect(screen.getByRole('button',{name:'添加任务'})).toBeEnabled()
-   view.rerender(<AgentTeamMenu {...props} members={[replacement]}/>)
+   view.rerender(<TeamMenuHarness {...props} members={[replacement]}/>)
    expect(screen.getByRole('combobox',{name:'负责人'})).toHaveTextContent('原成员（请选择）')
    expect(screen.getByRole('button',{name:'添加任务'})).toBeDisabled()
    fireEvent.click(screen.getByRole('button',{name:'添加任务'}))
    expect(save).not.toHaveBeenCalled()
    if(choice==='原成员') {
-    view.rerender(<AgentTeamMenu {...props} members={[former,replacement]}/>)
+    view.rerender(<TeamMenuHarness {...props} members={[former,replacement]}/>)
     expect(screen.getByRole('button',{name:'添加任务'})).toBeDisabled()
    }
    fireEvent.mouseDown(screen.getByRole('combobox',{name:'负责人'}))
@@ -587,7 +535,7 @@ describe('compact team menu',()=>{
  })
  it('shows removed owners without relabeling their tasks as the lead',()=>{
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],createdAt:1,teamTasks:[{id:'assigned',title:'Assigned',ownerId:'former-member',status:'pending',dependsOn:[]},{id:'lead-task',title:'Lead task',ownerId:'',status:'pending',dependsOn:[]}]}
-  const view=render(<AgentTeamMenu models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={vi.fn(async()=>true)}/>)
+  const view=render(<TeamMenuHarness models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={vi.fn(async()=>true)}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.getByText(/Assigned · 原成员/)).toBeVisible()
@@ -597,12 +545,12 @@ describe('compact team menu',()=>{
  it.each(['继承组长','组长模型'])('preserves an unavailable historical model until explicitly choosing %s',choice=>{
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],profileId:'base',teamSettings:{maxMembers:4,defaultModel:'deleted',autoCleanup:false}}
   const save=vi.fn(async()=>true), props={onEnd:vi.fn(),lead,members:[],onSave:save}
-  const view=render(<AgentTeamMenu {...props} models={[]}/>)
+  const view=render(<TeamMenuHarness {...props} models={[]}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.getByRole('combobox',{name:'成员默认模型'})).toHaveTextContent('原模型不可用')
    expect(save).not.toHaveBeenCalled()
-   view.rerender(<AgentTeamMenu {...props} models={[{id:'base',name:'组长模型'},{id:'other',name:'其他模型'}]}/>)
+   view.rerender(<TeamMenuHarness {...props} models={[{id:'base',name:'组长模型'},{id:'other',name:'其他模型'}]}/>)
    expect(screen.getByRole('combobox',{name:'成员默认模型'})).toHaveTextContent('原模型不可用')
    expect(save).not.toHaveBeenCalled()
    fireEvent.mouseDown(screen.getByRole('combobox',{name:'成员默认模型'}))
@@ -618,7 +566,7 @@ describe('compact team menu',()=>{
  it.each([{version:1,profileId:'other'}, {version:7,profileId:'future'}])('preserves an unhandled model selection when changing unrelated settings %#',async selection=>{
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],profileId:'base',teamSettings:{maxMembers:6,defaultModel:'old',autoCleanup:false,memberModelSelection:selection} as unknown as NonNullable<ChatSession['teamSettings']>}
   const save=vi.fn(async()=>true)
-  const view=render(<AgentTeamMenu models={[{id:'base',name:'组长模型'}]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
+  const view=render(<TeamMenuHarness models={[{id:'base',name:'组长模型'}]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.getByText('成员模型设置暂不可用')).toBeVisible()
@@ -635,7 +583,7 @@ describe('compact team menu',()=>{
  it('explains that the team default is inherited when no explicit member choice exists', () => {
   const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [], profileId: 'base' }
   const selected: ChatSession = { id: 'member', title: 'Member', messages: [], teamLeadId: 'lead', memberModelChoice: { version: 1, profileId: 'other' } }
-  const view=render(<AgentTeamMenu models={[{ id: 'base', name: '组长模型' }, { id: 'other', name: '其他模型' }]} onEnd={vi.fn()} lead={lead} members={[selected]} onSave={vi.fn()} />)
+  const view=render(<TeamMenuHarness models={[{ id: 'base', name: '组长模型' }, { id: 'other', name: '其他模型' }]} onEnd={vi.fn()} lead={lead} members={[selected]} onSave={vi.fn()} />)
   try {
    fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
    expect(screen.getByText('成员未单独选模型时继承组长')).toBeVisible()
@@ -646,7 +594,7 @@ describe('compact team menu',()=>{
  it('keeps member model choices aligned with the lead and names archive behavior accurately',async()=>{
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],createdAt:1,profileId:'base'}
   const save=vi.fn(async()=>true),end=vi.fn()
-  const view=render(<AgentTeamMenu models={[{id:'base',name:'组长模型'},{id:'other',name:'其他模型'}]} onEnd={end} lead={lead} members={[]} onSave={save}/>)
+  const view=render(<TeamMenuHarness models={[{id:'base',name:'组长模型'},{id:'other',name:'其他模型'}]} onEnd={end} lead={lead} members={[]} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.getByText('成员未单独选模型时继承组长')).toBeVisible()
@@ -665,7 +613,7 @@ describe('compact team menu',()=>{
  })
  it('labels the local channel record without implying member delivery',()=>{
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],createdAt:1,teamChannel:[{id:'old',senderId:'former',text:'prior note',createdAt:1}]},save=vi.fn(async()=>true)
-  const view=render(<AgentTeamMenu models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/> )
+  const view=render(<TeamMenuHarness models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/> )
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.getByText('记录与广播分开；广播会调用模型')).toBeVisible()
@@ -679,7 +627,7 @@ describe('compact team menu',()=>{
   const text=`第一行\n第二行  间隔 ${'长'.repeat(300)}`
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],teamChannel:[{id:'multi',senderId:'user',text,createdAt:1},{id:'normal',senderId:'user',text:'普通记录',createdAt:2}]}
   const save=vi.fn(),broadcast=vi.fn()
-  const view=render(<AgentTeamMenu models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save} onBroadcast={broadcast}/> )
+  const view=render(<TeamMenuHarness models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save} onBroadcast={broadcast}/> )
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    const row=screen.getByText((_,element)=>element?.textContent===`用户 · ${text}`)
@@ -694,7 +642,7 @@ describe('compact team menu',()=>{
   const running={id:'running',title:'处理',ownerId:'',status:'running' as const,dependsOn:['done']}
   const pending={id:'pending',title:'检查',ownerId:'',status:'pending' as const,dependsOn:['running']}
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],teamTasks:[done,running,pending]},save=vi.fn(async()=>true)
-  const view=render(<AgentTeamMenu models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
+  const view=render(<TeamMenuHarness models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.getByText('任务执行尚未接入')).toBeVisible()
@@ -713,7 +661,7 @@ describe('compact team menu',()=>{
   const second={id:'second',title:'Execute',ownerId:'',status:'pending' as const,dependsOn:['first']}
   const third={id:'third',title:'Review',ownerId:'',status:'pending' as const,dependsOn:[]}
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],teamTasks:[first,second,third]},save=vi.fn(async()=>true)
-  const view=render(<AgentTeamMenu models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
+  const view=render(<TeamMenuHarness models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    fireEvent.click(screen.getByText('编辑依赖 · Prepare'))
@@ -733,7 +681,7 @@ describe('compact team menu',()=>{
  it('does not describe a valid dependency as graph-invalid when only a draft save locks it',async()=>{
   const pending=deferred(),save=vi.fn(()=>pending.promise)
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],teamTasks:[{id:'a',title:'Alpha',ownerId:'',status:'pending',dependsOn:[]},{id:'b',title:'Beta',ownerId:'',status:'pending',dependsOn:[]}]}
-  const view=render(<AgentTeamMenu models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
+  const view=render(<TeamMenuHarness models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}));fireEvent.click(screen.getByText('编辑依赖 · Alpha'))
    const dependency=screen.getByRole('checkbox',{name:'Alpha 依赖 Beta'})
@@ -749,7 +697,7 @@ describe('compact team menu',()=>{
   const first={id:'first',title:'Prepare',ownerId:'',status:'pending' as const,dependsOn:[]}
   const second={id:'second',title:'Execute',ownerId:'',status:'pending' as const,dependsOn:['first']}
   const lead:ChatSession={id:'lead',title:'Lead',messages:[],createdAt:1,teamTasks:[first,second]},save=vi.fn(async()=>true)
-  const view=render(<AgentTeamMenu models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
+  const view=render(<TeamMenuHarness models={[]} onEnd={vi.fn()} lead={lead} members={[]} onSave={save}/>)
   try{
    fireEvent.click(screen.getByRole('button',{name:'团队管理'}))
    expect(screen.getByText(/等待 Prepare/)).toBeVisible()

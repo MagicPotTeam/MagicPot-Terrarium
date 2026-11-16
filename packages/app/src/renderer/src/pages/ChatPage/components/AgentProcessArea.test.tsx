@@ -19,10 +19,10 @@ describe('AgentProcessArea', () => {
   })
 
   it('keeps the same hidden host and collapsed state across an empty poll', () => {
-    const { rerender } = render(<AgentProcessArea entries={entries} managementSlot={<button>菜单</button>} />)
+    const { rerender } = render(<AgentProcessArea entries={entries} />)
     const area = screen.getByRole('region', { name: '进程区' })
     fireEvent.click(screen.getByRole('button', { name: /进程 ·/ }))
-    rerender(<AgentProcessArea entries={[]} managementSlot={<button>菜单</button>} />)
+    rerender(<AgentProcessArea entries={[]} />)
     expect(area.isConnected).toBe(true)
     expect(area).toHaveAttribute('hidden')
     expect(area).toBeEmptyDOMElement()
@@ -36,13 +36,12 @@ describe('AgentProcessArea', () => {
     const { rerender } = render(<AgentProcessArea entries={entries} />)
     const area = screen.getByRole('region', { name: '进程区' })
     fireEvent.click(screen.getByRole('button', { name: /进程 ·/ }))
-    rerender(<AgentProcessArea entries={[]} showStaticWhenEmpty staticSlot={<p>状态未知</p>} managementSlot={<button>菜单</button>} footerSlot={<p>页脚</p>}><p>活动明细</p></AgentProcessArea>)
+    rerender(<AgentProcessArea entries={[]} showStaticWhenEmpty staticSlot={<p>状态未知</p>} footerSlot={<p>页脚</p>}><p>活动明细</p></AgentProcessArea>)
     expect(screen.getByRole('region', { name: '进程区' })).toBe(area)
     expect(screen.getByText('状态未知')).toBeVisible()
     expect(screen.queryByRole('button', { name: /进程 ·/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /停止/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('list', { name: '进程列表' })).not.toBeInTheDocument()
-    expect(screen.queryByText('菜单')).not.toBeInTheDocument()
     expect(screen.queryByText('页脚')).not.toBeInTheDocument()
     expect(screen.queryByText('活动明细')).not.toBeInTheDocument()
     rerender(<AgentProcessArea entries={[]} staticSlot={<p>状态未知</p>} />)
@@ -97,13 +96,12 @@ describe('AgentProcessArea', () => {
     expect(screen.queryByRole('status', { name: 'explore：状态：运行中' })).not.toBeInTheDocument()
   })
 
-  it('collapses the list, retains footer and management slots and respects defaultExpanded', () => {
-    render(<AgentProcessArea entries={entries} defaultExpanded={false} managementSlot={<button>菜单</button>} footerSlot={<div>页脚内容</div>} />)
+  it('collapses the list, retains the footer slot and respects defaultExpanded', () => {
+    render(<AgentProcessArea entries={entries} defaultExpanded={false} footerSlot={<div>页脚内容</div>} />)
     const toggle = screen.getByRole('button', { name: /进程 ·/ })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByRole('list', { name: '进程列表' })).not.toBeInTheDocument()
     expect(screen.getByText('页脚内容')).toBeVisible()
-    expect(screen.getByRole('button', { name: '菜单' })).toBeVisible()
     fireEvent.click(toggle)
     expect(screen.getByRole('list', { name: '进程列表' })).toBeVisible()
     fireEvent.click(toggle)

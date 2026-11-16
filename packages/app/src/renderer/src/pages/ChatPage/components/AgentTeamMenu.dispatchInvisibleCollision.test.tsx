@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import AgentTeamMenu from './AgentTeamMenu'
+import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
 
 describe('team task dispatch generated-name invisible collision', () => {
@@ -17,7 +17,7 @@ describe('team task dispatch generated-name invisible collision', () => {
     const onSave = vi.fn<(value: ChatSession) => Promise<boolean>>().mockResolvedValue(true)
     const onEnd = vi.fn(), onBroadcast = vi.fn()
     const props = { lead, members: [member], models: [], onDispatch, onSave, onEnd, onBroadcast }
-    const view = render(<AgentTeamMenu {...props} />)
+    const view = render(<TeamMenuHarness {...props} />)
     try {
       fireEvent.click(screen.getByRole('button', { name: '团队管理' }))
       for (const [index, title] of titles.entries()) {
@@ -27,7 +27,7 @@ describe('team task dispatch generated-name invisible collision', () => {
         fireEvent.click(button)
       }
       expect(onDispatch.mock.calls).toEqual([['task-0'], ['task-1'], ['task-2']])
-      view.rerender(<AgentTeamMenu {...props} lead={{ ...lead, teamTasks: [tasks[1], tasks[0], tasks[2]] }} />)
+      view.rerender(<TeamMenuHarness {...props} lead={{ ...lead, teamTasks: [tasks[1], tasks[0], tasks[2]] }} />)
       fireEvent.click(screen.getByRole('button', { name: '当前列表第 1 项（位置随列表变化），执行：A' }))
       expect(onDispatch).toHaveBeenLastCalledWith('task-1')
       expect(onSave).not.toHaveBeenCalled()
