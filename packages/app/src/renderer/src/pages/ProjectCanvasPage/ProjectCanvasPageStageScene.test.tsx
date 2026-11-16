@@ -124,6 +124,14 @@ vi.mock('react-konva', async () => {
   }
 })
 
+const cropSourceEvidenceMock = vi.hoisted(() => ({ read: vi.fn() }))
+
+vi.mock('./canvasCropProvenance', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./canvasCropProvenance')>()
+  cropSourceEvidenceMock.read.mockImplementation(actual.readCanvasImageSourceEvidence)
+  return { ...actual, readCanvasImageSourceEvidence: cropSourceEvidenceMock.read }
+})
+
 vi.mock('../../components/MaxSizeLayout', () => ({
   default: ({ children }: { children: React.ReactNode }) => <>{children}</>
 }))
@@ -489,6 +497,7 @@ function createBaseProps(visibleItems: CanvasItem[]) {
     setExtractingImageId: vi.fn(),
     setInlineTextEdit: vi.fn(),
     setItemsWithHistory: vi.fn(),
+    setItemsWithoutHistory: vi.fn(),
     setLabelDialogItemId: vi.fn(),
     setLabelDialogOpen: vi.fn(),
     setLabelDialogText: vi.fn(),
@@ -4218,11 +4227,16 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(setCroppingImageId).toHaveBeenCalledWith(null)
   })
 
+  // SHA-256 and byte size of the 9 bytes behind 'data:image/png;base64,c3ludGhldGlj'.
+  const SYNTHETIC_SOURCE_SHA256 = 'b3cc0475bb78a5026098858e9889acf666d31062d513d303314eca31d36e72f2'
+  const SYNTHETIC_SOURCE_SIZE_BYTES = 9
+
   it.each([
     { label: 'unknown source dimensions', knownSize: false },
     { label: 'known full source dimensions', knownSize: true }
   ])('preserves a sibling crop unless it is a confirmed identity: $label', async ({ knownSize }) => {
     // A's 200x200 source is represented by a synthetic data URL; this test does not decode it.
+    // Known size: the record attests the 9 synthetic bytes ("synthetic") as a 200x200 source.
     const sibling: CanvasImageItem = {
       ...createImageItem('sibling'),
       src: 'data:image/png;base64,c3ludGhldGlj', image: undefined,
@@ -4231,7 +4245,15 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       width: 100, height: 100,
       crop: knownSize
         ? { x: 0, y: 0, width: 200, height: 200 }
-        : { x: 0, y: 0, width: 100, height: 100 }
+        : { x: 0, y: 0, width: 100, height: 100 },
+      ...(knownSize
+        ? {
+            cropSource: {
+              version: 1 as const, origin: 'confirm' as const, width: 200, height: 200,
+              sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES, sha256: SYNTHETIC_SOURCE_SHA256
+            }
+          }
+        : {})
     }
     const before = { ...sibling, crop: { ...sibling.crop! } }
     const target = createImageItem('crop-target')
@@ -4306,6 +4328,273 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       expect(encode).not.toHaveBeenCalled()
       expect(item).not.toHaveProperty('crop')
     } finally { getContext.mockRestore(); encode.mockRestore(); vi.unstubAllGlobals() }
+  })
+
+  describe('crop source record after confirm (synthetic sources, no decoding)', () => {
+    const syntheticEvidence = (width: number, height: number) => ({
+      sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+      sha256: SYNTHETIC_SOURCE_SHA256,
+      width,
+      height,
+      image: document.createElement('img')
+    })
+    const confirmedCrop = { x: 20, y: 10, width: 80, height: 60 }
+
+    function renderCropTarget(target: CanvasImageItem, siblings: CanvasImageItem[] = []) {
+      const setItemsWithHistory = vi.fn()
+      const setItemsWithoutHistory = vi.fn()
+      const props = {
+        ...createBaseProps([...siblings, target]),
+        tool: 'crop-select',
+        croppingImageId: target.id,
+        setItemsWithHistory,
+        setItemsWithoutHistory
+      }
+      const view = render(<ProjectCanvasPageStageScene {...props} />)
+      const confirm = cropOverlayProps.get(target.id)?.onConfirm as (
+        updates: Partial<CanvasImageItem>
+      ) => void
+      expect(confirm).toBeTypeOf('function')
+      return { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory }
+    }
+
+    function deferEvidence() {
+      let resolve!: (value: unknown) => void
+      cropSourceEvidenceMock.read.mockImplementationOnce(
+        () => new Promise((settle) => (resolve = settle))
+      )
+      return {
+        resolve: (value: unknown) => resolve(value),
+        isCurrent: () => (cropSourceEvidenceMock.read.mock.calls.at(-1)?.[1] as () => boolean)()
+      }
+    }
+
+    beforeEach(() => {
+      cropSourceEvidenceMock.read.mockClear()
+    })
+
+    it('attaches a confirm record when the evidence equals the crop space and writes the absent source size', async () => {
+      // In-memory image 200x120 and no explicit source size: the overlay measured in 200x120.
+      const target = createImageItem('record-target')
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      expect(setItemsWithHistory).toHaveBeenCalledTimes(1)
+      expect(cropSourceEvidenceMock.read).toHaveBeenCalledWith(
+        target.src,
+        expect.any(Function),
+        expect.objectContaining({ maxBytes: expect.any(Number) })
+      )
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+
+      await waitFor(() => expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1))
+      expect(setItemsWithHistory).toHaveBeenCalledTimes(1)
+      const confirmed = (
+        setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      )([target])
+      const attach = setItemsWithoutHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      const [attested] = attach(confirmed) as CanvasImageItem[]
+      expect(attested).toEqual(
+        expect.objectContaining({
+          id: target.id,
+          src: target.src,
+          crop: confirmedCrop,
+          sourceWidth: 200,
+          sourceHeight: 120,
+          cropSource: {
+            version: 1,
+            origin: 'confirm',
+            width: 200,
+            height: 120,
+            sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+            sha256: SYNTHETIC_SOURCE_SHA256
+          }
+        })
+      )
+      expect(target).not.toHaveProperty('cropSource')
+    })
+
+    it('attaches no record when the evidence differs from the crop space', async () => {
+      // A 200x120 thumbnail in memory over a 400x240 source: the crop numbers are in thumbnail space.
+      const target = createImageItem('thumbnail-target')
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(cropSourceEvidenceMock.read).toHaveBeenCalledTimes(1)
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    it('measures an explicit source size against the evidence, not the in-memory image', async () => {
+      const target = {
+        ...createImageItem('explicit-size-target'),
+        sourceWidth: 400,
+        sourceHeight: 240
+      }
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+
+      await waitFor(() => expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1))
+      const confirmed = (
+        setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      )([target])
+      const attach = setItemsWithoutHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      const [attested] = attach(confirmed) as CanvasImageItem[]
+      expect(attested.cropSource).toEqual(expect.objectContaining({ width: 400, height: 240 }))
+      expect(attested).toEqual(expect.objectContaining({ sourceWidth: 400, sourceHeight: 240 }))
+    })
+
+    it('writes nothing for a stale read: src or crop changed before the record lands', async () => {
+      const target = createImageItem('stale-target')
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+      await waitFor(() => expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1))
+
+      const [confirmed] = (
+        setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      )([target]) as CanvasImageItem[]
+      const attach = setItemsWithoutHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      for (const changed of [
+        { ...confirmed, src: 'file:///replaced-source.png' },
+        { ...confirmed, crop: { ...confirmedCrop, x: 21 } },
+        { ...confirmed, crop: undefined },
+        { ...confirmed, sourceWidth: 400, sourceHeight: 240 }
+      ]) {
+        const prev = [changed]
+        expect(attach(prev)).toBe(prev)
+      }
+    })
+
+    it('stops the read when the source changes meanwhile and writes nothing', async () => {
+      const target = createImageItem('replaced-target')
+      const evidence = deferEvidence()
+      const { view, props, confirm, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      expect(evidence.isCurrent()).toBe(true)
+      const replaced = { ...target, src: 'file:///replaced-target-other.png' }
+      view.rerender(
+        <ProjectCanvasPageStageScene
+          {...props}
+          visibleItems={[replaced]}
+          itemIdSet={new Set([replaced.id])}
+        />
+      )
+      expect(evidence.isCurrent()).toBe(false)
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    it('stops the read after unmount and writes nothing', async () => {
+      const target = createImageItem('unmounted-target')
+      const evidence = deferEvidence()
+      const { view, confirm, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      view.unmount()
+      expect(evidence.isCurrent()).toBe(false)
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+      await Promise.resolve()
+
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    it('drops the old record of a re-cropped item until the source is attested again', () => {
+      const target: CanvasImageItem = {
+        ...createImageItem('recrop-target'),
+        sourceWidth: 200,
+        sourceHeight: 120,
+        crop: { x: 0, y: 0, width: 100, height: 100 },
+        cropSource: {
+          version: 1,
+          origin: 'confirm',
+          width: 200,
+          height: 120,
+          sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+          sha256: SYNTHETIC_SOURCE_SHA256
+        }
+      }
+      deferEvidence()
+      const { confirm, setItemsWithHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      const [next] = (setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[])(
+        [target]
+      ) as CanvasImageItem[]
+      expect(next.crop).toEqual(confirmedCrop)
+      expect(next).not.toHaveProperty('cropSource')
+      expect(target.cropSource).toBeDefined()
+    })
+
+    it('never strips a sibling identity crop from a reopen record or without an explicit source size', () => {
+      const record = {
+        version: 1 as const,
+        width: 200,
+        height: 200,
+        sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+        sha256: SYNTHETIC_SOURCE_SHA256
+      }
+      const fullCrop = { x: 0, y: 0, width: 200, height: 200 }
+      const reopened: CanvasImageItem = {
+        ...createImageItem('sibling-reopen'),
+        image: undefined,
+        sourceWidth: 200,
+        sourceHeight: 200,
+        crop: fullCrop,
+        cropSource: { ...record, origin: 'reopen' }
+      }
+      const noSourceSize: CanvasImageItem = {
+        ...createImageItem('sibling-no-source-size'),
+        image: undefined,
+        crop: fullCrop,
+        cropSource: { ...record, origin: 'confirm' }
+      }
+      const proven: CanvasImageItem = {
+        ...createImageItem('sibling-proven'),
+        image: undefined,
+        sourceWidth: 200,
+        sourceHeight: 200,
+        crop: fullCrop,
+        cropSource: { ...record, origin: 'confirm' }
+      }
+      const target = createImageItem('identity-strip-target')
+      deferEvidence()
+      const { confirm, setItemsWithHistory } = renderCropTarget(target, [
+        reopened,
+        noSourceSize,
+        proven
+      ])
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      const update = setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      const [nextReopened, nextNoSourceSize, nextProven] = update([
+        reopened,
+        noSourceSize,
+        proven,
+        target
+      ]) as CanvasImageItem[]
+      expect(nextReopened).toBe(reopened)
+      expect(nextNoSourceSize).toBe(noSourceSize)
+      expect(nextProven).not.toHaveProperty('crop')
+      expect(nextProven).not.toHaveProperty('cropSource')
+      expect(proven.crop).toEqual(fullCrop)
+    })
   })
 
   it('flattens confirmed image crops into the canvas item source data', async () => {

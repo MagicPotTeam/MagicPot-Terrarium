@@ -59,6 +59,14 @@ import {
 import { resolveCanvasImageLodDecision } from './canvasImageLodPolicy'
 import { isAnimatedGifCanvasImage } from './canvasAnimatedImageUtils'
 import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
+import {
+  CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES,
+  createCropSourceRecord,
+  getCanvasCropOverlaySpace,
+  hasVerifiableCrop,
+  isConfirmedIdentityCrop,
+  readCanvasImageSourceEvidence
+} from './canvasCropProvenance'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -875,6 +883,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     setExtractingImageId,
     setInlineTextEdit,
     setItemsWithHistory,
+    setItemsWithoutHistory,
     setLabelDialogItemId,
     setLabelDialogOpen,
     setLabelDialogText,
@@ -2262,20 +2271,125 @@ export default function ProjectCanvasPageStageScene(props: any) {
     },
     [setInlineTextEdit, setSelectedIds]
   )
+  // Crop source records are attached in the background after a confirm; the
+  // fence below drops a read once the scene unmounts, the same item is cropped
+  // again, or its source changes.
+  const cropSourceMountedRef = React.useRef(true)
+  const cropSourceReadTokenByIdRef = React.useRef(new Map<string, number>())
+  const latestCanvasItemsForCropSourceRef = React.useRef<CanvasItem[]>(allCanvasItems)
+  React.useEffect(() => {
+    latestCanvasItemsForCropSourceRef.current = allCanvasItems
+  }, [allCanvasItems])
+  React.useEffect(() => {
+    cropSourceMountedRef.current = true
+    return () => {
+      cropSourceMountedRef.current = false
+    }
+  }, [])
+  const attachConfirmedCropSource = React.useCallback(
+    async (item: CanvasImageItem, crop: NonNullable<CanvasImageItem['crop']>) => {
+      if (typeof setItemsWithoutHistory !== 'function') return
+      // The space the overlay measured the crop in; unknown means no record.
+      const cropSpace = getCanvasCropOverlaySpace(item)
+      if (!cropSpace) return
+      const expected = {
+        id: item.id,
+        src: item.src,
+        sourceWidth: item.sourceWidth,
+        sourceHeight: item.sourceHeight,
+        crop: { x: crop.x, y: crop.y, width: crop.width, height: crop.height }
+      }
+      const tokens = cropSourceReadTokenByIdRef.current
+      const token = (tokens.get(item.id) ?? 0) + 1
+      tokens.set(item.id, token)
+      const isCurrent = () => {
+        if (!cropSourceMountedRef.current || tokens.get(expected.id) !== token) return false
+        const latest = latestCanvasItemsForCropSourceRef.current.find(
+          (candidate) => candidate.id === expected.id
+        )
+        return Boolean(
+          latest &&
+          latest.type === 'image' &&
+          latest.src === expected.src &&
+          latest.sourceWidth === expected.sourceWidth &&
+          latest.sourceHeight === expected.sourceHeight
+        )
+      }
+      const evidence = await readCanvasImageSourceEvidence(expected.src, isCurrent, {
+        maxBytes: CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES
+      })
+      if (!evidence || !isCurrent()) return
+      if (evidence.width !== cropSpace.width || evidence.height !== cropSpace.height) return
+      const cropSource = createCropSourceRecord(evidence, 'confirm')
+      if (!cropSource) return
+      setItemsWithoutHistory((prev: CanvasItem[]) => {
+        let changed = false
+        const next = prev.map((candidate) => {
+          if (candidate.id !== expected.id || candidate.type !== 'image') return candidate
+          const currentCrop = candidate.crop
+          if (
+            candidate.src !== expected.src ||
+            candidate.sourceWidth !== expected.sourceWidth ||
+            candidate.sourceHeight !== expected.sourceHeight ||
+            !currentCrop ||
+            currentCrop.x !== expected.crop.x ||
+            currentCrop.y !== expected.crop.y ||
+            currentCrop.width !== expected.crop.width ||
+            currentCrop.height !== expected.crop.height
+          ) {
+            return candidate
+          }
+          // Every display path must read the crop in the record's space.
+          const attested: CanvasImageItem = {
+            ...candidate,
+            sourceWidth: candidate.sourceWidth ?? cropSource.width,
+            sourceHeight: candidate.sourceHeight ?? cropSource.height,
+            cropSource
+          }
+          if (!hasVerifiableCrop(attested)) return candidate
+          changed = true
+          return attested
+        })
+        return changed ? next : prev
+      })
+    },
+    [setItemsWithoutHistory]
+  )
   const handleCropConfirm = React.useCallback(
     (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {
       lastClickedIdRef.current = item.id
       setSelectedIds(new Set([item.id]))
       // Dimensions alone cannot authenticate the coordinate system of a crop.
       // Keep the source and crop together rather than destructively flattening
-      // against possibly backfilled source-size hints.
+      // against possibly backfilled source-size hints. A changed crop drops its
+      // old record; the background read below attests the source again.
+      const cropChanged = Object.prototype.hasOwnProperty.call(updates, 'crop')
       setItemsWithHistory((prev: CanvasItem[]) =>
-        prev.map((i) => (i.id === item.id ? { ...i, ...updates } : i))
+        prev.map((i) => {
+          if (i.id === item.id) {
+            const merged = { ...i, ...updates } as CanvasImageItem
+            if (!cropChanged || merged.cropSource === undefined) return merged
+            const { cropSource: _replacedCropSource, ...withoutRecord } = merged
+            return withoutRecord
+          }
+          // A sibling's full-image crop is removed only when its record proves it;
+          // size hints never do.
+          if (i.type === 'image' && isConfirmedIdentityCrop(i)) {
+            const { crop: _identityCrop, cropSource: _identityCropSource, ...uncropped } = i
+            return uncropped
+          }
+          return i
+        })
       )
       setTool('select')
       setCroppingImageId(null)
+      const confirmedCrop = updates.crop ?? item.crop
+      if (confirmedCrop) {
+        void attachConfirmedCropSource(item, confirmedCrop).catch(() => undefined)
+      }
     },
     [
+      attachConfirmedCropSource,
       lastClickedIdRef,
       setCroppingImageId,
       setItemsWithHistory,

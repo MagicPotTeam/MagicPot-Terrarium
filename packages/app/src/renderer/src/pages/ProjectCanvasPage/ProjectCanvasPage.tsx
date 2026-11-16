@@ -1588,6 +1588,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     setInlineTextEdit,
     setItems,
     setItemsWithHistory,
+    setItemsWithoutHistory: setItems,
     setLabelDialogItemId,
     setSelectedHistoryRevision,
     setLabelDialogOpen,
