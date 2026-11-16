@@ -170,6 +170,7 @@ describe('isolated v2 hierarchical unit accounting DATA, not persistent admissio
     expect(() => model(cleanup, 20001)).toThrow('deadline')
     expect(apply(cleanup, finish(cleanup), 20001).document.runs[0].status).toBe('finished')
   })
+  // Fixed work: about 200-230 applies, each validating up to 264 receipts twice; measured 3.7-7.0 s on a 4-vCPU box and 9.4 s in K6's review run. Synchronous, so the bound is a pass/fail threshold only.
   it('validates original declared capacity at each historical begin, not only the currently pending frames', () => {
     let doc = apply(empty(owner), begin(empty(owner), { limits: { maxModelSteps: 32, maxToolInvocations: 32, maxProviderDispatches: 32 } }), 100).document, clock = 101
     for (let i = 0; i < 32; i++) {
@@ -190,7 +191,8 @@ describe('isolated v2 hierarchical unit accounting DATA, not persistent admissio
     // historical capacity, not commitment/FSM-record mismatch. No authority here.
     receipt.digest = createHash('sha256').update(JSON.stringify(canonical({ operationHash: receipt.operationHash, at: receipt.at, payload }))).digest('hex')
     expect(() => validate(doc)).toThrow('begin receipt admits limits beyond retained capacity')
-  })
+  }, 30_000)
+  // Fixed work: about 200-230 applies, each validating up to 264 receipts twice; measured 3.7-7.0 s on a 4-vCPU box and 9.4 s in K6's review run. Synchronous, so the bound is a pass/fail threshold only.
   it('keeps known settlement and closure available near the real byte-admission ceiling without evicting history', () => {
     const at = Number.MAX_SAFE_INTEGER - 1000000
     let doc = apply(empty(owner), begin(empty(owner), { limits: { maxModelSteps: 32, maxToolInvocations: 32, maxProviderDispatches: 32 } }), at).document, clock = at + 1
@@ -222,7 +224,8 @@ describe('isolated v2 hierarchical unit accounting DATA, not persistent admissio
     expect(denied).toBe(true); expect(crossedAdmissionCeiling).toBe(true)
     expect(doc.runs.at(-1)!.status).toBe('finished'); expect(doc.runs[0].units).toHaveLength(96)
     expect(Buffer.byteLength(JSON.stringify(doc), 'utf8')).toBeLessThan(128 * 1024)
-  })
+  }, 30_000)
+  // Fixed work: about 200-230 applies, each validating up to 264 receipts twice; measured 3.7-7.0 s on a 4-vCPU box and 9.4 s in K6's review run. Synchronous, so the bound is a pass/fail threshold only.
   it('accounts maximum nested model/dispatch/tool histories within the SAME 264 retained receipt ceiling', () => {
     let doc = apply(empty(owner), begin(empty(owner), { limits: { maxModelSteps: 32, maxToolInvocations: 32, maxProviderDispatches: 32 } }), 100).document, clock = 101
     for (let i = 0; i < 32; i++) {
@@ -236,5 +239,5 @@ describe('isolated v2 hierarchical unit accounting DATA, not persistent admissio
     doc = apply(doc, begin(doc, { limits: { maxModelSteps: 1, maxToolInvocations: 0, maxProviderDispatches: 1 } }), clock++).document
     doc = apply(doc, finish(doc), clock++).document
     expect(doc.runs).toHaveLength(2); expect(doc.runs[0].units).toHaveLength(96)
-  })
+  }, 30_000)
 })
