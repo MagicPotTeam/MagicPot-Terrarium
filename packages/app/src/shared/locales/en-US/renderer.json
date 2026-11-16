@@ -1626,6 +1626,12 @@
       "member_label": "[member] {{name}}",
       "status_waiting": "Waiting for approval",
       "background_result": "background task result delivered: {{label}}"
+    },
+    "model_switcher": {
+      "label": "Switch model",
+      "search": "Search models…",
+      "switch": "Switch",
+      "empty": "No matching models."
     }
   },
   "agent_workspace": {

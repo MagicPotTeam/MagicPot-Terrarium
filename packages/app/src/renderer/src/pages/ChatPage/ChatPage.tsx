@@ -1055,7 +1055,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   onThreadSubRowChange,
   onActivate,
   modelPillHost,
-  teamTargetHost
+  teamTargetHost,
+  overlayHost
 }) => {
   const queueResumeNoticeId = React.useId()
   // The Agent column shows the model in its header instead of inside the composer.
@@ -5964,6 +5965,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return {
         state: choice ? 'selected' as const : 'inherited' as const,
         label: profile.model_name,
+        profileId: profile.id,
         pending: memberModelChoicePendingRef.current.has(`${storageScope}\u0000${currentSession.id}`),
         disabled: config.use_remote_llm || !sessionsLoaded || Boolean(sessionLoadError) || isLoading,
         selectableProfileIds: availableProfiles.filter(item => isSelectableMemberProfile(item.id)).map(item => item.id),
@@ -6010,6 +6012,29 @@ const ChatPage: React.FC<ChatPageProps> = ({
     } catch { /* A changed/invalid team cannot change an unrelated profile preference. */ }
   }, [active, availableProfiles, currentSession?.id, storageScope])
 
+  // The model switcher lists every model with its efforts: the efforts of a model that is
+  // not in use come from the same per-model preference the effort menu writes.
+  const getProfileReasoning = useCallback((profileId: string) => {
+    const profile = availableProfiles.find(item => item.id === profileId)
+    if (!profile) return null
+    const capabilities = resolveChatProfileCapabilities(profile)
+    const key = resolveChatReasoningPreferenceKey(profileId, profile)
+    const effort = key ? normalizeReasoningEffort(reasoningEffortByProfileId[key], capabilities.reasoningEfforts) || capabilities.defaultReasoningEffort || null : null
+    return { efforts: key ? capabilities.reasoningEfforts : [], effort }
+  }, [availableProfiles, reasoningEffortByProfileId])
+  const selectProfileReasoningEffort = useCallback((profileId: string, effort: LLMReasoningEffort | undefined) => {
+    const profile = availableProfiles.find(item => item.id === profileId)
+    if (!profile) return
+    const capabilities = resolveChatProfileCapabilities(profile)
+    const key = resolveChatReasoningPreferenceKey(profileId, profile)
+    if (!key || (effort !== undefined && !capabilities.reasoningEfforts.includes(effort))) return
+    setReasoningEffortByProfileId(previous => {
+      const next = normalizeReasoningPreferenceMap({...previous, [key]: effort})
+      window.setTimeout(() => dispatchReasoningEffortSync(next), 0)
+      return next
+    })
+  }, [availableProfiles])
+
   const chatComposerControlSlot = useMemo(
     () => (
       <ChatPrimarySelection
@@ -6017,6 +6042,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         compact
         composerStyle
         headerPill={modelInHeader}
+        overlayHost={modelInHeader ? overlayHost : undefined}
+        getProfileReasoning={getProfileReasoning}
+        onSelectProfileReasoningEffort={selectProfileReasoningEffort}
         memberModel={selectedMemberModel}
         memberReasoningEffort={memberReasoningEffort}
         memberAvailableReasoningEfforts={memberProfileCapabilities.reasoningEfforts}
@@ -6039,6 +6067,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       currentSession?.teamLeadId,
       isAgentSkillSelected,
       modelInHeader,
+      overlayHost,
+      getProfileReasoning,
+      selectProfileReasoningEffort,
       selectedCustomSkill,
       selectedMemberModel,
       memberReasoningEffort,

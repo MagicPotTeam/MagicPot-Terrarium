@@ -28,6 +28,8 @@ export type AgentColumnOverlayProps = {
   /** Top row as a plain title, when there is no search field. */
   title?: string
   children?: React.ReactNode
+  /** A fixed area between the scrolling content and the footer. */
+  bottom?: React.ReactNode
   onClose: () => void
   /** Text of the footer's secondary button (default "取消" / "Cancel"). */
   cancelLabel?: string
@@ -63,6 +65,7 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
   top,
   title,
   children,
+  bottom,
   onClose,
   cancelLabel,
   cancelAriaLabel,
@@ -248,6 +251,7 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
         >
           {children}
         </Box>
+        {bottom ? <Box sx={{ flex: 'none', minWidth: 0 }}>{bottom}</Box> : null}
         <Box
           data-testid="agent-column-overlay-footer"
           sx={{

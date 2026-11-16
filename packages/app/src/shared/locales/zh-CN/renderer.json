@@ -1453,6 +1453,12 @@
       "member_label": "[成员] {{name}}",
       "status_waiting": "等待批准",
       "background_result": "后台任务结果已送达：{{label}}"
+    },
+    "model_switcher": {
+      "label": "切换模型",
+      "search": "搜索模型…",
+      "switch": "切换",
+      "empty": "没有匹配的模型。"
     }
   },
   "agent_workspace": {

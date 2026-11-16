@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Box, ButtonBase, Chip, Typography, Button, Menu, MenuItem } from '@mui/material'
 import { alpha, useTheme, type Theme } from '@mui/material/styles'
 import BoltIcon from '@mui/icons-material/Bolt'
@@ -10,10 +10,8 @@ import {
   normalizeReasoningEffort,
   type LLMReasoningEffort
 } from '@shared/llm'
-import {
-  getAgentColumnRaisedSurface,
-  getAgentColumnTokens
-} from '@renderer/components/agentColumnTokens'
+import { getAgentColumnTokens } from '@renderer/components/agentColumnTokens'
+import ChatModelSwitcher, { type ChatModelSwitcherProfile } from './ChatModelSwitcher'
 
 export type ChatPrimarySelectionProfile = {
   id: string
@@ -30,7 +28,10 @@ type ChatPrimarySelectionProps = {
   selectedSkillLabel: string
   active?: boolean
   /** The owner explicitly opts in only after member persistence and dispatch are supported. */
-  memberModel?: ({ state: 'inherited' | 'selected'; label: string } | { state: 'unavailable' }) & {
+  memberModel?: (
+    | { state: 'inherited' | 'selected'; label: string; profileId?: string }
+    | { state: 'unavailable' }
+  ) & {
     onSelectProfile?: (profileId: string) => void
     /** Display filter only; the caller must revalidate every selection at commit. */
     selectableProfileIds?: readonly string[]
@@ -43,39 +44,20 @@ type ChatPrimarySelectionProps = {
    * menu with the models and the reasoning efforts. Nothing is shown for an agent skill.
    */
   headerPill?: boolean
+  /** The Agent column's overlay layer, where the header pill opens the model switcher. */
+  overlayHost?: HTMLElement | null
+  /** Efforts of another model and the one its preference holds (for the model switcher). */
+  getProfileReasoning?: (
+    profileId: string
+  ) => { efforts: LLMReasoningEffort[]; effort: LLMReasoningEffort | null } | null
+  /** Stores the effort preference of the given model (used when the model changes too). */
+  onSelectProfileReasoningEffort?: (profileId: string, effort: LLMReasoningEffort | undefined) => void
   /** All three must be supplied for the caller-resolved effective member profile. */
   memberReasoningEffort?: LLMReasoningEffort | null
   memberAvailableReasoningEfforts?: LLMReasoningEffort[]
   onSelectMemberReasoningEffort?: (effort: LLMReasoningEffort | undefined) => void
   onSelectProfile: (profileId: string | null) => void
   onSelectReasoningEffort?: (effort: LLMReasoningEffort | undefined) => void
-}
-
-/**
- * Group heading of the pill's menu. `disabled` only tells MUI's MenuList to leave it out of
- * the keyboard order (initial focus and arrow keys); it is not forwarded to the DOM.
- */
-const PillMenuHeading: React.FC<{ children: React.ReactNode; disabled: true }> = ({ children }) => {
-  const theme = useTheme()
-  const tokens = getAgentColumnTokens(theme)
-  return (
-    <Box
-      component="li"
-      role="presentation"
-      sx={{
-        padding: '4px 12px',
-        fontSize: tokens.fontSize.micro,
-        fontWeight: 600,
-        lineHeight: '16px',
-        letterSpacing: '0.025em',
-        textTransform: 'uppercase',
-        color: tokens.muted,
-        userSelect: 'none'
-      }}
-    >
-      {children}
-    </Box>
-  )
 }
 
 const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
@@ -90,6 +72,9 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   memberModel,
   composerStyle = false,
   headerPill = false,
+  overlayHost,
+  getProfileReasoning,
+  onSelectProfileReasoningEffort,
   memberReasoningEffort,
   memberAvailableReasoningEfforts,
   onSelectMemberReasoningEffort,
@@ -102,7 +87,6 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
     return value === key ? fallback : value
   }
   const theme = useTheme()
-  const pillMenuId = useId()
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null)
   const [reasoningAnchorEl, setReasoningAnchorEl] = useState<null | HTMLElement>(null)
 
@@ -245,56 +229,52 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
       ? t('chat.model_pill.with_effort', { label: pillName, effort: displayReasoningLabel })
       : pillName
     const pillDisabled = pickableProfiles.length === 0 && pickableEfforts.length === 0
-    const menuOpen = active && Boolean(anchorEl) && !pillDisabled
-    const isModelChecked = (profile: ChatPrimarySelectionProfile) =>
-      memberModel
-        ? memberModel.state === 'selected' && profile.model_name === memberModel.label
-        : profile.id === selectedProfileId
-    // Keyboard focus lands on the current model when the menu opens, else on the current effort.
-    const hasCheckedModel = pickableProfiles.some(isModelChecked)
-    const renderOption = (
-      key: string,
-      label: string,
-      checked: boolean,
-      focusOnOpen: boolean,
-      choose: () => void
-    ) => (
-      <MenuItem
-        key={key}
-        role="menuitemradio"
-        aria-checked={checked}
-        selected={focusOnOpen}
-        onClick={() => {
-          choose()
-          handleClose()
-        }}
-        sx={{
-          gap: 1,
-          minHeight: 0,
-          padding: '6px 12px',
-          fontSize: tokens.fontSize.small,
-          color: tokens.text,
-          '&.Mui-selected': { backgroundColor: 'transparent' },
-          '&:hover, &.Mui-focusVisible, &.Mui-selected:hover, &.Mui-selected.Mui-focusVisible': {
-            backgroundColor: tokens.hover
-          }
-        }}
-      >
-        <Box
-          component="span"
-          sx={{
-            flex: 1,
-            minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap'
-          }}
-        >
-          {label}
-        </Box>
-        {checked ? <CheckIcon aria-hidden sx={{ flex: 'none', fontSize: 14 }} /> : null}
-      </MenuItem>
-    )
+    const switcherOpen = active && Boolean(anchorEl) && !pillDisabled
+    // The model in use: a member's own or inherited model, else the conversation's.
+    const currentProfileId = memberModel
+      ? memberModel.state === 'unavailable'
+        ? null
+        : (memberModel.profileId ??
+          availableProfiles.find((profile) => profile.model_name === memberModel.label)?.id ??
+          null)
+      : selectedProfileId
+    const switcherProfiles: ChatModelSwitcherProfile[] = pickableProfiles.map((profile) => {
+      if (profile.id === currentProfileId) {
+        return { ...profile, efforts: pickableEfforts, effort: normalizedSelectedEffort ?? null }
+      }
+      // Another model's efforts can only be set through the per-model preference.
+      const other = onSelectProfileReasoningEffort ? getProfileReasoning?.(profile.id) : undefined
+      return { ...profile, efforts: other?.efforts ?? [], effort: other?.effort ?? null }
+    })
+    // Only the efforts are pickable (a member that cannot change its model): list its model.
+    if (
+      pickableEfforts.length > 0 &&
+      currentProfileId &&
+      !switcherProfiles.some((profile) => profile.id === currentProfileId)
+    ) {
+      const own = availableProfiles.find((profile) => profile.id === currentProfileId)
+      if (own) {
+        switcherProfiles.push({
+          ...own,
+          efforts: pickableEfforts,
+          effort: normalizedSelectedEffort ?? null
+        })
+      }
+    }
+    const handleSwitch = (profileId: string, effort: LLMReasoningEffort | undefined) => {
+      const target = switcherProfiles.find((profile) => profile.id === profileId)
+      if (!target) return
+      const effortChanged = (effort ?? null) !== (target.effort ?? null)
+      if (profileId !== currentProfileId) {
+        if (memberModel) memberModel.onSelectProfile?.(profileId)
+        else onSelectProfile(profileId)
+        if (effortChanged) onSelectProfileReasoningEffort?.(profileId, effort)
+        return
+      }
+      if (!effortChanged) return
+      if (memberModel) onSelectMemberReasoningEffort?.(effort)
+      else onSelectReasoningEffort?.(effort)
+    }
 
     return (
       <>
@@ -303,9 +283,8 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           disableRipple
           data-testid="chat-model-pill"
           aria-label={pillLabel}
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          aria-controls={menuOpen ? pillMenuId : undefined}
+          aria-haspopup="dialog"
+          aria-expanded={switcherOpen}
           aria-busy={memberModel?.pending || undefined}
           disabled={pillDisabled}
           title={pillText}
@@ -362,71 +341,14 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           ) : null}
           <ExpandMoreIcon aria-hidden sx={{ flex: 'none', fontSize: 13, color: tokens.muted }} />
         </ButtonBase>
-        <Menu
-          id={pillMenuId}
-          anchorEl={anchorEl}
-          open={menuOpen}
+        <ChatModelSwitcher
+          open={switcherOpen}
+          container={overlayHost}
+          profiles={switcherProfiles}
+          currentProfileId={currentProfileId}
           onClose={handleClose}
-          anchorOrigin={{ horizontal: 'left', vertical: 'bottom' }}
-          transformOrigin={{ horizontal: 'left', vertical: 'top' }}
-          marginThreshold={8}
-          slotProps={{
-            paper: {
-              sx: {
-                mt: '4px',
-                minWidth: 'min(200px, 100%)',
-                // Never wider than the header slot the pill sits in, so it stays in the column.
-                maxWidth: anchorEl?.parentElement?.clientWidth || 360,
-                maxHeight: 'min(60vh, 480px)',
-                border: `1px solid ${tokens.border}`,
-                borderRadius: `${tokens.radius.content}px`,
-                bgcolor: getAgentColumnRaisedSurface(theme),
-                boxShadow: '0 10px 15px rgba(0,0,0,0.1)'
-              }
-            }
-          }}
-        >
-          {pickableProfiles.length > 0
-            ? [
-                <PillMenuHeading key="models-heading" disabled>
-                  {t('chat.model')}
-                </PillMenuHeading>,
-                ...pickableProfiles.map((profile) =>
-                  renderOption(
-                    `model:${profile.id}`,
-                    profile.model_name,
-                    isModelChecked(profile),
-                    isModelChecked(profile),
-                    () =>
-                      memberModel
-                        ? memberModel.onSelectProfile?.(profile.id)
-                        : onSelectProfile(profile.id)
-                  )
-                )
-              ]
-            : null}
-          {pickableEfforts.length > 0
-            ? [
-                <PillMenuHeading key="efforts-heading" disabled>
-                  {translate('chat.reasoning_label', 'Reasoning effort')}
-                </PillMenuHeading>,
-                ...[undefined, ...pickableEfforts].map((effort) =>
-                  renderOption(
-                    `effort:${effort ?? 'default'}`,
-                    effort
-                      ? getReasoningEffortLabel(effort)
-                      : translate('chat.reasoning_default', 'Default'),
-                    effort === normalizedSelectedEffort,
-                    !hasCheckedModel && effort === normalizedSelectedEffort,
-                    () =>
-                      memberModel
-                        ? onSelectMemberReasoningEffort?.(effort)
-                        : onSelectReasoningEffort?.(effort)
-                  )
-                )
-              ]
-            : null}
-        </Menu>
+          onSwitch={handleSwitch}
+        />
       </>
     )
   }

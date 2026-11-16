@@ -63,7 +63,7 @@ describe('ChatPrimarySelection header pill', () => {
     expect(screen.getAllByRole('button')).toHaveLength(3)
     expect(pill()).toHaveTextContent(/^anthropic\/claude-sonnetHigh$/)
     expect(pill()).toHaveAccessibleName('Model: anthropic/claude-sonnet, reasoning effort: High')
-    expect(pill()).toHaveAttribute('aria-haspopup', 'menu')
+    expect(pill()).toHaveAttribute('aria-haspopup', 'dialog')
     expect(pill()).toHaveAttribute('aria-expanded', 'false')
     expect(pill()).toHaveAttribute('title', 'anthropic/claude-sonnet')
     const [name, effort] = Array.from(pill().querySelectorAll('span'))
@@ -83,7 +83,7 @@ describe('ChatPrimarySelection header pill', () => {
     expect(screen.queryByTestId('chat-model-pill-effort')).toBeNull()
   })
 
-  it('is reached with Tab, opens its menu with Enter on the current model and gives focus back on Escape', async () => {
+  it('is reached with Tab, opens the model switcher with Enter and gives focus back on Escape', async () => {
     const user = userEvent.setup()
     const onSelectProfile = vi.fn()
     renderPill({
@@ -97,69 +97,146 @@ describe('ChatPrimarySelection header pill', () => {
     await user.tab()
     expect(pill()).toHaveFocus()
     await user.keyboard('{Enter}')
-    const menu = await screen.findByRole('menu')
+    const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
     expect(pill()).toHaveAttribute('aria-expanded', 'true')
-    expect(document.getElementById(pill().getAttribute('aria-controls') ?? '')).toContainElement(
-      menu
-    )
-    const options = within(menu).getAllByRole('menuitemradio')
-    expect(options.map((option) => option.textContent)).toEqual([
-      'anthropic/claude-sonnet',
-      'openai/gpt-5.5',
-      'Default',
-      'Medium',
-      'High'
+    // Search first, then the models as two-line rows (name, id) with the one in use chosen.
+    const search = within(sheet).getByRole('searchbox', { name: 'Search models…' })
+    await waitFor(() => expect(search).toHaveFocus())
+    const rows = within(sheet).getAllByRole('radio')
+    expect(rows.map((row) => row.textContent)).toEqual([
+      'anthropic/claude-sonnetsonnet',
+      'openai/gpt-5.5gpt'
     ])
-    expect(options.map((option) => option.getAttribute('aria-checked'))).toEqual([
-      'true',
-      'false',
-      'false',
-      'false',
-      'true'
+    expect(rows.map((row) => row.getAttribute('aria-checked'))).toEqual(['true', 'false'])
+    // The efforts of the chosen model as pill chips, the one in use pressed.
+    const chips = within(
+      within(sheet).getByRole('group', { name: 'Reasoning effort' })
+    ).getAllByRole('button')
+    expect(chips.map((chip) => [chip.textContent, chip.getAttribute('aria-pressed')])).toEqual([
+      ['Medium', 'false'],
+      ['High', 'true']
     ])
-    // Two group headings that the keyboard skips.
-    expect(within(menu).getByText('Model')).toBeInTheDocument()
-    expect(within(menu).getByText('Reasoning effort')).toBeInTheDocument()
-    await waitFor(() => expect(options[0]).toHaveFocus())
-    await user.keyboard('{ArrowDown}')
-    expect(options[1]).toHaveFocus()
-    await user.keyboard('{ArrowDown}')
-    expect(options[2]).toHaveFocus()
+    // Cancel and a Switch that waits for a change.
+    expect(within(sheet).getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    expect(within(sheet).getByRole('button', { name: 'Switch' })).toBeDisabled()
 
     await user.keyboard('{Escape}')
-    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(pill()).toHaveFocus()
     expect(pill()).toHaveAttribute('aria-expanded', 'false')
     expect(onSelectProfile).not.toHaveBeenCalled()
 
     await user.keyboard(' ')
-    expect(await screen.findByRole('menu')).toBeInTheDocument()
+    expect(await screen.findByRole('dialog', { name: 'Switch model' })).toBeInTheDocument()
   })
 
-  it('switches the model and the effort from the one menu', async () => {
+  it('filters the models by name or id and says when none matches', async () => {
+    const user = userEvent.setup()
+    renderPill()
+    await user.click(pill())
+    const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    const search = within(sheet).getByRole('searchbox')
+    await user.type(search, 'GPT')
+    expect(
+      within(sheet)
+        .getAllByRole('radio')
+        .map((row) => row.textContent)
+    ).toEqual(['openai/gpt-5.5gpt'])
+    await user.clear(search)
+    await user.type(search, 'nothing')
+    expect(within(sheet).queryAllByRole('radio')).toHaveLength(0)
+    expect(within(sheet).getByText('No matching models.')).toBeInTheDocument()
+  })
+
+  it('switches the model, the effort, or both, with Switch', async () => {
     const user = userEvent.setup()
     const onSelectProfile = vi.fn()
     const onSelectReasoningEffort = vi.fn()
+    const onSelectProfileReasoningEffort = vi.fn()
     renderPill({
       onSelectProfile,
       selectedReasoningEffort: 'high',
       availableReasoningEfforts: efforts,
-      onSelectReasoningEffort
+      onSelectReasoningEffort,
+      onSelectProfileReasoningEffort,
+      getProfileReasoning: (id) =>
+        id === 'gpt' ? { efforts: ['low', 'high'], effort: 'low' } : null
     })
 
+    // Only the effort of the model in use.
     await user.click(pill())
-    await user.click(await screen.findByRole('menuitemradio', { name: 'openai/gpt-5.5' }))
-    expect(onSelectProfile).toHaveBeenCalledExactlyOnceWith('gpt')
-    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
-
-    await user.click(pill())
-    await user.click(await screen.findByRole('menuitemradio', { name: 'Medium' }))
+    let sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    await user.click(within(sheet).getByRole('button', { name: 'Medium' }))
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
     expect(onSelectReasoningEffort).toHaveBeenLastCalledWith('medium')
-    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+    expect(onSelectProfile).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+    // Pressing the chosen effort again goes back to the default.
     await user.click(pill())
-    await user.click(await screen.findByRole('menuitemradio', { name: 'Default' }))
+    sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    await user.click(within(sheet).getByRole('button', { name: 'High' }))
+    expect(within(sheet).getByRole('button', { name: 'High' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    )
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
     expect(onSelectReasoningEffort).toHaveBeenLastCalledWith(undefined)
-    expect(onSelectProfile).toHaveBeenCalledTimes(1)
+
+    // Another model shows its own efforts; its stored effort alone changes nothing extra.
+    await user.click(pill())
+    sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    await user.click(within(sheet).getByRole('radio', { name: /openai\/gpt-5\.5/ }))
+    const chips = within(within(sheet).getByRole('group')).getAllByRole('button')
+    expect(chips.map((chip) => chip.textContent)).toEqual(['Low', 'High'])
+    expect(within(sheet).getByRole('button', { name: 'Low' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
+    expect(onSelectProfile).toHaveBeenCalledExactlyOnceWith('gpt')
+    expect(onSelectProfileReasoningEffort).not.toHaveBeenCalled()
+
+    // Model and effort together: the effort is stored for the new model.
+    await user.click(pill())
+    sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    await user.click(within(sheet).getByRole('radio', { name: /openai\/gpt-5\.5/ }))
+    await user.click(within(sheet).getByRole('button', { name: 'High' }))
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
+    expect(onSelectProfile).toHaveBeenLastCalledWith('gpt')
+    expect(onSelectProfileReasoningEffort).toHaveBeenCalledExactlyOnceWith('gpt', 'high')
+    expect(onSelectReasoningEffort).toHaveBeenCalledTimes(2)
+  })
+
+  it('Cancel drops the choice', async () => {
+    const user = userEvent.setup()
+    const onSelectProfile = vi.fn()
+    renderPill({ onSelectProfile })
+    await user.click(pill())
+    const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    await user.click(within(sheet).getByRole('radio', { name: /openai\/gpt-5\.5/ }))
+    expect(within(sheet).getByRole('button', { name: 'Switch' })).toBeEnabled()
+    await user.click(within(sheet).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(pill()).toHaveFocus()
+    expect(onSelectProfile).not.toHaveBeenCalled()
+    // Opening again starts from the model in use.
+    await user.click(pill())
+    const rows = within(await screen.findByRole('dialog')).getAllByRole('radio')
+    expect(rows.map((row) => row.getAttribute('aria-checked'))).toEqual(['true', 'false'])
+  })
+
+  it('draws the switcher into the column overlay layer', async () => {
+    const user = userEvent.setup()
+    const host = document.createElement('div')
+    document.body.append(host)
+    try {
+      renderPill({ overlayHost: host })
+      await user.click(pill())
+      expect(host).toContainElement(await screen.findByRole('dialog', { name: 'Switch model' }))
+    } finally {
+      host.remove()
+    }
   })
 
   it('is disabled without a model to choose and closes when the conversation stops being active', async () => {
@@ -171,13 +248,13 @@ describe('ChatPrimarySelection header pill', () => {
 
     const { rerender, props } = renderPill()
     await user.click(pill())
-    expect(await screen.findByRole('menu')).toBeInTheDocument()
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
     rerender(
       <ThemeProvider theme={theme}>
         <ChatPrimarySelection {...props} active={false} />
       </ThemeProvider>
     )
-    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
   it('reads "Inherits lead: <model>" for a member and stays read-only until the owner opts in', () => {
@@ -202,6 +279,7 @@ describe('ChatPrimarySelection header pill', () => {
       memberModel: {
         state: 'selected',
         label: 'openai/gpt-5.5',
+        profileId: 'gpt',
         onSelectProfile: member,
         selectableProfileIds: ['sonnet', 'gpt']
       },
@@ -213,21 +291,23 @@ describe('ChatPrimarySelection header pill', () => {
     expect(pill()).toHaveTextContent(/^Member model: openai\/gpt-5\.5Default$/)
     expect(pill()).toHaveAccessibleName('Member model: openai/gpt-5.5, reasoning effort: Default')
     await user.click(pill())
-    const options = within(await screen.findByRole('menu')).getAllByRole('menuitemradio')
-    expect(options.map((option) => option.textContent)).toEqual([
-      'anthropic/claude-sonnet',
-      'openai/gpt-5.5',
-      'Default',
-      'Medium',
-      'High'
+    let sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    const rows = within(sheet).getAllByRole('radio')
+    // No way back to inheriting: the stored member choice cannot be cleared.
+    expect(rows.map((row) => row.textContent)).toEqual([
+      'anthropic/claude-sonnetsonnet',
+      'openai/gpt-5.5gpt'
     ])
-    expect(options[1]).toHaveAttribute('aria-checked', 'true')
-    await user.click(options[0])
+    expect(rows[1]).toHaveAttribute('aria-checked', 'true')
+    await user.click(rows[0])
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
     expect(member).toHaveBeenCalledExactlyOnceWith('sonnet')
     expect(ordinary).not.toHaveBeenCalled()
-    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     await user.click(pill())
-    await user.click(await screen.findByRole('menuitemradio', { name: 'High' }))
+    sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    await user.click(within(sheet).getByRole('button', { name: 'High' }))
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
     expect(memberEffort).toHaveBeenCalledExactlyOnceWith('high')
 
     // A pending save disables the pill and announces that it is busy.
