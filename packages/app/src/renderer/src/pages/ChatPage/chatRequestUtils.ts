@@ -570,7 +570,9 @@ const normalizeImageAttachmentForRequest = async (
     // Every request image is read chunk by chunk from the response body under a
     // hard per-image cap. A response without a readable body (no body, or a body
     // without getReader) is refused by the reader before blob() or arrayBuffer()
-    // could read it uncapped; an ok 204/205 response is refused, not sent empty.
+    // could read it uncapped. A null body (HEAD, or an HTTP 204/205 from native
+    // fetch) is refused here; an empty body stream (a 204 from a custom scheme
+    // such as local-media) reads as zero bytes and main refuses the empty data URL.
     const blob = await readBoundedLocalChatImageBlob(response, {
       maxBytes: MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES,
       ...(options.signal ? { signal: options.signal } : {})
