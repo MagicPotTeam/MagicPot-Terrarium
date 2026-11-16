@@ -282,13 +282,18 @@ export const PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT = 512
 export const PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES = 768 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES = 128 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET = 128
-// Chromium stages uploads that do not fit its transfer buffer (16 MiB at most) in shared-memory
-// chunks, and keeps every chunk it ever needed at once for the life of the context. Eager
-// uploads of many textures in one task (5 x 48 MiB for 4096 x 3072, or 128 thumbnails of a
-// fitted board) therefore stay as staging memory. All eager uploads of one display frame
-// together stay within this many bytes, and the first one of a frame starts only when the
-// previous frame's uploads have finished on the GPU. A single texture above the budget gets a
-// frame of its own. The rest waits for the next frame, with what is on screen kept meanwhile.
+// Chromium stages an upload in the context's transfer buffer (16 MiB at most). An upload that
+// does not fit there gets a shared-memory chunk of its own size, and the context keeps every
+// chunk it ever needed at once for its whole life. Eager uploads of several large textures in
+// one task (5 x 48 MiB for 4096 x 3072) therefore stay as staging memory. All eager uploads of
+// one display frame together stay within this many bytes (no more than the transfer buffer),
+// and the first one of a frame starts only when the previous frame's uploads have finished on
+// the GPU. A single texture above the budget gets a frame of its own. The rest waits for the
+// next frame, with what is on screen kept meanwhile.
+// Measured on a fitted 100 x 2048 px board: the fit burst of 512 px previews (1 MiB each,
+// uploaded by Pixi on their first draw, one sprite batch per frame) stays in the transfer
+// buffer and adds no chunk; the layer's context holds 0 bytes of chunks after it. The ~104 MB
+// seen right after an import belongs to the thumbnail workers' canvases, not to this layer.
 export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_BYTES = 16 * 1024 * 1024
 // If the GPU never reports the previous frame's uploads as finished (no fence support, a lost
 // fence), the next frame's uploads wait at most this long.
