@@ -18,7 +18,11 @@ vi.mock('../config/userDataDirectory', () => ({
   })
 }))
 
-import { fsSvcDef, MAX_CANVAS_MIRROR_SOURCE_PATH_LENGTH } from '@shared/api/svcFs'
+import {
+  fsSvcDef,
+  MAX_CANVAS_MIRROR_SOURCE_PATH_LENGTH,
+  MAX_FULL_FILE_BYTES
+} from '@shared/api/svcFs'
 import { validateServiceValue } from '@shared/api/apiUtils/serviceValidation'
 import { CANVAS_MIRROR_PRUNE_GRACE_MS, FsSvcImpl } from './svcFsImpl'
 import {
@@ -236,6 +240,21 @@ describe('FsSvcImpl canvas mirror assets', () => {
       ).resolves.toEqual({ status: 'exists', sizeBytes: 6 })
       expect(fs.readFileSync(path.join(assetDir, `${KEY_B}.png`), 'utf8')).toBe('pixels')
       expect(listAssetDir()).toEqual([`${KEY_B}.png`])
+    })
+
+    it('refuses a source larger than the full-file limit and creates nothing', async () => {
+      const source = path.join(projectRoot, 'Board-1', 'huge.png')
+      writeFile(source, '')
+      // Sparse: takes no disk space.
+      fs.truncateSync(source, MAX_FULL_FILE_BYTES + 1)
+      await expect(
+        service.copyCanvasMirrorAsset({
+          projectDirName: PROJECT,
+          assetFileName: `${KEY_B}.png`,
+          sourcePath: source
+        })
+      ).rejects.toThrow('Canvas mirror asset source is too large')
+      expect(fs.readdirSync(autoSaveRoot)).toEqual([])
     })
 
     it('refuses a source outside the application roots until the user granted it', async () => {

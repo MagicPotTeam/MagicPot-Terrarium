@@ -1235,6 +1235,90 @@ describe('useCanvasViewportPersistence', () => {
       expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
     })
 
+    async function startHeldBlurFlush(canvasId: string) {
+      const rendered = await mountDirtyBoard(canvasId)
+      const heldFlush = createDeferred<unknown>()
+      mockSaveCanvasItems.mockImplementationOnce(() => heldFlush.promise).mockResolvedValue(undefined)
+      await act(async () => {
+        window.dispatchEvent(new Event('blur'))
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+      expect(saveOptionsOfCall(0).metadataOnly).toBe(true)
+      return { rendered, heldFlush }
+    }
+
+    it('still saves fully for a native save request that arrives during a metadata-only flush', async () => {
+      const { heldFlush } = await startHeldBlurFlush('canvas-flush-close')
+
+      await act(async () => {
+        requestUnsavedSave?.('close-during-flush')
+        await Promise.resolve()
+      })
+      await act(async () => {
+        heldFlush.resolve('needs-bytes')
+        await vi.advanceTimersByTimeAsync(10)
+      })
+
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+      expect(mockReportUnsavedSaveResult).toHaveBeenCalledWith({
+        requestId: 'close-during-flush',
+        success: true
+      })
+    })
+
+    it('still falls back to a full save when the page goes away during a metadata-only flush', async () => {
+      const { heldFlush } = await startHeldBlurFlush('canvas-flush-blur-pagehide')
+
+      await act(async () => {
+        window.dispatchEvent(new Event('pagehide'))
+        await Promise.resolve()
+      })
+      await act(async () => {
+        heldFlush.resolve('needs-bytes')
+        await vi.advanceTimersByTimeAsync(10)
+      })
+
+      // At once, not left to the autosave timer.
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+    })
+
+    it('still saves fully when the board unmounts during a metadata-only flush', async () => {
+      const { rendered, heldFlush } = await startHeldBlurFlush('canvas-flush-unmount')
+
+      rendered.unmount()
+      await act(async () => {
+        heldFlush.resolve('needs-bytes')
+        await vi.advanceTimersByTimeAsync(10)
+      })
+
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+      expect(mockSaveCanvasItems.mock.calls[1][1]).toBe('canvas-flush-unmount')
+    })
+
+    it('leaves moving bytes to the timer when only another flush joins a metadata-only flush', async () => {
+      const { heldFlush } = await startHeldBlurFlush('canvas-flush-double-blur')
+
+      await act(async () => {
+        window.dispatchEvent(new Event('blur'))
+        await Promise.resolve()
+      })
+      await act(async () => {
+        heldFlush.resolve('needs-bytes')
+        await vi.advanceTimersByTimeAsync(10)
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+    })
+
     it('postpones the autosave while a pointer is down and saves once it is released', async () => {
       await mountDirtyBoard('canvas-gesture-pointer')
       act(() => {

@@ -2070,6 +2070,15 @@ async function resolveCanvasSourceStringAssetKey(
   slotId: string,
   src: string
 ): Promise<string> {
+  // Long data: URLs are not kept in the string cache; the slot cache saves hashing them on every save.
+  const cachedSlot = canvasAssetKeyBySlot.get(owner)?.get(slotId)
+  if (
+    cachedSlot &&
+    cachedSlot.src === src &&
+    cachedSlot.sourceFile === getCanvasAssetSlotSourceFile(owner, slotId)
+  ) {
+    return cachedSlot.key
+  }
   const cacheable = src.length <= CANVAS_SOURCE_STRING_KEY_CACHE_MAX_LENGTH
   let key = cacheable ? canvasAssetKeyByShortSource.get(src) : undefined
   if (!key) {

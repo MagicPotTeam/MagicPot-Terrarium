@@ -734,6 +734,10 @@ export class FsSvcImpl implements FsSvc {
     if (!sourceStats.isFile()) {
       throw new Error('Canvas mirror asset source is not a file')
     }
+    // The same limit as readImageFromPath and writeCanvasMirrorAsset.
+    if (sourceStats.size > MAX_FULL_FILE_BYTES) {
+      throw new Error('Canvas mirror asset source is too large')
+    }
     const location = await resolveCanvasMirrorAssetDir(req.projectDirName, true)
     if (!location) throw new Error('Canvas mirror folder is unavailable')
     return publishCanvasMirrorAsset(location.assetDir, assetFileName, sourceStats.size, (tempPath) =>

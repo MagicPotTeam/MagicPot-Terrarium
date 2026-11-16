@@ -1057,6 +1057,29 @@ describe('content-addressed autosave mirror', () => {
     expect(mirror.calls.write).toEqual([])
   })
 
+  it('hashes a long inline source once while its item is unchanged', async () => {
+    const mirror = createFakeMirror()
+    const longInline = `data:image/png;base64,${'QUJD'.repeat(4096)}`
+    const inline = imageItem('long-inline', longInline)
+    const digest = vi.spyOn(globalThis.crypto.subtle, 'digest')
+    const longDigests = () =>
+      digest.mock.calls.filter(([, data]) => (data as ArrayBufferView).byteLength >= longInline.length)
+        .length
+    try {
+      await saveCanvasItems([inline], 'mirror-long-inline')
+      expect(mirror.assetFiles()).toHaveLength(1)
+      expect(longDigests()).toBe(1)
+
+      digest.mockClear()
+      mirror.resetCalls()
+      await saveCanvasItems([inline, imageItem('other', 'data:image/png;base64,AQID')], 'mirror-long-inline')
+      expect(longDigests()).toBe(0)
+      expect(mirror.calls.write).toHaveLength(1)
+    } finally {
+      digest.mockRestore()
+    }
+  })
+
   it('leaves the source of an item untouched when its bytes cannot be mirrored', async () => {
     const mirror = createFakeMirror()
     await saveCanvasItems([imageItem('lost', 'https://example.invalid/missing.png')], 'mirror-lost')

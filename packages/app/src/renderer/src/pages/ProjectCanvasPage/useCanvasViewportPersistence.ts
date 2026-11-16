@@ -97,6 +97,21 @@ const CANVAS_VIEWPORT_INTERACTION_QUIET_MS = 250
 
 type CanvasSaveMode = 'full' | 'metadata-only' | 'metadata-first'
 
+const CANVAS_SAVE_MODE_STRENGTH: Record<CanvasSaveMode, number> = {
+  'metadata-only': 0,
+  'metadata-first': 1,
+  full: 2
+}
+
+function strongerCanvasSaveMode(
+  left: CanvasSaveMode | null,
+  right: CanvasSaveMode
+): CanvasSaveMode {
+  return left !== null && CANVAS_SAVE_MODE_STRENGTH[left] >= CANVAS_SAVE_MODE_STRENGTH[right]
+    ? left
+    : right
+}
+
 const pendingCanvasSaveById = new Map<string, Promise<void>>()
 
 function rememberPendingCanvasSave(canvasId: string, promise: Promise<void>) {
@@ -173,6 +188,8 @@ export function useCanvasViewportPersistence({
   const hasPendingCanvasChangesRef = useRef(false)
   const canvasSaveInFlightRef = useRef<{ canvasId: string; promise: Promise<void> } | null>(null)
   const saveAgainAfterInFlightRef = useRef(false)
+  // The strongest mode asked for by callers that joined the save in flight.
+  const joinedCanvasSaveModeRef = useRef<CanvasSaveMode | null>(null)
   const lastCanvasSaveErrorRef = useRef<unknown>(null)
   const lastPersistedCanvasSignatureRef = useRef<CanvasPersistenceSignature | null>(null)
   const isRestoringRef = useRef(true)
@@ -211,6 +228,7 @@ export function useCanvasViewportPersistence({
     shouldClearCanvasBeforeRestoreRef.current = true
     hasPendingCanvasChangesRef.current = false
     saveAgainAfterInFlightRef.current = false
+    joinedCanvasSaveModeRef.current = null
     lastCanvasSaveErrorRef.current = null
     lastPersistedCanvasSignatureRef.current = null
   }
@@ -431,6 +449,14 @@ export function useCanvasViewportPersistence({
     const saveInFlight = canvasSaveInFlightRef.current
     if (saveInFlight?.canvasId === canvasId) {
       if (hasPendingCanvasChangesRef.current) saveAgainAfterInFlightRef.current = true
+      // The run in flight may be a metadata-only flush. A caller that needs the
+      // board saved (close, page hide, unmount) makes it fall back to a full save.
+      if (mode !== 'metadata-only') {
+        joinedCanvasSaveModeRef.current = strongerCanvasSaveMode(
+          joinedCanvasSaveModeRef.current,
+          mode
+        )
+      }
       return saveInFlight.promise
     }
 
@@ -440,11 +466,21 @@ export function useCanvasViewportPersistence({
 
     const saveCanvasId = canvasId
     let savePromise: Promise<void> | null = null
+    let runMode = mode
     let metadataOnly = mode !== 'full'
     let needsTimer = false
+    joinedCanvasSaveModeRef.current = null
+    const absorbJoinedSaveMode = () => {
+      const joinedMode = joinedCanvasSaveModeRef.current
+      joinedCanvasSaveModeRef.current = null
+      if (joinedMode === null) return
+      runMode = strongerCanvasSaveMode(runMode, joinedMode)
+      if (runMode === 'full') metadataOnly = false
+    }
     const drainCanvasSaves = async () => {
       try {
         do {
+          absorbJoinedSaveMode()
           saveAgainAfterInFlightRef.current = false
           hasPendingCanvasChangesRef.current = false
           const snapshot = latestPersistedCanvasStateRef.current
@@ -473,7 +509,8 @@ export function useCanvasViewportPersistence({
           if (outcome === 'needs-bytes') {
             // Nothing was written. The board stays dirty for a save that may move bytes.
             hasPendingCanvasChangesRef.current = true
-            if (mode === 'metadata-first') {
+            absorbJoinedSaveMode()
+            if (runMode !== 'metadata-only') {
               metadataOnly = false
               continue
             }
@@ -519,6 +556,7 @@ export function useCanvasViewportPersistence({
         clearPendingCanvasSave()
         hasPendingCanvasChangesRef.current = false
         saveAgainAfterInFlightRef.current = false
+        joinedCanvasSaveModeRef.current = null
         lastPersistedCanvasSignatureRef.current = null
         if (shouldClearCanvasBeforeRestoreRef.current) {
           shouldClearCanvasBeforeRestoreRef.current = false
@@ -731,7 +769,8 @@ export function useCanvasViewportPersistence({
     // flushed when its record alone is enough, and left to the autosave timer
     // otherwise. A page that is going away gets the full save as a fallback.
     const flushPendingCanvasSave = (force = false) => {
-      if (!hasPendingCanvasChangesRef.current) return
+      // A save in flight may be a metadata-only flush that still needs bytes moved.
+      if (!hasPendingCanvasChangesRef.current && canvasSaveInFlightRef.current === null) return
       if (!force && suspendAutoSaveRef.current) return
       void persistLatestCanvasState(force ? 'metadata-first' : 'metadata-only').catch(() => {
         // The native close flow reports the error and keeps the window open.
