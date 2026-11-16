@@ -456,4 +456,141 @@ describe('canvasTargetAgentArtifacts', () => {
       ])
     )
   })
+
+  describe('MAIN registration of the written bundle', () => {
+    const binding = `rb1.${'A'.repeat(43)}`
+    const ticket = `rbt1.${'B'.repeat(43)}`
+    const conversation = { conversationId: 'conversation-1', storageScope: 'scope-1' }
+    const bundleDir = 'C:/bundle-cache/.report_bundles/canvas-target-stage-1'
+
+    const run = async (
+      registration: {
+        beginReportBundle?: (req: unknown) => Promise<{ ticket: string }>
+        registerReportBundle?: (req: unknown) => Promise<{
+          binding: string
+          bundleId: string
+          imageCount: number
+          omittedEntries: number
+        }>
+        conversation?: typeof conversation
+      },
+      calls: string[] = []
+    ) => {
+      const stage = createStage()
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }))
+      )
+      const writeTextFile = vi.fn(async ({ outputPath, filename }) => {
+        calls.push(`write:${filename}`)
+        return { success: true, fullPath: `${outputPath}/${filename}` }
+      })
+      const saveImageToPath = vi.fn(async ({ outputPath, filename }) => {
+        calls.push(`image:${filename}`)
+        return { success: true, fullPath: `${outputPath}/${filename}` }
+      })
+      return materializeCanvasTargetAgentMessagePayload({
+        report: createReport(stage),
+        stage,
+        isChineseUi: false,
+        includeReportFile: true,
+        bundleRootDir: 'C:/bundle-cache',
+        writeTextFile,
+        saveImageToPath,
+        ...registration
+      } as Parameters<typeof materializeCanvasTargetAgentMessagePayload>[0])
+    }
+
+    const unboundPayload = async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const payload = await run({})
+      warn.mockRestore()
+      return payload
+    }
+
+    it('begins before the first bundle write, registers after the manifest write and binds the primary', async () => {
+      const calls: string[] = []
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const beginReportBundle = vi.fn(async (req: unknown) => {
+        calls.push(`begin:${JSON.stringify(req)}`)
+        return { ticket }
+      })
+      const registerReportBundle = vi.fn(async (req: unknown) => {
+        calls.push(`register:${JSON.stringify(req)}`)
+        return { binding, bundleId: 'canvas-target-stage-1', imageCount: 1, omittedEntries: 0 }
+      })
+
+      const payload = await run({ beginReportBundle, registerReportBundle, conversation }, calls)
+
+      expect(beginReportBundle).toHaveBeenCalledOnce()
+      expect(beginReportBundle).toHaveBeenCalledWith({ bundleDir, conversation })
+      expect(registerReportBundle).toHaveBeenCalledOnce()
+      expect(registerReportBundle).toHaveBeenCalledWith({ ticket })
+      expect(calls[0]).toBe(`begin:${JSON.stringify({ bundleDir, conversation })}`)
+      expect(calls.at(-2)).toBe('write:manifest.json')
+      expect(calls.at(-1)).toBe(`register:${JSON.stringify({ ticket })}`)
+      const primary = payload.attachments.find(
+        (attachment) => attachment.reportBundleRole === 'primary-report'
+      )
+      expect(primary?.reportBundleBinding).toBe(binding)
+      // Only the primary carries the binding.
+      expect(
+        payload.attachments.filter((attachment) => attachment.reportBundleBinding !== undefined)
+      ).toHaveLength(1)
+      const { reportBundleBinding: _binding, ...primaryWithoutBinding } = primary!
+      const unbound = await unboundPayload()
+      expect({
+        ...payload,
+        attachments: payload.attachments.map((attachment) =>
+          attachment === primary ? primaryWithoutBinding : attachment
+        )
+      }).toEqual(unbound)
+      expect(warn).not.toHaveBeenCalled()
+      warn.mockRestore()
+    })
+
+    it.each([
+      ['begin rejects', { begin: 'reject' as const }],
+      ['begin is missing', { begin: 'missing' as const }],
+      ['register rejects', { register: 'reject' as const }],
+      ['register is missing', { register: 'missing' as const }],
+      ['register returns no binding', { register: 'malformed' as const }],
+      ['the conversation is missing', { conversation: 'missing' as const }]
+    ])('posts the same payload without a binding and one warning when %s', async (_name, mode) => {
+      const unbound = await unboundPayload()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const beginReportBundle = vi.fn(async () => {
+        if ('begin' in mode && mode.begin === 'reject') throw new Error('refused')
+        return { ticket }
+      })
+      const registerReportBundle = vi.fn(async () => {
+        if ('register' in mode && mode.register === 'reject') throw new Error('refused')
+        return {
+          binding: 'register' in mode && mode.register === 'malformed' ? 'not-a-binding' : binding,
+          bundleId: 'canvas-target-stage-1',
+          imageCount: 1,
+          omittedEntries: 0
+        }
+      })
+
+      const payload = await run({
+        ...('begin' in mode && mode.begin === 'missing' ? {} : { beginReportBundle }),
+        ...('register' in mode && mode.register === 'missing' ? {} : { registerReportBundle }),
+        ...('conversation' in mode ? {} : { conversation })
+      })
+
+      expect(payload).toEqual(unbound)
+      expect(
+        payload.attachments.some((attachment) => attachment.reportBundleBinding !== undefined)
+      ).toBe(false)
+      expect(warn).toHaveBeenCalledOnce()
+      const warning = String(warn.mock.calls[0]?.[0])
+      expect(warning).not.toContain(ticket)
+      expect(warning).not.toContain(binding)
+      expect(warning).not.toContain('bundle-cache')
+      if ('begin' in mode && mode.begin === 'reject')
+        expect(registerReportBundle).not.toHaveBeenCalled()
+      warn.mockRestore()
+    })
+  })
 })
