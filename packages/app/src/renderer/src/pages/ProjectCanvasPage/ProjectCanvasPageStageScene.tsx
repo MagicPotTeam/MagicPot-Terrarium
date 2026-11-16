@@ -85,6 +85,19 @@ const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_DENSE_VIEW_MAX_SCALE = 1
 const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_DENSE_VIEW_CANDIDATE_LIMIT = 16
 const PROJECT_CANVAS_NEW_RESULT_HINT_DURATION_MS = 8000
 const PROJECT_CANVAS_NEW_RESULT_HINT_OUTLINE_SCREEN_PX = 4
+/**
+ * Set on the stage layer root while the viewport pans or zooms. Proxies and selection chrome stay
+ * mounted through a gesture (no remount at its start or end); this class only makes them inert.
+ */
+export const PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS = 'is-viewport-interacting'
+const PROJECT_CANVAS_STAGE_LAYER_ROOT_SX = {
+  position: 'relative',
+  width: '100%',
+  height: '100%',
+  [`&.${PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS} [data-project-canvas-proxy-layer="dom"] *`]: {
+    pointerEvents: 'none !important'
+  }
+} as const
 
 function getProjectCanvasDomImageDeviceScale() {
   return Math.min(4, Math.max(1, window.devicePixelRatio || 1))
@@ -1199,12 +1212,27 @@ export default function ProjectCanvasPageStageScene(props: any) {
       canvas2DFallbackLayerRef.current?.syncViewport(pos, scale)
     })
   }, [registerViewportCallback])
+  const stageLayerRootRef = React.useRef<HTMLDivElement | null>(null)
+  const isViewportInteractingClassActiveRef = React.useRef(isViewportInteracting)
+  const syncViewportInteractingClass = React.useCallback((active: boolean) => {
+    isViewportInteractingClassActiveRef.current = active
+    stageLayerRootRef.current?.classList.toggle(PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS, active)
+  }, [])
+  React.useLayoutEffect(() => {
+    syncViewportInteractingClass(isViewportInteracting)
+  }, [isViewportInteracting, syncViewportInteractingClass])
+  React.useLayoutEffect(() => {
+    // The class is written outside React; keep it if a render ever rewrites the root's className.
+    syncViewportInteractingClass(isViewportInteractingClassActiveRef.current)
+  })
   React.useEffect(() => {
     if (!registerViewportInteractionCallback) {
       return
     }
 
     return registerViewportInteractionCallback((active) => {
+      // The driver reports the gesture before React commits it: make proxies inert at once.
+      syncViewportInteractingClass(active)
       isViewportInteractionActiveRef.current = active
       isWebglRuntimeStateDeferredRef.current =
         active ||
@@ -1227,7 +1255,11 @@ export default function ProjectCanvasPageStageScene(props: any) {
         flushPendingWebglRuntimeState()
       }
     })
-  }, [flushPendingWebglRuntimeState, registerViewportInteractionCallback])
+  }, [
+    flushPendingWebglRuntimeState,
+    registerViewportInteractionCallback,
+    syncViewportInteractingClass
+  ])
   const regionSelectionTargetId =
     tool === 'crop-select' ? croppingImageId : tool === 'extract-select' ? extractingImageId : null
   const cropTargetId = regionSelectionTargetId
@@ -1512,9 +1544,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
         }
 
         const isActivePlaceholderDrag = activePlaceholderDragItemId === renderableItem.id
-        if (isViewportInteracting && runtimeRoute === 'webgl-primary' && !isActivePlaceholderDrag) {
-          continue
-        }
         const isSingleSelectedImage =
           tool === 'select' && selectedIds.size === 1 && selectedIds.has(renderableItem.id)
         const imageFallbackReason = imageFallbackReasonById.get(renderableItem.id)
@@ -1559,7 +1588,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
       activePlaceholderDragItemId,
       imageFallbackReasonById,
       imageRuntimeRouteById,
-      isViewportInteracting,
       renderableMediaItems,
       selectedIds,
       shouldUseDenseWebglImageProxyBudget,
@@ -3253,7 +3281,11 @@ export default function ProjectCanvasPageStageScene(props: any) {
       onDragOverCapture={handleDragOver}
     >
       <MaxSizeLayout onResize={handleResize}>
-        <Box sx={{ position: 'relative', width: '100%', height: '100%' }}>
+        <Box
+          ref={stageLayerRootRef}
+          data-project-canvas-stage-layer-root="true"
+          sx={PROJECT_CANVAS_STAGE_LAYER_ROOT_SX}
+        >
           <ProjectCanvasWebGLImageLayer
             ref={webglImageLayerRef}
             items={webglImageItems}

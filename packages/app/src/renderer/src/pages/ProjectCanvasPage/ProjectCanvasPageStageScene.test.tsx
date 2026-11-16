@@ -148,7 +148,10 @@ vi.mock('./components/CanvasItemPlaceholder', () => ({
       }
     })
 
-    return <div data-testid={`canvas-placeholder-${props.item.id}`} />
+    // Like the real proxy, the hit target opts back into pointer events.
+    return (
+      <div data-testid={`canvas-placeholder-${props.item.id}`} style={{ pointerEvents: 'auto' }} />
+    )
   }
 }))
 
@@ -398,6 +401,36 @@ function createAnnotationItem(
     locked: false,
     ...overrides
   }
+}
+
+// jsdom's CSSOM drops `!important` and getComputedStyle lets the proxy's own inline
+// `pointer-events: auto` win, so check the cascade directly: the element must be matched by a
+// `pointer-events: none` rule whose source text is marked important (it has to beat the proxy's own
+// pointer-events in the browser).
+function isForcedPointerEventsNone(element: Element) {
+  const styleText = Array.from(document.querySelectorAll('style'))
+    .map((style) => style.textContent ?? '')
+    .join('\n')
+  for (const sheet of Array.from(document.styleSheets)) {
+    let rules: CSSRuleList
+    try {
+      rules = sheet.cssRules
+    } catch {
+      continue
+    }
+    for (const rule of Array.from(rules)) {
+      if (!(rule instanceof CSSStyleRule)) continue
+      if (rule.style.getPropertyValue('pointer-events') !== 'none') continue
+      if (!element.matches(rule.selectorText)) continue
+      const sourceRule = styleText
+        .split('}')
+        .find((chunk) =>
+          chunk.replace(/\s+/g, '').startsWith(rule.selectorText.replace(/\s+/g, ''))
+        )
+      if (sourceRule && /pointer-events:\s*none\s*!important/.test(sourceRule)) return true
+    }
+  }
+  return false
 }
 
 function createBaseProps(visibleItems: CanvasItem[]) {
@@ -1392,7 +1425,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(updateSelection?.(new Set())).toEqual(new Set([items[0].id]))
   })
 
-  it('suspends WebGL image proxy content and multi-selection transform chrome during viewport interaction', async () => {
+  it('keeps WebGL image hit proxies mounted during viewport interaction and suspends multi-selection transform chrome', async () => {
     const selectedItem = createImageItem('image-selected')
     const siblingItem = createImageItem('image-sibling')
     siblingItem.x = 420
@@ -1408,17 +1441,19 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       expect(latestWebGLItems.map((item) => item.id)).toEqual([selectedItem.id, siblingItem.id])
     })
 
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(2)
+    })
     expect(
       screen
         .getByTestId('project-canvas-stage-root')
         .querySelector('[data-project-canvas-proxy-layer="dom"]')
-    ).toBeNull()
-    expect(canvasPlaceholderProps.size).toBe(0)
+    ).not.toBeNull()
     expect(imageInteractionOverlayProps.size).toBe(0)
     expect(rectInteractionOverlayProps.size).toBe(0)
     expect(screen.getByTestId('project-canvas-stage-root')).toHaveAttribute(
       'data-project-canvas-proxy-layer-candidate-count',
-      '0'
+      '2'
     )
     expect(screen.queryByTestId('mock-multi-selection-transform-overlay')).toBeNull()
 
@@ -1439,6 +1474,193 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
         .querySelector('[data-project-canvas-proxy-layer="dom"]')
     ).not.toBeNull()
     expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBeInTheDocument()
+  })
+
+  it('keeps WebGL hit proxies mounted and inert through a gesture without re-rendering them', async () => {
+    const firstItem = createImageItem('image-gesture-first')
+    const secondItem = createImageItem('image-gesture-second')
+    secondItem.x = 420
+    setMockWebGLRuntime({ loadedIds: [firstItem.id, secondItem.id] })
+    const baseProps = createBaseProps([firstItem, secondItem])
+    const noSelection = new Set<string>()
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={noSelection} />
+    )
+
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(2)
+    })
+    const stageLayerRoot = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-stage-layer-root="true"]') as HTMLElement
+    expect(stageLayerRoot).not.toBeNull()
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(false)
+    const firstProxyNode = screen.getByTestId(`canvas-placeholder-${firstItem.id}`)
+    const rendersBeforeGesture = canvasPlaceholderRenderCounts.get(firstItem.id)
+
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} isViewportInteracting selectedIds={noSelection} />
+    )
+
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(true)
+    expect(screen.getByTestId(`canvas-placeholder-${firstItem.id}`)).toBe(firstProxyNode)
+    expect(canvasPlaceholderProps.size).toBe(2)
+    expect(isForcedPointerEventsNone(firstProxyNode)).toBe(true)
+    expect(canvasPlaceholderRenderCounts.get(firstItem.id)).toBe(rendersBeforeGesture)
+    for (const props of canvasPlaceholderProps.values()) {
+      expect(props).not.toHaveProperty('isViewportInteracting')
+    }
+
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting={false}
+        selectedIds={noSelection}
+      />
+    )
+
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(false)
+    expect(screen.getByTestId(`canvas-placeholder-${firstItem.id}`)).toBe(firstProxyNode)
+    expect(isForcedPointerEventsNone(firstProxyNode)).toBe(false)
+    expect(canvasPlaceholderRenderCounts.get(firstItem.id)).toBe(rendersBeforeGesture)
+  })
+
+  it('makes proxies inert as soon as the viewport driver reports a gesture, before React commits it', async () => {
+    const item = createImageItem('image-driver-gesture')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    const interactionCallbacks = new Set<(active: boolean) => void>()
+    const registerViewportInteractionCallback = vi.fn((callback: (active: boolean) => void) => {
+      interactionCallbacks.add(callback)
+      callback(false)
+      return () => {
+        interactionCallbacks.delete(callback)
+      }
+    })
+
+    render(
+      <ProjectCanvasPageStageScene
+        {...createBaseProps([item])}
+        selectedIds={new Set<string>()}
+        {...({ registerViewportInteractionCallback } as Record<string, unknown>)}
+      />
+    )
+
+    await waitFor(() => {
+      expect(interactionCallbacks.size).toBe(1)
+    })
+    const stageLayerRoot = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-stage-layer-root="true"]') as HTMLElement
+
+    act(() => {
+      interactionCallbacks.forEach((callback) => callback(true))
+    })
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(true)
+
+    act(() => {
+      interactionCallbacks.forEach((callback) => callback(false))
+    })
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(false)
+  })
+
+  it('routes click, double-click, drag start and context menu to the right item after a pan and a zoom', async () => {
+    const imageItem = createImageItem('image-after-gesture')
+    const otherImageItem = createImageItem('image-after-gesture-other')
+    otherImageItem.x = 480
+    const textItem = createTextItem('text-after-gesture')
+    textItem.x = 900
+    setMockWebGLRuntime({ loadedIds: [imageItem.id, otherImageItem.id] })
+    const baseProps = createBaseProps([imageItem, otherImageItem, textItem])
+    const noSelection = new Set<string>()
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={noSelection} />
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(3)
+    })
+
+    // Pan, then a zoom; each gesture ends with a committed viewport.
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} isViewportInteracting selectedIds={noSelection} />
+    )
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting={false}
+        selectedIds={noSelection}
+        stagePos={{ x: -120, y: 40 }}
+      />
+    )
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting
+        selectedIds={noSelection}
+        stagePos={{ x: -120, y: 40 }}
+      />
+    )
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting={false}
+        selectedIds={noSelection}
+        stagePos={{ x: -300, y: -20 }}
+        stageScale={2}
+      />
+    )
+
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.get(imageItem.id)?.stageScale).toBe(2)
+    })
+    const viewportLayer = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-item-interaction-viewport="true"]') as HTMLElement
+    expect(viewportLayer.style.transform).toBe('translate3d(-300px, -20px, 0) scale(2)')
+
+    const imageProxyProps = canvasPlaceholderProps.get(imageItem.id) as {
+      item: CanvasItem
+      onSelect: (additive?: boolean) => void
+      onDragStart: (itemId: string) => void
+      onContextMenu: (event: MouseEvent) => void
+      isDraggable: boolean
+    }
+    expect(imageProxyProps.item).toBe(imageItem)
+    expect(imageProxyProps.isDraggable).toBe(true)
+
+    imageProxyProps.onSelect(false)
+    const selectionUpdate = (baseProps.setSelectedIds as ReturnType<typeof vi.fn>).mock.calls.at(
+      -1
+    )?.[0] as (previous: Set<string>) => Set<string>
+    expect([...selectionUpdate(new Set([otherImageItem.id]))]).toEqual([imageItem.id])
+
+    imageProxyProps.onDragStart(imageItem.id)
+    expect(baseProps.dragContextRef.current.draggingId).toBe(imageItem.id)
+    baseProps.dragContextRef.current.draggingId = null
+
+    const contextMenuEvent = new MouseEvent('contextmenu', { clientX: 10, clientY: 20 })
+    imageProxyProps.onContextMenu(contextMenuEvent)
+    expect(baseProps.handleImageContextMenu).toHaveBeenLastCalledWith(contextMenuEvent, imageItem)
+
+    const otherProxyProps = canvasPlaceholderProps.get(otherImageItem.id) as {
+      onContextMenu: (event: MouseEvent) => void
+    }
+    otherProxyProps.onContextMenu(contextMenuEvent)
+    expect(baseProps.handleImageContextMenu).toHaveBeenLastCalledWith(
+      contextMenuEvent,
+      otherImageItem
+    )
+
+    const textProxyProps = canvasPlaceholderProps.get(textItem.id) as {
+      onDoubleClick: () => void
+    }
+    act(() => {
+      textProxyProps.onDoubleClick()
+    })
+    expect(baseProps.setInlineTextEdit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: textItem.id, text: textItem.text, isNew: false })
+    )
   })
 
   it('forwards viewport driver callbacks into the WebGL layer imperative viewport sync', async () => {
