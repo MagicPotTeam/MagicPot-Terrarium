@@ -10,7 +10,10 @@ import {
   buildCanvasAgentAttachmentManifest,
   buildCanvasAgentGroupCompletionPrompt,
   expandCanvasItemsForAgentSend,
-  getCanvasBlobItemMimeType
+  getCanvasBlobItemMimeType,
+  hasCanvasAgentCrop,
+  prepareCanvasAgentCropDelivery,
+  type CanvasAgentCropPreparation
 } from './canvasAgentAttachmentUtils'
 import { resolveActiveAgentScope } from './canvasPageLocalStateUtils'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
@@ -139,11 +142,24 @@ export function useCanvasBridgeActions({
           notifyError(error instanceof Error ? error.message : String(error))
           return false
         }
-        // Existing crop coordinates do not carry evidence tying them to this
-        // source's pixels. Dimensions, including backfilled dimensions, cannot
-        // prove that mapping. Reject the whole selection before rasterization or
-        // delivery rather than exporting a potentially different region.
-        if (expandedTargetItems.some((item) => item.type === 'image' && item.crop)) {
+        // A cropped image is sent only as the pixels of its crop, drawn from
+        // bytes whose size, SHA-256 and decoded size equal its record. Budget
+        // and record checks come before any read; one unproven crop refuses the
+        // whole selection. The user's items are never changed.
+        // An uncropped selection takes no extra turn before materialization.
+        const cropPreparation: CanvasAgentCropPreparation = hasCanvasAgentCrop(expandedTargetItems)
+          ? await prepareCanvasAgentCropDelivery(expandedTargetItems, isCurrentDelivery)
+          : {
+              status: 'ready',
+              attachmentItems: expandedTargetItems,
+              overviewItems: expandedTargetItems
+            }
+        if (!isCurrentDelivery() || cropPreparation.status === 'cancelled') return false
+        if (cropPreparation.status === 'over-budget') {
+          notifyError(t('canvas.send_to_agent_failed'))
+          return false
+        }
+        if (cropPreparation.status !== 'ready') {
           notifyError(
             t('canvas.agent_send_cropped_image_failed', {
               defaultValue:
@@ -152,8 +168,8 @@ export function useCanvasBridgeActions({
           )
           return false
         }
+        const { attachmentItems, overviewItems } = cropPreparation
 
-        const attachmentItems = expandedTargetItems
         const baseAttachments = buildCanvasAgentAttachments(attachmentItems)
         const attachmentManifest = buildCanvasAgentAttachmentManifest(attachmentItems)
         // Check explicit attachments in order before creating an overview or
@@ -185,7 +201,7 @@ export function useCanvasBridgeActions({
         if (shouldIncludeSelectionSnapshot) {
           try {
             const snapshot = await renderCanvasItemsImageDataUrl(
-              expandedTargetItems,
+              overviewItems,
               false,
               undefined,
               AGENT_SELECTION_RASTER_LIMITS

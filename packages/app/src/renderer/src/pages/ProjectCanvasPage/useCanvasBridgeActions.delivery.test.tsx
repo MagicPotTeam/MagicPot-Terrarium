@@ -1,8 +1,10 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createHash } from 'node:crypto'
+
 import { useCanvasBridgeActions } from './useCanvasBridgeActions'
-import type { CanvasImageItem, CanvasItem } from './types'
+import type { CanvasImageCropSource, CanvasImageItem, CanvasItem } from './types'
 import type { ChatAttachment } from '@shared/llm'
 
 const mocks = vi.hoisted(() => ({
@@ -46,6 +48,32 @@ const image: CanvasImageItem = {
   rotation: 0,
   zIndex: 0,
   locked: false
+}
+
+// The crop record of a data: source's own bytes (backlog item 26, owner decision 2).
+function cropRecord(base64: string, width: number, height: number): CanvasImageCropSource {
+  const bytes = Buffer.from(base64, 'base64')
+  return {
+    version: 1,
+    origin: 'confirm',
+    width,
+    height,
+    sizeBytes: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex')
+  }
+}
+
+// Node's URL rejects jsdom Blobs: the object URL of the read bytes is stubbed.
+function stubObjectUrls(): Map<string, Blob> {
+  const blobs = new Map<string, Blob>()
+  let next = 0
+  vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob | MediaSource) => {
+    const url = `blob:delivery-fixture-${++next}`
+    blobs.set(url, blob as Blob)
+    return url
+  })
+  vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+  return blobs
 }
 
 function renderBridge() {
@@ -94,9 +122,10 @@ afterEach(() => {
 describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
   it.each(['switch', 'unmount'] as const)('does not continue crop work after %s while source load is pending', async action => {
     const selected = [
-      { ...image, id: 'crop-1', src: 'data:image/png;base64,YQ==', crop: { x: 0, y: 0, width: 50, height: 50 } },
-      { ...image, id: 'crop-2', src: 'data:image/png;base64,Yg==', crop: { x: 0, y: 0, width: 50, height: 50 } }
+      { ...image, id: 'crop-1', src: 'data:image/png;base64,YQ==', crop: { x: 0, y: 0, width: 50, height: 50 }, cropSource: cropRecord('YQ==', 100, 100) },
+      { ...image, id: 'crop-2', src: 'data:image/png;base64,Yg==', crop: { x: 0, y: 0, width: 50, height: 50 }, cropSource: cropRecord('Yg==', 100, 100) }
     ]
+    stubObjectUrls()
     let finish!: (value: { img: HTMLImageElement; width: number; height: number }) => void
     mocks.loadImageFromSrc.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
     const loaded = document.createElement('img')
@@ -120,7 +149,8 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
   })
 
   it('loads and exports cropped items normally while the canvas remains current', async () => {
-    const selected = [{ ...image, src: 'data:image/png;base64,YQ==', crop: { x: 0, y: 0, width: 50, height: 50 } }]
+    const selected = [{ ...image, src: 'data:image/png;base64,YQ==', crop: { x: 0, y: 0, width: 50, height: 50 }, cropSource: cropRecord('YQ==', 100, 100) }]
+    stubObjectUrls()
     const loaded = document.createElement('img')
     mocks.loadImageFromSrc.mockResolvedValue({ img: loaded, width: 100, height: 100 })
     const drawImage = vi.fn()
@@ -204,16 +234,21 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
     expect(deliveredEvents()).toEqual([])
   })
 
-  it('fails rather than silently dropping an oversized later crop when real dimensions appear after loading', async () => {
-    const oversized = { ...image, id: 'unknown-size', width: 0, height: 0,
-      crop: { x: 0, y: 0, width: 9000, height: 9000 } }
+  // Re-expressed (backlog item 26, owner decision 2): a crop without a record is
+  // refused before loading, so sizes can no longer "appear after loading"; the
+  // later crop now has a record whose pixel size the loaded source contradicts.
+  // Error key changed from canvas.send_to_agent_failed.
+  it('fails rather than silently dropping a later crop when the loaded source differs from its record', async () => {
+    const differing = { ...image, id: 'unknown-size', width: 0, height: 0, src: 'data:image/png;base64,Yg==',
+      crop: { x: 0, y: 0, width: 50, height: 50 }, cropSource: cropRecord('Yg==', 100, 100) }
+    stubObjectUrls()
     mocks.loadImageFromSrc.mockResolvedValue({ img: document.createElement('img'), width: 10000, height: 10000 })
     const { result, notifyError, deliveredEvents } = renderBridge()
     const canvasCreation = vi.spyOn(document, 'createElement')
-    await act(async () => { await result.current.handleSendCanvasItemsToAgent([image, oversized]); await vi.runAllTimersAsync() })
+    await act(async () => { await result.current.handleSendCanvasItemsToAgent([image, differing]); await vi.runAllTimersAsync() })
     expect(mocks.loadImageFromSrc).toHaveBeenCalledOnce()
     expect(canvasCreation.mock.calls.some(([tag]) => String(tag) === 'canvas')).toBe(false)
-    expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.send_to_agent_failed')
+    expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_cropped_image_failed')
     expect(mocks.materializeAttachment).not.toHaveBeenCalled()
     expect(mocks.dispatch).not.toHaveBeenCalled()
     expect(deliveredEvents()).toEqual([])

@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   buildCanvasAgentAttachments,
@@ -6,7 +7,7 @@ import {
   buildCanvasImageCropSourceMetadata,
   materializeCanvasAgentAttachmentItems
 } from './canvasAgentAttachmentUtils'
-import type { CanvasImageItem, CanvasModel3DItem } from './types'
+import type { CanvasImageCropSource, CanvasImageItem, CanvasModel3DItem } from './types'
 
 function imageItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
   return {
@@ -76,10 +77,32 @@ function modelItem(): CanvasModel3DItem {
 
 describe('canvas agent crop fallback on a synthetic source', () => {
   const original = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAADICAYAAACtWK6eAAACaUlEQVR42u3TMQ0AAAjAsPk3DTYI6TEHa9XoTqNTZUpABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABIkAAESCACBBABAggAgQQYwIiQAARIIAIEEAECCACRIAAIkAAESCACBBABIgAAUSAACJAABEggAgQmRIQAQKIAAFEgAAiQAARIAIEEAECiAABRIAAIkAECCACBBABAogAAUSACBBABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABIkAAESCACBBABAggAkSAACJAABEggAgQQAQIIAJEgAAiQAARIIAIEEAEiAABRIAAIkAAESCACBABAogAAUSAACJAABEggJgSEAECiAABRIAAIkAAESACBBABAogAAUSAACJABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAABxJiACBBABAggAgQQAQKIABEggAgQQAQIIAIEEAEiQAARIIAIEEAECCACRKYERIAAIkAAESCACBBABIgAAUSAACJAABEggAgQAQKIAAFEgAAiQAARIAIEEAECiAABRIAAIkAAESACBBABAogAAUSAACJABAggAgQQAQKIAAFEgAgQQAQIIAIEEAECiAARIIAIEEAECCACBBABAogAESCACBBABAggAgQQASJAABEggAgQQAQIIAJEgAAiQAARIIAIEEAECCCmBESAACJAABEggAgQQASIAAFEgAAiQAARIIAIEAECiAABRIAAIkAAESACBBABAogAAUSAACJAADEmIAIEEAECiAABRIAAIkAECCACBBAB8rEFA6mDSMjZmAIAAAAASUVORK5CYII='
+  // Signature change (backlog item 26, owner decision 2): crops are drawn only
+  // from evidence of their recorded bytes. The fixture gains the record of the
+  // data: source's own bytes (a 200x200 PNG), and the synthetic Image decodes
+  // only an object URL of the bytes that were read, never the original URL.
+  const originalBytes = Buffer.from(original.slice(original.indexOf(',') + 1), 'base64')
+  const record: CanvasImageCropSource = {
+    version: 1, origin: 'confirm', width: 200, height: 200, sizeBytes: originalBytes.byteLength,
+    sha256: createHash('sha256').update(originalBytes).digest('hex')
+  }
+  const objectUrlBlobs = new Map<string, Blob>()
+  beforeEach(() => {
+    objectUrlBlobs.clear()
+    let next = 0
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob | MediaSource) => {
+      const url = `blob:attachment-fixture-${++next}`
+      objectUrlBlobs.set(url, blob as Blob)
+      return url
+    })
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+  const decodesReadBytes = (value: string) => objectUrlBlobs.get(value)?.size === originalBytes.byteLength
   const makeItem = (crop: CanvasImageItem['crop'], known = false) => imageItem({
     src: original, sourceFile: undefined, sourceWidth: known ? 200 : undefined,
     sourceHeight: known ? 200 : undefined, image: undefined, width: 100, height: 100,
-    thumbnailSet: undefined, crop
+    thumbnailSet: undefined, crop, cropSource: record
   })
   const crop = { x: 0, y: 0, width: 100, height: 100 }
   it('keeps the original for an uncropped source', async () => {
@@ -92,7 +115,7 @@ describe('canvas agent crop fallback on a synthetic source', () => {
     const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,c3ludGhldGljLWNyb3A=')
     vi.stubGlobal('Image', class {
       naturalWidth = 200; naturalHeight = 200; onload: (() => void) | null = null; onerror: (() => void) | null = null
-      set src(_value: string) { queueMicrotask(() => this.onload?.()) }
+      set src(value: string) { queueMicrotask(() => (decodesReadBytes(value) ? this.onload : this.onerror)?.()) }
     })
     try {
       const result = await materializeCanvasAgentAttachmentItems([makeItem(crop, true)])
@@ -106,14 +129,14 @@ describe('canvas agent crop fallback on a synthetic source', () => {
     const item = imageItem({
       src: original, sourceFile: undefined, sourceWidth: 100, sourceHeight: 100,
       image: thumbnail, width: 100, height: 100, thumbnailSet: undefined,
-      crop: { x: 0, y: 0, width: 100, height: 100 }
+      crop: { x: 0, y: 0, width: 100, height: 100 }, cropSource: record
     })
     const cropped = 'data:image/png;base64,c3ludGhldGljLWNyb3A='
     const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: vi.fn() } as unknown as ReturnType<HTMLCanvasElement['getContext']>)
     const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(cropped)
     vi.stubGlobal('Image', class {
       naturalWidth = 200; naturalHeight = 200; onload: (() => void) | null = null; onerror: (() => void) | null = null
-      set src(_value: string) { queueMicrotask(() => this.onload?.()) }
+      set src(value: string) { queueMicrotask(() => (decodesReadBytes(value) ? this.onload : this.onerror)?.()) }
     })
     try {
       let result: Awaited<ReturnType<typeof materializeCanvasAgentAttachmentItems>> | undefined
@@ -139,7 +162,7 @@ describe('canvas agent crop fallback on a synthetic source', () => {
     expect(buildCanvasImageCropSourceMetadata(item)).toBeNull()
     vi.stubGlobal('Image', class {
       naturalWidth = 200; naturalHeight = 200; onload: (() => void) | null = null; onerror: (() => void) | null = null
-      set src(_value: string) { queueMicrotask(() => this.onload?.()) }
+      set src(value: string) { queueMicrotask(() => (decodesReadBytes(value) ? this.onload : this.onerror)?.()) }
     })
     try {
       const result = await materializeCanvasAgentAttachmentItems([item])
