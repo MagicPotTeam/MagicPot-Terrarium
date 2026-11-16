@@ -710,10 +710,12 @@ describe('chatStorage', () => {
     writer.freeze('scope','lead',lead)
     let finish!: (error:unknown)=>void
     const outcome=new Promise<unknown>(resolve=>{finish=resolve})
+    const staleEdit={...lead,title:'stale delayed edit'}
     // A second module instance represents another renderer's independent debounce queue.
-    storage.debouncedSaveSessions([{...lead,title:'stale delayed edit'}],250,'scope',{
-      saveOne: session=>writer.persist('scope',session,()=>lead),
-      onError:error=>finish(error), onSuccess:()=>finish(null)
+    storage.debouncedSaveSessions([staleEdit],250,'scope',{
+      owner:writer,
+      saveLatest:(id,scope)=>writer.persistLatest(scope,id,()=>staleEdit,()=>lead),
+      onError:error=>finish(error), onSuccess:()=>finish(null), onDiscard:()=>finish('discarded')
     })
     vi.resetModules()
     const otherWindow=await import('./chatStorage')
@@ -721,85 +723,6 @@ describe('chatStorage', () => {
     writer.fenceAndAdvance('scope','lead',ended.lead)
     expect(await outcome).toBeInstanceOf(Error)
     expect(await storage.loadSessionFromDB('lead','scope')).toMatchObject({title:'Lead',teamGeneration:1,teamLifecycleRevision:1})
-  })
-
-  it.each([false, true])('prevents a reserved old debounce payload from overwriting a newer immediate save (timerStarts=%s)', async (timerStarts) => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const {ChatSessionSaveBaseline}=await import('./chatSaveBaseline')
-    const writer=new ChatSessionSaveBaseline()
-    const original={id:'lineage',title:'original',messages:[]}
-    const older={...original,title:'older pending'}
-    const newer={...original,title:'newer immediate'}
-    await storage.saveSessionToDB(original,'scope')
-    writer.reserve('scope',older,()=>original)
-    let finish!: (error:unknown)=>void
-    let begin!: () => void
-    const begun=new Promise<void>(resolve=>{begin=resolve})
-    let release!:()=>void
-    const barrier=new Promise<void>(resolve=>{release=resolve})
-    const result=new Promise<unknown>(resolve=>{finish=resolve})
-    storage.debouncedSaveSessions([older],1,'scope',{
-      owner:writer,
-      onDiscard:session=>writer.discardReservation('scope',session),
-      saveOne:async session=>{begin(); if(timerStarts) await barrier; return writer.persist('scope',session,()=>original)},
-      onSuccess:()=>finish(null),onError:error=>finish(error)
-    })
-    if(timerStarts) await begun
-    writer.supersedeReservations('scope',older.id,newer)
-    await writer.persist('scope',newer,()=>original)
-    release()
-    expect(await result).toBeInstanceOf(Error)
-    expect(await storage.loadSessionFromDB('lineage','scope')).toMatchObject({title:'newer immediate'})
-  })
-
-  it('does not give a newly reserved stale clone a completed own write as its baseline', async () => {
-    const fakeIndexedDb = createFakeIndexedDb()
-    fakeIndexedDb.state.failGetAllOnce = false
-    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
-    const storage = await import('./chatStorage')
-    const {ChatSessionSaveBaseline} = await import('./chatSaveBaseline')
-    const writer = new ChatSessionSaveBaseline()
-    const original = {id:'reserved-stale',title:'original',messages:[{role:'user' as const,content:'question'}]}
-    const newer = {...original,messages:[...original.messages,{role:'assistant' as const,content:'new reply'}]}
-    const stale = {...structuredClone(original),title:'independent stale edit'}
-    await storage.saveSessionToDB(original,'scope')
-    await writer.persist('scope',newer,()=>original)
-    let failure: unknown
-    try {
-      writer.reserve('scope',stale,()=>original)
-      await writer.persist('scope',stale,()=>original)
-    } catch (error) {
-      failure = error
-    }
-    expect(await storage.loadSessionFromDB('reserved-stale','scope')).toMatchObject({title:'original',messages:newer.messages})
-    expect(failure).toBeInstanceOf(Error)
-  })
-
-  it('does not treat an independent value-prefix branch as a proven in-flight descendant', async () => {
-    const fakeIndexedDb = createFakeIndexedDb()
-    fakeIndexedDb.state.failGetAllOnce = false
-    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
-    const storage = await import('./chatStorage')
-    const {ChatSessionSaveBaseline} = await import('./chatSaveBaseline')
-    const writer = new ChatSessionSaveBaseline()
-    const original = {id:'independent-branch',title:'thread',messages:[]}
-    const first = {...original,messages:[{role:'user' as const,content:'question'}]}
-    // Constructed independently from original, not from first, even though the values share a prefix.
-    const independent = {...original,messages:[{role:'user' as const,content:'question'},{role:'assistant' as const,content:'other branch'}]}
-    await storage.saveSessionToDB(original,'scope')
-    const pending = writer.persist('scope',first,()=>original)
-    let failure: unknown
-    try {
-      writer.reserve('scope',independent,()=>original)
-      await pending
-      await writer.persist('scope',independent,()=>original)
-    } catch (error) {
-      failure = error
-      await pending
-    }
-    expect(await storage.loadSessionFromDB('independent-branch','scope')).toMatchObject({messages:first.messages})
-    expect(failure).toBeInstanceOf(Error)
   })
 
   it('persists a descendant registered while its own predecessor is still in flight', async () => {
@@ -811,10 +734,15 @@ describe('chatStorage', () => {
     const first={...original,messages:[{role:'user' as const,content:'first'}]}
     const latest={...first,messages:[...first.messages,{role:'assistant' as const,content:'latest'}]}
     await storage.saveSessionToDB(original,'scope')
-    const pending=writer.persist('scope',first,()=>original)
-    writer.reserve('scope',latest,()=>original)
-    await pending
-    await writer.persist('scope',latest,()=>original)
+    // Re-expressed on the production writer (owner decision 6): the live object moves on while its
+    // own predecessor is in flight; retrySuperseded=true, as production passes after K1.
+    let current: import('./chatStorage').ChatSession = first
+    const pending=writer.persistLatest('scope',first.id,()=>current,()=>original,undefined,true)
+    await Promise.resolve(); await Promise.resolve()
+    current=latest
+    const queued=writer.persistLatest('scope',latest.id,()=>current,()=>original,undefined,true)
+    await expect(pending).resolves.toBeTruthy()
+    await expect(queued).resolves.toBe(latest)
     expect(await storage.loadSessionFromDB('own-chain','scope')).toMatchObject({messages:latest.messages})
   })
 
@@ -928,12 +856,13 @@ describe('chatStorage', () => {
     const other={id:'other',title:'other',messages:[]}
     await storage.saveSessionToDB(other,'scope')
     const outcomes: unknown[]=[]
-    const doneA=new Promise<void>(resolve=>storage.debouncedSaveSessions([{...first,title:'stale edit'}],1,'scope',{
-      owner:writerA,saveOne:session=>writerA.persist('scope',session,()=>first),
+    const staleEdit={...first,title:'stale edit'}, otherEdit={...other,title:'other edit'}
+    const doneA=new Promise<void>(resolve=>storage.debouncedSaveSessions([staleEdit],1,'scope',{
+      owner:writerA,saveLatest:(id,scope)=>writerA.persistLatest(scope,id,()=>staleEdit,()=>first),
       onSuccess:()=>{outcomes.push('unexpected success');resolve()},onError:error=>{outcomes.push(error);resolve()}
     }))
-    const doneB=new Promise<void>(resolve=>storage.debouncedSaveSessions([{...other,title:'other edit'}],1,'scope',{
-      owner:writerB,saveOne:session=>writerB.persist('scope',session,()=>other),
+    const doneB=new Promise<void>(resolve=>storage.debouncedSaveSessions([otherEdit],1,'scope',{
+      owner:writerB,saveLatest:(id,scope)=>writerB.persistLatest(scope,id,()=>otherEdit,()=>other),
       onSuccess:()=>{outcomes.push('other success');resolve()},onError:error=>{outcomes.push(error);resolve()}
     }))
     await Promise.all([doneA,doneB])

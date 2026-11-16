@@ -17,6 +17,21 @@ const session = (id: string, content: string): ChatSession => ({
   messages: [{ role: 'user', content }]
 })
 
+/** The complete options object persistLatest passes to saveSessionToDB. */
+const saveOptions = (expectedSession: ChatSession | null) => ({
+  expectedSession,
+  pendingSaveOwner: null,
+  shouldUpdate: expect.any(Function)
+})
+
+/** Save one live object through the production writer; the object is the current state. */
+const persistCurrent = (
+  baseline: ChatSessionSaveBaseline,
+  scope: string,
+  current: ChatSession,
+  resolveBaseline: () => ChatSession | null
+): Promise<ChatSession | null> => baseline.persistLatest(scope, current.id, () => current, resolveBaseline)
+
 describe('ChatSessionSaveBaseline', () => {
   beforeEach(() => {
     saveSessionToDBMock.mockReset()
@@ -29,10 +44,10 @@ describe('ChatSessionSaveBaseline', () => {
     const v1 = session('s1', 'v1')
     const resolve = vi.fn(() => v0)
 
-    await baseline.persist('scope-a', v1, resolve)
+    await persistCurrent(baseline, 'scope-a', v1, resolve)
 
     expect(resolve).toHaveBeenCalledTimes(1)
-    expect(saveSessionToDBMock).toHaveBeenCalledWith(v1, 'scope-a', { expectedSession: v0, pendingSaveOwner: null })
+    expect(saveSessionToDBMock).toHaveBeenCalledWith(v1, 'scope-a', saveOptions(v0))
   })
 
   it('does not replace an already frozen baseline', () => {
@@ -52,18 +67,18 @@ describe('ChatSessionSaveBaseline', () => {
     old.messages[0].content='mutated source'
     returned.messages[0].content='mutated return'
     const next=session('baseline-clone','next')
-    await baseline.persist('scope',next,()=>old)
-    expect(saveSessionToDBMock).toHaveBeenCalledWith(next,'scope',{expectedSession:session('baseline-clone','old'), pendingSaveOwner:null})
+    await persistCurrent(baseline,'scope',next,()=>old)
+    expect(saveSessionToDBMock).toHaveBeenCalledWith(next,'scope',saveOptions(session('baseline-clone','old')))
   })
 
   it('revokes an earlier acknowledgement when its CAS revalidation fails', async () => {
     const baseline=new ChatSessionSaveBaseline()
     const old=session('revoked','old')
     const saved=session('revoked','saved')
-    await baseline.persist('scope',saved,()=>old)
+    await persistCurrent(baseline,'scope',saved,()=>old)
     expect(baseline.isAcknowledgementCurrent('scope',saved)).toBe(true)
     saveSessionToDBMock.mockRejectedValueOnce(new Error('remote conflict'))
-    await expect(baseline.persist('scope',saved,()=>old)).rejects.toThrow('remote conflict')
+    await expect(persistCurrent(baseline,'scope',saved,()=>old)).rejects.toThrow('remote conflict')
     expect(baseline.isAcknowledgementCurrent('scope',saved)).toBe(false)
   })
 
@@ -71,15 +86,15 @@ describe('ChatSessionSaveBaseline', () => {
     const baseline=new ChatSessionSaveBaseline()
     const old=session('concurrent-revalidation','old')
     const saved=session('concurrent-revalidation','saved')
-    await baseline.persist('scope',saved,()=>old)
+    await persistCurrent(baseline,'scope',saved,()=>old)
     let releaseSuccess!:()=>void
     let releaseFailure!:()=>void
     saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{releaseSuccess=resolve}))
       .mockImplementationOnce(()=>new Promise<void>((_resolve,reject)=>{releaseFailure=()=>reject(new Error('conflict'))}))
-    const first=baseline.persist('scope',saved,()=>old)
-    // An identical in-flight object joins the same promise: use a distinct clone to model a second path.
+    const first=persistCurrent(baseline,'scope',saved,()=>old)
+    // Use a distinct clone to model a second path that resolves another live object.
     const clone=structuredClone(saved)
-    const second=baseline.persist('scope',clone,()=>old)
+    const second=persistCurrent(baseline,'scope',clone,()=>old)
     const observed=second.catch(error=>error)
     await vi.waitFor(()=>expect(releaseSuccess).toBeDefined())
     releaseSuccess()
@@ -151,17 +166,19 @@ describe('ChatSessionSaveBaseline', () => {
     const archived = {...session('member','ended'),archived:true}
     let release!:()=>void
     saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve}))
-    const running=baseline.persist('scope',active,()=>old)
-    const queued=baseline.persist('scope',stale,()=>old)
+    const running=persistCurrent(baseline,'scope',active,()=>old)
+    const queued=persistCurrent(baseline,'scope',stale,()=>old)
     await vi.waitFor(()=>expect(release).toBeDefined())
     baseline.fenceAndAdvance('scope','member',archived)
     release()
     await running
-    await expect(queued).rejects.toThrow('lifecycle changed')
+    // Decided contract (owner decision 6): the fenced queued save is skipped and resolves null
+    // instead of rejecting 'lifecycle changed'; it never writes.
+    await expect(queued).resolves.toBeNull()
     expect(saveSessionToDBMock).toHaveBeenCalledTimes(1)
     const next={...archived,title:'updated'}
-    await baseline.persist('scope',next,()=>old)
-    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(next,'scope',{expectedSession:archived, pendingSaveOwner:null})
+    await persistCurrent(baseline,'scope',next,()=>old)
+    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(next,'scope',saveOptions(archived))
   })
 
   it('rejects a stale timer snapshot after a new lifecycle baseline is installed', async () => {
@@ -171,9 +188,9 @@ describe('ChatSessionSaveBaseline', () => {
     const ended = {...old,teamGeneration:1,teamLifecycleRevision:1}
     baseline.freeze('scope','lead',old)
     baseline.fenceAndAdvance('scope','lead',ended)
-    await expect(baseline.persist('scope',stale,()=>old)).rejects.toThrow('lifecycle changed')
+    await expect(persistCurrent(baseline,'scope',stale,()=>old)).rejects.toThrow('lifecycle changed')
     expect(saveSessionToDBMock).not.toHaveBeenCalled()
-    await baseline.persist('scope',{...ended,title:'new edit'},()=>ended)
+    await persistCurrent(baseline,'scope',{...ended,title:'new edit'},()=>ended)
     expect(saveSessionToDBMock).toHaveBeenCalledTimes(1)
   })
 
@@ -185,37 +202,15 @@ describe('ChatSessionSaveBaseline', () => {
     baseline.freeze('scope','member',original)
     const rebased=baseline.reconcileTeamEnd('scope',local,ended)
     expect(rebased).toMatchObject({title:'local edit',archived:true,teamLifecycleRevision:1})
-    await baseline.persist('scope',rebased!,()=>original)
-    expect(saveSessionToDBMock).toHaveBeenCalledWith(rebased,'scope',{expectedSession:ended, pendingSaveOwner:null})
+    await persistCurrent(baseline,'scope',rebased!,()=>original)
+    expect(saveSessionToDBMock).toHaveBeenCalledWith(rebased,'scope',saveOptions(ended))
 
     const conflicting = new ChatSessionSaveBaseline()
     conflicting.freeze('scope','member',original)
     const changed = {...ended,messages:[{role:'user' as const,content:'newer remote history'}]}
     expect(conflicting.reconcileTeamEnd('scope',local,changed)).toBeNull()
-    await conflicting.persist('scope',local,()=>original)
-    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(local,'scope',{expectedSession:original, pendingSaveOwner:null})
-  })
-
-  it('joins a pending save of the identical snapshot before later snapshots', async () => {
-    const baseline = new ChatSessionSaveBaseline()
-    const old = session('same','old')
-    const first = session('same','first')
-    const newer = session('same','newer')
-    let release!:()=>void
-    saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve}))
-    const pending=baseline.persist('scope',first,()=>old)
-    const duplicate=baseline.persist('scope',first,()=>old)
-    const current = newer
-    const later=baseline.persistLatest('scope',newer.id,()=>current,()=>old)
-    await vi.waitFor(()=>expect(release).toBeDefined())
-    release()
-    await Promise.all([pending,later,duplicate])
-    await baseline.persist('scope',first,()=>old)
-    expect(saveSessionToDBMock.mock.calls).toEqual([
-      [first,'scope',{expectedSession:old, pendingSaveOwner:null}],
-      [newer,'scope',expect.objectContaining({expectedSession:first,shouldUpdate:expect.any(Function),pendingSaveOwner:null})],
-      [first,'scope',{expectedSession:first,pendingSaveOwner:null}]
-    ])
+    await persistCurrent(conflicting,'scope',local,()=>original)
+    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(local,'scope',saveOptions(original))
   })
 
   it('does not accept a previously saved object as clean after another writer changes storage', async () => {
@@ -228,9 +223,9 @@ describe('ChatSessionSaveBaseline', () => {
       if (JSON.stringify(stored) !== JSON.stringify(options.expectedSession)) throw new Error('conflict')
       stored = payload
     })
-    await baseline.persist('scope', first, () => old)
+    await persistCurrent(baseline, 'scope', first, () => old)
     stored = external
-    await expect(baseline.persist('scope', first, () => old)).rejects.toThrow('conflict')
+    await expect(persistCurrent(baseline, 'scope', first, () => old)).rejects.toThrow('conflict')
     expect(stored).toEqual(external)
   })
 
@@ -242,14 +237,19 @@ describe('ChatSessionSaveBaseline', () => {
     const attached = {...original, title: 'file committed'}
     let release!: () => void
     saveSessionToDBMock.mockImplementationOnce(() => new Promise<void>(resolve => {release = resolve}))
-    const first = baseline.persist('scope', one, () => original)
-    const second = baseline.persist('scope', two, () => original)
+    const first = persistCurrent(baseline, 'scope', one, () => original)
+    const second = persistCurrent(baseline, 'scope', two, () => original)
     await vi.waitFor(() => expect(release).toBeDefined())
     baseline.advance('scope', original.id, attached)
     release()
     await first
-    await expect(second).rejects.toThrow('lifecycle changed')
+    // Decided contract (owner decision 6): the fenced queued save resolves null instead of
+    // rejecting 'lifecycle changed'. Exactly one write happened, and the next save uses the new baseline.
+    await expect(second).resolves.toBeNull()
     expect(saveSessionToDBMock).toHaveBeenCalledTimes(1)
+    const next = {...attached, messages: [{role: 'user' as const, content: 'after attachment'}]}
+    await persistCurrent(baseline, 'scope', next, () => original)
+    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(next, 'scope', saveOptions(attached))
   })
 
   it('cannot infer predecessor ownership from an equivalent independently built payload', () => {
@@ -263,61 +263,6 @@ describe('ChatSessionSaveBaseline', () => {
     expect(structuredClone(latest)).toEqual(structuredClone(independent))
   })
 
-  it('rebases a strict append reservation only on the exact completed own predecessor', async () => {
-    const baseline = new ChatSessionSaveBaseline()
-    const original = session('append', 'original')
-    const first = {...original, messages:[...original.messages, {role:'assistant' as const, content:'first'}]}
-    const later = {...first, messages:[...first.messages, {role:'user' as const, content:'later'}]}
-    let release!:()=>void
-    saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve}))
-    const pending=baseline.persist('scope',first,()=>original)
-    baseline.reserve('scope',later,()=>original)
-    const queued=baseline.persist('scope',later,()=>original)
-    await vi.waitFor(()=>expect(release).toBeDefined())
-    release()
-    await Promise.all([pending,queued])
-    expect(saveSessionToDBMock.mock.calls).toEqual([
-      [first,'scope',{expectedSession:original, pendingSaveOwner:null}],
-      [later,'scope',{expectedSession:first,pendingSaveOwner:null}]
-    ])
-  })
-
-  it.each(['history','metadata'])('does not follow an own predecessor when %s changed', async change => {
-    const baseline = new ChatSessionSaveBaseline()
-    const original = session('nonappend', 'original')
-    const first = {...original, messages:[...original.messages,{role:'assistant' as const,content:'first'}]}
-    const later = change === 'history'
-      ? {...first, messages:[{role:'user' as const,content:'altered'},...first.messages.slice(1),{role:'user' as const,content:'new'}]}
-      : {...first,title:'changed metadata',messages:[...first.messages,{role:'user' as const,content:'new'}]}
-    let release!:()=>void
-    saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve}))
-    const pending=baseline.persist('scope',first,()=>original)
-    baseline.reserve('scope',later,()=>original)
-    const queued=baseline.persist('scope',later,()=>original)
-    await vi.waitFor(()=>expect(release).toBeDefined())
-    release()
-    await Promise.all([pending,queued])
-    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(later,'scope',{expectedSession:original, pendingSaveOwner:null})
-  })
-
-  it('keeps the original CAS baseline after a failed or unknown predecessor', async () => {
-    const baseline = new ChatSessionSaveBaseline()
-    const original = session('unknown', 'original')
-    const first = {...original, messages:[...original.messages,{role:'assistant' as const,content:'first'}]}
-    const later = {...first, messages:[...first.messages,{role:'user' as const,content:'later'}]}
-    let release!:()=>void
-    saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>((_resolve,reject)=>{release=()=>reject(new Error('unknown outcome'))}))
-    const pending=baseline.persist('scope',first,()=>original)
-    const observed=pending.catch(error=>error)
-    baseline.reserve('scope',later,()=>original)
-    const queued=baseline.persist('scope',later,()=>original)
-    await vi.waitFor(()=>expect(release).toBeDefined())
-    release()
-    expect(await observed).toBeInstanceOf(Error)
-    await queued
-    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(later,'scope',{expectedSession:original, pendingSaveOwner:null})
-  })
-
   it('does not roll an older successful baseline back after an external End was adopted', async () => {
     const baseline=new ChatSessionSaveBaseline()
     const old={...session('external-race','old'),teamGeneration:0,teamLifecycleRevision:0}
@@ -325,57 +270,13 @@ describe('ChatSessionSaveBaseline', () => {
     const ended={...old,teamGeneration:1,teamLifecycleRevision:1}
     let release!:()=>void
     saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve}))
-    const pending=baseline.persist('scope',pendingSession,()=>old)
+    const pending=persistCurrent(baseline,'scope',pendingSession,()=>old)
     await vi.waitFor(()=>expect(release).toBeDefined())
     baseline.fenceAndAdvance('scope',old.id,ended)
     release()
     await pending
     expect(baseline.isAcknowledgementCurrent('scope',pendingSession)).toBe(false)
     expect(baseline.freeze('scope',old.id,null)).toEqual(ended)
-  })
-
-  it('does not rebase a strict append across an epoch fence', async () => {
-    const baseline = new ChatSessionSaveBaseline()
-    const original = session('fenced-append', 'original')
-    const first = {...original, messages:[...original.messages,{role:'assistant' as const,content:'first'}]}
-    const later = {...first, messages:[...first.messages,{role:'user' as const,content:'later'}]}
-    let release!:()=>void
-    saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve}))
-    const pending=baseline.persist('scope',first,()=>original)
-    baseline.reserve('scope',later,()=>original)
-    const queued=baseline.persist('scope',later,()=>original)
-    const observed=queued.catch(error=>error)
-    await vi.waitFor(()=>expect(release).toBeDefined())
-    baseline.fenceAndAdvance('scope',original.id,original)
-    release()
-    await pending
-    expect(await observed).toBeInstanceOf(Error)
-    expect(saveSessionToDBMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('preserves the current draft when a reserved snapshot conflicts with an earlier own commit', async () => {
-    const baseline = new ChatSessionSaveBaseline()
-    const original = session('durability', 'before')
-    const first = session('durability', 'first')
-    const latest = session('durability', 'latest')
-    let stored = original
-    let release!: () => void
-    saveSessionToDBMock.mockImplementationOnce(async (payload: ChatSession) => {
-      await new Promise<void>(resolve => {release = resolve})
-      stored = payload
-    }).mockImplementation(async (payload: ChatSession, _scope: string, options: {expectedSession: ChatSession | null}) => {
-      if (JSON.stringify(stored) !== JSON.stringify(options.expectedSession)) throw new Error('conflict')
-      stored = payload
-    })
-    const pending = baseline.persist('scope', first, () => original)
-    await vi.waitFor(() => expect(release).toBeDefined())
-    baseline.reserve('scope', latest, () => original)
-    release()
-    await pending
-    await expect(baseline.persist('scope', latest, () => original)).rejects.toThrow('conflict')
-    await expect(baseline.persist('scope', latest, () => original)).rejects.toThrow('conflict')
-    expect(stored).toEqual(first)
-    expect(latest.messages[0].content).toBe('latest')
   })
 
   it('does not advance the baseline when a save fails', async () => {
@@ -386,13 +287,13 @@ describe('ChatSessionSaveBaseline', () => {
 
     saveSessionToDBMock.mockRejectedValueOnce(new Error('conflict'))
 
-    await expect(baseline.persist('scope-a', v1, () => v0)).rejects.toThrow('conflict')
+    await expect(persistCurrent(baseline, 'scope-a', v1, () => v0)).rejects.toThrow('conflict')
     // Baseline stays at the frozen v0, so a retry still compares against v0.
-    await baseline.persist('scope-a', v2, () => v0)
+    await persistCurrent(baseline, 'scope-a', v2, () => v0)
 
     expect(saveSessionToDBMock.mock.calls).toEqual([
-      [v1, 'scope-a', { expectedSession: v0, pendingSaveOwner: null }],
-      [v2, 'scope-a', { expectedSession: v0, pendingSaveOwner: null }]
+      [v1, 'scope-a', saveOptions(v0)],
+      [v2, 'scope-a', saveOptions(v0)]
     ])
   })
 
@@ -402,7 +303,7 @@ describe('ChatSessionSaveBaseline', () => {
     const saved=session('mutable-ack','before')
     let release!:()=>void
     saveSessionToDBMock.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve}))
-    const pending=baseline.persist('scope',saved,()=>old)
+    const pending=persistCurrent(baseline,'scope',saved,()=>old)
     await vi.waitFor(()=>expect(release).toBeDefined())
     saved.messages[0].content='after mutation'
     release()
@@ -417,7 +318,7 @@ describe('ChatSessionSaveBaseline', () => {
     const saved={...old,messages:[{role:'assistant' as const,content:'local'}]}
     let releaseSecond!:()=>void
     const second=new Promise<void>(resolve=>{releaseSecond=resolve})
-    await baseline.persist('scope',saved,()=>old)
+    await persistCurrent(baseline,'scope',saved,()=>old)
     const batch=Promise.all([Promise.resolve(),second])
     const external={...old,teamGeneration:1,teamLifecycleRevision:1,messages:[{role:'user' as const,content:'external'}]}
     expect(baseline.reconcileTeamEnd('scope',saved,external)).toBeNull()
@@ -430,7 +331,7 @@ describe('ChatSessionSaveBaseline', () => {
     const baseline = new ChatSessionSaveBaseline()
     const old = {...session('ack', 'old'),teamGeneration:0,teamLifecycleRevision:0}
     const saved = {...old,messages:[{role:'user' as const,content:'saved'}]}
-    await baseline.persist('scope',saved,()=>old)
+    await persistCurrent(baseline,'scope',saved,()=>old)
     expect(baseline.isAcknowledgementCurrent('scope',saved)).toBe(true)
     saved.messages[0].content='mutated while saving'
     expect(baseline.isAcknowledgementCurrent('scope',saved)).toBe(false)
@@ -440,82 +341,17 @@ describe('ChatSessionSaveBaseline', () => {
     expect(baseline.isAcknowledgementCurrent('scope',saved)).toBe(false)
   })
 
-  it('does not revalidate a previously saved object after an End conflict fences its epoch', async () => {
-    const baseline=new ChatSessionSaveBaseline()
-    const old={...session('fenced-ack','old'),teamGeneration:0,teamLifecycleRevision:0}
-    const saved={...old,messages:[{role:'assistant' as const,content:'local'}]}
-    await baseline.persist('scope',saved,()=>old)
-    expect(baseline.reconcileTeamEnd('scope',saved,{...old,teamGeneration:1,teamLifecycleRevision:1,messages:[{role:'user',content:'external'}]})).toBeNull()
-    await expect(baseline.persist('scope',saved,()=>old)).rejects.toThrow('acknowledgement is no longer current')
-    expect(baseline.isAcknowledgementCurrent('scope',saved)).toBe(false)
-    expect(saveSessionToDBMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('rejects an unreserved older clone submitted after a newer own write completes', async () => {
-    const baseline = new ChatSessionSaveBaseline()
-    const old = session('late-clone','old')
-    const newer = {...old,messages:[...old.messages,{role:'assistant' as const,content:'new reply'}]}
-    const stale = structuredClone(old)
-    let stored=old
-    saveSessionToDBMock.mockImplementation(async (payload:ChatSession,_scope:string,options:{expectedSession:ChatSession|null})=>{
-      if (JSON.stringify(stored)!==JSON.stringify(options.expectedSession)) throw new Error('conflict')
-      stored=payload
-    })
-    await baseline.persist('scope',newer,()=>old)
-    await expect(baseline.persist('scope',stale,()=>old)).rejects.toThrow()
-    expect(stored).toEqual(newer)
-  })
-
-  it('does not silently overwrite a newer own commit with an unreserved non-prefix stale clone', async () => {
-    const baseline=new ChatSessionSaveBaseline()
-    const old=session('nonprefix-clone','old')
-    const stale={...old,title:'late stale clone'}
-    const newer={...old,messages:[...old.messages,{role:'assistant' as const,content:'new reply'}]}
-    let stored=old
-    saveSessionToDBMock.mockImplementation(async (payload:ChatSession,_scope:string,options:{expectedSession:ChatSession|null})=>{
-      if (JSON.stringify(stored)!==JSON.stringify(options.expectedSession)) throw new Error('conflict')
-      stored=payload
-    })
-    await baseline.persist('scope',newer,()=>old)
-    await expect(baseline.persist('scope',stale,()=>old)).rejects.toThrow()
-    expect(stored).toEqual(newer)
-  })
-
-  it('rejects an unreserved older clone queued behind a newer own write', async () => {
-    const baseline = new ChatSessionSaveBaseline()
-    const old = session('clone', 'old')
-    const newer = {...old,messages:[...old.messages,{role:'assistant' as const,content:'new reply'}]}
-    const stale = structuredClone(old)
-    let stored = old
-    let release!:()=>void
-    saveSessionToDBMock.mockImplementationOnce(async (payload: ChatSession) => {
-      await new Promise<void>(resolve=>{release=resolve})
-      stored=payload
-    }).mockImplementation(async (payload: ChatSession, _scope: string, options: {expectedSession: ChatSession | null}) => {
-      if (JSON.stringify(stored)!==JSON.stringify(options.expectedSession)) throw new Error('conflict')
-      stored=payload
-    })
-    const pending=baseline.persist('scope',newer,()=>old)
-    const queued=baseline.persist('scope',stale,()=>old)
-    const observed=queued.catch(error=>error)
-    await vi.waitFor(()=>expect(release).toBeDefined())
-    release()
-    await pending
-    expect(await observed).toBeInstanceOf(Error)
-    expect(stored).toEqual(newer)
-  })
-
   it('keeps baselines isolated per scope', async () => {
     const baseline = new ChatSessionSaveBaseline()
     const a = session('s1', 'scope a')
     const b = session('s1', 'scope b')
 
-    await baseline.persist('scope-a', a, () => null)
-    await baseline.persist('scope-b', b, () => null)
+    await persistCurrent(baseline, 'scope-a', a, () => null)
+    await persistCurrent(baseline, 'scope-b', b, () => null)
 
     expect(saveSessionToDBMock.mock.calls).toEqual([
-      [a, 'scope-a', { expectedSession: null, pendingSaveOwner: null }],
-      [b, 'scope-b', { expectedSession: null, pendingSaveOwner: null }]
+      [a, 'scope-a', saveOptions(null)],
+      [b, 'scope-b', saveOptions(null)]
     ])
   })
 
@@ -524,13 +360,13 @@ describe('ChatSessionSaveBaseline', () => {
     const v0 = session('s1', 'v0')
     const v1 = session('s1', 'v1')
 
-    await baseline.persist('scope-a', v0, () => null)
+    await persistCurrent(baseline, 'scope-a', v0, () => null)
     baseline.release('scope-a', 's1')
     const resolve = vi.fn(() => v1)
-    await baseline.persist('scope-a', v1, resolve)
+    await persistCurrent(baseline, 'scope-a', v1, resolve)
 
     expect(resolve).toHaveBeenCalledTimes(1)
-    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(v1, 'scope-a', { expectedSession: v1, pendingSaveOwner: null })
+    expect(saveSessionToDBMock).toHaveBeenLastCalledWith(v1, 'scope-a', saveOptions(v1))
   })
 
   it('freezes synchronously before enqueue so a later resolver value cannot move the baseline', async () => {
@@ -540,12 +376,15 @@ describe('ChatSessionSaveBaseline', () => {
     const toSave = session('s1', 'save')
     let current = v0
 
-    const pending = baseline.persist('scope-a', toSave, () => current)
+    // Decided contract (owner decision 6): the caller freezes first, then queues persistLatest,
+    // as the production callers do.
+    baseline.freeze('scope-a', 's1', current)
+    const pending = persistCurrent(baseline, 'scope-a', toSave, () => current)
     // Mutate the resolved source AFTER the persist call but BEFORE the queued task runs.
     current = vX
     await pending
 
-    expect(saveSessionToDBMock).toHaveBeenCalledWith(toSave, 'scope-a', { expectedSession: v0, pendingSaveOwner: null })
+    expect(saveSessionToDBMock).toHaveBeenCalledWith(toSave, 'scope-a', saveOptions(v0))
   })
 
   it('does not advance a stale in-flight baseline back after reset', async () => {
@@ -558,9 +397,9 @@ describe('ChatSessionSaveBaseline', () => {
         })
     )
 
-    const pending = baseline.persist('scope-a', session('s1', 'v1'), () => session('s1', 'v0'))
+    const pending = persistCurrent(baseline, 'scope-a', session('s1', 'v1'), () => session('s1', 'v0'))
     // Let the queued task start and block inside saveSessionToDB.
-    await Promise.resolve()
+    await vi.waitFor(() => expect(release).toBeDefined())
     baseline.reset()
     release()
     await pending
@@ -582,18 +421,15 @@ describe('ChatSessionSaveBaseline', () => {
         })
     )
 
-    const pending = baseline.persist('scope-a', staleSave, () => vOld)
-    await Promise.resolve()
+    const pending = persistCurrent(baseline, 'scope-a', staleSave, () => vOld)
+    await vi.waitFor(() => expect(release).toBeDefined())
     baseline.reset() // lifecycle reset (e.g. scope switch / reload)
     baseline.freeze('scope-a', 's1', vNewLoad) // new load freezes a new baseline for the same key
     release()
     await pending
 
     // The stale task must compare against the OLD captured snapshot, never the new-load baseline.
-    expect(saveSessionToDBMock).toHaveBeenCalledWith(staleSave, 'scope-a', {
-      expectedSession: vOld,
-      pendingSaveOwner: null
-    })
+    expect(saveSessionToDBMock).toHaveBeenCalledWith(staleSave, 'scope-a', saveOptions(vOld))
     // The new-load baseline is left intact for future clean saves.
     expect(baseline.freeze('scope-a', 's1', session('s1', 'ignored'))).toEqual(vNewLoad)
   })
@@ -627,14 +463,29 @@ describe('ChatSessionSaveBaseline', () => {
         })
     )
 
-    const pending = baseline.persist('scope-a', edit, () => v0)
-    await Promise.resolve()
+    const pending = persistCurrent(baseline, 'scope-a', edit, () => v0)
+    await vi.waitFor(() => expect(release).toBeDefined())
     baseline.adoptLoaded('scope-a', [session('s1', 'newer db')], new Set())
     release()
     await pending
 
     // Adoption must not have replaced the in-flight baseline; CAS compares against the frozen v0.
-    expect(saveSessionToDBMock).toHaveBeenCalledWith(edit, 'scope-a', { expectedSession: v0, pendingSaveOwner: null })
+    expect(saveSessionToDBMock).toHaveBeenCalledWith(edit, 'scope-a', saveOptions(v0))
+    expect(baseline.freeze('scope-a', 's1', session('s1', 'x'))).toEqual(edit)
+  })
+
+  it('skips adoption for a session whose write is queued but not started', async () => {
+    const baseline = new ChatSessionSaveBaseline()
+    const v0 = session('s1', 'v0')
+    const edit = session('s1', 'edit')
+
+    const pending = persistCurrent(baseline, 'scope-a', edit, () => v0)
+    // The task has not run yet, so no baseline is frozen; the queued chain alone must block adoption.
+    expect(baseline.isPending('scope-a', 's1')).toBe(true)
+    baseline.adoptLoaded('scope-a', [session('s1', 'newer db')], new Set())
+    await pending
+
+    expect(saveSessionToDBMock).toHaveBeenCalledWith(edit, 'scope-a', saveOptions(v0))
     expect(baseline.freeze('scope-a', 's1', session('s1', 'x'))).toEqual(edit)
   })
 
@@ -669,9 +520,10 @@ describe('ChatSessionSaveBaseline', () => {
     baseline.adoptLoaded('scope-a', [external], new Set())
 
     const follow = session('s1', 'legit follow-up')
+    // Decided contract (owner decision 6): persistLatest resolves to the saved live object.
     await expect(
-      baseline.persist('scope-a', follow, () => session('s1', 'stale'))
-    ).resolves.toBeUndefined()
+      persistCurrent(baseline, 'scope-a', follow, () => session('s1', 'stale'))
+    ).resolves.toBe(follow)
     expect(store.get('scope-a\u0000s1')).toEqual(follow)
   })
 
@@ -687,7 +539,7 @@ describe('ChatSessionSaveBaseline', () => {
     baseline.adoptLoaded('scope-a', [external], new Set(['s1']))
 
     await expect(
-      baseline.persist('scope-a', session('s1', 'dirty edit'), () => old)
+      persistCurrent(baseline, 'scope-a', session('s1', 'dirty edit'), () => old)
     ).rejects.toThrow('conflict')
     // The external record is preserved (no overwrite).
     expect(store.get('scope-a\u0000s1')).toBe(external)

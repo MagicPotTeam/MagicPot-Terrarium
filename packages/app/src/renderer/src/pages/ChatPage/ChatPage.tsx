@@ -1264,13 +1264,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
     if (teamAuthorityChanged) setTeamAuthorityRevision(revision => revision + 1)
     if (next !== previous && !sessionPersistenceGateRef.current) {
-      const byId = new Map(previous.map(session => [session.id, session]))
-      for (const session of next) {
-        const old = byId.get(session.id)
-        if (old !== session) chatSaveBaselineRef.current.supersedeReservations(storageScopeRef.current, session.id, session)
-        byId.delete(session.id)
-      }
-      for (const removed of byId.values()) chatSaveBaselineRef.current.discardReservation(storageScopeRef.current, removed)
       sessionMutationEpochRef.current += 1
     }
     sessionsRef.current = next
@@ -2978,7 +2971,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         index === currentSessionIndex ? updatedSession : session
       )
 
-      chatSaveBaselineRef.current.supersedeReservations(storageScope, updatedSession.id, updatedSession)
       sessionsRef.current = nextSessions
       if (!sessionPersistenceGateRef.current) {
         sessionMutationEpochRef.current += 1
@@ -4479,7 +4471,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         () => { if (isSaveScopeCurrent()) noteSessionWriteAcknowledged(scope) },
         Boolean(sessionsRef.current.find(session => session.id === id)?.teamLeadId)
       ),
-      onDiscard: (session) => chatSaveBaselineRef.current.discardReservation(storageScope, session),
       onSuccess: (savedSessions) => {
         if (!isSaveScopeCurrent()) return
         for (const session of savedSessions)
