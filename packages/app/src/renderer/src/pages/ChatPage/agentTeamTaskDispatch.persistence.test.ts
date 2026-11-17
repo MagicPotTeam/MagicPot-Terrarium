@@ -96,6 +96,20 @@ describe('persistent task claim adapter', () => {
     expect(db.current.teamTasks?.[0].status).toBe('pending')
   })
 
+  it('claims a task whose record carries an outcome this version does not know, and drops it with the claim', async () => {
+    const later = 'timed_out' as unknown as NonNullable<ChatSession['teamTasks']>[number]['lastOutcome']
+    const before: ChatSession = { ...lead(), teamTasks: [
+      { id: 'a', title: 'a', ownerId: '', status: 'done', dependsOn: [], lastOutcome: later },
+      { id: 'b', title: 'b', ownerId: '', status: 'pending', dependsOn: ['a'], lastOutcome: later }
+    ] }
+    db.current = structuredClone(before)
+    const claimed = await claim(before, 'b')
+    expect(claimed.teamTasks).toEqual([before.teamTasks![0], { id: 'b', title: 'b', ownerId: '', status: 'running', dependsOn: ['a'] }])
+    expect(db.current).toEqual(claimed)
+    // A run that never started is undone to the exact pre-claim record, unknown outcome included.
+    expect(await releaseTeamTaskClaimInDB({ scope: 'test', leadId: 'lead', claimedLead: claimed, taskBeforeClaim: before.teamTasks![1] })).toEqual(before)
+  })
+
   it('propagates storage failure without a claim', async () => {
     db.fail = true
     await expect(claim(lead())).rejects.toThrow('commit failed')

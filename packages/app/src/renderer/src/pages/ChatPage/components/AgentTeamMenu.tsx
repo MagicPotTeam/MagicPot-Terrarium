@@ -6,7 +6,7 @@ import AgentColumnOverlay from '@renderer/components/AgentColumnOverlay'
 import { getAgentColumnTokens } from '@renderer/components/agentColumnTokens'
 import type { ChatSession } from '../chatStorage'
 import { resolveTeamRequestSettings } from '../agentTeam'
-import { canSetTeamTaskStatus, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, validateTeamTasks, type TeamTaskOutcome } from '../agentTeamTasks'
+import { canSetTeamTaskStatus, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, teamTaskOutcome, validateTeamTasks, type TeamTaskOutcome } from '../agentTeamTasks'
 
 const taskStatusLabel = { pending: '待处理', running: '进行中', done: '已完成' } as const
 const broadcastUnknownNotice = '广播结果未确认，请先核对相关会话，避免重复发送。'
@@ -223,7 +223,8 @@ export default function AgentTeamMenu({
         // Running without a live run of its owner: the run ended without reporting (an earlier app
         // session, a lost save). Reset only returns it to pending; it never starts a run.
         const orphanedRun = item.status === 'running' && !!isOwnerBusy && !isOwnerBusy(item.ownerId || lead.id)
-        const outcomeNote = orphanedRun ? runOutcomeLabel('interrupted') : item.status === 'pending' && item.lastOutcome ? runOutcomeLabel(item.lastOutcome) : ''
+        const lastOutcome = teamTaskOutcome(item)
+        const outcomeNote = orphanedRun ? runOutcomeLabel('interrupted') : item.status === 'pending' && lastOutcome ? runOutcomeLabel(lastOutcome) : ''
         const resetLabel = t('chat.team_task_reset', { defaultValue: 'Reset' })
         return <Box key={item.id}>
           <Typography variant="caption">{item.title} · {unconfirmedEntry?.kind === 'task' && unconfirmedEntry.id === item.id ? '未确认 · ' : ''}{item.ownerId ? (members.find(member => member.id === item.ownerId)?.teamMemberName ?? '原成员') : '组长'} · {taskStatusLabel[item.status]}{outcomeNote ? ` · ${outcomeNote}` : ''} · 依赖 {item.dependsOn.map(id => tasks.find(taskItem => taskItem.id === id)?.title ?? id).join(', ') || '无'}{blockers.length > 0 ? ` · 等待 ${blockers.map(blocker => blocker.title).join(', ')}` : ''}</Typography>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canSetTeamTaskStatus, revertTeamTaskRun, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, validateTeamTasks, type TeamTask } from './agentTeamTasks'
+import { canSetTeamTaskStatus, revertTeamTaskRun, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, teamTaskOutcome, validateTeamTasks, type TeamTask } from './agentTeamTasks'
 
 const task = (id: string, dependsOn: string[] = [], status: TeamTask['status'] = 'pending'): TeamTask => ({ id, title: id, ownerId: '', status, dependsOn })
 
@@ -39,15 +39,42 @@ describe('team task dependency graph', () => {
 })
 
 describe('team task run outcome', () => {
-  it('keeps records written before lastOutcome existed valid, and accepts only known outcomes', () => {
+  it('keeps records written before lastOutcome existed valid, shows only known outcomes and rejects non-string ones', () => {
     const legacy = [{ id: 'a', title: 'a', ownerId: 'm', status: 'running', dependsOn: [] }] as TeamTask[]
     expect(() => validateTeamTasks(legacy)).not.toThrow()
+    expect(teamTaskOutcome(legacy[0])).toBeUndefined()
     for (const lastOutcome of ['failed', 'cancelled', 'interrupted'] as const) {
       expect(() => validateTeamTasks([{ ...task('a'), lastOutcome }])).not.toThrow()
+      expect(teamTaskOutcome({ ...task('a'), lastOutcome })).toBe(lastOutcome)
     }
-    for (const lastOutcome of ['done', '', 1, null]) {
+    // K23b: an unknown string (a later version's outcome) no longer blocks the graph; it shows as none.
+    for (const lastOutcome of ['done', '', 'timed_out']) {
+      expect(() => validateTeamTasks([{ ...task('a'), lastOutcome } as unknown as TeamTask])).not.toThrow()
+      expect(teamTaskOutcome({ lastOutcome })).toBeUndefined()
+    }
+    for (const lastOutcome of [1, null, {}, ['failed']]) {
       expect(() => validateTeamTasks([{ ...task('a'), lastOutcome } as unknown as TeamTask])).toThrow('Invalid task')
     }
+  })
+  it('keeps a graph with an unknown outcome usable and drops that outcome on the task\'s next status change', () => {
+    const later = 'timed_out' as unknown as TeamTask['lastOutcome']
+    const tasks: TeamTask[] = [
+      { ...task('done', [], 'done'), ownerId: 'm', lastOutcome: later },
+      { ...task('next', ['done']), ownerId: 'm', lastOutcome: later },
+      { ...task('other'), lastOutcome: later }
+    ]
+    expect(teamTaskBlockers(tasks, tasks[1])).toEqual([])
+    expect(canSetTeamTaskStatus(tasks, 'next', 'running')).toBe(true)
+    const running = setTeamTaskStatus(tasks, 'next', 'running')
+    expect(running[1]).toEqual({ id: 'next', title: 'next', ownerId: 'm', status: 'running', dependsOn: ['done'] })
+    // Only the changed task loses it; the others keep their record as written.
+    expect(running[0]).toBe(tasks[0])
+    expect(running[2]).toBe(tasks[2])
+    expect(revertTeamTaskRun(running, 'next', 'm', 'failed')?.[1].lastOutcome).toBe('failed')
+    expect(setTeamTaskStatus(tasks, 'next', 'pending', 'interrupted')[1].lastOutcome).toBe('interrupted')
+    const reopened = setTeamTaskStatus(tasks, 'done', 'pending')
+    expect(reopened[0]).toEqual({ id: 'done', title: 'done', ownerId: 'm', status: 'pending', dependsOn: [] })
+    expect(setTeamTaskDependencies(tasks, 'other', ['done'])[2].lastOutcome).toBe(later)
   })
   it('returns only a running task of the same owner to pending, with its outcome, without mutating the input', () => {
     const tasks: TeamTask[] = [{ ...task('a', [], 'running'), ownerId: 'm' }, task('b', ['a'])]

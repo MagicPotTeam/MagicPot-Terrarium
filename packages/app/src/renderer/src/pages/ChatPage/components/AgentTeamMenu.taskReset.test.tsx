@@ -57,6 +57,27 @@ describe('team menu: a running task without a live run', () => {
     }
   })
 
+  it('shows an outcome this version does not know as none, and keeps execute, reopen and reset working', async () => {
+    const later = 'timed_out' as unknown as Task['lastOutcome']
+    const tasks: Task[] = [
+      { ...doneTask, lastOutcome: later },
+      { id: 'next', title: '后续任务', ownerId: 'member', status: 'pending', dependsOn: ['done'], lastOutcome: later },
+      { id: 'stuck', title: '卡住任务', ownerId: 'member', status: 'running', dependsOn: [], lastOutcome: later }
+    ]
+    const { view, onSave } = open(leadWith(tasks), () => false)
+    try {
+      expect(screen.queryByText('任务依赖无效')).not.toBeInTheDocument()
+      expect(screen.getByText(/后续任务 · designer · 待处理 · 依赖/)).toBeVisible()
+      expect(screen.getByText(/已完成任务 · designer · 已完成 · 依赖/)).toBeVisible()
+      expect(screen.queryByText(/Last run (failed|cancelled)/)).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '执行 后续任务' })).toBeEnabled()
+      fireEvent.click(screen.getByRole('button', { name: 'Reset: 卡住任务' }))
+      await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+      const saved = (onSave.mock.calls[0] as unknown as [ChatSession])[0]
+      expect(saved.teamTasks).toEqual([tasks[0], tasks[1], { id: 'stuck', title: '卡住任务', ownerId: 'member', status: 'pending', dependsOn: [], lastOutcome: 'interrupted' }])
+    } finally { view.unmount() }
+  })
+
   it('shows the outcome of a pending task, offers no reset for pending or done tasks, and keeps execute', () => {
     const tasks: Task[] = [
       doneTask,

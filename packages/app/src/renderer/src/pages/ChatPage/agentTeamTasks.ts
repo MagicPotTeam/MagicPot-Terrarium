@@ -8,6 +8,12 @@ export const TEAM_TASK_OUTCOMES = ['failed', 'cancelled', 'interrupted'] as cons
 export type TeamTaskOutcome = (typeof TEAM_TASK_OUTCOMES)[number]
 const isTeamTaskOutcome = (value: unknown): value is TeamTaskOutcome =>
   typeof value === 'string' && (TEAM_TASK_OUTCOMES as readonly string[]).includes(value)
+/**
+ * The outcome to show for a task. A string this version does not know (written by a later version)
+ * counts as no outcome; it stays in the record until the task's next status change drops it.
+ */
+export const teamTaskOutcome = (task: Readonly<{ lastOutcome?: unknown }>): TeamTaskOutcome | undefined =>
+  isTeamTaskOutcome(task.lastOutcome) ? task.lastOutcome : undefined
 
 /** A task graph is local team metadata; validating it never starts work. */
 export function validateTeamTasks(tasks: readonly TeamTask[]): void {
@@ -20,7 +26,9 @@ export function validateTeamTasks(tasks: readonly TeamTask[]): void {
       !Array.isArray(task.dependsOn) || task.dependsOn.length > MAX_TASKS ||
       task.dependsOn.some(id => typeof id !== 'string' || !id) ||
       new Set(task.dependsOn).size !== task.dependsOn.length ||
-      (task.lastOutcome !== undefined && !isTeamTaskOutcome(task.lastOutcome))) throw new Error('Invalid task')
+      // lastOutcome is display-only: an unknown string is ignored (see teamTaskOutcome), not a reason
+      // to block the whole graph; any other type still fails closed like every other field.
+      (task.lastOutcome !== undefined && typeof task.lastOutcome !== 'string')) throw new Error('Invalid task')
     byId.set(task.id, task)
   }
   // Iterative graph traversal makes cycles and missing prerequisites fail closed.
@@ -63,7 +71,8 @@ export function setTeamTaskDependencies(tasks: readonly TeamTask[], taskId: stri
 }
 
 /**
- * Every status change drops the previous run's outcome; only a return to pending may record a new one.
+ * Every status change drops the previous run's outcome (an unknown one too); only a return to
+ * pending may record a new, known one.
  */
 export function setTeamTaskStatus(tasks: readonly TeamTask[], taskId: string, status: TeamTask['status'], lastOutcome?: TeamTaskOutcome): TeamTask[] {
   validateTeamTasks(tasks)
