@@ -1565,3 +1565,148 @@ describe('rendererDiagnostics hung renderer that dies after its reload request e
     expect(window.webContents.reload).not.toHaveBeenCalled()
   })
 })
+
+describe('rendererDiagnostics hung renderer that answers again while its forced end is pending', () => {
+  type Answer = { resolve: (response: number) => void; signal?: AbortSignal; message?: string }
+  let answers: Answer[] = []
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    answers = []
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockImplementation(
+        ((_window: unknown, options: { signal?: AbortSignal; message?: string; cancelId?: number }) =>
+          new Promise((resolve) => {
+            const answer: Answer = {
+              resolve: (response) => resolve({ response, checkboxChecked: false }),
+              signal: options.signal,
+              message: options.message
+            }
+            answers.push(answer)
+            options.signal?.addEventListener('abort', () => answer.resolve(options.cancelId ?? 1))
+          })) as never
+      )
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    resetAppQuittingForTests()
+    resetExpectedRendererExitsForTests()
+  })
+
+  const flush = async () => {
+    for (let index = 0; index < 8; index += 1) await Promise.resolve()
+  }
+  /** Hang -> Reload; the forced end does not land and the renderer answers again 2 s later. */
+  const answersWhileEnding = async () => {
+    const window = createWindow()
+    const clock = { now: 1_000 }
+    attachRendererDiagnostics(window as never, { monotonicNow: () => clock.now, wallClockNow: () => 42 })
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    expect(answers[0].message).toBe('窗口已超过 15 秒没有响应。')
+    answers[0].resolve(1) // 重新加载
+    await flush()
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(2_000)
+    clock.now += 2_000
+    listenerOf(window, 'responsive')()
+    vi.advanceTimersByTime(3_000)
+    clock.now += 3_000
+    await flush()
+    return { window, clock }
+  }
+
+  // Panel probe S1: the 'could not be ended' dialog used to open over the working window, and its
+  // Reload ended the healthy renderer (a reply in progress was lost).
+  it('asks nothing and never ends the renderer again once it answers (S1)', async () => {
+    const { window } = await answersWhileEnding()
+    expect(answers.map((answer) => answer.message)).toEqual(['窗口已超过 15 秒没有响应。'])
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(answers).toHaveLength(1)
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+    // The announcement to the death recorder is withdrawn with the request.
+    expect(takeExpectedRendererExit(window.webContents.id)).toBeUndefined()
+  })
+
+  // Panel probe S2: the kept request used to label a later, unrelated crash as the user's hang
+  // reload (no budget, the hang notice, the death record 'reload-after-hang').
+  it('answers a later, unrelated crash as that crash (S2)', async () => {
+    const { window, clock } = await answersWhileEnding()
+    clock.now += 5 * 60_000
+    vi.advanceTimersByTime(5 * 60_000)
+    expect(takeExpectedRendererExit(window.webContents.id)).toBeUndefined()
+    window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'oom', exitCode: 0 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    expect(answers).toHaveLength(1)
+    window.webContents.isCrashed.mockReturnValue(false)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'oom',
+      exitCode: 0,
+      diedAt: 42
+    })
+    // It used the crash budget: two more crashes are reloaded, the fourth within 60 s asks.
+    for (let crash = 0; crash < 2; crash += 1) {
+      listenerOf(window, 'render-process-gone')({}, { reason: 'oom', exitCode: 0 })
+    }
+    expect(window.webContents.reload).toHaveBeenCalledTimes(3)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'oom', exitCode: 0 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(3)
+    expect(answers.at(-1)?.message).toBe('窗口多次意外退出，自动恢复已暂停。')
+  })
+
+  it('still treats the forced end as the user\'s reload when it lands after the renderer answered', async () => {
+    const window = createWindow()
+    attachRendererDiagnostics(window as never, { wallClockNow: () => 42 })
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    answers[0].resolve(1)
+    await flush()
+    vi.advanceTimersByTime(2_000)
+    listenerOf(window, 'responsive')()
+    vi.advanceTimersByTime(1_000)
+    expect(takeExpectedRendererExit(window.webContents.id)).toBe('reload-after-hang')
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(answers).toHaveLength(1)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'unresponsive',
+      exitCode: 0,
+      diedAt: 42
+    })
+  })
+
+  it('still asks when the renderer hangs again before the forced end times out, and Reload ends it', async () => {
+    const window = createWindow()
+    attachRendererDiagnostics(window as never)
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    answers[0].resolve(1)
+    await flush()
+    vi.advanceTimersByTime(1_000)
+    listenerOf(window, 'responsive')()
+    vi.advanceTimersByTime(1_000)
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(3_000)
+    await flush()
+    expect(answers.map((answer) => answer.message)).toEqual([
+      '窗口已超过 15 秒没有响应。',
+      '未能结束没有响应的窗口进程。'
+    ])
+    answers[1].resolve(0)
+    await flush()
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(2)
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+  })
+})

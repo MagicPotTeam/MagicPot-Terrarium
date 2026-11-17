@@ -331,8 +331,10 @@ export function attachRendererDiagnostics(
         if (isShuttingDown()) return
         if (reload && kind === 'hang-not-ended' && !isRendererDead()) {
           // The renderer is still hung, and a hung renderer cannot process a reload: end it again
-          // and wait for its exit as before.
-          reloadHungRenderer()
+          // and wait for its exit as before. A renderer that answers again by now is healthy: it is
+          // never ended, and the request it was to be ended for is dropped.
+          if (unresponsive) reloadHungRenderer()
+          else dropHangReloadRequest()
         } else if (reload) {
           // (A 'hang-not-ended' renderer that is dead by now, its exit answered or not, gets the
           // reload the user asked for: ending a dead renderer again would never report an exit.)
@@ -423,6 +425,9 @@ export function attachRendererDiagnostics(
   let unresponsivePrompt: AbortController | null = null
   // Set while the forced end of a hung renderer (the user chose Reload) has not been reported yet.
   let hangTerminationTimer: ReturnType<typeof setTimeout> | null = null
+  // Set when the renderer answered again ('responsive') while that forced end was still pending:
+  // the reload it was to be ended for is then moot (see hangTerminationFailed).
+  let answeredWhileEnding = false
   // Until when an exit of this renderer is the user's hang reload (also after the 5 s above, e.g.
   // while the 'hang-not-ended' dialog is open): cleared by the exit, by 'responsive', by a finished
   // load and when the window closes.
@@ -443,6 +448,17 @@ export function attachRendererDiagnostics(
   }
   const hangTerminationFailed = () => {
     clearHangTermination()
+    const answered = answeredWhileEnding
+    answeredWhileEnding = false
+    // The renderer answered again while its forced end was pending and is still answering: the
+    // window works, so there is nothing to end and nothing to ask. Asking would offer to end a
+    // healthy renderer (a reply in progress would be lost), and a kept request would label a later,
+    // unrelated death as this reload.
+    if (answered && !unresponsive && !isRendererDead()) {
+      console.info('[App] The unresponsive renderer answered again before its forced end; nothing to reload')
+      dropHangReloadRequest()
+      return
+    }
     // The request (and its announcement to the death recorder) stays: an exit that is reported
     // late is still the reload the user asked for.
     if (isShuttingDown()) return
@@ -460,6 +476,7 @@ export function attachRendererDiagnostics(
     // only when that exit is reported (see 'render-process-gone' below): a reload started while
     // the old process is still going away is cancelled by its exit and the window stays dead.
     hangReloadRequestedUntil = now() + HANG_RELOAD_REQUEST_TTL_MS
+    answeredWhileEnding = false
     expectRendererExit(webContentsId, 'reload-after-hang', HANG_RELOAD_REQUEST_TTL_MS)
     hangTerminationTimer = setTimeout(hangTerminationFailed, HANG_TERMINATION_TIMEOUT_MS)
     hangTerminationTimer.unref?.()
@@ -598,7 +615,9 @@ export function attachRendererDiagnostics(
   window.webContents.on('responsive', () => {
     // The hung renderer answers again after its forced end was not reported in time: the reload
     // it was to be ended for is moot, and so is the question whether to end it once more. (While
-    // the forced end is still in flight its exit is expected and stays the user's reload.)
+    // the forced end is still in flight its exit is expected and stays the user's reload; that the
+    // renderer answered is remembered for the end of that wait, see hangTerminationFailed.)
+    if (hangTerminationTimer) answeredWhileEnding = true
     if (!hangTerminationTimer && hangReloadRequestedUntil !== null) {
       dropHangReloadRequest()
       withdrawRecoveryPrompt()
