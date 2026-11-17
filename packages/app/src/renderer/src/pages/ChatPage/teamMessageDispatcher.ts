@@ -10,7 +10,8 @@ export type TeamMessageIntent = Readonly<{
   recipient?: string
   text: string
 }>
-export type TeamDispatchStatus = 'queued' | 'request_started' | 'response_received' | 'unavailable' | 'unknown'
+/** 'held': waits for a stopped member until the user resumes it (see hold/release). */
+export type TeamDispatchStatus = 'queued' | 'held' | 'request_started' | 'response_received' | 'unavailable' | 'unknown'
 export type TeamDispatchEntry = Readonly<{ intent: TeamMessageIntent; recipient?: string; status: TeamDispatchStatus }>
 export type TeamDispatchStage = 'request_started' | 'response_received'
 
@@ -20,6 +21,9 @@ export class TeamMessageDispatcher {
   private readonly records: TeamDispatchEntry[] = []
   private readonly busy = new Set<string>()
   private readonly subscriptions = new Set<string>()
+  private readonly held = new Set<string>()
+  /** Indexes of claimed records whose delivery has not settled: hold never touches them. */
+  private readonly claimed = new Set<number>()
   private ended = false
 
   constructor(
@@ -30,7 +34,9 @@ export class TeamMessageDispatcher {
     private readonly deliver: (delivery: TeamMessageDelivery, source: TeamMessageSource, stage: (stage: TeamDispatchStage) => void, hop: 1 | 2) => Promise<void>,
     private readonly onChange: (entries: readonly TeamDispatchEntry[]) => void = () => {},
     private readonly limit = 1000,
-    private readonly isRecipientBusy: (member: string) => boolean = () => false
+    private readonly isRecipientBusy: (member: string) => boolean = () => false,
+    /** False while the host cannot start a delivery (a hidden pane): records stay queued, nothing is claimed. */
+    private readonly canDeliver: () => boolean = () => true
   ) {
     if (![team.scope, team.thread, team.lead].every(value => typeof value === 'string' && value.trim() && value.length <= 256)) throw new Error('Invalid team.')
     this.team = Object.freeze({ ...team })
@@ -83,7 +89,7 @@ export class TeamMessageDispatcher {
     else this.service.sendChannel(intent.id, source.member, 'team', intent.text)
     const deliveries = this.service.history().filter(item => item.id === intent.id)
     if (!deliveries.length) this.records.push(Object.freeze({ intent, status: 'unavailable' }))
-    else for (const item of deliveries) this.records.push(Object.freeze({ intent, recipient: item.recipient, status: 'queued' }))
+    else for (const item of deliveries) this.records.push(Object.freeze({ intent, recipient: item.recipient, status: this.held.has(item.recipient) ? 'held' : 'queued' }))
     this.notify()
     return deliveries.length
   }
@@ -99,7 +105,7 @@ export class TeamMessageDispatcher {
     let changed = false
     for (let i = 0; i < this.records.length; i++) {
       const entry = this.records[i]
-      if (entry.status === 'queued' && (!this.isSourceCurrent(entry.intent.source) || !entry.recipient || !this.isMember(entry.recipient))) {
+      if ((entry.status === 'queued' || entry.status === 'held') && (!this.isSourceCurrent(entry.intent.source) || !entry.recipient || !this.isMember(entry.recipient))) {
         this.records[i] = Object.freeze({ ...entry, status: 'unavailable' })
         changed = true
       }
@@ -109,11 +115,44 @@ export class TeamMessageDispatcher {
 
   private isSourceCurrent(source: TeamMessageSource): boolean { return source.kind === 'user' || this.isMember(source.member) }
 
-  /** Starts at most one delivery per member. Busy members remain queued; call again when ready. */
+  /**
+   * A stopped member gets no team delivery until the user resumes it: its waiting records, and
+   * every record for it that arrives later, are held. A delivery already claimed is not recalled
+   * (the host's stop cancels it). Never throws: a stop must not fail on an ended team.
+   */
+  hold(member: string): void {
+    if (this.ended) return
+    this.held.add(member)
+    let changed = false
+    for (let i = 0; i < this.records.length; i++) {
+      if (this.records[i].recipient === member && this.records[i].status === 'queued' && !this.claimed.has(i)) {
+        this.records[i] = Object.freeze({ ...this.records[i], status: 'held' })
+        changed = true
+      }
+    }
+    if (changed) this.notify()
+  }
+
+  /** The user resumed the member (their own send to it was accepted): held records wait again, in order. */
+  release(member: string): void {
+    if (this.ended || !this.held.delete(member)) return
+    let changed = false
+    for (let i = 0; i < this.records.length; i++) {
+      if (this.records[i].recipient === member && this.records[i].status === 'held') {
+        this.records[i] = Object.freeze({ ...this.records[i], status: 'queued' })
+        changed = true
+      }
+    }
+    if (changed) this.notify()
+  }
+
+  isHeld(member: string): boolean { return this.held.has(member) }
+
+  /** Starts at most one delivery per member. Busy, held or undeliverable members remain queued; call again when ready. */
   pump(recipient: string): Promise<void> | undefined {
     this.active()
     if (!this.isMember(recipient)) throw new Error('Team member unavailable.')
-    if (this.busy.has(recipient) || this.isRecipientBusy(recipient)) return undefined
+    if (this.held.has(recipient) || !this.canDeliver() || this.busy.has(recipient) || this.isRecipientBusy(recipient)) return undefined
     const index = this.records.findIndex(item => item.recipient === recipient && item.status === 'queued')
     if (index < 0) return undefined
     const record = this.records[index]
@@ -121,6 +160,7 @@ export class TeamMessageDispatcher {
     const claimed = this.service.claim(recipient, record.intent.id)
     if (!claimed) { this.set(index, 'unavailable'); return undefined }
     this.busy.add(recipient)
+    this.claimed.add(index)
     let stageOpen = true
     let admitted = false
     const stage = (value: TeamDispatchStage): void => {
@@ -136,6 +176,7 @@ export class TeamMessageDispatcher {
         const current = this.records[index].status
         if (current === 'queued') this.set(index, 'unavailable')
         else if (current === 'request_started') this.set(index, 'unknown')
+        this.claimed.delete(index)
         this.busy.delete(recipient)
       }
     })()
@@ -147,7 +188,7 @@ export class TeamMessageDispatcher {
     this.ended = true
     this.service.end()
     for (let i = 0; i < this.records.length; i++) {
-      if (this.records[i].status === 'queued') this.records[i] = Object.freeze({ ...this.records[i], status: 'unavailable' })
+      if (this.records[i].status === 'queued' || this.records[i].status === 'held') this.records[i] = Object.freeze({ ...this.records[i], status: 'unavailable' })
     }
     this.notify()
   }
