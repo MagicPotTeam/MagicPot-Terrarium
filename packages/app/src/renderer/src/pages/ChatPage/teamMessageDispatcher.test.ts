@@ -12,9 +12,10 @@ const setup = (deliver = vi.fn(async (_item, _source, _stage, _hop?: 1 | 2) => {
 }
 
 describe('TeamMessageDispatcher', () => {
-  it('preflights activity capacity before mutating the service, including unavailable records', () => {
+  it('preflights activity capacity before mutating the service while every record is unsettled', () => {
     const dispatcher = new TeamMessageDispatcher(team, () => true, id => ['a', 'b'].includes(id), ['a', 'b'], vi.fn(async () => {}), undefined, 2)
-    dispatcher.recordUnavailable({ ...intent('rejected'), recipient: 'missing' }, 'missing')
+    // K23b: a settled record (unavailable, response_received, unknown) now makes room; a queued one does not.
+    dispatcher.enqueue(intent('waiting'))
     expect(() => dispatcher.enqueueUserChannel({ id: 'u', source: { ...team, kind: 'user' }, text: 'hello' })).toThrow(/limit/)
     expect(dispatcher.entries()).toHaveLength(1)
     dispatcher.unsubscribe('a')

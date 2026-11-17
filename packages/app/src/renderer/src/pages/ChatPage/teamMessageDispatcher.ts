@@ -14,15 +14,22 @@ export type TeamMessageIntent = Readonly<{
 export type TeamDispatchStatus = 'queued' | 'held' | 'request_started' | 'response_received' | 'unavailable' | 'unknown'
 export type TeamDispatchEntry = Readonly<{ intent: TeamMessageIntent; recipient?: string; status: TeamDispatchStatus }>
 export type TeamDispatchStage = 'request_started' | 'response_received'
+/** A delivery that has ended one way or another: its record may be dropped when the log is full. */
+const SETTLED: ReadonlySet<TeamDispatchStatus> = new Set(['response_received', 'unavailable', 'unknown'])
 
 /** Delivery bookkeeping is renderer-local per generation; durable user-channel pending intents live on ChatSession. */
 export class TeamMessageDispatcher {
   private readonly service: TeamMessageService
   private readonly records: TeamDispatchEntry[] = []
+  /** Stable identity of each record (same index as records): pruning settled records shifts indexes. */
+  private readonly recordIds: number[] = []
+  private nextRecordId = 0
+  /** IDs of pruned messages, still refused as duplicates (bounded, oldest forgotten first). */
+  private readonly prunedIds = new Set<string>()
   private readonly busy = new Set<string>()
   private readonly subscriptions = new Set<string>()
   private readonly held = new Set<string>()
-  /** Indexes of claimed records whose delivery has not settled: hold never touches them. */
+  /** Record IDs of claimed records whose delivery has not settled: hold and pruning never touch them. */
   private readonly claimed = new Set<number>()
   private ended = false
 
@@ -54,6 +61,50 @@ export class TeamMessageDispatcher {
     this.records[index] = Object.freeze({ ...this.records[index], status })
     this.notify()
   }
+  private push(entry: TeamDispatchEntry): void {
+    this.records.push(entry)
+    this.recordIds.push(this.nextRecordId++)
+  }
+  private isClaimed(index: number): boolean { return this.claimed.has(this.recordIds[index]) }
+  private isKnownId(id: string): boolean { return this.prunedIds.has(id) || this.records.some(entry => entry.intent.id === id) }
+
+  /**
+   * Makes room for `count` new records by dropping the oldest messages whose records are all
+   * settled (response_received, unavailable, unknown) and unclaimed. Queued, held, started or
+   * claimed records are never dropped. Drops nothing and returns false when that is not enough.
+   */
+  private makeRoom(count: number): boolean {
+    const excess = this.records.length + count - this.limit
+    if (excess <= 0) return true
+    const blocked = new Set<string>()
+    this.records.forEach((entry, index) => { if (!SETTLED.has(entry.status) || this.isClaimed(index)) blocked.add(entry.intent.id) })
+    const drop: string[] = []
+    const seen = new Set<string>()
+    let freed = 0
+    for (const entry of this.records) {
+      const id = entry.intent.id
+      if (seen.has(id)) continue
+      seen.add(id)
+      if (blocked.has(id)) continue
+      drop.push(id)
+      freed += this.records.filter(item => item.intent.id === id).length
+      if (freed >= excess) break
+    }
+    if (freed < excess) return false
+    const dropped = new Set(drop)
+    for (let i = this.records.length - 1; i >= 0; i--) {
+      if (dropped.has(this.records[i].intent.id)) { this.records.splice(i, 1); this.recordIds.splice(i, 1) }
+    }
+    for (const id of drop) {
+      this.service.forget(id)
+      this.prunedIds.add(id)
+    }
+    for (const id of this.prunedIds) {
+      if (this.prunedIds.size <= this.limit * 4) break
+      this.prunedIds.delete(id)
+    }
+    return true
+  }
 
   subscribe(member: string): void { this.active(); this.service.subscribe(member, 'team'); this.subscriptions.add(member) }
   unsubscribe(member: string): void { this.active(); this.service.unsubscribe(member, 'team'); this.subscriptions.delete(member) }
@@ -62,10 +113,10 @@ export class TeamMessageDispatcher {
   recordUnavailable(input: TeamMessageIntent, recipient?: string): void {
     this.active()
     if (!input || !input.source || input.source.scope !== this.team.scope || input.source.thread !== this.team.thread || input.source.lead !== this.team.lead) throw new Error('Invalid team source.')
-    if (this.records.length >= this.limit || this.records.some(entry => entry.intent.id === input.id)) throw new Error('Team message activity limit reached.')
+    if (this.isKnownId(input.id) || !this.makeRoom(1)) throw new Error('Team message activity limit reached.')
     const source = Object.freeze({ ...input.source })
     const intent = Object.freeze({ id: input.id, source, kind: input.kind, hop: input.hop, ...(input.recipient === undefined ? {} : { recipient: input.recipient }), text: input.text })
-    this.records.push(Object.freeze({ intent, ...(recipient === undefined ? {} : { recipient }), status: 'unavailable' }))
+    this.push(Object.freeze({ intent, ...(recipient === undefined ? {} : { recipient }), status: 'unavailable' }))
     this.notify()
   }
 
@@ -79,17 +130,17 @@ export class TeamMessageDispatcher {
     if (input.hop !== 1 && input.hop !== 2) throw new Error('Invalid message hop.')
     if (input.kind === 'message' && !input.recipient) throw new Error('Recipient required.')
     if (input.kind === 'channel' && input.recipient !== undefined) throw new Error('Invalid channel recipient.')
-    if (this.records.some(entry => entry.intent.id === input.id)) throw new Error('Duplicate message ID.')
+    if (this.isKnownId(input.id)) throw new Error('Duplicate message ID.')
     const expectedRecipients = input.kind === 'message' ? 1 : [...this.subscriptions].filter(id => this.isMember(id) && (input.source.kind === 'user' || id !== input.source.member)).length
-    if (this.records.length + Math.max(1, expectedRecipients) > this.limit) throw new Error('Team message activity limit reached.')
+    if (!this.makeRoom(Math.max(1, expectedRecipients))) throw new Error('Team message activity limit reached.')
     const source = Object.freeze({ ...input.source })
     const intent = Object.freeze({ id: input.id, source, kind: input.kind, hop: input.hop, ...(input.recipient === undefined ? {} : { recipient: input.recipient }), text: input.text })
     if (source.kind === 'user') this.service.sendUserChannel(intent.id, 'team', intent.text)
     else if (intent.kind === 'message') this.service.sendDirect(intent.id, source.member, intent.recipient!, intent.text)
     else this.service.sendChannel(intent.id, source.member, 'team', intent.text)
     const deliveries = this.service.history().filter(item => item.id === intent.id)
-    if (!deliveries.length) this.records.push(Object.freeze({ intent, status: 'unavailable' }))
-    else for (const item of deliveries) this.records.push(Object.freeze({ intent, recipient: item.recipient, status: this.held.has(item.recipient) ? 'held' : 'queued' }))
+    if (!deliveries.length) this.push(Object.freeze({ intent, status: 'unavailable' }))
+    else for (const item of deliveries) this.push(Object.freeze({ intent, recipient: item.recipient, status: this.held.has(item.recipient) ? 'held' : 'queued' }))
     this.notify()
     return deliveries.length
   }
@@ -125,7 +176,7 @@ export class TeamMessageDispatcher {
     this.held.add(member)
     let changed = false
     for (let i = 0; i < this.records.length; i++) {
-      if (this.records[i].recipient === member && this.records[i].status === 'queued' && !this.claimed.has(i)) {
+      if (this.records[i].recipient === member && this.records[i].status === 'queued' && !this.isClaimed(i)) {
         this.records[i] = Object.freeze({ ...this.records[i], status: 'held' })
         changed = true
       }
@@ -150,7 +201,7 @@ export class TeamMessageDispatcher {
 
   /** A record for this member still waits for its delivery (queued and not claimed). */
   hasQueued(member: string): boolean {
-    return this.records.some((entry, index) => entry.recipient === member && entry.status === 'queued' && !this.claimed.has(index))
+    return this.records.some((entry, index) => entry.recipient === member && entry.status === 'queued' && !this.isClaimed(index))
   }
 
   /** Starts at most one delivery per member. Busy, held or undeliverable members remain queued; call again when ready. */
@@ -165,23 +216,26 @@ export class TeamMessageDispatcher {
     const claimed = this.service.claim(recipient, record.intent.id)
     if (!claimed) { this.set(index, 'unavailable'); return undefined }
     this.busy.add(recipient)
-    this.claimed.add(index)
+    // A claimed record is never pruned, so its current index is always found by its record ID.
+    const recordId = this.recordIds[index]
+    this.claimed.add(recordId)
+    const at = (): number => this.recordIds.indexOf(recordId)
     let stageOpen = true
     let admitted = false
     const stage = (value: TeamDispatchStage): void => {
       if (!stageOpen) return
-      const current = this.records[index].status
-      if (value === 'request_started' && !this.ended && this.isCurrent() && current === 'queued') { admitted = true; this.set(index, 'request_started') }
-      if (value === 'response_received' && admitted && current === 'request_started') this.set(index, 'response_received')
+      const current = this.records[at()].status
+      if (value === 'request_started' && !this.ended && this.isCurrent() && current === 'queued') { admitted = true; this.set(at(), 'request_started') }
+      if (value === 'response_received' && admitted && current === 'request_started') this.set(at(), 'response_received')
     }
     return (async () => {
       try { await this.deliver(claimed, record.intent.source, stage, record.intent.hop) } catch { /* unknown after start, unavailable before */ }
       finally {
         stageOpen = false
-        const current = this.records[index].status
-        if (current === 'queued') this.set(index, 'unavailable')
-        else if (current === 'request_started') this.set(index, 'unknown')
-        this.claimed.delete(index)
+        const current = this.records[at()].status
+        if (current === 'queued') this.set(at(), 'unavailable')
+        else if (current === 'request_started') this.set(at(), 'unknown')
+        this.claimed.delete(recordId)
         this.busy.delete(recipient)
       }
     })()

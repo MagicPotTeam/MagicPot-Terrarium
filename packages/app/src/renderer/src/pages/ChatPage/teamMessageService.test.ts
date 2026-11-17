@@ -117,4 +117,18 @@ describe('temporary team message service', () => {
     expect(service.ack('b', observed.id)).toBe(true)
     expect(service.history()[0].status).toBe('acknowledged')
   })
+
+  it('forgets a settled message: its deliveries and ID free their capacity', () => {
+    const service = create(undefined, 2)
+    service.subscribe('b', 'general'); service.subscribe('c', 'general')
+    expect(service.sendChannel('ch', 'a', 'general', 'hello')).toBe(2)
+    expect(() => service.sendDirect('d', 'a', 'b', 'next')).toThrow(/full/)
+    service.forget('ch')
+    expect(service.history()).toEqual([])
+    service.sendDirect('d', 'a', 'b', 'next')
+    expect(service.history().map(item => item.id)).toEqual(['d'])
+    // Unknown IDs are a no-op.
+    service.forget('missing')
+    expect(service.history()).toHaveLength(1)
+  })
 })

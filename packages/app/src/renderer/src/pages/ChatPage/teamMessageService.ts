@@ -141,6 +141,16 @@ export class TeamMessageService {
     return true
   }
 
+  /**
+   * Drops every delivery of a message and its ID, so a long-lived team does not fill up with
+   * finished messages. Only the host knows that the message is settled; it keeps its own
+   * duplicate check for forgotten IDs.
+   */
+  forget(id: string): void {
+    if (!this.ids.delete(id)) return
+    for (let i = this.deliveries.length - 1; i >= 0; i--) if (this.deliveries[i].id === id) this.deliveries.splice(i, 1)
+  }
+
   /** Read-only status, including acknowledgements; does not initiate delivery. */
   history(): readonly TeamMessageDelivery[] {
     return this.deliveries.slice()
