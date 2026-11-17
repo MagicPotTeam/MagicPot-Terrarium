@@ -1656,4 +1656,38 @@ describe('real ChatPage stop on in-memory fakes', () => {
     }
     await page.finish()
   }, 30000)
+
+  it('queues a user send to a session with a Canvas Target run and sends it exactly once after that run ends', async () => {
+    const page = await mountChannelPage({
+      members: [member('writer', '文案')],
+      model: ({ request }) => ({ text: request.conversationId === 'lead' ? '组长回复 fixture' : '文案回复 fixture' })
+    })
+    const { main } = page
+    const toLead = () =>
+      main.chatRequests
+        .filter((request) => request.conversationId === 'lead')
+        .map((request) => textOf(request.messages.at(-1)?.content))
+    const leadExternalRun = (loading: boolean): void => {
+      window.dispatchEvent(new CustomEvent('chat:set-external-loading', { detail: { scope: SCOPE, sessionId: 'lead', loading } }))
+    }
+    try {
+      act(() => leadExternalRun(true))
+      // Enter sends while the lead is busy (as a person would): the send waits behind the external run.
+      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '外部运行期间的消息' } })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      expect(toLead()).toEqual([])
+      act(() => leadExternalRun(false))
+      await waitFor(() => expect(toLead()).toHaveLength(1), { timeout: 5000 })
+      expect(toLead()[0]).toContain('外部运行期间的消息')
+      await waitFor(async () =>
+        expect((await page.stored('lead'))?.messages.map((message) => message.content)).toEqual(['外部运行期间的消息', '组长回复 fixture'])
+      )
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      expect(toLead()).toHaveLength(1)
+    } finally {
+      leadExternalRun(false)
+    }
+    await page.finish()
+  }, 30000)
 })
