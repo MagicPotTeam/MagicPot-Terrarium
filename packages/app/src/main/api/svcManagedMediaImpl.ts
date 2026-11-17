@@ -22,6 +22,7 @@ import type {
 } from '@shared/api/svcManagedMedia'
 import {
   MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES,
+  WINDOWS_DEVICE_NAME,
   validateEnsureManagedMediaDerivativeResp,
   validateImportManagedMediaResp,
   validateMigrateLegacyManagedMediaResp,
@@ -148,9 +149,6 @@ export type ImportSourcePathOptions = {
   /** Windows path rules; defaults to whether pathApi is path.win32 (true on Windows). */
   windows?: boolean
 }
-
-/** Windows reserved device names, which name a device in any folder (with any extension). */
-const WINDOWS_DEVICE_NAME = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])(?:[ .].*)?$/iu
 
 /**
  * Turn an importFile sourcePath (absolute path or file: URI) into a local path, without

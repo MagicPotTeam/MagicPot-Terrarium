@@ -172,6 +172,8 @@ describe('svcManagedMedia contract', () => {
       'C:\\Users\\artist\\com1.png',
       'C:\\Users\\artist\\NUL .txt',
       'C:\\Users\\artist\\CONOUT$',
+      'C:\\Users\\artist\\CON.tar.gz',
+      'C:\\Users\\artist\\aux .png',
       'file:///C:/Users/artist/lpt1.png'
     ]) {
       expect(
@@ -188,6 +190,9 @@ describe('svcManagedMedia contract', () => {
     for (const sourcePath of [
       'C:\\Users\\console\\a.png',
       'C:\\Users\\artist\\com10.png',
+      'C:\\Users\\artist\\Con Edison bill.png',
+      'C:\\Users\\artist\\AUX cable.jpg',
+      'C:\\Users\\artist\\com1 port.png',
       '/home/artist/con.png'
     ]) {
       expect(

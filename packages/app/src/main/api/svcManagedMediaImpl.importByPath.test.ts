@@ -104,6 +104,15 @@ describe('toImportSourceLocalPath (no filesystem access)', () => {
       )
     }
     expect(win32('C:\\Users\\console\\a.png')).toBe('C:\\Users\\console\\a.png')
+    // Win32 rule: a reserved word followed by more than spaces and an extension is an ordinary name.
+    for (const name of ['Con Edison bill.png', 'AUX cable.jpg', 'com1 port.png', 'Nul hypothesis.png']) {
+      expect(win32(`C:\\Users\\artist\\${name}`), name).toBe(`C:\\Users\\artist\\${name}`)
+    }
+    for (const name of ['CON  ', 'CON.tar.gz', 'aux .png']) {
+      expect(() => win32(`C:\\Users\\artist\\${name}`), name).toThrow(
+        expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+      )
+    }
     expect(win32('C:\\Users\\artist\\com10.png')).toBe('C:\\Users\\artist\\com10.png')
     // POSIX: the slash form of the NT prefix ('/' + '?' + '?' + '/') is refused as well; reserved
     // Windows names are ordinary file names.

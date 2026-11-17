@@ -223,8 +223,14 @@ const isSafeOriginalFileName = (value: unknown): value is string =>
   !/[. ]$/u.test(value) &&
   !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/iu.test(value)
 
-/** Windows reserved device names, which name a device in any folder (with any extension). */
-const WINDOWS_DEVICE_NAME = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])(?:[ .].*)?$/iu
+/**
+ * Windows reserved device names, which name a device in any folder (with any extension). Win32
+ * rule: the part before the first '.', with trailing spaces removed, is a reserved word. So
+ * 'CON', 'NUL .txt' and 'com1.png' are devices, but 'Con Edison bill.png' or 'AUX cable.jpg'
+ * are ordinary files.
+ */
+export const WINDOWS_DEVICE_NAME =
+  /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³]) *(?:\..*)?$/iu
 
 /**
  * This validates transport syntax only. importFile is intentionally fed from a user-selected
