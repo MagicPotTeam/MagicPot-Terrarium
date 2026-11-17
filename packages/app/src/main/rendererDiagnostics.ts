@@ -248,8 +248,10 @@ export function attachRendererDiagnostics(
     isAppShuttingDown() || options.isShuttingDown?.() === true || !isWindowUsable()
   // Set when a hung renderer the user asked to reload went away with a clean exit (see
   // 'render-process-gone'). Chromium's isCrashed() is false after a normal termination, so without
-  // this the window would look alive to every check below while it shows nothing. Cleared as soon
-  // as a new page starts (a recovery reload or any other load), and by the next exit.
+  // this the window would look alive to every check below while it shows nothing. Cleared only when
+  // a new page really starts or finishes loading ('did-start-loading' / 'did-finish-load'), by the
+  // next exit and when the window closes. NOT when a recovery reload is merely requested: a reload
+  // that is dropped without any event must still be seen as a dead window by the 10 s reload check.
   let goneWithoutCrash = false
   const isRendererDead = () => {
     if (goneWithoutCrash) return true
@@ -286,8 +288,8 @@ export function attachRendererDiagnostics(
   /** Starts a recovery reload and remembers what the page it brings up is told. */
   const startRecoveryReload = (details: RenderProcessGoneDetails, notice: RecoveryNotice = details) => {
     declinedRecovery = null
-    // A new renderer is being started: from now on isCrashed() tells whether it is dead.
-    goneWithoutCrash = false
+    // goneWithoutCrash stays as it is: the reload is only requested here. The page that really
+    // starts clears it ('did-start-loading'); until then the window still shows nothing.
     pendingRecoveryNotice = {
       reason: notice.reason,
       exitCode: notice.exitCode,
@@ -561,6 +563,9 @@ export function attachRendererDiagnostics(
         exitCode: details.exitCode,
         expected: 'reload-after-hang'
       })
+      // A normal termination is not a crash to Chromium (isCrashed() stays false): remember that
+      // the window is dead all the same, so that the reload check below can see a dropped reload.
+      if (details.reason === 'clean-exit') goneWithoutCrash = true
       if (isShuttingDown()) return
       startRecoveryReload(details, { reason: 'unresponsive', exitCode: 0 })
       return

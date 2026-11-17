@@ -1574,6 +1574,9 @@ describe('rendererDiagnostics hung renderer that dies after its reload request e
     listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
     expect(answers[1].signal?.aborted).toBe(true)
     expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    // Updated: the reload really starts here. Without this event the test pinned the silent blank
+    // window of a dropped reload (see 'recovery reload that is dropped after a clean exit' below).
+    listenerOf(window, 'did-start-loading')()
     await flush()
     vi.advanceTimersByTime(60_000)
     await flush()
@@ -1790,5 +1793,215 @@ describe('rendererDiagnostics hung renderer that answers again while its forced 
     await flush()
     expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(2)
     expect(window.webContents.reload).not.toHaveBeenCalled()
+  })
+})
+
+describe('rendererDiagnostics recovery reload that is dropped after a clean exit', () => {
+  type Answer = { resolve: (response: number) => void; signal?: AbortSignal; message?: string }
+  let answers: Answer[] = []
+  const HANG = '窗口已超过 15 秒没有响应。'
+  const NOT_ENDED = '未能结束没有响应的窗口进程。'
+  const RELOAD_FAILED = '窗口重新加载后仍未恢复。'
+  const BUDGET = '窗口多次意外退出，自动恢复已暂停。'
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    answers = []
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockImplementation(
+        ((_window: unknown, options: { signal?: AbortSignal; message?: string; cancelId?: number }) =>
+          new Promise((resolve) => {
+            const answer: Answer = {
+              resolve: (response) => resolve({ response, checkboxChecked: false }),
+              signal: options.signal,
+              message: options.message
+            }
+            answers.push(answer)
+            options.signal?.addEventListener('abort', () => answer.resolve(options.cancelId ?? 1))
+          })) as never
+      )
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    resetAppQuittingForTests()
+    resetExpectedRendererExitsForTests()
+  })
+
+  const flush = async () => {
+    for (let index = 0; index < 8; index += 1) await Promise.resolve()
+  }
+  const messages = () => answers.map((answer) => answer.message)
+  /** Hang -> Reload chosen: the forced end is in flight (isCrashed() stays false throughout). */
+  const hangReloadChosen = async (clock = { now: 1_000 }) => {
+    const window = createWindow()
+    attachRendererDiagnostics(window as never, { monotonicNow: () => clock.now, wallClockNow: () => 42 })
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    answers[0].resolve(1) // 重新加载
+    await flush()
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    return { window, clock }
+  }
+
+  // Reviewer probe A: hang, Reload, the forced end is dropped, 'could not be ended' is open, eleven
+  // minutes later a clean exit, reload() is called but no page ever starts. The reload check used
+  // to see isCrashed() === false and stay silent: a blank window without a dialog.
+  it('asks once with "did not recover" when the reload after a clean exit never starts (probe A)', async () => {
+    const { window, clock } = await hangReloadChosen()
+    vi.advanceTimersByTime(5_000)
+    await flush()
+    expect(messages()).toEqual([HANG, NOT_ENDED])
+    clock.now += 11 * 60_000
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    // No 'did-start-loading': the reload was dropped.
+    vi.advanceTimersByTime(9_999)
+    await flush()
+    expect(messages()).toEqual([HANG, NOT_ENDED])
+    vi.advanceTimersByTime(1)
+    await flush()
+    expect(messages()).toEqual([HANG, NOT_ENDED, RELOAD_FAILED])
+    // Once: nothing is stacked on the open dialog, and the 1 s look does not close it.
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(messages()).toEqual([HANG, NOT_ENDED, RELOAD_FAILED])
+    expect(answers[2].signal?.aborted).toBe(false)
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    // Reload in the dialog works without isCrashed(), and this time the page starts and loads.
+    answers[2].resolve(0)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(2)
+    listenerOf(window, 'did-start-loading')()
+    vi.advanceTimersByTime(30_000)
+    await flush()
+    expect(answers).toHaveLength(3)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'clean-exit',
+      exitCode: 0,
+      diedAt: 42
+    })
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+  })
+
+  // Reviewer probe H: the same gap for a clean exit while the user's reload request is alive.
+  it('asks when the hang reload itself ends with a clean exit and its reload never starts (probe H)', async () => {
+    const { window } = await hangReloadChosen()
+    vi.advanceTimersByTime(1_000)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(10_000)
+    await flush()
+    expect(messages()).toEqual([HANG, RELOAD_FAILED])
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(answers).toHaveLength(2)
+    // The retry from the dialog still tells the page that it was reloaded for a hang.
+    answers[1].resolve(0)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(2)
+    listenerOf(window, 'did-start-loading')()
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'unresponsive',
+      exitCode: 0,
+      diedAt: 42
+    })
+  })
+
+  it('a reload that starts clears the flag: no dialog, no question on focus, later checks see a live renderer', async () => {
+    const { window } = await hangReloadChosen()
+    vi.advanceTimersByTime(1_000)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    listenerOf(window, 'did-start-loading')()
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(messages()).toEqual([HANG])
+    window.on.mock.calls.find(([name]) => name === 'blur')?.[1]()
+    window.on.mock.calls.find(([name]) => name === 'focus')?.[1]()
+    expect(answers).toHaveLength(1)
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+  })
+
+  // Reviewer probe K: the budget dialog is answered with Reload and that reload is dropped.
+  it('asks once more, without duplicates, when the reload chosen in the budget dialog never starts (probe K)', async () => {
+    const window = createWindow()
+    // A clock that goes back once: the three automatic reloads stay in the budget while the hang
+    // reload request, read from the raw clock, has already expired.
+    const clock = { now: 1_000_000 }
+    attachRendererDiagnostics(window as never, { monotonicNow: () => clock.now, wallClockNow: () => 42 })
+    for (let crash = 0; crash < 3; crash += 1) {
+      listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+      listenerOf(window, 'did-finish-load')()
+    }
+    expect(window.webContents.reload).toHaveBeenCalledTimes(3)
+    clock.now = 0
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    answers[0].resolve(1)
+    await flush()
+    vi.advanceTimersByTime(5_000)
+    await flush()
+    clock.now = 11 * 60_000
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    expect(messages()).toEqual([HANG, NOT_ENDED, BUDGET])
+    answers[2].resolve(0) // 重新加载
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(4)
+    vi.advanceTimersByTime(10_000)
+    await flush()
+    expect(messages()).toEqual([HANG, NOT_ENDED, BUDGET, RELOAD_FAILED])
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(answers).toHaveLength(4)
+    expect(answers[3].signal?.aborted).toBe(false)
+    // Reload again, dropped again: one more dialog per attempt, never two at once.
+    answers[3].resolve(0)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(5)
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(messages()).toEqual([HANG, NOT_ENDED, BUDGET, RELOAD_FAILED, RELOAD_FAILED])
+    // The page finally starts while the dialog is open: the question is withdrawn, nothing is reloaded.
+    listenerOf(window, 'did-start-loading')()
+    vi.advanceTimersByTime(1_000)
+    await flush()
+    expect(answers[4].signal?.aborted).toBe(true)
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(answers).toHaveLength(5)
+    expect(window.webContents.reload).toHaveBeenCalledTimes(5)
+  })
+
+  it('forgets the dead window on the next exit', async () => {
+    const { window } = await hangReloadChosen()
+    vi.advanceTimersByTime(1_000)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    // A clean exit that has nothing to do with a hang follows before the check: still ignored.
+    vi.advanceTimersByTime(5_000)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(messages()).toEqual([HANG])
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('forgets the dead window when the window closes', async () => {
+    const { window } = await hangReloadChosen()
+    vi.advanceTimersByTime(1_000)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    window.on.mock.calls.find(([name]) => name === 'closed')?.[1]()
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(messages()).toEqual([HANG])
+    window.on.mock.calls.find(([name]) => name === 'blur')?.[1]()
+    window.on.mock.calls.find(([name]) => name === 'focus')?.[1]()
+    expect(answers).toHaveLength(1)
   })
 })
