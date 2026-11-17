@@ -78,16 +78,62 @@ const parameterLabelKeys = {
   name: 'name'
 } as const
 
-const ownKey = <T extends object>(record: T, key: string): key is Extract<keyof T, string> =>
-  Object.prototype.hasOwnProperty.call(record, key)
+// Null-prototype lookups: an input key such as "constructor", "toString" or "__proto__" is an
+// ordinary field name here, never a member inherited from Object.prototype.
+const actionLabels: ReadonlyMap<string, (typeof actionLabelKeys)[keyof typeof actionLabelKeys]> =
+  new Map(Object.entries(actionLabelKeys))
+const parameterLabels: ReadonlyMap<string, (typeof parameterLabelKeys)[keyof typeof parameterLabelKeys]> =
+  new Map(Object.entries(parameterLabelKeys))
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
 
+/** The value of an own field of `record`, or undefined; never an inherited member. */
+const ownValue = (record: Record<string, unknown>, key: string): unknown =>
+  Object.hasOwn(record, key) ? record[key] : undefined
+
+const TRUNCATE_AT = 480
+
+const parameterText = (value: unknown): string => {
+  if (typeof value === 'string') return value
+  try {
+    const json = JSON.stringify(value)
+    if (json !== undefined) return json
+  } catch {
+    // BigInt or a cycle: fall back to the plain string form below.
+  }
+  try {
+    return String(value)
+  } catch {
+    return Object.prototype.toString.call(value)
+  }
+}
+
+// A character that can hide or disguise a field name: control and format characters (bidi
+// overrides, zero-width), line and paragraph separators, spaces other than U+0020, and the
+// quote and backslash used by the quoted form below.
+const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\]|(?! )\p{Zs}/u
+
+/**
+ * How a field without a label is named in the approval. It is shown as sent, unless it could be
+ * misread: then it is quoted with its hidden characters escaped (empty names, surrounding
+ * spaces, invisible or control characters, and a name that reads like the label of a known field).
+ */
+const unlabelledParameterName = (key: string, knownLabels: ReadonlySet<string>): string => {
+  if (key && key === key.trim() && !UNCLEAR_NAME_CHARACTER.test(key) && !knownLabels.has(key)) return key
+  const escaped = Array.from(key, (character) =>
+    character === '"' || character === '\\'
+      ? `\\${character}`
+      : UNCLEAR_NAME_CHARACTER.test(character)
+        ? `\\u{${character.codePointAt(0)!.toString(16)}}`
+        : character
+  ).join('')
+  return `"${escaped}"`
+}
+
 const approvalDisplay = (
   approval: MagicAgentPlatformPendingApproval,
-  t: TFunction<'translation'>,
-  omitTechnical = false
+  t: TFunction<'translation'>
 ) => {
   // Only use the redacted request supplied by the trusted main-process service.
   const redacted = isRecord(approval.request) ? approval.request : {}
@@ -99,29 +145,35 @@ const approvalDisplay = (
     ''
   )
   const input = isRecord(request.input) ? request.input : {}
-  const keys = Object.keys(input).filter(key => !omitTechnical || !['conversationId', 'expectedRevision', 'namespaceGeneration', 'operationId'].includes(key))
+  // Every own field of the input is listed before the person decides: the known ones in the
+  // order of parameterLabelKeys, then the rest in the order they were sent.
+  const keys = Object.keys(input)
   const orderedKeys = [
-    ...Object.keys(parameterLabelKeys).filter((key) => keys.includes(key)),
-    ...keys.filter((key) => !(key in parameterLabelKeys))
-  ].slice(0, 6)
+    ...[...parameterLabels.keys()].filter((key) => Object.hasOwn(input, key)),
+    ...keys.filter((key) => !parameterLabels.has(key))
+  ]
+  const labelOf = (key: string): string | undefined => {
+    const labelKey = parameterLabels.get(key)
+    return labelKey === undefined ? undefined : t(`agent_workspace.approval.parameters.${labelKey}`)
+  }
+  const knownLabels = new Set([...parameterLabels.keys()].map((key) => labelOf(key)!))
+  const actionLabel = actionLabels.get(toolName)
   return {
     toolName: toolName || t('agent_workspace.approval.tool_name_missing'),
     action: toolName
-      ? ownKey(actionLabelKeys, toolName)
-        ? t(`agent_workspace.approval.actions.${actionLabelKeys[toolName]}`)
+      ? actionLabel !== undefined
+        ? t(`agent_workspace.approval.actions.${actionLabel}`)
         : toolName
       : t('agent_workspace.approval.pending_action'),
+    input,
     parameters: orderedKeys.map((key) => {
-      const value = input[key]
-      const text = typeof value === 'string' ? value : JSON.stringify(value)
+      const text = parameterText(ownValue(input, key))
       return {
         key,
-        label: ownKey(parameterLabelKeys, key)
-          ? t(`agent_workspace.approval.parameters.${parameterLabelKeys[key]}`)
-          : key,
+        label: labelOf(key) ?? unlabelledParameterName(key, knownLabels),
         text:
-          text && text.length > 480
-            ? t('agent_workspace.approval.truncated', { text: text.slice(0, 480) })
+          text.length > TRUNCATE_AT
+            ? t('agent_workspace.approval.truncated', { text: text.slice(0, TRUNCATE_AT) })
             : text
       }
     })
@@ -180,11 +232,11 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   }
 
   const inlineCards=inline.map(({approval:pending,surface})=>{
-    const shown = approvalDisplay(pending, t, true)
-    const envelope = isRecord(pending.request) ? pending.request : {}
-    const request = isRecord(envelope.request) ? envelope.request : {}
-    const input = isRecord(request.input) ? request.input : {}
-    const isNote = shown.toolName === 'scratchpad' && input.action === 'set'
+    const shown = approvalDisplay(pending, t)
+    const note = ownValue(shown.input, 'value')
+    const isNote = shown.toolName === 'scratchpad' && ownValue(shown.input, 'action') === 'set'
+    // A note card shows the note itself as its prompt; every other field is listed below it.
+    const detailParameters = isNote ? shown.parameters.filter(parameter => parameter.key !== 'value') : shown.parameters
     const member = surface!.members.get(matchTeamApproval(pending.request,surface!)!)
     // Presentation only: a prompt card at the end of the member's team transcript. Which
     // approval is shown here and what the buttons resolve are decided above.
@@ -194,8 +246,8 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
         icon={<WarningAmberIcon aria-hidden="true" />}
         accent="warning"
         title={isNote ? t('agent_workspace.approval.member_wants_note', { member }) : t('agent_workspace.approval.member_requests_action', { member })}
-        prompt={isNote ? <Box component="span" title={typeof input.value === 'string' ? input.value : undefined} sx={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{typeof input.value === 'string' ? input.value : t('agent_workspace.approval.note_missing')}</Box> : shown.action}
-        detail={isNote || !shown.parameters.length ? undefined : <>{shown.parameters.map(parameter => <Box key={parameter.key} component="span" sx={{display:'block'}}>{parameter.label}: {parameter.text}</Box>)}</>}
+        prompt={isNote ? <Box component="span" title={typeof note === 'string' ? note : undefined} sx={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{typeof note === 'string' ? note : t('agent_workspace.approval.note_missing')}</Box> : shown.action}
+        detail={!detailParameters.length ? undefined : <>{detailParameters.map(parameter => <Box key={parameter.key} component="span" sx={{display:'block'}}>{parameter.label}: {parameter.text}</Box>)}</>}
         options={[
           { key: 'approve', label: t('agent_workspace.approval.approve'), primary: true, disabled: busy, onSelect: () => void resolve(true, pending) },
           { key: 'deny', label: t('agent_workspace.approval.deny'), disabled: busy, onSelect: () => void resolve(false, pending) }
@@ -225,7 +277,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
         <Box component="dl" sx={{ m: 0, mt: 2 }}>
           {display.parameters.map((parameter) => (
             <React.Fragment key={parameter.key}>
-              <Typography component="dt" variant="body2" fontWeight={600}>
+              <Typography component="dt" variant="body2" fontWeight={600} sx={{ overflowWrap: 'anywhere' }}>
                 {parameter.label}
               </Typography>
               <Typography
