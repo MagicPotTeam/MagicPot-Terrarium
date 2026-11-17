@@ -8965,7 +8965,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     if (outOfDate(session) || outOfDate(lead)) return unavailable
     const teamKey = `${scope}\u0000${lead?.id ?? sessionId}`
     if (teamEndPendingRef.current.has(teamKey)) return unavailable
-    if (session.teamLeadId && (teamEndedMainRef.current.has(teamKey) || config.use_remote_llm ||
+    if (session.teamLeadId && (lead?.teamEnded || teamEndedMainRef.current.has(teamKey) || config.use_remote_llm ||
       memberModelChoicePendingRef.current.has(`${scope}\u0000${sessionId}`))) return unavailable
     const hasMembers = sessions.some(item => item.teamLeadId === sessionId)
     if ((hasMembers && /^@/.test(content)) || isReplayUserCommand(content) || isAgentBasicCommand(content) ||
