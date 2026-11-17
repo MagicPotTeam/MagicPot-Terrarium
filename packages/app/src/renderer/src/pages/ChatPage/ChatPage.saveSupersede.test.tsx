@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
-import { ChatSessionSaveConflictError, ChatSessionSaveSupersededError, normalizedSessionsEqual, type ChatSession } from './chatStorage'
+import { cancelDebouncedSessionSave, ChatSessionSaveConflictError, ChatSessionSaveSupersededError, normalizedSessionsEqual, type ChatSession } from './chatStorage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 import ChatPage from './ChatPage'
 
@@ -166,7 +166,17 @@ beforeEach(() => {
   vi.stubGlobal('fetch', h.fetch)
   localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), session.id)
 })
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+const otherSessionId = 'supersede-other'
+afterEach(() => {
+  // The debounced save queue is module state shared by every test of this file: a batch an
+  // unmounted page left pending would fire into the next test's fake storage. Cancel them all.
+  for (const id of new Set([session.id, otherSessionId, ...h.sessions.map(s => s.id)])) cancelDebouncedSessionSave(id, scope)
+  h.whileReadPending = null
+  h.afterReadPending = null
+  h.forceSupersede = null
+  h.forceError = null
+  vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals()
+})
 
 describe('ChatPage treats a superseded save as benign and stops retrying a permanent conflict', () => {
   it('does not report the debounced save of a session replaced while its read was pending, and stores the final snapshot', async () => {
@@ -366,7 +376,7 @@ describe('ChatPage treats a superseded save as benign and stops retrying a perma
   })
 
   it('re-queues a superseded save with the newest effect options, not its own stale closure', async () => {
-    const other: ChatSession = { id: 'supersede-other', title: 'Other', profileId: 'base-model', messages: [{ role: 'user', content: 'other original' }], createdAt: 298 }
+    const other: ChatSession = { id: otherSessionId, title: 'Other', profileId: 'base-model', messages: [{ role: 'user', content: 'other original' }], createdAt: 298 }
     h.sessions = [structuredClone(session), structuredClone(other)]
     const view = render(page())
     try {
