@@ -10,13 +10,20 @@ export function isBenignSaveSupersede(error: unknown): boolean {
   return error instanceof ChatSessionSaveSupersededError
 }
 
+/** The message of persistLatest's plain Error (chatSaveBaseline.ts) for a team lifecycle mismatch. */
+const LIFECYCLE_CHANGED_BEFORE_SAVE = 'Session lifecycle changed before save'
+
 /**
  * A guarded save was refused because the stored record changed under another writer (or the
- * session was deleted). Retrying the same local object can only be refused again, so the caller
- * keeps the dirty copy, reports it once and stops retrying it automatically.
+ * session was deleted), or because the live object's team membership / lifecycle fences no longer
+ * match the frozen baseline (an ordinary save may never change those; persistLatest refuses it
+ * before writing). Retrying the same local object can only be refused again, so the caller keeps the
+ * dirty copy, reports it once and stops retrying it automatically; a newer object or an explicit
+ * Retry still tries.
  */
 export function isPermanentSaveConflict(error: unknown): boolean {
-  return error instanceof ChatSessionSaveConflictError
+  return error instanceof ChatSessionSaveConflictError ||
+    (error instanceof Error && error.message === LIFECYCLE_CHANGED_BEFORE_SAVE)
 }
 
 /** Consecutive supersedes of one unchanged live object after which the save is reported as failed. */

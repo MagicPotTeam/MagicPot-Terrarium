@@ -22,6 +22,8 @@ const h = vi.hoisted(() => ({
   forceSupersede: null as null | ((candidate: ChatSession) => boolean),
   // Awaited after whileReadPending, so the page can render (and run its save effect) mid-save.
   afterReadPending: null as null | ((candidate: ChatSession) => Promise<void>),
+  // Makes a save fail with this error (before the compare-and-set), as persistLatest's own refusals do.
+  forceError: null as null | ((candidate: ChatSession) => Error | null),
   // Every debouncedSaveSessions call of the page: [session ids, options].
   registrations: [] as Array<{ ids: string[]; options: unknown }>,
   notify: vi.fn(),
@@ -127,6 +129,7 @@ beforeEach(() => {
   h.whileReadPending = null
   h.forceSupersede = null
   h.afterReadPending = null
+  h.forceError = null
   h.registrations = []
   h.load.mockReset().mockImplementation(async () => structuredClone(h.sessions))
   // Same contract as saveSessionToDB: the read is pending first, then the compare-and-set
@@ -141,6 +144,11 @@ beforeEach(() => {
     const expected = options?.expectedSession
     const call: SaveCall = { session: structuredClone(candidate), expected: expected && structuredClone(expected), outcome: 'written' }
     h.saves.push(call)
+    const forced = h.forceError?.(candidate)
+    if (forced) {
+      call.outcome = 'conflict'
+      throw forced
+    }
     if (guarded && !(expected === null ? !current : current && expected && normalizedSessionsEqual(current, expected, saveScope))) {
       call.outcome = 'conflict'
       throw new ChatSessionSaveConflictError(candidate.id, saveScope)
@@ -385,6 +393,36 @@ describe('ChatPage treats a superseded save as benign and stops retrying a perma
       expect(requeue).toBeGreaterThan(otherRegistration)
       expect(h.registrations[requeue].options).toBe(h.registrations[otherRegistration].options)
       expect(h.saves.map(call => call.outcome)).toEqual(['superseded', 'written', 'written'])
+      expect(banner()).toBeNull()
+    } finally { view.unmount() }
+  })
+
+  it('treats a lifecycle refusal like a conflict: one error line, no timer retries, a newer version still saves', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // persistLatest's plain Error when the live team lifecycle no longer matches the baseline.
+      h.forceError = candidate => candidate.messages.at(-1)?.content === 'lifecycle edit' ? new Error('Session lifecycle changed before save') : null
+      await append('lifecycle edit')
+      await waitFor(() => expect(banner()).not.toBeNull(), { timeout: 3000 })
+      expect(h.saves).toHaveLength(1)
+      // Before: the 1-30 s backoff retried the same object about 8 times in 120 s.
+      await advanceSeconds(120)
+      expect(h.saves).toHaveLength(1)
+      expect(screen.getAllByText(/Failed to save chat session/)).toHaveLength(1)
+      expect(saveErrorsNotified()).toEqual([])
+      expect(contents(stored())).toEqual(['original'])
+      // The explicit Retry still tries (and says so).
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(h.saves).toHaveLength(2))
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(1))
+      await advanceSeconds(60)
+      expect(h.saves).toHaveLength(2)
+      // A newer version of the session is tried and, here, saved.
+      await append('later edit')
+      await advanceSeconds(3)
+      expect(contents(stored())).toEqual(['original', 'lifecycle edit', 'later edit'])
       expect(banner()).toBeNull()
     } finally { view.unmount() }
   })
