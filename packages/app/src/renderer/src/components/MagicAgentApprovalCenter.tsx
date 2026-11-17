@@ -268,6 +268,35 @@ const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\\u27e6\u2800\u3164\uffa0\u1
 // A name with a colon could read as "label: value" inside the row; it is quoted, not escaped.
 const NAME_SEPARATOR = /[:：]/u
 
+// Letters of other scripts that draw like a Latin letter, as pairs of the letter and the Latin
+// letter it draws like (Cyrillic, Greek, Armenian and a few Latin ones outside ASCII).
+const LOOKALIKES: ReadonlyMap<string, string> = new Map(
+  Array.from('\u0410a\u0412b\u0415e\u0405s\u0406l\u0408j\u041ak\u041cm\u041dh\u041eo\u0420p\u0421c\u0422t\u0425x\u0423y\u04aey\u0430a\u0435e\u0455s\u0456i\u0458j\u043eo\u0440p\u0441c\u0443y\u0445x\u04bbh\u0501d\u051bq\u051dw\u04cfl\u04afy\u043fn\u0433r\u044cb\u0391a\u0392b\u0395e\u0396z\u0397h\u0399l\u039ak\u039cm\u039dn\u039fo\u03a1p\u03a4t\u03a5y\u03a7x\u03b1a\u03bfo\u03bdv\u03c1p\u03b9i\u03bak\u03c5u\u03c7x\u03b5e\u03b7n\u0585o\u057du\u0570h\u0578n\u0581g\u0566q\u0131i\u0261g\u01c0l'.matchAll(/(.)(.)/gu), ([, letter, latin]) => [letter, latin])
+)
+const ASCII_LOOKALIKES: Readonly<Record<string, string>> = { i: 'l', '1': 'l', '|': 'l', '0': 'o' }
+
+/**
+ * What a name reads as: compatibility forms folded (NFKD: fullwidth letters, CJK compatibility
+ * ideographs such as U+F937, ligatures), combining marks dropped, lookalike letters of other
+ * scripts and case folded, the
+ * letters that are hard to tell apart (I, l, 1, |; O, 0; rn, m; vv, w) merged, and runs of spaces
+ * merged. Two names with the same skeleton can be taken for each other.
+ */
+const nameSkeleton = (name: string): string => {
+  const lookalike = (text: string): string => Array.from(text, (character) => LOOKALIKES.get(character) ?? character).join('')
+  const folded = name.normalize('NFKD').replace(/\p{M}/gu, '')
+  return Array.from(lookalike(lookalike(folded).toLowerCase()), (character) => ASCII_LOOKALIKES[character] ?? character)
+    .join('')
+    .replace(/rn/g, 'm')
+    .replace(/vv/g, 'w')
+    .replace(/ +/g, ' ')
+    .trim()
+}
+
+/** A character outside ASCII that reads as another one or adds a mark to one (see nameSkeleton). */
+const isLookalikeCharacter = (character: string): boolean =>
+  character > '\u007f' && (LOOKALIKES.has(character) || character.normalize('NFKD') !== character || /\p{M}/u.test(character))
+
 const nameRules: VisibleRules = {
   inRun: (character) =>
     character === ' ' ||
@@ -280,31 +309,42 @@ const nameRules: VisibleRules = {
         : null
 }
 
+// In a name quoted because it reads like a known label, the characters that make it read so are
+// escaped too, so the quoted name shows how it differs from the label.
+const lookalikeNameRules: VisibleRules = {
+  inRun: nameRules.inRun,
+  escape: (character, text, index) =>
+    nameRules.escape(character, text, index) ?? (isLookalikeCharacter(character) ? escapedCharacter(character) : null)
+}
+
 /**
  * How a field without a label is named in the approval. It is shown as sent, unless it could be
  * misread: then it is quoted with its hidden characters escaped and long blank runs collapsed
- * (empty names, surrounding spaces, invisible or control characters, and a name that reads like
- * the label of a known field). `cut` tells that the name was cut after NAME_TRUNCATE_AT
- * characters.
+ * (empty names, surrounding spaces, invisible or control characters, a colon, and a name whose
+ * skeleton equals that of a known field's label in any shipped language or of its key, such as
+ * a fullwidth, compatibility-ideograph, Cyrillic or other-case form of it). `cut` tells that the
+ * name was cut after NAME_TRUNCATE_AT characters.
  */
-const unlabelledParameterName = (key: string, knownLabels: ReadonlySet<string>): { text: string; cut: boolean } => {
+const unlabelledParameterName = (key: string, knownSkeletons: ReadonlySet<string>): { text: string; cut: boolean } => {
+  const lookalike = knownSkeletons.has(nameSkeleton(key))
   if (
     key &&
     key === key.trim() &&
     !UNCLEAR_NAME_CHARACTER.test(key) &&
     !NAME_SEPARATOR.test(key) &&
-    !knownLabels.has(key)
+    !lookalike
   ) {
     const cutName = cutCodePoints(key, NAME_TRUNCATE_AT)
     return cutName === null ? { text: key, cut: false } : { text: cutName, cut: true }
   }
-  const quoted = visibleText(key, NAME_TRUNCATE_AT - 1, nameRules)
+  const quoted = visibleText(key, NAME_TRUNCATE_AT - 1, lookalike ? lookalikeNameRules : nameRules)
   return quoted.cut ? { text: `"${quoted.text}`, cut: true } : { text: `"${quoted.text}"`, cut: false }
 }
 
 const approvalDisplay = (
   approval: MagicAgentPlatformPendingApproval,
-  t: TFunction<'translation'>
+  t: TFunction<'translation'>,
+  languages: readonly string[]
 ) => {
   // Only use the redacted request supplied by the trusted main-process service.
   const redacted = isRecord(approval.request) ? approval.request : {}
@@ -327,7 +367,13 @@ const approvalDisplay = (
     const labelKey = parameterLabels.get(key)
     return labelKey === undefined ? undefined : t(`agent_workspace.approval.parameters.${labelKey}`)
   }
-  const knownLabels = new Set([...parameterLabels.keys()].map((key) => labelOf(key)!))
+  // A name is compared with the labels of every shipped language, not only the shown one, and
+  // with the keys themselves.
+  const knownSkeletons = new Set<string>()
+  for (const [key, labelKey] of parameterLabels) {
+    knownSkeletons.add(nameSkeleton(key))
+    for (const lng of languages) knownSkeletons.add(nameSkeleton(t(`agent_workspace.approval.parameters.${labelKey}`, { lng })))
+  }
   const actionLabel = actionLabels.get(toolName)
   return {
     toolName: toolName || t('agent_workspace.approval.tool_name_missing'),
@@ -340,7 +386,7 @@ const approvalDisplay = (
     parameters: orderedKeys.map((key) => {
       const value = shownValue(parameterText(ownValue(input, key)))
       const labelled = labelOf(key)
-      const name = labelled === undefined ? unlabelledParameterName(key, knownLabels) : { text: labelled, cut: false }
+      const name = labelled === undefined ? unlabelledParameterName(key, knownSkeletons) : { text: labelled, cut: false }
       return {
         key,
         label: name.cut ? t('agent_workspace.approval.truncated', { text: name.text }) : name.text,
@@ -435,7 +481,10 @@ const ClampedValue: React.FC<{
 export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   const [approvals, setApprovals] = useState<MagicAgentPlatformPendingApproval[]>([])
   const [busy, setBusy] = useState(false)
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  // The shipped languages, whose labels a field name must not read like.
+  const shipped = Object.keys(i18n.options.resources ?? {})
+  const languages = shipped.length ? shipped : [i18n.language]
 
   const resolving=React.useRef(false)
   const refreshEpoch=React.useRef(0)
@@ -460,7 +509,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   useEffect(()=>{surfaces.forEach(surface=>surface.onWaiting(new Set(inline.filter(item=>item.surface===surface).map(item=>matchTeamApproval(item.approval.request,surface)!))))},[approvals,surfaces])
   const approval = approvals.find(item=>!inline.some(entry=>entry.approval===item)) ?? inline[0]?.approval
   if (!approval) return null
-  const display = approvalDisplay(approval, t)
+  const display = approvalDisplay(approval, t, languages)
 
   const resolve = async (approved: boolean, selected = approval): Promise<void> => {
     if(resolving.current)return
@@ -484,7 +533,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   }
 
   const inlineCards=inline.map(({approval:pending,surface})=>{
-    const shown = approvalDisplay(pending, t)
+    const shown = approvalDisplay(pending, t, languages)
     const note = ownValue(shown.input, 'value')
     const isNote = shown.toolName === 'scratchpad' && ownValue(shown.input, 'action') === 'set'
     // A note card shows the note itself as its prompt; every other field is listed below it.

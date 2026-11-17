@@ -972,3 +972,75 @@ describe('MagicAgentApprovalCenter keeps the defining row in view', () => {
     } finally { restore() }
   })
 })
+
+// A field name must not read like the label of a known field in either language: names that
+// are canonically equal to a label or its key (NFKC, case), or confusable with it, are quoted and
+// show the characters that make them read so as escapes (SEC-1b).
+describe('MagicAgentApprovalCenter quotes names that read like a known label', () => {
+  const cp = (...codes: number[]) => String.fromCodePoint(...codes)
+  const dialogRows = () =>
+    [...screen.getByRole('dialog').querySelectorAll('dl > dt')].map(term => [term.textContent, term.nextElementSibling?.textContent])
+  const renderDialog = async (input: unknown) => {
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'names-lookalike', revision: 1, request: { request: { target: { id: 'files.write' }, input } } }] })
+    const view = render(<MagicAgentApprovalCenter />)
+    expect(await screen.findByRole('dialog')).toBeVisible()
+    return view
+  }
+
+  beforeEach(() => {
+    platformApi.listPendingApprovals.mockReset()
+    platformApi.resolvePendingApproval.mockReset()
+  })
+  afterEach(async () => { await act(async () => { await i18n.changeLanguage('zh-CN') }) })
+
+  it('quotes compatibility-ideograph, other-language, Cyrillic and other-case lookalikes in zh-CN', async () => {
+    const view = await renderDialog({
+      path: './real.txt',
+      [cp(0xf937) + '\u5f84']: './decoy.txt',
+      Command: 'en',
+      [cp(0x421) + 'ommand']: 'cyrillic',
+      'Note Key': 'case',
+      'MAlN operation lD': 'i-and-l',
+      routeIdentity: 'plain',
+      Pathway: 'not-a-label'
+    })
+    try {
+      expect(dialogRows()).toEqual([
+        ['\u8def\u5f84', './real.txt'],
+        ['"\\u{f937}\u5f84"', './decoy.txt'],
+        ['"Command"', 'en'],
+        ['"\\u{421}ommand"', 'cyrillic'],
+        ['"Note Key"', 'case'],
+        ['"MAlN operation lD"', 'i-and-l'],
+        ['routeIdentity', 'plain'],
+        ['Pathway', 'not-a-label']
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('quotes fullwidth, zh-CN-label, Greek and spacing lookalikes in en-US', async () => {
+    await act(async () => { await i18n.changeLanguage('en-US') })
+    const view = await renderDialog({
+      path: './real.txt',
+      [cp(0xff30, 0xff41, 0xff54, 0xff48)]: './decoy.txt',
+      '\u547d\u4ee4': 'zh',
+      [cp(0x39a) + 'ey']: 'greek',
+      'Target  path': 'spaces',
+      targetpath: 'raw-key-case',
+      'Pa\u0074h\u0301': 'combining',
+      ['P\u00e1th']: 'precomposed'
+    })
+    try {
+      expect(dialogRows()).toEqual([
+        ['Path', './real.txt'],
+        ['"\\u{ff30}\\u{ff41}\\u{ff54}\\u{ff48}"', './decoy.txt'],
+        ['"\u547d\u4ee4"', 'zh'],
+        ['"\\u{39a}ey"', 'greek'],
+        ['"Target  path"', 'spaces'],
+        ['"targetpath"', 'raw-key-case'],
+        ['"Path\\u{301}"', 'combining'],
+        ['"P\\u{e1}th"', 'precomposed']
+      ])
+    } finally { view.unmount() }
+  })
+})
