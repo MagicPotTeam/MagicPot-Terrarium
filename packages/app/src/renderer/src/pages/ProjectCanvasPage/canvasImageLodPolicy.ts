@@ -5,6 +5,12 @@ import type { CanvasImageAsset, CanvasImageItem } from './types'
 export const PROJECT_CANVAS_IMAGE_LOD_OVERVIEW_SOURCE_SUPPRESSION_MAX_SCALE = 0.15
 export const PROJECT_CANVAS_IMAGE_LOD_SOURCE_TEXTURE_MIN_GAIN_RATIO = 1.25
 export const PROJECT_CANVAS_IMAGE_LOD_SOURCE_TEXTURE_SCREEN_UPGRADE_RATIO = 2
+/**
+ * A selected image whose source has under the minimum gain keeps an already loaded source
+ * texture until its displayed size falls below this share of the preview, so zooming back
+ * and forth around the preview size does not load and drop the source on every step.
+ */
+export const PROJECT_CANVAS_IMAGE_LOD_FORCED_SOURCE_KEEP_RATIO = 0.9
 
 export type CanvasImageSourceSuppressionReason =
   | 'overview-scale'
@@ -44,6 +50,8 @@ export type ResolveCanvasImageLodDecisionOptions = {
   existingTextureBytes?: number
   residentTextureBudgetBytes?: number
   deviceScale?: number
+  /** The image's source texture is loaded now (keeps it on screen with some hysteresis). */
+  sourceTextureResident?: boolean
 }
 
 function hasFinitePositiveSize(width: number, height: number) {
@@ -109,7 +117,8 @@ export function resolveCanvasImageLodDecision({
   residentTextureBytes,
   existingTextureBytes,
   residentTextureBudgetBytes,
-  deviceScale = 1
+  deviceScale = 1,
+  sourceTextureResident = false
 }: ResolveCanvasImageLodDecisionOptions): CanvasImageLodDecision {
   const safeScale = Math.max(Math.abs(stageScale), PROJECT_CANVAS_MIN_STAGE_SCALE)
   const safeDeviceScale =
@@ -148,8 +157,13 @@ export function resolveCanvasImageLodDecision({
   // A selected image may skip the source-gain test only when the preview is
   // actually too small on screen. While the preview already covers the
   // displayed size, a source that is barely larger (under 1.25x) is not
-  // sharper there and would cost a full source texture per selected image.
-  const previewCoversProjectedSize = hasPreviewImage && projectedMaxSide <= previewMaxSide
+  // sharper there and would cost a full source texture per selected image. A
+  // loaded source stays until the displayed size is clearly under the preview.
+  const previewCoversProjectedSize =
+    hasPreviewImage &&
+    projectedMaxSide <=
+      previewMaxSide *
+        (sourceTextureResident ? PROJECT_CANVAS_IMAGE_LOD_FORCED_SOURCE_KEEP_RATIO : 1)
   const shouldBypassSourceGainForForcedSource = Boolean(
     forceSource && hasPreviewImage && !usesPlaceholderPreview && !previewCoversProjectedSize
   )

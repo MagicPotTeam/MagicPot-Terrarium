@@ -109,6 +109,40 @@ describe('resolveCanvasImageLodDecision', () => {
     expect(decide(4).shouldUseSourceTexture).toBe(true)
   })
 
+  it('keeps a loaded low-gain source of a selected image until the displayed size is clearly under the preview', () => {
+    // 1184 px source over a 1024 px preview: upgraded above 1024 device px, kept down to 0.9x.
+    const image = createImage(1024, 1024)
+    const item = createItem({
+      image,
+      width: 512,
+      height: 512,
+      sourceWidth: 1184,
+      sourceHeight: 1184
+    })
+    const decide = (stageScale: number, sourceTextureResident?: boolean) =>
+      resolveCanvasImageLodDecision({
+        item,
+        image,
+        stageScale,
+        selectedIds: new Set([item.id]),
+        forceSource: true,
+        isVisible: true,
+        deviceScale: 1,
+        sourceTextureResident
+      })
+
+    // Not loaded yet: only a size over the preview loads it.
+    expect(decide(1.9).shouldUseSourceTexture).toBe(false)
+    expect(decide(2.1).shouldUseSourceTexture).toBe(true)
+    // Loaded: zooming back to the preview size or just under it keeps it.
+    expect(decide(2, true).shouldUseSourceTexture).toBe(true)
+    expect(decide(1.9, true).projectedMaxSide).toBeCloseTo(972.8)
+    expect(decide(1.9, true).shouldUseSourceTexture).toBe(true)
+    // Clearly under the preview (0.9x = 921.6 device px): dropped.
+    expect(decide(1.75, true).projectedMaxSide).toBe(896)
+    expect(decide(1.75, true).shouldUseSourceTexture).toBe(false)
+  })
+
   it('still forces a selected source with enough gain while the preview covers the displayed size', () => {
     const image = createImage(512, 512)
     const item = createItem({

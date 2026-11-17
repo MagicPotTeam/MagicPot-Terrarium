@@ -740,48 +740,94 @@ describe('native drop image count boundary', () => {
     await waitFor(() => expect(f.blob).toHaveBeenCalled())
     expect(f.notify).not.toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
   })
-  // 4.9 MiB each: under the 5 MB per-image limit; 8 of them exceed the 32 MiB batch MAIN
-  // accepts for one request. They used to be attached, then refused after the send.
-  const largeImages = (count: number, offset = 0) =>
-    images(count + offset).slice(offset).map((file) => {
-      Object.defineProperty(file, 'size', { value: Math.round(4.9 * 1024 * 1024) })
-      return file
+  describe('per-message image budget', () => {
+    const MiB = 1024 * 1024
+    const size49 = Math.round(4.9 * MiB)
+    // 4.9 MiB each: under the 5 MB per-image limit; 8 of them exceed the 32 MiB batch MAIN
+    // prepares for one built-in Responses request. They used to be attached, then refused
+    // after the send. The routes MAIN does not limit this way are in
+    // ChatPage.composerImageBudgetRoute.test.tsx.
+    const largeImages = (count: number, offset = 0) =>
+      images(count + offset)
+        .slice(offset)
+        .map((file) => {
+          Object.defineProperty(file, 'size', { value: size49 })
+          return file
+        })
+    const attachmentCount = () =>
+      (JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]).length
+    const useProfile = (overrides: Record<string, unknown>) => {
+      f.config!.llm_config.api_profiles = [
+        {
+          id: 'fixture-profile',
+          provider: 'openai',
+          deployment: 'cloud',
+          model_use: 'chat',
+          model_name: 'fixture',
+          base_url: 'https://provider.invalid/v1',
+          api_key: 'fixture',
+          api_mode: 'responses',
+          call_type: 'api',
+          attachment_transports: ['request-data-url'],
+          ...overrides
+        } as Config['llm_config']['api_profiles'][number]
+      ]
+    }
+    // Session b has an empty draft; the import returns a managed reference with its size.
+    const setupSessionB = async () => {
+      let serial = 0
+      f.importDataUrl.mockImplementation(
+        async ({ originalFileName }: { originalFileName: string }) => {
+          const sha256 = (serial++).toString(16).padStart(64, '0')
+          return {
+            localMediaUrl: `local-media://imported/${sha256}`,
+            reference: {
+              version: 1,
+              kind: 'managed',
+              relativePath: `originals/00/${sha256}.png`,
+              status: 'ready',
+              sha256,
+              sizeBytes: size49,
+              mimeType: 'image/png',
+              originalFileName
+            }
+          }
+        }
+      )
+      await setup()
+      fireEvent.click(screen.getByRole('button', { name: 'switch b' }))
+      await waitFor(() => expect(screen.getByTestId('input')).toHaveValue('session b'))
+    }
+
+    it('refuses a native drop of eight 4.9 MB images on the built-in Responses route', async () => {
+      useProfile({})
+      await setupSessionB()
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(8)) })
+      await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
+      expect(f.blob).not.toHaveBeenCalled()
+      expect(f.fileReaderCreated).not.toHaveBeenCalled()
+      expect(f.importDataUrl).not.toHaveBeenCalled()
+      expect(f.importFile).not.toHaveBeenCalled()
+      expect(attachmentCount()).toBe(0)
+      expect(screen.getByTestId('input')).toHaveValue('session b')
     })
-  it('refuses a native drop of eight 4.9 MB images that one request cannot carry', async () => {
-    await setup()
-    const before = screen.getByTestId('attachments').textContent
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(8)) })
-    await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
-    expect(f.blob).not.toHaveBeenCalled()
-    expect(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
-    expect(f.importFile).not.toHaveBeenCalled()
-    expect(screen.getByTestId('attachments').textContent).toBe(before)
-    expect(screen.getByTestId('input')).toHaveValue('keep')
-  })
-  it('attaches six 4.9 MB images, then refuses two more for the same message', async () => {
-    await setup()
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(6)) })
-    await waitFor(() =>
-      expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(7)
-    )
-    expect(f.notify).not.toHaveBeenCalled()
-    const attached = JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
-    expect(attached.slice(1).map((attachment) => attachment.sizeBytes)).toEqual(
-      Array(6).fill(Math.round(4.9 * 1024 * 1024))
-    )
-    const importsAfterSix = f.importDataUrl.mock.calls.length
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(2, 6)) })
-    await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
-    expect(f.importDataUrl).toHaveBeenCalledTimes(importsAfterSix)
-    expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(7)
-    // A non-image still fits next to a full image budget.
-    fireEvent.drop(screen.getByTestId('input'), {
-      dataTransfer: transfer([new File(['x'], 'note.txt', { type: 'text/plain' })])
+    it('attaches six 4.9 MB images, then refuses two more for the same message', async () => {
+      useProfile({})
+      await setupSessionB()
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(6)) })
+      await waitFor(() => expect(attachmentCount()).toBe(6))
+      expect(f.notify).not.toHaveBeenCalled()
+      const importsAfterSix = f.importDataUrl.mock.calls.length
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(2, 6)) })
+      await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
+      expect(f.importDataUrl).toHaveBeenCalledTimes(importsAfterSix)
+      expect(attachmentCount()).toBe(6)
+      // A non-image still fits next to a full image budget.
+      fireEvent.drop(screen.getByTestId('input'), {
+        dataTransfer: transfer([new File(['x'], 'note.txt', { type: 'text/plain' })])
+      })
+      await waitFor(() => expect(attachmentCount()).toBe(7))
     })
-    await waitFor(() =>
-      expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(8)
-    )
   })
   it('does not count a URL-only drop as native files', async () => {
     await setup()

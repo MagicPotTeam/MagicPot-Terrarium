@@ -4784,7 +4784,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           residentTextureBytes: getResidentTextureBytes(),
           existingTextureBytes: existingRecord?.textureByteSize ?? 0,
           residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-          deviceScale: getProjectCanvasRenderDeviceScale()
+          deviceScale: getProjectCanvasRenderDeviceScale(),
+          sourceTextureResident: true
         })
         if (fallbackImage && !cachedSourceDecision.shouldUseSourceTexture) {
           if (

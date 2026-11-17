@@ -72,32 +72,42 @@ export const getChatAttachmentMaxSizeMB = (type: ChatAttachment['type']): number
 }
 
 /**
- * Largest total of image bytes the composer accepts for one message: MAIN's image
- * preparation batch limit (32 MiB of original bytes per request). With the per-image
- * limit alone, 8 images of 4.9 MB were accepted and the request was then refused after
- * the message had been posted. Routes with a smaller budget are still checked at send.
+ * Largest total of image bytes the composer accepts for one message on the built-in OpenAI
+ * Responses route: MAIN's image preparation batch limit (32 MiB of original bytes per
+ * request). With the per-image limit alone, 8 images of 4.9 MB were accepted and the
+ * request was then refused after the message had been posted. The composer applies it only
+ * where that route is certain (resolveComposerImageByteBudgetRoute); other routes keep
+ * their send-time checks.
  */
 export const CHAT_MESSAGE_IMAGE_BATCH_MAX_BYTES = MAX_CHAT_IMAGE_PREPARATION_BATCH_SOURCE_BYTES
 
 const isByteCount = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 
+const MAX_DATA_URL_HEADER_CHARS = 4096
+const NON_BASE64_CHAR = /[^A-Za-z0-9+/=]/g
+
 /**
- * Bytes an image attachment of the composer will send, known from its descriptor only:
- * the managed media size, the recorded size, or the length of a base64 data URL. 0 for
- * anything else (not an image, or a size that is not known without reading).
+ * Bytes an image attachment of the composer will send, known from its descriptor only and
+ * counted as the send-time check counts them (describeRequestImageSize): the managed media
+ * size, or the length of a well-formed base64 data URL. The descriptor's own sizeBytes is
+ * never trusted. 0 for anything else (not an image, or a size not known without reading).
  */
 export const getKnownChatImageBytes = (attachment: ChatAttachment | null | undefined): number => {
   if (attachment?.type !== 'image') return 0
   const media = normalizeMediaReference(attachment.media)
-  if (media?.kind === 'managed' && isByteCount(media.sizeBytes)) return media.sizeBytes
-  if (isByteCount(attachment.sizeBytes)) return attachment.sizeBytes
+  if (media?.kind === 'managed') return isByteCount(media.sizeBytes) ? media.sizeBytes : 0
   const url = typeof attachment.url === 'string' ? attachment.url : ''
-  const comma = url.slice(0, 5).toLowerCase() === 'data:' ? url.indexOf(',') : -1
-  if (comma < 0 || !/;base64$/i.test(url.slice(0, comma))) return 0
-  const payload = url.length - comma - 1
+  if (url.slice(0, 5).toLowerCase() !== 'data:') return 0
+  const comma = url.indexOf(',')
+  if (comma < 0 || comma > MAX_DATA_URL_HEADER_CHARS) return 0
+  if (!/;base64$/i.test(url.slice(0, comma))) return 0
+  const payloadChars = url.length - comma - 1
+  if (payloadChars <= 0 || payloadChars % 4 !== 0) return 0
+  NON_BASE64_CHAR.lastIndex = comma + 1
+  if (NON_BASE64_CHAR.exec(url)) return 0
   const padding = url.endsWith('==') ? 2 : url.endsWith('=') ? 1 : 0
-  return Math.max(0, Math.floor(payload / 4) * 3 - padding)
+  return (payloadChars / 4) * 3 - padding
 }
 
 export type ChatImageBatchBudget = {

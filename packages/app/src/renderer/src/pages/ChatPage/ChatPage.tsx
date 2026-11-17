@@ -164,6 +164,7 @@ import {
 import { getLocalizedConversationTitle } from './chatLocaleUtils'
 import {
   preflightChatRequestImages,
+  resolveComposerImageByteBudgetRoute,
   preflightChatRequestReports,
   REPORT_PREFLIGHT_TIMEOUT_MS,
   requestChatCompletion,
@@ -940,9 +941,14 @@ const describeImageBatchTooLarge = (t: TFunction, budget: ChatImageBatchBudget):
     remaining: formatFileSize(budget.remainingBytes)
   })
 
-/** Image bytes of a dropped or picked file as the composer will attach it (0 for others). */
-const getChatImageFileBytes = (file: File): number =>
-  getChatAttachmentTypeForFile(file) === 'image' ? file.size : 0
+/** An incoming composer batch: imported attachments and/or files still to be imported. */
+type ComposerIncomingImages = {
+  attachments?: readonly ChatAttachment[]
+  files?: readonly File[]
+  /** Text and hidden context that arrive with the batch. */
+  text?: string
+  hiddenContext?: string
+}
 
 const attachmentDescriptorsMatch = (left: ChatAttachment, right: ChatAttachment): boolean =>
   left.type === right.type && left.url === right.url && left.fileName === right.fileName
@@ -2600,6 +2606,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const inputValueRef = useRef(inputValue)
   const pendingAttachmentsRef = useRef<ChatAttachment[]>(pendingAttachments)
   const pendingHiddenContextRef = useRef(pendingHiddenContext)
+  // Per-message image budget of the composer for an incoming batch, or null where none
+  // applies at attach; assigned below once the composer's route is known.
+  const resolveComposerImageBatchBudgetRef = useRef<
+    (incoming: ComposerIncomingImages) => ChatImageBatchBudget | null
+  >(() => null)
   const pendingExternalSendToAgentRef = useRef<ExternalSendToAgentDetail[]>([])
   const [pendingExternalSendToAgentVersion, setPendingExternalSendToAgentVersion] = useState(0)
   const editingAttachmentReceiverRef = useRef<((attachment: ChatAttachment) => void) | null>(null)
@@ -2891,13 +2902,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // event. Other events and existing composer state are not a transaction.
       stageInArrivalOrder((resolvedAttachments) => {
         if (!isDestinationCurrent()) return
-        // Refuse the whole event when its images do not fit the message's image budget.
-        const stagedImageBudget = resolveChatImageBatchBudget(
-          pendingAttachmentsRef.current,
-          resolvedAttachments.map(getKnownChatImageBytes)
-        )
-        if (!stagedImageBudget.fits) {
+        // Refuse the event's attachments when its images do not fit the message's image
+        // budget. Its visible text is kept; the hidden context describing them is not.
+        const stagedImageBudget = resolveComposerImageBatchBudgetRef.current({
+          attachments: resolvedAttachments,
+          text,
+          hiddenContext: hiddenText
+        })
+        if (stagedImageBudget && !stagedImageBudget.fits) {
           notifyError(describeImageBatchTooLarge(t, stagedImageBudget))
+          if (text) setInputValue((prev) => (prev ? `${prev}\n${text}` : text))
           return
         }
         if (resolvedAttachments.length > 0) {
@@ -3574,6 +3588,62 @@ const ChatPage: React.FC<ChatPageProps> = ({
       resolveCustomSkillId(customSkills, skillId),
     [customSkills]
   )
+  // MAIN's 32 MiB preparation batch applies only on the built-in OpenAI Responses route,
+  // and not when the request turns into hosted image generation. Refuse images at attach
+  // only where the composer's current route and draft (incoming images included) certainly
+  // take that route, as the send would: no skill (external agents, skill runtimes,
+  // attachment batching), no image generation, no tool command. Elsewhere the images are
+  // attached and the send-time checks decide, as before.
+  resolveComposerImageBatchBudgetRef.current = ({
+    attachments = [],
+    files = [],
+    text,
+    hiddenContext
+  }: ComposerIncomingImages): ChatImageBatchBudget | null => {
+    const imageFiles = files.filter((file) => getChatAttachmentTypeForFile(file) === 'image')
+    const incomingBytes = [
+      ...attachments.map(getKnownChatImageBytes),
+      ...imageFiles.map((file) => file.size)
+    ]
+    if (!incomingBytes.some((bytes) => bytes > 0)) return null
+    const draftText = [inputValueRef.current, text].filter(Boolean).join('\n')
+    // As the send resolves them: the session's own skill and profile first. A team member
+    // sends with its lead's settings, which are only resolved at send.
+    const session = sessionsRef.current.find((item) => item.id === currentSessionIdRef.current)
+    if (session?.teamLeadId) return null
+    const requestedSkillId = session?.skillId ?? selectedSkillId
+    const skillId = resolveAvailableSkillId(requestedSkillId)
+    if (
+      isImageGenerationSelected ||
+      requestedSkillId === BUILT_IN_TAGGING_SKILL_ID ||
+      findCustomSkillById(customSkills, skillId) ||
+      parseExplicitToolCommand(draftText)
+    ) {
+      return null
+    }
+    const profileId = resolveProfileIdForSkill(skillId, session?.profileId || selectedProfileId)
+    const route = resolveComposerImageByteBudgetRoute({
+      config,
+      profileId,
+      remoteProfile: config.use_remote_llm
+        ? availableProfiles.find((profile) => profile.id === profileId)
+        : undefined,
+      imageGenerationOptions,
+      draft: {
+        content: draftText,
+        hiddenContext:
+          [pendingHiddenContextRef.current, hiddenContext].filter(Boolean).join('\n') || undefined,
+        attachments: [...pendingAttachmentsRef.current, ...attachments]
+      },
+      incomingImageFiles: imageFiles.map((file) => ({
+        fileName: file.name,
+        mimeType: normalizeFileMimeType(file.name, file.type),
+        sizeBytes: file.size
+      }))
+    })
+    if (route !== 'prepared-source') return null
+    return resolveChatImageBatchBudget(pendingAttachmentsRef.current, incomingBytes)
+  }
 
   const refreshHy3dModelUrlIfNeeded = useCallback(
     async (params: ReturnType<typeof getHy3dParams>) => {
@@ -5065,11 +5135,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 throw new ChatPathlessAttachmentTooLargeError('pasted-image.png', blob.size)
               }
               const file = new File([blob], 'pasted-image.png', { type: blob.type })
-              const pastedImageBudget = resolveChatImageBatchBudget(
-                pendingAttachmentsRef.current,
-                [file.size]
-              )
-              if (!pastedImageBudget.fits) {
+              const pastedImageBudget = resolveComposerImageBatchBudgetRef.current({
+                files: [file]
+              })
+              if (pastedImageBudget && !pastedImageBudget.fits) {
                 notifyError(describeImageBatchTooLarge(t, pastedImageBudget))
                 continue
               }
@@ -5278,15 +5347,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
             return
           }
 
-          const draggedImageBudget = resolveChatImageBatchBudget(
-            pendingAttachmentsRef.current,
-            materializedAttachments.map(getKnownChatImageBytes)
-          )
-          if (!draggedImageBudget.fits) {
+          // The dragged attachments are refused whole when their images do not fit the
+          // message's image budget; the visible text is still added below.
+          const draggedImageBudget = resolveComposerImageBatchBudgetRef.current({
+            attachments: materializedAttachments,
+            text: droppedText,
+            hiddenContext: droppedHiddenText
+          })
+          const draggedImagesRefused = Boolean(draggedImageBudget && !draggedImageBudget.fits)
+          if (draggedImageBudget && draggedImagesRefused) {
             notifyError(describeImageBatchTooLarge(t, draggedImageBudget))
-            return
           }
-          if (materializedAttachments.length > 0) {
+          if (!draggedImagesRefused && materializedAttachments.length > 0) {
             // Every dragged image is its own occurrence, in drag order, also when it repeats
             // a source already in the draft (owner decision 5); the count is checked above.
             setPendingAttachments((prev) => [...prev, ...materializedAttachments])
@@ -5299,11 +5371,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
             })
           }
 
-          if (droppedHiddenText) {
+          if (droppedHiddenText && !draggedImagesRefused) {
             setPendingHiddenContext((prev) => mergeHiddenContext(prev, droppedHiddenText))
           }
 
-          if (materializedAttachments.length > 0 || droppedText || droppedHiddenText) {
+          if (
+            draggedImagesRefused ||
+            materializedAttachments.length > 0 ||
+            droppedText ||
+            droppedHiddenText
+          ) {
             return
           }
         } catch (err) {
@@ -5370,11 +5447,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
             return
           }
           // The whole directory batch must also fit the message's image budget.
-          const directoryImageBudget = resolveChatImageBatchBudget(
-            pendingAttachmentsRef.current,
-            droppedDirectoryFiles.map(({ file }) => getChatImageFileBytes(file))
-          )
-          if (!editingAttachmentReceiver && !directoryImageBudget.fits) {
+          const directoryImageBudget = editingAttachmentReceiver
+            ? null
+            : resolveComposerImageBatchBudgetRef.current({
+                files: droppedDirectoryFiles.map(({ file }) => file)
+              })
+          if (directoryImageBudget && !directoryImageBudget.fits) {
             notifyError(describeImageBatchTooLarge(t, directoryImageBudget))
             return
           }
@@ -5460,6 +5538,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
           )
         }
       }
+      // Like the per-file limit above, refuse the whole native batch when its images do
+      // not fit the message's image budget, before importing any of them or appending
+      // their accompanying text.
+      const droppedImageText =
+        externalImageContent.fileUrls.length && externalImageContent.text.trim()
+          ? externalImageContent.text
+          : undefined
+      const nativeImageBudget = editingAttachmentReceiver
+        ? null
+        : resolveComposerImageBatchBudgetRef.current({
+            files: Array.from(files || []),
+            text: droppedImageText
+          })
+      if (nativeImageBudget && !nativeImageBudget.fits) {
+        notifyError(describeImageBatchTooLarge(t, nativeImageBudget))
+        return
+      }
       if (externalImageContent.fileUrls.length && externalImageContent.text.trim()) {
         if (editingAttachmentReceiver) {
           setEditingContent((prev) =>
@@ -5500,17 +5595,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         }
         // Do not leak non-image drops into the bottom composer while editing.
-        return
-      }
-
-      // Like the per-file limit above, refuse the whole native batch when its images do
-      // not fit the message's image budget, before importing any of them.
-      const nativeImageBudget = resolveChatImageBatchBudget(
-        pendingAttachmentsRef.current,
-        Array.from(files).map(getChatImageFileBytes)
-      )
-      if (!nativeImageBudget.fits) {
-        notifyError(describeImageBatchTooLarge(t, nativeImageBudget))
         return
       }
 
@@ -10054,10 +10138,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return undefined
     }
     if (isImage) {
-      const pickedImageBudget = resolveChatImageBatchBudget(pendingAttachmentsRef.current, [
-        file.size
-      ])
-      if (!pickedImageBudget.fits) {
+      const pickedImageBudget = resolveComposerImageBatchBudgetRef.current({ files: [file] })
+      if (pickedImageBudget && !pickedImageBudget.fits) {
         notifyError(describeImageBatchTooLarge(t, pickedImageBudget))
         return undefined
       }

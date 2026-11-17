@@ -12,6 +12,7 @@ import { DEFAULT_PROVIDER_JSON_MAX_BYTES } from '@shared/llm/providerJsonBudget'
 import {
   preflightChatRequestImages,
   preflightChatRequestReports,
+  resolveComposerImageByteBudgetRoute,
   requestChatCompletion,
   requestChatCompletionStream
 } from './chatRequestUtils'
@@ -555,3 +556,102 @@ describe('refusal message', () => {
     expect(en.chat.request_images_too_large.length).toBeLessThan(140)
   })
 })
+
+describe("composer image byte budget route (attach time)", () => {
+  type RouteInput = Parameters<typeof resolveComposerImageByteBudgetRoute>[0];
+  const route = (
+    extra: Partial<RouteInput> = {},
+    content = "",
+    overrides: Partial<LLMAPIProfile> = {},
+  ) =>
+    resolveComposerImageByteBudgetRoute({
+      config: localConfig(overrides),
+      profileId: "fixture",
+      draft: { content, attachments: [managedImage(REPORT_JPEG_BYTES)] },
+      incomingImageFiles: [
+        { fileName: "fixture.png", mimeType: "image/png", sizeBytes: 5 * MiB },
+      ],
+      ...extra,
+    });
+
+  it("is the prepared-source route for the built-in Responses profile", () => {
+    expect(route()).toBe("prepared-source");
+    expect(route({ draft: { content: "" } })).toBe("prepared-source");
+  });
+
+  it.each([
+    ["an image-generation profile", {}, "", { model_use: "image" as const }],
+    [
+      "explicit image generation",
+      { imageGenerationOptions: { enabled: true } },
+      "",
+      {},
+    ],
+    [
+      "a draft whose text asks for an image",
+      {},
+      "帮我生成一张图片，参考这些设计图",
+      {},
+    ],
+    ["a skill runtime", { skillRuntime: { skillId: "fixture" } }, "", {}],
+    [
+      "an external agent",
+      {
+        externalAgentSkill: {
+          id: "agent",
+          type: "agent",
+          category: "owned",
+          skillName: "agent",
+          prompt: "x",
+          apiAddress: "https://agent.invalid",
+        } as RouteInput["externalAgentSkill"],
+      },
+      "",
+      {},
+    ],
+    [
+      "the chat-completions route",
+      {},
+      "",
+      { api_mode: "chat-completions" as const },
+    ],
+    ["an unknown profile", { profileId: "missing" }, "", {}],
+  ])(
+    "applies no attach-time budget for %s",
+    (_label, extra, content, overrides) => {
+      expect(
+        route(extra as Partial<RouteInput>, content, overrides),
+      ).toBeUndefined();
+    },
+  );
+
+  it("leaves incoming files exempt whose names make MAIN choose hosted image generation", () => {
+    // "image ... design" in the attachment summary MAIN appends to the text.
+    expect(
+      route({
+        draft: { content: "look" },
+        incomingImageFiles: [
+          { fileName: "design-v2.png", mimeType: "image/png", sizeBytes: MiB },
+        ],
+      }),
+    ).toBeUndefined();
+    expect(
+      route({
+        draft: { content: "look" },
+        incomingImageFiles: [
+          { fileName: "fixture.png", mimeType: "image/png", sizeBytes: MiB },
+        ],
+      }),
+    ).toBe("prepared-source");
+  });
+
+  it("names the provider JSON route for Gemini and Claude", () => {
+    expect(
+      route({}, "", {
+        provider: "gemini",
+        api_mode: undefined,
+        base_url: "https://provider.invalid",
+      }),
+    ).toBe("provider-json");
+  });
+});

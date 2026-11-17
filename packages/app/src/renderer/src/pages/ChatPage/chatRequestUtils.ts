@@ -2981,18 +2981,21 @@ const projectRequestImageForAugmentation = (
 const mayUseAutomaticImageGeneration = (
   input: RequestImageByteBudgetInput,
   modelUse: ReturnType<typeof resolveProfileModelUse>,
-  imageGenerationOptions: OpenAIImageGenerationOptions | undefined
+  imageGenerationOptions: OpenAIImageGenerationOptions | undefined,
+  // Images still to be attached, already in the form the augmentation sees (composer only).
+  projectedIncomingImages: readonly ChatAttachment[] = []
 ): boolean => {
   const latestUser = input.messages.findLast((message) => message.role === 'user')
   if (!latestUser) return false
   let content = latestUser.content
-  if (latestUser.attachments?.length) {
+  if (latestUser.attachments?.length || projectedIncomingImages.length) {
     const projected: ChatAttachment[] = []
-    for (const attachment of latestUser.attachments) {
+    for (const attachment of latestUser.attachments || []) {
       const requestAttachment = projectRequestImageForAugmentation(attachment)
       if (!requestAttachment) return true
       projected.push(requestAttachment)
     }
+    projected.push(...projectedIncomingImages)
     const preview = previewAugmentedMessageContentWithoutReads(projected, content, { role: 'user' })
     if (preview === undefined) return true
     content = preview
@@ -3011,7 +3014,8 @@ const mayUseAutomaticImageGeneration = (
 const resolveRequestImageByteBudgetRoute = (
   input: RequestImageByteBudgetInput,
   profile: RemoteRequestProfile | undefined,
-  dispatch: 'stream' | 'unary' | 'preflight'
+  dispatch: 'stream' | 'unary' | 'preflight',
+  projectedIncomingImages: readonly ChatAttachment[] = []
 ): ChatRequestImageByteBudgetRoute | undefined => {
   if (
     input.externalAgentSkill?.type === 'agent' ||
@@ -3052,7 +3056,12 @@ const resolveRequestImageByteBudgetRoute = (
   const provider = resolveProfileProvider(profile)
   if (provider === 'gemini' || provider === 'claude') return 'provider-json'
   if (provider === 'openai' && usesOpenAIResponsesImagePolicy(profile, input.apiMode)) {
-    return mayUseAutomaticImageGeneration(input, modelUse, imageGenerationOptions)
+    return mayUseAutomaticImageGeneration(
+      input,
+      modelUse,
+      imageGenerationOptions,
+      projectedIncomingImages
+    )
       ? undefined
       : 'prepared-source'
   }
@@ -3089,6 +3098,54 @@ const resolveRequestImageByteBudget = (
       ).allowManagedChunkedBinary === true,
     imageHistoryPolicy: input.imageHistoryPolicy
   }
+}
+
+/**
+ * The route on which MAIN would certainly limit the size of the images of the message the
+ * composer holds now, decided from the composer's route and its draft so far, or undefined
+ * when no limit applies with certainty (external agents, skills, image generation, a
+ * profile that cannot be resolved, ...). For the composer's attach-time image budget only:
+ * the final text may still change the route, and the send path checks the final message.
+ */
+export const resolveComposerImageByteBudgetRoute = (
+  input: Pick<
+    RequestChatCompletionInput,
+    | 'config'
+    | 'profileId'
+    | 'remoteProfile'
+    | 'externalAgentSkill'
+    | 'apiMode'
+    | 'imageGenerationOptions'
+    | 'skillRuntime'
+  > & {
+    /** The composer's draft: its text, hidden context and attachments (incoming ones too). */
+    draft: Pick<ChatMessage, 'content' | 'attachments' | 'hiddenContext'>
+    /** Image files about to be imported, known only from their file descriptors. */
+    incomingImageFiles?: ReadonlyArray<{ fileName: string; mimeType?: string; sizeBytes: number }>
+  }
+): ChatRequestImageByteBudgetRoute | undefined => {
+  if (input.externalAgentSkill || input.skillRuntime) return undefined
+  let profile: RemoteRequestProfile | undefined
+  try {
+    profile = resolveSelectedRequestProfile(input)
+  } catch {
+    return undefined
+  }
+  const { draft, incomingImageFiles, ...route } = input
+  // As projectRequestImageForAugmentation projects the managed reference each file becomes.
+  const projectedIncomingImages = (incomingImageFiles || []).map((file): ChatAttachment => ({
+    type: 'image',
+    url: '',
+    fileName: file.fileName,
+    ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+    sizeBytes: file.sizeBytes
+  }))
+  return resolveRequestImageByteBudgetRoute(
+    { ...route, messages: [{ role: 'user', ...draft }] },
+    profile,
+    'stream',
+    projectedIncomingImages
+  )
 }
 
 /**

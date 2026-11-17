@@ -1063,6 +1063,18 @@ function applyCanvasTargetQuickAppSelectionsToCatalog(
   }
 }
 
+/** Whether a QuickApp action of the plan takes the selection snapshot as an input. */
+const canvasTargetActionsBindSelectionSnapshot = (
+  actions: readonly CanvasTargetCapabilityAction[] | undefined
+): boolean =>
+  (actions || []).some(
+    (action) =>
+      action.type === 'quick_app' &&
+      (action.inputAssignments || []).some(
+        (assignment) => assignment.source === 'selection_snapshot'
+      )
+  )
+
 export function useCanvasTargetWorkflow({
   canvasId,
   projectName,
@@ -1732,12 +1744,23 @@ export function useCanvasTargetWorkflow({
           // Bound the snapshot like the "send to Agent" overview (2000 px /
           // 4 MP) instead of the 33.5 MP export ceiling. In selected_sources
           // mode the sources are still attached separately at full size.
-          snapshotDataUrl = await renderCanvasItemsImageDataUrl(
-            targetItems,
-            false,
-            canvasTargetSelectionBounds,
-            AGENT_SELECTION_RASTER_LIMITS
-          )
+          try {
+            snapshotDataUrl = await renderCanvasItemsImageDataUrl(
+              targetItems,
+              false,
+              canvasTargetSelectionBounds,
+              AGENT_SELECTION_RASTER_LIMITS
+            )
+          } catch (boundedError) {
+            // A selection more than 2000:1 wide cannot keep 1 px within the bound; its
+            // unbounded render stays small (at most 16384 x 9 px), so take that instead.
+            if (!(boundedError instanceof RangeError)) throw boundedError
+            snapshotDataUrl = await renderCanvasItemsImageDataUrl(
+              targetItems,
+              false,
+              canvasTargetSelectionBounds
+            )
+          }
         } catch (snapshotError) {
           console.warn('[CanvasTarget] Failed to render selection snapshot.', snapshotError)
         }
@@ -2176,6 +2199,32 @@ export function useCanvasTargetWorkflow({
         canvasTargetEvidenceMode
       )
       ensureCanvasTargetRunActive()
+      // A QuickApp bound to the selection snapshot processes its pixels and may place its
+      // result on the canvas, so it gets the selection at the export ceiling, rendered only
+      // when the plan binds one. The model-facing copies keep the bounded snapshot.
+      let quickAppSnapshotAttachment = evidenceSnapshotAttachment
+      if (
+        evidenceSnapshotAttachment &&
+        canvasTargetActionsBindSelectionSnapshot(controlPlan.capabilityActions)
+      ) {
+        let fullSnapshotDataUrl: string | null = null
+        try {
+          fullSnapshotDataUrl = await renderCanvasItemsImageDataUrl(
+            targetItems,
+            false,
+            canvasTargetSelectionBounds
+          )
+        } catch (snapshotError) {
+          console.warn(
+            '[CanvasTarget] Failed to render the full-resolution selection snapshot.',
+            snapshotError
+          )
+        }
+        ensureCanvasTargetRunActive()
+        if (fullSnapshotDataUrl) {
+          quickAppSnapshotAttachment = { ...evidenceSnapshotAttachment, url: fullSnapshotDataUrl }
+        }
+      }
 
       await publishStage(
         buildCanvasTargetStage({
@@ -2888,7 +2937,7 @@ export function useCanvasTargetWorkflow({
                 userIntent: canvasTargetUserIntent,
                 controlProfileId: canvasTargetControlProfileId,
                 sourceAttachments: evidenceSourceAttachments,
-                snapshotAttachment: evidenceSnapshotAttachment,
+                snapshotAttachment: quickAppSnapshotAttachment,
                 upstreamAttachments: dedupeCanvasTargetAttachments([
                   ...quickAppInputBinding.referencedAttachments,
                   ...executedStageResults.flatMap((stage) => stage.responseAttachments || [])

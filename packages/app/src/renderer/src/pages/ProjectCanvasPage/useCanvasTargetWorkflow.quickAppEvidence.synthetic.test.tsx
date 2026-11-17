@@ -84,3 +84,142 @@ describe('QuickApp planned item references and evidence mode boundary', () => {
     hook.unmount()
   })
 })
+
+describe("QuickApp input from the selection snapshot", () => {
+  const BOUNDED = "data:image/png;base64,Qk9VTkRFRA==";
+  const FULL = "data:image/png;base64,RlVMTA==";
+  const planWith = (source: "selection_snapshot" | "user_intent") => ({
+    id: "plan",
+    generatedAt: "2026-01-01T00:00:00Z",
+    summary: "fixture",
+    rawResponse: "fixture",
+    stageInstructions: [],
+    capabilityActions: [
+      {
+        id: "quick",
+        type: "quick_app",
+        qAppKey: "fixture-app",
+        phase: "before_model_stages",
+        outputTarget: "canvas",
+        inputAssignments: [{ slot: "image", source }],
+      },
+    ],
+  });
+  const run = async (
+    render: Parameters<
+      typeof useCanvasTargetWorkflow
+    >[0]["renderCanvasItemsImageDataUrl"],
+  ) => {
+    const hook = renderHook(() =>
+      useCanvasTargetWorkflow({
+        ...options,
+        renderCanvasItemsImageDataUrl: render,
+      }),
+    );
+    await act(async () => {
+      await hook.result.current.handleOpenCanvasTargetDialog([base], {
+        x: 0,
+        y: 0,
+        width: 50,
+        height: 50,
+      });
+    });
+    act(() => {
+      hook.result.current.setCanvasTargetEvidenceMode("selection_region");
+      hook.result.current.setCanvasTargetUserIntent("fixture");
+    });
+    await act(async () => {
+      await hook.result.current.handleRunCanvasTarget();
+    });
+    hook.unmount();
+  };
+  const planUrls = () =>
+    JSON.stringify(f.plan.mock.calls[0]?.[0]?.attachments ?? []);
+
+  it("gives a QuickApp bound to selection_snapshot an unbounded render while the plan gets the bounded one", async () => {
+    f.plan.mockResolvedValue(planWith("selection_snapshot"));
+    const render = vi.fn(
+      async (
+        _items: unknown,
+        _bg?: boolean,
+        _bounds?: unknown,
+        limits?: unknown,
+      ) => (limits ? BOUNDED : FULL),
+    );
+    await run(render);
+    expect(render.mock.calls.map((call) => call[3])).toEqual([
+      { maxSide: 2000, maxArea: 4_000_000 },
+      undefined,
+    ]);
+    expect(planUrls()).toContain(BOUNDED);
+    expect(planUrls()).not.toContain(FULL);
+    expect(f.quickApp).toHaveBeenCalledOnce();
+    expect(f.quickApp.mock.calls[0][0].snapshotAttachment).toEqual(
+      expect.objectContaining({ type: "image", url: FULL }),
+    );
+  });
+
+  it("renders no full-resolution snapshot when no QuickApp binds it", async () => {
+    f.plan.mockResolvedValue(planWith("user_intent"));
+    const render = vi.fn(
+      async (
+        _items: unknown,
+        _bg?: boolean,
+        _bounds?: unknown,
+        limits?: unknown,
+      ) => (limits ? BOUNDED : FULL),
+    );
+    await run(render);
+    expect(render).toHaveBeenCalledOnce();
+    expect(render.mock.calls[0][3]).toEqual({
+      maxSide: 2000,
+      maxArea: 4_000_000,
+    });
+    expect(f.quickApp.mock.calls[0][0].snapshotAttachment).toEqual(
+      expect.objectContaining({ url: BOUNDED }),
+    );
+  });
+
+  it("keeps the bounded snapshot for the QuickApp when the full render fails", async () => {
+    f.plan.mockResolvedValue(planWith("selection_snapshot"));
+    const render = vi.fn(
+      async (
+        _items: unknown,
+        _bg?: boolean,
+        _bounds?: unknown,
+        limits?: unknown,
+      ) => {
+        if (!limits) throw new Error("out of memory");
+        return BOUNDED;
+      },
+    );
+    await run(render);
+    expect(f.quickApp.mock.calls[0][0].snapshotAttachment).toEqual(
+      expect.objectContaining({ url: BOUNDED }),
+    );
+  });
+
+  it("falls back to the unbounded render for a selection too thin for the bound", async () => {
+    f.plan.mockResolvedValue(planWith("user_intent"));
+    const render = vi.fn(
+      async (
+        _items: unknown,
+        _bg?: boolean,
+        _bounds?: unknown,
+        limits?: unknown,
+      ) => {
+        if (limits)
+          throw new RangeError(
+            "Canvas overview cannot be represented within raster limits",
+          );
+        return FULL;
+      },
+    );
+    await run(render);
+    expect(render.mock.calls.map((call) => call[3])).toEqual([
+      { maxSide: 2000, maxArea: 4_000_000 },
+      undefined,
+    ]);
+    expect(planUrls()).toContain(FULL);
+  });
+});

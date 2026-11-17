@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
-import { assertRequestImageBytesWithinBudget } from '@renderer/pages/ChatPage/chatRequestImageBudget'
+import {
+  assertRequestImageBytesWithinBudget,
+  describeRequestImageSize
+} from '@renderer/pages/ChatPage/chatRequestImageBudget'
 import {
   CHAT_MESSAGE_IMAGE_BATCH_MAX_BYTES,
   getChatAttachmentMaxSizeMB,
@@ -122,13 +125,32 @@ describe('chatAttachmentUtils', () => {
 
     it('reads image sizes from descriptors only', () => {
       expect(getKnownChatImageBytes(managedImage(1, 1234))).toBe(1234)
-      expect(getKnownChatImageBytes({ type: 'image', url: 'blob:x', sizeBytes: 77 })).toBe(77)
+      // A descriptor's own sizeBytes is not trusted, as at send.
+      expect(getKnownChatImageBytes({ type: 'image', url: 'blob:x', sizeBytes: 77 })).toBe(0)
+      expect(getKnownChatImageBytes({ ...managedImage(2, 1234), sizeBytes: 40 * MiB })).toBe(1234)
       expect(getKnownChatImageBytes({ type: 'image', url: 'data:image/png;base64,QUJDRA==' })).toBe(
         4
       )
       expect(getKnownChatImageBytes({ type: 'image', url: 'local-media://unknown.png' })).toBe(0)
       expect(getKnownChatImageBytes({ type: 'file', url: 'x', sizeBytes: 50 * MiB })).toBe(0)
       expect(getKnownChatImageBytes({ type: 'image', url: 'x', sizeBytes: -1 })).toBe(0)
+    })
+
+    it('counts every image as the send-time check counts it', () => {
+      const samples: ChatAttachment[] = [
+        managedImage(3, 4321),
+        { type: 'image', url: 'data:image/png;base64,QUJDRA==' },
+        { type: 'image', url: 'data:image/png;base64,QUJDRA=', sizeBytes: 9 },
+        { type: 'image', url: 'data:image/png;base64,QU JDRA==' },
+        { type: 'image', url: 'data:image/png,ABCD' },
+        { type: 'image', url: `data:${'x'.repeat(5000)};base64,QUJDRA==` },
+        { type: 'image', url: 'local-media://x.png', sizeBytes: 10 * MiB }
+      ]
+      for (const attachment of samples) {
+        expect(getKnownChatImageBytes(attachment)).toBe(
+          describeRequestImageSize(attachment)?.sourceBytes ?? 0
+        )
+      }
     })
 
     it('accepts six 4.9 MB PNG one by one and refuses the seventh and eighth', () => {
