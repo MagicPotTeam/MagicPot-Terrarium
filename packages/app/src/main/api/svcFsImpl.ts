@@ -328,7 +328,7 @@ const publishCanvasMirrorAsset = async (
   assetDir: string,
   assetFileName: string,
   sourceSizeBytes: number,
-  writeTemp: (handle: FileHandle) => Promise<void>
+  writeTemp: (handle: FileHandle, wrote: (bytes: number) => void) => Promise<void>
 ): Promise<CanvasMirrorAssetResp> => {
   const destination = path.join(assetDir, requireCanvasMirrorAssetFileName(assetFileName))
   const previous = canvasMirrorAssetWrites.get(destination)
@@ -342,6 +342,11 @@ const publishCanvasMirrorAsset = async (
       return { status: 'exists', sizeBytes: existing.size }
     }
 
+    // Only a file that has to be written needs room; the bytes stay reserved until it is
+    // published or given up, so copies running at the same time cannot overcommit the volume.
+    const space = await reserveCanvasMirrorSpace(assetDir, sourceSizeBytes)
+    if (!space) return { status: 'no-space', sizeBytes: sourceSizeBytes }
+
     const tempPath = path.join(
       assetDir,
       `.${assetFileName}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -350,7 +355,7 @@ const publishCanvasMirrorAsset = async (
       await runBoundedFsOp(async () => {
         const handle = await fs.open(tempPath, 'wx', 0o644)
         try {
-          await writeTemp(handle)
+          await writeTemp(handle, space.wrote)
           await handle.sync()
         } finally {
           await handle.close()
@@ -381,6 +386,7 @@ const publishCanvasMirrorAsset = async (
       return { status: 'written', sizeBytes: written.size }
     } finally {
       await fs.rm(tempPath, { force: true }).catch(() => undefined)
+      space.release()
     }
   }
   const result = previous ? previous.then(run, run) : run()
@@ -479,18 +485,64 @@ const collectCanvasMirrorAssetRefs = (
 /** Bytes kept free on the volume of the mirror besides the asset being copied. */
 const CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES = 256 * 1024 * 1024
 
-const assertCanvasMirrorFreeSpace = async (assetDir: string, sizeBytes: number): Promise<void> => {
-  if (typeof fs.statfs !== 'function') return
-  let available: number
+/** Bytes of mirror assets being written right now, by volume. */
+const canvasMirrorReservedBytesByVolume = new Map<string, number>()
+
+const getCanvasMirrorVolumeId = async (assetDir: string): Promise<string> => {
   try {
-    const stats = await runBoundedFsOp(() => fs.statfs(assetDir))
-    available = Number(stats.bavail) * Number(stats.bsize)
+    const stats = await runBoundedFsOp(() => fs.stat(assetDir))
+    return `dev:${String(stats.dev)}`
   } catch {
-    return // No statistics for this volume: the write itself reports a full disk.
+    return `root:${path.parse(path.resolve(assetDir)).root.toLowerCase()}`
   }
-  if (Number.isFinite(available) && available < sizeBytes + CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES) {
-    throw new Error('Not enough free disk space for the canvas mirror asset')
+}
+
+type CanvasMirrorSpaceReservation = {
+  /** Bytes of the asset that reached the temporary file (the volume's free space shows them now). */
+  wrote(bytes: number): void
+  release(): void
+}
+
+/**
+ * Reserves room for one asset on the mirror's volume. The free space is read
+ * first; the check against it and the reservation then happen in one step, so
+ * concurrent copies each see the bytes the others are still about to write.
+ * Resolves the reservation, or null when the volume cannot hold the asset
+ * besides the bytes in flight and the margin. Without volume statistics the
+ * write itself reports a full disk, and the copy is allowed.
+ */
+const reserveCanvasMirrorSpace = async (
+  assetDir: string,
+  sizeBytes: number
+): Promise<CanvasMirrorSpaceReservation | null> => {
+  const volumeId = await getCanvasMirrorVolumeId(assetDir)
+  let available = Number.POSITIVE_INFINITY
+  if (typeof fs.statfs === 'function') {
+    try {
+      const stats = await runBoundedFsOp(() => fs.statfs(assetDir))
+      available = Number(stats.bavail) * Number(stats.bsize)
+    } catch {
+      available = Number.POSITIVE_INFINITY
+    }
   }
+  const reserved = canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0
+  if (
+    Number.isFinite(available) &&
+    available < reserved + sizeBytes + CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES
+  ) {
+    return null
+  }
+  canvasMirrorReservedBytesByVolume.set(volumeId, reserved + sizeBytes)
+  let outstanding = sizeBytes
+  const give = (bytes: number): void => {
+    const amount = Math.min(outstanding, Math.max(0, bytes))
+    if (amount <= 0) return
+    outstanding -= amount
+    const remaining = (canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0) - amount
+    if (remaining > 0) canvasMirrorReservedBytesByVolume.set(volumeId, remaining)
+    else canvasMirrorReservedBytesByVolume.delete(volumeId)
+  }
+  return { wrote: give, release: () => give(outstanding) }
 }
 
 export class FsSvcImpl implements FsSvc {
@@ -825,18 +877,19 @@ export class FsSvcImpl implements FsSvc {
     // File to file: no IPC payload, so no payload limit; only the free disk space bounds it.
     const location = await resolveCanvasMirrorAssetDir(req.projectDirName, true)
     if (!location) throw new Error('Canvas mirror folder is unavailable')
-    await assertCanvasMirrorFreeSpace(location.assetDir, sourceStats.size)
+    // The free space is checked (and reserved) by the publish, as for a write.
     return publishCanvasMirrorAsset(
       location.assetDir,
       assetFileName,
       sourceStats.size,
-      async (handle) => {
+      async (handle, wrote) => {
         // Streamed into our own temporary file, so a read-only source copies like any other.
         for await (const chunk of createReadStream(sourcePath)) {
           const buffer = chunk as Buffer
           for (let offset = 0; offset < buffer.length; ) {
             const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset)
             offset += bytesWritten
+            wrote(bytesWritten)
           }
         }
       }

@@ -107,6 +107,26 @@ describe('FsSvcImpl canvas mirror assets', () => {
       expect(listAssetDir()).toEqual([`${KEY_A}.png`])
     })
 
+    it('refuses a write the free disk space cannot hold and publishes nothing', async () => {
+      vi.spyOn(fsp, 'statfs').mockResolvedValue({
+        type: 0,
+        bsize: 4096,
+        blocks: 1000,
+        bfree: 0,
+        bavail: 0,
+        files: 0,
+        ffree: 0
+      } as unknown as Awaited<ReturnType<typeof fsp.statfs>>)
+      await expect(
+        service.writeCanvasMirrorAsset({
+          projectDirName: PROJECT,
+          assetFileName: `${KEY_A}.png`,
+          data: new Uint8Array(1000)
+        })
+      ).resolves.toEqual({ status: 'no-space', sizeBytes: 1000 })
+      expect(listAssetDir()).toEqual([])
+    })
+
     it('keeps one winner when the same asset is written concurrently', async () => {
       const results = await Promise.all(
         [1, 2, 3, 4].map((value) =>
@@ -270,14 +290,88 @@ describe('FsSvcImpl canvas mirror assets', () => {
         files: 0,
         ffree: 0
       } as unknown as Awaited<ReturnType<typeof fsp.statfs>>)
+      // A recognisable result, not an error: the renderer must not send the bytes again.
       await expect(
         service.copyCanvasMirrorAsset({
           projectDirName: PROJECT,
           assetFileName: `${KEY_B}.png`,
           sourcePath: source
         })
-      ).rejects.toThrow('Not enough free disk space')
+      ).resolves.toEqual({ status: 'no-space', sizeBytes: 6 })
       expect(listAssetDir()).toEqual([])
+    })
+
+    const MARGIN = 256 * 1024 * 1024
+    const mockFreeBytes = (freeBytes: number): void => {
+      vi.spyOn(fsp, 'statfs').mockResolvedValue({
+        type: 0,
+        bsize: 1,
+        blocks: freeBytes * 2,
+        bfree: freeBytes,
+        bavail: freeBytes,
+        files: 0,
+        ffree: 0
+      } as unknown as Awaited<ReturnType<typeof fsp.statfs>>)
+    }
+
+    it('publishes one of three concurrent copies when the volume has room for one', async () => {
+      const source = writeFile(path.join(projectRoot, 'Board-1', 'k.bin'), new Uint8Array(1000))
+      mockFreeBytes(MARGIN + 1500)
+      const keys = [`b-${'1'.repeat(40)}`, `b-${'2'.repeat(40)}`, `b-${'3'.repeat(40)}`]
+      const results = await Promise.all(
+        keys.map((key) =>
+          service.copyCanvasMirrorAsset({
+            projectDirName: PROJECT,
+            assetFileName: `${key}.bin`,
+            sourcePath: source
+          })
+        )
+      )
+      expect(results.filter((result) => result.status === 'written')).toHaveLength(1)
+      expect(results.filter((result) => result.status === 'no-space')).toEqual([
+        { status: 'no-space', sizeBytes: 1000 },
+        { status: 'no-space', sizeBytes: 1000 }
+      ])
+      expect(listAssetDir()).toHaveLength(1)
+
+      // The reservation ends with the copy: the next copy is judged by the free space alone.
+      const later = await service.copyCanvasMirrorAsset({
+        projectDirName: PROJECT,
+        assetFileName: `${keys[1]}.bin`,
+        sourcePath: source
+      })
+      expect(later).toEqual({ status: 'written', sizeBytes: 1000 })
+    })
+
+    it('counts a write through the renderer against the same reservation', async () => {
+      const source = writeFile(path.join(projectRoot, 'Board-1', 'w.bin'), new Uint8Array(1000))
+      mockFreeBytes(MARGIN + 1500)
+      const [copied, written] = await Promise.all([
+        service.copyCanvasMirrorAsset({
+          projectDirName: PROJECT,
+          assetFileName: `b-${'4'.repeat(40)}.bin`,
+          sourcePath: source
+        }),
+        service.writeCanvasMirrorAsset({
+          projectDirName: PROJECT,
+          assetFileName: `b-${'5'.repeat(40)}.bin`,
+          data: new Uint8Array(1000)
+        })
+      ])
+      expect([copied.status, written.status].sort()).toEqual(['no-space', 'written'])
+      expect(listAssetDir()).toHaveLength(1)
+    })
+
+    it('reports an existing asset even when the volume is full', async () => {
+      writeFile(path.join(assetDir, `${KEY_A}.png`), new Uint8Array([1, 2]))
+      mockFreeBytes(0)
+      await expect(
+        service.writeCanvasMirrorAsset({
+          projectDirName: PROJECT,
+          assetFileName: `${KEY_A}.png`,
+          data: new Uint8Array([1, 2])
+        })
+      ).resolves.toEqual({ status: 'exists', sizeBytes: 2 })
     })
 
     it.runIf(process.platform !== 'win32')(

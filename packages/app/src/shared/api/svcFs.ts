@@ -135,8 +135,13 @@ export const MAX_CANVAS_MIRROR_KEEP_ENTRIES = 200_000
 export const MAX_CANVAS_MIRROR_SOURCE_PATH_LENGTH = 4096
 
 export type CanvasMirrorAssetResp = {
-  /** 'written': the file was created by this call; 'exists': it was already there and was kept. */
-  status: 'written' | 'exists'
+  /**
+   * 'written': the file was created by this call; 'exists': it was already there and was kept;
+   * 'no-space': nothing was written because the volume cannot hold the asset besides the
+   * copies already in flight and a safety margin (sizeBytes is then the asset's size).
+   * A 'no-space' result is final for the save that asked: it must not send the same bytes again.
+   */
+  status: 'written' | 'exists' | 'no-space'
   sizeBytes: number
 }
 

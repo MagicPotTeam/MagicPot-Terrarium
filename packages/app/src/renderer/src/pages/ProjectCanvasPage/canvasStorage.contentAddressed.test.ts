@@ -701,6 +701,8 @@ function createFakeMirror(autoSaveRoot = '/home/u/AutoSave') {
   const state = {
     failProjectFileWrite: false,
     refuseCopy: false,
+    /** Main reports no free disk space for every asset (copy and write). */
+    noSpace: false,
     applyPrune: false,
     failWrite: null as ((assetFileName: string) => boolean) | null,
     /** Sizes the metadata call reports instead of the real ones, by full path. */
@@ -726,6 +728,7 @@ function createFakeMirror(autoSaveRoot = '/home/u/AutoSave') {
       calls.copy.push({ assetFileName: req.assetFileName, sourcePath: req.sourcePath })
       const data = readable(req.sourcePath)
       if (state.refuseCopy || !data) throw new Error('Canvas mirror asset source is not authorized')
+      if (state.noSpace) return { status: 'no-space' as const, sizeBytes: data.byteLength }
       events.push(`asset:${req.assetFileName}`)
       return publish(assetPath(req.projectDirName, req.assetFileName), data)
     },
@@ -736,6 +739,7 @@ function createFakeMirror(autoSaveRoot = '/home/u/AutoSave') {
     }) => {
       calls.write.push({ assetFileName: req.assetFileName, bytes: req.data.byteLength })
       if (state.failWrite?.(req.assetFileName)) throw new Error('synthetic asset write failure')
+      if (state.noSpace) return { status: 'no-space' as const, sizeBytes: req.data.byteLength }
       events.push(`asset:${req.assetFileName}`)
       return publish(assetPath(req.projectDirName, req.assetFileName), req.data)
     },
@@ -2025,6 +2029,43 @@ describe('mirror staging failures', () => {
     await saveCanvasItems([good, bad], 'stage-fail')
     expect(mirror.calls.write.map((call) => call.assetFileName)).toEqual([`${contentKey([4, 5])}.png`])
     expect(mirror.project().items[1].src).toBe(`assets/${contentKey([4, 5])}.png`)
+  })
+
+  it('treats a full disk as final for the save: no second send, the previous copy stays', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.applyPrune = true
+    const filePath = '/home/u/Projects/full/photo.png'
+    mirror.localFiles.set(filePath, new Uint8Array([6, 6, 6]))
+    const photo = imageItem('photo', `local-media://${filePath}`, {
+      sourceIdentity: { kind: 'local-file', canonicalPath: filePath, sizeBytes: 3, lastModifiedMs: 1_700_000_000_000 }
+    })
+    const first = imageItem('first', registerSource('blob:full-first', [1, 1]))
+    await saveCanvasItems([first], 'full-disk')
+    const firstRef = `assets/${contentKey([1, 1])}.png`
+    expect(mirror.project().items[0].src).toBe(firstRef)
+
+    // The image is replaced while the disk is full.
+    mirror.state.noSpace = true
+    mirror.resetCalls()
+    const replaced = { ...first, src: registerSource('blob:full-second', [2, 2]) } as CanvasItem
+    await saveCanvasItems([replaced, photo], 'full-disk')
+
+    // One attempt per asset, nothing sent again through the renderer. The file is read
+    // once, by the IndexedDB store; the mirror does not read it to write it itself.
+    expect(mirror.calls.copy.map((call) => call.sourcePath)).toEqual([filePath])
+    expect(mirror.calls.write.map((call) => call.assetFileName)).toEqual([`${contentKey([2, 2])}.png`])
+    expect(mirror.calls.readFileFromPath).toEqual([filePath])
+    // The replaced image keeps its previous copy; the photo has none and keeps its source,
+    // so nothing is pruned.
+    expect(mirror.project().items.map((item) => item.src)).toEqual([firstRef, `local-media://${filePath}`])
+    expect(mirror.calls.prune).toEqual([])
+    expect(mirror.assetFiles()).toEqual([`${contentKey([1, 1])}.png`])
+
+    // Room again: the next save mirrors both.
+    mirror.state.noSpace = false
+    await saveCanvasItems([replaced, photo], 'full-disk')
+    expect(mirror.project().items[0].src).toBe(`assets/${contentKey([2, 2])}.png`)
+    expect(mirror.project().items[1].src).toMatch(/^assets\/f-[0-9a-f]{40}\.png$/)
   })
 
   it('never reads a source larger than the IPC limit through the renderer when main cannot copy it', async () => {

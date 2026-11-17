@@ -2549,6 +2549,12 @@ async function pruneCanvasAssetBlobs(
 const CANVAS_MIRROR_STAGE_CONCURRENCY = 3
 const CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN = /^[bfu]-[0-9a-f]{40}(?:\.[a-z0-9]{1,16})?$/
 const CANVAS_SOURCE_STRING_KEY_CACHE_MAX_LENGTH = 2048
+/**
+ * Main refused an asset for lack of free disk space. Final for the save that
+ * asked: the slot stays unsafe (its previous copy is carried) and the bytes are
+ * not sent again through another call; the next save asks once more.
+ */
+const CANVAS_MIRROR_NO_SPACE = 'no-space' as const
 
 // Keys of sources identified by their string (remote URLs, data: URLs); only
 // short strings are remembered so that no large data: URL is kept alive here.
@@ -2578,11 +2584,18 @@ type CanvasMirrorTransport = {
   /** Asset file names in the folder. */
   list(): Promise<Set<string>>
   /**
-   * File-to-file copy in the main process: the size of the published file, or
-   * null when it failed. The member is null when the bridge has no such call.
+   * File-to-file copy in the main process: the size of the published file,
+   * CANVAS_MIRROR_NO_SPACE when main refused it for lack of free disk space, or
+   * null when it failed otherwise. The member is null when the bridge has no such call.
    */
-  copy: ((assetFileName: string, sourcePath: string) => Promise<number | null>) | null
-  write(assetFileName: string, data: ArrayBuffer): Promise<void>
+  copy:
+    | ((
+        assetFileName: string,
+        sourcePath: string
+      ) => Promise<number | typeof CANVAS_MIRROR_NO_SPACE | null>)
+    | null
+  /** Resolves CANVAS_MIRROR_NO_SPACE when main refused the bytes for lack of free disk space. */
+  write(assetFileName: string, data: ArrayBuffer): Promise<void | typeof CANVAS_MIRROR_NO_SPACE>
   prune: ((keepAssetKeys: string[], keepEntryNames: string[]) => Promise<void>) | null
 }
 
@@ -2759,6 +2772,7 @@ function createCanvasMirrorTransport(
             assetFileName,
             sourcePath
           })
+          if (receipt?.status === CANVAS_MIRROR_NO_SPACE) return CANVAS_MIRROR_NO_SPACE
           return receipt?.status === 'written' || receipt?.status === 'exists'
             ? receipt.sizeBytes
             : null
@@ -2773,9 +2787,11 @@ function createCanvasMirrorTransport(
           assetFileName,
           data: new Uint8Array(data)
         })
+        if (receipt?.status === CANVAS_MIRROR_NO_SPACE) return CANVAS_MIRROR_NO_SPACE
         if (receipt?.status !== 'written' && receipt?.status !== 'exists') {
           throw new Error('CANVAS_PROJECT_ASSET_WRITE_UNACKNOWLEDGED')
         }
+        return undefined
       },
       prune: async (keepAssetKeys, keepEntryNames) => {
         await svcFs.pruneCanvasMirrorAssets({ projectDirName, keepAssetKeys, keepEntryNames })
@@ -2936,6 +2952,11 @@ async function stageCanvasMirrorAsset(
         getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src))
     ) {
       const copiedBytes = await plan.transport.copy(assetFileName, localPath)
+      // No room on the mirror's volume: final for this save, the bytes are not sent again.
+      if (copiedBytes === CANVAS_MIRROR_NO_SPACE) {
+        console.warn('[Canvas Storage] Not enough free disk space to mirror asset:', slot.logicalKey)
+        return false
+      }
       // An empty copy of an image, video or model is listed as missing and redone later.
       if (copiedBytes !== null && (copiedBytes > 0 || !refusesEmptyCanvasRead(slot.owner, slot.src))) {
         return true
@@ -2957,7 +2978,10 @@ async function stageCanvasMirrorAsset(
       console.error('[Canvas Storage] Failed to stage project asset:', slot.logicalKey)
       return false
     }
-    await plan.transport.write(assetFileName, bytes.data)
+    if ((await plan.transport.write(assetFileName, bytes.data)) === CANVAS_MIRROR_NO_SPACE) {
+      console.warn('[Canvas Storage] Not enough free disk space to mirror asset:', slot.logicalKey)
+      return false
+    }
     return true
   } catch (error) {
     console.warn('[Canvas Storage] Failed to stage project asset:', slotPlan.slot.logicalKey, error)
