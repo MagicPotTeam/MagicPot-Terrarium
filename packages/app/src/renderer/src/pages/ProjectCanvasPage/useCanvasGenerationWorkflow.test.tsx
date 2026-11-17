@@ -142,14 +142,52 @@ function createTextItem(text = 'A neon fox courier in rainy cyberpunk Shanghai')
 describe('generation delivery result contract', () => {
   it('keeps the dialog open and does not report success when send returns false', async () => {
     const notifySuccess = vi.fn()
+    const notifyWarning = vi.fn()
     const send = vi.fn().mockResolvedValue(false)
-    render(<WorkflowProbe items={[createImageItem()]} notifySuccess={notifySuccess} notifyWarning={vi.fn()} sendCanvasItemsToAgent={send} />)
+    render(<WorkflowProbe items={[createImageItem()]} notifySuccess={notifySuccess} notifyWarning={notifyWarning} sendCanvasItemsToAgent={send} />)
     fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
     await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' })) })
     expect(send).toHaveBeenCalledOnce()
     expect(screen.getByTestId('dialog-state')).toHaveTextContent('open')
     expect(notifySuccess).not.toHaveBeenCalled()
+    // A send that was not scheduled is not reported as scheduled either.
+    expect(notifyWarning).not.toHaveBeenCalled()
+  })
+
+  it('says nothing while the hand-off is still pending, then reports it as scheduled once', async () => {
+    const notifySuccess = vi.fn()
+    const notifyWarning = vi.fn()
+    let settle: (scheduled: boolean) => void = () => undefined
+    const send = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          settle = resolve
+        })
+    )
+    render(
+      <WorkflowProbe
+        items={[createImageItem()]}
+        notifySuccess={notifySuccess}
+        notifyWarning={notifyWarning}
+        sendCanvasItemsToAgent={send}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
+    await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' }))
+    })
+    expect(send).toHaveBeenCalledOnce()
+    expect(notifyWarning).not.toHaveBeenCalled()
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(screen.getByTestId('dialog-state')).toHaveTextContent('open')
+    await act(async () => {
+      settle(true)
+    })
+    expect(notifyWarning).toHaveBeenCalledExactlyOnceWith('已安排向默认 Agent 投递，尚未确认接收')
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(screen.getByTestId('dialog-state')).toHaveTextContent('closed')
   })
 
   it('describes true as scheduled, not confirmed delivery', async () => {

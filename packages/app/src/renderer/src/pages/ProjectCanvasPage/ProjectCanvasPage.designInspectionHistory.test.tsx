@@ -2156,10 +2156,15 @@ describe('ProjectCanvasPage generation-first entry', () => {
       shiftClick(secondFileButton)
 
       fireEvent.click(await screen.findByRole('button', { name: 'Generate From Selection' }))
-      // Nothing is reported before the send is handed to the delivery path.
+      // Nothing is reported while the dialog is only open.
       expect(notifyWarning).not.toHaveBeenCalled()
       expect(notifySuccess).not.toHaveBeenCalled()
       fireEvent.click(await screen.findByRole('button', { name: '发送给 默认 Agent 生成候选图' }))
+      // The click has started the hand-off but it has not been scheduled yet (the
+      // selection is still being prepared, and that can fail or be cancelled), so
+      // the user must not be told anything at this point.
+      expect(notifyWarning).not.toHaveBeenCalled()
+      expect(notifySuccess).not.toHaveBeenCalled()
 
       await waitFor(
         () => {
