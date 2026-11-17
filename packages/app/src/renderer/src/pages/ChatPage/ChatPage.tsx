@@ -1,9 +1,9 @@
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
-import { setTeamTaskStatus, validateTeamTasks } from './agentTeamTasks'
+import { revertTeamTaskRun, setTeamTaskStatus, validateTeamTasks, type TeamTaskOutcome } from './agentTeamTasks'
 import { createTeamLiveActivity } from './teamLiveActivity'
-import { claimTeamTaskInDB } from './agentTeamTaskDispatch'
+import { claimTeamTaskInDB, releaseTeamTaskClaimInDB } from './agentTeamTaskDispatch'
 import AgentTeamMenu from './components/AgentTeamMenu'
 import { registerTeamApprovalSurface } from '../../components/teamApprovalSurface'
 import { AgentTeamMemberForm, AgentTeamMemberImages } from './components/AgentTeamTree'
@@ -451,6 +451,8 @@ type SendMessageOverrides = {
   queuedAttachmentTypes?: ChatAttachment['type'][]
   /** The task remains running unless a real model response completes. */
   onTaskCompleted?: () => void
+  /** The run ended without a confirmed result (failed, cancelled, or its reply save unconfirmed). */
+  onTaskSettled?: (outcome: TeamTaskOutcome) => void
   /** Renderer initiated a member request, not proof the provider received it. */
   onTeamRequestStarted?: () => void
   /** True only while the originating composer draft still belongs to this submission. */
@@ -8197,7 +8199,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         lifecycleEvent('completed')
         overrides?.onTeamResponseReceived?.()
         if (!sessionSnapshotSaveFailed) overrides?.onTaskCompleted?.()
-        else if (overrides?.onTaskCompleted) notifyWarning('成员已有回复，但会话保存未确认，任务仍为进行中')
+        else if (overrides?.onTaskCompleted) {
+          notifyWarning(t('chat.team_task_reply_unsaved', { defaultValue: 'The member replied, but its conversation save is not confirmed. The task is back to pending.' }))
+          overrides.onTaskSettled?.('interrupted')
+        }
         emitAgentTraceEvent(
           'success',
           `Agent response completed with ${traceResponseCount || 1} assistant message(s).`,
@@ -8227,6 +8232,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         )
         if (wasCancelled) {
           lifecycleEvent('cancelled')
+          overrides?.onTaskSettled?.('cancelled')
           const hasPartialStreamedResponse =
             Boolean(streamedResponse.trim()) ||
             streamedAttachments.length > 0 ||
@@ -8281,6 +8287,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } else {
           lifecycleEvent('failed')
           if (error === staleRunError || !isCurrentRun()) return
+          overrides?.onTaskSettled?.('failed')
           console.error('[ChatPage] Send message error:', error)
           notifyError(error instanceof Error ? error.message : String(error))
           const runId = targetSessionId || null
@@ -8757,8 +8764,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         (currentMember.teamMemberGeneration ?? 0) === (currentLead.teamGeneration ?? 0) &&
         !hasSessionDeleteTombstone(leadId, scope) && !hasSessionDeleteTombstone(currentMember.id, scope) &&
         !teamEndPendingRef.current.has(teamKey) && !teamEndedMainRef.current.has(teamKey))
-    if (!lead || !task || task.status !== 'pending' || !member || !validTeam(lead, member) ||
-      loadingSessionIdsRef.current.has(member.id) || sendingSessionIdsRef.current.has(member.id) ||
+    const ownerBusy = (id: string): boolean =>
+      loadingSessionIdsRef.current.has(id) || sendingSessionIdsRef.current.has(id) || externalLoadingSessionIdsRef.current.has(id)
+    if (!lead || !task || task.status !== 'pending' || !member || !validTeam(lead, member) || ownerBusy(member.id) ||
       persistedSessionsRef.current.get(leadId) !== lead || chatSaveBaselineRef.current.isPending(scope, leadId)) {
       notifyWarning('任务不可执行：请检查负责人、依赖和已保存状态')
       return
@@ -8775,22 +8783,40 @@ const ChatPage: React.FC<ChatPageProps> = ({
         (teamEndEpochsRef.current.get(teamKey) ?? 0) === endEpoch &&
         sessionsRef.current.find(session => session.id === leadId) === lead &&
         validTeam(lead, sessionsRef.current.find(session => session.id === member.id))
-      if (!stillCurrent) {
-        if (isMountedRef.current && storageScopeRef.current === scope) void refreshSessionsFromStorage()
-        notifyWarning('任务已领取但团队状态发生变化，请检查任务状态')
+      // The owner became busy while the claim was committing: this task's run never starts.
+      const busyAfterClaim = stillCurrent && ownerBusy(member.id)
+      if (!stillCurrent || busyAfterClaim) {
+        // Nothing runs for this claim, so undo it: the stored lead goes back to the exact snapshot the
+        // claim started from. Another write since the claim wins; the task then stays running and the
+        // team menu offers a reset. Never dispatched again automatically.
+        let released: ChatSession | null = null
+        try { released = await releaseTeamTaskClaimInDB({ scope, leadId, claimedLead: claimed, taskBeforeClaim: task }) } catch { /* Stays running. */ }
+        if (released) noteSessionWriteAcknowledged(scope)
+        if (isMountedRef.current && storageScopeRef.current === scope && (!stillCurrent || !released)) void refreshSessionsFromStorage()
+        notifyWarning(stillCurrent
+          ? t('chat.team_task_owner_busy', { defaultValue: 'The owner is busy with another request. The task was not started; try again later.' })
+          : '任务已领取但团队状态发生变化，请检查任务状态')
         return
       }
       chatSaveBaselineRef.current.fenceAndAdvance(scope, leadId, claimed)
       persistedSessionsRef.current.set(leadId, claimed)
       setSessions(previous => previous.map(session => session === lead ? claimed : session))
-      const complete = () => {
+      // Records the end of this task's run on the lead: done after a confirmed reply, otherwise back to
+      // pending with the outcome. Skipped (the task stays running until the user resets it) when the
+      // pane, scope or team changed meanwhile.
+      const finishTaskRun = (outcome: 'done' | TeamTaskOutcome) => {
         if (!isMountedRef.current || storageScopeRef.current !== scope || sessionLoadEpochRef.current !== scopeEpoch) return
+        const targetStatus = outcome === 'done' ? 'done' : 'pending'
         const current = sessionsRef.current.find(session => session.id === leadId)
         const currentTask = current?.teamTasks?.find(item => item.id === taskId)
         if (!current || current.teamEnded || teamEndPendingRef.current.has(teamKey) || teamEndedMainRef.current.has(teamKey) ||
           (teamEndEpochsRef.current.get(teamKey) ?? 0) !== endEpoch || currentTask?.status !== 'running' || currentTask.ownerId !== member.id ||
           (current.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)) return
         let updated: ChatSession | undefined
+        const notifyTaskStateUnsaved = (): void => {
+          if (outcome === 'done') notifyWarning('任务执行结果已返回，但任务状态保存失败')
+          else notifyWarning(t('chat.team_task_revert_unsaved', { defaultValue: 'The task could not be returned to pending. Reset it in team management.' }))
+        }
         chatSaveBaselineRef.current.freeze(scope, leadId, persistedSessionsRef.current.get(leadId) ?? null)
         void chatSaveBaselineRef.current.persistLatest(scope, leadId,
           () => storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch ? sessionsRef.current.find(session => session.id === leadId) ?? null : null,
@@ -8801,25 +8827,39 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const latest = sessionsRef.current.find(session => session.id === leadId)
           const latestTask = latest?.teamTasks?.find(item => item.id === taskId)
           if (!latest || latest.teamEnded || (latest.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)) return null
-          if (latestTask?.status === 'done' && updated) return latest
+          if (latestTask?.status === targetStatus && updated) return latest
           if (latestTask?.status !== 'running' || latestTask.ownerId !== member.id) return null
-          updated = { ...latest, teamTasks: setTeamTaskStatus(latest.teamTasks ?? [], taskId, 'done') }
+          const nextTasks = outcome === 'done'
+            ? setTeamTaskStatus(latest.teamTasks ?? [], taskId, 'done')
+            : revertTeamTaskRun(latest.teamTasks ?? [], taskId, member.id, outcome)
+          if (!nextTasks) return null
+          updated = { ...latest, teamTasks: nextTasks }
           setSessions(previous => previous.map(session => session === latest ? updated! : session))
           setDirtySessionSnapshot(scope, updated)
           return updated
         }).then(saved => {
-          if (!saved || !clearDirtySessionSnapshotIfCurrent(scope, saved)) notifyWarning('任务执行结果已返回，但任务状态保存失败')
+          if (!saved || !clearDirtySessionSnapshotIfCurrent(scope, saved)) notifyTaskStateUnsaved()
         }).catch(error => {
           const detail = error instanceof Error ? error.message : String(error)
           setSessionSaveError(`Failed to save chat session: ${detail}`)
-          notifyWarning('任务执行结果已返回，但任务状态保存失败')
+          notifyTaskStateUnsaved()
         })
       }
-      if (loadingSessionIdsRef.current.has(member.id) || sendingSessionIdsRef.current.has(member.id)) {
-        notifyWarning('负责人已在执行其他任务，此任务保持运行中，请检查后重试')
-        return
+      let taskRunReported = false
+      const complete = () => { taskRunReported = true; finishTaskRun('done') }
+      const settle = (outcome: TeamTaskOutcome) => {
+        if (taskRunReported) return
+        taskRunReported = true
+        finishTaskRun(outcome)
       }
-      await sendMessage({ content: `团队任务：${task.title}`, targetSessionId: member.id, onTaskCompleted: complete })
+      try {
+        await sendMessage({ content: `团队任务：${task.title}`, targetSessionId: member.id, onTaskCompleted: complete, onTaskSettled: settle })
+      } finally {
+        // The send returned without reporting the run (it never started, or it was abandoned when
+        // its scope changed). A send queued behind another run of the owner reports when it runs.
+        const queued = queuedSessionSendsRef.current.get(member.id)?.some(item => item.overrides?.onTaskCompleted === complete)
+        if (!taskRunReported && !queued) settle('interrupted')
+      }
     } catch {
       notifyWarning('无法领取任务，请刷新团队状态并重试')
     } finally {
