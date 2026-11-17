@@ -99,6 +99,22 @@ describe('agent loop budget landing (native tools)', () => {
     expect(new Set(history.map(r => r.toolCallId)).size).toBe(64)
     expect(history.every(r => r.status === 'completed')).toBe(true)
     expect(history.map(r => (r.args as { path: string }).path)).toEqual(Array.from({ length: 64 }, (_, i) => `c${i}.txt`))
+    // The summary call reported no finish reason of its own, so none is recorded.
+    expect(result.metadata).not.toHaveProperty('finalFinishReason')
+  })
+
+  it('keeps the summary call\'s own finish reason next to the landed length', async () => {
+    let n = 0
+    const { chat } = recordingChat(params => params.tools
+      ? { content: '', toolCalls: [call('c' + n++)], finishReason: 'tool_call' }
+      : { content: SUMMARY, finishReason: 'length' })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const result = await new LLMProxySvcImpl().chat(request())
+    expect(result.content).toBe(SUMMARY)
+    expect(result.finishReason).toBe('length')
+    expect(result.metadata?.limitReached).toBe('tool_calls')
+    // A summary cut short by maxOutputTokens is visible as such.
+    expect(result.metadata?.finalFinishReason).toBe('length')
   })
 
   it('sends the final call without any tool surface and with every kept result as plain text', async () => {
@@ -124,6 +140,8 @@ describe('agent loop budget landing (native tools)', () => {
     const last = final.messages.at(-1)!
     expect(last.role).toBe('user')
     expect(last.content).toMatch(/Tool budget reached/)
+    // A landed turn releases its background work as unsuccessful, so the summary must not claim it runs on.
+    expect(last.content).toContain('Background jobs, processes and apps started in this turn are stopped when this turn ends')
     expect(final.systemPrompt).toBe('You are the base agent.')
     // The previous step still had the full tool surface.
     expect(seen.at(-2)!.toolTurns).toHaveLength(64)

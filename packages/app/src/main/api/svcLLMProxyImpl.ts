@@ -1194,6 +1194,9 @@ const buildAgentLoopLimitNote = (
     detail.withheldResults
       ? `The results of the last ${detail.withheldResults} tool call(s) are not shown because they exceeded the transcript budget; they were still recorded for the user.`
       : '',
+    // A landed turn is not a successful one: its background jobs, processes and apps are released
+    // as unsuccessful (cancelled) when it ends, so the summary must not call them still running.
+    'Background jobs, processes and apps started in this turn are stopped when this turn ends; do not tell the user they are still running.',
     'Using only the tool results above, answer the user in plain text: summarize what was done and found, what is still unfinished, and how they can continue. Do not output tool calls or tool JSON.'
   ].filter(Boolean).join('\n')
 })
@@ -3396,7 +3399,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           content,
           finishReason: 'length',
           ...(landed.sessionUrl ? { sessionUrl: landed.sessionUrl } : {}),
-          metadata: { ...(landed.metadata || {}), limitReached }
+          // finalFinishReason keeps the provider's own outcome of the summary call (for example a
+          // summary cut short by maxOutputTokens), which the landed 'length' would otherwise hide.
+          metadata: {
+            ...(landed.metadata || {}),
+            limitReached,
+            ...(landed.finishReason ? { finalFinishReason: landed.finishReason } : {})
+          }
         }
       }
     } catch (error) {

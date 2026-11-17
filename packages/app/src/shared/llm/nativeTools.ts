@@ -22,7 +22,10 @@ const MAX_CALL_BYTES = 512 * 1024
 export const MAX_NATIVE_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 export const MAX_AGENT_TOOL_CALLS = 64
 /** Model calls of one Agent turn: every tool step plus one protocol repair and the final answer.
- * Reaching it (or the call/transcript budget) lands the turn with one tool-less summary call. */
+ * Reaching it (or the call/transcript budget) lands the turn with one tool-less summary call.
+ * Through the real loop the tool-call cap is always reached first (every step ends the turn,
+ * repairs once or runs at least one tool), so this cap is a backstop; its landing is tested with
+ * a lowered mock value. */
 export const MAX_AGENT_MODEL_STEPS = MAX_AGENT_TOOL_CALLS + 2
 /** From this many executed calls on (75 % of the cap) the loop asks the model, once, to wrap up. */
 export const AGENT_TOOL_CALL_SOFT_BUDGET = Math.ceil(MAX_AGENT_TOOL_CALLS * 0.75)
