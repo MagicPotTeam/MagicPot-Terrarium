@@ -74,6 +74,19 @@ describe('canvas proven crop registry', () => {
     expect(registry.totalBytes).toBe(16)
   })
 
+  it('tells subscribers which item got an entry, and nothing after they unsubscribe', () => {
+    const { registry } = createRegistry()
+    const listener = vi.fn()
+    const unsubscribe = registry.subscribe(listener)
+    registry.register(croppedItem(), png(), CROP_SIZE)
+    expect(listener).toHaveBeenCalledExactlyOnceWith('image-1')
+    expect(registry.register(croppedItem({ cropSource: undefined }), png(), CROP_SIZE)).toBeNull()
+    expect(listener).toHaveBeenCalledTimes(1)
+    unsubscribe()
+    registry.register(croppedItem({ id: 'image-2' }), png(), CROP_SIZE)
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     ['no record', { cropSource: undefined }],
     ['a malformed record', { cropSource: { ...RECORD, sha256: 'not-a-hash' } }],

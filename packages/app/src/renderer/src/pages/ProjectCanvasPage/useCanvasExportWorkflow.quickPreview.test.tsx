@@ -1,8 +1,12 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runWithCanvasRasterWorkLimit } from './canvasRasterWorkLimiter'
+import {
+  createCanvasProvenCropRegistry,
+  type CanvasProvenCropRegistry
+} from './canvasProvenCropRegistry'
 import { useCanvasExportWorkflow } from './useCanvasExportWorkflow'
-import type { CanvasImageItem, CanvasItem } from './types'
+import type { CanvasImageCropSource, CanvasImageItem, CanvasItem } from './types'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key })
@@ -39,6 +43,34 @@ function createImageItem(id: string, overrides: Partial<CanvasImageItem> = {}): 
     zIndex: 0,
     locked: false,
     ...overrides
+  }
+}
+
+// The URL a stub registry hands out for one exact crop of one exact source.
+function provenUrl(item: CanvasImageItem): string {
+  const crop = item.crop!
+  return `blob:proven-${item.id}-${item.src.split('/').pop()}-${crop.x}-${crop.y}-${crop.width}-${crop.height}`
+}
+
+// A registry that has an entry for every crop (the pixel content is not modelled).
+function createStubRegistry(): CanvasProvenCropRegistry {
+  return {
+    register: () => null,
+    lookup: (item) =>
+      item.crop
+        ? {
+            url: provenUrl(item),
+            fileName: `${item.id}-crop.png`,
+            mimeType: 'image/png',
+            sizeBytes: 16,
+            width: item.crop.width,
+            height: item.crop.height
+          }
+        : null,
+    release: () => undefined,
+    subscribe: () => () => undefined,
+    entryCount: 0,
+    totalBytes: 0
   }
 }
 
@@ -213,7 +245,9 @@ describe('useCanvasExportWorkflow quick drag previews', () => {
     expect(options.setSelectedIds).not.toHaveBeenCalled()
   })
 
-  it('preserves crop, flip, rotation and z-order when drawing selected originals', async () => {
+  it('draws a crop from its registered PNG with flip, rotation and z-order kept', async () => {
+    // Before F2 the crop was redrawn from the original source (16, 24, 48, 72 of
+    // item.src); it now comes only from the PNG registered when it was proven.
     const back = createImageItem('back', { zIndex: 1 })
     const front = createImageItem('cropped-front', {
       crop: { x: 16, y: 24, width: 48, height: 72 },
@@ -222,19 +256,22 @@ describe('useCanvasExportWorkflow quick drag previews', () => {
       scaleY: 2,
       zIndex: 4
     })
-    const { result, loadImageFromSrc } = renderWorkflow([front, back])
+    const { result, loadImageFromSrc } = renderWorkflow([front, back], {
+      provenCropRegistry: createStubRegistry()
+    })
     let url: string | null = null
     await act(async () => {
       url = await result.current.prepareQuickCanvasItemsImageUrl([front, back])
     })
 
     const context = previewContext(url)
+    expect(loadImageFromSrc.mock.calls.map(([src]) => src)).toEqual([back.src, provenUrl(front)])
     const [backImage, frontImage] = await Promise.all(
       loadImageFromSrc.mock.results.map((call) => call.value as Promise<LoadedImage>)
     )
     expect(context.drawImage.mock.calls).toEqual([
       [backImage.img, 0, 0, 120, 160],
-      [frontImage.img, 16, 24, 48, 72, 0, 0, 120, 160]
+      [frontImage.img, 0, 0, 120, 160]
     ])
     expect(context.rotate).toHaveBeenCalledExactlyOnceWith(Math.PI / 2)
     expect(context.scale.mock.calls).toEqual([
@@ -250,12 +287,15 @@ describe('useCanvasExportWorkflow quick drag previews', () => {
       crop: { x: 10, y: 20, width: 30, height: 40 }
     })
     const original = { ...item, crop: { ...item.crop! } }
-    const imageA = createLoadedImage(original.src)
+    const imageA = createLoadedImage(provenUrl(original))
     const readyA = deferred<LoadedImage>()
     const loadImageFromSrc = vi.fn((src: string) =>
-      src === original.src ? readyA.promise : Promise.resolve(createLoadedImage(src))
+      src === provenUrl(original) ? readyA.promise : Promise.resolve(createLoadedImage(src))
     )
-    const { result, rerender, options } = renderWorkflow([item], { loadImageFromSrc })
+    const { result, rerender, options } = renderWorkflow([item], {
+      loadImageFromSrc,
+      provenCropRegistry: createStubRegistry()
+    })
     let urlA: string | null = null
     let urlB: string | null = null
     await act(async () => {
@@ -272,12 +312,10 @@ describe('useCanvasExportWorkflow quick drag previews', () => {
     })
 
     expect(urlA).not.toBe(urlB)
-    expect(previewContext(urlA).drawImage.mock.calls).toEqual([
-      [imageA.img, 10, 20, 30, 40, 0, 0, 120, 160]
-    ])
+    expect(previewContext(urlA).drawImage.mock.calls).toEqual([[imageA.img, 0, 0, 120, 160]])
     const contextB = previewContext(urlB)
-    expect((drawnSources(contextB)[0] as HTMLImageElement).src).toBe(item.src)
-    expect(contextB.drawImage.mock.calls[0].slice(1)).toEqual([70, 20, 30, 40, 0, 0, 120, 160])
+    expect((drawnSources(contextB)[0] as HTMLImageElement).src).toBe(provenUrl(item))
+    expect(contextB.drawImage.mock.calls[0].slice(1)).toEqual([0, 0, 120, 160])
     expect(contextB.rotate).toHaveBeenCalledExactlyOnceWith(Math.PI)
     expect(result.current.getQuickCanvasItemsImageUrl([original])).toBe(urlA)
     expect(result.current.getQuickCanvasItemsImageUrl([item])).toBe(urlB)
@@ -291,7 +329,9 @@ describe('useCanvasExportWorkflow quick drag previews', () => {
     const targets: CanvasItem[] = [item]
     const queueGate = deferred<void>()
     const blocker = runWithCanvasRasterWorkLimit(() => queueGate.promise)
-    const { result, loadImageFromSrc } = renderWorkflow(targets)
+    const { result, loadImageFromSrc } = renderWorkflow(targets, {
+      provenCropRegistry: createStubRegistry()
+    })
     let url: string | null = null
     await act(async () => {
       const pending = result.current.prepareQuickCanvasItemsImageUrl(targets)
@@ -302,9 +342,9 @@ describe('useCanvasExportWorkflow quick drag previews', () => {
       ;[, url] = await Promise.all([blocker, pending])
     })
 
-    expect(loadImageFromSrc).toHaveBeenCalledExactlyOnceWith(original.src)
+    expect(loadImageFromSrc).toHaveBeenCalledExactlyOnceWith(provenUrl(original))
     const context = previewContext(url)
-    expect(context.drawImage.mock.calls[0].slice(1)).toEqual([1, 2, 3, 4, 0, 0, 120, 160])
+    expect(context.drawImage.mock.calls[0].slice(1)).toEqual([0, 0, 120, 160])
     expect(result.current.getQuickCanvasItemsImageUrl([original])).toBe(url)
     expect(result.current.getQuickCanvasItemsImageUrl(targets)).toBeNull()
   })
@@ -450,5 +490,139 @@ describe('useCanvasExportWorkflow quick drag previews', () => {
     for (const url of previewCanvases.keys()) {
       expect(revokeObjectURL).toHaveBeenCalledWith(url)
     }
+  })
+  describe('selections that hold a crop (F2 part 1)', () => {
+    const SHA = 'a'.repeat(64)
+    const record: CanvasImageCropSource = {
+      version: 1,
+      origin: 'confirm',
+      width: 400,
+      height: 300,
+      sizeBytes: 1234,
+      sha256: SHA
+    }
+    function croppedItem(id: string, overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
+      return createImageItem(id, {
+        src: `local-media:///C:/images/${id}.png`,
+        sourceWidth: 400,
+        sourceHeight: 300,
+        crop: { x: 40, y: 30, width: 120, height: 160 },
+        cropSource: record,
+        zIndex: 2,
+        ...overrides
+      })
+    }
+    function realRegistry() {
+      let made = 0
+      return createCanvasProvenCropRegistry(
+        {},
+        { create: () => `blob:registered-crop-${++made}`, revoke: () => undefined }
+      )
+    }
+    const png = () => new Blob(['crop-pixels'], { type: 'image/png' })
+
+    it('makes no snapshot of a proven crop that has no registered PNG and never loads its source', async () => {
+      const plain = createImageItem('plain-neighbour', { x: 300 })
+      const cropped = croppedItem('unregistered-crop')
+      const { result, loadImageFromSrc } = renderWorkflow([plain, cropped], {
+        provenCropRegistry: realRegistry()
+      })
+      let url: string | null = 'not-called'
+      await act(async () => {
+        url = await result.current.prepareQuickCanvasItemsImageUrl([plain, cropped])
+      })
+
+      expect(url).toBeNull()
+      expect(result.current.getQuickCanvasItemsImageUrl([plain, cropped])).toBeNull()
+      expect(loadImageFromSrc).not.toHaveBeenCalled()
+      expect(createObjectURL).not.toHaveBeenCalled()
+    })
+
+    it('makes no snapshot of a cropped selection without a registry', async () => {
+      const cropped = croppedItem('no-registry-crop')
+      const { result, loadImageFromSrc } = renderWorkflow([cropped])
+      let url: string | null = 'not-called'
+      await act(async () => {
+        url = await result.current.prepareQuickCanvasItemsImageUrl([cropped])
+      })
+      expect(url).toBeNull()
+      expect(loadImageFromSrc).not.toHaveBeenCalled()
+    })
+
+    it('draws the registered crop PNG, not item.src, even after the source file changed under the same URL', async () => {
+      const plain = createImageItem('plain-beside-crop', { x: 300, zIndex: 1 })
+      const cropped = croppedItem('registered-crop')
+      const registry = realRegistry()
+      const entry = registry.register(cropped, png(), { width: 120, height: 160 })
+      expect(entry?.url).toBe('blob:registered-crop-1')
+      // The local file behind cropped.src now holds other pixels: loading it
+      // would give an image of a different size and content.
+      const loadImageFromSrc = vi.fn(async (src: string) =>
+        src === cropped.src
+          ? { img: createLoadedImage('overwritten').img, width: 2048, height: 2048 }
+          : createLoadedImage(src)
+      )
+      const { result } = renderWorkflow([plain, cropped], {
+        loadImageFromSrc,
+        provenCropRegistry: registry
+      })
+      let url: string | null = null
+      await act(async () => {
+        url = await result.current.prepareQuickCanvasItemsImageUrl([plain, cropped])
+      })
+
+      expect(loadImageFromSrc.mock.calls.map(([src]) => src)).toEqual([
+        plain.src,
+        'blob:registered-crop-1'
+      ])
+      const context = previewContext(url)
+      const drawn = context.drawImage.mock.calls
+      expect(drawn[1][0]).toEqual(expect.objectContaining({ src: 'blob:registered-crop-1' }))
+      // Whole registered PNG into the item's own box: no crop rectangle is applied.
+      expect(drawn[1].slice(1)).toEqual([0, 0, 120, 160])
+      expect(result.current.getQuickCanvasItemsImageUrl([plain, cropped])).toBe(url)
+    })
+
+    it('stops serving the snapshot once the crop no longer matches its registered PNG', async () => {
+      const cropped = croppedItem('changed-after-snapshot')
+      const registry = realRegistry()
+      registry.register(cropped, png(), { width: 120, height: 160 })
+      const { result } = renderWorkflow([cropped], { provenCropRegistry: registry })
+      let url: string | null = null
+      await act(async () => {
+        url = await result.current.prepareQuickCanvasItemsImageUrl([cropped])
+      })
+      expect(url).not.toBeNull()
+
+      const recropped = { ...cropped, crop: { x: 0, y: 0, width: 100, height: 100 } }
+      expect(result.current.getQuickCanvasItemsImageUrl([recropped])).toBeNull()
+      const replaced = { ...cropped, src: 'local-media:///C:/images/replaced.png' }
+      expect(result.current.getQuickCanvasItemsImageUrl([replaced])).toBeNull()
+    })
+
+    it('prepares the selection again when a selected crop gets its PNG', async () => {
+      const plain = createImageItem('selected-plain', { x: 300 })
+      const cropped = croppedItem('selected-late-crop')
+      const registry = realRegistry()
+      const { result } = renderWorkflow([plain, cropped], {
+        provenCropRegistry: registry,
+        selectedIds: new Set([plain.id, cropped.id])
+      })
+      const before = result.current.prepareQuickCanvasItemsImageUrl
+      const unrelated = croppedItem('unselected-crop')
+      act(() => {
+        registry.register(unrelated, png(), { width: 120, height: 160 })
+      })
+      expect(result.current.prepareQuickCanvasItemsImageUrl).toBe(before)
+      act(() => {
+        registry.register(cropped, png(), { width: 120, height: 160 })
+      })
+      expect(result.current.prepareQuickCanvasItemsImageUrl).not.toBe(before)
+      let url: string | null = null
+      await act(async () => {
+        url = await result.current.prepareQuickCanvasItemsImageUrl([plain, cropped])
+      })
+      expect(url).not.toBeNull()
+    })
   })
 })

@@ -21,6 +21,8 @@ import {
 } from './canvasExportNamingUtils'
 import { buildRasterBackedSvgMarkup, SVG_EXPORT_MIME_TYPE } from './canvasExportSvgUtils'
 import { runWithCanvasRasterWorkLimit } from './canvasRasterWorkLimiter'
+import { buildCanvasProvenCropSnapshotItemsSync } from './canvasAgentAttachmentUtils'
+import type { CanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import { type ExportSubmenuPlacement, resolveExportSubmenuPlacement } from './exportMenuPlacement'
 import type { CanvasRasterLimits } from './canvasExportRasterUtils'
 import type { CanvasExportBounds } from './groupPlaybackUtils'
@@ -77,6 +79,12 @@ type UseCanvasExportWorkflowOptions = {
   notifyError: NotifyFn
   notifyInfo?: (message: string, duration?: number | null) => import('notistack').SnackbarKey
   closeMessage?: (key?: import('notistack').SnackbarKey) => void
+  /**
+   * Pixels of proven crops. A quick selection snapshot (the multi-item drag
+   * payload's objectUrl) draws each cropped image only from its registered
+   * PNG; without one there is no snapshot of a cropped selection.
+   */
+  provenCropRegistry?: CanvasProvenCropRegistry
 }
 
 type CanvasFileSaveFeedbackOwner = Readonly<{ canvasId: string }>
@@ -583,7 +591,8 @@ export function useCanvasExportWorkflow({
   notifySuccess,
   notifyError,
   notifyInfo,
-  closeMessage
+  closeMessage,
+  provenCropRegistry
 }: UseCanvasExportWorkflowOptions) {
   const { t } = useTranslation()
   const [exportMenuAnchor, setExportMenuAnchor] = useState<HTMLElement | null>(null)
@@ -687,6 +696,31 @@ export function useCanvasExportWorkflow({
   const quickCanvasImageUrlCacheRef = useRef(new Map<string, string>())
   const quickCanvasImageUrlPendingRef = useRef(new Map<string, Promise<string | null>>())
   const quickCanvasImageUrlGenerationRef = useRef(0)
+  // A crop's pixels can be registered after its selection was prepared (the
+  // background proof after a confirm or a board open). The revision changes
+  // prepareQuickCanvasItemsImageUrl's identity so the selection prepares again.
+  const [provenCropRevision, setProvenCropRevision] = useState(0)
+  const quickSelectedIdsRef = useRef(selectedIds)
+  quickSelectedIdsRef.current = selectedIds
+  useEffect(() => {
+    if (!provenCropRegistry) return
+    return provenCropRegistry.subscribe((itemId) => {
+      const selected = quickSelectedIdsRef.current
+      if (selected.size > 1 && selected.has(itemId)) {
+        setProvenCropRevision((revision) => revision + 1)
+      }
+    })
+  }, [provenCropRegistry])
+  // A cropped image is drawn only from its registered PNG, never from item.src:
+  // the source may have changed since the crop was proven.
+  const resolveQuickCanvasSnapshotItems = useCallback(
+    (targetItems: CanvasItem[]): CanvasItem[] | null =>
+      buildCanvasProvenCropSnapshotItemsSync(
+        targetItems,
+        provenCropRegistry ? (item) => provenCropRegistry.lookup(item) : undefined
+      ),
+    [provenCropRegistry]
+  )
 
   const disposeQuickCanvasImageUrl = useCallback((imageUrl: string) => {
     if (imageUrl.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') {
@@ -1296,7 +1330,9 @@ export function useCanvasExportWorkflow({
 
   const getQuickCanvasItemsImageUrl = useCallback(
     (targetItems: CanvasItem[]): string | null => {
-      const cacheKey = buildQuickCanvasItemsImageUrlKey(targetItems)
+      const snapshotItems = resolveQuickCanvasSnapshotItems(targetItems)
+      if (!snapshotItems) return null
+      const cacheKey = buildQuickCanvasItemsImageUrlKey(snapshotItems)
       const cachedImageUrl = quickCanvasImageUrlCacheRef.current.get(cacheKey)
       if (!cachedImageUrl) {
         return null
@@ -1306,14 +1342,14 @@ export function useCanvasExportWorkflow({
       quickCanvasImageUrlCacheRef.current.set(cacheKey, cachedImageUrl)
       return cachedImageUrl
     },
-    [buildQuickCanvasItemsImageUrlKey]
+    [buildQuickCanvasItemsImageUrlKey, resolveQuickCanvasSnapshotItems]
   )
 
   const prepareQuickCanvasItemsImageUrl = useCallback(
     async (targetItems: CanvasItem[]): Promise<string | null> => {
       if (targetItems.length === 0) return null
 
-      const targetSnapshot = targetItems.map((item): CanvasItem => {
+      const copiedTargets = targetItems.map((item): CanvasItem => {
         if (item.type === 'image') {
           return { ...item, crop: item.crop ? { ...item.crop } : undefined }
         }
@@ -1322,6 +1358,8 @@ export function useCanvasExportWorkflow({
         }
         return { ...item }
       })
+      const targetSnapshot = resolveQuickCanvasSnapshotItems(copiedTargets)
+      if (!targetSnapshot) return null
       const cacheKey = buildQuickCanvasItemsImageUrlKey(targetSnapshot)
       const cachedImageUrl = quickCanvasImageUrlCacheRef.current.get(cacheKey)
       if (cachedImageUrl) {
@@ -1373,14 +1411,19 @@ export function useCanvasExportWorkflow({
         }
       }
     },
+    // provenCropRevision only changes this callback's identity: the selection
+    // overlay prepares again when a selected crop gets its registered PNG.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       buildQuickCanvasItemsImageUrlKey,
       createCanvasExportEntries,
       disposeQuickCanvasImageUrl,
       ensureExportImageDataUrl,
+      provenCropRevision,
       rememberQuickCanvasItemsImageUrl,
       renderCanvasBlob,
-      renderCanvasItemsToCanvas
+      renderCanvasItemsToCanvas,
+      resolveQuickCanvasSnapshotItems
     ]
   )
 

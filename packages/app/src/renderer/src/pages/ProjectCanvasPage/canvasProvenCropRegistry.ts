@@ -48,6 +48,12 @@ export type CanvasProvenCropRegistry = {
   lookup: (item: CanvasImageItem) => CanvasProvenCrop | null
   /** Revokes every object URL and forgets every entry; the registry stays usable. */
   release: () => void
+  /**
+   * Calls listener with the item id after each entry is made, so a view that
+   * waits for a crop's pixels (a selection drag snapshot) can prepare again.
+   * Returns the unsubscribe function.
+   */
+  subscribe: (listener: (itemId: string) => void) => () => void
   readonly entryCount: number
   readonly totalBytes: number
 }
@@ -104,6 +110,7 @@ export function createCanvasProvenCropRegistry(
   )
   // Map order is the recency order: the first entry is the least recently used.
   const entries = new Map<string, RegistryEntry>()
+  const listeners = new Set<(itemId: string) => void>()
   let totalBytes = 0
 
   const revoke = (entry: RegistryEntry) => {
@@ -180,6 +187,13 @@ export function createCanvasProvenCropRegistry(
         if (oldest === entry) break
         remove(oldest.itemId)
       }
+      for (const listener of Array.from(listeners)) {
+        try {
+          listener(item.id)
+        } catch {
+          // A listener's failure does not undo the entry.
+        }
+      }
       return toPublic(entry)
     },
     lookup(item) {
@@ -196,6 +210,12 @@ export function createCanvasProvenCropRegistry(
       entries.clear()
       totalBytes = 0
       for (const entry of all) revoke(entry)
+    },
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
     },
     get entryCount() {
       return entries.size

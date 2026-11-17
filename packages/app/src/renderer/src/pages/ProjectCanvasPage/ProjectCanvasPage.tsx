@@ -606,7 +606,8 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     notifySuccess,
     notifyError,
     notifyInfo,
-    closeMessage
+    closeMessage,
+    provenCropRegistry
   })
 
   const handleOpenTargetSchemeManager = useCallback(() => {

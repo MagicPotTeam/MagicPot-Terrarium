@@ -724,6 +724,45 @@ export function materializeCanvasAgentAttachmentItemsSync(
 }
 
 /**
+ * The selection as a snapshot render may draw it: every cropped image replaced
+ * by the PNG that lookupProvenCrop returns, drawn at the item's own canvas
+ * geometry with no crop (as the Agent send's overview does). Null when any
+ * crop has no registered PNG: a snapshot of such a selection would have to
+ * redraw the crop from item.src, which may no longer hold the proven bytes.
+ * Items without a crop are returned unchanged.
+ */
+export function buildCanvasProvenCropSnapshotItemsSync(
+  items: CanvasItem[],
+  lookupProvenCrop?: (item: CanvasImageItem) => CanvasProvenCropPixels | null
+): CanvasItem[] | null {
+  if (!items.some(isCroppedCanvasImageItem)) return items
+  if (!lookupProvenCrop) return null
+  const prepared: CanvasItem[] = []
+  for (const item of items) {
+    if (!isCroppedCanvasImageItem(item)) {
+      prepared.push(item)
+      continue
+    }
+    let proven: CanvasProvenCropPixels | null
+    try {
+      proven = lookupProvenCrop(item)
+    } catch {
+      proven = null
+    }
+    if (!proven || proven.url === item.src) return null
+    prepared.push({
+      ...stripCroppedImageSourceFields(item),
+      src: proven.url,
+      fileName: proven.fileName,
+      sizeBytes: proven.sizeBytes,
+      sourceWidth: proven.width,
+      sourceHeight: proven.height
+    })
+  }
+  return hasCroppedSourceLeak(items, prepared) ? null : prepared
+}
+
+/**
  * True when url is the source of a cropped image in the selection, in any of the
  * forms an attachment may carry it. Such a url must not enter a payload.
  */
