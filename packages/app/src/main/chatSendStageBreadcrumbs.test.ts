@@ -36,7 +36,9 @@ describe('chat send-stage breadcrumbs in main', () => {
     h.listeners.clear()
   })
 
-  it('keeps the last breadcrumb per renderer and ignores anything that is not exactly one', () => {
+  // Updated: a report with a key main does not know used to be dropped whole; main no longer walks
+  // the keys (that costs as much as the deserialization), it keeps the known ones and nothing else.
+  it('keeps the last breadcrumb per renderer, ignores anything that is not one and keeps no other key', () => {
     const main = sender(1)
     const gone = sender(2, true)
     let mainWindow: unknown = windowOf(main)
@@ -49,7 +51,7 @@ describe('chat send-stage breadcrumbs in main', () => {
     mainWindow = windowOf(gone)
     listener(from(gone), crumb('request-start'))
 
-    expect(getLastChatSendStage(1)).toMatchObject(crumb('request-built'))
+    expect(getLastChatSendStage(1)).toMatchObject(crumb('reply-finished'))
     expect(getLastChatSendStage(1)).not.toHaveProperty('prompt')
     expect(getLastChatSendStage(1)?.receivedAt).toMatch(/^\d{4}-\d\d-\d\dT/)
     expect(getLastChatSendStage(2)).toBeNull()
@@ -89,10 +91,13 @@ describe('chat send-stage breadcrumbs in main', () => {
   it('keeps the JS heap numbers the preload attached and nothing else', () => {
     expect(recordChatSendStage(1, { ...crumb('request-built'), usedJSHeapSize: 1_932_642_304, jsHeapSizeLimit: 2_248_146_944 })).toBe(true)
     expect(getLastChatSendStage(1)).toMatchObject({ stage: 'request-built', usedJSHeapSize: 1_932_642_304, jsHeapSizeLimit: 2_248_146_944 })
-    // A heap number of the wrong kind, or any other extra key, makes the whole message invalid.
+    // A heap number of the wrong kind makes the whole message invalid.
     expect(recordChatSendStage(1, { ...crumb('reply-finished'), usedJSHeapSize: 'much' })).toBe(false)
-    expect(recordChatSendStage(1, { ...crumb('reply-finished'), usedJSHeapSize: 1, heapDump: 'secret' })).toBe(false)
     expect(getLastChatSendStage(1)).toMatchObject({ stage: 'request-built' })
+    // Updated: an extra key used to make the message invalid; it is now left behind, never stored.
+    expect(recordChatSendStage(1, { ...crumb('reply-finished'), usedJSHeapSize: 1, heapDump: 'secret' })).toBe(true)
+    expect(getLastChatSendStage(1)).toMatchObject({ stage: 'reply-finished', usedJSHeapSize: 1 })
+    expect(getLastChatSendStage(1)).not.toHaveProperty('heapDump')
   })
 
   it('answers the latest breadcrumb of any renderer for child-process deaths and stays bounded', () => {

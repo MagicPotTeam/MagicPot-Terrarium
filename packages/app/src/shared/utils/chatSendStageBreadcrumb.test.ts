@@ -57,10 +57,17 @@ describe('chat send-stage breadcrumb', () => {
     'request-built',
     { stage: 'request-built' },
     { stage: 'request-built', sendSeq: 1, messageCount: 1, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0, usedJSHeapSize: '1' },
-    { stage: 'request-built', sendSeq: 1, messageCount: 1, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0, jsHeapSizeLimit: -1 },
-    { stage: 'request-built', sendSeq: 1, messageCount: 1, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0, usedJSHeapSize: 1, text: 'hello' }
+    { stage: 'request-built', sendSeq: 1, messageCount: 1, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0, jsHeapSizeLimit: -1 }
   ])('the report rejects anything but counts and the two heap numbers: %j', (value) => {
     expect(parseChatSendStageReport(value)).toBeNull()
+  })
+
+  // Updated: main used to refuse a report with a key it does not know, by walking every key. It now
+  // reads only the keys it knows and leaves any other behind (the preload refuses it from the page).
+  it('the report keeps only counts and the two heap numbers, whatever else a report carries', () => {
+    const counts = { stage: 'request-built', sendSeq: 1, messageCount: 1, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0 }
+    expect(parseChatSendStageReport({ ...counts, usedJSHeapSize: 1, text: 'hello' })).toEqual({ ...counts, usedJSHeapSize: 1 })
+    expect(parseChatSendStageBreadcrumb({ ...counts, text: 'hello' })).toBeNull()
   })
 
   it('knows the stage a failed or aborted request had reached, with that stage\'s counts and the error\'s enumerated name', () => {
@@ -146,9 +153,11 @@ describe('main-side report parser: shape first, nothing copied before it', () =>
     expect(parseChatSendStageReport({ ...valid, [Symbol('x')]: 1 })).toBeNull()
   })
 
-  it('stops at the first unknown key and never reads the value of a key it does not know', () => {
+  // Updated: this pinned a key walk that stopped at the first unknown key. V8's for-in lists every
+  // key before its first step, so that walk cost as much as the deserialization; main no longer walks.
+  it('never walks the keys: it looks at the known keys only, once each, and leaves any other unread', () => {
     const read: string[] = []
-    const visited: string[] = []
+    const looked: string[] = []
     const record: Record<string, unknown> = { ...valid, content: 'secret' }
     for (let index = 0; index < 1000; index += 1) record[`k${index}`] = index
     const probe = new Proxy(record, {
@@ -157,14 +166,28 @@ describe('main-side report parser: shape first, nothing copied before it', () =>
         return Reflect.get(target, key, receiver)
       },
       getOwnPropertyDescriptor: (target, key) => {
-        if (typeof key === 'string') visited.push(key)
+        if (typeof key === 'string') looked.push(key)
         return Reflect.getOwnPropertyDescriptor(target, key)
       },
       getPrototypeOf: () => Object.prototype
     })
-    expect(parseChatSendStageReport(probe)).toBeNull()
-    expect(read).toEqual([])
-    // The key walk ends at 'content', the first key that is not part of a report.
-    expect(visited).not.toContain('k999')
+    expect(parseChatSendStageReport(probe)).toEqual(valid)
+    const known = [...Object.keys(valid), 'failedAfter', 'errorName', 'usedJSHeapSize', 'jsHeapSizeLimit']
+    expect(looked.filter((key) => !known.includes(key))).toEqual([])
+    expect(read.filter((key) => !known.includes(key))).toEqual([])
+    // One read of each key that is there.
+    expect(read.slice().sort()).toEqual(Object.keys(valid).sort())
+  })
+
+  it('never takes a value inherited from Object.prototype for a missing key', () => {
+    const { stage: _stage, ...withoutStage } = valid
+    const prototype = Object.prototype as Record<string, unknown>
+    prototype.stage = 'request-built'
+    try {
+      expect(parseChatSendStageReport(withoutStage)).toBeNull()
+      expect(parseChatSendStageBreadcrumb(withoutStage)).toBeNull()
+    } finally {
+      delete prototype.stage
+    }
   })
 })

@@ -163,24 +163,36 @@ const BREADCRUMB_KEYS = new Set<string>([
 ])
 
 /**
- * True only for a plain object (prototype Object.prototype or null) whose own enumerable keys are
- * all in `allowed`. Checked BEFORE anything is read or copied: a typed array, an array, a class
- * instance or a map is rejected by its prototype alone, and the key walk stops at the first key
- * that is not allowed or as soon as there are more keys than `allowed` holds, so a payload with
- * millions of keys is never listed or copied in full. Only key NAMES are looked at here.
+ * True only for a plain object: its prototype is Object.prototype or null, so a typed array, an
+ * array, a map, a date, an error or a class instance is rejected by its prototype alone, before
+ * any key is looked at. Symbol keys are never part of a breadcrumb: Object.getOwnPropertySymbols
+ * scans the property table without building a list of the string keys (30 ms for an object with a
+ * million keys, against 716 ms for deserializing that object, measured on Node 24). Over IPC a
+ * symbol key cannot arrive at all (structured clone drops it); this keeps direct callers strict.
  */
-function isPlainRecordWithKeys(value: unknown, allowed: ReadonlySet<string>): value is Record<string, unknown> {
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
   if (prototype !== Object.prototype && prototype !== null) return false
+  return Object.getOwnPropertySymbols(value).length === 0
+}
+
+/**
+ * True only for a plain object whose own enumerable keys are all in `allowed`. The key walk is
+ * NOT cheap for a large object: V8's for-in lists every key before the first step, so it costs
+ * about as much as copying the object, whatever key it stops at. Only the preload uses it, where
+ * contextBridge has already copied the page's whole object; main never walks a report's keys (see
+ * parseChatSendStageReport). Only key NAMES are looked at here.
+ */
+function isPlainRecordWithKeys(value: unknown, allowed: ReadonlySet<string>): value is Record<string, unknown> {
+  if (!isPlainRecord(value)) return false
   let count = 0
   // With Object.prototype or null as prototype, for-in visits own enumerable string keys only.
   for (const key in value) {
     count += 1
     if (count > allowed.size || !allowed.has(key)) return false
   }
-  // Symbol keys are never part of a breadcrumb.
-  return Object.getOwnPropertySymbols(value).length === 0
+  return true
 }
 
 /**
@@ -192,16 +204,26 @@ export function parseChatSendStageBreadcrumb(value: unknown): ChatSendStageBread
   return readBreadcrumb(value)
 }
 
-/** Reads the known keys by name from a record whose keys were already checked. */
+/**
+ * The value of an OWN key, read once; undefined when the key is absent (an inherited value, e.g. a
+ * key added to Object.prototype, is never taken).
+ */
+const ownValue = (record: Record<string, unknown>, key: string): unknown =>
+  Object.hasOwn(record, key) ? record[key] : undefined
+
+/**
+ * Reads the known keys by name, each once, into a new object. Nothing else of `record` is read or
+ * copied, so keys it does not know are left behind unread.
+ */
 function readBreadcrumb(record: Record<string, unknown>): ChatSendStageBreadcrumb | null {
-  const stage = record.stage
+  const stage = ownValue(record, 'stage')
   if (!CHAT_SEND_STAGES.includes(stage as ChatSendStage)) return null
-  const sendSeq = record.sendSeq
-  const messageCount = record.messageCount
-  const imageCount = record.imageCount
-  const imageBytes = record.imageBytes
-  const dataUrlCount = record.dataUrlCount
-  const dataUrlChars = record.dataUrlChars
+  const sendSeq = ownValue(record, 'sendSeq')
+  const messageCount = ownValue(record, 'messageCount')
+  const imageCount = ownValue(record, 'imageCount')
+  const imageBytes = ownValue(record, 'imageBytes')
+  const dataUrlCount = ownValue(record, 'dataUrlCount')
+  const dataUrlChars = ownValue(record, 'dataUrlChars')
   if (
     !isCount(sendSeq) ||
     !isCount(messageCount) ||
@@ -221,8 +243,8 @@ function readBreadcrumb(record: Record<string, unknown>): ChatSendStageBreadcrum
     dataUrlCount,
     dataUrlChars
   }
-  const failedAfter = record.failedAfter
-  const errorName = record.errorName
+  const failedAfter = ownValue(record, 'failedAfter')
+  const errorName = ownValue(record, 'errorName')
   // A failure names the stage it came after and the error's enumerated name; nothing else does.
   if (breadcrumb.stage === 'reply-failed') {
     if (!(RUNNING_CHAT_SEND_STAGES as readonly unknown[]).includes(failedAfter)) return null
@@ -250,17 +272,21 @@ export function withJsHeapNumbers(
   return report
 }
 
-const REPORT_KEYS = new Set<string>([...BREADCRUMB_KEYS, ...HEAP_KEYS])
-
 /**
- * What main accepts on the channel: a breadcrumb plus, optionally, the two heap numbers. Main
- * gets this from a renderer, so the shape is checked before anything is read or copied (see
- * isPlainRecordWithKeys) and the known keys are read by name.
+ * What main accepts on the channel: a breadcrumb plus, optionally, the two heap numbers. Main gets
+ * this from a renderer, so its prototype is checked before anything is read (see isPlainRecord)
+ * and then only the known keys are read, by name and once each, into a new object (see
+ * readBreadcrumb). The keys are NOT walked: listing them costs as much as Electron's own
+ * deserialization of the message, a second block of the main thread for a report with millions of
+ * keys. A key main does not know is therefore not refused but left behind unread; the preload
+ * already refuses one from the page (parseChatSendStageBreadcrumb), and nothing unknown is stored.
+ * Beyond the deserialization, the work here does not grow with the size of the report except for
+ * the symbol check's scan.
  */
 export function parseChatSendStageReport(value: unknown): ChatSendStageReport | null {
-  if (!isPlainRecordWithKeys(value, REPORT_KEYS)) return null
-  const usedJSHeapSize = value.usedJSHeapSize
-  const jsHeapSizeLimit = value.jsHeapSizeLimit
+  if (!isPlainRecord(value)) return null
+  const usedJSHeapSize = ownValue(value, 'usedJSHeapSize')
+  const jsHeapSizeLimit = ownValue(value, 'jsHeapSizeLimit')
   if (usedJSHeapSize !== undefined && !isCount(usedJSHeapSize)) return null
   if (jsHeapSizeLimit !== undefined && !isCount(jsHeapSizeLimit)) return null
   const breadcrumb = readBreadcrumb(value)
