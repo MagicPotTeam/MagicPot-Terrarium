@@ -29,7 +29,7 @@ vi.mock('electron', () => ({
   screen: {},
   shell: {}
 }))
-vi.mock('../../../runtime-assets/resources/icon.png?asset', () => ({ default: 'mock-icon' }))
+vi.mock('../../../runtime-assets/resources/icon-256.png?asset', () => ({ default: 'mock-icon' }))
 vi.mock('./config/buildEnv', () => ({ isDev: () => false }))
 vi.mock('./testUiPolicy', () => ({ resolveTestArtifactPath: vi.fn() }))
 vi.mock('./testWindowRuntime', () => ({

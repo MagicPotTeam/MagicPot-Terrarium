@@ -2,7 +2,9 @@ import { app, BrowserWindow, ipcMain, nativeImage, screen, shell } from 'electro
 import * as fs from 'fs'
 import { basename, extname, join } from 'path'
 import { pathToFileURL } from 'url'
-import icon from '../../../runtime-assets/resources/icon.png?asset'
+// 256 px copy of the 4096 px master logo (scripts/assets/generate-logo-sizes.py):
+// the master costs a 64 MB decode per window and per canvas drag without its own icon.
+import icon from '../../../runtime-assets/resources/icon-256.png?asset'
 import { isDev } from './config/buildEnv'
 import { resolveTestArtifactPath } from './testUiPolicy'
 import {

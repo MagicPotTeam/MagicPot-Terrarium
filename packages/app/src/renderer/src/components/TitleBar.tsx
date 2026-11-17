@@ -122,8 +122,9 @@ const BTN_SIZE = 16
 const MIN_BTN_HEIGHT = 2
 const HELP_SIZE = 20
 const TAB_MIN_WIDTH = 72
-const titleBarLogoImg = new URL('../../../../../runtime-assets/build/icon.png', import.meta.url)
-  .href
+// A 128 px copy of the 4096 px master logo (scripts/assets/generate-logo-sizes.py):
+// the master would cost a 64 MB decode at every start for a 26 px image.
+const titleBarLogoImg = new URL('../assets/logo-128.png', import.meta.url).href
 
 // System tab ID → i18n key mapping for dynamic label resolution
 type SystemTabTranslationKey =

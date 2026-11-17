@@ -20,7 +20,7 @@ class FakeWindow extends EventEmitter {
   isDestroyed() { return this.destroyed }
 }
 vi.mock('electron', () => ({ app: { isPackaged: false, getPath: () => '/mock-only' }, ipcMain: { handle: h.calls }, BrowserWindow: vi.fn(function () { return new FakeWindow() }), nativeImage: {}, screen: {}, shell: {} }))
-vi.mock('../../../runtime-assets/resources/icon.png?asset', () => ({ default: 'mock-icon' }))
+vi.mock('../../../runtime-assets/resources/icon-256.png?asset', () => ({ default: 'mock-icon' }))
 vi.mock('./unsavedChanges', () => ({ unsavedChangesController: { attach: h.calls, registerIpc: h.calls, confirm: h.calls } }))
 vi.mock('./config/buildEnv', () => ({ isDev: () => false }))
 vi.mock('./testUiPolicy', () => ({ resolveTestArtifactPath: h.heavy }))

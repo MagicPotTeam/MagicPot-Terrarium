@@ -3,7 +3,11 @@ import { Box, ButtonBase, Typography } from '@mui/material'
 import { useSidebarCollapse } from './SidebarCollapseContext'
 
 const LOGO_SIZE = 55
-const sidebarLogoImg = new URL('../../../../../runtime-assets/build/icon.png', import.meta.url).href
+// 128 / 256 px copies of the 4096 px master logo (scripts/assets/generate-logo-sizes.py):
+// the master would cost a 64 MB decode at every start for a 55 px image.
+const sidebarLogoImg = new URL('../assets/logo-128.png', import.meta.url).href
+const sidebarLogoImg2x = new URL('../assets/logo-256.png', import.meta.url).href
+const sidebarLogoSrcSet = `${sidebarLogoImg} 128w, ${sidebarLogoImg2x} 256w`
 // 提取橙色常量
 const ORANGE_COLOR = '#dd653f'
 const BLUE_COLOR = '#313386'
@@ -53,6 +57,8 @@ const SidebarHeader: React.FC = () => {
         <Box
           component="img"
           src={sidebarLogoImg}
+          srcSet={sidebarLogoSrcSet}
+          sizes={`${LOGO_SIZE}px`}
           alt="MagicPot-Terrarium"
           sx={{
             width: LOGO_SIZE,
