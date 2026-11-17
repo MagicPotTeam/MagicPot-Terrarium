@@ -1325,6 +1325,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // Consecutive supersedes per live session object: the same object superseded again and again was
   // never replaced, so the save is failing, not being overtaken (see SaveSupersedeStreaks).
   const saveSupersedeStreaksRef = useRef(new SaveSupersedeStreaks())
+  // The options of the newest debounced-save registration. debouncedSaveSessions replaces the
+  // options of the owner's whole pending batch, so a re-registration from an older effect's callback
+  // must use these, not its own closure's, or it would hand other pending sessions stale callbacks.
+  const latestDebouncedSaveOptionsRef = useRef<{ scope: string; options: Parameters<typeof debouncedSaveSessions>[3] } | null>(null)
   const chatSaveBaselineRef = useRef<ChatSessionSaveBaseline>(new ChatSessionSaveBaseline())
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
@@ -4912,7 +4916,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           // would loop about twice a second, silently. Report it and back off instead.
           const exhausted = live.filter(session => saveSupersedeStreaksRef.current.note(session))
           const requeue = live.filter(session => !exhausted.includes(session))
-          if (requeue.length > 0) debouncedSaveSessions(requeue, 500, storageScope, saveOptions)
+          const latest = latestDebouncedSaveOptionsRef.current
+          const requeueOptions = latest?.scope === storageScope ? latest.options : saveOptions
+          if (requeue.length > 0) debouncedSaveSessions(requeue, 500, storageScope, requeueOptions)
           if (exhausted.length === 0) return
         }
         const detail = error instanceof Error ? error.message : String(error)
@@ -4946,6 +4952,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }, retryDelayMs)
       }
     }
+    latestDebouncedSaveOptionsRef.current = { scope: storageScope, options: saveOptions }
     debouncedSaveSessions(sessionsToSave, 500, storageScope, saveOptions)
   }, [
     clearDirtySessionSnapshotIfCurrent,

@@ -20,6 +20,10 @@ const h = vi.hoisted(() => ({
   whileReadPending: null as null | ((candidate: ChatSession) => void),
   // Makes the writer refuse a candidate as superseded although the live object was never replaced.
   forceSupersede: null as null | ((candidate: ChatSession) => boolean),
+  // Awaited after whileReadPending, so the page can render (and run its save effect) mid-save.
+  afterReadPending: null as null | ((candidate: ChatSession) => Promise<void>),
+  // Every debouncedSaveSessions call of the page: [session ids, options].
+  registrations: [] as Array<{ ids: string[]; options: unknown }>,
   notify: vi.fn(),
   notifyWarning: vi.fn(),
   notifySuccess: vi.fn(),
@@ -43,6 +47,10 @@ vi.mock('./chatStorage', async (importOriginal) => {
     loadAllSessions: (...args: unknown[]) => h.load(...args),
     loadSessionFromDB: async (id: string) => structuredClone(h.sessions.find(s => s.id === id) ?? null),
     saveSessionToDB: (...args: unknown[]) => h.save(...args),
+    debouncedSaveSessions: (...args: Parameters<typeof actual.debouncedSaveSessions>) => {
+      h.registrations.push({ ids: args[0].map(s => s.id), options: args[3] })
+      return actual.debouncedSaveSessions(...args)
+    },
     saveAllSessions: vi.fn(),
     compareAndUpdateSessionInDB: vi.fn(),
     deleteSessionFromDB: vi.fn(),
@@ -118,6 +126,8 @@ beforeEach(() => {
   h.saves = []
   h.whileReadPending = null
   h.forceSupersede = null
+  h.afterReadPending = null
+  h.registrations = []
   h.load.mockReset().mockImplementation(async () => structuredClone(h.sessions))
   // Same contract as saveSessionToDB: the read is pending first, then the compare-and-set
   // (conflict when storage no longer equals the baseline), then the supersede check (the caller's
@@ -125,6 +135,7 @@ beforeEach(() => {
   h.save.mockReset().mockImplementation(async (candidate: ChatSession, saveScope: string, options?: SaveOptions) => {
     await Promise.resolve()
     h.whileReadPending?.(candidate)
+    if (h.afterReadPending) await h.afterReadPending(candidate)
     const current = h.sessions.find(s => s.id === candidate.id)
     const guarded = Boolean(options && Object.hasOwn(options, 'expectedSession'))
     const expected = options?.expectedSession
@@ -343,6 +354,38 @@ describe('ChatPage treats a superseded save as benign and stops retrying a perma
       await waitFor(() => expect(h.saves).toHaveLength(3))
       expect(h.saves.at(-1)?.outcome).toBe('conflict')
       expect(h.sessions).toEqual([external])
+    } finally { view.unmount() }
+  })
+
+  it('re-queues a superseded save with the newest effect options, not its own stale closure', async () => {
+    const other: ChatSession = { id: 'supersede-other', title: 'Other', profileId: 'base-model', messages: [{ role: 'user', content: 'other original' }], createdAt: 298 }
+    h.sessions = [structuredClone(session), structuredClone(other)]
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // The save of 'first edit' is superseded although its object was never replaced (a one-off
+      // refusal). Meanwhile another session changes, so a newer effect run registers its own options.
+      let refusedOnce = false
+      h.forceSupersede = candidate => {
+        if (refusedOnce || candidate.messages.at(-1)?.content !== 'first edit') return false
+        refusedOnce = true
+        return true
+      }
+      h.afterReadPending = async (candidate) => {
+        if (candidate.messages.at(-1)?.content !== 'first edit' || refusedOnce) return
+        window.dispatchEvent(new CustomEvent('chat:append-message', { detail: { scope, sessionId: other.id, role: 'user', content: 'other edit' } }))
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      await append('first edit')
+      await waitFor(() => expect(contents(stored())).toEqual(['original', 'first edit']), { timeout: 4000 })
+      await waitFor(() => expect(contents(h.sessions.find(s => s.id === other.id))).toEqual(['other original', 'other edit']), { timeout: 4000 })
+      const otherRegistration = h.registrations.findIndex(call => call.ids.includes(other.id))
+      const requeue = h.registrations.findIndex((call, index) => index > otherRegistration && call.ids.includes(session.id))
+      expect(otherRegistration).toBeGreaterThan(0)
+      expect(requeue).toBeGreaterThan(otherRegistration)
+      expect(h.registrations[requeue].options).toBe(h.registrations[otherRegistration].options)
+      expect(h.saves.map(call => call.outcome)).toEqual(['superseded', 'written', 'written'])
+      expect(banner()).toBeNull()
     } finally { view.unmount() }
   })
 })
