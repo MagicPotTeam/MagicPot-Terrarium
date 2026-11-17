@@ -68,3 +68,40 @@ type AcceptedSend = Readonly<{
 export const sendReleasesStopHolds = (overrides: AcceptedSend | undefined): boolean =>
   !overrides?.isQueuedComposerCurrent &&
   (!overrides || Boolean(overrides.composerSubmission) || Boolean(overrides.onComposerSubmissionAccepted) || overrides.userTaskDispatch === true)
+
+type TeamSessionRecord = Readonly<{
+  id: string
+  teamLeadId?: string
+  archived?: boolean
+  teamEnded?: boolean
+  teamGeneration?: number
+  teamMemberGeneration?: number
+}>
+
+/**
+ * Drops the stop holds ('scope\0member') of this scope whose member is no longer in a live team:
+ * the team ended, the member was removed (archived or deleted) or belongs to an older generation.
+ * Holds of other scopes and of current members stay. Returns the member ids it dropped.
+ */
+export const pruneTeamMemberHolds = (
+  held: Set<string>,
+  scope: string,
+  sessions: readonly TeamSessionRecord[],
+  isDeleted: (id: string) => boolean = () => false
+): string[] => {
+  const prefix = `${scope}\u0000`
+  const byId = new Map(sessions.map(session => [session.id, session]))
+  const dropped: string[] = []
+  for (const key of held) {
+    if (!key.startsWith(prefix)) continue
+    const id = key.slice(prefix.length)
+    const member = byId.get(id)
+    const lead = member?.teamLeadId ? byId.get(member.teamLeadId) : undefined
+    const live = !!member && !!lead && !member.archived && !lead.archived && !lead.teamEnded && !lead.teamLeadId &&
+      (member.teamMemberGeneration ?? 0) === (lead.teamGeneration ?? 0) && !isDeleted(id) && !isDeleted(lead.id)
+    if (live) continue
+    held.delete(key)
+    dropped.push(id)
+  }
+  return dropped
+}

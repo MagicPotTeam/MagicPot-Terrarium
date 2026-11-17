@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { sendReleasesStopHolds, sessionPreparing, stopTeamMembers, stopTeamMembersAndHoldQueued, teamMembersToStop } from './teamMemberStop'
+import { pruneTeamMemberHolds, sendReleasesStopHolds, sessionPreparing, stopTeamMembers, stopTeamMembersAndHoldQueued, teamMembersToStop } from './teamMemberStop'
 
 const none = new Set<string>()
 const state = (patch: Partial<Parameters<typeof teamMembersToStop>[1]> = {}) => ({
@@ -61,5 +61,34 @@ describe('which accepted send releases a stop hold', () => {
     // A drained item releases in its own lease (onQueuedComposerAccepted), not here.
     expect(sendReleasesStopHolds({ composerSubmission: true, isQueuedComposerCurrent: () => true })).toBe(false)
     expect(sendReleasesStopHolds({ ...task, userTaskDispatch: true, isQueuedComposerCurrent: () => true })).toBe(false)
+  })
+})
+
+describe('pruning stop holds of members that left the team', () => {
+  const key = (scope: string, id: string) => `${scope}\u0000${id}`
+  const lead = { id: 'lead', teamGeneration: 1 }
+  const members = [
+    { id: 'kept', teamLeadId: 'lead', teamMemberGeneration: 1 },
+    { id: 'archived', teamLeadId: 'lead', teamMemberGeneration: 1, archived: true },
+    { id: 'old-generation', teamLeadId: 'lead', teamMemberGeneration: 0 },
+    { id: 'deleted', teamLeadId: 'lead', teamMemberGeneration: 1 }
+  ]
+  it('drops the holds of removed, deleted and older-generation members and keeps current members and other scopes', () => {
+    const held = new Set([key('s', 'kept'), key('s', 'archived'), key('s', 'old-generation'), key('s', 'deleted'), key('s', 'missing'), key('other', 'archived')])
+    const dropped = pruneTeamMemberHolds(held, 's', [lead, ...members], id => id === 'deleted')
+    expect(dropped.sort()).toEqual(['archived', 'deleted', 'missing', 'old-generation'])
+    expect([...held]).toEqual([key('s', 'kept'), key('other', 'archived')])
+  })
+  it('drops every hold of the team when the team ends, or its lead is archived or deleted', () => {
+    for (const [endedLead, deleted] of [[{ ...lead, teamEnded: true }, ''], [{ ...lead, archived: true }, ''], [lead, 'lead']] as const) {
+      const held = new Set([key('s', 'kept'), key('other', 'kept')])
+      expect(pruneTeamMemberHolds(held, 's', [endedLead, ...members], id => id === deleted)).toEqual(['kept'])
+      expect([...held]).toEqual([key('other', 'kept')])
+    }
+  })
+  it('changes nothing while every held member is still in the team', () => {
+    const held = new Set([key('s', 'kept')])
+    expect(pruneTeamMemberHolds(held, 's', [lead, ...members])).toEqual([])
+    expect([...held]).toEqual([key('s', 'kept')])
   })
 })

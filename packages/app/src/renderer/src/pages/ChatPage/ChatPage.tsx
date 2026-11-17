@@ -1,5 +1,5 @@
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
-import { sendReleasesStopHolds, sessionPreparing, stopTeamMembersAndHoldQueued, teamMembersToStop } from './teamMemberStop'
+import { pruneTeamMemberHolds, sendReleasesStopHolds, sessionPreparing, stopTeamMembersAndHoldQueued, teamMembersToStop } from './teamMemberStop'
 import { startTeamMessagePolling } from './teamMessagePolling'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
@@ -8905,7 +8905,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{ key: string; ids: readonly string[] }>({ key: '', ids: [] })
   // Members with team messages held for them (joined ids), for their delegated rows.
   const [teamHeldRecipients, setTeamHeldRecipients] = useState<{ key: string; ids: string }>({ key: '', ids: '' })
-  const teamMessageDispatcherRef = useRef<{ key: string; dispatcher: TeamMessageDispatcher; pump: () => void; wake: () => void; scopeEpoch: number; visibilityEpoch: number } | null>(null)
+  const teamMessageDispatcherRef = useRef<{ key: string; dispatcher: TeamMessageDispatcher; pump: () => void; wake: () => void; scopeEpoch: number } | null>(null)
   const messageLeadId = teamLead?.id
   const messageGeneration = teamLead?.teamGeneration ?? 0
   const messageKey = JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration])
@@ -9083,7 +9083,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     if (!teamDeliveryEnabled || !sessionsLoaded || sessionLoadError || !route?.threadId || !messageLeadId || teamLead?.teamEnded || teamLead?.archived) return
     const scope = storageScope, thread = route.threadId, leadId = messageLeadId, generation = messageGeneration
     const scopeEpoch = sessionLoadEpochRef.current
-    const visibilityEpoch = teamVisibilityRef.current.epoch
     const key = messageKey
     let alive = true, polling = false
     const teamKey = `${scope}\u0000${leadId}`
@@ -9151,11 +9150,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
     // Polls MAIN every 500 ms while the pane is visible and every 3 s while it is hidden
     // (teamMessagePolling.ts); the first poll runs now.
     const poller = startTeamMessagePolling(isVisible, () => { pump(); void tick() })
-    teamMessageDispatcherRef.current = { key, dispatcher, pump, wake: poller.wake, scopeEpoch, visibilityEpoch }
+    teamMessageDispatcherRef.current = { key, dispatcher, pump, wake: poller.wake, scopeEpoch }
     return () => { alive = false; poller.stop(); dispatcher.end(); if (teamMessageDispatcherRef.current?.dispatcher === dispatcher) teamMessageDispatcherRef.current = null }
   }, [teamDeliveryEnabled, isSessionBusy, sessionsLoaded, sessionLoadError, storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, messageKey, teamLead?.teamEnded, teamLead?.archived])
   // A pane shown again goes back to the visible pace at once and delivers what waited for it.
   useEffect(() => { if (active) teamMessageDispatcherRef.current?.wake() }, [active])
+  // A stopped member that left its team (team end, removal, deletion) needs no hold any more. Only
+  // once this scope's sessions are loaded, so a scope still loading never loses its holds.
+  useEffect(() => {
+    if (!sessionsLoaded || sessionLoadError || sessionsLoadedScopeRef.current !== storageScope || !heldTeamMembersRef.current.size) return
+    pruneTeamMemberHolds(heldTeamMembersRef.current, storageScope, sessions, id => hasSessionDeleteTombstone(id, storageScope))
+  }, [sessions, sessionsLoaded, sessionLoadError, storageScope])
   const reconcileTeamLifecycle = useCallback((records: ChatSession[]) => {
     let conflict = false
     for (const persisted of records) {
