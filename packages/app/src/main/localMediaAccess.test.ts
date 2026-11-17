@@ -173,12 +173,27 @@ describe('local media access policy', () => {
     })
   })
 
-  it('rejects unscoped network paths before application-root fallback', () => {
+  function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...descriptor, value: platform })
+    try {
+      return run()
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor)
+    }
+  }
+
+  it('rejects unscoped network paths before application-root fallback on Windows', () => {
     const networkPath = '//server/share/image.png'
     const canonical = path.resolve(networkPath)
     const realpathSpy = vi.spyOn(fs.realpathSync, 'native').mockReturnValue(canonical)
 
-    expect(resolveAuthorizedLocalMediaPath(networkPath, [canonical])).toBeNull()
+    withPlatform('win32', () => {
+      expect(resolveAuthorizedLocalMediaPath(networkPath, [canonical])).toBeNull()
+      expect(
+        resolveAuthorizedLocalMediaPath('\\\\server\\share\\image.png', [canonical])
+      ).toBeNull()
+    })
     realpathSpy.mockRestore()
   })
 
@@ -187,10 +202,54 @@ describe('local media access policy', () => {
     const canonical = path.resolve(networkPath)
     const realpathSpy = vi.spyOn(fs.realpathSync, 'native').mockReturnValue(canonical)
 
-    expect(authorizeScopedLocalMediaPath(networkPath)).toBe(true)
-    expect(resolveAuthorizedLocalMediaPath(networkPath, [])).toBe(canonical)
+    withPlatform('win32', () => {
+      expect(resolveAuthorizedLocalMediaPath(networkPath, [])).toBeNull()
+      expect(authorizeScopedLocalMediaPath(networkPath)).toBe(true)
+      expect(resolveAuthorizedLocalMediaPath(networkPath, [])).toBe(canonical)
+    })
     realpathSpy.mockRestore()
   })
+
+  // Chromium reads `local-media:///dir/file` (a standard scheme) with `dir` as the host, so on
+  // POSIX an application-root file is asked for as `//dir/file`: the same local file.
+  it.skipIf(process.platform === 'win32')(
+    'reads the double-slash form of a POSIX path as the local file it is',
+    () => {
+      const root = makeTempDir('magicpot-media-root-')
+      const outside = makeTempDir('magicpot-media-outside-')
+      const mediaPath = path.join(root, 'canvas-thumbnails', '512.webp')
+      const secretPath = path.join(outside, 'secret.txt')
+      const linkedPath = path.join(root, 'linked.txt')
+      fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+      fs.writeFileSync(mediaPath, 'image')
+      fs.writeFileSync(secretPath, 'secret')
+      fs.symlinkSync(secretPath, linkedPath, 'file')
+      const canonicalMediaPath = path.resolve(fs.realpathSync.native(mediaPath))
+
+      withPlatform('linux', () => {
+        // Inside an application root: allowed, and answered with the canonical single-slash path.
+        expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}`, [root])).toBe(canonicalMediaPath)
+        // Every refusal of the single-slash form still holds for the double-slash form.
+        expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}`, [])).toBeNull()
+        expect(resolveAuthorizedLocalMediaPath(`/${secretPath}`, [root])).toBeNull()
+        expect(resolveAuthorizedLocalMediaPath(`/${linkedPath}`, [root])).toBeNull()
+        expect(
+          resolveAuthorizedLocalMediaPath(
+            `/${path.join(root, '..', path.basename(outside), 'secret.txt')}`,
+            [root]
+          )
+        ).toBeNull()
+        expect(
+          resolveAuthorizedLocalMediaPath(`/${path.join(root, 'missing.png')}`, [root])
+        ).toBeNull()
+        expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}\0`, [root])).toBeNull()
+      })
+      // The same request is still a network path on Windows, refused before the root check.
+      withPlatform('win32', () => {
+        expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}`, [root])).toBeNull()
+      })
+    }
+  )
 
   it('rejects symlink escapes from an allowed root', () => {
     const root = makeTempDir('magicpot-media-root-')

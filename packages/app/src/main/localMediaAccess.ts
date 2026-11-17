@@ -216,7 +216,15 @@ export function resolveAuthorizedLocalMediaPath(
   allowedRoots: readonly string[]
 ): string | null {
   const trimmed = String(filePath || '').trim()
-  const isNetworkPath = trimmed.startsWith('\\\\') || trimmed.startsWith('//')
+  // Only Windows has network (UNC) paths. On POSIX `//dir/file` is the local file `/dir/file`,
+  // and that is the form every application-root file arrives in there: `local-media` is a
+  // standard scheme, so Chromium reads `local-media:///dir/file` with `dir` as the host, and
+  // both the renderer and the protocol handler turn host + path back into `//dir/file`.
+  // Refusing it as a network path made every thumbnail and every managed file under an
+  // application root unreadable on Linux and macOS. The canonical path still has to be inside
+  // an allowed root (or scoped) below.
+  const isNetworkPath =
+    process.platform === 'win32' && (trimmed.startsWith('\\\\') || trimmed.startsWith('//'))
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) {
     return null
   }
