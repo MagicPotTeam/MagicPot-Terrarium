@@ -87,7 +87,8 @@ beforeEach(() => {
   processKill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => (isFakePid(pid) ? true : realKill(pid, signal)))
 })
 
-function createFakeSpawner() {
+/** Answers the win32 tree sweep's PowerShell snapshot from the fake process table (empty by default). */
+function createFakeSpawner(snapshotRows: () => unknown[] = () => []) {
   const calls: SpawnCall[] = []
   const spawnProcess = ((
     command: string,
@@ -98,9 +99,14 @@ function createFakeSpawner() {
     calls.push({ command, args: [...args], options, child })
     queueMicrotask(() => {
       if (!args.includes('--spawn-error')) child.emit('spawn')
-      if (path.basename(command).toLowerCase() === 'taskkill.exe') {
-        const pid = Number(args[args.indexOf('/PID') + 1])
-        calls.find((call) => call.child.pid === pid)?.child.close(null, 'SIGTERM')
+      if (path.win32.basename(command).toLowerCase() === 'taskkill.exe') {
+        const pids = args.flatMap((arg, index) => (arg === '/PID' ? [Number(args[index + 1])] : []))
+        for (const pid of pids) calls.find((call) => call.child.pid === pid)?.child.close(null, 'SIGTERM')
+        child.close(0)
+        return
+      }
+      if (path.win32.basename(command).toLowerCase() === 'powershell.exe') {
+        child.stdout.write(JSON.stringify(snapshotRows()))
         child.close(0)
         return
       }
@@ -818,5 +824,83 @@ describe('CommandJobsToolHost', () => {
       // Never leave the real helper process behind when an expectation above fails.
       if (job.pid) try { process.kill(-job.pid, 'SIGKILL') } catch { /* already gone: the expected case */ }
     }
+  })
+})
+
+describe('CommandJobsToolHost win32 stop strategy', () => {
+  const FILETIME_UNIX_EPOCH = 116_444_736_000_000_000n
+  const filetime = (ms: number) => String(BigInt(ms) * 10_000n + FILETIME_UNIX_EPOCH)
+  const isTaskkill = (call: SpawnCall) => path.win32.basename(call.command).toLowerCase() === 'taskkill.exe'
+  const isPowerShell = (call: SpawnCall) => path.win32.basename(call.command).toLowerCase() === 'powershell.exe'
+  const win32Host = (
+    root: string,
+    authorization: MagicAgentPolicyAuthorizationService,
+    spawnProcess: CommandJobsSpawnProcess,
+    extra: Partial<ConstructorParameters<typeof CommandJobsToolHost>[1]> = {}
+  ) =>
+    new CommandJobsToolHost(authorization, {
+      workspaceRoot: root,
+      allowedCommands: ['fake-command'],
+      spawnProcess,
+      killProcessGroup,
+      platform: 'win32',
+      ...extra
+    })
+
+  it('sweeps an unconfined job: a grandchild born during the taskkill is killed before the stop is known', async () => {
+    let survivor: { p: number; q: number; c: string } | undefined
+    const fake = createFakeSpawner(() => (survivor ? [survivor] : []))
+    const spawnProcess = ((command: string, args: readonly string[], options: SpawnOptions) => {
+      if (path.win32.basename(command).toLowerCase() === 'taskkill.exe') {
+        // The job forks while the first taskkill runs: its new child is not in that enumeration.
+        if (args.includes('/T')) survivor = { p: 61_001, q: fake.calls[0].child.pid, c: filetime(Date.now()) }
+        else if (args.includes(String(61_001))) survivor = undefined
+      }
+      return fake.spawnProcess(command, args, options)
+    }) as CommandJobsSpawnProcess
+    const { root, authorization } = setup(fake.spawnProcess)
+    const host = win32Host(root, authorization, spawnProcess)
+    const input = approved(root, authorization, ['--hang'])
+    const job = await host.background(input)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'known', stopOutcome: 'stop-requested', termination: { controllerExitCode: 0, controllerTimedOut: false, controllerFailed: false, childClosed: true } })
+    expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([
+      ['/PID', String(fake.calls[0].child.pid), '/T', '/F'],
+      ['/PID', '61001', '/F']
+    ])
+    expect(fake.calls.filter(isPowerShell).length).toBeGreaterThanOrEqual(2)
+    expect(survivor).toBeUndefined()
+    expect(() => host.assertNoUncertainStop()).not.toThrow()
+  })
+
+  it('keeps an unconfined stop unknown and quarantined when no process snapshot can be taken', async () => {
+    const fake = createFakeSpawner()
+    const { root, authorization } = setup(fake.spawnProcess)
+    const host = win32Host(root, authorization, fake.spawnProcess, { windowsProcessSnapshot: async () => undefined })
+    const input = approved(root, authorization, ['--hang'])
+    const job = await host.background(input)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'unknown', stopOutcome: 'termination-unconfirmed', termination: { controllerExitCode: 0, controllerFailed: true, childClosed: true } })
+    expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([['/PID', String(fake.calls[0].child.pid), '/T', '/F']])
+    expect(() => host.assertNoUncertainStop()).toThrow('unconfirmed')
+  })
+
+  it('stops a confined job by ending the Job Object helper itself, without a sweep', async () => {
+    const helper = 'C:\\MagicPot\\bin\\magicpot-command-job\\magicpot-command-job.exe'
+    const fake = createFakeSpawner()
+    const confinedSpawn = ((command: string, args: readonly string[], options: SpawnOptions) =>
+      fake.spawnProcess(helper, ['1024', '-', '-', '--', command, ...args], options)) as CommandJobsSpawnProcess
+    const { root, authorization } = setup(fake.spawnProcess, false, { metadata: { maxMemoryBytes: 1024 } })
+    const host = win32Host(root, authorization, fake.spawnProcess, {
+      confinementAdapter: { platform: 'windows-job-object:test', capabilities: { memory: true, cpu: true, processCount: true, networkDeny: false, networkHosts: false }, prepare: () => confinedSpawn }
+    })
+    const input = approved(root, authorization, ['--hang'])
+    const job = await host.background(input)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+    expect(fake.calls[0].command).toBe(helper)
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'known' })
+    expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([['/PID', String(fake.calls[0].child.pid), '/T', '/F']])
+    expect(fake.calls.filter(isPowerShell)).toEqual([])
   })
 })

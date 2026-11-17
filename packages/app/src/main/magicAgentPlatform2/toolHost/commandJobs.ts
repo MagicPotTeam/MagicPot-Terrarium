@@ -33,6 +33,11 @@ import {
   validateTerminalArgs,
   validateTerminalCommand
 } from './terminalRun'
+import {
+  stopWindowsProcessTree,
+  type WindowsProcessSnapshotProvider,
+  type WindowsProcessSpawn
+} from './windowsProcessTree'
 
 const STORE_DIR = '.magicpot/command-jobs'
 const MAX_ARGS = 128
@@ -79,7 +84,13 @@ export type CommandJobRecord = Readonly<{
 type MutableRecord = {
   -readonly [K in keyof CommandJobRecord]: K extends 'args' ? string[] : CommandJobRecord[K]
 }
-type LiveJob = { child: ChildProcess; timer: NodeJS.Timeout; stopping: boolean; closed: Promise<void>; confirmClosed(): void }
+type LiveJob = {
+  child: ChildProcess; timer: NodeJS.Timeout; stopping: boolean; closed: Promise<void>; confirmClosed(): void
+  /** Spawned through the confinement adapter: on win32 the child is the Job Object helper. */
+  confined: boolean
+  /** Date.now() read before spawn: the child cannot have been created earlier. */
+  spawnedNotBeforeMs: number
+}
 
 export type CommandsBackgroundInput = Readonly<{
   authorizationId: string
@@ -128,6 +139,14 @@ export type CommandJobsAuditSink = Readonly<{
   getLastSequence(streamId: string): number | undefined
 }>
 
+/** True when the permit asks for OS confinement, which then always goes through the adapter. */
+const confinementRequested = (constraints?: PolicyConstraints): boolean =>
+  numberMetadata(constraints, 'maxMemoryBytes') !== undefined ||
+  numberMetadata(constraints, 'maxCpuTimeMs') !== undefined ||
+  numberMetadata(constraints, 'maxProcessCount') !== undefined ||
+  booleanMetadata(constraints, 'denyNetwork') === true ||
+  Boolean(constraints?.networkHosts?.length)
+
 export class CommandJobsToolHost {
   private readonly root: string
   private readonly storeDir: string
@@ -145,6 +164,8 @@ export class CommandJobsToolHost {
   private readonly auditSink?: CommandJobsAuditSink
   private readonly confinementAdapter?: CommandJobsConfinementAdapter
   private readonly mandatoryResourceLimits?: Readonly<{ maxMemoryBytes: number; maxCpuTimeMs: number }>
+  private readonly platform: NodeJS.Platform
+  private readonly windowsProcessSnapshot?: WindowsProcessSnapshotProvider
 
   constructor(
     private readonly authorization: MagicAgentPolicyAuthorizationService,
@@ -161,6 +182,10 @@ export class CommandJobsToolHost {
       confinementAdapter?: CommandJobsConfinementAdapter
       /** Fail closed if the actual execution permit omits or weakens these caps. */
       mandatoryResourceLimits?: Readonly<{ maxMemoryBytes: number; maxCpuTimeMs: number }>
+      /** Test seam for the stop strategy; defaults to process.platform. */
+      platform?: NodeJS.Platform
+      /** Test seam for the win32 tree sweep; defaults to PowerShell started through spawnProcess. */
+      windowsProcessSnapshot?: WindowsProcessSnapshotProvider
     }>
   ) {
     this.root = canonicalTerminalDirectory(options.workspaceRoot)
@@ -183,6 +208,8 @@ export class CommandJobsToolHost {
     this.killProcessGroup = options.killProcessGroup ?? ((pid, signal) => process.kill(pid, signal))
     this.auditSink = options.auditSink
     this.confinementAdapter = options.confinementAdapter
+    this.platform = options.platform ?? process.platform
+    this.windowsProcessSnapshot = options.windowsProcessSnapshot
     if (options.mandatoryResourceLimits) {
       this.mandatoryResourceLimits = Object.freeze({
         maxMemoryBytes: bound(options.mandatoryResourceLimits.maxMemoryBytes, 1, Number.MAX_SAFE_INTEGER, 'maxMemoryBytes'),
@@ -232,6 +259,7 @@ export class CommandJobsToolHost {
     }
     this.validateConstraints(command, cwd, input.request.target.id, constraints)
     const spawnProcess = this.resolveSpawnProcess(constraints)
+    const confined = confinementRequested(constraints)
     const env = this.buildEnvironment(input.env ?? {}, constraints)
     const timeoutMs = Math.min(
       bound(input.timeoutMs ?? DEFAULT_RUNTIME_MS, 1, MAX_RUNTIME_MS, 'timeoutMs'),
@@ -279,12 +307,13 @@ export class CommandJobsToolHost {
     })
 
     let child: ChildProcess
+    const spawnedNotBeforeMs = Date.now()
     try {
       child = spawnProcess(command, args, {
         cwd,
         env,
         shell: false,
-        detached: process.platform !== 'win32',
+        detached: this.platform !== 'win32',
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
       })
@@ -305,7 +334,7 @@ export class CommandJobsToolHost {
     const timer = setTimeout(() => { void this.terminate(record.jobId, 'timed-out').catch(() => undefined) }, timeoutMs)
     let confirmClosed!: () => void
     const closed = new Promise<void>((resolve) => { confirmClosed = resolve })
-    this.live.set(record.jobId, { child, timer, stopping: false, closed, confirmClosed })
+    this.live.set(record.jobId, { child, timer, stopping: false, closed, confirmClosed, confined, spawnedNotBeforeMs })
     const abort = () => { void this.stop({ jobId: record.jobId, routeKey: record.routeKey, sessionId: record.sessionId }).catch(() => undefined) }
     input.signal?.addEventListener('abort', abort, { once: true })
     const detachAbort = () => input.signal?.removeEventListener('abort', abort)
@@ -436,11 +465,14 @@ export class CommandJobsToolHost {
   }
 
   private async finishTermination(jobId: string, live: LiveJob, state: 'timed-out' | 'stopped' | 'output-limit'): Promise<void> {
-    let killerConfirmed = process.platform !== 'win32'
+    let killerConfirmed = this.platform !== 'win32'
     let controllerExitCode: number | null = null, controllerTimedOut = false, controllerFailed = false
     const pid = live.child.pid
     if (pid) {
-      if (process.platform === 'win32') {
+      if (this.platform === 'win32' && live.confined) {
+        // The child is the Job Object helper, which holds the only handle to its
+        // KILL_ON_JOB_CLOSE job: ending the helper itself makes Windows kill every
+        // process in the job, including ones created while this stop runs.
         killerConfirmed = await new Promise<boolean>((resolve) => {
           let killer: ChildProcess | undefined
           const timer = setTimeout(() => { controllerTimedOut = true; killer?.kill(); resolve(false) }, 3000)
@@ -451,6 +483,18 @@ export class CommandJobsToolHost {
             killer.once('error', () => { controllerFailed = true; clearTimeout(timer); resolve(false) })
           } catch { controllerFailed = true; clearTimeout(timer); resolve(false) }
         })
+      } else if (this.platform === 'win32') {
+        // Unconfined: the immediate taskkill no longer trusts one enumeration of the
+        // tree; the sweep kills what it missed or reports the stop unconfirmed.
+        const report = await stopWindowsProcessTree(pid, {
+          rootCreatedNotBeforeMs: live.spawnedNotBeforeMs,
+          spawnProcess: this.spawnProcess as unknown as WindowsProcessSpawn,
+          ...(this.windowsProcessSnapshot ? { snapshot: this.windowsProcessSnapshot } : {})
+        })
+        controllerExitCode = report.initialKill.exitCode
+        controllerTimedOut = report.initialKill.timedOut || report.outcome === 'deadline'
+        controllerFailed = report.initialKill.failed || report.outcome === 'snapshot-unavailable'
+        killerConfirmed = report.confirmed && report.initialKill.exitCode === 0
       } else {
         try { this.killProcessGroup(-pid, 'SIGTERM') } catch { /* process group may already have exited */ }
         await new Promise((resolve) => setTimeout(resolve, 250))
@@ -562,13 +606,7 @@ export class CommandJobsToolHost {
   assertConfinement(constraints: PolicyConstraints): void { this.resolveSpawnProcess(constraints) }
 
   private resolveSpawnProcess(constraints?: PolicyConstraints): CommandJobsSpawnProcess {
-    const requested =
-      numberMetadata(constraints, 'maxMemoryBytes') !== undefined ||
-      numberMetadata(constraints, 'maxCpuTimeMs') !== undefined ||
-      numberMetadata(constraints, 'maxProcessCount') !== undefined ||
-      booleanMetadata(constraints, 'denyNetwork') === true ||
-      Boolean(constraints?.networkHosts?.length)
-    if (!requested) return this.spawnProcess
+    if (!confinementRequested(constraints)) return this.spawnProcess
     if (!constraints || !this.confinementAdapter)
       throw new TerminalRunValidationError(
         'Requested OS resource or network confinement is unavailable on this Tool Host.'
