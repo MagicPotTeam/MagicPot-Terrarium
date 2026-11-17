@@ -97,5 +97,8 @@ function bodyContent(body: unknown): React.ReactNode {
 export default function AgentThreadCardBody({ body }: { body: unknown }) {
   const content = bodyContent(body)
   if (content === null) return null
-  return <Box component="div" sx={{ fontSize: '0.875rem', lineHeight: 1.43, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', my: 1, '& p': { my: 0.5 }, '& ul, & ol': { my: 0.5, pl: 2.5 }, '& pre': { m: 0.5, p: 1, overflowX: 'auto', bgcolor: 'action.hover', whiteSpace: 'pre-wrap' }, '& code': { fontFamily: 'monospace' }, '& blockquote': { ml: 1, pl: 1, borderLeft: '2px solid', borderColor: 'divider' }, '& table': { width: '100%', borderCollapse: 'collapse' }, '& th, & td': { border: '1px solid', borderColor: 'divider', px: 0.5, py: 0.25, textAlign: 'left' } }}>{content}</Box>
+  // Plain text keeps its line breaks. Formatted Markdown keeps them inside its blocks only: the
+  // line breaks between blocks (a list, its items) would otherwise show as empty lines.
+  const plain = typeof content === 'string'
+  return <Box component="div" sx={{ fontSize: '0.875rem', lineHeight: 1.43, whiteSpace: plain ? 'pre-wrap' : 'normal', overflowWrap: 'anywhere', my: 1, '& p, & li, & td, & th, & pre': { whiteSpace: 'pre-wrap' }, '& p': { my: 0.5 }, '& ul, & ol': { my: 0.5, pl: 2.5 }, '& pre': { m: 0.5, p: 1, overflowX: 'auto', bgcolor: 'action.hover', whiteSpace: 'pre-wrap' }, '& code': { fontFamily: 'monospace' }, '& blockquote': { ml: 1, pl: 1, borderLeft: '2px solid', borderColor: 'divider' }, '& table': { width: '100%', borderCollapse: 'collapse' }, '& th, & td': { border: '1px solid', borderColor: 'divider', px: 0.5, py: 0.25, textAlign: 'left' } }}>{content}</Box>
 }

@@ -1349,7 +1349,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     isLoading && index === messages.length - 1 ? loadingStatus : undefined
                   }
                   workingLineHost={
-                    hasTail && isLoading && index === messages.length - 1 ? workingLineHost : null
+                    (hasTail || hasTailEnd) && isLoading && index === messages.length - 1 ? workingLineHost : null
                   }
                   onPreviewImage={onPreviewImage}
                   onImageContextMenu={onImageContextMenu}
@@ -1411,7 +1411,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           columnStyle={columnStyle}
         />
       ) : null}
-      {hasTail ? (
+      {/* The working line is the last child, after the tail and the cards at its end. */}
+      {hasTail || hasTailEnd ? (
         <Box
           ref={setWorkingLineHost}
           data-testid="chat-transcript-working-line"

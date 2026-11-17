@@ -384,4 +384,24 @@ describe('the transcript tail of the Agent column', () => {
     const tail = screen.getByTestId('chat-transcript-tail')
     expect(tail.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
+
+  it('draws the working line after the cards at the end of the transcript (tailEnd)', () => {
+    const running: ChatSession = {
+      ...short,
+      messages: [...short.messages, { role: 'user', content: 'Go on' }, { role: 'assistant', content: '' }]
+    }
+    render(
+      list(running, {
+        isLoading: true,
+        loadingStatus: { label: 'Waiting for your answer' },
+        tailEnd: <div data-testid="prompt-card">question</div>
+      })
+    )
+    const status = screen.getByTestId('assistant-loading-status')
+    expect(status.closest('[data-chat-message-index]')).toBeNull()
+    expect(screen.getByTestId('chat-transcript-working-line')).toContainElement(status)
+    expect(
+      screen.getByTestId('prompt-card').compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
 })
