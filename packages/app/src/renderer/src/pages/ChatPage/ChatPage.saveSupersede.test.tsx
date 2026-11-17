@@ -347,6 +347,37 @@ describe('ChatPage treats a superseded save as benign and stops retrying a perma
     } finally { view.unmount() }
   })
 
+  it('reports an explicit Retry of a stuck supersede (one attempt, one toast) instead of dropping it silently', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      h.forceSupersede = candidate => candidate.messages.some(m => m.content === 'stuck edit')
+      await append('stuck edit')
+      // Past the backoff retries at about 3, 5.5 and 10 s; the next one is due at about 18.5 s.
+      await advanceSeconds(12)
+      expect(banner()).not.toBeNull()
+      // The debounced save reports through the banner only.
+      expect(saveErrorsNotified()).toEqual([])
+      const before = h.saves.length
+      // Retry goes through persistCurrentSessionSnapshot. Before: three more superseded attempts,
+      // then "left to the debounced save" with no word to the user.
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(1))
+      expect(h.saves.length - before).toBe(1)
+      expect(h.saves.every(call => call.outcome === 'superseded')).toBe(true)
+      expect(banner()).not.toBeNull()
+      expect(contents(stored())).toEqual(['original'])
+      expect(shown()).toBe('original|stuck edit')
+      // The edit stayed dirty: once the writer accepts it, Retry stores it and clears the banner.
+      h.forceSupersede = null
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(contents(stored())).toEqual(['original', 'stuck edit']))
+      await waitFor(() => expect(banner()).toBeNull())
+      expect(saveErrorsNotified()).toHaveLength(1)
+    } finally { view.unmount() }
+  })
+
   it('records the refused live object, not the registered one, so the refused payload is not tried again', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
     const view = render(page())
