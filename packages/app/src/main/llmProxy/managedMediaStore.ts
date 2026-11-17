@@ -1193,7 +1193,10 @@ export async function importManagedMediaFile(
   const maxBytes = sizeLimit(input.maxBytes)
   if (!sourceLstat.size) throw new Error('Managed media cannot be empty')
   if (maxBytes !== undefined && sourceLstat.size > maxBytes)
-    throw new Error(`Managed media exceeds the ${maxBytes} byte limit`)
+    throw new ManagedMediaImportError(
+      'MANAGED_MEDIA_TOO_LARGE',
+      `Managed media exceeds the ${maxBytes} byte limit`
+    )
   if (guard)
     copyDeadline =
       Date.now() +
@@ -1214,18 +1217,22 @@ export async function importManagedMediaFile(
       opened.mtimeMs !== sourceLstat.mtimeMs
     )
       throw new Error('Managed media source changed before import')
+    // Read to the end of the file, not just the stat size: bytes that appear during the copy
+    // count against maxBytes in stageIterable (which stops the copy there), and a size that
+    // differs from the stat is refused below and by the after-copy stat.
     async function* chunks(): AsyncGenerator<Buffer> {
       const buffer = Buffer.allocUnsafe(Math.min(IO_CHUNK_BYTES, opened.size))
       let position = 0
-      while (position < opened.size) {
+      for (;;) {
         throwIfAborted(input.signal)
         const { bytesRead } = await onSource(() =>
-          sourceHandle.read(buffer, 0, Math.min(buffer.length, opened.size - position), position)
+          sourceHandle.read(buffer, 0, buffer.length, position)
         )
-        if (!bytesRead) throw new Error('Managed media source changed during import')
+        if (!bytesRead) break
         position += bytesRead
         yield Buffer.from(buffer.subarray(0, bytesRead))
       }
+      if (position !== opened.size) throw new Error('Managed media source changed during import')
     }
     staged = await stageIterable(
       canonicalRoot,

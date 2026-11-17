@@ -409,39 +409,125 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
     const large = path.join(allowed, 'large.png')
     await fs.writeFile(large, Buffer.concat([PNG, Buffer.alloc(2048)]))
     const { service, importFile } = create({ maxImportFileBytes: 1024 })
-    await expectNoPathInError(service.importFile(request(large)), 'MANAGED_MEDIA_IMPORT_FAILED')
+    await expectNoPathInError(service.importFile(request(large)), 'MANAGED_MEDIA_TOO_LARGE')
     expect(importFile).toHaveBeenCalledWith(expect.objectContaining({ maxBytes: 1024 }), {
       authorizedRoot: media
     })
     await stagingIsEmpty()
 
-    // A file that grows past the cap after its stat is cut off by the copy itself.
-    const small = path.join(allowed, 'small.png')
-    await fs.writeFile(small, PNG)
+    // A file that grows past the cap after the checks, while it is being copied: the copy
+    // reads to the end of the file and the cap on the copied bytes stops it.
+    const growing = path.join(allowed, 'growing-past-cap.png')
+    await fs.writeFile(growing, PNG)
+    const cap = PNG.length + 10
+    let bytesReadFromSource = 0
+    let grown = false
     const staged = create({
-      maxImportFileBytes: PNG.length + 10,
-      importFile: async (input, dependencies) => {
-        const stat = await fs.stat(input.sourcePath)
-        expect(stat.size).toBe(PNG.length)
-        return importManagedMediaFile(input, {
+      maxImportFileBytes: cap,
+      importFile: (input, dependencies) =>
+        importManagedMediaFile(input, {
           ...dependencies,
           fs: {
             ...fs,
-            lstat: (async (...args: Parameters<typeof fs.lstat>) => {
-              const result = await fs.lstat(...args)
-              if (String(args[0]) === small) await fs.appendFile(small, Buffer.alloc(64))
-              return result
-            }) as typeof fs.lstat
+            open: (async (...args: Parameters<typeof fs.open>) => {
+              const handle = await fs.open(...args)
+              if (String(args[0]) !== growing) return handle
+              return new Proxy(handle, {
+                get(target, property) {
+                  if (property === 'read') {
+                    return async (...readArgs: Parameters<typeof handle.read>) => {
+                      if (!grown) {
+                        grown = true
+                        await fs.appendFile(growing, Buffer.alloc(64 * 1024))
+                      }
+                      const result = await (target.read as (...a: unknown[]) => Promise<{
+                        bytesRead: number
+                      }>)(...readArgs)
+                      bytesReadFromSource += result.bytesRead
+                      return result
+                    }
+                  }
+                  const value = Reflect.get(target, property) as unknown
+                  return typeof value === 'function' ? value.bind(target) : value
+                }
+              })
+            }) as typeof fs.open
           }
         })
-      }
     })
-    await expectNoPathInError(
-      staged.service.importFile(request(small)),
-      'MANAGED_MEDIA_IMPORT_FAILED'
-    )
+    await expectNoPathInError(staged.service.importFile(request(growing)), 'MANAGED_MEDIA_TOO_LARGE')
+    expect(grown).toBe(true)
+    // Bounded: no more than one read chunk past the cap was read.
+    expect(bytesReadFromSource).toBeGreaterThan(cap)
+    expect(bytesReadFromSource).toBeLessThanOrEqual(cap + 64 * 1024)
     await stagingIsEmpty()
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses another regular file swapped in before the open (same size and time, other inode)',
+    async () => {
+      const picked = path.join(allowed, 'picked-swap.png')
+      const other = path.join(allowed, 'other.png')
+      // Same size and modification time: only the device / inode check tells them apart.
+      await fs.writeFile(picked, PNG)
+      await fs.writeFile(other, PNG)
+      const time = new Date('2026-01-02T03:04:05Z')
+      await fs.utimes(picked, time, time)
+      await fs.utimes(other, time, time)
+      let swapped = false
+      const { service } = create({
+        importFile: (input, dependencies) =>
+          importManagedMediaFile(input, {
+            ...dependencies,
+            fs: {
+              ...fs,
+              open: (async (...args: Parameters<typeof fs.open>) => {
+                if (!swapped && String(args[0]) === picked) {
+                  swapped = true
+                  await fs.rename(other, picked)
+                }
+                return fs.open(...args)
+              }) as typeof fs.open
+            }
+          })
+      })
+      await expectNoPathInError(service.importFile(request(picked)), 'MANAGED_MEDIA_IMPORT_FAILED')
+      expect(swapped).toBe(true)
+      await stagingIsEmpty()
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'opens the source with O_NOFOLLOW: a symlink swapped in before the open is not followed',
+    async () => {
+      const picked = path.join(allowed, 'picked-link.png')
+      const moved = path.join(outside, 'moved.png')
+      await fs.writeFile(picked, PNG)
+      let swapped = false
+      const { service } = create({
+        importFile: (input, dependencies) =>
+          importManagedMediaFile(input, {
+            ...dependencies,
+            fs: {
+              ...fs,
+              open: (async (...args: Parameters<typeof fs.open>) => {
+                if (!swapped && String(args[0]) === picked) {
+                  // The same file (same inode) now sits outside, reached through a link:
+                  // only O_NOFOLLOW refuses it.
+                  swapped = true
+                  await fs.rename(picked, moved)
+                  await fs.symlink(moved, picked)
+                }
+                return fs.open(...args)
+              }) as typeof fs.open
+            }
+          })
+      })
+      await expectNoPathInError(service.importFile(request(picked)), 'MANAGED_MEDIA_IMPORT_FAILED')
+      expect(swapped).toBe(true)
+      await stagingIsEmpty()
+    }
+  )
 
   it('checks the image type on the copied bytes, not on the declared type or name', async () => {
     const fake = path.join(allowed, 'fake.png')

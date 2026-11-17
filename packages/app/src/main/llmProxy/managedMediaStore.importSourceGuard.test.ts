@@ -190,16 +190,19 @@ describe('import source deadlines (a stalled or slow source never blocks main)',
   })
 
   it('has no deadline for main-owned callers that pass no guard', async () => {
-    let finishRead!: () => void
+    let finishRead: (() => void) | undefined
     const { fs: slow } = slowSource({
+      // The first read waits longer than any guard deadline used here; later reads run.
       read: (real, args) =>
-        new Promise((resolve, reject) => {
-          finishRead = () => void real(...args).then(resolve, reject)
-        })
+        finishRead
+          ? real(...args)
+          : new Promise((resolve, reject) => {
+              finishRead = () => void real(...args).then(resolve, reject)
+            })
     })
     const pending = importWith(slow)
     await new Promise((resolve) => setTimeout(resolve, 150))
-    finishRead()
+    finishRead!()
     await expect(pending).resolves.toMatchObject({ reference: { kind: 'managed' } })
   })
 
