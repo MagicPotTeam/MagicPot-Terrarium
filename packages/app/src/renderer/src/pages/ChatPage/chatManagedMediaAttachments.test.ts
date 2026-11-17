@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
+import enUS from '@shared/locales/en-US/renderer.json'
+import zhCN from '@shared/locales/zh-CN/renderer.json'
+import type { ImportManagedMediaBytesReq, ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import {
   CHAT_ATTACHMENT_STORAGE,
+  CHAT_PATHLESS_ATTACHMENT_MAX_BYTES,
+  ChatPathlessAttachmentTooLargeError,
   importChatAttachment,
   importChatAttachmentUrl
 } from './chatManagedMediaAttachments'
@@ -31,6 +35,15 @@ class TestFileReader {
     this.result = 'data:image/png;base64,AQID'
     this.onload?.()
   }
+  readAsArrayBuffer(blob: Blob) {
+    // jsdom's Blob has no arrayBuffer(); read its bytes through jsdom's own FileReader.
+    const reader = new originalFileReader()
+    reader.onload = () => {
+      this.result = reader.result
+      this.onload?.()
+    }
+    reader.readAsArrayBuffer(blob)
+  }
 }
 
 const originalFileReader = globalThis.FileReader
@@ -48,8 +61,8 @@ describe('chatManagedMediaAttachments', () => {
     const file = new File([new Uint8Array([1, 2, 3])], 'file.png', { type: 'image/png' })
     const service = {
       importFile: vi.fn(async () => imported),
-      importDataUrl: vi.fn()
-    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+      importBytes: vi.fn()
+    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
 
     const attachment = await importChatAttachment({
       service,
@@ -71,7 +84,7 @@ describe('chatManagedMediaAttachments', () => {
       originalFileName: 'file.png',
       storage: CHAT_ATTACHMENT_STORAGE
     })
-    expect(service.importDataUrl).not.toHaveBeenCalled()
+    expect(service.importBytes).not.toHaveBeenCalled()
     expect(attachment).toMatchObject({
       url: imported.localMediaUrl,
       media: reference,
@@ -106,8 +119,8 @@ describe('chatManagedMediaAttachments', () => {
     })
     const service = {
       importFile: vi.fn(async () => imported),
-      importDataUrl: vi.fn()
-    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+      importBytes: vi.fn()
+    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
 
     const attachment = await importChatAttachment({
       service,
@@ -127,7 +140,7 @@ describe('chatManagedMediaAttachments', () => {
       originalFileName: 'clip.mp4',
       storage: CHAT_ATTACHMENT_STORAGE
     })
-    expect(service.importDataUrl).not.toHaveBeenCalled()
+    expect(service.importBytes).not.toHaveBeenCalled()
     expect(fileReaderConstructed).not.toHaveBeenCalled()
     expect(readAsDataURL).not.toHaveBeenCalled()
     expect(arrayBuffer).not.toHaveBeenCalled()
@@ -191,20 +204,20 @@ describe('chatManagedMediaAttachments', () => {
       vi.stubGlobal('electronFile', bridge)
       const service = {
         importFile: vi.fn(),
-        importDataUrl: vi.fn(async () => imported)
-      } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+        importBytes: vi.fn(async () => imported)
+      } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
       await importChatAttachment({ service, file, type: 'image', mimeType: 'image/png' })
       expect(service.importFile).not.toHaveBeenCalled()
-      expect(service.importDataUrl).toHaveBeenCalledOnce()
+      expect(service.importBytes).toHaveBeenCalledOnce()
     }
   })
 
-  it('imports pathless clipboard Files as data URLs and persists only local-media', async () => {
+  it('imports pathless clipboard Files as bytes and persists only local-media', async () => {
     globalThis.FileReader = TestFileReader as unknown as typeof FileReader
     const service = {
       importFile: vi.fn(),
-      importDataUrl: vi.fn(async () => imported)
-    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+      importBytes: vi.fn(async () => imported)
+    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
     const file = new File([new Uint8Array([1, 2, 3])], 'paste.png', { type: 'image/png' })
 
     const attachment = await importChatAttachment({
@@ -215,16 +228,127 @@ describe('chatManagedMediaAttachments', () => {
     })
 
     expect(service.importFile).not.toHaveBeenCalled()
-    expect(service.importDataUrl).toHaveBeenCalledWith({
-      dataUrl: 'data:image/png;base64,AQID',
+    expect(service.importBytes).toHaveBeenCalledWith({
+      bytes: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/png',
       originalFileName: 'paste.png',
       storage: CHAT_ATTACHMENT_STORAGE
     })
+    expect(dataUrlReader).not.toHaveBeenCalled()
     expect(attachment.url).toBe(imported.localMediaUrl)
     expect(attachment.url).not.toMatch(/^(?:blob|data):/)
   })
 
-  it('materializes data/blob URLs through managed media', async () => {
+  it('sends a path-less 2 MB image as one byte array and builds no base64 string', async () => {
+    // Only a byte read is allowed (jsdom's Blob has no arrayBuffer(); Chromium's has).
+    globalThis.FileReader = TestFileReader as unknown as typeof FileReader
+    const btoa = vi.fn()
+    vi.stubGlobal('btoa', btoa)
+    const payload = new Uint8Array(2 * 1024 * 1024)
+    for (let index = 0; index < payload.length; index += 4096) payload[index] = index % 251
+    const file = new File([payload], 'generated.png', { type: 'image/png' })
+    // Chromium's Blob#arrayBuffer (jsdom has none, and its FileReader is slow for 2 MB).
+    const arrayBuffer = vi.fn(async () => payload.slice().buffer)
+    Object.defineProperty(file, 'arrayBuffer', { value: arrayBuffer })
+    const service = {
+      importFile: vi.fn(),
+      importBytes: vi.fn(async (_req: ImportManagedMediaBytesReq) => imported)
+    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
+
+    await importChatAttachment({ service, file, type: 'image', mimeType: 'image/png' })
+
+    expect(service.importBytes).toHaveBeenCalledOnce()
+    const request = service.importBytes.mock.calls[0][0] as { bytes: unknown }
+    expect(request.bytes).toBeInstanceOf(Uint8Array)
+    expect((request.bytes as Uint8Array).byteLength).toBe(payload.byteLength)
+    expect((request.bytes as Uint8Array).every((value, index) => value === payload[index])).toBe(
+      true
+    )
+    // Nothing in the request is a string longer than a file name.
+    for (const value of Object.values(request)) {
+      if (typeof value === 'string') expect(value.length).toBeLessThan(64)
+    }
+    expect(arrayBuffer).toHaveBeenCalledOnce()
+    expect(dataUrlReader).not.toHaveBeenCalled()
+    expect(btoa).not.toHaveBeenCalled()
+  })
+
+  it('refuses path-less data above the cap with a short message, before reading it', async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], 'huge-paste.png', { type: 'image/png' })
+    Object.defineProperty(file, 'size', { value: CHAT_PATHLESS_ATTACHMENT_MAX_BYTES + 1 })
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(file, 'arrayBuffer', { value: arrayBuffer })
+    const service = {
+      importFile: vi.fn(async () => imported),
+      importBytes: vi.fn(async () => imported)
+    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
+
+    const error = await importChatAttachment({
+      service,
+      file,
+      type: 'image',
+      mimeType: 'image/png'
+    }).then(
+      () => expect.unreachable('a path-less file above the cap must be refused'),
+      (reason: unknown) => reason
+    )
+
+    expect(error).toBeInstanceOf(ChatPathlessAttachmentTooLargeError)
+    expect(error).toMatchObject({
+      fileName: 'huge-paste.png',
+      sizeBytes: CHAT_PATHLESS_ATTACHMENT_MAX_BYTES + 1,
+      maxBytes: CHAT_PATHLESS_ATTACHMENT_MAX_BYTES
+    })
+    const message = (error as Error).message
+    expect(message).toContain('huge-paste.png')
+    expect(message).toContain(String(CHAT_PATHLESS_ATTACHMENT_MAX_BYTES / (1024 * 1024)))
+    expect(message).not.toContain('chat.pathless_attachment_too_large')
+    expect(message.length).toBeLessThan(200)
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(service.importBytes).not.toHaveBeenCalled()
+
+    // The localized line in both locales.
+    const { default: i18n } = await import('@renderer/i18n')
+    for (const [language, locale] of [
+      ['zh-CN', zhCN],
+      ['en-US', enUS]
+    ] as const) {
+      await i18n.changeLanguage(language)
+      const localized = new ChatPathlessAttachmentTooLargeError('huge-paste.png', 70 * 1024 * 1024)
+      expect(localized.message).toBe(
+        locale.chat.pathless_attachment_too_large
+          .replace('{{fileName}}', 'huge-paste.png')
+          .replace('{{size}}', '70 MB')
+          .replace('{{maxMB}}', '64')
+      )
+    }
+
+    // The same file with a path is imported by path whatever its size.
+    await importChatAttachment({
+      service,
+      file,
+      fileBridge: {
+        getPathForFile: () => '/picked/huge.png',
+        authorizeLocalMediaFile: async () => '/picked/huge.png',
+        resolveAuthorizedLocalMediaPath: async (filePath) => filePath
+      },
+      type: 'image',
+      mimeType: 'image/png'
+    })
+    expect(service.importFile).toHaveBeenCalledOnce()
+  })
+
+  it('has the refusal message in both locales with the same placeholders', () => {
+    const placeholders = (text: string) => [...text.matchAll(/{{(\w+)}}/g)].map((m) => m[1]).sort()
+    const en = enUS.chat.pathless_attachment_too_large
+    const zh = zhCN.chat.pathless_attachment_too_large
+    expect(en).toBeTruthy()
+    expect(zh).toBeTruthy()
+    expect(placeholders(zh)).toEqual(placeholders(en))
+    expect(placeholders(en)).toEqual(['fileName', 'maxMB', 'size'])
+  })
+
+  it('sends blob URLs as bytes and data URLs as they are', async () => {
     globalThis.FileReader = TestFileReader as unknown as typeof FileReader
     vi.stubGlobal(
       'fetch',
@@ -236,7 +360,10 @@ describe('chatManagedMediaAttachments', () => {
           })
       )
     )
-    const service = { importDataUrl: vi.fn(async () => imported) }
+    const service = {
+      importDataUrl: vi.fn(async () => imported),
+      importBytes: vi.fn(async () => imported)
+    }
 
     const attachment = await importChatAttachmentUrl({
       service,
@@ -245,32 +372,47 @@ describe('chatManagedMediaAttachments', () => {
       dimensions: { sourceWidth: 4, sourceHeight: 5 }
     })
 
-    expect(service.importDataUrl).toHaveBeenCalledWith({
-      dataUrl: 'data:image/png;base64,AQID',
+    expect(service.importBytes).toHaveBeenCalledWith({
+      bytes: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/png',
       originalFileName: 'preview.png',
       storage: CHAT_ATTACHMENT_STORAGE
     })
+    expect(service.importDataUrl).not.toHaveBeenCalled()
+    expect(dataUrlReader).not.toHaveBeenCalled()
     expect(attachment).toMatchObject({
       url: imported.localMediaUrl,
       media: reference,
       sourceWidth: 4,
       sourceHeight: 5
     })
+
+    await importChatAttachmentUrl({
+      service,
+      url: 'data:image/png;base64,AQID',
+      fileName: 'inline.png'
+    })
+    expect(service.importDataUrl).toHaveBeenCalledWith({
+      dataUrl: 'data:image/png;base64,AQID',
+      originalFileName: 'inline.png',
+      storage: CHAT_ATTACHMENT_STORAGE
+    })
+    expect(service.importBytes).toHaveBeenCalledOnce()
   })
 
   it('passes an explicit lifecycle scope without allowing the helper to rewrite it', async () => {
-    globalThis.FileReader = TestFileReader as unknown as typeof FileReader
     const service = {
       importFile: vi.fn(),
-      importDataUrl: vi.fn(async () => imported)
-    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+      importBytes: vi.fn(async () => imported)
+    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
     const storage = { namespace: 'task' as const, scope: 'run_01' }
     const file = new File([new Uint8Array([1, 2, 3])], 'task.png', { type: 'image/png' })
 
     await importChatAttachment({ service, file, type: 'image', storage })
 
-    expect(service.importDataUrl).toHaveBeenCalledWith({
-      dataUrl: 'data:image/png;base64,AQID',
+    expect(service.importBytes).toHaveBeenCalledWith({
+      bytes: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/png',
       originalFileName: 'task.png',
       storage
     })
@@ -290,7 +432,7 @@ describe('chatManagedMediaAttachments', () => {
     const failure = new Error('import failed')
     await expect(
       importChatAttachment({
-        service: { importFile: vi.fn(), importDataUrl: vi.fn(async () => Promise.reject(failure)) },
+        service: { importFile: vi.fn(), importBytes: vi.fn(async () => Promise.reject(failure)) },
         file,
         type: 'image',
         mimeType: 'image/png'

@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import type {
   EnsureManagedMediaDerivativeReq,
   EnsureManagedMediaDerivativeResp,
+  ImportManagedMediaBytesReq,
   ImportManagedMediaDataUrlReq,
   ImportManagedMediaFileReq,
   ImportManagedMediaResp,
@@ -20,6 +21,7 @@ import type {
   MaterializeManagedMediaForRequestResp
 } from '@shared/api/svcManagedMedia'
 import {
+  MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES,
   validateEnsureManagedMediaDerivativeResp,
   validateImportManagedMediaResp,
   validateMigrateLegacyManagedMediaResp,
@@ -180,6 +182,23 @@ export function toImportSourceLocalPath(
     throw invalidImportSource()
   }
   return sourcePath
+}
+
+const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+/**
+ * Whether `payload` (already restricted to the base64 alphabet with at most two trailing '=')
+ * is the canonical padded encoding of its bytes, i.e. what Buffer#toString('base64') would
+ * return, without building that second string: padded to a multiple of four, and the unused
+ * low bits of the last data character zero.
+ */
+export function isCanonicalBase64Payload(payload: string): boolean {
+  if (!payload.length || payload.length % 4 !== 0) return false
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  if (padding === 0) return true
+  const last = BASE64_ALPHABET.indexOf(payload[payload.length - padding - 1])
+  if (last < 0) return false
+  return (last & (padding === 2 ? 0x0f : 0x03)) === 0
 }
 
 function sameFilesystemPath(left: string, right: string): boolean {
@@ -413,33 +432,22 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
     }
   }
 
+  /** Kept for older callers; new path-less callers send bytes through importBytes. */
   async importDataUrl(req: ImportManagedMediaDataUrlReq): Promise<ImportManagedMediaResp> {
     try {
       const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/.exec(req.dataUrl)
       if (!match) throw new Error('Invalid data URL')
+      // Canonical-base64 check on the payload itself: no re-encoded copy of a string that
+      // can be hundreds of MB.
+      if (!isCanonicalBase64Payload(match[2])) throw new Error('Invalid base64')
       const bytes = Buffer.from(match[2], 'base64')
-      if (!bytes.length || bytes.toString('base64') !== match[2]) throw new Error('Invalid base64')
-      const { importRoot, authorizedRoot } = await resolveImportRoots(
-        req.storage,
-        this.dependencies
-      )
-      const imported = await (this.dependencies.importBytes ?? importManagedMedia)(
-        importRoot,
-        {
-          bytes,
-          mimeType: match[1],
-          originalFileName: req.originalFileName,
-          provenance: { source: 'chat-attachment-data-url' }
-        },
-        { authorizedRoot }
-      )
-      const response = importResponse(imported, authorizedRoot)
-      void (this.dependencies.ensureDerivative ?? ensureManagedMediaDerivative)({
-        authorizedRoot,
-        reference: response.reference,
-        maxEdge: 2048
-      }).catch(() => undefined)
-      return response
+      if (!bytes.length) throw new Error('Invalid base64')
+      return await this.importBytesInto(req.storage, {
+        bytes,
+        mimeType: match[1],
+        originalFileName: req.originalFileName,
+        provenance: { source: 'chat-attachment-data-url' }
+      })
     } catch (error) {
       if (error instanceof ServiceError) throw error
       if (error instanceof ManagedMediaImportError) {
@@ -449,6 +457,60 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
         code: 'MANAGED_MEDIA_IMPORT_FAILED'
       })
     }
+  }
+
+  async importBytes(req: ImportManagedMediaBytesReq): Promise<ImportManagedMediaResp> {
+    try {
+      // Direct MAIN callers skip the IPC validator: repeat its limits here.
+      if (
+        !(req.bytes instanceof Uint8Array) ||
+        req.bytes.byteLength <= 0 ||
+        req.bytes.byteLength > MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES
+      ) {
+        throw new ServiceError('Managed media bytes are empty or above the import limit', {
+          code: 'MANAGED_MEDIA_TOO_LARGE'
+        })
+      }
+      if (!isManagedMediaMimeTypeSupported(req.mimeType)) {
+        throw new ServiceError('Unsupported managed media type', {
+          code: 'MANAGED_MEDIA_UNSUPPORTED'
+        })
+      }
+      return await this.importBytesInto(req.storage, {
+        bytes: req.bytes,
+        mimeType: req.mimeType,
+        originalFileName: req.originalFileName,
+        provenance: { source: 'chat-attachment-bytes' },
+        maxBytes: MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES
+      })
+    } catch (error) {
+      if (error instanceof ServiceError) throw error
+      if (error instanceof ManagedMediaImportError) {
+        throw new ServiceError(error.message, { code: error.code })
+      }
+      throw new ServiceError('Unable to import managed media bytes', {
+        code: 'MANAGED_MEDIA_IMPORT_FAILED'
+      })
+    }
+  }
+
+  private async importBytesInto(
+    storage: ManagedMediaStorage | undefined,
+    input: Parameters<typeof importManagedMedia>[1]
+  ): Promise<ImportManagedMediaResp> {
+    const { importRoot, authorizedRoot } = await resolveImportRoots(storage, this.dependencies)
+    const imported = await (this.dependencies.importBytes ?? importManagedMedia)(
+      importRoot,
+      input,
+      { authorizedRoot }
+    )
+    const response = importResponse(imported, authorizedRoot)
+    void (this.dependencies.ensureDerivative ?? ensureManagedMediaDerivative)({
+      authorizedRoot,
+      reference: response.reference,
+      maxEdge: 2048
+    }).catch(() => undefined)
+    return response
   }
 
   async ensureDerivative(

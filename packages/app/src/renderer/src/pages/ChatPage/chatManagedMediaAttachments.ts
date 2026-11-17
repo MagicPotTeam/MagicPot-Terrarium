@@ -1,7 +1,10 @@
+import i18next from 'i18next'
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import type { ManagedMediaStorage } from '@shared/api/svcManagedMedia'
+import { MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference } from '@shared/mediaReference'
+import { formatFileSize } from '@renderer/utils/fileUtils'
 import { resolveLocalMediaPathFromUrl } from './chatPageShared'
 
 /**
@@ -25,7 +28,7 @@ export type ChatAttachmentFileBridge = {
 }
 
 type ImportChatAttachmentInput = {
-  service?: Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+  service?: Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
   file: ManagedAttachmentFile
   /** Defaults to window.electronFile. */
   fileBridge?: ChatAttachmentFileBridge
@@ -37,7 +40,7 @@ type ImportChatAttachmentInput = {
 }
 
 type ImportChatAttachmentUrlInput = {
-  service?: Pick<ManagedMediaSvc, 'importDataUrl'>
+  service?: Pick<ManagedMediaSvc, 'importDataUrl' | 'importBytes'>
   url: string
   fileName: string
   dimensions?: Dimensions
@@ -52,15 +55,71 @@ const readFileAsDataUrl = (file: File): Promise<string> =>
     reader.readAsDataURL(file)
   })
 
-const readUrlAsDataUrl = async (url: string): Promise<string> => {
-  if (url.startsWith('data:')) return url
+/** Largest path-less attachment (pasted or generated data) the chat reads into memory. */
+export const CHAT_PATHLESS_ATTACHMENT_MAX_BYTES = MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES
+
+/** Raised before reading path-less data above CHAT_PATHLESS_ATTACHMENT_MAX_BYTES. */
+export class ChatPathlessAttachmentTooLargeError extends Error {
+  constructor(
+    readonly fileName: string,
+    readonly sizeBytes: number,
+    readonly maxBytes: number = CHAT_PATHLESS_ATTACHMENT_MAX_BYTES
+  ) {
+    const values = {
+      fileName: fileName || 'attachment',
+      size: formatFileSize(sizeBytes),
+      maxMB: Math.floor(maxBytes / (1024 * 1024))
+    }
+    // i18next returns nothing before it is initialised: keep the numbers in that case.
+    super(
+      i18next.t('chat.pathless_attachment_too_large', values) ||
+        `${values.fileName} (${values.size}) > ${values.maxMB} MB`
+    )
+    this.name = 'ChatPathlessAttachmentTooLargeError'
+  }
+}
+
+/** The blob's bytes as one ArrayBuffer (FileReader only where Blob#arrayBuffer is missing). */
+const readBlobArrayBuffer = (blob: Blob): Promise<ArrayBuffer> => {
+  if (typeof blob.arrayBuffer === 'function') return blob.arrayBuffer()
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as ArrayBuffer)
+    reader.onerror = () => reject(reader.error || new Error('Failed to read attachment.'))
+    reader.readAsArrayBuffer(blob)
+  })
+}
+
+/**
+ * Import path-less data (clipboard, generated blob) as bytes: one ArrayBuffer, never a base64
+ * string. Data above the cap is refused before it is read.
+ */
+const importPathlessBlob = async (
+  service: Pick<ManagedMediaSvc, 'importBytes'>,
+  blob: Blob,
+  {
+    mimeType,
+    originalFileName,
+    storage
+  }: { mimeType: string; originalFileName: string; storage: ManagedMediaStorage }
+): Promise<Awaited<ReturnType<ManagedMediaSvc['importBytes']>>> => {
+  if (blob.size > CHAT_PATHLESS_ATTACHMENT_MAX_BYTES) {
+    throw new ChatPathlessAttachmentTooLargeError(originalFileName, blob.size)
+  }
+  return service.importBytes({
+    bytes: new Uint8Array(await readBlobArrayBuffer(blob)),
+    // A typeless blob is application/octet-stream, which the managed store rejects.
+    mimeType: mimeType || 'application/octet-stream',
+    originalFileName,
+    storage
+  })
+}
+
+const fetchAttachmentBlob = async (url: string): Promise<Blob> => {
   const response = await fetch(url)
   if ('ok' in response && !response.ok)
     throw new Error(`Failed to fetch attachment: ${response.status}`)
-  const blob = await response.blob()
-  // Keep the blob's type: a typeless File would encode as application/octet-stream,
-  // which the managed store rejects.
-  return readFileAsDataUrl(new File([blob], 'attachment', { type: blob.type }))
+  return response.blob()
 }
 
 /** UNC (\\server\share) and Win32 device / namespace paths (\\?\, \\.\): main refuses them. */
@@ -128,8 +187,8 @@ export const importChatAttachment = async ({
         originalFileName,
         storage
       })
-    : await service.importDataUrl({
-        dataUrl: await readFileAsDataUrl(file),
+    : await importPathlessBlob(service, file, {
+        mimeType: mimeType || file.type,
         originalFileName,
         storage
       })
@@ -156,11 +215,17 @@ export const importChatAttachmentUrl = async ({
   if (!url.startsWith('data:') && !url.startsWith('blob:')) {
     return { type: 'image', url, fileName, ...dimensions }
   }
-  const imported = await service.importDataUrl({
-    dataUrl: await readUrlAsDataUrl(url),
-    originalFileName: fileName,
-    storage
-  })
+  // A data: URL is already a string: it is sent as it is. A blob: URL is sent as bytes.
+  const imported = url.startsWith('data:')
+    ? await service.importDataUrl({ dataUrl: url, originalFileName: fileName, storage })
+    : await (async () => {
+        const blob = await fetchAttachmentBlob(url)
+        return importPathlessBlob(service, blob, {
+          mimeType: blob.type,
+          originalFileName: fileName,
+          storage
+        })
+      })()
   return {
     type: 'image',
     url: imported.localMediaUrl,
@@ -223,7 +288,7 @@ const defaultResolveAuthorizedLocalPath = async (filePath: string): Promise<stri
 }
 
 export type IncomingChatImageImportOptions = {
-  service?: Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+  service?: Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl' | 'importBytes'>
   /** Main-side local-media authorisation; returns the canonical path or ''. */
   resolveAuthorizedLocalPath?: (filePath: string) => Promise<string>
   fetchImpl?: typeof fetch
@@ -251,7 +316,7 @@ const hasManagedReference = (attachment: ChatAttachment): boolean =>
  * - local-media / file: imported by path in main after the local-media authorisation;
  *   no image bytes pass through the renderer. A path main does not authorise is
  *   returned unchanged (as before; the protocol refuses it as well).
- * - blob: read once and imported; the blob URL is never kept.
+ * - blob: read once as bytes and imported; the blob URL is never kept.
  * - data: imported as it is.
  *
  * Every other field (hiddenFromChatView, fileName, dimensions, metadata, ...) is kept.
@@ -311,6 +376,9 @@ export const importIncomingChatImageAttachment = async (
     if (!isManagedImageMimeType(effectiveMime)) {
       // Not a format the store holds: keep today's inline form for blob sources.
       if (!isBlob) return attachment
+      if (blob.size > CHAT_PATHLESS_ATTACHMENT_MAX_BYTES) {
+        throw new ChatPathlessAttachmentTooLargeError(originalFileName, blob.size)
+      }
       const dataUrl = await blobToTypedDataUrl(blob, effectiveMime || 'image/png')
       return {
         ...attachment,
@@ -321,8 +389,8 @@ export const importIncomingChatImageAttachment = async (
     }
     if (!service) throw new Error('Managed media service is unavailable')
     return toManaged(
-      await service.importDataUrl({
-        dataUrl: await blobToTypedDataUrl(blob, effectiveMime),
+      await importPathlessBlob(service, blob, {
+        mimeType: effectiveMime,
         originalFileName,
         storage
       })
@@ -417,7 +485,7 @@ export const boundIncomingChatImageSize = async (
     fetchImpl = (input) => fetch(input),
     storage = CHAT_ATTACHMENT_STORAGE
   }: {
-    service?: Partial<Pick<ManagedMediaSvc, 'ensureDerivative' | 'importDataUrl'>>
+    service?: Partial<Pick<ManagedMediaSvc, 'ensureDerivative' | 'importBytes'>>
     maxBytes: number
     fetchImpl?: typeof fetch
     storage?: ManagedMediaStorage
@@ -430,7 +498,8 @@ export const boundIncomingChatImageSize = async (
   if (sizeBytes <= maxBytes) return { attachment }
   const fileName = attachment.fileName || managed?.originalFileName || 'image'
   const tooLarge = () => new ChatImageTooLargeError(fileName, sizeBytes, maxBytes)
-  if (!managed || !service?.ensureDerivative || !service.importDataUrl) throw tooLarge()
+  if (!managed || !service?.ensureDerivative || !service.importBytes) throw tooLarge()
+  const bytesService = { importBytes: service.importBytes.bind(service) }
 
   for (const maxEdge of DOWNSCALE_MAX_EDGES) {
     let derivative: Awaited<ReturnType<ManagedMediaSvc['ensureDerivative']>>
@@ -444,8 +513,8 @@ export const boundIncomingChatImageSize = async (
     const descriptor = derivative.descriptor
     if (descriptor.sizeBytes > maxBytes) continue
     const blob = await fetchImageBlob(descriptor.localMediaUrl, fetchImpl)
-    const imported = await service.importDataUrl({
-      dataUrl: await blobToTypedDataUrl(blob, descriptor.mimeType),
+    const imported = await importPathlessBlob(bytesService, blob, {
+      mimeType: descriptor.mimeType,
       originalFileName: toManagedOriginalFileName(fileName, 'image'),
       storage
     })

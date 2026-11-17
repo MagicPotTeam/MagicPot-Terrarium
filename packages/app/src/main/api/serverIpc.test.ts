@@ -15,7 +15,7 @@ const CANVAS_THUMBNAIL_METHODS = [
   'createNativeRegion'
 ] as const
 
-const { createServiceClass, handleMock, onMock, catalogDelegateFactory, platformConstructor, storageDelegateFactory, stateConstructor } = vi.hoisted(() => {
+const { createServiceClass, handleMock, onMock, catalogDelegateFactory, platformConstructor, storageDelegateFactory, stateConstructor, managedMediaConstructor, resolveAuthorizedLocalMediaPathMock } = vi.hoisted(() => {
   const createServiceClass = () =>
     class {
       [methodName: string]: unknown
@@ -42,7 +42,11 @@ const { createServiceClass, handleMock, onMock, catalogDelegateFactory, platform
     catalogDelegateFactory: vi.fn((_getMainWindow: () => Electron.BrowserWindow | null) => vi.fn(async () => ({ status: 'unavailable', reason: 'unavailable' }))),
     platformConstructor: vi.fn(),
     storageDelegateFactory: vi.fn((_getMainWindow: () => Electron.BrowserWindow | null) => vi.fn(async () => ({ status: 'unavailable', reason: 'unavailable' }))),
-    stateConstructor: vi.fn()
+    stateConstructor: vi.fn(),
+    managedMediaConstructor: vi.fn(),
+    resolveAuthorizedLocalMediaPathMock: vi.fn((filePath: string, roots: readonly string[]) =>
+      roots.some((root) => filePath.startsWith(`${root}/`)) ? filePath : null
+    )
   }
 })
 
@@ -84,12 +88,28 @@ vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: vi.fn
   platformConstructor(deps); return new (createServiceClass())()
 }) }))
 vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({ createInstalledCatalogReadDelegate: catalogDelegateFactory }))
-vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: createServiceClass(), MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES: 1024 }))
+vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: vi.fn(function (deps?: unknown) { managedMediaConstructor(deps); return new (createServiceClass())() }), MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES: 1024 }))
+vi.mock('../localMediaAccess', () => ({ resolveAuthorizedLocalMediaPath: resolveAuthorizedLocalMediaPathMock }))
+vi.mock('../localMediaAllowedRoots', () => ({ getLocalMediaAllowedRoots: () => ['/app-root'] }))
 vi.mock('./svcReportBundlesImpl', () => ({ ReportBundlesSvcImpl: createServiceClass() }))
 describe('serverIpc createServer', () => {
   beforeEach(() => {
     handleMock.mockClear()
     onMock.mockClear(); catalogDelegateFactory.mockClear(); platformConstructor.mockClear(); storageDelegateFactory.mockClear(); stateConstructor.mockClear()
+  })
+
+  it('gives the renderer-facing managed media service the source-path policy and the size cap', () => {
+    managedMediaConstructor.mockClear()
+    createServer()
+    expect(managedMediaConstructor).toHaveBeenCalledOnce()
+    const deps = managedMediaConstructor.mock.calls[0]?.[0] as {
+      authorizeImportSourcePath?: (sourcePath: string) => string | null
+      maxImportFileBytes?: number
+    }
+    expect(deps.maxImportFileBytes).toBe(1024)
+    expect(deps.authorizeImportSourcePath?.('/app-root/a.png')).toBe('/app-root/a.png')
+    expect(deps.authorizeImportSourcePath?.('/elsewhere/a.png')).toBeNull()
+    expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenLastCalledWith('/elsewhere/a.png', ['/app-root'])
   })
 
   it('creates the remaining service registry', () => {

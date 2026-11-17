@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import type {
+  ImportManagedMediaBytesReq,
   ImportManagedMediaDataUrlReq,
   ImportManagedMediaFileReq,
   ManagedMediaSvc
@@ -8,7 +9,9 @@ import type {
 import {
   boundIncomingChatImageSize,
   CHAT_ATTACHMENT_STORAGE,
+  CHAT_PATHLESS_ATTACHMENT_MAX_BYTES,
   ChatImageTooLargeError,
+  ChatPathlessAttachmentTooLargeError,
   importChatAttachmentUrl,
   importIncomingChatImageAttachment,
   withIncomingChatImageImportTimeout
@@ -31,8 +34,9 @@ const imported = (sha: string, mimeType?: string, sizeBytes?: number) => ({
 const makeService = () =>
   ({
     importFile: vi.fn(async (_req: ImportManagedMediaFileReq) => imported('aa')),
-    importDataUrl: vi.fn(async (_req: ImportManagedMediaDataUrlReq) => imported('bb'))
-  }) satisfies Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
+    importDataUrl: vi.fn(async (_req: ImportManagedMediaDataUrlReq) => imported('bb')),
+    importBytes: vi.fn(async (_req: ImportManagedMediaBytesReq) => imported('bb'))
+  }) satisfies Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl' | 'importBytes'>
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -117,8 +121,11 @@ describe('importIncomingChatImageAttachment', () => {
     }
     const result = await importIncomingChatImageAttachment(attachment, { service, fetchImpl })
     expect(fetchImpl).toHaveBeenCalledWith('blob:restored-canvas-item')
-    expect(service.importDataUrl).toHaveBeenCalledWith({
-      dataUrl: 'data:image/png;base64,AQID',
+    // Sent as bytes: no data: URL string is built for a blob.
+    expect(service.importDataUrl).not.toHaveBeenCalled()
+    expect(service.importBytes).toHaveBeenCalledWith({
+      bytes: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/png',
       originalFileName: 'restored.png',
       storage: CHAT_ATTACHMENT_STORAGE
     })
@@ -249,6 +256,33 @@ describe('importIncomingChatImageAttachment', () => {
     ])
   })
 
+  it('refuses a path-less canvas image above the in-memory cap before reading it', async () => {
+    const service = makeService()
+    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
+    Object.defineProperty(blob, 'size', { value: CHAT_PATHLESS_ATTACHMENT_MAX_BYTES + 1 })
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(blob, 'arrayBuffer', { value: arrayBuffer })
+    const bmp = new Blob([new Uint8Array([66, 77])], { type: 'image/bmp' })
+    Object.defineProperty(bmp, 'size', { value: CHAT_PATHLESS_ATTACHMENT_MAX_BYTES + 1 })
+    for (const [url, source] of [
+      ['blob:huge-png', blob],
+      ['blob:huge-bmp', bmp]
+    ] as const) {
+      await expect(
+        importIncomingChatImageAttachment(
+          { type: 'image', url, fileName: 'huge.png' },
+          {
+            service,
+            fetchImpl: vi.fn(async () => ({ ok: true, blob: async () => source }) as never)
+          }
+        )
+      ).rejects.toBeInstanceOf(ChatPathlessAttachmentTooLargeError)
+    }
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(service.importBytes).not.toHaveBeenCalled()
+    expect(service.importDataUrl).not.toHaveBeenCalled()
+  })
+
   it('passes a store-safe original file name while keeping the display name', async () => {
     const service = makeService()
     const result = await importIncomingChatImageAttachment(
@@ -261,7 +295,7 @@ describe('importIncomingChatImageAttachment', () => {
 })
 
 describe('importChatAttachmentUrl', () => {
-  it('encodes a blob with its own MIME type, which the managed store requires', async () => {
+  it('sends a blob as bytes with its own MIME type, which the managed store requires', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -271,7 +305,11 @@ describe('importChatAttachmentUrl', () => {
     )
     const service = makeService()
     await importChatAttachmentUrl({ service, url: 'blob:pasted', fileName: 'pasted.png' })
-    expect(service.importDataUrl.mock.calls[0][0].dataUrl).toBe('data:image/png;base64,AQID')
+    expect(service.importDataUrl).not.toHaveBeenCalled()
+    expect(service.importBytes.mock.calls[0][0]).toMatchObject({
+      bytes: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/png'
+    })
   })
 })
 
@@ -301,7 +339,7 @@ describe('boundIncomingChatImageSize', () => {
   })
 
   it('leaves an image within the limit untouched', async () => {
-    const service = { ensureDerivative: vi.fn(), importDataUrl: vi.fn() }
+    const service = { ensureDerivative: vi.fn(), importBytes: vi.fn() }
     const small = { ...big('aa'), media: reference('aa', 'image/png', MAX) }
     await expect(boundIncomingChatImageSize(small, { service, maxBytes: MAX })).resolves.toEqual({
       attachment: small
@@ -314,7 +352,7 @@ describe('boundIncomingChatImageSize', () => {
       ensureDerivative: vi.fn(async ({ maxEdge }: { maxEdge: 256 | 512 | 1024 | 2048 }) =>
         descriptor(maxEdge, maxEdge === 2048 ? MAX + 1 : 700_000)
       ),
-      importDataUrl: vi.fn(async (_req: ImportManagedMediaDataUrlReq) =>
+      importBytes: vi.fn(async (_req: ImportManagedMediaBytesReq) =>
         imported('dd', 'image/webp', 700_000)
       )
     }
@@ -327,8 +365,9 @@ describe('boundIncomingChatImageSize', () => {
 
     expect(service.ensureDerivative.mock.calls.map(([req]) => req.maxEdge)).toEqual([2048, 1024])
     expect(fetchImpl).toHaveBeenCalledWith('local-media:///managed/derivatives/1024.webp')
-    expect(service.importDataUrl).toHaveBeenCalledWith({
-      dataUrl: 'data:image/webp;base64,AQID',
+    expect(service.importBytes).toHaveBeenCalledWith({
+      bytes: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/webp',
       originalFileName: 'huge.png',
       storage: CHAT_ATTACHMENT_STORAGE
     })
@@ -355,7 +394,7 @@ describe('boundIncomingChatImageSize', () => {
         reason: 'animated-gif' as const,
         localMediaUrl: 'local-media:///managed/a.gif'
       })),
-      importDataUrl: vi.fn()
+      importBytes: vi.fn()
     }
     await expect(
       boundIncomingChatImageSize(big('aa'), { service: gif, maxBytes: MAX })
@@ -364,7 +403,7 @@ describe('boundIncomingChatImageSize', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const failing = {
       ensureDerivative: vi.fn(async () => Promise.reject(new Error('sidecar missing'))),
-      importDataUrl: vi.fn()
+      importBytes: vi.fn()
     }
     await expect(
       boundIncomingChatImageSize(big('aa'), { service: failing, maxBytes: MAX })
@@ -378,7 +417,8 @@ describe('boundIncomingChatImageSize', () => {
     await expect(
       boundIncomingChatImageSize(unmanaged, { service: gif, maxBytes: MAX })
     ).rejects.toBeInstanceOf(ChatImageTooLargeError)
-    expect(gif.importDataUrl).not.toHaveBeenCalled()
+    expect(gif.ensureDerivative).toHaveBeenCalled()
+    expect(gif.importBytes).not.toHaveBeenCalled()
   })
 })
 

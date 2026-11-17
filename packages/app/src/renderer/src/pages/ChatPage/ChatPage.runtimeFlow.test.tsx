@@ -156,6 +156,7 @@ const hoisted = vi.hoisted(() => ({
   fileToDataUrlMock: vi.fn(async () => 'data:application/octet-stream;base64,QUJD'),
   importManagedFileMock: vi.fn(),
   importManagedDataUrlMock: vi.fn(),
+  importManagedBytesMock: vi.fn(),
   importManagedUrlMock: vi.fn(),
   readTextFileMock: vi.fn(),
   saveImageToDirMock: vi.fn(),
@@ -327,6 +328,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     svcManagedMedia: {
       importFile: hoisted.importManagedFileMock,
       importDataUrl: hoisted.importManagedDataUrlMock,
+      importBytes: hoisted.importManagedBytesMock,
       importUrl: hoisted.importManagedUrlMock
     }
   })
@@ -1170,12 +1172,27 @@ const dispatchSwitchSession = async (sessionId: string, scope = 'runtime-flow') 
   })
 }
 
+// Electron 42 has no File.path: the path of a file on disk comes from the preload's
+// webUtils.getPathForFile, stubbed per test in beforeEach (window.electronFile).
+// Only those files are granted: no other local path is authorised.
+const localFilePaths = new WeakMap<File, string>()
+const grantedLocalFilePaths = new Set<string>()
+const stubLocalFileBridge = () => {
+  grantedLocalFilePaths.clear()
+  vi.stubGlobal('electronFile', {
+    getPathForFile: (file: File) => localFilePaths.get(file) ?? '',
+    authorizeLocalMediaFile: async (file: File) => {
+      const filePath = localFilePaths.get(file) ?? ''
+      if (filePath) grantedLocalFilePaths.add(filePath)
+      return filePath
+    },
+    resolveAuthorizedLocalMediaPath: async (filePath: string) =>
+      grantedLocalFilePaths.has(filePath) ? filePath : ''
+  })
+}
 const createLocalFile = (name: string, type: string, path: string): File => {
   const file = new File(['mock-file'], name, { type })
-  Object.defineProperty(file, 'path', {
-    configurable: true,
-    value: path
-  })
+  localFilePaths.set(file, path)
   return file
 }
 
@@ -1321,6 +1338,7 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.selectFileMock.mockResolvedValue(null)
     hoisted.fileToBlobUrlMock.mockClear()
     hoisted.fileToDataUrlMock.mockClear()
+    stubLocalFileBridge()
     const managedResponse = {
       version: 1 as const,
       reference: {
@@ -1341,6 +1359,8 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.importManagedFileMock.mockResolvedValue(managedResponse)
     hoisted.importManagedDataUrlMock.mockReset()
     hoisted.importManagedDataUrlMock.mockResolvedValue(managedResponse)
+    hoisted.importManagedBytesMock.mockReset()
+    hoisted.importManagedBytesMock.mockResolvedValue(managedResponse)
     hoisted.importManagedUrlMock.mockReset()
     hoisted.importManagedUrlMock.mockResolvedValue(managedResponse)
     hoisted.requestChatCompletionMock.mockImplementation(
@@ -4375,8 +4395,9 @@ describe('ChatPage runtime workflow integration', () => {
     const revokeObjectURL = vi.fn()
     vi.stubGlobal('URL', { ...URL, revokeObjectURL })
     const managedUrl = `local-media:///managed/originals/aa/${'a'.repeat(64)}.png`
-    hoisted.importManagedDataUrlMock.mockReset()
-    hoisted.importManagedDataUrlMock.mockImplementation(
+    // blob: images are sent to main as bytes (no data: URL string is built).
+    hoisted.importManagedBytesMock.mockReset()
+    hoisted.importManagedBytesMock.mockImplementation(
       async ({ originalFileName }: { originalFileName: string }) => ({
         reference: {
           version: 1,
@@ -4438,10 +4459,15 @@ describe('ChatPage runtime workflow integration', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledWith('blob:duplicate-user-upload')
-    expect(hoisted.importManagedDataUrlMock).toHaveBeenCalledTimes(1)
-    expect(hoisted.importManagedDataUrlMock).toHaveBeenCalledWith(
-      expect.objectContaining({ dataUrl: 'data:image/png;base64,AQID', originalFileName: 'first.png' })
+    expect(hoisted.importManagedBytesMock).toHaveBeenCalledTimes(1)
+    expect(hoisted.importManagedBytesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bytes: new Uint8Array([1, 2, 3]),
+        mimeType: 'image/png',
+        originalFileName: 'first.png'
+      })
     )
+    expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
     expect(hoisted.saveImageToDirMock).not.toHaveBeenCalled()
     expect(revokeObjectURL).not.toHaveBeenCalled()
 
@@ -4465,8 +4491,8 @@ describe('ChatPage runtime workflow integration', () => {
       'fetch',
       vi.fn(async () => ({ ok: true, blob: async () => new Blob(['image'], { type: 'image/png' }) }))
     )
-    hoisted.importManagedDataUrlMock.mockReset()
-    hoisted.importManagedDataUrlMock.mockRejectedValue(new Error('managed store unavailable'))
+    hoisted.importManagedBytesMock.mockReset()
+    hoisted.importManagedBytesMock.mockRejectedValue(new Error('managed store unavailable'))
     vi.spyOn(console, 'error').mockImplementation(() => {})
 
     renderChatPage()
@@ -8292,6 +8318,12 @@ describe('ChatPage runtime workflow integration', () => {
           this.result = 'data:image/png;base64,Y2FudmFz'
           void Promise.resolve().then(() => this.onload?.())
         }
+
+        // A blob is sent to main as bytes (jsdom's Blob has no arrayBuffer()).
+        readAsArrayBuffer(_blob: Blob) {
+          this.result = new Uint8Array([99, 97, 110, 118, 97, 115]).buffer
+          void Promise.resolve().then(() => this.onload?.())
+        }
       }
     )
     vi.stubGlobal(
@@ -8494,15 +8526,22 @@ describe('ChatPage runtime workflow integration', () => {
     const beginBlobDrop = async ({ changeBeforeRead }: { changeBeforeRead?: () => void } = {}) => {
       let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
       const readAsDataURL = vi.fn()
+      const readAsArrayBuffer = vi.fn()
       vi.stubGlobal(
         'FileReader',
         class {
-          result: string | null = null
+          result: string | ArrayBuffer | null = null
           onload: (() => void) | null = null
           onerror: (() => void) | null = null
           readAsDataURL(blob: Blob) {
             readAsDataURL(blob)
             this.result = 'data:image/png;base64,Y2FudmFz'
+            queueMicrotask(() => this.onload?.())
+          }
+          // The blob is sent to main as bytes (jsdom's Blob has no arrayBuffer()).
+          readAsArrayBuffer(blob: Blob) {
+            readAsArrayBuffer(blob)
+            this.result = new Uint8Array([99, 97, 110, 118, 97, 115]).buffer
             queueMicrotask(() => this.onload?.())
           }
         }
@@ -8548,7 +8587,8 @@ describe('ChatPage runtime workflow integration', () => {
           })
           return
         }
-        await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+        await waitFor(() => expect(readAsArrayBuffer).toHaveBeenCalledOnce())
+        expect(readAsDataURL).not.toHaveBeenCalled()
         // Let the import that follows the read settle before the caller asserts the outcome.
         await act(async () => {
           await new Promise((resolve) => setTimeout(resolve, 20))
@@ -8667,15 +8707,22 @@ describe('ChatPage runtime workflow integration', () => {
       const originalReceiver = vi.fn()
       let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
       const readAsDataURL = vi.fn()
+      const readAsArrayBuffer = vi.fn()
       vi.stubGlobal(
         'FileReader',
         class {
-          result: string | null = null
+          result: string | ArrayBuffer | null = null
           onload: (() => void) | null = null
           onerror: (() => void) | null = null
           readAsDataURL(blob: Blob) {
             readAsDataURL(blob)
             this.result = 'data:image/png;base64,Y2FudmFz'
+            queueMicrotask(() => this.onload?.())
+          }
+          // The blob is sent to main as bytes (jsdom's Blob has no arrayBuffer()).
+          readAsArrayBuffer(blob: Blob) {
+            readAsArrayBuffer(blob)
+            this.result = new Uint8Array([99, 97, 110, 118, 97, 115]).buffer
             queueMicrotask(() => this.onload?.())
           }
         }
@@ -8716,7 +8763,8 @@ describe('ChatPage runtime workflow integration', () => {
           blob: async () => new Blob(['canvas'], { type: 'image/png' })
         })
       })
-      await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+      await waitFor(() => expect(readAsArrayBuffer).toHaveBeenCalledOnce())
+      expect(readAsDataURL).not.toHaveBeenCalled()
 
       expect(originalReceiver).not.toHaveBeenCalled()
       expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
@@ -10093,7 +10141,8 @@ describe('ChatPage runtime workflow integration', () => {
   it('does not let an older async draft persistence restore over newer composer input', async () => {
     const user = userEvent.setup()
     let releaseImport: (() => void) | null = null
-    hoisted.importManagedDataUrlMock.mockImplementationOnce(
+    // A path-less composer file is sent to main as bytes.
+    hoisted.importManagedBytesMock.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
           releaseImport = () =>
@@ -10129,7 +10178,7 @@ describe('ChatPage runtime workflow integration', () => {
       )
       await user.click(screen.getByTestId('chat-composer-upload-mock'))
 
-      await waitFor(() => expect(hoisted.importManagedDataUrlMock).toHaveBeenCalled())
+      await waitFor(() => expect(hoisted.importManagedBytesMock).toHaveBeenCalled())
 
       await user.type(screen.getByTestId('chat-composer-input-mock'), 'plus fresh edit')
 

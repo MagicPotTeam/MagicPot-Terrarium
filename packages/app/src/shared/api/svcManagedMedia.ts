@@ -75,6 +75,21 @@ export type ImportManagedMediaDataUrlReq = {
   storage?: ManagedMediaStorage
 }
 
+/**
+ * Path-less data (a pasted image, a generated blob) sent as bytes, never as a base64 string.
+ * A file on disk goes through importFile instead.
+ */
+export type ImportManagedMediaBytesReq = {
+  bytes: Uint8Array
+  mimeType: string
+  originalFileName: string
+  /** Optional physical lifecycle namespace. Omitted requests retain legacy storage. */
+  storage?: ManagedMediaStorage
+}
+
+/** Largest path-less import (importBytes); the renderer refuses larger data before reading it. */
+export const MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES = 64 * 1024 * 1024
+
 export type ImportManagedMediaResp = {
   reference: MediaReference
   localMediaUrl: string
@@ -113,6 +128,7 @@ export type ReclaimLegacyManagedMediaResp = { queued: true }
 export type ManagedMediaSvc = {
   importFile(req: ImportManagedMediaFileReq): Promise<ImportManagedMediaResp>
   importDataUrl(req: ImportManagedMediaDataUrlReq): Promise<ImportManagedMediaResp>
+  importBytes(req: ImportManagedMediaBytesReq): Promise<ImportManagedMediaResp>
   migrateLegacyDataUrl(req: MigrateLegacyManagedMediaReq): Promise<MigrateLegacyManagedMediaResp>
   reclaimLegacyMigration(req: ReclaimLegacyManagedMediaReq): Promise<ReclaimLegacyManagedMediaResp>
   updateReferenceSnapshot(
@@ -276,6 +292,28 @@ export const validateImportManagedMediaFileReq = (value: unknown): ImportManaged
   const storage = validateManagedMediaStorage(value.storage)
   return {
     sourcePath: value.sourcePath,
+    mimeType: value.mimeType.toLowerCase(),
+    originalFileName: value.originalFileName,
+    ...(storage ? { storage } : {})
+  }
+}
+
+export const validateImportManagedMediaBytesReq = (value: unknown): ImportManagedMediaBytesReq => {
+  if (
+    !isRecord(value) ||
+    !hasAllowedKeys(value, ['bytes', 'mimeType', 'originalFileName'], ['storage']) ||
+    !(value.bytes instanceof Uint8Array) ||
+    value.bytes.byteLength <= 0 ||
+    value.bytes.byteLength > MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES ||
+    typeof value.mimeType !== 'string' ||
+    !MIME_TYPE_PATTERN.test(value.mimeType) ||
+    !isSafeOriginalFileName(value.originalFileName)
+  ) {
+    throw new ServiceValidationError('svcManagedMedia.importBytes request')
+  }
+  const storage = validateManagedMediaStorage(value.storage)
+  return {
+    bytes: value.bytes,
     mimeType: value.mimeType.toLowerCase(),
     originalFileName: value.originalFileName,
     ...(storage ? { storage } : {})
@@ -610,6 +648,11 @@ export const managedMediaSvcDef: ServiceDefSheet<ManagedMediaSvc> = {
   importDataUrl: {
     type: 'unary',
     request: validateImportManagedMediaDataUrlReq,
+    response: validateImportManagedMediaResp
+  },
+  importBytes: {
+    type: 'unary',
+    request: validateImportManagedMediaBytesReq,
     response: validateImportManagedMediaResp
   },
   migrateLegacyDataUrl: {

@@ -17,6 +17,7 @@ const f = vi.hoisted(() => ({
   imageCreated: vi.fn(),
   fileReaderCreated: vi.fn(),
   importDataUrl: vi.fn(),
+  importBytes: vi.fn(),
   importFile: vi.fn(),
   read: vi.fn(),
   config: null as Config | null,
@@ -57,7 +58,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcFs: {},
     svcLLMProxy: { signHy3DModel: vi.fn() },
-    svcManagedMedia: { importDataUrl: f.importDataUrl, importFile: f.importFile }
+    svcManagedMedia: { importDataUrl: f.importDataUrl, importBytes: f.importBytes, importFile: f.importFile }
   })
 }))
 vi.mock('@renderer/utils/fileUtils', async (original) => ({
@@ -230,7 +231,7 @@ beforeEach(() => {
     return actual.materializeInternalImageDragAttachment(attachment)
   })
   f.blob.mockReturnValue('blob:test')
-  f.importDataUrl.mockResolvedValue({
+  f.importBytes.mockResolvedValue({
     localMediaUrl: 'local-media://imported',
     reference: { version: 1, kind: 'managed', relativePath: 'imported', status: 'ready' }
   })
@@ -423,7 +424,7 @@ describe('edit-form native image import preparation', () => {
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.imageCreated).not.toHaveBeenCalled()
     expect(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments')).toHaveTextContent('existing.png')
     expect(screen.getByTestId('input')).toHaveValue('keep')
@@ -432,13 +433,13 @@ describe('edit-form native image import preparation', () => {
   it('waits for the first image import before decoding or importing the second', async () => {
     await setup()
     let release!: (value: unknown) => void
-    f.importDataUrl.mockImplementationOnce(
+    f.importBytes.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
           release = resolve
         })
     )
-    f.importDataUrl.mockResolvedValueOnce({
+    f.importBytes.mockResolvedValueOnce({
       localMediaUrl: 'local-media://second',
       reference: { version: 1, kind: 'managed', relativePath: 'second', status: 'ready' }
     })
@@ -447,8 +448,8 @@ describe('edit-form native image import preparation', () => {
     expect(importer).toBeTypeOf('function')
     const result = importer(files)
     try {
-      await waitFor(() => expect(f.importDataUrl).toHaveBeenCalled())
-      expect(f.importDataUrl).toHaveBeenCalledOnce()
+      await waitFor(() => expect(f.importBytes).toHaveBeenCalled())
+      expect(f.importBytes).toHaveBeenCalledOnce()
       expect(f.imageCreated).toHaveBeenCalledOnce()
     } finally {
       release({
@@ -467,7 +468,7 @@ describe('edit-form native image import preparation', () => {
       [1, 1],
       [1, 1]
     ])
-    expect(f.importDataUrl).toHaveBeenCalledTimes(2)
+    expect(f.importBytes).toHaveBeenCalledTimes(2)
   })
 
   it('preflights every image size before starting any import', async () => {
@@ -481,19 +482,19 @@ describe('edit-form native image import preparation', () => {
       await expect(result).rejects.toThrow('1.png is too large')
       expect(f.blob).not.toHaveBeenCalled()
       expect(f.imageCreated).not.toHaveBeenCalled()
-      expect(f.importDataUrl).not.toHaveBeenCalled()
+      expect(f.importBytes).not.toHaveBeenCalled()
       expect(f.importFile).not.toHaveBeenCalled()
     } finally {
       // A failing preflight implementation may have already started the first
       // FileReader; drain its import before the next test resets the mocks.
       if (f.blob.mock.calls.length > 0)
-        await waitFor(() => expect(f.importDataUrl).toHaveBeenCalled())
+        await waitFor(() => expect(f.importBytes).toHaveBeenCalled())
     }
   })
 
   it('preserves order, dimensions, bytes and managed references for eight images', async () => {
     await setup()
-    f.importDataUrl.mockImplementation(
+    f.importBytes.mockImplementation(
       async ({ originalFileName }: { originalFileName: string }) => ({
         localMediaUrl: `local-media://${originalFileName}`,
         reference: { version: 1, kind: 'managed', relativePath: originalFileName, status: 'ready' }
@@ -515,24 +516,26 @@ describe('edit-form native image import preparation', () => {
         attachment.sizeBytes
       ])
     ).toEqual(files.map(() => [1, 1, 1]))
-    expect(f.importDataUrl.mock.calls.map(([input]) => input.originalFileName)).toEqual(
+    expect(f.importBytes.mock.calls.map(([input]) => input.originalFileName)).toEqual(
       files.map((file) => file.name)
     )
-    expect(f.importDataUrl.mock.calls.map(([input]) => input.dataUrl)).toEqual(
-      files.map(() => 'data:image/png;base64,eA==')
+    // Path-less composer files are sent as bytes ('x'), never as a data: URL.
+    expect(f.importBytes.mock.calls.map(([input]) => [input.bytes, input.mimeType])).toEqual(
+      files.map(() => [new Uint8Array([0x78]), 'image/png'])
     )
+    expect(f.importDataUrl).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
   })
 
   it('rejects the entire result and does not read the third image when the second import fails', async () => {
     await setup()
-    f.importDataUrl.mockResolvedValueOnce({
+    f.importBytes.mockResolvedValueOnce({
       localMediaUrl: 'local-media://first',
       reference: { version: 1, kind: 'managed', relativePath: 'first', status: 'ready' }
     })
-    f.importDataUrl.mockRejectedValueOnce(new Error('second import failed'))
+    f.importBytes.mockRejectedValueOnce(new Error('second import failed'))
     await expect(f.editImport!(images(3))).rejects.toThrow('second import failed')
-    expect(f.importDataUrl).toHaveBeenCalledTimes(2)
+    expect(f.importBytes).toHaveBeenCalledTimes(2)
     expect(f.blob).toHaveBeenCalledTimes(2)
     expect(f.imageCreated).toHaveBeenCalledTimes(2)
     expect(f.fileReaderCreated).toHaveBeenCalledTimes(2)
@@ -576,7 +579,7 @@ describe('native drop image count boundary', () => {
     expect(fetchMock).not.toHaveBeenCalled()
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.imageCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments').textContent).toBe(before)
     expect(screen.getByTestId('input')).toHaveValue('keep')
@@ -591,7 +594,7 @@ describe('native drop image count boundary', () => {
     expect(f.editing).not.toHaveBeenCalled()
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.imageCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(f.read).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments').textContent).toBe(before)
@@ -604,12 +607,12 @@ describe('native drop image count boundary', () => {
     const before = screen.getByTestId('attachments').textContent
     const drop = directoryTransfer(2, 0, true)
     fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
-    await waitFor(() => expect(f.notify.mock.calls.length > 0 || (edit ? f.editing.mock.calls.length : f.importDataUrl.mock.calls.length) > 0).toBe(true), { timeout: 5000 })
+    await waitFor(() => expect(f.notify.mock.calls.length > 0 || (edit ? f.editing.mock.calls.length : f.importBytes.mock.calls.length) > 0).toBe(true), { timeout: 5000 })
     expect(f.notify).toHaveBeenCalledWith('Some selected images have conflicting paths. Drag them separately to avoid losing any.')
     expect(f.editing).not.toHaveBeenCalled()
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.imageCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments').textContent).toBe(before)
     expect(screen.getByTestId('input')).toHaveValue('keep')
@@ -622,14 +625,14 @@ describe('native drop image count boundary', () => {
     const drop = directoryTransfer(51, 1, true)
     fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
     // Both reject and the old first-path-only import provide a completion signal.
-    await waitFor(() => expect(f.notify.mock.calls.length > 0 || (edit ? f.editing.mock.calls.length : f.importDataUrl.mock.calls.length) > 0).toBe(true), { timeout: 5000 })
+    await waitFor(() => expect(f.notify.mock.calls.length > 0 || (edit ? f.editing.mock.calls.length : f.importBytes.mock.calls.length) > 0).toBe(true), { timeout: 5000 })
     expect(f.notify).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
     expect(drop.fileCallback).toHaveBeenCalledTimes(51)
     expect(f.editing).not.toHaveBeenCalled()
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.imageCreated).not.toHaveBeenCalled()
     expect(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments').textContent).toBe(before)
     expect(screen.getByTestId('input')).toHaveValue('keep')
@@ -645,7 +648,7 @@ describe('native drop image count boundary', () => {
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.imageCreated).not.toHaveBeenCalled()
     expect(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments').textContent).toBe(before)
     expect(screen.getByTestId('input')).toHaveValue('keep')
@@ -658,7 +661,7 @@ describe('native drop image count boundary', () => {
     await waitFor(() => expect(f.notify).toHaveBeenCalledWith('目录内容过多，请分批拖入'), {
       timeout: 5000
     })
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(f.blob).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments').textContent).toBe(before)
@@ -668,7 +671,7 @@ describe('native drop image count boundary', () => {
     await setup()
     const drop = directoryTransfer(50)
     fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
-    await waitFor(() => expect(f.importDataUrl).toHaveBeenCalled())
+    await waitFor(() => expect(f.importBytes).toHaveBeenCalled())
     expect(drop.fileCallback).toHaveBeenCalledTimes(51)
     expect(f.notify).not.toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
   })
@@ -686,7 +689,7 @@ describe('native drop image count boundary', () => {
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.imageCreated).not.toHaveBeenCalled()
     expect(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments').textContent).toBe(before)
     expect(screen.getByTestId('input')).toHaveValue('keep')
@@ -707,7 +710,7 @@ describe('native drop image count boundary', () => {
     await waitFor(() => expect(f.notify.mock.calls.length > 0 || f.noop.mock.calls.length > 0).toBe(true), { timeout: 10000 })
     expect(f.notify).toHaveBeenCalledWith('目录内容过多，请分批拖入')
     expect(f.editing).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.blob).not.toHaveBeenCalled()
   })
   it('rejects 51 images and a non-image before reading, preserving draft and text even with a file URL', async () => {
@@ -723,7 +726,7 @@ describe('native drop image count boundary', () => {
     expect(f.blob).not.toHaveBeenCalled()
     expect(f.imageCreated).not.toHaveBeenCalled()
     expect(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
     expect(f.importFile).not.toHaveBeenCalled()
     expect(f.read).not.toHaveBeenCalled()
     expect(screen.getByTestId('attachments').textContent).toBe(before)
@@ -759,7 +762,7 @@ describe('native drop image count boundary', () => {
     expect.soft(f.blob).not.toHaveBeenCalled()
     expect.soft(f.imageCreated).not.toHaveBeenCalled()
     expect.soft(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect.soft(f.importDataUrl).not.toHaveBeenCalled()
+    expect.soft(f.importBytes).not.toHaveBeenCalled()
     expect.soft(f.importFile).not.toHaveBeenCalled()
     expect.soft(f.editing).not.toHaveBeenCalled()
     expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
@@ -795,7 +798,7 @@ describe('native drop image count boundary', () => {
     expect.soft(f.blob).not.toHaveBeenCalled()
     expect.soft(f.imageCreated).not.toHaveBeenCalled()
     expect.soft(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect.soft(f.importDataUrl).not.toHaveBeenCalled()
+    expect.soft(f.importBytes).not.toHaveBeenCalled()
     expect.soft(f.importFile).not.toHaveBeenCalled()
     expect.soft(f.editing).not.toHaveBeenCalled()
     expect.soft(screen.getByTestId('attachments').textContent).toBe(before)

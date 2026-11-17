@@ -20,6 +20,7 @@ const f = vi.hoisted(() => ({
   importTimeoutMs: 60_000,
   importFile: vi.fn(),
   importDataUrl: vi.fn(),
+  importBytes: vi.fn(),
   ensureDerivative: vi.fn(),
   resolvePath: vi.fn(),
   fetch: vi.fn(),
@@ -66,6 +67,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     svcManagedMedia: {
       importFile: f.importFile,
       importDataUrl: f.importDataUrl,
+      importBytes: f.importBytes,
       ensureDerivative: f.ensureDerivative
     },
     svcLLMProxy: { chat: f.request, chatStream: f.request, signHy3DModel: vi.fn() }
@@ -242,6 +244,10 @@ beforeEach(() => {
   f.importDataUrl.mockImplementation(async ({ originalFileName }: { originalFileName: string }) =>
     managed(originalFileName.startsWith('blob') ? 'b' : 'c', originalFileName)
   )
+  // blob: sources are sent as bytes.
+  f.importBytes.mockImplementation(async ({ originalFileName }: { originalFileName: string }) =>
+    managed(originalFileName.startsWith('blob') ? 'b' : 'c', originalFileName)
+  )
   f.resolvePath.mockImplementation(async (filePath: string) => filePath)
   f.fetch.mockImplementation(async (url: string) => {
     if (!String(url).startsWith('blob:')) throw new Error(`Unexpected fetch ${url}`)
@@ -265,6 +271,14 @@ const stubOverLimitImports = () => {
   f.importDataUrl.mockImplementation(
     async ({ dataUrl, originalFileName }: { dataUrl: string; originalFileName: string }) => {
       if (dataUrl.startsWith('data:image/webp')) return managed('f', originalFileName)
+      const original = managed('e', originalFileName)
+      return { ...original, reference: { ...original.reference, sizeBytes: 8 * 1024 * 1024 } }
+    }
+  )
+  // Path-less originals and the bounded webp derivative are sent as bytes.
+  f.importBytes.mockImplementation(
+    async ({ mimeType, originalFileName }: { mimeType: string; originalFileName: string }) => {
+      if (mimeType === 'image/webp') return managed('f', originalFileName)
       const original = managed('e', originalFileName)
       return { ...original, reference: { ...original.reference, sizeBytes: 8 * 1024 * 1024 } }
     }
@@ -423,6 +437,9 @@ describe('canvas hand-off into managed media', () => {
     f.importDataUrl.mockImplementation(async ({ originalFileName }: { originalFileName: string }) =>
       managed('d', originalFileName)
     )
+    f.importBytes.mockImplementation(async ({ originalFileName }: { originalFileName: string }) =>
+      managed('d', originalFileName)
+    )
     await dispatch({
       attachment: { type: 'image', url: 'data:image/png;base64,AQID', fileName: 'same.png' }
     })
@@ -464,9 +481,11 @@ describe('canvas hand-off into managed media', () => {
       url: `local-media:///fixture-media/${sha('b')}.png`,
       media: expect.objectContaining({ kind: 'managed', sha256: sha('b') })
     })
-    expect(f.importDataUrl).toHaveBeenCalledWith(
-      expect.objectContaining({ dataUrl: 'data:image/png;base64,AQID' })
+    // Sent as bytes: no data: URL is built for a blob.
+    expect(f.importBytes).toHaveBeenCalledWith(
+      expect.objectContaining({ bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/png' })
     )
+    expect(f.importDataUrl).not.toHaveBeenCalled()
   })
 
   it('attaches a bounded copy of a canvas image above the per-image limit and says so', async () => {
@@ -478,6 +497,16 @@ describe('canvas hand-off into managed media', () => {
         const original = managed('e', originalFileName)
         return { ...original, reference: { ...original.reference, sizeBytes: tooBig } }
       }
+    )
+    // The bounded webp derivative is sent as bytes.
+    f.importBytes.mockImplementation(
+      async ({ mimeType, originalFileName }: { mimeType: string; originalFileName: string }) =>
+        mimeType === 'image/webp'
+          ? managed('f', originalFileName)
+          : {
+              ...managed('e', originalFileName),
+              reference: { ...managed('e', originalFileName).reference, sizeBytes: tooBig }
+            }
     )
     f.ensureDerivative.mockImplementation(async ({ maxEdge }: { maxEdge: number }) => ({
       status: 'ready',
@@ -632,7 +661,8 @@ describe('canvas hand-off into managed media', () => {
     })
     await waitFor(() => expect(pending()).toHaveLength(2))
     expect(f.fetch).toHaveBeenCalledTimes(1)
-    expect(f.importDataUrl).toHaveBeenCalledTimes(1)
+    expect(f.importBytes).toHaveBeenCalledTimes(1)
+    expect(f.importDataUrl).not.toHaveBeenCalled()
     expect(pending().map((item) => [item.fileName, item.url, item.media?.kind])).toEqual([
       ['first.png', `local-media:///fixture-media/${sha('c')}.png`, 'managed'],
       ['second.png', `local-media:///fixture-media/${sha('c')}.png`, 'managed']
