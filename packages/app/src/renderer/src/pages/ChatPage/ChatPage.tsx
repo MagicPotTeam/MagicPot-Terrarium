@@ -215,7 +215,9 @@ import { collectDroppedDirectoryFilesBounded, DroppedDirectoryLimitError } from 
 import { normalizeMediaReference } from '@shared/mediaReference'
 import {
   boundIncomingChatImageSize,
+  CHAT_PATHLESS_ATTACHMENT_MAX_BYTES,
   ChatImageTooLargeError,
+  ChatPathlessAttachmentTooLargeError,
   importChatAttachment,
   importChatAttachmentUrl,
   importIncomingChatImageAttachment,
@@ -918,7 +920,7 @@ const describeIncomingImageDownscaled = (
     height: downscaled?.height
   })
 
-/** Message for a failed incoming image: the size message when it is above the limit. */
+/** Message for a failed incoming image: the size message when it is above a limit. */
 const describeIncomingImageFailure = (t: TFunction, error: unknown): string =>
   error instanceof ChatImageTooLargeError
     ? t('chat.incoming_image_too_large', {
@@ -926,7 +928,9 @@ const describeIncomingImageFailure = (t: TFunction, error: unknown): string =>
         maxMB: getChatAttachmentMaxSizeMB('image'),
         size: formatFileSize(error.sizeBytes)
       })
-    : t('canvas.send_to_agent_failed')
+    : error instanceof ChatPathlessAttachmentTooLargeError
+      ? error.message
+      : t('canvas.send_to_agent_failed')
 
 const attachmentDescriptorsMatch = (left: ChatAttachment, right: ChatAttachment): boolean =>
   left.type === right.type && left.url === right.url && left.fileName === right.fileName
@@ -5010,11 +5014,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const blob = item.getAsFile()
           if (blob) {
             try {
+              // Pasted data has no file behind it: refuse it above the cap before decoding it.
+              if (blob.size > CHAT_PATHLESS_ATTACHMENT_MAX_BYTES) {
+                throw new ChatPathlessAttachmentTooLargeError('pasted-image.png', blob.size)
+              }
               const file = new File([blob], 'pasted-image.png', { type: blob.type })
               const attachment = await buildImageChatAttachmentFromFile(file)
               setPendingAttachments((prev) => [...prev, attachment])
             } catch (error) {
               console.error('[ChatPage] Failed to process pasted image:', error)
+              if (error instanceof ChatPathlessAttachmentTooLargeError) {
+                notifyErrorRef.current(error.message)
+              }
             }
           }
           break
@@ -5236,7 +5247,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } catch (err) {
           if (!isDropTargetCurrent()) return
           console.error('[ChatPage] 内部拖拽数据解析失败:', err)
-          notifyError(t('canvas.send_to_agent_failed'))
+          notifyError(describeIncomingImageFailure(t, err))
           return
         }
       }
@@ -5446,6 +5457,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } catch (error) {
           if (!isDropTargetCurrent()) return
           console.error('[ChatPage] Failed to process dropped file:', error)
+          if (error instanceof ChatPathlessAttachmentTooLargeError) {
+            notifyError(error.message)
+            continue
+          }
           const messageKey =
             getChatAttachmentTypeForFile(file) === 'image'
               ? 'chat.image_process_failed'

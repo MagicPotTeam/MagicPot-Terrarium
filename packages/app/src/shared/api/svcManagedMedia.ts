@@ -223,6 +223,9 @@ const isSafeOriginalFileName = (value: unknown): value is string =>
   !/[. ]$/u.test(value) &&
   !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/iu.test(value)
 
+/** Windows reserved device names, which name a device in any folder (with any extension). */
+const WINDOWS_DEVICE_NAME = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])(?:[ .].*)?$/iu
+
 /**
  * This validates transport syntax only. importFile is intentionally fed from a user-selected
  * Electron File path; the main-owned store remains the authority for canonical/symlink/root checks.
@@ -249,7 +252,9 @@ const isCanonicalAbsoluteFileSource = (value: unknown): value is string => {
       return (
         decoded.startsWith('/') &&
         !decoded.includes('\\') &&
-        !decoded.split('/').some((segment) => segment === '.' || segment === '..')
+        !decoded.startsWith('/??/') &&
+        !decoded.split('/').some((segment) => segment === '.' || segment === '..') &&
+        !(/^\/[A-Za-z]:/u.test(decoded) && WINDOWS_DEVICE_NAME.test(decoded.split('/').pop() || ''))
       )
     } catch {
       return false
@@ -257,10 +262,14 @@ const isCanonicalAbsoluteFileSource = (value: unknown): value is string => {
   }
   const normalized = value.replace(/\\/g, '/')
   const absolute = normalized.startsWith('/') || /^[A-Za-z]:\//u.test(normalized)
+  const windowsStyle = /^[A-Za-z]:/u.test(value) || value.includes('\\')
   return (
     absolute &&
     !normalized.includes('//') &&
-    !normalized.split('/').some((segment) => segment === '.' || segment === '..')
+    // NT object namespace (\??\UNC\host\share): a UNC or device path in disguise.
+    !normalized.startsWith('/??/') &&
+    !normalized.split('/').some((segment) => segment === '.' || segment === '..') &&
+    !(windowsStyle && WINDOWS_DEVICE_NAME.test(normalized.split('/').pop() || ''))
   )
 }
 

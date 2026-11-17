@@ -84,6 +84,34 @@ describe('toImportSourceLocalPath (no filesystem access)', () => {
     }
   })
 
+  it('refuses NT object-namespace, root-relative and device-name paths on Windows', () => {
+    for (const value of [
+      '\\??\\UNC\\attacker-host\\share\\a.png',
+      '\\??\\C:\\Users\\a.png',
+      '/??/UNC/attacker-host/share/a.png',
+      'file:///%3F%3F/UNC/attacker-host/share/a.png',
+      '\\Users\\artist\\a.png',
+      '\\Users\\artist\\a.png:hidden',
+      'C:\\Users\\artist\\CON',
+      'C:\\Users\\artist\\com1.png',
+      'C:\\Users\\artist\\NUL .txt',
+      'C:\\Users\\artist\\CONOUT$',
+      'C:\\Users\\artist\\lpt¹.png',
+      'file:///C:/Users/artist/aux.png'
+    ]) {
+      expect(() => win32(value), value).toThrow(
+        expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+      )
+    }
+    expect(win32('C:\\Users\\console\\a.png')).toBe('C:\\Users\\console\\a.png')
+    expect(win32('C:\\Users\\artist\\com10.png')).toBe('C:\\Users\\artist\\com10.png')
+    // POSIX: '/??/' is refused as well; reserved Windows names are ordinary file names.
+    expect(() => posix('/??/UNC/attacker-host/share/a.png')).toThrow(
+      expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+    )
+    expect(posix('/home/artist/con.png')).toBe('/home/artist/con.png')
+  })
+
   it('keeps UNC paths for main-owned callers that confine paths themselves', () => {
     expect(win32('\\\\server\\share\\a.png', false)).toBe('\\\\server\\share\\a.png')
     expect(win32('file://server/share/a.png', false)).toBe('\\\\server\\share\\a.png')

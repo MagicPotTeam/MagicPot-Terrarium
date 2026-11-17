@@ -10106,6 +10106,41 @@ describe('ChatPage runtime workflow integration', () => {
     expect(hoisted.importManagedFileMock).not.toHaveBeenCalled()
   })
 
+  it('shows the localized cap message for a pasted image above the in-memory cap and attaches nothing', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    // Clipboard image data has no file behind it.
+    const pasted = new File(['pasted'], 'clipboard.png', { type: 'image/png' })
+    Object.defineProperty(pasted, 'size', { value: 70 * 1024 * 1024 })
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(pasted, 'arrayBuffer', { value: arrayBuffer })
+
+    await act(async () => {
+      const pasteEvent = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent
+      Object.defineProperty(pasteEvent, 'clipboardData', {
+        value: { items: [{ type: 'image/png', getAsFile: () => pasted }] }
+      })
+      document.dispatchEvent(pasteEvent)
+    })
+
+    await waitFor(() =>
+      expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+        new ChatPathlessAttachmentTooLargeError('pasted-image.png', 70 * 1024 * 1024).message
+      )
+    )
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+    // Refused before the image is decoded or read.
+    expect(hoisted.fileToBlobUrlMock).not.toHaveBeenCalled()
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(hoisted.importManagedBytesMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedFileMock).not.toHaveBeenCalled()
+  })
+
   it('restores per-session drafts after switching away and remounting the same scope', async () => {
     const user = userEvent.setup()
     const firstRender = renderChatPage()

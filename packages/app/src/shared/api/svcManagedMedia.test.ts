@@ -161,6 +161,45 @@ describe('svcManagedMedia contract', () => {
     }
   })
 
+  it('refuses NT object-namespace paths and Windows device names at the IPC boundary', () => {
+    for (const sourcePath of [
+      '\\??\\UNC\\attacker-host\\share\\a.png',
+      '\\??\\C:\\Users\\a.png',
+      '/??/UNC/attacker-host/share/a.png',
+      'file:///??/UNC/attacker-host/share/a.png',
+      'file:///%3F%3F/UNC/attacker-host/share/a.png',
+      'C:\\Users\\artist\\CON',
+      'C:\\Users\\artist\\com1.png',
+      'C:\\Users\\artist\\NUL .txt',
+      'C:\\Users\\artist\\CONOUT$',
+      'file:///C:/Users/artist/lpt1.png'
+    ]) {
+      expect(
+        () =>
+          validateImportManagedMediaFileReq({
+            sourcePath,
+            mimeType: 'image/png',
+            originalFileName: 'a.png'
+          }),
+        sourcePath
+      ).toThrow(ServiceValidationError)
+    }
+    // Only the last segment of a Windows path names a device; POSIX names are just names.
+    for (const sourcePath of [
+      'C:\\Users\\console\\a.png',
+      'C:\\Users\\artist\\com10.png',
+      '/home/artist/con.png'
+    ]) {
+      expect(
+        validateImportManagedMediaFileReq({
+          sourcePath,
+          mimeType: 'image/png',
+          originalFileName: 'a.png'
+        }).sourcePath
+      ).toBe(sourcePath)
+    }
+  })
+
   it('validates import data URL MIME, base64, decoded size, and file name', () => {
     expect(
       validateImportManagedMediaDataUrlReq({

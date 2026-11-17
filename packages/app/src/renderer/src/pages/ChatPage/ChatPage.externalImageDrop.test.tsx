@@ -12,7 +12,10 @@ import type {
 } from '@shared/api/svcManagedMedia'
 import type { ChatSession } from './chatStorage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
-import { CHAT_ATTACHMENT_STORAGE } from './chatManagedMediaAttachments'
+import {
+  CHAT_ATTACHMENT_STORAGE,
+  ChatPathlessAttachmentTooLargeError
+} from './chatManagedMediaAttachments'
 import ChatPage from './ChatPage'
 
 type DropReadResult = { files: File[]; failedUrls: string[] }
@@ -763,6 +766,29 @@ describe('ChatPage external local image drop', () => {
     await waitFor(() => expect(fixture.notifyError).toHaveBeenCalled())
     expect(pendingAttachments()).toEqual([existingAttachment])
     expect(screen.getByTestId('composer-input')).toHaveValue(draft)
+    expect(fixture.importFile).not.toHaveBeenCalled()
+  })
+
+  it('refuses a dropped path-less file above the in-memory cap with its own message', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    await renderPage([existingAttachment])
+    const size = 70 * 1024 * 1024
+    const video = new File(['video'], 'generated.mp4', { type: 'video/mp4' })
+    Object.defineProperty(video, 'size', { value: size })
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(video, 'arrayBuffer', { value: arrayBuffer })
+
+    drop({}, [video])
+
+    await waitFor(() =>
+      expect(fixture.notifyError).toHaveBeenCalledWith(
+        new ChatPathlessAttachmentTooLargeError('generated.mp4', size).message
+      )
+    )
+    expect(fixture.notifyError).toHaveBeenCalledOnce()
+    expect(pendingAttachments()).toEqual([existingAttachment])
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(fixture.importBytes).not.toHaveBeenCalled()
     expect(fixture.importFile).not.toHaveBeenCalled()
   })
 

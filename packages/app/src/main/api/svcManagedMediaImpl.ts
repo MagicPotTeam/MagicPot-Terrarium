@@ -145,21 +145,29 @@ export type ImportSourcePathOptions = {
   toPath?: (url: URL) => string
   /** Default true; main-owned callers that confine paths themselves may allow UNC paths. */
   refuseNetworkAndDevicePaths?: boolean
+  /** Windows path rules; defaults to whether pathApi is path.win32 (true on Windows). */
+  windows?: boolean
 }
+
+/** Windows reserved device names, which name a device in any folder (with any extension). */
+const WINDOWS_DEVICE_NAME = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])(?:[ .].*)?$/iu
 
 /**
  * Turn an importFile sourcePath (absolute path or file: URI) into a local path, without
  * touching the filesystem. Refused: other URI schemes, relative or non-normalized paths and,
  * by default, UNC and Win32 device or long-path namespace paths (\\server\share, \\?\,
- * \\.\), which would make main contact a remote host or a device before any other check,
- * and Windows alternate data streams. Errors never contain the path.
+ * \\.\, \??\), which would make main contact a remote host or a device before any other
+ * check, and Windows alternate data streams. On Windows a refused-by-default path must also
+ * be a plain drive-letter path that does not end in a reserved device name (CON, COM1.png).
+ * Errors never contain the path.
  */
 export function toImportSourceLocalPath(
   value: string,
   {
     pathApi = path,
     toPath = (url) => fileURLToPath(url),
-    refuseNetworkAndDevicePaths = true
+    refuseNetworkAndDevicePaths = true,
+    windows = pathApi === path.win32
   }: ImportSourcePathOptions = {}
 ): string {
   const raw = String(value || '')
@@ -175,7 +183,12 @@ export function toImportSourceLocalPath(
   if (
     (refuseNetworkAndDevicePaths &&
       (/^[\\/]{2}/u.test(sourcePath) ||
-        (/^[A-Za-z]:[\\/]/u.test(sourcePath) && sourcePath.slice(2).includes(':')))) ||
+        // NT object namespace (\??\UNC\host\share, \??\C:\...).
+        /^[\\/][?]{2}[\\/]/u.test(sourcePath) ||
+        (/^[A-Za-z]:[\\/]/u.test(sourcePath) && sourcePath.slice(2).includes(':')) ||
+        (windows &&
+          (!/^[A-Za-z]:\\/u.test(sourcePath) ||
+            WINDOWS_DEVICE_NAME.test(sourcePath.split(/[\\/]/u).pop() || ''))))) ||
     !pathApi.isAbsolute(sourcePath) ||
     pathApi.normalize(sourcePath) !== sourcePath
   ) {

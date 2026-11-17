@@ -9,6 +9,7 @@ import type { ChatAttachment } from '@shared/llm'
 import type { ChatSession } from './chatStorage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 import ChatPage from './ChatPage'
+import { ChatPathlessAttachmentTooLargeError } from './chatManagedMediaAttachments'
 
 // Canvas -> Agent hand-off: every incoming image must reach composer, draft and
 // session state as a managed attachment (local-media URL + media reference).
@@ -460,6 +461,30 @@ describe('canvas hand-off into managed media', () => {
     })
     await waitFor(() => expect(f.error).toHaveBeenCalledWith('canvas.send_to_agent_failed'))
     expect(pending().map((item) => item.fileName)).toEqual(['same.png', 'same.png'])
+  })
+
+  it('refuses a blob: hand-off above the path-less cap with its own message, before reading it', async () => {
+    await renderPage()
+    const size = 70 * 1024 * 1024
+    const arrayBuffer = vi.fn()
+    const huge = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
+    Object.defineProperty(huge, 'size', { value: size })
+    Object.defineProperty(huge, 'arrayBuffer', { value: arrayBuffer })
+    f.fetch.mockImplementation(async () => ({ ok: true, blob: async () => huge }))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await dispatch({
+      attachment: { type: 'image', url: 'blob:huge-generated', fileName: 'huge.png' }
+    })
+    await waitFor(() =>
+      expect(f.error).toHaveBeenCalledWith(
+        new ChatPathlessAttachmentTooLargeError('huge.png', size).message
+      )
+    )
+    expect(f.error).not.toHaveBeenCalledWith('canvas.send_to_agent_failed')
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
+    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(pending()).toEqual([])
   })
 
   it('imports a blob: image from an internal canvas drag instead of inlining it', async () => {

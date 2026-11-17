@@ -834,7 +834,7 @@
     "drop_folder_has_no_supported_images": "拖入的文件夹中没有受支持的图片。",
     "incoming_image_downscaled": "{{fileName}} 超过 {{maxMB}} MB，已改为附加 {{width}}×{{height}} 的缩小副本。",
     "incoming_image_too_large": "{{fileName}} 过大。最大 {{maxMB}} MB，当前大小 {{size}}。",
-    "pathless_attachment_too_large": "{{fileName}}（{{size}}）不是磁盘上的文件，超过了粘贴或生成数据的 {{maxMB}} MB 上限。请先保存为文件，再添加该文件。",
+    "pathless_attachment_too_large": "{{fileName}}（{{size}}）无法作为本地文件读取，超过了粘贴、生成或网络位置数据的 {{maxMB}} MB 上限。请先保存到本地文件夹，再从那里添加。",
     "report_check_timed_out": "检查报告超时，消息已保留，请重试。",
     "request_images_too_large": "本对话中的图片超出了单次请求可携带的大小，请移除较早的图片或新建对话。",
     "drop_folder_process_failed": "处理拖入的文件夹失败。",
