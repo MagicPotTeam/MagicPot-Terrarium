@@ -2147,6 +2147,9 @@ describe('ProjectCanvasPage generation-first entry', () => {
       shiftClick(secondFileButton)
 
       fireEvent.click(await screen.findByRole('button', { name: 'Generate From Selection' }))
+      // Nothing is reported before the send is handed to the delivery path.
+      expect(notifyWarning).not.toHaveBeenCalled()
+      expect(notifySuccess).not.toHaveBeenCalled()
       fireEvent.click(await screen.findByRole('button', { name: '发送给 默认 Agent 生成候选图' }))
 
       await waitFor(
@@ -2160,7 +2163,12 @@ describe('ProjectCanvasPage generation-first entry', () => {
       const eventTypes = dispatchEventSpy.mock.calls.map(([event]) => (event as Event).type)
       expect(eventTypes).not.toContain('qapp:switch')
       expect(eventTypes).not.toContain('qapp:apply-task-pack')
-      expect(notifySuccess).toHaveBeenCalledWith('已发送给默认 Agent 生成候选图')
+      // The app only knows the delivery was scheduled (no acknowledgement from the
+      // Agent column yet), so the dialog reports it as scheduled, never as a success.
+      expect(notifyWarning).toHaveBeenCalledExactlyOnceWith(
+        'project_canvas.generation.delivery_scheduled'
+      )
+      expect(notifySuccess).not.toHaveBeenCalled()
     } finally {
       dispatchEventSpy.mockRestore()
     }
