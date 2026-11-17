@@ -246,7 +246,13 @@ export function attachRendererDiagnostics(
   const isWindowUsable = () => canUseWindow(window)
   const isShuttingDown = () =>
     isAppShuttingDown() || options.isShuttingDown?.() === true || !isWindowUsable()
+  // Set when a hung renderer the user asked to reload went away with a clean exit (see
+  // 'render-process-gone'). Chromium's isCrashed() is false after a normal termination, so without
+  // this the window would look alive to every check below while it shows nothing. Cleared as soon
+  // as a new page starts (a recovery reload or any other load), and by the next exit.
+  let goneWithoutCrash = false
   const isRendererDead = () => {
+    if (goneWithoutCrash) return true
     try {
       return typeof window.webContents.isCrashed === 'function' && window.webContents.isCrashed()
     } catch {
@@ -280,6 +286,8 @@ export function attachRendererDiagnostics(
   /** Starts a recovery reload and remembers what the page it brings up is told. */
   const startRecoveryReload = (details: RenderProcessGoneDetails, notice: RecoveryNotice = details) => {
     declinedRecovery = null
+    // A new renderer is being started: from now on isCrashed() tells whether it is dead.
+    goneWithoutCrash = false
     pendingRecoveryNotice = {
       reason: notice.reason,
       exitCode: notice.exitCode,
@@ -388,10 +396,12 @@ export function attachRendererDiagnostics(
 
   window.webContents.on('did-start-loading', () => {
     console.info('[App] Renderer started loading')
+    goneWithoutCrash = false
   })
 
   window.webContents.on('did-finish-load', () => {
     console.info('[App] Renderer finished loading')
+    goneWithoutCrash = false
     clearReloadCheck()
     // The page is up: a dialog that asks whether to reload a dead window no longer applies.
     withdrawRecoveryPrompt()
@@ -537,6 +547,7 @@ export function attachRendererDiagnostics(
     // Whatever was being checked belongs to the process before this exit; this exit gets its own answer.
     clearReloadCheck()
     declinedRecovery = null
+    goneWithoutCrash = false
     if (hangTerminationTimer || isHangReloadRequested()) {
       // The forced end of a hung renderer the user chose to reload, also when it is reported after
       // the 5 s: not a new crash, so no dialog and no use of the crash budget. A 'hang-not-ended'
@@ -558,8 +569,26 @@ export function attachRendererDiagnostics(
     // whether to end it once more is still open: that question no longer applies, and keeping it
     // open would swallow this exit (an open dialog blocks every other answer). Close it, and let
     // the exit get its own answer below.
+    // A hung renderer the user asked to reload goes away with a clean exit (its request expired
+    // or its 'could not be ended' question is open): the page is gone all the same, but Chromium
+    // does not count a normal termination as a crash, so the exit would be ignored and every later
+    // check (the dialog's Reload, the 1 s look, the question on focus) would see a live renderer:
+    // a blank window with no way out. Answer it as a death, within the crash budget.
+    const hungRendererGone =
+      details.reason === 'clean-exit' &&
+      (hangReloadRequestedUntil !== null || recoveryPrompt?.kind === 'hang-not-ended')
     if (recoveryPrompt?.kind === 'hang-not-ended') withdrawRecoveryPrompt()
     dropHangReloadRequest()
+    if (hungRendererGone) {
+      goneWithoutCrash = true
+      console.error('[App] The unresponsive renderer exited cleanly; answering it as a death', {
+        reason: details.reason,
+        exitCode: details.exitCode
+      })
+      if (isShuttingDown()) return
+      recoverWithinBudget(window, details)
+      return
+    }
     handleRendererProcessGone(window, details, {
       recoverRenderer: recoverWithinBudget,
       promptRenderer: promptForManualRecovery,
@@ -573,6 +602,7 @@ export function attachRendererDiagnostics(
     clearReloadCheck()
     withdrawRecoveryPrompt()
     declinedRecovery = null
+    goneWithoutCrash = false
     dropHangReloadRequest()
   })
 

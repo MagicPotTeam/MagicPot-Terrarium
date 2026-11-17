@@ -1564,6 +1564,88 @@ describe('rendererDiagnostics hung renderer that dies after its reload request e
     expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(2)
     expect(window.webContents.reload).not.toHaveBeenCalled()
   })
+
+  // Panel probe S3: Chromium's isCrashed() is false after a normal termination, so a clean exit
+  // used to be ignored after the open dialog was withdrawn: a dead, blank window with no dialog.
+  it('answers a clean exit of the hung renderer as a death: the dialog is withdrawn and the window reloaded (S3)', async () => {
+    const { window, clock } = await hungWindowAskedAgain()
+    clock.now += 11 * 60_000
+    // isCrashed() stays false, as Chromium reports it for a normal termination.
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    expect(answers[1].signal?.aborted).toBe(true)
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    await flush()
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(answers).toHaveLength(2)
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'clean-exit',
+      exitCode: 0,
+      diedAt: 42
+    })
+  })
+
+  it('answers a clean exit after the "could not be ended" dialog was cancelled and the request expired', async () => {
+    const { window, clock } = await hungWindowAskedAgain()
+    answers[1].resolve(1) // 取消
+    await flush()
+    clock.now += 11 * 60_000
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    expect(answers).toHaveLength(2)
+  })
+
+  it('a clean exit of the hung renderer that finds the budget spent asks, and Reload and the question on focus work without isCrashed()', async () => {
+    const window = createWindow()
+    // A clock that goes back once: the three automatic reloads below stay in the budget while the
+    // hang reload request, read from the raw clock, has already expired.
+    const clock = { now: 1_000_000 }
+    attachRendererDiagnostics(window as never, { monotonicNow: () => clock.now, wallClockNow: () => 42 })
+    for (let crash = 0; crash < 3; crash += 1) {
+      listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+      listenerOf(window, 'did-finish-load')()
+    }
+    expect(window.webContents.reload).toHaveBeenCalledTimes(3)
+    clock.now = 0
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    answers[0].resolve(1)
+    await flush()
+    vi.advanceTimersByTime(5_000)
+    await flush()
+    expect(answers[1].message).toBe('未能结束没有响应的窗口进程。')
+    clock.now = 11 * 60_000
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    expect(answers[1].signal?.aborted).toBe(true)
+    expect(answers).toHaveLength(3)
+    expect(answers[2].message).toBe('窗口多次意外退出，自动恢复已暂停。')
+    // The 1 s look must not take the clean exit for a renderer that came back.
+    vi.advanceTimersByTime(5_000)
+    expect(answers[2].signal?.aborted).toBe(false)
+    // 取消, then the user comes back to the window: asked again.
+    answers[2].resolve(1)
+    await flush()
+    window.on.mock.calls.find(([name]) => name === 'blur')?.[1]()
+    window.on.mock.calls.find(([name]) => name === 'focus')?.[1]()
+    expect(answers).toHaveLength(4)
+    answers[3].resolve(0)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(4)
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+  })
+
+  it('still ignores a clean exit that has nothing to do with a hang', async () => {
+    const window = createWindow()
+    attachRendererDiagnostics(window as never)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 })
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(answers).toHaveLength(0)
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+  })
 })
 
 describe('rendererDiagnostics hung renderer that answers again while its forced end is pending', () => {
