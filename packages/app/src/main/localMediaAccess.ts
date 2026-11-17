@@ -241,6 +241,84 @@ export function resolveAuthorizedLocalMediaPath(
     : null
 }
 
+/**
+ * Short-lived import grants. A file the user picks or drops into the chat composer is copied
+ * into managed media at once, so it needs no durable grant: these grants live in memory only
+ * (never persisted), expire after LOCAL_MEDIA_IMPORT_GRANT_TTL_MS, are removed by the import
+ * that uses them, and never evict the persisted grants that canvas boards rely on.
+ */
+export const LOCAL_MEDIA_IMPORT_GRANT_TTL_MS = 60_000
+const MAX_LOCAL_MEDIA_IMPORT_GRANTS = 256
+/** Canonical-path key -> expiry time of each grant for that path, oldest first. */
+const localMediaImportGrants = new Map<string, number[]>()
+
+function pruneLocalMediaImportGrants(now: number): number {
+  let total = 0
+  for (const [key, expiries] of localMediaImportGrants) {
+    const live = expiries.filter((expiresAt) => expiresAt > now)
+    if (live.length) {
+      localMediaImportGrants.set(key, live)
+      total += live.length
+    } else {
+      localMediaImportGrants.delete(key)
+    }
+  }
+  return total
+}
+
+/**
+ * Records one import grant for a canonical path (the caller has canonicalised it and checked
+ * that main would import it). The oldest import grants go first when the bound is reached.
+ */
+export function recordLocalMediaImportGrant(canonicalPath: string, now = Date.now()): void {
+  const key = comparisonKey(canonicalPath)
+  let total = pruneLocalMediaImportGrants(now)
+  const expiries = localMediaImportGrants.get(key) ?? []
+  localMediaImportGrants.delete(key)
+  localMediaImportGrants.set(key, [...expiries, now + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS])
+  total += 1
+  while (total > MAX_LOCAL_MEDIA_IMPORT_GRANTS) {
+    const [oldestKey, oldestExpiries] = localMediaImportGrants.entries().next().value ?? []
+    if (!oldestKey || !oldestExpiries) break
+    oldestExpiries.shift()
+    if (!oldestExpiries.length) localMediaImportGrants.delete(oldestKey)
+    total -= 1
+  }
+}
+
+/** Uses up one live import grant for this canonical path; false when there is none. */
+export function consumeLocalMediaImportGrant(canonicalPath: string, now = Date.now()): boolean {
+  pruneLocalMediaImportGrants(now)
+  const key = comparisonKey(canonicalPath)
+  const expiries = localMediaImportGrants.get(key)
+  if (!expiries?.length) return false
+  expiries.shift()
+  if (!expiries.length) localMediaImportGrants.delete(key)
+  return true
+}
+
+/**
+ * Source-path policy for a renderer importFile request: the canonical path when a live
+ * import grant covers it (the grant is used up) or when it is persistently authorized
+ * (application root or scoped grant), otherwise null.
+ */
+export function authorizeLocalMediaImportSourcePath(
+  filePath: string,
+  allowedRoots: readonly string[],
+  now = Date.now()
+): string | null {
+  const trimmed = String(filePath || '').trim()
+  if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
+  const canonical = canonicalizeExistingPath(trimmed)
+  if (!canonical) return null
+  if (consumeLocalMediaImportGrant(canonical, now)) return canonical
+  return resolveAuthorizedLocalMediaPath(trimmed, allowedRoots)
+}
+
+export function countLocalMediaImportGrantsForTest(now = Date.now()): number {
+  return pruneLocalMediaImportGrants(now)
+}
+
 /** Checks an already-authorized path without expanding the scoped allowlist. */
 export function isScopedLocalMediaPathAuthorized(filePath: string): boolean {
   const canonical = canonicalizeExistingPath(String(filePath || '').trim())
@@ -254,6 +332,7 @@ export function clearScopedLocalMediaPathsForTest(): void {
   }
   scopedLocalMediaPaths.clear()
   scopedLocalMediaDirectories.clear()
+  localMediaImportGrants.clear()
   localMediaGrantsPath = null
   localMediaGrantsDirty = false
 }

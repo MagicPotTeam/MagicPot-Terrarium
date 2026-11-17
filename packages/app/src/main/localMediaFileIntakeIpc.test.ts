@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { handleMock, authorizeMock, resolveMock } = vi.hoisted(() => ({
+const { handleMock, authorizeMock, resolveMock, recordImportGrantMock } = vi.hoisted(() => ({
   handleMock: vi.fn(),
   authorizeMock: vi.fn(),
-  resolveMock: vi.fn()
+  resolveMock: vi.fn(),
+  recordImportGrantMock: vi.fn()
 }))
 
 vi.mock('electron', () => ({
@@ -18,6 +19,7 @@ vi.mock('./config/userDataDirectory', () => ({
 }))
 vi.mock('./localMediaAccess', () => ({
   authorizeScopedLocalMediaPath: authorizeMock,
+  recordLocalMediaImportGrant: recordImportGrantMock,
   resolveAuthorizedLocalMediaPath: resolveMock
 }))
 
@@ -26,12 +28,17 @@ import {
   resetLocalMediaFileIntakeIpcForTest
 } from './localMediaFileIntakeIpc'
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const handlerFor = (channel: string): any =>
+  handleMock.mock.calls.find(([name]) => name === channel)?.[1]
+
 describe('local media file intake IPC', () => {
   beforeEach(() => {
     resetLocalMediaFileIntakeIpcForTest()
     handleMock.mockReset()
     authorizeMock.mockReset()
     resolveMock.mockReset()
+    recordImportGrantMock.mockReset()
     delete process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK
     delete process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT
     delete process.env.MAGICPOT_TEST_ARTIFACT_ROOT
@@ -43,11 +50,12 @@ describe('local media file intake IPC', () => {
 
     expect(handleMock.mock.calls.map(([channel]) => channel)).toEqual([
       'local-media:authorize-picker-path',
+      'local-media:authorize-import-path',
       'local-media:resolve-scoped-path'
     ])
 
-    const authorizeHandler = handleMock.mock.calls[0]?.[1]
-    const resolveHandler = handleMock.mock.calls[1]?.[1]
+    const authorizeHandler = handlerFor('local-media:authorize-picker-path')
+    const resolveHandler = handlerFor('local-media:resolve-scoped-path')
     const trustedSender = { isDestroyed: () => false }
     const untrustedSender = { isDestroyed: () => false }
     authorizeMock.mockReturnValue(true)
@@ -84,7 +92,7 @@ describe('local media file intake IPC', () => {
     }
     registerLocalMediaFileIntakeIpc(() => mainWindow)
 
-    const resolveHandler = handleMock.mock.calls[1]?.[1]
+    const resolveHandler = handlerFor('local-media:resolve-scoped-path')
     resolveMock.mockReturnValue('C:/shared-thumbnail-cache/image.webp')
     expect(
       resolveHandler({ sender: mainWindow.webContents }, 'C:/shared-thumbnail-cache/image.webp')
@@ -98,5 +106,24 @@ describe('local media file intake IPC', () => {
       expect.stringMatching(/C:[\\/]shared-thumbnail-cache/),
       expect.stringMatching(/C:[\\/]artifacts/)
     ])
+  })
+
+  it('records an import grant only for the current main renderer and never a persisted grant', async () => {
+    let mainWindow: any = null
+    registerLocalMediaFileIntakeIpc(() => mainWindow)
+    const importHandler = handlerFor('local-media:authorize-import-path')
+    const trustedSender = { isDestroyed: () => false }
+    // A path that does not exist: the trust check comes before any filesystem access.
+    const picked = process.platform === 'win32' ? 'C:\\nowhere\\a.png' : '/nowhere/a.png'
+
+    await expect(importHandler({ sender: trustedSender }, picked, 'image/png')).resolves.toBe('')
+    mainWindow = { isDestroyed: () => false, webContents: trustedSender }
+    await expect(
+      importHandler({ sender: { isDestroyed: () => false } }, picked, 'image/png')
+    ).resolves.toBe('')
+    // Trusted, but the file does not exist: nothing is recorded.
+    await expect(importHandler({ sender: trustedSender }, picked, 'image/png')).resolves.toBe('')
+    expect(recordImportGrantMock).not.toHaveBeenCalled()
+    expect(authorizeMock).not.toHaveBeenCalled()
   })
 })

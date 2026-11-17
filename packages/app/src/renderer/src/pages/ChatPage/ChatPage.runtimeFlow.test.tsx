@@ -1187,6 +1187,12 @@ const stubLocalFileBridge = () => {
       if (filePath) grantedLocalFilePaths.add(filePath)
       return filePath
     },
+    // The composer's one-use import grant (main returns the canonical path).
+    authorizeLocalMediaFileForImport: async (file: File) => {
+      const filePath = localFilePaths.get(file) ?? ''
+      if (filePath) grantedLocalFilePaths.add(filePath)
+      return filePath
+    },
     resolveAuthorizedLocalMediaPath: async (filePath: string) =>
       grantedLocalFilePaths.has(filePath) ? filePath : ''
   })

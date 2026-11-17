@@ -89,7 +89,7 @@ vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: vi.fn
 }) }))
 vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({ createInstalledCatalogReadDelegate: catalogDelegateFactory }))
 vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: vi.fn(function (deps?: unknown) { managedMediaConstructor(deps); return new (createServiceClass())() }), MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES: 1024 }))
-vi.mock('../localMediaAccess', () => ({ resolveAuthorizedLocalMediaPath: resolveAuthorizedLocalMediaPathMock }))
+vi.mock('../localMediaAccess', () => ({ authorizeLocalMediaImportSourcePath: resolveAuthorizedLocalMediaPathMock }))
 vi.mock('../localMediaAllowedRoots', () => ({ getLocalMediaAllowedRoots: () => ['/app-root'] }))
 vi.mock('./svcReportBundlesImpl', () => ({ ReportBundlesSvcImpl: createServiceClass() }))
 describe('serverIpc createServer', () => {

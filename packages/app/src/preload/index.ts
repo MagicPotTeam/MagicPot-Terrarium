@@ -45,6 +45,26 @@ const electronFile = {
       return ''
     }
   },
+  /**
+   * One-use, in-memory import grant for a File the user picked or dropped: main records it
+   * only for a type it imports and a path it would import, and returns the canonical path
+   * ('' otherwise). The path comes only from webUtils.getPathForFile of a real File, never
+   * from a string the page passes.
+   */
+  async authorizeLocalMediaFileForImport(file: unknown, mimeType: unknown): Promise<string> {
+    try {
+      const filePath = (webUtils.getPathForFile as (target: unknown) => string)(file) || ''
+      if (!filePath || typeof mimeType !== 'string') return ''
+      const canonical: unknown = await ipcRenderer.invoke(
+        'local-media:authorize-import-path',
+        filePath,
+        mimeType
+      )
+      return typeof canonical === 'string' ? canonical : ''
+    } catch {
+      return ''
+    }
+  },
   authorizeDroppedLocalImage(canonicalUrl: string): Promise<string> {
     return droppedLocalImages.authorizeDroppedLocalImage(canonicalUrl)
   },

@@ -5,10 +5,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  authorizeLocalMediaImportSourcePath,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
   resolveAuthorizedLocalMediaPath
 } from '../localMediaAccess'
+import { grantLocalMediaImportPath } from '../localMediaFileIntakeIpc'
 import { importManagedMediaFile } from '../llmProxy/managedMediaStore'
 import { ManagedMediaSvcImpl, toImportSourceLocalPath } from './svcManagedMediaImpl'
 
@@ -213,6 +215,25 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
     await expect(service.importFile(request(picked))).resolves.toMatchObject({
       reference: { kind: 'managed', sizeBytes: PNG.length }
     })
+  })
+
+  it('imports a picked file once with its one-use import grant and refuses a second use', async () => {
+    const picked = path.join(outside, 'chat-pick.png')
+    await fs.writeFile(picked, PNG)
+    const { service, importFile } = create({
+      authorizeImportSourcePath: (sourcePath) =>
+        authorizeLocalMediaImportSourcePath(sourcePath, [allowed])
+    })
+    // The preload sends the webUtils path of the picked File; main returns the canonical path.
+    const canonical = await grantLocalMediaImportPath(picked, 'image/png')
+    expect(canonical).toBe(picked)
+    await expect(service.importFile(request(canonical))).resolves.toMatchObject({
+      reference: { kind: 'managed', sizeBytes: PNG.length }
+    })
+    await expectNoPathInError(service.importFile(request(canonical)), 'MANAGED_MEDIA_IMPORT_FORBIDDEN')
+    expect(importFile).toHaveBeenCalledOnce()
+    // Nothing was granted durably.
+    expect(resolveAuthorizedLocalMediaPath(picked, [allowed])).toBeNull()
   })
 
   it('refuses a path outside the allowed roots before the store opens it', async () => {

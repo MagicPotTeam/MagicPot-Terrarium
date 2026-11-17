@@ -23,7 +23,8 @@ export const CHAT_ATTACHMENT_STORAGE = {
 /** The preload's file bridge (window.electronFile), as far as attachment import uses it. */
 export type ChatAttachmentFileBridge = {
   getPathForFile?: (file: File) => string
-  authorizeLocalMediaFile?: (file: File) => Promise<string>
+  /** One-use, in-memory import grant in main; returns the canonical path or ''. */
+  authorizeLocalMediaFileForImport?: (file: File, mimeType: string) => Promise<string>
   resolveAuthorizedLocalMediaPath?: (filePath: string) => Promise<string>
 }
 
@@ -128,24 +129,9 @@ const isNetworkOrDevicePath = (value: string): boolean => /^[\\/]{2}/u.test(valu
 const defaultFileBridge = (): ChatAttachmentFileBridge | undefined =>
   typeof window === 'undefined' ? undefined : window.electronFile
 
-/**
- * The canonical path main may import a picked file from, or '' when the file has no path
- * (clipboard, generated blob) or main does not authorise it. The path comes only from the
- * preload's webUtils.getPathForFile, which returns a path only for a File the user picked or
- * dropped; authorizeLocalMediaFile records that pick as a grant in main, and main checks
- * the grant again when it imports.
- */
-const resolvePickedFileImportPath = async (
-  file: File,
-  bridge: ChatAttachmentFileBridge | undefined
-): Promise<string> => {
-  if (
-    !bridge?.getPathForFile ||
-    !bridge.authorizeLocalMediaFile ||
-    !bridge.resolveAuthorizedLocalMediaPath
-  ) {
-    return ''
-  }
+/** The path the preload reports for a File the user picked or dropped, or ''. */
+const readPickedFilePath = (file: File, bridge: ChatAttachmentFileBridge | undefined): string => {
+  if (!bridge?.getPathForFile) return ''
   try {
     const rawPath: unknown = bridge.getPathForFile(file)
     if (typeof rawPath !== 'string') {
@@ -153,12 +139,31 @@ const resolvePickedFileImportPath = async (
       void Promise.resolve(rawPath).catch(() => undefined)
       return ''
     }
-    const pickedPath = rawPath.trim()
-    if (!pickedPath || isNetworkOrDevicePath(pickedPath)) return ''
-    const grantedPath = String((await bridge.authorizeLocalMediaFile(file)) || '').trim()
-    if (!grantedPath) return ''
+    return rawPath.trim()
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * The canonical path main may import a picked file from, or '' when the file has no path
+ * (clipboard, generated blob) or main does not grant it. The path comes only from the
+ * preload's webUtils.getPathForFile, which returns a path only for a File the user picked or
+ * dropped. authorizeLocalMediaFileForImport records a one-use, in-memory import grant in main
+ * (never a persisted grant, so chat attachments cannot push canvas grants out), and main's
+ * importFile uses it up.
+ */
+const resolvePickedFileImportPath = async (
+  file: File,
+  pickedPath: string,
+  mimeType: string,
+  bridge: ChatAttachmentFileBridge | undefined
+): Promise<string> => {
+  if (!pickedPath || isNetworkOrDevicePath(pickedPath)) return ''
+  if (!bridge?.authorizeLocalMediaFileForImport) return ''
+  try {
     const canonicalPath = String(
-      (await bridge.resolveAuthorizedLocalMediaPath(grantedPath)) || ''
+      (await bridge.authorizeLocalMediaFileForImport(file, mimeType)) || ''
     ).trim()
     return canonicalPath && !isNetworkOrDevicePath(canonicalPath) ? canonicalPath : ''
   } catch {
@@ -178,17 +183,25 @@ export const importChatAttachment = async ({
 }: ImportChatAttachmentInput): Promise<ChatAttachment> => {
   if (!service) throw new Error('Managed media service is unavailable')
   const originalFileName = file.name || 'attachment'
+  const importMimeType = mimeType || file.type
+  const pickedPath = readPickedFilePath(file, fileBridge)
+  // A file on disk whose type the store does not hold (video, 3D model): main refuses the
+  // type before it looks at the path, so no grant is asked for and the file is never read.
+  const grantable =
+    !pickedPath || isNetworkOrDevicePath(pickedPath) || isStoreMimeType(importMimeType)
   // A file on disk is copied by main from its path: its bytes never enter the renderer.
-  const sourcePath = await resolvePickedFileImportPath(file, fileBridge)
+  const sourcePath = grantable
+    ? await resolvePickedFileImportPath(file, pickedPath, importMimeType, fileBridge)
+    : pickedPath
   const imported = sourcePath
     ? await service.importFile({
         sourcePath,
-        mimeType: mimeType || file.type,
+        mimeType: importMimeType,
         originalFileName,
         storage
       })
     : await importPathlessBlob(service, file, {
-        mimeType: mimeType || file.type,
+        mimeType: importMimeType,
         originalFileName,
         storage
       })
@@ -263,6 +276,10 @@ const dataUrlMimeType = (url: string): string =>
   normalizeImageMimeType(url.slice(5, Math.max(5, url.search(/[;,]/))))
 
 const isManagedImageMimeType = (mime: string): boolean => MANAGED_IMAGE_MIME_TYPES.has(mime)
+
+/** The store's own type rule (main's isManagedMediaMimeTypeSupported): no jpg alias. */
+const isStoreMimeType = (value: string): boolean =>
+  MANAGED_IMAGE_MIME_TYPES.has(String(value || '').split(';', 1)[0].trim().toLowerCase())
 
 /** The store's file-name rule; the attachment keeps its own display name. */
 const toManagedOriginalFileName = (fileName: string | undefined, fallback: string): string => {

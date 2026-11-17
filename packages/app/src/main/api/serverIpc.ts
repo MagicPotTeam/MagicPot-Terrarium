@@ -30,7 +30,7 @@ import { createInstalledCatalogReadDelegate } from '../magicAgentRuntime/install
 import { createStartupStorageReadDelegate } from '../storageMetadata/startupStorageReadBinding'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 import { MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES, ManagedMediaSvcImpl } from './svcManagedMediaImpl'
-import { resolveAuthorizedLocalMediaPath } from '../localMediaAccess'
+import { authorizeLocalMediaImportSourcePath } from '../localMediaAccess'
 import { getLocalMediaAllowedRoots } from '../localMediaAllowedRoots'
 import { ReportBundlesSvcImpl } from './svcReportBundlesImpl'
 import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaCleanupScheduler'
@@ -79,9 +79,10 @@ export const createServer = (
     svcAppUpdate: new AppUpdateSvcImpl(),
     svcMagicAgentPlatform: new MagicAgentPlatformSvcImpl({ installedCatalogRead: createInstalledCatalogReadDelegate(getMainWindow) }),
     svcManagedMedia: new ManagedMediaSvcImpl({
-      // Renderer-supplied paths: only application roots and files the user picked (grants).
+      // Renderer-supplied paths: application roots, persisted grants, and the one-use,
+      // in-memory import grant of a file the user just picked or dropped in the chat.
       authorizeImportSourcePath: (sourcePath) =>
-        resolveAuthorizedLocalMediaPath(sourcePath, getLocalMediaAllowedRoots()),
+        authorizeLocalMediaImportSourcePath(sourcePath, getLocalMediaAllowedRoots()),
       maxImportFileBytes: MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES,
       updateReferenceSnapshot: async (snapshot) => {
         const chatMediaRoot = await getChatMediaDir()

@@ -90,11 +90,51 @@ describe('preload capability boundary', () => {
     expect(sendSyncMock).not.toHaveBeenCalled()
   })
 
+  it('asks for an import grant only with the webUtils path of a real File', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const file = { name: 'picked.png' }
+    getPathForFileMock.mockReturnValue('/picked/picked.png')
+    invokeMock.mockResolvedValue('/canonical/picked.png')
+
+    await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toBe(
+      '/canonical/picked.png'
+    )
+    expect(getPathForFileMock).toHaveBeenCalledWith(file)
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith(
+      'local-media:authorize-import-path',
+      '/picked/picked.png',
+      'image/png'
+    )
+
+    // A page cannot name the path: a string or a forged object has no webUtils path.
+    invokeMock.mockClear()
+    getPathForFileMock.mockImplementation((target: unknown) => {
+      if (typeof target === 'string') throw new TypeError('not a File')
+      return ''
+    })
+    await expect(
+      electronFile.authorizeLocalMediaFileForImport('/home/user/.ssh/id_rsa', 'image/png')
+    ).resolves.toBe('')
+    await expect(
+      electronFile.authorizeLocalMediaFileForImport(
+        { name: 'forged.png', path: '/etc/shadow' },
+        'image/png'
+      )
+    ).resolves.toBe('')
+    expect(invokeMock).not.toHaveBeenCalled()
+    // A non-string answer from main is never passed on as a path.
+    getPathForFileMock.mockReturnValue('/picked/picked.png')
+    invokeMock.mockResolvedValue({ path: '/etc/shadow' })
+    await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toBe('')
+    expect(sendSyncMock).not.toHaveBeenCalled()
+  })
+
   it('captures trusted drops before bridge exposure without exposing a trust setter', () => {
     const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
     expect(Object.keys(electronFile).sort()).toEqual([
       'authorizeDroppedLocalImage',
       'authorizeLocalMediaFile',
+      'authorizeLocalMediaFileForImport',
       'getPathForFile',
       'resolveAuthorizedLocalMediaPath'
     ])

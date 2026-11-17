@@ -69,8 +69,7 @@ describe('chatManagedMediaAttachments', () => {
       file,
       fileBridge: {
         getPathForFile: () => '/selected/file.png',
-        authorizeLocalMediaFile: async () => '/selected/file.png',
-        resolveAuthorizedLocalMediaPath: async (filePath) => filePath
+        authorizeLocalMediaFileForImport: async () => '/selected/file.png'
       },
       type: 'image',
       mimeType: 'image/png',
@@ -106,14 +105,18 @@ describe('chatManagedMediaAttachments', () => {
       }
       readAsDataURL = readAsDataURL
     } as unknown as typeof FileReader
-    const file = new File([new Uint8Array([1, 2, 3])], 'clip.mp4', { type: 'video/mp4' })
+    const file = new File([new Uint8Array([1, 2, 3])], 'shot.jpg', { type: 'image/jpeg' })
     const arrayBuffer = vi.fn()
     Object.defineProperty(file, 'arrayBuffer', { value: arrayBuffer })
-    const getPathForFile = vi.fn(() => 'C:\\Users\\artist\\Videos\\clip.mp4')
-    const authorizeLocalMediaFile = vi.fn(async () => 'C:\\Users\\artist\\Videos\\clip.mp4')
-    const resolveAuthorizedLocalMediaPath = vi.fn(async () => 'C:\\Users\\Artist\\Videos\\clip.mp4')
+    const getPathForFile = vi.fn(() => 'C:\\Users\\artist\\Pictures\\shot.jpg')
+    const authorizeLocalMediaFileForImport = vi.fn(
+      async () => 'C:\\Users\\Artist\\Pictures\\shot.jpg'
+    )
+    const authorizeLocalMediaFile = vi.fn()
+    const resolveAuthorizedLocalMediaPath = vi.fn()
     vi.stubGlobal('electronFile', {
       getPathForFile,
+      authorizeLocalMediaFileForImport,
       authorizeLocalMediaFile,
       resolveAuthorizedLocalMediaPath
     })
@@ -125,26 +128,70 @@ describe('chatManagedMediaAttachments', () => {
     const attachment = await importChatAttachment({
       service,
       file,
-      type: 'video',
-      mimeType: 'video/mp4'
+      type: 'image',
+      mimeType: 'image/jpeg'
     })
 
     expect(getPathForFile).toHaveBeenCalledWith(file)
-    expect(authorizeLocalMediaFile).toHaveBeenCalledWith(file)
-    expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith(
-      'C:\\Users\\artist\\Videos\\clip.mp4'
-    )
+    // A one-use import grant, never the persisted grant canvas boards depend on.
+    expect(authorizeLocalMediaFileForImport).toHaveBeenCalledExactlyOnceWith(file, 'image/jpeg')
+    expect(authorizeLocalMediaFile).not.toHaveBeenCalled()
+    expect(resolveAuthorizedLocalMediaPath).not.toHaveBeenCalled()
     expect(service.importFile).toHaveBeenCalledWith({
-      sourcePath: 'C:\\Users\\Artist\\Videos\\clip.mp4',
-      mimeType: 'video/mp4',
-      originalFileName: 'clip.mp4',
+      sourcePath: 'C:\\Users\\Artist\\Pictures\\shot.jpg',
+      mimeType: 'image/jpeg',
+      originalFileName: 'shot.jpg',
       storage: CHAT_ATTACHMENT_STORAGE
     })
     expect(service.importBytes).not.toHaveBeenCalled()
     expect(fileReaderConstructed).not.toHaveBeenCalled()
     expect(readAsDataURL).not.toHaveBeenCalled()
     expect(arrayBuffer).not.toHaveBeenCalled()
-    expect(attachment).toMatchObject({ type: 'video', url: imported.localMediaUrl, sizeBytes: 3 })
+    expect(attachment).toMatchObject({ type: 'image', url: imported.localMediaUrl, sizeBytes: 3 })
+  })
+
+  it('asks for no grant and reads nothing for a picked file of a type the store refuses', async () => {
+    const authorizeLocalMediaFileForImport = vi.fn(async () => '/videos/clip.mp4')
+    const authorizeLocalMediaFile = vi.fn(async () => '/videos/clip.mp4')
+    // Main refuses the type before it looks at the path or the grants.
+    const service = {
+      importFile: vi.fn(async () => {
+        throw new Error('Unsupported managed media type')
+      }),
+      importBytes: vi.fn(async () => imported)
+    } satisfies Pick<ManagedMediaSvc, 'importFile' | 'importBytes'>
+
+    for (const [name, mimeType] of [
+      ['clip.mp4', 'video/mp4'],
+      ['model.glb', 'model/gltf-binary'],
+      ['legacy.jpg', 'image/jpg'],
+      ['typeless.bin', '']
+    ] as const) {
+      const file = new File([new Uint8Array([1])], name, { type: mimeType })
+      const arrayBuffer = vi.fn()
+      Object.defineProperty(file, 'arrayBuffer', { value: arrayBuffer })
+      await expect(
+        importChatAttachment({
+          service,
+          file,
+          fileBridge: {
+            getPathForFile: () => `/videos/${name}`,
+            authorizeLocalMediaFileForImport,
+            // A bridge from before this change: never used for chat imports.
+            ...({ authorizeLocalMediaFile } as object)
+          },
+          type: 'video',
+          mimeType
+        })
+      ).rejects.toThrow('Unsupported managed media type')
+      expect(service.importFile).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sourcePath: `/videos/${name}`, mimeType })
+      )
+      expect(arrayBuffer).not.toHaveBeenCalled()
+    }
+    expect(authorizeLocalMediaFileForImport).not.toHaveBeenCalled()
+    expect(authorizeLocalMediaFile).not.toHaveBeenCalled()
+    expect(service.importBytes).not.toHaveBeenCalled()
   })
 
   it('never imports from a File.path property, a UNC path or a path main does not authorise', async () => {
@@ -159,8 +206,7 @@ describe('chatManagedMediaAttachments', () => {
         file: forged,
         bridge: {
           getPathForFile: () => '',
-          authorizeLocalMediaFile: vi.fn(),
-          resolveAuthorizedLocalMediaPath: vi.fn()
+          authorizeLocalMediaFileForImport: vi.fn()
         }
       },
       { file: forged, bridge: undefined },
@@ -169,25 +215,32 @@ describe('chatManagedMediaAttachments', () => {
         file: new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' }),
         bridge: {
           getPathForFile: () => p,
-          authorizeLocalMediaFile: vi.fn(async () => p),
-          resolveAuthorizedLocalMediaPath: vi.fn(async () => p)
+          authorizeLocalMediaFileForImport: vi.fn(async () => p)
         }
       })),
-      // Main refuses the grant or the scoped resolution.
+      // Main refuses the grant (other window, mapped network drive, not a regular file).
       {
         file: new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' }),
         bridge: {
           getPathForFile: () => '/picked/a.png',
-          authorizeLocalMediaFile: async () => '',
-          resolveAuthorizedLocalMediaPath: vi.fn()
+          authorizeLocalMediaFileForImport: async () => ''
         }
       },
+      // Main's canonical form is a UNC path (mapped drive): never sent by path.
+      {
+        file: new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' }),
+        bridge: {
+          getPathForFile: () => 'Z:\\a.png',
+          authorizeLocalMediaFileForImport: async () => '\\\\nas\\share\\a.png'
+        }
+      },
+      // A bridge without the import grant: the persisted grant is not used instead.
       {
         file: new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' }),
         bridge: {
           getPathForFile: () => '/picked/a.png',
           authorizeLocalMediaFile: async () => '/picked/a.png',
-          resolveAuthorizedLocalMediaPath: async () => ''
+          resolveAuthorizedLocalMediaPath: async (filePath: string) => filePath
         }
       },
       // A guarded bridge answers with a rejected promise.
@@ -195,8 +248,7 @@ describe('chatManagedMediaAttachments', () => {
         file: new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' }),
         bridge: {
           getPathForFile: () => Promise.reject(new Error('denied')),
-          authorizeLocalMediaFile: vi.fn(),
-          resolveAuthorizedLocalMediaPath: vi.fn()
+          authorizeLocalMediaFileForImport: vi.fn()
         }
       }
     ]
@@ -329,8 +381,7 @@ describe('chatManagedMediaAttachments', () => {
       file,
       fileBridge: {
         getPathForFile: () => '/picked/huge.png',
-        authorizeLocalMediaFile: async () => '/picked/huge.png',
-        resolveAuthorizedLocalMediaPath: async (filePath) => filePath
+        authorizeLocalMediaFileForImport: async () => '/picked/huge.png'
       },
       type: 'image',
       mimeType: 'image/png'
