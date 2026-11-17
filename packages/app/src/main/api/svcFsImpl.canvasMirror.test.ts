@@ -304,12 +304,13 @@ describe('FsSvcImpl canvas mirror assets', () => {
       const source = writeFile(path.join(projectRoot, 'Board-1', 'shrinking.png'), 'short')
       // The file is bigger when it is inspected than when it is read: it changed meanwhile.
       const realStat = fsp.stat.bind(fsp)
-      const sourceIdentity = await realStat(source)
+      // Match the spelling MAIN stats: resolveAuthorizedLocalMediaPath canonicalises with
+      // realpathSync.native, which on Windows can spell the temp directory differently from
+      // realpathSync (8.3 names, case), so a realpathSync match never injected the failure there.
+      const mainSourcePath = path.resolve(fs.realpathSync.native(source))
       vi.spyOn(fsp, 'stat').mockImplementation(async (target, options) => {
         const stats = await realStat(target, options as never)
-        // Match the file, not its spelling: MAIN canonicalises with realpathSync.native, which on
-        // Windows can spell the temp directory differently from realpathSync (8.3 names, case).
-        return stats.dev === sourceIdentity.dev && stats.ino === sourceIdentity.ino
+        return String(target) === mainSourcePath
           ? (Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { size: 999 }) as typeof stats)
           : stats
       })

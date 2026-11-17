@@ -66,7 +66,7 @@ const openManagement = async () => { fireEvent.click(screen.getByRole('button', 
 
 describe('actual router/Layout/MainArea/Settings/PanelLLM model-profile handoff, public empty extension fallback', () => {
   // Explicit bound, not a duration assertion: two full Layout/Settings round trips with jsdom role queries over MUI
-  // styles measured 5.0-5.4 s. The global 5 s hang guard stays for the other tests.
+  // styles: 5.0-5.4 s alone, 6.1-10.9 s under 4x load. The global 5 s hang guard stays for the other tests.
   it('selects actual LLM despite stale Environment tab and legacy state, reconciles delayed Layout and repeats model/source/Back returns without extra tabs or hidden effects', async () => {
     const store = mount(); expect(await screen.findByRole('heading', { name: 'Agent management' })).toBeVisible(); await settle()
     expect(screen.queryByLabelText('llm.base_url')).toBeNull(); expect(h.environment).not.toHaveBeenCalled(); expect(h.general).not.toHaveBeenCalled(); expect(h.api).not.toHaveBeenCalled(); expect(h.save).not.toHaveBeenCalled()

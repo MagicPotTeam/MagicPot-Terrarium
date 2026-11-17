@@ -107,6 +107,7 @@ describe('real edit form registered attachment receiver', () => {
     expect(f.session).toEqual(f.snapshot)
   })
 
+  // Slow: 51 image chips in the real edit form, queried by role (1.9-3.2 s under 4x load).
   it('counts hidden same-source arrivals in the image limit and exposes them when over limit', () => {
     const same = { ...image('same.png'), hiddenFromChatView: true }
     const existing = Array.from({ length: 50 }, (_, i) => i === 0 ? same : image(`existing-${i}.png`))
@@ -118,7 +119,7 @@ describe('real edit form registered attachment receiver', () => {
     expect(f.onSendEditedMessage).not.toHaveBeenCalled()
     expect(screen.getByText('本次图片数量超过限制，请分批发送')).toBeInTheDocument()
     expect(f.session).toEqual(f.snapshot)
-  })
+  }, 30_000)
 
   it('ignores received non-image attachments', () => {
     const f = setup()

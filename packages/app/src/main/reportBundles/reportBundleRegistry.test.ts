@@ -118,34 +118,78 @@ async function verifyOne(binding: string, primaryUrl: string, conv = conversatio
   return results[0]
 }
 
+const symlinkPrivilegeReason =
+  'Creating a file symlink needs Windows Developer Mode or admin rights (EPERM); this case is environment-blocked, not passed.'
+
+function isWindowsPrivilegeError(error: unknown): boolean {
+  return process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM'
+}
+
 /**
  * Windows lets a process create a file or directory symlink only with Developer Mode or admin
- * rights (EPERM otherwise). Probe once in the temp directory; the tests that need a symlink skip
- * with this reason instead of failing, and the hard-link cases keep running.
+ * rights (EPERM otherwise), while a directory junction needs no privilege and Node's lstat
+ * reports it as a symbolic link too. Probe once in the temp directory: the tests that need a
+ * file symlink skip with the reason, the tests that only alias a directory use a junction there,
+ * and the hard-link cases always run.
  */
-const symlinkBlockedReason = ((): string | undefined => {
+const linkSupport = ((): {
+  fileSymlinkBlockedReason?: string
+  dirLinkType?: 'dir' | 'junction'
+  dirLinkBlockedReason?: string
+} => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mp-report-bundles-symlink-probe-'))
+  const tryLink = (target: string, link: string, type: 'file' | 'dir' | 'junction'): boolean => {
+    try {
+      fs.symlinkSync(path.join(dir, target), path.join(dir, link), type)
+      return true
+    } catch (error) {
+      if (isWindowsPrivilegeError(error)) return false
+      throw error
+    }
+  }
   try {
     fs.writeFileSync(path.join(dir, 'file'), '')
     fs.mkdirSync(path.join(dir, 'dir'))
-    fs.symlinkSync(path.join(dir, 'file'), path.join(dir, 'file-link'))
-    fs.symlinkSync(path.join(dir, 'dir'), path.join(dir, 'dir-link'), 'dir')
-    return undefined
-  } catch (error) {
-    if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM')
-      return 'Creating a symlink needs Windows Developer Mode or admin rights (EPERM); this case is environment-blocked, not passed.'
-    throw error
+    const fileSymlink = tryLink('file', 'file-link', 'file')
+    const dirLinkType = tryLink('dir', 'dir-link', 'dir')
+      ? 'dir'
+      : tryLink('dir', 'dir-junction', 'junction')
+        ? 'junction'
+        : undefined
+    return {
+      ...(fileSymlink ? {} : { fileSymlinkBlockedReason: symlinkPrivilegeReason }),
+      ...(dirLinkType
+        ? { dirLinkType }
+        : {
+            dirLinkBlockedReason:
+              'Neither a directory symlink nor a junction can be created in the temp directory (EPERM); this case is environment-blocked, not passed.'
+          })
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })()
 
-/** A test that creates a symlink: skipped, with the reason, where the OS refuses to create one. */
+/** A test that creates a file symlink: skipped, with the reason, where the OS refuses one. */
 function itWithSymlink(name: string, fn: () => Promise<void>): void {
   it(name, async (context) => {
-    if (symlinkBlockedReason) context.skip(true, symlinkBlockedReason)
+    if (linkSupport.fileSymlinkBlockedReason)
+      context.skip(true, linkSupport.fileSymlinkBlockedReason)
     await fn()
   })
+}
+
+/** A test that only aliases a directory: a 'dir' symlink, or a junction on unprivileged Windows. */
+function itWithDirLink(name: string, fn: () => Promise<void>): void {
+  it(name, async (context) => {
+    if (linkSupport.dirLinkBlockedReason) context.skip(true, linkSupport.dirLinkBlockedReason)
+    await fn()
+  })
+}
+
+/** Makes `link` a second spelling of the directory `target`. */
+function linkDirectory(target: string, link: string): void {
+  fs.symlinkSync(target, link, linkSupport.dirLinkType)
 }
 
 beforeEach(() => {
@@ -224,11 +268,11 @@ describe('report bundle registration', () => {
     expect(fs.existsSync(path.join(other, '.report_bundles'))).toBe(false)
   })
 
-  itWithSymlink('refuses a linked bundle directory, at begin and when swapped before register', async () => {
+  itWithDirLink('refuses a linked bundle directory, at begin and when swapped before register', async () => {
     const target = path.join(tmp, 'target')
     fs.mkdirSync(target)
     fs.mkdirSync(path.join(root, '.report_bundles'), { recursive: true })
-    fs.symlinkSync(target, bundleDirFor('linked'), 'dir')
+    linkDirectory(target, bundleDirFor('linked'))
     await expect(
       beginReportBundle({ bundleDir: bundleDirFor('linked'), conversation }, [root])
     ).rejects.toBeInstanceOf(ReportBundleRefusedError)
@@ -237,7 +281,7 @@ describe('report bundle registration', () => {
     const { ticket } = await beginReportBundle({ bundleDir: swapped, conversation }, [root])
     writeBundleFiles(target, 'swapped')
     fs.rmSync(swapped, { recursive: true })
-    fs.symlinkSync(target, swapped, 'dir')
+    linkDirectory(target, swapped)
     await expect(registerReportBundle({ ticket })).rejects.toBeInstanceOf(ReportBundleRefusedError)
   })
 
@@ -822,7 +866,7 @@ describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => 
    */
   async function sealUnderAlias(name = 'canvas-target-alias') {
     const alias = path.join(tmp, 'alias')
-    fs.symlinkSync(root, alias, 'dir')
+    linkDirectory(root, alias)
     const configuredDir = path.join(alias, '.report_bundles', name)
     const { ticket } = await beginReportBundle({ bundleDir: configuredDir, conversation }, [alias])
     writeBundleFiles(bundleDirFor(name), name)
@@ -834,10 +878,10 @@ describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => 
     vi.restoreAllMocks()
   })
 
-  itWithSymlink('isBoundTo accepts the registered primary when the native realpath spells it differently', async () => {
+  itWithDirLink('isBoundTo accepts the registered primary when the native realpath spells it differently', async () => {
     const { resp, primaryUrl, bundleDir } = await seal()
     const alias = path.join(tmp, 'alias')
-    fs.symlinkSync(root, alias, 'dir')
+    linkDirectory(root, alias)
     const otherSpelling = path.join(alias, path.relative(root, path.join(bundleDir, 'report.md')))
     vi.spyOn(fs.realpathSync, 'native').mockImplementation((() => otherSpelling) as never)
     expect((await verifyOne(resp.binding, primaryUrl)).status).toBe('verified')
@@ -848,7 +892,7 @@ describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => 
     ).toBe(false)
   })
 
-  itWithSymlink('verify and isBoundTo accept the producer’s spelling of a primary the realpath does not canonicalise', async () => {
+  itWithDirLink('verify and isBoundTo accept the producer’s spelling of a primary the realpath does not canonicalise', async () => {
     const { alias, configuredDir, resp } = await sealUnderAlias()
     const configuredUrl = toLocalMediaUrl(path.join(configuredDir, 'report.md'))!
     const fsp = (await import('node:fs/promises')).default
@@ -860,7 +904,7 @@ describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => 
     expect(isBoundTo(resp.binding, conversation, configuredUrl)).toBe(true)
   })
 
-  itWithSymlink('writes the snapshot’s source URLs under the root as configured', async () => {
+  itWithDirLink('writes the snapshot’s source URLs under the root as configured', async () => {
     const { configuredDir, resp } = await sealUnderAlias()
     const snapshotPath = path.join(
       userData,
