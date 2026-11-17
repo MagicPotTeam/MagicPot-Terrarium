@@ -26,6 +26,7 @@ import {
 import { generateCanvasThumbnailLevelsInScope } from './canvasThumbnailGeneration.worker'
 import {
   CanvasThumbnailWorkerPool,
+  DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_DRAINED_TTL_MS,
   DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_IDLE_TTL_MS,
   DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_MAX_QUEUE_SIZE,
   getDefaultCanvasThumbnailWorkerPoolMaxSize,
@@ -46,7 +47,8 @@ function createDefaultCanvasThumbnailWorkerPoolOptions(): CanvasThumbnailWorkerP
     maxWorkers: getDefaultCanvasThumbnailWorkerPoolMaxSize(),
     maxQueueSize: DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_MAX_QUEUE_SIZE,
     requestTimeoutMs: WORKER_REQUEST_TIMEOUT_MS,
-    idleWorkerTtlMs: DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_IDLE_TTL_MS
+    idleWorkerTtlMs: DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_IDLE_TTL_MS,
+    drainedWorkerTtlMs: DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_DRAINED_TTL_MS
   }
 }
 

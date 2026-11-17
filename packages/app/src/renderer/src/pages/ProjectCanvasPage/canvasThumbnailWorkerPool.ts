@@ -10,13 +10,21 @@ import {
 const DEFAULT_WORKER_POOL_MAX_SIZE = 2
 export const DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_MAX_QUEUE_SIZE = 32
 export const DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_IDLE_TTL_MS = 30_000
+// Once the pool has nothing running and nothing queued (an import finished), its idle workers
+// end this soon instead of after the idle TTL: each one holds a V8 isolate and what its last
+// decode left behind. The short wait covers the gaps between the jobs of one import; the next
+// job starts a worker again.
+export const DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_DRAINED_TTL_MS = 1_000
 
 export type CanvasThumbnailWorkerPoolOptions = {
   maxWorkers: number
   maxQueueSize: number
   requestTimeoutMs: number
   idleWorkerTtlMs: number
+  drainedWorkerTtlMs?: number
 }
+
+type NormalizedCanvasThumbnailWorkerPoolOptions = Required<CanvasThumbnailWorkerPoolOptions>
 
 export type CanvasThumbnailWorkerPoolMetrics = {
   workerCount: number
@@ -129,12 +137,18 @@ function defaultClearWorkerPoolTimeout(timeoutId: number): void {
 
 function normalizeWorkerPoolOptions(
   options: CanvasThumbnailWorkerPoolOptions
-): CanvasThumbnailWorkerPoolOptions {
+): NormalizedCanvasThumbnailWorkerPoolOptions {
+  const drainedWorkerTtlMs = Number(
+    options.drainedWorkerTtlMs ?? DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_DRAINED_TTL_MS
+  )
   return {
     maxWorkers: Math.max(1, Math.floor(options.maxWorkers)),
     maxQueueSize: Math.max(0, Math.floor(options.maxQueueSize)),
     requestTimeoutMs: Math.max(1, Math.floor(options.requestTimeoutMs)),
-    idleWorkerTtlMs: Math.max(0, Math.floor(options.idleWorkerTtlMs))
+    idleWorkerTtlMs: Math.max(0, Math.floor(options.idleWorkerTtlMs)),
+    drainedWorkerTtlMs: Number.isFinite(drainedWorkerTtlMs)
+      ? Math.max(0, Math.floor(drainedWorkerTtlMs))
+      : DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_DRAINED_TTL_MS
   }
 }
 
@@ -150,7 +164,7 @@ export class CanvasThumbnailWorkerPool {
   private timedOutRequestCount = 0
   private failedWorkerCount = 0
   private completedRequestCount = 0
-  private options: CanvasThumbnailWorkerPoolOptions
+  private options: NormalizedCanvasThumbnailWorkerPoolOptions
   private readonly createWorker: () => Worker | null
   private readonly createRequestId: () => string
   private readonly setTimeout: CanvasThumbnailWorkerPoolSetTimeout
@@ -355,6 +369,25 @@ export class CanvasThumbnailWorkerPool {
       }
     }
     this.pumpQueue()
+    this.shortenIdleTimeoutsWhenDrained()
+  }
+
+  private isDrained(): boolean {
+    return this.activeJobsByWorker.size === 0 && this.queue.length === 0
+  }
+
+  /**
+   * Nothing runs and nothing waits: the idle workers end after the short drained TTL. A job
+   * that arrives before that takes an idle worker as usual; a worker whose short wait runs out
+   * while other work is running stays as a spare for the normal idle TTL.
+   */
+  private shortenIdleTimeoutsWhenDrained(): void {
+    if (!this.isDrained() || this.options.drainedWorkerTtlMs >= this.options.idleWorkerTtlMs) {
+      return
+    }
+    for (const worker of [...this.idleWorkers]) {
+      this.armIdleTimeout(worker, this.options.drainedWorkerTtlMs, true)
+    }
   }
 
   private clearJobTimeout(job: CanvasThumbnailWorkerJob): void {
@@ -371,11 +404,28 @@ export class CanvasThumbnailWorkerPool {
       this.terminateWorker(worker)
       return
     }
-    const timeoutId = this.setTimeout(() => {
+    this.armIdleTimeout(worker, this.options.idleWorkerTtlMs, false)
+  }
+
+  private armIdleTimeout(worker: Worker, ttlMs: number, onlyWhileDrained: boolean): void {
+    this.clearIdleTimeout(worker)
+    if (ttlMs <= 0) {
       if (!this.activeJobsByWorker.has(worker)) {
         this.terminateWorker(worker)
       }
-    }, this.options.idleWorkerTtlMs)
+      return
+    }
+    const timeoutId = this.setTimeout(() => {
+      this.idleTimeoutsByWorker.delete(worker)
+      if (this.activeJobsByWorker.has(worker) || !this.workers.includes(worker)) {
+        return
+      }
+      if (onlyWhileDrained && !this.isDrained()) {
+        this.armIdleTimeout(worker, this.options.idleWorkerTtlMs, false)
+        return
+      }
+      this.terminateWorker(worker)
+    }, ttlMs)
     this.idleTimeoutsByWorker.set(worker, timeoutId)
   }
 

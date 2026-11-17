@@ -56,12 +56,29 @@ class MockThumbnailWorker {
 class TestScheduler {
   private nextId = 1
   private readonly callbacks = new Map<number, () => void>()
+  private readonly delaysById = new Map<number, number>()
 
-  setTimeout = (handler: () => void): number => {
+  setTimeout = (handler: () => void, timeoutMs = 0): number => {
     const id = this.nextId
     this.nextId += 1
     this.callbacks.set(id, handler)
+    this.delaysById.set(id, timeoutMs)
     return id
+  }
+
+  /** Delays of the pending callbacks, in the order they were armed. */
+  get delays(): number[] {
+    return [...this.callbacks.keys()].map((id) => this.delaysById.get(id) ?? 0)
+  }
+
+  /** Runs every pending callback armed with this delay (not the ones they arm). */
+  runDelay(timeoutMs: number): void {
+    const due = [...this.callbacks.keys()].filter((id) => this.delaysById.get(id) === timeoutMs)
+    due.forEach((id) => {
+      const callback = this.callbacks.get(id)
+      this.callbacks.delete(id)
+      callback?.()
+    })
   }
 
   clearTimeout = (id: number): void => {
@@ -131,6 +148,7 @@ function createPool({
   maxQueueSize = 4,
   requestTimeoutMs = 1000,
   idleWorkerTtlMs = 1000,
+  drainedWorkerTtlMs,
   scheduler = new TestScheduler(),
   createWorker = () => new MockThumbnailWorker() as unknown as Worker
 }: {
@@ -138,12 +156,13 @@ function createPool({
   maxQueueSize?: number
   requestTimeoutMs?: number
   idleWorkerTtlMs?: number
+  drainedWorkerTtlMs?: number
   scheduler?: TestScheduler
   createWorker?: () => Worker | null
 } = {}) {
   MockThumbnailWorker.instances = []
   const pool = new CanvasThumbnailWorkerPool(
-    { maxWorkers, maxQueueSize, requestTimeoutMs, idleWorkerTtlMs },
+    { maxWorkers, maxQueueSize, requestTimeoutMs, idleWorkerTtlMs, drainedWorkerTtlMs },
     {
       createWorker,
       createRequestId: () => `request-${Math.random().toString(36).slice(2)}`,
@@ -370,5 +389,107 @@ describe('CanvasThumbnailWorkerPool', () => {
     workerWithQueuedJob?.emit(successMessage(workerWithQueuedJob))
     await expect(queued).resolves.toHaveLength(1)
     expect(pool.getMetrics().completedRequestCount).toBe(3)
+  })
+  describe('when the queue drains', () => {
+    const IDLE_TTL_MS = 30_000
+    const DRAINED_TTL_MS = 1_000
+    const createDrainingPool = (options: { maxWorkers?: number; maxQueueSize?: number } = {}) =>
+      createPool({
+        maxWorkers: options.maxWorkers ?? 2,
+        maxQueueSize: options.maxQueueSize ?? 4,
+        requestTimeoutMs: 60_000,
+        idleWorkerTtlMs: IDLE_TTL_MS,
+        drainedWorkerTtlMs: DRAINED_TTL_MS
+      })
+    const finish = async (worker: MockThumbnailWorker | undefined, job: Promise<unknown>) => {
+      worker?.emit(successMessage(worker))
+      await expect(job).resolves.toHaveLength(1)
+    }
+
+    it('ends every idle worker soon after the last job, and starts new ones for the next import', async () => {
+      const { pool, scheduler } = createDrainingPool()
+      const first = pool.generate(createRequest('drain-1'))
+      const second = pool.generate(createRequest('drain-2'))
+      const [firstWorker, secondWorker] = MockThumbnailWorker.instances
+
+      await finish(firstWorker, first)
+      // The other job still runs: the idle worker keeps the normal idle TTL.
+      expect(scheduler.delays).toEqual([60_000, IDLE_TTL_MS])
+
+      await finish(secondWorker, second)
+      // Nothing runs and nothing waits: both idle workers end after the short TTL.
+      expect(scheduler.delays).toEqual([DRAINED_TTL_MS, DRAINED_TTL_MS])
+      scheduler.runDelay(DRAINED_TTL_MS)
+      expect(firstWorker?.terminated).toBe(true)
+      expect(secondWorker?.terminated).toBe(true)
+      expect(pool.getMetrics()).toEqual(
+        expect.objectContaining({ workerCount: 0, idleWorkerCount: 0, activeRequestCount: 0 })
+      )
+      expect(scheduler.size).toBe(0)
+
+      // The next import starts a worker again.
+      const next = pool.generate(createRequest('drain-next'))
+      expect(MockThumbnailWorker.instances).toHaveLength(3)
+      await finish(MockThumbnailWorker.instances[2], next)
+    })
+
+    it('never ends a worker while a job runs or waits in the queue', async () => {
+      const { pool, scheduler } = createDrainingPool({ maxWorkers: 1 })
+      const first = pool.generate(createRequest('queued-1'))
+      const queued = pool.generate(createRequest('queued-2'))
+      const worker = MockThumbnailWorker.instances[0]
+
+      await finish(worker, first)
+      // The queued job took the worker at once: no idle timer at all, only its request timeout.
+      expect(worker?.messages).toHaveLength(2)
+      expect(scheduler.delays).toEqual([60_000])
+      expect(worker?.terminated).toBe(false)
+
+      await finish(worker, queued)
+      expect(scheduler.delays).toEqual([DRAINED_TTL_MS])
+      scheduler.runDelay(DRAINED_TTL_MS)
+      expect(worker?.terminated).toBe(true)
+    })
+
+    it('keeps an idle worker that a new job reached before its short wait ran out', async () => {
+      const { pool, scheduler } = createDrainingPool()
+      const first = pool.generate(createRequest('race-1'))
+      const second = pool.generate(createRequest('race-2'))
+      const [firstWorker, secondWorker] = MockThumbnailWorker.instances
+      await finish(firstWorker, first)
+      await finish(secondWorker, second)
+      expect(scheduler.delays).toEqual([DRAINED_TTL_MS, DRAINED_TTL_MS])
+
+      // A second import arrives while both short waits run.
+      const next = pool.generate(createRequest('race-next'))
+      expect(MockThumbnailWorker.instances).toHaveLength(2)
+      const busyWorker = [firstWorker, secondWorker].find((worker) => worker?.messages.length === 2)
+      const spareWorker = [firstWorker, secondWorker].find((worker) => worker !== busyWorker)
+      // The other worker's short wait runs out while the job runs: it stays as a spare.
+      scheduler.runDelay(DRAINED_TTL_MS)
+      expect(busyWorker?.terminated).toBe(false)
+      expect(spareWorker?.terminated).toBe(false)
+      expect(scheduler.delays).toEqual([60_000, IDLE_TTL_MS])
+
+      await finish(busyWorker, next)
+      expect(scheduler.delays).toEqual([DRAINED_TTL_MS, DRAINED_TTL_MS])
+      scheduler.runDelay(DRAINED_TTL_MS)
+      expect(busyWorker?.terminated).toBe(true)
+      expect(spareWorker?.terminated).toBe(true)
+      expect(pool.getMetrics().workerCount).toBe(0)
+    })
+
+    it('ends the idle workers after a failed last job too', async () => {
+      const { pool, scheduler } = createDrainingPool()
+      const failing = pool.generate(createRequest('fail-last'))
+      const failure = expect(failing).rejects.toThrow('boom')
+      const worker = MockThumbnailWorker.instances[0]
+      worker?.emit({ type: 'error', requestId: worker.messages[0]!.requestId, error: 'boom' })
+      await failure
+
+      expect(scheduler.delays).toEqual([DRAINED_TTL_MS])
+      scheduler.runDelay(DRAINED_TTL_MS)
+      expect(worker?.terminated).toBe(true)
+    })
   })
 })
