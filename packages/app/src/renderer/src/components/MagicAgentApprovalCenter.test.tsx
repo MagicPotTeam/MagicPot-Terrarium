@@ -1044,3 +1044,134 @@ describe('MagicAgentApprovalCenter quotes names that read like a known label', (
     } finally { view.unmount() }
   })
 })
+
+// What tells a model-written line inside a value apart from a real row is styling: the bold label
+// element, the hanging indent of a card row, the left border of a dialog value and unicode-bidi
+// isolation. These tests pin those guards and the lookups and fallbacks that keep every field an
+// ordinary, readable row, so a refactor cannot drop one silently (SEC-1b).
+describe('MagicAgentApprovalCenter pins the guards of what it shows', () => {
+  const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' }
+  const cp = (...codes: number[]) => String.fromCodePoint(...codes)
+  const shellInput = { command: '/bin/bash', args: ['--noprofile', '--norc', '-c', 'ls'], cwd: '/work', code: 'ls' }
+  const pendingFor = (approvalId: string, tool: string, input: unknown, sessionId?: string) => ({
+    approvalId, revision: 1,
+    request: { request: { ...(sessionId ? { sessionId, route } : {}), target: { id: tool }, input } }
+  })
+  const renderDialog = async (approval: unknown) => {
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [approval] })
+    const view = render(<MagicAgentApprovalCenter />)
+    expect(await screen.findByRole('dialog')).toBeVisible()
+    return view
+  }
+  const dialogRows = () =>
+    [...screen.getByRole('dialog').querySelectorAll('dl > dt')].map(term => [term.textContent, term.nextElementSibling?.textContent])
+  // The values a property takes in the style rules that match the element itself.
+  const ownRuleValues = (element: Element, property: string) =>
+    [...document.styleSheets]
+      .flatMap(sheet => [...sheet.cssRules])
+      .filter((rule): rule is CSSStyleRule => {
+        if (!(rule instanceof CSSStyleRule)) return false
+        try { return element.matches(rule.selectorText) } catch { return false }
+      })
+      .map(rule => rule.style.getPropertyValue(property))
+      .filter(Boolean)
+
+  beforeEach(() => {
+    platformApi.listPendingApprovals.mockReset()
+    platformApi.resolvePendingApproval.mockReset()
+  })
+  afterEach(async () => { await act(async () => { await i18n.changeLanguage('zh-CN') }) })
+
+  it('draws each inline row with a bold label, a hanging indent and an isolated value', async () => {
+    const host = document.createElement('div'); document.body.append(host)
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [pendingFor('inline-style', 'shell.execute', shellInput, 'member')] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', 'Writer']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      await waitFor(() => expect(host.querySelector('[data-testid="team-approval-card"]')).not.toBeNull())
+      const rows = [...host.querySelectorAll<HTMLElement>('[data-approval-parameter]')]
+      expect(rows).toHaveLength(4)
+      for (const row of rows) {
+        const style = getComputedStyle(row)
+        expect([style.display, style.paddingLeft, style.textIndent]).toEqual(['block', '1em', '-1em'])
+        const label = row.querySelector<HTMLElement>('[data-approval-parameter-label]')!
+        expect(getComputedStyle(label).fontWeight).toBe('600')
+        const value = row.querySelector<HTMLElement>('[data-approval-parameter-value]')!
+        expect(label.compareDocumentPosition(value) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        expect([getComputedStyle(value).unicodeBidi, getComputedStyle(value).whiteSpace]).toEqual(['isolate', 'pre-wrap'])
+      }
+    } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
+  })
+
+  it('draws each dialog row with a bold term and an isolated value behind a left border', async () => {
+    const view = await renderDialog(pendingFor('dialog-style', 'shell.execute', shellInput))
+    try {
+      const terms = [...screen.getByRole('dialog').querySelectorAll<HTMLElement>('dl > dt')]
+      expect(terms).toHaveLength(4)
+      for (const term of terms) {
+        expect(getComputedStyle(term).fontWeight).toBe('600')
+        const value = term.nextElementSibling as HTMLElement
+        expect(value.tagName).toBe('DD')
+        const style = getComputedStyle(value)
+        expect([style.borderLeftWidth, style.borderLeftStyle, style.paddingLeft, style.unicodeBidi]).toEqual(['2px', 'solid', '8px', 'isolate'])
+        // jsdom reports unicode-bidi of a descendant here, so the dd's own rules are read too.
+        expect(ownRuleValues(value, 'unicode-bidi')).toContain('isolate')
+        expect(getComputedStyle(value.querySelector<HTMLElement>('[data-approval-parameter-value]')!).unicodeBidi).toBe('isolate')
+      }
+    } finally { view.unmount() }
+  })
+
+  it.each(['toString', 'constructor', 'hasOwnProperty', '__proto__', 'valueOf'])('shows a tool named %s by its name, never as an inherited label', async (tool) => {
+    const view = await renderDialog(pendingFor('prototype-tool', tool, { path: './x' }))
+    try {
+      expect(within(screen.getByRole('dialog')).getByText(tool, { exact: true })).toBeVisible()
+    } finally { view.unmount() }
+  })
+
+  it('quotes and escapes a name with a single space other than U+0020', async () => {
+    const view = await renderDialog(pendingFor('name-spaces', 'files.write', {
+      ['a' + cp(0xa0) + 'b']: 'nbsp',
+      ['c' + cp(0x3000) + 'd']: 'ideographic',
+      ['e' + cp(0x2009) + 'f']: 'thin',
+      'g h': 'plain'
+    }))
+    try {
+      expect(dialogRows()).toEqual([
+        ['"a\\u{a0}b"', 'nbsp'],
+        ['"c\\u{3000}d"', 'ideographic'],
+        ['"e\\u{2009}f"', 'thin'],
+        ['g h', 'plain']
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('quotes a name with a backslash and doubles the backslash, so it never reads as an escape', async () => {
+    const view = await renderDialog(pendingFor('name-backslash', 'files.write', {
+      'dir\\name': 'one',
+      'x\\u{200b}': 'reads-like-escape',
+      ['x' + cp(0x200b)]: 'real-zero-width'
+    }))
+    try {
+      expect(dialogRows()).toEqual([
+        ['"dir\\\\name"', 'one'],
+        ['"x\\\\u{200b}"', 'reads-like-escape'],
+        ['"x\\u{200b}"', 'real-zero-width']
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('falls back to String() and then to the object tag for values JSON cannot write', async () => {
+    const hostile = { toJSON() { throw new Error('json') }, toString() { throw new Error('string') } }
+    const approval = pendingFor('string-fallback', 'files.write', { count: BigInt(10), hostile, plain: 'ok' })
+    // The Details JSON of the envelope is written through its own toJSON, so only the rows
+    // exercise the fallbacks.
+    const view = await renderDialog({ ...approval, request: { ...approval.request, toJSON: () => ({ redacted: true }) } })
+    try {
+      expect(dialogRows()).toEqual([
+        ['count', '10'],
+        ['hostile', '[object Object]'],
+        ['plain', 'ok']
+      ])
+    } finally { view.unmount() }
+  })
+})
