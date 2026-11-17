@@ -150,4 +150,14 @@ describe('bounded formatting-only card body', () => {
     const body = '**unclosed\n\n[broken](\n\n`unclosed\n\n> quote', { container } = mount(body)
     expect(container.textContent).toContain('**unclosed'); expect(container.textContent).toContain('[broken]('); noAuthority(container)
   })
+  it('draws no empty lines between formatted blocks, shows list markers, and keeps the line breaks of plain text', () => {
+    const { container } = mount('Intro line\n\n- First item\n- Second item')
+    const root = container.firstElementChild as HTMLElement
+    expect(root).toHaveStyle({ whiteSpace: 'normal' })
+    expect(screen.getByText('First item').closest('li')).toHaveStyle({ whiteSpace: 'pre-wrap' })
+    expect(screen.getByText('First item').closest('ul')).toHaveStyle({ listStyleType: 'disc' })
+    cleanup()
+    const plain = mount('{"line": "one"}').container.firstElementChild as HTMLElement
+    expect(plain).toHaveStyle({ whiteSpace: 'pre-wrap' })
+  })
 })
