@@ -18,6 +18,7 @@ import {
 import { useTheme } from '@mui/material/styles'
 import {
   Add as AddIcon,
+  Autorenew as RefreshIcon,
   Close as CloseIcon,
   ExpandMore as ExpandMoreIcon
 } from '@mui/icons-material'
@@ -619,6 +620,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   // The layer over the column below the header; the active pane's chat page draws its overlay
   // drawer (model switcher, member form, team management) into it.
   const [overlayHost, setOverlayHost] = useState<HTMLElement | null>(null)
+  // The status line under the toolbar: the active pane's chat page puts its error line here.
+  const [statusLineHost, setStatusLineHost] = useState<HTMLElement | null>(null)
   const headerRef = useRef<HTMLDivElement | null>(null)
   const [headerHeight, setHeaderHeight] = useState(50)
   // A drawer is open in the overlay host: the header under its dimmed layer takes no input.
@@ -629,6 +632,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
   const subRowChangeHandlers = useRef(new Map<string, (title: string | null) => void>())
   const subRowPresenceHandlers = useRef(new Map<string, (delta: 1 | -1) => void>())
   const paneActivateHandlers = useRef(new Map<string, () => void>())
+  // Per pane: the reload its chat page registered (Refresh runs the active pane's).
+  const paneReloads = useRef(new Map<string, () => void>())
+  const paneReloadRegistrations = useRef(new Map<string, (reload: (() => void) | null) => void>())
   // Callbacks stay the same for a pane's whole life: a new ref identity would detach and
   // re-attach the host on every render.
   const getSubRowHostRef = (paneId: string) => {
@@ -664,6 +670,17 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
       subRowPresenceHandlers.current.set(paneId, handler)
     }
     return handler
+  }
+  const getPaneReloadRegistration = (paneId: string) => {
+    let register = paneReloadRegistrations.current.get(paneId)
+    if (!register) {
+      register = (reload) => {
+        if (reload) paneReloads.current.set(paneId, reload)
+        else paneReloads.current.delete(paneId)
+      }
+      paneReloadRegistrations.current.set(paneId, register)
+    }
+    return register
   }
   const getPaneActivateHandler = (paneId: string) => {
     let handler = paneActivateHandlers.current.get(paneId)
@@ -1426,6 +1443,32 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
               <AddIcon sx={{ fontSize: 16 }} />
             </IconButton>
           </Tooltip>
+
+          {/* Re-reads the active thread (its unsaved changes are saved first); without a thread,
+              the thread list. Always there and always safe to press, as upstream's Refresh. */}
+          <Tooltip title={t('agent_workspace.refresh')} arrow>
+            <IconButton
+              aria-label={t('agent_workspace.refresh')}
+              data-testid="agent-thread-refresh"
+              onClick={() => {
+                const reload = activePane ? paneReloads.current.get(activePane.id) : undefined
+                if (reload) reload()
+                else window.dispatchEvent(new CustomEvent('chat:preview-refresh'))
+              }}
+              sx={{
+                width: 26,
+                height: 26,
+                padding: 0,
+                flex: 'none',
+                borderRadius: `${columnTokens.radius.control}px`,
+                color: columnTokens.text,
+                '&:hover': { backgroundColor: columnTokens.hover },
+                '&.Mui-focusVisible': columnTokens.focusRing
+              }}
+            >
+              <RefreshIcon sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
         </Box>
 
         {threadListOpen && (
@@ -1542,23 +1585,31 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
         )}
       </Box>
 
-      {activeTraceState.id && (
-        <Box
-          role="status"
-          data-testid="agent-workspace-status-line"
-          sx={{
-            flexShrink: 0,
-            padding: '6px 10px',
-            borderBottom: `1px solid ${columnTokens.border}`,
-            fontSize: columnTokens.fontSize.base,
-            lineHeight: 1.4,
-            color: columnTokens.muted,
-            overflowWrap: 'anywhere'
-          }}
-        >
-          {t('agent_workspace.trace_recording')}
-        </Box>
-      )}
+      {/* Status lines under the toolbar (text only): the active thread's error line (its chat
+          page draws it into this host, role=alert), then a neutral line. The neutral one stays
+          mounted while empty, so that text arriving later is announced. */}
+      <Box
+        ref={setStatusLineHost}
+        data-testid="agent-workspace-error-line-host"
+        sx={{ flexShrink: 0, minWidth: 0 }}
+      />
+      <Box
+        role="status"
+        data-testid="agent-workspace-status-line"
+        sx={{
+          flexShrink: 0,
+          minWidth: 0,
+          padding: '6px 10px',
+          borderBottom: `1px solid ${columnTokens.border}`,
+          fontSize: columnTokens.fontSize.base,
+          lineHeight: 1.4,
+          color: columnTokens.muted,
+          overflowWrap: 'anywhere',
+          '&:empty': { padding: 0, borderBottom: 0 }
+        }}
+      >
+        {activeTraceState.id ? t('agent_workspace.trace_recording') : null}
+      </Box>
 
       <Box
         sx={{ flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}
@@ -1599,6 +1650,8 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName,
                 modelPillHost={modelPillHost}
                 teamTargetHost={teamTargetHost}
                 overlayHost={overlayHost}
+                statusLineHost={statusLineHost}
+                onRegisterReload={getPaneReloadRegistration(pane.id)}
                 onThreadSubRowChange={getSubRowChangeHandler(pane.id)}
                 onActivate={getPaneActivateHandler(pane.id)}
               />

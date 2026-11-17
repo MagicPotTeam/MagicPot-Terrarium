@@ -889,9 +889,37 @@ describe('AgentWorkspace', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 
+  it('offers Refresh after New in the toolbar and runs the active pane\'s reload with it', async () => {
+    renderWorkspace()
+    const toolbar = screen.getByTestId('agent-thread-toolbar')
+    const buttons = within(toolbar).getAllByRole('button')
+    const refresh = within(toolbar).getByRole('button', { name: 'agent_workspace.refresh' })
+    expect(buttons.at(-1)).toBe(refresh)
+    expect(buttons.at(-2)).toBe(within(toolbar).getByRole('button', { name: 'agent_workspace.new_chat' }))
+    const props = chatPageMock.mock.calls.at(-1)?.[0] as {
+      onRegisterReload: (reload: (() => void) | null) => void
+      statusLineHost: HTMLElement | null
+    }
+    // The pane draws its error line into the host under the toolbar.
+    expect(props.statusLineHost).toBe(screen.getByTestId('agent-workspace-error-line-host'))
+    const reload = vi.fn()
+    act(() => props.onRegisterReload(reload))
+    fireEvent.click(refresh)
+    expect(reload).toHaveBeenCalledOnce()
+    // Without a registered reload (the pane is gone), Refresh re-reads the thread list instead.
+    act(() => props.onRegisterReload(null))
+    const listener = vi.fn()
+    window.addEventListener('chat:preview-refresh', listener)
+    fireEvent.click(refresh)
+    window.removeEventListener('chat:preview-refresh', listener)
+    expect(listener).toHaveBeenCalledOnce()
+    expect(reload).toHaveBeenCalledOnce()
+  })
+
   it('shows a text-only status line under the toolbar while a trace is recording', async () => {
     renderWorkspace()
-    expect(screen.queryByTestId('agent-workspace-status-line')).not.toBeInTheDocument()
+    // Mounted while empty, so that a line arriving later is announced.
+    expect(screen.getByTestId('agent-workspace-status-line')).toBeEmptyDOMElement()
 
     act(() => {
       window.dispatchEvent(
@@ -913,7 +941,7 @@ describe('AgentWorkspace', () => {
 
     // The same menu action now stops the recording instead of opening the dialog.
     await act(async () => latestWorkspaceMenu().onToggleTrace())
-    expect(screen.queryByTestId('agent-workspace-status-line')).not.toBeInTheDocument()
+    expect(screen.getByTestId('agent-workspace-status-line')).toBeEmptyDOMElement()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(latestWorkspaceMenu().traceRecording).toBe(false)
     // The result is a toast at the top of the column, not an app-wide snackbar.
@@ -1082,8 +1110,12 @@ describe('AgentWorkspace', () => {
       const toggle = screen.getByTestId('agent-thread-toggle')
       const paneHost = root.querySelector<HTMLElement>(':scope > [data-agent-workspace-scope]')!
 
-      // Column top to transcript: header, then the toolbar section, then the pane host.
-      expect([...root.children].indexOf(paneHost)).toBe(2)
+      // Column top to transcript: header, the toolbar section, the two status lines (empty: they
+      // draw nothing), then the pane host.
+      expect([...root.children].indexOf(paneHost)).toBe(4)
+      expect(root.children[2]).toBe(screen.getByTestId('agent-workspace-error-line-host'))
+      expect(root.children[3]).toBe(screen.getByTestId('agent-workspace-status-line'))
+      for (const line of [root.children[2], root.children[3]]) expect(line).toBeEmptyDOMElement()
       expect(root.children[1]).toContainElement(toolbar)
       expect(root.children[1].children).toHaveLength(1)
       expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument()
@@ -1326,7 +1358,11 @@ describe('AgentWorkspace', () => {
         )
       })
       const statusLine = screen.getByTestId('agent-workspace-status-line')
-      expect(region.nextElementSibling).toBe(statusLine)
+      // The (empty) host of the error line comes first and draws nothing.
+      const errorHost = screen.getByTestId('agent-workspace-error-line-host')
+      expect(region.nextElementSibling).toBe(errorHost)
+      expect(errorHost.nextElementSibling).toBe(statusLine)
+      expect(border(errorHost, 'Bottom')).toBe('none')
       expect(border(statusLine, 'Top')).toBe('none')
       expect(border(statusLine, 'Bottom')).toBe(divider)
       expect(border(region, 'Bottom')).toBe(divider)

@@ -1655,7 +1655,8 @@
       "search": "Search models…",
       "switch": "Switch",
       "empty": "No matching models."
-    }
+    },
+    "no_model_status": "No model is configured. Open {{settings}} › {{tab}}."
   },
   "agent_workspace": {
     "title": "Agent Threads",
@@ -1777,7 +1778,8 @@
         "tool_name": "External tool",
         "name": "Name"
       }
-    }
+    },
+    "refresh": "Refresh"
   },
   "custom_app": {
     "enable_custom_node_urls": "Set Custom Node URLs",

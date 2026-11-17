@@ -2048,6 +2048,49 @@ describe('ChatPage runtime workflow integration', () => {
     expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
   })
 
+  it('in the Agent column shows a load error as the status line and recovers through the toolbar Refresh', async () => {
+    const session: ChatSession = { id: 'column-retry', title: 'Retry', profileId: 'base-model', messages: [{ role: 'user', content: 'back after refresh' }], createdAt: 299 }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), session.id)
+    hoisted.loadAllSessionsMock.mockRejectedValueOnce(new Error('temporary read failure'))
+    const statusLineHost = document.createElement('div'); document.body.appendChild(statusLineHost)
+    let reload: (() => void) | null = null
+    const register = vi.fn((next: (() => void) | null) => { reload = next })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" statusLineHost={statusLineHost} onRegisterReload={register} />)
+    try {
+      const line = await within(statusLineHost).findByRole('alert')
+      expect(line).toHaveTextContent(/Failed to load chat sessions: temporary read failure/)
+      // Text only: no Alert with a Retry button in the pane.
+      expect(line.querySelector('button')).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+      expect(register).toHaveBeenCalledWith(expect.any(Function))
+      await act(async () => { reload!() })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      expect(readCurrentSessionState()?.messages.some(message => message.content === 'back after refresh')).toBe(true)
+      await waitFor(() => expect(statusLineHost).toBeEmptyDOMElement())
+    } finally {
+      view.unmount(); statusLineHost.remove()
+    }
+    expect(register).toHaveBeenLastCalledWith(null)
+  })
+
+  it('in the Agent column without a model shows the status line, the empty transcript and the placeholder line', async () => {
+    hoisted.availableProfiles.value = []
+    const statusLineHost = document.createElement('div'); document.body.appendChild(statusLineHost)
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" statusLineHost={statusLineHost} />)
+    try {
+      const line = await within(statusLineHost).findByRole('alert')
+      expect(line).toHaveTextContent('chat.no_model_status')
+      expect(screen.getByTestId('chat-empty-state')).toBeInTheDocument()
+      expect(screen.getByTestId('chat-no-model-composer')).toHaveTextContent('agent_workspace.no_thread_composer')
+      expect(screen.queryByText('chat.no_llm_config')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('chat-composer-input-mock')).not.toBeInTheDocument()
+      expect(view.container.querySelector('button')).toBeNull()
+    } finally {
+      view.unmount(); statusLineHost.remove()
+    }
+  })
+
   it('does not let a delayed storage refresh overwrite a newer in-memory response', async () => {
     const session: ChatSession = {
       id: 'storage-load-race',

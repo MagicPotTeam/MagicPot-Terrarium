@@ -314,6 +314,8 @@ import { useChatProfiles } from './hooks/useChatProfiles'
 import SessionSidebar from './components/SessionSidebar'
 import SessionHistoryDialog from './components/SessionHistoryDialog'
 import ChatMessageList, { type ChatAnchoredTailGroup, type ChatPendingConfirmation } from './components/ChatMessageList'
+import ChatTranscriptEmptyState from './components/ChatTranscriptEmptyState'
+import { getAgentColumnTokens } from '../../components/agentColumnTokens'
 import AgentThreadHtmlPanel from './components/AgentThreadHtmlPanel'
 import { isAgentBasicCommand, parseAgentBasicCommand } from './agentBasicCommand'
 import { listComposerCommands } from './composerCommandCatalog'
@@ -405,6 +407,13 @@ interface ChatPageProps {
    * overlay drawer (model switcher, member form, team management) into it.
    */
   overlayHost?: HTMLElement | null
+  /**
+   * The Agent column's status line under its toolbar. The active conversation draws its error
+   * line there (a load or save error, no model configured), as text only.
+   */
+  statusLineHost?: HTMLElement | null
+  /** Gives the Agent column this conversation's reload, run by the toolbar's Refresh (null: gone). */
+  onRegisterReload?: (reload: (() => void) | null) => void
 }
 
 export interface ChatPageWorkspaceMenu {
@@ -1109,7 +1118,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   onActivate,
   modelPillHost,
   teamTargetHost,
-  overlayHost
+  overlayHost,
+  statusLineHost,
+  onRegisterReload
 }) => {
   const queueResumeNoticeId = React.useId()
   // The Agent column shows the model in its header instead of inside the composer.
@@ -1993,6 +2004,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
     refreshSessionsFromStorage,
     storageScope
   ])
+
+  // The column's Refresh runs this page's reload: unsaved changes are saved first, then the
+  // conversations are read again (the same as the retry of a load or save error).
+  const retrySessionLoadRef = useRef(retrySessionLoad)
+  retrySessionLoadRef.current = retrySessionLoad
+  useEffect(() => {
+    if (!onRegisterReload) return
+    onRegisterReload(() => { void retrySessionLoadRef.current() })
+    return () => onRegisterReload(null)
+  }, [onRegisterReload])
 
   useEffect(() => {
     for (const key of deletedSessionKeysRef.current) {
@@ -10547,6 +10568,62 @@ const ChatPage: React.FC<ChatPageProps> = ({
     )
   }
 
+  // The Agent column's status line: one text line under the toolbar, drawn by the active pane.
+  // Hosted by the Agent column (it passes the host): errors go to its status line instead of an Alert.
+  const statusInColumn = compact && statusLineHost !== undefined
+  const columnTokens = statusInColumn ? getAgentColumnTokens(theme) : null
+  const statusErrorText = showNoApiWarning
+    ? t('chat.no_model_status', { settings: t('menu.settings'), tab: t('settings.tabs.llm') })
+    : sessionSaveError || sessionLoadError
+  const statusErrorLine = statusInColumn && active && statusLineHost && statusErrorText && columnTokens
+    ? createPortal(
+      <Box
+        role="alert"
+        data-testid="agent-workspace-error-line"
+        sx={{
+          padding: '6px 10px',
+          maxHeight: 96,
+          overflowY: 'auto',
+          borderBottom: `1px solid ${columnTokens.border}`,
+          fontSize: columnTokens.fontSize.base,
+          lineHeight: 1.4,
+          color: columnTokens.danger,
+          overflowWrap: 'anywhere',
+          whiteSpace: 'pre-line'
+        }}
+      >
+        {statusErrorText}
+      </Box>,
+      statusLineHost
+    )
+    : null
+
+  // In the Agent column without a model: the status line says where to configure one; the pane
+  // keeps the empty transcript and, instead of a composer, its one muted line.
+  if (showNoApiWarning && statusInColumn && columnTokens) {
+    return (
+      <Box
+        data-chat-page-root={storageScope}
+        data-testid="chat-no-model"
+        sx={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0, bgcolor: isLight ? 'transparent' : theme.palette.background.default }}
+      >
+        <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', boxSizing: 'border-box', px: '8px', pt: '16px', fontSize: columnTokens.fontSize.base }}>
+          <ChatTranscriptEmptyState tokens={columnTokens} />
+        </Box>
+        <Box sx={{ flexShrink: 0, minWidth: 0, padding: '8px', borderTop: `1px solid ${columnTokens.border}` }}>
+          <Box
+            component="p"
+            data-testid="chat-no-model-composer"
+            sx={{ margin: 0, padding: '4px', fontSize: columnTokens.fontSize.small, lineHeight: 1.4, color: columnTokens.muted, overflowWrap: 'anywhere' }}
+          >
+            {t('agent_workspace.no_thread_composer')}
+          </Box>
+        </Box>
+        {statusErrorLine}
+      </Box>
+    )
+  }
+
   if (showNoApiWarning) {
     return (
       <>
@@ -10693,7 +10770,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             minWidth: 0
           }}
         >
-          {sessionSaveError || sessionLoadError ? (
+          {!statusInColumn && (sessionSaveError || sessionLoadError) ? (
             <Alert
               severity="error"
               action={
@@ -11247,6 +11324,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           </Box>
         </Box>
 
+        {statusErrorLine}
         {/* Only the active conversation shows its model pill in the column header. */}
         {modelInHeader && active && modelPillHost
           ? createPortal(chatComposerControlSlot, modelPillHost)

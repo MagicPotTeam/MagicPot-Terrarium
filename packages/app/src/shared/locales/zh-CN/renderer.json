@@ -1482,7 +1482,8 @@
       "search": "搜索模型…",
       "switch": "切换",
       "empty": "没有匹配的模型。"
-    }
+    },
+    "no_model_status": "未配置模型。请到 {{settings}} › {{tab}}。"
   },
   "agent_workspace": {
     "title": "Agent 线程",
@@ -1604,7 +1605,8 @@
         "tool_name": "外部工具",
         "name": "名称"
       }
-    }
+    },
+    "refresh": "刷新"
   },
   "custom_app": {
     "enable_custom_node_urls": "是否设置自定义节点 URL",
