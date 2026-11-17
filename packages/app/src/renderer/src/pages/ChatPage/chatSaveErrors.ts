@@ -44,3 +44,40 @@ export class SaveSupersedeStreaks {
     this.counts.delete(live)
   }
 }
+
+/**
+ * scope\u0000id -> the session object whose guarded save another writer refused. The automatic save
+ * skips that very object (it can only be refused again) and tries any newer one. The object is held
+ * through a WeakRef: a conflicted session of another scope (whole messages, inline images) must not
+ * stay alive just because it was refused once; once collected, nothing can present it again.
+ */
+export class RefusedSaveSessions {
+  private entries = new Map<string, { id: string; ref: WeakRef<object> }>()
+
+  get size(): number {
+    return this.entries.size
+  }
+
+  record(key: string, session: { id: string }): void {
+    this.entries.set(key, { id: session.id, ref: new WeakRef(session) })
+  }
+
+  /** Whether `session` is the very object that was refused under `key`. */
+  isRefused(key: string, session: object): boolean {
+    return this.entries.get(key)?.ref.deref() === session
+  }
+
+  /** Whether a refusal was recorded (and so reported) for `key` since its last successful save. */
+  has(key: string): boolean {
+    return this.entries.has(key)
+  }
+
+  delete(key: string): void {
+    this.entries.delete(key)
+  }
+
+  /** Drop every entry for which `drop(key, sessionId)` is true. */
+  prune(drop: (key: string, sessionId: string) => boolean): void {
+    for (const [key, entry] of this.entries) if (drop(key, entry.id)) this.entries.delete(key)
+  }
+}
