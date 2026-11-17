@@ -9049,7 +9049,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // A running task whose owner has no live run or send in this pane is left over from an earlier
   // run (or an earlier app session): the team menu offers a reset for it, never a re-run. An owner
   // whose finished task is still being saved on the lead is busy too (no reset window after a run).
+  // The menu calls this when it renders and again when 重置 is clicked: the refs give the state at
+  // that moment (a run, a send or a Canvas Target run that started after the last render), and the
+  // rendered state is kept as well, so the answer is busy whenever either says so.
   const isTeamTaskOwnerBusy = (id: string): boolean => {
+    if (loadingSessionIdsRef.current.has(id) || externalLoadingSessionIdsRef.current.has(id) ||
+      sessionPreparing(id, sendingSessionIdsRef.current, queuedSessionSendsRef.current)) return true
     if (loadingSessionIds.has(id) || externalLoadingSessionIds.has(id) || sessionPreparing(id, sendingSessionIds, queuedSessionSends)) return true
     const scopePrefix = `${storageScope}\u0000`
     for (const [key, finish] of teamTaskFinishesRef.current) if (finish.ownerId === id && key.startsWith(scopePrefix)) return true

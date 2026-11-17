@@ -31,6 +31,19 @@ describe('team menu: a running task without a live run', () => {
     } finally { view.unmount() }
   })
 
+  it('asks again at click time and saves nothing when the owner became busy after the last render', async () => {
+    const running: Task = { id: 'task', title: '海报', ownerId: 'member', status: 'running', dependsOn: [] }
+    let busy = false
+    const { view, onSave } = open(leadWith([running]), () => busy)
+    try {
+      const reset = screen.getByRole('button', { name: 'Reset: 海报' })
+      busy = true
+      fireEvent.click(reset)
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(onSave).not.toHaveBeenCalled()
+    } finally { view.unmount() }
+  })
+
   it('offers no reset while the owner has a live run, or when the page cannot tell', () => {
     const running: Task = { id: 'task', title: '海报', ownerId: 'member', status: 'running', dependsOn: [] }
     for (const isOwnerBusy of [() => true, undefined]) {

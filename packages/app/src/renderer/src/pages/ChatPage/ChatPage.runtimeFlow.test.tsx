@@ -6593,6 +6593,31 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  it('re-checks the owner at the moment of the reset click, not at the last render', async () => {
+    const lead: ChatSession = {id:'click-check-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[{id:'task',title:'点击时检查',ownerId:'click-check-member',status:'running',dependsOn:[]}]}
+    const member: ChatSession = {id:'click-check-member',title:'writer',messages:[],teamLeadId:lead.id,teamMemberName:'writer'}
+    hoisted.storedSessions.value = [lead,member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID,'runtime-flow'),lead.id)
+    const externalLoading = (loading: boolean) => window.dispatchEvent(new CustomEvent('chat:set-external-loading', { detail: { scope: 'runtime-flow', sessionId: member.id, loading } }))
+    const page = renderChatPage({team:true})
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      const reset = screen.getByRole('button',{name:'Reset: 点击时检查'})
+      // A Canvas Target run of the owner starts and the reset is clicked before the page renders again.
+      await act(async () => { externalLoading(true); reset.click() })
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0]).toEqual(lead.teamTasks![0])
+      expect(readCurrentSessionState()?.teamTasks?.[0].status).toBe('running')
+      expect(screen.queryByRole('button',{name:'Reset: 点击时检查'})).not.toBeInTheDocument()
+      // The external run ends: the reset is offered again and works.
+      await act(async () => { externalLoading(false) })
+      fireEvent.click(await screen.findByRole('button',{name:'Reset: 点击时检查'}))
+      await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0]).toEqual({id:'task',title:'点击时检查',ownerId:member.id,status:'pending',dependsOn:[],lastOutcome:'interrupted'}))
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally { externalLoading(false); page.unmount() }
+  })
+
   it('keeps a task pending when its owner is busy at dispatch, before or while the claim commits', async () => {
     const lead: ChatSession = {id:'busy-task-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[{id:'task',title:'忙碌任务',ownerId:'busy-task-member',status:'pending',dependsOn:[]}]}
     const member: ChatSession = {id:'busy-task-member',title:'Alice',messages:[],teamLeadId:lead.id,teamMemberName:'Alice'}
