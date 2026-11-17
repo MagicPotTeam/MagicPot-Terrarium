@@ -12,7 +12,36 @@ export type LogEntry = {
 type LogListener = (entry: LogEntry) => void
 const listeners: Set<LogListener> = new Set()
 const MAX_HISTORY = 1000
+// One entry of the replayed history (and of every live stream to the renderer)
+// keeps at most this many UTF-16 code units: without a cap a single logged data
+// URL or request body stays in main's memory for the next 999 entries. The
+// renderer shows at most 16 Ki characters per entry as well (utils/logText.ts).
+// The file transport is not affected: it still receives the whole message.
+export const MAX_LOG_HISTORY_ENTRY_CHARACTERS = 16 * 1024
+const LOG_HISTORY_TRUNCATION = '[log truncated]'
 const history: LogEntry[] = []
+
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff
+
+/**
+ * Keep the head and the tail of an oversized log message. The cuts never fall
+ * between the two halves of a surrogate pair, so no character is split into a
+ * lone surrogate (which would become U+FFFD on the way to the renderer).
+ */
+export function capLogHistoryMessage(
+  message: string,
+  limit = MAX_LOG_HISTORY_ENTRY_CHARACTERS
+): string {
+  if (message.length <= limit) return message
+  const marker = ` ${LOG_HISTORY_TRUNCATION} `
+  const budget = Math.max(0, limit - marker.length)
+  let headEnd = Math.ceil(budget / 2)
+  let tailStart = message.length - (budget - headEnd)
+  if (headEnd > 0 && isHighSurrogate(message.charCodeAt(headEnd - 1))) headEnd -= 1
+  if (tailStart < message.length && isLowSurrogate(message.charCodeAt(tailStart))) tailStart += 1
+  return message.slice(0, headEnd) + marker + message.slice(tailStart)
+}
 let reportingListenerError = false
 
 function reportListenerError(prefix: string, error: unknown): void {
@@ -110,7 +139,7 @@ log.hooks.push((message, transport) => {
 
   const entry: LogEntry = {
     level: message.level,
-    message: message.data.map(formatArg).join(' '),
+    message: capLogHistoryMessage(message.data.map(formatArg).join(' ')),
     timestamp: Date.now()
   }
 
