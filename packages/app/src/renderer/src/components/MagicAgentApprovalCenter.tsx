@@ -102,9 +102,10 @@ const MAX_VALUE_LINES = 6
 // parameters out of view either.
 const NAME_TRUNCATE_AT = 120
 const LINE_BREAKS = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/g
-// Characters that draw as blank space: tab, spaces (U+0020 is handled apart), the braille blank
-// and the Hangul and Khmer fillers.
-const BLANK_DRAWN = /[\t\p{Zs}\u2800\u3164\uffa0\u115f]|\u1160|\u17b4|\u17b5/u
+// Characters that draw as blank space: tab, spaces (U+0020 is handled apart), the braille blank,
+// the Hangul and Khmer fillers and the musical null notehead (U+1D159, category So, drawn with no
+// ink but a real advance).
+const BLANK_DRAWN = /[\t\p{Zs}\u2800\u3164\uffa0\u115f\u{1d159}]|\u1160|\u17b4|\u17b5/u
 // Characters that draw nothing or change how the text around them reads: control characters,
 // format characters (bidi controls, zero-width characters, word joiner, BOM, soft hyphen, the
 // U+E0000 tag block), private-use, unassigned and lone surrogate code points, default-ignorable
@@ -112,7 +113,7 @@ const BLANK_DRAWN = /[\t\p{Zs}\u2800\u3164\uffa0\u115f]|\u1160|\u17b4|\u17b5/u
 const HIDDEN = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]/u
 const COMBINING_MARK = /^\p{M}$/u
 // A line that draws blank: blank-drawing characters and combining marks only (or nothing).
-const BLANK_LINE = /^(?:[\t\p{Zs}\p{M}\u2800\u3164\uffa0\u115f]|\u1160)*$/u
+const BLANK_LINE = /^(?:[\t\p{Zs}\p{M}\u2800\u3164\uffa0\u115f\u{1d159}]|\u1160)*$/u
 // A run of more blank characters than this (or of one hidden character repeated, or of
 // combining marks on one base) is shown as one marker such as ⟦460 × U+2800⟧, so blank padding
 // can neither push the rest of a value out of view nor fill it, and stacked marks cannot draw
@@ -364,7 +365,7 @@ const shownValue = (text: string): { text: string; truncated: boolean; changed: 
 // What Details shows: the request as JSON with every hidden or blank-drawing character written
 // as a JSON \u escape (such characters only occur inside JSON strings), so the full request
 // reads exactly as it is and stays valid JSON.
-const DETAILS_ESCAPE = /(?![\t\n ])(?:[\p{Zs}\u2800\u3164\uffa0\u115f]|\u1160|\u17b4|\u17b5|[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])/gu
+const DETAILS_ESCAPE = /(?![\t\n ])(?:[\p{Zs}\u2800\u3164\uffa0\u115f\u{1d159}]|\u1160|\u17b4|\u17b5|[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])/gu
 const detailsJson = (value: unknown): string =>
   JSON.stringify(value, null, 2).replace(DETAILS_ESCAPE, (character) =>
     Array.from({ length: character.length }, (_, unit) => `\\u${character.charCodeAt(unit).toString(16).padStart(4, '0')}`).join('')
@@ -389,7 +390,7 @@ const parameterText = (value: unknown): string => {
 // overrides, zero-width), line and paragraph separators, spaces other than U+0020, characters
 // that draw blank or nothing, the marker bracket and its lookalikes, and the quote and backslash
 // used by the quoted form below.
-const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\\u27e6\u301a\u29f5\u29f9\ufe68\uff3c\u2216\u2800\u3164\uffa0\u115f\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]|\u1160|\u17b4|\u17b5|(?! )\p{Zs}/u
+const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\\u27e6\u301a\u29f5\u29f9\ufe68\uff3c\u2216\u2800\u3164\uffa0\u115f\u{1d159}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]|\u1160|\u17b4|\u17b5|(?! )\p{Zs}/u
 // A name with a colon could read as "label: value" inside the row; it is quoted, not escaped.
 const NAME_SEPARATOR = /[:：]/u
 // A name with a character outside printable ASCII and the Han script may hold a letter that draws
@@ -631,7 +632,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   const [busy, setBusy] = useState(false)
   const { t, i18n } = useTranslation()
   // The shipped languages, whose labels a field name must not read like.
-  const shipped = Object.keys(i18n.options.resources ?? {})
+  const shipped = Object.keys(i18n.options?.resources ?? {})
   const languages = (shipped.length ? shipped : [i18n.language]).join('\u0000')
   // A name is compared with the labels of every shipped language, not only the shown one, and
   // with the keys themselves; built once per language, not on every poll.

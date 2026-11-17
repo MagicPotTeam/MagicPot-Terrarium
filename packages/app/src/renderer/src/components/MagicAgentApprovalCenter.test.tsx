@@ -721,6 +721,29 @@ describe('MagicAgentApprovalCenter shows blank and hidden characters', () => {
     } finally { await cleanup() }
   })
 
+  it.each(['zh-CN', 'en-US'])('marks musical null noteheads that draw blank, in the dialog and the inline card (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    // U+1D159 is category So, draws no ink and has a real advance: lines of it pushed the command
+    // under the six-line clamp with no marker (second independent panel on the approval display).
+    const notehead = cp(0x1d159)
+    const code = 'ls\n' + (notehead.repeat(135) + '\n').repeat(3) + 'rm -rf ~'
+    const view = await renderDialog('shell.execute', { command: '/bin/bash', code })
+    try {
+      const shown = dialogRows().find(([name]) => name === label('code'))?.[1] ?? ''
+      expect(shown).toContain('rm -rf ~')
+      expect(shown).toMatch(/\u27e6\d+ \u00d7 U\+1D159/)
+      expect(shown).toBe(escaped(shown.slice(0, shown.indexOf('rm -rf ~') + 'rm -rf ~'.length)))
+      expect(shown).not.toContain(notehead)
+    } finally { view.unmount() }
+    const { host, cleanup } = await renderCard('shell.execute', { command: '/bin/bash', code })
+    try {
+      const shown = cardRows(host).find(([name]) => name === label('code'))?.[1] ?? ''
+      expect(shown).toContain('rm -rf ~')
+      expect(shown).toMatch(/\u27e6\d+ \u00d7 U\+1D159/)
+      expect(shown).not.toContain(notehead)
+    } finally { await cleanup() }
+  })
+
   it('collapses runs of other blank-drawing characters, mixed runs and runs broken up by spaces', async () => {
     const view = await renderDialog('shell.execute', {
       command: 'a' + cp(0x3164).repeat(40) + 'b',
