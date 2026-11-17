@@ -1223,6 +1223,22 @@ export default function ProjectCanvasPageStageScene(props: any) {
       )
     }
   }, [flushPendingWebglRuntimeState, webglImageLayerReady])
+  // ProjectCanvasPage does not hand its live stage refs down, so the proxies' memo comparators
+  // could not use them and every proxy re-rendered for each committed pan or zoom. These refs hold
+  // the committed viewport, and the live one while the driver moves it.
+  const fallbackStagePosRef = React.useRef(stagePos)
+  const fallbackStageScaleRef = React.useRef(stageScale)
+  const fallbackCommittedViewportRef = React.useRef({ pos: stagePos, scale: stageScale })
+  if (
+    fallbackCommittedViewportRef.current.pos !== stagePos ||
+    fallbackCommittedViewportRef.current.scale !== stageScale
+  ) {
+    fallbackCommittedViewportRef.current = { pos: stagePos, scale: stageScale }
+    fallbackStagePosRef.current = stagePos
+    fallbackStageScaleRef.current = stageScale
+  }
+  const proxyStagePosRef = stagePosRef ?? fallbackStagePosRef
+  const proxyStageScaleRef = stageScaleRef ?? fallbackStageScaleRef
   // The scene overlay (group outlines, drawing preview, marquee) stays mounted through a gesture.
   // It is laid out for the committed viewport, so while the viewport moves its wrapper gets the
   // transform from the committed to the live viewport. Only done when it shows something.
@@ -1273,6 +1289,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
       }
       canvas2DFallbackLayerRef.current?.syncViewport(pos, scale)
       sceneOverlayLiveViewportRef.current = { x: pos.x, y: pos.y, scale }
+      fallbackStagePosRef.current = pos
+      fallbackStageScaleRef.current = scale
       syncSceneOverlayFollowerTransform()
     })
   }, [registerViewportCallback, syncSceneOverlayFollowerTransform])
@@ -2972,8 +2990,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
               visualVariant={imageProxyVisualVariant}
               stagePos={stagePos}
               stageScale={stageScale}
-              stagePosRef={stagePosRef}
-              stageScaleRef={stageScaleRef}
+              stagePosRef={proxyStagePosRef}
+              stageScaleRef={proxyStageScaleRef}
               onPreviewChange={tool === 'select' ? syncWebGLImagePreview : undefined}
               onDragStart={handlePlaceholderDragStart}
               onSelect={(additiveSelection) => {
@@ -3000,8 +3018,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
             renderMode="dom-text-proxy"
             stagePos={stagePos}
             stageScale={stageScale}
-            stagePosRef={stagePosRef}
-            stageScaleRef={stageScaleRef}
+            stagePosRef={proxyStagePosRef}
+            stageScaleRef={proxyStageScaleRef}
             onDragStart={handlePlaceholderDragStart}
             onSelect={(additiveSelection?: boolean) => {
               selectItem(item.id, false, Boolean(additiveSelection))
@@ -3060,8 +3078,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
             proxyRect={proxyRect}
             stagePos={stagePos}
             stageScale={stageScale}
-            stagePosRef={stagePosRef}
-            stageScaleRef={stageScaleRef}
+            stagePosRef={proxyStagePosRef}
+            stageScaleRef={proxyStageScaleRef}
             onDragStart={handlePlaceholderDragStart}
             onRectPreviewChange={(_itemId, preview) => {
               handleAnnotationPlaceholderPreviewChange(annoItem, proxyRect, preview)
@@ -3135,8 +3153,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
             renderMode="dom-model3d-proxy"
             stagePos={stagePos}
             stageScale={stageScale}
-            stagePosRef={stagePosRef}
-            stageScaleRef={stageScaleRef}
+            stagePosRef={proxyStagePosRef}
+            stageScaleRef={proxyStageScaleRef}
             onDragStart={handlePlaceholderDragStart}
             onSelect={(additiveSelection) => {
               selectItem(item.id, false, Boolean(additiveSelection))
@@ -3188,9 +3206,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
     setLabelDialogText,
     setSelectedIds,
     stagePos,
-    stagePosRef,
+    proxyStagePosRef,
     stageScale,
-    stageScaleRef,
+    proxyStageScaleRef,
     tool
   ])
   const hasProxyLayerElements = proxyLayerElements.some(Boolean)
@@ -3874,9 +3892,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
                 onPreviewBoundsChange={onLiveMultiSelectionBoundsChange}
                 registerViewportCallback={registerViewportCallback}
                 stagePos={stagePos}
-                stagePosRef={stagePosRef}
+                stagePosRef={proxyStagePosRef}
                 stageScale={stageScale}
-                stageScaleRef={stageScaleRef}
+                stageScaleRef={proxyStageScaleRef}
                 onTransformEnd={handleMultiSelectionTransformEnd}
               />
             )}

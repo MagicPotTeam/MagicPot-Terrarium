@@ -1758,6 +1758,54 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(follower.style.transform).toBe('')
   })
 
+  it('gives proxies stable stage refs that follow the live and the committed viewport', async () => {
+    const item = createImageItem('image-proxy-stage-refs')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    const viewportCallbacks = new Set<(pos: { x: number; y: number }, scale: number) => void>()
+    const registerViewportCallback = vi.fn(
+      (callback: (pos: { x: number; y: number }, scale: number) => void) => {
+        viewportCallbacks.add(callback)
+        return () => {
+          viewportCallbacks.delete(callback)
+        }
+      }
+    )
+    const baseProps = {
+      ...createBaseProps([item]),
+      selectedIds: new Set<string>(),
+      registerViewportCallback
+    }
+
+    const { rerender } = render(<ProjectCanvasPageStageScene {...baseProps} />)
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.has(item.id)).toBe(true)
+    })
+    const proxyProps = canvasPlaceholderProps.get(item.id) as {
+      stagePosRef: { current: { x: number; y: number } }
+      stageScaleRef: { current: number }
+    }
+    const { stagePosRef, stageScaleRef } = proxyProps
+    expect(stagePosRef.current).toEqual({ x: 0, y: 0 })
+    expect(stageScaleRef.current).toBe(1)
+
+    act(() => {
+      viewportCallbacks.forEach((callback) => callback({ x: 70, y: -15 }, 1.5))
+    })
+    expect(stagePosRef.current).toEqual({ x: 70, y: -15 })
+    expect(stageScaleRef.current).toBe(1.5)
+
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} stagePos={{ x: 80, y: -20 }} stageScale={2} />
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.get(item.id)?.stageScale).toBe(2)
+    })
+    expect(canvasPlaceholderProps.get(item.id)?.stagePosRef).toBe(stagePosRef)
+    expect(canvasPlaceholderProps.get(item.id)?.stageScaleRef).toBe(stageScaleRef)
+    expect(stagePosRef.current).toEqual({ x: 80, y: -20 })
+    expect(stageScaleRef.current).toBe(2)
+  })
+
   it('makes proxies inert as soon as the viewport driver reports a gesture, before React commits it', async () => {
     const item = createImageItem('image-driver-gesture')
     setMockWebGLRuntime({ loadedIds: [item.id] })
