@@ -13,7 +13,7 @@ vi.mock('../pages/ChatPage/chatStorage', () => ({
 }))
 
 vi.mock('../pages/ProjectCanvasPage/canvasStorage', () => ({
-  loadCanvasItems: mocks.loadCanvasItems
+  loadCanvasItemsMetadata: mocks.loadCanvasItems
 }))
 
 vi.mock('../utils/windowUtils', () => ({

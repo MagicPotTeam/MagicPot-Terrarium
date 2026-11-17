@@ -1,5 +1,5 @@
 import { loadAllSessions, readSessionDraftBackup } from '../pages/ChatPage/chatStorage'
-import { loadCanvasItems } from '../pages/ProjectCanvasPage/canvasStorage'
+import { loadCanvasItemsMetadata } from '../pages/ProjectCanvasPage/canvasStorage'
 import { LEGACY_PROJECTS_STORAGE_KEY, PROJECTS_STORAGE_KEY } from '../pages/MainPage/projectStore'
 import { api } from '../utils/windowUtils'
 import {
@@ -50,8 +50,10 @@ function createScannerSources(): ManagedMediaReferenceScannerSources {
       return loaded.map((session) => readSessionDraftBackup(session.id)).filter(Boolean)
     },
     readCanvasItems: async () => {
+      // Only the items' media references are scanned: read the records, not the images
+      // (a full load would wrap every image of every board in a new object URL each scan).
       const documents = await Promise.all(
-        readProjectIds().map((projectId) => loadCanvasItems(projectId))
+        readProjectIds().map((projectId) => loadCanvasItemsMetadata(projectId))
       )
       return documents.flatMap((document) => document.items)
     },

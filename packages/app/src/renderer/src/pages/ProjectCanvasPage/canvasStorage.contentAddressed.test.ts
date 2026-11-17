@@ -11,6 +11,7 @@ import {
   countCanvasAssetKeyReferences,
   getCanvasMirrorEntryNameCacheStats,
   loadCanvasItems,
+  loadCanvasItemsMetadata,
   saveCanvasItems
 } from './canvasStorage'
 import type { CanvasItem } from './types'
@@ -2109,6 +2110,135 @@ describe('writers that load a board and save it back', () => {
       expect(fake.blobBytes(assetBlobKey('figma', [...bytes]))).toEqual(bytes)
       expect(fake.blobBytes(legacyBlobKey('figma', id))).toEqual(bytes)
     }
+  })
+})
+
+describe('reopening a board the mirror holds', () => {
+  // The window may read local-media under main's allowed roots; the autosave root is one of them.
+  const authorizedPaths: string[] = []
+  let authorizeMirror = true
+  beforeEach(() => {
+    authorizedPaths.length = 0
+    authorizeMirror = true
+    vi.stubGlobal('electronFile', {
+      resolveAuthorizedLocalMediaPath: async (filePath: string) => {
+        authorizedPaths.push(filePath)
+        return authorizeMirror ? filePath : ''
+      }
+    })
+  })
+
+  it('restores each image from its mirror file and keeps no copy of its bytes', async () => {
+    const mirror = createFakeMirror()
+    const a = imageItem('a', registerSource('blob:reopen-a', [1, 2, 3]))
+    const b = imageItem('b', registerSource('blob:reopen-b', [4, 5]))
+    const twin = imageItem('twin', 'blob:reopen-a', { x: 40 })
+    await saveCanvasItems([a, b, twin], 'reopen-mirror')
+    const recordBefore = fake.record('reopen-mirror')!.items.map((item) => [item.id, item.assetKey])
+
+    fake.resetLog()
+    const createObjectUrl = vi.mocked(URL.createObjectURL)
+    createObjectUrl.mockClear()
+    const reopened = await loadCanvasItems('reopen-mirror')
+
+    // No image byte is read from IndexedDB and no object URL is made.
+    expect(fake.log.gets.filter((get) => get.key.includes('::canvas::'))).toEqual([])
+    expect(createObjectUrl).not.toHaveBeenCalled()
+    const sources = reopened.items.map((item) => (item as { src: string }).src)
+    expect(sources).toEqual([
+      `local-media://${mirror.projectDir()}/assets/${contentKey([1, 2, 3])}.png`,
+      `local-media://${mirror.projectDir()}/assets/${contentKey([4, 5])}.png`,
+      `local-media://${mirror.projectDir()}/assets/${contentKey([1, 2, 3])}.png`
+    ])
+
+    // The next saves move nothing and keep every key.
+    for (let round = 0; round < 2; round += 1) {
+      mirror.resetCalls()
+      fake.resetLog()
+      fetchCalls = []
+      await saveCanvasItems(
+        reopened.items.map((item) => ({ ...item, y: round }) as CanvasItem),
+        'reopen-mirror'
+      )
+      expect(fake.blobPuts()).toEqual([])
+      expect(mirror.calls.copy).toEqual([])
+      expect(mirror.calls.write).toEqual([])
+      expect(mirror.calls.readFileFromPath).toEqual([])
+      expect(fetchCalls).toEqual([])
+    }
+    expect(fake.record('reopen-mirror')!.items.map((item) => [item.id, item.assetKey])).toEqual(recordBefore)
+    // The previous release still finds every image in its per-item blobs.
+    expect(Object.fromEntries(loadLikePreviousRelease('reopen-mirror'))).toEqual({
+      a: [1, 2, 3],
+      b: [4, 5],
+      twin: [1, 2, 3]
+    })
+  })
+
+  it('reads an image from IndexedDB when the mirror lacks its file', async () => {
+    const mirror = createFakeMirror()
+    const a = imageItem('a', registerSource('blob:reopen-gone-a', [7, 7]))
+    const b = imageItem('b', registerSource('blob:reopen-gone-b', [8, 8, 8]))
+    await saveCanvasItems([a, b], 'reopen-gone')
+    mirror.files.delete(`${mirror.projectDir()}/assets/${contentKey([8, 8, 8])}.png`)
+
+    const reopened = await loadCanvasItems('reopen-gone')
+    const [restoredA, restoredB] = reopened.items as Array<CanvasItem & { src: string }>
+    expect(restoredA.src).toBe(`local-media://${mirror.projectDir()}/assets/${contentKey([7, 7])}.png`)
+    expect(restoredB.src.startsWith('blob:')).toBe(true)
+    expect(await readBlobBytes(restoredBlobs.get(restoredB.src)!)).toEqual([8, 8, 8])
+  })
+
+  it('reads every image from IndexedDB when the window may not read the mirror folder', async () => {
+    const mirror = createFakeMirror()
+    const a = imageItem('a', registerSource('blob:reopen-denied-a', [2, 4]))
+    await saveCanvasItems([a], 'reopen-denied')
+    // A mirror on a network share, or a URL the platform cannot map back to the file.
+    authorizeMirror = false
+
+    const reopened = await loadCanvasItems('reopen-denied')
+    const restored = reopened.items[0] as CanvasItem & { src: string }
+    expect(authorizedPaths).toEqual([`${mirror.projectDir()}/assets/${contentKey([2, 4])}.png`])
+    expect(restored.src.startsWith('blob:')).toBe(true)
+    expect(await readBlobBytes(restoredBlobs.get(restored.src)!)).toEqual([2, 4])
+  })
+
+  it('reads the images of a record the previous release wrote from IndexedDB, mirror or not', async () => {
+    const mirror = createFakeMirror()
+    const item = imageItem('pic', registerSource('blob:reopen-prev', [3, 3, 3]))
+    await saveCanvasItems([item], 'reopen-prev')
+    // The previous release changed the image and saved: no format marker, a new per-item blob.
+    const record = fake.record('reopen-prev')! as unknown as Record<string, unknown>
+    fake.committed.get('canvas-items')!.set('reopen-prev', { items: record.items, groups: [], groupBranches: [] })
+    fake.committed.get('canvas-blobs')!.set(legacyBlobKey('reopen-prev', 'pic'), {
+      data: new Uint8Array([9, 9]).buffer,
+      mimeType: 'image/png'
+    })
+    expect(mirror.assetFiles()).toContain(`${contentKey([3, 3, 3])}.png`)
+
+    const reopened = await loadCanvasItems('reopen-prev')
+    const restored = reopened.items[0] as CanvasItem & { src: string }
+    expect(restored.src.startsWith('blob:')).toBe(true)
+    expect(await readBlobBytes(restoredBlobs.get(restored.src)!)).toEqual([9, 9])
+  })
+})
+
+describe('metadata-only reads', () => {
+  it('gives the managed-media scan every item without reading an image or making an object URL', async () => {
+    const managed = imageItem('managed', registerSource('blob:meta-managed', [6, 6]), {
+      media: { kind: 'managed', id: 'media-7' }
+    })
+    const plain = imageItem('plain', registerSource('blob:meta-plain', [5]))
+    await saveCanvasItems([managed, plain], 'meta-scan')
+
+    fake.resetLog()
+    const createObjectUrl = vi.mocked(URL.createObjectURL)
+    createObjectUrl.mockClear()
+    const { items } = await loadCanvasItemsMetadata('meta-scan')
+    expect(createObjectUrl).not.toHaveBeenCalled()
+    expect(fake.log.gets.map((get) => get.key)).toEqual(['meta-scan'])
+    expect(items.map((item) => (item as { id: string }).id)).toEqual(['managed', 'plain'])
+    expect((items[0] as { media?: unknown }).media).toEqual({ kind: 'managed', id: 'media-7' })
   })
 })
 
