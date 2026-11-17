@@ -98,6 +98,7 @@ import {
   type ChatSessionDraft
 } from './chatStorage'
 import { ChatSessionSaveBaseline } from './chatSaveBaseline'
+import { isBenignSaveSupersede, isPermanentSaveConflict } from './chatSaveErrors'
 import {
   buildAutoSavedChatImageKey,
   generateUUID,
@@ -1264,6 +1265,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const gatedMutationCountRef = useRef(0)
   const persistedSessionsRef = useRef<Map<string, ChatSession>>(new Map())
   const dirtySessionSnapshotsRef = useRef<Map<string, ChatSession>>(new Map())
+  // scope\u0000id -> the live object whose guarded save was refused by another writer. The automatic
+  // save does not retry that same object (it can only be refused again); a newer object is tried.
+  const saveConflictSessionsRef = useRef<Map<string, ChatSession>>(new Map())
   const chatSaveBaselineRef = useRef<ChatSessionSaveBaseline>(new ChatSessionSaveBaseline())
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
@@ -1447,7 +1451,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       sessionId: string,
       label = '',
       refreshReason: ChatPreviewRefreshReason = 'storage-updated',
-      retrySuperseded = false
+      retrySuperseded = false,
+      onSuperseded?: () => void
     ): Promise<boolean> => {
       const requestScope = storageScope
       const requestEpoch = committedRunScopeEpochRef.current
@@ -1457,37 +1462,65 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const session = sessionsRef.current.find((candidate) => candidate.id === sessionId)
       if (!session) return false
       setDirtySessionSnapshot(requestScope, session)
-
-      try {
-        const saved = await chatSaveBaselineRef.current.persistLatest(
-          requestScope, sessionId,
-          () => isCurrentScope() ? sessionsRef.current.find(candidate => candidate.id === sessionId && (retrySuperseded || candidate === session)) ?? null : null,
-          () => persistedSessionsRef.current.get(sessionId) ?? null,
-          () => { if (isCurrentScope()) noteSessionWriteAcknowledged(requestScope) },
-          retrySuperseded
-        )
-        if (!saved) return false
-        if (!isCurrentScope()) return true
-        if (!clearDirtySessionSnapshotIfCurrent(requestScope, saved)) return false
-        if (getDirtySessionIds(requestScope).length === 0) setSessionSaveError(null)
-        emitPreviewRefresh(refreshReason)
-        console.log(`[ChatPage] persistCurrentSessionSnapshot(${label}): saved`)
-        return true
-      } catch (e) {
-        if (!isCurrentScope()) return false
-        const current = sessionsRef.current.find((candidate) => candidate.id === sessionId)
-        if (current) setDirtySessionSnapshot(requestScope, current)
-        const message = e instanceof Error ? e.message : String(e)
-        const detail = `Failed to save chat session: ${message}`
-        setSessionSaveError(detail)
-        notifyError(detail)
-        console.warn('[ChatPage] persistCurrentSessionSnapshot failed:', e)
-        return false
+      const conflictKey = getSessionStorageKey(requestScope, sessionId)
+      let resolveLiveSession = retrySuperseded
+      for (let followUp = 0; ; followUp++) {
+        try {
+          const saveLive = resolveLiveSession
+          const saved = await chatSaveBaselineRef.current.persistLatest(
+            requestScope, sessionId,
+            () => isCurrentScope() ? sessionsRef.current.find(candidate => candidate.id === sessionId && (saveLive || candidate === session)) ?? null : null,
+            () => persistedSessionsRef.current.get(sessionId) ?? null,
+            () => { if (isCurrentScope()) noteSessionWriteAcknowledged(requestScope) },
+            saveLive
+          )
+          if (!saved) return false
+          saveConflictSessionsRef.current.delete(conflictKey)
+          if (!isCurrentScope()) return true
+          if (!clearDirtySessionSnapshotIfCurrent(requestScope, saved)) return false
+          if (getDirtySessionIds(requestScope).length === 0) setSessionSaveError(null)
+          emitPreviewRefresh(refreshReason)
+          console.log(`[ChatPage] persistCurrentSessionSnapshot(${label}): saved`)
+          return true
+        } catch (e) {
+          if (!isCurrentScope()) return false
+          const current = sessionsRef.current.find((candidate) => candidate.id === sessionId)
+          if (current) setDirtySessionSnapshot(requestScope, current)
+          if (isBenignSaveSupersede(e)) {
+            // Nothing was written and nothing conflicts: the session object was replaced while its
+            // put was pending. Save the live object instead of reporting a failure. If it keeps
+            // changing it stays dirty, and each change schedules the debounced save again.
+            if (current && followUp < 2) {
+              resolveLiveSession = true
+              continue
+            }
+            console.log(`[ChatPage] persistCurrentSessionSnapshot(${label}): superseded, left to the debounced save`)
+            onSuperseded?.()
+            return false
+          }
+          const message = e instanceof Error ? e.message : String(e)
+          const detail = `Failed to save chat session: ${message}`
+          setSessionSaveError(detail)
+          if (isPermanentSaveConflict(e)) {
+            // Another writer owns the newer record. Say so once per conflicted session; an explicit
+            // Retry reports again.
+            const reported = saveConflictSessionsRef.current.has(conflictKey)
+            if (current) saveConflictSessionsRef.current.set(conflictKey, current)
+            if (reported && label !== 'retry-unsaved') {
+              console.warn('[ChatPage] persistCurrentSessionSnapshot conflict (already reported):', e)
+              return false
+            }
+          }
+          notifyError(detail)
+          console.warn('[ChatPage] persistCurrentSessionSnapshot failed:', e)
+          return false
+        }
       }
     },
     [
       clearDirtySessionSnapshotIfCurrent,
       getDirtySessionIds,
+      getSessionStorageKey,
       emitPreviewRefresh,
       notifyError,
       noteSessionWriteAcknowledged,
@@ -4644,19 +4677,35 @@ const ChatPage: React.FC<ChatPageProps> = ({
     for (const session of changedSessions) {
       setDirtySessionSnapshot(storageScope, session)
     }
-    debouncedSaveSessions(changedSessions, 500, storageScope, {
+    const saveConflicts = saveConflictSessionsRef.current
+    if (saveConflicts.size > 0) {
+      const liveIds = new Set(sessions.map(session => session.id))
+      for (const [key, conflicted] of saveConflicts) {
+        if (key === getSessionStorageKey(storageScope, conflicted.id) && !liveIds.has(conflicted.id)) saveConflicts.delete(key)
+      }
+    }
+    // A session object another writer already refused stays dirty and reported; saving the same
+    // object again can only be refused again. A newer object of that session is tried.
+    const sessionsToSave = changedSessions.filter(
+      session => saveConflicts.get(getSessionStorageKey(storageScope, session.id)) !== session
+    )
+    const saveOptions: Parameters<typeof debouncedSaveSessions>[3] = {
       owner: chatSaveBaselineRef.current,
+      // Every session saves its live object: an object replaced while its put is pending is a
+      // benign supersede, not a failure.
       saveLatest: (id, scope) => chatSaveBaselineRef.current.persistLatest(
         scope, id,
         () => isSaveScopeCurrent() && scope === storageScope ? sessionsRef.current.find(session => session.id === id) ?? null : null,
         () => persistedSessionsRef.current.get(id) ?? null,
         () => { if (isSaveScopeCurrent()) noteSessionWriteAcknowledged(scope) },
-        Boolean(sessionsRef.current.find(session => session.id === id)?.teamLeadId)
+        true
       ),
       onSuccess: (savedSessions) => {
         if (!isSaveScopeCurrent()) return
-        for (const session of savedSessions)
+        for (const session of savedSessions) {
+          saveConflictSessionsRef.current.delete(getSessionStorageKey(storageScope, session.id))
           clearDirtySessionSnapshotIfCurrent(storageScope, session)
+        }
         if (getDirtySessionIds(storageScope).length === 0) {
           setSessionSaveError(null)
           sessionPersistenceRetryCountRef.current = 0
@@ -4666,10 +4715,30 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         }
       },
-      onError: (error) => {
+      onError: (error, failedSessions) => {
         if (!isSaveScopeCurrent()) return
+        if (isBenignSaveSupersede(error)) {
+          // Nothing was written and nothing conflicts: the object kept being replaced while its put
+          // was pending. Keep the live object dirty and save it; no banner, no backoff.
+          const live = failedSessions
+            .map(failed => sessionsRef.current.find(session => session.id === failed.id))
+            .filter((session): session is ChatSession => Boolean(session))
+          for (const session of live) setDirtySessionSnapshot(storageScope, session)
+          if (live.length > 0) debouncedSaveSessions(live, 500, storageScope, saveOptions)
+          return
+        }
         const detail = error instanceof Error ? error.message : String(error)
         setSessionSaveError(`Failed to save chat session: ${detail}`)
+        if (isPermanentSaveConflict(error)) {
+          // Another writer owns the newer record (or the session was deleted). Keep the dirty copy
+          // and the one error line; retrying the same object on a timer would loop forever.
+          for (const failed of failedSessions) {
+            const live = sessionsRef.current.find(session => session.id === failed.id)
+            if (live) setDirtySessionSnapshot(storageScope, live)
+            saveConflictSessionsRef.current.set(getSessionStorageKey(storageScope, failed.id), failed)
+          }
+          return
+        }
         if (sessionPersistenceRetryTimerRef.current) return
         const retryDelayMs = Math.min(
           30_000,
@@ -4683,10 +4752,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         }, retryDelayMs)
       }
-    })
+    }
+    debouncedSaveSessions(sessionsToSave, 500, storageScope, saveOptions)
   }, [
     clearDirtySessionSnapshotIfCurrent,
     getDirtySessionIds,
+    getSessionStorageKey,
     noteSessionWriteAcknowledged,
     persistSessionWithBaseline,
     sessions,
@@ -7157,18 +7228,30 @@ const ChatPage: React.FC<ChatPageProps> = ({
         1
       )
 
-      // 同步保存到 IndexedDB; the helper reports failures and notifies the user.
-      void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder', 'storage-updated', Boolean(inheritedTeamSettings)).catch(
+      // 同步保存到 IndexedDB; the helper reports failures and notifies the user. Every session saves
+      // its live object, so a placeholder replaced by the first status or delta is not a failure.
+      void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder', 'storage-updated', true).catch(
         () => undefined
       )
 
+      // A refused or failed save is sticky. A benign supersede (the object kept changing while its
+      // put was pending) only counts until a save that started later succeeds.
       let sessionSnapshotSaveFailed = false
+      let sessionSnapshotSaveRefused = false
+      let snapshotSaveTicket = 0
+      let lastSavedSnapshotTicket = 0
+      let lastSupersededSnapshotTicket = 0
       const persistSessionsToStorage = async (
         _updater: (prev: ChatSession[]) => ChatSession[],
         label = ''
       ): Promise<void> => {
-        if (!(await persistCurrentSessionSnapshot(targetSessionId, label, 'storage-updated', Boolean(inheritedTeamSettings))))
-          sessionSnapshotSaveFailed = true
+        const ticket = ++snapshotSaveTicket
+        let superseded = false
+        const saved = await persistCurrentSessionSnapshot(targetSessionId, label, 'storage-updated', true, () => { superseded = true })
+        if (saved) lastSavedSnapshotTicket = Math.max(lastSavedSnapshotTicket, ticket)
+        else if (superseded) lastSupersededSnapshotTicket = Math.max(lastSupersededSnapshotTicket, ticket)
+        else sessionSnapshotSaveRefused = true
+        sessionSnapshotSaveFailed = sessionSnapshotSaveRefused || lastSupersededSnapshotTicket > lastSavedSnapshotTicket
       }
 
       const buildRequestMessageWithRuntimeContext = (requestMessage: ChatMessage): ChatMessage =>

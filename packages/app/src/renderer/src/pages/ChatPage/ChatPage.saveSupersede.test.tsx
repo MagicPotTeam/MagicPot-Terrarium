@@ -1,0 +1,266 @@
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { ThemeProvider, createTheme } from '@mui/material/styles'
+import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
+import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
+import { ChatSessionSaveConflictError, ChatSessionSaveSupersededError, normalizedSessionsEqual, type ChatSession } from './chatStorage'
+import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
+import ChatPage from './ChatPage'
+
+// Synthetic storage only: the IndexedDB read and the guarded write are a fake with the same
+// read -> compare-and-set -> put contract as saveSessionToDB, while the real debounced save queue
+// and the real baseline writer (persistLatest) run on top of it. Model requests and fetch fail closed.
+type SaveOptions = { expectedSession?: ChatSession | null; shouldUpdate?: () => boolean }
+type SaveCall = { session: ChatSession; expected: ChatSession | null | undefined; outcome: 'written' | 'conflict' | 'superseded' }
+const h = vi.hoisted(() => ({
+  sessions: [] as ChatSession[],
+  saves: [] as Array<{ session: ChatSession; expected: ChatSession | null | undefined; outcome: 'written' | 'conflict' | 'superseded' }>,
+  // Runs while a save's read is pending, before its compare-and-set and put.
+  whileReadPending: null as null | ((candidate: ChatSession) => void),
+  notify: vi.fn(),
+  notifyWarning: vi.fn(),
+  notifySuccess: vi.fn(),
+  notifyInfo: vi.fn(),
+  updateConfig: vi.fn(),
+  load: vi.fn(),
+  save: vi.fn(),
+  stream: vi.fn(),
+  fetch: vi.fn()
+}))
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, opts?: { defaultValue?: string }) => opts?.defaultValue || key, i18n: { language: 'en', resolvedLanguage: 'en' } }) }))
+vi.mock('@renderer/hooks/useConfig', () => ({ useConfig: () => ({ config: { ...DEFAULT_CONFIG, use_remote_llm: false, llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [], customSkills: [], customSkillCategories: [] } } as Config, isReady: true, buildEnv: { ...DEFAULT_BUILD_ENV }, configUtils: {}, updateConfig: h.updateConfig }) }))
+vi.mock('@renderer/hooks/useRuntimeMcpStatus', () => ({ useRuntimeMcpStatus: () => ({ runtimeMcpStatus: null }) }))
+// Stable callbacks, as the real hook returns them; only notifyError is swapped to force a same-scope reload.
+vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifyError: h.notify, notifyWarning: h.notifyWarning, notifySuccess: h.notifySuccess, notifyInfo: h.notifyInfo }) }))
+vi.mock('./hooks/useChatProfiles', () => ({ useChatProfiles: () => ({ availableProfiles: [{ id: 'base-model', model_name: 'Base', model_use: 'chat' }], remoteProfiles: [] }) }))
+vi.mock('./chatStorage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./chatStorage')>()
+  return {
+    ...actual,
+    loadAllSessions: (...args: unknown[]) => h.load(...args),
+    loadSessionFromDB: async (id: string) => structuredClone(h.sessions.find(s => s.id === id) ?? null),
+    saveSessionToDB: (...args: unknown[]) => h.save(...args),
+    saveAllSessions: vi.fn(),
+    compareAndUpdateSessionInDB: vi.fn(),
+    deleteSessionFromDB: vi.fn(),
+    deleteSessionDraftBackup: vi.fn(),
+    migrateFromLocalStorage: vi.fn(async () => null),
+    readSessionDraftBackup: vi.fn(),
+    hasSessionDeleteTombstone: vi.fn(() => false),
+    readSessionDeleteTombstones: vi.fn(() => []),
+    setSessionDeleteTombstone: vi.fn(),
+    writeSessionDraftBackup: vi.fn()
+  }
+})
+vi.mock('./components/SessionSidebar', () => ({ default: () => <div /> }))
+vi.mock('./components/SessionHistoryDialog', () => ({ default: () => null }))
+vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
+vi.mock('./components/ImagePreviewOverlay', () => ({ default: () => null }))
+vi.mock('./components/ImageContextMenu', () => ({ default: () => null }))
+vi.mock('./components/AgentLocalFilesPanel', () => ({ default: () => null }))
+vi.mock('./components/ChatImageGenerationSettings', () => ({ default: () => null }))
+vi.mock('@renderer/utils/fileUtils', () => ({ selectFile: vi.fn(), fileToBlobUrl: vi.fn(), fileToDataUrl: vi.fn(), checkFileSize: vi.fn(() => true), formatFileSize: vi.fn(() => '1 B') }))
+vi.mock('@renderer/utils/windowUtils', () => ({ api: () => ({ svcAgentLocalFiles: {}, svcFs: {}, svcLLMProxy: {}, svcHyper: {}, svcManagedMedia: {} }) }))
+vi.mock('./chatRequestUtils', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./chatRequestUtils')>()
+  return {
+    ...actual,
+    requestChatCompletion: vi.fn(async () => { throw new Error('Non-streaming request forbidden in fixture') }),
+    requestChatCompletionStream: (...args: unknown[]) => h.stream(...args),
+    supportsStreamingChatCompletion: () => true
+  }
+})
+vi.mock('./components/ChatComposer', () => ({
+  default: function ComposerMock({ inputValue, onInputChange, onSend }: { inputValue: string; onInputChange: (value: string) => void; onSend: () => void }) {
+    return <div data-testid="composer"><input data-testid="composer-input" value={inputValue} onChange={event => onInputChange(event.target.value)} /><button type="button" data-testid="composer-send" onClick={onSend}>send</button></div>
+  }
+}))
+vi.mock('./components/ChatMessageList', () => ({ default: ({ currentSession }: { currentSession?: ChatSession }) => <output data-testid="session">{currentSession?.messages.map(m => m.content).join('|')}</output> }))
+
+const scope = 'save-supersede-fixture'
+const session: ChatSession = { id: 'supersede-target', title: 'Fixture', profileId: 'base-model', messages: [{ role: 'user', content: 'original' }], createdAt: 299 }
+const theme = createTheme()
+const page = () => <MemoryRouter><ThemeProvider theme={theme}><ChatPage compact storageScope={scope} active /></ThemeProvider></MemoryRouter>
+const shown = () => screen.getByTestId('session').textContent
+const appendEvent = (content: string) =>
+  window.dispatchEvent(new CustomEvent('chat:append-message', { detail: { scope, sessionId: session.id, role: 'user', content } }))
+const append = (content: string) => act(async () => { appendEvent(content) })
+const settle = (ms: number) => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)) })
+const banner = () => screen.queryByText(/Failed to save chat session/)
+const saveErrorsNotified = () => h.notify.mock.calls.filter(([message]) => /Failed to save/.test(String(message)))
+const stored = () => h.sessions.find(s => s.id === session.id)
+const contents = (value?: ChatSession) => value?.messages.map(m => m.content)
+// A same-scope reload of the page: the notifyError identity is a load-effect dependency.
+const reloadWith = async (view: ReturnType<typeof render>, read: () => Promise<ChatSession[]>) => {
+  let started = false
+  h.load.mockImplementationOnce(() => { started = true; return read() })
+  h.notify = vi.fn()
+  view.rerender(page())
+  await waitFor(() => expect(started).toBe(true))
+}
+// Advance fake time one second per act(), so effects scheduled by a fired timer (a retry
+// re-render, a new debounced save) run before the next second is advanced.
+const advanceSeconds = async (seconds: number) => {
+  for (let second = 0; second < seconds; second++) await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+}
+const pending = () => {
+  let release!: (value: ChatSession[]) => void
+  const promise = new Promise<ChatSession[]>((resolve) => { release = resolve })
+  return { promise, release }
+}
+
+beforeEach(() => {
+  localStorage.clear(); sessionStorage.clear()
+  h.sessions = [structuredClone(session)]
+  h.saves = []
+  h.whileReadPending = null
+  h.load.mockReset().mockImplementation(async () => structuredClone(h.sessions))
+  // Same contract as saveSessionToDB: the read is pending first, then the compare-and-set
+  // (conflict when storage no longer equals the baseline), then the supersede check (the caller's
+  // live object was replaced while the read was pending), then the put.
+  h.save.mockReset().mockImplementation(async (candidate: ChatSession, saveScope: string, options?: SaveOptions) => {
+    await Promise.resolve()
+    h.whileReadPending?.(candidate)
+    const current = h.sessions.find(s => s.id === candidate.id)
+    const guarded = Boolean(options && Object.hasOwn(options, 'expectedSession'))
+    const expected = options?.expectedSession
+    const call: SaveCall = { session: structuredClone(candidate), expected: expected && structuredClone(expected), outcome: 'written' }
+    h.saves.push(call)
+    if (guarded && !(expected === null ? !current : current && expected && normalizedSessionsEqual(current, expected, saveScope))) {
+      call.outcome = 'conflict'
+      throw new ChatSessionSaveConflictError(candidate.id, saveScope)
+    }
+    if (options?.shouldUpdate && !options.shouldUpdate()) {
+      call.outcome = 'superseded'
+      throw new ChatSessionSaveSupersededError()
+    }
+    h.sessions = [...h.sessions.filter(s => s.id !== candidate.id), structuredClone(candidate)]
+  })
+  h.notify = vi.fn()
+  h.notifyWarning.mockReset()
+  h.stream.mockReset().mockRejectedValue(new Error('Model request forbidden in fixture'))
+  h.fetch.mockReset().mockRejectedValue(new Error('Network forbidden in fixture'))
+  vi.stubGlobal('fetch', h.fetch)
+  localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), session.id)
+})
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+describe('ChatPage treats a superseded save as benign and stops retrying a permanent conflict', () => {
+  it('does not report the debounced save of a session replaced while its read was pending, and stores the final snapshot', async () => {
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // The first save of 'first edit' sees the session replaced by 'second edit' before its put.
+      h.whileReadPending = (candidate) => {
+        if (candidate.messages.at(-1)?.content !== 'first edit') return
+        h.whileReadPending = null
+        appendEvent('second edit')
+      }
+      await append('first edit')
+      await waitFor(() => expect(h.saves.some(call => call.outcome === 'superseded')).toBe(true), { timeout: 3000 })
+      // Shorter than the 500 ms debounce of the newer object: any report here comes from the superseded save.
+      await settle(150)
+      expect(banner()).toBeNull()
+      expect(saveErrorsNotified()).toEqual([])
+      await waitFor(() => expect(contents(stored())).toEqual(['original', 'first edit', 'second edit']), { timeout: 3000 })
+      await settle(900)
+      expect(shown()).toBe('original|first edit|second edit')
+      expect(normalizedSessionsEqual(stored()!, h.saves.at(-1)!.session, scope)).toBe(true)
+      expect(contents(stored())).toEqual(['original', 'first edit', 'second edit'])
+      expect(h.saves.filter(call => call.outcome === 'conflict')).toEqual([])
+      expect(banner()).toBeNull()
+      expect(h.notify).not.toHaveBeenCalled()
+      expect(h.fetch).not.toHaveBeenCalled()
+    } finally { view.unmount() }
+  })
+
+  it('does not report a request placeholder save whose session keeps being replaced while its read is pending', async () => {
+    let finish!: (value: unknown) => void
+    h.stream.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // Three replacements in a row: more than the writer's own retries, so the page's follow-up save is needed.
+      let replacements = 0
+      h.whileReadPending = (candidate) => {
+        const last = candidate.messages.at(-1)
+        if (replacements >= 3 || !candidate.messages.some(m => m.content === 'fixture request') || last?.role !== 'assistant' && !last?.content.startsWith('canvas note')) return
+        replacements += 1
+        appendEvent(`canvas note ${replacements}`)
+      }
+      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'fixture request' } })
+      fireEvent.click(screen.getByTestId('composer-send'))
+      await waitFor(() => expect(replacements).toBe(3), { timeout: 3000 })
+      await waitFor(() => expect(contents(stored())).toEqual(['original', 'fixture request', '', 'canvas note 1', 'canvas note 2', 'canvas note 3']), { timeout: 3000 })
+      expect(h.saves.filter(call => call.outcome === 'superseded').length).toBeGreaterThanOrEqual(3)
+      await settle(900)
+      expect(banner()).toBeNull()
+      expect(saveErrorsNotified()).toEqual([])
+      expect(h.saves.filter(call => call.outcome === 'conflict')).toEqual([])
+      expect(contents(stored())).toEqual(['original', 'fixture request', '', 'canvas note 1', 'canvas note 2', 'canvas note 3'])
+      expect(h.fetch).not.toHaveBeenCalled()
+    } finally {
+      await act(async () => finish?.({ result: { content: 'done' }, response: 'done' }))
+      view.unmount()
+    }
+  })
+
+  it('reports a second writer conflict once and makes no further save attempt in the next 120 s', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // Another writer commits a newer record; this page's baseline is still the original.
+      const external: ChatSession = { ...structuredClone(session), messages: [...session.messages, { role: 'assistant', content: 'other writer' }] }
+      h.sessions = [structuredClone(external)]
+      await append('local edit')
+      await waitFor(() => expect(banner()).not.toBeNull(), { timeout: 3000 })
+      const attempts = h.saves.length
+      expect(attempts).toBeGreaterThanOrEqual(1)
+      expect(h.saves.every(call => call.outcome === 'conflict')).toBe(true)
+      await advanceSeconds(120)
+      expect(h.saves).toHaveLength(attempts)
+      expect(screen.getAllByText(/Failed to save chat session/)).toHaveLength(1)
+      expect(saveErrorsNotified()).toEqual([])
+      // The newer record is untouched and the local edit stays visible and dirty.
+      expect(h.sessions).toEqual([external])
+      expect(shown()).toBe('original|local edit')
+      // An explicit Retry still tries once more and says so.
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(h.saves).toHaveLength(attempts + 1))
+      expect(h.saves.at(-1)?.outcome).toBe('conflict')
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(1))
+      await advanceSeconds(120)
+      expect(h.saves).toHaveLength(attempts + 1)
+      expect(h.sessions).toEqual([external])
+      expect(h.fetch).not.toHaveBeenCalled()
+    } finally { view.unmount() }
+  })
+
+  it('surfaces exactly one error without a save loop when a kept local edit meets a newer stored copy after a reload', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    const read = pending()
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      const preLoad = structuredClone(h.sessions[0])
+      await reloadWith(view, () => read.promise)
+      await append('local update')
+      const external: ChatSession = { ...structuredClone(session), messages: [...session.messages, { role: 'assistant', content: 'other writer' }] }
+      h.sessions = [structuredClone(external)]
+      await act(async () => read.release(structuredClone(h.sessions)))
+      expect(shown()).toBe('original|local update')
+      await waitFor(() => expect(banner()).not.toBeNull(), { timeout: 3000 })
+      const attempts = h.saves.length
+      for (const call of h.saves) expect(call).toEqual(expect.objectContaining({ expected: preLoad, outcome: 'conflict' }))
+      await advanceSeconds(120)
+      expect(h.saves).toHaveLength(attempts)
+      expect(screen.getAllByText(/Failed to save chat session/)).toHaveLength(1)
+      expect(h.notify).not.toHaveBeenCalled()
+      expect(h.sessions).toEqual([external])
+      expect(shown()).toBe('original|local update')
+      expect(h.fetch).not.toHaveBeenCalled()
+    } finally { read.release(structuredClone(h.sessions)); view.unmount() }
+  })
+})
