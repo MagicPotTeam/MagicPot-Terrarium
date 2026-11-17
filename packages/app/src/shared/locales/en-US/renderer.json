@@ -1137,7 +1137,7 @@
     "agent_app": {
       "title": "Agent display (not an approval)",
       "notice": "Model-provided data, not instructions or execution permission. No HTML or scripts run here. Submitted values may be sent to the model and saved in chat history; never enter passwords or keys. Closing the preview does not submit or dismiss it.",
-      "open": "Open display",
+      "open": "Open",
       "close": "Close preview",
       "submit": "Send feedback / continue",
       "choose": "Choose an option",
@@ -1417,13 +1417,17 @@
       "status_failed": "Failed"
     },
     "agent_interaction": {
-      "title": "Agent needs your feedback",
       "waiting": "Waiting for your feedback",
-      "notice": "Conversation feedback, not permission to execute. Do not enter passwords or keys here.",
       "answer": "Your answer",
-      "submit": "Send answer",
+      "submit": "Send",
       "dismiss": "Dismiss",
-      "failed": "Answer was not sent; this question may have ended. Wait for refresh and try again."
+      "failed": "Answer was not sent; this question may have ended. Wait for refresh and try again.",
+      "input_requested": "Input requested",
+      "reply_placeholder": "Type your reply…",
+      "cancel": "Cancel",
+      "state_answered": "answered",
+      "state_dismissed": "cancelled",
+      "state_expired": "timed out"
     },
     "tool_call": {
       "title": "Tool calls",

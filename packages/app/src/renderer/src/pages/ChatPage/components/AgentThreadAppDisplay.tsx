@@ -3,6 +3,7 @@ import { Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, 
 import { useTranslation } from 'react-i18next'
 import { AGENT_APP_LIMITS, parseAgentAppDocument, parseAgentAppValues, type AgentAppDocument, type AgentAppValues } from '@shared/api/agentThreadApp'
 import type { AgentThreadInteractionAnswer } from '@shared/api/agentThreadInteraction'
+import { AgentAppLauncherCard, AgentAppLauncherLine } from './AgentAppLauncherCard'
 
 /** Fixed components only. Never use innerHTML, markdown, model props/styles or external resource URLs. */
 function DisplayBlocks({ document }: { document: AgentAppDocument }) {
@@ -66,14 +67,11 @@ export default function AgentThreadAppDisplay({ document: raw, expiresAt, onReso
     finally { sending.current = false; if (mounted.current) setBusy(false) }
   }
   if (expired) return null
-  if (!document) return <Alert severity="error">{t('chat.agent_app.invalid')}</Alert>
+  if (!document) return <AgentAppLauncherCard testId="agent-app-display" title={t('chat.agent_app.title')}><AgentAppLauncherLine tone="error">{t('chat.agent_app.invalid')}</AgentAppLauncherLine></AgentAppLauncherCard>
   const disabled = busy || expired
-  return <Box role="region" aria-label={t('chat.agent_app.title')} sx={{ mx: 2, mb: 1, p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 2, flexShrink: 0 }}>
-    <Typography variant="caption">{t('chat.agent_app.notice')}</Typography>
-    <Typography sx={{ overflowWrap: 'anywhere' }}>{document.title}</Typography>
-    <Button disabled={disabled} onClick={() => setOpen(true)}>{t('chat.agent_app.open')}</Button>
-    <Button disabled={disabled} onClick={() => void resolve({ status: 'dismissed' })}>{t('chat.agent_interaction.dismiss')}</Button>
-    {error && !open ? <Alert severity="error">{t('chat.agent_interaction.failed')}</Alert> : null}
+  // In the transcript: upstream's app launcher (title + 打开); the display opens in the dialog.
+  return <AgentAppLauncherCard testId="agent-app-display" title={document.title} openLabel={t('chat.agent_app.open')} openDisabled={disabled} onOpen={() => setOpen(true)}>
+    {error && !open ? <AgentAppLauncherLine tone="error">{t('chat.agent_interaction.failed')}</AgentAppLauncherLine> : null}
     <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md" aria-labelledby={titleId}>
       <DialogTitle id={titleId}>{t('chat.agent_app.title')}</DialogTitle>
       <DialogContent sx={{ maxHeight: '70vh' }}>
@@ -101,5 +99,5 @@ export default function AgentThreadAppDisplay({ document: raw, expiresAt, onReso
         <Button disabled={disabled || !values} variant="contained" onClick={() => { if (values) void resolve({ status: 'answered', values }) }}>{t('chat.agent_app.submit')}</Button>
       </DialogActions>
     </Dialog>
-  </Box>
+  </AgentAppLauncherCard>
 }

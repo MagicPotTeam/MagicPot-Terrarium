@@ -14,7 +14,7 @@ export type ChatPromptCardOption = {
   onSelect: () => void
 }
 
-export type ChatPromptCardAccent = 'neutral' | 'warning' | 'danger' | 'info'
+export type ChatPromptCardAccent = 'neutral' | 'warning' | 'danger' | 'info' | 'success' | 'primary'
 
 /** How an answered card reads: the state word in the header and the reply under the prompt. */
 export type ChatPromptCardResolution = { state: string; reply?: string }
@@ -28,9 +28,20 @@ export type ChatPromptCardResolution = { state: string; reply?: string }
 export const ChatPromptCard: React.FC<{
   /** A 14px icon element; it takes the accent colour. */
   icon?: React.ReactNode
-  title: string
+  title: React.ReactNode
+  /**
+   * 'label' (default): a 12px one-line title in the accent colour. 'heading': the 14px bold
+   * title of an agent card, in the text colour, that may wrap.
+   */
+  titleVariant?: 'label' | 'heading'
+  /** Colour of the header (icon and title) when it differs from the accent: an ask card. */
+  titleColor?: string
+  /** Muted text at the right of the header: the subtitle of an agent card. */
+  aside?: React.ReactNode
   prompt?: React.ReactNode
   detail?: React.ReactNode
+  /** Content shown in both states, under the prompt: the body, fields and footer of a card. */
+  body?: React.ReactNode
   options?: readonly ChatPromptCardOption[]
   accent?: ChatPromptCardAccent
   resolution?: ChatPromptCardResolution | null
@@ -41,8 +52,12 @@ export const ChatPromptCard: React.FC<{
 }> = ({
   icon,
   title,
+  titleVariant = 'label',
+  titleColor,
+  aside,
   prompt,
   detail,
+  body,
   options,
   accent = 'neutral',
   resolution,
@@ -59,8 +74,13 @@ export const ChatPromptCard: React.FC<{
       : accent === 'danger'
         ? tokens.danger
         : accent === 'info'
+          ? theme.palette.info.main
+          : accent === 'primary'
           ? tokens.accent
-          : null
+          : accent === 'success'
+            ? tokens.live
+            : null
+  const heading = titleVariant === 'heading'
   const resolved = Boolean(resolution)
 
   return (
@@ -91,7 +111,7 @@ export const ChatPromptCard: React.FC<{
           gap: '6.4px',
           minWidth: 0,
           mb: '4px',
-          color: accentColor ?? tokens.text,
+          color: titleColor ?? (heading ? tokens.text : (accentColor ?? tokens.text)),
           '& > svg': { fontSize: 14, flexShrink: 0 }
         }}
       >
@@ -100,24 +120,53 @@ export const ChatPromptCard: React.FC<{
           component="span"
           id={titleId}
           data-testid="chat-prompt-card-title"
-          sx={{
-            minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            fontSize: tokens.fontSize.small,
-            lineHeight: '16px',
-            fontWeight: 500
-          }}
+          sx={
+            heading
+              ? {
+                  flex: 1,
+                  minWidth: 0,
+                  overflowWrap: 'anywhere',
+                  fontSize: 14,
+                  lineHeight: '20px',
+                  fontWeight: 600
+                }
+              : {
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  fontSize: tokens.fontSize.small,
+                  lineHeight: '16px',
+                  fontWeight: 500
+                }
+          }
         >
           {title}
         </Box>
+        {aside ? (
+          <Box
+            component="span"
+            data-testid="chat-prompt-card-aside"
+            sx={{
+              ml: heading ? 0 : 'auto',
+              minWidth: 0,
+              maxWidth: '50%',
+              overflowWrap: 'anywhere',
+              fontSize: tokens.fontSize.small,
+              lineHeight: '16px',
+              fontWeight: 400,
+              color: tokens.muted
+            }}
+          >
+            {aside}
+          </Box>
+        ) : null}
         {resolution ? (
           <Box
             component="span"
             data-testid="chat-prompt-card-state"
             sx={{
-              ml: 'auto',
+              ml: heading || aside ? 0 : 'auto',
               flexShrink: 0,
               fontSize: tokens.fontSize.micro,
               lineHeight: '16px',
@@ -159,6 +208,7 @@ export const ChatPromptCard: React.FC<{
           {detail}
         </Box>
       ) : null}
+      {body}
       {resolution ? (
         resolution.reply ? (
           <Box
@@ -192,6 +242,7 @@ export const ChatPromptCard: React.FC<{
                     key={option.key}
                     data-option={option.key}
                     data-primary={option.primary ? 'true' : undefined}
+                    data-danger={option.danger ? 'true' : undefined}
                     disabled={option.disabled}
                     onClick={option.onSelect}
                     sx={{

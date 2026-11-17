@@ -1,7 +1,7 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ThemeProvider, createTheme } from '@mui/material/styles'
+import { ThemeProvider, alpha, createTheme } from '@mui/material/styles'
 import type { AgentThreadInteraction } from '@shared/api/agentThreadInteraction'
 import AgentThreadInteractionPanel from './AgentThreadInteractionPanel'
 
@@ -11,6 +11,17 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => k
 const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' } as const
 const question = (id = 'question-a'): AgentThreadInteraction => ({ id, expiresAt: Date.now() + 60000, prompt: { kind: 'ask_user', question: `Question ${id}`, multiline: true } })
 const poll = () => act(async () => { await vi.advanceTimersByTimeAsync(500) })
+/** The card's option buttons say how they are drawn: filled (data-primary) and/or the error colour (data-danger). */
+const expectButtonStyle = (button: HTMLElement, filled: boolean, danger: boolean) => {
+  expect(button.getAttribute('data-primary')).toBe(filled ? 'true' : null)
+  expect(button.getAttribute('data-danger')).toBe(danger ? 'true' : null)
+}
+const card = () => screen.getByTestId('agent-prompt-card')
+/** An expired card stays, dimmed, with its state and without any control. */
+const expectExpired = () => {
+  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.getByTestId('chat-prompt-card-state')).toHaveTextContent('chat.agent_interaction.state_expired')
+}
 const mount = async (item = question()) => {
   mocks.list.mockResolvedValue({ interactions: [item] })
   const view = render(<AgentThreadInteractionPanel route={route} conversationId="a" active />)
@@ -63,8 +74,8 @@ describe('Agent thread interaction UI', () => {
     await mount({ id: 'icon-styles', expiresAt: Date.now() + 60000, prompt })
     const mark = screen.getByText('Bearer [redacted]'), title = screen.getByText(prompt.title), button = screen.getByRole('button', { name: 'Explicit feedback' })
     expect(title).toHaveAccessibleName(''); expect(title.textContent).toBe('Bearer [redacted]' + prompt.title); expect(mark).toHaveAttribute('aria-hidden', 'true'); expect(title.firstChild).toBe(mark)
-    expect(button).toHaveClass(style === 'secondary' ? 'MuiButton-outlined' : 'MuiButton-contained', style === 'danger' ? 'MuiButton-colorError' : 'MuiButton-colorPrimary')
-    expect(screen.getByRole('region')).not.toHaveAttribute('icon'); expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expectButtonStyle(button, style !== 'secondary', style === 'danger')
+    expect(card()).not.toHaveAttribute('icon'); expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument()
     expect(document.body.textContent).not.toContain('ICON_UI_SECRET'); expect(document.body.textContent).not.toContain('\u202e'); expect(prompt.icon).toBe(icon); expect(mocks.resolve).not.toHaveBeenCalled()
     await act(async () => { fireEvent.click(button) }); expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'icon-styles', answer: { status: 'answered', actionId: 'approve' } })
   })
@@ -72,7 +83,7 @@ describe('Agent thread interaction UI', () => {
     await mount({ id: 'icon-end', expiresAt: Date.now() + 10, prompt: { kind: 'show_card', title: 'Decorative icon lifetime', icon: '✓👩🏽‍💻', actions: [{ id: 'a', label: 'Explicit feedback', style: 'danger' }] } })
     expect(screen.getByText('✓👩🏽‍💻')).toHaveAttribute('aria-hidden', 'true'); expect(mocks.resolve).not.toHaveBeenCalled()
     if (ending === 'dismiss') { await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) }); expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'icon-end', answer: { status: 'dismissed' } }) }
-    else { await act(async () => { await vi.advanceTimersByTimeAsync(10) }); for (const button of screen.getAllByRole('button')) expect(button).toBeDisabled(); fireEvent.click(screen.getByRole('button', { name: 'Explicit feedback' })); expect(mocks.resolve).not.toHaveBeenCalled() }
+    else { await act(async () => { await vi.advanceTimersByTimeAsync(10) }); expectExpired(); expect(mocks.resolve).not.toHaveBeenCalled() }
   })
   it.each(['resolve', 'reject'] as const)('does not duplicate an icon choice or let late %s affect a replacement scope', async ending => {
     const item: AgentThreadInteraction = { id: 'icon-old', expiresAt: Date.now() + 60000, prompt: { kind: 'show_card', title: 'Old icon title', icon: '✓', actions: [{ id: 'approve', label: 'Old explicit feedback', style: 'primary' }] } }, view = await mount(item)
@@ -103,10 +114,11 @@ describe('Agent thread interaction UI', () => {
     render(<ThemeProvider theme={theme}><AgentThreadInteractionPanel route={route} conversationId="a" active /></ThemeProvider>)
     await act(async () => { await Promise.resolve() })
     const button = screen.getByRole('button', { name: 'Styled feedback' }), color = style === 'danger' ? '#579bdf' : '#13579b'
-    expect(button).toHaveClass(style === 'secondary' ? 'MuiButton-outlined' : 'MuiButton-contained', style === 'danger' ? 'MuiButton-colorError' : 'MuiButton-colorPrimary')
-    // MUI uses these theme-bound CSS variables; JSDOM does not resolve var() to RGB.
-    expect(getComputedStyle(button).getPropertyValue(style === 'secondary' ? '--variant-outlinedColor' : '--variant-containedBg').trim()).toBe(color)
-    expect(screen.getByRole('region')).toHaveStyle({ borderColor: '#3579bd' })
+    expectButtonStyle(button, style !== 'secondary', style === 'danger')
+    // A filled button takes the theme's colour; an outlined one stays in the text colour.
+    if (style === 'secondary') expect(button).not.toHaveStyle({ backgroundColor: color })
+    else expect(button).toHaveStyle({ backgroundColor: color })
+    expect(card()).toHaveStyle({ borderColor: alpha('#3579bd', 0.4) })
     expect(screen.getAllByRole('button')).toHaveLength(2); expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument()
     expect(document.body.textContent).not.toContain('STYLE_UI_SECRET'); expect(prompt.footer).toContain('STYLE_UI_SECRET')
     expect(mocks.resolve).not.toHaveBeenCalled()
@@ -119,7 +131,7 @@ describe('Agent thread interaction UI', () => {
     render(<AgentThreadInteractionPanel route={route} conversationId="a" active />)
     await act(async () => { await Promise.resolve() })
     const button = screen.getByRole('button', { name: 'Original feedback' })
-    expect(button).toHaveClass('MuiButton-outlined', 'MuiButton-colorPrimary'); expect(button).not.toHaveAttribute('href'); expect(button).not.toHaveAttribute('style')
+    expectButtonStyle(button, false, false); expect(button).not.toHaveAttribute('href'); expect(button).not.toHaveAttribute('style')
     expect(document.querySelector('a,img,input,textarea,script')).toBeNull(); expect(mocks.resolve).not.toHaveBeenCalled()
     await act(async () => { fireEvent.click(button) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'forged-style', answer: { status: 'answered', actionId: 'a' } })
@@ -128,8 +140,8 @@ describe('Agent thread interaction UI', () => {
   it('ignores inherited button style and keeps mixed omitted choices and dismissal independent', async () => {
     const actions = [{ id: 'a', label: 'Primary feedback', style: 'primary' as const }, { id: 'b', label: 'Original feedback' }, Object.assign(Object.create({ style: 'danger' }), { id: 'c', label: 'Inherited ignored' })]
     await mount({ id: 'mixed-styles', expiresAt: Date.now() + 60000, prompt: { kind: 'show_card', title: 'Mixed style data', actions } })
-    expect(screen.getByRole('button', { name: 'Primary feedback' })).toHaveClass('MuiButton-contained', 'MuiButton-colorPrimary')
-    for (const name of ['Original feedback', 'Inherited ignored']) expect(screen.getByRole('button', { name })).toHaveClass('MuiButton-outlined', 'MuiButton-colorPrimary')
+    expectButtonStyle(screen.getByRole('button', { name: 'Primary feedback' }), true, false)
+    for (const name of ['Original feedback', 'Inherited ignored']) expectButtonStyle(screen.getByRole('button', { name }), false, false)
     expect(mocks.resolve).not.toHaveBeenCalled(); expect(Object.hasOwn(actions[1], 'style')).toBe(false)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'mixed-styles', answer: { status: 'dismissed' } })
@@ -138,9 +150,8 @@ describe('Agent thread interaction UI', () => {
     const prompt = { kind: 'show_card' as const, title: 'Button style is not approval', actions: [{ id: 'approve', label: 'Send feedback', style }] }
     await mount({ id: 'styled-choice', expiresAt: Date.now() + 60000, prompt })
     const button = screen.getByRole('button', { name: 'Send feedback' })
-    expect(button).toHaveClass(style === 'secondary' ? 'MuiButton-outlined' : 'MuiButton-contained')
-    expect(button).toHaveClass(style === 'danger' ? 'MuiButton-colorError' : 'MuiButton-colorPrimary')
-    expect(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })).not.toHaveClass('MuiButton-contained')
+    expectButtonStyle(button, style !== 'secondary', style === 'danger')
+    expectButtonStyle(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' }), false, false)
     expect(mocks.resolve).not.toHaveBeenCalled(); expect(document.querySelector('a,img,input,textarea,script')).toBeNull()
     await act(async () => { fireEvent.click(button) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'styled-choice', answer: { status: 'answered', actionId: 'approve' } })
@@ -152,7 +163,7 @@ describe('Agent thread interaction UI', () => {
     mocks.list.mockResolvedValue({ interactions: [{ id: 'forged-accent', expiresAt: Date.now() + 60000, prompt }] })
     render(<ThemeProvider theme={theme}><AgentThreadInteractionPanel route={route} conversationId="a" active /></ThemeProvider>)
     await act(async () => { await Promise.resolve() })
-    const region = screen.getByRole('region')
+    const region = card()
     expect(region).toHaveStyle({ borderColor: 'rgb(13, 35, 57)' }); expect(region).not.toHaveAttribute('accent')
     expect(document.querySelector('a,img,input,textarea,script')).toBeNull(); expect(mocks.resolve).not.toHaveBeenCalled()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.getAllByRole('button')).toHaveLength(2)
@@ -176,9 +187,10 @@ describe('Agent thread interaction UI', () => {
     mocks.list.mockResolvedValue({ interactions: [{ id: 'accent-choice', expiresAt: Date.now() + 60000, prompt }] })
     render(<ThemeProvider theme={theme}><AgentThreadInteractionPanel route={route} conversationId="a" active /></ThemeProvider>)
     await act(async () => { await Promise.resolve() })
-    const region = screen.getByRole('region'), title = screen.getByText(prompt.title)
-    expect(region).toHaveStyle({ borderColor: tokens[accent as keyof typeof tokens] })
-    expect(title).toHaveStyle({ color: accent === 'neutral' ? 'rgb(23, 45, 67)' : tokens[accent as keyof typeof tokens] })
+    const region = card(), title = screen.getByText(prompt.title)
+    // The accent tints the card's border (40%); the card's title keeps the text colour.
+    expect(region).toHaveStyle({ borderColor: accent === 'neutral' ? tokens.neutral : alpha(tokens[accent as keyof typeof tokens], 0.4) })
+    expect(title.closest('header')).toHaveStyle({ color: 'rgb(23, 45, 67)' })
     expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument()
     expect(screen.getAllByRole('button')).toHaveLength(2); expect(document.querySelector('a,img,input,textarea,script')).toBeNull()
     expect(document.body.textContent).not.toContain('ACCENT_UI_SECRET'); expect(prompt.subtitle).toContain('ACCENT_UI_SECRET')
@@ -198,7 +210,7 @@ describe('Agent thread interaction UI', () => {
     expect(mocks.resolve).not.toHaveBeenCalled(); expect(prompt.footer).toBe(footer)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Feedback 0' })) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'footer-card', answer: { status: 'answered', actionId: 'a0' } })
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
   })
   it.each(['Authorization: Basic FOOTER_BASIC_SECRET', 'api_key=FOOTER_KEY_SECRET', 'https://user:FOOTER_URL_SECRET@example.invalid', '\u001b[31mBearer FOOTER_CONTROL_SECRET\u001b[0m\u202e'])('renders recognized footer patterns redacted without rewriting original data or autoconfirming %#', async footer => {
     const prompt = { kind: 'show_card' as const, title: 'Footer patterns', footer, actions: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }
@@ -218,8 +230,7 @@ describe('Agent thread interaction UI', () => {
       expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'footer-terminal', answer: { status: 'dismissed' } })
     } else {
       await act(async () => { await vi.advanceTimersByTimeAsync(10) })
-      for (const button of screen.getAllByRole('button')) expect(button).toBeDisabled()
-      fireEvent.click(screen.getByRole('button', { name: 'Explicit feedback' })); expect(mocks.resolve).not.toHaveBeenCalled()
+      expectExpired(); expect(mocks.resolve).not.toHaveBeenCalled()
     }
   })
   it.each([false, true])('does not let a late footer choice resolution consume a replacement conversation accent=%s', async withAccent => {
@@ -255,8 +266,8 @@ describe('Agent thread interaction UI', () => {
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'single-button', answer: { status: 'answered', actionId: 'approve' } })
     expect(button).toBeDisabled()
     await act(async () => { release(); await Promise.resolve() })
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
-    await poll(); expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    await poll(); expect(screen.queryAllByRole('button')).toHaveLength(0)
   })
   it.each(['dismiss', 'expiry'] as const)('never treats lone-action %s as an affirmative response', async kind => {
     await mount({ id: 'single-terminal', expiresAt: Date.now() + 10, prompt: { kind: 'show_card', title: 'One is not automatic', actions: [{ id: 'approve', label: 'Explicit feedback' }] } })
@@ -266,8 +277,7 @@ describe('Agent thread interaction UI', () => {
       expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'single-terminal', answer: { status: 'dismissed' } })
     } else {
       await act(async () => { await vi.advanceTimersByTimeAsync(10) })
-      for (const button of screen.getAllByRole('button')) expect(button).toBeDisabled()
-      fireEvent.click(screen.getByRole('button', { name: 'Explicit feedback' }))
+      expectExpired()
       expect(mocks.resolve).not.toHaveBeenCalled()
     }
   })
@@ -292,7 +302,7 @@ describe('Agent thread interaction UI', () => {
     expect(document.querySelector('img,a,script,input,textarea')).toBeNull()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Feedback only' })) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'subtitle-card', answer: { status: 'answered', actionId: 'approve' } })
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
   })
   it.each(['Authorization: Basic SUBTITLE_BASIC_SECRET', 'api_key=SUBTITLE_KEY_SECRET', 'https://user:SUBTITLE_URL_SECRET@example.invalid', '\u001b[31mBearer SUBTITLE_CONTROL_SECRET\u001b[0m\u202e'])('renders recognized subtitle patterns redacted, without autoanswer or markup %#', async subtitle => {
     const prompt = { kind: 'show_card' as const, title: 'Subtitle patterns', subtitle, actions: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }
@@ -307,15 +317,24 @@ describe('Agent thread interaction UI', () => {
   })
   it('renders a free-text prompt and submits to its exact conversation without a new chat turn', async () => {
     await mount()
-    expect(screen.getByText('chat.agent_interaction.notice')).toBeInTheDocument()
+    // Upstream's ask card: "Input requested", the question, a reply field, Send (filled) and Cancel; no notice paragraph.
+    expect(screen.getByTestId('chat-prompt-card-title')).toHaveTextContent('chat.agent_interaction.input_requested')
+    expect(screen.getByText('Question question-a')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'chat.agent_interaction.answer' })).toHaveAttribute('placeholder', 'chat.agent_interaction.reply_placeholder')
     expect(screen.getByRole('button', { name: 'chat.agent_interaction.submit' })).toBeDisabled()
+    expectButtonStyle(screen.getByRole('button', { name: 'chat.agent_interaction.submit' }), true, false)
+    expectButtonStyle(screen.getByRole('button', { name: 'chat.agent_interaction.cancel' }), false, false)
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Blue' } })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.submit' })) })
     expect(mocks.resolve).toHaveBeenCalledWith({ route, conversationId: 'a', interactionId: 'question-a', answer: { status: 'answered', text: 'Blue' } })
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    // The answered card stays, dimmed, with its state and the reply instead of the controls.
+    expect(card()).toHaveAttribute('data-resolved', 'true')
+    expect(screen.getByTestId('chat-prompt-card-state')).toHaveTextContent('chat.agent_interaction.state_answered')
+    expect(screen.getByTestId('chat-prompt-card-reply')).toHaveTextContent('→ Blue')
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument(); expect(screen.queryAllByRole('button')).toHaveLength(0)
     // An old in-flight polling response cannot resurrect an answered prompt.
     await poll()
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument(); expect(screen.getAllByTestId('agent-prompt-card')).toHaveLength(1)
   })
   it('renders cards as text only and returns only the selected action ID', async () => {
     await mount({ id: 'card', expiresAt: Date.now() + 60000, prompt: { kind: 'show_card', title: 'Choose', body: '<img src="https://example.invalid/tracker">', actions: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] } })
@@ -337,9 +356,9 @@ describe('Agent thread interaction UI', () => {
     expect(screen.getAllByRole('button')).toHaveLength(3)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Feedback yes' })) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'choice-fields', answer: { status: 'answered', actionId: 'approve' } })
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
     await poll()
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
   })
   it.each(['dismiss', 'expiry'] as const)('keeps choice fields read-only and never submits field values on %s', async kind => {
     await mount({ id: 'field-lifetime', expiresAt: Date.now() + 10, prompt: { kind: 'show_card', title: 'Lifetime', fields: [{ label: 'Status', value: 'Read only', inline: true }, { label: 'Next', value: 'No form' }], actions: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] } })
@@ -351,8 +370,7 @@ describe('Agent thread interaction UI', () => {
       expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'field-lifetime', answer: { status: 'dismissed' } })
     } else {
       await act(async () => { await vi.advanceTimersByTimeAsync(10) })
-      for (const button of screen.getAllByRole('button')) expect(button).toBeDisabled()
-      fireEvent.click(screen.getByRole('button', { name: 'A' }))
+      expectExpired()
       expect(mocks.resolve).not.toHaveBeenCalled()
     }
   })
@@ -374,10 +392,38 @@ describe('Agent thread interaction UI', () => {
     expect(screen.getByRole('button', { name: 'B' })).not.toBeDisabled()
     expect(mocks.resolve).toHaveBeenCalledOnce()
   })
+  it('keeps an answered card with the chosen button as its reply and draws the cards into the given host', async () => {
+    const host = window.document.createElement('div'); window.document.body.appendChild(host)
+    mocks.list.mockResolvedValue({ interactions: [{ id: 'kept', expiresAt: Date.now() + 60000, prompt: { kind: 'show_card', title: 'Pick a plan', body: 'Plan body', actions: [{ id: 'a', label: 'Plan A', style: 'primary' }, { id: 'b', label: 'Plan B' }] } }] })
+    const view = render(<AgentThreadInteractionPanel route={route} conversationId="a" active host={host} />)
+    await act(async () => { await Promise.resolve() })
+    expect(host).toContainElement(screen.getByText('Pick a plan')); expect(view.container).toBeEmptyDOMElement()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Plan B' })) })
+    expect(screen.getByText('Plan body')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-prompt-card-reply')).toHaveTextContent('→ Plan B')
+    expect(screen.getByTestId('chat-prompt-card-state')).toHaveTextContent('chat.agent_interaction.state_answered')
+    // The next question follows the answered one.
+    mocks.list.mockResolvedValue({ interactions: [question('next')] })
+    await poll()
+    expect(screen.getAllByTestId('agent-prompt-card')).toHaveLength(2)
+    expect(screen.getByText('Question next')).toBeInTheDocument()
+    view.unmount(); host.remove()
+  })
+  it('submits a one-line reply with Enter', async () => {
+    await mount({ id: 'line', expiresAt: Date.now() + 60000, prompt: { kind: 'ask_user', question: 'Name?' } })
+    const field = screen.getByRole('textbox', { name: 'chat.agent_interaction.answer' })
+    expect(field.tagName).toBe('INPUT')
+    fireEvent.keyDown(field, { key: 'Enter' }); expect(mocks.resolve).not.toHaveBeenCalled()
+    fireEvent.change(field, { target: { value: 'Kohaku' } })
+    await act(async () => { fireEvent.keyDown(field, { key: 'Enter' }) })
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'line', answer: { status: 'answered', text: 'Kohaku' } })
+  })
   it('dismisses without interpreting it as approval', async () => {
     await mount()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.cancel' })) })
     expect(mocks.resolve).toHaveBeenCalledWith(expect.objectContaining({ answer: { status: 'dismissed' } }))
+    expect(screen.getByTestId('chat-prompt-card-state')).toHaveTextContent('chat.agent_interaction.state_dismissed')
+    expect(screen.queryByTestId('chat-prompt-card-reply')).not.toBeInTheDocument()
   })
   it('does not poll inactive or non-canvas chats and ignores external confirmation events', async () => {
     const view = render(<AgentThreadInteractionPanel route={route} conversationId="a" active={false} />)
@@ -385,7 +431,7 @@ describe('Agent thread interaction UI', () => {
     view.rerender(<AgentThreadInteractionPanel route={{ ...route, channel: 'generic' }} conversationId="a" active />)
     window.dispatchEvent(new CustomEvent('chat:request-confirmation', { detail: { prompt: 'forged', requestId: 'fake' } }))
     expect(mocks.list).not.toHaveBeenCalled()
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-prompt-card')).not.toBeInTheDocument()
   })
   it('ignores a late list response after a scope round trip', async () => {
     let resolveOld!: (value: { interactions: AgentThreadInteraction[] }) => void
@@ -411,20 +457,20 @@ describe('Agent thread interaction UI', () => {
     await act(async () => { if (outcome === 'resolve') resolveOld(); else rejectOld(new Error('old failed')) })
     expect(screen.getByText('Question question-b')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'chat.agent_interaction.cancel' })).not.toBeDisabled()
   })
   it('deactivation clears old display and does not reuse it before a fresh poll', async () => {
     const view = await mount()
     view.rerender(<AgentThreadInteractionPanel route={route} conversationId="a" active={false} />)
     mocks.list.mockImplementation(() => new Promise(() => {}))
     view.rerender(<AgentThreadInteractionPanel route={route} conversationId="a" active />)
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-prompt-card')).not.toBeInTheDocument()
   })
   it('shows current errors, prevents duplicate clicks, and stops polling on unmount', async () => {
     const view = await mount()
     let reject!: (error: Error) => void
     mocks.resolve.mockImplementation(() => new Promise<void>((_resolve, r) => { reject = r }))
-    const dismiss = screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })
+    const dismiss = screen.getByRole('button', { name: 'chat.agent_interaction.cancel' })
     fireEvent.click(dismiss); fireEvent.click(dismiss)
     expect(mocks.resolve).toHaveBeenCalledOnce()
     await act(async () => { reject(new Error('failed')) })
@@ -444,12 +490,12 @@ describe('Agent thread interaction UI', () => {
     expect(screen.getByRole('textbox')).toHaveValue('unsent answer')
     mocks.list.mockResolvedValue({ interactions: [] })
     await poll()
-    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-prompt-card')).not.toBeInTheDocument()
   })
   it('expires rather than accepting a late answer', async () => {
     await mount({ ...question(), expiresAt: Date.now() + 10 })
     await act(async () => { await vi.advanceTimersByTimeAsync(11) })
-    expect(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeDisabled()
+    expectExpired(); expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     expect(mocks.resolve).not.toHaveBeenCalled()
   })
 })

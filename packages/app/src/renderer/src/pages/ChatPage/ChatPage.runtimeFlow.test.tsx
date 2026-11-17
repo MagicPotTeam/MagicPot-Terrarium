@@ -3954,6 +3954,8 @@ describe('ChatPage runtime workflow integration', () => {
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
     await waitFor(() => expect(screen.getByText('Which colour?')).toBeInTheDocument())
     try {
+      // In the column the question is a card at the end of the transcript.
+      expect(screen.getByTestId('agent-prompt-host')).toContainElement(screen.getByText('Which colour?'))
       expect(hoisted.listAgentInteractionsMock).toHaveBeenCalledWith({ route, conversationId: sessionId })
       fireEvent.change(screen.getByRole('textbox', { name: 'chat.agent_interaction.answer' }), { target: { value: 'Blue' } })
       fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.submit' }))
