@@ -19,6 +19,8 @@ const MAX_JPEG_HEADER_BYTES = 1024 * 1024
 const IO_CHUNK_BYTES = 64 * 1024
 const MAX_STRUCTURAL_CHUNKS = 16_384
 const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0
+/** Opening a FIFO swapped in for a checked file returns at once instead of waiting for a writer. */
+const NONBLOCK = fsConstants.O_NONBLOCK ?? 0
 
 type SupportedMimeType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
 type FileHandle = Awaited<ReturnType<typeof fs.open>>
@@ -1042,7 +1044,10 @@ export async function importManagedMediaFile(
   if (!sourceLstat.size) throw new Error('Managed media cannot be empty')
   if (maxBytes !== undefined && sourceLstat.size > maxBytes)
     throw new Error(`Managed media exceeds the ${maxBytes} byte limit`)
-  const sourceHandle = await fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW)
+  const sourceHandle = await fileSystem.open(
+    resolvedSource,
+    fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK
+  )
   let staged: { stagedPath: string; size: number; sha256: string } | undefined
   try {
     const opened = await sourceHandle.stat()

@@ -288,6 +288,38 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
     }
   )
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses a file swapped for a FIFO between the checks and the open, without blocking',
+    async () => {
+      const swapped = path.join(allowed, 'swapped-fifo.png')
+      await fs.writeFile(swapped, PNG)
+      let swappedForFifo = false
+      const { service } = create({
+        importFile: (input, dependencies) =>
+          importManagedMediaFile(input, {
+            ...dependencies,
+            fs: {
+              ...fs,
+              open: (async (...args: Parameters<typeof fs.open>) => {
+                if (!swappedForFifo && String(args[0]) === swapped) {
+                  // The lstat / realpath checks saw a regular file; a FIFO takes its place
+                  // before the open. A blocking open would wait for a writer forever.
+                  swappedForFifo = true
+                  await fs.unlink(swapped)
+                  execFileSync('mkfifo', [swapped])
+                }
+                return fs.open(...args)
+              }) as typeof fs.open
+            }
+          })
+      })
+      await expectNoPathInError(service.importFile(request(swapped)), 'MANAGED_MEDIA_IMPORT_FAILED')
+      expect(swappedForFifo).toBe(true)
+      await stagingIsEmpty()
+    },
+    5000
+  )
+
   it('refuses a file that changes size during the copy and removes the partial copy', async () => {
     const growing = path.join(allowed, 'growing.png')
     await fs.writeFile(growing, PNG)

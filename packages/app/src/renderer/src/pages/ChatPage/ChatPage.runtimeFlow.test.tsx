@@ -15,6 +15,7 @@ import { createTeamMemberInDB, saveSessionToDB, type ChatSession, type ChatSessi
 import type { ChatLoadingStatus } from './chatLoadingStatus'
 import ChatPage from './ChatPage'
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
+import { ChatPathlessAttachmentTooLargeError } from './chatManagedMediaAttachments'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
@@ -10023,6 +10024,86 @@ describe('ChatPage runtime workflow integration', () => {
       fetchSpy.mockRestore()
       warning.mockRestore()
     }
+  })
+
+  it('imports a composer file on disk by its path and never reads it in the renderer', async () => {
+    const user = userEvent.setup()
+    const fileReaderConstructed = vi.fn()
+    const OriginalFileReader = globalThis.FileReader
+    vi.stubGlobal(
+      'FileReader',
+      class extends OriginalFileReader {
+        constructor() {
+          super()
+          fileReaderConstructed()
+        }
+      }
+    )
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 64
+        naturalHeight = 32
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    const picked = createLocalFile('picked.png', 'image/png', '/home/artist/Pictures/picked.png')
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(picked, 'arrayBuffer', { value: arrayBuffer })
+    hoisted.selectFileMock.mockResolvedValueOnce(picked)
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+    )
+    expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce()
+    expect(hoisted.importManagedFileMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourcePath: '/home/artist/Pictures/picked.png',
+        originalFileName: 'picked.png'
+      })
+    )
+    expect(hoisted.importManagedBytesMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
+    expect(hoisted.fileToDataUrlMock).not.toHaveBeenCalled()
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    // Only the dimensions probe may touch the file (a blob: preview URL), never its bytes.
+    expect(fileReaderConstructed).not.toHaveBeenCalled()
+  })
+
+  it('refuses a path-less composer file above the in-memory cap with the localized message', async () => {
+    const user = userEvent.setup()
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    // A generated video with no file behind it (no path from the preload bridge).
+    const generated = new File(['video'], 'generated.mp4', { type: 'video/mp4' })
+    Object.defineProperty(generated, 'size', { value: 70 * 1024 * 1024 })
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(generated, 'arrayBuffer', { value: arrayBuffer })
+    hoisted.selectFileMock.mockResolvedValueOnce(generated)
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    await waitFor(() => expect(alert).toHaveBeenCalledOnce())
+    const shown = String(alert.mock.calls[0]?.[0])
+    expect(shown).toContain(
+      new ChatPathlessAttachmentTooLargeError('generated.mp4', 70 * 1024 * 1024).message
+    )
+    expect(shown).toContain('generated.mp4')
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(hoisted.importManagedBytesMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedFileMock).not.toHaveBeenCalled()
   })
 
   it('restores per-session drafts after switching away and remounting the same scope', async () => {
