@@ -156,8 +156,8 @@ function PromptCard({ item, onResolve, onExpired, resolution }: {
 
   const icon = Object.hasOwn(prompt, 'icon') ? getToolCardIcon(prompt.icon) : undefined
   const anyInline = prompt.fields?.some(field => field.inline) ?? false
-  const options: ChatPromptCardOption[] = [
-    ...prompt.actions.map((action): ChatPromptCardOption => {
+  // Upstream's card offers only its own actions; Stop and expiry end the wait otherwise.
+  const options: ChatPromptCardOption[] = prompt.actions.map((action): ChatPromptCardOption => {
       const style = getToolCardActionStyle(Object.hasOwn(action, 'style') ? action.style : undefined)
       return {
         key: `action:${action.id}`,
@@ -167,9 +167,7 @@ function PromptCard({ item, onResolve, onExpired, resolution }: {
         disabled,
         onSelect: () => void resolve({ status: 'answered', actionId: action.id })
       }
-    }),
-    { key: 'dismiss', label: t('chat.agent_interaction.dismiss'), disabled, onSelect: () => void resolve({ status: 'dismissed' }) }
-  ]
+    })
   const body = (
     <>
       {prompt.body ? <Box sx={{ px: '4px', '& > div': { my: '8px' } }}><AgentThreadCardBody body={prompt.body} /></Box> : null}
@@ -217,16 +215,39 @@ function resolutionOf(item: PromptItem, answer: AgentThreadInteractionAnswer | '
   return { state: labels.answered }
 }
 
-/** Settled questions stay on screen while this conversation's run lasts, at most this many. */
+/** Settled questions stay on screen, at most this many per conversation. */
 const SETTLED_CARDS_KEPT = 8
+/** Conversations whose settled questions a panel remembers after their run ended. */
+const SETTLED_SCOPES_KEPT = 16
 
-function ActiveThreadInteractions({ scope, host }: { scope: string; host?: HTMLElement | null }) {
+type SettledCard = { item: PromptItem; resolution: ChatPromptCardResolution }
+
+/** The prompt cards at the end of the transcript: the settled ones, then the open one. */
+function PromptCards({ scope, settledCards, current, host }: { scope: string; settledCards: readonly SettledCard[]; current?: React.ReactNode; host?: HTMLElement | null }) {
+  const cards = (
+    <Box data-testid="agent-prompt-cards" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+      {settledCards.map(entry => <PromptCard key={`${scope}:${entry.item.id}:settled`} item={entry.item} resolution={entry.resolution} />)}
+      {current}
+    </Box>
+  )
+  if (host === undefined) return cards
+  return host ? createPortal(cards, host) : null
+}
+
+function ActiveThreadInteractions({ scope, host, onSettled }: { scope: string; host?: HTMLElement | null; onSettled(cards: readonly SettledCard[]): void }) {
   const { t } = useTranslation()
   const [pending, setPending] = useState<{ scope: string; item: AgentThreadInteraction }>()
-  const [settledCards, setSettledCards] = useState<{ item: PromptItem; resolution: ChatPromptCardResolution }[]>([])
+  const [settledCards, setSettledCards] = useState<SettledCard[]>([])
+  const settledCardsRef = useRef<SettledCard[]>([])
+  const onSettledRef = useRef(onSettled)
+  onSettledRef.current = onSettled
   const settled = useRef(new Set<string>())
   const live = useRef(false)
   const item = pending?.scope === scope ? pending.item : undefined
+
+  // A new run (or a new activation) starts with no settled cards; those of the run before it
+  // leave the transcript tail here, where newer turns now follow them.
+  useEffect(() => { onSettledRef.current([]) }, [])
 
   useEffect(() => {
     live.current = true
@@ -262,7 +283,10 @@ function ActiveThreadInteractions({ scope, host }: { scope: string; host?: HTMLE
     // An app display leaves when it is settled; a question card stays with its answer.
     if (selected.prompt.kind !== 'show_app') {
       const card = selected as PromptItem
-      setSettledCards(previous => [...previous.filter(entry => entry.item.id !== card.id), { item: card, resolution: resolutionOf(card, answer, { answered: t('chat.agent_interaction.state_answered'), dismissed: t('chat.agent_interaction.state_dismissed'), expired: t('chat.agent_interaction.state_expired') }) }].slice(-SETTLED_CARDS_KEPT))
+      const next = [...settledCardsRef.current.filter(entry => entry.item.id !== card.id), { item: card, resolution: resolutionOf(card, answer, { answered: t('chat.agent_interaction.state_answered'), dismissed: t('chat.agent_interaction.state_dismissed'), expired: t('chat.agent_interaction.state_expired') }) }].slice(-SETTLED_CARDS_KEPT)
+      settledCardsRef.current = next
+      setSettledCards(next)
+      onSettledRef.current(next)
     }
   }
   let current: React.ReactNode = null
@@ -278,21 +302,16 @@ function ActiveThreadInteractions({ scope, host }: { scope: string; host?: HTMLE
       : <PromptCard key={`${scope}:${selected.id}`} item={selected as PromptItem} onResolve={resolve} onExpired={() => { if (live.current) settle(selected, 'expired') }} />
   }
   if (!current && !settledCards.length) return null
-  const cards = (
-    <Box data-testid="agent-prompt-cards" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-      {settledCards.map(entry => <PromptCard key={`${scope}:${entry.item.id}:settled`} item={entry.item} resolution={entry.resolution} />)}
-      {current}
-    </Box>
-  )
-  if (host === undefined) return cards
-  return host ? createPortal(cards, host) : null
+  return <PromptCards scope={scope} settledCards={settledCards} current={current} host={host} />
 }
 
 /**
  * The agent's questions to the person (ask_user, show_card) and its app displays (show_app), as
  * cards at the end of the transcript. `host` is the element at the end of the transcript that
  * takes them; without it they are drawn in place. Mount a fresh channel for every
- * scope/activation: late replies never reach its successor.
+ * scope/activation: late replies never reach its successor. When the run ends, its answered,
+ * cancelled and expired cards stay, dimmed with their state, as upstream's do; they leave when
+ * the conversation's next run starts.
  */
 export default function AgentThreadInteractionPanel({ route, conversationId, active, host }: {
   route?: AgentRouteLike
@@ -300,7 +319,18 @@ export default function AgentThreadInteractionPanel({ route, conversationId, act
   active: boolean
   host?: HTMLElement | null
 }) {
-  if (!active || route?.channel !== 'canvas' || route.scopeType !== 'thread' || !conversationId) return null
+  const settledByScope = useRef(new Map<string, readonly SettledCard[]>())
+  if (route?.channel !== 'canvas' || route.scopeType !== 'thread' || !conversationId) return null
   const scope = JSON.stringify({ route, conversationId })
-  return <ActiveThreadInteractions key={scope} scope={scope} host={host} />
+  if (!active) {
+    const settledCards = settledByScope.current.get(scope)
+    return settledCards?.length ? <PromptCards scope={scope} settledCards={settledCards} host={host} /> : null
+  }
+  const keepSettled = (cards: readonly SettledCard[]) => {
+    const kept = settledByScope.current
+    kept.delete(scope)
+    if (cards.length) kept.set(scope, cards)
+    while (kept.size > SETTLED_SCOPES_KEPT) kept.delete(kept.keys().next().value!)
+  }
+  return <ActiveThreadInteractions key={scope} scope={scope} host={host} onSettled={keepSettled} />
 }

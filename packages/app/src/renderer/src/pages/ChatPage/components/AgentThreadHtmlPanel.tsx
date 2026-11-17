@@ -96,7 +96,9 @@ function HtmlApps({ scope, host }: { scope: string; host?: HTMLElement | null })
     void poll(); return () => { closed = true; clearTimeout(timer) }
   }, [scope, boundScope, revision])
   const savedEnabled = storage?.initialized === true && storage.available && storage.saveEnabled
-  if (!apps.length && !(storage?.enabled && savedEnabled)) return null
+  // Upstream has app cards only: with no app there is nothing to draw (the snapshots are listed in
+  // an app card's body).
+  if (!apps.length) return null
   // The thread's app storage: short lines in the body of the last app card, never a card of its own.
   const storageBody = storage?.enabled ? <>
     {!storage.initialized && storage.canInitialize && <>
@@ -107,12 +109,14 @@ function HtmlApps({ scope, host }: { scope: string; host?: HTMLElement | null })
     {storage.initialized && storage.unconfirmedRuns !== null && storage.unconfirmedRuns > 0 && <AgentAppLauncherLine detail={t('chat.agent_html.run_slots', { count: storage.unconfirmedRuns })}>{t('chat.agent_html.run_slots_short', { count: storage.unconfirmedRuns })}</AgentAppLauncherLine>}
     {storageError && <AgentAppLauncherLine tone="error" detail={t('chat.agent_html.initialize_failed')}>{t('chat.agent_html.initialize_failed_short')}</AgentAppLauncherLine>}
   </> : null
-  // Each saved snapshot is a launcher card of its own (title + 恢复); none is drawn when there is none.
+  // The saved snapshots are short lines in the body of the last app card, after its storage lines.
   const cards = <>
     {apps.map((item, index) => <HtmlAppRow key={item.id} item={item} scope={boundScope ?? scope} canOpen={storage?.enabled === true && storage.initialized && storage.available} canSave={savedEnabled} onChanged={() => setRevision(value => value + 1)}>
-      {index === apps.length - 1 ? storageBody : null}
+      {index === apps.length - 1 ? <>
+        {storageBody}
+        {boundScope ? <AgentThreadHtmlSaved scope={boundScope} enabled={savedEnabled} revision={revision} onChanged={() => setRevision(value => value + 1)} /> : null}
+      </> : null}
     </HtmlAppRow>)}
-    {boundScope ? <AgentThreadHtmlSaved scope={boundScope} enabled={savedEnabled} revision={revision} onChanged={() => setRevision(value => value + 1)} /> : null}
   </>
   // In the transcript tail (`host`) the cards are the host's own children, so an empty host stays
   // empty; drawn in place they share one column.

@@ -11,11 +11,12 @@ export type ChatQueueStripItem = {
   id: number
   /** The message text; empty for a message of attachments only. */
   text: string
-  attachmentCount: number
+  /** One label per attachment: its file name, or what kind of attachment it is. */
+  attachments: readonly { fileName?: string; type: string }[]
   status: ChatQueueStripStatus
   canEdit: boolean
   canRemove: boolean
-  /** A paused item that the newer messages wait behind: the row says so in one line. */
+  /** A paused item that the newer messages wait behind: the row says so in one short line. */
   blocksNewer: boolean
 }
 
@@ -41,9 +42,10 @@ const buttonSx = (tokens: AgentColumnTokens, contrast: string) =>
 
 /**
  * The Agent column's queued messages, directly above the composer (upstream's QueuedMessages):
- * a live line with the count, then one row per message — the text, its attachments, the status
- * word, 编辑 and 取消 — the last three first, "再显示 N 条" for the rest. 编辑 turns the row into an
- * editor (保存 / 放弃编辑; Ctrl/Cmd+Enter saves, Escape discards).
+ * a live line with the count, then one row per message — the text, one label per attachment, the
+ * status word, 编辑 and 取消 (disabled where they cannot be used) — the last three, then "再显示 N
+ * 条" for the rest. 编辑 turns the row into an editor (textarea, 保存 / 放弃编辑; Ctrl/Cmd+Enter
+ * saves, Escape discards).
  */
 export const ChatQueueStrip: React.FC<{
   items: readonly ChatQueueStripItem[]
@@ -122,10 +124,7 @@ export const ChatQueueStrip: React.FC<{
       </Box>
       {shown.map((item) => {
         const isEditing = editing?.id === item.id
-        const attachmentLabel =
-          item.attachmentCount > 0
-            ? t('chat.queue_attachment_count', { count: item.attachmentCount })
-            : null
+        const canSave = Boolean(editing?.text.trim()) || item.attachments.length > 0
         return (
           <Box
             key={item.id}
@@ -162,7 +161,7 @@ export const ChatQueueStrip: React.FC<{
                       onDiscard()
                     } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
                       event.preventDefault()
-                      if (editing.text.trim() || item.attachmentCount > 0) onSave()
+                      if (canSave) onSave()
                     }
                   }}
                   sx={{
@@ -203,15 +202,10 @@ export const ChatQueueStrip: React.FC<{
                     {editing.error}
                   </Box>
                 ) : null}
-                {attachmentLabel ? (
-                  <Box component="span" sx={{ fontSize: '0.85em', color: tokens.muted }}>
-                    {attachmentLabel}
-                  </Box>
-                ) : null}
                 <Box
                   component="button"
                   type="button"
-                  disabled={!editing.text.trim() && item.attachmentCount === 0}
+                  disabled={!canSave}
                   onClick={onSave}
                   sx={buttonSx(tokens, contrast)}
                 >
@@ -241,15 +235,21 @@ export const ChatQueueStrip: React.FC<{
                 >
                   {item.text || t('chat.queue_attachments')}
                 </Box>
-                {attachmentLabel ? (
+                {item.attachments.map((attachment, index) => (
                   <Box
+                    key={index}
                     component="span"
-                    data-testid="chat-queue-attachments"
-                    sx={{ flexShrink: 0, fontSize: '0.85em', color: tokens.muted }}
+                    data-testid="chat-queue-attachment"
+                    sx={{ fontSize: '0.85em', overflowWrap: 'anywhere', color: tokens.muted }}
                   >
-                    {attachmentLabel}
+                    {attachment.fileName ||
+                      t(
+                        attachment.type === 'image'
+                          ? 'chat.queue_attachment_image'
+                          : 'chat.queue_attachment_file'
+                      )}
                   </Box>
-                ) : null}
+                ))}
                 <Box
                   component="span"
                   data-testid="chat-queue-status"
@@ -257,18 +257,17 @@ export const ChatQueueStrip: React.FC<{
                 >
                   {statusLabel[item.status]}
                 </Box>
-                {item.canEdit ? (
-                  <Box
-                    component="button"
-                    type="button"
-                    aria-label={t('chat.queue_edit')}
-                    aria-describedby={item.blocksNewer ? resumeNoticeId : undefined}
-                    onClick={() => onEdit(item.id)}
-                    sx={buttonSx(tokens, contrast)}
-                  >
-                    {t('chat.queue_edit_button')}
-                  </Box>
-                ) : null}
+                <Box
+                  component="button"
+                  type="button"
+                  aria-label={t('chat.queue_edit')}
+                  aria-describedby={item.blocksNewer ? resumeNoticeId : undefined}
+                  disabled={!item.canEdit}
+                  onClick={() => onEdit(item.id)}
+                  sx={buttonSx(tokens, contrast)}
+                >
+                  {t('chat.queue_edit_button')}
+                </Box>
                 <Box
                   component="button"
                   type="button"

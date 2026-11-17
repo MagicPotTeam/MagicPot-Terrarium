@@ -13,10 +13,13 @@ const mount = () => { const changed = vi.fn(), view = render(<AgentThreadHtmlSav
 // The list is read on its own once saving is available: wait for it.
 const refresh = async () => { await act(async () => { await Promise.resolve() }) }
 describe('explicit user saved HTML controls', () => {
-  it('lists once when enabled, as launcher cards, and restores a ready card without injecting HTML or starting a model', async () => {
+  it('lists once when enabled, as short lines, and restores a ready card without injecting HTML or starting a model', async () => {
     const t = mount(); await refresh()
     expect(h.list).toHaveBeenCalledExactlyOnceWith(JSON.parse(scope)); expect(document.querySelector('script,iframe')).toBeNull()
-    expect(screen.getByTestId('agent-app-launcher-title')).toHaveTextContent('<script>UNTRUSTED_TITLE</script>')
+    expect(screen.getByTestId('agent-html-saved-title')).toHaveTextContent('<script>UNTRUSTED_TITLE</script>')
+    // A line of the app card's body, not a card of its own: no launcher card, no version label.
+    expect(screen.queryByTestId('agent-app-launcher-title')).toBeNull()
+    expect(screen.getByTestId('agent-html-saved-item')).not.toHaveTextContent('v7')
     expect(screen.getByRole('button', { name: 'chat.agent_html.restore' })).toHaveAccessibleDescription('chat.agent_html.saved_notice')
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore' })))
     expect(h.restore).toHaveBeenCalledWith({ ...JSON.parse(scope), savedId: item.id, expectedStorageRevision: 2, operationId: expect.any(String) }); expect(t.changed).toHaveBeenCalledOnce()
@@ -35,14 +38,13 @@ describe('explicit user saved HTML controls', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore' })))
     expect(h.restore.mock.calls[1][0].operationId).toBe(original)
   })
-  it('requires acknowledged success and a separate confirmation before generating a fresh restore operation', async () => {
+  it('never generates a fresh restore operation after an acknowledged success: a second restore is the same operation', async () => {
     mount(); await refresh(); h.restore.mockRejectedValueOnce(new Error('uncertain'))
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore' })))
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore' })))
     const prior = h.restore.mock.calls.at(-1)![0].operationId
-    fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore_another' })); expect(h.restore).toHaveBeenCalledTimes(2)
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.confirm_restore_another' })))
-    expect(h.restore).toHaveBeenCalledTimes(3); expect(h.restore.mock.calls[2][0].operationId).not.toBe(prior)
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore' })))
+    expect(h.restore).toHaveBeenCalledTimes(3); expect(h.restore.mock.calls[2][0].operationId).toBe(prior)
   })
   it('draws nothing while no snapshot is saved and lists again after a change', async () => {
     h.list.mockResolvedValue({ apps: [] })
@@ -52,12 +54,12 @@ describe('explicit user saved HTML controls', () => {
     view.rerender(<AgentThreadHtmlSaved scope={scope} enabled revision={1} onChanged={changed} />); await refresh()
     expect(h.list).toHaveBeenCalledTimes(2); expect(screen.getByTestId('agent-html-saved-item')).toBeTruthy()
   })
-  it('requires a separate deletion confirmation and never restarts a failed/unknown process', async () => {
-    mount(); await refresh(); fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.delete_saved' }))
-    expect(h.remove).not.toHaveBeenCalled(); fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.cancel_delete' })); expect(h.remove).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.delete_saved' })); h.remove.mockRejectedValueOnce(new Error('termination unconfirmed'))
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.confirm_delete' })))
-    expect(h.remove).toHaveBeenCalledWith({ ...JSON.parse(scope), savedId: item.id, expectedStorageRevision: 2 }); expect(screen.getByText('chat.agent_html.snapshot_failed_short')).toBeTruthy(); expect(h.restore).not.toHaveBeenCalled()
+  it('offers only the restore button per snapshot: no delete, no second copy, nothing removed', async () => {
+    h.list.mockResolvedValue({ apps: [item, { ...item, id: '22222222-2222-4222-8222-222222222222', title: 'Second snapshot' }] })
+    mount(); await refresh()
+    expect(screen.getAllByTestId('agent-html-saved-item')).toHaveLength(2)
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['chat.agent_html.restore', 'chat.agent_html.restore'])
+    expect(h.remove).not.toHaveBeenCalled(); expect(h.restore).not.toHaveBeenCalled()
   })
   it('discards old list/restore responses when disabled or unmounted', async () => {
     let finish!: (value: unknown) => void; h.list.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))

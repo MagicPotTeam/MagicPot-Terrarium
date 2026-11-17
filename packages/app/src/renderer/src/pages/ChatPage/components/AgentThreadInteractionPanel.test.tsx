@@ -38,7 +38,7 @@ describe('Agent thread interaction UI', () => {
     expect(screen.getByText('Body strong').tagName).toBe('STRONG'); expect(screen.getByText('Body emphasis').tagName).toBe('EM'); expect(screen.getByText('Body removed').tagName).toBe('DEL'); expect(screen.getByText('Body quote').closest('blockquote')).not.toBeNull(); expect(screen.getByText('Body list').closest('li')).not.toBeNull(); expect(screen.getByText('Body table').closest('td')).not.toBeNull()
     expect(screen.getByText(/flowchart TD/).tagName).toBe('CODE'); expect(screen.getByText(/flowchart TD/).closest('pre')).not.toBeNull()
     for (const text of [prompt.title, prompt.subtitle, prompt.footer, '*Label*: **Literal field**']) expect(screen.getByText(text).querySelector('strong,em')).toBeNull()
-    expect(screen.getByText(prompt.icon)).toHaveAttribute('aria-hidden', 'true'); expect(screen.queryByRole('heading')).not.toBeInTheDocument(); expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument(); expect(screen.getAllByRole('button')).toHaveLength(2); expect(document.querySelector('a,img,script,input,textarea,svg')).toBeNull(); expect(mocks.resolve).not.toHaveBeenCalled()
+    expect(screen.getByText(prompt.icon)).toHaveAttribute('aria-hidden', 'true'); expect(screen.queryByRole('heading')).not.toBeInTheDocument(); expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument(); expect(screen.getAllByRole('button')).toHaveLength(1); expect(document.querySelector('a,img,script,input,textarea,svg')).toBeNull(); expect(mocks.resolve).not.toHaveBeenCalled()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: prompt.actions[0].label })) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'body-format', answer: { status: 'answered', actionId: 'approve' } }); expect(prompt.body).toBe(body)
   })
@@ -46,7 +46,7 @@ describe('Agent thread interaction UI', () => {
     const body = '[Visible label](https://external.invalid/link)\n\n![Visible alt](file:///private/probe.png)\n\n- [x] Body completed task\n- [ ] Body pending task\n\n<img src="https://external.invalid/raw">'
     await mount({ id: 'body-inert', expiresAt: Date.now() + 60000, prompt: { kind: 'show_card', title: 'Original feedback title', body, actions: [{ id: 'a', label: 'Only offered feedback' }] } })
     expect(screen.getByText('Visible label')).toBeInTheDocument(); expect(screen.getByText('Visible alt')).toBeInTheDocument(); expect(screen.getByText(/\[x\] Body completed task/)).toBeInTheDocument(); expect(screen.getByText(/\[ \] Body pending task/)).toBeInTheDocument(); expect(screen.getByText('<img src="https://external.invalid/raw">')).toBeInTheDocument()
-    expect(document.querySelector('a,img,input,textarea,script,iframe,svg')).toBeNull(); expect(screen.getAllByRole('button')).toHaveLength(2); expect(mocks.resolve).not.toHaveBeenCalled()
+    expect(document.querySelector('a,img,input,textarea,script,iframe,svg')).toBeNull(); expect(screen.getAllByRole('button')).toHaveLength(1); expect(mocks.resolve).not.toHaveBeenCalled()
   })
   it('redacts entity-decoded and inline-split credentials from body display without rewriting feedback data', async () => {
     const body = 'Public **safe** prefix\n\n&#x42;ea**rer** ENTITY_BODY_SECRET', prompt = { kind: 'show_card' as const, title: 'Body redaction', body, actions: [{ id: 'a', label: 'Explicit feedback' }] }
@@ -57,7 +57,7 @@ describe('Agent thread interaction UI', () => {
     const prompt = { kind: 'show_card' as const, title: 'Original undecorated title', icon, actions: [{ id: 'a', label: 'A' }] }
     await mount({ id: 'icon-fallback', expiresAt: Date.now() + 60000, prompt } as never)
     const title = screen.getByText(prompt.title); expect(title.textContent).toBe(prompt.title); expect(title.querySelector('span')).toBeNull(); expect(title.querySelector('[aria-hidden]')).toBeNull()
-    expect(document.querySelector('img,a,script,input,textarea')).toBeNull(); expect(mocks.resolve).not.toHaveBeenCalled(); expect(screen.getAllByRole('button')).toHaveLength(2)
+    expect(document.querySelector('img,a,script,input,textarea')).toBeNull(); expect(mocks.resolve).not.toHaveBeenCalled(); expect(screen.getAllByRole('button')).toHaveLength(1)
   })
   it('ignores inherited icon and never invokes malformed icon conversion hooks', async () => {
     const toJSON = vi.fn(() => '✓'), toString = vi.fn(() => '✓'), prompt = Object.assign(Object.create({ icon: 'INHERITED_ICON_IGNORE' }), { kind: 'show_card' as const, title: 'Own icon only', actions: [{ id: 'a', label: 'A' }] })
@@ -79,10 +79,11 @@ describe('Agent thread interaction UI', () => {
     expect(document.body.textContent).not.toContain('ICON_UI_SECRET'); expect(document.body.textContent).not.toContain('\u202e'); expect(prompt.icon).toBe(icon); expect(mocks.resolve).not.toHaveBeenCalled()
     await act(async () => { fireEvent.click(button) }); expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'icon-styles', answer: { status: 'answered', actionId: 'approve' } })
   })
-  it.each(['dismiss', 'expiry'] as const)('keeps decorative icons passive during %s', async ending => {
+  it.each(['no dismiss button', 'expiry'] as const)('keeps decorative icons passive during %s', async ending => {
     await mount({ id: 'icon-end', expiresAt: Date.now() + 10, prompt: { kind: 'show_card', title: 'Decorative icon lifetime', icon: '✓👩🏽‍💻', actions: [{ id: 'a', label: 'Explicit feedback', style: 'danger' }] } })
     expect(screen.getByText('✓👩🏽‍💻')).toHaveAttribute('aria-hidden', 'true'); expect(mocks.resolve).not.toHaveBeenCalled()
-    if (ending === 'dismiss') { await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) }); expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'icon-end', answer: { status: 'dismissed' } }) }
+    // Upstream's card has only its own actions: no extra dismiss button.
+    if (ending === 'no dismiss button') { expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull(); expect(screen.getAllByRole('button')).toHaveLength(1); await poll(); expect(mocks.resolve).not.toHaveBeenCalled() }
     else { await act(async () => { await vi.advanceTimersByTimeAsync(10) }); expectExpired(); expect(mocks.resolve).not.toHaveBeenCalled() }
   })
   it.each(['resolve', 'reject'] as const)('does not duplicate an icon choice or let late %s affect a replacement scope', async ending => {
@@ -102,7 +103,7 @@ describe('Agent thread interaction UI', () => {
     const mark = screen.getByText(icon), title = screen.getByText(prompt.title)
     expect(mark.tagName).toBe('SPAN'); expect(mark).toHaveAttribute('aria-hidden', 'true'); expect(title.contains(mark)).toBe(true)
     expect(title.textContent).toBe(icon + prompt.title)
-    expect(screen.getAllByRole('button')).toHaveLength(2); expect(mocks.resolve).not.toHaveBeenCalled(); expect(document.querySelector('img,a,script,input,textarea')).toBeNull()
+    expect(screen.getAllByRole('button')).toHaveLength(1); expect(mocks.resolve).not.toHaveBeenCalled(); expect(document.querySelector('img,a,script,input,textarea')).toBeNull()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Explicit feedback' })) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'icon-choice', answer: { status: 'answered', actionId: 'approve' } })
     expect(prompt.icon).toBe(icon)
@@ -119,7 +120,7 @@ describe('Agent thread interaction UI', () => {
     if (style === 'secondary') expect(button).not.toHaveStyle({ backgroundColor: color })
     else expect(button).toHaveStyle({ backgroundColor: color })
     expect(card()).toHaveStyle({ borderColor: alpha('#3579bd', 0.4) })
-    expect(screen.getAllByRole('button')).toHaveLength(2); expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button')).toHaveLength(1); expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument()
     expect(document.body.textContent).not.toContain('STYLE_UI_SECRET'); expect(prompt.footer).toContain('STYLE_UI_SECRET')
     expect(mocks.resolve).not.toHaveBeenCalled()
     await act(async () => { fireEvent.click(button) })
@@ -137,21 +138,22 @@ describe('Agent thread interaction UI', () => {
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'forged-style', answer: { status: 'answered', actionId: 'a' } })
     expect(prompt.actions[0].style).toBe(style)
   })
-  it('ignores inherited button style and keeps mixed omitted choices and dismissal independent', async () => {
+  it('ignores inherited button style and keeps mixed omitted choices independent, with no dismiss button', async () => {
     const actions = [{ id: 'a', label: 'Primary feedback', style: 'primary' as const }, { id: 'b', label: 'Original feedback' }, Object.assign(Object.create({ style: 'danger' }), { id: 'c', label: 'Inherited ignored' })]
     await mount({ id: 'mixed-styles', expiresAt: Date.now() + 60000, prompt: { kind: 'show_card', title: 'Mixed style data', actions } })
     expectButtonStyle(screen.getByRole('button', { name: 'Primary feedback' }), true, false)
     for (const name of ['Original feedback', 'Inherited ignored']) expectButtonStyle(screen.getByRole('button', { name }), false, false)
     expect(mocks.resolve).not.toHaveBeenCalled(); expect(Object.hasOwn(actions[1], 'style')).toBe(false)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
-    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'mixed-styles', answer: { status: 'dismissed' } })
+    expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull(); expect(screen.getAllByRole('button')).toHaveLength(3)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Inherited ignored' })) })
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'mixed-styles', answer: { status: 'answered', actionId: 'c' } })
   })
-  it.each(['primary', 'secondary', 'danger'] as const)('renders fixed action style without changing explicit feedback or dismissal style=%s', async style => {
+  it.each(['primary', 'secondary', 'danger'] as const)('renders fixed action style without changing explicit feedback, with no dismiss button style=%s', async style => {
     const prompt = { kind: 'show_card' as const, title: 'Button style is not approval', actions: [{ id: 'approve', label: 'Send feedback', style }] }
     await mount({ id: 'styled-choice', expiresAt: Date.now() + 60000, prompt })
     const button = screen.getByRole('button', { name: 'Send feedback' })
     expectButtonStyle(button, style !== 'secondary', style === 'danger')
-    expectButtonStyle(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' }), false, false)
+    expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull(); expect(screen.getAllByRole('button')).toHaveLength(1)
     expect(mocks.resolve).not.toHaveBeenCalled(); expect(document.querySelector('a,img,input,textarea,script')).toBeNull()
     await act(async () => { fireEvent.click(button) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'styled-choice', answer: { status: 'answered', actionId: 'approve' } })
@@ -166,15 +168,15 @@ describe('Agent thread interaction UI', () => {
     const region = card()
     expect(region).toHaveStyle({ borderColor: 'rgb(13, 35, 57)' }); expect(region).not.toHaveAttribute('accent')
     expect(document.querySelector('a,img,input,textarea,script')).toBeNull(); expect(mocks.resolve).not.toHaveBeenCalled()
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.getAllByRole('button')).toHaveLength(2)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.getAllByRole('button')).toHaveLength(1)
     expect(prompt.accent).toBe(accent)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
-    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'forged-accent', answer: { status: 'dismissed' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Dismiss by choice' })) })
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'forged-accent', answer: { status: 'answered', actionId: 'ack' } })
   })
   it.each(['bare', 'fields', 'subtitle', 'footer', 'all'])('maps a valid accent only to display styling with all optional contexts %#', async variant => {
     const prompt = { kind: 'show_card' as const, title: 'Fixed palette choice', accent: 'danger' as const, ...(['fields', 'all'].includes(variant) ? { fields: [{ label: 'Status', value: 'Not tool status' }] } : {}), ...(['subtitle', 'all'].includes(variant) ? { subtitle: '<b>Context only</b>' } : {}), ...(['footer', 'all'].includes(variant) ? { footer: 'Bearer ACCENT_CONTEXT_SECRET' } : {}), actions: [{ id: 'approve', label: 'Feedback only' }, { id: 'no', label: 'No feedback' }] }
     await mount({ id: 'context-accent', expiresAt: Date.now() + 60000, prompt })
-    expect(screen.getByText(prompt.title)).toBeInTheDocument(); expect(screen.getAllByRole('button')).toHaveLength(3)
+    expect(screen.getByText(prompt.title)).toBeInTheDocument(); expect(screen.getAllByRole('button')).toHaveLength(2)
     expect(document.querySelector('b,a,img,input,textarea,script')).toBeNull(); expect(document.body.textContent).not.toContain('ACCENT_CONTEXT_SECRET')
     expect(mocks.resolve).not.toHaveBeenCalled()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'No feedback' })) })
@@ -192,7 +194,7 @@ describe('Agent thread interaction UI', () => {
     expect(region).toHaveStyle({ borderColor: accent === 'neutral' ? tokens.neutral : alpha(tokens[accent as keyof typeof tokens], 0.4) })
     expect(title.closest('header')).toHaveStyle({ color: 'rgb(23, 45, 67)' })
     expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(screen.queryByRole('status')).not.toBeInTheDocument()
-    expect(screen.getAllByRole('button')).toHaveLength(2); expect(document.querySelector('a,img,input,textarea,script')).toBeNull()
+    expect(screen.getAllByRole('button')).toHaveLength(1); expect(document.querySelector('a,img,input,textarea,script')).toBeNull()
     expect(document.body.textContent).not.toContain('ACCENT_UI_SECRET'); expect(prompt.subtitle).toContain('ACCENT_UI_SECRET')
     expect(mocks.resolve).not.toHaveBeenCalled()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Explicit feedback' })) })
@@ -219,15 +221,16 @@ describe('Agent thread interaction UI', () => {
     expect(document.body.textContent).not.toMatch(/FOOTER_(?:BASIC|KEY|URL|CONTROL)_SECRET/)
     expect(document.querySelector('img,a,script,input,textarea')).toBeNull()
     expect(mocks.resolve).not.toHaveBeenCalled(); expect(prompt.footer).toBe(footer)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
-    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'footer-pattern', answer: { status: 'dismissed' } })
+    expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'B' })) })
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'footer-pattern', answer: { status: 'answered', actionId: 'b' } })
   })
-  it.each((['dismiss', 'expiry'] as const).flatMap(kind => [false, true].map(withAccent => [kind, withAccent] as const)))('never treats footer single-action %s as consent or an affirmative answer accent=%s', async (kind, withAccent) => {
+  it.each((['no dismiss button', 'expiry'] as const).flatMap(kind => [false, true].map(withAccent => [kind, withAccent] as const)))('never treats footer single-action %s as consent or an affirmative answer accent=%s', async (kind, withAccent) => {
     await mount({ id: 'footer-terminal', expiresAt: Date.now() + 10, prompt: { kind: 'show_card', title: 'Footer terminal', ...(withAccent ? { accent: 'success' as const } : {}), footer: 'Not approval', actions: [{ id: 'approve', label: 'Explicit feedback' }] } })
     expect(mocks.resolve).not.toHaveBeenCalled()
-    if (kind === 'dismiss') {
-      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
-      expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'footer-terminal', answer: { status: 'dismissed' } })
+    if (kind === 'no dismiss button') {
+      expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull(); expect(screen.getAllByRole('button')).toHaveLength(1)
+      await poll(); expect(mocks.resolve).not.toHaveBeenCalled()
     } else {
       await act(async () => { await vi.advanceTimersByTimeAsync(10) })
       expectExpired(); expect(mocks.resolve).not.toHaveBeenCalled()
@@ -248,13 +251,13 @@ describe('Agent thread interaction UI', () => {
     expect(screen.getByRole('button', { name: 'New feedback' })).not.toBeDisabled()
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'footer-old', answer: { status: 'answered', actionId: 'a' } })
   })
-  it.each(['bare', 'fields', 'subtitle', 'both'] as const)('requires an explicit click on the lone action and keeps dismissal independent context=%s', async variant => {
+  it.each(['bare', 'fields', 'subtitle', 'both'] as const)('requires an explicit click on the lone action, with no dismiss button, context=%s', async variant => {
     const prompt = { kind: 'show_card' as const, title: 'Single explicit button', actions: [{ id: 'approve', label: 'Feedback only, not approval' }],
       ...(['fields', 'both'].includes(variant) ? { fields: [{ label: 'Status', value: '<img src="https://external.invalid">' }] } : {}),
       ...(['subtitle', 'both'].includes(variant) ? { subtitle: 'Bearer SINGLE_UI_SECRET' } : {}) }
     await mount({ id: 'single-button', expiresAt: Date.now() + 60000, prompt })
-    expect(screen.getAllByRole('button')).toHaveLength(2)
-    expect(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull()
     expect(document.querySelector('img,a,input,textarea,script')).toBeNull()
     expect(document.body.textContent).not.toContain('SINGLE_UI_SECRET')
     await poll()
@@ -269,12 +272,12 @@ describe('Agent thread interaction UI', () => {
     expect(screen.queryAllByRole('button')).toHaveLength(0)
     await poll(); expect(screen.queryAllByRole('button')).toHaveLength(0)
   })
-  it.each(['dismiss', 'expiry'] as const)('never treats lone-action %s as an affirmative response', async kind => {
+  it.each(['no dismiss button', 'expiry'] as const)('never treats lone-action %s as an affirmative response', async kind => {
     await mount({ id: 'single-terminal', expiresAt: Date.now() + 10, prompt: { kind: 'show_card', title: 'One is not automatic', actions: [{ id: 'approve', label: 'Explicit feedback' }] } })
     expect(mocks.resolve).not.toHaveBeenCalled()
-    if (kind === 'dismiss') {
-      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
-      expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'single-terminal', answer: { status: 'dismissed' } })
+    if (kind === 'no dismiss button') {
+      expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull(); expect(screen.getAllByRole('button')).toHaveLength(1)
+      await poll(); expect(mocks.resolve).not.toHaveBeenCalled()
     } else {
       await act(async () => { await vi.advanceTimersByTimeAsync(10) })
       expectExpired()
@@ -312,8 +315,9 @@ describe('Agent thread interaction UI', () => {
     expect(document.querySelector('img,a,script,input,textarea')).toBeNull()
     expect(mocks.resolve).not.toHaveBeenCalled()
     expect(prompt.subtitle).toBe(subtitle)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
-    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'subtitle-pattern', answer: { status: 'dismissed' } })
+    expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'A' })) })
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'subtitle-pattern', answer: { status: 'answered', actionId: 'a' } })
   })
   it('renders a free-text prompt and submits to its exact conversation without a new chat turn', async () => {
     await mount()
@@ -353,21 +357,21 @@ describe('Agent thread interaction UI', () => {
     expect(document.body.textContent).not.toContain('newline')
     expect(fields[1].value).toContain('PRIVATE_CHOICE_FIELD')
     expect(document.querySelector('img,a,input,textarea,script')).toBeNull()
-    expect(screen.getAllByRole('button')).toHaveLength(3)
+    expect(screen.getAllByRole('button')).toHaveLength(2)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Feedback yes' })) })
     expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'choice-fields', answer: { status: 'answered', actionId: 'approve' } })
     expect(screen.queryAllByRole('button')).toHaveLength(0)
     await poll()
     expect(screen.queryAllByRole('button')).toHaveLength(0)
   })
-  it.each(['dismiss', 'expiry'] as const)('keeps choice fields read-only and never submits field values on %s', async kind => {
+  it.each(['no dismiss button', 'expiry'] as const)('keeps choice fields read-only and never submits field values on %s', async kind => {
     await mount({ id: 'field-lifetime', expiresAt: Date.now() + 10, prompt: { kind: 'show_card', title: 'Lifetime', fields: [{ label: 'Status', value: 'Read only', inline: true }, { label: 'Next', value: 'No form' }], actions: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] } })
     expect(screen.getByText('Status: Read only')).toBeInTheDocument()
     expect(screen.getByText('Next: No form')).toBeInTheDocument()
     expect(document.querySelector('input,textarea,a,img,script')).toBeNull()
-    if (kind === 'dismiss') {
-      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.dismiss' })) })
-      expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'a', interactionId: 'field-lifetime', answer: { status: 'dismissed' } })
+    if (kind === 'no dismiss button') {
+      expect(screen.queryByRole('button', { name: 'chat.agent_interaction.dismiss' })).toBeNull(); expect(screen.getAllByRole('button')).toHaveLength(2)
+      await poll(); expect(mocks.resolve).not.toHaveBeenCalled()
     } else {
       await act(async () => { await vi.advanceTimersByTimeAsync(10) })
       expectExpired()
@@ -408,6 +412,50 @@ describe('Agent thread interaction UI', () => {
     expect(screen.getAllByTestId('agent-prompt-card')).toHaveLength(2)
     expect(screen.getByText('Question next')).toBeInTheDocument()
     view.unmount(); host.remove()
+  })
+  it('keeps answered, cancelled and expired cards dimmed after the run ends, until the next run starts', async () => {
+    const host = window.document.createElement('div'); window.document.body.appendChild(host)
+    mocks.list.mockResolvedValue({ interactions: [{ id: 'plan', expiresAt: Date.now() + 60000, prompt: { kind: 'show_card', title: 'Pick a plan', actions: [{ id: 'a', label: 'Plan A' }, { id: 'b', label: 'Plan B' }] } }] })
+    const view = render(<AgentThreadInteractionPanel route={route} conversationId="a" active host={host} />)
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Plan B' })) })
+    mocks.list.mockResolvedValue({ interactions: [question('asked')] })
+    await poll()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.cancel' })) })
+    mocks.list.mockResolvedValue({ interactions: [{ ...question('late'), expiresAt: Date.now() + 600 }] })
+    await poll()
+    await act(async () => { await vi.advanceTimersByTimeAsync(700) })
+    mocks.list.mockResolvedValue({ interactions: [] })
+    // The run ends: the panel stops polling, and the three settled cards stay in the host.
+    view.rerender(<AgentThreadInteractionPanel route={route} conversationId="a" active={false} host={host} />)
+    const polls = mocks.list.mock.calls.length
+    await poll()
+    expect(mocks.list).toHaveBeenCalledTimes(polls)
+    const cards = screen.getAllByTestId('agent-prompt-card')
+    expect(cards).toHaveLength(3)
+    for (const entry of cards) { expect(host).toContainElement(entry); expect(entry).toHaveAttribute('data-resolved', 'true') }
+    expect(screen.getAllByTestId('chat-prompt-card-state').map(state => state.textContent)).toEqual([
+      'chat.agent_interaction.state_answered', 'chat.agent_interaction.state_dismissed', 'chat.agent_interaction.state_expired'
+    ])
+    expect(screen.getByTestId('chat-prompt-card-reply')).toHaveTextContent('→ Plan B')
+    expect(screen.queryAllByRole('button')).toHaveLength(0); expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    // Another conversation has none; coming back shows them again.
+    view.rerender(<AgentThreadInteractionPanel route={route} conversationId="b" active={false} host={host} />)
+    expect(screen.queryByTestId('agent-prompt-card')).not.toBeInTheDocument()
+    view.rerender(<AgentThreadInteractionPanel route={route} conversationId="a" active={false} host={host} />)
+    expect(screen.getAllByTestId('agent-prompt-card')).toHaveLength(3)
+    // The next run of the conversation starts without them, and they do not come back after it.
+    view.rerender(<AgentThreadInteractionPanel route={route} conversationId="a" active host={host} />)
+    await act(async () => { await Promise.resolve() })
+    expect(screen.queryByTestId('agent-prompt-card')).not.toBeInTheDocument()
+    view.rerender(<AgentThreadInteractionPanel route={route} conversationId="a" active={false} host={host} />)
+    expect(screen.queryByTestId('agent-prompt-card')).not.toBeInTheDocument()
+    view.unmount(); host.remove()
+  })
+  it('does not keep an open question after the run ends', async () => {
+    const view = await mount()
+    view.rerender(<AgentThreadInteractionPanel route={route} conversationId="a" active={false} />)
+    expect(screen.queryByTestId('agent-prompt-card')).not.toBeInTheDocument()
   })
   it('submits a one-line reply with Enter', async () => {
     await mount({ id: 'line', expiresAt: Date.now() + 60000, prompt: { kind: 'ask_user', question: 'Name?' } })

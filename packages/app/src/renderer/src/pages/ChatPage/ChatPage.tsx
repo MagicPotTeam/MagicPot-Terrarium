@@ -11188,7 +11188,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 const items = currentSessionQueuedSends.map((queuedSend): ChatQueueStripItem => ({
                   id: queuedSend.id,
                   text: queuedSend.overrides?.content ?? '',
-                  attachmentCount: (queuedSend.overrides?.queuedAttachmentTypes ?? queuedSend.overrides?.attachments ?? []).length,
+                  attachments: queuedSend.overrides?.queuedAttachmentTypes?.map((type) => ({ type })) ??
+                    queuedSend.overrides?.attachments?.map(({ type, fileName }) => ({ type, fileName })) ?? [],
                   status: queuedSend.inFlight ? 'preparing' : queuedSend.heldByStop ? 'held' : queuedSend.paused ? 'paused' : 'queued',
                   canEdit: isEditableQueuedSend(queuedSend),
                   canRemove: !queuedSend.inFlight,

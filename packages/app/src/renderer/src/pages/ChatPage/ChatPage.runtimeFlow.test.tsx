@@ -3353,9 +3353,10 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'chat.agent_html.save_snapshot' }))
       await waitFor(() => expect(hoisted.saveAgentHtmlAppMock).toHaveBeenCalledOnce())
       expect(hoisted.saveAgentHtmlAppMock.mock.calls[0][0]).toEqual({ route, conversationId: readCurrentSessionState()!.id, documentToken: 'document-token', appId: app.id, expectedRevision: 3, expectedStorageRevision: 0, operationId: expect.any(String) })
-      // The saved snapshot appears as a launcher card of its own after the save, without a request.
+      // The saved snapshot appears as a line in the app card's body after the save, without a request.
       const savedCard = await screen.findByTestId('agent-html-saved-item')
       expect(screen.getByTestId('agent-html-app-host')).toContainElement(savedCard)
+      expect(savedCard.closest('[data-testid="agent-html-app"]')).not.toBeNull()
       fireEvent.click(within(savedCard).getByRole('button', { name: 'chat.agent_html.restore' }))
       await waitFor(() => expect(hoisted.restoreAgentHtmlAppMock).toHaveBeenCalledOnce())
       expect(hoisted.restoreAgentHtmlAppMock.mock.calls[0][0]).toMatchObject({ route, conversationId: readCurrentSessionState()!.id, documentToken: 'document-token', savedId: saved.id, expectedStorageRevision: 1 })
@@ -4016,6 +4017,14 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(hoisted.resolveAgentInteractionMock).toHaveBeenCalledWith({ route, conversationId: sessionId, interactionId: 'owned-question', answer: { status: 'answered', text: 'Blue' } }))
       expect(dispatch).toHaveBeenCalledOnce()
       expect(readCurrentSessionState()?.messages.filter((message) => message.role === 'user')).toHaveLength(1)
+      // The run ends: the answered card stays at the end of the transcript, dimmed with its reply.
+      hoisted.listAgentInteractionsMock.mockResolvedValue({ interactions: [] })
+      await act(async () => settle(stream ? { result: { content: 'Received Blue' }, response: 'Received Blue' } : { content: 'Received Blue' }))
+      await waitFor(() => expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument())
+      const reply = screen.getByTestId('chat-prompt-card-reply')
+      expect(screen.getByTestId('agent-prompt-host')).toContainElement(reply)
+      expect(reply).toHaveTextContent('Blue')
+      expect(screen.getByTestId('agent-prompt-card')).toHaveAttribute('data-resolved', 'true')
     } finally {
       await act(async () => settle(stream ? { result: { content: 'Received Blue' }, response: 'Received Blue' } : { content: 'Received Blue' }))
       view.unmount()
@@ -9409,14 +9418,15 @@ describe('ChatPage runtime workflow integration', () => {
     // Stop never sends the queued item by itself: it stays, paused, with its attachment.
     await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('chat.queue_status_paused'))
     expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued text')
-    expect(within(screen.getByTestId('chat-queue-item')).getByTestId('chat-queue-attachments')).toHaveTextContent('chat.queue_attachment_count')
+    expect(within(screen.getByTestId('chat-queue-item')).getByTestId('chat-queue-attachment')).toHaveTextContent('queued.png')
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
     expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
 
     // Edit in the row keeps the attachment; Save resumes the item in place and it is sent.
     fireEvent.click(within(screen.getByTestId('chat-queue-item')).getByRole('button', { name: 'chat.queue_edit' }))
     expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue('queued text')
-    expect(within(screen.getByTestId('chat-queue-item')).getByText('chat.queue_attachment_count')).toBeInTheDocument()
+    // Upstream's editor has no attachment labels; the attachment stays with the item and is sent.
+    expect(within(screen.getByTestId('chat-queue-item')).queryByTestId('chat-queue-attachment')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
 
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
@@ -9992,7 +10002,7 @@ describe('ChatPage runtime workflow integration', () => {
         expect.stringContaining('second'),
         expect.stringContaining('third')
       ])
-      expect(within(queuedItems[0]).getByTestId('chat-queue-attachments')).toHaveTextContent('chat.queue_attachment_count')
+      expect(within(queuedItems[0]).getByTestId('chat-queue-attachment')).toHaveTextContent('chat.queue_attachment_image')
       expect(screen.getAllByRole('button', { name: 'chat.queue_remove' })).toHaveLength(2)
 
       await act(async () => rejectFirstRequest?.(new Error('first failed')))

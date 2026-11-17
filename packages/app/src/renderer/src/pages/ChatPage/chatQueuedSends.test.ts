@@ -234,11 +234,12 @@ describe('queue strip views', () => {
     expect(queuedEditResumes(stopped, 9)).toBe(false)
   })
 
-  it('shows the last three while collapsed, plus the blocking head when it is older', () => {
+  it('shows exactly the last three while collapsed, as upstream does', () => {
     const plain = [1, 2, 3, 4, 5].map((id) => composer(id))
     expect([...collapsedQueuedSendIds(plain)]).toEqual([3, 4, 5])
+    // An older blocking head is reached through "show more", not as a fourth row.
     const blocked = [composer(1, { paused: true }), ...[2, 3, 4, 5].map((id) => composer(id))]
-    expect([...collapsedQueuedSendIds(blocked)].sort()).toEqual([1, 3, 4, 5])
+    expect([...collapsedQueuedSendIds(blocked)]).toEqual([3, 4, 5])
     expect([...collapsedQueuedSendIds([composer(1), composer(2)])]).toEqual([1, 2])
   })
 })

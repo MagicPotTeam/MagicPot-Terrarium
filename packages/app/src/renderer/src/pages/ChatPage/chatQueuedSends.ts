@@ -178,17 +178,8 @@ export const queuedEditResumes = (
   return index >= 0 && !items.slice(0, index).some((item) => item.heldByStop || item.paused)
 }
 
-/**
- * The rows a collapsed queue view shows: the last three, and the item the newer ones wait
- * behind when it is not among them.
- */
+/** The rows a collapsed queue view shows: the last three, as upstream's strip does. */
 export const collapsedQueuedSendIds = <T extends QueuedSendState>(
   queue: readonly T[] | undefined,
   size = 3
-): Set<number> => {
-  const items = queue ?? []
-  const ids = new Set(items.slice(-size).map((item) => item.id))
-  const blocking = queuedSendBlockingNewer(items)
-  if (blocking) ids.add(blocking.id)
-  return ids
-}
+): Set<number> => new Set((queue ?? []).slice(-size).map((item) => item.id))

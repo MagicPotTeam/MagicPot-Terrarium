@@ -17,7 +17,7 @@ const theme = createTheme({
 const item = (id: number, extra: Partial<ChatQueueStripItem> = {}): ChatQueueStripItem => ({
   id,
   text: `message ${id}`,
-  attachmentCount: 0,
+  attachments: [],
   status: 'queued',
   canEdit: true,
   canRemove: true,
@@ -54,8 +54,8 @@ describe('ChatQueueStrip', () => {
   it("is upstream's queue strip: a count line, then flat tinted rows with text, status word and two text buttons", () => {
     const handlers = renderStrip({
       items: [
-        item(1, { attachmentCount: 2 }),
-        item(2, { text: '', attachmentCount: 1, status: 'held' })
+        item(1, { attachments: [{ type: 'image', fileName: 'hero.png' }, { type: 'file' }] }),
+        item(2, { text: '', attachments: [{ type: 'image' }], status: 'held' })
       ]
     })
     const panel = screen.getByRole('region', { name: 'chat.queue_region' })
@@ -66,8 +66,14 @@ describe('ChatQueueStrip', () => {
     expect(rows[0]).toHaveStyle({ padding: '6.4px', backgroundColor: alpha('#cca700', 0.16) })
     expect(getComputedStyle(rows[0]).borderRadius).toMatch(/^(|0|0px)$/)
     expect(within(rows[0]).getByTestId('chat-queue-text')).toHaveTextContent('message 1')
-    expect(within(rows[0]).getByTestId('chat-queue-attachments')).toHaveTextContent(
-      'chat.queue_attachment_count:2'
+    // One label per attachment, as upstream words it: the file name, or its kind.
+    expect(
+      within(rows[0])
+        .getAllByTestId('chat-queue-attachment')
+        .map((label) => label.textContent)
+    ).toEqual(['hero.png', 'chat.queue_attachment_file'])
+    expect(within(rows[1]).getByTestId('chat-queue-attachment')).toHaveTextContent(
+      'chat.queue_attachment_image'
     )
     expect(within(rows[0]).getByTestId('chat-queue-status')).toHaveTextContent(
       'chat.queue_status_queued'
@@ -104,7 +110,8 @@ describe('ChatQueueStrip', () => {
     expect(within(preparing).getByTestId('chat-queue-status')).toHaveTextContent(
       'chat.queue_status_preparing'
     )
-    expect(within(preparing).queryByRole('button', { name: 'chat.queue_edit' })).toBeNull()
+    // Upstream keeps both buttons and disables them.
+    expect(within(preparing).getByRole('button', { name: 'chat.queue_edit' })).toBeDisabled()
     expect(within(preparing).getByRole('button', { name: 'chat.queue_remove' })).toBeDisabled()
     expect(within(paused).getByTestId('chat-queue-status')).toHaveTextContent(
       'chat.queue_status_paused'
@@ -160,7 +167,7 @@ describe('ChatQueueStrip', () => {
 
   it('edits in the row: Ctrl/Cmd+Enter saves, Escape discards, Save needs text or an attachment', () => {
     const handlers = renderStrip({
-      items: [item(1, { attachmentCount: 1 }), item(2)],
+      items: [item(1, { attachments: [{ type: 'image', fileName: 'hero.png' }] }), item(2)],
       editing: { id: 1, text: 'draft' }
     })
     const row = screen.getAllByTestId('chat-queue-item')[0]
@@ -168,8 +175,12 @@ describe('ChatQueueStrip', () => {
     const editor = within(row).getByRole('textbox', { name: 'chat.queue_edit_field' })
     expect(editor).toHaveValue('draft')
     expect(editor).toHaveFocus()
-    // The attachments stay with the item while it is edited.
-    expect(row).toHaveTextContent('chat.queue_attachment_count:1')
+    // The editor is upstream's: the text field, Save and Discard; the attachment labels are not in it.
+    expect(within(row).queryByTestId('chat-queue-attachment')).toBeNull()
+    expect(within(row).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      'chat.queue_save',
+      'chat.queue_discard'
+    ])
     fireEvent.change(editor, { target: { value: 'draft 2' } })
     expect(handlers.onEditChange).toHaveBeenCalledWith('draft 2')
     fireEvent.keyDown(editor, { key: 'Enter' })
