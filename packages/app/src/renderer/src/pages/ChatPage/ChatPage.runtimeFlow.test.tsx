@@ -19,6 +19,7 @@ import {
   ChatPathlessAttachmentTooLargeError,
   describeChatAttachmentImportFailure
 } from './chatManagedMediaAttachments'
+import { CHAT_IMAGE_HEADER_READ_BYTES } from './chatImageHeaderDimensions'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
@@ -10177,14 +10178,19 @@ describe('ChatPage runtime workflow integration', () => {
 
   it('imports a composer file on disk by its path and never reads it in the renderer', async () => {
     const user = userEvent.setup()
-    const fileReaderConstructed = vi.fn()
+    const readSizes: number[] = []
+    const dataUrlRead = vi.fn()
     const OriginalFileReader = globalThis.FileReader
     vi.stubGlobal(
       'FileReader',
       class extends OriginalFileReader {
-        constructor() {
-          super()
-          fileReaderConstructed()
+        readAsArrayBuffer(blob: Blob) {
+          readSizes.push(blob.size)
+          super.readAsArrayBuffer(blob)
+        }
+        readAsDataURL(blob: Blob) {
+          dataUrlRead(blob)
+          super.readAsDataURL(blob)
         }
       }
     )
@@ -10223,8 +10229,45 @@ describe('ChatPage runtime workflow integration', () => {
     expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
     expect(hoisted.fileToDataUrlMock).not.toHaveBeenCalled()
     expect(arrayBuffer).not.toHaveBeenCalled()
-    // Only the dimensions probe may touch the file (a blob: preview URL), never its bytes.
-    expect(fileReaderConstructed).not.toHaveBeenCalled()
+    // Only the dimensions probe may touch the file: its header (a bounded slice; jsdom has
+    // no Blob#arrayBuffer, so it goes through FileReader here) or a blob: preview URL.
+    expect(dataUrlRead).not.toHaveBeenCalled()
+    for (const size of readSizes) expect(size).toBeLessThanOrEqual(CHAT_IMAGE_HEADER_READ_BYTES)
+  })
+
+  it('reads a picked image\'s size from its header and never decodes it', async () => {
+    const user = userEvent.setup()
+    const imageConstructed = vi.fn()
+    vi.stubGlobal(
+      'Image',
+      class {
+        constructor() {
+          imageConstructed()
+        }
+      }
+    )
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    // A real PNG header (IHDR 4000 x 3000) followed by the start of the image data.
+    const be32 = (value: number) => [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255]
+    const ascii = (text: string) => Array.from(text, (c) => c.charCodeAt(0))
+    const header = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      ...be32(13), ...ascii('IHDR'), ...be32(4000), ...be32(3000), 8, 6, 0, 0, 0, 0, 0, 0, 0,
+      ...be32(3), ...ascii('IDAT'), 1, 2, 3, 0, 0, 0, 0
+    ])
+    const picked = new File([header], 'big-board.png', { type: 'image/png' })
+    localFilePaths.set(picked, '/home/artist/Pictures/big-board.png')
+    hoisted.selectFileMock.mockResolvedValueOnce(picked)
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+    )
+    expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce()
+    expect(hoisted.fileToBlobUrlMock).not.toHaveBeenCalled()
+    expect(imageConstructed).not.toHaveBeenCalled()
   })
 
   it('refuses a path-less composer file above the in-memory cap with the localized message', async () => {

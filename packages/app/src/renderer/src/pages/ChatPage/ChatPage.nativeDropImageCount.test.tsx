@@ -538,7 +538,9 @@ describe('edit-form native image import preparation', () => {
     expect(f.importBytes).toHaveBeenCalledTimes(2)
     expect(f.blob).toHaveBeenCalledTimes(2)
     expect(f.imageCreated).toHaveBeenCalledTimes(2)
-    expect(f.fileReaderCreated).toHaveBeenCalledTimes(2)
+    // Per read image: its header (jsdom has no Blob#arrayBuffer, so a FileReader on a bounded
+    // slice) and its bytes. The third image is never touched.
+    expect(f.fileReaderCreated).toHaveBeenCalledTimes(4)
     expect(screen.getByTestId('attachments')).toHaveTextContent('existing.png')
     expect(screen.getByTestId('input')).toHaveValue('keep')
   })

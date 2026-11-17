@@ -215,6 +215,7 @@ import {
 } from '@renderer/utils/droppedImageUtils'
 import { collectDroppedDirectoryFilesBounded, DroppedDirectoryLimitError } from '../ProjectCanvasPage/dropDirectory'
 import { normalizeMediaReference } from '@shared/mediaReference'
+import { readChatImageHeaderDimensions } from './chatImageHeaderDimensions'
 import {
   boundIncomingChatImageSize,
   CHAT_PATHLESS_ATTACHMENT_MAX_BYTES,
@@ -1049,9 +1050,17 @@ const buildImageChatAttachmentFromFile = async (
     relativePath?: string
   }
 ): Promise<ChatAttachment> => {
-  const previewUrl = fileToBlobUrl(file)
-  const dimensions = await readImageDimensionsFromUrl(previewUrl)
-  revokeBlobUrl(previewUrl)
+  // The size from the file's first bytes; a full decode only when the header cannot tell.
+  const dimensions =
+    (await readChatImageHeaderDimensions(file)) ??
+    (await (async () => {
+      const previewUrl = fileToBlobUrl(file)
+      try {
+        return await readImageDimensionsFromUrl(previewUrl)
+      } finally {
+        revokeBlobUrl(previewUrl)
+      }
+    })())
   return importChatAttachment({
     service: api().svcManagedMedia,
     file,
