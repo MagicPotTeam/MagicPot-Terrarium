@@ -2587,6 +2587,50 @@ const CANVAS_SOURCE_STRING_KEY_CACHE_MAX_LENGTH = 2048
  */
 const CANVAS_MIRROR_NO_SPACE = 'no-space' as const
 
+/**
+ * A file at least this large is copied by main in a job the save does not wait
+ * for: on a slow disk the copy can take minutes, and the IndexedDB saves queued
+ * behind it (pasted images that exist only in the renderer) must not wait. Its
+ * slot stays unsafe until the file is in the folder, so it carries the copy the
+ * mirror held before (or keeps the save from pruning).
+ */
+export const canvasMirrorDetachedCopyConfig = { minBytes: 64 * 1024 * 1024 }
+
+type CanvasMirrorDetachedCopy = {
+  status: 'running' | 'done' | 'failed'
+  /** The plan serial at the time the job settled; plans after it listed its result. */
+  settledAtPlanSerial: number
+}
+
+// Detached copies by mirror asset folder, then by asset file name. A job is
+// remembered until a save that planned after it settled has run, so the prune of
+// any save in between keeps its file, and a failed job's next attempt waits for
+// the copy (and its fallback through the renderer) like any other asset.
+const canvasMirrorDetachedCopies = new Map<string, Map<string, CanvasMirrorDetachedCopy>>()
+// One detached copy at a time, across folders: a slow disk is not asked for two.
+let canvasMirrorDetachedCopyTail: Promise<void> = Promise.resolve()
+let canvasMirrorPlanSerial = 0
+
+/** Detached copies of one canvas: running, and remembered in all. For tests. */
+export function getCanvasMirrorDetachedCopyStats(storeKey: string): { running: number; remembered: number } {
+  let running = 0
+  let remembered = 0
+  const projectDirName = resolveProjectStorageDirName(storeKey)
+  for (const [assetDir, jobs] of canvasMirrorDetachedCopies) {
+    if (!assetDir.split(/[\\/]/).includes(projectDirName)) continue
+    for (const job of jobs.values()) {
+      remembered += 1
+      if (job.status === 'running') running += 1
+    }
+  }
+  return { running, remembered }
+}
+
+/** Resolves once every detached copy queued so far has settled. For tests. */
+export function waitForCanvasMirrorDetachedCopies(): Promise<void> {
+  return canvasMirrorDetachedCopyTail
+}
+
 // Keys of sources identified by their string (remote URLs, data: URLs); only
 // short strings are remembered so that no large data: URL is kept alive here.
 const canvasAssetKeyByShortSource = new Map<string, string>()
@@ -2641,6 +2685,8 @@ type CanvasMirrorPlan = {
   needsBytes: boolean
   /** Bytes read while planning (to compute a content key), by logical key. */
   bytesByLogicalKey: Map<string, ResolvedCanvasBinaryAsset>
+  /** Taken before the folder was listed; orders the plan against detached copies. */
+  serial: number
 }
 
 function collectCanvasMirrorSlots(items: readonly CanvasItem[]): CanvasMirrorSlot[] {
@@ -2892,6 +2938,8 @@ async function planCanvasMirrorSave(
   if (!transport) return null
 
   const slots = collectCanvasMirrorSlots(items)
+  canvasMirrorPlanSerial += 1
+  const serial = canvasMirrorPlanSerial
   const existing = slots.length > 0 ? await transport.list() : new Set<string>()
   const plan: CanvasMirrorPlan = {
     projectDir,
@@ -2900,7 +2948,8 @@ async function planCanvasMirrorSave(
     slotPlans: [],
     missing: new Map(),
     needsBytes: false,
-    bytesByLogicalKey: new Map()
+    bytesByLogicalKey: new Map(),
+    serial
   }
 
   for (const slot of slots) {
@@ -3018,6 +3067,77 @@ function noteCanvasMirrorSeeds(
   for (const entry of seeds?.values() ?? []) canvasMirrorSeedStats.keptBytes += entry.data.byteLength
 }
 
+/**
+ * Whether this asset is (or was just) copied by a detached job: true while the
+ * job runs or once it has copied the file, so the save treats the slot as not
+ * staged yet without waiting. A job that failed is forgotten here and the save
+ * copies the file itself (with its fallback through the renderer).
+ */
+function startOrJoinDetachedCanvasMirrorCopy(
+  plan: CanvasMirrorPlan,
+  assetFileName: string,
+  localPath: string,
+  sizeBytes: number | undefined
+): boolean {
+  const copy = plan.transport.copy
+  if (!copy) return false
+  let jobs = canvasMirrorDetachedCopies.get(plan.assetDir)
+  const known = jobs?.get(assetFileName)
+  if (known?.status === 'running' || known?.status === 'done') return true
+  if (known?.status === 'failed') {
+    jobs!.delete(assetFileName)
+    return false
+  }
+  if (sizeBytes === undefined || sizeBytes < canvasMirrorDetachedCopyConfig.minBytes) return false
+  if (!jobs) {
+    jobs = new Map()
+    canvasMirrorDetachedCopies.set(plan.assetDir, jobs)
+  }
+  const job: CanvasMirrorDetachedCopy = { status: 'running', settledAtPlanSerial: 0 }
+  jobs.set(assetFileName, job)
+  const run = async (): Promise<void> => {
+    let copiedBytes: number | typeof CANVAS_MIRROR_NO_SPACE | null = null
+    try {
+      copiedBytes = await copy(assetFileName, localPath)
+    } catch {
+      copiedBytes = null
+    }
+    if (copiedBytes === CANVAS_MIRROR_NO_SPACE) {
+      console.warn('[Canvas Storage] Not enough free disk space to mirror asset:', assetFileName)
+    }
+    // No room: final for this job; a later save starts another one (one statfs, no bytes).
+    job.status = typeof copiedBytes === 'number' && copiedBytes > 0 ? 'done' : 'failed'
+    job.settledAtPlanSerial = canvasMirrorPlanSerial
+    if (copiedBytes === CANVAS_MIRROR_NO_SPACE && jobs!.get(assetFileName) === job) {
+      jobs!.delete(assetFileName)
+    }
+  }
+  canvasMirrorDetachedCopyTail = canvasMirrorDetachedCopyTail.then(run, run)
+  return true
+}
+
+/** Entry names the prune of this save keeps for detached copies. */
+function collectDetachedCanvasMirrorEntryNames(plan: CanvasMirrorPlan): string[] {
+  const jobs = canvasMirrorDetachedCopies.get(plan.assetDir)
+  return jobs ? [...jobs.keys()] : []
+}
+
+/**
+ * Forgets the jobs whose result this save's plan has seen (the folder was listed
+ * after they settled). Called once the project file of that save is written: it
+ * names a copied file of every slot that still has one, and the history walk
+ * protects the rest.
+ */
+function forgetSeenDetachedCanvasMirrorCopies(plan: CanvasMirrorPlan): void {
+  const jobs = canvasMirrorDetachedCopies.get(plan.assetDir)
+  if (!jobs) return
+  for (const [assetFileName, job] of jobs) {
+    // A failed job of a slot this save still has was consumed by its staging above.
+    if (job.status !== 'running' && job.settledAtPlanSerial < plan.serial) jobs.delete(assetFileName)
+  }
+  if (jobs.size === 0) canvasMirrorDetachedCopies.delete(plan.assetDir)
+}
+
 async function stageCanvasMirrorAsset(
   plan: CanvasMirrorPlan,
   slotPlan: CanvasMirrorSlotPlan,
@@ -3036,6 +3156,14 @@ async function stageCanvasMirrorAsset(
     const writesSeededContent = writesCanvasMirrorSeedAsIs(assetKey, seeded)
     // A file the main process may read is copied there; its bytes never enter the renderer.
     if (localPath && plan.transport.copy && !writesSeededContent && copiesCanvasMirrorSlotByPath(slot)) {
+      // A large file is copied without holding up this save (and the IndexedDB saves after it).
+      const detachable = canvasMirrorDetachedCopies.get(plan.assetDir)?.has(assetFileName)
+        ? undefined
+        : (getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src)?.sizeBytes ??
+          (await readCanvasLocalSourceFileIdentity(localPath))?.sizeBytes)
+      if (startOrJoinDetachedCanvasMirrorCopy(plan, assetFileName, localPath, detachable)) {
+        return false
+      }
       const copiedBytes = await plan.transport.copy(assetFileName, localPath)
       // No room on the mirror's volume: final for this save, the bytes are not sent again.
       if (copiedBytes === CANVAS_MIRROR_NO_SPACE) {
@@ -3279,6 +3407,7 @@ async function executeCanvasMirrorSave(
     if (receipt?.success !== true) {
       throw new Error('CANVAS_PROJECT_METADATA_WRITE_UNACKNOWLEDGED')
     }
+    forgetSeenDetachedCanvasMirrorCopies(plan)
     if (typeof svcFs.pruneAutoSaveProjects === 'function') {
       void svcFs.pruneAutoSaveProjects({
         currentProjectDirName: resolveProjectStorageDirName(storeKey),
@@ -3294,6 +3423,8 @@ async function executeCanvasMirrorSave(
       try {
         const keepAssetKeys = new Set<string>()
         const keepEntryNames = new Set<string>(carriedEntryNames)
+        // A detached copy may publish its file before any project file names it.
+        for (const entryName of collectDetachedCanvasMirrorEntryNames(plan)) keepEntryNames.add(entryName)
         for (const fileName of refBySlot.values()) {
           keepAssetKeys.add(fileName.slice(PROJECT_ASSET_DIRNAME.length + 1).split('.')[0])
         }

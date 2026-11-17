@@ -2,6 +2,9 @@ import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   canvasMirrorSeedStats,
+  canvasMirrorDetachedCopyConfig,
+  getCanvasMirrorDetachedCopyStats,
+  waitForCanvasMirrorDetachedCopies,
   canvasProtectedStateWalkStats,
   countCanvasAssetKeyReferences,
   getCanvasMirrorEntryNameCacheStats,
@@ -739,7 +742,9 @@ function createFakeMirror(autoSaveRoot = '/home/u/AutoSave') {
     applyPrune: false,
     failWrite: null as ((assetFileName: string) => boolean) | null,
     /** Sizes the metadata call reports instead of the real ones, by full path. */
-    reportedSizes: new Map<string, number>()
+    reportedSizes: new Map<string, number>(),
+    /** While set, every direct copy waits for it (a long copy on a slow disk). */
+    holdCopy: null as Promise<void> | null
   }
   const assetPath = (projectDirName: string, assetFileName: string): string =>
     `${autoSaveRoot}/${projectDirName}/assets/${assetFileName}`
@@ -759,6 +764,7 @@ function createFakeMirror(autoSaveRoot = '/home/u/AutoSave') {
       sourcePath: string
     }) => {
       calls.copy.push({ assetFileName: req.assetFileName, sourcePath: req.sourcePath })
+      if (state.holdCopy) await state.holdCopy
       const data = readable(req.sourcePath)
       if (state.refuseCopy || !data) throw new Error('Canvas mirror asset source is not authorized')
       if (state.noSpace) return { status: 'no-space' as const, sizeBytes: data.byteLength }
@@ -2180,6 +2186,93 @@ describe('mirror staging failures', () => {
     expect(fetchCalls.filter((url) => url.includes('huge'))).toEqual([])
     expect(mirror.calls.write.map((call) => call.assetFileName)).toEqual([`${contentKey([9])}.png`])
     expect(mirror.project().items[0].src).toBe(`local-media://${bigPath}`)
+  })
+})
+
+describe('large mirror copies', () => {
+  // Files from 4 bytes on count as large here (64 MB in the app).
+  beforeEach(() => {
+    canvasMirrorDetachedCopyConfig.minBytes = 4
+  })
+  afterEach(() => {
+    canvasMirrorDetachedCopyConfig.minBytes = 64 * 1024 * 1024
+  })
+
+  it('does not hold up the IndexedDB saves while a large file is copied', async () => {
+    const mirror = createFakeMirror()
+    mirror.localFiles.set('/slow/disk/video.mp4', new Uint8Array([1, 9, 9, 1]))
+    let releaseCopy = (): void => {}
+    mirror.state.holdCopy = new Promise<void>((resolve) => {
+      releaseCopy = resolve
+    })
+    const video = imageItem('video', 'local-media:///slow/disk/video.mp4', { fileName: 'video.mp4' })
+    await saveCanvasItems([video], 'mirror-detached')
+    expect(mirror.calls.copy).toHaveLength(1)
+    expect(getCanvasMirrorDetachedCopyStats('mirror-detached').running).toBe(1)
+    // The copy is still running: the slot has no copy yet, so it keeps its source and
+    // nothing is pruned.
+    expect(mirror.project().items[0].src).toBe('local-media:///slow/disk/video.mp4')
+    expect(mirror.calls.prune).toEqual([])
+
+    // A pasted image (bytes only in the renderer) is stored while the copy runs, and
+    // the save does not start the same copy again.
+    const pasted = imageItem('pasted', registerSource('blob:detached-pasted', [4, 2]))
+    await saveCanvasItems([video, pasted], 'mirror-detached')
+    expect(fake.record('mirror-detached')!.items.map((item) => item.id)).toEqual(['video', 'pasted'])
+    expect(mirror.calls.copy).toHaveLength(1)
+    expect(mirror.assetFiles()).toEqual([`${contentKey([4, 2])}.png`])
+
+    // The video is deleted while its copy runs: a prune keeps the file the copy publishes.
+    mirror.state.applyPrune = true
+    const videoFile = mirror.calls.copy[0].assetFileName
+    expect(videoFile).toMatch(/^f-[0-9a-f]{40}\.mp4$/)
+    await saveCanvasItems([pasted], 'mirror-detached')
+    expect(mirror.calls.prune.at(-1)!.keepEntryNames).toContain(videoFile)
+
+    releaseCopy()
+    mirror.state.holdCopy = null
+    await waitForCanvasMirrorDetachedCopies()
+    expect(getCanvasMirrorDetachedCopyStats('mirror-detached').running).toBe(0)
+    expect(mirror.assetFiles()).toContain(videoFile)
+
+    // Undo brings the video back: the next save names the copied file, with no second
+    // copy, and the job is forgotten.
+    mirror.resetCalls()
+    await saveCanvasItems([video, pasted], 'mirror-detached')
+    expect(mirror.calls.copy).toEqual([])
+    expect(mirror.project().items.find((item) => item.id === 'video')!.src).toBe(`assets/${videoFile}`)
+    expect(getCanvasMirrorDetachedCopyStats('mirror-detached').remembered).toBe(0)
+  })
+
+  it('copies a large file within the save once a detached copy failed, falling back to the renderer', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.refuseCopy = true
+    mirror.localFiles.set('/mnt/share/big.mov', new Uint8Array([3, 3, 3, 3, 3]))
+    const big = imageItem('big', 'local-media:///mnt/share/big.mov', { fileName: 'big.mov' })
+    await saveCanvasItems([big], 'mirror-detached-refused')
+    await waitForCanvasMirrorDetachedCopies()
+    expect(mirror.calls.copy).toHaveLength(1)
+    expect(mirror.calls.write).toEqual([])
+
+    mirror.resetCalls()
+    await saveCanvasItems([{ ...big, x: 1 } as CanvasItem], 'mirror-detached-refused')
+    expect(mirror.calls.copy).toHaveLength(1)
+    expect(mirror.calls.write).toHaveLength(1)
+    expect(mirror.project().items[0].src).toBe(`assets/${mirror.assetFiles()[0]}`)
+    expect(getCanvasMirrorDetachedCopyStats('mirror-detached-refused').remembered).toBe(0)
+  })
+
+  it('treats a detached copy refused for lack of space as final and does not retry it in that save', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.noSpace = true
+    mirror.localFiles.set('/data/huge.mp4', new Uint8Array([5, 5, 5, 5, 5]))
+    const huge = imageItem('huge', 'local-media:///data/huge.mp4', { fileName: 'huge.mp4' })
+    await saveCanvasItems([huge], 'mirror-detached-full')
+    await waitForCanvasMirrorDetachedCopies()
+    expect(mirror.calls.copy).toHaveLength(1)
+    expect(mirror.calls.write).toEqual([])
+    expect(mirror.assetFiles()).toEqual([])
+    expect(getCanvasMirrorDetachedCopyStats('mirror-detached-full').remembered).toBe(0)
   })
 })
 
