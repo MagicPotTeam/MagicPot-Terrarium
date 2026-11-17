@@ -119,6 +119,8 @@ describe('Studio basic workspace', () => {
     expect(h.api).not.toHaveBeenCalled()
   }, 20_000)
 
+  // Explicit bound, not a duration assertion: two MUI selects opened and queried by role, 1.6 s alone, up to 7.6 s
+  // with four runs in parallel.
   it('exports a selected manual node bundle without credentials, network, Start or permission fields', async () => {
     config.studio_workspace = existing()
     const create = vi.fn(() => 'blob:bundle-test')
@@ -137,7 +139,7 @@ describe('Studio basic workspace', () => {
     expect(bundle).toEqual({ format: 'magicpot-studio-creature-bundle', version: 1, creature: existing().creatures[0], target: existing().nodes[0], delivery: 'manual', start: false })
     expect(JSON.stringify(bundle)).not.toMatch(/api_key|token|permission|PRIVATE/)
     expect(h.api).not.toHaveBeenCalled(); expect(h.save).not.toHaveBeenCalled()
-  })
+  }, 20_000)
 
   it('rejects unknown fields, duplicate IDs, credential-bearing node URLs and oversized restores', () => {
     for (const bad of [

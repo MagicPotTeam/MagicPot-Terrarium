@@ -249,6 +249,7 @@ describe('ChatMessageList real edit-form interactions', () => {
     expect(onSendEditedMessage.mock.calls[0][1]).toEqual([hidden, shared, between])
   })
 
+  // Slow: 51 image chips in the real edit form, queried by role (~1.3 s alone, up to 7 s under 4x load).
   it('removes only one repeated hidden image occurrence above the limit', () => {
     const base = editingSession()
     const hidden = { ...imageAttachment('repeated-hidden.png'), hiddenFromChatView: true }
@@ -261,7 +262,7 @@ describe('ChatMessageList real edit-form interactions', () => {
     expect(screen.queryByRole('button', { name: 'Remove repeated-hidden.png' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
     expect(onSendEditedMessage.mock.calls[0][1]).toEqual([hidden, ...images])
-  })
+  }, 30_000)
 
   it('does not remove an additional duplicate when the same rendered button fires twice in one batch', () => {
     const base = editingSession()
@@ -275,6 +276,7 @@ describe('ChatMessageList real edit-form interactions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
     expect(onSendEditedMessage.mock.calls[0][1]).toEqual([duplicate, duplicate])
   })
+  // Slow: 51 image chips in the real edit form, queried by role (~1.6 s alone, up to 8 s under 4x load).
   it('reveals a hidden image only above the limit so it can be removed before rerunning', () => {
     const base = editingSession()
     const images = Array.from({ length: 50 }, (_, index) => imageAttachment(`visible-${index}.png`))
@@ -300,7 +302,7 @@ describe('ChatMessageList real edit-form interactions', () => {
       'retained draft', [...images, ...base.messages[2].attachments!],
       base.messages[2].hiddenContext, base.messages.slice(0, 2)
     )
-  })
+  }, 30_000)
 
   it('keeps a hidden image hidden at the limit', () => {
     const base = editingSession()

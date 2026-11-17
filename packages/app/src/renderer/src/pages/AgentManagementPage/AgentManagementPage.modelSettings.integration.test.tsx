@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { configureStore } from '@reduxjs/toolkit'
 import { Provider } from 'react-redux'
 import { HashRouter } from 'react-router-dom'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import layoutSlice, { type LayoutState } from '@renderer/store/slices/layoutSlice'
 import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
@@ -53,6 +53,13 @@ beforeEach(() => {
   expect(rendererHostExtensionApiV1.settings).toBeUndefined()
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+// The routes load AgentManagementPage and SettingsPage lazily. Their first import (module transform) took longer
+// than findBy's 1 s under load, so the first visit was not found in time (19 of 20 runs with four in parallel).
+// Load both once here; the lazy routes then resolve from the module cache.
+beforeAll(async () => {
+  await import('@renderer/pages/AgentManagementPage/AgentManagementPage')
+  await import('@renderer/pages/SettingsPage/SettingsPage')
+}, 60_000)
 const settle = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)) }) }
 const modelAction = () => screen.getByRole('button', { name: 'Open model-profile settings' })
 const openManagement = async () => { fireEvent.click(screen.getByRole('button', { name: 'Agent management' })); expect(await screen.findByRole('heading', { name: 'Agent management' })).toBeVisible() }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
@@ -419,12 +419,23 @@ describe('cancellation, lifecycle and bounded concurrent work', () => {
 })
 
 describe('real adapter and kernel preserve default read access and explicit tool restrictions', () => {
+  let runtime: typeof import('../assistantRuntime/executionAdapter') &
+    typeof import('../assistantRuntime/sessionStore') &
+    typeof import('@shared/config/config')
+  // Loading the real assistant runtime is setup, not the behaviour under test. Inside the first
+  // case it took 4.5 s alone and over 5 s under load: that case timed out and kept running into
+  // the next ones (EEXIST, "not a constructor"). Load it once here, with its own bound.
+  beforeAll(async () => {
+    runtime = {
+      ...(await import('../assistantRuntime/executionAdapter')),
+      ...(await import('../assistantRuntime/sessionStore')),
+      ...(await import('@shared/config/config'))
+    }
+  }, 60_000)
   it.each(['files.read', 'files.tree', 'files.glob', 'files.json.read'] as const)(
     'executes absolute %s through the real registry without prompting',
     async (tool) => {
-      const { AssistantExecutionAdapter } = await import('../assistantRuntime/executionAdapter')
-      const { AssistantSessionStore } = await import('../assistantRuntime/sessionStore')
-      const { DEFAULT_CONFIG } = await import('@shared/config/config')
+      const { AssistantExecutionAdapter, AssistantSessionStore, DEFAULT_CONFIG } = runtime
       const file = await fixture('directory/owned.txt', 'OWNED_CONTENT')
       const workspace = path.join(root, 'workspace')
       await fs.mkdir(workspace)
@@ -476,9 +487,7 @@ describe('real adapter and kernel preserve default read access and explicit tool
   it.each(['files.read', 'files.tree'] as const)(
     'does not override an explicit denial of %s',
     async (tool) => {
-      const { AssistantExecutionAdapter } = await import('../assistantRuntime/executionAdapter')
-      const { AssistantSessionStore } = await import('../assistantRuntime/sessionStore')
-      const { DEFAULT_CONFIG } = await import('@shared/config/config')
+      const { AssistantExecutionAdapter, AssistantSessionStore, DEFAULT_CONFIG } = runtime
       const store = new AssistantSessionStore(path.join(root, 'denied-session.json'))
       const adapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
       const authorize = vi.spyOn(LocalFileReadGrants.prototype, 'authorize')
