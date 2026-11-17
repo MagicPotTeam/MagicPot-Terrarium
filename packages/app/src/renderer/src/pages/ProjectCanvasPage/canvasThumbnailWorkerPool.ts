@@ -12,9 +12,11 @@ export const DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_MAX_QUEUE_SIZE = 32
 export const DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_IDLE_TTL_MS = 30_000
 // Once the pool has nothing running and nothing queued (an import finished), its idle workers
 // end this soon instead of after the idle TTL: each one holds a V8 isolate and what its last
-// decode left behind. The short wait covers the gaps between the jobs of one import; the next
-// job starts a worker again.
-export const DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_DRAINED_TTL_MS = 1_000
+// decode left behind. The wait covers the gaps between the jobs of one import and between
+// jobs that come a few seconds apart (a board opening, a pan onto items without thumbnails,
+// small drag-ins), which would otherwise each pay a worker start; a later job starts a worker
+// again.
+export const DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_DRAINED_TTL_MS = 3_000
 
 export type CanvasThumbnailWorkerPoolOptions = {
   maxWorkers: number
