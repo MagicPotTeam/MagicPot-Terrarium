@@ -8487,10 +8487,11 @@ describe('ChatPage runtime workflow integration', () => {
     }
 
     // The drop reads its blob: URL inside the managed-media import (b86546df), a few microtasks
-    // after the drop event: by default wait until that read is in flight before changing the
-    // destination. With { beforeRead: true } return right after the drop event instead, so the
-    // test can change the destination in the window before the read starts.
-    const beginBlobDrop = async ({ beforeRead = false }: { beforeRead?: boolean } = {}) => {
+    // after the drop event: by default wait until that read is in flight before the caller
+    // changes the destination. changeBeforeRead covers the window before the read instead: it
+    // runs synchronously right after the drop event, with no await in between, so the drop's
+    // pending microtasks cannot reach fetch first (an awaited helper would let them).
+    const beginBlobDrop = async ({ changeBeforeRead }: { changeBeforeRead?: () => void } = {}) => {
       let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
       const readAsDataURL = vi.fn()
       vi.stubGlobal(
@@ -8523,8 +8524,10 @@ describe('ChatPage runtime workflow integration', () => {
           getData: (type: string) => (type === 'application/x-qapp-image' ? payload : '')
         }
       })
-      if (beforeRead) {
-        // Nothing has been read yet: the destination change happens before the fetch starts.
+      if (changeBeforeRead) {
+        expect(fetchMock).not.toHaveBeenCalled()
+        changeBeforeRead()
+        // The destination changed while nothing had been read yet.
         expect(fetchMock).not.toHaveBeenCalled()
       } else {
         await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop'))
@@ -8536,8 +8539,10 @@ describe('ChatPage runtime workflow integration', () => {
             blob: async () => new Blob(['canvas'], { type: 'image/png' })
           })
         })
-        if (beforeRead && fetchMock.mock.calls.length === 0) {
-          // A drop discarded before its read may never fetch: let it settle instead.
+        if (changeBeforeRead && fetchMock.mock.calls.length === 0) {
+          // Today the product still reads and imports the blob after the destination changed
+          // and discards it afterwards, so this branch does not run. It keeps these tests valid
+          // if handleDrop learns to skip the read for a stale destination: let it settle.
           await act(async () => {
             await new Promise((resolve) => setTimeout(resolve, 20))
           })
@@ -8631,21 +8636,23 @@ describe('ChatPage runtime workflow integration', () => {
         renderChatPage()
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
         startEditing(originalReceiver)
-        const finishDrop = await beginBlobDrop({ beforeRead: true })
-
-        act(() => {
-          editingProps().onSetEditingIndex(null)
-          editingProps().onSetEditingContent('')
-          editingProps().onRegisterEditingAttachmentReceiver(null)
+        const finishDrop = await beginBlobDrop({
+          changeBeforeRead: () => {
+            act(() => {
+              editingProps().onSetEditingIndex(null)
+              editingProps().onSetEditingContent('')
+              editingProps().onRegisterEditingAttachmentReceiver(null)
+            })
+            if (change !== 'cancel') {
+              act(() => {
+                editingProps().onSetEditingIndex(change === 'another edit' ? 2 : 0)
+                editingProps().onRegisterEditingAttachmentReceiver(
+                  change === 'another edit' ? nextReceiver : originalReceiver
+                )
+              })
+            }
+          }
         })
-        if (change !== 'cancel') {
-          act(() => {
-            editingProps().onSetEditingIndex(change === 'another edit' ? 2 : 0)
-            editingProps().onRegisterEditingAttachmentReceiver(
-              change === 'another edit' ? nextReceiver : originalReceiver
-            )
-          })
-        }
         await finishDrop()
 
         expect(originalReceiver).not.toHaveBeenCalled()
@@ -8738,15 +8745,43 @@ describe('ChatPage runtime workflow integration', () => {
       async (change) => {
         renderChatPage()
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
-        const finishDrop = await beginBlobDrop({ beforeRead: true })
-
-        await dispatchSwitchSession('drop-session-b')
-        if (change === 'session round trip') await dispatchSwitchSession('drop-session-a')
+        // A synchronous switch: dispatchSwitchSession awaits, which would let the read start.
+        const switchSessionNow = (sessionId: string) =>
+          act(() => {
+            window.dispatchEvent(
+              new CustomEvent('chat:switchSession', {
+                detail: { scope: 'runtime-flow', sessionId }
+              })
+            )
+          })
+        const finishDrop = await beginBlobDrop({
+          changeBeforeRead: () => {
+            switchSessionNow('drop-session-b')
+            if (change === 'session round trip') switchSessionNow('drop-session-a')
+          }
+        })
         await finishDrop()
 
+        expect(readCurrentSessionState()?.id).toBe(
+          change === 'switch' ? 'drop-session-b' : 'drop-session-a'
+        )
         expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
         expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
         expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        // Nothing reached the old session's stored draft or its draft backup either.
+        const storedDrafts = JSON.stringify([
+          hoisted.storedSessions.value.find((session) => session.id === 'drop-session-a'),
+          hoisted.draftBackups.value
+        ])
+        expect(storedDrafts).not.toContain('delayed-drop')
+        expect(storedDrafts).not.toContain('text from delayed drop')
+        if (change === 'switch') {
+          // ... nor its composer, once the old session is open again.
+          await dispatchSwitchSession('drop-session-a')
+          expect(readCurrentSessionState()?.id).toBe('drop-session-a')
+          expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+          expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        }
       }
     )
 
@@ -8755,9 +8790,7 @@ describe('ChatPage runtime workflow integration', () => {
       const { unmount } = renderChatPage()
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
       startEditing(receiveAttachment)
-      const finishDrop = await beginBlobDrop({ beforeRead: true })
-
-      unmount()
+      const finishDrop = await beginBlobDrop({ changeBeforeRead: unmount })
       await finishDrop()
 
       expect(receiveAttachment).not.toHaveBeenCalled()
