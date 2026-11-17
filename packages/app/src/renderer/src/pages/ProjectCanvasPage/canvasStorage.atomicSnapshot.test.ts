@@ -157,7 +157,11 @@ describe('canvas snapshot atomic staged fake', () => {
       // only the per-item copy of the previous release is written together with the record.
       const metadataTx = fake.transactions.find((tx) => tx.puts.includes('canvas-items'))!
       expect(metadataTx.mode).toBe('readwrite')
-      expect(metadataTx.puts.filter((store) => store === 'canvas-items')).toEqual(['canvas-items'])
+      // The record and its revision marker, in the one metadata transaction (a record put
+      // that throws is the last one issued).
+      expect(metadataTx.puts.filter((store) => store === 'canvas-items')).toEqual(
+        mode === 'sync-throw' ? ['canvas-items'] : ['canvas-items', 'canvas-items']
+      )
       const assetTx = fake.transactions.find((tx) => tx.puts.includes('canvas-blobs'))!
       expect(assetTx.committed).toBe(true)
       expect(fake.transactions.indexOf(assetTx)).toBeLessThan(fake.transactions.indexOf(metadataTx))

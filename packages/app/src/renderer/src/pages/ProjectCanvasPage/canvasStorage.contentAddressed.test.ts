@@ -6,6 +6,8 @@ import {
   getCanvasMirrorDetachedCopyStats,
   waitForCanvasMirrorDetachedCopies,
   canvasProtectedStateWalkStats,
+  canvasRecordReadStats,
+  clearCanvasItems,
   countCanvasAssetKeyReferences,
   getCanvasMirrorEntryNameCacheStats,
   loadCanvasItems,
@@ -429,7 +431,8 @@ describe('content-addressed canvas blob store', () => {
 
     expect(fetchCalls).toEqual([])
     expect(fake.blobPuts()).toEqual([])
-    expect(fake.recordPuts()).toHaveLength(1)
+    // The record, plus its small revision marker.
+    expect(fake.recordPuts().map((put) => put.key)).toEqual(['twice', 'twice::canvas-save-revision'])
     expect(fake.log.deletes).toEqual([])
   })
 
@@ -2292,6 +2295,68 @@ describe('save-time cost on big boards', () => {
     // Only the local source is remembered, and no key is anywhere near an inline source's length.
     expect(after.entries - before.entries).toBe(1)
     expect(after.longestKeyLength).toBeLessThan(2048 + 256)
+  })
+
+  it('reads the stored record once per session instead of up to three times per save', async () => {
+    const items = Array.from({ length: 40 }, (_, index) =>
+      imageItem(`r${index}`, registerSource(`blob:rev-${index}`, [index, 1]))
+    )
+    await saveCanvasItems(items, 'rev-cache')
+    canvasRecordReadStats.fullReads = 0
+    fake.resetLog()
+    for (let save = 0; save < 5; save += 1) {
+      await saveCanvasItems(items.map((item) => ({ ...item, x: save }) as CanvasItem), 'rev-cache')
+    }
+    // Blur flushes too.
+    await saveCanvasItems(items, 'rev-cache', [], [], null, { metadataOnly: true })
+    expect(canvasRecordReadStats.fullReads).toBe(0)
+    expect(fake.log.gets.filter((get) => get.key === 'rev-cache')).toEqual([])
+
+    // Deleting, adding and the one save of grace work from the cached summary as before.
+    const added = imageItem('added', registerSource('blob:rev-added', [9, 9]))
+    await saveCanvasItems([...items.slice(1), added], 'rev-cache')
+    expect(fake.blobKeys()).toContain(assetBlobKey('rev-cache', [0, 1]))
+    expect(fake.blobKeys()).toContain(legacyBlobKey('rev-cache', 'r0'))
+    await saveCanvasItems([...items.slice(1), added], 'rev-cache')
+    expect(fake.blobKeys()).not.toContain(assetBlobKey('rev-cache', [0, 1]))
+    expect(fake.blobKeys()).not.toContain(legacyBlobKey('rev-cache', 'r0'))
+    expect(fake.blobBytes(legacyBlobKey('rev-cache', 'added'))).toEqual([9, 9])
+    expect(loadLikePreviousRelease('rev-cache').size).toBe(40)
+    expect(canvasRecordReadStats.fullReads).toBe(0)
+  })
+
+  it('reads the record again once another writer has committed since', async () => {
+    const kept = imageItem('kept', registerSource('blob:rev-kept', [1, 1]))
+    await saveCanvasItems([kept], 'rev-other')
+    // Another window adds an image and commits (its own revision marker).
+    const theirs = imageItem('theirs', registerSource('blob:rev-theirs', [2, 2]))
+    const ours = fake.record('rev-other')!
+    fake.committed.get('canvas-blobs')!.set(assetBlobKey('rev-other', [2, 2]), {
+      data: new Uint8Array([2, 2]).buffer,
+      mimeType: 'image/png'
+    })
+    fake.committed.get('canvas-blobs')!.set(legacyBlobKey('rev-other', 'theirs'), {
+      data: new Uint8Array([2, 2]).buffer,
+      mimeType: 'image/png'
+    })
+    fake.committed.get('canvas-items')!.set('rev-other', {
+      ...ours,
+      items: [...ours.items, { ...theirs, src: '', assetKey: contentKey([2, 2]) }],
+      legacyBlobAssetKeys: { kept: contentKey([1, 1]), theirs: contentKey([2, 2]) }
+    })
+    fake.committed.get('canvas-items')!.set('rev-other::canvas-save-revision', 'another-window:1')
+
+    // This window saves a stale snapshot over it: the record is read again, so what the
+    // other window's record named survives this save (one save of grace).
+    canvasRecordReadStats.fullReads = 0
+    await saveCanvasItems([{ ...kept, x: 3 } as CanvasItem], 'rev-other')
+    expect(canvasRecordReadStats.fullReads).toBeGreaterThan(0)
+    expect(fake.blobKeys()).toContain(assetBlobKey('rev-other', [2, 2]))
+    expect(fake.blobKeys()).toContain(legacyBlobKey('rev-other', 'theirs'))
+
+    // A clear drops the marker with the record.
+    await clearCanvasItems('rev-other')
+    expect(fake.committed.get('canvas-items')!.has('rev-other::canvas-save-revision')).toBe(false)
   })
 
   it('visits each item object once across 50 history lists of a 2000-item board', async () => {

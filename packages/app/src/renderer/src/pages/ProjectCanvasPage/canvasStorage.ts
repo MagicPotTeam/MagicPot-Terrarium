@@ -86,6 +86,72 @@ function readCanvasRecordLegacyBlobAssetKeys(
   return keys
 }
 
+/**
+ * What a save needs from a committed record: which content key each per-item
+ * blob holds, the item ids, and the content keys its items reference.
+ */
+type CanvasRecordSummary = {
+  legacyBlobAssetKeys: ReadonlyMap<string, string>
+  itemIds: ReadonlySet<string>
+  assetKeys: ReadonlySet<string>
+}
+
+function summarizeCanvasRecord(
+  persisted: CanvasPersistedData | SerializableCanvasItem[] | undefined
+): CanvasRecordSummary {
+  const items = persisted ? extractPersistedCanvasData(persisted).items : []
+  const itemIds = new Set<string>()
+  for (const item of items) {
+    if (item && typeof item === 'object' && typeof item.id === 'string') itemIds.add(item.id)
+  }
+  return {
+    legacyBlobAssetKeys: readCanvasRecordLegacyBlobAssetKeys(persisted),
+    itemIds,
+    assetKeys: new Set(countCanvasAssetKeyReferences(items).keys())
+  }
+}
+
+/**
+ * Every commit of this version also writes a small revision marker next to the
+ * record (key <storeKey>::canvas-save-revision in the same store, the same
+ * transaction). A save reads that marker instead of the whole record: when it
+ * names this session's last commit, the summary of that commit stands for the
+ * record. Any other value (another window's commit, a clear, no marker at all)
+ * means the record is read as before. The previous release only gets and puts
+ * the record by its own key, so it never sees the marker; it cannot run in the
+ * same session, and the summaries live only in memory.
+ */
+const CANVAS_SAVE_REVISION_KEY_SUFFIX = '::canvas-save-revision'
+const canvasCommittedRecordSummaries = new Map<string, CanvasRecordSummary & { revision: string }>()
+let canvasSaveRevisionCounter = 0
+
+function getCanvasSaveRevisionKey(storeKey: string): string {
+  return `${storeKey}${CANVAS_SAVE_REVISION_KEY_SUFFIX}`
+}
+
+function createCanvasSaveRevision(): string {
+  canvasSaveRevisionCounter += 1
+  const random =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
+  return `${random}:${canvasSaveRevisionCounter}`
+}
+
+/** The summary of this session's last commit, if the stored marker still names it. */
+function getCanvasRecordSummaryForRevision(
+  storeKey: string,
+  storedRevision: unknown
+): CanvasRecordSummary | null {
+  const cached = canvasCommittedRecordSummaries.get(storeKey)
+  return cached && typeof storedRevision === 'string' && storedRevision === cached.revision
+    ? cached
+    : null
+}
+
+/** How many times saves read the whole record. For tests. */
+export const canvasRecordReadStats = { fullReads: 0 }
+
 type CanvasSnapshot = {
   items: CanvasItem[]
   groups: CanvasGroup[]
@@ -1718,9 +1784,9 @@ function listCanvasBlobKeys(
 type CanvasSaveBaseline = {
   index: CanvasBlobKeyIndex | null
   /** From the committed record: which content key each per-item blob holds. */
-  legacyBlobAssetKeys: Map<string, string>
+  legacyBlobAssetKeys: ReadonlyMap<string, string>
   /** Ids of the items of the committed record; null when it could not be read. */
-  recordItemIds: Set<string> | null
+  recordItemIds: ReadonlySet<string> | null
 }
 
 async function readCanvasSaveBaseline(
@@ -1730,8 +1796,8 @@ async function readCanvasSaveBaseline(
   return await new Promise((resolve, reject) => {
     const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readonly')
     let index: CanvasBlobKeyIndex | null = null
-    let legacyBlobAssetKeys = new Map<string, string>()
-    let recordItemIds: Set<string> | null = null
+    let legacyBlobAssetKeys: ReadonlyMap<string, string> = new Map<string, string>()
+    let recordItemIds: ReadonlySet<string> | null = null
     tx.oncomplete = () => resolve({ index, legacyBlobAssetKeys, recordItemIds })
     tx.onabort = () => rejectCanvasStorageError(reject, 'blob key index transaction', tx.error)
     tx.onerror = () => rejectCanvasStorageError(reject, 'blob key index transaction', tx.error)
@@ -1741,15 +1807,29 @@ async function readCanvasSaveBaseline(
       })
       const itemStore = tx.objectStore(STORE_NAME)
       if (typeof (itemStore as Partial<IDBObjectStore>).get === 'function') {
-        const request = itemStore.get(storeKey)
-        request.onsuccess = () => {
-          const record = request.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
-          legacyBlobAssetKeys = readCanvasRecordLegacyBlobAssetKeys(record)
-          const ids = new Set<string>()
-          for (const item of record ? extractPersistedCanvasData(record).items : []) {
-            if (item && typeof item === 'object' && typeof item.id === 'string') ids.add(item.id)
+        const revisionRequest = itemStore.get(getCanvasSaveRevisionKey(storeKey))
+        revisionRequest.onsuccess = () => {
+          try {
+            // This session's last commit is still the stored one: its summary stands for it.
+            const cached = getCanvasRecordSummaryForRevision(storeKey, revisionRequest.result)
+            if (cached) {
+              legacyBlobAssetKeys = cached.legacyBlobAssetKeys
+              recordItemIds = cached.itemIds
+              return
+            }
+            canvasRecordReadStats.fullReads += 1
+            const request = itemStore.get(storeKey)
+            request.onsuccess = () => {
+              const summary = summarizeCanvasRecord(
+                request.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
+              )
+              legacyBlobAssetKeys = summary.legacyBlobAssetKeys
+              recordItemIds = summary.itemIds
+            }
+          } catch (error) {
+            try { tx.abort() } catch { /* Already inactive. */ }
+            rejectCanvasStorageError(reject, 'blob key index transaction', error)
           }
-          recordItemIds = ids
         }
       }
     } catch (error) {
@@ -2065,7 +2145,7 @@ async function storeCanvasAssetBlobs(
 
 type CanvasCommitOutcome =
   | { committed: false }
-  | { committed: true; replaced: CanvasPersistedData | SerializableCanvasItem[] | undefined }
+  | { committed: true; replaced: CanvasRecordSummary | undefined }
 
 /**
  * Commits the metadata record. Inside the same transaction it re-checks that
@@ -2088,13 +2168,20 @@ async function commitCanvasMetadata(
   return await new Promise<CanvasCommitOutcome>((resolve, reject) => {
     const tx = db.transaction([BLOB_STORE_NAME, STORE_NAME], 'readwrite')
     let assetKeyVanished = false
-    let replaced: CanvasPersistedData | SerializableCanvasItem[] | undefined
+    let replaced: CanvasRecordSummary | undefined
+    const revision = createCanvasSaveRevision()
+    let revisionWritten = false
     tx.oncomplete = () => {
       if (assetKeyVanished) {
         resolve({ committed: false })
         return
       }
       for (const write of legacyWrites) noteCanvasLegacyBlobRewritten(storeKey, write.logicalKey)
+      if (revisionWritten) {
+        canvasCommittedRecordSummaries.set(storeKey, { ...summarizeCanvasRecord(payload), revision })
+      } else {
+        canvasCommittedRecordSummaries.delete(storeKey)
+      }
       resolve({ committed: true, replaced })
     }
     tx.onabort = () => {
@@ -2160,17 +2247,38 @@ async function commitCanvasMetadata(
           // Request errors abort the transaction; do not prevent their default action.
         }
         const itemStore = tx.objectStore(STORE_NAME)
+        const putRecord = (): void => {
+          itemStore.put(payload, storeKey)
+          itemStore.put(revision, getCanvasSaveRevisionKey(storeKey))
+          revisionWritten = true
+        }
         // The record this commit replaces, read in the same transaction before the put:
         // the prune keeps what it references for one more save.
         if (typeof (itemStore as Partial<IDBObjectStore>).get !== 'function') {
-          itemStore.put(payload, storeKey)
+          putRecord()
           return
         }
-        const previous = itemStore.get(storeKey)
-        previous.onsuccess = () => {
+        const storedRevision = itemStore.get(getCanvasSaveRevisionKey(storeKey))
+        storedRevision.onsuccess = () => {
           try {
-            replaced = previous.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
-            itemStore.put(payload, storeKey)
+            // It is this session's last commit: its summary is what it referenced.
+            const cached = getCanvasRecordSummaryForRevision(storeKey, storedRevision.result)
+            if (cached) {
+              replaced = cached
+              putRecord()
+              return
+            }
+            canvasRecordReadStats.fullReads += 1
+            const previous = itemStore.get(storeKey)
+            previous.onsuccess = () => {
+              try {
+                const record = previous.result as CanvasPersistedData | SerializableCanvasItem[] | undefined
+                replaced = record === undefined ? undefined : summarizeCanvasRecord(record)
+                putRecord()
+              } catch (error) {
+                fail(error)
+              }
+            }
           } catch (error) {
             fail(error)
           }
@@ -2536,19 +2644,10 @@ async function pruneCanvasAssetBlobs(
       ) {
         return
       }
-      const request = itemStore.get(storeKey)
-      request.onsuccess = () => {
-        const persisted = request.result as
-          | CanvasPersistedData
-          | SerializableCanvasItem[]
-          | undefined
-        if (persisted === undefined) return
-        const persistedItems = extractPersistedCanvasData(persisted).items
-        const referenced = countCanvasAssetKeyReferences(persistedItems)
+      const sweep = (record: CanvasRecordSummary): void => {
+        const referenced = record.assetKeys
         const liveItemIds = new Set(protectedItemIds)
-        for (const item of persistedItems) {
-          if (item && typeof item === 'object' && typeof item.id === 'string') liveItemIds.add(item.id)
-        }
+        for (const id of record.itemIds) liveItemIds.add(id)
         listCanvasBlobKeys(blobStore, storeKey, (index) => {
           if (!index) return
           for (const assetKey of index.assetKeys) {
@@ -2562,6 +2661,35 @@ async function pruneCanvasAssetBlobs(
             blobStore.delete(getScopedCanvasBlobKey(storeKey, legacyKey))
           }
         })
+      }
+      const storedRevision = itemStore.get(getCanvasSaveRevisionKey(storeKey))
+      storedRevision.onsuccess = () => {
+        try {
+          // The stored record is still this session's last commit: sweep by its summary.
+          const cached = getCanvasRecordSummaryForRevision(storeKey, storedRevision.result)
+          if (cached) {
+            sweep(cached)
+            return
+          }
+          canvasRecordReadStats.fullReads += 1
+          const request = itemStore.get(storeKey)
+          request.onsuccess = () => {
+            try {
+              const persisted = request.result as
+                | CanvasPersistedData
+                | SerializableCanvasItem[]
+                | undefined
+              if (persisted === undefined) return
+              sweep(summarizeCanvasRecord(persisted))
+            } catch (error) {
+              try { tx.abort() } catch { /* Already inactive. */ }
+              rejectCanvasStorageError(reject, 'canvas asset prune transaction', error)
+            }
+          }
+        } catch (error) {
+          try { tx.abort() } catch { /* Already inactive. */ }
+          rejectCanvasStorageError(reject, 'canvas asset prune transaction', error)
+        }
       }
     } catch (error) {
       try { tx.abort() } catch { /* Already inactive. */ }
@@ -3507,7 +3635,7 @@ async function saveCanvasItemsExclusive(
     let assetKeyByLogicalKey = new Map<string, string>()
     let readEntries: ResolvedCanvasBinaryAsset[] = []
     let mirrorPlan: CanvasMirrorPlan | null | undefined
-    let replacedRecord: CanvasPersistedData | SerializableCanvasItem[] | undefined
+    let replacedRecord: CanvasRecordSummary | undefined
     for (let attempt = 1; ; attempt += 1) {
       // Also read with no slot to store: a board emptied by delete-all keeps the record of
       // which per-item blobs it still holds, so an undo moves nothing.
@@ -3634,13 +3762,8 @@ async function saveCanvasItemsExclusive(
       const protectedItemIds = new Set(items.map((item) => item.id))
       // One save of grace: what the replaced record referenced survives this save, so a
       // writer that saved a stale snapshot over newer work cannot take its bytes at once.
-      const replacedItems = replacedRecord ? extractPersistedCanvasData(replacedRecord).items : []
-      for (const assetKey of countCanvasAssetKeyReferences(replacedItems).keys()) {
-        protectedAssetKeys.add(assetKey)
-      }
-      for (const item of replacedItems) {
-        if (item && typeof item === 'object' && typeof item.id === 'string') protectedItemIds.add(item.id)
-      }
+      for (const assetKey of replacedRecord?.assetKeys ?? []) protectedAssetKeys.add(assetKey)
+      for (const id of replacedRecord?.itemIds ?? []) protectedItemIds.add(id)
       const known = getProtectedState()
       for (const key of known.assetKeys) protectedAssetKeys.add(key)
       for (const id of known.itemIds) protectedItemIds.add(id)
@@ -3682,6 +3805,9 @@ async function loadCanvasItemsExclusive(storeKey: string): Promise<{
 }> {
   let db: IDBDatabase | undefined
   let createdUrls: Map<string, string> | undefined
+  // A load starts from what is stored: the next save reads the record once more
+  // instead of trusting the summary of an earlier commit.
+  canvasCommittedRecordSummaries.delete(storeKey)
   try {
     db = await openDB()
     const { persisted, binaries, resolvedByAssetKey, resolvedByLegacyBlob } =
@@ -3768,6 +3894,8 @@ async function clearCanvasItemsExclusive(storeKey: string): Promise<void> {
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
     store.delete(storeKey)
+    store.delete(getCanvasSaveRevisionKey(storeKey))
+    canvasCommittedRecordSummaries.delete(storeKey)
 
     await new Promise<void>((resolve, reject) => {
       tx.oncomplete = () => resolve()
