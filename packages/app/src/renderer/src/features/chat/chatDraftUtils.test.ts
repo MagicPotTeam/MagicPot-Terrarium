@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import {
   type ChatSessionDraftModel,
+  areChatComposerDraftsEqual,
   areChatSessionDraftsEqual,
   cloneChatSessionDraft,
   normalizeChatSessionDraft,
@@ -234,6 +235,35 @@ describe('chatDraftUtils', () => {
         queued('q2')
       ])
       expect(resolvePreferredQueuedSends(undefined, undefined)).toEqual({ queuedSends: [], queuedSendsUpdatedAt: 0 })
+    })
+
+    it('lets a newer removal marker in the session record outrank an older backup queue', () => {
+      // The queue was emptied (an item accepted) but the backup write that removes it failed.
+      const marker = { ...composer, queuedSends: [], queuedSendsUpdatedAt: 70 }
+      const staleBackup = { queuedSends: [queued('accepted')], queuedSendsUpdatedAt: 50 }
+      expect(resolvePreferredQueuedSends(marker, staleBackup)).toEqual({ queuedSends: [], queuedSendsUpdatedAt: 70 })
+      // An older marker loses to a newer backup list.
+      expect(resolvePreferredQueuedSends({ ...marker, queuedSendsUpdatedAt: 40 }, staleBackup).queuedSends).toEqual([
+        queued('accepted')
+      ])
+      // A draft holding only the marker survives normalisation, stripping and merging.
+      const markerOnly = { inputValue: '', pendingHiddenContext: '', pendingAttachments: [], updatedAt: 0, queuedSends: [], queuedSendsUpdatedAt: 70 }
+      expect(normalizeChatSessionDraft(markerOnly)).toEqual(markerOnly)
+      const session = { id: 's1', title: 'Chat', messages: [], draft: markerOnly }
+      expect(stripSessionDraft(session)).toBe(session)
+      expect(withDraftQueuedSends({ ...composer }, markerOnly)).toEqual({ ...composer, queuedSends: [], queuedSendsUpdatedAt: 70 })
+      // A list without a timestamp is still no marker.
+      expect(normalizeChatSessionDraft({ ...markerOnly, queuedSendsUpdatedAt: undefined })).toBeUndefined()
+    })
+
+    it('compares only the composer fields in the composer equality helper', () => {
+      const withQueue = { ...composer, queuedSends: [queued('q1')], queuedSendsUpdatedAt: 5 }
+      expect(areChatComposerDraftsEqual(composer, withQueue)).toBe(true)
+      expect(areChatComposerDraftsEqual(composer, { ...withQueue, inputValue: 'other' })).toBe(false)
+      // An empty composer equals no draft, whatever queue the stored draft carries.
+      const queueOnly = { inputValue: '', pendingHiddenContext: '', pendingAttachments: [], updatedAt: 0, queuedSends: [], queuedSendsUpdatedAt: 9 }
+      expect(areChatComposerDraftsEqual(undefined, queueOnly)).toBe(true)
+      expect(areChatComposerDraftsEqual(undefined, composer)).toBe(false)
     })
   })
 })

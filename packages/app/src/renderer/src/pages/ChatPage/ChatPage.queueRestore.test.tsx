@@ -581,8 +581,95 @@ describe('ChatPage queued sends kept with the draft', () => {
     expectRestoredPaused(['archived queued text'])
     fireEvent.click(within(queueItems()[0]).getByRole('button', { name: 'chat.queue_edit' }))
     fireEvent.click(screen.getByTestId('composer-send'))
-    await waitFor(() => expect(fixture.notifyWarning).toHaveBeenCalled())
+    // The refusal is the team-authority check for an archived member, not an unrelated warning.
+    await waitFor(() => expect(fixture.notifyWarning).toHaveBeenCalledWith('Team lead unavailable.'))
     await wait(200)
+    expect(fixture.request).not.toHaveBeenCalled()
+  })
+
+  // Accepts 'accepted item' while every write of this session's draft backup fails (storage full).
+  const acceptWhileBackupWritesFail = async (id: string, failRemove: boolean) => {
+    const view = await renderPage([session(id)])
+    const first = pendingReply()
+    fixture.request.mockImplementationOnce(first.run)
+    typeAndSend('running reply')
+    await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
+    typeAndSend('accepted item')
+    await waitFor(() => expect(queueItems()).toHaveLength(1))
+    await waitFor(() => expect(storedSession(id)?.draft?.queuedSends).toHaveLength(1))
+    expect(JSON.parse(localStorage.getItem(backupKey(id)) || '{}').queuedSends).toHaveLength(1)
+    const quotaError = () => new DOMException('full', 'QuotaExceededError')
+    const setItem = Storage.prototype.setItem
+    const removeItem = Storage.prototype.removeItem
+    const setSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+      if (key === backupKey(id)) throw quotaError()
+      return setItem.call(this, key, value)
+    })
+    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (this: Storage, key: string) {
+      if (failRemove && key === backupKey(id)) throw quotaError()
+      return removeItem.call(this, key)
+    })
+    await act(async () => first.reply.resolve({ content: 'first reply' }))
+    await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(queueItems()).toHaveLength(0))
+    await waitFor(() => expect(userTexts(storedSession(id)?.messages)).toContain('accepted item'))
+    await wait(900)
+    setSpy.mockRestore()
+    removeSpy.mockRestore()
+    return view
+  }
+
+  it('does not restore an accepted item when the backup write that removes it fails', async () => {
+    const view = await acceptWhileBackupWritesFail('quota', false)
+    // The stale queue left the backup even though the backup could not be rewritten.
+    expect(JSON.parse(localStorage.getItem(backupKey('quota')) || '{}').queuedSends ?? []).toEqual([])
+
+    view.unmount()
+    fixture.request.mockClear()
+    await mountPage('quota')
+    await wait(400)
+    expect(queueItems()).toHaveLength(0)
+    expect(fixture.request).not.toHaveBeenCalled()
+    expect(userTexts(currentSession().messages)).toEqual(['running reply', 'accepted item'])
+  })
+
+  it('lets the session record outrank a stale backup queue that could not be changed at all', async () => {
+    const view = await acceptWhileBackupWritesFail('stuck', true)
+    // The backup still lists the accepted item; the session record holds the newer removal marker.
+    const backup = JSON.parse(localStorage.getItem(backupKey('stuck')) || '{}')
+    expect(backup.queuedSends?.map((item: { content: string }) => item.content)).toEqual(['accepted item'])
+    const stored = storedSession('stuck')?.draft
+    expect(stored?.queuedSends).toEqual([])
+    expect(stored?.queuedSendsUpdatedAt).toBeGreaterThan(backup.queuedSendsUpdatedAt)
+
+    view.unmount()
+    fixture.request.mockClear()
+    await mountPage('stuck')
+    await wait(400)
+    expect(queueItems()).toHaveLength(0)
+    expect(fixture.request).not.toHaveBeenCalled()
+    expect(userTexts(currentSession().messages)).toEqual(['running reply', 'accepted item'])
+  })
+
+  it('stores the edited text in the draft backup at once when a restored item is moved into the composer', async () => {
+    await renderPage([
+      session('edit-flush', {
+        draft: {
+          inputValue: '',
+          pendingAttachments: [],
+          pendingHiddenContext: '',
+          updatedAt: 0,
+          queuedSendsUpdatedAt: 5,
+          queuedSends: [{ id: 'edit-item', content: 'edited queued text', queuedAt: 1 }]
+        }
+      })
+    ])
+    await waitFor(() => expect(queueItems()).toHaveLength(1))
+    fireEvent.click(within(queueItems()[0]).getByRole('button', { name: 'chat.queue_edit' }))
+    // Read synchronously, before any debounced persistence can run: the text is never in neither place.
+    const backup = JSON.parse(localStorage.getItem(backupKey('edit-flush')) || '{}')
+    expect(backup.draft?.inputValue).toBe('edited queued text')
+    expect(backup.queuedSends).toEqual([])
     expect(fixture.request).not.toHaveBeenCalled()
   })
 

@@ -1900,4 +1900,69 @@ describe('chatStorage queued sends kept with the draft', () => {
     expect(loaded?.draft?.queuedSendsUpdatedAt).toBe(9)
     expect(storage.normalizedSessionsEqual(loaded!, session, 'workspace-a')).toBe(true)
   })
+
+  it('keeps a queue removal marker in the session record', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    type S = import('./chatStorage').ChatSession
+    const marker = { inputValue: '', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 0, queuedSends: [], queuedSendsUpdatedAt: 12 }
+    const session = { id: 'emptied', title: 'emptied', messages: [], draft: marker } as unknown as S
+    await storage.saveSessionToDB(session, 'workspace-a', { expectedSession: null })
+    const loaded = await storage.loadSessionFromDB('emptied', 'workspace-a')
+    expect(loaded?.draft).toEqual(marker)
+  })
+
+  it('takes a stale queue out of the backup when the write that empties it fails', async () => {
+    const storage = await import('./chatStorage')
+    const key = 'magicpot-chat-draft:workspace-a:s1'
+    const composerDraft = { inputValue: 'typing', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 100 }
+    storage.writeSessionDraftBackup('s1', 100, composerDraft, 'workspace-a')
+    expect(storage.writeSessionQueuedSendsBackup('s1', [queued('accepted')], 200, 'workspace-a')).toBe(true)
+    const setItem = Storage.prototype.setItem
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      // Storage full: replacing the existing record fails, a smaller record fits once it is removed.
+      const full = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, name: string, value: string) {
+        if (name === key && this.getItem(name) !== null) throw new DOMException('full', 'QuotaExceededError')
+        return setItem.call(this, name, value)
+      })
+      expect(storage.writeSessionQueuedSendsBackup('s1', [], 300, 'workspace-a')).toBe(false)
+      full.mockRestore()
+      expect(storage.readSessionDraftBackup('s1', 'workspace-a')).toEqual({
+        updatedAt: 100,
+        draft: composerDraft,
+        queuedSends: [],
+        queuedSendsUpdatedAt: 300
+      })
+
+      // A failed write of a non-empty queue keeps the older copy: it still holds user text.
+      expect(storage.writeSessionQueuedSendsBackup('s1', [queued('kept')], 400, 'workspace-a')).toBe(true)
+      // Only the bytes freed by the removal itself fit again.
+      const previous = localStorage.getItem(key)
+      const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, name: string, value: string) {
+        if (name === key && value !== previous) throw new DOMException('full', 'QuotaExceededError')
+        return setItem.call(this, name, value)
+      })
+      expect(storage.writeSessionQueuedSendsBackup('s1', [queued('kept'), queued('new')], 500, 'workspace-a')).toBe(false)
+      expect(storage.readSessionDraftBackup('s1', 'workspace-a')?.queuedSends).toEqual([queued('kept')])
+
+      // Nothing can be written: the old record is put back so the composer draft is not lost (the
+      // session record's newer removal marker outranks its queue).
+      expect(storage.writeSessionQueuedSendsBackup('s1', [], 600, 'workspace-a')).toBe(false)
+      expect(storage.readSessionDraftBackup('s1', 'workspace-a')?.draft).toEqual(composerDraft)
+      // Without a composer draft to keep, the stale queue leaves the backup.
+      blocked.mockRestore()
+      storage.writeSessionDraftBackup('s1', 700, undefined, 'workspace-a')
+      const failing = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, name: string, value: string) {
+        if (name === key) throw new DOMException('full', 'QuotaExceededError')
+        return setItem.call(this, name, value)
+      })
+      expect(storage.writeSessionQueuedSendsBackup('s1', [], 800, 'workspace-a')).toBe(false)
+      failing.mockRestore()
+      expect(localStorage.getItem(key)).toBeNull()
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })

@@ -580,9 +580,12 @@ const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => 
       ? candidate.updatedAt
       : 0
   const queuedSends = normalizeStoredQueuedSends(candidate.queuedSends, normalizeDraftAttachments)
+  const queuedSendsUpdatedAt = readFiniteTimestamp(candidate.queuedSendsUpdatedAt)
+  // An empty queue with a timestamp is a removal marker: it must outrank an older backup copy.
+  const hasQueuePart = queuedSends.length > 0 || queuedSendsUpdatedAt > 0
 
-  // A draft that holds only queued sends is kept: they must survive a reload.
-  if (!inputValue && !pendingHiddenContext && pendingAttachments.length === 0 && queuedSends.length === 0) {
+  // A draft that holds only queued sends (or only a removal marker) is kept: they must survive a reload.
+  if (!inputValue && !pendingHiddenContext && pendingAttachments.length === 0 && !hasQueuePart) {
     return undefined
   }
 
@@ -591,9 +594,7 @@ const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => 
     pendingAttachments,
     pendingHiddenContext,
     updatedAt,
-    ...(queuedSends.length
-      ? { queuedSends, queuedSendsUpdatedAt: readFiniteTimestamp(candidate.queuedSendsUpdatedAt) }
-      : {})
+    ...(hasQueuePart ? { queuedSends, queuedSendsUpdatedAt } : {})
   }
 }
 
@@ -770,7 +771,50 @@ export function writeSessionQueuedSendsBackup(
     return true
   } catch (error) {
     console.warn('[ChatStorage] Failed to write the queued sends backup:', error)
+    // A failed removal must not leave the old queue behind: it would bring accepted or removed
+    // items back after a reload. A failed write of a non-empty queue keeps the older copy, which
+    // still holds user text the session record may not have yet.
+    if (queuedSends.length === 0) dropStaleQueuedSendsBackup(sessionId, queuedSendsUpdatedAt, scope)
     return false
+  }
+}
+
+/**
+ * Takes an older queue out of a session's draft backup after its removal could not be written.
+ * removeItem needs no quota; the smaller record put back holds the removal marker, or the composer
+ * part alone (the session record then decides the queue). If neither fits, the old record is put
+ * back as it was: the composer draft must not be lost, and the session record's newer removal
+ * marker still outranks its queue.
+ */
+function dropStaleQueuedSendsBackup(sessionId: string, queuedSendsUpdatedAt: number, scope: string): void {
+  try {
+    const key = getDraftBackupStorageKey(sessionId, scope)
+    const raw = localStorage.getItem(key)
+    const existingRecord = readSessionDraftBackup(sessionId, scope)
+    if (raw === null || !existingRecord?.queuedSends?.length) return
+    if ((existingRecord.queuedSendsUpdatedAt ?? 0) > queuedSendsUpdatedAt) return
+    const composerPart = {
+      updatedAt: existingRecord.updatedAt,
+      ...(existingRecord.draft ? { draft: existingRecord.draft } : {})
+    }
+    localStorage.removeItem(key)
+    const candidates = [
+      normalizeDraftBackupRecord({ ...composerPart, queuedSends: [], queuedSendsUpdatedAt }),
+      normalizeDraftBackupRecord(composerPart)
+    ]
+    for (const candidate of candidates) {
+      if (!candidate) continue
+      try {
+        localStorage.setItem(key, JSON.stringify(candidate))
+        return
+      } catch (error) {
+        console.warn('[ChatStorage] Failed to rewrite the draft backup without its queue:', error)
+      }
+    }
+    if (!existingRecord.draft) return
+    localStorage.setItem(key, raw)
+  } catch (error) {
+    console.warn('[ChatStorage] Failed to drop a stale queued sends backup:', error)
   }
 }
 

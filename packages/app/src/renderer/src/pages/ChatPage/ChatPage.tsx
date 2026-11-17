@@ -268,6 +268,7 @@ import {
   summarizeChatAttachmentsForLog
 } from '@renderer/features/chat/chatAttachmentUtils'
 import {
+  areChatComposerDraftsEqual,
   areChatSessionDraftsEqual,
   cloneChatAttachment,
   cloneChatSessionDraft,
@@ -2911,7 +2912,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           updatedAt: normalizedDraft?.updatedAt ?? 0
         })
 
-        if (!areChatSessionDraftsEqual(currentDraft, normalizedDraft)) {
+        // Composer fields only: a stored draft may also carry the session's queue, which has its own owner.
+        if (!areChatComposerDraftsEqual(currentDraft, normalizedDraft)) {
           pendingAttachmentsRef.current = nextPendingAttachments
           pendingHiddenContextRef.current = nextPendingHiddenContext
           setPendingAttachments(nextPendingAttachments)
@@ -3126,7 +3128,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // come back paused and held: never sent by themselves, resumed only through Edit, so every
   // send-time check runs again. Keyed by scope and session: what this instance last stored, and
   // which sessions it has already restored.
-  const queuedSendDraftStateRef = useRef(new Map<string, { signature: string; updatedAt: number }>())
+  // backupFailed: the draft backup does not hold this state (storage full or unavailable, or a newer
+  // copy is there); the session record then carries it, including an empty queue's removal marker.
+  const queuedSendDraftStateRef = useRef(new Map<string, { signature: string; updatedAt: number; backupFailed?: boolean; attemptedAt?: number }>())
   const queuedSendRestoredKeysRef = useRef(new Set<string>())
   queuedSendDraftSyncRef.current = ({ updateSessions }) => {
     const scope = sessionsLoadedScopeRef.current
@@ -3178,16 +3182,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (!queuedSendRestoredKeysRef.current.has(key) || isGone(key, session.id)) continue
       const queue = queues.get(session.id)
       let state = queuedSendDraftStateRef.current.get(key)
-      if (!queue?.length && (!state || state.signature === '[]') && !session.draft?.queuedSends?.length) continue
+      if (!queue?.length && (!state || (state.signature === '[]' && !state.backupFailed)) && !session.draft?.queuedSends?.length) continue
       const queuedSends = serializeQueuedSends(queue)
       const signature = JSON.stringify(queuedSends)
-      if (!state || state.signature !== signature) {
-        const updatedAt = Math.max(Date.now(), (state?.updatedAt ?? 0) + 1)
-        writeSessionQueuedSendsBackup(session.id, queuedSends, updatedAt, scope)
-        state = { signature, updatedAt }
+      const now = Date.now()
+      // A failed backup write is retried with the same timestamp (so the session record is not saved
+      // again for it), at most once a second.
+      const retry = state?.signature === signature && state.backupFailed && now - (state.attemptedAt ?? 0) >= 1000
+      if (!state || state.signature !== signature || retry) {
+        const updatedAt = retry && state ? state.updatedAt : Math.max(now, (state?.updatedAt ?? 0) + 1)
+        const stored = writeSessionQueuedSendsBackup(session.id, queuedSends, updatedAt, scope)
+        state = { signature, updatedAt, ...(stored ? {} : { backupFailed: true, attemptedAt: now }) }
         queuedSendDraftStateRef.current.set(key, state)
       }
-      if (updateSessions && JSON.stringify(readDraftQueuedSends(session.draft)?.queuedSends ?? []) !== signature) {
+      const sessionQueue = readDraftQueuedSends(session.draft)
+      // The session record must carry the state the backup could not hold, an empty queue included.
+      const sessionBehind = Boolean(state.backupFailed) && (sessionQueue?.queuedSendsUpdatedAt ?? 0) < state.updatedAt
+      if (updateSessions && (JSON.stringify(sessionQueue?.queuedSends ?? []) !== signature || sessionBehind)) {
         sessionUpdates.set(session.id, { queuedSends, updatedAt: state.updatedAt })
       }
     }
@@ -3195,16 +3206,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
     setSessions((previous) => previous.map((session) => {
       const update = sessionUpdates.get(session.id)
       if (!update) return session
-      const draft = withDraftQueuedSends(
-        session.draft,
-        update.queuedSends.length ? { queuedSends: update.queuedSends, queuedSendsUpdatedAt: update.updatedAt } : undefined
-      )
-      if (draft && (draft.inputValue || draft.pendingHiddenContext || draft.pendingAttachments.length || draft.queuedSends?.length)) {
-        return { ...session, draft }
-      }
-      if (!Object.hasOwn(session, 'draft')) return session
-      const { draft: _draft, ...rest } = session
-      return rest
+      // An emptied queue stays as a removal marker (an empty list with its timestamp), so this record
+      // outranks an older backup that still lists the accepted or removed items.
+      const draft = withDraftQueuedSends(session.draft, { queuedSends: update.queuedSends, queuedSendsUpdatedAt: update.updatedAt })
+      return draft ? { ...session, draft } : session
     }))
   }
   useEffect(() => {
@@ -8556,9 +8561,28 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyWarning('请先处理当前输入，再编辑排队消息')
         return
       }
+      const editedAttachments = overrides.attachments?.map(cloneChatAttachment) ?? []
+      const editedHiddenContext = liveItem.originalComposerHiddenContext ?? overrides.hiddenContext ?? ''
       setInputValue(overrides.content)
-      setPendingAttachments(overrides.attachments?.map(cloneChatAttachment) ?? [])
-      setPendingHiddenContext(liveItem.originalComposerHiddenContext ?? overrides.hiddenContext ?? '')
+      setPendingAttachments(editedAttachments)
+      setPendingHiddenContext(editedHiddenContext)
+      // Store the edited text in the composer's draft backup before the item leaves the stored queue,
+      // so a crash between the two never loses it (the debounced persistence comes later). Built from
+      // the edited values: the composer refs of attachments and hidden context update only on render.
+      // A blob URL lives only in this renderer and must not replace durable backup data.
+      const editedDraft = normalizeChatSessionDraft<ChatSessionDraft>({
+        inputValue: overrides.content,
+        pendingAttachments: editedAttachments,
+        pendingHiddenContext: editedHiddenContext,
+        updatedAt: Date.now()
+      })
+      const scope = storageScopeRef.current
+      if (
+        editedDraft && sessionId === currentSessionIdRef.current && sessionsLoadedScopeRef.current === scope &&
+        !editedAttachments.some(attachment => attachment.url.startsWith('blob:'))
+      ) {
+        writeSessionDraftBackup(sessionId, editedDraft.updatedAt, editedDraft, scope)
+      }
       removeQueuedSessionSend(sessionId, queuedSend.id)
       window.setTimeout(() => composerInputRef.current?.focus(), 0)
     },

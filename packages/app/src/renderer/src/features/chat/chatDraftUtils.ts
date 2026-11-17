@@ -48,7 +48,11 @@ export const cloneChatSessionDraft = <T extends ChatSessionDraftModel>(
 const isFiniteTimestamp = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value)
 
-/** The queue part of a draft, or undefined when it holds no queued send. */
+/**
+ * The queue part of a draft, or undefined when it holds neither a queued send nor a removal marker.
+ * An empty list with a timestamp is a removal marker: the queue was emptied at that time, and it
+ * outranks an older copy elsewhere (the draft backup or the session record).
+ */
 export const readDraftQueuedSends = (
   draft?: Partial<ChatSessionDraftModel> | null
 ): { queuedSends: ChatDraftQueuedSend[]; queuedSendsUpdatedAt: number } | undefined => {
@@ -58,10 +62,11 @@ export const readDraftQueuedSends = (
           Boolean(item) && typeof item.id === 'string' && Boolean(item.id) && typeof item.content === 'string'
       )
     : []
-  if (!queuedSends.length) return undefined
+  const queuedSendsUpdatedAt = isFiniteTimestamp(draft?.queuedSendsUpdatedAt) ? draft.queuedSendsUpdatedAt : 0
+  if (!queuedSends.length && queuedSendsUpdatedAt <= 0) return undefined
   return {
     queuedSends: queuedSends.map(cloneChatDraftQueuedSend),
-    queuedSendsUpdatedAt: isFiniteTimestamp(draft?.queuedSendsUpdatedAt) ? draft.queuedSendsUpdatedAt : 0
+    queuedSendsUpdatedAt
   }
 }
 
@@ -82,7 +87,8 @@ export const normalizeChatSessionDraft = <T extends ChatSessionDraftModel = Chat
     typeof draft.updatedAt === 'number' && Number.isFinite(draft.updatedAt)
       ? draft.updatedAt
       : Date.now()
-  // A draft that holds only queued sends is kept: its queue must survive a reload.
+  // A draft that holds only queued sends, or only a queue removal marker, is kept: its queue (or
+  // the fact that the queue was emptied) must survive a reload.
   const queue = readDraftQueuedSends(draft)
 
   if (!inputValue && !pendingHiddenContext && pendingAttachments.length === 0 && !queue) {
@@ -122,6 +128,25 @@ export const areChatSessionDraftsEqual = (
   JSON.stringify(buildChatDraftComparableValue(left || undefined)) ===
   JSON.stringify(buildChatDraftComparableValue(right || undefined))
 
+const buildChatComposerComparableValue = (
+  draft?: ChatSessionDraftModel | null
+): { inputValue: string; pendingHiddenContext: string; pendingAttachments: ChatAttachment[] } | null =>
+  draft && (draft.inputValue || draft.pendingHiddenContext || draft.pendingAttachments.length)
+    ? {
+        inputValue: draft.inputValue,
+        pendingHiddenContext: draft.pendingHiddenContext,
+        pendingAttachments: draft.pendingAttachments
+      }
+    : null
+
+/** Equality of the composer fields only: the queue part has its own owner. */
+export const areChatComposerDraftsEqual = (
+  left?: ChatSessionDraftModel | null,
+  right?: ChatSessionDraftModel | null
+): boolean =>
+  JSON.stringify(buildChatComposerComparableValue(left)) ===
+  JSON.stringify(buildChatComposerComparableValue(right))
+
 /**
  * The draft with its queue part taken from queueSource: the composer fields and the queue are
  * written by different owners, and neither may drop the other's part.
@@ -160,7 +185,11 @@ export const stripSessionDraft = <T extends { draft?: unknown }>(session: T): Om
   } as Omit<T, 'draft'>
 }
 
-/** The freshest copy of a session's queued sends: the backup wins a tie (it is written first). */
+/**
+ * The freshest copy of a session's queued sends: the backup wins a tie (it is written first). Both
+ * copies may hold a removal marker (an empty list with a timestamp); a newer marker beats an older
+ * list, so an accepted or removed item never comes back from a stale copy.
+ */
 export const resolvePreferredQueuedSends = (
   sessionDraft: Partial<ChatSessionDraftModel> | undefined | null,
   backupRecord?: { queuedSends?: ChatDraftQueuedSend[]; queuedSendsUpdatedAt?: number } | null
