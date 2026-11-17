@@ -28,8 +28,18 @@ class FakeIDBObjectStore {
     private transaction?: FakeIDBTransaction
   ) {}
 
-  put(value: unknown, key: string): void {
+  put(value: unknown, key: string): { result?: string; onsuccess?: () => void; onerror?: () => void } {
     this.stores.get(this.storeName)?.set(key, cloneValue(value))
+    // Like IDBObjectStore.put, it returns a request that succeeds later in the transaction.
+    const request: { result?: string; onsuccess?: () => void; onerror?: () => void } = {}
+    const complete = this.transaction?.beginRequest()
+    setTimeout(() => {
+      try {
+        request.result = key
+        request.onsuccess?.()
+      } finally { complete?.() }
+    }, 0)
+    return request
   }
 
   // Compatibility seam only: not a native isolation/rollback or staged-transaction witness.

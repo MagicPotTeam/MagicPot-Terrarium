@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  canvasMirrorSeedStats,
   canvasProtectedStateWalkStats,
   countCanvasAssetKeyReferences,
   getCanvasMirrorEntryNameCacheStats,
@@ -28,11 +29,23 @@ function createFakeIndexedDb() {
     ['canvas-blobs', new Map()]
   ])
   const log = {
-    puts: [] as Array<{ store: string; key: string; bytes: number }>,
+    // tx: serial of the put's transaction; inFlight: puts into the same store in that
+    // transaction still waiting for their success callback when this one was issued.
+    puts: [] as Array<{ store: string; key: string; bytes: number; tx: number; inFlight: number }>,
     deletes: [] as Array<{ store: string; key: string }>,
     gets: [] as Array<{ store: string; key: string; stores: string[] }>,
-    transactions: [] as Array<{ stores: string[]; mode: string; committed: boolean; aborted: boolean }>
+    transactions: [] as Array<{
+      stores: string[]
+      mode: string
+      committed: boolean
+      aborted: boolean
+      serial: number
+      /** Serials of the transactions that had committed when this one was opened. */
+      openedAfter: number[]
+    }>
   }
+  let nextTransactionSerial = 0
+  const committedSerials: number[] = []
   let failure: { store: string; mode: 'sync-throw' | 'async-abort' } | null = null
   let beforeTransaction: ((stores: string[], mode: string) => void) | null = null
 
@@ -43,7 +56,16 @@ function createFakeIndexedDb() {
     transaction(names: string | string[], mode: string = 'readonly') {
       const scope = typeof names === 'string' ? [names] : [...names]
       beforeTransaction?.(scope, mode)
-      const record = { stores: scope, mode, committed: false, aborted: false }
+      nextTransactionSerial += 1
+      const record = {
+        stores: scope,
+        mode,
+        committed: false,
+        aborted: false,
+        serial: nextTransactionSerial,
+        openedAfter: [...committedSerials]
+      }
+      const inFlightPuts = new Map<string, number>()
       log.transactions.push(record)
       const ops: FakeOp[] = []
       let pending = 0
@@ -96,9 +118,19 @@ function createFakeIndexedDb() {
               if (failure?.store === name && failure.mode === 'sync-throw') {
                 throw new Error('synthetic put failure')
               }
-              log.puts.push({ store: name, key, bytes: byteLengthOf(value) })
+              log.puts.push({
+                store: name,
+                key,
+                bytes: byteLengthOf(value),
+                tx: record.serial,
+                inFlight: inFlightPuts.get(name) ?? 0
+              })
               ops.push({ store: name, kind: 'put', key, value: structuredClone(value) })
-              return request(() => key)
+              inFlightPuts.set(name, (inFlightPuts.get(name) ?? 0) + 1)
+              return request(() => {
+                inFlightPuts.set(name, inFlightPuts.get(name)! - 1)
+                return key
+              })
             },
             delete(key: string) {
               if (mode !== 'readwrite') throw new Error('readonly transaction')
@@ -135,6 +167,7 @@ function createFakeIndexedDb() {
             else committed.get(op.store)!.delete(op.key)
           }
           record.committed = true
+          committedSerials.push(record.serial)
           tx.oncomplete?.()
         }, 0)
       }
@@ -1004,6 +1037,27 @@ describe('content-addressed autosave mirror', () => {
     expect(outsideKey).not.toBe(contentKey([5, 5]))
   })
 
+  it('lets go of the bytes read for IndexedDB that the mirror does not send itself', async () => {
+    const mirror = createFakeMirror()
+    mirror.localFiles.set('/home/u/pics/seed.png', new Uint8Array([9, 9, 9, 9]))
+    const pathBacked = imageItem('path', 'local-media:///home/u/pics/seed.png')
+    const pasted = imageItem('pasted', registerSource('blob:seed-pasted', [1, 2]))
+    await saveCanvasItems([pathBacked, pasted], 'mirror-seeds')
+
+    // Both were read for IndexedDB. Main copies the file by its path, so only the pasted
+    // bytes (which exist only in the renderer) are kept for the mirror copies.
+    expect(canvasMirrorSeedStats).toEqual({ readEntries: 2, keptEntries: 1, keptBytes: 2 })
+    expect(mirror.calls.copy.map((call) => call.sourcePath)).toEqual(['/home/u/pics/seed.png'])
+    expect(mirror.calls.write).toEqual([{ assetFileName: `${contentKey([1, 2])}.png`, bytes: 2 }])
+    expect(fetchCalls).toEqual(['blob:seed-pasted'])
+    expect(mirror.calls.readFileFromPath).toEqual(['/home/u/pics/seed.png'])
+
+    // An asset the mirror already holds keeps no bytes either.
+    const another = imageItem('another', registerSource('blob:seed-another', [1, 2]))
+    await saveCanvasItems([pathBacked, pasted, another], 'mirror-seeds')
+    expect(canvasMirrorSeedStats.keptEntries).toBe(0)
+  })
+
   it('sends the bytes through the renderer when main refuses the direct copy', async () => {
     const mirror = createFakeMirror()
     mirror.state.refuseCopy = true
@@ -1517,6 +1571,48 @@ describe('rollback to the previous release', () => {
     fake.resetLog()
     await saveCanvasItems([kept, ...imported.map((item) => ({ ...item, x: 3 }) as CanvasItem)], 'rb-hand')
     expect(fake.blobPuts()).toEqual([])
+  })
+
+  it('writes the per-item copy of new bytes only after their keyed blob has committed', async () => {
+    const fresh = imageItem('fresh', registerSource('blob:rb-two-tx', [6, 6, 6]))
+    const other = imageItem('other', registerSource('blob:rb-two-tx-b', [2, 6]))
+    fake.resetLog()
+    await saveCanvasItems([fresh, other], 'rb-two-tx')
+
+    for (const [id, bytes] of [['fresh', [6, 6, 6]], ['other', [2, 6]]] as const) {
+      const keyed = fake.blobPuts().find((put) => put.key === assetBlobKey('rb-two-tx', [...bytes]))!
+      const perItem = fake.blobPuts().find((put) => put.key === legacyBlobKey('rb-two-tx', id))!
+      // Two transactions, the second opened once the first had committed: the clone the
+      // keyed put made is gone before the per-item put makes its own.
+      expect(perItem.tx).not.toBe(keyed.tx)
+      expect(fake.log.transactions.find((tx) => tx.serial === perItem.tx)!.openedAfter).toContain(keyed.tx)
+    }
+    // Both still land before the record that names them.
+    const recordTx = fake.recordPuts()[0].tx
+    expect(Math.max(...fake.blobPuts().map((put) => put.tx))).toBeLessThan(recordTx)
+    expect(Object.fromEntries(loadLikePreviousRelease('rb-two-tx'))).toEqual({
+      fresh: [6, 6, 6],
+      other: [2, 6]
+    })
+  })
+
+  it('copies stored bytes to the per-item blobs of several duplicates one put at a time', async () => {
+    const original = imageItem('first', registerSource('blob:rb-serial', [5, 4, 3]))
+    await saveCanvasItems([original], 'rb-serial')
+    const duplicates = ['d1', 'd2', 'd3'].map((id, index) => ({ ...original, id, x: index }) as CanvasItem)
+    fake.resetLog()
+    await saveCanvasItems([original, ...duplicates], 'rb-serial')
+
+    const copies = fake.blobPuts()
+    expect(copies.map((put) => put.key).sort()).toEqual(
+      ['d1', 'd2', 'd3'].map((id) => legacyBlobKey('rb-serial', id)).sort()
+    )
+    // Each put clones the bytes; none is issued while another copy is still pending.
+    expect(copies.map((put) => put.inFlight)).toEqual([0, 0, 0])
+    expect(new Set(copies.map((put) => put.tx)).size).toBe(1)
+    for (const id of ['d1', 'd2', 'd3']) {
+      expect(loadLikePreviousRelease('rb-serial').get(id)).toEqual([5, 4, 3])
+    }
   })
 
   it('rewrites the per-item blob when the image of an item is replaced', async () => {

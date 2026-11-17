@@ -1769,43 +1769,61 @@ type CanvasAssetBlobWrite = {
 /** A per-item blob of the previous release, copied from the keyed blob of `assetKey`. */
 type CanvasLegacyBlobWrite = { logicalKey: string; assetKey: string }
 
+function putCanvasBlobEntries(
+  db: IDBDatabase,
+  puts: ReadonlyArray<{ key: string; data: ArrayBuffer; mimeType: string }>
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction([BLOB_STORE_NAME], 'readwrite')
+    tx.oncomplete = () => resolve()
+    tx.onabort = () => rejectCanvasStorageError(reject, 'canvas asset save transaction', tx.error)
+    tx.onerror = () => rejectCanvasStorageError(reject, 'canvas asset save transaction', tx.error)
+    try {
+      const store = tx.objectStore(BLOB_STORE_NAME)
+      for (const put of puts) store.put({ data: put.data, mimeType: put.mimeType }, put.key)
+    } catch (error) {
+      try { tx.abort() } catch { /* Already inactive. */ }
+      rejectCanvasStorageError(reject, 'canvas asset save transaction', error)
+    }
+  })
+}
+
+/**
+ * Writes the keyed blobs of one batch, then, once that transaction has
+ * committed, the per-item copies of the same bytes in a second one. Every put
+ * clones its value when it is issued; one transaction at a time keeps a single
+ * clone of an asset alive, not one per copy. A failure of either rejects the
+ * save before its record is committed, so no committed record ever names a
+ * per-item blob that was not written.
+ */
 async function writeCanvasAssetBlobBatch(
   db: IDBDatabase,
   storeKey: string,
   batch: readonly CanvasAssetBlobWrite[]
 ): Promise<void> {
   if (batch.length === 0) return
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction([BLOB_STORE_NAME], 'readwrite')
-    tx.oncomplete = () => {
-      for (const entry of batch) {
-        for (const logicalKey of entry.legacyLogicalKeys ?? []) {
-          noteCanvasLegacyBlobRewritten(storeKey, logicalKey)
-        }
-      }
-      resolve()
+  await putCanvasBlobEntries(
+    db,
+    batch.map((entry) => ({
+      key: getScopedCanvasAssetBlobKey(storeKey, entry.assetKey),
+      data: entry.data,
+      mimeType: entry.mimeType
+    }))
+  )
+  const legacyPuts = batch.flatMap((entry) =>
+    (entry.legacyLogicalKeys ?? []).map((logicalKey) => ({
+      key: getScopedCanvasBlobKey(storeKey, logicalKey),
+      data: entry.data,
+      mimeType: entry.mimeType
+    }))
+  )
+  if (legacyPuts.length === 0) return
+  await putCanvasBlobEntries(db, legacyPuts)
+  for (const entry of batch) {
+    for (const logicalKey of entry.legacyLogicalKeys ?? []) {
+      noteCanvasLegacyBlobRewritten(storeKey, logicalKey)
     }
-    tx.onabort = () => rejectCanvasStorageError(reject, 'canvas asset save transaction', tx.error)
-    tx.onerror = () => rejectCanvasStorageError(reject, 'canvas asset save transaction', tx.error)
-    try {
-      const store = tx.objectStore(BLOB_STORE_NAME)
-      for (const entry of batch) {
-        store.put(
-          { data: entry.data, mimeType: entry.mimeType },
-          getScopedCanvasAssetBlobKey(storeKey, entry.assetKey)
-        )
-        for (const logicalKey of entry.legacyLogicalKeys ?? []) {
-          store.put(
-            { data: entry.data, mimeType: entry.mimeType },
-            getScopedCanvasBlobKey(storeKey, logicalKey)
-          )
-        }
-      }
-    } catch (error) {
-      try { tx.abort() } catch { /* Already inactive. */ }
-      rejectCanvasStorageError(reject, 'canvas asset save transaction', error)
-    }
-  })
+  }
 }
 
 /**
@@ -1879,7 +1897,8 @@ async function storeCanvasAssetBlobs(
   }
   const enqueue = async (entry: CanvasAssetBlobWrite): Promise<void> => {
     batch.push(entry)
-    batchBytes += entry.data.byteLength * (1 + (entry.legacyLogicalKeys?.length ?? 0))
+    // Keyed blobs and their per-item copies are written in separate transactions.
+    batchBytes += entry.data.byteLength * Math.max(1, entry.legacyLogicalKeys?.length ?? 0)
     if (batch.length >= CANVAS_BLOB_BATCH_MAX_ENTRIES || batchBytes >= CANVAS_BLOB_BATCH_MAX_BYTES) {
       await flush()
     }
@@ -2116,12 +2135,24 @@ async function commitCanvasMetadata(
                 vanish()
                 return
               }
-              for (const logicalKey of logicalKeys) {
-                blobStore.put(
+              // One put at a time: each put clones the value, so issuing them together
+              // would hold one clone per item that shares these bytes.
+              const putNext = (index: number): void => {
+                if (index >= logicalKeys.length) return
+                const put = blobStore.put(
                   { data: binary.data, mimeType: binary.mimeType },
-                  getScopedCanvasBlobKey(storeKey, logicalKey)
+                  getScopedCanvasBlobKey(storeKey, logicalKeys[index])
                 )
+                put.onsuccess = () => {
+                  try {
+                    putNext(index + 1)
+                  } catch (error) {
+                    fail(error)
+                  }
+                }
+                // Request errors abort the transaction; do not prevent their default action.
               }
+              putNext(0)
             } catch (error) {
               fail(error)
             }
@@ -2920,6 +2951,73 @@ async function planCanvasMirrorSave(
   return plan
 }
 
+/**
+ * A content key names exact bytes. When this save already holds them (a file
+ * whose size changed was re-keyed by its content), they are written as they
+ * are: a copy by path could publish a version the file changed to since.
+ */
+function writesCanvasMirrorSeedAsIs(
+  assetKey: string,
+  seeded: ResolvedCanvasBinaryAsset | undefined
+): boolean {
+  return (
+    !!seeded &&
+    assetKey.startsWith('b-') &&
+    seeded.data.byteLength > 0 &&
+    seeded.data.byteLength <= MAX_FULL_FILE_BYTES
+  )
+}
+
+/** Whether the main process copies this slot's file itself (the file is the slot's content). */
+function copiesCanvasMirrorSlotByPath(slot: CanvasMirrorSlot): boolean {
+  return (
+    !getCanvasAssetSlotSourceFile(slot.owner, slot.slotId) ||
+    !!getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src)
+  )
+}
+
+/**
+ * The bytes read by the IndexedDB save that the mirror will use, by logical
+ * key: only for asset files the mirror is missing, and only where it writes
+ * them from the renderer (a source without a file main can copy, or a content
+ * key it writes as it is). Everything else (a path-backed file main copies, an
+ * asset the mirror already holds or one too large to send) is let go before
+ * the copies start.
+ */
+/** How many bytes read for IndexedDB the last save kept for its mirror copies. For tests. */
+export const canvasMirrorSeedStats = { readEntries: 0, keptEntries: 0, keptBytes: 0 }
+
+function selectCanvasMirrorSeeds(
+  plan: CanvasMirrorPlan,
+  readEntries: readonly ResolvedCanvasBinaryAsset[]
+): Map<string, ResolvedCanvasBinaryAsset> {
+  const seeds = new Map<string, ResolvedCanvasBinaryAsset>()
+  if (readEntries.length === 0 || plan.missing.size === 0) return seeds
+  const byLogicalKey = new Map(readEntries.map((entry) => [entry.key, entry]))
+  for (const [assetFileName, slotPlan] of plan.missing) {
+    const { slot } = slotPlan
+    const entry = byLogicalKey.get(slot.logicalKey)
+    if (!entry || entry.data.byteLength > MAX_FULL_FILE_BYTES) continue
+    const copiedByPath =
+      !!plan.transport.copy &&
+      resolveLocalFilePathFromSource(slot.src) !== null &&
+      copiesCanvasMirrorSlotByPath(slot)
+    if (copiedByPath && !writesCanvasMirrorSeedAsIs(assetFileName.split('.')[0], entry)) continue
+    seeds.set(slot.logicalKey, entry)
+  }
+  return seeds
+}
+
+function noteCanvasMirrorSeeds(
+  readEntries: readonly ResolvedCanvasBinaryAsset[],
+  seeds: ReadonlyMap<string, ResolvedCanvasBinaryAsset> | null
+): void {
+  canvasMirrorSeedStats.readEntries = readEntries.length
+  canvasMirrorSeedStats.keptEntries = seeds?.size ?? 0
+  canvasMirrorSeedStats.keptBytes = 0
+  for (const entry of seeds?.values() ?? []) canvasMirrorSeedStats.keptBytes += entry.data.byteLength
+}
+
 async function stageCanvasMirrorAsset(
   plan: CanvasMirrorPlan,
   slotPlan: CanvasMirrorSlotPlan,
@@ -2935,22 +3033,9 @@ async function stageCanvasMirrorAsset(
     const assetKey = assetFileName.split('.')[0]
     const seeded =
       seedEntries.get(slot.logicalKey) ?? plan.bytesByLogicalKey.get(slot.logicalKey)
-    // A content key names exact bytes. When this save already holds them (a file whose
-    // size changed was re-keyed by its content), they are written as they are: a copy
-    // by path could publish a version the file changed to since.
-    const writesSeededContent =
-      !!seeded &&
-      assetKey.startsWith('b-') &&
-      seeded.data.byteLength > 0 &&
-      seeded.data.byteLength <= MAX_FULL_FILE_BYTES
+    const writesSeededContent = writesCanvasMirrorSeedAsIs(assetKey, seeded)
     // A file the main process may read is copied there; its bytes never enter the renderer.
-    if (
-      localPath &&
-      plan.transport.copy &&
-      !writesSeededContent &&
-      (!getCanvasAssetSlotSourceFile(slot.owner, slot.slotId) ||
-        getMatchingLocalFileIdentity(slot.owner, slot.slotId, slot.src))
-    ) {
+    if (localPath && plan.transport.copy && !writesSeededContent && copiesCanvasMirrorSlotByPath(slot)) {
       const copiedBytes = await plan.transport.copy(assetFileName, localPath)
       // No room on the mirror's volume: final for this save, the bytes are not sent again.
       if (copiedBytes === CANVAS_MIRROR_NO_SPACE) {
@@ -3060,7 +3145,8 @@ async function executeCanvasMirrorSave(
   groups: CanvasGroup[],
   groupBranches: CanvasGroupBranch[],
   figmaBinding: CanvasFigmaBinding | null,
-  seedEntries: ReadonlyMap<string, ResolvedCanvasBinaryAsset>,
+  /** Taken over: each entry is dropped once its asset has been staged. */
+  seedEntries: Map<string, ResolvedCanvasBinaryAsset>,
   getProtectedState: (() => ProtectedCanvasState) | undefined
 ): Promise<boolean> {
   try {
@@ -3079,6 +3165,9 @@ async function executeCanvasMirrorSave(
           if (await stageCanvasMirrorAsset(plan, slotPlan, assetFileName, storeKey, seedEntries)) {
             stagedFileNames.add(assetFileName)
           }
+          // Its bytes are not needed any more in this save.
+          seedEntries.delete(slotPlan.slot.logicalKey)
+          plan.bytesByLogicalKey.delete(slotPlan.slot.logicalKey)
         }
       }
     )
@@ -3387,7 +3476,11 @@ async function saveCanvasItemsExclusive(
       if (mirrorPlan === undefined) {
         mirrorPlan = await planCanvasMirrorSave(storeKey, items, assetKeyByLogicalKey, true)
       }
-      if (mirrorPlan) {
+      // Only the bytes the mirror writes from the renderer stay; the rest are released here.
+      const seedEntries = mirrorPlan ? selectCanvasMirrorSeeds(mirrorPlan, readEntries) : null
+      noteCanvasMirrorSeeds(readEntries, seedEntries)
+      readEntries = []
+      if (mirrorPlan && seedEntries) {
         await executeCanvasMirrorSave(
           mirrorPlan,
           storeKey,
@@ -3395,7 +3488,7 @@ async function saveCanvasItemsExclusive(
           groups,
           groupBranches,
           figmaBinding,
-          new Map(readEntries.map((entry) => [entry.key, entry])),
+          seedEntries,
           getProtectedState
         )
       }
