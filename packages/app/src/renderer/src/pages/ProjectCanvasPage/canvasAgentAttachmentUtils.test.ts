@@ -5,7 +5,10 @@ import {
   buildCanvasAgentAttachments,
   buildCanvasImageAttachment,
   buildCanvasImageCropSourceMetadata,
-  materializeCanvasAgentAttachmentItems
+  canvasPngDataUrlToBlob,
+  drawVerifiedCanvasImageCropPng,
+  materializeCanvasAgentAttachmentItems,
+  materializeCanvasAgentAttachmentItemsSync
 } from './canvasAgentAttachmentUtils'
 import type { CanvasImageCropSource, CanvasImageItem, CanvasModel3DItem } from './types'
 
@@ -204,5 +207,81 @@ describe('canvas agent attachments preserve original sources', () => {
       url: 'local-media:///original/model.glb',
       fileName: 'model.glb'
     })
+  })
+})
+
+describe('canvas proven crop pixels for synchronous sinks', () => {
+  const record: CanvasImageCropSource = {
+    version: 1, origin: 'confirm', width: 4000, height: 3000, sizeBytes: 12, sha256: '0f'.repeat(32)
+  }
+  const evidence = { sizeBytes: 12, sha256: record.sha256, width: 4000, height: 3000 }
+  const cropped = () => imageItem({ crop: { x: 100, y: 200, width: 300, height: 400 }, cropSource: record })
+  const originalGetContext = HTMLCanvasElement.prototype.getContext
+  const originalToBlob = HTMLCanvasElement.prototype.toBlob
+  afterEach(() => {
+    HTMLCanvasElement.prototype.getContext = originalGetContext
+    HTMLCanvasElement.prototype.toBlob = originalToBlob
+    vi.restoreAllMocks()
+  })
+  const stubCanvas = (blob: Blob | null) => {
+    const drawImage = vi.fn()
+    HTMLCanvasElement.prototype.getContext = (() => ({ drawImage })) as unknown as typeof HTMLCanvasElement.prototype.getContext
+    const toBlob = vi.fn((callback: BlobCallback) => callback(blob))
+    HTMLCanvasElement.prototype.toBlob = toBlob as unknown as typeof HTMLCanvasElement.prototype.toBlob
+    return { drawImage, toBlob }
+  }
+  const decoded = { width: 4000, height: 3000 } as unknown as HTMLImageElement
+
+  it('draws the recorded crop of verified bytes into a PNG blob at the crop size', async () => {
+    const png = new Blob(['png'], { type: 'image/png' })
+    const { drawImage, toBlob } = stubCanvas(png)
+    await expect(drawVerifiedCanvasImageCropPng(cropped(), { ...evidence, image: decoded })).resolves.toEqual({ blob: png, width: 300, height: 400 })
+    expect(drawImage).toHaveBeenCalledExactlyOnceWith(decoded, 100, 200, 300, 400, 0, 0, 300, 400)
+    expect(toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/png')
+  })
+
+  it.each([
+    ['hash', { sha256: 'aa'.repeat(32) }],
+    ['byte size', { sizeBytes: 13 }],
+    ['decoded size', { width: 2000, height: 1500 }]
+  ] as const)('draws nothing when the evidence %s differs from the record', async (_label, change) => {
+    const { drawImage, toBlob } = stubCanvas(new Blob(['png'], { type: 'image/png' }))
+    const createElement = vi.spyOn(document, 'createElement')
+    await expect(drawVerifiedCanvasImageCropPng(cropped(), { ...evidence, ...change, image: decoded })).resolves.toBeNull()
+    expect(createElement).not.toHaveBeenCalledWith('canvas')
+    expect(drawImage).not.toHaveBeenCalled()
+    expect(toBlob).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['no blob', null],
+    ['an empty blob', new Blob([], { type: 'image/png' })],
+    ['a non-PNG blob', new Blob(['x'], { type: 'image/jpeg' })]
+  ] as const)('returns null when the encoder yields %s', async (_label, blob) => {
+    stubCanvas(blob)
+    await expect(drawVerifiedCanvasImageCropPng(cropped(), { ...evidence, image: decoded })).resolves.toBeNull()
+  })
+
+  it('turns only a base64 PNG data URL into a PNG blob', async () => {
+    const blob = canvasPngDataUrlToBlob('data:image/png;base64,iVBORw0K')
+    expect(blob?.type).toBe('image/png')
+    expect(blob?.size).toBe(6)
+    expect(canvasPngDataUrlToBlob('data:,')).toBeNull()
+    expect(canvasPngDataUrlToBlob('data:image/jpeg;base64,iVBORw0K')).toBeNull()
+    expect(canvasPngDataUrlToBlob('local-media:///original/full-frame.png')).toBeNull()
+  })
+
+  it('replaces a crop only by a proven PNG that is not the original source', () => {
+    const item = cropped()
+    const proven = { url: 'blob:proven-crop', fileName: 'full-frame.png', sizeBytes: 3, width: 300, height: 400 }
+    const [visible] = materializeCanvasAgentAttachmentItemsSync([item], () => proven) as CanvasImageItem[]
+    expect(visible).toEqual(expect.objectContaining({ id: item.id, src: 'blob:proven-crop', sourceWidth: 300, sourceHeight: 400, width: 300, height: 400 }))
+    for (const key of ['crop', 'cropSource', 'image', 'thumbnailSet', 'sourceFile', 'sourceIdentity', 'media'] as const) {
+      expect(visible).not.toHaveProperty(key)
+    }
+    expect(materializeCanvasAgentAttachmentItemsSync([item], () => ({ ...proven, url: item.src }))).toEqual([item])
+    expect(materializeCanvasAgentAttachmentItemsSync([item], () => null)).toEqual([item])
+    expect(materializeCanvasAgentAttachmentItemsSync([item])).toEqual([item])
+    expect(item.crop).toEqual({ x: 100, y: 200, width: 300, height: 400 })
   })
 })

@@ -7,8 +7,10 @@ import {
   buildCanvasAgentAttachmentManifest,
   buildCanvasAgentAttachments,
   expandCanvasItemsForAgentSend,
+  isCanvasCroppedImageSourceUrl,
   materializeCanvasAgentAttachmentItemsSync
 } from './canvasAgentAttachmentUtils'
+import type { CanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import { isCanvasAdditiveSelectionModifier } from './canvasSelectionModifiers'
 import { FILLED_ANNOTATION_OPACITY, type CanvasDragPayload } from './projectCanvasPageShared'
 import { formatProjectCanvasScalePercent } from './projectCanvasViewportScale'
@@ -90,6 +92,7 @@ export function useCanvasSelectionUiActions(options: UseCanvasSelectionUiActions
     nextZIndex,
     notifyError,
     notifySuccess,
+    provenCropRegistry,
     selectedIds,
     setAnnotationFillOpacity,
     setContextMenuTarget,
@@ -551,7 +554,14 @@ Return shape:
   const buildCanvasDragPayload = useCallback(
     (targetItems: CanvasItem[], options?: CanvasDragPayloadBuildOptions): CanvasDragPayload => {
       const expandedTargetItems = expandCanvasItemsForAgentSend(targetItems, items)
-      const attachmentSourceItems = materializeCanvasAgentAttachmentItemsSync(expandedTargetItems)
+      // A drag start cannot read and hash a source. A cropped image travels only
+      // as the PNG drawn when its crop was proven (registry entry for the same
+      // id, source, record and crop); a crop without one stays in place here.
+      const registry = provenCropRegistry as CanvasProvenCropRegistry | undefined
+      const attachmentSourceItems = materializeCanvasAgentAttachmentItemsSync(
+        expandedTargetItems,
+        registry ? (item) => registry.lookup(item) : undefined
+      )
       // If a crop remains, synchronous materialization did not produce visible
       // pixels. The original URL (including option fallbacks) must not enter a
       // drag payload; abort the whole selection instead of silently dropping it.
@@ -593,13 +603,13 @@ Return shape:
           ? attachments[0]
           : null
       const singleDragImageUrl = singleDragAttachment?.url || singleDragImageItem?.src
+      // A caller's fallback URL is never the original source of a cropped item.
+      const getSafeOptionUrl = (url: string | undefined): string | undefined =>
+        url?.trim() && !isCanvasCroppedImageSourceUrl(expandedTargetItems, url) ? url : undefined
 
       return {
-        objectUrl:
-          singleDragImageUrl || (options?.objectUrl?.trim() ? options.objectUrl : undefined),
-        previewImageUrl:
-          singleDragImageUrl ||
-          (options?.previewImageUrl?.trim() ? options.previewImageUrl : undefined),
+        objectUrl: singleDragImageUrl || getSafeOptionUrl(options?.objectUrl),
+        previewImageUrl: singleDragImageUrl || getSafeOptionUrl(options?.previewImageUrl),
         promptId: options?.promptId?.trim() ? options.promptId : undefined,
         sourceCanvasId: canvasId,
         attachments: attachments.length > 0 ? attachments : undefined,
@@ -616,7 +626,7 @@ Return shape:
           : {})
       }
     },
-    [canvasId, extractPromptTextFromCanvasItems, items, notifyError, t]
+    [canvasId, extractPromptTextFromCanvasItems, items, notifyError, provenCropRegistry, t]
   )
 
   const setCanvasDragPayload = useCallback(

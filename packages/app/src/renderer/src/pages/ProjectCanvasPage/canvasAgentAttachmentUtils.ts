@@ -245,17 +245,27 @@ function resolveCanvasImageAttachmentSourceSize(item: CanvasImageItem): {
   return { sourceWidth, sourceHeight }
 }
 
-function materializeCanvasImageAttachmentSourceFromAsset(
+type DrawnCanvasImageCrop = {
+  canvas: HTMLCanvasElement
+  outputWidth: number
+  outputHeight: number
+}
+
+/** Draws the crop of a decoded source into a new canvas of the crop's pixel size. */
+function drawCanvasImageCropFromAsset(
   item: CanvasImageItem,
   sourceAsset: { image: CanvasImageAsset; width: number; height: number },
   sourceWidth: number,
   sourceHeight: number,
-  allowFullSource = false
-): MaterializedCanvasImageAttachmentSource | null {
+  allowFullSource: boolean
+): DrawnCanvasImageCrop | null {
   if (!item.crop || typeof document === 'undefined') return null
 
   const sourceCrop = normalizeCanvasImageDisplayCrop(item.crop, sourceWidth, sourceHeight)
-  if (!sourceCrop || (!allowFullSource && isFullSourceCrop(sourceCrop, sourceWidth, sourceHeight))) {
+  if (
+    !sourceCrop ||
+    (!allowFullSource && isFullSourceCrop(sourceCrop, sourceWidth, sourceHeight))
+  ) {
     return null
   }
 
@@ -286,6 +296,30 @@ function materializeCanvasImageAttachmentSourceFromAsset(
     outputWidth,
     outputHeight
   )
+  return { canvas, outputWidth, outputHeight }
+}
+
+/** The .png name a crop of this item travels under. */
+export function getCanvasImageCropPngFileName(item: CanvasImageItem): string {
+  return getPngFileName(item.fileName?.trim() || inferFileNameFromUrl(item.src, item.id))
+}
+
+function materializeCanvasImageAttachmentSourceFromAsset(
+  item: CanvasImageItem,
+  sourceAsset: { image: CanvasImageAsset; width: number; height: number },
+  sourceWidth: number,
+  sourceHeight: number,
+  allowFullSource = false
+): MaterializedCanvasImageAttachmentSource | null {
+  const drawn = drawCanvasImageCropFromAsset(
+    item,
+    sourceAsset,
+    sourceWidth,
+    sourceHeight,
+    allowFullSource
+  )
+  if (!drawn) return null
+  const { canvas, outputWidth, outputHeight } = drawn
 
   const src = canvas.toDataURL('image/png')
   // Browsers return the sentinel `data:,` for an unencodable/empty canvas.
@@ -293,7 +327,7 @@ function materializeCanvasImageAttachmentSourceFromAsset(
   if (!/^data:image\/png;base64,.+/i.test(src)) return null
   return {
     src,
-    fileName: getPngFileName(item.fileName?.trim() || inferFileNameFromUrl(item.src, item.id)),
+    fileName: getCanvasImageCropPngFileName(item),
     sizeBytes: estimateDataUrlByteSize(src),
     sourceWidth: outputWidth,
     sourceHeight: outputHeight
@@ -441,6 +475,74 @@ function resolveCanvasImageAttachmentCrop(
   )
 }
 
+/** A crop's PNG, drawn at proof time for synchronous sinks such as a drag start. */
+export type CanvasVerifiedCropPng = { blob: Blob; width: number; height: number }
+
+/**
+ * The proof-time draw for the drag registry: the crop pixels of bytes whose
+ * byte size, SHA-256 and decoded size equal the item's record, encoded as a PNG
+ * Blob (toBlob, off the main thread). The canvas is released afterwards. Null
+ * on any mismatch, budget breach or encoding failure.
+ */
+export async function drawVerifiedCanvasImageCropPng(
+  item: CanvasImageItem,
+  evidence: CanvasImageSourceEvidence
+): Promise<CanvasVerifiedCropPng | null> {
+  if (!isCroppedCanvasImageItem(item) || !hasVerifiableCrop(item)) return null
+  if (!matchesCropSource(item, evidence)) return null
+  const record = item.cropSource!
+  let drawn: DrawnCanvasImageCrop | null
+  try {
+    drawn = drawCanvasImageCropFromAsset(
+      item,
+      { image: evidence.image, width: evidence.width, height: evidence.height },
+      record.width,
+      record.height,
+      true
+    )
+  } catch {
+    return null
+  }
+  if (!drawn) return null
+  const { canvas, outputWidth, outputHeight } = drawn
+  try {
+    const blob = await new Promise<Blob | null>((resolve) => {
+      if (typeof canvas.toBlob !== 'function') {
+        resolve(null)
+        return
+      }
+      try {
+        canvas.toBlob(resolve, 'image/png')
+      } catch {
+        resolve(null)
+      }
+    })
+    if (!blob || blob.size <= 0 || blob.type !== 'image/png') return null
+    return { blob, width: outputWidth, height: outputHeight }
+  } finally {
+    canvas.width = 0
+    canvas.height = 0
+  }
+}
+
+const PNG_BASE64_DATA_URL_PATTERN = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/
+
+/** The bytes of a base64 PNG data URL (a crop drawn by the Agent send) as a Blob, or null. */
+export function canvasPngDataUrlToBlob(src: string): Blob | null {
+  const match = typeof src === 'string' ? PNG_BASE64_DATA_URL_PATTERN.exec(src) : null
+  if (!match || typeof atob !== 'function') return null
+  let binary: string
+  try {
+    binary = atob(match[1])
+  } catch {
+    return null
+  }
+  if (binary.length === 0) return null
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return new Blob([bytes], { type: 'image/png' })
+}
+
 // Fields that could lead a sink back to the original pixels of a cropped item.
 function stripCroppedImageSourceFields(item: CanvasImageItem): CanvasImageItem {
   const {
@@ -571,12 +673,69 @@ export async function materializeCanvasAgentAttachmentItems(
   return prepared.status === 'ready' ? prepared.attachmentItems : []
 }
 
-export function materializeCanvasAgentAttachmentItemsSync(items: CanvasItem[]): CanvasItem[] {
-  // Neither a same-sized in-memory preview nor a size hint proves that the
-  // pixels and coordinates belong to item.src. Leave every crop in place so
-  // the synchronous payload builder can reject the entire selection. An
-  // already-flattened item with no crop remains draggable as before.
-  return items
+/** The registered PNG of a proven crop, as a synchronous sink may use it. */
+export type CanvasProvenCropPixels = {
+  url: string
+  fileName: string
+  sizeBytes: number
+  width: number
+  height: number
+}
+
+/**
+ * The synchronous attachment view of a selection. Neither a same-sized
+ * in-memory preview nor a size hint proves that pixels and coordinates belong
+ * to item.src, and a drag start cannot read and hash a source. A cropped image
+ * is therefore replaced only by the PNG that lookupProvenCrop returns, which
+ * was drawn when the crop was proven; every other crop stays in place so the
+ * caller refuses the whole selection. An item without a crop is unchanged.
+ */
+export function materializeCanvasAgentAttachmentItemsSync(
+  items: CanvasItem[],
+  lookupProvenCrop?: (item: CanvasImageItem) => CanvasProvenCropPixels | null
+): CanvasItem[] {
+  if (!lookupProvenCrop) return items
+  const prepared = items.map((item): CanvasItem => {
+    if (!isCroppedCanvasImageItem(item)) return item
+    let proven: CanvasProvenCropPixels | null
+    try {
+      proven = lookupProvenCrop(item)
+    } catch {
+      proven = null
+    }
+    if (!proven || proven.url === item.src) return item
+    return {
+      ...stripCroppedImageSourceFields(item),
+      src: proven.url,
+      fileName: proven.fileName,
+      sizeBytes: proven.sizeBytes,
+      sourceWidth: proven.width,
+      sourceHeight: proven.height,
+      width: proven.width,
+      height: proven.height
+    }
+  })
+  // A proven item that still carries a crop or the original src is never used.
+  return prepared.map((item, index) => {
+    const source = items[index]
+    const replaced = item !== source
+    return replaced && hasCroppedSourceLeak([source], [item]) ? source : item
+  })
+}
+
+/**
+ * True when url is the source of a cropped image in the selection, in any of the
+ * forms an attachment may carry it. Such a url must not enter a payload.
+ */
+export function isCanvasCroppedImageSourceUrl(items: CanvasItem[], url: string): boolean {
+  const candidate = url.trim()
+  if (!candidate) return false
+  const normalized = toLocalMediaUrl(candidate)
+  return items.some(
+    (item) =>
+      isCroppedCanvasImageItem(item) &&
+      (item.src === candidate || toLocalMediaUrl(item.src) === normalized)
+  )
 }
 
 export function buildCanvasFileAttachment(item: CanvasFileItem): CanvasAgentAttachment {
