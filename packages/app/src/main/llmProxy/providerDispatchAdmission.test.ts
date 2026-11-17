@@ -131,9 +131,12 @@ describe('isolated private-capability ledger/transport adapter, not production u
     expect(t.store.read(scope).document.runs[0]).toMatchObject({ status: 'unknown', chargedProviderDispatches: 1, attempts: [{ outcome: { state: 'not-dispatched', charged: true } }] })
   })
   it('allows a definitive charged outcome after the wall deadline, while expiry cannot renew dispatch rights', async () => {
+    // Freeze wall clock, monotonic clock and the expiry timer so the 100 ms deadline is crossed only
+    // by the explicit jump below, never by a slow machine during admission or dispatch.
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] })
     const t = setup({ maxWalltimeMs: 100 }), real = Date.now()
     const response = await t.request.fetch(endpoint, post())
-    vi.spyOn(Date, 'now').mockReturnValue(real + 1000)
+    vi.setSystemTime(real + 1000)
     await expect(response.text()).rejects.toThrow('deadline')
     expect(t.store.read(scope).document.runs[0]).toMatchObject({ status: 'unknown', chargedProviderDispatches: 1, attempts: [{ outcome: { state: 'unknown' } }] })
     await expect(t.request.fetch(endpoint, post())).rejects.toThrow()
