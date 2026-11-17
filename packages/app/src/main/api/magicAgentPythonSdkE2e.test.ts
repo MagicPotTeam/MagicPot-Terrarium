@@ -759,6 +759,56 @@ print(json.dumps({'runId': result.run_id, 'status': result.status, 'output': res
     })
   })
 
+  it('reaches the loopback listener directly when an unreachable HTTP proxy is configured', async () => {
+    // Every proxy variable points at a closed port and nothing bypasses loopback, which is the
+    // setup that used to send the request (and its Bearer token) to the proxy and fail.
+    const env: NodeJS.ProcessEnv = { PYTHONPATH: pythonSdk }
+    for (const [key, value] of Object.entries(process.env)) {
+      if (!/_proxy$/i.test(key)) env[key] = value
+    }
+    for (const key of [
+      'HTTP_PROXY',
+      'http_proxy',
+      'HTTPS_PROXY',
+      'https_proxy',
+      'ALL_PROXY',
+      'all_proxy'
+    ]) {
+      env[key] = 'http://127.0.0.1:9'
+    }
+    const code = `import asyncio, json, urllib.request
+from magicpot_agent_sdk import AgentRunRequest, AsyncMagicAgentClient, HttpAgentTransport, MagicAgentClient
+assert urllib.request.getproxies().get('http') == 'http://127.0.0.1:9'
+client = MagicAgentClient(HttpAgentTransport(${JSON.stringify(baseUrl)}, 'python-token'))
+result = client.run(AgentRunRequest('python-agent', {'prompt': 'hello'}, session_id='python-e2e'))
+async def attach():
+    events = AsyncMagicAgentClient(HttpAgentTransport(${JSON.stringify(baseUrl)}, 'python-token')).attach_graph_run('python-run', {'channel':'sdk','scopeType':'run','scopeId':'python-run'}, 'event-0')
+    try:
+        return [event['eventId'] async for event in events]
+    finally:
+        await events.aclose()
+print(json.dumps({'runId': result.run_id, 'status': result.status, 'events': asyncio.run(attach())}))
+`
+    const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
+      (resolve, reject) => {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], { env })
+        let stdout = ''
+        let stderr = ''
+        child.stdout.setEncoding('utf8').on('data', (chunk) => (stdout += chunk))
+        child.stderr.setEncoding('utf8').on('data', (chunk) => (stderr += chunk))
+        child.once('error', reject)
+        child.once('close', (status) => resolve({ status, stdout, stderr }))
+      }
+    )
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      runId: 'python-e2e-run',
+      status: 'completed',
+      events: ['event-1', 'event-2']
+    })
+  })
+
   it('uses Python typed Agent replace against a real loopback listener', async () => {
     const code = `import json
 from magicpot_agent_sdk import HttpAgentTransport, MagicAgentClient, AgentInstanceReplaceRequest
