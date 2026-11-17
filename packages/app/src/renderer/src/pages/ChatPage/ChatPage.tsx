@@ -8722,7 +8722,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const sideCommandRef = useRef<AgentSideCommandHandle>(null)
   const teamLead = currentSession?.teamLeadId ? sessions.find(session=>session.id===currentSession.teamLeadId) : currentSession
   const teamMembers = teamLead ? sessions.filter(session=>session.teamLeadId===teamLead.id && !session.archived && (session.teamMemberGeneration ?? 0) === (teamLead.teamGeneration ?? 0)) : []
-  const teamEnabled = active && isReady && !config.use_remote_llm && route?.channel==='canvas' && route.scopeType==='thread'
+  // Team messages keep arriving while the pane is hidden: delivery does not depend on `active`.
+  const teamDeliveryEnabled = isReady && !config.use_remote_llm && route?.channel==='canvas' && route.scopeType==='thread'
+  const teamEnabled = active && teamDeliveryEnabled
   // The thread has a team to manage: members, or a lead that still carries team records.
   const threadHasTeam = Boolean(teamLead && (teamMembers.length > 0 || teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length))
   const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{ key: string; ids: readonly string[] }>({ key: '', ids: [] })
@@ -8870,8 +8872,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // run (or an earlier app session): the team menu offers a reset for it, never a re-run.
   const isTeamTaskOwnerBusy = (id: string): boolean =>
     loadingSessionIds.has(id) || externalLoadingSessionIds.has(id) || sessionPreparing(id, sendingSessionIds, queuedSessionSends)
+  // The dispatcher lives as long as the team in this scope: it ends on unmount, a scope change or the
+  // team's end, never because the pane was hidden. A hidden pane keeps claiming MAIN's intents (which
+  // expire after 60 s) into queued records; deliveries start once the pane is visible again.
   useEffect(() => {
-    if (!teamEnabled || !sessionsLoaded || sessionLoadError || !route?.threadId || !messageLeadId || teamLead?.teamEnded || teamLead?.archived) return
+    if (!teamDeliveryEnabled || !sessionsLoaded || sessionLoadError || !route?.threadId || !messageLeadId || teamLead?.teamEnded || teamLead?.archived) return
     const scope = storageScope, thread = route.threadId, leadId = messageLeadId, generation = messageGeneration
     const scopeEpoch = sessionLoadEpochRef.current
     const visibilityEpoch = teamVisibilityRef.current.epoch
@@ -8881,7 +8886,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const scopeRoute = { channel: route.channel, scopeType: route.scopeType, scopeId: route.scopeId, threadId: thread }
     const isCurrent = () => {
       const lead = sessionsRef.current.find(session => session.id === leadId)
-      return alive && isMountedRef.current && teamVisibilityRef.current.active && teamVisibilityRef.current.epoch === visibilityEpoch && storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch &&
+      return alive && isMountedRef.current && storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch &&
         !!lead && !lead.teamLeadId && !lead.archived && !lead.teamEnded && (lead.teamGeneration ?? 0) === generation &&
         !teamEndPendingRef.current.has(teamKey) && !teamEndedMainRef.current.has(teamKey) && !hasSessionDeleteTombstone(leadId, scope)
     }
@@ -8889,6 +8894,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const member = sessionsRef.current.find(session => session.id === id)
       return !!member && member.teamLeadId === leadId && !member.archived && (member.teamMemberGeneration ?? 0) === generation && !hasSessionDeleteTombstone(id, scope)
     }
+    const isVisible = () => teamVisibilityRef.current.active
     const dispatcher = new TeamMessageDispatcher({ scope, thread, lead: leadId }, isCurrent, isMember, [],
       async (delivery, source, stage, hop) => {
         if (!isCurrent() || !isMember(delivery.recipient) || (source.kind === 'member' && !isMember(source.member))) return
@@ -8898,7 +8904,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           isTeamMessageCurrent: () => isCurrent() && (source.kind === 'user' || isMember(source.member)) && isMember(delivery.recipient),
           onTeamRequestStarted: () => stage('request_started'), onTeamResponseReceived: () => stage('response_received') })
       }, undefined, 1000,
-      id => loadingSessionIdsRef.current.has(id) || sendingSessionIdsRef.current.has(id))
+      id => loadingSessionIdsRef.current.has(id) || sendingSessionIdsRef.current.has(id), isVisible)
     const knownMembers = new Set<string>()
     const syncSubscriptions = () => {
       const members = sessionsRef.current.filter(session => isMember(session.id)).map(session => session.id)
@@ -8909,7 +8915,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setTeamMessageSubscriptions(previous => previous.key === key && previous.ids.length === ids.length && previous.ids.every((id, i) => id === ids[i]) ? previous : { key, ids })
     }
     const pump = () => {
-      if (!isCurrent()) return
+      if (!isCurrent() || !isVisible()) return
       for (const member of sessionsRef.current.filter(session => isMember(session.id))) {
         try { const work = dispatcher.pump(member.id); if (work) void work.finally(pump) } catch { /* End or membership changed. */ }
       }
@@ -8917,6 +8923,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
     teamMessageDispatcherRef.current = { key, dispatcher, pump, scopeEpoch, visibilityEpoch }
     const tick = async () => {
       if (polling || !isCurrent()) return
+      // A hidden pane without members has nothing to claim: no IPC in the background.
+      if (!isVisible() && !sessionsRef.current.some(session => isMember(session.id))) return
       polling = true
       try {
         syncSubscriptions()
@@ -8937,7 +8945,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     void tick()
     const timer = window.setInterval(() => { pump(); void tick() }, 500)
     return () => { alive = false; window.clearInterval(timer); dispatcher.end(); if (teamMessageDispatcherRef.current?.dispatcher === dispatcher) teamMessageDispatcherRef.current = null }
-  }, [teamEnabled, sessionsLoaded, sessionLoadError, storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, messageKey, teamLead?.teamEnded, teamLead?.archived])
+  }, [teamDeliveryEnabled, sessionsLoaded, sessionLoadError, storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, messageKey, teamLead?.teamEnded, teamLead?.archived])
   const reconcileTeamLifecycle = useCallback((records: ChatSession[]) => {
     let conflict = false
     for (const persisted of records) {

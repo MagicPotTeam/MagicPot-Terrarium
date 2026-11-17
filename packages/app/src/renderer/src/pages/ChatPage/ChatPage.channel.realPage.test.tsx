@@ -1307,6 +1307,92 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     expect(main.claimRequests).toEqual([])
     await page.finish()
   }, 20000)
+
+  it('keeps a member message across a pane switch and delivers it once when the pane is back', async () => {
+    let releaseBusy: (() => void) | undefined
+    let releaseSender: (() => void) | undefined
+    const page = await mountChannelPage({
+      members: [member('designer', '设计师'), member('writer', '文案')],
+      model: ({ lastUserText, teamTools, toolResults }) => {
+        if (lastUserText.includes('hold writer busy')) {
+          return new Promise<ModelStep>((resolve) => {
+            releaseBusy = () => resolve({ text: 'writer busy reply fixture' })
+          })
+        }
+        if (lastUserText.includes('来自成员的测试消息') || lastUserText.includes('隐藏时的第二条消息')) {
+          return { text: '文案已收到 fixture' }
+        }
+        if (toolResults.length || !teamTools.includes('send_message')) return { text: '发送成员完成 fixture' }
+        if (lastUserText.includes('hidden pane send')) {
+          return new Promise<ModelStep>((resolve) => {
+            releaseSender = () =>
+              resolve({
+                tool: 'send_message',
+                callId: 'fixture-hidden-send',
+                args: { recipient: 'writer', text: '隐藏时的第二条消息' }
+              })
+          })
+        }
+        return {
+          tool: 'send_message',
+          callId: 'fixture-pane-send',
+          args: { recipient: 'writer', text: '来自成员的测试消息' }
+        }
+      }
+    })
+    const { main } = page
+    const toWriter = (text: string) =>
+      main.chatRequests.filter(
+        (request) => request.conversationId === 'writer' && requestText(request).includes(text)
+      )
+    const writerStored = async (): Promise<string[]> =>
+      ((await page.stored('writer'))?.messages ?? []).map((message) => message.content)
+    const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    // While a member runs, the lead's composer shows Stop; Enter still sends (as a person would).
+    const sendByEnter = (text: string): void => {
+      const input = screen.getByTestId('chat-composer-input')
+      fireEvent.change(input, { target: { value: text } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+    }
+
+    // 1. Claimed while the pane is visible and queued behind the busy recipient; then the pane is
+    //    hidden. The message is not dropped when the pane goes away.
+    page.send('@writer hold writer busy')
+    await waitFor(() => expect(releaseBusy).toBeDefined())
+    sendByEnter('@designer 请联系文案')
+    await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
+    page.rerender({ active: false })
+    releaseBusy?.()
+    await waitFor(async () => expect(await writerStored()).toContain('writer busy reply fixture'))
+    // Hidden: the recipient is free, but nothing is delivered until the pane is shown again.
+    await pause(1500)
+    expect(toWriter('来自成员的测试消息')).toHaveLength(0)
+    page.rerender({ active: true })
+    await waitFor(() => expect(toWriter('来自成员的测试消息')).toHaveLength(1), { timeout: 5000 })
+    await waitFor(async () => expect(await writerStored()).toContain('文案已收到 fixture'))
+
+    // 2. Sent by a member while the pane is hidden: the hidden pane claims it at once (MAIN would
+    //    drop it after 60 s) and delivers it when the pane is back.
+    page.send('@designer hidden pane send')
+    await waitFor(() => expect(releaseSender).toBeDefined())
+    page.rerender({ active: false })
+    releaseSender?.()
+    await waitFor(() => expect(main.claimRequests).toHaveLength(2), { timeout: 5000 })
+    expect(main.enqueued).toHaveLength(2)
+    await pause(1500)
+    expect(toWriter('隐藏时的第二条消息')).toHaveLength(0)
+    page.rerender({ active: true })
+    await waitFor(() => expect(toWriter('隐藏时的第二条消息')).toHaveLength(1), { timeout: 5000 })
+    await pause(1500)
+    // Exactly one request per message, and every intent was claimed once.
+    expect(toWriter('来自成员的测试消息')).toHaveLength(1)
+    expect(toWriter('隐藏时的第二条消息')).toHaveLength(1)
+    expect(main.claimRequests).toHaveLength(2)
+    await waitFor(async () =>
+      expect((await writerStored()).filter((text) => text === '文案已收到 fixture')).toHaveLength(2)
+    )
+    await page.finish()
+  }, 30000)
 })
 
 // ---------------------------------------------------------------------------------------------
