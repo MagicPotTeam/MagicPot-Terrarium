@@ -9,6 +9,20 @@ import ProjectCanvasPageSelectionOverlays from './ProjectCanvasPageSelectionOver
 import ProjectCanvasPageShortcutDialog from './ProjectCanvasPageShortcutDialog'
 import ProjectCanvasPageVisualOverlays from './ProjectCanvasPageVisualOverlays'
 
+// The page re-renders on every gesture start and end and on every committed viewport change. Each
+// overlay and dialog is memoised so that only the ones whose props changed render again; the shell
+// passes their props through useStableCallbackProps, so their callbacks keep one identity and always
+// call the latest handler.
+const MemoizedSelectionOverlays = React.memo(ProjectCanvasPageSelectionOverlays)
+const MemoizedVisualOverlays = React.memo(ProjectCanvasPageVisualOverlays)
+const MemoizedInlineTextEditor = React.memo(ProjectCanvasPageInlineTextEditor)
+const MemoizedHiddenInputs = React.memo(ProjectCanvasPageHiddenInputs)
+const MemoizedShortcutDialog = React.memo(ProjectCanvasPageShortcutDialog)
+const MemoizedCanvasTargetDialog = React.memo(CanvasTargetDialog)
+const MemoizedFigmaBindingDialog = React.memo(FigmaBindingDialog)
+const MemoizedDialogs = React.memo(ProjectCanvasPageDialogs)
+const MemoizedColorPopovers = React.memo(ProjectCanvasPageColorPopovers)
+
 type ProjectCanvasPageOverlayDialogAssemblyProps = {
   suspendViewportChrome?: boolean
   selectionOverlaysProps: React.ComponentProps<typeof ProjectCanvasPageSelectionOverlays>
@@ -36,15 +50,15 @@ export default function ProjectCanvasPageOverlayDialogAssembly({
 }: ProjectCanvasPageOverlayDialogAssemblyProps) {
   return (
     <>
-      {!suspendViewportChrome && <ProjectCanvasPageSelectionOverlays {...selectionOverlaysProps} />}
-      <ProjectCanvasPageVisualOverlays {...visualOverlaysProps} />
-      <ProjectCanvasPageInlineTextEditor {...inlineTextEditorProps} />
-      <ProjectCanvasPageHiddenInputs {...hiddenInputsProps} />
-      <ProjectCanvasPageShortcutDialog {...shortcutDialogProps} />
-      <CanvasTargetDialog {...canvasTargetDialogProps} />
-      <FigmaBindingDialog {...figmaBindingDialogProps} />
-      <ProjectCanvasPageDialogs {...dialogsProps} />
-      <ProjectCanvasPageColorPopovers {...colorPopoversProps} />
+      {!suspendViewportChrome && <MemoizedSelectionOverlays {...selectionOverlaysProps} />}
+      <MemoizedVisualOverlays {...visualOverlaysProps} />
+      <MemoizedInlineTextEditor {...inlineTextEditorProps} />
+      <MemoizedHiddenInputs {...hiddenInputsProps} />
+      <MemoizedShortcutDialog {...shortcutDialogProps} />
+      <MemoizedCanvasTargetDialog {...canvasTargetDialogProps} />
+      <MemoizedFigmaBindingDialog {...figmaBindingDialogProps} />
+      <MemoizedDialogs {...dialogsProps} />
+      <MemoizedColorPopovers {...colorPopoversProps} />
     </>
   )
 }

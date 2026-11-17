@@ -590,6 +590,102 @@ describe('ProjectCanvasPageTopToolbar', () => {
     expect(setStagePos).not.toHaveBeenCalled()
   })
 
+  it('draws the zoom chip from the viewport driver and updates it when no gesture is active', () => {
+    const viewportCallbacks = new Set<(pos: { x: number; y: number }, scale: number) => void>()
+    const interactionCallbacks = new Set<(active: boolean) => void>()
+    const registerViewportCallback = vi.fn(
+      (callback: (pos: { x: number; y: number }, scale: number) => void) => {
+        viewportCallbacks.add(callback)
+        callback({ x: 0, y: 0 }, 1.5)
+        return () => viewportCallbacks.delete(callback)
+      }
+    )
+    const registerViewportInteractionCallback = vi.fn((callback: (active: boolean) => void) => {
+      interactionCallbacks.add(callback)
+      callback(false)
+      return () => interactionCallbacks.delete(callback)
+    })
+    const emitViewport = (scale: number) => {
+      for (const callback of viewportCallbacks) callback({ x: 0, y: 0 }, scale)
+    }
+    const emitInteraction = (active: boolean) => {
+      for (const callback of interactionCallbacks) callback(active)
+    }
+
+    const { unmount } = render(
+      <ThemeProvider theme={theme}>
+        <ProjectCanvasPageTopToolbar
+          {...buildBaseProps({
+            scalePercent: undefined,
+            registerViewportCallback,
+            registerViewportInteractionCallback
+          })}
+        />
+      </ThemeProvider>
+    )
+    const label = document.querySelector('[data-project-canvas-zoom-label="true"]') as HTMLElement
+    expect(label.textContent).toBe('150% ')
+
+    emitViewport(2)
+    expect(label.textContent).toBe('200% ')
+
+    // During a gesture the label waits for the end, like the committed scalePercent did.
+    emitInteraction(true)
+    emitViewport(3)
+    expect(label.textContent).toBe('200% ')
+    emitInteraction(false)
+    expect(label.textContent).toBe('300% ')
+
+    unmount()
+    expect(viewportCallbacks.size).toBe(0)
+    expect(interactionCallbacks.size).toBe(0)
+  })
+
+  it('reads the committed viewport through getStageViewport when resetting the zoom', () => {
+    const setStagePos = vi.fn()
+    const setStageScale = vi.fn()
+    const nearItem = {
+      id: 'selected-near',
+      type: 'image',
+      src: 'near.png',
+      x: 5200,
+      y: 5100,
+      width: 200,
+      height: 100,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 2,
+      locked: false
+    }
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ProjectCanvasPageTopToolbar
+          {...buildBaseProps({
+            items: [nearItem],
+            selectedIds: new Set([nearItem.id]),
+            // Stale props: the shell no longer passes the viewport, the getter has the latest one.
+            stagePos: { x: 0, y: 0 },
+            stageSize: { width: 10, height: 10 },
+            getStageViewport: () => ({
+              stagePos: { x: -5000, y: -5000 },
+              stageScale: 1,
+              stageSize: { width: 1000, height: 600 }
+            }),
+            setStagePos,
+            setStageScale
+          })}
+        />
+      </ThemeProvider>
+    )
+
+    clickZoomChip()
+
+    expect(setStageScale).toHaveBeenCalledWith(1)
+    expect(setStagePos).toHaveBeenCalledWith({ x: -4800, y: -4850 })
+  })
+
   it('opens the group menu from the toolbar chip and focuses the clicked group', async () => {
     const handleFocusGroup = vi.fn()
 

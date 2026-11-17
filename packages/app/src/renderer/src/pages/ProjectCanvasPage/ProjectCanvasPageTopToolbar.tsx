@@ -52,6 +52,7 @@ import {
 import ProjectCanvasGroupTreePopover from './ProjectCanvasGroupTreePopover'
 import ProjectCanvasPageExportMenus from './ProjectCanvasPageExportMenus'
 import { getCanvasItemFocusBounds, type CanvasFocusBounds } from './canvasFitBoundsUtils'
+import { formatProjectCanvasScalePercent } from './projectCanvasViewportScale'
 import type {
   AnnotationShape,
   CanvasAnnotationItem,
@@ -138,6 +139,72 @@ function resolveZoomResetAnchor(options: {
   }
 
   return best?.anchor ?? null
+}
+
+type ViewportCallbackRegistrar = (
+  callback: (pos: CanvasViewportPoint, scale: number) => void
+) => (() => void) | void
+type ViewportInteractionCallbackRegistrar = (
+  callback: (active: boolean) => void
+) => (() => void) | void
+
+/**
+ * The zoom chip label. With the viewport driver's callbacks it writes the percentage itself, so a zoom
+ * does not re-render the toolbar: it updates when a gesture ends and on every committed viewport
+ * change, as the scalePercent prop did. Without them (tests, other hosts) it renders scalePercent.
+ */
+function ProjectCanvasZoomChipLabel({
+  scalePercent,
+  registerViewportCallback,
+  registerViewportInteractionCallback
+}: {
+  scalePercent?: number | string
+  registerViewportCallback?: ViewportCallbackRegistrar
+  registerViewportInteractionCallback?: ViewportInteractionCallbackRegistrar
+}) {
+  const labelRef = React.useRef<HTMLSpanElement | null>(null)
+  const followsViewport = typeof registerViewportCallback === 'function'
+
+  React.useLayoutEffect(() => {
+    if (!registerViewportCallback) {
+      return
+    }
+
+    let isInteracting = false
+    let latestScale: number | null = null
+    const writeLabel = () => {
+      if (labelRef.current && latestScale != null) {
+        const text = `${formatProjectCanvasScalePercent(latestScale)}% `
+        if (labelRef.current.textContent !== text) {
+          labelRef.current.textContent = text
+        }
+      }
+    }
+    const disposeInteraction = registerViewportInteractionCallback?.((active) => {
+      isInteracting = active
+      if (!active) {
+        writeLabel()
+      }
+    })
+    const disposeViewport = registerViewportCallback((_pos, scale) => {
+      latestScale = scale
+      if (!isInteracting) {
+        writeLabel()
+      }
+    })
+
+    return () => {
+      if (typeof disposeViewport === 'function') disposeViewport()
+      if (typeof disposeInteraction === 'function') disposeInteraction()
+    }
+  }, [registerViewportCallback, registerViewportInteractionCallback])
+
+  // When it follows the viewport, React never owns the text node: the effect writes it.
+  return (
+    <span ref={labelRef} data-project-canvas-zoom-label="true">
+      {followsViewport ? null : `${scalePercent}% `}
+    </span>
+  )
 }
 
 function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
@@ -423,8 +490,24 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
     updateToolShortcut,
     videoInputRef,
     videoItems,
-    visibleItems
+    visibleItems,
+    getStageViewport,
+    registerViewportCallback,
+    registerViewportInteractionCallback
   } = props
+  // The shell passes the committed viewport through getStageViewport instead of as props, so a pan
+  // or a zoom does not re-render the toolbar. Handlers read it when they run.
+  const readStageViewport = React.useCallback(
+    (): {
+      stagePos: CanvasViewportPoint
+      stageScale: number
+      stageSize: CanvasViewportSize | null | undefined
+    } =>
+      typeof getStageViewport === 'function'
+        ? getStageViewport()
+        : { stagePos, stageScale, stageSize },
+    [getStageViewport, stagePos, stageScale, stageSize]
+  )
   const [historyMenuAnchor, setHistoryMenuAnchor] = React.useState<HTMLElement | null>(null)
   const historyCount = historySnapshots?.length ?? 0
   const resolvedHistorySnapshots = historySnapshots || []
@@ -445,6 +528,7 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
   const resumeGroupPlaybackTooltip = isChineseUi ? '继续播放' : 'Resume playback'
   const stopGroupPlaybackTooltip = isChineseUi ? '停止播放' : 'Stop playback'
   const resetZoomToCanvasContentAnchor = React.useCallback(() => {
+    const { stagePos, stageScale, stageSize } = readStageViewport()
     if (!stageSize) {
       setStageScaleAroundViewportCenter(1)
       return
@@ -476,14 +560,11 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
     })
   }, [
     items,
+    readStageViewport,
     selectedIds,
     setStagePos,
     setStageScale,
-    setStageScaleAroundViewportCenter,
-    stagePos?.x,
-    stagePos?.y,
-    stageScale,
-    stageSize
+    setStageScaleAroundViewportCenter
   ])
   return (
     <Box
@@ -1140,7 +1221,13 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
       </Tooltip>
 
       <Chip
-        label={`${scalePercent}% `}
+        label={
+          <ProjectCanvasZoomChipLabel
+            scalePercent={scalePercent}
+            registerViewportCallback={registerViewportCallback}
+            registerViewportInteractionCallback={registerViewportInteractionCallback}
+          />
+        }
         size="small"
         variant="outlined"
         onPointerDown={(e) => {
@@ -1150,6 +1237,7 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
           target.setPointerCapture(e.pointerId)
 
           const startX = e.clientX
+          const { stagePos, stageScale, stageSize } = readStageViewport()
           const startScale = stageScale
           const startPos = { ...stagePos }
           let hasDragged = false

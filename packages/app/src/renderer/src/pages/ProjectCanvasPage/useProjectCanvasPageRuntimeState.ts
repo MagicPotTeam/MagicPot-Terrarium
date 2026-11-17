@@ -169,7 +169,11 @@ export function useProjectCanvasPageRuntimeState() {
     selectedHistoryRevision: null
   })
   const { items, history, future, historyRevision, selectedHistoryRevision } = itemsState
-  const historySnapshots = history.map((snapshot, index) => ({ index, items: snapshot })).reverse()
+  // One array per history change, not per render: the top toolbar is memoised on it.
+  const historySnapshots = useMemo(
+    () => history.map((snapshot, index) => ({ index, items: snapshot })).reverse(),
+    [history]
+  )
   const historyCount = history.length
   const [groups, setGroups] = useState<CanvasGroup[]>([])
   const [groupBranches, setGroupBranches] = useState<CanvasGroupBranch[]>([])
