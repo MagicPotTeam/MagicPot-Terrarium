@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
@@ -16,12 +16,11 @@ import {
   type WindowsCommandLookup
 } from './windowsCommandResolution'
 import { resolveCapableWindowsCommandJobHelper } from './windowsJobObjectConfinement'
-
-type TerminalRunSpawn = (
-  command: string,
-  args: readonly string[],
-  options: SpawnOptions
-) => ChildProcess
+import {
+  stopWindowsProcessTree,
+  type WindowsProcessSnapshotProvider,
+  type WindowsProcessSpawn
+} from './windowsProcessTree'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_OUTPUT_CHARS = 64_000
@@ -60,17 +59,20 @@ export type TerminalRunOutcome = Readonly<{
  */
 export type TerminalRunProcessControl = Readonly<{
   platform: NodeJS.Platform
-  spawn: TerminalRunSpawn
+  spawn: WindowsProcessSpawn
   now: () => number
   /** win32: the verified Job Object helper that answers the current capability, or undefined. */
   resolveWindowsJobHelper: () => Promise<string | undefined>
   /** win32: inputs of the libuv-equivalent command lookup used before launching through the helper. */
   windowsCommandLookup: WindowsCommandLookup
+  /** win32 without the helper: process-table snapshots for the tree sweep (default: PowerShell). */
+  windowsSnapshot?: WindowsProcessSnapshotProvider
+  windowsSweepDeadlineMs?: number
 }>
 
 const defaultProcessControl = (): TerminalRunProcessControl => ({
   platform: process.platform,
-  spawn: spawn as unknown as TerminalRunSpawn,
+  spawn: spawn as unknown as WindowsProcessSpawn,
   now: Date.now,
   resolveWindowsJobHelper: () => resolveCapableWindowsCommandJobHelper(),
   windowsCommandLookup: defaultWindowsCommandLookup()
@@ -344,27 +346,25 @@ async function executeProcess(
         }
         termination = Promise.resolve()
       } else if (windows) {
-        // Never resolve a kill helper from the workspace or caller-controlled PATH.
-        const taskkill = path.join(
-          process.env.SystemRoot || 'C:\\Windows',
-          'System32',
-          'taskkill.exe'
-        )
-        termination = new Promise<void>((done) => {
-          const killer = control.spawn(taskkill, ['/PID', String(pid), '/T', '/F'], {
-            shell: false,
-            windowsHide: true,
-            stdio: 'ignore'
-          })
-          killer.once('error', () => {
+        // Today's immediate `taskkill /PID <pid> /T /F`, then a sweep for processes it missed.
+        termination = stopWindowsProcessTree(pid, {
+          rootCreatedNotBeforeMs: spawnedNotBeforeMs,
+          spawnProcess: control.spawn,
+          now: control.now,
+          ...(control.windowsSnapshot ? { snapshot: control.windowsSnapshot } : {}),
+          ...(control.windowsSweepDeadlineMs === undefined
+            ? {}
+            : { deadlineMs: control.windowsSweepDeadlineMs }),
+          onInitialKillFailed: () => child.kill('SIGKILL')
+        }).then(
+          (report) => {
+            processTreeStop = report.confirmed ? 'tree-swept' : 'tree-unconfirmed'
+          },
+          () => {
+            processTreeStop = 'tree-unconfirmed'
             child.kill('SIGKILL')
-            done()
-          })
-          killer.once('close', (code) => {
-            if (code !== 0) child.kill('SIGKILL')
-            done()
-          })
-        })
+          }
+        )
       } else {
         try {
           process.kill(-pid, 'SIGKILL')

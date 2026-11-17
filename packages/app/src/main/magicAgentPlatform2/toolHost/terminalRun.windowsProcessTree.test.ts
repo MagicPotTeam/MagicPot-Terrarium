@@ -342,3 +342,89 @@ describe('terminal.run on win32 without a usable helper', () => {
     ])
   })
 })
+
+describe('terminal.run on win32 without the helper: taskkill plus sweep', () => {
+  const noHelper = async () => undefined
+  const taskkillSpawner = (exitCode = 0) => {
+    const fake = fakeSpawner(({ file, child }) => {
+      if (!file.endsWith('taskkill.exe')) return
+      fake.calls[0].child.close(1)
+      child.close(exitCode)
+    })
+    return fake
+  }
+
+  it('kills at once with taskkill, then reports only after the sweep confirmed the tree is gone', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { root, authorization } = setup()
+    const fake = taskkillSpawner()
+    let answer!: (table: []) => void
+    const windowsSnapshot = vi.fn(() => new Promise<[]>((resolve) => (answer = resolve)))
+    const audit: TerminalRunAuditEvidence[] = []
+    const running = host(
+      root,
+      authorization,
+      {
+        spawn: fake.spawn,
+        resolveWindowsJobHelper: noHelper,
+        windowsCommandLookup: windowsFiles(['C:\\Windows\\System32\\tool.exe']),
+        windowsSnapshot
+      },
+      audit
+    ).run(approvedInput(root, authorization, 'tool', ['x'], { timeoutMs: 100 }))
+    const state = settledFlag(running)
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(1))
+    expect(fake.calls[0].file).toBe('tool')
+    vi.advanceTimersByTime(100)
+    // The first kill is today's command, issued synchronously at the timeout.
+    expect(fake.calls[1].file).toMatch(/[\\/]System32[\\/]taskkill\.exe$/)
+    expect(fake.calls[1].args).toEqual(['/PID', String(fake.calls[0].child.pid), '/T', '/F'])
+    expect(windowsSnapshot).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(fake.calls[0].child.closed).toBe(true))
+    await Promise.resolve()
+    expect(state.settled).toBe(false)
+    answer([])
+    const result = await running
+    expect(result.status).toBe('timed-out')
+    expect(fake.calls[0].child.kills).toEqual([])
+    expect(audit[0]).toMatchObject({ status: 'timed-out', processTreeStop: 'tree-swept' })
+  })
+
+  it('reports an unconfirmed tree stop when no snapshot can be taken', async () => {
+    const { root, authorization } = setup()
+    const fake = taskkillSpawner()
+    const controller = new AbortController()
+    const audit: TerminalRunAuditEvidence[] = []
+    const running = host(
+      root,
+      authorization,
+      {
+        spawn: fake.spawn,
+        resolveWindowsJobHelper: noHelper,
+        windowsCommandLookup: windowsFiles([]),
+        windowsSnapshot: async () => undefined
+      },
+      audit
+    ).run(approvedInput(root, authorization, 'tool', [], { signal: controller.signal }))
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(1))
+    controller.abort()
+    expect((await running).status).toBe('cancelled')
+    expect(audit[0]).toMatchObject({ status: 'cancelled', processTreeStop: 'tree-unconfirmed' })
+  })
+
+  it('still kills the child directly when taskkill fails, as before', async () => {
+    const { root, authorization } = setup()
+    const fake = taskkillSpawner(1)
+    const controller = new AbortController()
+    const running = host(root, authorization, {
+      spawn: fake.spawn,
+      resolveWindowsJobHelper: noHelper,
+      windowsCommandLookup: windowsFiles([]),
+      windowsSnapshot: async () => []
+    }).run(approvedInput(root, authorization, 'tool', [], { signal: controller.signal }))
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(1))
+    controller.abort()
+    await running
+    expect(fake.calls[0].child.kills).toEqual(['SIGKILL'])
+  })
+})

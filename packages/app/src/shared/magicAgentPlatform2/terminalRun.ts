@@ -19,8 +19,11 @@ export type TerminalRunAuditEvidence = Readonly<{
   truncated: boolean
   durationMs: number
   /**
-   * win32 only, present when the run was stopped (timeout, output limit or cancel) through the
-   * Job Object helper: terminating the helper closes the job and kills every process in it.
+   * win32 only, present when the run was stopped (timeout, output limit or cancel): how the
+   * process tree was stopped. 'job-object': the Job Object helper was terminated, which kills the
+   * whole job. 'tree-swept': taskkill plus a process-table sweep confirmed that no member of the
+   * tree is alive. 'tree-unconfirmed': no snapshot could be taken or the sweep deadline passed, so
+   * descendants may still be running.
    */
-  processTreeStop?: 'job-object'
+  processTreeStop?: 'job-object' | 'tree-swept' | 'tree-unconfirmed'
 }>
