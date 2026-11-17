@@ -7,6 +7,14 @@ vi.unmock('fs')
 vi.unmock('node:fs')
 
 const pythonSdk = path.join(process.cwd(), 'packages/agent-sdk-python/src')
+/**
+ * Puts the SDK checkout on sys.path from inside the script. PYTHONPATH alone is not enough: an
+ * isolated or embedded Python (for example a bundled runtime started with -I, or the Windows
+ * embeddable package with a ._pth file) ignores the environment and then cannot import the SDK.
+ * PYTHONPATH is still passed for any child process the script starts.
+ */
+const withSdkOnPath = (code: string): string =>
+  `import sys\nsys.path.insert(0, ${JSON.stringify(pythonSdk)})\n${code}`
 let baseUrl = ''
 let server: ReturnType<typeof createServer>
 const semanticMemoryRequests: Array<{ method: string; body: Record<string, unknown> }> = []
@@ -15,7 +23,7 @@ let pythonUnavailableReason: string | undefined
 /**
  * The suite needs what the SDK's README asks of its users and nothing else: a `python` on PATH
  * that runs Python code and is 3.10 or newer. The SDK is stdlib-only and is imported from the
- * checkout through PYTHONPATH, so no package has to be installed. Only those prerequisites skip
+ * checkout (on sys.path and through PYTHONPATH), so no package has to be installed. Only those prerequisites skip
  * the suite. Everything past them (importing the SDK, reaching the loopback test server, the
  * calls themselves) is the SDK's own job and fails the suite when it breaks.
  */
@@ -37,7 +45,7 @@ async function probePython(): Promise<string | undefined> {
     child.on('close', (status) => resolve({ status, stdout, stderr }))
   })
   const prerequisite =
-    'the Python SDK suite needs Python 3.10+ as `python` on PATH (stdlib only, SDK via PYTHONPATH)'
+    'the Python SDK suite needs Python 3.10+ as `python` on PATH (stdlib only, SDK from the checkout)'
   if (result.error) return `No \`python\` on PATH (${result.error.message}): ${prerequisite}.`
   const version = result.stdout.trim().match(/^(\d+)\.(\d+)\.(\d+)$/)
   if (result.status !== 0 || !version) {
@@ -625,7 +633,7 @@ asyncio.run(main())
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve) => {
-        const child = spawn('python', ['-c', source], {
+        const child = spawn('python', ['-c', withSdkOnPath(source)], {
           env: { ...process.env, PYTHONPATH: pythonSdk },
           stdio: ['ignore', 'pipe', 'pipe']
         })
@@ -663,7 +671,7 @@ asyncio.run(main())
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve) => {
-        const child = spawn('python', ['-c', source], {
+        const child = spawn('python', ['-c', withSdkOnPath(source)], {
           env: { ...process.env, PYTHONPATH: pythonSdk },
           stdio: ['ignore', 'pipe', 'pipe']
         })
@@ -706,7 +714,7 @@ asyncio.run(main())
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -731,7 +739,7 @@ print(json.dumps({'runId': result.run_id, 'status': result.status, 'output': res
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -760,7 +768,7 @@ print(json.dumps({'id':result.id,'revision':result.revision,'definition':result.
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -791,7 +799,7 @@ print(json.dumps({'root': root.id, 'child': child.id, 'removed': removed.state['
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -821,7 +829,7 @@ print(json.dumps({'paused': paused.state['status'], 'resumed': resumed.state['st
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -846,7 +854,7 @@ print(json.dumps({'action':result['action'],'status':result['status']}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -874,7 +882,7 @@ print(json.dumps({'status':start['status'],'teamId':start['teamId']}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -902,7 +910,7 @@ print(json.dumps({'create':created['revision'],'add':added['revision'],'removeMe
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -930,7 +938,7 @@ print(json.dumps({'created': created.version, 'active': active.state['configVers
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -955,7 +963,7 @@ print(json.dumps({'id': result.message_id, 'status': result.status}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -980,7 +988,7 @@ print(json.dumps({'id': channel.id, 'mode': channel.state['mode']}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -1007,7 +1015,7 @@ print(json.dumps({'joined': len(joined.state['members']), 'left': len(left.state
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -1034,7 +1042,7 @@ print(json.dumps({'wired': wired.id, 'enabled': unwired.state['enabled']}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -1060,7 +1068,7 @@ print(json.dumps({'listed': listed.id, 'max_hops': wire.state['maxHops']}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -1086,7 +1094,7 @@ print(json.dumps({'token': claimed.claim_token, 'ack': ack.acknowledged_at, 'ack
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -1115,7 +1123,7 @@ print(json.dumps({'id': value.id, 'mode': value.state['mode']}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -1140,7 +1148,7 @@ print(json.dumps({'id': value.id, 'revision': value.revision}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -1169,7 +1177,7 @@ print(json.dumps([a.status, b.status, c.status]))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = '',
@@ -1193,7 +1201,7 @@ print(json.dumps({'id': value.id, 'revision': value.revision}))
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
@@ -1218,7 +1226,7 @@ print(json.dumps({'id': value.id, 'status': value.state['received']['occurrenceI
 `
     const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
-        const child = spawn('python', ['-c', code], {
+        const child = spawn('python', ['-c', withSdkOnPath(code)], {
           env: { ...process.env, PYTHONPATH: pythonSdk }
         })
         let stdout = ''
