@@ -117,7 +117,7 @@ type MockApplicationInstance = {
     gl: MockWebGLContext
     resolution?: number
     context?: { webGLVersion: number }
-    texture?: { initSource: ReturnType<typeof vi.fn> }
+    texture?: { initSource: ReturnType<typeof vi.fn>; _uploads?: Record<string, unknown> }
   }
   render: ReturnType<typeof vi.fn>
   destroy: ReturnType<typeof vi.fn>
@@ -144,12 +144,20 @@ let eagerTextureUploads: unknown[] = []
 // real <img> element), which the layer uploads eagerly too but never releases.
 let eagerPreviewUploads: unknown[] = []
 let providedItemImages = new WeakSet<object>()
+// Called at the start of every eager upload of the mock renderer, before the upload itself.
+let eagerUploadHook: ((source: MockTextureSource) => void) | null = null
+// Textures that the mock render had to upload on their first draw (Pixi's lazy upload).
+let lazyRenderUploadCount = 0
 // 1 simulates a WebGL 1 context, which cannot run the edge-antialias program.
 let mockWebGLVersion = 2
 // true gives the mock context WebGL 2 fences; each one passes when the test sets `signaled`.
 let mockWebGLFences = false
 let createdWebGLFences: { signaled: boolean; deleted: boolean }[] = []
 let createdEdgeAntialiasShaders: { destroyed: boolean; resources: Record<string, unknown> }[] = []
+// Upload methods registered with the mocked Pixi extensions (name -> method), copied into each
+// renderer's texture system when it is created, as Pixi does.
+let registeredTextureUploaders: Record<string, unknown> = {}
+const pixiImageUploadMock = vi.fn()
 const originalDevicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio
 
 type MockImageInstance = {
@@ -438,7 +446,9 @@ function installPixiMock() {
         ...(mockRendererSupportsEagerUpload
           ? {
               texture: {
+                _uploads: { ...registeredTextureUploaders },
                 initSource: vi.fn((source: MockTextureSource) => {
+                  eagerUploadHook?.(source)
                   if (source.destroyed) {
                     throw new Error('Pixi attempted to upload a destroyed texture source.')
                   }
@@ -495,6 +505,7 @@ function installPixiMock() {
             }
             if (!source.gpuValid) {
               assertBitmapUploadable(source.resource)
+              lazyRenderUploadCount += 1
               source.gpuValid = true
             }
           }
@@ -516,6 +527,17 @@ function installPixiMock() {
     return {
       Application: MockApplication,
       Container: MockContainer,
+      ExtensionType: { TextureUploaderWebGL: 'texture-uploader-webgl' },
+      extensions: {
+        add: (...added: { extension: { type: string; name: string } }[]) => {
+          added.forEach((extension) => {
+            if (extension.extension.type === 'texture-uploader-webgl') {
+              registeredTextureUploaders[extension.extension.name] = extension
+            }
+          })
+        }
+      },
+      glUploadImageResource: { id: 'image', upload: pixiImageUploadMock },
       GlProgram: MockGlProgram,
       Mesh: MockMesh,
       MeshGeometry: MockMeshGeometry,
@@ -736,10 +758,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     eagerTextureUploads = []
     eagerPreviewUploads = []
     providedItemImages = new WeakSet<object>()
+    eagerUploadHook = null
+    lazyRenderUploadCount = 0
     mockWebGLVersion = 2
     mockWebGLFences = false
     createdWebGLFences = []
     createdEdgeAntialiasShaders = []
+    registeredTextureUploaders = {}
+    pixiImageUploadMock.mockReset()
     setWindowDevicePixelRatio(originalDevicePixelRatio)
     installPixiMock()
   })
@@ -993,35 +1019,17 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         })
       )
       const uploadFrames: number[] = []
-      let lazyUploads = 0
-      const utils = render(<Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
-      await waitFor(() => expect(createdApplications).toHaveLength(1))
-      const app = createdApplications[0]
-      const upload = app.renderer.texture!.initSource
-      const uploadImplementation = upload.getMockImplementation() as (
-        source: MockTextureSource
-      ) => void
-      upload.mockImplementation((source: MockTextureSource) => {
+      eagerUploadHook = () => {
         uploadFrames.push(displayFrame)
         clockMs += uploadMs
-        uploadImplementation(source)
-      })
-      const renderImplementation = app.render.getMockImplementation() as () => void
-      app.render.mockImplementation(() => {
-        lazyUploads += createdSprites.filter(
-          (sprite) =>
-            !sprite.destroyed &&
-            sprite.parent &&
-            !(sprite.texture.source as MockTextureSource).gpuValid
-        ).length
-        renderImplementation()
-      })
+      }
+      const utils = render(<Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
       const uploadsPerFrame = () => {
         const perFrame = new Map<number, number>()
         uploadFrames.forEach((frame) => perFrame.set(frame, (perFrame.get(frame) ?? 0) + 1))
         return [...perFrame.values()]
       }
-      return { ...utils, app, items, uploadsPerFrame, getLazyUploads: () => lazyUploads }
+      return { ...utils, items, uploadsPerFrame, getLazyUploads: () => lazyRenderUploadCount }
     }
 
     it("uploads the items' own preview images eagerly, within the frame byte budget", async () => {
@@ -1061,6 +1069,199 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(getLiveSpriteByLabel(first.id)).toBe(firstSprite)
       expect(firstSprite?.destroyed).toBe(false)
       expect(uploadsPerFrame().every((count) => count === 1)).toBe(true)
+    })
+
+    describe('strip uploads of large sources', () => {
+      const createStripGl = () => {
+        const calls: { fn: string; args: unknown[] }[] = []
+        const gl = {
+          UNPACK_SKIP_ROWS: 0x0cf3,
+          pixelStorei: vi.fn((...args: unknown[]) => calls.push({ fn: 'pixelStorei', args })),
+          texImage2D: vi.fn((...args: unknown[]) => calls.push({ fn: 'texImage2D', args })),
+          texSubImage2D: vi.fn((...args: unknown[]) => calls.push({ fn: 'texSubImage2D', args }))
+        }
+        return { gl, calls }
+      }
+      const createStripSource = (width: number, height: number) => ({
+        pixelWidth: width,
+        pixelHeight: height,
+        resourceWidth: width,
+        resourceHeight: height,
+        resource: createBitmap(width, height)
+      })
+      const createGlTexture = (width = -1, height = -1) => ({
+        target: 3553,
+        internalFormat: 6408,
+        format: 6408,
+        type: 5121,
+        width,
+        height
+      })
+
+      it('uploads a 4096 x 3072 source as strips of at most 4 MiB covering every row', async () => {
+        const {
+          uploadProjectCanvasTextureInStrips,
+          PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES
+        } = await import('./projectCanvasWebGLStripUpload')
+        const { gl, calls } = createStripGl()
+        const source = createStripSource(4096, 3072)
+        const glTexture = createGlTexture()
+
+        uploadProjectCanvasTextureInStrips(source, glTexture, gl, 2)
+
+        // Allocated once without data, so no upload of the whole image is staged at once.
+        expect(gl.texImage2D).toHaveBeenCalledTimes(1)
+        expect(gl.texImage2D.mock.calls[0]).toEqual([
+          3553,
+          0,
+          6408,
+          4096,
+          3072,
+          0,
+          6408,
+          5121,
+          null
+        ])
+        const strips = gl.texSubImage2D.mock.calls.map((args) => ({
+          y: args[3] as number,
+          width: args[4] as number,
+          rows: args[5] as number,
+          resource: args[8]
+        }))
+        expect(strips).toHaveLength(12)
+        let nextRow = 0
+        strips.forEach((strip) => {
+          expect(strip.y).toBe(nextRow)
+          expect(strip.width).toBe(4096)
+          expect(strip.width * strip.rows * 4).toBeLessThanOrEqual(
+            PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES
+          )
+          expect(strip.resource).toBe(source.resource)
+          nextRow += strip.rows
+        })
+        expect(nextRow).toBe(3072)
+        // Each strip reads its own rows of the image, and the unpack state is left clean.
+        const skipRows = calls.filter((call) => call.fn === 'pixelStorei').map((call) => call.args)
+        expect(skipRows.slice(0, -1)).toEqual(strips.map((strip) => [0x0cf3, strip.y]))
+        expect(skipRows.at(-1)).toEqual([0x0cf3, 0])
+        expect(calls.at(-1)?.fn).toBe('pixelStorei')
+        expect([glTexture.width, glTexture.height]).toEqual([4096, 3072])
+        expect(pixiImageUploadMock).not.toHaveBeenCalled()
+      })
+
+      it('refills a texture of the same size without allocating it again', async () => {
+        const { uploadProjectCanvasTextureInStrips } =
+          await import('./projectCanvasWebGLStripUpload')
+        const { gl } = createStripGl()
+
+        uploadProjectCanvasTextureInStrips(
+          createStripSource(2048, 2048),
+          createGlTexture(2048, 2048),
+          gl,
+          2
+        )
+
+        expect(gl.texImage2D).not.toHaveBeenCalled()
+        expect(gl.texSubImage2D.mock.calls.map((args) => [args[3], args[5]])).toEqual([
+          [0, 512],
+          [512, 512],
+          [1024, 512],
+          [1536, 512]
+        ])
+      })
+
+      it('leaves small images and WebGL 1 to the single upload of Pixi', async () => {
+        const { uploadProjectCanvasTextureInStrips } =
+          await import('./projectCanvasWebGLStripUpload')
+        const { gl } = createStripGl()
+        const small = createStripSource(1024, 1024)
+        const large = createStripSource(2048, 2048)
+
+        uploadProjectCanvasTextureInStrips(small, createGlTexture(), gl, 2)
+        uploadProjectCanvasTextureInStrips(large, createGlTexture(), gl, 1)
+
+        expect(gl.texImage2D).not.toHaveBeenCalled()
+        expect(gl.texSubImage2D).not.toHaveBeenCalled()
+        expect(pixiImageUploadMock.mock.calls.map((args) => [args[0], args[3]])).toEqual([
+          [small, 2],
+          [large, 1]
+        ])
+      })
+
+      it('gives decoded sources above the strip size the strip upload method', async () => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        vi.stubGlobal(
+          'createImageBitmap',
+          vi.fn(async () => createBitmap(2048, 2048))
+        )
+        const item = createNamedItem('strip-source', {
+          src: 'local-media:///C:/images/strip-source.png',
+          sourceWidth: 2048,
+          sourceHeight: 2048,
+          image: createImage(16, 16)
+        })
+        const { unmount } = render(
+          <Layer
+            items={[item]}
+            {...TEST_STAGE_VIEWPORT_1280_720}
+            selectedIds={new Set([item.id])}
+          />
+        )
+        await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+        const sourceTexture = createdBaseTextures.find(
+          (texture) => (texture.source as MockTextureSource).resource === eagerTextureUploads[0]
+        )!
+        // The preview's texture (destroyed once the source replaced it) kept Pixi's upload.
+        const otherTextures = createdBaseTextures.filter((texture) => texture !== sourceTexture)
+        expect(otherTextures.length).toBeGreaterThan(0)
+        expect((sourceTexture.source as { uploadMethodId?: string }).uploadMethodId).toBe(
+          'project-canvas-strips'
+        )
+        expect(
+          otherTextures.every(
+            (texture) =>
+              (texture.source as { uploadMethodId?: string }).uploadMethodId === undefined
+          )
+        ).toBe(true)
+        // The method Pixi calls for it is the strip upload, registered before the renderer.
+        const uploads = createdApplications[0].renderer.texture!._uploads!
+        const { uploadProjectCanvasTextureInStrips } =
+          await import('./projectCanvasWebGLStripUpload')
+        expect((uploads['project-canvas-strips'] as { upload: unknown }).upload).toBe(
+          uploadProjectCanvasTextureInStrips
+        )
+        unmount()
+      })
+
+      it('keeps the single upload on a WebGL 1 renderer', async () => {
+        mockWebGLVersion = 1
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        vi.stubGlobal(
+          'createImageBitmap',
+          vi.fn(async () => createBitmap(2048, 2048))
+        )
+        const item = createNamedItem('webgl1-source', {
+          src: 'local-media:///C:/images/webgl1-source.png',
+          sourceWidth: 2048,
+          sourceHeight: 2048,
+          image: createImage(16, 16)
+        })
+        const { unmount } = render(
+          <Layer
+            items={[item]}
+            {...TEST_STAGE_VIEWPORT_1280_720}
+            selectedIds={new Set([item.id])}
+          />
+        )
+        await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+        expect(
+          createdBaseTextures.some(
+            (texture) =>
+              (texture.source as { uploadMethodId?: string }).uploadMethodId !== undefined
+          )
+        ).toBe(false)
+        unmount()
+      })
     })
 
     it('moves, re-layers and rotates an image whose large upload is held back', async () => {

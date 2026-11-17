@@ -114,6 +114,12 @@ import {
   getCanvasImageObjectUrlRegistryMetrics
 } from '../canvasImageObjectUrlRegistry'
 import { withProjectCanvasWebGLTimeout } from './projectCanvasWebGLTimeout'
+import {
+  PROJECT_CANVAS_WEBGL_STRIP_UPLOAD_METHOD_ID,
+  PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES,
+  getRegisteredProjectCanvasStripTextureUploader,
+  registerProjectCanvasStripTextureUploader
+} from './projectCanvasWebGLStripUpload'
 import { PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } from '@shared/config/viteEnv'
 
 export { PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } from '@shared/config/viteEnv'
@@ -855,7 +861,23 @@ function getProjectCanvasTextureScaleMode(): 'linear' {
   return 'linear'
 }
 
-function createProjectCanvasTexture(image: CanvasImageAsset): Texture {
+/** True when this renderer can upload large sources in strips (WebGL 2, method registered). */
+function canProjectCanvasRendererUploadInStrips(app: Application | null) {
+  const renderer = app?.renderer as
+    | (PixiRendererWithWebGLContext & {
+        texture?: { _uploads?: Record<string, unknown> }
+      })
+    | null
+    | undefined
+  const uploader = getRegisteredProjectCanvasStripTextureUploader()
+  return Boolean(
+    uploader &&
+    renderer?.context?.webGLVersion === 2 &&
+    renderer.texture?._uploads?.[PROJECT_CANVAS_WEBGL_STRIP_UPLOAD_METHOD_ID] === uploader
+  )
+}
+
+function createProjectCanvasTexture(image: CanvasImageAsset, uploadInStrips = false): Texture {
   const texture = Texture.from(
     {
       resource: image,
@@ -863,6 +885,15 @@ function createProjectCanvasTexture(image: CanvasImageAsset): Texture {
     },
     true
   )
+  if (uploadInStrips && isCanvasImageBitmapLike(image)) {
+    // A decoded bitmap above the strip size goes up in strips (see the upload method). Image
+    // elements keep Pixi's single upload: a row range of an element may decode it again.
+    const { width, height } = getCanvasImageAssetSize(image)
+    const stripSource = texture.source as { uploadMethodId?: string } | null | undefined
+    if (stripSource && width * height * 4 > PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES) {
+      stripSource.uploadMethodId = PROJECT_CANVAS_WEBGL_STRIP_UPLOAD_METHOD_ID
+    }
+  }
   // The layer's own residency code (sprite destroy, texture budget) decides what stays on
   // the GPU. Pixi's collector must never unload one of these textures on its own schedule:
   // the decoded input of an uploaded texture is released, so it could not be uploaded again.
@@ -3607,6 +3638,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
     const initialize = async () => {
       try {
+        registerProjectCanvasStripTextureUploader()
         const app = new Application()
         await app.init({
           resizeTo: host,
@@ -5274,6 +5306,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     const canUploadEagerly =
       typeof (appRef.current?.renderer as PixiRendererWithEagerTextureUpload | null | undefined)
         ?.texture?.initSource === 'function'
+    const canUploadInStrips = canProjectCanvasRendererUploadInStrips(appRef.current)
     let residentCandidateTextureBytes = 0
     let worldOrderDirty = false
     const nextRenderItems = new Map<string, ProjectCanvasRenderableImage>()
@@ -5941,7 +5974,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         let createdSharedTexture = false
         baseTexture = sharedTexturePoolRef.current.acquire(sharedTextureKey, () => {
           createdSharedTexture = true
-          return createProjectCanvasTexture(image)
+          return createProjectCanvasTexture(image, canUploadInStrips)
         })
         if (createdSharedTexture) {
           requestSampledWebGLErrorCheck()
