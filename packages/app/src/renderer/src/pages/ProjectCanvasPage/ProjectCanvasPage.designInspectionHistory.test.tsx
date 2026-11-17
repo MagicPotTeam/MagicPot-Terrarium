@@ -1775,34 +1775,35 @@ describe('ProjectCanvasPage generation-first entry', () => {
     const savedTargetImage = savedItems.find((item) => item.id === 'image-1')
     const savedPeerImage = savedItems.find((item) => item.id === 'image-2')
 
+    // Crop confirm keeps the user's original picture plus the crop region (never
+    // flattened into a new data URL). The crop is in the 320x240 source's pixel
+    // space (the decoded MockImage size, recorded as sourceWidth/Height). The
+    // frame (x, y, width, height, scale) is exactly what the overlay reported:
+    // the mocked overlay above reports width - 32, height - 24 and scale x1.15 /
+    // x1.1; the real overlay reports the crop size with a compensating scale.
     expect(savedTargetImage).toEqual(
       expect.objectContaining({
         id: 'image-1',
         x: 92,
         y: 48,
-        width: 300,
-        height: 224,
+        width: 128,
+        height: 136,
         scaleX: 1.15,
         scaleY: 1.1,
-        src: 'data:image/png;base64,mock-canvas',
+        src: 'file:///C:/magicpot/crop-target.png',
         fileName: 'crop-target.png',
-        sourceWidth: 300,
-        sourceHeight: 224
+        sourceWidth: 320,
+        sourceHeight: 240,
+        crop: { x: 10, y: 6, width: 300, height: 224 }
       })
     )
-    expect(savedTargetImage).not.toHaveProperty('crop')
+    expect(String(savedTargetImage?.src)).not.toMatch(/^data:/)
+    // The other image of the earlier multi-selection is saved unchanged.
     expect(savedPeerImage).toEqual(
-      expect.objectContaining({
-        id: 'image-2',
-        x: 280,
-        y: 40,
-        width: 160,
-        height: 160,
-        scaleX: 1,
-        scaleY: 1
-      })
+      expect.objectContaining(createImageItem('image-2', 280, 'crop-peer.png'))
     )
     expect(savedPeerImage).not.toHaveProperty('crop')
+    expect(savedPeerImage).not.toHaveProperty('cropSource')
     expect(savedItems.filter((item) => item.id === 'image-1')).toHaveLength(1)
     expect(savedItems.filter((item) => item.id === 'image-2')).toHaveLength(1)
   })
