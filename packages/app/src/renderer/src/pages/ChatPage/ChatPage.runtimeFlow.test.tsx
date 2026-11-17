@@ -6618,6 +6618,39 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { externalLoading(false); page.unmount() }
   })
 
+  it.each([
+    ['the user stops it', 'cancelled'],
+    ['its team record changes', 'interrupted']
+  ] as const)('returns a task whose member send ends in preflight because %s to pending with outcome %s', async (cause, outcome) => {
+    const lead: ChatSession = {id:'preflight-task-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[{id:'task',title:'准备中任务',ownerId:'preflight-task-member',status:'pending',dependsOn:[]}]}
+    const member: ChatSession = {id:'preflight-task-member',title:'writer',messages:[],teamLeadId:lead.id,teamMemberName:'writer'}
+    hoisted.storedSessions.value = [lead,member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID,'runtime-flow'),lead.id)
+    let release!: () => void
+    const gate = {gate:new Promise<void>(resolve => { release = resolve }),entered:false}
+    const page = renderChatPage({team:true})
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      hoisted.teamPreflightReadGate.value = gate
+      fireEvent.click(screen.getByRole('button',{name:'执行 准备中任务'}))
+      await waitFor(() => expect(gate.entered).toBe(true))
+      fireEvent.click(screen.getByRole('button',{name:'关闭团队管理'}))
+      if (cause === 'the user stops it') {
+        // The lead's composer stop covers a member whose send is still preparing.
+        await waitFor(() => expect(screen.getByTestId('chat-composer-stop-mock')).toBeVisible())
+        fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      } else {
+        hoisted.storedSessions.value = hoisted.storedSessions.value.map(session => session.id === member.id ? {...session, teamLifecycleRevision: 1} : session)
+      }
+      await act(async () => { hoisted.teamPreflightReadGate.value = null; release() })
+      await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0]).toEqual({id:'task',title:'准备中任务',ownerId:member.id,status:'pending',dependsOn:[],lastOutcome:outcome}))
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0].lastOutcome).toBe(outcome)
+    } finally { hoisted.teamPreflightReadGate.value = null; release(); page.unmount() }
+  })
+
   it('keeps a task pending when its owner is busy at dispatch, before or while the claim commits', async () => {
     const lead: ChatSession = {id:'busy-task-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[{id:'task',title:'忙碌任务',ownerId:'busy-task-member',status:'pending',dependsOn:[]}]}
     const member: ChatSession = {id:'busy-task-member',title:'Alice',messages:[],teamLeadId:lead.id,teamMemberName:'Alice'}

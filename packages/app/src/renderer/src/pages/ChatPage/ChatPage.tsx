@@ -2141,6 +2141,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // Incremented for every explicit stop/termination. Sends that are still in
   // async preparation capture the value and must not continue when it changes.
   const sessionTerminationEpochRef = useRef<Map<string, number>>(new Map())
+  // The termination epoch of the user's last stop of a session (a manual Stop, a member stop or
+  // stop-all; not scope termination or deletion): a send it ended in preflight was cancelled.
+  const sessionUserStopEpochRef = useRef<Map<string, number>>(new Map())
   const cancelledSessionsRef = useRef<Set<string>>(new Set())
   const [loadingStatusBySessionId, setLoadingStatusBySessionId] = useState<
     Record<string, ChatLoadingStatus>
@@ -2329,6 +2332,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionId,
         (sessionTerminationEpochRef.current.get(sessionId) ?? 0) + 1
       )
+      if (!options?.dropQueued || options.pauseUserSends) {
+        sessionUserStopEpochRef.current.set(sessionId, sessionTerminationEpochRef.current.get(sessionId)!)
+      }
       cancelledSessionsRef.current.add(sessionId)
       const helper = helperHandlesRef.current.get(sessionId)
       if (helper?.scope === storageScope) {
@@ -9032,13 +9038,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
         taskRunReported = true
         finishTaskRun(outcome)
       }
+      const terminationEpochAtSend = sessionTerminationEpochRef.current.get(member.id) ?? 0
       try {
         await sendMessage({ content: `团队任务：${task.title}`, targetSessionId: member.id, onTaskCompleted: complete, onTaskSettled: settle })
       } finally {
         // The send returned without reporting the run (it never started, or it was abandoned when
         // its scope changed). A send queued behind another run of the owner reports when it runs.
+        // The user's own stop during its preflight cancelled it; anything else interrupted it.
         const queued = queuedSessionSendsRef.current.get(member.id)?.some(item => item.overrides?.onTaskCompleted === complete)
-        if (!taskRunReported && !queued) settle('interrupted')
+        const stoppedByUser = (sessionUserStopEpochRef.current.get(member.id) ?? 0) > terminationEpochAtSend
+        if (!taskRunReported && !queued) settle(stoppedByUser ? 'cancelled' : 'interrupted')
       }
     } catch {
       notifyWarning('无法领取任务，请刷新团队状态并重试')
