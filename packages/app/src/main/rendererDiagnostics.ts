@@ -54,6 +54,12 @@ export const UNRESPONSIVE_PROMPT_DELAY_MS = 15_000
  * loads) is still that reload, in the window and in the death record.
  */
 export const HANG_RELOAD_REQUEST_TTL_MS = 10 * 60_000
+/**
+ * How long an exit is still taken as our own forced end after that end was given up because the
+ * renderer answered again: a forced end that lands late is the reload the user asked for, not an
+ * unexpected death. Short on purpose: a death after it is answered as any other death.
+ */
+export const HANG_LATE_END_GRACE_MS = 5_000
 /** How often an open recovery dialog checks whether the dead renderer came back by itself. */
 export const RECOVERY_PROMPT_POLL_MS = 1_000
 
@@ -450,6 +456,24 @@ export function attachRendererDiagnostics(
     hangReloadRequestedUntil = null
     cancelExpectedRendererExit(webContentsId)
   }
+  // Runs for HANG_LATE_END_GRACE_MS after the request above was dropped because the renderer
+  // answered again during the 5 s wait: the forced end was sent all the same and may still land.
+  // An exit while it runs is that forced end (ours, asked for by the user); ended by that exit, by
+  // a new hang reload and when the window closes.
+  let lateForcedEndTimer: ReturnType<typeof setTimeout> | null = null
+  const dropLateForcedEnd = () => {
+    if (!lateForcedEndTimer) return
+    clearTimeout(lateForcedEndTimer)
+    lateForcedEndTimer = null
+    cancelExpectedRendererExit(webContentsId)
+  }
+  const expectLateForcedEnd = () => {
+    dropLateForcedEnd()
+    // Announced to the death recorder for the same few seconds, so that its record agrees.
+    expectRendererExit(webContentsId, 'reload-after-hang', HANG_LATE_END_GRACE_MS)
+    lateForcedEndTimer = setTimeout(dropLateForcedEnd, HANG_LATE_END_GRACE_MS)
+    lateForcedEndTimer.unref?.()
+  }
   const clearUnresponsiveTimer = () => {
     if (unresponsiveTimer) clearTimeout(unresponsiveTimer)
     unresponsiveTimer = null
@@ -465,10 +489,12 @@ export function attachRendererDiagnostics(
     // The renderer answered again while its forced end was pending and is still answering: the
     // window works, so there is nothing to end and nothing to ask. Asking would offer to end a
     // healthy renderer (a reply in progress would be lost), and a kept request would label a later,
-    // unrelated death as this reload.
+    // unrelated death as this reload. Only for a few more seconds an exit is still expected: the
+    // forced end was sent and can land late, and that must not look like an unexpected death.
     if (answered && !unresponsive && !isRendererDead()) {
       console.info('[App] The unresponsive renderer answered again before its forced end; nothing to reload')
       dropHangReloadRequest()
+      expectLateForcedEnd()
       return
     }
     // The request (and its announcement to the death recorder) stays: an exit that is reported
@@ -489,6 +515,7 @@ export function attachRendererDiagnostics(
     // the old process is still going away is cancelled by its exit and the window stays dead.
     hangReloadRequestedUntil = now() + HANG_RELOAD_REQUEST_TTL_MS
     answeredWhileEnding = false
+    dropLateForcedEnd()
     expectRendererExit(webContentsId, 'reload-after-hang', HANG_RELOAD_REQUEST_TTL_MS)
     hangTerminationTimer = setTimeout(hangTerminationFailed, HANG_TERMINATION_TIMEOUT_MS)
     hangTerminationTimer.unref?.()
@@ -550,7 +577,11 @@ export function attachRendererDiagnostics(
     clearReloadCheck()
     declinedRecovery = null
     goneWithoutCrash = false
-    if (hangTerminationTimer || isHangReloadRequested()) {
+    // An exit in the few seconds after the forced end was given up (the renderer had answered
+    // again) is that forced end landing late. (The death recorder has taken the announcement.)
+    const lateForcedEnd = lateForcedEndTimer !== null
+    dropLateForcedEnd()
+    if (hangTerminationTimer || isHangReloadRequested() || lateForcedEnd) {
       // The forced end of a hung renderer the user chose to reload, also when it is reported after
       // the 5 s: not a new crash, so no dialog and no use of the crash budget. A 'hang-not-ended'
       // dialog still open is answered by this exit. Now that the old process is gone the reload can work.
@@ -609,6 +640,7 @@ export function attachRendererDiagnostics(
     declinedRecovery = null
     goneWithoutCrash = false
     dropHangReloadRequest()
+    dropLateForcedEnd()
   })
 
   // A recovery dialog answered with 取消 leaves a dark frameless window without controls. Ask once

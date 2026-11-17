@@ -5,7 +5,9 @@
 // exit was the user's reload and not a crash. The announcement lives as long as the user's request
 // (minutes: the forced end can be reported late) and is cancelled when the renderer answers again,
 // when the next page finishes loading or when the window closes; one that nobody takes or cancels
-// expires by itself. At most one entry per window.
+// expires by itself. When the request is dropped because the renderer answered again during the
+// wait for its forced end, the announcement is renewed for a few seconds (the forced end was sent
+// and can still land), then cancelled. At most one entry per window.
 import { performance } from 'node:perf_hooks'
 
 export type ExpectedRendererExit = 'reload-after-hang'

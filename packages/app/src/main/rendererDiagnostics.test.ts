@@ -7,6 +7,7 @@ import { markAppQuitting, markSessionEnding, resetAppQuittingForTests } from './
 import { resetExpectedRendererExitsForTests, takeExpectedRendererExit } from './expectedRendererExits'
 import {
   attachRendererDiagnostics,
+  HANG_LATE_END_GRACE_MS,
   handleRendererProcessGone,
   resolveRendererGoneAction,
   shouldRecoverRendererProcess
@@ -1770,6 +1771,89 @@ describe('rendererDiagnostics hung renderer that answers again while its forced 
       exitCode: 0,
       diedAt: 42
     })
+  })
+
+  // Reviewer probe C: the renderer answered during the 5 s wait, the request was dropped, and then
+  // our own forced end landed. It used to be answered as an unexpected 'killed': the dialog
+  // '窗口的显示进程已意外停止。' although the user had asked for the reload, and an untagged death record.
+  it('takes a forced end that lands inside the grace as the user\'s reload: no dialog, tagged record (probe C)', async () => {
+    const { window, clock } = await answersWhileEnding()
+    vi.advanceTimersByTime(HANG_LATE_END_GRACE_MS - 1)
+    clock.now += HANG_LATE_END_GRACE_MS - 1
+    // What the death recorder (the app-level listener, which runs first) reads for this exit.
+    expect(takeExpectedRendererExit(window.webContents.id)).toBe('reload-after-hang')
+    window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    await flush()
+    window.webContents.isCrashed.mockReturnValue(false)
+    listenerOf(window, 'did-start-loading')()
+    vi.advanceTimersByTime(60_000)
+    await flush()
+    expect(answers.map((answer) => answer.message)).toEqual(['窗口已超过 15 秒没有响应。'])
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'unresponsive',
+      exitCode: 0,
+      diedAt: 42
+    })
+    // The crash budget was not used: three crashes of the reloaded page are still reloaded.
+    for (let crash = 0; crash < 3; crash += 1) {
+      listenerOf(window, 'render-process-gone')({}, { reason: 'oom', exitCode: 0 })
+    }
+    expect(window.webContents.reload).toHaveBeenCalledTimes(4)
+    expect(answers).toHaveLength(1)
+  })
+
+  it('answers a death after the grace as unexpected: the dialog, no reload, no tag', async () => {
+    const { window, clock } = await answersWhileEnding()
+    vi.advanceTimersByTime(HANG_LATE_END_GRACE_MS)
+    clock.now += HANG_LATE_END_GRACE_MS
+    expect(takeExpectedRendererExit(window.webContents.id)).toBeUndefined()
+    window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    await flush()
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+    expect(answers.map((answer) => answer.message)).toEqual([
+      '窗口已超过 15 秒没有响应。',
+      '窗口的显示进程已意外停止。'
+    ])
+  })
+
+  it('answers a crash after the grace within the crash budget, with its own reason', async () => {
+    const { window, clock } = await answersWhileEnding()
+    vi.advanceTimersByTime(HANG_LATE_END_GRACE_MS + 1_000)
+    clock.now += HANG_LATE_END_GRACE_MS + 1_000
+    window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'crashed',
+      exitCode: 5,
+      diedAt: 42
+    })
+  })
+
+  it('the grace covers one exit only', async () => {
+    const first = await answersWhileEnding()
+    expect(takeExpectedRendererExit(first.window.webContents.id)).toBe('reload-after-hang')
+    first.window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(first.window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    expect(first.window.webContents.reload).toHaveBeenCalledTimes(1)
+    // A second 'killed' one second later is not ours any more.
+    vi.advanceTimersByTime(1_000)
+    listenerOf(first.window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    await flush()
+    expect(first.window.webContents.reload).toHaveBeenCalledTimes(1)
+    expect(answers.at(-1)?.message).toBe('窗口的显示进程已意外停止。')
+  })
+
+  it('withdraws the grace announcement when the window closes', async () => {
+    const { window } = await answersWhileEnding()
+    window.on.mock.calls.find(([name]) => name === 'closed')?.[1]()
+    expect(takeExpectedRendererExit(window.webContents.id)).toBeUndefined()
   })
 
   it('still asks when the renderer hangs again before the forced end times out, and Reload ends it', async () => {
