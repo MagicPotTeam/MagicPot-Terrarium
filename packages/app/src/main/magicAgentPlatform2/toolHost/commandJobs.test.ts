@@ -59,6 +59,10 @@ class FakeChildProcess extends EventEmitter {
   }
 }
 
+/** win32 stop controllers: taskkill and the tree sweep's PowerShell process-table snapshot. */
+const isProcessSnapshotCommand = (command: string) => path.win32.basename(command).toLowerCase() === 'powershell.exe'
+const isStopControllerCommand = (command: string) => path.win32.basename(command).toLowerCase() === 'taskkill.exe' || isProcessSnapshotCommand(command)
+
 type SpawnCall = Readonly<{
   command: string
   args: readonly string[]
@@ -324,7 +328,7 @@ describe('CommandJobsToolHost', () => {
     let rootForSpawn = ''
     const spawnProcess = ((command, args, options) => {
       const child = fake.spawnProcess(command, args, options)
-      if (path.basename(command).toLowerCase() !== 'taskkill.exe') rmSync(path.join(rootForSpawn, '.magicpot/command-jobs'), { recursive: true, force: true })
+      if (!isStopControllerCommand(command)) rmSync(path.join(rootForSpawn, '.magicpot/command-jobs'), { recursive: true, force: true })
       return child
     }) as CommandJobsSpawnProcess
     const { root, authorization, host } = setup(spawnProcess); rootForSpawn = root
@@ -332,7 +336,7 @@ describe('CommandJobsToolHost', () => {
     await expect(host.background({ ...approved(root, authorization, ['--hang']), onOwned, onStarted })).rejects.toThrow('setup failed after spawn')
     expect(onOwned).toHaveBeenCalledOnce(); expect(onStarted).not.toHaveBeenCalled()
     expect(host.status({ jobId: onOwned.mock.calls[0][0].jobId, routeKey: 'route', sessionId: 'session' }).state).not.toBe('running')
-    expect(fake.calls).toHaveLength(process.platform === 'win32' ? 2 : 1)
+    expect(fake.calls.filter((call) => !isProcessSnapshotCommand(call.command))).toHaveLength(process.platform === 'win32' ? 2 : 1)
     if (process.platform === 'win32') expect(() => host.assertNoUncertainStop()).not.toThrow()
   })
   it('rejects replaced/linked or oversized logs before allocating an unbounded read', async () => {
@@ -410,7 +414,7 @@ describe('CommandJobsToolHost', () => {
     resume()
     const job = await first
     expect(await second).toMatchObject({ message: expect.stringContaining('Concurrent') })
-    expect(fake.calls.filter((call) => path.basename(call.command).toLowerCase() !== 'taskkill.exe')).toHaveLength(1)
+    expect(fake.calls.filter((call) => !isStopControllerCommand(call.command))).toHaveLength(1)
     await host.stop({ ...one, jobId: job.jobId })
   })
 
@@ -426,7 +430,7 @@ describe('CommandJobsToolHost', () => {
     resume()
     expect(await pending).toMatchObject({ message: expect.stringContaining('termination') })
     await stopped
-    expect(fake.calls.filter((call) => path.basename(call.command).toLowerCase() !== 'taskkill.exe')).toHaveLength(1)
+    expect(fake.calls.filter((call) => !isStopControllerCommand(call.command))).toHaveLength(1)
   })
 
   it.runIf(process.platform === 'win32')('keeps a nonzero termination controller exit unknown even when the owned child has closed', async () => {
