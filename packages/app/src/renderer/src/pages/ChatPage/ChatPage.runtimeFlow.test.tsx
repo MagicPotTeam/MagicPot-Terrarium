@@ -6551,6 +6551,48 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { finish?.({content:'cleanup'}); page.unmount() }
   })
 
+  it('offers no reset while a finished task waits for its turn on the lead save chain, and records it done', async () => {
+    const lead: ChatSession = {id:'finish-window-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[{id:'task',title:'保存中任务',ownerId:'finish-window-member',status:'pending',dependsOn:[]}]}
+    const member: ChatSession = {id:'finish-window-member',title:'writer',messages:[],teamLeadId:lead.id,teamMemberName:'writer'}
+    hoisted.storedSessions.value = [lead,member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID,'runtime-flow'),lead.id)
+    const finishers: Array<(value: {content: string}) => void> = []
+    hoisted.requestChatCompletionMock.mockImplementation(() => new Promise(resolve => { finishers.push(resolve) }))
+    let release: (() => void) | undefined
+    const page = renderChatPage({team:true})
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      fireEvent.click(screen.getByRole('button',{name:'执行 保存中任务'}))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      fireEvent.click(screen.getByRole('button',{name:'关闭团队管理'}))
+      // A lead save is in flight: the task's finish has to wait for its turn on the lead's chain.
+      const selective = { id:lead.id, gate:new Promise<void>(resolve => { release = resolve }), started:false }
+      hoisted.selectiveSaveGate.value = selective
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'),{target:{value:'Lead message during the task'}})
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(selective.started).toBe(true))
+      await act(async () => finishers[0]({content:'任务结果'}))
+      await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===member.id)?.messages.some(message=>message.content==='任务结果')).toBe(true))
+      // The member is idle and the lead still shows the task running, but its finish is pending: no reset.
+      chooseAddMenuEntry('chat-composer-menu-team')
+      await waitFor(() => expect(screen.getByText(/保存中任务 · writer · 进行中/)).toBeVisible())
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect(screen.queryByRole('button',{name:'Reset: 保存中任务'})).not.toBeInTheDocument()
+      expect(screen.queryByText(/Last run interrupted/)).not.toBeInTheDocument()
+      hoisted.selectiveSaveGate.value = null
+      await act(async () => { release?.() })
+      await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0]).toEqual({id:'task',title:'保存中任务',ownerId:member.id,status:'done',dependsOn:[]}))
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith('任务执行结果已返回，但任务状态保存失败')
+      expect(screen.queryByRole('button',{name:'Reset: 保存中任务'})).not.toBeInTheDocument()
+    } finally {
+      hoisted.selectiveSaveGate.value = null
+      release?.()
+      for (const finish of finishers) finish({content:'cleanup'})
+      page.unmount()
+    }
+  })
+
   it('keeps a task pending when its owner is busy at dispatch, before or while the claim commits', async () => {
     const lead: ChatSession = {id:'busy-task-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[{id:'task',title:'忙碌任务',ownerId:'busy-task-member',status:'pending',dependsOn:[]}]}
     const member: ChatSession = {id:'busy-task-member',title:'Alice',messages:[],teamLeadId:lead.id,teamMemberName:'Alice'}

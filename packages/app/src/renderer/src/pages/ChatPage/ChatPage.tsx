@@ -8917,6 +8917,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useLayoutEffect(() => { onThreadSubRowChange?.(openSubRowTitle) }, [openSubRowTitle, onThreadSubRowChange])
   useLayoutEffect(() => () => onThreadSubRowChange?.(null), [onThreadSubRowChange])
   const teamTaskClaimsRef = useRef(new Set<string>())
+  // Tasks whose run ended and whose result is still being saved on the lead ('scope\0lead\0task' ->
+  // owner). Their owners count as busy, so team management never offers or accepts a reset while a
+  // finish waits for its turn on the lead's save chain. The version re-renders the menu when one settles.
+  const teamTaskFinishesRef = useRef(new Map<string, { ownerId: string }>())
+  const [, setTeamTaskFinishVersion] = useState(0)
   const dispatchSelectedTeamTask = async (taskId: string): Promise<void> => {
     const scope = storageScope
     const leadId = teamLead?.id
@@ -8986,6 +8991,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           else notifyWarning(t('chat.team_task_revert_unsaved', { defaultValue: 'The task could not be returned to pending. Reset it in team management.' }))
         }
         chatSaveBaselineRef.current.freeze(scope, leadId, persistedSessionsRef.current.get(leadId) ?? null)
+        const finishToken = { ownerId: member.id }
+        teamTaskFinishesRef.current.set(claimKey, finishToken)
+        setTeamTaskFinishVersion(version => version + 1)
         void chatSaveBaselineRef.current.persistLatest(scope, leadId,
           () => storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch ? sessionsRef.current.find(session => session.id === leadId) ?? null : null,
           () => persistedSessionsRef.current.get(leadId) ?? null,
@@ -9011,6 +9019,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const detail = error instanceof Error ? error.message : String(error)
           setSessionSaveError(`Failed to save chat session: ${detail}`)
           notifyTaskStateUnsaved()
+        }).finally(() => {
+          if (teamTaskFinishesRef.current.get(claimKey) !== finishToken) return
+          teamTaskFinishesRef.current.delete(claimKey)
+          if (isMountedRef.current) setTeamTaskFinishVersion(version => version + 1)
         })
       }
       let taskRunReported = false
@@ -9035,9 +9047,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }
   // A running task whose owner has no live run or send in this pane is left over from an earlier
-  // run (or an earlier app session): the team menu offers a reset for it, never a re-run.
-  const isTeamTaskOwnerBusy = (id: string): boolean =>
-    loadingSessionIds.has(id) || externalLoadingSessionIds.has(id) || sessionPreparing(id, sendingSessionIds, queuedSessionSends)
+  // run (or an earlier app session): the team menu offers a reset for it, never a re-run. An owner
+  // whose finished task is still being saved on the lead is busy too (no reset window after a run).
+  const isTeamTaskOwnerBusy = (id: string): boolean => {
+    if (loadingSessionIds.has(id) || externalLoadingSessionIds.has(id) || sessionPreparing(id, sendingSessionIds, queuedSessionSends)) return true
+    const scopePrefix = `${storageScope}\u0000`
+    for (const [key, finish] of teamTaskFinishesRef.current) if (finish.ownerId === id && key.startsWith(scopePrefix)) return true
+    return false
+  }
   // The dispatcher lives as long as the team in this scope: it ends on unmount, a scope change or the
   // team's end, never because the pane was hidden. A hidden pane keeps claiming MAIN's intents (which
   // expire after 60 s) into queued records; deliveries start once the pane is visible again.
