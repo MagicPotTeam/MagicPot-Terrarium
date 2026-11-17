@@ -1,5 +1,6 @@
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
 import { sendReleasesStopHolds, sessionPreparing, stopTeamMembersAndHoldQueued, teamMembersToStop } from './teamMemberStop'
+import { startTeamMessagePolling } from './teamMessagePolling'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
 import { revertTeamTaskRun, setTeamTaskStatus, validateTeamTasks, type TeamTaskOutcome } from './agentTeamTasks'
@@ -8904,7 +8905,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{ key: string; ids: readonly string[] }>({ key: '', ids: [] })
   // Members with team messages held for them (joined ids), for their delegated rows.
   const [teamHeldRecipients, setTeamHeldRecipients] = useState<{ key: string; ids: string }>({ key: '', ids: '' })
-  const teamMessageDispatcherRef = useRef<{ key: string; dispatcher: TeamMessageDispatcher; pump: () => void; scopeEpoch: number; visibilityEpoch: number } | null>(null)
+  const teamMessageDispatcherRef = useRef<{ key: string; dispatcher: TeamMessageDispatcher; pump: () => void; wake: () => void; scopeEpoch: number; visibilityEpoch: number } | null>(null)
   const messageLeadId = teamLead?.id
   const messageGeneration = teamLead?.teamGeneration ?? 0
   const messageKey = JSON.stringify([storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration])
@@ -9126,7 +9127,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         try { const work = dispatcher.pump(member.id); if (work) void work.finally(pump) } catch { /* End or membership changed. */ }
       }
     }
-    teamMessageDispatcherRef.current = { key, dispatcher, pump, scopeEpoch, visibilityEpoch }
     const tick = async () => {
       if (polling || !isCurrent()) return
       // A hidden pane without members has nothing to claim: no IPC in the background.
@@ -9148,10 +9148,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       } catch { /* IPC unavailable or document scope changed: never claim delivery. */ }
       finally { polling = false; pump() }
     }
-    void tick()
-    const timer = window.setInterval(() => { pump(); void tick() }, 500)
-    return () => { alive = false; window.clearInterval(timer); dispatcher.end(); if (teamMessageDispatcherRef.current?.dispatcher === dispatcher) teamMessageDispatcherRef.current = null }
+    // Polls MAIN every 500 ms while the pane is visible and every 3 s while it is hidden
+    // (teamMessagePolling.ts); the first poll runs now.
+    const poller = startTeamMessagePolling(isVisible, () => { pump(); void tick() })
+    teamMessageDispatcherRef.current = { key, dispatcher, pump, wake: poller.wake, scopeEpoch, visibilityEpoch }
+    return () => { alive = false; poller.stop(); dispatcher.end(); if (teamMessageDispatcherRef.current?.dispatcher === dispatcher) teamMessageDispatcherRef.current = null }
   }, [teamDeliveryEnabled, isSessionBusy, sessionsLoaded, sessionLoadError, storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, messageKey, teamLead?.teamEnded, teamLead?.archived])
+  // A pane shown again goes back to the visible pace at once and delivers what waited for it.
+  useEffect(() => { if (active) teamMessageDispatcherRef.current?.wake() }, [active])
   const reconcileTeamLifecycle = useCallback((records: ChatSession[]) => {
     let conflict = false
     for (const persisted of records) {
