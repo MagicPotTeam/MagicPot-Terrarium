@@ -18,6 +18,8 @@ const h = vi.hoisted(() => ({
   saves: [] as Array<{ session: ChatSession; expected: ChatSession | null | undefined; outcome: 'written' | 'conflict' | 'superseded' }>,
   // Runs while a save's read is pending, before its compare-and-set and put.
   whileReadPending: null as null | ((candidate: ChatSession) => void),
+  // Makes the writer refuse a candidate as superseded although the live object was never replaced.
+  forceSupersede: null as null | ((candidate: ChatSession) => boolean),
   notify: vi.fn(),
   notifyWarning: vi.fn(),
   notifySuccess: vi.fn(),
@@ -115,6 +117,7 @@ beforeEach(() => {
   h.sessions = [structuredClone(session)]
   h.saves = []
   h.whileReadPending = null
+  h.forceSupersede = null
   h.load.mockReset().mockImplementation(async () => structuredClone(h.sessions))
   // Same contract as saveSessionToDB: the read is pending first, then the compare-and-set
   // (conflict when storage no longer equals the baseline), then the supersede check (the caller's
@@ -131,7 +134,7 @@ beforeEach(() => {
       call.outcome = 'conflict'
       throw new ChatSessionSaveConflictError(candidate.id, saveScope)
     }
-    if (options?.shouldUpdate && !options.shouldUpdate()) {
+    if (options?.shouldUpdate && (!options.shouldUpdate() || h.forceSupersede?.(candidate))) {
       call.outcome = 'superseded'
       throw new ChatSessionSaveSupersededError()
     }
@@ -262,5 +265,56 @@ describe('ChatPage treats a superseded save as benign and stops retrying a perma
       expect(shown()).toBe('original|local update')
       expect(h.fetch).not.toHaveBeenCalled()
     } finally { read.release(structuredClone(h.sessions)); view.unmount() }
+  })
+
+  it('saves a session holding a NaN value instead of retrying it silently forever', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // NaN !== NaN: before, this session could never equal its own copy and every save was superseded.
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent('chat:append-message', { detail: { scope, sessionId: session.id, role: 'user', content: 'nan edit', ocrResult: { kind: 'text', text: 'x', boxes: [{ x: 0, y: 0, width: 1, height: 1, confidence: NaN }] } } }))
+      })
+      await advanceSeconds(10)
+      expect(contents(stored())).toEqual(['original', 'nan edit'])
+      expect(Number.isNaN(stored()!.messages[1].ocrResult?.boxes?.[0].confidence)).toBe(true)
+      expect(h.saves.map(call => call.outcome)).toEqual(['written'])
+      // The stored record and the new baseline both hold the NaN: the next edit still matches them.
+      await append('after nan')
+      await advanceSeconds(10)
+      expect(contents(stored())).toEqual(['original', 'nan edit', 'after nan'])
+      expect(h.saves.map(call => call.outcome)).toEqual(['written', 'written'])
+      expect(banner()).toBeNull()
+      expect(h.notify).not.toHaveBeenCalled()
+    } finally { view.unmount() }
+  })
+
+  it('reports a supersede of an unchanged session object once and backs off instead of looping', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      h.forceSupersede = candidate => candidate.messages.some(m => m.content === 'stuck edit')
+      await append('stuck edit')
+      await advanceSeconds(5)
+      expect(banner()).not.toBeNull()
+      const early = h.saves.length
+      expect(early).toBeGreaterThanOrEqual(3)
+      expect(early).toBeLessThanOrEqual(6)
+      expect(h.saves.every(call => call.outcome === 'superseded')).toBe(true)
+      // Re-queued every 500 ms this would be about 240 attempts; the 1-30 s backoff makes about 8.
+      await advanceSeconds(120)
+      expect(h.saves.length - early).toBeLessThanOrEqual(10)
+      expect(screen.getAllByText(/Failed to save chat session/)).toHaveLength(1)
+      expect(contents(stored())).toEqual(['original'])
+      expect(shown()).toBe('original|stuck edit')
+      // The edit is still dirty: once the writer accepts it, the next backoff retry stores it.
+      h.forceSupersede = null
+      await advanceSeconds(31)
+      expect(contents(stored())).toEqual(['original', 'stuck edit'])
+      expect(banner()).toBeNull()
+      expect(h.saves.filter(call => call.outcome === 'conflict')).toEqual([])
+    } finally { view.unmount() }
   })
 })

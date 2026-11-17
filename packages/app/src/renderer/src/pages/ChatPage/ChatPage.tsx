@@ -100,7 +100,7 @@ import {
   type ChatSessionDraft
 } from './chatStorage'
 import { ChatSessionSaveBaseline } from './chatSaveBaseline'
-import { isBenignSaveSupersede, isPermanentSaveConflict } from './chatSaveErrors'
+import { isBenignSaveSupersede, isPermanentSaveConflict, SaveSupersedeStreaks } from './chatSaveErrors'
 import {
   buildAutoSavedChatImageKey,
   generateUUID,
@@ -1321,6 +1321,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // scope\u0000id -> the live object whose guarded save was refused by another writer. The automatic
   // save does not retry that same object (it can only be refused again); a newer object is tried.
   const saveConflictSessionsRef = useRef<Map<string, ChatSession>>(new Map())
+  // Consecutive supersedes per live session object: the same object superseded again and again was
+  // never replaced, so the save is failing, not being overtaken (see SaveSupersedeStreaks).
+  const saveSupersedeStreaksRef = useRef(new SaveSupersedeStreaks())
   const chatSaveBaselineRef = useRef<ChatSessionSaveBaseline>(new ChatSessionSaveBaseline())
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
@@ -1529,6 +1532,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           )
           if (!saved) return false
           saveConflictSessionsRef.current.delete(conflictKey)
+          saveSupersedeStreaksRef.current.clear(saved)
           if (!isCurrentScope()) return true
           if (!clearDirtySessionSnapshotIfCurrent(requestScope, saved)) return false
           if (getDirtySessionIds(requestScope).length === 0) setSessionSaveError(null)
@@ -1539,7 +1543,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (!isCurrentScope()) return false
           const current = sessionsRef.current.find((candidate) => candidate.id === sessionId)
           if (current) setDirtySessionSnapshot(requestScope, current)
-          if (isBenignSaveSupersede(e)) {
+          // A supersede while the live object was never replaced is a failing save, reported below.
+          if (isBenignSaveSupersede(e) && !(current && saveSupersedeStreaksRef.current.note(current))) {
             // Nothing was written and nothing conflicts: the session object was replaced while its
             // put was pending. Save the live object instead of reporting a failure. If it keeps
             // changing it stays dirty, and each change schedules the debounced save again.
@@ -4879,6 +4884,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (!isSaveScopeCurrent()) return
         for (const session of savedSessions) {
           saveConflictSessionsRef.current.delete(getSessionStorageKey(storageScope, session.id))
+          saveSupersedeStreaksRef.current.clear(session)
           clearDirtySessionSnapshotIfCurrent(storageScope, session)
         }
         if (getDirtySessionIds(storageScope).length === 0) {
@@ -4899,8 +4905,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
             .map(failed => sessionsRef.current.find(session => session.id === failed.id))
             .filter((session): session is ChatSession => Boolean(session))
           for (const session of live) setDirtySessionSnapshot(storageScope, session)
-          if (live.length > 0) debouncedSaveSessions(live, 500, storageScope, saveOptions)
-          return
+          // The same live object superseded again and again was never replaced: re-queueing it
+          // would loop about twice a second, silently. Report it and back off instead.
+          const exhausted = live.filter(session => saveSupersedeStreaksRef.current.note(session))
+          const requeue = live.filter(session => !exhausted.includes(session))
+          if (requeue.length > 0) debouncedSaveSessions(requeue, 500, storageScope, saveOptions)
+          if (exhausted.length === 0) return
         }
         const detail = error instanceof Error ? error.message : String(error)
         setSessionSaveError(`Failed to save chat session: ${detail}`)

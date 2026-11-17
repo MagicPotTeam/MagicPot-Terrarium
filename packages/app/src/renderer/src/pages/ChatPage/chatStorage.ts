@@ -914,9 +914,12 @@ function createStorageError(error: unknown, fallbackMessage: string): Error {
  * Order-insensitive (for object keys) but array-order-strict deep equality. Null/undefined values
  * are treated as absent so a raw snapshot and a normalized stored record that only differ by an
  * explicit `undefined`/key insertion order still compare equal. Avoids JSON.stringify ordering bugs.
+ * NaN equals NaN (IndexedDB's structured clone keeps NaN), so a session holding a NaN still equals
+ * its own copy; NaN never equals a number, and +0/-0 stay equal as before.
  */
 function stableDeepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true
+  if (typeof a === 'number' && typeof b === 'number') return Number.isNaN(a) && Number.isNaN(b)
   if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return a === b
   const aIsArray = Array.isArray(a)
   const bIsArray = Array.isArray(b)

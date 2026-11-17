@@ -18,3 +18,29 @@ export function isBenignSaveSupersede(error: unknown): boolean {
 export function isPermanentSaveConflict(error: unknown): boolean {
   return error instanceof ChatSessionSaveConflictError
 }
+
+/** Consecutive supersedes of one unchanged live object after which the save is reported as failed. */
+export const SAVE_SUPERSEDE_STREAK_LIMIT = 3
+
+/**
+ * A supersede is benign only while the live session object keeps being replaced. A supersede of the
+ * SAME live object (it was never replaced, yet the writer could not match it to its own copy, for
+ * example after an in-place mutation) repeats forever if it is simply re-queued. This counts
+ * consecutive supersedes per live object; keyed weakly, so a replaced object is not kept alive and a
+ * newer object starts a new streak.
+ */
+export class SaveSupersedeStreaks {
+  private counts = new WeakMap<object, number>()
+
+  /** Record one supersede seen while `live` was the live object; true once the streak is exhausted. */
+  note(live: object): boolean {
+    const count = (this.counts.get(live) ?? 0) + 1
+    this.counts.set(live, count)
+    return count >= SAVE_SUPERSEDE_STREAK_LIMIT
+  }
+
+  /** Forget the streak of an object that was saved. */
+  clear(live: object): void {
+    this.counts.delete(live)
+  }
+}
