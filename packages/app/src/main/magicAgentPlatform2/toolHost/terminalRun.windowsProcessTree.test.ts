@@ -270,6 +270,34 @@ describe('terminal.run on win32 with the Job Object helper', () => {
     expect((await running).status).toBe('cancelled')
   })
 
+  it('passes a command path and arguments with spaces and non-ASCII characters through unchanged', async () => {
+    const { root, authorization } = setup()
+    const fake = fakeSpawner(({ child }) => child.close(0))
+    const tool = 'C:\\Program Files\\工具 集\\outil é.exe'
+    const args = ['--name=名前 と 空白', 'C:\\データ\\été\\']
+    await host(root, authorization, {
+      spawn: fake.spawn,
+      resolveWindowsJobHelper: async () => HELPER,
+      windowsCommandLookup: windowsFiles([tool])
+    }).run(approvedInput(root, authorization, tool, args))
+    expect(fake.calls.map((call) => [call.file, call.args])).toEqual([
+      [HELPER, ['-', '-', '-', '--', tool, ...args]]
+    ])
+    expect(fake.calls[0].options.cwd).toBe(root)
+  })
+
+  it('keeps the direct spawn for a command path beyond the classic Windows path limit', async () => {
+    const { root, authorization } = setup()
+    const fake = fakeSpawner(({ child }) => child.close(0))
+    const tool = `C:\\${'d'.repeat(250)}\\tool.exe`
+    await host(root, authorization, {
+      spawn: fake.spawn,
+      resolveWindowsJobHelper: async () => HELPER,
+      windowsCommandLookup: windowsFiles([tool])
+    }).run(approvedInput(root, authorization, tool, ['x']))
+    expect(fake.calls.map((call) => [call.file, call.args])).toEqual([[tool, ['x']]])
+  })
+
   it('keeps the direct spawn for commands the helper cannot launch the same way', async () => {
     const { root, authorization } = setup()
     for (const [command, files] of [
@@ -345,6 +373,8 @@ describe('terminal.run on win32 without a usable helper', () => {
 
 describe('terminal.run on win32 without the helper: taskkill plus sweep', () => {
   const noHelper = async () => undefined
+  /** The command itself: stays open until the test closes it. */
+  const fakeCommand = fakeSpawner()
   const taskkillSpawner = (exitCode = 0) => {
     const fake = fakeSpawner(({ file, child }) => {
       if (!file.endsWith('taskkill.exe')) return
@@ -354,12 +384,12 @@ describe('terminal.run on win32 without the helper: taskkill plus sweep', () => 
     return fake
   }
 
-  it('kills at once with taskkill, then reports only after the sweep confirmed the tree is gone', async () => {
+  it('kills at once with taskkill, then reports only after the sweep found no linked survivor', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const { root, authorization } = setup()
     const fake = taskkillSpawner()
-    let answer!: (table: []) => void
-    const windowsSnapshot = vi.fn(() => new Promise<[]>((resolve) => (answer = resolve)))
+    const answers: ((table: []) => void)[] = []
+    const windowsSnapshot = vi.fn(() => new Promise<[]>((resolve) => answers.push(resolve)))
     const audit: TerminalRunAuditEvidence[] = []
     const running = host(
       root,
@@ -379,11 +409,15 @@ describe('terminal.run on win32 without the helper: taskkill plus sweep', () => 
     // The first kill is today's command, issued synchronously at the timeout.
     expect(fake.calls[1].file).toMatch(/[\\/]System32[\\/]taskkill\.exe$/)
     expect(fake.calls[1].args).toEqual(['/PID', String(fake.calls[0].child.pid), '/T', '/F'])
+    // One snapshot starts in parallel with the kill (it only records members) ...
     expect(windowsSnapshot).toHaveBeenCalledTimes(1)
     await vi.waitFor(() => expect(fake.calls[0].child.closed).toBe(true))
+    // ... and the one that decides is requested once the taskkill has completed.
+    await vi.waitFor(() => expect(windowsSnapshot).toHaveBeenCalledTimes(2))
+    answers[0]([])
     await Promise.resolve()
     expect(state.settled).toBe(false)
-    answer([])
+    answers[1]([])
     const result = await running
     expect(result.status).toBe('timed-out')
     expect(fake.calls[0].child.kills).toEqual([])
@@ -410,6 +444,53 @@ describe('terminal.run on win32 without the helper: taskkill plus sweep', () => 
     controller.abort()
     expect((await running).status).toBe('cancelled')
     expect(audit[0]).toMatchObject({ status: 'cancelled', processTreeStop: 'tree-unconfirmed' })
+  })
+
+  it('aims no taskkill at a command that has already exited and sweeps only what it left behind', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { root, authorization } = setup()
+    const fake = fakeSpawner(({ child }) => child.close(0))
+    let clock = 1_700_000_000_000
+    const us = (ms: number) => ms * 1000
+    const audit: TerminalRunAuditEvidence[] = []
+    const running = host(
+      root,
+      authorization,
+      {
+        spawn: ((file, args, options) =>
+          file === 'tool'
+            ? fakeCommand.spawn(file, args, options)
+            : fake.spawn(file, args, options)) as TerminalRunProcessControl['spawn'],
+        now: () => clock,
+        resolveWindowsJobHelper: noHelper,
+        windowsCommandLookup: windowsFiles([]),
+        // 7001 was started by the command (pid 7000) before it exited and keeps its pipes open;
+        // 7002 names the same parent pid but was created after the command had exited.
+        windowsSnapshot: async () => [
+          ...(fake.calls.some((call) => call.args.includes('7001'))
+            ? []
+            : [{ pid: 7001, parentPid: 7000, createdAtUs: us(1_700_000_000_500) }]),
+          { pid: 7002, parentPid: 7000, createdAtUs: us(1_700_000_020_000) }
+        ]
+      },
+      audit
+    ).run(approvedInput(root, authorization, 'tool', [], { timeoutMs: 100 }))
+    await vi.waitFor(() => expect(fakeCommand.calls).toHaveLength(1))
+    const commandChild = fakeCommand.calls[0].child
+    clock += 1_000
+    commandChild.emit('exit', 0, null)
+    clock += 29_000
+    vi.advanceTimersByTime(100)
+    vi.useRealTimers()
+    await vi.waitFor(() => expect(fake.calls.length).toBeGreaterThan(0))
+    commandChild.close(0)
+    await running
+    expect(
+      fake.calls
+        .filter((call) => call.file.endsWith('taskkill.exe'))
+        .map((call) => call.args.join(' '))
+    ).toEqual(['/PID 7001 /F'])
+    expect(audit[0]).toMatchObject({ status: 'timed-out' })
   })
 
   it('still kills the child directly when taskkill fails, as before', async () => {

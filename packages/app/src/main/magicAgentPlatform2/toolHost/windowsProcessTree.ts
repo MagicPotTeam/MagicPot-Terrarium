@@ -2,15 +2,37 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import path from 'node:path'
 
 /**
- * Stopping a process tree on Windows without a Job Object.
+ * Stopping a process tree on Windows without a Job Object: a best effort, not a guarantee.
  *
  * `taskkill /PID <root> /T /F` enumerates the tree once. A process the tree creates between that
  * enumeration and the death of its parent is not killed and keeps running. This module keeps the
  * immediate taskkill (no added delay before the first kill) and then sweeps: it takes snapshots of
- * the process table (pid, parent pid, creation time), kills every live process that descends from
- * a recorded member of the tree, remembers every member it has seen (after a kill the links of the
- * tree point at dead pids) and repeats until one snapshot shows no live member, bounded by a
- * deadline. A process created before its claimed parent is not that parent's child (pid reuse).
+ * the process table (pid, parent pid, creation time), kills every live process whose parent is a
+ * recorded member of the tree, remembers every member it has seen (after a kill the links of the
+ * tree point at dead pids) and repeats until one snapshot shows no such process, bounded by a
+ * deadline.
+ *
+ * WHAT THE SWEEP REACHES: live processes linked by parent pid to the root, or to a member that a
+ * snapshot saw alive. That covers the leaves a still-growing root creates while taskkill runs
+ * (their parent is the root; with a single taskkill 7 or 8 of them survived in 6 of 6 runs on
+ * Windows 11).
+ *
+ * WHAT IT CANNOT REACH (only the Job Object helper closes these cases):
+ * - an orphan: a descendant whose parent exited before the stop. Windows keeps no link from a
+ *   process to its grandparent, the dead parent was never recorded, so nothing ties the orphan to
+ *   the tree. It survives the taskkill (5 of 5 runs on Windows 11) and the sweep cannot find it.
+ * - a process created by a member below the root while the first taskkill runs, when that member
+ *   is dead before any snapshot saw it. The first snapshot needs a PowerShell start (0.5 to 1.5 s)
+ *   and may not delay the first kill (about 250 ms), so in practice members below the root are
+ *   rarely recorded.
+ * So `confirmed` / 'converged' means "no live process linked to the tree was found", never "no
+ * process of the tree is running".
+ *
+ * WHAT IT MUST NOT KILL: a process outside the tree whose parent pid merely equals the pid of a
+ * dead member (pids are reused). A child is accepted only when it was created inside the lifetime
+ * of its claimed parent: not before the parent was created and not after the parent was dead.
+ * The snapshot started in parallel with the first kill only records members and never decides a
+ * kill: what it shows alive is, most of the time, killed by that first kill a moment later.
  *
  * Only integers ever reach a command line: taskkill gets `/PID <n>` pairs, the snapshot runs a
  * constant PowerShell script from the fixed System32 path (never PATH).
@@ -37,11 +59,24 @@ export type WindowsProcessSpawn = (
 export type WindowsProcessTreeStopOutcome = 'converged' | 'snapshot-unavailable' | 'deadline'
 
 export type WindowsProcessTreeStopReport = Readonly<{
-  /** One snapshot taken after the first kill showed no live member of the tree. */
+  /**
+   * One snapshot started after the last kill showed no live process linked by parent pid to the
+   * root or to a member a snapshot saw alive. It does NOT prove that nothing of the tree runs:
+   * orphans (their parent exited before the stop) and children of members that were never
+   * recorded are out of reach without a Job Object (see the module comment).
+   */
   confirmed: boolean
   outcome: WindowsProcessTreeStopOutcome
-  /** The immediate `taskkill /PID <root> /T /F`. */
-  initialKill: Readonly<{ exitCode: number | null; failed: boolean; timedOut: boolean }>
+  /**
+   * The immediate `taskkill /PID <root> /T /F`. `skipped`: the root had already exited, so no
+   * taskkill was aimed at its pid (exitCode stays null).
+   */
+  initialKill: Readonly<{
+    exitCode: number | null
+    failed: boolean
+    timedOut: boolean
+    skipped: boolean
+  }>
   /** Snapshots evaluated. */
   snapshots: number
   /** Processes the sweep killed after the initial taskkill. */
@@ -51,6 +86,14 @@ export type WindowsProcessTreeStopReport = Readonly<{
 export type WindowsProcessTreeStopOptions = Readonly<{
   /** Date.now() read before the root was spawned: the root cannot have been created earlier. */
   rootCreatedNotBeforeMs: number
+  /**
+   * Date.now() of the root's 'exit' event when the root had already exited before the stop (a
+   * descendant may keep its pipes open, so the run is still pending). Whatever holds the root's
+   * pid by now is a stranger, so no taskkill is aimed at that pid (it could only fail, or kill
+   * the stranger and its whole tree), and a process created after the exit is not the root's
+   * child, whatever its parent pid says. The sweep still kills the children the root left behind.
+   */
+  rootExitedAtMs?: number
   spawnProcess?: WindowsProcessSpawn
   /** Defaults to the PowerShell / CIM snapshot started through `spawnProcess`. */
   snapshot?: WindowsProcessSnapshotProvider
@@ -60,7 +103,10 @@ export type WindowsProcessTreeStopOptions = Readonly<{
   /** Bound of the initial taskkill. */
   initialKillTimeoutMs?: number
   systemRoot?: string
-  /** Called as soon as the initial taskkill fails or exits non-zero (today's fallback hook). */
+  /**
+   * Called as soon as the initial taskkill fails, exits non-zero or was skipped (today's
+   * fallback hook).
+   */
   onInitialKillFailed?: () => void
   /** Never killed, whatever a snapshot says (defaults to this process and its parent). */
   protectedPids?: readonly number[]
@@ -71,11 +117,16 @@ const INITIAL_KILL_TIMEOUT_MS = 3_000
 const MIN_SNAPSHOT_TIMEOUT_MS = 1_500
 const MAX_SNAPSHOT_TIMEOUT_MS = 4_000
 const MAX_PIDS_PER_TASKKILL = 32
+/** Second bound of the sweep, for a clock that does not advance: rounds of snapshot and kill. */
+const MAX_SWEEP_ROUNDS = 64
+/** Bound of the last kill of known live members when the deadline has already passed. */
+const FINAL_KILL_TIMEOUT_MS = 1_000
 /**
- * Windows stamps a process with the coarse system time (about 16 ms steps) while Date.now() is
- * precise, so a root may look created slightly before the Date.now() read before its spawn.
+ * Windows stamps a process with the system time (possibly in about 16 ms steps) while Date.now()
+ * follows its own interpolated clock, so a creation time may look slightly earlier or later than
+ * a Date.now() read around the same event. Every comparison between the two allows this much.
  */
-const ROOT_CREATION_SKEW_US = 250_000
+const CLOCK_SKEW_US = 250_000
 const FILETIME_UNIX_EPOCH = 116_444_736_000_000_000n
 const MAX_PID = 0xffff_ffff
 
@@ -101,15 +152,24 @@ export const windowsPidArgument = (pid: number): string => {
   return String(pid)
 }
 
-/** A constant script: no value from the caller, the workspace or a process is interpolated. */
+/**
+ * A constant script: no value from the caller, the workspace or a process is interpolated.
+ * - The query names the three properties it needs, so WMI does not build the expensive ones
+ *   (command line, executable path) of every process.
+ * - It uses only cmdlets, operators and casts to core types (string, long, DateTime methods), so
+ *   it also runs under PowerShell Constrained Language Mode (WDAC / AppLocker PCs), where calls
+ *   such as [Console]::Out.Write are refused.
+ * - The JSON is built from integers only and written as plain pipeline output, one short row per
+ *   line, so no host line wrapping can split a number.
+ */
 const SNAPSHOT_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
-  '$rows = @(Get-CimInstance -ClassName Win32_Process | ForEach-Object {',
+  "$rows = @(Get-CimInstance -Query 'SELECT ProcessId, ParentProcessId, CreationDate FROM Win32_Process' | ForEach-Object {",
   "  $created = ''",
   '  if ($null -ne $_.CreationDate) { $created = [string]$_.CreationDate.ToFileTimeUtc() }',
-  '  [pscustomobject]@{ p = [long]$_.ProcessId; q = [long]$_.ParentProcessId; c = $created }',
+  `  '{"p":' + [string][long]$_.ProcessId + ',"q":' + [string][long]$_.ParentProcessId + ',"c":"' + $created + '"}'`,
   '})',
-  '[Console]::Out.Write((ConvertTo-Json -InputObject $rows -Compress))'
+  "'[' + ($rows -join \",`n\") + ']'"
 ].join('\n')
 
 export const WINDOWS_PROCESS_SNAPSHOT_ARGS: readonly string[] = Object.freeze([
@@ -260,20 +320,38 @@ function runTaskkill(
   })
 }
 
-type Member = { createdAtUs: number | null; notBeforeUs: number; notAfterUs: number }
+type Member = {
+  createdAtUs: number | null
+  notBeforeUs: number
+  notAfterUs: number
+  /**
+   * The moment by which this member was dead: the upper bound for the creation of its children.
+   * Set when a snapshot first lacks the member (to the earlier of that snapshot's arrival and a
+   * successful kill), or by the caller for a root that had exited before the stop.
+   */
+  deadByUs?: number
+  /** Completion time of a kill of this pid that reported success. */
+  killedAtUs?: number
+}
 /** Every identity ever recorded for a pid: a pid may be reused inside the tree, too. */
 export type WindowsTreeMembers = Map<number, Member[]>
+
+/** When a snapshot was requested and when its answer arrived (microseconds, caller's clock). */
+export type WindowsSnapshotWindow = Readonly<{ startedAtUs: number; observedAtUs: number }>
 
 const memberLowerBound = (member: Member): number => member.createdAtUs ?? member.notBeforeUs
 
 /**
- * Adds every live descendant of a recorded member to `members` and returns the live members that
- * may be killed. Exported for tests.
+ * Adds every live process whose parent is a recorded member to `members` and returns the live
+ * members that may be killed. `window` dates the snapshot: a member the table lacks was dead when
+ * the answer arrived, and a member it shows alive survived every kill that had completed before
+ * the snapshot was requested. Exported for tests.
  */
 export function collectLiveTreeMembers(
   table: readonly WindowsProcessEntry[],
   members: WindowsTreeMembers,
-  protectedPids: ReadonlySet<number>
+  protectedPids: ReadonlySet<number>,
+  window?: WindowsSnapshotWindow
 ): WindowsProcessEntry[] {
   const byPid = new Map(table.map((entry) => [entry.pid, entry]))
   const identifies = (member: Member, entry: WindowsProcessEntry): boolean => {
@@ -283,22 +361,38 @@ export function collectLiveTreeMembers(
     return entry.createdAtUs >= member.notBeforeUs && entry.createdAtUs <= member.notAfterUs
   }
   const live = new Map<number, WindowsProcessEntry>()
+  const liveMembers = new Set<Member>()
   for (const entry of table) {
     const member = members.get(entry.pid)?.find((candidate) => identifies(candidate, entry))
     if (!member) continue
     member.createdAtUs = entry.createdAtUs
+    // Alive although a kill had completed before this snapshot was requested: that kill missed.
+    if (window && member.killedAtUs !== undefined && member.killedAtUs <= window.startedAtUs)
+      delete member.killedAtUs
+    liveMembers.add(member)
     live.set(entry.pid, entry)
   }
+  // A member this table lacks is dead: from now on it can no longer become a parent.
+  if (window)
+    for (const identities of members.values())
+      for (const member of identities)
+        if (!liveMembers.has(member) && member.deadByUs === undefined)
+          member.deadByUs = Math.min(member.killedAtUs ?? Infinity, window.observedAtUs)
   let grew = true
   while (grew) {
     grew = false
     for (const entry of table) {
       const createdAtUs = entry.createdAtUs
       if (live.has(entry.pid) || createdAtUs === null || entry.pid === entry.parentPid) continue
-      // A process created before its claimed parent is not its child (the parent pid was reused).
+      // A child is created inside the lifetime of its parent. Created before its claimed parent,
+      // or after that parent was dead: the parent pid was reused, this is somebody else's child.
       const parents = members
         .get(entry.parentPid)
-        ?.filter((member) => createdAtUs >= memberLowerBound(member))
+        ?.filter(
+          (member) =>
+            createdAtUs >= memberLowerBound(member) &&
+            (member.deadByUs === undefined || createdAtUs <= member.deadByUs + CLOCK_SKEW_US)
+        )
       if (!parents?.length) continue
       // The parent pid belongs to a live process outside the tree that already existed when this
       // one was created: that process is the parent.
@@ -323,7 +417,8 @@ export function collectLiveTreeMembers(
 
 /**
  * Kills the tree of `rootPid` as `taskkill /PID <root> /T /F` does today (immediately), then
- * sweeps the process table until no member of the tree is alive or the deadline passes.
+ * sweeps the process table until no live process linked to the tree is found or the deadline
+ * passes. See the module comment for what this reaches and what it cannot reach.
  */
 export async function stopWindowsProcessTree(
   rootPid: number,
@@ -339,56 +434,103 @@ export async function stopWindowsProcessTree(
   const protectedPids = new Set(options.protectedPids ?? [process.pid, process.ppid])
   const snapshotTimeout = () =>
     Math.min(MAX_SNAPSHOT_TIMEOUT_MS, Math.max(MIN_SNAPSHOT_TIMEOUT_MS, deadline - now()))
-  const takeSnapshot = () => snapshot(snapshotTimeout()).catch(() => undefined)
+  const takeSnapshot = async () => {
+    const startedAtUs = now() * 1000
+    try {
+      const table = await snapshot(snapshotTimeout())
+      return table ? { table, window: { startedAtUs, observedAtUs: now() * 1000 } } : undefined
+    } catch {
+      return undefined
+    }
+  }
 
-  // First kill: today's command, with no delay before it.
-  const initialKill = runTaskkill(
-    spawnProcess,
-    options.systemRoot,
-    ['/PID', root, '/T', '/F'],
-    options.initialKillTimeoutMs ?? INITIAL_KILL_TIMEOUT_MS
-  )
-  // Started in parallel; it may still see members that the taskkill has not reached yet.
-  let pending = takeSnapshot()
-  const initial = await initialKill
+  const rootExitedAtUs =
+    options.rootExitedAtMs === undefined ? undefined : options.rootExitedAtMs * 1000
+  // First kill: today's command, with no delay before it. Not for a root that has already
+  // exited: its pid may belong to a stranger by now.
+  const initialKill: Promise<KillResult> =
+    rootExitedAtUs === undefined
+      ? runTaskkill(
+          spawnProcess,
+          options.systemRoot,
+          ['/PID', root, '/T', '/F'],
+          options.initialKillTimeoutMs ?? INITIAL_KILL_TIMEOUT_MS
+        )
+      : Promise.resolve({ exitCode: null, failed: false, timedOut: false })
+  // Started in parallel so that it does not delay the kill. It may still see members that the
+  // taskkill has not reached yet, so it only RECORDS members and never decides a kill: by the
+  // time its answer arrives the first kill has usually ended the processes it shows, and their
+  // pids may already belong to somebody else.
+  const early = takeSnapshot()
+  const initial = { ...(await initialKill), skipped: rootExitedAtUs !== undefined }
+  const initialKillDoneUs = now() * 1000
   if (initial.failed || initial.timedOut || initial.exitCode !== 0) options.onInitialKillFailed?.()
 
-  const members: WindowsTreeMembers = new Map([
-    [
-      rootPid,
-      [
-        {
-          createdAtUs: null,
-          notBeforeUs: options.rootCreatedNotBeforeMs * 1000 - ROOT_CREATION_SKEW_US,
-          notAfterUs: startedAt * 1000
-        }
-      ]
-    ]
-  ])
+  const rootMember: Member = {
+    createdAtUs: null,
+    notBeforeUs: options.rootCreatedNotBeforeMs * 1000 - CLOCK_SKEW_US,
+    notAfterUs:
+      rootExitedAtUs !== undefined
+        ? // The root has exited: whatever holds its pid now is not the root.
+          -Infinity
+        : startedAt * 1000,
+    ...(rootExitedAtUs === undefined ? {} : { deadByUs: rootExitedAtUs }),
+    // Exit code 0: taskkill terminated the root (and what it had enumerated below it).
+    ...(initial.exitCode === 0 ? { killedAtUs: initialKillDoneUs } : {})
+  }
+  const members: WindowsTreeMembers = new Map([[rootPid, [rootMember]]])
   let snapshots = 0
   let swept = 0
   const report = (confirmed: boolean, outcome: WindowsProcessTreeStopOutcome) =>
     Object.freeze({ confirmed, outcome, initialKill: Object.freeze(initial), snapshots, swept })
-  for (;;) {
-    const table = await pending
-    if (!table) return report(false, now() >= deadline ? 'deadline' : 'snapshot-unavailable')
-    snapshots += 1
-    const live = collectLiveTreeMembers(table, members, protectedPids)
-    if (!live.length) return report(true, 'converged')
-    if (now() >= deadline) return report(false, 'deadline')
+  const kill = async (live: readonly WindowsProcessEntry[], timeoutMs: () => number) => {
     for (let index = 0; index < live.length; index += MAX_PIDS_PER_TASKKILL) {
-      const args = live
-        .slice(index, index + MAX_PIDS_PER_TASKKILL)
-        .flatMap((entry) => ['/PID', windowsPidArgument(entry.pid)])
-      // Exit codes are not trusted here: the next snapshot decides.
-      await runTaskkill(
+      const batch = live.slice(index, index + MAX_PIDS_PER_TASKKILL)
+      const args = batch.flatMap((entry) => ['/PID', windowsPidArgument(entry.pid)])
+      // Whether a member is gone is decided by the next snapshot, not by this exit code; a
+      // success only dates the death (the upper bound for the member's children).
+      const result = await runTaskkill(
         spawnProcess,
         options.systemRoot,
         [...args, '/F'],
-        Math.max(500, deadline - now())
+        timeoutMs()
       )
+      if (result.exitCode !== 0) continue
+      const killedAtUs = now() * 1000
+      for (const entry of batch) {
+        const member = members
+          .get(entry.pid)
+          ?.find((candidate) => candidate.createdAtUs === entry.createdAtUs)
+        if (member) member.killedAtUs = killedAtUs
+      }
     }
     swept += live.length
+  }
+
+  // Requested after the first kill has completed: the first snapshot that may decide a kill.
+  let pending = takeSnapshot()
+  let recordOnly: typeof early | undefined = early
+  for (let round = 1; ; round += 1) {
+    const shot = await pending
+    if (recordOnly) {
+      // Used only when its answer is already there: it must not hold up the deciding snapshot.
+      const recorded = await Promise.race([recordOnly, undefined])
+      recordOnly = undefined
+      if (recorded) {
+        snapshots += 1
+        collectLiveTreeMembers(recorded.table, members, protectedPids, recorded.window)
+      }
+    }
+    if (!shot) return report(false, now() >= deadline ? 'deadline' : 'snapshot-unavailable')
+    snapshots += 1
+    const live = collectLiveTreeMembers(shot.table, members, protectedPids, shot.window)
+    if (!live.length) return report(true, 'converged')
+    if (now() >= deadline || round >= MAX_SWEEP_ROUNDS) {
+      // Out of time with members known to be alive: kill them once more, then report honestly.
+      await kill(live, () => FINAL_KILL_TIMEOUT_MS)
+      return report(false, 'deadline')
+    }
+    await kill(live, () => Math.max(500, deadline - now()))
     if (now() >= deadline) return report(false, 'deadline')
     pending = takeSnapshot()
   }

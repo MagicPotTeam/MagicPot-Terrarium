@@ -90,6 +90,8 @@ type LiveJob = {
   confined: boolean
   /** Date.now() read before spawn: the child cannot have been created earlier. */
   spawnedNotBeforeMs: number
+  /** Date.now() of the child's 'exit' event: nothing created later is its child. */
+  exitedAtMs?: number
 }
 
 export type CommandsBackgroundInput = Readonly<{
@@ -334,7 +336,9 @@ export class CommandJobsToolHost {
     const timer = setTimeout(() => { void this.terminate(record.jobId, 'timed-out').catch(() => undefined) }, timeoutMs)
     let confirmClosed!: () => void
     const closed = new Promise<void>((resolve) => { confirmClosed = resolve })
-    this.live.set(record.jobId, { child, timer, stopping: false, closed, confirmClosed, confined, spawnedNotBeforeMs })
+    const liveJob: LiveJob = { child, timer, stopping: false, closed, confirmClosed, confined, spawnedNotBeforeMs }
+    child.once('exit', () => { liveJob.exitedAtMs = Date.now() })
+    this.live.set(record.jobId, liveJob)
     const abort = () => { void this.stop({ jobId: record.jobId, routeKey: record.routeKey, sessionId: record.sessionId }).catch(() => undefined) }
     input.signal?.addEventListener('abort', abort, { once: true })
     const detachAbort = () => input.signal?.removeEventListener('abort', abort)
@@ -484,10 +488,16 @@ export class CommandJobsToolHost {
           } catch { controllerFailed = true; clearTimeout(timer); resolve(false) }
         })
       } else if (this.platform === 'win32') {
-        // Unconfined: the immediate taskkill no longer trusts one enumeration of the
-        // tree; the sweep kills what it missed or reports the stop unconfirmed.
+        // Unconfined (no Job Object): the immediate taskkill is followed by a best-effort
+        // sweep that kills processes linked by parent pid to the job which the single
+        // enumeration missed, or reports the stop unconfirmed. 'known' below therefore means
+        // what it meant before (taskkill exit 0 and the child's close) plus "the sweep found no
+        // linked survivor". It does NOT mean nothing of the job runs: an orphan (a descendant
+        // whose parent exited before the stop) is out of the sweep's reach and can survive;
+        // only confined jobs (Job Object) exclude that. See windowsProcessTree.ts.
         const report = await stopWindowsProcessTree(pid, {
           rootCreatedNotBeforeMs: live.spawnedNotBeforeMs,
+          ...(live.exitedAtMs === undefined ? {} : { rootExitedAtMs: live.exitedAtMs }),
           spawnProcess: this.spawnProcess as unknown as WindowsProcessSpawn,
           ...(this.windowsProcessSnapshot ? { snapshot: this.windowsProcessSnapshot } : {})
         })

@@ -181,4 +181,26 @@ describe('resolveWindowsSpawnCommand (libuv search_path on win32)', () => {
     expect(isJobHelperLaunchable('D:tool.exe')).toBe(false)
     expect(isJobHelperLaunchable('/tmp/tool.exe')).toBe(false)
   })
+
+  it('hands paths with spaces and non-ASCII characters to the helper, but no path beyond the classic limits', () => {
+    const fs = lookup(['C:\\Program Files\\工具 集\\outil é.exe'])
+    const resolved = resolveWindowsSpawnCommand(
+      'outil é',
+      'C:\\作業 フォルダ',
+      {
+        PATH: 'C:\\Program Files\\工具 集'
+      },
+      fs
+    )
+    expect(resolved).toBe('C:\\Program Files\\工具 集\\outil é.exe')
+    expect(isJobHelperLaunchable(resolved!, 'C:\\作業 フォルダ')).toBe(true)
+    // Deliberately stricter than libuv: the helper has no long-path manifest, so a command or a
+    // working directory at or beyond the classic limits keeps the direct spawn.
+    const dir = (length: number) => `C:\\${'d'.repeat(length - 3)}`
+    expect(dir(247)).toHaveLength(247)
+    expect(isJobHelperLaunchable('C:\\bin\\tool.exe', dir(247))).toBe(true)
+    expect(isJobHelperLaunchable('C:\\bin\\tool.exe', dir(248))).toBe(false)
+    expect(isJobHelperLaunchable(`${dir(238)}\\tool.exe`)).toBe(true)
+    expect(isJobHelperLaunchable(`${dir(239)}\\tool.exe`)).toBe(false)
+  })
 })

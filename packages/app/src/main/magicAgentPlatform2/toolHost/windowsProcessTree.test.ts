@@ -45,10 +45,13 @@ class FakeWindows {
   readonly calls: { file: string; args: string[]; options: SpawnOptions }[] = []
   /** Runs inside a taskkill between its enumeration and the kills. */
   onKill?: (enumerated: number[], call: number) => void
+  /** Runs when a PowerShell snapshot is about to read the table (0 is the parallel one). */
+  onSnapshot?: (call: number) => void
   powershell: 'answer' | 'missing' | 'garbage' | 'silent' = 'answer'
   taskkillExitCode?: number
   private killerPid = 9000
   private kills = 0
+  private snaps = 0
 
   add(pid: number, ppid: number, createdMs: number): void {
     this.table.set(pid, { pid, ppid, createdMs, alive: true })
@@ -94,6 +97,7 @@ class FakeWindows {
           return
         }
         if (this.powershell === 'silent') return
+        this.onSnapshot?.(this.snaps++)
         const rows = [...this.table.values()]
           .filter((proc) => proc.alive)
           .map((proc) => ({ p: proc.pid, q: proc.ppid, c: filetime(proc.createdMs) }))
@@ -151,8 +155,9 @@ describe('stopWindowsProcessTree', () => {
     expect(report).toMatchObject({
       confirmed: true,
       outcome: 'converged',
-      initialKill: { exitCode: 0, failed: false, timedOut: false },
-      snapshots: 3,
+      initialKill: { exitCode: 0, failed: false, timedOut: false, skipped: false },
+      // The parallel one (records only), then one after each kill.
+      snapshots: 4,
       swept: 2
     })
     for (const pid of [100, 101, 102, 103]) expect(os.alive(pid), `pid ${pid}`).toBe(false)
@@ -287,6 +292,166 @@ describe('stopWindowsProcessTree', () => {
     })
   })
 
+  it('never kills a process created after its claimed parent was dead (pid reuse after a kill)', async () => {
+    const os = new FakeWindows()
+    os.add(1, 0, T0 - 10_000)
+    os.add(100, 1, T0 + 10)
+    const clock = fakeClock()
+    os.onKill = (_enumerated, call) => {
+      // 102 is born while the first taskkill runs, survives it and is swept.
+      if (call === 0) os.add(102, 100, clock.now())
+    }
+    os.onSnapshot = (call) => {
+      // The snapshot after the sweep of 102 arrives 3 s later. Meanwhile short-lived launchers
+      // reused the pids of the dead root and of the dead 102 and left a child behind each: 777
+      // and 778 were created 2 s after their claimed parents had been killed.
+      if (call !== 2) return
+      clock.advance(3_000)
+      os.add(777, 102, clock.now() - 1_000)
+      os.add(778, 100, clock.now() - 1_000)
+    }
+    const report = await stopWindowsProcessTree(100, stopOptions(os, clock.now))
+
+    expect(os.calls.filter((call) => call.file === TASKKILL).map((call) => call.args)).toEqual([
+      ['/PID', '100', '/T', '/F'],
+      ['/PID', '102', '/F']
+    ])
+    expect(os.alive(777)).toBe(true)
+    expect(os.alive(778)).toBe(true)
+    expect(os.alive(102)).toBe(false)
+    expect(report).toMatchObject({ confirmed: true, outcome: 'converged', swept: 1 })
+  })
+
+  it('never aims a kill at the pid of a root that had exited, nor at processes created after its exit', async () => {
+    const os = new FakeWindows()
+    os.add(1, 0, T0 - 10_000)
+    // The command exited 5 s after its start; 150, created before that, keeps its pipes open, so
+    // the run is still pending when the stop comes 30 s after the start.
+    os.add(150, 100, T0 + 1_000)
+    // Strangers: 777 names pid 100 as parent but was created 15 s after the root had exited, and
+    // a new process holds pid 100 now, with a child of its own. `taskkill /PID 100 /T /F` would
+    // kill those two.
+    os.add(777, 100, T0 + 20_000)
+    os.add(100, 1, T0 + 25_000)
+    os.add(779, 100, T0 + 26_000)
+    const clock = fakeClock(T0 + 30_000)
+    const onInitialKillFailed = vi.fn()
+    const report = await stopWindowsProcessTree(100, {
+      ...stopOptions(os, clock.now),
+      rootExitedAtMs: T0 + 5_000,
+      onInitialKillFailed
+    })
+
+    expect(os.calls.filter((call) => call.file === TASKKILL).map((call) => call.args)).toEqual([
+      ['/PID', '150', '/F']
+    ])
+    expect(os.alive(150)).toBe(false)
+    for (const pid of [777, 100, 779]) expect(os.alive(pid), `pid ${pid}`).toBe(true)
+    // Today's fallback (kill the child handle) still runs, and the stop is not called a success.
+    expect(onInitialKillFailed).toHaveBeenCalledTimes(1)
+    expect(report).toMatchObject({
+      outcome: 'converged',
+      initialKill: { exitCode: null, failed: false, timedOut: false, skipped: true }
+    })
+  })
+
+  it('records members from the snapshot taken in parallel with the first kill but never kills by it', async () => {
+    const os = new FakeWindows()
+    os.add(1, 0, T0 - 10_000)
+    os.add(100, 1, T0 + 10)
+    os.add(150, 100, T0 + 20)
+    os.add(160, 150, T0 + 30)
+    const before = os.entries()
+    const clock = fakeClock()
+    os.onKill = (_enumerated, call) => {
+      // The middle process forks while the first taskkill runs.
+      if (call === 0) os.add(170, 150, clock.now())
+    }
+    let taken = 0
+    const report = await stopWindowsProcessTree(100, {
+      ...stopOptions(os, clock.now),
+      // The parallel snapshot read the table before the kill: root, middle and leaf alive.
+      snapshot: async () => (taken++ === 0 ? before : os.entries())
+    })
+    // 100, 150 and 160 died by the first kill; their pids are not killed a second time from the
+    // stale table. 170 is reached only because the middle had been recorded.
+    expect(os.calls.map((call) => call.args)).toEqual([
+      ['/PID', '100', '/T', '/F'],
+      ['/PID', '170', '/F']
+    ])
+    expect(os.alive(170)).toBe(false)
+    expect(report).toMatchObject({ confirmed: true, snapshots: 3, swept: 1 })
+  })
+
+  it('does not wait for a parallel snapshot that has not answered when the deciding one has', async () => {
+    const os = new FakeWindows()
+    os.add(100, 1, T0 + 10)
+    const clock = fakeClock()
+    os.onKill = (_enumerated, call) => {
+      if (call === 0) os.add(102, 100, clock.now())
+    }
+    let taken = 0
+    const report = await stopWindowsProcessTree(100, {
+      ...stopOptions(os, clock.now),
+      snapshot: (): Promise<WindowsProcessEntry[]> =>
+        taken++ === 0 ? new Promise(() => undefined) : Promise.resolve(os.entries())
+    })
+    expect(report).toMatchObject({ confirmed: true, outcome: 'converged', snapshots: 2, swept: 1 })
+    expect(os.alive(102)).toBe(false)
+  })
+
+  it('kills the members it knows to be alive once more when the deadline has passed', async () => {
+    const os = new FakeWindows()
+    os.add(100, 1, T0 + 10)
+    const clock = fakeClock()
+    os.onKill = (_enumerated, call) => {
+      if (call === 0) os.add(102, 100, clock.now())
+    }
+    os.onSnapshot = (call) => {
+      // The deciding snapshot is slow: its answer arrives after the deadline.
+      if (call === 1) clock.advance(6_000)
+    }
+    const report = await stopWindowsProcessTree(100, stopOptions(os, clock.now))
+    expect(report).toMatchObject({ confirmed: false, outcome: 'deadline', swept: 1 })
+    expect(os.calls.at(-1)?.args).toEqual(['/PID', '102', '/F'])
+    expect(os.alive(102)).toBe(false)
+  })
+
+  // The two tests below pin what the sweep CANNOT do, so that no comment, audit value or record
+  // can drift back to claiming more. `confirmed` only means "no live process linked to the tree
+  // was found". Both survivors are killed for certain only by the Job Object helper.
+  it('KNOWN LIMIT: reports a converged sweep while an orphan of the tree is still running', async () => {
+    const os = new FakeWindows()
+    os.add(1, 0, T0 - 10_000)
+    os.add(100, 1, T0 + 10)
+    // 150 was a child of the root and exited before the stop; its child 160 lives on. Nothing in
+    // the process table links 160 to the root any more.
+    os.add(160, 150, T0 + 30)
+    const clock = fakeClock()
+    const report = await stopWindowsProcessTree(100, stopOptions(os, clock.now))
+    expect(report).toMatchObject({ confirmed: true, outcome: 'converged', swept: 0 })
+    expect(os.alive(160)).toBe(true)
+  })
+
+  it('KNOWN LIMIT: misses a process that a member below the root creates during the first kill', async () => {
+    const os = new FakeWindows()
+    os.add(1, 0, T0 - 10_000)
+    os.add(100, 1, T0 + 10)
+    os.add(150, 100, T0 + 20)
+    os.add(160, 150, T0 + 30)
+    const clock = fakeClock()
+    os.onKill = (_enumerated, call) => {
+      // The middle process forks between taskkill's enumeration and its kills. Every snapshot
+      // is read after the kill here (as on a real PC, where PowerShell starts slower than
+      // taskkill ends), so the middle is never seen alive and 170 cannot be linked to the tree.
+      if (call === 0) os.add(170, 150, clock.now())
+    }
+    const report = await stopWindowsProcessTree(100, stopOptions(os, clock.now))
+    expect(report).toMatchObject({ confirmed: true, outcome: 'converged', swept: 0 })
+    expect(os.alive(170)).toBe(true)
+    for (const pid of [100, 150, 160]) expect(os.alive(pid), `pid ${pid}`).toBe(false)
+  })
+
   it('never kills a protected pid, even when a snapshot claims it descends from the tree', async () => {
     const os = new FakeWindows()
     os.add(100, 1, T0 + 10)
@@ -336,6 +501,46 @@ describe('collectLiveTreeMembers', () => {
     expect(live).toEqual([])
     // Unknown creation times are never adopted.
     expect(collectLiveTreeMembers([entry(106, 103, null)], members, new Set())).toEqual([])
+  })
+
+  it('dates the death of a member by the first snapshot that lacks it, or by an earlier successful kill', () => {
+    const us = (ms: number) => ms * 1000
+    const members = rootMembers()
+    const snapshot = (startedMs: number, observedMs: number) => ({
+      startedAtUs: us(startedMs),
+      observedAtUs: us(observedMs)
+    })
+    // Round 1: root and its child 102 are alive.
+    collectLiveTreeMembers(
+      [entry(100, 1, T0 + 10), entry(102, 100, T0 + 500)],
+      members,
+      new Set(),
+      snapshot(T0 + 1000, T0 + 1500)
+    )
+    members.get(102)![0].killedAtUs = us(T0 + 1600)
+    // Round 2, requested after that kill: 102 is still alive, so the kill missed and dates
+    // nothing; the root is gone and was dead when this answer arrived.
+    let live = collectLiveTreeMembers(
+      [entry(102, 100, T0 + 500), entry(103, 100, T0 + 1400), entry(104, 100, T0 + 3000)],
+      members,
+      new Set(),
+      snapshot(T0 + 1700, T0 + 2000)
+    )
+    // 103 was created while the root may still have lived; 104 a second after it was dead.
+    expect(live.map((item) => item.pid).sort()).toEqual([102, 103])
+    expect(members.get(102)![0].killedAtUs).toBeUndefined()
+    expect(members.get(100)![0].deadByUs).toBe(us(T0 + 2000))
+    // Round 3: a successful kill of 102 at T0+2100 dates its death, although the snapshot that
+    // lacks it arrives much later. Inside the clock tolerance (250 ms) a child is still accepted.
+    members.get(102)![0].killedAtUs = us(T0 + 2100)
+    live = collectLiveTreeMembers(
+      [entry(105, 102, T0 + 2300), entry(106, 102, T0 + 2400)],
+      members,
+      new Set(),
+      snapshot(T0 + 2200, T0 + 4000)
+    )
+    expect(members.get(102)![0].deadByUs).toBe(us(T0 + 2100))
+    expect(live.map((item) => item.pid)).toEqual([105])
   })
 
   it('recognizes the root while it is still alive in a snapshot taken in parallel with the kill', () => {
@@ -395,8 +600,15 @@ describe('Windows process snapshot', () => {
       }
     ])
     const script = Buffer.from(WINDOWS_PROCESS_SNAPSHOT_ARGS[4], 'base64').toString('utf16le')
-    expect(script).toContain('Get-CimInstance -ClassName Win32_Process')
+    // Only the three properties it needs, so WMI does not build command lines and image paths.
+    expect(script).toContain(
+      "Get-CimInstance -Query 'SELECT ProcessId, ParentProcessId, CreationDate FROM Win32_Process'"
+    )
     expect(script).toContain('ToFileTimeUtc()')
+    // Constrained Language Mode refuses method calls on non-core types and ::new / New-Object:
+    // the script uses none (the only method call is DateTime.ToFileTimeUtc()).
+    expect(script).not.toMatch(/\[Console\]|::|New-Object|Add-Type|ConvertTo-Json|pscustomobject/i)
+    expect(script.match(/\.[A-Za-z]+\(/g)).toEqual(['.ToFileTimeUtc('])
     expect(WINDOWS_PROCESS_SNAPSHOT_ARGS.slice(0, 4)).toEqual([
       '-NoLogo',
       '-NoProfile',
@@ -404,6 +616,22 @@ describe('Windows process snapshot', () => {
       '-EncodedCommand'
     ])
   })
+
+  // The script itself can only be checked on Windows: this is the test that tells a broken or
+  // refused snapshot script (every stop would then be 'tree-unconfirmed') from a working one.
+  it.runIf(process.platform === 'win32')(
+    'takes a real snapshot on Windows that contains this process with its parent and creation time',
+    async () => {
+      const startedAtMs = Date.now() - process.uptime() * 1000
+      const table = await createWindowsPowerShellSnapshot()(15_000)
+      expect(table, 'the PowerShell / CIM snapshot returned nothing').toBeDefined()
+      const self = table!.find((item) => item.pid === process.pid)
+      expect(self?.parentPid).toBe(process.ppid)
+      expect(Math.abs(self!.createdAtUs! / 1000 - startedAtMs)).toBeLessThan(5_000)
+      expect(table!.length).toBeGreaterThan(10)
+    },
+    30_000
+  )
 
   it('gives up on a PowerShell that does not answer in time and stops it', async () => {
     const os = new FakeWindows()

@@ -308,7 +308,7 @@ async function executeProcess(
     const resolved = helper
       ? resolveWindowsSpawnCommand(command, cwd, env, control.windowsCommandLookup)
       : undefined
-    if (helper && resolved !== undefined && isJobHelperLaunchable(resolved))
+    if (helper && resolved !== undefined && isJobHelperLaunchable(resolved, cwd))
       launch = { file: helper, args: ['-', '-', '-', '--', resolved, ...args], jobObject: true }
   }
   return new Promise((resolve) => {
@@ -321,6 +321,12 @@ async function executeProcess(
       detached: !windows,
       windowsHide: true,
       stdio: 'pipe'
+    })
+    // When the command itself has already exited (a descendant may keep its pipes open), its pid
+    // may be reused: nothing created later is its child, whatever holds that pid by then.
+    let exitedAtMs: number | undefined
+    child.once('exit', () => {
+      exitedAtMs = control.now()
     })
     let stdout = ''
     let stderr = ''
@@ -346,9 +352,14 @@ async function executeProcess(
         }
         termination = Promise.resolve()
       } else if (windows) {
-        // Today's immediate `taskkill /PID <pid> /T /F`, then a sweep for processes it missed.
+        // No Job Object (no verified helper, or a command the helper cannot launch): today's
+        // immediate `taskkill /PID <pid> /T /F`, then a best-effort sweep for processes it missed.
+        // The sweep reaches processes linked by parent pid to the command; it cannot reach an
+        // orphan (a descendant whose parent exited before the stop), so 'tree-swept' means "no
+        // linked survivor found", not "nothing of the tree runs" (see windowsProcessTree.ts).
         termination = stopWindowsProcessTree(pid, {
           rootCreatedNotBeforeMs: spawnedNotBeforeMs,
+          ...(exitedAtMs === undefined ? {} : { rootExitedAtMs: exitedAtMs }),
           spawnProcess: control.spawn,
           now: control.now,
           ...(control.windowsSnapshot ? { snapshot: control.windowsSnapshot } : {}),

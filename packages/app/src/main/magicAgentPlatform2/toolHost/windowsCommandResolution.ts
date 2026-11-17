@@ -187,10 +187,25 @@ export function windowsPathIsNonDirectory(candidate: string): boolean {
 }
 
 /**
- * True when `resolved` can be given to the Job Object helper: an absolute drive or UNC path to a
- * `.exe` or `.com` file. Anything else (batch files, which Node refuses without a shell, other
- * extensions, drive-relative results) keeps today's direct spawn so its behaviour is unchanged.
+ * The helper is a plain Win32 program without a long-path manifest, while the app that spawns
+ * directly today is long-path aware. Whether CreateProcessW in the helper takes a command or a
+ * working directory at or beyond the classic limits (MAX_PATH 260, directories 248) could not be
+ * verified, so such launches deliberately keep the direct spawn (a stricter rule than libuv's).
  */
-export function isJobHelperLaunchable(resolved: string): boolean {
-  return /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/])/.test(resolved) && /\.(?:exe|com)$/i.test(resolved)
+export const JOB_HELPER_MAX_PATH_CHARS = 247
+
+/**
+ * True when `resolved` can be given to the Job Object helper: an absolute drive or UNC path to a
+ * `.exe` or `.com` file, with the path and the working directory inside the classic length
+ * limits. Anything else (batch files, which Node refuses without a shell, other extensions,
+ * drive-relative results, long paths) keeps today's direct spawn so its behaviour is unchanged;
+ * such a command is then stopped by taskkill plus the sweep, not by a Job Object.
+ */
+export function isJobHelperLaunchable(resolved: string, cwd = ''): boolean {
+  return (
+    /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/])/.test(resolved) &&
+    /\.(?:exe|com)$/i.test(resolved) &&
+    resolved.length <= JOB_HELPER_MAX_PATH_CHARS &&
+    cwd.length <= JOB_HELPER_MAX_PATH_CHARS
+  )
 }

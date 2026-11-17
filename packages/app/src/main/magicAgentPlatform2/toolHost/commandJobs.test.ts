@@ -878,6 +878,38 @@ describe('CommandJobsToolHost win32 stop strategy', () => {
     expect(() => host.assertNoUncertainStop()).not.toThrow()
   })
 
+  it('aims no taskkill at an unconfined job whose command has already exited, sweeps what it left behind and keeps the stop unknown', async () => {
+    // The command exited, but a process it started keeps its output pipes open, so the job is
+    // still live. Its pid may belong to a stranger by now: `taskkill /PID <pid> /T /F` could only
+    // fail or kill that stranger. 61002 was created before the exit and is swept; 61003 names
+    // the same parent pid but was created afterwards and must stay.
+    const startedAt = Date.now()
+    let leftBehind = true
+    const fake = createFakeSpawner(() => [
+      ...(leftBehind ? [{ p: 61_002, q: commandPid(), c: filetime(startedAt + 1) }] : []),
+      { p: 61_003, q: commandPid(), c: filetime(startedAt + 60_000) }
+    ])
+    const commandPid = () => fake.calls[0].child.pid
+    const spawnProcess = ((command: string, args: readonly string[], options: SpawnOptions) => {
+      if (path.win32.basename(command).toLowerCase() === 'taskkill.exe' && args.includes(String(61_002))) {
+        leftBehind = false
+        // The swept process held the pipes: the job's streams close now.
+        queueMicrotask(() => fake.calls[0].child.close(0))
+      }
+      return fake.spawnProcess(command, args, options)
+    }) as CommandJobsSpawnProcess
+    const { root, authorization } = setup(fake.spawnProcess)
+    const host = win32Host(root, authorization, spawnProcess)
+    const input = approved(root, authorization, ['--hang'])
+    const job = await host.background(input)
+    fake.calls[0].child.emit('exit', 0, null)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+
+    expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([['/PID', '61002', '/F']])
+    // As before for a root that taskkill could not kill: the stop is not called a success.
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'unknown', stopOutcome: 'termination-unconfirmed', termination: { controllerExitCode: null, childClosed: true } })
+  })
+
   it('keeps an unconfined stop unknown and quarantined when no process snapshot can be taken', async () => {
     const fake = createFakeSpawner()
     const { root, authorization } = setup(fake.spawnProcess)
