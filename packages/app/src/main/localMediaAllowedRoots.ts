@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { app } from 'electron'
 import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
+import { ensurePrivateLocalMediaTempRoot } from './localMediaTempRoot'
 
 function isAbsoluteLocalMediaRoot(value: string): boolean {
   return path.isAbsolute(value) || path.win32.isAbsolute(value)
@@ -18,9 +19,12 @@ function normalizeLocalMediaRoot(value: string): string {
 /** Returns the application-owned roots plus the narrowly scoped benchmark cache root. */
 export function getLocalMediaAllowedRoots(): string[] {
   const storageState = getCurrentUserDataDirectoryState()
+  const tempRoot = normalizeLocalMediaRoot(path.join(app.getPath('temp'), 'magicpot-local-media'))
   const roots: string[] = [
     app.getPath('userData'),
-    path.join(app.getPath('temp'), 'magicpot-local-media'),
+    // The OS temp directory may be shared with other users (/tmp): trusted only as main's own
+    // private directory.
+    ...(ensurePrivateLocalMediaTempRoot(tempRoot) ? [tempRoot] : []),
     storageState.projectRoot,
     storageState.autoSaveRoot
   ]

@@ -17,6 +17,7 @@ vi.mock('./config/userDataDirectory', () => ({
     autoSaveRoot: 'C:/autosave'
   })
 }))
+vi.mock('./localMediaTempRoot', () => ({ ensurePrivateLocalMediaTempRoot: () => true }))
 vi.mock('./localMediaAccess', () => ({
   authorizeScopedLocalMediaPath: authorizeMock,
   recordLocalMediaImportGrant: recordImportGrantMock,
