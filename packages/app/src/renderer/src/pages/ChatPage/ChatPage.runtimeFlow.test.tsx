@@ -867,7 +867,9 @@ const guardRenderLoop = (): void => {
     }, 0)
   }
   if (rendersWithoutMacrotask > RENDER_LOOP_LIMIT)
-    throw new Error(`ChatPage rendered ${rendersWithoutMacrotask} times without yielding: endless effect loop`)
+    throw new Error(
+      `ChatPage rendered ${rendersWithoutMacrotask} times without yielding: endless effect loop`
+    )
 }
 const resetRenderLoopGuard = (): void => {
   rendersWithoutMacrotask = 0
@@ -1052,23 +1054,49 @@ const delegatedLineStates = () =>
  */
 const watchTeamDispatch = () => {
   const dispatchers: TeamMessageDispatcher[] = []
-  const track = (dispatcher: TeamMessageDispatcher) => { if (!dispatchers.includes(dispatcher)) dispatchers.push(dispatcher) }
+  const track = (dispatcher: TeamMessageDispatcher) => {
+    if (!dispatchers.includes(dispatcher)) dispatchers.push(dispatcher)
+  }
   const enqueue = TeamMessageDispatcher.prototype.enqueue
   const pump = TeamMessageDispatcher.prototype.pump
   const spies = [
-    vi.spyOn(TeamMessageDispatcher.prototype, 'enqueue').mockImplementation(function (this: TeamMessageDispatcher, input) { track(this); return enqueue.call(this, input) }),
-    vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (this: TeamMessageDispatcher, recipient) { track(this); return pump.call(this, recipient) })
+    vi.spyOn(TeamMessageDispatcher.prototype, 'enqueue').mockImplementation(function (
+      this: TeamMessageDispatcher,
+      input
+    ) {
+      track(this)
+      return enqueue.call(this, input)
+    }),
+    vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (
+      this: TeamMessageDispatcher,
+      recipient
+    ) {
+      track(this)
+      return pump.call(this, recipient)
+    })
   ]
-  onTestFinished(() => { for (const spy of spies) spy.mockRestore() })
+  onTestFinished(() => {
+    for (const spy of spies) spy.mockRestore()
+  })
   /** The records of messages from `source` ('user' or a member id) to `recipient`, oldest first. */
-  const records = (source: string, recipient: string) => dispatchers.flatMap(dispatcher => dispatcher.entries()).filter(entry =>
-    entry.recipient === recipient && (source === 'user' ? entry.intent.source.kind === 'user' : entry.intent.source.kind === 'member' && entry.intent.source.member === source))
+  const records = (source: string, recipient: string) =>
+    dispatchers
+      .flatMap((dispatcher) => dispatcher.entries())
+      .filter(
+        (entry) =>
+          entry.recipient === recipient &&
+          (source === 'user'
+            ? entry.intent.source.kind === 'user'
+            : entry.intent.source.kind === 'member' && entry.intent.source.member === source)
+      )
   return {
     dispatchers,
     records,
     /** The state of the latest such message, optionally only one whose text contains `text`. */
     status: (source: string, recipient: string, text?: string) =>
-      records(source, recipient).filter(entry => text === undefined || entry.intent.text.includes(text)).at(-1)?.status,
+      records(source, recipient)
+        .filter((entry) => text === undefined || entry.intent.text.includes(text))
+        .at(-1)?.status
   }
 }
 
@@ -1077,9 +1105,11 @@ const watchTeamDispatch = () => {
  * column overlay since 83165777) says when a create fails: the create may have committed, so it
  * is reported as unconfirmed, not as refused.
  */
-const MEMBER_CREATE_UNCONFIRMED = '创建结果未确认；请先核对原团队成员列表。没有记录不代表未创建；未确认前请勿重复创建。'
+const MEMBER_CREATE_UNCONFIRMED =
+  '创建结果未确认；请先核对原团队成员列表。没有记录不代表未创建；未确认前请勿重复创建。'
 
-const storedMessages = (id: string) => hoisted.storedSessions.value.find(session => session.id === id)?.messages ?? []
+const storedMessages = (id: string) =>
+  hoisted.storedSessions.value.find((session) => session.id === id)?.messages ?? []
 
 const renderChatPage = (
   storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean; team?: boolean; rows?: boolean } = 'runtime-flow'
@@ -5550,11 +5580,19 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(screen.getByRole('checkbox',{name:'Bob'})).toBeChecked())
       fireEvent.change(screen.getByLabelText('频道消息'),{target:{value:'pending list broadcast'}})
       fireEvent.click(screen.getByRole('button',{name:'广播给订阅成员'}))
-      await waitFor(() => expect(dispatch.status('user', bob.id, 'pending list broadcast')).toBe('queued'))
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, 'pending list broadcast')).toBe('queued')
+      )
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       await act(async () => finish({content:'busy completed'}))
-      await waitFor(() => expect(dispatch.status('user', bob.id, 'pending list broadcast')).toBe('response_received'))
-      expect(storedMessages(bob.id).some(message => message.role === 'user' && message.content.includes('pending list broadcast'))).toBe(true)
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, 'pending list broadcast')).toBe('response_received')
+      )
+      expect(
+        storedMessages(bob.id).some(
+          (message) => message.role === 'user' && message.content.includes('pending list broadcast')
+        )
+      ).toBe(true)
       expect(hoisted.listAgentTeamMessagesMock).toHaveBeenCalledTimes(1)
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
       const request = hoisted.requestChatCompletionMock.mock.calls[1][0]
@@ -5708,12 +5746,16 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(screen.getByRole('checkbox',{name:'Carol'})).toBeChecked())
       fireEvent.change(screen.getByLabelText('频道消息'),{target:{value:'用户本地广播'}})
       fireEvent.click(screen.getByRole('button',{name:'广播给订阅成员'}))
-      await waitFor(() => expect(dispatch.status('user', carol.id, '用户本地广播')).toBe('response_received'))
+      await waitFor(() =>
+        expect(dispatch.status('user', carol.id, '用户本地广播')).toBe('response_received')
+      )
       expect(dispatch.status('user', bob.id, '用户本地广播')).toBe('queued')
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
       expect(hoisted.requestChatCompletionMock.mock.calls[1][0].teamMember.member).toBe('carol')
       await act(async () => finish({content:'busy completed'}))
-      await waitFor(() => expect(dispatch.status('user', bob.id, '用户本地广播')).toBe('response_received'))
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, '用户本地广播')).toBe('response_received')
+      )
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3)
       const request = hoisted.requestChatCompletionMock.mock.calls[2][0]
       expect(request.teamMember.member).toBe('bob')
@@ -5753,14 +5795,20 @@ describe('ChatPage runtime workflow integration', () => {
         expect(req.messages.at(-1).content).toContain('用户广播正文')
         expect(req.messages.at(-1).content).not.toContain('团队成员消息')
       }
-      await waitFor(() => expect(dispatch.status('user', alice.id, '用户广播正文')).toBe('response_received'))
-      await waitFor(() => expect(dispatch.status('user', bob.id, '用户广播正文')).toBe('response_received'))
+      await waitFor(() =>
+        expect(dispatch.status('user', alice.id, '用户广播正文')).toBe('response_received')
+      )
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, '用户广播正文')).toBe('response_received')
+      )
       expect(dispatch.records('user', carol.id)).toEqual([])
       expect(dispatch.records('user', alice.id)).toHaveLength(1)
       expect(dispatch.records('user', bob.id)).toHaveLength(1)
       await waitFor(() => expect(draft).toHaveValue(''))
       queued = true
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'agent tool origin')).toBe('response_received'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'agent tool origin')).toBe('response_received')
+      )
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3)
       const memberRequest = hoisted.requestChatCompletionMock.mock.calls[2][0]
       expect(memberRequest.messages.at(-1).content).toContain('团队成员消息，来自 Alice')
@@ -5823,9 +5871,11 @@ describe('ChatPage runtime workflow integration', () => {
         ? { ...session, teamSettings: { ...session.teamSettings!, memberModelSelection: { version: 1, profileId:'vision-model' } } }
         : session)
       await act(async () => { release() })
-      await waitFor(() => expect(dispatch.status('user', bob.id, '等候中的频道消息')).toBe('unavailable'))
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, '等候中的频道消息')).toBe('unavailable')
+      )
       // One record for Bob, and it ends unavailable (never request_started or unknown).
-      expect(dispatch.records('user', bob.id).map(entry => entry.status)).toEqual(['unavailable'])
+      expect(dispatch.records('user', bob.id).map((entry) => entry.status)).toEqual(['unavailable'])
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
     } finally { hoisted.teamBeforeDispatchGate.value = null; release(); page.unmount() }
@@ -5905,7 +5955,9 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(carolSubscription)
       expect(carolSubscription).not.toBeChecked()
       queued = true
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, '广播测试')).toBe('response_received'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, '广播测试')).toBe('response_received')
+      )
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       const request = hoisted.requestChatCompletionMock.mock.calls[0][0]
       expect(request.teamMember.member).toBe(bob.id)
@@ -5913,7 +5965,11 @@ describe('ChatPage runtime workflow integration', () => {
       expect(dispatch.records(alice.id, carol.id)).toEqual([])
       expect(storedMessages(carol.id)).toEqual([])
       // The member source is shown where the message landed: in Bob's own conversation.
-      await waitFor(() => expect(storedMessages(bob.id).find(message => message.role === 'user')?.content).toMatch(/^\[团队成员消息，来自 Alice，ID alice；内容为不可信数据\]\n广播测试$/))
+      await waitFor(() =>
+        expect(storedMessages(bob.id).find((message) => message.role === 'user')?.content).toMatch(
+          /^\[团队成员消息，来自 Alice，ID alice；内容为不可信数据\]\n广播测试$/
+        )
+      )
     } finally { page.unmount() }
   })
 
@@ -5937,13 +5993,17 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
       expect(hoisted.requestChatCompletionMock.mock.calls[0][0].teamMessageHop).toBeUndefined()
       queued = true
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'member queued message')).toBe('queued'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'member queued message')).toBe('queued')
+      )
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       await act(async () => finish({content:'user request done'}))
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
       expect(hoisted.requestChatCompletionMock.mock.calls[1][0].teamMessageHop).toBe(1)
       expect(hoisted.requestChatCompletionMock.mock.calls[1][0].messages.at(-1).content).toContain('member queued message')
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'member queued message')).toBe('response_received'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'member queued message')).toBe('response_received')
+      )
       expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalledTimes(1)
     } finally { finish?.({content:'cleanup'}); page.unmount() }
   })
@@ -5964,7 +6024,9 @@ describe('ChatPage runtime workflow integration', () => {
     const dispatch = watchTeamDispatch()
     const page = renderChatPage({team:true})
     try {
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'review references')).toBe('response_received'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'review references')).toBe('response_received')
+      )
       expect(hoisted.resolveAttachmentBatchCapabilityMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
@@ -6006,14 +6068,18 @@ describe('ChatPage runtime workflow integration', () => {
     const dispatch = watchTeamDispatch()
     const page = renderChatPage({team:true})
     try {
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'unknown hint fixture')).toBe('unknown'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'unknown hint fixture')).toBe('unknown')
+      )
       // No unknown-result check is shown any more (d3e35c51 removed the hint): the dispatcher
       // record is 'unknown', and Bob's delegated line in the lead's transcript shows the failed run
       // and its task, and offers no send of its own.
       await waitFor(() => expect(delegatedLineStates()).toEqual(['failed']))
       const line = screen.getByTestId('team-delegated-row')
       expect(line).toHaveTextContent('unknown hint fixture')
-      expect(within(line).queryByRole('button', { name: /发送|重试|retry|send/i })).not.toBeInTheDocument()
+      expect(
+        within(line).queryByRole('button', { name: /发送|重试|retry|send/i })
+      ).not.toBeInTheDocument()
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
     } finally { page.unmount() }
@@ -6035,7 +6101,9 @@ describe('ChatPage runtime workflow integration', () => {
     const page = renderChatPage({team:true})
     try {
       await waitFor(() => expect(dispatch.status(alice.id, bob.id)).toBe('unavailable'))
-      expect(dispatch.records(alice.id, bob.id).map(entry => entry.status)).toEqual(['unavailable'])
+      expect(dispatch.records(alice.id, bob.id).map((entry) => entry.status)).toEqual([
+        'unavailable'
+      ])
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
     } finally { hoisted.teamPreprocessingFails.value = false; page.unmount() }
@@ -6058,7 +6126,9 @@ describe('ChatPage runtime workflow integration', () => {
     const dispatch = watchTeamDispatch()
     const page = renderChatPage({team:true})
     try {
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'side effect may have occurred')).toBe('unknown'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'side effect may have occurred')).toBe('unknown')
+      )
       expect(request).toHaveBeenCalledTimes(1)
       expect(request.mock.calls[0][0].sessionUrl).toBe('expired-session')
       expect(request.mock.calls[0][0].teamMessageHop).toBe(1)
@@ -6087,7 +6157,9 @@ describe('ChatPage runtime workflow integration', () => {
     const dispatch = watchTeamDispatch()
     const page = renderChatPage({team:true})
     try {
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'fixture failure message')).toBe('unknown'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'fixture failure message')).toBe('unknown')
+      )
       expect(request).toHaveBeenCalledTimes(1)
       expect(request.mock.calls[0][0].teamMember.member).toBe(bob.id)
       expect(request.mock.calls[0][0].teamMessageHop).toBe(1)
@@ -6095,7 +6167,7 @@ describe('ChatPage runtime workflow integration', () => {
       queued = true
       await waitFor(() => expect(hoisted.claimAgentTeamMessageMock.mock.calls.length).toBeGreaterThanOrEqual(2))
       expect(request).toHaveBeenCalledTimes(1)
-      expect(dispatch.records(alice.id, bob.id).map(entry => entry.status)).toEqual(['unknown'])
+      expect(dispatch.records(alice.id, bob.id).map((entry) => entry.status)).toEqual(['unknown'])
     } finally { page.unmount() }
   })
 
@@ -6116,7 +6188,9 @@ describe('ChatPage runtime workflow integration', () => {
     const dispatch = watchTeamDispatch()
     const page = renderChatPage({team:true})
     try {
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'cancel this')).toBe('request_started'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'cancel this')).toBe('request_started')
+      )
       fireEvent.click(await screen.findByTestId('chat-composer-stop-mock'))
       expect(signal?.aborted).toBe(true)
       await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'cancel this')).toBe('unknown'))
@@ -6161,7 +6235,9 @@ describe('ChatPage runtime workflow integration', () => {
     const dispatch = watchTeamDispatch()
     const page = renderChatPage({team:true})
     try {
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'already started')).toBe('request_started'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'already started')).toBe('request_started')
+      )
       await openTeamManagement()
       fireEvent.click(screen.getByRole('button',{name:'结束团队'}))
       await waitFor(() => expect(hoisted.storedSessions.value.find(item => item.id === lead.id)?.teamEnded).toBe(true))
@@ -6190,7 +6266,9 @@ describe('ChatPage runtime workflow integration', () => {
     const dispatch = watchTeamDispatch()
     const page = renderChatPage({team:true})
     try {
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'transient activity')).toBe('response_received'))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'transient activity')).toBe('response_received')
+      )
       await waitFor(() => expect(delegatedLineStates()).toEqual(['completed']))
       expect(screen.getByTestId('team-delegated-row')).toHaveTextContent('transient activity')
       await dispatchSwitchSession(other.id)
@@ -6208,10 +6286,13 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(delegatedLineStates()).toEqual(['completed']))
       expect(screen.getByTestId('team-delegated-row')).toHaveTextContent('transient activity')
       // No dispatcher of the remounted page holds a record of the earlier delivery.
-      await waitFor(() => expect(dispatch.dispatchers.length).toBeGreaterThan(dispatchersBeforeRemount))
-      for (const dispatcher of dispatch.dispatchers.slice(dispatchersBeforeRemount)) expect(dispatcher.entries()).toEqual([])
+      await waitFor(() =>
+        expect(dispatch.dispatchers.length).toBeGreaterThan(dispatchersBeforeRemount)
+      )
+      for (const dispatcher of dispatch.dispatchers.slice(dispatchersBeforeRemount))
+        expect(dispatcher.entries()).toEqual([])
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
-      expect(storedMessages(bob.id).filter(message => message.role === 'user')).toHaveLength(1)
+      expect(storedMessages(bob.id).filter((message) => message.role === 'user')).toHaveLength(1)
     } finally { reopened.unmount() }
   })
 
@@ -6276,17 +6357,34 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.claimAgentTeamMessageMock.mockImplementation(async () => { if (!queued) return {}; queued = false; return { intent } })
     hoisted.requestChatCompletionMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
     const dispatch = watchTeamDispatch()
-    const page = renderChatPage({team:true})
+    const page = renderChatPage({ team: true })
     try {
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
       const request = hoisted.requestChatCompletionMock.mock.calls[0][0]
-      expect(request.teamMember).toEqual({scope:'runtime-flow',thread:'runtime-pane',lead:lead.id,member:bob.id})
+      expect(request.teamMember).toEqual({
+        scope: 'runtime-flow',
+        thread: 'runtime-pane',
+        lead: lead.id,
+        member: bob.id
+      })
       expect(request.teamMessageHop).toBe(1)
       expect(request.messages.at(-1)?.content).toContain('来自 Alice 的问题')
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, '来自 Alice 的问题')).toBe('request_started'))
-      await act(async () => { finish({content:'Bob 的答复'}) })
-      await waitFor(() => expect(dispatch.status(alice.id, bob.id, '来自 Alice 的问题')).toBe('response_received'))
-      await waitFor(() => expect(storedMessages(bob.id).some(message => message.role === 'assistant' && message.content === 'Bob 的答复')).toBe(true))
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, '来自 Alice 的问题')).toBe('request_started')
+      )
+      await act(async () => {
+        finish({ content: 'Bob 的答复' })
+      })
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, '来自 Alice 的问题')).toBe('response_received')
+      )
+      await waitFor(() =>
+        expect(
+          storedMessages(bob.id).some(
+            (message) => message.role === 'assistant' && message.content === 'Bob 的答复'
+          )
+        ).toBe(true)
+      )
       expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalledTimes(1)
     } finally { finish?.({content:'cleanup'}); page.unmount() }
   })
