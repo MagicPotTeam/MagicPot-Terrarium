@@ -138,14 +138,31 @@ describe('queue strip views', () => {
     // Alone, it blocks nothing.
     expect(queuedSendBlockingNewer([composer(1, { paused: true })])).toBeUndefined()
     // Held items (a reload, a Stop) are passed over: the first item a drain looks at counts.
-    expect(queuedSendBlockingNewer([composer(1, { paused: true, heldByStop: 3 }), composer(2)])).toBeUndefined()
     expect(
-      queuedSendBlockingNewer([composer(1, { paused: true, heldByStop: 3 }), composer(2, { paused: true }), composer(3)])?.id
+      queuedSendBlockingNewer([composer(1, { paused: true, heldByStop: 3 }), composer(2)])
+    ).toBeUndefined()
+    expect(
+      queuedSendBlockingNewer([
+        composer(1, { paused: true, heldByStop: 3 }),
+        composer(2, { paused: true }),
+        composer(3)
+      ])?.id
     ).toBe(2)
     // A restored head whose hold was released by the person's next send blocks the newer one.
     const restored = composer(1, { paused: true, heldByStop: 4 })
     const [released, newer] = releaseStopHolds([restored, composer(2)])
     expect(queuedSendBlockingNewer([released, newer])?.id).toBe(1)
+    // Only what a drain could send counts as waiting: a paused item behind it does not.
+    expect(
+      queuedSendBlockingNewer([composer(1, { paused: true }), composer(2, { paused: true })])
+    ).toBeUndefined()
+    expect(
+      queuedSendBlockingNewer([
+        composer(1, { paused: true }),
+        composer(2, { paused: true }),
+        composer(3)
+      ])?.id
+    ).toBe(1)
     // Being prepared or simply waiting is not blocking.
     expect(queuedSendBlockingNewer([composer(1, { inFlight: true }), composer(2)])).toBeUndefined()
     expect(queuedSendBlockingNewer([composer(1), composer(2)])).toBeUndefined()

@@ -43,6 +43,8 @@ export const ChatPromptCard: React.FC<{
   /** Content shown in both states, under the prompt: the body, fields and footer of a card. */
   body?: React.ReactNode
   options?: readonly ChatPromptCardOption[]
+  /** A field that leads the row of option buttons and takes its free width (a reply field). */
+  leadingControl?: React.ReactNode
   accent?: ChatPromptCardAccent
   resolution?: ChatPromptCardResolution | null
   testId?: string
@@ -59,6 +61,7 @@ export const ChatPromptCard: React.FC<{
   detail,
   body,
   options,
+  leadingControl,
   accent = 'neutral',
   resolution,
   testId = 'chat-prompt-card',
@@ -228,12 +231,23 @@ export const ChatPromptCard: React.FC<{
       ) : (
         <>
           {children}
-          {options?.length ? (
+          {options?.length || leadingControl ? (
             <Box
               data-testid="chat-prompt-card-options"
-              sx={{ display: 'flex', flexWrap: 'wrap', gap: '8px', minWidth: 0 }}
+              sx={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                alignItems: 'flex-start',
+                gap: '8px',
+                minWidth: 0
+              }}
             >
-              {options.map((option) => {
+              {leadingControl ? (
+                <Box sx={{ display: 'flex', flex: '1 1 4rem', minWidth: '4rem' }}>
+                  {leadingControl}
+                </Box>
+              ) : null}
+              {(options ?? []).map((option) => {
                 const color = option.danger ? tokens.danger : tokens.accent
                 return (
                   <Box

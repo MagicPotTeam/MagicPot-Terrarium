@@ -51,7 +51,8 @@ export const ChatQueueStrip: React.FC<{
   visibleIds: ReadonlySet<number>
   expanded: boolean
   onToggleExpanded: () => void
-  editing: { id: number; text: string } | null
+  /** The row being edited, and why its last save was refused (one line in the row). */
+  editing: { id: number; text: string; error?: string } | null
   onEdit: (id: number) => void
   onEditChange: (text: string) => void
   onSave: () => void
@@ -181,6 +182,24 @@ export const ChatQueueStrip: React.FC<{
                     '&:focus': { borderColor: tokens.accent }
                   }}
                 />
+                {editing.error ? (
+                  <Box
+                    component="span"
+                    role="alert"
+                    data-testid="chat-queue-edit-error"
+                    title={editing.error}
+                    sx={{
+                      flexBasis: '100%',
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: tokens.danger
+                    }}
+                  >
+                    {editing.error}
+                  </Box>
+                ) : null}
                 {attachmentLabel ? (
                   <Box component="span" sx={{ fontSize: '0.85em', color: tokens.muted }}>
                     {attachmentLabel}

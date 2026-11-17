@@ -190,4 +190,14 @@ describe('ChatQueueStrip', () => {
     })
     expect(handlers.onSave).not.toHaveBeenCalled()
   })
+
+  it('shows why a save was refused in one line of the row, and keeps the editor open', () => {
+    renderStrip({ items: [item(1)], editing: { id: 1, text: '/status', error: 'not a message' } })
+    const row = screen.getByTestId('chat-queue-item')
+    const error = within(row).getByTestId('chat-queue-edit-error')
+    expect(error).toHaveAttribute('role', 'alert')
+    expect(error).toHaveTextContent('not a message')
+    expect(error).toHaveStyle({ whiteSpace: 'nowrap' })
+    expect(within(row).getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue('/status')
+  })
 })

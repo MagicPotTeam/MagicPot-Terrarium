@@ -147,8 +147,8 @@ function PromptCard({ item, onResolve, onExpired, resolution }: {
           { key: 'submit', label: t('chat.agent_interaction.submit'), primary: true, disabled: disabled || !answer.trim(), onSelect: submit },
           { key: 'cancel', label: t('chat.agent_interaction.cancel'), disabled, onSelect: () => void resolve({ status: 'dismissed' }) }
         ]}
+        leadingControl={field}
       >
-        <Box sx={{ mb: '8px' }}>{field}</Box>
         {errorLine}
       </ChatPromptCard>
     )

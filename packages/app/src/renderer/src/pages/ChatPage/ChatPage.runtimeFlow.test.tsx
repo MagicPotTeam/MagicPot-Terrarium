@@ -1768,19 +1768,15 @@ describe('ChatPage runtime workflow integration', () => {
       const editor = screen.getByRole('textbox', { name: 'chat.queue_edit_field' })
       expect(editor).toHaveValue('old A queued')
       expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new unsent draft')
-      // Saving is the composer's own send: refused while the composer holds another draft; the edit stays open.
-      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
-      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('请先处理当前输入，再编辑排队消息')
-      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new unsent draft')
-      expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toBe(editor)
-      expect(requests).toHaveLength(3)
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '' } })
+      // Saving edits the item where it stands: the composer and its newer draft are not touched.
       fireEvent.change(editor, { target: { value: 'old A queued, edited' } })
       fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
-      // The paused item resumes only through this edit: the composer path sends it now.
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith('请先处理当前输入，再编辑排队消息')
+      // The paused item resumes only through this edit: it is sent now, in place.
       await waitFor(() => expect(requests).toHaveLength(4))
       expect(JSON.stringify(requests[3])).toContain('old A queued, edited')
       expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new unsent draft')
     } finally {
       for (const finish of finishes) finish({ result: { content: 'cleanup' }, response: 'cleanup' })
       page.unmount()
@@ -3357,8 +3353,10 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'chat.agent_html.save_snapshot' }))
       await waitFor(() => expect(hoisted.saveAgentHtmlAppMock).toHaveBeenCalledOnce())
       expect(hoisted.saveAgentHtmlAppMock.mock.calls[0][0]).toEqual({ route, conversationId: readCurrentSessionState()!.id, documentToken: 'document-token', appId: app.id, expectedRevision: 3, expectedStorageRevision: 0, operationId: expect.any(String) })
-      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.saved_refresh' }))
-      fireEvent.click(await screen.findByRole('button', { name: 'chat.agent_html.restore' }))
+      // The saved snapshot appears as a launcher card of its own after the save, without a request.
+      const savedCard = await screen.findByTestId('agent-html-saved-item')
+      expect(screen.getByTestId('agent-html-app-host')).toContainElement(savedCard)
+      fireEvent.click(within(savedCard).getByRole('button', { name: 'chat.agent_html.restore' }))
       await waitFor(() => expect(hoisted.restoreAgentHtmlAppMock).toHaveBeenCalledOnce())
       expect(hoisted.restoreAgentHtmlAppMock.mock.calls[0][0]).toMatchObject({ route, conversationId: readCurrentSessionState()!.id, documentToken: 'document-token', savedId: saved.id, expectedStorageRevision: 1 })
       expect(hoisted.openAgentHtmlAppMock).not.toHaveBeenCalled(); expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled(); expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
@@ -5074,13 +5072,20 @@ describe('ChatPage runtime workflow integration', () => {
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
       fireEvent.click(within(screen.getByTestId('chat-queue-item')).getByRole('button', { name: 'chat.queue_edit' }))
       expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue('unstarted queued text')
-      // Saving would overwrite the newer draft: it is refused and both stay.
-      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
-      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('请先处理当前输入，再编辑排队消息')
       expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('newer unsent draft')
-      expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue('unstarted queued text')
-      expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      // Saving edits the item in its row and resumes it; the newer draft in the composer stays.
+      fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: 'unstarted queued text, edited' } })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('newer unsent draft')
+      expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('unstarted queued text, edited')
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('chat.queue_status_queued')
+      // It waits only for the stopped request to settle, then it is sent.
+      await act(async () => finish({ content: 'stopped request settles' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      expect(JSON.stringify(hoisted.requestChatCompletionMock.mock.calls[1][0].messages)).toContain('unstarted queued text, edited')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('newer unsent draft')
       expect(fetchBlocked).not.toHaveBeenCalled()
     } finally {
       finish({ content: 'synthetic cleanup' })
@@ -9408,7 +9413,7 @@ describe('ChatPage runtime workflow integration', () => {
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
     expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
 
-    // Edit in the row keeps the attachment; Save sends it through the composer's send path.
+    // Edit in the row keeps the attachment; Save resumes the item in place and it is sent.
     fireEvent.click(within(screen.getByTestId('chat-queue-item')).getByRole('button', { name: 'chat.queue_edit' }))
     expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue('queued text')
     expect(within(screen.getByTestId('chat-queue-item')).getByText('chat.queue_attachment_count')).toBeInTheDocument()
@@ -9645,7 +9650,7 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(within(screen.getByTestId('chat-queue-item')).getByRole('button', { name: 'chat.queue_edit' }))
       expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue('queued with context')
       hoisted.preflightFailure.value = false
-      // Save is the composer's send: the item goes with its attachment and its own hidden context.
+      // Save resumes the item in place: it goes with its attachment and its own hidden context, once.
       fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
       const messages = hoisted.requestChatCompletionMock.mock.calls[1][0].messages as ChatMessage[]
@@ -9755,12 +9760,23 @@ describe('ChatPage runtime workflow integration', () => {
     fireEvent.keyDown(editor, { key: 'Escape' })
     expect(screen.queryByRole('textbox', { name: 'chat.queue_edit_field' })).not.toBeInTheDocument()
     expect(screen.getAllByTestId('chat-queue-text').map(item => item.textContent)).toEqual(['second', 'third'])
-    // Ctrl+Enter saves: the composer's send path takes it again; the conversation is busy, so it is queued anew.
+    // Ctrl+Enter saves in place: the item keeps its place in the queue, and an unrelated draft in
+    // the composer neither blocks the save nor is touched by it.
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'my unrelated draft' } })
     fireEvent.click(screen.getAllByRole('button', { name: 'chat.queue_edit' })[0])
-    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: 'second edited' } })
+    // A command is not a queued message: the save is refused with one line in the row; the editor stays.
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: '/status' } })
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { key: 'Enter', ctrlKey: true })
-    await waitFor(() => expect(screen.getAllByTestId('chat-queue-text').map(item => item.textContent)).toEqual(['third', 'second edited']))
-    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent('chat.queue_edit_plain_only')
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveAttribute('role', 'alert')
+    expect(screen.getAllByTestId('chat-queue-text').map(item => item.textContent)).toEqual(['third'])
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: 'second edited' } })
+    expect(screen.queryByTestId('chat-queue-edit-error')).not.toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { key: 'Enter', ctrlKey: true })
+    await waitFor(() => expect(screen.getAllByTestId('chat-queue-text').map(item => item.textContent)).toEqual(['second edited', 'third']))
+    expect(screen.queryByRole('textbox', { name: 'chat.queue_edit_field' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('my unrelated draft')
+    expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith('请先处理当前输入，再编辑排队消息')
     expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
 
     for (const button of screen.getAllByRole('button', { name: 'chat.queue_remove' })) fireEvent.click(button)

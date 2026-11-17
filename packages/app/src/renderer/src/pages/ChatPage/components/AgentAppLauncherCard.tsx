@@ -4,6 +4,19 @@ import { alpha, useTheme } from '@mui/material/styles'
 import WebAssetOutlinedIcon from '@mui/icons-material/WebAssetOutlined'
 import { getAgentColumnTokens } from '../../../components/agentColumnTokens'
 
+/** Read by screen readers, not drawn: the full text behind a short line or a button. */
+const visuallyHiddenSx = {
+  position: 'absolute',
+  width: '1px',
+  height: '1px',
+  padding: 0,
+  margin: '-1px',
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+  border: 0
+} as const
+
 /**
  * An app the agent made, as a row of the transcript: one line with an app icon, the title and a
  * small filled "打开" button; the app itself runs elsewhere (a dialog or its own window). The body
@@ -15,7 +28,10 @@ export const AgentAppLauncherCard: React.FC<{
   openLabel?: string
   onOpen?: () => void
   openDisabled?: boolean
-  /** Shown when the pointer rests on the open button: what opening does. */
+  /**
+   * What opening does: shown when the pointer rests on the open button and given to screen
+   * readers as the button's description.
+   */
   openTitle?: string
   /** A muted word at the right of the title: the state of the app. */
   state?: string
@@ -34,6 +50,7 @@ export const AgentAppLauncherCard: React.FC<{
   const theme = useTheme()
   const tokens = React.useMemo(() => getAgentColumnTokens(theme), [theme])
   const titleId = React.useId()
+  const openDescriptionId = React.useId()
   return (
     <Box
       component="section"
@@ -91,6 +108,7 @@ export const AgentAppLauncherCard: React.FC<{
             type="button"
             disabled={openDisabled}
             title={openTitle}
+            aria-describedby={openTitle ? openDescriptionId : undefined}
             onClick={onOpen}
             sx={{
               flexShrink: 0,
@@ -118,6 +136,11 @@ export const AgentAppLauncherCard: React.FC<{
             {openLabel}
           </Box>
         ) : null}
+        {openLabel && openTitle ? (
+          <Box component="span" id={openDescriptionId} sx={visuallyHiddenSx}>
+            {openTitle}
+          </Box>
+        ) : null}
       </Box>
       {children}
     </Box>
@@ -126,26 +149,41 @@ export const AgentAppLauncherCard: React.FC<{
 
 /**
  * A line of a launcher card's body: a muted note, a warning, or an error (announced). Notes are
- * upstream's launcher note: 12px at 75% opacity.
+ * upstream's launcher note: 12px at 75% opacity. With `detail` the line is one short line; the
+ * full text is its tooltip and what a screen reader reads.
  */
 export const AgentAppLauncherLine: React.FC<{
   tone?: 'note' | 'warning' | 'error'
+  detail?: string
   children: React.ReactNode
-}> = ({ tone = 'note', children }) => {
+}> = ({ tone = 'note', detail, children }) => {
   const theme = useTheme()
   const tokens = React.useMemo(() => getAgentColumnTokens(theme), [theme])
   return (
     <Box
       role={tone === 'error' ? 'alert' : undefined}
+      title={detail}
       sx={{
+        position: 'relative',
         mt: '4px',
-        overflowWrap: 'anywhere',
-        whiteSpace: 'pre-line',
+        minWidth: 0,
+        ...(detail
+          ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+          : { overflowWrap: 'anywhere', whiteSpace: 'pre-line' }),
         color: tone === 'error' ? tokens.danger : tone === 'warning' ? tokens.attention : 'inherit',
         opacity: tone === 'note' ? 0.75 : 1
       }}
     >
-      {children}
+      {detail ? (
+        <>
+          <span aria-hidden="true">{children}</span>
+          <Box component="span" sx={visuallyHiddenSx}>
+            {detail}
+          </Box>
+        </>
+      ) : (
+        children
+      )}
     </Box>
   )
 }
@@ -161,9 +199,9 @@ export type AgentAppLauncherAction = {
 }
 
 /** A wrapping row of text buttons under a launcher card's title: what else can be done with the app. */
-export const AgentAppLauncherActions: React.FC<{ actions: readonly (AgentAppLauncherAction | false | null | undefined)[] }> = ({
-  actions
-}) => {
+export const AgentAppLauncherActions: React.FC<{
+  actions: readonly (AgentAppLauncherAction | false | null | undefined)[]
+}> = ({ actions }) => {
   const theme = useTheme()
   const tokens = React.useMemo(() => getAgentColumnTokens(theme), [theme])
   const shown = actions.filter((action): action is AgentAppLauncherAction => Boolean(action))

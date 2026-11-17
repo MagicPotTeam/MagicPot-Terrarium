@@ -119,15 +119,17 @@ export const releaseStopHolds = <T extends QueuedSendState>(queue: readonly T[])
 
 /**
  * The item the newer ones wait behind, or undefined: the first item a drain would look at (the
- * first not held back) when it is paused and another such item follows it. Such a head is sent
- * only after an explicit edit or removal.
+ * first not held back) when it is paused and an item a drain could send (neither held nor paused)
+ * follows it. Such a head is sent only after an explicit edit or removal.
  */
 export const queuedSendBlockingNewer = <T extends QueuedSendState>(
   queue: readonly T[] | undefined
 ): T | undefined => {
   const waiting = (queue ?? []).filter((item) => !item.heldByStop)
   const head = waiting[0]
-  return head && head.paused && !head.inFlight && waiting.length > 1 ? head : undefined
+  return head && head.paused && !head.inFlight && waiting.slice(1).some((item) => !item.paused)
+    ? head
+    : undefined
 }
 
 /**

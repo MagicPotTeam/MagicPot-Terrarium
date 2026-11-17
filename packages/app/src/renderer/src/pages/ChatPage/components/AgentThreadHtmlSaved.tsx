@@ -1,29 +1,35 @@
 import { htmlSnapshotOperation, acknowledgeHtmlRestore, canStartAnotherHtmlRestore, startAnotherHtmlRestore } from '../htmlSnapshotOperations'
 import React, { useEffect, useRef, useState } from 'react'
-import { Box } from '@mui/material'
 import { useTranslation } from 'react-i18next'
 import type { AgentHtmlSaved } from '@shared/api/agentThreadHtml'
 import { api } from '../../../utils/windowUtils'
-import { AgentAppLauncherActions, AgentAppLauncherLine } from './AgentAppLauncherCard'
+import { AgentAppLauncherActions, AgentAppLauncherCard, AgentAppLauncherLine } from './AgentAppLauncherCard'
 
-/** Metadata only. Restoring creates a disconnected card; it never launches HTML. */
-export default function AgentThreadHtmlSaved({ scope, enabled, onChanged }: { scope: string; enabled: boolean; onChanged(): void }) {
+/**
+ * The thread's saved snapshots, each as an app launcher card (title + 恢复). Metadata only:
+ * restoring creates a disconnected card; it never launches HTML. The list is read when saving is
+ * available and again after each change (`revision`); with no snapshot nothing is drawn.
+ */
+export default function AgentThreadHtmlSaved({ scope, enabled, revision = 0, onChanged }: { scope: string; enabled: boolean; revision?: number; onChanged(): void }) {
   const { t } = useTranslation(), live = useRef(true), lock = useRef(false), generation = useRef(0)
-  const [apps, setApps] = useState<AgentHtmlSaved[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(false), [confirmDelete, setConfirmDelete] = useState<string | undefined>(), [confirmAnother, setConfirmAnother] = useState<string | undefined>(), [, rerender] = useState(0)
+  const [apps, setApps] = useState<AgentHtmlSaved[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState<string | undefined>(), [confirmDelete, setConfirmDelete] = useState<string | undefined>(), [confirmAnother, setConfirmAnother] = useState<string | undefined>(), [, rerender] = useState(0)
   useEffect(() => { live.current = true; return () => { live.current = false; generation.current++ } }, [])
-  useEffect(() => { if (!enabled) { generation.current++; setApps([]); setConfirmDelete(undefined); setConfirmAnother(undefined); setError(false) } }, [enabled])
-  const run = async (operation: () => Promise<void>) => {
+  useEffect(() => { if (!enabled) { generation.current++; setApps([]); setConfirmDelete(undefined); setConfirmAnother(undefined); setError(undefined) } }, [enabled])
+  // `target`: the snapshot whose card shows a failure (a failed list read shows none).
+  const run = async (operation: () => Promise<void>, target?: string) => {
     if (!enabled || lock.current) return
     const owned = ++generation.current
-    lock.current = true; setBusy(true); setError(false)
+    lock.current = true; setBusy(true); setError(undefined)
     try { await operation() }
-    catch { if (live.current && owned === generation.current) setError(true) }
+    catch { if (live.current && owned === generation.current) setError(target) }
     finally { lock.current = false; if (live.current) setBusy(false) }
   }
   const refresh = async () => {
     const owned = generation.current, result = await api().svcLLMProxy.listSavedAgentHtmlApps(JSON.parse(scope))
     if (live.current && owned === generation.current) setApps(result.apps)
   }
+  // Read once when saving becomes available, and again after a save, restore or deletion.
+  useEffect(() => { if (enabled) void run(refresh) }, [enabled, scope, revision]) // eslint-disable-line react-hooks/exhaustive-deps
   const restore = async (item: AgentHtmlSaved) => {
     const operationId = htmlSnapshotOperation(scope, 'restore', [item.id, item.storageRevision])
     const owned = generation.current
@@ -42,33 +48,35 @@ export default function AgentThreadHtmlSaved({ scope, enabled, onChanged }: { sc
     await api().svcLLMProxy.deleteSavedAgentHtmlApp({ ...JSON.parse(scope), savedId: item.id, expectedStorageRevision: item.storageRevision })
     if (live.current && owned === generation.current) { setConfirmDelete(undefined); onChanged(); await refresh() }
   }
-  if (!enabled) return null
-  // Saved copies in an app card's body: a text button to list them, then one entry per copy.
-  return <Box data-testid="agent-html-saved" sx={{ mt: '4px', minWidth: 0 }}>
-    <AgentAppLauncherActions actions={[{ key: 'refresh', label: t('chat.agent_html.saved_refresh'), title: t('chat.agent_html.saved_notice'), disabled: busy, onClick: () => void run(refresh) }]} />
-    {error && <AgentAppLauncherLine tone="error">{t('chat.agent_html.snapshot_failed')}</AgentAppLauncherLine>}
-    {apps.map(item => <Box key={item.id} data-testid="agent-html-saved-item" sx={{ mt: '6px', minWidth: 0 }}>
-      <Box sx={{ overflowWrap: 'anywhere' }}>{item.title} · v{item.documentRevision} / {item.storageRevision}</Box>
-      <AgentAppLauncherLine>{item.id} · {item.htmlBytes} B</AgentAppLauncherLine>
+  if (!enabled || !apps.length) return null
+  return <>{apps.map(item => <AgentAppLauncherCard
+    key={item.id}
+    testId="agent-html-saved-item"
+    title={item.title}
+    state={`v${item.documentRevision}`}
+    openLabel={t('chat.agent_html.restore')}
+    openTitle={t('chat.agent_html.saved_notice')}
+    openDisabled={busy}
+    onOpen={() => void run(() => restore(item), item.id)}
+  >
+    <AgentAppLauncherActions actions={[
+      canStartAnotherHtmlRestore(scope, [item.id, item.storageRevision]) && { key: 'another', label: t('chat.agent_html.restore_another'), disabled: busy, onClick: () => setConfirmAnother(item.id) },
+      { key: 'delete', label: t('chat.agent_html.delete_saved'), danger: true, disabled: busy, onClick: () => setConfirmDelete(item.id) }
+    ]} />
+    {error === item.id && <AgentAppLauncherLine tone="error" detail={t('chat.agent_html.snapshot_failed')}>{t('chat.agent_html.snapshot_failed_short')}</AgentAppLauncherLine>}
+    {confirmAnother === item.id && <>
+      <AgentAppLauncherLine detail={t('chat.agent_html.restore_another_notice')}>{t('chat.agent_html.restore_another_notice_short')}</AgentAppLauncherLine>
       <AgentAppLauncherActions actions={[
-        { key: 'restore', label: t('chat.agent_html.restore'), disabled: busy, onClick: () => void run(() => restore(item)) },
-        canStartAnotherHtmlRestore(scope, [item.id, item.storageRevision]) && { key: 'another', label: t('chat.agent_html.restore_another'), disabled: busy, onClick: () => setConfirmAnother(item.id) },
-        { key: 'delete', label: t('chat.agent_html.delete_saved'), danger: true, disabled: busy, onClick: () => setConfirmDelete(item.id) }
+        { key: 'confirm-another', label: t('chat.agent_html.confirm_restore_another'), disabled: busy, onClick: () => void run(() => another(item), item.id) },
+        { key: 'cancel-another', label: t('chat.agent_html.cancel_delete'), disabled: busy, onClick: () => setConfirmAnother(undefined) }
       ]} />
-      {confirmAnother === item.id && <>
-        <AgentAppLauncherLine>{t('chat.agent_html.restore_another_notice')}</AgentAppLauncherLine>
-        <AgentAppLauncherActions actions={[
-          { key: 'confirm-another', label: t('chat.agent_html.confirm_restore_another'), disabled: busy, onClick: () => void run(() => another(item)) },
-          { key: 'cancel-another', label: t('chat.agent_html.cancel_delete'), disabled: busy, onClick: () => setConfirmAnother(undefined) }
-        ]} />
-      </>}
-      {confirmDelete === item.id && <>
-        <AgentAppLauncherLine>{t('chat.agent_html.delete_notice')}</AgentAppLauncherLine>
-        <AgentAppLauncherActions actions={[
-          { key: 'confirm-delete', label: t('chat.agent_html.confirm_delete'), danger: true, disabled: busy, onClick: () => void run(() => remove(item)) },
-          { key: 'cancel-delete', label: t('chat.agent_html.cancel_delete'), disabled: busy, onClick: () => setConfirmDelete(undefined) }
-        ]} />
-      </>}
-    </Box>)}
-  </Box>
+    </>}
+    {confirmDelete === item.id && <>
+      <AgentAppLauncherLine detail={t('chat.agent_html.delete_notice')}>{t('chat.agent_html.delete_notice_short')}</AgentAppLauncherLine>
+      <AgentAppLauncherActions actions={[
+        { key: 'confirm-delete', label: t('chat.agent_html.confirm_delete'), danger: true, disabled: busy, onClick: () => void run(() => remove(item), item.id) },
+        { key: 'cancel-delete', label: t('chat.agent_html.cancel_delete'), disabled: busy, onClick: () => setConfirmDelete(undefined) }
+      ]} />
+    </>}
+  </AgentAppLauncherCard>)}</>
 }

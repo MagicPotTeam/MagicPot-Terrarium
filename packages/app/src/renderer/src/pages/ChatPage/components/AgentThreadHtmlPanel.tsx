@@ -36,10 +36,11 @@ function HtmlAppRow({ item, scope, canOpen, canSave, onChanged, children }: { it
     finally { locks.current.save = false; if (live.current) setBusy({ ...locks.current }) }
   }
   // Upstream's app launcher: the title and 打开 on one line; closing, saving and what went wrong under it.
+  // A ready app has no state word: its 打开 button says it.
   return <AgentAppLauncherCard
     testId="agent-html-app"
     title={item.title}
-    state={t(`chat.agent_html.status_${item.status}`)}
+    state={item.status === 'ready' ? undefined : t(`chat.agent_html.status_${item.status}`)}
     openLabel={item.status === 'ready' ? t('chat.agent_html.open') : undefined}
     openTitle={t('chat.agent_html.notice')}
     openDisabled={!canOpen || busy.open || busy.close || busy.save}
@@ -47,10 +48,10 @@ function HtmlAppRow({ item, scope, canOpen, canSave, onChanged, children }: { it
   >
     <AgentAppLauncherActions actions={[
       ['ready', 'opening', 'open'].includes(item.status) && { key: 'close', label: t('chat.agent_html.close'), disabled: busy.close, onClick: () => void act(false) },
-      canSave && item.snapshotReady !== false && ['ready', 'closed'].includes(item.status) && { key: 'save', label: t('chat.agent_html.save_snapshot'), disabled: busy.open || busy.close || busy.save, onClick: () => void save() }
+      canSave && item.snapshotReady !== false && ['ready', 'closed'].includes(item.status) && { key: 'save', label: t('chat.agent_html.save_snapshot'), title: t('chat.agent_html.saved_notice'), disabled: busy.open || busy.close || busy.save, onClick: () => void save() }
     ]} />
-    {error && <AgentAppLauncherLine tone="error">{t('chat.agent_html.error')}</AgentAppLauncherLine>}
-    {item.status === 'unknown' && <AgentAppLauncherLine tone="warning">{t('chat.agent_html.unknown')}</AgentAppLauncherLine>}
+    {error && <AgentAppLauncherLine tone="error" detail={t('chat.agent_html.error')}>{t('chat.agent_html.error_short')}</AgentAppLauncherLine>}
+    {item.status === 'unknown' && <AgentAppLauncherLine tone="warning" detail={t('chat.agent_html.unknown')}>{t('chat.agent_html.unknown_short')}</AgentAppLauncherLine>}
     {children}
   </AgentAppLauncherCard>
 }
@@ -94,26 +95,28 @@ function HtmlApps({ scope, host }: { scope: string; host?: HTMLElement | null })
     }
     void poll(); return () => { closed = true; clearTimeout(timer) }
   }, [scope, boundScope, revision])
-  if (!apps.length && !storage?.enabled) return null
-  // The thread's app storage and its saved copies: in the body of the last app card, or in a
-  // card of their own while no app is listed.
+  const savedEnabled = storage?.initialized === true && storage.available && storage.saveEnabled
+  if (!apps.length && !(storage?.enabled && savedEnabled)) return null
+  // The thread's app storage: short lines in the body of the last app card, never a card of its own.
   const storageBody = storage?.enabled ? <>
     {!storage.initialized && storage.canInitialize && <>
-      <AgentAppLauncherLine>{t('chat.agent_html.initialize_notice')}</AgentAppLauncherLine>
+      <AgentAppLauncherLine detail={t('chat.agent_html.initialize_notice')}>{t('chat.agent_html.initialize_notice_short')}</AgentAppLauncherLine>
       <AgentAppLauncherActions actions={[{ key: 'initialize', label: t('chat.agent_html.initialize'), disabled: initializing || !storage.available, onClick: () => void initialize() }]} />
     </>}
-    {(!storage.available || !storage.initialized && !storage.canInitialize) && <AgentAppLauncherLine tone="warning">{t('chat.agent_html.storage_unavailable')}</AgentAppLauncherLine>}
-    {storage.initialized && storage.unconfirmedRuns !== null && storage.unconfirmedRuns > 0 && <AgentAppLauncherLine>{t('chat.agent_html.run_slots', { count: storage.unconfirmedRuns })}</AgentAppLauncherLine>}
-    {storageError && <AgentAppLauncherLine tone="error">{t('chat.agent_html.initialize_failed')}</AgentAppLauncherLine>}
+    {(!storage.available || !storage.initialized && !storage.canInitialize) && <AgentAppLauncherLine tone="warning" detail={t('chat.agent_html.storage_unavailable')}>{t('chat.agent_html.storage_unavailable_short')}</AgentAppLauncherLine>}
+    {storage.initialized && storage.unconfirmedRuns !== null && storage.unconfirmedRuns > 0 && <AgentAppLauncherLine detail={t('chat.agent_html.run_slots', { count: storage.unconfirmedRuns })}>{t('chat.agent_html.run_slots_short', { count: storage.unconfirmedRuns })}</AgentAppLauncherLine>}
+    {storageError && <AgentAppLauncherLine tone="error" detail={t('chat.agent_html.initialize_failed')}>{t('chat.agent_html.initialize_failed_short')}</AgentAppLauncherLine>}
   </> : null
-  const saved = boundScope ? <AgentThreadHtmlSaved scope={boundScope} enabled={storage?.initialized === true && storage.available && storage.saveEnabled} onChanged={() => setRevision(value => value + 1)} /> : null
-  const cards = <Box data-testid="agent-html-apps" sx={{ display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 }}>
-    {apps.map((item, index) => <HtmlAppRow key={item.id} item={item} scope={boundScope ?? scope} canOpen={storage?.enabled === true && storage.initialized && storage.available} canSave={storage?.initialized === true && storage.available && storage.saveEnabled} onChanged={() => setRevision(value => value + 1)}>
-      {index === apps.length - 1 ? <>{storageBody}{saved}</> : null}
+  // Each saved snapshot is a launcher card of its own (title + 恢复); none is drawn when there is none.
+  const cards = <>
+    {apps.map((item, index) => <HtmlAppRow key={item.id} item={item} scope={boundScope ?? scope} canOpen={storage?.enabled === true && storage.initialized && storage.available} canSave={savedEnabled} onChanged={() => setRevision(value => value + 1)}>
+      {index === apps.length - 1 ? storageBody : null}
     </HtmlAppRow>)}
-    {!apps.length && <AgentAppLauncherCard testId="agent-html-storage" title={t('chat.agent_html.title')}>{storageBody}{saved}</AgentAppLauncherCard>}
-  </Box>
-  if (host === undefined) return cards
+    {boundScope ? <AgentThreadHtmlSaved scope={boundScope} enabled={savedEnabled} revision={revision} onChanged={() => setRevision(value => value + 1)} /> : null}
+  </>
+  // In the transcript tail (`host`) the cards are the host's own children, so an empty host stays
+  // empty; drawn in place they share one column.
+  if (host === undefined) return <Box data-testid="agent-html-apps" sx={{ display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 }}>{cards}</Box>
   return host ? createPortal(cards, host) : null
 }
 /**

@@ -10,18 +10,21 @@ const item = { id: '11111111-1111-4111-8111-111111111111', title: '<script>UNTRU
 beforeEach(() => { Object.values(h).forEach(mock => mock.mockReset()); h.list.mockResolvedValue({ apps: [item] }); h.restore.mockResolvedValue({ app: { id: 'restored', status: 'ready' } }); h.remove.mockResolvedValue(undefined) })
 afterEach(cleanup)
 const mount = () => { const changed = vi.fn(), view = render(<AgentThreadHtmlSaved scope={scope} enabled onChanged={changed} />); return { view, changed } }
-const refresh = async () => { await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.saved_refresh' }))) }
+// The list is read on its own once saving is available: wait for it.
+const refresh = async () => { await act(async () => { await Promise.resolve() }) }
 describe('explicit user saved HTML controls', () => {
-  it('lists only on request and restores a ready card without injecting HTML or starting a model', async () => {
-    const t = mount(); expect(h.list).not.toHaveBeenCalled(); await refresh()
+  it('lists once when enabled, as launcher cards, and restores a ready card without injecting HTML or starting a model', async () => {
+    const t = mount(); await refresh()
     expect(h.list).toHaveBeenCalledExactlyOnceWith(JSON.parse(scope)); expect(document.querySelector('script,iframe')).toBeNull()
+    expect(screen.getByTestId('agent-app-launcher-title')).toHaveTextContent('<script>UNTRUSTED_TITLE</script>')
+    expect(screen.getByRole('button', { name: 'chat.agent_html.restore' })).toHaveAccessibleDescription('chat.agent_html.saved_notice')
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore' })))
     expect(h.restore).toHaveBeenCalledWith({ ...JSON.parse(scope), savedId: item.id, expectedStorageRevision: 2, operationId: expect.any(String) }); expect(t.changed).toHaveBeenCalledOnce()
   })
   it('reuses restoration operationID across uncertain retries and stale double clicks', async () => {
     mount(); await refresh(); h.restore.mockRejectedValueOnce(new Error('uncertain transport'))
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore' })))
-    expect(screen.getByText('chat.agent_html.snapshot_failed')).toBeTruthy()
+    expect(screen.getByText('chat.agent_html.snapshot_failed_short')).toBeTruthy()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.restore' })))
     expect(h.restore.mock.calls[1][0].operationId).toBe(h.restore.mock.calls[0][0].operationId)
   })
@@ -41,16 +44,24 @@ describe('explicit user saved HTML controls', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.confirm_restore_another' })))
     expect(h.restore).toHaveBeenCalledTimes(3); expect(h.restore.mock.calls[2][0].operationId).not.toBe(prior)
   })
+  it('draws nothing while no snapshot is saved and lists again after a change', async () => {
+    h.list.mockResolvedValue({ apps: [] })
+    const changed = vi.fn(), view = render(<AgentThreadHtmlSaved scope={scope} enabled revision={0} onChanged={changed} />); await refresh()
+    expect(view.container).toBeEmptyDOMElement()
+    h.list.mockResolvedValue({ apps: [item] })
+    view.rerender(<AgentThreadHtmlSaved scope={scope} enabled revision={1} onChanged={changed} />); await refresh()
+    expect(h.list).toHaveBeenCalledTimes(2); expect(screen.getByTestId('agent-html-saved-item')).toBeTruthy()
+  })
   it('requires a separate deletion confirmation and never restarts a failed/unknown process', async () => {
     mount(); await refresh(); fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.delete_saved' }))
     expect(h.remove).not.toHaveBeenCalled(); fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.cancel_delete' })); expect(h.remove).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.delete_saved' })); h.remove.mockRejectedValueOnce(new Error('termination unconfirmed'))
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.confirm_delete' })))
-    expect(h.remove).toHaveBeenCalledWith({ ...JSON.parse(scope), savedId: item.id, expectedStorageRevision: 2 }); expect(screen.getByText('chat.agent_html.snapshot_failed')).toBeTruthy(); expect(h.restore).not.toHaveBeenCalled()
+    expect(h.remove).toHaveBeenCalledWith({ ...JSON.parse(scope), savedId: item.id, expectedStorageRevision: 2 }); expect(screen.getByText('chat.agent_html.snapshot_failed_short')).toBeTruthy(); expect(h.restore).not.toHaveBeenCalled()
   })
   it('discards old list/restore responses when disabled or unmounted', async () => {
-    const t = mount(); let finish!: (value: unknown) => void; h.list.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
-    fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.saved_refresh' })); t.view.rerender(<AgentThreadHtmlSaved scope={scope} enabled={false} onChanged={t.changed} />)
+    let finish!: (value: unknown) => void; h.list.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const t = mount(); t.view.rerender(<AgentThreadHtmlSaved scope={scope} enabled={false} onChanged={t.changed} />)
     await act(async () => finish({ apps: [item] })); expect(screen.queryByText(/UNTRUSTED_TITLE/)).toBeNull()
     t.view.rerender(<AgentThreadHtmlSaved scope={scope} enabled onChanged={t.changed} />); await refresh()
     let finishRestore!: (value: unknown) => void; h.restore.mockImplementationOnce(() => new Promise(resolve => { finishRestore = resolve }))
