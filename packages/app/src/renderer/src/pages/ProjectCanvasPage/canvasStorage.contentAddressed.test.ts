@@ -2119,42 +2119,40 @@ describe('writers that load a board and save it back', () => {
 })
 
 describe('reopening a board the mirror holds', () => {
-  // The window may read local-media under main's allowed roots; the autosave root is one of them.
+  // A reopen never shows an image from its file in the autosave mirror: that file is in a
+  // cache the mirror prunes, so a source pointing into it could outlive the bytes it names.
   const authorizedPaths: string[] = []
-  let authorizeMirror = true
   beforeEach(() => {
     authorizedPaths.length = 0
-    authorizeMirror = true
     vi.stubGlobal('electronFile', {
       resolveAuthorizedLocalMediaPath: async (filePath: string) => {
         authorizedPaths.push(filePath)
-        return authorizeMirror ? filePath : ''
+        return filePath
       }
     })
   })
 
-  it('restores each image from its mirror file and keeps no copy of its bytes', async () => {
+  it('restores every image from its IndexedDB bytes, never from its mirror file', async () => {
     const mirror = createFakeMirror()
     const a = imageItem('a', registerSource('blob:reopen-a', [1, 2, 3]))
     const b = imageItem('b', registerSource('blob:reopen-b', [4, 5]))
     const twin = imageItem('twin', 'blob:reopen-a', { x: 40 })
     await saveCanvasItems([a, b, twin], 'reopen-mirror')
     const recordBefore = fake.record('reopen-mirror')!.items.map((item) => [item.id, item.assetKey])
+    expect(mirror.assetFiles().sort()).toEqual(
+      [`${contentKey([1, 2, 3])}.png`, `${contentKey([4, 5])}.png`].sort()
+    )
 
-    fake.resetLog()
-    const createObjectUrl = vi.mocked(URL.createObjectURL)
-    createObjectUrl.mockClear()
     const reopened = await loadCanvasItems('reopen-mirror')
 
-    // No image byte is read from IndexedDB and no object URL is made.
-    expect(fake.log.gets.filter((get) => get.key.includes('::canvas::'))).toEqual([])
-    expect(createObjectUrl).not.toHaveBeenCalled()
+    // The window holds the bytes of every image; no source points into the mirror and
+    // the window was not asked to read it.
     const sources = reopened.items.map((item) => (item as { src: string }).src)
-    expect(sources).toEqual([
-      `local-media://${mirror.projectDir()}/assets/${contentKey([1, 2, 3])}.png`,
-      `local-media://${mirror.projectDir()}/assets/${contentKey([4, 5])}.png`,
-      `local-media://${mirror.projectDir()}/assets/${contentKey([1, 2, 3])}.png`
-    ])
+    expect(sources.every((src) => src.startsWith('blob:'))).toBe(true)
+    expect(sources[2]).toBe(sources[0])
+    expect(await readBlobBytes(restoredBlobs.get(sources[0])!)).toEqual([1, 2, 3])
+    expect(await readBlobBytes(restoredBlobs.get(sources[1])!)).toEqual([4, 5])
+    expect(authorizedPaths).toEqual([])
 
     // The next saves move nothing and keep every key.
     for (let round = 0; round < 2; round += 1) {
@@ -2180,34 +2178,6 @@ describe('reopening a board the mirror holds', () => {
     })
   })
 
-  it('reads an image from IndexedDB when the mirror lacks its file', async () => {
-    const mirror = createFakeMirror()
-    const a = imageItem('a', registerSource('blob:reopen-gone-a', [7, 7]))
-    const b = imageItem('b', registerSource('blob:reopen-gone-b', [8, 8, 8]))
-    await saveCanvasItems([a, b], 'reopen-gone')
-    mirror.files.delete(`${mirror.projectDir()}/assets/${contentKey([8, 8, 8])}.png`)
-
-    const reopened = await loadCanvasItems('reopen-gone')
-    const [restoredA, restoredB] = reopened.items as Array<CanvasItem & { src: string }>
-    expect(restoredA.src).toBe(`local-media://${mirror.projectDir()}/assets/${contentKey([7, 7])}.png`)
-    expect(restoredB.src.startsWith('blob:')).toBe(true)
-    expect(await readBlobBytes(restoredBlobs.get(restoredB.src)!)).toEqual([8, 8, 8])
-  })
-
-  it('reads every image from IndexedDB when the window may not read the mirror folder', async () => {
-    const mirror = createFakeMirror()
-    const a = imageItem('a', registerSource('blob:reopen-denied-a', [2, 4]))
-    await saveCanvasItems([a], 'reopen-denied')
-    // A mirror on a network share, or a URL the platform cannot map back to the file.
-    authorizeMirror = false
-
-    const reopened = await loadCanvasItems('reopen-denied')
-    const restored = reopened.items[0] as CanvasItem & { src: string }
-    expect(authorizedPaths).toEqual([`${mirror.projectDir()}/assets/${contentKey([2, 4])}.png`])
-    expect(restored.src.startsWith('blob:')).toBe(true)
-    expect(await readBlobBytes(restoredBlobs.get(restored.src)!)).toEqual([2, 4])
-  })
-
   it('reads the images of a record the previous release wrote from IndexedDB, mirror or not', async () => {
     const mirror = createFakeMirror()
     const item = imageItem('pic', registerSource('blob:reopen-prev', [3, 3, 3]))
@@ -2226,41 +2196,50 @@ describe('reopening a board the mirror holds', () => {
     expect(restored.src.startsWith('blob:')).toBe(true)
     expect(await readBlobBytes(restoredBlobs.get(restored.src)!)).toEqual([9, 9])
   })
-  it('keeps a format the managed store cannot hold off the mirror, so a hand-off keeps its bytes after the prune', async () => {
+
+  it('hands a reopened image to the Agent as bytes, so the conversation keeps it after the board prunes it', async () => {
     const mirror = createFakeMirror()
     mirror.state.applyPrune = true
     const scanBytes = [0x42, 0x4d, 1, 2, 3]
+    const photoBytes = [9, 8, 7]
     const scan = imageItem('scan', registerSource('blob:reopen-bmp', scanBytes), { fileName: 'scan.bmp' })
-    const photo = imageItem('photo', registerSource('blob:reopen-png', [9, 8, 7]))
+    const photo = imageItem('photo', registerSource('blob:reopen-png', photoBytes))
     await saveCanvasItems([scan, photo], 'reopen-bmp')
     const scanFile = `${mirror.projectDir()}/assets/${contentKey(scanBytes)}.bmp`
-    const photoFile = `${mirror.projectDir()}/assets/${contentKey([9, 8, 7])}.png`
+    const photoFile = `${mirror.projectDir()}/assets/${contentKey(photoBytes)}.png`
     expect(mirror.files.has(scanFile)).toBe(true)
+    expect(mirror.files.has(photoFile)).toBe(true)
 
     const reopened = await loadCanvasItems('reopen-bmp')
     const [restoredScan, restoredPhoto] = reopened.items as Array<CanvasItem & { src: string }>
-    // The BMP is shown from its IndexedDB bytes; the PNG from its mirror file.
     expect(restoredScan.src.startsWith('blob:')).toBe(true)
-    expect(await readBlobBytes(restoredBlobs.get(restoredScan.src)!)).toEqual(scanBytes)
-    expect(restoredPhoto.src).toBe(`local-media://${photoFile}`)
+    expect(restoredPhoto.src.startsWith('blob:')).toBe(true)
 
-    // The Agent hand-off: the BMP is inlined, the PNG is imported into managed media.
-    const importFile = vi.fn(async (req: { sourcePath: string }) => ({
+    // The Agent hand-off reads the bytes: a format the managed store does not hold (BMP)
+    // is inlined, a PNG is imported into managed media. Neither keeps a path.
+    const importFile = vi.fn()
+    const importDataUrl = vi.fn(async (req: { dataUrl: string }) => ({
       reference: { version: 1, kind: 'managed', relativePath: 'chat/p.png', mimeType: 'image/png', sizeBytes: 3 },
-      localMediaUrl: `local-media:///home/u/Media/imported-${req.sourcePath.split('/').pop()}`
+      localMediaUrl: `local-media:///home/u/Media/imported-${req.dataUrl.length}.png`
     }))
-    const service = { importFile, importDataUrl: vi.fn() } as unknown as IncomingChatImageImportOptions['service']
+    const service = { importFile, importDataUrl } as unknown as IncomingChatImageImportOptions['service']
+    const fetchImpl = (async (url: string) => ({
+      ok: true,
+      blob: async () => restoredBlobs.get(url)!
+    })) as unknown as typeof fetch
     const handedScan = await importIncomingChatImageAttachment(
       { type: 'image', url: restoredScan.src, fileName: 'scan.bmp' } as ChatAttachment,
-      { service, fetchImpl: (async (url: string) => ({ ok: true, blob: async () => restoredBlobs.get(url)! })) as unknown as typeof fetch }
+      { service, fetchImpl }
     )
     const handedPhoto = await importIncomingChatImageAttachment(
       { type: 'image', url: restoredPhoto.src, fileName: 'photo.png' } as ChatAttachment,
-      { service, resolveAuthorizedLocalPath: async (filePath: string) => filePath }
+      { service, fetchImpl }
     )
     expect(handedScan.url.startsWith('data:')).toBe(true)
-    expect(importFile).toHaveBeenCalledTimes(1)
-    expect(importFile.mock.calls[0][0].sourcePath).toBe(photoFile)
+    expect(importFile).not.toHaveBeenCalled()
+    expect(importDataUrl).toHaveBeenCalledTimes(1)
+    const importedDataUrl = importDataUrl.mock.calls[0][0].dataUrl
+    expect([...Buffer.from(importedDataUrl.slice(importedDataUrl.indexOf(',') + 1), 'base64')]).toEqual(photoBytes)
     expect(handedPhoto.url.startsWith('local-media:///home/u/Media/')).toBe(true)
 
     // Both images are deleted (outside undo) and the board is saved until it prunes.
@@ -2268,10 +2247,48 @@ describe('reopening a board the mirror holds', () => {
     expect(mirror.files.has(scanFile)).toBe(false)
     expect(mirror.files.has(photoFile)).toBe(false)
     expect(fake.committed.get('canvas-blobs')!.has(assetBlobKey('reopen-bmp', scanBytes))).toBe(false)
-    // What the conversation keeps still holds the bytes.
+    // What the conversation keeps still holds the bytes and names nothing in the mirror.
     const inlined = Buffer.from(handedScan.url.slice(handedScan.url.indexOf(',') + 1), 'base64')
     expect([...inlined]).toEqual(scanBytes)
+    expect(handedScan.url.includes('/AutoSave/')).toBe(false)
     expect(handedPhoto.url.includes('/AutoSave/')).toBe(false)
+  })
+
+  it('still saves an open board after another writer removed one of its images and pruned it', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.applyPrune = true
+    const a = imageItem('a', registerSource('blob:reopen-other-a', [1, 2, 3]))
+    const b = imageItem('b', registerSource('blob:reopen-other-b', [4, 5]))
+    await saveCanvasItems([a, b], 'reopen-other')
+    const fileA = `${mirror.projectDir()}/assets/${contentKey([1, 2, 3])}.png`
+
+    // The board is open; another writer of the same record drops "a" and saves until
+    // the stored blob and the mirror file of "a" are pruned.
+    const open = await loadCanvasItems('reopen-other')
+    const other = await loadCanvasItems('reopen-other')
+    for (let round = 0; round < 3; round += 1) {
+      await saveCanvasItems([{ ...other.items[1], x: round } as CanvasItem], 'reopen-other')
+    }
+    expect(mirror.files.has(fileA)).toBe(false)
+    expect(fake.committed.get('canvas-blobs')!.has(assetBlobKey('reopen-other', [1, 2, 3]))).toBe(false)
+
+    // The open board still holds the bytes of "a": its save stores them again and its
+    // other changes are kept.
+    await saveCanvasItems(
+      open.items.map((item) => ({ ...item, y: 5 }) as CanvasItem),
+      'reopen-other'
+    )
+    expect(
+      fake.record('reopen-other')!.items.map((item) => [item.id, item.assetKey, (item as { y?: number }).y])
+    ).toEqual([
+      ['a', contentKey([1, 2, 3]), 5],
+      ['b', contentKey([4, 5]), 5]
+    ])
+    expect(fake.committed.get('canvas-blobs')!.has(assetBlobKey('reopen-other', [1, 2, 3]))).toBe(true)
+    expect(mirror.files.has(fileA)).toBe(true)
+    const again = await loadCanvasItems('reopen-other')
+    const restoredA = again.items[0] as CanvasItem & { src: string }
+    expect(await readBlobBytes(restoredBlobs.get(restoredA.src)!)).toEqual([1, 2, 3])
   })
 
   it('reads an image keyed by its file identity from IndexedDB, not from its mirror copy', async () => {

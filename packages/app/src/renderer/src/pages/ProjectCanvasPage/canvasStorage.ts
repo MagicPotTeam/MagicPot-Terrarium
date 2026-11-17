@@ -16,10 +16,7 @@ import { buildProjectStorageDirName, getProjectById } from '../MainPage/projectS
 import { normalizeGeneratedRootDirName, unprefixGeneratedRootDirName } from '@shared/projectStorage'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
-import {
-  getElectronCanvasFilePath,
-  resolveAuthorizedCanvasLocalMediaSourceUrl
-} from './canvasLocalFileSource'
+import { getElectronCanvasFilePath } from './canvasLocalFileSource'
 import { assertCanvasImportFileSize, parseCanvasImportText } from './canvasImportPreflight'
 import { sha256Hex } from './canvasSha256'
 import { dropMalformedCropSource } from './canvasCropProvenance'
@@ -1375,43 +1372,9 @@ function queueCanvasBlobSnapshotReads(
   }
 }
 
-/** Extensions of the image formats the managed media store holds (png, jpeg, webp, gif). */
-const CANVAS_MIRROR_RESTORE_EXTENSIONS: ReadonlySet<string> = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
-
-/**
- * The mirror file a reopen may show a stored image from instead of reading its
- * bytes from IndexedDB, or null when the image must be read from IndexedDB.
- *
- * The file sits in the app's own autosave cache, which the mirror prunes as
- * soon as the board no longer references it, so it may stand in for the bytes
- * only where nothing can keep its path as a lasting reference and where it
- * provably holds the stored bytes:
- * - a content key (b-): the file was written from exactly those bytes. A
- *   file-identity key (f-) names a path, size and time, and the mirror's copy
- *   by path can hold what the file was changed to since;
- * - bytes that came from the renderer (a blob source, no path): a source path
- *   that was re-keyed by its content can still be copied by path later;
- * - a format the managed store holds: an Agent hand-off then imports the
- *   bytes into managed media instead of keeping this path in a conversation
- *   (it keeps the path of any other format, as for a file of the user's).
- */
-function getCanvasMirrorRestoreFileName(
-  item: SerializableBlobPersistableCanvasItem,
-  assetKey: string
-): string | null {
-  if (item.type !== 'image' || !assetKey.startsWith('b-')) return null
-  const extension = getCanvasMirrorAssetExtension(resolveCanvasAssetFileName(item))
-  if (!CANVAS_MIRROR_RESTORE_EXTENSIONS.has(extension)) return null
-  const src = typeof item.src === 'string' ? item.src : ''
-  if (src && !src.startsWith('blob:')) return null
-  return `${assetKey}${extension}`
-}
-
 async function readIndexedDbCanvasSnapshot(
   db: IDBDatabase,
-  storeKey: string,
-  /** Asset file names in this board's mirror folder; null when it was not listed. */
-  mirrorAssetFileNames: ReadonlySet<string> | null = null
+  storeKey: string
 ): Promise<{
   persisted: CanvasPersistedData | SerializableCanvasItem[] | undefined
   binaries: Map<string, CanvasStoredBinary>
@@ -1419,18 +1382,14 @@ async function readIndexedDbCanvasSnapshot(
   resolvedByAssetKey: Set<string>
   /** Logical keys whose binary was read from the per-item blob of that very item. */
   resolvedByLegacyBlob: Set<string>
-  /** Image items whose bytes are not read: the mirror file named by their content key, by item id. */
-  mirrorFileNameByLogicalKey: Map<string, string>
 }> {
   return await new Promise((resolve, reject) => {
     const tx = db.transaction([STORE_NAME, BLOB_STORE_NAME], 'readonly')
     const binaries = new Map<string, CanvasStoredBinary>()
     const resolvedByAssetKey = new Set<string>()
     const resolvedByLegacyBlob = new Set<string>()
-    const mirrorFileNameByLogicalKey = new Map<string, string>()
     let persisted: CanvasPersistedData | SerializableCanvasItem[] | undefined
-    tx.oncomplete = () =>
-      resolve({ persisted, binaries, resolvedByAssetKey, resolvedByLegacyBlob, mirrorFileNameByLogicalKey })
+    tx.oncomplete = () => resolve({ persisted, binaries, resolvedByAssetKey, resolvedByLegacyBlob })
     tx.onabort = () => rejectCanvasStorageError(reject, 'canvas snapshot read transaction', tx.error)
     tx.onerror = () => rejectCanvasStorageError(reject, 'canvas snapshot read transaction', tx.error)
     try {
@@ -1445,21 +1404,8 @@ async function readIndexedDbCanvasSnapshot(
               isBlobPersistableCanvasItem(item) &&
               (!item.src || hasLocallyPersistableCanvasSrc(item) || isRelativeCanvasAssetReference(item.src))
           )
-          // Only a record of this version names the bytes of each item by its content key
-          // (the previous release may have changed an image under its old key).
-          const currentFormat = isCurrentFormatCanvasRecord(persisted)
           const reads = blobBackedItems.flatMap((item): CanvasBlobSnapshotRead[] => {
             const persistedKeys = readPersistedCanvasAssetKeys(item)
-            const mirrorFileName =
-              currentFormat && mirrorAssetFileNames && persistedKeys.assetKey
-                ? getCanvasMirrorRestoreFileName(item, persistedKeys.assetKey)
-                : null
-            if (mirrorFileName && mirrorAssetFileNames?.has(mirrorFileName)) {
-              // The mirror holds these exact bytes in a file that is never rewritten: the
-              // image is restored from that file and its bytes are not read here at all.
-              mirrorFileNameByLogicalKey.set(item.id, mirrorFileName)
-              return []
-            }
             return [
               { logicalKey: item.id, assetKey: persistedKeys.assetKey },
               ...(item.type === 'model3d' && item.textures
@@ -3864,54 +3810,6 @@ async function saveCanvasItemsExclusive(
 }
 
 /**
- * The asset files of this board's autosave mirror, for a restore. Null when
- * there is no mirror bridge, the window may not read the folder through
- * local-media, or it cannot be listed; the restore then reads every image from
- * IndexedDB as before.
- */
-async function listCanvasMirrorAssetsForRestore(
-  storeKey: string
-): Promise<{ assetDir: string; fileNames: Set<string> } | null> {
-  try {
-    const svcFs = window.api?.svcFs
-    if (
-      !svcFs ||
-      typeof svcFs.listCanvasMirrorAssets !== 'function' ||
-      typeof svcFs.copyCanvasMirrorAsset !== 'function' ||
-      !window.path ||
-      typeof window.path.join !== 'function'
-    ) {
-      return null
-    }
-    const autoSaveRoot = await resolveAutoSaveRootPath()
-    if (!autoSaveRoot) return null
-    const projectDirName = resolveProjectStorageDirName(storeKey)
-    const assetDir = window.path.join(autoSaveRoot, projectDirName, PROJECT_ASSET_DIRNAME)
-    const { assetFileNames } = await svcFs.listCanvasMirrorAssets({ projectDirName })
-    const fileNames = new Set(
-      (assetFileNames ?? []).filter(
-        (name): name is string =>
-          typeof name === 'string' && CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(name)
-      )
-    )
-    // The canvas, a crop or a hand-off reads a restored image through the same check as
-    // this one: a local-media URL the window may read. A mirror main does not serve (one
-    // on a network share, say) or a URL this platform cannot map back to the file leaves
-    // every image restored from IndexedDB as before.
-    const sample = fileNames.values().next().value
-    if (
-      sample !== undefined &&
-      !(await resolveAuthorizedCanvasLocalMediaSourceUrl(toLocalMediaUrl(window.path.join(assetDir, sample))))
-    ) {
-      return null
-    }
-    return { assetDir, fileNames }
-  } catch {
-    return null
-  }
-}
-
-/**
  * The items of a stored board as they are persisted, for scans that read item
  * metadata only (managed-media references). No binary is read and no object
  * URL is created. A board with no IndexedDB record (or an empty one) is loaded
@@ -3978,10 +3876,9 @@ async function loadCanvasItemsExclusive(storeKey: string): Promise<{
   // instead of trusting the summary of an earlier commit.
   canvasCommittedRecordSummaries.delete(storeKey)
   try {
-    const mirrorAssets = await listCanvasMirrorAssetsForRestore(storeKey)
     db = await openDB()
-    const { persisted, binaries, resolvedByAssetKey, resolvedByLegacyBlob, mirrorFileNameByLogicalKey } =
-      await readIndexedDbCanvasSnapshot(db, storeKey, mirrorAssets?.fileNames ?? null)
+    const { persisted, binaries, resolvedByAssetKey, resolvedByLegacyBlob } =
+      await readIndexedDbCanvasSnapshot(db, storeKey)
     db.close()
     db = undefined
 
@@ -4015,18 +3912,14 @@ async function loadCanvasItemsExclusive(storeKey: string): Promise<{
       }
     }
     createdUrls = createCanvasBlobUrlMap(new Map([...binaries].filter(([key]) => eligibleKeys.has(key))))
-    // Images the mirror holds are restored from its file, so no copy of their bytes is
-    // kept in this window: the canvas layer, a crop, a save or an Agent hand-off reads the
-    // file when it needs the bytes, and IndexedDB still holds them under the same key.
-    const restoredSourceUrls = new Map(createdUrls)
-    for (const [logicalKey, fileName] of mirrorFileNameByLogicalKey) {
-      if (!mirrorAssets || !eligibleKeys.has(logicalKey)) continue
-      restoredSourceUrls.set(logicalKey, toLocalMediaUrl(window.path.join(mirrorAssets.assetDir, fileName)))
-      resolvedByAssetKey.add(logicalKey)
-    }
+    // Every stored image is restored from its IndexedDB bytes, as a blob: URL this window
+    // holds. Its file in the autosave mirror is not used as its source: that file lives in
+    // a cache the mirror (and the autosave project limit) prunes, so a source pointing into
+    // it could outlive the bytes it names (in a conversation it was handed to, or on a
+    // board another writer saved meanwhile).
     const restoredBlobUrls = createdUrls
-    const restoredItems = restorePersistedCanvasItems(resolvedIndexedDbItems, restoredSourceUrls).map(
-      (item) => tagRestoredCanvasItemAssetKeys(item, restoredSourceUrls, resolvedByAssetKey)
+    const restoredItems = restorePersistedCanvasItems(resolvedIndexedDbItems, restoredBlobUrls).map(
+      (item) => tagRestoredCanvasItemAssetKeys(item, restoredBlobUrls, resolvedByAssetKey)
     )
 
     if (restoredItems.length === 0 && resolvedIndexedDbItems.length > 0) {
