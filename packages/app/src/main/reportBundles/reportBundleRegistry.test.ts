@@ -118,6 +118,36 @@ async function verifyOne(binding: string, primaryUrl: string, conv = conversatio
   return results[0]
 }
 
+/**
+ * Windows lets a process create a file or directory symlink only with Developer Mode or admin
+ * rights (EPERM otherwise). Probe once in the temp directory; the tests that need a symlink skip
+ * with this reason instead of failing, and the hard-link cases keep running.
+ */
+const symlinkBlockedReason = ((): string | undefined => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mp-report-bundles-symlink-probe-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'file'), '')
+    fs.mkdirSync(path.join(dir, 'dir'))
+    fs.symlinkSync(path.join(dir, 'file'), path.join(dir, 'file-link'))
+    fs.symlinkSync(path.join(dir, 'dir'), path.join(dir, 'dir-link'), 'dir')
+    return undefined
+  } catch (error) {
+    if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM')
+      return 'Creating a symlink needs Windows Developer Mode or admin rights (EPERM); this case is environment-blocked, not passed.'
+    throw error
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})()
+
+/** A test that creates a symlink: skipped, with the reason, where the OS refuses to create one. */
+function itWithSymlink(name: string, fn: () => Promise<void>): void {
+  it(name, async (context) => {
+    if (symlinkBlockedReason) context.skip(true, symlinkBlockedReason)
+    await fn()
+  })
+}
+
 beforeEach(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mp-report-bundles-')))
   root = path.join(tmp, 'project')
@@ -194,7 +224,7 @@ describe('report bundle registration', () => {
     expect(fs.existsSync(path.join(other, '.report_bundles'))).toBe(false)
   })
 
-  it('refuses a linked bundle directory, at begin and when swapped before register', async () => {
+  itWithSymlink('refuses a linked bundle directory, at begin and when swapped before register', async () => {
     const target = path.join(tmp, 'target')
     fs.mkdirSync(target)
     fs.mkdirSync(path.join(root, '.report_bundles'), { recursive: true })
@@ -246,7 +276,7 @@ describe('report bundle registration', () => {
     })
   })
 
-  it('refuses traversal, absolute paths, linked and hard-linked children and two primaries', async () => {
+  it('refuses traversal, absolute paths, hard-linked children and two primaries', async () => {
     fs.writeFileSync(path.join(tmp, 'outside.md'), 'outside')
     await expectRegisterRefused('dotdot', {
       entries: (e) => [{ ...e[0], relativePath: '../outside.md' }, ...e.slice(1)]
@@ -262,6 +292,15 @@ describe('report bundle registration', () => {
     })
     await expectRegisterRefused('no-primary', { entries: (e) => e.slice(1) })
 
+    const hardName = 'hardlinked-child'
+    const hardDir = bundleDirFor(hardName)
+    const hardTicket = await beginReportBundle({ bundleDir: hardDir, conversation }, [root])
+    writeBundleFiles(hardDir, hardName)
+    fs.linkSync(path.join(hardDir, 'images', 'fig-01.png'), path.join(tmp, 'alias.png'))
+    await expect(registerReportBundle(hardTicket)).rejects.toBeInstanceOf(ReportBundleRefusedError)
+  })
+
+  itWithSymlink('refuses a symlinked child', async () => {
     const linkName = 'symlinked-child'
     const linkDir = bundleDirFor(linkName)
     const linkTicket = await beginReportBundle({ bundleDir: linkDir, conversation }, [root])
@@ -272,13 +311,6 @@ describe('report bundle registration', () => {
       path.join(linkDir, 'images', 'fig-02.png')
     )
     await expect(registerReportBundle(linkTicket)).rejects.toBeInstanceOf(ReportBundleRefusedError)
-
-    const hardName = 'hardlinked-child'
-    const hardDir = bundleDirFor(hardName)
-    const hardTicket = await beginReportBundle({ bundleDir: hardDir, conversation }, [root])
-    writeBundleFiles(hardDir, hardName)
-    fs.linkSync(path.join(hardDir, 'images', 'fig-01.png'), path.join(tmp, 'alias.png'))
-    await expect(registerReportBundle(hardTicket)).rejects.toBeInstanceOf(ReportBundleRefusedError)
   })
 
   it('omits and counts entries known only by a source URL', async () => {
@@ -772,7 +804,7 @@ describe('isBoundTo', () => {
     expect(isBoundTo(resp.binding, { conversationId: 7 }, primaryUrl)).toBe(false)
   })
 
-  it('refuses a primary URL that names a link to the registered primary', async () => {
+  itWithSymlink('refuses a primary URL that names a link to the registered primary', async () => {
     const { resp, bundleDir } = await seal()
     const alias = path.join(tmp, 'alias.md')
     fs.symlinkSync(path.join(bundleDir, 'report.md'), alias)
@@ -802,7 +834,7 @@ describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => 
     vi.restoreAllMocks()
   })
 
-  it('isBoundTo accepts the registered primary when the native realpath spells it differently', async () => {
+  itWithSymlink('isBoundTo accepts the registered primary when the native realpath spells it differently', async () => {
     const { resp, primaryUrl, bundleDir } = await seal()
     const alias = path.join(tmp, 'alias')
     fs.symlinkSync(root, alias, 'dir')
@@ -816,7 +848,7 @@ describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => 
     ).toBe(false)
   })
 
-  it('verify and isBoundTo accept the producer’s spelling of a primary the realpath does not canonicalise', async () => {
+  itWithSymlink('verify and isBoundTo accept the producer’s spelling of a primary the realpath does not canonicalise', async () => {
     const { alias, configuredDir, resp } = await sealUnderAlias()
     const configuredUrl = toLocalMediaUrl(path.join(configuredDir, 'report.md'))!
     const fsp = (await import('node:fs/promises')).default
@@ -828,7 +860,7 @@ describe('one canonical path (mapped, subst and 8.3 drives, macOS case)', () => 
     expect(isBoundTo(resp.binding, conversation, configuredUrl)).toBe(true)
   })
 
-  it('writes the snapshot’s source URLs under the root as configured', async () => {
+  itWithSymlink('writes the snapshot’s source URLs under the root as configured', async () => {
     const { configuredDir, resp } = await sealUnderAlias()
     const snapshotPath = path.join(
       userData,

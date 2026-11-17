@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createTerminalPolicyRequest,
@@ -321,26 +322,46 @@ describe('TerminalRunToolHost', () => {
 
   it('kills the complete process tree at the bounded timeout', async () => {
     const { root, authorization } = setup('require-approval', { maxTimeoutMs: 100 })
+    const ready = path.join(root, 'grandchild-ready.txt')
     const marker = path.join(root, 'grandchild-late.txt')
-    const markerArgument = Buffer.from(marker).toString('base64')
-    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(Buffer.from('${markerArgument}', 'base64').toString(), 'late'), 700)`
+    const encode = (value: string) => Buffer.from(value).toString('base64')
+    const grandchild = [
+      "const fs = require('node:fs')",
+      `const file = (value) => Buffer.from(value, 'base64').toString()`,
+      `fs.writeFileSync(file('${encode(ready)}'), 'ready')`,
+      `setTimeout(() => fs.writeFileSync(file('${encode(marker)}'), 'late'), 700)`
+    ].join(';')
     const parent = [
       "const { spawn } = require('node:child_process')",
       `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
       'setTimeout(() => {}, 5000)'
     ].join(';')
-    const result = await new TerminalRunToolHost(authorization, {
-      allowedRoots: [root],
-      allowedCommands: [command]
-    }).run({
-      ...input(root, ['-e', parent], authorization),
-      timeoutMs: 5_000
-    })
-
-    expect(result.status).toBe('timed-out')
-    await new Promise((resolve) => setTimeout(resolve, 850))
+    // The 100 ms timeout fires only once the whole tree exists. With a real timer a slow machine
+    // (the Windows test PC) fired it while the parent was still starting, so the grandchild was
+    // created while taskkill /T was already enumerating the tree, which the kill cannot cover.
+    // Two real node processes must start first, which takes seconds under load: 30 s timeout.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const running = new TerminalRunToolHost(authorization, {
+        allowedRoots: [root],
+        allowedCommands: [command]
+      }).run({
+        ...input(root, ['-e', parent], authorization),
+        timeoutMs: 5_000
+      })
+      let settled = false
+      void running.finally(() => (settled = true))
+      while (!settled && !existsSync(ready)) await delay(10)
+      vi.advanceTimersByTime(100)
+      vi.useRealTimers()
+      const result = await running
+      expect(result.status).toBe('timed-out')
+    } finally {
+      vi.useRealTimers()
+    }
+    await delay(850)
     expect(existsSync(marker)).toBe(false)
-  })
+  }, 30_000)
 
   it('rejects policy request parameters that do not exactly match execution', async () => {
     const { root, authorization } = setup()

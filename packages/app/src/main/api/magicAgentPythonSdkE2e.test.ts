@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import path from 'node:path'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.unmock('fs')
 vi.unmock('node:fs')
 
@@ -10,11 +10,52 @@ const pythonSdk = path.join(process.cwd(), 'packages/agent-sdk-python/src')
 let baseUrl = ''
 let server: ReturnType<typeof createServer>
 const semanticMemoryRequests: Array<{ method: string; body: Record<string, unknown> }> = []
+const PYTHON_PROBE_PATH = '/__python-environment-probe'
+let pythonUnavailableReason: string | undefined
+
+/**
+ * The suite needs what the SDK's README asks of its users: a `python` on PATH that is 3.10 or
+ * newer (the SDK is stdlib-only and imported from the checkout through PYTHONPATH, nothing is
+ * installed), and Python's urllib reaching the loopback test server directly. The probe uses
+ * plain urllib, never the SDK, so an SDK defect still fails the suite instead of skipping it.
+ */
+async function probePython(): Promise<string | undefined> {
+  const probe = [
+    'import sys, urllib.request',
+    "if sys.version_info < (3, 10): sys.exit('Python %s is older than the SDK minimum 3.10' % sys.version.split()[0])",
+    'try:',
+    `    body = urllib.request.urlopen('${baseUrl}${PYTHON_PROBE_PATH}', timeout=10).read()`,
+    'except Exception as error:',
+    "    sys.exit('Python urllib cannot reach the loopback test server (a system proxy without a loopback bypass?): %r' % (error,))",
+    "if body != b'ok': sys.exit('Python urllib got an unexpected loopback answer (a system proxy?): %r' % (body[:80],))",
+    "print('ok')"
+  ].join('\n')
+  const result = await new Promise<{ status: number | null; stdout: string; stderr: string; error?: Error }>(
+    (resolve) => {
+      const child = spawn('python', ['-c', probe], { stdio: ['ignore', 'pipe', 'pipe'] })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk) => (stdout += chunk))
+      child.stderr.on('data', (chunk) => (stderr += chunk))
+      child.on('error', (error) => resolve({ status: null, stdout, stderr, error }))
+      child.on('close', (status) => resolve({ status, stdout, stderr }))
+    }
+  )
+  if (result.error) return `No usable \`python\` on PATH (${result.error.message}).`
+  if (result.status === 0 && result.stdout.trim() === 'ok') return undefined
+  const detail = (result.stderr || result.stdout).trim().split(/\r?\n/).slice(-1)[0] || `exit ${result.status}`
+  return `\`python\` cannot run the SDK end-to-end suite here: ${detail}`
+}
 
 beforeAll(async () => {
   server = createServer(async (request, response) => {
     const chunks: Buffer[] = []
     for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    if (request.url === PYTHON_PROBE_PATH) {
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('ok')
+      return
+    }
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     if (request.headers.authorization !== 'Bearer python-token') {
       response.writeHead(401, { 'content-type': 'application/json' })
@@ -550,6 +591,12 @@ beforeAll(async () => {
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('Missing test server address.')
   baseUrl = `http://127.0.0.1:${address.port}`
+  pythonUnavailableReason = await probePython()
+}, 30_000)
+
+beforeEach((context) => {
+  // Environment-blocked (no Python 3.10+, or loopback HTTP diverted), not passed.
+  if (pythonUnavailableReason) context.skip(pythonUnavailableReason)
 })
 
 afterAll(async () => {
