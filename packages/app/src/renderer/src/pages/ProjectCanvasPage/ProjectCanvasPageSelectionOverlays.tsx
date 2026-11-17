@@ -939,6 +939,8 @@ export default function ProjectCanvasPageSelectionOverlays({
     return [selectedSingleTextLikeItem]
   }, [selectedIds.size, selectedItems, selectedSingleTextLikeItem, tool])
 
+  // prepareQuickCanvasItemsImageUrl changes identity with its cache key (the committed viewport is
+  // part of it), so it must reach this component as the page built it, not as a stable forwarder.
   React.useEffect(() => {
     if (quickDragPreviewItems.length === 0) return
     void prepareQuickCanvasItemsImageUrl(quickDragPreviewItems)

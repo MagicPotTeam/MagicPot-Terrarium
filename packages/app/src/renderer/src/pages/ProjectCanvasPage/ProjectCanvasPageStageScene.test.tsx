@@ -3898,6 +3898,48 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(mouseUpArg?.evt.button).toBe(0)
   })
 
+  it('ends a hand-tool pan exactly once when the pointer is released outside the canvas, even after a page re-render with new handlers', async () => {
+    const item = createFileItem('file-hand-release')
+    const props = createBaseProps([item])
+    props.tool = 'hand'
+
+    const view = render(<ProjectCanvasPageStageScene {...props} />)
+
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.has(item.id)).toBe(true)
+    })
+
+    const overlay = screen.getByTestId(`canvas-placeholder-${item.id}`)
+    fireEvent.pointerDown(overlay, {
+      button: 0,
+      buttons: 1,
+      clientX: 140,
+      clientY: 160,
+      pointerId: 1,
+      pointerType: 'mouse'
+    })
+    expect(props.handleStageMouseDown).toHaveBeenCalledTimes(1)
+
+    // The page re-renders mid-pan with a new mouse-up handler.
+    const nextHandleStageMouseUp = vi.fn()
+    view.rerender(
+      <ProjectCanvasPageStageScene {...props} handleStageMouseUp={nextHandleStageMouseUp} />
+    )
+
+    fireEvent.pointerUp(document.body, {
+      button: 0,
+      clientX: 900,
+      clientY: 20,
+      pointerId: 1,
+      pointerType: 'mouse'
+    })
+    fireEvent.mouseUp(document.body, { button: 0, clientX: 900, clientY: 20 })
+
+    expect(props.handleStageMouseUp).not.toHaveBeenCalled()
+    expect(nextHandleStageMouseUp).toHaveBeenCalledTimes(1)
+    expect(nextHandleStageMouseUp.mock.calls[0]?.[0]?.type).toBe('pointerup')
+  })
+
   it('starts marquee capture from non-interactive stage wrapper elements above the stage event layer', () => {
     const props = createBaseProps([])
 

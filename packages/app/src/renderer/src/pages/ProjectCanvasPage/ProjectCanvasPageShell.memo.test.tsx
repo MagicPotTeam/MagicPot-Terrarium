@@ -195,6 +195,34 @@ describe('ProjectCanvasPageShell memoised chrome', () => {
     expect(selectionProps.stagePos).toEqual({ x: 5, y: 6 })
   })
 
+  it('hands the selection overlays the page-built drag-preview preparer so a new viewport re-prepares it', () => {
+    // The drag-preview cache key includes the committed viewport, and the page rebuilds the preparer
+    // with it. The selection overlays re-prepare the preview when the preparer changes identity, so
+    // it must not be replaced by a stable forwarder, or a selection could not be dragged out of the
+    // canvas after a pan or zoom.
+    const selectedIds = new Set(['a', 'b'])
+    const firstPrepare = vi.fn()
+    const { rerender } = render(
+      <ProjectCanvasPageShell
+        {...createProps({ selectedIds, prepareQuickCanvasItemsImageUrl: firstPrepare })}
+      />
+    )
+    expect(latestProps.get('selectionOverlays')?.prepareQuickCanvasItemsImageUrl).toBe(firstPrepare)
+
+    const nextPrepare = vi.fn()
+    rerender(
+      <ProjectCanvasPageShell
+        {...createProps({
+          selectedIds,
+          stagePos: { x: -120, y: 40 },
+          stageScale: 0.5,
+          prepareQuickCanvasItemsImageUrl: nextPrepare
+        })}
+      />
+    )
+    expect(latestProps.get('selectionOverlays')?.prepareQuickCanvasItemsImageUrl).toBe(nextPrepare)
+  })
+
   it('does not re-render the toolbar for a new stage size after a panel drag', () => {
     const firstStart = vi.fn()
     const { rerender } = render(

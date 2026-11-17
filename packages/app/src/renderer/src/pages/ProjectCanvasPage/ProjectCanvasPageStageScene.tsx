@@ -2815,32 +2815,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     [handleStageMouseUp, isMiddleMouseRef, isStageEventLayerTarget, shouldIgnoreMouseCompatEvent]
   )
   React.useEffect(() => {
-    if (!isHandToolCaptureRef.current) {
-      return
-    }
-
-    const releaseHandToolCapture = (nativeEvent: MouseEvent | PointerEvent) => {
-      if (!isHandToolCaptureRef.current) {
-        return
-      }
-      isHandToolCaptureRef.current = false
-      handleStageMouseUp({
-        evt: nativeEvent,
-        type: nativeEvent.type
-      })
-    }
-
-    window.addEventListener('mouseup', releaseHandToolCapture, true)
-    window.addEventListener('pointerup', releaseHandToolCapture, true)
-    window.addEventListener('pointercancel', releaseHandToolCapture, true)
-
-    return () => {
-      window.removeEventListener('mouseup', releaseHandToolCapture, true)
-      window.removeEventListener('pointerup', releaseHandToolCapture, true)
-      window.removeEventListener('pointercancel', releaseHandToolCapture, true)
-    }
-  }, [handleStageMouseUp])
-  React.useEffect(() => {
     const describeTarget = (target: EventTarget | null) => {
       if (!(target instanceof Element)) {
         return null

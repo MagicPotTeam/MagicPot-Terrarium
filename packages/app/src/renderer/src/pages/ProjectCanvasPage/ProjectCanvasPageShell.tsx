@@ -113,13 +113,16 @@ const TOOLBAR_OMITTED_PROP_KEYS = new Set([
   'prepareQuickCanvasItemsImageUrl',
   'registerViewportLayer'
 ])
-// Selection toolbar helpers that are only called from drag / click handlers and effects. The page
-// rebuilds them whenever the committed viewport changes.
+// Selection toolbar helpers that are only called from drag / click handlers. The page rebuilds them
+// whenever the committed viewport changes. prepareQuickCanvasItemsImageUrl is deliberately not
+// forwarded: its identity changes with the drag-preview cache key (canvas, viewport, export
+// snapshot), and the selection overlays re-prepare the preview when it does. A stable forwarder
+// would leave the cache empty after a pan or zoom and cancel every drag of the selection out of the
+// canvas.
 const SELECTION_OVERLAY_STABLE_CALLBACK_KEYS = new Set([
   'buildCanvasDragPayload',
   'setCanvasDragPayload',
-  'getQuickCanvasItemsImageUrl',
-  'prepareQuickCanvasItemsImageUrl'
+  'getQuickCanvasItemsImageUrl'
 ])
 // Toolbar callbacks without an on* / handle* name that the page rebuilds when the viewport or the
 // stage size changes. The toolbar (and its group tree popover) only calls them from click handlers.
