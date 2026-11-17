@@ -7,7 +7,7 @@ import { useCanvasLayerRuntime } from './useCanvasLayerRuntime'
 import { useCanvasMediaRuntime } from './useCanvasMediaRuntime'
 import { useProjectCanvasPageRuntimeState } from './useProjectCanvasPageRuntimeState'
 
-import type { CanvasImageItem, CanvasTextItem } from './types'
+import type { CanvasImageItem, CanvasItem, CanvasTextItem } from './types'
 
 const makeText = (id: string, text: string): CanvasTextItem => ({
   id,
@@ -159,6 +159,118 @@ describe('history state transitions', () => {
     expect(result.current.selectedHistoryRevision).toBe(2)
     act(() => result.current.handleUndo())
     expect(result.current.selectedHistoryRevision).toBeNull()
+  })
+})
+
+describe('crop source records outside the undo history (F2 part 3)', () => {
+  const RECORD = {
+    version: 1 as const,
+    origin: 'confirm' as const,
+    width: 400,
+    height: 300,
+    sizeBytes: 5000,
+    sha256: 'cd'.repeat(32)
+  }
+  const CROP_A = { x: 10, y: 20, width: 100, height: 80 }
+  const image = (overrides: Partial<CanvasImageItem> = {}): CanvasImageItem => ({
+    id: 'image',
+    type: 'image',
+    src: 'local-media:///C:/images/source.png',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 80,
+    rotation: 0,
+    scaleX: 1,
+    scaleY: 1,
+    zIndex: 0,
+    locked: false,
+    sourceWidth: 400,
+    sourceHeight: 300,
+    ...overrides
+  })
+  // What the confirm read attests: crop A on these bytes, nothing else.
+  const attestCropA = (item: CanvasItem): CanvasItem =>
+    item.type === 'image' &&
+    item.src === 'local-media:///C:/images/source.png' &&
+    item.cropSource === undefined &&
+    item.crop?.x === CROP_A.x &&
+    item.crop?.y === CROP_A.y &&
+    item.crop?.width === CROP_A.width &&
+    item.crop?.height === CROP_A.height
+      ? { ...item, cropSource: RECORD }
+      : item
+  const recordOf = (items: unknown[]) => (items[0] as CanvasImageItem).cropSource
+
+  it('keeps a record that landed after a move when the move is undone', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState(), {
+      wrapper: StrictMode
+    })
+    act(() => result.current.setItemsWithHistory([image()]))
+    act(() => result.current.setItemsWithHistory([image({ crop: CROP_A })]))
+    // The read is still running; the user moves the item.
+    act(() => result.current.setItemsWithHistory([image({ crop: CROP_A, x: 50 })]))
+    act(() => result.current.attestItems(attestCropA))
+    expect(recordOf(result.current.items)).toEqual(RECORD)
+
+    act(() => result.current.handleUndo())
+    expect((result.current.items[0] as CanvasImageItem).x).toBe(0)
+    expect(recordOf(result.current.items)).toEqual(RECORD)
+    act(() => result.current.handleUndo())
+    expect((result.current.items[0] as CanvasImageItem).crop).toBeUndefined()
+    expect(recordOf(result.current.items)).toBeUndefined()
+    act(() => result.current.handleRedo())
+    act(() => result.current.handleRedo())
+    expect((result.current.items[0] as CanvasImageItem).x).toBe(50)
+    expect(recordOf(result.current.items)).toEqual(RECORD)
+  })
+
+  it('keeps a record that lands while the crop is undone, for the redo', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState())
+    act(() => result.current.setItemsWithHistory([image()]))
+    act(() => result.current.setItemsWithHistory([image({ crop: CROP_A })]))
+    act(() => result.current.handleUndo())
+    act(() => result.current.attestItems(attestCropA))
+    expect(recordOf(result.current.items)).toBeUndefined()
+
+    act(() => result.current.handleRedo())
+    expect(recordOf(result.current.items)).toEqual(RECORD)
+  })
+
+  it('never attaches a record to a snapshot that shows another crop or source', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState())
+    act(() => result.current.setItemsWithHistory([image({ crop: { ...CROP_A, x: 11 } })]))
+    act(() =>
+      result.current.setItemsWithHistory([image({ crop: CROP_A, src: 'local-media:///C:/other.png' })])
+    )
+    act(() => result.current.setItemsWithHistory([image({ crop: CROP_A })]))
+    act(() => result.current.attestItems(attestCropA))
+    act(() => result.current.handleUndo())
+    expect(recordOf(result.current.items)).toBeUndefined()
+    act(() => result.current.handleUndo())
+    expect(recordOf(result.current.items)).toBeUndefined()
+  })
+
+  it('leaves the selected history revision, the history and its revision alone', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState())
+    act(() => result.current.setItemsWithHistory([image()]))
+    act(() => result.current.setItemsWithHistory([image({ crop: CROP_A })]))
+    act(() => result.current.setItemsWithHistory([image({ crop: CROP_A, x: 50 })]))
+    act(() => result.current.restoreHistoryRevision(2))
+    expect(result.current.selectedHistoryRevision).toBe(2)
+    const revision = result.current.historyRevision
+    const count = result.current.historyCount
+
+    // A no-op attestation changes nothing at all.
+    const before = result.current
+    act(() => result.current.attestItems((item) => item))
+    expect(result.current).toBe(before)
+
+    act(() => result.current.attestItems(attestCropA))
+    expect(result.current.selectedHistoryRevision).toBe(2)
+    expect(result.current.historyRevision).toBe(revision)
+    expect(result.current.historyCount).toBe(count)
+    expect(recordOf(result.current.items)).toEqual(RECORD)
   })
 })
 

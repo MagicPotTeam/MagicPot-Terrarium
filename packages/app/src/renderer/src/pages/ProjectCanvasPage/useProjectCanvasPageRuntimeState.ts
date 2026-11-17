@@ -28,8 +28,18 @@ type RuntimeItemsState = {
   selectedHistoryRevision: number | null
 }
 
+/**
+ * Maps one item to itself or to an attested copy. Used for facts about an
+ * item's bytes (a crop source record, a legacy-crop marker): they are not
+ * edits, so they apply to the present items and to every undo/redo snapshot
+ * alike, and leave the history and its selected revision alone. The mapper
+ * must return the same object for every item it does not change.
+ */
+export type CanvasItemAttestation = (item: CanvasItem) => CanvasItem
+
 type RuntimeItemsAction =
   | { type: 'set'; updater: CanvasItemsUpdate }
+  | { type: 'attest'; mapItem: CanvasItemAttestation }
   | { type: 'edit'; updater: CanvasItemsUpdate }
   | { type: 'undo' }
   | { type: 'redo' }
@@ -43,10 +53,48 @@ function resolveCanvasItemsUpdate(
   return typeof updater === 'function' ? updater(previous) : updater
 }
 
+function attestCanvasItemList(
+  list: CanvasItem[],
+  mapItem: CanvasItemAttestation
+): CanvasItem[] {
+  let changed = false
+  const next = list.map((item) => {
+    const mapped = mapItem(item)
+    if (mapped !== item) changed = true
+    return mapped
+  })
+  return changed ? next : list
+}
+
+function attestCanvasItemLists(
+  lists: CanvasItem[][],
+  mapItem: CanvasItemAttestation
+): CanvasItem[][] {
+  let changed = false
+  const next = lists.map((list) => {
+    const mapped = attestCanvasItemList(list, mapItem)
+    if (mapped !== list) changed = true
+    return mapped
+  })
+  return changed ? next : lists
+}
+
 function reduceRuntimeItemsState(
   state: RuntimeItemsState,
   action: RuntimeItemsAction
 ): RuntimeItemsState {
+  if (action.type === 'attest') {
+    // Present, undo and redo alike: an undo never brings back a state that
+    // lacks a fact already proven about the same bytes and crop.
+    const items = attestCanvasItemList(state.items, action.mapItem)
+    const history = attestCanvasItemLists(state.history, action.mapItem)
+    const future = attestCanvasItemLists(state.future, action.mapItem)
+    if (items === state.items && history === state.history && future === state.future) {
+      return state
+    }
+    return { ...state, items, history, future }
+  }
+
   if (action.type === 'select-history') {
     const selectedHistoryRevision =
       typeof action.updater === 'function'
@@ -264,6 +312,10 @@ export function useProjectCanvasPageRuntimeState() {
     dispatchItems({ type: 'edit', updater })
   }, [])
 
+  const attestItems = useCallback((mapItem: CanvasItemAttestation) => {
+    dispatchItems({ type: 'attest', mapItem })
+  }, [])
+
   const handleUndo = useCallback(() => {
     dispatchItems({ type: 'undo' })
     setSelectedIds(new Set())
@@ -290,6 +342,7 @@ export function useProjectCanvasPageRuntimeState() {
     () => ({
       activeOcrHover,
       annoTool,
+      attestItems,
       drawingState,
       getUndoRedoItemLists,
       groups,
@@ -333,6 +386,7 @@ export function useProjectCanvasPageRuntimeState() {
     [
       activeOcrHover,
       annoTool,
+      attestItems,
       drawingState,
       getUndoRedoItemLists,
       groups,

@@ -918,6 +918,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     setInlineTextEdit,
     setItemsWithHistory,
     setItemsWithoutHistory,
+    attestCanvasItems,
     provenCropRegistry,
     setLabelDialogItemId,
     setLabelDialogOpen,
@@ -2447,31 +2448,43 @@ export default function ProjectCanvasPageStageScene(props: any) {
         const cropSource = createCropSourceRecord(evidence, 'confirm')
         if (!cropSource) return
         attestedSourceSize = { width: cropSource.width, height: cropSource.height }
-        setItemsWithoutHistory((prev: CanvasItem[]) => {
-          let changed = false
-          const next = prev.map((candidate) => {
-            if (candidate.id !== expected.id || candidate.type !== 'image') return candidate
-            if (
-              candidate.src !== expected.src ||
-              candidate.sourceWidth !== expected.sourceWidth ||
-              candidate.sourceHeight !== expected.sourceHeight ||
-              !isSameCanvasCrop(candidate.crop, expected.crop)
-            ) {
-              return candidate
-            }
-            // Every display path must read the crop in the record's space.
-            const attested: CanvasImageItem = {
-              ...candidate,
-              sourceWidth: candidate.sourceWidth ?? cropSource.width,
-              sourceHeight: candidate.sourceHeight ?? cropSource.height,
-              cropSource
-            }
-            if (!hasVerifiableCrop(attested)) return candidate
-            changed = true
-            return attested
+        // The record is a fact about these bytes and this crop, not an edit: it
+        // goes to the present items and to every undo/redo snapshot that shows
+        // the same crop on the same source, so neither an undo to a snapshot
+        // taken before it landed nor an undo/redo during the read loses it.
+        const attest = (candidate: CanvasItem): CanvasItem => {
+          if (candidate.id !== expected.id || candidate.type !== 'image') return candidate
+          if (
+            candidate.src !== expected.src ||
+            candidate.sourceWidth !== expected.sourceWidth ||
+            candidate.sourceHeight !== expected.sourceHeight ||
+            candidate.cropSource !== undefined ||
+            !isSameCanvasCrop(candidate.crop, expected.crop)
+          ) {
+            return candidate
+          }
+          // Every display path must read the crop in the record's space.
+          const attested: CanvasImageItem = {
+            ...candidate,
+            sourceWidth: candidate.sourceWidth ?? cropSource.width,
+            sourceHeight: candidate.sourceHeight ?? cropSource.height,
+            cropSource
+          }
+          return hasVerifiableCrop(attested) ? attested : candidate
+        }
+        if (typeof attestCanvasItems === 'function') {
+          attestCanvasItems(attest)
+        } else {
+          setItemsWithoutHistory((prev: CanvasItem[]) => {
+            let changed = false
+            const next = prev.map((candidate) => {
+              const attested = attest(candidate)
+              if (attested !== candidate) changed = true
+              return attested
+            })
+            return changed ? next : prev
           })
-          return changed ? next : prev
-        })
+        }
         // Keep the crop's pixels, drawn from the decode of the verified bytes, so
         // a drag start (synchronous, cannot hash) can carry only what is visible.
         if (!registry) return
@@ -2493,7 +2506,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
         endPending?.()
       }
     },
-    [provenCropRegistry, setItemsWithoutHistory]
+    [attestCanvasItems, provenCropRegistry, setItemsWithoutHistory]
   )
   const handleCropConfirm = React.useCallback(
     (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {

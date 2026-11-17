@@ -26,6 +26,7 @@ import {
   type CanvasImageSourceEvidence
 } from './canvasCropProvenance'
 import type { CanvasItemsLoadedEvent } from './useCanvasViewportPersistence'
+import type { CanvasItemAttestation } from './useProjectCanvasPageRuntimeState'
 import type { CanvasImageCropSource, CanvasImageItem, CanvasItem } from './types'
 
 type CanvasCrop = NonNullable<CanvasImageItem['crop']>
@@ -225,6 +226,12 @@ type UseCanvasLegacyCropUpgradeOptions = {
   items: CanvasItem[]
   /** Writes outside the undo history; the next save persists the record. */
   setItemsWithoutHistory: Dispatch<SetStateAction<CanvasItem[]>>
+  /**
+   * Preferred over setItemsWithoutHistory: applies the marker and the records
+   * to the present items and to every undo/redo snapshot that still shows the
+   * same crop, and leaves the selected history revision alone.
+   */
+  attestItems?: (mapItem: CanvasItemAttestation) => void
   readEvidence?: CanvasLegacyCropEvidenceReader
   waitForIdle?: () => Promise<void>
 }
@@ -239,6 +246,7 @@ export function useCanvasLegacyCropUpgrade({
   canvasId,
   items,
   setItemsWithoutHistory,
+  attestItems,
   readEvidence = readLegacyCropEvidence,
   waitForIdle = waitForCanvasIdle
 }: UseCanvasLegacyCropUpgradeOptions): {
@@ -250,8 +258,25 @@ export function useCanvasLegacyCropUpgrade({
   latestItemsRef.current = items
   const mountedRef = useRef(true)
   const passTokenRef = useRef(0)
-  const optionsRef = useRef({ setItemsWithoutHistory, readEvidence, waitForIdle })
-  optionsRef.current = { setItemsWithoutHistory, readEvidence, waitForIdle }
+  const optionsRef = useRef({ setItemsWithoutHistory, attestItems, readEvidence, waitForIdle })
+  optionsRef.current = { setItemsWithoutHistory, attestItems, readEvidence, waitForIdle }
+  // One item at a time: through attestItems when the page provides it.
+  const attest = useCallback((mapItem: CanvasItemAttestation) => {
+    const { attestItems: attestWith, setItemsWithoutHistory: setItems } = optionsRef.current
+    if (typeof attestWith === 'function') {
+      attestWith(mapItem)
+      return
+    }
+    setItems((prev) => {
+      let changed = false
+      const next = prev.map((item) => {
+        const mapped = mapItem(item)
+        if (mapped !== item) changed = true
+        return mapped
+      })
+      return changed ? next : prev
+    })
+  }, [])
 
   useEffect(() => {
     mountedRef.current = true
@@ -271,24 +296,19 @@ export function useCanvasLegacyCropUpgrade({
       // items: the marker lands before any later edit or save can take the
       // backfilled size hints for stored ones.
       const marks = new Map(toMark.map((entry) => [entry.id, entry.crop]))
-      optionsRef.current.setItemsWithoutHistory((prev) => {
-        if (!isPassCurrent()) return prev
-        let changed = false
-        const next = prev.map((item) => {
-          const crop = marks.get(item.id)
-          if (
-            !crop ||
-            item.type !== 'image' ||
-            item.cropSource !== undefined ||
-            !isSameCrop(item.crop, crop) ||
-            isLegacyCropWithoutSourceSize(item)
-          ) {
-            return item
-          }
-          changed = true
-          return { ...item, [LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY]: copyCrop(crop) } as CanvasItem
-        })
-        return changed ? next : prev
+      attest((item) => {
+        if (!isPassCurrent()) return item
+        const crop = marks.get(item.id)
+        if (
+          !crop ||
+          item.type !== 'image' ||
+          item.cropSource !== undefined ||
+          !isSameCrop(item.crop, crop) ||
+          isLegacyCropWithoutSourceSize(item)
+        ) {
+          return item
+        }
+        return { ...item, [LEGACY_CROP_WITHOUT_SOURCE_SIZE_KEY]: copyCrop(crop) } as CanvasItem
       })
     }
     if (candidates.length === 0) {
@@ -340,19 +360,13 @@ export function useCanvasLegacyCropUpgrade({
     }
     if (attested.size === 0 || !isPassCurrent()) return
 
-    optionsRef.current.setItemsWithoutHistory((prev) => {
-      let changed = false
-      const next = prev.map((item) => {
-        const entry = attested.get(item.id)
-        if (!entry || !isUnchangedCandidate(item, entry.candidate, entry.src)) return item
-        const upgraded: CanvasImageItem = { ...item, cropSource: entry.record }
-        if (!hasVerifiableCrop(upgraded)) return item
-        changed = true
-        return upgraded
-      })
-      return changed ? next : prev
+    attest((item) => {
+      const entry = attested.get(item.id)
+      if (!entry || !isUnchangedCandidate(item, entry.candidate, entry.src)) return item
+      const upgraded: CanvasImageItem = { ...item, cropSource: entry.record }
+      return hasVerifiableCrop(upgraded) ? upgraded : item
     })
-  }, [])
+  }, [attest])
 
   // The loaded items reach the canvas state in the same commit as this
   // request, so the pass (an effect) always sees them as live items.

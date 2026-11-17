@@ -252,6 +252,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     activeOcrHover,
     annoTool,
     drawingState,
+    attestItems,
     getUndoRedoItemLists,
     groups,
     groupBranches,
@@ -845,7 +846,8 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   const { handleCanvasItemsLoaded } = useCanvasLegacyCropUpgrade({
     canvasId,
     items,
-    setItemsWithoutHistory: setItems
+    setItemsWithoutHistory: setItems,
+    attestItems
   })
   // Proven crops stay draggable after a board open or a registry eviction.
   useCanvasProvenCropRegistryFill({ items, selectedIds, registry: provenCropRegistry })
@@ -1608,6 +1610,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     setItems,
     setItemsWithHistory,
     setItemsWithoutHistory: setItems,
+    attestCanvasItems: attestItems,
     provenCropRegistry,
     setLabelDialogItemId,
     setSelectedHistoryRevision,

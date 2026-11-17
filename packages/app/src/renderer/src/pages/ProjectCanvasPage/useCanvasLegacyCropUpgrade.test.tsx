@@ -20,6 +20,7 @@ import {
   type CanvasLegacyCropEvidenceReader
 } from './useCanvasLegacyCropUpgrade'
 import { useCanvasViewportPersistence } from './useCanvasViewportPersistence'
+import { useProjectCanvasPageRuntimeState } from './useProjectCanvasPageRuntimeState'
 import type { CanvasGroup, CanvasGroupBranch, CanvasImageItem, CanvasItem } from './types'
 
 const mockLoadCanvasItems = vi.fn()
@@ -778,6 +779,55 @@ describe('useCanvasLegacyCropUpgrade (owner decision 2)', () => {
     await waitFor(() => expect(findImage(result.current.items).cropSource?.origin).toBe('reopen'))
     expect(fixture.fetch).toHaveBeenCalledTimes(1)
     expect(legacyCropWarnings(warn)).toEqual([])
+  })
+
+  describe('with the page runtime state (F2 part 3)', () => {
+    function renderRuntimeBoard(readEvidence: CanvasLegacyCropEvidenceReader) {
+      return renderHook(() => {
+        const runtime = useProjectCanvasPageRuntimeState()
+        const setItemsWithoutHistory = React.useMemo(() => vi.fn(runtime.setItems), [runtime.setItems])
+        const upgrade = useCanvasLegacyCropUpgrade({
+          canvasId: 'board-a',
+          items: runtime.items,
+          setItemsWithoutHistory,
+          attestItems: runtime.attestItems,
+          readEvidence,
+          waitForIdle: async () => undefined
+        })
+        return { runtime, upgrade, setItemsWithoutHistory }
+      })
+    }
+
+    it('keeps the reopen record through an undo of an edit made before it landed, and the selected revision', async () => {
+      const read = deferred<CanvasLegacyCropEvidence | null>()
+      const readEvidence = vi.fn(() => read.promise)
+      const { result } = renderRuntimeBoard(readEvidence)
+      const stored = createLegacyCrop()
+      act(() => result.current.runtime.setItems([stored]))
+      act(() =>
+        result.current.upgrade.handleCanvasItemsLoaded({ canvasId: 'board-a', storedItems: [stored] })
+      )
+      await waitFor(() => expect(readEvidence).toHaveBeenCalledTimes(1))
+      // The user edits twice and picks a history node before the record lands.
+      act(() => result.current.runtime.setItemsWithHistory([{ ...stored, x: 10 }]))
+      act(() => result.current.runtime.setItemsWithHistory([{ ...stored, x: 20 }]))
+      act(() => result.current.runtime.restoreHistoryRevision(1))
+      expect(result.current.runtime.selectedHistoryRevision).toBe(1)
+
+      await act(async () => read.resolve(MATCHING_EVIDENCE))
+      await waitFor(() =>
+        expect(findImage(result.current.runtime.items).cropSource?.origin).toBe('reopen')
+      )
+      expect(result.current.setItemsWithoutHistory).not.toHaveBeenCalled()
+      expect(result.current.runtime.selectedHistoryRevision).toBe(1)
+
+      act(() => result.current.runtime.handleUndo())
+      expect(findImage(result.current.runtime.items).cropSource?.origin).toBe('reopen')
+      act(() => result.current.runtime.handleRedo())
+      act(() => result.current.runtime.handleRedo())
+      expect(findImage(result.current.runtime.items).x).toBe(20)
+      expect(findImage(result.current.runtime.items).cropSource?.origin).toBe('reopen')
+    })
   })
 
   it('judges candidates on the stored items', () => {

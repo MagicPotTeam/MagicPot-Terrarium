@@ -4768,6 +4768,43 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       expect(target).not.toHaveProperty('cropSource')
     })
 
+    it('attests the record through attestCanvasItems, for the present and every snapshot of the same crop (F2)', async () => {
+      const target = createImageItem('attest-target')
+      const evidence = deferEvidence()
+      const attestCanvasItems = vi.fn()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target, [], {
+        attestCanvasItems
+      })
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+      await waitFor(() => expect(attestCanvasItems).toHaveBeenCalledTimes(1))
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+
+      const attest = attestCanvasItems.mock.calls[0][0] as (item: CanvasItem) => CanvasItem
+      const [confirmed] = applyConfirm(setItemsWithHistory, [target]) as CanvasImageItem[]
+      // A history snapshot: runtime refs stripped, moved after the confirm.
+      const { image: _image, ...snapshot } = { ...confirmed, x: 400 }
+      const attestedSnapshot = attest(snapshot as CanvasItem) as CanvasImageItem
+      expect(attestedSnapshot).toEqual(
+        expect.objectContaining({ x: 400, sourceWidth: 200, sourceHeight: 120, crop: confirmedCrop })
+      )
+      expect(attestedSnapshot.cropSource).toEqual(
+        expect.objectContaining({ origin: 'confirm', width: 200, height: 120 })
+      )
+      for (const other of [
+        target,
+        { ...confirmed, crop: { ...confirmedCrop, width: 81 } },
+        { ...confirmed, src: 'file:///another-source.png' },
+        {
+          ...confirmed,
+          cropSource: { ...attestedSnapshot.cropSource!, origin: 'reopen' as const }
+        },
+        { ...confirmed, id: 'another-item' }
+      ]) {
+        expect(attest(other as CanvasItem)).toBe(other)
+      }
+    })
+
     it('attaches no record when the evidence differs from the crop space', async () => {
       // A 200x120 thumbnail in memory over a 400x240 source: the crop numbers are in thumbnail space.
       const target = createImageItem('thumbnail-target')
