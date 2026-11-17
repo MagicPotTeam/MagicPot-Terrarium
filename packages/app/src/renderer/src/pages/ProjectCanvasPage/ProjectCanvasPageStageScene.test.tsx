@@ -4728,7 +4728,9 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     })
   })
 
-  it('flattens confirmed image crops into the canvas item source data', async () => {
+  it('keeps the source and the confirmed crop instead of flattening into the canvas item source data', async () => {
+    // Owner contract: crop-confirm keeps the original picture plus the crop; the
+    // crop source record is attached afterwards by the background read.
     const cropItem = {
       ...createImageItem('crop-target'),
       sourceWidth: 200,
@@ -4745,6 +4747,8 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const toDataURLSpy = vi
       .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
       .mockReturnValue('data:image/png;base64,cropped-canvas-source')
+    cropSourceEvidenceMock.read.mockClear()
+    cropSourceEvidenceMock.read.mockImplementationOnce(() => new Promise(() => undefined))
 
     try {
       render(
@@ -4778,25 +4782,31 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       const updateItems = setItemsWithHistory.mock.calls[0][0] as (
         prev: CanvasImageItem[]
       ) => CanvasImageItem[]
-      const [flattenedItem] = updateItems([cropItem])
+      const [croppedItem] = updateItems([cropItem])
 
-      expect(flattenedItem).toEqual(
+      expect(croppedItem).toEqual(
         expect.objectContaining({
           id: cropItem.id,
           x: 132,
           y: 156,
-          src: 'data:image/png;base64,cropped-canvas-source',
+          src: cropItem.src,
           fileName: 'crop-target.png',
-          sourceWidth: 80,
-          sourceHeight: 60,
+          sourceWidth: 200,
+          sourceHeight: 120,
           width: 80,
-          height: 60
+          height: 60,
+          crop: { x: 20, y: 10, width: 80, height: 60 }
         })
       )
-      expect(flattenedItem).not.toHaveProperty('crop')
-      expect(flattenedItem).not.toHaveProperty('image')
-      expect(drawImage).toHaveBeenCalledWith(cropItem.image, 20, 10, 80, 60, 0, 0, 80, 60)
-      expect(toDataURLSpy).toHaveBeenCalledWith('image/png')
+      expect(croppedItem.image).toBe(cropItem.image)
+      expect(croppedItem).not.toHaveProperty('cropSource')
+      expect(cropSourceEvidenceMock.read).toHaveBeenCalledWith(
+        cropItem.src,
+        expect.any(Function),
+        expect.objectContaining({ maxBytes: expect.any(Number) })
+      )
+      expect(drawImage).not.toHaveBeenCalled()
+      expect(toDataURLSpy).not.toHaveBeenCalled()
     } finally {
       getContextSpy.mockRestore()
       toDataURLSpy.mockRestore()
