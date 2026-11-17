@@ -397,22 +397,32 @@ describe('TerminalRunToolHost', () => {
   }, 30_000)
 
   it('kills a process tree that is still growing at the bounded timeout', async () => {
+    // The product promise: once the stop is reported, nothing of the tree runs any more.
     // The timeout lands while the parent is still creating grandchildren: it starts one every
-    // 25 ms for about a second and the kill comes right after the first. Every grandchild reports
-    // itself 700 ms after it starts unless it was killed. On POSIX one process-group SIGKILL
-    // covers a fork in flight. On win32 the product runs `taskkill /PID <pid> /T /F`, which
-    // enumerates the tree once, so a grandchild created between that enumeration and the
-    // parent's termination survives: a known product gap (a Job Object kill would close it, see
-    // windowsJobObjectConfinement.ts), which this test is meant to keep showing until fixed.
+    // 25 ms for about a second and the kill comes right after the first. Every grandchild appends
+    // Date.now() to its own heartbeat file every 50 ms (appending, so a kill in the middle of a
+    // write can only leave a shorter, smaller number). After the result arrives the test waits
+    // 1.5 s and requires that no heartbeat is later than the result plus 250 ms (room for a
+    // process that the OS is still tearing down).
+    // POSIX: one process-group SIGKILL covers a fork in flight. Windows with the Job Object
+    // helper: terminating the helper closes the job, which kills every process in it, including
+    // ones created during the stop. Windows without the helper: the immediate taskkill is
+    // followed by a process-table sweep that kills descendants it missed before the result is
+    // reported. Against the former single `taskkill /PID <pid> /T /F` this test fails on Windows:
+    // taskkill enumerates the tree once, so a grandchild created between that enumeration and the
+    // parent's termination survives and keeps writing heartbeats after the result.
     const { root, authorization } = setup('require-approval', { maxTimeoutMs: 100 })
     const growing = path.join(root, 'parent-growing.txt')
-    const lateDir = path.join(root, 'late')
-    mkdirSync(lateDir)
+    const heartbeatDir = path.join(root, 'heartbeats')
+    mkdirSync(heartbeatDir)
     const grandchild = [
       "const fs = require('node:fs')",
       "const path = require('node:path')",
-      `const dir = Buffer.from('${encodeArgument(lateDir)}', 'base64').toString()`,
-      "setTimeout(() => fs.writeFileSync(path.join(dir, 'late-' + process.pid), 'late'), 700)"
+      `const dir = Buffer.from('${encodeArgument(heartbeatDir)}', 'base64').toString()`,
+      "const file = path.join(dir, 'heartbeat-' + process.pid)",
+      "const beat = () => fs.appendFileSync(file, Date.now() + '\\n')",
+      'beat()',
+      'setInterval(beat, 50)'
     ].join(';')
     const parent = [
       "const fs = require('node:fs')",
@@ -432,13 +442,21 @@ describe('TerminalRunToolHost', () => {
     const result = await runAndTimeOutOnceReady(root, authorization, parent, () =>
       existsSync(growing)
     )
+    const reportedAt = Date.now()
 
     expect(result.status).toBe('timed-out')
-    // 700 ms report delay plus room for a surviving grandchild that is still booting.
     await delay(1_500)
+    const lateHeartbeats = readdirSync(heartbeatDir).flatMap((name) => {
+      const beats = readFileSync(path.join(heartbeatDir, name), 'utf8')
+        .split('\n')
+        .filter((line) => /^[0-9]+$/.test(line))
+        .map(Number)
+      const last = Math.max(0, ...beats)
+      return last > reportedAt + 250 ? [`${name}: ${last - reportedAt} ms after the result`] : []
+    })
     expect(
-      readdirSync(lateDir),
-      'grandchildren that survived the bounded-timeout kill of a growing process tree'
+      lateHeartbeats,
+      'grandchildren of a growing process tree that still ran after the bounded-timeout stop was reported'
     ).toEqual([])
   }, 30_000)
 
