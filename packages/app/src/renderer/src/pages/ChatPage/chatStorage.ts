@@ -68,7 +68,8 @@ export interface ChatSession {
   teamEnded?: boolean
   /** Legacy defaultModel is historical; versioned member selection is reserved but unavailable. */
   teamSettings?: { maxMembers: number; defaultModel: string | null; autoCleanup: boolean; memberModelSelection?: { version: 1; profileId: string } }
-  teamTasks?: { id: string; title: string; ownerId: string; status: 'pending' | 'running' | 'done'; dependsOn: string[] }[]
+  /** lastOutcome: why the last run ended without a result (absent on records written before it existed). */
+  teamTasks?: { id: string; title: string; ownerId: string; status: 'pending' | 'running' | 'done'; dependsOn: string[]; lastOutcome?: 'failed' | 'cancelled' | 'interrupted' }[]
   teamChannel?: { id: string; senderId: string; text: string; createdAt: number }[]
   /** Durable user-channel intent snapshots. Queued means persisted pending, never delivery proof. */
   teamMessageReceipts?: import('./teamMessageReceipt').TeamMessageReceipt[]

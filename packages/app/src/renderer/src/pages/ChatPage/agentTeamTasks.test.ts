@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canSetTeamTaskStatus, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, validateTeamTasks, type TeamTask } from './agentTeamTasks'
+import { canSetTeamTaskStatus, revertTeamTaskRun, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, validateTeamTasks, type TeamTask } from './agentTeamTasks'
 
 const task = (id: string, dependsOn: string[] = [], status: TeamTask['status'] = 'pending'): TeamTask => ({ id, title: id, ownerId: '', status, dependsOn })
 
@@ -35,5 +35,39 @@ describe('team task dependency graph', () => {
   })
   it('allows diamond dependencies with a shared ancestor', () => {
     expect(() => validateTeamTasks([task('a'), task('b', ['a']), task('c', ['a']), task('d', ['b', 'c'])])).not.toThrow()
+  })
+})
+
+describe('team task run outcome', () => {
+  it('keeps records written before lastOutcome existed valid, and accepts only known outcomes', () => {
+    const legacy = [{ id: 'a', title: 'a', ownerId: 'm', status: 'running', dependsOn: [] }] as TeamTask[]
+    expect(() => validateTeamTasks(legacy)).not.toThrow()
+    for (const lastOutcome of ['failed', 'cancelled', 'interrupted'] as const) {
+      expect(() => validateTeamTasks([{ ...task('a'), lastOutcome }])).not.toThrow()
+    }
+    for (const lastOutcome of ['done', '', 1, null]) {
+      expect(() => validateTeamTasks([{ ...task('a'), lastOutcome } as unknown as TeamTask])).toThrow('Invalid task')
+    }
+  })
+  it('returns only a running task of the same owner to pending, with its outcome, without mutating the input', () => {
+    const tasks: TeamTask[] = [{ ...task('a', [], 'running'), ownerId: 'm' }, task('b', ['a'])]
+    const reverted = revertTeamTaskRun(tasks, 'a', 'm', 'cancelled')
+    expect(reverted?.[0]).toEqual({ id: 'a', title: 'a', ownerId: 'm', status: 'pending', dependsOn: [], lastOutcome: 'cancelled' })
+    expect(reverted?.[1]).toBe(tasks[1])
+    expect(tasks[0].status).toBe('running')
+    expect(revertTeamTaskRun(tasks, 'a', 'other', 'failed')).toBeNull()
+    expect(revertTeamTaskRun(tasks, 'missing', 'm', 'failed')).toBeNull()
+    for (const status of ['pending', 'done'] as const) {
+      const settled: TeamTask[] = [{ ...task('a', [], status), ownerId: 'm' }]
+      expect(revertTeamTaskRun(settled, 'a', 'm', 'failed')).toBeNull()
+    }
+  })
+  it('drops the previous outcome on every status change and records one only with pending', () => {
+    const tasks: TeamTask[] = [{ ...task('a'), lastOutcome: 'failed' }]
+    expect(setTeamTaskStatus(tasks, 'a', 'running')[0]).not.toHaveProperty('lastOutcome')
+    expect(setTeamTaskStatus(tasks, 'a', 'done')[0]).not.toHaveProperty('lastOutcome')
+    expect(() => setTeamTaskStatus(tasks, 'a', 'done', 'failed')).toThrow('Invalid task outcome')
+    expect(() => setTeamTaskStatus(tasks, 'a', 'pending', 'bogus' as never)).toThrow('Invalid task outcome')
+    expect(setTeamTaskStatus(tasks, 'a', 'pending', 'interrupted')[0].lastOutcome).toBe('interrupted')
   })
 })

@@ -48,9 +48,23 @@ describe('team task dispatch admission', () => {
     expect(execute).not.toHaveBeenCalled()
   })
 
-  it('retains the claim if execution fails, rather than silently retrying work', async () => {
+  it('returns the task to pending with its outcome if execution fails, rather than silently retrying work', async () => {
     const state = fixture([task('a')])
-    await expect(dispatchTeamTask(state.store, 'a', async () => { throw new Error('executor failed') })).rejects.toThrow('executor failed')
-    expect(state.getTasks()[0].status).toBe('running')
+    const execute = vi.fn(async () => { throw new Error('executor failed') })
+    await expect(dispatchTeamTask(state.store, 'a', execute)).rejects.toThrow('executor failed')
+    expect(state.getTasks()[0]).toMatchObject({ status: 'pending', lastOutcome: 'failed' })
+    expect(execute).toHaveBeenCalledOnce()
+    await expect(dispatchTeamTask(state.store, 'a', async () => { throw new Error('stopped') }, () => 'cancelled')).rejects.toThrow('stopped')
+    expect(state.getTasks()[0]).toMatchObject({ status: 'pending', lastOutcome: 'cancelled' })
+  })
+
+  it('does not revert a task the user completed while its run was failing', async () => {
+    const state = fixture([task('a')])
+    await expect(dispatchTeamTask(state.store, 'a', async () => {
+      await state.store.updateTasks(current => setTeamTaskStatus(current, 'a', 'done'))
+      throw new Error('late failure')
+    })).rejects.toThrow('late failure')
+    expect(state.getTasks()[0].status).toBe('done')
+    expect(state.getTasks()[0]).not.toHaveProperty('lastOutcome')
   })
 })

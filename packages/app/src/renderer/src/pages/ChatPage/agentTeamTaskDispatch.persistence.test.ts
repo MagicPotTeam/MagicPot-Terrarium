@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatSession } from './chatStorage'
-import { claimTeamTaskInDB } from './agentTeamTaskDispatch'
+import { claimTeamTaskInDB, releaseTeamTaskClaimInDB } from './agentTeamTaskDispatch'
 
 const db = vi.hoisted(() => ({ current: undefined as ChatSession | undefined, deleted: false, fail: false, queue: Promise.resolve() }))
 vi.mock('./chatStorage', () => ({
@@ -100,5 +100,44 @@ describe('persistent task claim adapter', () => {
     db.fail = true
     await expect(claim(lead())).rejects.toThrow('commit failed')
     expect(db.current).toEqual(lead())
+  })
+})
+
+describe('persistent task claim release', () => {
+  const release = (claimedLead: ChatSession) => releaseTeamTaskClaimInDB({ scope: 'test', leadId: 'lead', claimedLead, taskBeforeClaim: lead().teamTasks![0] })
+  it('restores the exact pre-claim record while the stored lead is still the claimed snapshot', async () => {
+    const before = lead()
+    const claimed = await claim(before)
+    const released = await release(claimed)
+    expect(released).toEqual(before)
+    expect(db.current).toEqual(before)
+    // The released task can be claimed again from the original snapshot.
+    expect((await claim(before)).teamTasks?.[0].status).toBe('running')
+  })
+  it('changes nothing when another write landed after the claim', async () => {
+    const claimed = await claim(lead())
+    db.current!.title = 'concurrent edit'
+    const concurrent = structuredClone(db.current)
+    expect(await release(claimed)).toBeNull()
+    expect(db.current).toEqual(concurrent)
+    // The user marked it done in the meantime: still nothing to release.
+    const done = { ...structuredClone(claimed), teamTasks: [{ ...claimed.teamTasks![0], status: 'done' as const }, claimed.teamTasks![1]] }
+    db.current = structuredClone(done)
+    expect(await release(claimed)).toBeNull()
+    expect(db.current).toEqual(done)
+  })
+  it('does not touch an ended, archived or deleted lead, and refuses a release of a task that is not running', async () => {
+    const claimed = await claim(lead())
+    for (const stored of [{ ...claimed, teamEnded: true }, { ...claimed, archived: true }]) {
+      db.current = structuredClone(stored)
+      await expect(release(stored)).resolves.toBeNull()
+      expect(db.current).toEqual(stored)
+    }
+    db.current = structuredClone(claimed); db.deleted = true
+    await expect(release(claimed)).resolves.toBeNull()
+    expect(db.current).toEqual(claimed)
+    db.deleted = false
+    await expect(releaseTeamTaskClaimInDB({ scope: 'test', leadId: 'lead', claimedLead: lead(), taskBeforeClaim: lead().teamTasks![0] })).rejects.toThrow('Invalid team claim release')
+    await expect(releaseTeamTaskClaimInDB({ scope: 'test', leadId: 'lead', claimedLead: claimed, taskBeforeClaim: { ...lead().teamTasks![0], status: 'running' } })).rejects.toThrow('Invalid team claim release')
   })
 })

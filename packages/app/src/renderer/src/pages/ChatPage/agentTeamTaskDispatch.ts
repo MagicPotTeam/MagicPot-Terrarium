@@ -1,5 +1,5 @@
 import { compareAndUpdateSessionInDB, hasSessionDeleteTombstone, sameTeamLifecycle, type ChatSession } from './chatStorage'
-import { setTeamTaskStatus, type TeamTask } from './agentTeamTasks'
+import { revertTeamTaskRun, setTeamTaskStatus, type TeamTask, type TeamTaskOutcome } from './agentTeamTasks'
 
 /**
  * The store must serialize updates for the team and commit the returned graph before
@@ -43,16 +43,59 @@ export async function claimTeamTaskInDB(input: {
   return committed
 }
 
-/** Fixture-oriented executor: callers provide their normal dispatch admission checks. */
+/**
+ * Undo a claim whose run never started: only while the stored lead is still exactly the claimed
+ * snapshot, the stored task goes back to its pre-claim record, so the stored lead equals the
+ * snapshot the claim started from again (and the renderer's save baseline for it stays valid).
+ * Any other write since the claim wins: nothing is changed and null is returned, and the task stays
+ * running until the user resets it. Storage failures reject.
+ */
+export async function releaseTeamTaskClaimInDB(input: {
+  scope: string
+  leadId: string
+  claimedLead: ChatSession
+  taskBeforeClaim: TeamTask
+}): Promise<ChatSession | null> {
+  const { scope, leadId } = input
+  const claimedLead = structuredClone(input.claimedLead)
+  const restored = structuredClone(input.taskBeforeClaim)
+  if (!scope || !leadId || claimedLead.id !== leadId || restored.status !== 'pending' ||
+    claimedLead.teamTasks?.find(item => item.id === restored.id)?.status !== 'running') throw new Error('Invalid team claim release')
+  return compareAndUpdateSessionInDB(leadId, scope, {
+    expectedSession: claimedLead,
+    shouldUpdate: current => current.id === leadId && !current.teamEnded && !current.archived &&
+      sameTeamLifecycle(current, claimedLead) && !hasSessionDeleteTombstone(leadId, scope),
+    update: current => {
+      const tasks = current.teamTasks ?? []
+      const task = tasks.find(item => item.id === restored.id)
+      if (!task || task.status !== 'running' || task.ownerId !== restored.ownerId) throw new Error('Task is not running')
+      return { ...current, teamTasks: tasks.map(item => item.id === restored.id ? restored : item) }
+    }
+  })
+}
+
+/**
+ * Fixture-oriented executor: callers provide their normal dispatch admission checks. A failed run
+ * returns the task to pending with its outcome; it is never retried here.
+ */
 export async function dispatchTeamTask(
   store: TeamTaskDispatchStore,
   taskId: string,
-  execute: () => Promise<void>
+  execute: () => Promise<void>,
+  outcomeOf: (error: unknown) => TeamTaskOutcome = () => 'failed'
 ): Promise<void> {
+  let ownerId = ''
   await store.updateTasks(current => {
     const task = current.find(item => item.id === taskId)
     if (!task || task.status !== 'pending') throw new Error('Task is not pending')
+    ownerId = task.ownerId
     return setTeamTaskStatus(current, taskId, 'running')
   })
-  await execute()
+  try {
+    await execute()
+  } catch (error) {
+    // A failed revert leaves the task running (the user can reset it); the run's error still wins.
+    await store.updateTasks(current => revertTeamTaskRun(current, taskId, ownerId, outcomeOf(error)) ?? [...current]).catch(() => undefined)
+    throw error
+  }
 }
