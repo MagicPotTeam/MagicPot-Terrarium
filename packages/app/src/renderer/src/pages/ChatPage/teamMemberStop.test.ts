@@ -55,7 +55,8 @@ describe('which accepted send releases a stop hold', () => {
     expect(sendReleasesStopHolds({ ...task, userTaskDispatch: true })).toBe(true)
   })
   it('never releases on a task dispatched by the lead or by automation, a team-message delivery or a drained queue item', () => {
-    expect(sendReleasesStopHolds(task)).toBe(false)
+    // A task send without the mark (the shape of the lead's or an automation's dispatch).
+    expect(sendReleasesStopHolds(task as never)).toBe(false)
     expect(sendReleasesStopHolds({ ...task, userTaskDispatch: false })).toBe(false)
     expect(sendReleasesStopHolds({ content: '[团队成员消息]', queueKey: 'team-message:1', teamMessageHop: 1 } as never)).toBe(false)
     // A drained item releases in its own lease (onQueuedComposerAccepted), not here.
