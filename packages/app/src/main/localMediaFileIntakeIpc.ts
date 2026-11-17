@@ -8,7 +8,11 @@ import {
 } from './localMediaAccess'
 import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 import { toImportSourceLocalPath } from './api/svcManagedMediaImpl'
-import { isManagedMediaMimeTypeSupported } from './llmProxy/managedMediaStore'
+import {
+  DEFAULT_IMPORT_SOURCE_GUARD,
+  isManagedMediaMimeTypeSupported,
+  runImportSourceOperation
+} from './llmProxy/managedMediaStore'
 
 let localMediaFileIntakeIpcRegistered = false
 
@@ -29,6 +33,8 @@ export type LocalMediaImportGrantDependencies = {
   realpath?: (filePath: string) => Promise<string>
   stat?: (filePath: string) => Promise<{ isFile(): boolean }>
   now?: () => number
+  /** Deadline for the realpath and stat (the file may sit on a stalled mount). */
+  timeoutMs?: number
 }
 
 const isImportablePath = (value: string): boolean => {
@@ -53,14 +59,23 @@ export async function grantLocalMediaImportPath(
   {
     realpath = (value) => fs.realpath(value),
     stat = (value) => fs.stat(value),
-    now = Date.now
+    now = Date.now,
+    timeoutMs = DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs
   }: LocalMediaImportGrantDependencies = {}
 ): Promise<string> {
   if (typeof filePath !== 'string' || typeof mimeType !== 'string') return ''
   if (!isManagedMediaMimeTypeSupported(mimeType) || !isImportablePath(filePath)) return ''
   try {
-    const canonical = path.resolve(await realpath(filePath))
-    if (!isImportablePath(canonical) || !(await stat(canonical)).isFile()) return ''
+    // Off the event loop and under the import-source deadline and gate.
+    const canonical = await runImportSourceOperation(
+      async () => {
+        const resolved = path.resolve(await realpath(filePath))
+        if (!isImportablePath(resolved) || !(await stat(resolved)).isFile()) return ''
+        return resolved
+      },
+      { timeoutMs }
+    )
+    if (!canonical) return ''
     recordLocalMediaImportGrant(canonical, now())
     return canonical
   } catch {

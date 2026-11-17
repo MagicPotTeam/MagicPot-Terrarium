@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  authorizeLocalMediaImportSourcePath,
+  authorizeLocalMediaImportSourcePathAsync,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
   resolveAuthorizedLocalMediaPath
@@ -222,7 +222,7 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
     await fs.writeFile(picked, PNG)
     const { service, importFile } = create({
       authorizeImportSourcePath: (sourcePath) =>
-        authorizeLocalMediaImportSourcePath(sourcePath, [allowed])
+        authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed])
     })
     // The preload sends the webUtils path of the picked File; main returns the canonical path.
     const canonical = await grantLocalMediaImportPath(picked, 'image/png')

@@ -15,7 +15,7 @@ vi.mock('electron', () => ({
 
 import {
   LOCAL_MEDIA_IMPORT_GRANT_TTL_MS,
-  authorizeLocalMediaImportSourcePath,
+  authorizeLocalMediaImportSourcePathAsync,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
   countLocalMediaImportGrantsForTest,
@@ -55,7 +55,7 @@ describe('short-lived local media import grants', () => {
       const canonical = await grantLocalMediaImportPath(picked, 'image/png')
       expect(canonical).toBe(picked)
       // main's importFile uses the grant up.
-      expect(authorizeLocalMediaImportSourcePath(canonical, [])).toBe(picked)
+      expect(await authorizeLocalMediaImportSourcePathAsync(canonical, [])).toBe(picked)
     }
 
     expect(resolveAuthorizedLocalMediaPath(canvasVideo, [])).toBe(canvasVideo)
@@ -74,16 +74,16 @@ describe('short-lived local media import grants', () => {
     const clock = { now: () => now }
 
     expect(await grantLocalMediaImportPath(picked, 'image/png', clock)).toBe(picked)
-    expect(authorizeLocalMediaImportSourcePath(picked, [], now)).toBe(picked)
-    expect(authorizeLocalMediaImportSourcePath(picked, [], now)).toBeNull()
+    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [], { now })).toBe(picked)
+    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [], { now })).toBeNull()
 
     expect(await grantLocalMediaImportPath(picked, 'image/png', clock)).toBe(picked)
     now += LOCAL_MEDIA_IMPORT_GRANT_TTL_MS - 1
-    expect(authorizeLocalMediaImportSourcePath(picked, [], now)).toBe(picked)
+    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [], { now })).toBe(picked)
 
     expect(await grantLocalMediaImportPath(picked, 'image/png', clock)).toBe(picked)
     now += LOCAL_MEDIA_IMPORT_GRANT_TTL_MS
-    expect(authorizeLocalMediaImportSourcePath(picked, [], now)).toBeNull()
+    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [], { now })).toBeNull()
     expect(countLocalMediaImportGrantsForTest(now)).toBe(0)
   })
 
@@ -93,9 +93,9 @@ describe('short-lived local media import grants', () => {
     fs.writeFileSync(picked, 'png')
     await grantLocalMediaImportPath(picked, 'image/png')
     await grantLocalMediaImportPath(picked, 'image/png')
-    expect(authorizeLocalMediaImportSourcePath(picked, [])).toBe(picked)
-    expect(authorizeLocalMediaImportSourcePath(picked, [])).toBe(picked)
-    expect(authorizeLocalMediaImportSourcePath(picked, [])).toBeNull()
+    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [])).toBe(picked)
+    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [])).toBe(picked)
+    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [])).toBeNull()
   })
 
   it('keeps at most 256 import grants in memory', async () => {
@@ -107,8 +107,8 @@ describe('short-lived local media import grants', () => {
     }
     expect(countLocalMediaImportGrantsForTest()).toBe(256)
     // The oldest went first.
-    expect(authorizeLocalMediaImportSourcePath(files[0], [])).toBeNull()
-    expect(authorizeLocalMediaImportSourcePath(files[299], [])).toBe(files[299])
+    expect(await authorizeLocalMediaImportSourcePathAsync(files[0], [])).toBeNull()
+    expect(await authorizeLocalMediaImportSourcePathAsync(files[299], [])).toBe(files[299])
   })
 
   it('records no grant for a type main refuses, a directory, a missing file or a refused path', async () => {
@@ -152,13 +152,13 @@ describe('short-lived local media import grants', () => {
     fs.writeFileSync(picked, 'png')
     fs.writeFileSync(other, 'png')
     await grantLocalMediaImportPath(picked, 'image/png')
-    expect(authorizeLocalMediaImportSourcePath(other, [])).toBeNull()
+    expect(await authorizeLocalMediaImportSourcePathAsync(other, [])).toBeNull()
     if (process.platform !== 'win32') {
       // A symlink to the granted file resolves to it: the canonical path is what importFile
       // compares with the request, so the link itself is still refused there.
       const link = path.join(root, 'link.png')
       fs.symlinkSync(picked, link)
-      expect(authorizeLocalMediaImportSourcePath(link, [])).toBe(picked)
+      expect(await authorizeLocalMediaImportSourcePathAsync(link, [])).toBe(picked)
     }
   })
 })

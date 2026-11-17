@@ -51,7 +51,11 @@ export type ImportManagedMediaInput = {
   signal?: AbortSignal
 }
 type ImportManagedMediaCommon = Omit<ImportManagedMediaInput, 'bytes'> & { chatMediaRoot: string }
-export type ImportManagedMediaFileInput = ImportManagedMediaCommon & { sourcePath: string }
+export type ImportManagedMediaFileInput = ImportManagedMediaCommon & {
+  sourcePath: string
+  /** Deadlines for a source the renderer named; main-owned callers leave it unset. */
+  sourceGuard?: ImportSourceGuard
+}
 export type ImportManagedMediaStreamInput = ImportManagedMediaCommon & {
   stream: AsyncIterable<Uint8Array | string> | NodeJS.ReadableStream
 }
@@ -93,6 +97,7 @@ export type ManagedMediaImportErrorCode =
   | 'MANAGED_MEDIA_UNSUPPORTED'
   | 'MANAGED_MEDIA_TOO_LARGE'
   | 'MANAGED_MEDIA_IO'
+  | 'MANAGED_MEDIA_IMPORT_TIMEOUT'
 export class ManagedMediaImportError extends Error {
   constructor(
     public readonly code: ManagedMediaImportErrorCode,
@@ -112,6 +117,132 @@ export function isPathInsideRoot(root: string, candidate: string): boolean {
   const relative = path.relative(comparisonPath(root), comparisonPath(candidate))
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
+/**
+ * Deadlines for reading a source the renderer named, which may sit on a stalled network
+ * mount. A filesystem call that never returns holds one of libuv's few threadpool threads
+ * whatever main does, so these calls also run through a small gate: at most
+ * IMPORT_SOURCE_MAX_CONCURRENT_OPERATIONS of them at once (a slot is freed only when its
+ * call really returns), and the caller gets a short error at the deadline instead of
+ * waiting. Main's other file work keeps the remaining threads.
+ */
+export type ImportSourceGuard = {
+  /** Deadline for each filesystem call on the source: lstat, realpath, open, stat, each read. */
+  operationTimeoutMs: number
+  /** The whole copy may take this long plus one second per copyMinBytesPerSecond bytes. */
+  copyBaseTimeoutMs: number
+  copyMinBytesPerSecond: number
+}
+export const IMPORT_SOURCE_MAX_CONCURRENT_OPERATIONS = 2
+export const DEFAULT_IMPORT_SOURCE_GUARD: ImportSourceGuard = {
+  operationTimeoutMs: 15_000,
+  copyBaseTimeoutMs: 60_000,
+  copyMinBytesPerSecond: 1024 * 1024
+}
+
+function importSourceTimeoutError(): ManagedMediaImportError {
+  return new ManagedMediaImportError(
+    'MANAGED_MEDIA_IMPORT_TIMEOUT',
+    'Managed media source did not respond in time'
+  )
+}
+
+type ImportSourceGate = {
+  acquire(run: () => void): () => void
+  release(): void
+  readonly active: number
+}
+
+export function createImportSourceGate(limit: number): ImportSourceGate {
+  let active = 0
+  const waiting = new Set<() => void>()
+  return {
+    acquire(run) {
+      if (active < limit) {
+        active += 1
+        run()
+        return () => undefined
+      }
+      waiting.add(run)
+      return () => waiting.delete(run)
+    },
+    release() {
+      const next = waiting.values().next().value
+      if (next) {
+        waiting.delete(next)
+        next()
+      } else {
+        active = Math.max(0, active - 1)
+      }
+    },
+    get active() {
+      return active
+    }
+  }
+}
+
+const defaultImportSourceGate = createImportSourceGate(IMPORT_SOURCE_MAX_CONCURRENT_OPERATIONS)
+
+/**
+ * Runs one filesystem call on an import source under the gate, rejecting with
+ * MANAGED_MEDIA_IMPORT_TIMEOUT once timeoutMs has passed (waiting for a slot included).
+ * The slot stays taken until the call really settles; a result that arrives after the
+ * deadline goes to onLateResult (to close a late file handle).
+ */
+export function runImportSourceOperation<T>(
+  operation: () => Promise<T>,
+  {
+    timeoutMs,
+    gate = defaultImportSourceGate,
+    onLateResult
+  }: { timeoutMs: number; gate?: ImportSourceGate; onLateResult?: (value: T) => void }
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    let cancelWait = (): void => undefined
+    const timer = setTimeout(
+      () => {
+        if (settled) return
+        settled = true
+        cancelWait()
+        reject(importSourceTimeoutError())
+      },
+      Math.max(0, timeoutMs)
+    )
+    cancelWait = gate.acquire(() => {
+      if (settled) {
+        gate.release()
+        return
+      }
+      let pending: Promise<T>
+      try {
+        pending = Promise.resolve(operation())
+      } catch (error) {
+        pending = Promise.reject(error)
+      }
+      pending
+        .then(
+          (value) => {
+            if (!settled) {
+              settled = true
+              clearTimeout(timer)
+              resolve(value)
+            } else {
+              onLateResult?.(value)
+            }
+          },
+          (error: unknown) => {
+            if (!settled) {
+              settled = true
+              clearTimeout(timer)
+              reject(error)
+            }
+          }
+        )
+        .finally(() => gate.release())
+    })
+  })
+}
+
 function abortError(): Error {
   return new ManagedMediaImportError('MANAGED_MEDIA_ABORTED', 'Managed media import aborted')
 }
@@ -1031,11 +1162,30 @@ export async function importManagedMediaFile(
   const authorizedRoot = await canonicalAuthorizedRoot(dependencies.authorizedRoot, fileSystem)
   const canonicalRoot = await prepareStoreRoot(input.chatMediaRoot, authorizedRoot, fileSystem)
   throwIfAborted(input.signal)
+  const guard = input.sourceGuard
+  let copyDeadline = Number.POSITIVE_INFINITY
+  let timedOut = false
+  // Every call on the source (which may be a stalled or hostile mount) has a deadline.
+  const onSource = <T>(operation: () => Promise<T>, onLateResult?: (value: T) => void) => {
+    if (!guard) return operation()
+    const timeoutMs = Math.min(guard.operationTimeoutMs, copyDeadline - Date.now())
+    if (timeoutMs <= 0) {
+      timedOut = true
+      return Promise.reject(importSourceTimeoutError())
+    }
+    return runImportSourceOperation(operation, { timeoutMs, onLateResult }).catch(
+      (error: unknown) => {
+        if ((error as ManagedMediaImportError)?.code === 'MANAGED_MEDIA_IMPORT_TIMEOUT')
+          timedOut = true
+        throw error
+      }
+    )
+  }
   const resolvedSource = path.resolve(input.sourcePath)
-  const sourceLstat = await fileSystem.lstat(resolvedSource)
+  const sourceLstat = await onSource(() => fileSystem.lstat(resolvedSource))
   if (sourceLstat.isSymbolicLink() || !sourceLstat.isFile())
     throw new Error('Managed media source must be a regular non-symlink file')
-  const canonicalSource = await fileSystem.realpath(resolvedSource)
+  const canonicalSource = await onSource(() => fileSystem.realpath(resolvedSource))
   if (comparisonPath(canonicalSource) !== comparisonPath(resolvedSource))
     throw new Error('Managed media source must be canonical')
   if (isPathInsideRoot(canonicalRoot, canonicalSource))
@@ -1044,13 +1194,18 @@ export async function importManagedMediaFile(
   if (!sourceLstat.size) throw new Error('Managed media cannot be empty')
   if (maxBytes !== undefined && sourceLstat.size > maxBytes)
     throw new Error(`Managed media exceeds the ${maxBytes} byte limit`)
-  const sourceHandle = await fileSystem.open(
-    resolvedSource,
-    fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK
+  if (guard)
+    copyDeadline =
+      Date.now() +
+      guard.copyBaseTimeoutMs +
+      Math.ceil((sourceLstat.size / guard.copyMinBytesPerSecond) * 1000)
+  const sourceHandle = await onSource(
+    () => fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK),
+    (lateHandle) => void lateHandle.close().catch(() => undefined)
   )
   let staged: { stagedPath: string; size: number; sha256: string } | undefined
   try {
-    const opened = await sourceHandle.stat()
+    const opened = await onSource(() => sourceHandle.stat())
     if (
       !opened.isFile() ||
       opened.dev !== sourceLstat.dev ||
@@ -1064,11 +1219,8 @@ export async function importManagedMediaFile(
       let position = 0
       while (position < opened.size) {
         throwIfAborted(input.signal)
-        const { bytesRead } = await sourceHandle.read(
-          buffer,
-          0,
-          Math.min(buffer.length, opened.size - position),
-          position
+        const { bytesRead } = await onSource(() =>
+          sourceHandle.read(buffer, 0, Math.min(buffer.length, opened.size - position), position)
         )
         if (!bytesRead) throw new Error('Managed media source changed during import')
         position += bytesRead
@@ -1083,7 +1235,7 @@ export async function importManagedMediaFile(
       fileSystem,
       randomId
     )
-    const after = await sourceHandle.stat()
+    const after = await onSource(() => sourceHandle.stat())
     if (
       after.dev !== opened.dev ||
       after.ino !== opened.ino ||
@@ -1094,7 +1246,10 @@ export async function importManagedMediaFile(
       throw new Error('Managed media source changed during import')
     return await publishImport(canonicalRoot, staged, input, dependencies)
   } finally {
-    await sourceHandle.close().catch(() => undefined)
+    // FileHandle.close() waits for the handle's pending calls: after a deadline it would wait
+    // for the stalled read, so it is then left to finish in the background.
+    if (timedOut) void sourceHandle.close().catch(() => undefined)
+    else await sourceHandle.close().catch(() => undefined)
     if (staged) await fileSystem.unlink(staged.stagedPath).catch(() => undefined)
   }
 }

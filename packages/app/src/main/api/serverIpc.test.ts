@@ -89,7 +89,7 @@ vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: vi.fn
 }) }))
 vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({ createInstalledCatalogReadDelegate: catalogDelegateFactory }))
 vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: vi.fn(function (deps?: unknown) { managedMediaConstructor(deps); return new (createServiceClass())() }), MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES: 1024 }))
-vi.mock('../localMediaAccess', () => ({ authorizeLocalMediaImportSourcePath: resolveAuthorizedLocalMediaPathMock }))
+vi.mock('../localMediaAccess', () => ({ authorizeLocalMediaImportSourcePathAsync: resolveAuthorizedLocalMediaPathMock }))
 vi.mock('../localMediaAllowedRoots', () => ({ getLocalMediaAllowedRoots: () => ['/app-root'] }))
 vi.mock('./svcReportBundlesImpl', () => ({ ReportBundlesSvcImpl: createServiceClass() }))
 describe('serverIpc createServer', () => {
@@ -98,17 +98,19 @@ describe('serverIpc createServer', () => {
     onMock.mockClear(); catalogDelegateFactory.mockClear(); platformConstructor.mockClear(); storageDelegateFactory.mockClear(); stateConstructor.mockClear()
   })
 
-  it('gives the renderer-facing managed media service the source-path policy and the size cap', () => {
+  it('gives the renderer-facing managed media service the source-path policy, the size cap and the source deadlines', async () => {
     managedMediaConstructor.mockClear()
     createServer()
     expect(managedMediaConstructor).toHaveBeenCalledOnce()
     const deps = managedMediaConstructor.mock.calls[0]?.[0] as {
-      authorizeImportSourcePath?: (sourcePath: string) => string | null
+      authorizeImportSourcePath?: (sourcePath: string) => Promise<string | null>
       maxImportFileBytes?: number
+      importSourceGuard?: { operationTimeoutMs: number }
     }
     expect(deps.maxImportFileBytes).toBe(1024)
-    expect(deps.authorizeImportSourcePath?.('/app-root/a.png')).toBe('/app-root/a.png')
-    expect(deps.authorizeImportSourcePath?.('/elsewhere/a.png')).toBeNull()
+    expect(deps.importSourceGuard?.operationTimeoutMs).toBeGreaterThan(0)
+    await expect(deps.authorizeImportSourcePath?.('/app-root/a.png')).resolves.toBe('/app-root/a.png')
+    await expect(deps.authorizeImportSourcePath?.('/elsewhere/a.png')).resolves.toBeNull()
     expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenLastCalledWith('/elsewhere/a.png', ['/app-root'])
   })
 

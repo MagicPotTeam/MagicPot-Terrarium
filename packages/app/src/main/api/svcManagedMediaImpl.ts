@@ -44,6 +44,7 @@ import {
   importManagedMedia,
   importManagedMediaFile,
   isManagedMediaMimeTypeSupported,
+  type ImportSourceGuard,
   readManagedMediaBytes,
   isPathInsideRoot,
   type ImportedManagedMedia,
@@ -66,9 +67,11 @@ export type ManagedMediaSvcImplDependencies = {
    * user picked), otherwise null. When set, importFile refuses every path it does not
    * return unchanged. Main-owned callers that confine paths themselves leave it unset.
    */
-  authorizeImportSourcePath?: (sourcePath: string) => string | null
+  authorizeImportSourcePath?: (sourcePath: string) => string | null | Promise<string | null>
   /** Byte cap for importFile, checked on the stat and again on the bytes actually copied. */
   maxImportFileBytes?: number
+  /** Deadlines for the source's filesystem calls and copy (renderer-named sources). */
+  importSourceGuard?: ImportSourceGuard
   updateReferenceSnapshot?: (snapshot: {
     complete: boolean
     ids: readonly string[]
@@ -317,7 +320,7 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       if (authorize) {
         // The authorized form must be the requested path itself: no symlink, alias or
         // case variant of an allowed path is followed to somewhere else.
-        const authorized = authorize(sourcePath)
+        const authorized = await authorize(sourcePath)
         if (!authorized || !sameFilesystemPath(authorized, sourcePath)) {
           throw new ServiceError('Managed media source is not an allowed file', {
             code: 'MANAGED_MEDIA_IMPORT_FORBIDDEN'
@@ -340,6 +343,9 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
           provenance: { source: 'chat-attachment-file' },
           ...(this.dependencies.maxImportFileBytes !== undefined
             ? { maxBytes: this.dependencies.maxImportFileBytes }
+            : {}),
+          ...(this.dependencies.importSourceGuard
+            ? { sourceGuard: this.dependencies.importSourceGuard }
             : {})
         },
         { authorizedRoot }

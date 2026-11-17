@@ -30,11 +30,15 @@ import { createInstalledCatalogReadDelegate } from '../magicAgentRuntime/install
 import { createStartupStorageReadDelegate } from '../storageMetadata/startupStorageReadBinding'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 import { MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES, ManagedMediaSvcImpl } from './svcManagedMediaImpl'
-import { authorizeLocalMediaImportSourcePath } from '../localMediaAccess'
+import { authorizeLocalMediaImportSourcePathAsync } from '../localMediaAccess'
 import { getLocalMediaAllowedRoots } from '../localMediaAllowedRoots'
 import { ReportBundlesSvcImpl } from './svcReportBundlesImpl'
 import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaCleanupScheduler'
 import { getChatMediaDir } from '../llmProxy/chatMediaDir'
+import {
+  DEFAULT_IMPORT_SOURCE_GUARD,
+  runImportSourceOperation
+} from '../llmProxy/managedMediaStore'
 
 export const createServer = (
   managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler,
@@ -81,9 +85,15 @@ export const createServer = (
     svcManagedMedia: new ManagedMediaSvcImpl({
       // Renderer-supplied paths: application roots, persisted grants, and the one-use,
       // in-memory import grant of a file the user just picked or dropped in the chat.
+      // Off the event loop (async realpath) and under the import-source deadline: the path
+      // may sit on a stalled network mount.
       authorizeImportSourcePath: (sourcePath) =>
-        authorizeLocalMediaImportSourcePath(sourcePath, getLocalMediaAllowedRoots()),
+        runImportSourceOperation(
+          () => authorizeLocalMediaImportSourcePathAsync(sourcePath, getLocalMediaAllowedRoots()),
+          { timeoutMs: DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs }
+        ),
       maxImportFileBytes: MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES,
+      importSourceGuard: DEFAULT_IMPORT_SOURCE_GUARD,
       updateReferenceSnapshot: async (snapshot) => {
         const chatMediaRoot = await getChatMediaDir()
         managedMediaCleanupScheduler?.submitSnapshot({

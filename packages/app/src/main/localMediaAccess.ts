@@ -297,22 +297,52 @@ export function consumeLocalMediaImportGrant(canonicalPath: string, now = Date.n
   return true
 }
 
+async function canonicalizeExistingPathAsync(
+  filePath: string,
+  realpath: (value: string) => Promise<string>
+): Promise<string | null> {
+  try {
+    return path.resolve(await realpath(filePath))
+  } catch {
+    return null
+  }
+}
+
 /**
  * Source-path policy for a renderer importFile request: the canonical path when a live
  * import grant covers it (the grant is used up) or when it is persistently authorized
- * (application root or scoped grant), otherwise null.
+ * (scoped grant or application root), otherwise null. Every realpath (of the source and of
+ * each root) is fs.promises.realpath, on the threadpool, so a path on a stalled mount never
+ * blocks main's event loop.
  */
-export function authorizeLocalMediaImportSourcePath(
+export async function authorizeLocalMediaImportSourcePathAsync(
   filePath: string,
   allowedRoots: readonly string[],
-  now = Date.now()
-): string | null {
+  {
+    now = Date.now(),
+    realpath = (value: string) => fs.promises.realpath(value)
+  }: { now?: number; realpath?: (value: string) => Promise<string> } = {}
+): Promise<string | null> {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
-  const canonical = canonicalizeExistingPath(trimmed)
+  const isNetworkPath = trimmed.startsWith('\\\\') || trimmed.startsWith('//')
+  const canonical = await canonicalizeExistingPathAsync(trimmed, realpath)
   if (!canonical) return null
   if (consumeLocalMediaImportGrant(canonical, now)) return canonical
-  return resolveAuthorizedLocalMediaPath(trimmed, allowedRoots)
+  if (scopedLocalMediaPaths.has(comparisonKey(canonical))) return canonical
+  if (
+    Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
+      isSameOrInside(directory, canonical)
+    )
+  ) {
+    return canonical
+  }
+  if (isNetworkPath) return null
+  for (const root of allowedRoots) {
+    const canonicalRoot = await canonicalizeExistingPathAsync(root, realpath)
+    if (canonicalRoot && isSameOrInside(canonicalRoot, canonical)) return canonical
+  }
+  return null
 }
 
 export function countLocalMediaImportGrantsForTest(now = Date.now()): number {
