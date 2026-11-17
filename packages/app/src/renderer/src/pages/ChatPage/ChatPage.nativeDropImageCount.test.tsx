@@ -747,13 +747,13 @@ describe('native drop image count boundary', () => {
     // prepares for one built-in Responses request. They used to be attached, then refused
     // after the send. The routes MAIN does not limit this way are in
     // ChatPage.composerImageBudgetRoute.test.tsx.
+    // Own names, so an import still finishing from an earlier test is never counted here.
     const largeImages = (count: number, offset = 0) =>
-      images(count + offset)
-        .slice(offset)
-        .map((file) => {
-          Object.defineProperty(file, 'size', { value: size49 })
-          return file
-        })
+      Array.from({ length: count }, (_, index) => {
+        const file = new File(['x'], `large-${index + offset}.png`, { type: 'image/png' })
+        Object.defineProperty(file, 'size', { value: size49 })
+        return file
+      })
     const attachmentCount = () =>
       (JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]).length
     const useProfile = (overrides: Record<string, unknown>) => {
@@ -774,26 +774,33 @@ describe('native drop image count boundary', () => {
       ]
     }
     // Session b has an empty draft; the import returns a managed reference with its size.
+    // A dropped File without a path (jsdom has none) is imported as bytes.
+    const imports = () =>
+      [...f.importDataUrl.mock.calls, ...f.importBytes.mock.calls].filter(([input]) =>
+        String((input as { originalFileName?: unknown } | undefined)?.originalFileName).startsWith(
+          'large-'
+        )
+      ).length
     const setupSessionB = async () => {
       let serial = 0
-      f.importDataUrl.mockImplementation(
-        async ({ originalFileName }: { originalFileName: string }) => {
-          const sha256 = (serial++).toString(16).padStart(64, '0')
-          return {
-            localMediaUrl: `local-media://imported/${sha256}`,
-            reference: {
-              version: 1,
-              kind: 'managed',
-              relativePath: `originals/00/${sha256}.png`,
-              status: 'ready',
-              sha256,
-              sizeBytes: size49,
-              mimeType: 'image/png',
-              originalFileName
-            }
+      const importManaged = async ({ originalFileName }: { originalFileName: string }) => {
+        const sha256 = (serial++).toString(16).padStart(64, '0')
+        return {
+          localMediaUrl: `local-media://imported/${sha256}`,
+          reference: {
+            version: 1,
+            kind: 'managed',
+            relativePath: `originals/00/${sha256}.png`,
+            status: 'ready',
+            sha256,
+            sizeBytes: size49,
+            mimeType: 'image/png',
+            originalFileName
           }
         }
-      )
+      }
+      f.importDataUrl.mockImplementation(importManaged)
+      f.importBytes.mockImplementation(importManaged)
       await setup()
       fireEvent.click(screen.getByRole('button', { name: 'switch b' }))
       await waitFor(() => expect(screen.getByTestId('input')).toHaveValue('session b'))
@@ -806,7 +813,7 @@ describe('native drop image count boundary', () => {
       await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
       expect(f.blob).not.toHaveBeenCalled()
       expect(f.fileReaderCreated).not.toHaveBeenCalled()
-      expect(f.importDataUrl).not.toHaveBeenCalled()
+      expect(imports()).toBe(0)
       expect(f.importFile).not.toHaveBeenCalled()
       expect(attachmentCount()).toBe(0)
       expect(screen.getByTestId('input')).toHaveValue('session b')
@@ -817,10 +824,11 @@ describe('native drop image count boundary', () => {
       fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(6)) })
       await waitFor(() => expect(attachmentCount()).toBe(6))
       expect(f.notify).not.toHaveBeenCalled()
-      const importsAfterSix = f.importDataUrl.mock.calls.length
+      const importsAfterSix = imports()
+      expect(importsAfterSix).toBe(6)
       fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(2, 6)) })
       await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
-      expect(f.importDataUrl).toHaveBeenCalledTimes(importsAfterSix)
+      expect(imports()).toBe(importsAfterSix)
       expect(attachmentCount()).toBe(6)
       // A non-image still fits next to a full image budget.
       fireEvent.drop(screen.getByTestId('input'), {

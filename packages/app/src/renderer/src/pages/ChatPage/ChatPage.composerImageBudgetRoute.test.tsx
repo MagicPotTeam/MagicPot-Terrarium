@@ -20,6 +20,7 @@ const f = vi.hoisted(() => ({
   imageCreated: vi.fn(),
   fileReaderCreated: vi.fn(),
   importDataUrl: vi.fn(),
+  importBytes: vi.fn(),
   importFile: vi.fn(),
   read: vi.fn(),
   config: null as Config | null,
@@ -61,7 +62,11 @@ vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcFs: {},
     svcLLMProxy: { signHy3DModel: vi.fn() },
-    svcManagedMedia: { importDataUrl: f.importDataUrl, importFile: f.importFile }
+    svcManagedMedia: {
+      importDataUrl: f.importDataUrl,
+      importBytes: f.importBytes,
+      importFile: f.importFile
+    }
   })
 }))
 vi.mock('@renderer/utils/fileUtils', async (original) => ({
@@ -189,10 +194,13 @@ beforeEach(() => {
     return actual.materializeInternalImageDragAttachment(attachment)
   })
   f.blob.mockReturnValue('blob:test')
-  f.importDataUrl.mockResolvedValue({
+  const imported = {
     localMediaUrl: 'local-media://imported',
     reference: { version: 1, kind: 'managed', relativePath: 'imported', status: 'ready' }
-  })
+  }
+  f.importDataUrl.mockResolvedValue(imported)
+  // A File without a path (jsdom has none) is imported as bytes.
+  f.importBytes.mockResolvedValue(imported)
   f.read.mockResolvedValue({ files: [], failedUrls: [] })
   vi.stubGlobal(
     'Image',
