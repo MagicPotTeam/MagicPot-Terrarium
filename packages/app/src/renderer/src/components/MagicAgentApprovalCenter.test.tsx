@@ -365,3 +365,144 @@ describe('MagicAgentApprovalCenter', () => {
     }
   })
 })
+
+// An approval must never hide one of its parameters: field names that are also members of
+// Object.prototype, a JSON "__proto__" field, fields past the sixth and technical fields are all
+// listed with their values before the person decides.
+describe('MagicAgentApprovalCenter shows every parameter of the request', () => {
+  const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' }
+  // JSON.parse keeps "__proto__" as an own field, as a request decoded from a tool call does.
+  const prototypeNamedInput = () => JSON.parse(JSON.stringify({
+    command: 'echo visible',
+    constructor: 'CONSTRUCTOR-VALUE',
+    toString: 'TO-STRING-VALUE',
+    valueOf: 'VALUE-OF-VALUE',
+    hasOwnProperty: 'HAS-OWN-VALUE',
+    conversationId: 'conversation-fixture',
+    path: './fixture.txt'
+  }).replace(/}$/, ',"__proto__":{"nested":"PROTO-VALUE"}}')) as Record<string, unknown>
+  const label = (key: string) => i18n.t(`agent_workspace.approval.parameters.${key}` as never) as string
+  // Known fields first in their display order (conversationId, path, command), then the rest in
+  // the order they were sent.
+  const expectedRows = () => [
+    [label('conversation_id'), 'conversation-fixture'],
+    [label('path'), './fixture.txt'],
+    [label('command'), 'echo visible'],
+    ['constructor', 'CONSTRUCTOR-VALUE'],
+    ['toString', 'TO-STRING-VALUE'],
+    ['valueOf', 'VALUE-OF-VALUE'],
+    ['hasOwnProperty', 'HAS-OWN-VALUE'],
+    ['__proto__', '{"nested":"PROTO-VALUE"}']
+  ]
+  const dialogRows = () =>
+    [...screen.getByRole('dialog').querySelectorAll('dl > dt')].map(term => [term.textContent, term.nextElementSibling?.textContent])
+  const cardRows = (host: HTMLElement) =>
+    [...host.querySelectorAll('[data-testid="chat-prompt-card-detail"] > span')].map(row => row.textContent)
+
+  beforeEach(() => {
+    platformApi.listPendingApprovals.mockReset()
+    platformApi.resolvePendingApproval.mockReset()
+  })
+  afterEach(async () => { await act(async () => { await i18n.changeLanguage('zh-CN') }) })
+
+  it('builds the fixture with own prototype-named fields, including __proto__', () => {
+    const input = prototypeNamedInput()
+    for (const key of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) expect(Object.hasOwn(input, key)).toBe(true)
+    expect(Object.getPrototypeOf(input)).toBe(Object.prototype)
+  })
+
+  it.each(['zh-CN', 'en-US'])('lists every field with its value in the dialog (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'dialog-proto', revision: 1, request: { request: { target: { id: 'shell.execute' }, input: prototypeNamedInput() } } }] })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      expect(await screen.findByRole('dialog')).toBeVisible()
+      expect(dialogRows()).toEqual(expectedRows())
+      expect(label('path')).not.toBe('path')
+      expect(platformApi.resolvePendingApproval).not.toHaveBeenCalled()
+    } finally { view.unmount() }
+  })
+
+  it.each(['zh-CN', 'en-US'])('lists every field with its value in the inline member card (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    const host = document.createElement('div'); document.body.append(host)
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'inline-proto', revision: 1, request: { request: { sessionId: 'member', route, target: { id: 'shell.execute' }, input: prototypeNamedInput() } } }] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', 'Writer']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      await waitFor(() => expect(host.querySelector('[data-testid="team-approval-card"]')).not.toBeNull())
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(cardRows(host)).toEqual(expectedRows().map(([name, value]) => `${name}: ${value}`))
+      expect(host.querySelector('details')?.open).toBe(false)
+    } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
+  })
+
+  it('lists the other fields of a note under the note in the inline card', async () => {
+    const host = document.createElement('div'); document.body.append(host)
+    const input = JSON.parse('{"action":"set","key":"note-key","value":"note text","expectedRevision":3,"constructor":"CTOR","__proto__":"PROTO"}')
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'inline-note', revision: 1, request: { request: { sessionId: 'member', route, target: { id: 'scratchpad' }, input } } }] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', '文案']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      expect(await screen.findByText('文案 想保存一条笔记')).toBeVisible()
+      expect(host.querySelector('[title]')?.textContent).toBe('note text')
+      expect(cardRows(host)).toEqual(['操作: set', '笔记键: note-key', '预期笔记版本: 3', 'constructor: CTOR', '__proto__: PROTO'])
+    } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
+  })
+
+  it('lists every field of a request with more than six fields, known ones in their order', async () => {
+    const input = { content: 'body', path: './memory/facts.md', namespace: 'ns', create: true, preimage: null, namespaceGeneration: 'gen', namespaceCreation: true, operationId: 'op', conversationId: 'conv', routeIdentity: ['canvas', 'thread'], workspaceId: 'ws', bindingRevision: 'rev' }
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'many', revision: 1, request: { request: { target: { id: 'memory_write' }, input } } }] })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      expect(await screen.findByRole('dialog')).toBeVisible()
+      expect(dialogRows()).toEqual([
+        [label('content'), 'body'], [label('namespace'), 'ns'], [label('namespace_generation'), 'gen'],
+        [label('namespace_creation'), 'true'], [label('preimage'), 'null'], [label('create'), 'true'],
+        [label('operation_id'), 'op'], [label('conversation_id'), 'conv'], [label('path'), './memory/facts.md'],
+        ['routeIdentity', '["canvas","thread"]'], ['workspaceId', 'ws'], ['bindingRevision', 'rev']
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('shows a long value of a prototype-named field in the truncated form that points to the details', async () => {
+    const input = JSON.parse(JSON.stringify({ valueOf: 'v'.repeat(600) + 'TAIL' }))
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'long', revision: 1, request: { request: { target: { id: 'shell.execute' }, input } } }] })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      expect(await screen.findByRole('dialog')).toBeVisible()
+      expect(dialogRows()).toEqual([['valueOf', i18n.t('agent_workspace.approval.truncated', { text: 'v'.repeat(480) })]])
+      expect(document.querySelector('details pre')?.textContent).toContain('TAIL')
+    } finally { view.unmount() }
+  })
+
+  it('quotes a field name that could be misread and shows names and values only as text', async () => {
+    const input = JSON.parse(JSON.stringify({
+      path: './real.txt',
+      '路径': './spoofed.txt',
+      '': 'empty-name',
+      'cmd​': 'zero-width',
+      ' padded ': 'spaces',
+      'line\nbreak': 'newline',
+      '"quoted"': 'quotes',
+      '<b>bold</b>': '[link](https://example.invalid) <img src=x onerror=alert(1)> $t(agent_workspace.approval.deny) {{text}}'
+    }))
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'names', revision: 1, request: { request: { target: { id: 'shell.execute' }, input } } }] })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      expect(await screen.findByRole('dialog')).toBeVisible()
+      expect(dialogRows()).toEqual([
+        ['路径', './real.txt'],
+        ['"路径"', './spoofed.txt'],
+        ['""', 'empty-name'],
+        ['"cmd\\u{200b}"', 'zero-width'],
+        ['" padded "', 'spaces'],
+        ['"line\\u{a}break"', 'newline'],
+        ['"\\"quoted\\""', 'quotes'],
+        ['<b>bold</b>', '[link](https://example.invalid) <img src=x onerror=alert(1)> $t(agent_workspace.approval.deny) {{text}}']
+      ])
+      const dialog = screen.getByRole('dialog')
+      expect(dialog.querySelector('b, a, img')).toBeNull()
+    } finally { view.unmount() }
+  })
+})
