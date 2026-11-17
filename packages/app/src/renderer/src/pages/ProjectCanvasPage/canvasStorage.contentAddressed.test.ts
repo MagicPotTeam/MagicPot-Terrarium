@@ -1818,6 +1818,65 @@ describe('mirror prune with assets that cannot be staged', () => {
     expect(mirror.project().items.find((item) => item.id === 'remote')!.src).toBe(copyRef)
   })
 
+  it('never mirrors the per-item blob of another version under the key of an unreachable remote image', async () => {
+    // Move, replace the image under the same item id, delete, then undo back to the remote version.
+    const mirror = createFakeMirror()
+    mirror.state.applyPrune = true
+    const { remoteUrl, copyRef, copyPath } = seedRemoteBoardOfEarlierVersion(mirror, 'undo-replace')
+    const loaded = await loadCanvasItems('undo-replace')
+    await saveCanvasItems(loaded.items, 'undo-replace')
+    const history: CanvasItem[][] = []
+    const withHistory = (future: CanvasItem[][] = []) => ({
+      getProtectedItems: () => [...history, ...future]
+    })
+    history.push(createCanvasHistorySnapshot(loaded.items))
+    const moved = loaded.items.map((item) =>
+      item.id === 'remote' ? ({ ...item, x: 5 } as CanvasItem) : item
+    )
+    await saveCanvasItems(moved, 'undo-replace', [], [], null, withHistory())
+    history.push(createCanvasHistorySnapshot(moved))
+    const replaced = moved.map((item) =>
+      item.id === 'remote' ? ({ ...item, src: registerSource('blob:undo-replace-new', [7, 7]) } as CanvasItem) : item
+    )
+    await saveCanvasItems(replaced, 'undo-replace', [], [], null, withHistory())
+    // The dual write gave the item id a per-item blob with the bytes of the replacement.
+    expect(fake.blobBytes(legacyBlobKey('undo-replace', 'remote'))).toEqual([7, 7])
+    history.push(createCanvasHistorySnapshot(replaced))
+    const deleted = replaced.filter((item) => item.id !== 'remote')
+    await saveCanvasItems(deleted, 'undo-replace', [], [], null, withHistory())
+    await saveCanvasItems(
+      deleted.map((item) => ({ ...item, x: 9 }) as CanvasItem),
+      'undo-replace',
+      [],
+      [],
+      null,
+      withHistory()
+    )
+    expect(mirror.files.has(copyPath)).toBe(true)
+
+    // Undo twice: the remote version is back while its server is still down.
+    const future = [createCanvasHistorySnapshot(deleted)]
+    history.pop()
+    future.unshift(createCanvasHistorySnapshot(replaced))
+    const back = history.pop()!.map((item) => ({ ...item }) as CanvasItem)
+    await saveCanvasItems(back, 'undo-replace', [], [], null, withHistory(future))
+    await saveCanvasItems(
+      back.map((item) => ({ ...item, y: 1 }) as CanvasItem),
+      'undo-replace',
+      [],
+      [],
+      null,
+      withHistory(future)
+    )
+
+    expect((back.find((item) => item.id === 'remote') as { src: string }).src).toBe(remoteUrl)
+    // The original bytes stay the remote image's copy; no file holds [7, 7] under the URL's key.
+    expect(mirror.files.has(copyPath)).toBe(true)
+    expect(Array.from(mirror.files.get(copyPath)!)).toEqual([4, 2])
+    expect(mirror.project().items.find((item) => item.id === 'remote')!.src).toBe(copyRef)
+    expect(mirror.assetFiles().some((name) => name.startsWith('u-'))).toBe(false)
+  })
+
   it('lets the copy go once the deleted image has left the undo history', async () => {
     const mirror = createFakeMirror()
     mirror.state.applyPrune = true

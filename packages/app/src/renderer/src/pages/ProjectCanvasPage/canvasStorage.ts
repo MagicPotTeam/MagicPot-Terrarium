@@ -192,6 +192,13 @@ type CanvasBinaryAssetResolveOptions = {
   allowIndexedDbFallback?: boolean
   /** Content key of the slot, when known: the fallback then reads the keyed blob first. */
   indexedDbAssetKey?: string
+  /**
+   * Only bytes that provably belong to `indexedDbAssetKey`: its keyed blob, or a
+   * per-item blob whose SHA-256 is that content key. A per-item blob can hold
+   * another version of the item (undo restores other sources under one id), so
+   * a writer that names the bytes by the key (the mirror) must never take it on trust.
+   */
+  indexedDbVerifiedOnly?: boolean
 }
 
 type CanvasFileStorageMode = 'embedded' | 'project'
@@ -905,6 +912,48 @@ async function readIndexedDbBinaryAsset(
   }
 }
 
+/**
+ * The stored bytes of content key `assetKey` and nothing else: its keyed blob,
+ * else (for a key derived from the bytes themselves) a per-item blob whose
+ * content hashes to it. Null when no stored bytes provably belong to the key.
+ */
+async function readVerifiedIndexedDbBinaryAsset(
+  logicalKey: string,
+  storeKey: string | undefined,
+  assetKey: string | undefined
+): Promise<{ data: ArrayBuffer; mimeType: string } | null> {
+  if (!storeKey || !assetKey || !isCanvasAssetKey(assetKey)) return null
+  try {
+    const db = await openDB()
+    let results: Array<{ data: ArrayBuffer; mimeType: string } | undefined>
+    try {
+      const keyed = await readBlobStoreEntry(
+        db.transaction(BLOB_STORE_NAME, 'readonly').objectStore(BLOB_STORE_NAME),
+        getScopedCanvasAssetBlobKey(storeKey, assetKey)
+      )
+      if (keyed) return { data: keyed.data, mimeType: keyed.mimeType }
+      // Only a content key can be checked against bytes; a file identity or a source
+      // string key names bytes no hash can confirm.
+      if (!assetKey.startsWith('b-')) return null
+      const store = db.transaction(BLOB_STORE_NAME, 'readonly').objectStore(BLOB_STORE_NAME)
+      results = await Promise.all([
+        readBlobStoreEntry(store, getScopedCanvasBlobKey(storeKey, logicalKey)),
+        readBlobStoreEntry(store, logicalKey)
+      ])
+    } finally {
+      db.close()
+    }
+    for (const candidate of results) {
+      if (candidate?.data && (await buildCanvasContentAssetKey(candidate.data)) === assetKey) {
+        return { data: candidate.data, mimeType: candidate.mimeType }
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 async function resolveCanvasBinaryAsset(
   key: string,
   sourceUrl: string | undefined,
@@ -923,7 +972,9 @@ async function resolveCanvasBinaryAsset(
   const fromIndexedDb =
     fromDataUri || fromLocalFile || fromFetch || !options.allowIndexedDbFallback
       ? null
-      : await readIndexedDbBinaryAsset(key, storeKey, options.indexedDbAssetKey)
+      : options.indexedDbVerifiedOnly
+        ? await readVerifiedIndexedDbBinaryAsset(key, storeKey, options.indexedDbAssetKey)
+        : await readIndexedDbBinaryAsset(key, storeKey, options.indexedDbAssetKey)
   const resolved = fromDataUri || fromLocalFile || fromFetch || fromIndexedDb
 
   if (!resolved) {
@@ -2596,9 +2647,13 @@ async function readCanvasMirrorSlotBytes(
   storeKey: string,
   assetKey: string | undefined
 ): Promise<ResolvedCanvasBinaryAsset | null> {
+  // The mirror names these bytes by `assetKey`: stored bytes count only when they
+  // provably are that key's. Without a key (it is being derived from the bytes) no
+  // stored copy is used at all, as nothing could tell which version of the item it holds.
   const options: CanvasBinaryAssetResolveOptions = {
-    allowIndexedDbFallback: true,
-    indexedDbAssetKey: assetKey
+    allowIndexedDbFallback: assetKey !== undefined,
+    indexedDbAssetKey: assetKey,
+    indexedDbVerifiedOnly: true
   }
   const resolved =
     slot.slotId === CANVAS_ASSET_SOURCE_SLOT
