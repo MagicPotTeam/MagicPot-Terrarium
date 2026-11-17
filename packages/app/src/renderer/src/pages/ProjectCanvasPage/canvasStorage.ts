@@ -2316,10 +2316,36 @@ const canvasMirrorEntryNamesByItem = new WeakMap<
 >()
 
 // By asset folder and source: undo snapshots copy their items, so the per-object
-// cache above misses once per snapshot while the sources repeat.
+// cache above misses once per snapshot while the sources repeat. Only short local
+// sources are remembered: a key holds a flat copy of its source, and no data: URL
+// may be kept alive here.
 const canvasMirrorEntryNameBySource = new Map<string, string | null>()
 
+/** Test hook: how many sources the entry-name cache holds and its longest key. */
+export function getCanvasMirrorEntryNameCacheStats(): { entries: number; longestKeyLength: number } {
+  let longestKeyLength = 0
+  for (const key of canvasMirrorEntryNameBySource.keys()) {
+    longestKeyLength = Math.max(longestKeyLength, key.length)
+  }
+  return { entries: canvasMirrorEntryNameBySource.size, longestKeyLength }
+}
+
+const CANVAS_LOCAL_FILE_SOURCE_PREFIX_PATTERN = /^\s*(?:local-media:\/\/|file:\/\/|\/|\\\\|[a-zA-Z]:[\\/])/
+
+/**
+ * Whether a source can name a local file at all (local-media://, file:// or an
+ * absolute path), from its first characters only: data:, blob: and remote URLs
+ * never point into the mirror folder.
+ */
+function mayBeLocalFileSource(source: string): boolean {
+  return CANVAS_LOCAL_FILE_SOURCE_PREFIX_PATTERN.test(source.slice(0, 32))
+}
+
 function getCachedCanvasMirrorEntryName(assetDir: string, source: string): string | null {
+  if (!mayBeLocalFileSource(source)) return null
+  if (source.length > CANVAS_SOURCE_STRING_KEY_CACHE_MAX_LENGTH) {
+    return getCanvasMirrorEntryForSource(assetDir, source)?.entryName ?? null
+  }
   const id = `${assetDir}\n${source}`
   const cached = canvasMirrorEntryNameBySource.get(id)
   if (cached !== undefined) return cached

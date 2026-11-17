@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   canvasProtectedStateWalkStats,
   countCanvasAssetKeyReferences,
+  getCanvasMirrorEntryNameCacheStats,
   loadCanvasItems,
   saveCanvasItems
 } from './canvasStorage'
@@ -2046,6 +2047,23 @@ describe('mirror staging failures', () => {
 })
 
 describe('save-time cost on big boards', () => {
+  it('keeps no copy of an inline source in the mirror entry-name cache', async () => {
+    createFakeMirror()
+    const inline = Array.from({ length: 5 }, (_, index) =>
+      imageItem(`inline-${index}`, `data:image/png;base64,${String(index).repeat(20_000)}`)
+    )
+    const remote = imageItem('remote-cache', registerSource('https://example.invalid/cache.png', [3]))
+    const local = imageItem('local-cache', 'local-media:///home/u/Pictures/cache-probe.png')
+    const before = getCanvasMirrorEntryNameCacheStats()
+    await saveCanvasItems([...inline, remote], 'entry-cache', [], [], null, {
+      getProtectedItems: () => [createCanvasHistorySnapshot([...inline, remote, local])]
+    })
+    const after = getCanvasMirrorEntryNameCacheStats()
+    // Only the local source is remembered, and no key is anywhere near an inline source's length.
+    expect(after.entries - before.entries).toBe(1)
+    expect(after.longestKeyLength).toBeLessThan(2048 + 256)
+  })
+
   it('visits each item object once across 50 history lists of a 2000-item board', async () => {
     const mirror = createFakeMirror()
     const N = 2000
