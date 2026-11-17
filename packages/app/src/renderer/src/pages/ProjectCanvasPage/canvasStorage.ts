@@ -1375,6 +1375,38 @@ function queueCanvasBlobSnapshotReads(
   }
 }
 
+/** Extensions of the image formats the managed media store holds (png, jpeg, webp, gif). */
+const CANVAS_MIRROR_RESTORE_EXTENSIONS: ReadonlySet<string> = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
+
+/**
+ * The mirror file a reopen may show a stored image from instead of reading its
+ * bytes from IndexedDB, or null when the image must be read from IndexedDB.
+ *
+ * The file sits in the app's own autosave cache, which the mirror prunes as
+ * soon as the board no longer references it, so it may stand in for the bytes
+ * only where nothing can keep its path as a lasting reference and where it
+ * provably holds the stored bytes:
+ * - a content key (b-): the file was written from exactly those bytes. A
+ *   file-identity key (f-) names a path, size and time, and the mirror's copy
+ *   by path can hold what the file was changed to since;
+ * - bytes that came from the renderer (a blob source, no path): a source path
+ *   that was re-keyed by its content can still be copied by path later;
+ * - a format the managed store holds: an Agent hand-off then imports the
+ *   bytes into managed media instead of keeping this path in a conversation
+ *   (it keeps the path of any other format, as for a file of the user's).
+ */
+function getCanvasMirrorRestoreFileName(
+  item: SerializableBlobPersistableCanvasItem,
+  assetKey: string
+): string | null {
+  if (item.type !== 'image' || !assetKey.startsWith('b-')) return null
+  const extension = getCanvasMirrorAssetExtension(resolveCanvasAssetFileName(item))
+  if (!CANVAS_MIRROR_RESTORE_EXTENSIONS.has(extension)) return null
+  const src = typeof item.src === 'string' ? item.src : ''
+  if (src && !src.startsWith('blob:')) return null
+  return `${assetKey}${extension}`
+}
+
 async function readIndexedDbCanvasSnapshot(
   db: IDBDatabase,
   storeKey: string,
@@ -1419,8 +1451,8 @@ async function readIndexedDbCanvasSnapshot(
           const reads = blobBackedItems.flatMap((item): CanvasBlobSnapshotRead[] => {
             const persistedKeys = readPersistedCanvasAssetKeys(item)
             const mirrorFileName =
-              currentFormat && mirrorAssetFileNames && item.type === 'image' && persistedKeys.assetKey
-                ? `${persistedKeys.assetKey}${getCanvasMirrorAssetExtension(resolveCanvasAssetFileName(item))}`
+              currentFormat && mirrorAssetFileNames && persistedKeys.assetKey
+                ? getCanvasMirrorRestoreFileName(item, persistedKeys.assetKey)
                 : null
             if (mirrorFileName && mirrorAssetFileNames?.has(mirrorFileName)) {
               // The mirror holds these exact bytes in a file that is never rewritten: the
@@ -2744,7 +2776,15 @@ const CANVAS_MIRROR_NO_SPACE = 'no-space' as const
  * slot stays unsafe until the file is in the folder, so it carries the copy the
  * mirror held before (or keeps the save from pruning).
  */
-export const canvasMirrorDetachedCopyConfig = { minBytes: 64 * 1024 * 1024 }
+export const canvasMirrorDetachedCopyConfig = {
+  minBytes: 64 * 1024 * 1024,
+  /**
+   * The next detached copy starts once the one before it settled, or after this
+   * long: a copy that never settles (a source on a share that stopped answering)
+   * keeps its own slot unsafe but does not hold up the copies queued behind it.
+   */
+  queueReleaseMs: 5 * 60 * 1000
+}
 
 type CanvasMirrorDetachedCopy = {
   status: 'running' | 'done' | 'failed'
@@ -2757,8 +2797,10 @@ type CanvasMirrorDetachedCopy = {
 // any save in between keeps its file, and a failed job's next attempt waits for
 // the copy (and its fallback through the renderer) like any other asset.
 const canvasMirrorDetachedCopies = new Map<string, Map<string, CanvasMirrorDetachedCopy>>()
-// One detached copy at a time, across folders: a slow disk is not asked for two.
+// One detached copy at a time, across folders: a slow disk is not asked for two
+// (unless one of them has run for longer than queueReleaseMs).
 let canvasMirrorDetachedCopyTail: Promise<void> = Promise.resolve()
+const canvasMirrorDetachedCopiesInFlight = new Set<Promise<void>>()
 let canvasMirrorPlanSerial = 0
 
 /** Detached copies of one canvas: running, and remembered in all. For tests. */
@@ -2777,8 +2819,10 @@ export function getCanvasMirrorDetachedCopyStats(storeKey: string): { running: n
 }
 
 /** Resolves once every detached copy queued so far has settled. For tests. */
-export function waitForCanvasMirrorDetachedCopies(): Promise<void> {
-  return canvasMirrorDetachedCopyTail
+export async function waitForCanvasMirrorDetachedCopies(): Promise<void> {
+  while (canvasMirrorDetachedCopiesInFlight.size > 0) {
+    await Promise.all([...canvasMirrorDetachedCopiesInFlight])
+  }
 }
 
 // Keys of sources identified by their string (remote URLs, data: URLs); only
@@ -3262,7 +3306,23 @@ function startOrJoinDetachedCanvasMirrorCopy(
       jobs!.delete(assetFileName)
     }
   }
-  canvasMirrorDetachedCopyTail = canvasMirrorDetachedCopyTail.then(run, run)
+  let settled!: () => void
+  const finished = new Promise<void>((resolve) => {
+    settled = resolve
+  })
+  canvasMirrorDetachedCopiesInFlight.add(finished)
+  void finished.then(() => canvasMirrorDetachedCopiesInFlight.delete(finished))
+  canvasMirrorDetachedCopyTail = canvasMirrorDetachedCopyTail.then(
+    () =>
+      new Promise<void>((release) => {
+        const timer = setTimeout(release, canvasMirrorDetachedCopyConfig.queueReleaseMs)
+        void run().finally(() => {
+          clearTimeout(timer)
+          release()
+          settled()
+        })
+      })
+  )
   return true
 }
 

@@ -503,10 +503,14 @@ type CanvasMirrorSpaceReservation = {
   release(): void
 }
 
+// Reservations of one volume are judged one at a time (see reserveCanvasMirrorSpace).
+const canvasMirrorSpaceChecksByVolume = new Map<string, Promise<unknown>>()
+
 /**
- * Reserves room for one asset on the mirror's volume. The free space is read
- * first; the check against it and the reservation then happen in one step, so
- * concurrent copies each see the bytes the others are still about to write.
+ * Reserves room for one asset on the mirror's volume. The reservations of one
+ * volume are judged one at a time (bytes in flight, then free space, then the
+ * check and the reservation), so concurrent copies each see the bytes the
+ * others are still about to write.
  * Resolves the reservation, or null when the volume cannot hold the asset
  * besides the bytes in flight and the margin. Without volume statistics the
  * write itself reports a full disk, and the copy is allowed.
@@ -516,33 +520,53 @@ const reserveCanvasMirrorSpace = async (
   sizeBytes: number
 ): Promise<CanvasMirrorSpaceReservation | null> => {
   const volumeId = await getCanvasMirrorVolumeId(assetDir)
-  let available = Number.POSITIVE_INFINITY
-  if (typeof fs.statfs === 'function') {
-    try {
-      const stats = await runBoundedFsOp(() => fs.statfs(assetDir))
-      available = Number(stats.bavail) * Number(stats.bsize)
-    } catch {
-      available = Number.POSITIVE_INFINITY
+  const check = async (): Promise<CanvasMirrorSpaceReservation | null> => {
+    // The bytes in flight are read before the free space: a copy that reaches the disk
+    // while statfs runs gives back its reservation, and a free-space figure taken before
+    // its bytes landed must not be checked against the smaller remainder. The reserved
+    // figure can only shrink while this step runs (no other reservation of this volume
+    // is judged meanwhile), so the check errs on the side of refusing.
+    const reserved = canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0
+    let available = Number.POSITIVE_INFINITY
+    if (typeof fs.statfs === 'function') {
+      try {
+        const stats = await runBoundedFsOp(() => fs.statfs(assetDir))
+        available = Number(stats.bavail) * Number(stats.bsize)
+      } catch {
+        available = Number.POSITIVE_INFINITY
+      }
     }
+    if (
+      Number.isFinite(available) &&
+      available < reserved + sizeBytes + CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES
+    ) {
+      return null
+    }
+    canvasMirrorReservedBytesByVolume.set(
+      volumeId,
+      (canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0) + sizeBytes
+    )
+    let outstanding = sizeBytes
+    const give = (bytes: number): void => {
+      const amount = Math.min(outstanding, Math.max(0, bytes))
+      if (amount <= 0) return
+      outstanding -= amount
+      const remaining = (canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0) - amount
+      if (remaining > 0) canvasMirrorReservedBytesByVolume.set(volumeId, remaining)
+      else canvasMirrorReservedBytesByVolume.delete(volumeId)
+    }
+    return { wrote: give, release: () => give(outstanding) }
   }
-  const reserved = canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0
-  if (
-    Number.isFinite(available) &&
-    available < reserved + sizeBytes + CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES
-  ) {
-    return null
-  }
-  canvasMirrorReservedBytesByVolume.set(volumeId, reserved + sizeBytes)
-  let outstanding = sizeBytes
-  const give = (bytes: number): void => {
-    const amount = Math.min(outstanding, Math.max(0, bytes))
-    if (amount <= 0) return
-    outstanding -= amount
-    const remaining = (canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0) - amount
-    if (remaining > 0) canvasMirrorReservedBytesByVolume.set(volumeId, remaining)
-    else canvasMirrorReservedBytesByVolume.delete(volumeId)
-  }
-  return { wrote: give, release: () => give(outstanding) }
+  const previous = canvasMirrorSpaceChecksByVolume.get(volumeId) ?? Promise.resolve()
+  const step = previous.then(check, check)
+  const settled = step.catch(() => undefined)
+  canvasMirrorSpaceChecksByVolume.set(volumeId, settled)
+  void settled.then(() => {
+    if (canvasMirrorSpaceChecksByVolume.get(volumeId) === settled) {
+      canvasMirrorSpaceChecksByVolume.delete(volumeId)
+    }
+  })
+  return step
 }
 
 export class FsSvcImpl implements FsSvc {

@@ -362,6 +362,63 @@ describe('FsSvcImpl canvas mirror assets', () => {
       expect(listAssetDir()).toHaveLength(1)
     })
 
+    it('does not judge a free-space figure taken before a finished write against the smaller remainder', async () => {
+      const room = MARGIN + 1500
+      // The first write may open its temporary file only once the second has asked for
+      // the free space; the second's figure arrives after the first write is published
+      // and still counts its bytes as free (a stale figure).
+      let secondAsked = (): void => {}
+      const secondAskedGate = new Promise<void>((resolve) => {
+        secondAsked = resolve
+      })
+      let firstPublished = (): void => {}
+      const firstPublishedGate = new Promise<void>((resolve) => {
+        firstPublished = resolve
+      })
+      const statfsResult = {
+        type: 0,
+        bsize: 1,
+        blocks: room * 2,
+        bfree: room,
+        bavail: room,
+        files: 0,
+        ffree: 0
+      } as unknown as Awaited<ReturnType<typeof fsp.statfs>>
+      let statfsCalls = 0
+      vi.spyOn(fsp, 'statfs').mockImplementation(async () => {
+        statfsCalls += 1
+        if (statfsCalls === 2) {
+          secondAsked()
+          await firstPublishedGate
+        }
+        return statfsResult
+      })
+      const realOpen = fsp.open.bind(fsp)
+      let gatedOpen = false
+      vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+        if (!gatedOpen && String(args[0]).includes('.tmp-')) {
+          gatedOpen = true
+          await secondAskedGate
+        }
+        return realOpen(...args)
+      }) as typeof fsp.open)
+
+      const first = service.writeCanvasMirrorAsset({
+        projectDirName: PROJECT,
+        assetFileName: `b-${'6'.repeat(40)}.bin`,
+        data: new Uint8Array(1000)
+      })
+      void first.then(firstPublished, firstPublished)
+      const second = service.writeCanvasMirrorAsset({
+        projectDirName: PROJECT,
+        assetFileName: `b-${'7'.repeat(40)}.bin`,
+        data: new Uint8Array(1000)
+      })
+      expect(await first).toEqual({ status: 'written', sizeBytes: 1000 })
+      expect(await second).toEqual({ status: 'no-space', sizeBytes: 1000 })
+      expect(listAssetDir()).toHaveLength(1)
+    })
+
     it('reports an existing asset even when the volume is full', async () => {
       writeFile(path.join(assetDir, `${KEY_A}.png`), new Uint8Array([1, 2]))
       mockFreeBytes(0)

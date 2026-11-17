@@ -17,6 +17,11 @@ import {
 import type { CanvasItem } from './types'
 import { createCanvasHistorySnapshot } from './canvasHistory'
 import { buildProjectStorageDirName } from '@shared/projectStorage'
+import type { ChatAttachment } from '@shared/api/svcLLMProxy'
+import {
+  importIncomingChatImageAttachment,
+  type IncomingChatImageImportOptions
+} from '../ChatPage/chatManagedMediaAttachments'
 
 // A small transactional model of IndexedDB: writes are staged per transaction and
 // applied on completion, an abort drops them. It is a test double, not evidence
@@ -2221,6 +2226,72 @@ describe('reopening a board the mirror holds', () => {
     expect(restored.src.startsWith('blob:')).toBe(true)
     expect(await readBlobBytes(restoredBlobs.get(restored.src)!)).toEqual([9, 9])
   })
+  it('keeps a format the managed store cannot hold off the mirror, so a hand-off keeps its bytes after the prune', async () => {
+    const mirror = createFakeMirror()
+    mirror.state.applyPrune = true
+    const scanBytes = [0x42, 0x4d, 1, 2, 3]
+    const scan = imageItem('scan', registerSource('blob:reopen-bmp', scanBytes), { fileName: 'scan.bmp' })
+    const photo = imageItem('photo', registerSource('blob:reopen-png', [9, 8, 7]))
+    await saveCanvasItems([scan, photo], 'reopen-bmp')
+    const scanFile = `${mirror.projectDir()}/assets/${contentKey(scanBytes)}.bmp`
+    const photoFile = `${mirror.projectDir()}/assets/${contentKey([9, 8, 7])}.png`
+    expect(mirror.files.has(scanFile)).toBe(true)
+
+    const reopened = await loadCanvasItems('reopen-bmp')
+    const [restoredScan, restoredPhoto] = reopened.items as Array<CanvasItem & { src: string }>
+    // The BMP is shown from its IndexedDB bytes; the PNG from its mirror file.
+    expect(restoredScan.src.startsWith('blob:')).toBe(true)
+    expect(await readBlobBytes(restoredBlobs.get(restoredScan.src)!)).toEqual(scanBytes)
+    expect(restoredPhoto.src).toBe(`local-media://${photoFile}`)
+
+    // The Agent hand-off: the BMP is inlined, the PNG is imported into managed media.
+    const importFile = vi.fn(async (req: { sourcePath: string }) => ({
+      reference: { version: 1, kind: 'managed', relativePath: 'chat/p.png', mimeType: 'image/png', sizeBytes: 3 },
+      localMediaUrl: `local-media:///home/u/Media/imported-${req.sourcePath.split('/').pop()}`
+    }))
+    const service = { importFile, importDataUrl: vi.fn() } as unknown as IncomingChatImageImportOptions['service']
+    const handedScan = await importIncomingChatImageAttachment(
+      { type: 'image', url: restoredScan.src, fileName: 'scan.bmp' } as ChatAttachment,
+      { service, fetchImpl: (async (url: string) => ({ ok: true, blob: async () => restoredBlobs.get(url)! })) as unknown as typeof fetch }
+    )
+    const handedPhoto = await importIncomingChatImageAttachment(
+      { type: 'image', url: restoredPhoto.src, fileName: 'photo.png' } as ChatAttachment,
+      { service, resolveAuthorizedLocalPath: async (filePath: string) => filePath }
+    )
+    expect(handedScan.url.startsWith('data:')).toBe(true)
+    expect(importFile).toHaveBeenCalledTimes(1)
+    expect(importFile.mock.calls[0][0].sourcePath).toBe(photoFile)
+    expect(handedPhoto.url.startsWith('local-media:///home/u/Media/')).toBe(true)
+
+    // Both images are deleted (outside undo) and the board is saved until it prunes.
+    for (let round = 0; round < 3; round += 1) await saveCanvasItems([], 'reopen-bmp')
+    expect(mirror.files.has(scanFile)).toBe(false)
+    expect(mirror.files.has(photoFile)).toBe(false)
+    expect(fake.committed.get('canvas-blobs')!.has(assetBlobKey('reopen-bmp', scanBytes))).toBe(false)
+    // What the conversation keeps still holds the bytes.
+    const inlined = Buffer.from(handedScan.url.slice(handedScan.url.indexOf(',') + 1), 'base64')
+    expect([...inlined]).toEqual(scanBytes)
+    expect(handedPhoto.url.includes('/AutoSave/')).toBe(false)
+  })
+
+  it('reads an image keyed by its file identity from IndexedDB, not from its mirror copy', async () => {
+    const mirror = createFakeMirror()
+    const filePath = '/home/u/Projects/refs/ref.png'
+    mirror.localFiles.set(filePath, new Uint8Array([5, 5, 5]))
+    const sourceIdentity = { kind: 'local-file', canonicalPath: filePath, sizeBytes: 3, lastModifiedMs: 1_700_000_000_000 }
+    const ref = imageItem('ref', `local-media://${filePath}`, { sourceIdentity })
+    await saveCanvasItems([ref], 'reopen-identity')
+    const key = fileIdentityKey(filePath, 3, 1_700_000_000_000)
+    const mirrorFile = `${mirror.projectDir()}/assets/${key}.png`
+    expect(fake.record('reopen-identity')!.items[0].assetKey).toBe(key)
+    // A copy by path made after the file was changed holds the new bytes under the old key.
+    mirror.files.set(mirrorFile, new Uint8Array([6, 6, 6]))
+
+    const reopened = await loadCanvasItems('reopen-identity')
+    const restored = reopened.items[0] as CanvasItem & { src: string }
+    expect(restored.src.startsWith('blob:')).toBe(true)
+    expect(await readBlobBytes(restoredBlobs.get(restored.src)!)).toEqual([5, 5, 5])
+  })
 })
 
 describe('metadata-only reads', () => {
@@ -2375,6 +2446,47 @@ describe('large mirror copies', () => {
     expect(mirror.calls.copy).toEqual([])
     expect(mirror.project().items.find((item) => item.id === 'video')!.src).toBe(`assets/${videoFile}`)
     expect(getCanvasMirrorDetachedCopyStats('mirror-detached').remembered).toBe(0)
+  })
+
+  it('does not let a copy that never settles hold up the large copies queued behind it', async () => {
+    const mirror = createFakeMirror()
+    canvasMirrorDetachedCopyConfig.queueReleaseMs = 20
+    try {
+      mirror.localFiles.set('/mnt/gone/stuck.mov', new Uint8Array([7, 7, 7, 7]))
+      mirror.localFiles.set('/home/u/Videos/next.mov', new Uint8Array([8, 8, 8, 8, 8]))
+      // The share stops answering: the first copy does not settle until the end of the test.
+      let answer = (): void => {}
+      mirror.state.holdCopy = new Promise<void>((resolve) => {
+        answer = resolve
+      })
+      const stuck = imageItem('stuck', 'local-media:///mnt/gone/stuck.mov', { fileName: 'stuck.mov' })
+      await saveCanvasItems([stuck], 'mirror-detached-stuck')
+      expect(mirror.calls.copy).toHaveLength(1)
+      mirror.state.holdCopy = null
+
+      const next = imageItem('next', 'local-media:///home/u/Videos/next.mov', { fileName: 'next.mov' })
+      await saveCanvasItems([next], 'mirror-detached-next')
+      await vi.waitFor(() => expect(mirror.calls.copy).toHaveLength(2), { timeout: 2000, interval: 10 })
+      await vi.waitFor(
+        () => expect(getCanvasMirrorDetachedCopyStats('mirror-detached-next').running).toBe(0),
+        { timeout: 2000, interval: 10 }
+      )
+      // The stuck copy still runs: its slot keeps its source and its board is not pruned.
+      expect(getCanvasMirrorDetachedCopyStats('mirror-detached-stuck').running).toBe(1)
+      await saveCanvasItems([next], 'mirror-detached-next')
+      const nextProject = [...mirror.text].find(
+        ([name, content]) => name.endsWith('.mpcanvas') && content.includes('next.mov')
+      )!
+      expect((JSON.parse(nextProject[1]) as { items: Array<{ src: string }> }).items.map((item) => item.src)).toEqual([
+        `assets/${mirror.calls.copy[1].assetFileName}`
+      ])
+
+      answer()
+      await waitForCanvasMirrorDetachedCopies()
+      expect(getCanvasMirrorDetachedCopyStats('mirror-detached-stuck').running).toBe(0)
+    } finally {
+      canvasMirrorDetachedCopyConfig.queueReleaseMs = 5 * 60 * 1000
+    }
   })
 
   it('copies a large file within the save once a detached copy failed, falling back to the renderer', async () => {
