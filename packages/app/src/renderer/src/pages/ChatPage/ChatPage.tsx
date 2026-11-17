@@ -1,5 +1,5 @@
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
-import { sendReleasesStopHolds, sessionPreparing, stopTeamMembers, teamMembersToStop } from './teamMemberStop'
+import { sendReleasesStopHolds, sessionPreparing, stopTeamMembersAndHoldQueued, teamMembersToStop } from './teamMemberStop'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
 import { revertTeamTaskRun, setTeamTaskStatus, validateTeamTasks, type TeamTaskOutcome } from './agentTeamTasks'
@@ -10503,7 +10503,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       terminateSession(currentSessionId)
     }
     // The one stop-all of the members (teamMemberStop.ts), on the state read before the lead's stop.
-    stopTeamMembers(stoppableTeamMemberIds, stopState, terminateSession)
+    // A member idle at the click with team messages still queued for it is held as well.
+    const dispatcher = teamMessageDispatcherRef.current?.dispatcher
+    stopTeamMembersAndHoldQueued(stoppableTeamMemberIds, stopState, terminateSession, id => Boolean(dispatcher?.hasQueued(id)), id => {
+      heldTeamMembersRef.current.add(`${storageScope}\u0000${id}`)
+      dispatcher?.hold(id)
+    })
   }
 
   // ==================== 渲染 ====================

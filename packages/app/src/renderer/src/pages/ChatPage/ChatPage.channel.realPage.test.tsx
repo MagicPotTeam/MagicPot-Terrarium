@@ -30,7 +30,7 @@ import {
   type ChannelBridgeAllowance
 } from '../../test/channelDenyGuards'
 import type React from 'react'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1605,6 +1605,55 @@ describe('real ChatPage stop on in-memory fakes', () => {
     await new Promise((resolve) => setTimeout(resolve, 1500))
     expect(toWriter()).toHaveLength(3)
     expect(main.claimRequests).toHaveLength(1)
+    await page.finish()
+  }, 30000)
+
+  it('stop-all holds a member whose run ended just before the click while a team message waits for it', async () => {
+    const page = await mountChannelPage({
+      members: [member('designer', '设计师'), member('writer', '文案')],
+      model: ({ request, lastUserText, teamTools, toolResults }) => {
+        if (request.conversationId === 'writer') return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+        if (!toolResults.length && teamTools.includes('send_message')) {
+          return { tool: 'send_message', callId: 'fixture-ended-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+        }
+        // The designer keeps running after its message: the lead's composer offers Stop.
+        return new Promise<ModelStep>(() => undefined)
+      }
+    })
+    const { main } = page
+    const toWriter = () =>
+      main.chatRequests
+        .filter((request) => request.conversationId === 'writer')
+        .map((request) => textOf(request.messages.at(-1)?.content))
+    const writerExternalRun = (loading: boolean): void => {
+      window.dispatchEvent(new CustomEvent('chat:set-external-loading', { detail: { scope: SCOPE, sessionId: 'writer', loading } }))
+    }
+    try {
+      // The writer is busy with a Canvas Target run, so the designer's message waits for it, queued.
+      act(() => writerExternalRun(true))
+      page.send('@designer 请联系文案')
+      await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      expect(toWriter()).toEqual([])
+      const stop = await screen.findByRole('button', { name: 'chat.stop_generating' })
+      // The writer's run ends and stop-all is clicked before the next pump.
+      act(() => {
+        writerExternalRun(false)
+        stop.click()
+      })
+      await waitFor(() => expect(main.cancelledRuns).toEqual(['designer']))
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      expect(toWriter()).toEqual([])
+      // The user's next send to the writer resumes it: the held message follows, once.
+      page.send('@writer 请继续')
+      await waitFor(() => expect(toWriter()).toHaveLength(2), { timeout: 5000 })
+      expect(toWriter()[0]).toContain('请继续')
+      expect(toWriter()[1]).toContain('来自成员的测试消息')
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      expect(toWriter()).toHaveLength(2)
+    } finally {
+      writerExternalRun(false)
+    }
     await page.finish()
   }, 30000)
 })

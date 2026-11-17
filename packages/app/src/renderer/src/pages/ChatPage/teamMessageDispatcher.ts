@@ -148,6 +148,11 @@ export class TeamMessageDispatcher {
 
   isHeld(member: string): boolean { return this.held.has(member) }
 
+  /** A record for this member still waits for its delivery (queued and not claimed). */
+  hasQueued(member: string): boolean {
+    return this.records.some((entry, index) => entry.recipient === member && entry.status === 'queued' && !this.claimed.has(index))
+  }
+
   /** Starts at most one delivery per member. Busy, held or undeliverable members remain queued; call again when ready. */
   pump(recipient: string): Promise<void> | undefined {
     this.active()

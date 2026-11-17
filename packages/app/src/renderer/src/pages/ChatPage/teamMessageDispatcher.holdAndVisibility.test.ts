@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TeamMessageDispatcher, type TeamDispatchStage, type TeamMessageIntent } from './teamMessageDispatcher'
+import { stopTeamMembersAndHoldQueued } from './teamMemberStop'
 
 // A host like the ChatPage effect: every 500 ms it claims the MAIN intents (which expire after
 // 60 s, agentTeamMessageQueue.ts) into the dispatcher and pumps every member.
@@ -97,6 +98,33 @@ describe('team message delivery across a hidden pane and a member stop', () => {
     host.dispatcher.release('b')
     await vi.advanceTimersByTimeAsync(5000)
     expect(host.requests).toEqual(['a:m3', 'b:m1', 'b:m2'])
+    host.dispose()
+  })
+
+  it('stop-all holds a member whose run ended just before the click while its message is still queued', async () => {
+    const host = createHost()
+    host.busy.add('a')
+    host.busy.add('b')
+    host.send('m1', 'b')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(host.statuses()).toEqual(['b:m1:queued'])
+    expect(host.dispatcher.hasQueued('b')).toBe(true)
+    expect(host.dispatcher.hasQueued('a')).toBe(false)
+    // b's run ends a moment before the click (no pump in between); a still runs.
+    host.busy.delete('b')
+    const terminate = vi.fn()
+    const result = stopTeamMembersAndHoldQueued(members, { loading: new Set(['a']), sending: new Set(), waiting: new Set(), queues: new Map() },
+      terminate, id => host.dispatcher.hasQueued(id), id => host.dispatcher.hold(id))
+    expect(result).toEqual({ stopped: ['a'], held: ['b'] })
+    expect(terminate.mock.calls).toEqual([['a', { dropQueued: true, pauseUserSends: true }]])
+    // a's own stop holds a (the host's terminate does that); here only b is checked.
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(host.deliver).not.toHaveBeenCalled()
+    expect(host.statuses()).toEqual(['b:m1:held'])
+    expect(host.dispatcher.hasQueued('b')).toBe(false)
+    host.dispatcher.release('b')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(host.requests).toEqual(['b:m1'])
     host.dispose()
   })
 

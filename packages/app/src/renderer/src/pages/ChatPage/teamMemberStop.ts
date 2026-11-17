@@ -32,6 +32,25 @@ export const stopTeamMembers = (
   return stopped
 }
 
+/**
+ * The lead's composer stop (stop-all): stops the members that work (stopTeamMembers) and also holds
+ * the members that are idle at the click but still have team messages waiting for them (their run
+ * ended just before the click), so the next pump delivers nothing to them either. Both stay held
+ * until the user's own next send to them.
+ */
+export const stopTeamMembersAndHoldQueued = (
+  memberIds: readonly string[],
+  state: Parameters<typeof teamMembersToStop>[1],
+  terminate: TeamMemberTerminate,
+  hasQueuedTeamMessages: (memberId: string) => boolean,
+  hold: (memberId: string) => void
+): { stopped: string[]; held: string[] } => {
+  const stopped = stopTeamMembers(memberIds, state, terminate)
+  const held = memberIds.filter(id => !stopped.includes(id) && hasQueuedTeamMessages(id))
+  for (const id of held) hold(id)
+  return { stopped, held }
+}
+
 type AcceptedSend = Readonly<{
   composerSubmission?: boolean
   onComposerSubmissionAccepted?: unknown
