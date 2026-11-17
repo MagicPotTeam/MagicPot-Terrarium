@@ -1487,4 +1487,68 @@ describe('real ChatPage stop on in-memory fakes', () => {
     expect(main.chatRequests).toHaveLength(1)
     await page.finish()
   }, 20000)
+
+  it('keeps a stopped member stopped: its team message waits until the user sends to it again', async () => {
+    const page = await mountChannelPage({
+      members: [member('designer', '设计师'), member('writer', '文案')],
+      model: ({ request, lastUserText, teamTools, toolResults }) => {
+        if (request.conversationId === 'writer') {
+          // Never answers: only the stop ends the writer's first run.
+          if (lastUserText.includes('hold writer busy')) return new Promise<ModelStep>(() => undefined)
+          return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+        }
+        if (!toolResults.length && teamTools.includes('send_message')) {
+          return {
+            tool: 'send_message',
+            callId: 'fixture-stop-send',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
+        }
+        return { text: '发送成员完成 fixture' }
+      }
+    })
+    const { main } = page
+    const toWriter = () =>
+      main.chatRequests
+        .filter((request) => request.conversationId === 'writer')
+        .map((request) => textOf(request.messages.at(-1)?.content))
+
+    page.send('@writer hold writer busy')
+    await waitFor(() => expect(toWriter()).toHaveLength(1))
+    // Enter sends while a member runs (the lead's composer shows Stop).
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+    fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
+    await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
+    await waitFor(async () =>
+      expect((await page.stored('designer'))?.messages.map((message) => message.content)).toContain(
+        '发送成员完成 fixture'
+      )
+    )
+
+    // Stop-all from the lead's composer stops the writer; its queued team message is held.
+    fireEvent.click(await screen.findByRole('button', { name: 'chat.stop_generating' }))
+    await waitFor(() => expect(main.cancelledRuns).toEqual(['writer']))
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    expect(toWriter()).toHaveLength(1)
+    // The writer's delegated row says so (the fixture's t() returns keys).
+    expect(
+      screen.getByRole('button', { name: 'chat.delegated.member_label — chat.delegated.held' })
+    ).toBeInTheDocument()
+
+    // The user's next send to the writer resumes it: the held message follows, once.
+    page.send('@writer 请继续')
+    await waitFor(() => expect(toWriter()).toHaveLength(3), { timeout: 5000 })
+    expect(toWriter()[1]).toContain('请继续')
+    expect(toWriter()[2]).toContain('来自成员的测试消息')
+    await waitFor(async () =>
+      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+        '文案已收到 fixture'
+      )
+    )
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    expect(toWriter()).toHaveLength(3)
+    expect(main.claimRequests).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'chat.delegated.member_label — chat.delegated.held' })).toBeNull()
+    await page.finish()
+  }, 30000)
 })

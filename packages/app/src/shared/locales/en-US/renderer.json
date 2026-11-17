@@ -1636,6 +1636,7 @@
       "interrupted": "(interrupted)",
       "member_label": "[member] {{name}}",
       "status_waiting": "Waiting for approval",
+      "held": "Stopped · waiting to resume",
       "background_result": "background task result delivered: {{label}}"
     },
     "model_switcher": {

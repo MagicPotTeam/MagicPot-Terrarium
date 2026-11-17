@@ -1463,6 +1463,7 @@
       "interrupted": "(已中断)",
       "member_label": "[成员] {{name}}",
       "status_waiting": "等待批准",
+      "held": "已停止 · 待恢复",
       "background_result": "后台任务结果已送达：{{label}}"
     },
     "model_switcher": {

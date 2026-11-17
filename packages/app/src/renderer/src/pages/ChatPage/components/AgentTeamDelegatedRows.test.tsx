@@ -184,6 +184,36 @@ describe('member work as delegated-agent lines in the lead transcript', () => {
     )
   })
 
+  it('says that the team messages of a stopped member wait until the user resumes it', () => {
+    const writer = member('w', '文案', [user('写口号'), assistant('第一版')])
+    const designer = member('d', '设计师', [user('出图')])
+    const view = render(
+      <AgentTeamDelegatedRows
+        members={[writer, designer]}
+        scope={SCOPE}
+        running={none}
+        waiting={none}
+        held={new Set(['w'])}
+      />
+    )
+    const header = screen.getByRole('button', {
+      name: 'chat.delegated.member_label:文案 — chat.delegated.held'
+    })
+    fireEvent.click(header)
+    // The held line first, then the member's last reply; no "interrupted" placeholder.
+    const body = within(rows()[0])
+    expect(body.getByText('chat.delegated.held')).toBeInTheDocument()
+    expect(body.getByText('第一版')).toBeInTheDocument()
+    expect(body.queryByText('chat.delegated.interrupted')).toBeNull()
+    // The other member is not held.
+    expect(within(rows()[1]).queryByText('chat.delegated.held')).toBeNull()
+    expect(screen.queryByRole('group', { name: /chat\.delegated\.held/ })).toBeNull()
+    view.rerender(
+      <AgentTeamDelegatedRows members={[writer, designer]} scope={SCOPE} running={none} waiting={none} held={none} />
+    )
+    expect(screen.queryByText('chat.delegated.held')).toBeNull()
+  })
+
   it('renders nothing without members', () => {
     expect(
       render(<AgentTeamDelegatedRows members={[]} scope={SCOPE} running={none} waiting={none} />)

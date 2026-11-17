@@ -1,4 +1,5 @@
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
+import { sessionPreparing, stopTeamMembers, teamMembersToStop } from './teamMemberStop'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
 import { revertTeamTaskRun, setTeamTaskStatus, validateTeamTasks, type TeamTaskOutcome } from './agentTeamTasks'
@@ -493,13 +494,6 @@ type QueuedSessionSend = {
   persistId?: string
   queuedAt?: number
 }
-
-/** A send to this session is in its preflight (a leased queue item included): Stop can stop it. */
-const sessionPreparing = (
-  id: string,
-  sending: { has(id: string): boolean },
-  queues: ReadonlyMap<string, QueuedSessionSend[]>
-): boolean => sending.has(id) || Boolean(queues.get(id)?.some(item => item.inFlight))
 
 type ExternalInitialChatMessage = {
   role: ChatMessage['role']
@@ -2080,15 +2074,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [])
   const queueLeaseIdRef = useRef(0)
   const stopHoldEpochRef = useRef(0)
+  // Members the user stopped ('scope\0id'): team messages to them are held until the user's own
+  // send to them is accepted. Kept here so a dispatcher made later in this scope holds them too.
+  const heldTeamMembersRef = useRef(new Set<string>())
   /** The user's own send to this session was accepted: items held by a manual Stop may follow it. */
   const releaseStopHolds = useCallback((sessionId: string) => {
+    if (heldTeamMembersRef.current.delete(`${storageScope}\u0000${sessionId}`)) {
+      teamMessageDispatcherRef.current?.dispatcher.release(sessionId)
+    }
     const queue = queuedSessionSendsRef.current.get(sessionId)
     const released = queue && releaseQueuedStopHolds(queue)
     if (!queue || released === queue) return
     const next = new Map(queuedSessionSendsRef.current)
     next.set(sessionId, [...released!])
     updateQueuedSessionSends(next)
-  }, [updateQueuedSessionSends])
+  }, [storageScope, updateQueuedSessionSends])
   const pendingSessionSendKeysRef = useRef<Set<string>>(new Set())
   const drainQueuedSessionRef = useRef<(sessionId: string) => void>(() => undefined)
   const [composerClearVersion, setComposerClearVersion] = useState(0)
@@ -2099,6 +2099,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return new Set(readScopedExternalLoadingSessionIds(storageScope))
   })
   const externalLoadingSessionIdsRef = useRef<Set<string>>(externalLoadingSessionIds)
+  /** One busy test everywhere: a run, a send in its preflight, or a run the Canvas Target bridge drives. */
+  const isSessionBusy = useCallback((id: string): boolean =>
+    sendingSessionIdsRef.current.has(id) || loadingSessionIdsRef.current.has(id) || externalLoadingSessionIdsRef.current.has(id), [])
   const runIdRef = useRef(0)
   const activeRunIdBySessionRef = useRef<Map<string, number>>(new Map())
   const lifecycleRunIdBySessionRef = useRef<Map<string, string>>(new Map())
@@ -2268,6 +2271,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // - A manual Stop pauses the first user item and holds the others until the user's own
       //   send to this session is accepted; Stop never sends the next item by itself.
       // Team-internal items are dropped by every kind of stop: their delivery has its own state.
+      // A member stopped by the user (a manual Stop, a member stop or stop-all) stays stopped:
+      // team messages to it are held until the user's own send to it is accepted (releaseStopHolds).
+      // Scope termination and deletion hold nothing.
+      if ((!options?.dropQueued || options.pauseUserSends) && sessionsRef.current.find(session => session.id === sessionId)?.teamLeadId) {
+        heldTeamMembersRef.current.add(`${storageScope}\u0000${sessionId}`)
+        teamMessageDispatcherRef.current?.dispatcher.hold(sessionId)
+      }
       const queuedSends = queuedSessionSendsRef.current.get(sessionId)
       if (queuedSends?.length) {
         const { kept, dropped } = settleQueueOnStop(
@@ -2541,6 +2551,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
         loading,
         customEvent.detail.completed ?? !loading
       )
+      // A send that waited for the external run (isSessionBusy) follows it.
+      if (!loading) {
+        const scopeEpoch = committedRunScopeEpochRef.current
+        queueMicrotask(() => {
+          if (committedRunScopeRef.current === storageScope && committedRunScopeEpochRef.current === scopeEpoch) {
+            drainQueuedSessionRef.current(sessionId)
+          }
+        })
+      }
     }
 
     window.addEventListener('chat:set-external-loading', handleExternalLoading)
@@ -8474,9 +8493,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // A drained item uses an override but no longer owns the live composer.
       const fromComposer = !overrides || (overrides.composerSubmission === true && !overrides.isQueuedComposerCurrent)
       const pausedHead = queuedSessionSendsRef.current.get(targetSessionId)?.[0]
-      const isBusy =
-        sendingSessionIdsRef.current.has(targetSessionId) ||
-        loadingSessionIdsRef.current.has(targetSessionId)
+      const isBusy = isSessionBusy(targetSessionId)
       if (!isBusy && pausedHead?.paused && pausedHead.blocksFollowing && fromComposer) {
         notifyWarning('请先处理暂停的排队消息，再发送当前输入')
         return
@@ -8553,6 +8570,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [
       executeSendMessage,
+      isSessionBusy,
       storageScope,
       notifyError,
       notifyWarning,
@@ -8566,10 +8584,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   drainQueuedSessionRef.current = (sessionId: string) => {
-    if (
-      sendingSessionIdsRef.current.has(sessionId) ||
-      loadingSessionIdsRef.current.has(sessionId)
-    ) {
+    if (isSessionBusy(sessionId)) {
       return
     }
     const queue = queuedSessionSendsRef.current.get(sessionId)
@@ -8728,6 +8743,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // The thread has a team to manage: members, or a lead that still carries team records.
   const threadHasTeam = Boolean(teamLead && (teamMembers.length > 0 || teamLead.teamEnded || teamLead.teamSettings || teamLead.teamTasks?.length || teamLead.teamChannel?.length))
   const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{ key: string; ids: readonly string[] }>({ key: '', ids: [] })
+  // Members with team messages held for them (joined ids), for their delegated rows.
+  const [teamHeldRecipients, setTeamHeldRecipients] = useState<{ key: string; ids: string }>({ key: '', ids: '' })
   const teamMessageDispatcherRef = useRef<{ key: string; dispatcher: TeamMessageDispatcher; pump: () => void; scopeEpoch: number; visibilityEpoch: number } | null>(null)
   const messageLeadId = teamLead?.id
   const messageGeneration = teamLead?.teamGeneration ?? 0
@@ -8766,8 +8783,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         (currentMember.teamMemberGeneration ?? 0) === (currentLead.teamGeneration ?? 0) &&
         !hasSessionDeleteTombstone(leadId, scope) && !hasSessionDeleteTombstone(currentMember.id, scope) &&
         !teamEndPendingRef.current.has(teamKey) && !teamEndedMainRef.current.has(teamKey))
-    const ownerBusy = (id: string): boolean =>
-      loadingSessionIdsRef.current.has(id) || sendingSessionIdsRef.current.has(id) || externalLoadingSessionIdsRef.current.has(id)
+    const ownerBusy = isSessionBusy
     if (!lead || !task || task.status !== 'pending' || !member || !validTeam(lead, member) || ownerBusy(member.id) ||
       persistedSessionsRef.current.get(leadId) !== lead || chatSaveBaselineRef.current.isPending(scope, leadId)) {
       notifyWarning('任务不可执行：请检查负责人、依赖和已保存状态')
@@ -8903,8 +8919,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
         await sendMessageRef.current?.({ content, targetSessionId: delivery.recipient, queueKey: `team-message:${delivery.id}`, teamMessageHop: hop,
           isTeamMessageCurrent: () => isCurrent() && (source.kind === 'user' || isMember(source.member)) && isMember(delivery.recipient),
           onTeamRequestStarted: () => stage('request_started'), onTeamResponseReceived: () => stage('response_received') })
-      }, undefined, 1000,
-      id => loadingSessionIdsRef.current.has(id) || sendingSessionIdsRef.current.has(id), isVisible)
+      }, entries => {
+        const ids = [...new Set(entries.flatMap(entry => entry.status === 'held' && entry.recipient ? [entry.recipient] : []))].sort().join('\u0000')
+        setTeamHeldRecipients(previous => previous.key === key && previous.ids === ids ? previous : { key, ids })
+      }, 1000, isSessionBusy, isVisible)
+    for (const held of heldTeamMembersRef.current) if (held.startsWith(`${scope}\u0000`)) dispatcher.hold(held.slice(scope.length + 1))
     const knownMembers = new Set<string>()
     const syncSubscriptions = () => {
       const members = sessionsRef.current.filter(session => isMember(session.id)).map(session => session.id)
@@ -8945,7 +8964,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     void tick()
     const timer = window.setInterval(() => { pump(); void tick() }, 500)
     return () => { alive = false; window.clearInterval(timer); dispatcher.end(); if (teamMessageDispatcherRef.current?.dispatcher === dispatcher) teamMessageDispatcherRef.current = null }
-  }, [teamDeliveryEnabled, sessionsLoaded, sessionLoadError, storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, messageKey, teamLead?.teamEnded, teamLead?.archived])
+  }, [teamDeliveryEnabled, isSessionBusy, sessionsLoaded, sessionLoadError, storageScope, route?.channel, route?.scopeType, route?.scopeId, route?.threadId, messageLeadId, messageGeneration, messageKey, teamLead?.teamEnded, teamLead?.archived])
   const reconcileTeamLifecycle = useCallback((records: ChatSession[]) => {
     let conflict = false
     for (const persisted of records) {
@@ -9275,7 +9294,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const hiddenContext = pendingHiddenContextRef.current
         // Do not queue an @ draft behind an active member: a local queue is not a
         // durable receipt and the target may fail its later model preflight.
-        if (sendingSessionIdsRef.current.has(recipient.session.id) || loadingSessionIdsRef.current.has(recipient.session.id)) {
+        if (isSessionBusy(recipient.session.id)) {
           notifyWarning('成员正在处理其他请求，请稍后重试。')
           return
         }
@@ -9835,9 +9854,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
     delegatedMembersRef.current = delegatedCandidates
   }
   const delegatedMembers = delegatedMembersRef.current
+  const delegatedHeldKey = teamHeldRecipients.key === messageKey ? teamHeldRecipients.ids : ''
+  const delegatedHeld = useMemo(() => new Set(delegatedHeldKey ? delegatedHeldKey.split('\u0000') : []), [delegatedHeldKey])
   const delegatedRowsTail = useMemo(() => delegatedMembers.length
-    ? <AgentTeamDelegatedRows members={delegatedMembers} scope={storageScope} running={delegatedRunning} waiting={delegatedWaiting} />
-    : null, [delegatedMembers, storageScope, delegatedRunning, delegatedWaiting])
+    ? <AgentTeamDelegatedRows members={delegatedMembers} scope={storageScope} running={delegatedRunning} waiting={delegatedWaiting} held={delegatedHeld} />
+    : null, [delegatedMembers, storageScope, delegatedRunning, delegatedWaiting, delegatedHeld])
   // In the column the member approval cards are prompt cards at the end of the transcript:
   // their host follows the tail (the full-page chat keeps it above the transcript).
   // A card that arrives is announced; a card that leaves after 批准 / 拒绝 gives the keyboard
@@ -10263,25 +10284,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // approval or prepare a send (a queued item in its preflight included). A member stop keeps
   // the member's unsent user items as paused queue entries and drops its team-internal items.
   // Render reads state; the click reads the refs, which are never older than the state.
+  const stoppableTeamMemberIds = teamRowsTeam && !currentSession?.teamLeadId ? teamMembers.map(member => member.id) : []
   const activeTeamMemberIds = (
     ids: { has(id: string): boolean },
     sending: { has(id: string): boolean },
     queues: ReadonlyMap<string, QueuedSessionSend[]>
-  ) =>
-    teamRowsTeam && !currentSession?.teamLeadId
-      ? teamMembers.filter(member => ids.has(member.id) || teamWaiting.has(member.id) || sessionPreparing(member.id, sending, queues)).map(member => member.id)
-      : []
+  ) => teamMembersToStop(stoppableTeamMemberIds, { loading: ids, sending, waiting: teamWaiting, queues })
   const currentSessionPreparing = Boolean(currentSessionId) && sessionPreparing(currentSessionId!, sendingSessionIds, queuedSessionSends)
   const composerRunning = isLoading || currentSessionPreparing ||
     activeTeamMemberIds(loadingSessionIds, sendingSessionIds, queuedSessionSends).length > 0
   const handleStopGenerating = () => {
-    const members = activeTeamMemberIds(loadingSessionIdsRef.current, sendingSessionIdsRef.current, queuedSessionSendsRef.current)
+    const stopState = { loading: loadingSessionIdsRef.current, sending: sendingSessionIdsRef.current, waiting: teamWaiting, queues: queuedSessionSendsRef.current }
+    const members = teamMembersToStop(stoppableTeamMemberIds, stopState)
     const ownWork = Boolean(currentSessionId) && (isLoading || loadingSessionIdsRef.current.has(currentSessionId!) ||
       sessionPreparing(currentSessionId!, sendingSessionIdsRef.current, queuedSessionSendsRef.current))
     if (currentSessionId && (ownWork || !members.length)) {
       terminateSession(currentSessionId)
     }
-    for (const memberId of members) terminateSession(memberId, { dropQueued: true, pauseUserSends: true })
+    // The one stop-all of the members (teamMemberStop.ts), on the state read before the lead's stop.
+    stopTeamMembers(stoppableTeamMemberIds, stopState, terminateSession)
   }
 
   // ==================== 渲染 ====================
