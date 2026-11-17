@@ -100,10 +100,24 @@ const MAX_VALUE_LINES = 6
 // parameters out of view either.
 const NAME_TRUNCATE_AT = 120
 const LINE_BREAK = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/
-// Bidi controls can make a value read differently from what it is; they are shown escaped.
-const BIDI_CONTROL = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
+// Characters that draw as blank space: tab, spaces (U+0020 is handled apart), the braille blank
+// and the Hangul and Khmer fillers.
+const BLANK_DRAWN = /[\t\p{Zs}\u2800\u3164\uffa0\u115f]|\u1160|\u17b4|\u17b5/u
+// Characters that draw nothing or change how the text around them reads: control characters,
+// format characters (bidi controls, zero-width characters, word joiner, BOM, soft hyphen, the
+// U+E0000 tag block), private-use, unassigned and lone surrogate code points, default-ignorable
+// code points and variation selectors.
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]/u
+// A run of more blank or hidden characters than this is shown as one marker such as
+// ⟦460 × U+2800⟧, so blank padding can neither push the rest of a value out of view nor fill it.
+const MAX_BLANK_RUN = 3
+// The opening bracket of that marker; inside names and values it is always escaped, so a marker
+// is never text the model wrote.
+const MARKER_OPEN = '\u27e6'
 
 const escapedCharacter = (character: string): string => `\\u{${character.codePointAt(0)!.toString(16)}}`
+const codePointName = (character: string): string =>
+  `U+${character.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`
 
 /** The first `limit` code points of `text` (never half of a surrogate pair), or null if it is not longer. */
 const cutCodePoints = (text: string, limit: number): string | null => {
@@ -113,24 +127,121 @@ const cutCodePoints = (text: string, limit: number): string | null => {
   return head.length > limit ? head.slice(0, limit).join('') : null
 }
 
+type VisibleText = { text: string; changed: boolean; cut: boolean }
+type VisibleRules = {
+  /** Whether the character belongs to a run that may be collapsed into a marker. */
+  inRun: (character: string) => boolean
+  /** The escaped form of a character outside a collapsed run, or null to show it as it is. */
+  escape: (character: string, text: string, index: number) => string | null
+}
+
+/**
+ * `text` as a row shows it: runs of more than MAX_BLANK_RUN blank or hidden characters become one
+ * marker with their count and code points, the other characters the rules name are escaped, and
+ * the result is cut after `limit` code points (never inside a marker, an escape, a surrogate pair
+ * or before a combining mark). `changed` tells that something was collapsed or escaped.
+ */
+const visibleText = (text: string, limit: number, rules: VisibleRules): VisibleText => {
+  const pieces: string[] = []
+  let size = 0
+  let changed = false
+  let cut = false
+  const push = (piece: string, escaped: boolean): boolean => {
+    // Escapes and markers are ASCII or BMP text, so their length is their code point count.
+    const points = escaped ? piece.length : 1
+    if (size + points > limit) {
+      cut = true
+      return false
+    }
+    pieces.push(piece)
+    size += points
+    if (escaped) changed = true
+    return true
+  }
+  let index = 0
+  scan: while (index < text.length) {
+    const character = String.fromCodePoint(text.codePointAt(index)!)
+    if (rules.inRun(character)) {
+      let end = index
+      let count = 0
+      let blank = false
+      const seen = new Set<string>()
+      while (end < text.length) {
+        const next = String.fromCodePoint(text.codePointAt(end)!)
+        if (!rules.inRun(next)) break
+        count++
+        if (next !== ' ' && BLANK_DRAWN.test(next)) blank = true
+        if (seen.size <= 4) seen.add(next)
+        end += next.length
+      }
+      const others = [...seen].filter((item) => item !== ' ')
+      // A run of plain spaces stays as it is (code indentation); a long run that draws blank, or
+      // one character repeated, becomes a marker. A long run of different hidden characters
+      // (such as tag characters that spell out text) is escaped character by character.
+      if (others.length && count > MAX_BLANK_RUN && (blank || others.length === 1)) {
+        const codes = [...seen].slice(0, 4).map(codePointName).join('/')
+        if (!push(`${MARKER_OPEN}${count} \u00d7 ${codes}${seen.size > 4 ? '/\u2026' : ''}\u27e7`, true)) break
+      } else {
+        for (let at = index; at < end; ) {
+          const item = String.fromCodePoint(text.codePointAt(at)!)
+          const escaped = rules.escape(item, text, at)
+          if (!push(escaped ?? item, escaped !== null)) break scan
+          at += item.length
+        }
+      }
+      index = end
+      continue
+    }
+    const escaped = rules.escape(character, text, index)
+    if (!push(escaped ?? character, escaped !== null)) {
+      // Never leave a base character without the combining marks that follow it.
+      if (/\p{M}/u.test(character)) {
+        while (pieces.length && /^\p{M}$/u.test(pieces[pieces.length - 1])) pieces.pop()
+        if (pieces.length && Array.from(pieces[pieces.length - 1]).length === 1) pieces.pop()
+      }
+      break
+    }
+    index += character.length
+  }
+  return { text: pieces.join(''), changed, cut }
+}
+
+const valueRules: VisibleRules = {
+  inRun: (character) => character !== '\n' && (BLANK_DRAWN.test(character) || HIDDEN.test(character)),
+  escape: (character, text, index) =>
+    (character !== '\t' && character !== '\n' && HIDDEN.test(character)) ||
+    character === MARKER_OPEN ||
+    // A backslash that starts what reads like an escape is escaped too, so an escape is never
+    // text the model wrote.
+    (character === '\\' && text.startsWith('u{', index + 1))
+      ? escapedCharacter(character)
+      : null
+}
+
 /**
  * The text a row shows for a value: at most MAX_VALUE_LINES lines and TRUNCATE_AT characters,
- * line breaks of any kind shown as plain line breaks, bidi controls escaped. `truncated` asks for
- * the form that points to the full request in Details.
+ * line breaks of any kind shown as plain line breaks, blank runs collapsed and hidden characters
+ * escaped. `truncated` asks for the form that points to the full request in Details; `changed`
+ * for the form that says characters are shown as codes.
  */
-const shownValue = (text: string): { text: string; truncated: boolean } => {
+const shownValue = (text: string): { text: string; truncated: boolean; changed: boolean } => {
   const lines = text.split(LINE_BREAK, MAX_VALUE_LINES + 1)
   let truncated = lines.length > MAX_VALUE_LINES
   const kept = lines.slice(0, MAX_VALUE_LINES)
   if (truncated) while (kept.length > 1 && !kept[kept.length - 1].trim()) kept.pop()
-  let shown = kept.join('\n')
-  const cut = cutCodePoints(shown, TRUNCATE_AT)
-  if (cut !== null) {
-    shown = cut
-    truncated = true
-  }
-  return { text: shown.replace(BIDI_CONTROL, escapedCharacter), truncated }
+  const shown = visibleText(kept.join('\n'), TRUNCATE_AT, valueRules)
+  if (shown.cut) truncated = true
+  return { text: shown.text, truncated, changed: shown.changed }
 }
+
+// What Details shows: the request as JSON with every hidden or blank-drawing character written
+// as a JSON \u escape (such characters only occur inside JSON strings), so the full request
+// reads exactly as it is and stays valid JSON.
+const DETAILS_ESCAPE = /(?![\t\n ])(?:[\p{Zs}\u2800\u3164\uffa0\u115f]|\u1160|\u17b4|\u17b5|[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])/gu
+const detailsJson = (value: unknown): string =>
+  JSON.stringify(value, null, 2).replace(DETAILS_ESCAPE, (character) =>
+    Array.from({ length: character.length }, (_, unit) => `\\u${character.charCodeAt(unit).toString(16).padStart(4, '0')}`).join('')
+  )
 
 const parameterText = (value: unknown): string => {
   if (typeof value === 'string') return value
@@ -148,34 +259,45 @@ const parameterText = (value: unknown): string => {
 }
 
 // A character that can hide or disguise a field name: control and format characters (bidi
-// overrides, zero-width), line and paragraph separators, spaces other than U+0020, and the
-// quote and backslash used by the quoted form below.
-const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\]|(?! )\p{Zs}/u
+// overrides, zero-width), line and paragraph separators, spaces other than U+0020, characters
+// that draw blank or nothing, the marker bracket, and the quote and backslash used by the quoted
+// form below.
+const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\\u27e6\u2800\u3164\uffa0\u115f\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]|\u1160|\u17b4|\u17b5|(?! )\p{Zs}/u
 // A name with a colon could read as "label: value" inside the row; it is quoted, not escaped.
 const NAME_SEPARATOR = /[:：]/u
 
+const nameRules: VisibleRules = {
+  inRun: (character) =>
+    character === ' ' ||
+    (character !== '"' && character !== '\\' && character !== MARKER_OPEN && UNCLEAR_NAME_CHARACTER.test(character)),
+  escape: (character) =>
+    character === '"' || character === '\\'
+      ? `\\${character}`
+      : character !== ' ' && UNCLEAR_NAME_CHARACTER.test(character)
+        ? escapedCharacter(character)
+        : null
+}
+
 /**
  * How a field without a label is named in the approval. It is shown as sent, unless it could be
- * misread: then it is quoted with its hidden characters escaped (empty names, surrounding
- * spaces, invisible or control characters, and a name that reads like the label of a known field).
+ * misread: then it is quoted with its hidden characters escaped and long blank runs collapsed
+ * (empty names, surrounding spaces, invisible or control characters, and a name that reads like
+ * the label of a known field). `cut` tells that the name was cut after NAME_TRUNCATE_AT
+ * characters.
  */
-const unlabelledParameterName = (key: string, knownLabels: ReadonlySet<string>): string => {
+const unlabelledParameterName = (key: string, knownLabels: ReadonlySet<string>): { text: string; cut: boolean } => {
   if (
     key &&
     key === key.trim() &&
     !UNCLEAR_NAME_CHARACTER.test(key) &&
     !NAME_SEPARATOR.test(key) &&
     !knownLabels.has(key)
-  )
-    return key
-  const escaped = Array.from(key, (character) =>
-    character === '"' || character === '\\'
-      ? `\\${character}`
-      : UNCLEAR_NAME_CHARACTER.test(character)
-        ? escapedCharacter(character)
-        : character
-  ).join('')
-  return `"${escaped}"`
+  ) {
+    const cutName = cutCodePoints(key, NAME_TRUNCATE_AT)
+    return cutName === null ? { text: key, cut: false } : { text: cutName, cut: true }
+  }
+  const quoted = visibleText(key, NAME_TRUNCATE_AT - 1, nameRules)
+  return quoted.cut ? { text: `"${quoted.text}`, cut: true } : { text: `"${quoted.text}"`, cut: false }
 }
 
 const approvalDisplay = (
@@ -215,12 +337,17 @@ const approvalDisplay = (
     input,
     parameters: orderedKeys.map((key) => {
       const value = shownValue(parameterText(ownValue(input, key)))
-      const name = labelOf(key) ?? unlabelledParameterName(key, knownLabels)
-      const cutName = cutCodePoints(name, NAME_TRUNCATE_AT)
+      const labelled = labelOf(key)
+      const name = labelled === undefined ? unlabelledParameterName(key, knownLabels) : { text: labelled, cut: false }
       return {
         key,
-        label: cutName === null ? name : t('agent_workspace.approval.truncated', { text: cutName }),
-        text: value.truncated ? t('agent_workspace.approval.truncated', { text: value.text }) : value.text
+        label: name.cut ? t('agent_workspace.approval.truncated', { text: name.text }) : name.text,
+        // Whenever the row does not show the value as it is, it points to the full request.
+        text: value.truncated
+          ? t('agent_workspace.approval.truncated', { text: value.text })
+          : value.changed
+            ? t('agent_workspace.approval.escaped', { text: value.text })
+            : value.text
       }
     })
   }
@@ -300,7 +427,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
           { key: 'deny', label: t('agent_workspace.approval.deny'), disabled: busy, onSelect: () => void resolve(false, pending) }
         ]}
       >
-        <Box component="details" sx={{px:'4px',pb:'8px',color:'text.secondary',fontSize:12,'& summary':{cursor:'pointer',fontSize:12,lineHeight:'16px'}}}><summary>{t('agent_workspace.approval.details')}</summary><Typography component="pre" sx={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'16rem',overflow:'auto',m:0,mt:'4px',fontFamily:'monospace',fontSize:11,lineHeight:'16px'}}>{JSON.stringify(pending.request,null,2)}</Typography></Box>
+        <Box component="details" sx={{px:'4px',pb:'8px',color:'text.secondary',fontSize:12,'& summary':{cursor:'pointer',fontSize:12,lineHeight:'16px'}}}><summary>{t('agent_workspace.approval.details')}</summary><Typography component="pre" sx={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'16rem',overflow:'auto',m:0,mt:'4px',fontFamily:'monospace',fontSize:11,lineHeight:'16px'}}>{detailsJson(pending.request)}</Typography></Box>
       </ChatPromptCard>
     </Box>,surface!.element,pending.approvalId)
   })
@@ -354,7 +481,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
             component="pre"
             sx={{ maxWidth: 640, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap' }}
           >
-            {JSON.stringify(approval.request, null, 2)}
+            {detailsJson(approval.request)}
           </Box>
         </Box>
       </DialogContent>

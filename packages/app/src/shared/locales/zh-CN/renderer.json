@@ -1529,6 +1529,7 @@
       "tool_name_missing": "未提供工具名称",
       "pending_action": "待确认操作",
       "truncated": "{{text}}…（完整内容见详情）",
+      "escaped": "{{text}}（隐藏或空白字符以编码显示；完整内容见详情）",
       "actions": {
         "memory_write": "修改持久记忆文件（独立审批）",
         "scratchpad": "修改当前会话草稿笔记",

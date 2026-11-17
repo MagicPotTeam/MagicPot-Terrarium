@@ -515,6 +515,7 @@ describe('MagicAgentApprovalCenter keeps every parameter in view', () => {
   const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' }
   const label = (key: string) => i18n.t(`agent_workspace.approval.parameters.${key}` as never) as string
   const truncated = (text: string) => i18n.t('agent_workspace.approval.truncated', { text }) as string
+  const escaped = (text: string) => i18n.t('agent_workspace.approval.escaped', { text }) as string
   // A model-written value: a forged row for a field listed after it, then 400 blank lines.
   const stuffedInput = () => ({
     content: `first line\n${label('path')}: ./forged.txt` + '\n'.repeat(400),
@@ -604,8 +605,9 @@ describe('MagicAgentApprovalCenter keeps every parameter in view', () => {
     const view = await renderDialog({ path: './safe‮txt.exe', content: 'x⁦y‏z' })
     try {
       expect(dialogRows()).toEqual([
-        [label('content'), 'x\\u{2066}y\\u{200f}z'],
-        [label('path'), './safe\\u{202e}txt.exe']
+        // Since SEC-1b a row that shows characters as codes also points to the full request.
+        [label('content'), escaped('x\\u{2066}y\\u{200f}z')],
+        [label('path'), escaped('./safe\\u{202e}txt.exe')]
       ])
     } finally { view.unmount() }
   })
@@ -638,5 +640,186 @@ describe('MagicAgentApprovalCenter keeps every parameter in view', () => {
       expect([...host.querySelectorAll('[data-testid="chat-prompt-card-detail"] > span')].map(row => row.textContent))
         .toEqual(['操作: set', '笔记键: k', '笔记内容: {"secret":"NONSTRING-VALUE"}'])
     } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
+  })
+})
+
+// Characters that draw blank or nothing must never hide what is approved: long blank runs are
+// collapsed into a visible marker, hidden characters are escaped, and Details shows them as JSON
+// escapes (SEC-1b).
+describe('MagicAgentApprovalCenter shows blank and hidden characters', () => {
+  const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' }
+  const label = (key: string) => i18n.t(`agent_workspace.approval.parameters.${key}` as never) as string
+  const truncated = (text: string) => i18n.t('agent_workspace.approval.truncated', { text }) as string
+  const escaped = (text: string) => i18n.t('agent_workspace.approval.escaped', { text }) as string
+  const cp = (...codes: number[]) => String.fromCodePoint(...codes)
+  const BRAILLE_BLANK = cp(0x2800)
+  // The panel's input: blank padding pushes the real command past the visible part of the row.
+  const shellCode = 'ls' + BRAILLE_BLANK.repeat(460) + '\nrm -rf ~'
+  // As main builds a shell.execute approval (agentThreadShellHost.ts).
+  const shellInput = () => ({ command: '/bin/bash', args: ['--noprofile', '--norc', '-c', shellCode], cwd: '/work', code: shellCode })
+  // 'User prefers tea.' followed by 460 tag characters that spell out hidden text.
+  const tagText = Array.from({ length: 460 }, (_, index) => cp(0xe0020 + (index % 95))).join('')
+  const dialogRows = () =>
+    [...screen.getByRole('dialog').querySelectorAll('dl > dt')].map(term => [term.textContent, term.nextElementSibling?.textContent])
+  const cardRows = (host: HTMLElement) =>
+    [...host.querySelectorAll('[data-testid="chat-prompt-card-detail"] > span')].map(row => [
+      row.querySelector('[data-approval-parameter-label]')?.textContent,
+      row.querySelector('[data-approval-parameter-value]')?.textContent
+    ])
+  const pendingFor = (approvalId: string, tool: string, input: unknown, sessionId?: string) => ({
+    approvalId, revision: 1,
+    request: { request: { ...(sessionId ? { sessionId, route } : {}), target: { id: tool }, input } }
+  })
+  const renderDialog = async (tool: string, input: unknown) => {
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [pendingFor('dialog-hidden', tool, input)] })
+    const view = render(<MagicAgentApprovalCenter />)
+    expect(await screen.findByRole('dialog')).toBeVisible()
+    return view
+  }
+  const renderCard = async (tool: string, input: unknown) => {
+    const host = document.createElement('div'); document.body.append(host)
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [pendingFor('inline-hidden', tool, input, 'member')] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', 'Writer']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    await waitFor(() => expect(host.querySelector('[data-testid="team-approval-card"]')).not.toBeNull())
+    return { host, cleanup: async () => { await act(async () => { unregister() }); view.unmount(); host.remove() } }
+  }
+  // Every character a row or Details shows draws something.
+  const INVISIBLE = /[\p{Cf}\p{Co}\p{Cn}\u2800\u3164\uffa0\u115f\u1160\u00a0\u3000]|(?![\t\n])\p{Cc}/u
+
+  beforeEach(() => {
+    platformApi.listPendingApprovals.mockReset()
+    platformApi.resolvePendingApproval.mockReset()
+  })
+  afterEach(async () => { await act(async () => { await i18n.changeLanguage('zh-CN') }) })
+
+  it.each(['zh-CN', 'en-US'])('shows the command after blank padding in the Code row of the dialog (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    const view = await renderDialog('shell.execute', shellInput())
+    try {
+      const rows = dialogRows()
+      const code = rows.find(([name]) => name === label('code'))
+      expect(code).toEqual([label('code'), escaped('ls\u27e6460 \u00d7 U+2800\u27e7\nrm -rf ~')])
+      expect(rows.find(([name]) => name === label('args'))?.[1]).toBe(escaped('["--noprofile","--norc","-c","ls\u27e6460 \u00d7 U+2800\u27e7\\nrm -rf ~"]'))
+      for (const [, value] of rows) expect(value).not.toMatch(INVISIBLE)
+      expect(platformApi.resolvePendingApproval).not.toHaveBeenCalled()
+    } finally { view.unmount() }
+  })
+
+  it.each(['zh-CN', 'en-US'])('shows the command after blank padding in the Code row of the inline card (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    const { host, cleanup } = await renderCard('shell.execute', shellInput())
+    try {
+      expect(screen.queryByRole('dialog')).toBeNull()
+      const code = cardRows(host).find(([name]) => name === label('code'))
+      expect(code?.[1]).toBe(escaped('ls\u27e6460 \u00d7 U+2800\u27e7\nrm -rf ~'))
+      expect(host.querySelector('[data-testid="chat-prompt-card-detail"]')?.textContent).not.toMatch(INVISIBLE)
+    } finally { await cleanup() }
+  })
+
+  it('collapses runs of other blank-drawing characters, mixed runs and runs broken up by spaces', async () => {
+    const view = await renderDialog('shell.execute', {
+      command: 'a' + cp(0x3164).repeat(40) + 'b',
+      args: 'a' + cp(0xa0).repeat(10) + cp(0x3000).repeat(5) + 'b',
+      cwd: 'a' + (BRAILLE_BLANK.repeat(3) + ' ').repeat(115) + 'b',
+      code: 'a' + '\t'.repeat(6) + 'b' + cp(0xffa0, 0x115f, 0x1160, 0x17b4, 0x17b5) + 'c'
+    })
+    try {
+      expect(dialogRows()).toEqual([
+        [label('command'), escaped('a\u27e640 \u00d7 U+3164\u27e7b')],
+        [label('args'), escaped('a\u27e615 \u00d7 U+00A0/U+3000\u27e7b')],
+        [label('cwd'), escaped('a\u27e6460 \u00d7 U+2800/U+0020\u27e7b')],
+        [label('code'), escaped('a\u27e66 \u00d7 U+0009\u27e7b\u27e65 \u00d7 U+FFA0/U+115F/U+1160/U+17B4/\u2026\u27e7c')]
+      ])
+    } finally { view.unmount() }
+  })
+
+  it.each(['zh-CN', 'en-US'])('shows tag characters and zero-width characters in a memory_write content as escapes (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    const view = await renderDialog('memory_write', {
+      content: 'User prefers tea.' + tagText,
+      path: './memory/facts.md' + cp(0x200b, 0x2060, 0xfeff, 0xad),
+      namespace: 'ns' + cp(0xfe0f) + cp(0xe0100) + cp(0xe000) + cp(0x1) + 'x'
+    })
+    try {
+      const rows = dialogRows()
+      const content = rows.find(([name]) => name === label('content'))![1]!
+      expect(content.startsWith('User prefers tea.\\u{e0020}\\u{e0021}\\u{e0022}')).toBe(true)
+      expect(content).toBe(truncated('User prefers tea.' + Array.from(tagText).slice(0, 51).map(c => `\\u{${c.codePointAt(0)!.toString(16)}}`).join('')))
+      expect(rows.find(([name]) => name === label('path'))?.[1]).toBe(escaped('./memory/facts.md\\u{200b}\\u{2060}\\u{feff}\\u{ad}'))
+      expect(rows.find(([name]) => name === label('namespace'))?.[1]).toBe(escaped('ns\\u{fe0f}\\u{e0100}\\u{e000}\\u{1}x'))
+      for (const [, value] of rows) expect(value).not.toMatch(INVISIBLE)
+    } finally { view.unmount() }
+  })
+
+  it('shows tag characters as escapes in the inline card too', async () => {
+    const { host, cleanup } = await renderCard('memory_write', { content: 'User prefers tea.' + tagText.slice(0, 8), path: './memory/facts.md' })
+    try {
+      expect(cardRows(host).find(([name]) => name === label('content'))?.[1]).toBe(escaped('User prefers tea.\\u{e0020}\\u{e0021}\\u{e0022}\\u{e0023}'))
+    } finally { await cleanup() }
+  })
+
+  it('escapes the Details JSON of the dialog and of the inline card with valid JSON escapes', async () => {
+    const input = { content: 'User prefers tea.' + tagText.slice(0, 4) + BRAILLE_BLANK.repeat(5) + cp(0x202e, 0xa0, 0x3164), path: './a.txt' }
+    const view = await renderDialog('memory_write', input)
+    try {
+      const shown = document.querySelector('[role="dialog"] details pre')!.textContent!
+      expect(shown).not.toMatch(INVISIBLE)
+      expect(shown).toContain('User prefers tea.\\udb40\\udc20\\udb40\\udc21')
+      expect(shown).toContain('\\u2800\\u2800\\u2800\\u2800\\u2800\\u202e\\u00a0\\u3164')
+      expect(JSON.parse(shown)).toEqual(pendingFor('dialog-hidden', 'memory_write', input).request)
+    } finally { view.unmount() }
+    const { host, cleanup } = await renderCard('memory_write', input)
+    try {
+      const shown = host.querySelector('details pre')!.textContent!
+      expect(shown).not.toMatch(INVISIBLE)
+      expect(JSON.parse(shown)).toEqual(pendingFor('inline-hidden', 'memory_write', input, 'member').request)
+    } finally { await cleanup() }
+  })
+
+  it('leaves plain spaces, one tab, a few no-break spaces and ordinary text as they are', async () => {
+    const view = await renderDialog('python.run', { code: 'def f():\n        return 1\t# one tab', path: 'prix' + cp(0xa0) + ': 5' })
+    try {
+      expect(dialogRows()).toEqual([
+        [label('path'), 'prix' + cp(0xa0) + ': 5'],
+        [label('code'), 'def f():\n        return 1\t# one tab']
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('escapes text that reads like an escape or a marker, so neither is ever model text', async () => {
+    const view = await renderDialog('shell.execute', { command: 'a\\u{200b}', cwd: '\u27e63 \u00d7 U+2800\u27e7', code: 'C:\\Users\\x' })
+    try {
+      expect(dialogRows()).toEqual([
+        [label('command'), escaped('a\\u{5c}u{200b}')],
+        [label('cwd'), escaped('\\u{27e6}3 \u00d7 U+2800\u27e7')],
+        [label('code'), 'C:\\Users\\x']
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('cuts a long value before a combining mark together with its base, and escapes a lone surrogate', async () => {
+    const view = await renderDialog('shell.execute', { command: 'a'.repeat(479) + 'e' + cp(0x301) + 'zzz', cwd: 'x' + String.fromCharCode(0xd800) + 'y' })
+    try {
+      expect(dialogRows()).toEqual([
+        [label('command'), truncated('a'.repeat(479))],
+        [label('cwd'), escaped('x\\u{d800}y')]
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('collapses blank runs in field names and escapes hidden characters in them', async () => {
+    const view = await renderDialog('shell.execute', {
+      ['n' + BRAILLE_BLANK.repeat(460)]: 'blank-name',
+      ['tag' + tagText.slice(0, 6)]: 'tag-name',
+      [cp(0x3164)]: 'filler-name'
+    })
+    try {
+      expect(dialogRows()).toEqual([
+        ['"n\u27e6460 \u00d7 U+2800\u27e7"', 'blank-name'],
+        ['"tag\\u{e0020}\\u{e0021}\\u{e0022}"', 'tag-name'],
+        ['"\\u{3164}"', 'filler-name']
+      ])
+    } finally { view.unmount() }
   })
 })
