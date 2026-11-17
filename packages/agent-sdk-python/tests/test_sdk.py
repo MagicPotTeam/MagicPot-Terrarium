@@ -466,7 +466,9 @@ class SdkTest(unittest.TestCase):
         self.assertEqual(result.run_id, "http-run")
         request = mocked.call_args.args[0]
         self.assertEqual(request.full_url, "https://magicpot.invalid/v2/sdk/agent.run")
-        self.assertEqual(request.headers["Authorization"], "Bearer token")
+        self.assertEqual(request.get_header("Authorization"), "Bearer token")
+        # Sent on this request only: urllib copies request.headers onto a redirect, not this one.
+        self.assertNotIn("Authorization", request.headers)
 
     def test_http_stream_is_incremental_and_closable(self):
         class Response:
