@@ -190,7 +190,7 @@ describe('useCanvasGenerationWorkflow', () => {
   it('always sends the task pack to the default agent even if a project model exists', async () => {
     const notifySuccess = vi.fn()
     const notifyWarning = vi.fn()
-    const sendCanvasItemsToAgent = vi.fn().mockResolvedValue(undefined)
+    const sendCanvasItemsToAgent = vi.fn().mockResolvedValue(true)
     const items = [createFileItem(), createImageItem()]
 
     upsertProjectStyleModel('canvas-1', {
@@ -225,8 +225,8 @@ describe('useCanvasGenerationWorkflow', () => {
       expect(sendCanvasItemsToAgent).toHaveBeenCalledTimes(1)
     })
 
-    expect(notifyWarning).not.toHaveBeenCalled()
-    expect(notifySuccess).toHaveBeenCalledWith('已发送给默认 Agent 生成候选图')
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(notifyWarning).toHaveBeenCalledWith('已安排向默认 Agent 投递，尚未确认接收')
     expect(sendCanvasItemsToAgent).toHaveBeenCalledWith(
       items,
       expect.objectContaining({

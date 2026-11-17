@@ -398,7 +398,7 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
 
     await expect(
       result.current.handleSendCanvasItemsToAgent([image], 'canvas-a.agent-explicit')
-    ).resolves.toBeUndefined()
+    ).resolves.toBe(false)
     await vi.runAllTimersAsync()
 
     expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.send_to_agent_failed')
@@ -421,7 +421,7 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
 
     rerender({ canvasId: 'canvas-b' })
     rejectAttachment(new Error('Old canvas failed'))
-    await expect(send).resolves.toBeUndefined()
+    await expect(send).resolves.toBe(false)
     await vi.runAllTimersAsync()
 
     expect(notifyError).not.toHaveBeenCalled()
