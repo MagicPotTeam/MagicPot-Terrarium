@@ -159,6 +159,7 @@ import {
 import { hydrateCanvasImageItemForCanvas, loadImageFromSrc } from './canvasAssetIntakeHelpers'
 import { createMagicPotNativeProvenance } from './canvasProvenanceUtils'
 import { extractImageRegionLocally } from './localImageExtract'
+import { AGENT_SELECTION_RASTER_LIMITS, type CanvasRasterLimits } from './canvasExportRasterUtils'
 import { collectCascadeDeletedCanvasItemIds } from './canvasAttachedCaptionUtils'
 import {
   collectCanvasTargetRunWrittenIds,
@@ -318,7 +319,8 @@ type UseCanvasTargetWorkflowOptions = {
   renderCanvasItemsImageDataUrl: (
     targetItems: CanvasItem[],
     includeBackground?: boolean,
-    clipBounds?: CanvasTargetSelectionBounds | null
+    clipBounds?: CanvasTargetSelectionBounds | null,
+    limits?: CanvasRasterLimits
   ) => Promise<string>
   setSelectionRect: Dispatch<SetStateAction<SelectionRect>>
   setItemsWithHistory: Dispatch<SetStateAction<CanvasItem[]>>
@@ -1727,10 +1729,14 @@ export function useCanvasTargetWorkflow({
       // for in-memory context or a possible diagnostic failure archive.
       if (canvasTargetEvidenceAllowsSelectionSnapshot(canvasTargetEvidenceMode)) {
         try {
+          // Bound the snapshot like the "send to Agent" overview (2000 px /
+          // 4 MP) instead of the 33.5 MP export ceiling. In selected_sources
+          // mode the sources are still attached separately at full size.
           snapshotDataUrl = await renderCanvasItemsImageDataUrl(
             targetItems,
             false,
-            canvasTargetSelectionBounds
+            canvasTargetSelectionBounds,
+            AGENT_SELECTION_RASTER_LIMITS
           )
         } catch (snapshotError) {
           console.warn('[CanvasTarget] Failed to render selection snapshot.', snapshotError)

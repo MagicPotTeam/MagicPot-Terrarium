@@ -27,6 +27,8 @@ import { useProjectCanvasPageRuntimeState } from './useProjectCanvasPageRuntimeS
 const source = 'data:image/png;base64,SYNTHETIC_SOURCE'
 const image: CanvasImageItem = { id: 'source', type: 'image', src: source, sourceWidth: 200, sourceHeight: 200, crop: { x: 50, y: 50, width: 100, height: 100 }, x: 0, y: 0, width: 100, height: 100, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
 const noop = vi.fn()
+// The run snapshot is an overview bounded like the "send to Agent" overview.
+const AGENT_OVERVIEW_LIMITS = { maxSide: 2000, maxArea: 4_000_000 }
 const options: Parameters<typeof useCanvasTargetWorkflow>[0] = { canvasId: 'canvas', projectName: 'Fixture', isChineseUi: false, items: [image], selectedIds: new Set(['source']), groups: [], buildCanvasAssetMetadata: () => [], resolveCanvasTargetItemBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }), renderCanvasItemsImageDataUrl: async () => 'data:image/png;base64,SNAPSHOT', setSelectionRect: noop, setItemsWithHistory: f.commits, setSelectedIds: noop, setGroups: noop, setTool: noop, handleBgColorChange: noop, setShowGrid: noop, setAnnoTool: noop, setAnnotationColor: noop, setAnnotationStrokeWidth: noop, setAnnotationFillOpacity: noop, nextZIndexRef: { current: 2 }, notifySuccess: noop, notifyError: f.errors, notifyWarning: noop, notifyInfo: noop, resolveActiveAgentScope: () => 'fixture', openTargetManager: noop }
 
 beforeEach(() => {
@@ -93,9 +95,30 @@ describe('Canvas Target evidence action gate', () => {
     expect(f.plan).toHaveBeenCalledOnce()
     expect(f.summary).toHaveBeenCalledOnce()
     expect(snapshot).toHaveBeenCalledTimes(1)
-    expect(snapshot).toHaveBeenCalledWith([plain], false, bounds)
+    expect(snapshot).toHaveBeenCalledWith([plain], false, bounds, AGENT_OVERVIEW_LIMITS)
     const summaryRequest = f.summary.mock.calls[0][0] as { attachments?: Array<{ fileName?: string }> }
     expect(summaryRequest.attachments?.some((attachment) => attachment.fileName === 'canvas-target-final-evidence.png') ?? false).toBe(false)
+  })
+
+  it('bounds the run snapshot to 2000 px / 4 MP and still attaches every selected source', async () => {
+    const first: CanvasImageItem = { ...image, crop: undefined, src: 'data:image/png;base64,SOURCE_ONE' }
+    const second: CanvasImageItem = { ...first, id: 'second', src: 'data:image/png;base64,SOURCE_TWO', x: 120 }
+    const snapshot = vi.fn(async (..._args: unknown[]) => 'data:image/png;base64,BOUNDED_OVERVIEW')
+    f.plan.mockResolvedValue({ id: 'plan', generatedAt: '2026-01-01T00:00:00Z', summary: 'fixture', rawResponse: 'fixture', stageInstructions: [], capabilityActions: [] })
+    const { result } = renderHook(() => useCanvasTargetWorkflow({
+      ...options, items: [first, second], selectedIds: new Set([first.id, second.id]), renderCanvasItemsImageDataUrl: snapshot
+    }))
+    await act(async () => { await result.current.handleOpenCanvasTargetDialog([first, second], null) })
+    act(() => { result.current.setCanvasTargetEvidenceMode('selected_sources'); result.current.setCanvasTargetUserIntent('fixture') })
+    await act(async () => { await result.current.handleRunCanvasTarget() })
+    expect(f.plan).toHaveBeenCalledOnce()
+    expect(snapshot).toHaveBeenCalledTimes(1)
+    const limits = snapshot.mock.calls[0][3] as { maxSide: number; maxArea: number }
+    expect(limits).toEqual(AGENT_OVERVIEW_LIMITS)
+    expect(Object.isFrozen(limits)).toBe(true)
+    const request = f.plan.mock.calls[0][0] as { attachments?: Array<{ url: string }> }
+    const urls = (request.attachments || []).map((attachment) => attachment.url)
+    expect(urls).toEqual(expect.arrayContaining(['data:image/png;base64,SOURCE_ONE', 'data:image/png;base64,SOURCE_TWO', 'data:image/png;base64,BOUNDED_OVERVIEW']))
   })
 
   it('does not label the original selection as final canvas evidence', async () => {
@@ -111,7 +134,7 @@ describe('Canvas Target evidence action gate', () => {
     await act(async () => { await result.current.handleRunCanvasTarget() })
     expect(f.plan).toHaveBeenCalledOnce()
     expect(snapshot).toHaveBeenCalledTimes(1)
-    expect(snapshot).toHaveBeenCalledWith([plain], false, { x: 0, y: 0, width: 50, height: 50 })
+    expect(snapshot).toHaveBeenCalledWith([plain], false, { x: 0, y: 0, width: 50, height: 50 }, AGENT_OVERVIEW_LIMITS)
     const summary = f.summary.mock.calls[0][0] as { attachments?: Array<{ fileName?: string }> }
     expect(summary.attachments?.some((attachment) => attachment.fileName === 'canvas-target-final-evidence.png') ?? false).toBe(false)
   })
@@ -151,7 +174,7 @@ describe('Canvas Target evidence action gate', () => {
     const copiedItems = replayCommits([selected, other]).at(-1) as CanvasImageItem[]
     expect(copiedItems.some((item) => item.id !== other.id && item.src === other.src)).toBe(true)
     expect(snapshot).toHaveBeenCalledTimes(1)
-    expect(snapshot).toHaveBeenCalledWith([selected], false, { x: 0, y: 0, width: 50, height: 50 })
+    expect(snapshot).toHaveBeenCalledWith([selected], false, { x: 0, y: 0, width: 50, height: 50 }, AGENT_OVERVIEW_LIMITS)
     const summary = f.summary.mock.calls[0][0] as { attachments?: Array<{ fileName?: string }> }
     expect(summary.attachments?.some((attachment) => attachment.fileName === 'canvas-target-final-evidence.png') ?? false).toBe(false)
   })
@@ -365,7 +388,7 @@ describe('Canvas Target evidence action gate', () => {
     await act(async () => { await result.current.handleRunCanvasTarget() })
     expect(f.plan).toHaveBeenCalledOnce()
     expect(snapshot).toHaveBeenCalledTimes(1)
-    expect(snapshot).toHaveBeenCalledWith([plain], false, { x: 0, y: 0, width: 100, height: 100 })
+    expect(snapshot).toHaveBeenCalledWith([plain], false, { x: 0, y: 0, width: 100, height: 100 }, AGENT_OVERVIEW_LIMITS)
     expect(JSON.stringify(f.plan.mock.calls[0][0])).not.toContain('NEIGHBOUR')
   })
 
