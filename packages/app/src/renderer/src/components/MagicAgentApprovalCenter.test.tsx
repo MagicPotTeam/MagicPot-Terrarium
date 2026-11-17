@@ -386,12 +386,12 @@ describe('MagicAgentApprovalCenter shows every parameter of the request', () => 
     path: './fixture.txt'
   }).replace(/}$/, ',"__proto__":{"nested":"PROTO-VALUE"}}')) as Record<string, unknown>
   const label = (key: string) => i18n.t(`agent_workspace.approval.parameters.${key}` as never) as string
-  // Known fields first in their display order (conversationId, path, command), then the rest in
-  // the order they were sent.
+  // Known fields first in their display order (command, path, conversationId: since SEC-1b the
+  // fields that define the action come first), then the rest in the order they were sent.
   const expectedRows = () => [
-    [label('conversation_id'), 'conversation-fixture'],
-    [label('path'), './fixture.txt'],
     [label('command'), 'echo visible'],
+    [label('path'), './fixture.txt'],
+    [label('conversation_id'), 'conversation-fixture'],
     ['constructor', 'CONSTRUCTOR-VALUE'],
     ['toString', 'TO-STRING-VALUE'],
     ['valueOf', 'VALUE-OF-VALUE'],
@@ -461,9 +461,10 @@ describe('MagicAgentApprovalCenter shows every parameter of the request', () => 
     try {
       expect(await screen.findByRole('dialog')).toBeVisible()
       expect(dialogRows()).toEqual([
-        [label('content'), 'body'], [label('namespace'), 'ns'], [label('namespace_generation'), 'gen'],
+        // Since SEC-1b the path follows the content directly: both define the action.
+        [label('content'), 'body'], [label('path'), './memory/facts.md'], [label('namespace'), 'ns'], [label('namespace_generation'), 'gen'],
         [label('namespace_creation'), 'true'], [label('preimage'), 'null'], [label('create'), 'true'],
-        [label('operation_id'), 'op'], [label('conversation_id'), 'conv'], [label('path'), './memory/facts.md'],
+        [label('operation_id'), 'op'], [label('conversation_id'), 'conv'],
         ['routeIdentity', '["canvas","thread"]'], ['workspaceId', 'ws'], ['bindingRevision', 'rev']
       ])
     } finally { view.unmount() }
@@ -526,8 +527,8 @@ describe('MagicAgentApprovalCenter keeps every parameter in view', () => {
   })
   const expectedRows = () => [
     [label('content'), truncated(`first line\n${label('path')}: ./forged.txt`)],
-    [label('namespace'), 'real-namespace'],
-    [label('path'), './real.txt']
+    [label('path'), './real.txt'],
+    [label('namespace'), 'real-namespace']
   ]
   const dialogRows = () =>
     [...screen.getByRole('dialog').querySelectorAll('dl > dt')].map(term => [term.textContent, term.nextElementSibling?.textContent])
@@ -573,7 +574,7 @@ describe('MagicAgentApprovalCenter keeps every parameter in view', () => {
       expect(screen.queryByRole('dialog')).toBeNull()
       const rows = [...host.querySelectorAll('[data-testid="chat-prompt-card-detail"] > span')]
       expect(rows.map(row => row.textContent)).toEqual(expectedRows().map(([name, value]) => `${name}: ${value}`))
-      expect(rows.map(row => row.getAttribute('data-approval-parameter'))).toEqual(['content', 'namespace', 'path'])
+      expect(rows.map(row => row.getAttribute('data-approval-parameter'))).toEqual(['content', 'path', 'namespace'])
       // Labels are their own elements; text inside a value never becomes a label.
       expect([...host.querySelectorAll('[data-approval-parameter-label]')].map(name => name.textContent)).toEqual(expectedRows().map(([name]) => name))
       expect([...host.querySelectorAll('[data-approval-parameter-value]')].map(value => value.textContent)).toEqual(expectedRows().map(([, value]) => value))
@@ -590,8 +591,8 @@ describe('MagicAgentApprovalCenter keeps every parameter in view', () => {
     try {
       expect(dialogRows()).toEqual([
         [label('content'), 'a\nb\nc\nd\ne\nf'],
-        [label('namespace'), truncated('a\nb\nc\nd\ne\nf')],
-        [label('path'), truncated('a\nb\nc\nd\ne\nf')]
+        [label('path'), truncated('a\nb\nc\nd\ne\nf')],
+        [label('namespace'), truncated('a\nb\nc\nd\ne\nf')]
       ])
     } finally { view.unmount() }
   })
@@ -728,10 +729,10 @@ describe('MagicAgentApprovalCenter shows blank and hidden characters', () => {
     })
     try {
       expect(dialogRows()).toEqual([
+        [label('code'), escaped('a\u27e66 \u00d7 U+0009\u27e7b\u27e65 \u00d7 U+FFA0/U+115F/U+1160/U+17B4/\u2026\u27e7c')],
         [label('command'), escaped('a\u27e640 \u00d7 U+3164\u27e7b')],
         [label('args'), escaped('a\u27e615 \u00d7 U+00A0/U+3000\u27e7b')],
-        [label('cwd'), escaped('a\u27e6460 \u00d7 U+2800/U+0020\u27e7b')],
-        [label('code'), escaped('a\u27e66 \u00d7 U+0009\u27e7b\u27e65 \u00d7 U+FFA0/U+115F/U+1160/U+17B4/\u2026\u27e7c')]
+        [label('cwd'), escaped('a\u27e6460 \u00d7 U+2800/U+0020\u27e7b')]
       ])
     } finally { view.unmount() }
   })
@@ -783,8 +784,8 @@ describe('MagicAgentApprovalCenter shows blank and hidden characters', () => {
     const view = await renderDialog('python.run', { code: 'def f():\n        return 1\t# one tab', path: 'prix' + cp(0xa0) + ': 5' })
     try {
       expect(dialogRows()).toEqual([
-        [label('path'), 'prix' + cp(0xa0) + ': 5'],
-        [label('code'), 'def f():\n        return 1\t# one tab']
+        [label('code'), 'def f():\n        return 1\t# one tab'],
+        [label('path'), 'prix' + cp(0xa0) + ': 5']
       ])
     } finally { view.unmount() }
   })
@@ -793,9 +794,9 @@ describe('MagicAgentApprovalCenter shows blank and hidden characters', () => {
     const view = await renderDialog('shell.execute', { command: 'a\\u{200b}', cwd: '\u27e63 \u00d7 U+2800\u27e7', code: 'C:\\Users\\x' })
     try {
       expect(dialogRows()).toEqual([
+        [label('code'), 'C:\\Users\\x'],
         [label('command'), escaped('a\\u{5c}u{200b}')],
-        [label('cwd'), escaped('\\u{27e6}3 \u00d7 U+2800\u27e7')],
-        [label('code'), 'C:\\Users\\x']
+        [label('cwd'), escaped('\\u{27e6}3 \u00d7 U+2800\u27e7')]
       ])
     } finally { view.unmount() }
   })
@@ -861,5 +862,113 @@ describe('MagicAgentApprovalCenter shows a note in the inline card as it is', ()
       expect(host.querySelector('[title]')).toBeNull()
       expect(prompt.textContent).not.toMatch(/[\u00a0\u202c\u202e]/)
     } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
+  })
+})
+
+// What is drawn is bounded, not only what is counted: each value is at most six lines high with a
+// visible cue when it is taller, and the row that defines the action comes first (SEC-1b).
+describe('MagicAgentApprovalCenter keeps the defining row in view', () => {
+  const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' }
+  const label = (key: string) => i18n.t(`agent_workspace.approval.parameters.${key}` as never) as string
+  // As main builds them: shell.execute (agentThreadShellHost.ts) and memory_write.
+  const shellInput = { command: '/bin/bash', args: ['--noprofile', '--norc', '-c', 'ls'], cwd: '/work', code: 'ls' }
+  const memoryInput = { path: './memory/facts.md', namespace: 'ns', namespaceGeneration: 'g', namespaceCreation: true, preimage: null, create: true, operationId: 'op', conversationId: 'c', content: 'body' }
+  const pendingFor = (approvalId: string, tool: string, input: unknown, sessionId?: string) => ({
+    approvalId, revision: 1,
+    request: { request: { ...(sessionId ? { sessionId, route } : {}), target: { id: tool }, input } }
+  })
+  const renderDialog = async (tool: string, input: unknown) => {
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [pendingFor('dialog-order', tool, input)] })
+    const view = render(<MagicAgentApprovalCenter />)
+    expect(await screen.findByRole('dialog')).toBeVisible()
+    return view
+  }
+  const renderCard = async (tool: string, input: unknown) => {
+    const host = document.createElement('div'); document.body.append(host)
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [pendingFor('inline-order', tool, input, 'member')] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', 'Writer']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    await waitFor(() => expect(host.querySelector('[data-testid="team-approval-card"]')).not.toBeNull())
+    return { host, cleanup: async () => { await act(async () => { unregister() }); view.unmount(); host.remove() } }
+  }
+  const dialogKeys = () => [...screen.getByRole('dialog').querySelectorAll('dl > dt')].map(term => term.textContent)
+  const cardKeys = (host: HTMLElement) => [...host.querySelectorAll('[data-approval-parameter]')].map(row => row.getAttribute('data-approval-parameter'))
+  // jsdom does no layout: a clamped value reports the height its text would take.
+  const fakeLayout = (tall: (element: Element) => boolean) => {
+    const scroll = vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(function (this: Element) { return this.hasAttribute('data-approval-clamped') && tall(this) ? 400 : 20 })
+    const client = vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) { return 20 })
+    return () => { scroll.mockRestore(); client.mockRestore() }
+  }
+
+  beforeEach(() => {
+    platformApi.listPendingApprovals.mockReset()
+    platformApi.resolvePendingApproval.mockReset()
+  })
+  afterEach(async () => { await act(async () => { await i18n.changeLanguage('zh-CN') }) })
+
+  it.each(['zh-CN', 'en-US'])('lists the code of a shell command and the content of a memory file first (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    let view = await renderDialog('shell.execute', shellInput)
+    try {
+      expect(dialogKeys()).toEqual([label('code'), label('command'), label('args'), label('cwd')])
+    } finally { view.unmount() }
+    view = await renderDialog('memory_write', memoryInput)
+    try {
+      expect(dialogKeys().slice(0, 3)).toEqual([label('content'), label('path'), label('namespace')])
+    } finally { view.unmount() }
+    for (const [tool, input, first] of [['shell.execute', shellInput, ['code', 'command']], ['memory_write', memoryInput, ['content', 'path']]] as const) {
+      const { host, cleanup } = await renderCard(tool, input)
+      try {
+        expect(cardKeys(host).slice(0, 2)).toEqual(first)
+      } finally { await cleanup() }
+    }
+  })
+
+  it('draws each value at most six lines high in the dialog, the inline card and the note prompt', async () => {
+    const view = await renderDialog('shell.execute', shellInput)
+    try {
+      const values = [...screen.getByRole('dialog').querySelectorAll<HTMLElement>('dl > dd [data-approval-parameter-value]')]
+      expect(values).toHaveLength(4)
+      for (const value of values) {
+        const style = getComputedStyle(value)
+        expect([style.display, style.lineHeight, style.maxHeight, style.overflow]).toEqual(['block', '20px', '120px', 'hidden'])
+      }
+    } finally { view.unmount() }
+    let card = await renderCard('shell.execute', shellInput)
+    try {
+      const values = [...card.host.querySelectorAll<HTMLElement>('[data-approval-parameter-value]')]
+      expect(values).toHaveLength(4)
+      for (const value of values) {
+        const style = getComputedStyle(value)
+        expect([style.display, style.lineHeight, style.maxHeight, style.overflow, style.textIndent]).toEqual(['block', '18px', '108px', 'hidden', '0'])
+      }
+    } finally { await card.cleanup() }
+    card = await renderCard('scratchpad', { action: 'set', key: 'k', value: 'note' })
+    try {
+      const style = getComputedStyle(card.host.querySelector<HTMLElement>('[data-approval-note]')!)
+      expect([style.lineHeight, style.maxHeight, style.overflow]).toEqual(['20px', '120px', 'hidden'])
+    } finally { await card.cleanup() }
+  })
+
+  it.each(['zh-CN', 'en-US'])('shows a cue under a value taller than six lines that opens the rest (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    const restore = fakeLayout(element => element.textContent === 'tall value')
+    try {
+      const view = await renderDialog('shell.execute', { code: 'tall value', cwd: '/work' })
+      try {
+        const cues = [...screen.getByRole('dialog').querySelectorAll<HTMLElement>('[data-approval-more]')]
+        expect(cues.map(cue => [cue.closest('dd')?.previousElementSibling?.textContent, cue.textContent])).toEqual([[label('code'), i18n.t('agent_workspace.approval.show_more')]])
+        expect(cues[0]).toBeVisible()
+        fireEvent.click(cues[0])
+        expect(getComputedStyle(screen.getByRole('dialog').querySelector<HTMLElement>('[data-approval-parameter-value]')!).maxHeight).toBe('none')
+        expect(screen.getByRole('dialog').querySelector('[data-approval-more]')).toBeNull()
+      } finally { view.unmount() }
+      const { host, cleanup } = await renderCard('shell.execute', { code: 'tall value', cwd: '/work' })
+      try {
+        const cues = [...host.querySelectorAll<HTMLElement>('[data-approval-more]')]
+        expect(cues.map(cue => cue.closest('[data-approval-parameter]')?.getAttribute('data-approval-parameter'))).toEqual(['code'])
+        expect(cues[0].textContent).toBe(i18n.t('agent_workspace.approval.show_more'))
+      } finally { await cleanup() }
+    } finally { restore() }
   })
 })

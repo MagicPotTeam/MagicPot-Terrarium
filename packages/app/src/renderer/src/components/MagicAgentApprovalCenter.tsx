@@ -46,9 +46,29 @@ const actionLabelKeys = {
 } as const
 
 // Each known input field maps to its label under agent_workspace.approval.parameters.
-// The order here is the display order.
+// The order here is the display order: the fields that define the action (the code, command,
+// content or path it runs or writes) come first, so they are in view without scrolling; the
+// fields that only qualify it (arguments, working directory, namespace, revisions) follow.
 const parameterLabelKeys = {
+  code: 'code',
+  command: 'command',
   content: 'content',
+  path: 'path',
+  targetPath: 'target_path',
+  sourcePath: 'source_path',
+  outputPath: 'output_path',
+  action: 'action',
+  key: 'key',
+  value: 'value',
+  prompt: 'prompt',
+  url: 'url',
+  workflow: 'workflow',
+  qAppKey: 'q_app_key',
+  toolName: 'tool_name',
+  name: 'name',
+  model: 'model',
+  args: 'args',
+  cwd: 'cwd',
   namespace: 'namespace',
   namespaceGeneration: 'namespace_generation',
   namespaceCreation: 'namespace_creation',
@@ -56,26 +76,8 @@ const parameterLabelKeys = {
   create: 'create',
   operationId: 'operation_id',
   conversationId: 'conversation_id',
-  action: 'action',
-  key: 'key',
-  value: 'value',
   expectedRevision: 'expected_revision',
-  clearScope: 'clear_scope',
-  prompt: 'prompt',
-  model: 'model',
-  path: 'path',
-  targetPath: 'target_path',
-  sourcePath: 'source_path',
-  outputPath: 'output_path',
-  url: 'url',
-  workflow: 'workflow',
-  qAppKey: 'q_app_key',
-  command: 'command',
-  args: 'args',
-  cwd: 'cwd',
-  code: 'code',
-  toolName: 'tool_name',
-  name: 'name'
+  clearScope: 'clear_scope'
 } as const
 
 // Null-prototype lookups: an input key such as "constructor", "toString" or "__proto__" is an
@@ -353,6 +355,83 @@ const approvalDisplay = (
   }
 }
 
+// A value is drawn at most this many lines high, so one value can never push the rows after it
+// (or the buttons) out of view, whatever its characters draw like.
+const VALUE_LINES = 6
+
+/**
+ * A value drawn at most VALUE_LINES lines high. When its text is taller, a visible cue below it
+ * says so and opens the rest in place.
+ */
+const ClampedValue: React.FC<{
+  text: string
+  lineHeight: number
+  kind: 'parameter' | 'note'
+}> = ({ text, lineHeight, kind }) => {
+  const { t } = useTranslation()
+  const ref = React.useRef<HTMLElement | null>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+  React.useLayoutEffect(() => {
+    const element = ref.current
+    if (!element || expanded) return
+    const measure = (): void => setOverflowing(element.scrollHeight > element.clientHeight + 1)
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [text, expanded])
+  return (
+    <>
+      <Box
+        component="span"
+        ref={ref}
+        data-approval-parameter-value={kind === 'parameter' ? '' : undefined}
+        data-approval-note={kind === 'note' ? '' : undefined}
+        data-approval-clamped={expanded ? undefined : ''}
+        sx={{
+          display: 'block',
+          textIndent: 0,
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+          unicodeBidi: 'isolate',
+          lineHeight: `${lineHeight}px`,
+          maxHeight: expanded ? 'none' : `${lineHeight * VALUE_LINES}px`,
+          overflow: 'hidden'
+        }}
+      >
+        {text}
+      </Box>
+      {overflowing && !expanded ? (
+        <Box
+          component="button"
+          type="button"
+          data-approval-more=""
+          onClick={() => setExpanded(true)}
+          sx={{
+            display: 'block',
+            m: 0,
+            mt: '2px',
+            p: 0,
+            border: 0,
+            bgcolor: 'transparent',
+            color: 'primary.main',
+            cursor: 'pointer',
+            font: 'inherit',
+            fontSize: 12,
+            lineHeight: '16px',
+            textIndent: 0,
+            textDecoration: 'underline'
+          }}
+        >
+          {t('agent_workspace.approval.show_more')}
+        </Box>
+      ) : null}
+    </>
+  )
+}
+
 export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   const [approvals, setApprovals] = useState<MagicAgentPlatformPendingApproval[]>([])
   const [busy, setBusy] = useState(false)
@@ -422,8 +501,8 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
         icon={<WarningAmberIcon aria-hidden="true" />}
         accent="warning"
         title={isNote ? t('agent_workspace.approval.member_wants_note', { member }) : t('agent_workspace.approval.member_requests_action', { member })}
-        prompt={isNote ? noteRow ? <Box component="span" data-approval-note="" sx={{display:'block',whiteSpace:'pre-wrap',overflowWrap:'anywhere',unicodeBidi:'isolate'}}>{noteRow.text}</Box> : t('agent_workspace.approval.note_missing') : shown.action}
-        detail={!detailParameters.length ? undefined : <>{detailParameters.map(parameter => <Box key={parameter.key} component="span" data-approval-parameter={parameter.key} sx={{display:'block',pl:'1em',textIndent:'-1em'}}><Box component="span" data-approval-parameter-label="" sx={{fontWeight:600}}>{parameter.label}</Box>: <Box component="span" data-approval-parameter-value="" sx={{unicodeBidi:'isolate'}}>{parameter.text}</Box></Box>)}</>}
+        prompt={isNote ? noteRow ? <ClampedValue kind="note" lineHeight={20} text={noteRow.text} /> : t('agent_workspace.approval.note_missing') : shown.action}
+        detail={!detailParameters.length ? undefined : <>{detailParameters.map(parameter => <Box key={parameter.key} component="span" data-approval-parameter={parameter.key} sx={{display:'block',pl:'1em',textIndent:'-1em'}}><Box component="span" data-approval-parameter-label="" sx={{fontWeight:600}}>{parameter.label}</Box>: <Box component="span" sx={{display:'inline-block',verticalAlign:'top',maxWidth:'100%',textIndent:0}}><ClampedValue kind="parameter" lineHeight={18} text={parameter.text} /></Box></Box>)}</>}
         options={[
           { key: 'approve', label: t('agent_workspace.approval.approve'), primary: true, disabled: busy, onSelect: () => void resolve(true, pending) },
           { key: 'deny', label: t('agent_workspace.approval.deny'), disabled: busy, onSelect: () => void resolve(false, pending) }
@@ -470,7 +549,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
                   unicodeBidi: 'isolate'
                 }}
               >
-                {parameter.text}
+                <ClampedValue kind="parameter" lineHeight={20} text={parameter.text} />
               </Typography>
             </React.Fragment>
           ))}

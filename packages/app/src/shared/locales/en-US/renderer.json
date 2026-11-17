@@ -1703,6 +1703,7 @@
       "pending_action": "Action awaiting confirmation",
       "truncated": "{{text}}… (full content in Details)",
       "escaped": "{{text}} (hidden or blank characters shown as codes; full content in Details)",
+      "show_more": "Show more",
       "actions": {
         "memory_write": "Modify a persistent memory file (separate approval)",
         "scratchpad": "Modify this conversation's scratchpad note",
