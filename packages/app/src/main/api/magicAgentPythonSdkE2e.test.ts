@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import path from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1337,6 +1337,9 @@ asyncio.run(main())
 
 const runPythonFile = (script: string) =>
   new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    // Same reason as withSdkOnPath: an isolated Python ignores PYTHONPATH, so the script puts the
+    // SDK on sys.path itself.
+    writeFileSync(script, withSdkOnPath(readFileSync(script, 'utf8')))
     const child = spawn('python', [script], { env: { ...process.env, PYTHONPATH: pythonSdk } })
     let stdout = '',
       stderr = ''
