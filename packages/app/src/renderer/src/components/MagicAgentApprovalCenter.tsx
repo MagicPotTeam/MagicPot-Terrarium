@@ -93,6 +93,44 @@ const ownValue = (record: Record<string, unknown>, key: string): unknown =>
   Object.hasOwn(record, key) ? record[key] : undefined
 
 const TRUNCATE_AT = 480
+// A value is shown on at most this many lines, so a value made of line breaks can neither push
+// the other parameters out of view nor line up text that reads like a further row.
+const MAX_VALUE_LINES = 6
+// A field name without a label is cut after this many characters, so it cannot push the other
+// parameters out of view either.
+const NAME_TRUNCATE_AT = 120
+const LINE_BREAK = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/
+// Bidi controls can make a value read differently from what it is; they are shown escaped.
+const BIDI_CONTROL = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
+
+const escapedCharacter = (character: string): string => `\\u{${character.codePointAt(0)!.toString(16)}}`
+
+/** The first `limit` code points of `text` (never half of a surrogate pair), or null if it is not longer. */
+const cutCodePoints = (text: string, limit: number): string | null => {
+  // A code point takes at most two code units, so this prefix holds more than `limit` of them
+  // whenever the text does.
+  const head = Array.from(text.slice(0, limit * 2 + 1))
+  return head.length > limit ? head.slice(0, limit).join('') : null
+}
+
+/**
+ * The text a row shows for a value: at most MAX_VALUE_LINES lines and TRUNCATE_AT characters,
+ * line breaks of any kind shown as plain line breaks, bidi controls escaped. `truncated` asks for
+ * the form that points to the full request in Details.
+ */
+const shownValue = (text: string): { text: string; truncated: boolean } => {
+  const lines = text.split(LINE_BREAK, MAX_VALUE_LINES + 1)
+  let truncated = lines.length > MAX_VALUE_LINES
+  const kept = lines.slice(0, MAX_VALUE_LINES)
+  if (truncated) while (kept.length > 1 && !kept[kept.length - 1].trim()) kept.pop()
+  let shown = kept.join('\n')
+  const cut = cutCodePoints(shown, TRUNCATE_AT)
+  if (cut !== null) {
+    shown = cut
+    truncated = true
+  }
+  return { text: shown.replace(BIDI_CONTROL, escapedCharacter), truncated }
+}
 
 const parameterText = (value: unknown): string => {
   if (typeof value === 'string') return value
@@ -113,6 +151,8 @@ const parameterText = (value: unknown): string => {
 // overrides, zero-width), line and paragraph separators, spaces other than U+0020, and the
 // quote and backslash used by the quoted form below.
 const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\]|(?! )\p{Zs}/u
+// A name with a colon could read as "label: value" inside the row; it is quoted, not escaped.
+const NAME_SEPARATOR = /[:：]/u
 
 /**
  * How a field without a label is named in the approval. It is shown as sent, unless it could be
@@ -120,12 +160,19 @@ const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\]|(?! )\p{Zs}/u
  * spaces, invisible or control characters, and a name that reads like the label of a known field).
  */
 const unlabelledParameterName = (key: string, knownLabels: ReadonlySet<string>): string => {
-  if (key && key === key.trim() && !UNCLEAR_NAME_CHARACTER.test(key) && !knownLabels.has(key)) return key
+  if (
+    key &&
+    key === key.trim() &&
+    !UNCLEAR_NAME_CHARACTER.test(key) &&
+    !NAME_SEPARATOR.test(key) &&
+    !knownLabels.has(key)
+  )
+    return key
   const escaped = Array.from(key, (character) =>
     character === '"' || character === '\\'
       ? `\\${character}`
       : UNCLEAR_NAME_CHARACTER.test(character)
-        ? `\\u{${character.codePointAt(0)!.toString(16)}}`
+        ? escapedCharacter(character)
         : character
   ).join('')
   return `"${escaped}"`
@@ -167,14 +214,13 @@ const approvalDisplay = (
       : t('agent_workspace.approval.pending_action'),
     input,
     parameters: orderedKeys.map((key) => {
-      const text = parameterText(ownValue(input, key))
+      const value = shownValue(parameterText(ownValue(input, key)))
+      const name = labelOf(key) ?? unlabelledParameterName(key, knownLabels)
+      const cutName = cutCodePoints(name, NAME_TRUNCATE_AT)
       return {
         key,
-        label: labelOf(key) ?? unlabelledParameterName(key, knownLabels),
-        text:
-          text.length > TRUNCATE_AT
-            ? t('agent_workspace.approval.truncated', { text: text.slice(0, TRUNCATE_AT) })
-            : text
+        label: cutName === null ? name : t('agent_workspace.approval.truncated', { text: cutName }),
+        text: value.truncated ? t('agent_workspace.approval.truncated', { text: value.text }) : value.text
       }
     })
   }
@@ -236,7 +282,8 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
     const note = ownValue(shown.input, 'value')
     const isNote = shown.toolName === 'scratchpad' && ownValue(shown.input, 'action') === 'set'
     // A note card shows the note itself as its prompt; every other field is listed below it.
-    const detailParameters = isNote ? shown.parameters.filter(parameter => parameter.key !== 'value') : shown.parameters
+    // A note that is not text is not the prompt, so its value stays in the list.
+    const detailParameters = isNote && typeof note === 'string' ? shown.parameters.filter(parameter => parameter.key !== 'value') : shown.parameters
     const member = surface!.members.get(matchTeamApproval(pending.request,surface!)!)
     // Presentation only: a prompt card at the end of the member's team transcript. Which
     // approval is shown here and what the buttons resolve are decided above.
@@ -247,7 +294,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
         accent="warning"
         title={isNote ? t('agent_workspace.approval.member_wants_note', { member }) : t('agent_workspace.approval.member_requests_action', { member })}
         prompt={isNote ? <Box component="span" title={typeof note === 'string' ? note : undefined} sx={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{typeof note === 'string' ? note : t('agent_workspace.approval.note_missing')}</Box> : shown.action}
-        detail={!detailParameters.length ? undefined : <>{detailParameters.map(parameter => <Box key={parameter.key} component="span" sx={{display:'block'}}>{parameter.label}: {parameter.text}</Box>)}</>}
+        detail={!detailParameters.length ? undefined : <>{detailParameters.map(parameter => <Box key={parameter.key} component="span" data-approval-parameter={parameter.key} sx={{display:'block',pl:'1em',textIndent:'-1em'}}><Box component="span" data-approval-parameter-label="" sx={{fontWeight:600}}>{parameter.label}</Box>: <Box component="span" data-approval-parameter-value="" sx={{unicodeBidi:'isolate'}}>{parameter.text}</Box></Box>)}</>}
         options={[
           { key: 'approve', label: t('agent_workspace.approval.approve'), primary: true, disabled: busy, onSelect: () => void resolve(true, pending) },
           { key: 'deny', label: t('agent_workspace.approval.deny'), disabled: busy, onSelect: () => void resolve(false, pending) }
@@ -283,7 +330,16 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
               <Typography
                 component="dd"
                 variant="body2"
-                sx={{ ml: 0, mb: 1, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}
+                sx={{
+                  ml: 0,
+                  mb: 1,
+                  pl: 1,
+                  borderLeft: 2,
+                  borderColor: 'divider',
+                  whiteSpace: 'pre-wrap',
+                  overflowWrap: 'anywhere',
+                  unicodeBidi: 'isolate'
+                }}
               >
                 {parameter.text}
               </Typography>

@@ -186,10 +186,12 @@ describe('MagicAgentApprovalCenter', () => {
     const view = render(<MagicAgentApprovalCenter />)
     try {
       expect(await screen.findByText('文案 请求操作')).toBeVisible()
-      expect(screen.getByText(expected)).toBeVisible()
+      // A row's label and value are separate elements; match the whole row.
+      const row = (text: string) => screen.getByText((_, element) => element?.hasAttribute('data-approval-parameter') === true && element.textContent === text)
+      expect(row(expected)).toBeVisible()
       expect(host.querySelector('details')?.open).toBe(false)
       expect(host.querySelector('details pre')?.textContent).toBe(JSON.stringify(request, null, 2))
-      if (tool === 'files.write') expect(screen.getByText('文件完整内容: sample-content')).toBeVisible()
+      if (tool === 'files.write') expect(row('文件完整内容: sample-content')).toBeVisible()
     } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
   })
 
@@ -504,5 +506,137 @@ describe('MagicAgentApprovalCenter shows every parameter of the request', () => 
       const dialog = screen.getByRole('dialog')
       expect(dialog.querySelector('b, a, img')).toBeNull()
     } finally { view.unmount() }
+  })
+})
+
+// A value made of line breaks must not push the other parameters out of view or plant text that
+// reads like a further "label: value" row; a long name must not push them out of view either.
+describe('MagicAgentApprovalCenter keeps every parameter in view', () => {
+  const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' }
+  const label = (key: string) => i18n.t(`agent_workspace.approval.parameters.${key}` as never) as string
+  const truncated = (text: string) => i18n.t('agent_workspace.approval.truncated', { text }) as string
+  // A model-written value: a forged row for a field listed after it, then 400 blank lines.
+  const stuffedInput = () => ({
+    content: `first line\n${label('path')}: ./forged.txt` + '\n'.repeat(400),
+    path: './real.txt',
+    namespace: 'real-namespace'
+  })
+  const expectedRows = () => [
+    [label('content'), truncated(`first line\n${label('path')}: ./forged.txt`)],
+    [label('namespace'), 'real-namespace'],
+    [label('path'), './real.txt']
+  ]
+  const dialogRows = () =>
+    [...screen.getByRole('dialog').querySelectorAll('dl > dt')].map(term => [term.textContent, term.nextElementSibling?.textContent])
+  const pendingFor = (approvalId: string, input: unknown, sessionId?: string) => ({
+    approvalId, revision: 1,
+    request: { request: { ...(sessionId ? { sessionId, route } : {}), target: { id: 'memory_write' }, input } }
+  })
+  const renderDialog = async (input: unknown) => {
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [pendingFor('dialog-view', input)] })
+    const view = render(<MagicAgentApprovalCenter />)
+    expect(await screen.findByRole('dialog')).toBeVisible()
+    return view
+  }
+
+  beforeEach(() => {
+    platformApi.listPendingApprovals.mockReset()
+    platformApi.resolvePendingApproval.mockReset()
+  })
+  afterEach(async () => { await act(async () => { await i18n.changeLanguage('zh-CN') }) })
+
+  it.each(['zh-CN', 'en-US'])('cuts a value made of line breaks in the dialog and keeps the next rows right after it (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    const view = await renderDialog(stuffedInput())
+    try {
+      expect(dialogRows()).toEqual(expectedRows())
+      for (const value of screen.getByRole('dialog').querySelectorAll('dl > dd')) expect(value.textContent!.split('\n').length).toBeLessThanOrEqual(6)
+      // The only term that reads as the path label is the real one, and its value is the real path.
+      const terms = [...screen.getByRole('dialog').querySelectorAll('dl > dt')].filter(term => term.textContent?.startsWith(label('path')))
+      expect(terms.map(term => term.nextElementSibling?.textContent)).toEqual(['./real.txt'])
+      expect(document.querySelector('details pre')?.textContent).toContain('\\n\\n\\n')
+      expect(platformApi.resolvePendingApproval).not.toHaveBeenCalled()
+    } finally { view.unmount() }
+  })
+
+  it.each(['zh-CN', 'en-US'])('cuts a value made of line breaks in the inline card and keeps labels apart from values (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    const host = document.createElement('div'); document.body.append(host)
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [pendingFor('inline-view', stuffedInput(), 'member')] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', 'Writer']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      await waitFor(() => expect(host.querySelector('[data-testid="team-approval-card"]')).not.toBeNull())
+      expect(screen.queryByRole('dialog')).toBeNull()
+      const rows = [...host.querySelectorAll('[data-testid="chat-prompt-card-detail"] > span')]
+      expect(rows.map(row => row.textContent)).toEqual(expectedRows().map(([name, value]) => `${name}: ${value}`))
+      expect(rows.map(row => row.getAttribute('data-approval-parameter'))).toEqual(['content', 'namespace', 'path'])
+      // Labels are their own elements; text inside a value never becomes a label.
+      expect([...host.querySelectorAll('[data-approval-parameter-label]')].map(name => name.textContent)).toEqual(expectedRows().map(([name]) => name))
+      expect([...host.querySelectorAll('[data-approval-parameter-value]')].map(value => value.textContent)).toEqual(expectedRows().map(([, value]) => value))
+      for (const row of rows) expect(row.textContent!.split('\n').length).toBeLessThanOrEqual(6)
+    } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
+  })
+
+  it('keeps a value of six lines whole and cuts one of seven, counting every kind of line break', async () => {
+    const view = await renderDialog({
+      content: 'a\nb\nc\nd\ne\nf',
+      namespace: 'a\r\nb\rc d e\vf\fg\u0085h',
+      path: 'a\nb\nc\nd\ne\nf\ng'
+    })
+    try {
+      expect(dialogRows()).toEqual([
+        [label('content'), 'a\nb\nc\nd\ne\nf'],
+        [label('namespace'), truncated('a\nb\nc\nd\ne\nf')],
+        [label('path'), truncated('a\nb\nc\nd\ne\nf')]
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('cuts a long value between characters, never inside a surrogate pair', async () => {
+    const view = await renderDialog({ content: 'a' + '😀'.repeat(600) })
+    try {
+      expect(dialogRows()).toEqual([[label('content'), truncated('a' + '😀'.repeat(479))]])
+    } finally { view.unmount() }
+  })
+
+  it('shows bidi controls inside a value escaped', async () => {
+    const view = await renderDialog({ path: './safe‮txt.exe', content: 'x⁦y‏z' })
+    try {
+      expect(dialogRows()).toEqual([
+        [label('content'), 'x\\u{2066}y\\u{200f}z'],
+        [label('path'), './safe\\u{202e}txt.exe']
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('quotes a name with a colon and cuts a very long name', async () => {
+    const view = await renderDialog({
+      command: 'echo real',
+      [`${label('command')}: rm -rf ~`]: 'x',
+      'full：width': 'y',
+      ['n'.repeat(5000)]: 'long-name-value'
+    })
+    try {
+      expect(dialogRows()).toEqual([
+        [label('command'), 'echo real'],
+        [`"${label('command')}: rm -rf ~"`, 'x'],
+        ['"full：width"', 'y'],
+        [truncated('n'.repeat(120)), 'long-name-value']
+      ])
+    } finally { view.unmount() }
+  })
+
+  it('lists the value of a note that is not text in the inline card', async () => {
+    const host = document.createElement('div'); document.body.append(host)
+    const input = { action: 'set', key: 'k', value: { secret: 'NONSTRING-VALUE' } }
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'inline-note-object', revision: 1, request: { request: { sessionId: 'member', route, target: { id: 'scratchpad' }, input } } }] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', '文案']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      expect(await screen.findByText('文案 想保存一条笔记')).toBeVisible()
+      expect([...host.querySelectorAll('[data-testid="chat-prompt-card-detail"] > span')].map(row => row.textContent))
+        .toEqual(['操作: set', '笔记键: k', '笔记内容: {"secret":"NONSTRING-VALUE"}'])
+    } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
   })
 })
