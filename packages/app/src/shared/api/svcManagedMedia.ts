@@ -266,7 +266,8 @@ const isCanonicalAbsoluteFileSource = (value: unknown): value is string => {
   return (
     absolute &&
     !normalized.includes('//') &&
-    // NT object namespace (\??\UNC\host\share): a UNC or device path in disguise.
+    // NT object namespace (the '\' + '?' + '?' + '\' prefix before UNC\host\share): a UNC or
+    // device path in disguise.
     !normalized.startsWith('/??/') &&
     !normalized.split('/').some((segment) => segment === '.' || segment === '..') &&
     !(windowsStyle && WINDOWS_DEVICE_NAME.test(normalized.split('/').pop() || ''))

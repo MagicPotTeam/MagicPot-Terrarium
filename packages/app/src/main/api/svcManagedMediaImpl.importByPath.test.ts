@@ -105,7 +105,8 @@ describe('toImportSourceLocalPath (no filesystem access)', () => {
     }
     expect(win32('C:\\Users\\console\\a.png')).toBe('C:\\Users\\console\\a.png')
     expect(win32('C:\\Users\\artist\\com10.png')).toBe('C:\\Users\\artist\\com10.png')
-    // POSIX: '/??/' is refused as well; reserved Windows names are ordinary file names.
+    // POSIX: the slash form of the NT prefix ('/' + '?' + '?' + '/') is refused as well; reserved
+    // Windows names are ordinary file names.
     expect(() => posix('/??/UNC/attacker-host/share/a.png')).toThrow(
       expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
     )
