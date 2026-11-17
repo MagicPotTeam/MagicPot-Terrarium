@@ -15,6 +15,8 @@ import {
 const mounts = vi.hoisted(() => ({
   agentRenders: vi.fn(),
   mainAreaRenders: vi.fn(),
+  titleBarRenders: vi.fn(),
+  activityBarRenders: vi.fn(),
   dispatch: vi.fn()
 }))
 let layout: LayoutState
@@ -22,8 +24,18 @@ vi.mock('../store', () => ({
   useAppDispatch: () => mounts.dispatch,
   useAppSelector: (selector: (state: { layout: LayoutState }) => unknown) => selector({ layout })
 }))
-vi.mock('./TitleBar', () => ({ default: () => null }))
-vi.mock('./ActivityBar', () => ({ default: () => null }))
+vi.mock('./TitleBar', () => ({
+  default: () => {
+    mounts.titleBarRenders()
+    return null
+  }
+}))
+vi.mock('./ActivityBar', () => ({
+  default: () => {
+    mounts.activityBarRenders()
+    return null
+  }
+}))
 vi.mock('./MainArea', () => ({
   default: () => {
     mounts.mainAreaRenders()
@@ -171,6 +183,28 @@ describe('Layout Agent column resize interaction', () => {
     } finally {
       recorder.dispose()
     }
+  })
+
+  it('commits the final width without re-rendering the title bar, activity bar or Agent column', async () => {
+    renderLayout()
+    const { handle, rightPanel } = await findPanels()
+    const agentRendersBefore = mounts.agentRenders.mock.calls.length
+    const titleBarRendersBefore = mounts.titleBarRenders.mock.calls.length
+    const activityBarRendersBefore = mounts.activityBarRenders.mock.calls.length
+    expect(titleBarRendersBefore).toBeGreaterThan(0)
+    expect(activityBarRendersBefore).toBeGreaterThan(0)
+
+    fireEvent.mouseDown(handle, { clientX: 1000, buttons: 1 })
+    fireEvent.mouseMove(window, { clientX: 940, buttons: 1 })
+    await nextFrame()
+    fireEvent.mouseUp(window)
+
+    // The width is committed through Layout state...
+    expect(getComputedStyle(rightPanel).width).toBe('480px')
+    // ...but nothing inside the frame depends on it.
+    expect(mounts.agentRenders.mock.calls.length).toBe(agentRendersBefore)
+    expect(mounts.titleBarRenders.mock.calls.length).toBe(titleBarRendersBefore)
+    expect(mounts.activityBarRenders.mock.calls.length).toBe(activityBarRendersBefore)
   })
 
   it('ends the drag when the window loses focus', async () => {

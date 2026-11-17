@@ -81,7 +81,10 @@ const stablePageValues = {
   stagePos: { x: 0, y: 0 },
   stageSize: { width: 1280, height: 720 },
   isLegacySelectionToolbarEnabled: () => false,
-  t: (key: string) => key
+  t: (key: string) => key,
+  setStageScaleAroundViewportCenter: vi.fn(),
+  getQuickCanvasItemsImageUrl: vi.fn(),
+  prepareQuickCanvasItemsImageUrl: vi.fn()
 }
 
 function createProps(overrides: Record<string, unknown> = {}) {
@@ -103,9 +106,6 @@ function createProps(overrides: Record<string, unknown> = {}) {
     handleBgColorChange: vi.fn(),
     handleRunCanvasTarget: vi.fn(),
     handleConfirmLabelDialog: vi.fn(),
-    setStageScaleAroundViewportCenter: vi.fn(),
-    getQuickCanvasItemsImageUrl: vi.fn(),
-    prepareQuickCanvasItemsImageUrl: vi.fn(),
     ...overrides
   }
 }
@@ -193,6 +193,41 @@ describe('ProjectCanvasPageShell memoised chrome', () => {
     expect(renderCounts.get('selectionOverlays')).toBe(2)
     const selectionProps = latestProps.get('selectionOverlays') as Record<string, any>
     expect(selectionProps.stagePos).toEqual({ x: 5, y: 6 })
+  })
+
+  it('does not re-render the toolbar for a new stage size after a panel drag', () => {
+    const firstStart = vi.fn()
+    const { rerender } = render(
+      <ProjectCanvasPageShell {...createProps({ startGroupPlayback: firstStart })} />
+    )
+    expect(renderCounts.get('toolbar')).toBe(1)
+
+    // The page rebuilds its group playback callbacks with the new stage size.
+    const nextStart = vi.fn()
+    rerender(
+      <ProjectCanvasPageShell
+        {...createProps({ stageSize: { width: 1220, height: 720 }, startGroupPlayback: nextStart })}
+      />
+    )
+    expect(renderCounts.get('toolbar')).toBe(1)
+    const toolbarProps = latestProps.get('toolbar') as Record<string, any>
+    toolbarProps.startGroupPlayback({ id: 'group-1' })
+    expect(nextStart).toHaveBeenCalledWith({ id: 'group-1' })
+    expect(firstStart).not.toHaveBeenCalled()
+    expect(toolbarProps.getStageViewport().stageSize).toEqual({ width: 1220, height: 720 })
+  })
+
+  it('does not re-render the stage when the page only rebuilds its handlers', () => {
+    const { rerender } = render(<ProjectCanvasPageShell {...createProps()} />)
+    expect(renderCounts.get('stage')).toBe(1)
+
+    // The deferred-value pass after a commit re-renders the page with fresh handlers only.
+    const nextMouseDown = vi.fn()
+    rerender(<ProjectCanvasPageShell {...createProps({ handleStageMouseDown: nextMouseDown })} />)
+    expect(renderCounts.get('stage')).toBe(1)
+    const stageProps = latestProps.get('stage') as Record<string, any>
+    stageProps.handleStageMouseDown({ type: 'mousedown' })
+    expect(nextMouseDown).toHaveBeenCalledWith({ type: 'mousedown' })
   })
 
   it('still re-renders a dialog when a value it shows changes', () => {

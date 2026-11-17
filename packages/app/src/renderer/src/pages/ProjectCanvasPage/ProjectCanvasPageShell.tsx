@@ -121,10 +121,17 @@ const SELECTION_OVERLAY_STABLE_CALLBACK_KEYS = new Set([
   'getQuickCanvasItemsImageUrl',
   'prepareQuickCanvasItemsImageUrl'
 ])
-// setStageScaleAroundViewportCenter closes over the committed viewport; the toolbar only calls it
-// from the zoom chip's click handler.
+// Toolbar callbacks without an on* / handle* name that the page rebuilds when the viewport or the
+// stage size changes. The toolbar (and its group tree popover) only calls them from click handlers.
+const TOOLBAR_STABLE_CALLBACK_KEYS = new Set([
+  'setStageScaleAroundViewportCenter',
+  'startGroupPlayback',
+  'stopGroupPlayback',
+  'pauseGroupPlayback',
+  'resumeGroupPlayback'
+])
 const isToolbarCallbackKey = (key: string) =>
-  isDefaultStableCallbackKey(key) || key === 'setStageScaleAroundViewportCenter'
+  isDefaultStableCallbackKey(key) || TOOLBAR_STABLE_CALLBACK_KEYS.has(key)
 const isSelectionOverlayCallbackKey = (key: string) =>
   isDefaultStableCallbackKey(key) || SELECTION_OVERLAY_STABLE_CALLBACK_KEYS.has(key)
 
@@ -170,6 +177,10 @@ function resolveImageBatchImportDisplay(progress: {
 
 export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRuntimeProps) {
   const { imageBatchImportProgress: _imageBatchImportProgress, ...stageSceneProps } = props
+  // The page rebuilds several stage handlers on every render (including the deferred-value pass
+  // after a viewport or stage size commit). The stage calls them from event handlers and effects
+  // only, so they reach it as stable forwarders and do not re-render it on their own.
+  const stableStageSceneProps = useStableCallbackProps(stageSceneProps)
   // The toolbar reads the committed viewport only when a handler runs, through this getter, and its
   // zoom chip follows the viewport driver itself. So a pan or a zoom does not re-render it.
   const getStageViewport = useStableEventHandler(() => ({
@@ -1073,7 +1084,7 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
         </Box>
       ) : null}
       <MemoizedProjectCanvasPageStageScene
-        {...stageSceneProps}
+        {...stableStageSceneProps}
         isViewportInteracting={isViewportInteracting}
         onLiveMultiSelectionBoundsChange={setLiveMultiSelectionBounds}
         setCanvasContainerElement={setCanvasContainerElement}

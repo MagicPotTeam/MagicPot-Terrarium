@@ -34,6 +34,14 @@ import { emitCanvasLayoutResizeInteraction } from '../pages/ProjectCanvasPage/ca
 const SidePanel = lazyWithRetry(() => import('./SidePanel'))
 const BottomPanel = lazyWithRetry(() => import('./BottomPanel'))
 const AgentWorkspace = lazyWithRetry(() => import('./AgentWorkspace'))
+// Layout re-renders when a panel is resized (the Agent column commits its width once at the end of a
+// drag, the side and bottom panels on every frame). None of these children depends on the panel
+// sizes, so memoise them: a drag then re-renders the layout frame only, not the title bar, the
+// activity bar or the Agent column with its conversations.
+const MemoizedTitleBar = React.memo(TitleBar)
+const MemoizedActivityBar = React.memo(ActivityBar)
+const MemoizedExistingConversationOpenStatus = React.memo(ExistingConversationOpenStatus)
+const MemoizedAgentWorkspace = React.memo(AgentWorkspace)
 const prefetchPrimaryWorkspaceModules = () => Promise.allSettled([import('./SidePanel')])
 
 const RIGHT_PANEL_DEFAULT_WIDTH = 420
@@ -759,13 +767,13 @@ const Layout: React.FC = () => {
         overflow: 'hidden'
       }}
     >
-      <TitleBar />
-      <ExistingConversationOpenStatus />
+      <MemoizedTitleBar />
+      <MemoizedExistingConversationOpenStatus />
 
       <Box
         sx={{ display: 'flex', flexDirection: 'row', flex: 1, overflow: 'hidden', minHeight: 0 }}
       >
-        <ActivityBar />
+        <MemoizedActivityBar />
 
         <Box sx={{ position: 'relative', flex: 1, overflow: 'hidden', minWidth: 0, minHeight: 0 }}>
           <Box
@@ -879,7 +887,7 @@ const Layout: React.FC = () => {
                 })}
               />
               <Suspense fallback={<Box sx={{ flex: 1 }} />}>
-                <AgentWorkspace
+                <MemoizedAgentWorkspace
                   key={activeTabId}
                   projectId={activeTabId}
                   projectName={openTabs.find((tab) => tab.id === activeTabId)?.label}

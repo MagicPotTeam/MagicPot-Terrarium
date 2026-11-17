@@ -2,7 +2,9 @@ import React from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
-import ProjectCanvasPageStageScene from './ProjectCanvasPageStageScene'
+import ProjectCanvasPageStageScene, {
+  PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS
+} from './ProjectCanvasPageStageScene'
 import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import type {
   CanvasAnnotationItem,
@@ -82,14 +84,15 @@ let webglLoadedIds = new Set<string>()
 let webglResidentIds = new Set<string>()
 let webglFailedIds = new Set<string>()
 let latestWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = createTestWebGLMetrics()
-let latestWebGLLayerProps: {
+type WebGLLayerMockProps = {
   items: CanvasImageItem[]
   onReadyChange?: (ready: boolean) => void
   onResidentIdsChange?: (residentIds: Set<string>) => void
   onResolvedIdsChange?: (resolvedIds: Set<string>) => void
   onFailedIdsChange?: (failedIds: Set<string>) => void
   onMetricsChange?: (metrics: typeof latestWebGLMetrics) => void
-} | null = null
+}
+let latestWebGLLayerProps: WebGLLayerMockProps | null = null
 
 vi.mock('./canvasTextLayout', () => ({
   CANVAS_TEXT_LINE_HEIGHT: 1.5,
@@ -879,6 +882,107 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(setViewportInteractingSpy).toHaveBeenLastCalledWith(false)
     expect(root.getAttribute('data-project-canvas-react-commit-count')).toBe(stageCommitsBefore)
     expect(webglLayerRenderCount).toBe(webglRendersBefore)
+  })
+
+  it('commits the WebGL runtime reports after a layout panel drag together, once settled', async () => {
+    const item = createImageItem('image-layout-resize-settle')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+
+    render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    await waitFor(() => {
+      expect(root).toHaveAttribute('data-project-canvas-webgl-primary-image-count', '1')
+    })
+    const layerProps = latestWebGLLayerProps as WebGLLayerMockProps
+    const onMetricsChange = layerProps.onMetricsChange as (
+      metrics: ProjectCanvasWebGLRuntimeMetrics
+    ) => void
+    const onResidentIdsChange = layerProps.onResidentIdsChange as (ids: Set<string>) => void
+    const commitCount = () => Number(root.getAttribute('data-project-canvas-react-commit-count'))
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(true, 'right')
+    })
+    act(() => {
+      emitCanvasLayoutResizeInteraction(false)
+    })
+    const stageCommitsAfterDrag = commitCount()
+
+    // The layer resizes and reports several times while the newly visible images settle.
+    act(() => {
+      onResidentIdsChange(new Set())
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 11 }))
+    })
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS - 100)
+      )
+    })
+    act(() => {
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 12 }))
+      onResidentIdsChange(new Set([item.id]))
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 13 }))
+    })
+    // Each report pushed the window back, so nothing has committed yet.
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS - 100)
+      )
+    })
+    expect(commitCount()).toBe(stageCommitsAfterDrag)
+    expect(root).not.toHaveAttribute('data-project-canvas-webgl-sprite-count', '13')
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 200))
+    })
+    expect(commitCount()).toBe(stageCommitsAfterDrag + 1)
+    expect(root).toHaveAttribute('data-project-canvas-webgl-sprite-count', '13')
+
+    // Outside the window, reports commit as before.
+    act(() => {
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 14 }))
+    })
+    expect(root).toHaveAttribute('data-project-canvas-webgl-sprite-count', '14')
+  })
+
+  it('starts a new layout drag without flushing the reports of the previous one', async () => {
+    const item = createImageItem('image-layout-resize-restart')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+
+    render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    await waitFor(() => {
+      expect(root).toHaveAttribute('data-project-canvas-webgl-primary-image-count', '1')
+    })
+    const onMetricsChange = (latestWebGLLayerProps as WebGLLayerMockProps).onMetricsChange as (
+      metrics: ProjectCanvasWebGLRuntimeMetrics
+    ) => void
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(true, 'right')
+      emitCanvasLayoutResizeInteraction(false)
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 21 }))
+      emitCanvasLayoutResizeInteraction(true, 'right')
+    })
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS + 100)
+      )
+    })
+    // Still dragging: the report stays queued.
+    expect(root).not.toHaveAttribute('data-project-canvas-webgl-sprite-count', '21')
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(false)
+    })
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS + 100)
+      )
+    })
+    expect(root).toHaveAttribute('data-project-canvas-webgl-sprite-count', '21')
   })
 
   it('budgets jumbo source overlays by visible pixels instead of a four item cap', async () => {

@@ -118,6 +118,12 @@ const PROJECT_CANVAS_STAGE_LAYER_ROOT_SX = {
     pointerEvents: 'none !important'
   }
 } as const
+// After a layout panel drag ends, the WebGL runtime reports are committed together once no report
+// came for this long, and at the latest after the max window. The layer throttles its metrics
+// reports to one per 250 ms while it uploads the newly visible images, so the quiet period must be
+// clearly longer than that.
+export const PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS = 500
+export const PROJECT_CANVAS_LAYOUT_RESIZE_MAX_SETTLE_MS = 1500
 const PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE: React.CSSProperties = {
   position: 'absolute',
   inset: 0,
@@ -1108,6 +1114,39 @@ export default function ProjectCanvasPageStageScene(props: any) {
         : nextFailedIds
     })
   }, [])
+  // After a layout panel drag (Agent column, side or bottom panel) the stage commits its new size,
+  // then the WebGL layer resizes and reports its resident ids and metrics several times while the
+  // newly visible images settle. Those reports stay queued, as during the drag, until none came for
+  // a short while (or the max window ran out), and are then committed together: the stage
+  // re-renders once for its new size and once for the new runtime state, not once per report.
+  const isCanvasLayoutResizeSettlingRef = React.useRef(false)
+  const layoutResizeSettleTimerRef = React.useRef<number | null>(null)
+  const layoutResizeSettleDeadlineRef = React.useRef(0)
+  const finishLayoutResizeSettleRef = React.useRef<() => void>(() => {})
+  const clearLayoutResizeSettleTimer = React.useCallback(() => {
+    if (layoutResizeSettleTimerRef.current !== null) {
+      window.clearTimeout(layoutResizeSettleTimerRef.current)
+      layoutResizeSettleTimerRef.current = null
+    }
+  }, [])
+  const armLayoutResizeSettleTimer = React.useCallback(() => {
+    clearLayoutResizeSettleTimer()
+    const remainingMs = Math.max(0, layoutResizeSettleDeadlineRef.current - Date.now())
+    layoutResizeSettleTimerRef.current = window.setTimeout(
+      () => {
+        layoutResizeSettleTimerRef.current = null
+        finishLayoutResizeSettleRef.current()
+      },
+      Math.min(PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS, remainingMs)
+    )
+  }, [clearLayoutResizeSettleTimer])
+  // A deferred WebGL report pushes the end of the settle window back.
+  const noteDeferredWebglRuntimeReport = React.useCallback(() => {
+    if (isCanvasLayoutResizeSettlingRef.current) {
+      armLayoutResizeSettleTimer()
+    }
+  }, [armLayoutResizeSettleTimer])
+  React.useEffect(() => clearLayoutResizeSettleTimer, [clearLayoutResizeSettleTimer])
   const flushPendingWebglRuntimeState = React.useCallback(() => {
     const { pending, next } = takeProjectCanvasWebGLPendingRuntimeState(
       pendingWebglRuntimeStateRef.current
@@ -1135,12 +1174,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
           'residentIds',
           residentIds
         )
+        noteDeferredWebglRuntimeReport()
         return
       }
 
       commitWebglResidentIds(residentIds)
     },
-    [commitWebglResidentIds]
+    [commitWebglResidentIds, noteDeferredWebglRuntimeReport]
   )
   const handleWebglResolvedIdsChange = React.useCallback(
     (resolvedIds: Set<string>) => {
@@ -1150,12 +1190,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
           'resolvedIds',
           resolvedIds
         )
+        noteDeferredWebglRuntimeReport()
         return
       }
 
       commitWebglResolvedIds(resolvedIds)
     },
-    [commitWebglResolvedIds]
+    [commitWebglResolvedIds, noteDeferredWebglRuntimeReport]
   )
   const handleWebglFailedIdsChange = React.useCallback(
     (failedIds: Set<string>) => {
@@ -1165,12 +1206,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
           'failedIds',
           failedIds
         )
+        noteDeferredWebglRuntimeReport()
         return
       }
 
       commitWebglFailedIds(failedIds)
     },
-    [commitWebglFailedIds]
+    [commitWebglFailedIds, noteDeferredWebglRuntimeReport]
   )
   const handleWebglMetricsChange = React.useCallback(
     (metrics: ProjectCanvasWebGLImageLayerMetrics) => {
@@ -1179,12 +1221,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
           pendingWebglRuntimeStateRef.current,
           metrics
         )
+        noteDeferredWebglRuntimeReport()
         return
       }
 
       commitWebglMetrics(metrics)
     },
-    [commitWebglMetrics]
+    [commitWebglMetrics, noteDeferredWebglRuntimeReport]
   )
   React.useEffect(() => {
     isCanvasPerformanceThrottledRef.current = isCanvasPerformanceThrottled
@@ -1192,19 +1235,45 @@ export default function ProjectCanvasPageStageScene(props: any) {
     const shouldDeferRuntimeState =
       isViewportInteracting ||
       isCanvasPerformanceThrottled ||
-      isCanvasLayoutResizeInteractionActiveRef.current
+      isCanvasLayoutResizeInteractionActiveRef.current ||
+      isCanvasLayoutResizeSettlingRef.current
     isWebglRuntimeStateDeferredRef.current = shouldDeferRuntimeState
     if (!shouldDeferRuntimeState) {
       flushPendingWebglRuntimeState()
     }
   }, [flushPendingWebglRuntimeState, isCanvasPerformanceThrottled, isViewportInteracting])
   React.useEffect(() => {
+    finishLayoutResizeSettleRef.current = () => {
+      isCanvasLayoutResizeSettlingRef.current = false
+      const shouldDeferRuntimeState =
+        isViewportInteractionActiveRef.current ||
+        isCanvasPerformanceThrottledRef.current ||
+        isCanvasLayoutResizeInteractionActiveRef.current
+      isWebglRuntimeStateDeferredRef.current = shouldDeferRuntimeState
+      if (!shouldDeferRuntimeState) {
+        flushPendingWebglRuntimeState()
+      }
+    }
+  }, [flushPendingWebglRuntimeState])
+  React.useEffect(() => {
     const handleCanvasLayoutResizeInteraction = (event: Event) => {
       const detail = (event as CustomEvent<CanvasLayoutResizeInteractionDetail>).detail
       const active = Boolean(detail?.active)
       isCanvasLayoutResizeInteractionActiveRef.current = active
+      if (active) {
+        isCanvasLayoutResizeSettlingRef.current = false
+        clearLayoutResizeSettleTimer()
+      } else {
+        // Keep the runtime reports queued until the stage has resized and the layer settled.
+        isCanvasLayoutResizeSettlingRef.current = true
+        layoutResizeSettleDeadlineRef.current = Date.now() + PROJECT_CANVAS_LAYOUT_RESIZE_MAX_SETTLE_MS
+        armLayoutResizeSettleTimer()
+      }
       isWebglRuntimeStateDeferredRef.current =
-        active || isViewportInteractionActiveRef.current || isCanvasPerformanceThrottledRef.current
+        active ||
+        isCanvasLayoutResizeSettlingRef.current ||
+        isViewportInteractionActiveRef.current ||
+        isCanvasPerformanceThrottledRef.current
       if (
         webglImageLayerReady &&
         typeof webglImageLayerRef.current?.setViewportInteracting === 'function'
@@ -1216,13 +1285,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
       canvas2DFallbackLayerRef.current?.setViewportInteracting(
         active || isViewportInteractionActiveRef.current
       )
-      if (
-        !active &&
-        !isViewportInteractionActiveRef.current &&
-        !isCanvasPerformanceThrottledRef.current
-      ) {
-        flushPendingWebglRuntimeState()
-      }
     }
 
     window.addEventListener(
@@ -1235,7 +1297,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
         handleCanvasLayoutResizeInteraction
       )
     }
-  }, [flushPendingWebglRuntimeState, webglImageLayerReady])
+  }, [armLayoutResizeSettleTimer, clearLayoutResizeSettleTimer, webglImageLayerReady])
   // ProjectCanvasPage does not hand its live stage refs down, so the proxies' memo comparators
   // could not use them and every proxy re-rendered for each committed pan or zoom. These refs hold
   // the committed viewport, and the live one while the driver moves it.
@@ -1332,7 +1394,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
       isWebglRuntimeStateDeferredRef.current =
         active ||
         isCanvasPerformanceThrottledRef.current ||
-        isCanvasLayoutResizeInteractionActiveRef.current
+        isCanvasLayoutResizeInteractionActiveRef.current ||
+        isCanvasLayoutResizeSettlingRef.current
       const webglImageLayer = webglImageLayerRef.current
       if (typeof webglImageLayer?.setViewportInteracting === 'function') {
         webglImageLayer.setViewportInteracting(
@@ -1345,7 +1408,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
       if (
         !active &&
         !isCanvasPerformanceThrottledRef.current &&
-        !isCanvasLayoutResizeInteractionActiveRef.current
+        !isCanvasLayoutResizeInteractionActiveRef.current &&
+        !isCanvasLayoutResizeSettlingRef.current
       ) {
         flushPendingWebglRuntimeState()
       }
