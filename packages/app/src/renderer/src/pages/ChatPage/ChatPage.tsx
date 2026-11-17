@@ -9042,12 +9042,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
       try {
         await sendMessage({ content: `团队任务：${task.title}`, targetSessionId: member.id, onTaskCompleted: complete, onTaskSettled: settle })
       } finally {
-        // The send returned without reporting the run (it never started, or it was abandoned when
-        // its scope changed). A send queued behind another run of the owner reports when it runs.
-        // The user's own stop during its preflight cancelled it; anything else interrupted it.
-        const queued = queuedSessionSendsRef.current.get(member.id)?.some(item => item.overrides?.onTaskCompleted === complete)
+        // The send returned without reporting the run: it never started, or it was abandoned in its
+        // preflight or when its scope changed. The user's own stop in that window cancelled it;
+        // anything else interrupted it. The task send is never queued behind another run: the owner
+        // was checked idle (isSessionBusy) just above with no await before this call, and
+        // sendMessage queues only on that same busy test.
         const stoppedByUser = (sessionUserStopEpochRef.current.get(member.id) ?? 0) > terminationEpochAtSend
-        if (!taskRunReported && !queued) settle(stoppedByUser ? 'cancelled' : 'interrupted')
+        if (!taskRunReported) settle(stoppedByUser ? 'cancelled' : 'interrupted')
       }
     } catch {
       notifyWarning('无法领取任务，请刷新团队状态并重试')
