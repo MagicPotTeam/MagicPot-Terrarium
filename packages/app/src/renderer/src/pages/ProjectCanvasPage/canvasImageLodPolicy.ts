@@ -145,8 +145,13 @@ export function resolveCanvasImageLodDecision({
     !hasPreviewImage ||
     (Number.isFinite(sourceMaxSide) &&
       sourceMaxSide > previewMaxSide * PROJECT_CANVAS_IMAGE_LOD_SOURCE_TEXTURE_MIN_GAIN_RATIO)
+  // A selected image may skip the source-gain test only when the preview is
+  // actually too small on screen. While the preview already covers the
+  // displayed size, a source that is barely larger (under 1.25x) is not
+  // sharper there and would cost a full source texture per selected image.
+  const previewCoversProjectedSize = hasPreviewImage && projectedMaxSide <= previewMaxSide
   const shouldBypassSourceGainForForcedSource = Boolean(
-    forceSource && hasPreviewImage && !usesPlaceholderPreview
+    forceSource && hasPreviewImage && !usesPlaceholderPreview && !previewCoversProjectedSize
   )
   const canUseThumbnailPreview = hasEnoughSourceGain || shouldBypassSourceGainForForcedSource
   const usesThumbnailPreview = Boolean(
