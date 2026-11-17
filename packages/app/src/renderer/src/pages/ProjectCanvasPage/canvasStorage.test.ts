@@ -2519,10 +2519,12 @@ describe('canvasStorage provenance metadata', () => {
     expect(oldEntry).toBeDefined()
     const oldProject = JSON.parse(oldEntry![1]) as { items: Array<{ src: string; crop?: unknown }> }
     expect(oldProject.items).toHaveLength(1)
-    expect(oldProject.items[0].crop).toBeUndefined()
-    expect(drawImage).toHaveBeenCalledWith(expect.anything(), 20, 20, 50, 50, 0, 0, 50, 50)
+    // Re-expressed for the owner's contract (plan: the project mirror keeps the original plus
+    // the crop): the old project keeps the crop and names the original bytes, nothing is drawn.
+    expect(oldProject.items[0].crop).toEqual({ x: 20, y: 20, width: 50, height: 50 })
+    expect(drawImage).not.toHaveBeenCalled()
     const oldAssetPath = path.win32.join(path.win32.dirname(oldEntry![0]), oldProject.items[0].src)
-    expect(binaries.get(oldAssetPath)).toEqual(flattened)
+    expect(binaries.get(oldAssetPath)).toEqual(original)
     secondSave = true
     const second: CanvasItem = { ...first, sourceWidth: undefined, sourceHeight: undefined }
     // The mirror handles its own write failure; inspect at the synchronous fake commit boundary.
@@ -2530,10 +2532,15 @@ describe('canvasStorage provenance metadata', () => {
     expect(projectWrites).toBe(2)
     expect(snapshotAtSecondCommit).toBeDefined()
     expect(textFiles.get(oldEntry![0])).toBe(oldEntry![1])
-    expect(snapshotAtSecondCommit!.get(oldAssetPath)).toEqual(flattened)
+    expect(snapshotAtSecondCommit!.get(oldAssetPath)).toEqual(original)
+    expect(
+      [...snapshotAtSecondCommit!.values()].some(
+        (bytes) => bytes.length === flattened.length && bytes.every((value, index) => value === flattened[index])
+      )
+    ).toBe(false)
   })
 
-  it('flattens cropped project cache images using the original raster format', async () => {
+  it('keeps the original raster and the crop of a cropped project cache image', async () => {
     const blobPayload = new TextEncoder().encode('crop-source-binary').buffer
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input) !== 'blob:crop-image-source') {
@@ -2722,24 +2729,25 @@ describe('canvasStorage provenance metadata', () => {
       }>
     }
 
+    // Re-expressed for the owner's contract (plan: the project mirror keeps the original plus
+    // the crop): one read, nothing drawn or re-encoded; the committed project file names the
+    // original bytes under their content key (canvas plan C1) with the .jpg extension, and
+    // keeps the crop in the source's pixel space.
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(drawImageMock).toHaveBeenCalledWith(expect.anything(), 120, 80, 320, 180, 0, 0, 320, 180)
-    expect(toBlobMock).toHaveBeenCalledWith(expect.any(Function), 'image/jpeg')
-    // Re-expressed for canvas plan C1 (content-addressed mirror): the flattened asset is the
-    // one the committed project file names, under the content key of the flattened bytes
-    // that toBlob produced, with the source's .jpg extension kept.
-    const flattenedBytes = new Uint8Array([1, 2, 3, 4])
+    expect(drawImageMock).not.toHaveBeenCalled()
+    expect(toBlobMock).not.toHaveBeenCalled()
+    const sourceBytes = new Uint8Array(blobPayload)
     const assetRef = expectContentAddressedAssetRef(projectCanvasJson.items?.[0]?.src, {
-      bytes: flattenedBytes,
+      bytes: sourceBytes,
       extension: '.jpg',
       sourceSrc: 'blob:crop-image-source'
     })
     expect(projectCanvasJson.items?.[0]).toMatchObject({
       src: assetRef,
-      sourceWidth: 320,
-      sourceHeight: 180
+      sourceWidth: 800,
+      sourceHeight: 600,
+      crop: { x: 120, y: 80, width: 320, height: 180 }
     })
-    expect(projectCanvasJson.items?.[0]?.crop).toBeUndefined()
     const mirroredAssetPath = path.win32.join(
       userDataDir,
       'AutoSave',
@@ -2747,7 +2755,7 @@ describe('canvasStorage provenance metadata', () => {
       ...assetRef.split('/')
     )
     expect(binaryFiles.has(mirroredAssetPath)).toBe(true)
-    expect(Array.from(binaryFiles.get(mirroredAssetPath) || [])).toEqual(Array.from(flattenedBytes))
+    expect(Array.from(binaryFiles.get(mirroredAssetPath) || [])).toEqual(Array.from(sourceBytes))
 
     Object.defineProperty(globalThis, 'indexedDB', {
       configurable: true,
@@ -2761,10 +2769,10 @@ describe('canvasStorage provenance metadata', () => {
       id: 'image-crop-1',
       type: 'image',
       src: toExpectedLocalMediaUrl(mirroredAssetPath),
-      sourceWidth: 320,
-      sourceHeight: 180
+      sourceWidth: 800,
+      sourceHeight: 600,
+      crop: { x: 120, y: 80, width: 320, height: 180 }
     })
-    expect(restored.items[0]).not.toHaveProperty('crop')
   })
 
   it('logs missing project assets without showing UI prompts when the lightweight project file is moved alone', async () => {
