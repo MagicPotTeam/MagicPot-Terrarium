@@ -577,6 +577,32 @@ function deferredBitmap() {
   return { promise, resolve }
 }
 
+const realSetTimeoutForPolling = globalThis.setTimeout
+
+/**
+ * The layer arms short real timers of its own after a pass (viewport reconcile 48 ms, source
+ * upgrade idle 80 ms, deferred image version 180 ms...). On a loaded machine they fired inside an
+ * act() a test was measuring and ran an extra reconcile pass there. Tests that keep setTimeout
+ * fake from the first render wait with this instead of waitFor (whose act wrapper waits on a
+ * setTimeout): fake time moves only here, `advanceMs` per step next to 20 ms of real time
+ * (promises and animation frames stay real), and never inside the act() under test. Before
+ * the measured act() a test passes 0, so the timers armed at mount are still pending there.
+ */
+async function waitAdvancingFakeTimers(assertion: () => void, advanceMs = 20): Promise<void> {
+  for (let step = 0; ; step += 1) {
+    try {
+      assertion()
+      return
+    } catch (error) {
+      if (step >= 250) throw error
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(advanceMs)
+      await new Promise((resolve) => realSetTimeoutForPolling(resolve, 20))
+    })
+  }
+}
+
 function getTextureImage(sprite: MockSpriteInstance | null) {
   return (sprite?.texture.source as { image?: unknown } | undefined)?.image
 }
@@ -1855,6 +1881,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       unmount()
     }, 30000)
 
+    // Slow: eight 4096 px decodes go through eviction and paced uploads (1.5-2.5 s alone, up
+    // to 5.5 s with four runs in parallel, past the default 5 s timeout).
     it('evicts the oldest waiting decodes above the hard limit without starving the upload', async () => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
       const bitmaps: ReturnType<typeof createBitmap>[] = []
@@ -1890,51 +1918,58 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           sourceHeight: 2048
         })
       })
-      const { unmount } = render(
-        <Layer ref={ref} items={items} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.3} />
-      )
-      // Six thumbnail levels decode at once.
-      await waitFor(() => expect(decode).toHaveBeenCalledTimes(6))
-      // While the viewport moves, finished decodes wait for the next reconcile pass.
-      act(() => ref.current?.setViewportInteracting(true))
-      await act(async () => {
-        for (const next of pending.splice(0)) {
-          // 64 MiB each: six of them are 384 MiB, above the 256 MiB limit.
-          const bitmap = createBitmap(4096, 4096)
-          bitmaps.push(bitmap)
-          next.resolve(bitmap)
-        }
-      })
-      // The two oldest were given up at once; the four newest (256 MiB) wait for their upload.
-      expect(bitmaps.map((bitmap) => isBitmapClosed(bitmap))).toEqual([
-        true,
-        true,
-        false,
-        false,
-        false,
-        false
-      ])
-      expect(eagerTextureUploads).toEqual([])
+      // Timers stay fake for the whole test, so no pass the layer armed before the gesture can
+      // run while the decodes finish (it uploaded and closed a waiting decode there under load).
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const { unmount } = render(
+          <Layer ref={ref} items={items} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.3} />
+        )
+        // Six thumbnail levels decode at once.
+        await waitAdvancingFakeTimers(() => expect(decode).toHaveBeenCalledTimes(6), 0)
+        // While the viewport moves, finished decodes wait for the next reconcile pass.
+        act(() => ref.current?.setViewportInteracting(true))
+        await act(async () => {
+          for (const next of pending.splice(0)) {
+            // 64 MiB each: six of them are 384 MiB, above the 256 MiB limit.
+            const bitmap = createBitmap(4096, 4096)
+            bitmaps.push(bitmap)
+            next.resolve(bitmap)
+          }
+        })
+        // The two oldest were given up at once; the four newest (256 MiB) wait for their upload.
+        expect(bitmaps.map((bitmap) => isBitmapClosed(bitmap))).toEqual([
+          true,
+          true,
+          false,
+          false,
+          false,
+          false
+        ])
+        expect(eagerTextureUploads).toEqual([])
 
-      act(() => ref.current?.setViewportInteracting(false))
-      // The four are uploaded, and the two evicted levels are decoded again.
-      await waitFor(() => expect(eagerTextureUploads).toHaveLength(4))
-      await waitFor(() => expect(decode).toHaveBeenCalledTimes(8))
-      await act(async () => {
-        for (const next of pending.splice(0)) {
-          const bitmap = createBitmap(4096, 4096)
-          bitmaps.push(bitmap)
-          next.resolve(bitmap)
-        }
-      })
-      await waitFor(() => expect(eagerTextureUploads).toHaveLength(6))
-      items.forEach((item) =>
-        expect(bitmaps).toContain(getTextureImage(getLiveSpriteByLabel(item.id)))
-      )
-      expect(decode).toHaveBeenCalledTimes(8)
-      unmount()
-      bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
-    })
+        act(() => ref.current?.setViewportInteracting(false))
+        // The four are uploaded, and the two evicted levels are decoded again.
+        await waitAdvancingFakeTimers(() => expect(eagerTextureUploads).toHaveLength(4))
+        await waitAdvancingFakeTimers(() => expect(decode).toHaveBeenCalledTimes(8))
+        await act(async () => {
+          for (const next of pending.splice(0)) {
+            const bitmap = createBitmap(4096, 4096)
+            bitmaps.push(bitmap)
+            next.resolve(bitmap)
+          }
+        })
+        await waitAdvancingFakeTimers(() => expect(eagerTextureUploads).toHaveLength(6))
+        items.forEach((item) =>
+          expect(bitmaps).toContain(getTextureImage(getLiveSpriteByLabel(item.id)))
+        )
+        expect(decode).toHaveBeenCalledTimes(8)
+        unmount()
+        bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
+      } finally {
+        vi.useRealTimers()
+      }
+    }, 30000)
 
     it('does not cancel a shared source decode when only one pending consumer leaves', async () => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -5428,6 +5463,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+    // Timers stay fake for the whole test, so a pass the layer armed at mount cannot run between
+    // the two loads and the frame count (under load it did, and armed an upload frame there).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 
     try {
       const srcOnlyItems = createItems(2).map((item) => ({
@@ -5439,9 +5477,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         <ProjectCanvasWebGLImageLayer items={srcOnlyItems} {...TEST_STAGE_VIEWPORT_1280_720} />
       )
 
-      await waitFor(() => {
+      await waitAdvancingFakeTimers(() => {
         expect(imageInstances).toHaveLength(2)
-      })
+      }, 0)
       queuedAnimationFrames.clear()
 
       await act(async () => {
@@ -5458,13 +5496,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         imageVersionFrame(window.performance.now())
       })
 
-      await waitFor(() => {
+      await waitAdvancingFakeTimers(() => {
         expect(createdSprites.filter((sprite) => !sprite.destroyed)).toHaveLength(2)
       })
     } finally {
       requestAnimationFrameSpy.mockRestore()
       cancelAnimationFrameSpy.mockRestore()
       vi.unstubAllGlobals()
+      vi.useRealTimers()
     }
   }, 30000)
 
