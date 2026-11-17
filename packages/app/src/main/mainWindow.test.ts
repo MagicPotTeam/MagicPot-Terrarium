@@ -2,8 +2,13 @@ import { EventEmitter } from 'node:events'
 import { BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
-import { createMainWindow, MAIN_WINDOW_BACKGROUND_COLOR, MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS } from './mainWindow'
-import { AGENT_PROCESS_JOB_LIMITS } from '@shared/api/agentThreadProcessJob'
+import {
+  createMainWindow,
+  MAIN_WINDOW_BACKGROUND_COLOR,
+  MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS,
+  MAIN_WINDOW_RUNNING_REQUEST_LISTENERS,
+  MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS
+} from './mainWindow'
 import { getAuthoritativeMainWindow, winController } from './winControls'
 import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
 import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
@@ -132,21 +137,38 @@ describe('createMainWindow teardown', () => {
     expect(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).toBeGreaterThan(10)
     expect(window.webContents.getMaxListeners()).toBe(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
     expect(limitsAtInstall).toEqual([MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS])
-    // What the running app can hold by design does not warn: 13 'render-process-gone' listeners
-    // measured during a send, one per retained Agent background process (their interaction leases
-    // live until the entry is removed) and two more for each of eight further running sends.
-    const byDesign = 13 + AGENT_PROCESS_JOB_LIMITS.retainedGlobal + 2 * 8
+    // Updated: the limit no longer counts one listener per retained Agent background process. All
+    // interaction leases of a WebContents share one dispatcher (agentThreadInteractions.test.ts pins
+    // that 200 leases hold one listener of each event), so what grows is only the running requests.
+    // What the running app can hold by design does not warn: at most 13 listeners of one event
+    // measured in the real app (within the fixed allowance) plus one per running request.
+    expect(MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS).toBeGreaterThanOrEqual(13)
+    expect(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).toBe(
+      MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS + MAIN_WINDOW_RUNNING_REQUEST_LISTENERS
+    )
+    const byDesign = MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS + MAIN_WINDOW_RUNNING_REQUEST_LISTENERS
     const warnings: Error[] = []
     const onWarning = (warning: Error) => warnings.push(warning)
     process.on('warning', onWarning)
     try {
-      for (let index = 0; index < byDesign; index += 1) window.webContents.on('render-process-gone', () => undefined)
+      // The fixed allowance includes what createMainWindow already added.
+      const already = window.webContents.listenerCount('render-process-gone')
+      for (let index = already; index < byDesign; index += 1) window.webContents.on('render-process-gone', () => undefined)
       // Node emits the warning on a later tick.
       await new Promise((resolve) => setImmediate(resolve))
     } finally {
       process.off('warning', onWarning)
     }
     expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toEqual([])
+    // One more (a leak) warns.
+    process.on('warning', onWarning)
+    try {
+      window.webContents.on('render-process-gone', () => undefined)
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.off('warning', onWarning)
+    }
+    expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toHaveLength(1)
   })
 
   it('paints the dark theme background, never white, while no page is shown', async () => {

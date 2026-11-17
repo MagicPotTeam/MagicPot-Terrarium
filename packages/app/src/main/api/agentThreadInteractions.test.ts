@@ -900,3 +900,59 @@ describe('local Agent thread interactions', () => {
     await result
   })
 })
+
+describe('document listeners of Agent thread interaction leases', () => {
+  const counts = () => ['did-start-navigation', 'render-process-gone', 'destroyed'].map((event) => sender.listenerCount(event))
+  const leases = (count: number) =>
+    Array.from({ length: count }, (_, index) => manager.createScoped({ route, conversationId: `retained-${index}` }, invocation())!)
+
+  it('keeps one listener per event on the WebContents however many leases are alive, and none once all are gone', () => {
+    expect(counts()).toEqual([1, 1, 1])
+    // More than the default limit of 10 and more than every retained lease holder together.
+    const retained = leases(200)
+    expect(counts()).toEqual([1, 1, 1])
+    for (const lease of retained) lease.dispose()
+    expect(counts()).toEqual([1, 1, 1])
+    channel.dispose()
+    expect(counts()).toEqual([0, 0, 0])
+    // A lease taken afterwards watches the document again.
+    const later = manager.createScoped(scope, invocation())!
+    expect(counts()).toEqual([1, 1, 1])
+    sender.emit('render-process-gone')
+    expect(later.signal.aborted).toBe(true)
+    expect(counts()).toEqual([0, 0, 0])
+  })
+
+  it.each(['navigation', 'crash', 'destroyed'] as const)('still ends every lease of the document on %s', (kind) => {
+    const retained = leases(20)
+    if (kind === 'navigation') sender.emit('did-start-navigation', { isMainFrame: true })
+    else sender.emit(kind === 'crash' ? 'render-process-gone' : 'destroyed')
+    expect([channel, ...retained].every((lease) => lease.signal.aborted)).toBe(true)
+    expect(() => retained[7].assertLive()).toThrow('no longer active')
+    expect(counts()).toEqual([0, 0, 0])
+  })
+
+  it('ends no lease on a sub-frame navigation, and a disposed lease is never ended again', () => {
+    const [first, second] = leases(2)
+    const ended = vi.fn()
+    second.signal.addEventListener('abort', ended)
+    sender.emit('did-start-navigation', { isMainFrame: false })
+    sender.emit('did-start-navigation', undefined, url, false, false)
+    expect([channel, first, second].some((lease) => lease.signal.aborted)).toBe(false)
+    second.dispose()
+    expect(ended).toHaveBeenCalledTimes(1)
+    sender.emit('did-start-navigation', { isMainFrame: true })
+    expect(first.signal.aborted).toBe(true)
+    expect(ended).toHaveBeenCalledTimes(1)
+  })
+
+  it('a lease taken while the document ends is not ended by that same event', () => {
+    let late: AgentThreadInteractionChannel | undefined
+    channel.signal.addEventListener('abort', () => { late = manager.createScoped({ route, conversationId: 'late' }, invocation()) })
+    sender.emit('render-process-gone')
+    expect(late?.signal.aborted).toBe(false)
+    expect(counts()).toEqual([1, 1, 1])
+    late?.dispose()
+    expect(counts()).toEqual([0, 0, 0])
+  })
+})

@@ -18,7 +18,6 @@ import { isTrustedRendererNavigation } from './utils/rendererNavigation'
 import { authorizeScopedLocalMediaPath } from './localMediaAccess'
 import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
 import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
-import { AGENT_PROCESS_JOB_LIMITS } from '@shared/api/agentThreadProcessJob'
 import {
   registerMagicAgentTrustedRouteBinding,
   unregisterMagicAgentTrustedRouteBinding
@@ -44,17 +43,29 @@ let canvasStartSystemDragRegistered = false
 export const MAIN_WINDOW_BACKGROUND_COLOR = '#1a1a1a'
 
 /**
- * Listener limit of the main window's WebContents. Its 'render-process-gone' / 'destroyed' /
- * 'did-start-navigation' listeners are bounded by design, not leaked: measured in the real app,
- * 10 'render-process-gone' listeners right after the start, unchanged after 2 more threads and 5
- * reloads; a running send adds a few (its IPC stream and its Agent thread interaction lease) and
- * removes them when it ends. Each retained Agent background process keeps its interaction lease
- * (three listeners, one of each) until the entry is removed, up to retainedGlobal entries for up to
- * 15 min after the process ended (api/agentThreadProcesses.ts). The limit is that bound plus room
- * for the fixed listeners and the running sends, so only a real leak (per reload or per request)
- * warns.
+ * Listeners of one event ('render-process-gone', 'destroyed', 'did-start-navigation') that the main
+ * window's WebContents holds whatever the app does, rounded up: Electron's own forwarder, renderer
+ * diagnostics, the two read admissions, the team-queue owner, the scope bindings (skill, goal,
+ * first-run), the send-stage breadcrumbs, the unsaved-changes guard and ONE dispatcher for every
+ * Agent thread interaction lease (api/agentThreadInteractions.ts: retained background processes,
+ * sub-agent jobs, HTML apps, scope bindings and running requests all share it, so retained entries
+ * no longer add listeners). Measured in the real app: at most 13 of one event, unchanged across
+ * threads and reloads.
  */
-export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS = AGENT_PROCESS_JOB_LIMITS.retainedGlobal + 64
+export const MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS = 16
+/**
+ * Room for running requests: each open IPC stream (shared/api/createServer/registerIpcServer.ts)
+ * and each pending canvas path read (api/canvasPathReadApproval.ts) holds one listener of each event
+ * until it ends.
+ */
+export const MAIN_WINDOW_RUNNING_REQUEST_LISTENERS = 48
+/**
+ * Listener limit of the main window's WebContents: the fixed listeners plus the running requests.
+ * Nothing else grows with use, so a leak (listeners added per reload or per request and never
+ * removed) still warns once it passes this.
+ */
+export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS =
+  MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS + MAIN_WINDOW_RUNNING_REQUEST_LISTENERS
 
 function sanitizeDragFileName(fileName: string): string {
   const trimmed = (fileName || '').trim()
@@ -180,7 +191,7 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     }
   })
 
-  // Electron's forwarder, renderer diagnostics, both read admissions, one per open IPC stream, one per Agent thread interaction lease (scope bindings + running requests) and one per retained Agent background process.
+  // The fixed listeners plus one per running request (see MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).
   mainWindow.webContents.setMaxListeners(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
 
   const trustedRendererUrl = resolveMainWindowRendererUrl()
