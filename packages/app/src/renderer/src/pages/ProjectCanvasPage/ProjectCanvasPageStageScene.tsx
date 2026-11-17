@@ -124,6 +124,15 @@ const PROJECT_CANVAS_STAGE_LAYER_ROOT_SX = {
 // clearly longer than that.
 export const PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS = 500
 export const PROJECT_CANVAS_LAYOUT_RESIZE_MAX_SETTLE_MS = 1500
+// The scene overlay is clipped to the stage by this fixed box. The follower inside it gets the
+// live-viewport transform during a gesture, so only the content moves: on a zoom-out the clip box
+// stays the size of the stage and outlines near its edges are not cut off.
+const PROJECT_CANVAS_SCENE_OVERLAY_CLIP_STYLE: React.CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  overflow: 'hidden',
+  pointerEvents: 'none'
+}
 const PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE: React.CSSProperties = {
   position: 'absolute',
   inset: 0,
@@ -1266,7 +1275,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
       } else {
         // Keep the runtime reports queued until the stage has resized and the layer settled.
         isCanvasLayoutResizeSettlingRef.current = true
-        layoutResizeSettleDeadlineRef.current = Date.now() + PROJECT_CANVAS_LAYOUT_RESIZE_MAX_SETTLE_MS
+        layoutResizeSettleDeadlineRef.current =
+          Date.now() + PROJECT_CANVAS_LAYOUT_RESIZE_MAX_SETTLE_MS
         armLayoutResizeSettleTimer()
       }
       isWebglRuntimeStateDeferredRef.current =
@@ -4146,24 +4156,30 @@ export default function ProjectCanvasPageStageScene(props: any) {
               />
             )}
           <div
-            ref={sceneOverlayFollowerRef}
-            data-project-canvas-scene-overlay-follower="true"
-            style={PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE}
+            data-project-canvas-scene-overlay-clip="true"
+            style={PROJECT_CANVAS_SCENE_OVERLAY_CLIP_STYLE}
           >
-            <ProjectCanvasPageSceneOverlay
-              annotationColor={annotationColor}
-              annotationFillOpacity={annotationFillOpacity}
-              drawingState={drawingState}
-              exactSelectedGroup={exactSelectedGroup}
-              isFillableShape={isFillableShape}
-              onSelectionRectElementsChange={onSelectionRectElementsChange}
-              selectionOverlayGroups={liveSelectionOverlayGroups}
-              selectionRect={selectionRect}
-              selectionRectRenderMode={selectionRectRenderMode}
-              stagePos={stagePos}
-              stageScale={stageScale}
-              tool={tool}
-            />
+            <div
+              ref={sceneOverlayFollowerRef}
+              data-project-canvas-scene-overlay-follower="true"
+              style={PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE}
+            >
+              <ProjectCanvasPageSceneOverlay
+                annotationColor={annotationColor}
+                annotationFillOpacity={annotationFillOpacity}
+                clipToBounds={false}
+                drawingState={drawingState}
+                exactSelectedGroup={exactSelectedGroup}
+                isFillableShape={isFillableShape}
+                onSelectionRectElementsChange={onSelectionRectElementsChange}
+                selectionOverlayGroups={liveSelectionOverlayGroups}
+                selectionRect={selectionRect}
+                selectionRectRenderMode={selectionRectRenderMode}
+                stagePos={stagePos}
+                stageScale={stageScale}
+                tool={tool}
+              />
+            </div>
           </div>
         </Box>
       </MaxSizeLayout>

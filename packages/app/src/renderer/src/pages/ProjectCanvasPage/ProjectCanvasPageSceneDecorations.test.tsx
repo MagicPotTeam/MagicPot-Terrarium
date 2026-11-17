@@ -59,4 +59,26 @@ describe('ProjectCanvasPageSceneOverlay', () => {
     expect(publishedElementCalls[1].svg).not.toBe(firstPublish?.svg)
     expect(publishedElementCalls[1].rect).not.toBe(firstPublish?.rect)
   })
+
+  it('clips to its own bounds unless its parent clips instead', () => {
+    const props = {
+      annotationColor: '#6366f1',
+      annotationFillOpacity: 0,
+      drawingState: null,
+      exactSelectedGroup: null,
+      isFillableShape: () => false,
+      selectionOverlayGroups: [],
+      selectionRect: null,
+      stagePos: { x: 0, y: 0 },
+      stageScale: 1,
+      tool: 'select'
+    }
+    const { container, rerender } = render(<ProjectCanvasPageSceneOverlay {...props} />)
+    const root = () =>
+      container.querySelector('[data-project-canvas-scene-overlay="dom"]') as HTMLElement
+    expect(getComputedStyle(root()).overflow).toBe('hidden')
+
+    rerender(<ProjectCanvasPageSceneOverlay {...props} clipToBounds={false} />)
+    expect(getComputedStyle(root()).overflow).toBe('visible')
+  })
 })

@@ -1851,6 +1851,18 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       viewportCallbacks.forEach((callback) => callback({ x: 50, y: 20 }, 2))
     })
     expect(follower.style.transform).toBe('translate3d(50px, 20px, 0) scale(2)')
+    // Only the content moves: the stage-sized clip box around the follower stays where it is,
+    // and nothing inside the follower clips to the moved box.
+    const clipBox = follower.parentElement as HTMLElement
+    expect(clipBox).toHaveAttribute('data-project-canvas-scene-overlay-clip', 'true')
+    expect(clipBox.style.overflow).toBe('hidden')
+    expect(clipBox.style.position).toBe('absolute')
+    expect(clipBox.style.transform).toBe('')
+    expect(follower.style.overflow).toBe('visible')
+    const sceneOverlayRoot = follower.querySelector(
+      '[data-project-canvas-scene-overlay="dom"]'
+    ) as HTMLElement
+    expect(getComputedStyle(sceneOverlayRoot).overflow).toBe('visible')
 
     rerender(
       <ProjectCanvasPageStageScene {...baseProps} stagePos={{ x: 50, y: 20 }} stageScale={2} />
