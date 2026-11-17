@@ -1,9 +1,10 @@
 import { htmlSnapshotOperation, acknowledgeHtmlRestore, canStartAnotherHtmlRestore, startAnotherHtmlRestore } from '../htmlSnapshotOperations'
 import React, { useEffect, useRef, useState } from 'react'
-import { Alert, Box, Button, Typography } from '@mui/material'
+import { Box } from '@mui/material'
 import { useTranslation } from 'react-i18next'
 import type { AgentHtmlSaved } from '@shared/api/agentThreadHtml'
 import { api } from '../../../utils/windowUtils'
+import { AgentAppLauncherActions, AgentAppLauncherLine } from './AgentAppLauncherCard'
 
 /** Metadata only. Restoring creates a disconnected card; it never launches HTML. */
 export default function AgentThreadHtmlSaved({ scope, enabled, onChanged }: { scope: string; enabled: boolean; onChanged(): void }) {
@@ -42,18 +43,32 @@ export default function AgentThreadHtmlSaved({ scope, enabled, onChanged }: { sc
     if (live.current && owned === generation.current) { setConfirmDelete(undefined); onChanged(); await refresh() }
   }
   if (!enabled) return null
-  return <Box sx={{ mt: 1 }}>
-    <Button size="small" disabled={busy} onClick={() => void run(refresh)}>{t('chat.agent_html.saved_refresh')}</Button>
-    <Typography variant="caption" display="block">{t('chat.agent_html.saved_notice')}</Typography>
-    {error && <Alert severity="error">{t('chat.agent_html.snapshot_failed')}</Alert>}
-    {apps.map(item => <Box key={item.id} sx={{ mt: 1 }}>
-      <Typography variant="body2">{item.title} · v{item.documentRevision} / {item.storageRevision}</Typography>
-      <Typography variant="caption">{item.id} · {item.htmlBytes} B</Typography>
-      <Button size="small" disabled={busy} onClick={() => void run(() => restore(item))}>{t('chat.agent_html.restore')}</Button>
-      {canStartAnotherHtmlRestore(scope, [item.id, item.storageRevision]) && <Button size="small" disabled={busy} onClick={() => setConfirmAnother(item.id)}>{t('chat.agent_html.restore_another')}</Button>}
-      {confirmAnother === item.id && <Box><Typography variant="caption">{t('chat.agent_html.restore_another_notice')}</Typography><Button size="small" disabled={busy} onClick={() => void run(() => another(item))}>{t('chat.agent_html.confirm_restore_another')}</Button><Button size="small" disabled={busy} onClick={() => setConfirmAnother(undefined)}>{t('chat.agent_html.cancel_delete')}</Button></Box>}
-      <Button size="small" disabled={busy} onClick={() => setConfirmDelete(item.id)}>{t('chat.agent_html.delete_saved')}</Button>
-      {confirmDelete === item.id && <Box><Typography variant="caption">{t('chat.agent_html.delete_notice')}</Typography><Button size="small" color="error" disabled={busy} onClick={() => void run(() => remove(item))}>{t('chat.agent_html.confirm_delete')}</Button><Button size="small" disabled={busy} onClick={() => setConfirmDelete(undefined)}>{t('chat.agent_html.cancel_delete')}</Button></Box>}
+  // Saved copies in an app card's body: a text button to list them, then one entry per copy.
+  return <Box data-testid="agent-html-saved" sx={{ mt: '4px', minWidth: 0 }}>
+    <AgentAppLauncherActions actions={[{ key: 'refresh', label: t('chat.agent_html.saved_refresh'), title: t('chat.agent_html.saved_notice'), disabled: busy, onClick: () => void run(refresh) }]} />
+    {error && <AgentAppLauncherLine tone="error">{t('chat.agent_html.snapshot_failed')}</AgentAppLauncherLine>}
+    {apps.map(item => <Box key={item.id} data-testid="agent-html-saved-item" sx={{ mt: '6px', minWidth: 0 }}>
+      <Box sx={{ overflowWrap: 'anywhere' }}>{item.title} · v{item.documentRevision} / {item.storageRevision}</Box>
+      <AgentAppLauncherLine>{item.id} · {item.htmlBytes} B</AgentAppLauncherLine>
+      <AgentAppLauncherActions actions={[
+        { key: 'restore', label: t('chat.agent_html.restore'), disabled: busy, onClick: () => void run(() => restore(item)) },
+        canStartAnotherHtmlRestore(scope, [item.id, item.storageRevision]) && { key: 'another', label: t('chat.agent_html.restore_another'), disabled: busy, onClick: () => setConfirmAnother(item.id) },
+        { key: 'delete', label: t('chat.agent_html.delete_saved'), danger: true, disabled: busy, onClick: () => setConfirmDelete(item.id) }
+      ]} />
+      {confirmAnother === item.id && <>
+        <AgentAppLauncherLine>{t('chat.agent_html.restore_another_notice')}</AgentAppLauncherLine>
+        <AgentAppLauncherActions actions={[
+          { key: 'confirm-another', label: t('chat.agent_html.confirm_restore_another'), disabled: busy, onClick: () => void run(() => another(item)) },
+          { key: 'cancel-another', label: t('chat.agent_html.cancel_delete'), disabled: busy, onClick: () => setConfirmAnother(undefined) }
+        ]} />
+      </>}
+      {confirmDelete === item.id && <>
+        <AgentAppLauncherLine>{t('chat.agent_html.delete_notice')}</AgentAppLauncherLine>
+        <AgentAppLauncherActions actions={[
+          { key: 'confirm-delete', label: t('chat.agent_html.confirm_delete'), danger: true, disabled: busy, onClick: () => void run(() => remove(item)) },
+          { key: 'cancel-delete', label: t('chat.agent_html.cancel_delete'), disabled: busy, onClick: () => setConfirmDelete(undefined) }
+        ]} />
+      </>}
     </Box>)}
   </Box>
 }

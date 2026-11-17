@@ -9224,6 +9224,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [teamApprovalHost, setTeamApprovalHost] = useState<HTMLDivElement | null>(null)
   // The agent's questions and app displays: cards at the end of the column's transcript.
   const [agentPromptHost, setAgentPromptHost] = useState<HTMLDivElement | null>(null)
+  // The agent's isolated HTML apps: app launcher cards at the end of the column's transcript.
+  const [htmlAppHost, setHtmlAppHost] = useState<HTMLDivElement | null>(null)
   const approvalSurfaceRef = useRef<object | null>(null)
   const [teamWaitingState, setTeamWaitingState] = useState<{ key: string; token: object; host: HTMLElement; ids: ReadonlySet<string> } | null>(null)
   const approvalSurfaceKey = teamEnabled && route && teamApprovalHost && teamMembers.length && !showingSide &&
@@ -10061,9 +10063,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // their host follows the tail (the full-page chat keeps it above the transcript).
   // A card that arrives is announced; a card that leaves after 批准 / 拒绝 gives the keyboard
   // back to the composer instead of dropping it on the page.
-  // The agent's own questions and app displays come first, then the member approvals.
+  // The agent's HTML apps and its own questions come first, then the member approvals.
   const approvalTailEnd = useMemo(() => compact
     ? <>
+      <Box ref={setHtmlAppHost} data-testid="agent-html-app-host" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0, '&:not(:empty)': { my: '8px' } }} />
       <Box ref={setAgentPromptHost} data-testid="agent-prompt-host" aria-live="polite" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }} />
       {teamEnabled ? <Box ref={setTeamApprovalHost} data-testid="team-inline-approvals" aria-live="polite" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }} /> : null}
     </>
@@ -10960,7 +10963,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               />
               </Box>
               </Box>
-              <AgentThreadHtmlPanel route={route} conversationId={currentSessionId || undefined} active={active} />
+              <AgentThreadHtmlPanel route={route} conversationId={currentSessionId || undefined} active={active} host={compact ? htmlAppHost : undefined} />
               <AgentThreadInteractionPanel
                 route={route}
                 conversationId={currentSessionId || undefined}

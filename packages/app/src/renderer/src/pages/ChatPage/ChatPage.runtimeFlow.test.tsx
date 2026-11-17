@@ -3275,7 +3275,10 @@ describe('ChatPage runtime workflow integration', () => {
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
       const before = JSON.stringify(readCurrentSessionState()?.messages)
-      fireEvent.click(await screen.findByRole('button', { name: 'chat.agent_html.open' }))
+      const open = await screen.findByRole('button', { name: 'chat.agent_html.open' })
+      // In the column the app is a launcher card at the end of the transcript, not a panel under it.
+      expect(screen.getByTestId('agent-html-app-host')).toContainElement(open)
+      fireEvent.click(open)
       await waitFor(() => expect(hoisted.openAgentHtmlAppMock).toHaveBeenCalledOnce())
       expect(hoisted.openAgentHtmlAppMock).toHaveBeenCalledWith({ route, conversationId: readCurrentSessionState()!.id, appId: app.id, expectedRevision: 1 })
       expect(view.container.querySelector('iframe,script')).toBeNull()

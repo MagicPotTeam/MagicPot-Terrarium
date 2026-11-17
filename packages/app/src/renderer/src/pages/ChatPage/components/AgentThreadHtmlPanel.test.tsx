@@ -1,5 +1,5 @@
 import React from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentHtmlApp } from '@shared/api/agentThreadHtml'
 import AgentThreadHtmlPanel from './AgentThreadHtmlPanel'
@@ -42,7 +42,7 @@ describe('HTML user-control metadata panel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.open' }))
     mocks.list.mockResolvedValue({ apps: [] }); mocks.storage.mockResolvedValue({ enabled: false }); view.rerender(<AgentThreadHtmlPanel route={route} conversationId="other" active />)
     await act(async () => { resolve({ apps: [{ ...app(), title: 'OLD DOCUMENT' }] }); reject(new Error('old')); await Promise.resolve() })
-    expect(screen.queryByRole('region')).toBeNull(); expect(screen.queryByText('OLD DOCUMENT')).toBeNull()
+    expect(screen.queryByTestId('agent-html-apps')).toBeNull(); expect(screen.queryByText('OLD DOCUMENT')).toBeNull()
   })
   it('allows stop while an open IPC is unresolved and ignores its later obsolete failure', async () => {
     await mount(); let reject!: (error: Error) => void
@@ -110,8 +110,38 @@ describe('HTML user-control metadata panel', () => {
   })
   it('does not poll inactive surfaces and removes expired metadata', async () => {
     mocks.storage.mockResolvedValue({ enabled: false, initialized: false, available: false, unconfirmedRuns: null, canInitialize: false, saveEnabled: false })
-    const view = await mount(); await act(async () => vi.advanceTimersByTimeAsync(61000)); expect(screen.queryByRole('region')).toBeNull()
+    const view = await mount(); await act(async () => vi.advanceTimersByTimeAsync(61000)); expect(screen.queryByTestId('agent-html-apps')).toBeNull()
     view.rerender(<AgentThreadHtmlPanel route={route} conversationId="chat" active={false} />)
     const count = mocks.list.mock.calls.length; await act(async () => vi.advanceTimersByTimeAsync(2000)); expect(mocks.list).toHaveBeenCalledTimes(count)
+  })
+  it('draws each app as a launcher card (title, state, 打开) into the given host, with no notice paragraph', async () => {
+    const host = document.createElement('div'); document.body.appendChild(host)
+    mocks.list.mockResolvedValue({ apps: [app(), { ...app('open'), id: 'second', title: 'Second app' }] })
+    const view = render(<AgentThreadHtmlPanel route={route} conversationId="chat" active host={host} />)
+    await act(async () => { await Promise.resolve() })
+    expect(view.container).toBeEmptyDOMElement()
+    const cards = within(host).getAllByTestId('agent-html-app')
+    expect(cards).toHaveLength(2)
+    expect(within(cards[0]).getByTestId('agent-app-launcher-title')).toHaveTextContent('<img src=x onerror=alert(1)>')
+    expect(within(cards[0]).getByRole('button', { name: 'chat.agent_html.open' })).toHaveAttribute('title', 'chat.agent_html.notice')
+    expect(within(cards[1]).queryByRole('button', { name: 'chat.agent_html.open' })).toBeNull()
+    expect(within(cards[1]).getByText('chat.agent_html.status_open')).toBeTruthy()
+    expect(screen.queryByText('chat.agent_html.notice')).toBeNull()
+    view.unmount(); host.remove()
+  })
+  it('keeps storage set-up and saved copies in a card of their own while no app is listed, else in the last app card', async () => {
+    mocks.storage.mockResolvedValue({ enabled: true, initialized: true, available: true, unconfirmedRuns: 0, canInitialize: false, saveEnabled: true })
+    mocks.list.mockResolvedValue({ apps: [] })
+    render(<AgentThreadHtmlPanel route={route} conversationId="chat" active />)
+    await act(async () => { await Promise.resolve() })
+    const storageCard = screen.getByTestId('agent-html-storage')
+    expect(within(storageCard).getByTestId('agent-app-launcher-title')).toHaveTextContent('chat.agent_html.title')
+    expect(within(storageCard).getByRole('button', { name: 'chat.agent_html.saved_refresh' })).toBeTruthy()
+    mocks.list.mockResolvedValue({ apps: [app(), { ...app(), id: 'last', title: 'Last app' }] })
+    await act(async () => vi.advanceTimersByTimeAsync(1000))
+    expect(screen.queryByTestId('agent-html-storage')).toBeNull()
+    const cards = screen.getAllByTestId('agent-html-app')
+    expect(within(cards[0]).queryByRole('button', { name: 'chat.agent_html.saved_refresh' })).toBeNull()
+    expect(within(cards[1]).getByRole('button', { name: 'chat.agent_html.saved_refresh' })).toBeTruthy()
   })
 })

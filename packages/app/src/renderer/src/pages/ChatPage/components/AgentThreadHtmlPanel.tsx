@@ -1,12 +1,14 @@
 import { htmlSnapshotOperation } from '../htmlSnapshotOperations'
 import AgentThreadHtmlSaved from './AgentThreadHtmlSaved'
 import React, { useEffect, useRef, useState } from 'react'
-import { Alert, Box, Button, Typography } from '@mui/material'
+import { createPortal } from 'react-dom'
+import { Box } from '@mui/material'
 import { useTranslation } from 'react-i18next'
 import type { AgentRouteLike } from '@shared/agent'
 import type { AgentHtmlApp, AgentHtmlStorageStatus } from '@shared/api/agentThreadHtml'
 import { api } from '../../../utils/windowUtils'
-function HtmlAppRow({ item, scope, canOpen, canSave, onChanged }: { item: AgentHtmlApp; scope: string; canOpen: boolean; canSave: boolean; onChanged(): void }) {
+import { AgentAppLauncherActions, AgentAppLauncherCard, AgentAppLauncherLine } from './AgentAppLauncherCard'
+function HtmlAppRow({ item, scope, canOpen, canSave, onChanged, children }: { item: AgentHtmlApp; scope: string; canOpen: boolean; canSave: boolean; onChanged(): void; children?: React.ReactNode }) {
   const { t } = useTranslation(), live = useRef(true), locks = useRef({ open: false, close: false, save: false }), generation = useRef(0), saveGeneration = useRef(0)
   const [busy, setBusy] = useState({ open: false, close: false, save: false }), [error, setError] = useState(false)
   useEffect(() => { live.current = true; return () => { live.current = false } }, [])
@@ -33,18 +35,27 @@ function HtmlAppRow({ item, scope, canOpen, canSave, onChanged }: { item: AgentH
     } catch { if (live.current && owned === generation.current && saveOwned === saveGeneration.current) setError(true) }
     finally { locks.current.save = false; if (live.current) setBusy({ ...locks.current }) }
   }
-  return <Box sx={{ mt: 1 }}>
-    <Typography variant="body2">{item.title} · {t(`chat.agent_html.status_${item.status}`)}</Typography>
-    <Typography variant="caption">{item.id} · v{item.revision}</Typography>
-    {item.status === 'ready' && <Button size="small" disabled={!canOpen || busy.open || busy.close || busy.save} onClick={() => void act(true)}>{t('chat.agent_html.open')}</Button>}
-    {['ready', 'opening', 'open'].includes(item.status) && <Button size="small" disabled={busy.close} onClick={() => void act(false)}>{t('chat.agent_html.close')}</Button>}
-    {canSave && item.snapshotReady !== false && ['ready', 'closed'].includes(item.status) && <Button size="small" disabled={busy.open || busy.close || busy.save} onClick={() => void save()}>{t('chat.agent_html.save_snapshot')}</Button>}
-    {error && <Alert severity="error">{t('chat.agent_html.error')}</Alert>}
-    {item.status === 'unknown' && <Alert severity="warning">{t('chat.agent_html.unknown')}</Alert>}
-  </Box>
+  // Upstream's app launcher: the title and 打开 on one line; closing, saving and what went wrong under it.
+  return <AgentAppLauncherCard
+    testId="agent-html-app"
+    title={item.title}
+    state={t(`chat.agent_html.status_${item.status}`)}
+    openLabel={item.status === 'ready' ? t('chat.agent_html.open') : undefined}
+    openTitle={t('chat.agent_html.notice')}
+    openDisabled={!canOpen || busy.open || busy.close || busy.save}
+    onOpen={() => void act(true)}
+  >
+    <AgentAppLauncherActions actions={[
+      ['ready', 'opening', 'open'].includes(item.status) && { key: 'close', label: t('chat.agent_html.close'), disabled: busy.close, onClick: () => void act(false) },
+      canSave && item.snapshotReady !== false && ['ready', 'closed'].includes(item.status) && { key: 'save', label: t('chat.agent_html.save_snapshot'), disabled: busy.open || busy.close || busy.save, onClick: () => void save() }
+    ]} />
+    {error && <AgentAppLauncherLine tone="error">{t('chat.agent_html.error')}</AgentAppLauncherLine>}
+    {item.status === 'unknown' && <AgentAppLauncherLine tone="warning">{t('chat.agent_html.unknown')}</AgentAppLauncherLine>}
+    {children}
+  </AgentAppLauncherCard>
 }
 let lifecycleRevision = 0
-function HtmlApps({ scope }: { scope: string }) {
+function HtmlApps({ scope, host }: { scope: string; host?: HTMLElement | null }) {
   const { t } = useTranslation(), [apps, setApps] = useState<AgentHtmlApp[]>([]), [storage, setStorage] = useState<AgentHtmlStorageStatus | undefined>()
   const [revision, setRevision] = useState(0)
   const [initializing, setInitializing] = useState(false), [storageError, setStorageError] = useState(false), live = useRef(true), initLock = useRef(false), storageGeneration = useRef(0)
@@ -84,21 +95,33 @@ function HtmlApps({ scope }: { scope: string }) {
     void poll(); return () => { closed = true; clearTimeout(timer) }
   }, [scope, boundScope, revision])
   if (!apps.length && !storage?.enabled) return null
-  return <Box role="region" aria-label={t('chat.agent_html.title')} sx={{ mx: 2, mb: 1, p: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-    <Typography variant="subtitle2">{t('chat.agent_html.title')}</Typography>
-    <Typography variant="caption">{t('chat.agent_html.notice')}</Typography>
-    {storage?.enabled && <Box>
-      {!storage.initialized && storage.canInitialize && <><Alert severity="info">{t('chat.agent_html.initialize_notice')}</Alert><Button size="small" disabled={initializing || !storage.available} onClick={() => void initialize()}>{t('chat.agent_html.initialize')}</Button></>}
-      {(!storage.available || !storage.initialized && !storage.canInitialize) && <Alert severity="warning">{t('chat.agent_html.storage_unavailable')}</Alert>}
-      {storage.initialized && storage.unconfirmedRuns !== null && storage.unconfirmedRuns > 0 && <Alert severity="info">{t('chat.agent_html.run_slots', { count: storage.unconfirmedRuns })}</Alert>}
-      {storageError && <Alert severity="error">{t('chat.agent_html.initialize_failed')}</Alert>}
-    </Box>}
-    {boundScope && <AgentThreadHtmlSaved scope={boundScope} enabled={storage?.initialized === true && storage.available && storage.saveEnabled} onChanged={() => setRevision(value => value + 1)} />}
-    {apps.map(item => <HtmlAppRow key={item.id} item={item} scope={boundScope ?? scope} canOpen={storage?.enabled === true && storage.initialized && storage.available} canSave={storage?.initialized === true && storage.available && storage.saveEnabled} onChanged={() => setRevision(value => value + 1)} />)}
+  // The thread's app storage and its saved copies: in the body of the last app card, or in a
+  // card of their own while no app is listed.
+  const storageBody = storage?.enabled ? <>
+    {!storage.initialized && storage.canInitialize && <>
+      <AgentAppLauncherLine>{t('chat.agent_html.initialize_notice')}</AgentAppLauncherLine>
+      <AgentAppLauncherActions actions={[{ key: 'initialize', label: t('chat.agent_html.initialize'), disabled: initializing || !storage.available, onClick: () => void initialize() }]} />
+    </>}
+    {(!storage.available || !storage.initialized && !storage.canInitialize) && <AgentAppLauncherLine tone="warning">{t('chat.agent_html.storage_unavailable')}</AgentAppLauncherLine>}
+    {storage.initialized && storage.unconfirmedRuns !== null && storage.unconfirmedRuns > 0 && <AgentAppLauncherLine>{t('chat.agent_html.run_slots', { count: storage.unconfirmedRuns })}</AgentAppLauncherLine>}
+    {storageError && <AgentAppLauncherLine tone="error">{t('chat.agent_html.initialize_failed')}</AgentAppLauncherLine>}
+  </> : null
+  const saved = boundScope ? <AgentThreadHtmlSaved scope={boundScope} enabled={storage?.initialized === true && storage.available && storage.saveEnabled} onChanged={() => setRevision(value => value + 1)} /> : null
+  const cards = <Box data-testid="agent-html-apps" sx={{ display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 }}>
+    {apps.map((item, index) => <HtmlAppRow key={item.id} item={item} scope={boundScope ?? scope} canOpen={storage?.enabled === true && storage.initialized && storage.available} canSave={storage?.initialized === true && storage.available && storage.saveEnabled} onChanged={() => setRevision(value => value + 1)}>
+      {index === apps.length - 1 ? <>{storageBody}{saved}</> : null}
+    </HtmlAppRow>)}
+    {!apps.length && <AgentAppLauncherCard testId="agent-html-storage" title={t('chat.agent_html.title')}>{storageBody}{saved}</AgentAppLauncherCard>}
   </Box>
+  if (host === undefined) return cards
+  return host ? createPortal(cards, host) : null
 }
-export default function AgentThreadHtmlPanel({ route, conversationId, active }: { route?: AgentRouteLike; conversationId?: string; active: boolean }) {
+/**
+ * The agent's isolated HTML apps of this conversation, as app launcher cards at the end of the
+ * transcript (`host`; without it they are drawn in place).
+ */
+export default function AgentThreadHtmlPanel({ route, conversationId, active, host }: { route?: AgentRouteLike; conversationId?: string; active: boolean; host?: HTMLElement | null }) {
   if (!active || !conversationId || route?.channel !== 'canvas' || route.scopeType !== 'thread') return null
   const scope = JSON.stringify({ route, conversationId })
-  return <HtmlApps key={scope} scope={scope} />
+  return <HtmlApps key={scope} scope={scope} host={host} />
 }
