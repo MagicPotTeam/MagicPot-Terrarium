@@ -341,7 +341,10 @@ import {
   leaseQueuedSend,
   nextDrainableSend,
   pauseQueuedSend,
+  queuedEditResumes,
   queuedSendBlockingNewer,
+  queuedSendDrainHead,
+  queuedSendWaitsBehindPause,
   releaseStopHolds as releaseQueuedStopHolds,
   settleQueueOnStop,
   withoutLease
@@ -8682,9 +8685,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       let queuedOverrides = overrides
       // A drained item uses an override but no longer owns the live composer.
       const fromComposer = !overrides || (overrides.composerSubmission === true && !overrides.isQueuedComposerCurrent)
-      const pausedHead = queuedSessionSendsRef.current.get(targetSessionId)?.[0]
+      const targetQueue = queuedSessionSendsRef.current.get(targetSessionId)
+      const pausedHead = targetQueue?.[0]
       const isBusy = isSessionBusy(targetSessionId)
-      if (!isBusy && pausedHead?.paused && pausedHead.blocksFollowing && fromComposer) {
+      // On an idle conversation a direct send must not overtake a queued item that waits behind a
+      // paused one: the person deals with the paused item first (edit or remove it).
+      if (!isBusy && fromComposer && ((pausedHead?.paused && pausedHead.blocksFollowing) || queuedSendWaitsBehindPause(targetQueue))) {
         notifyWarning('请先处理暂停的排队消息，再发送当前输入')
         return
       }
@@ -8849,17 +8855,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }
 
   const removeQueuedSessionSend = useCallback(
-    (sessionId: string, queuedSendId: number) => {
+    (sessionId: string, queuedSendId: number, movedToComposer = false) => {
       const queue = queuedSessionSendsRef.current.get(sessionId) ?? []
       const removed = queue.find((item) => item.id === queuedSendId)
       if (!removed || removed.inFlight) return
+      // Removing the item a drain looks at first lets the ones after it continue in order. The
+      // drain still sends only an item that is neither held, paused nor being edited, so nothing
+      // a Stop or a reload kept back goes out by this. An item moved back into the composer keeps
+      // the earlier rule (only a failed preparation resumes the next one): the person is about to
+      // send it again, ahead of what waited behind it.
+      const resumesFollowers = removed.blocksFollowing || (!movedToComposer && queuedSendDrainHead(queue)?.id === removed.id)
       const remaining = queue.filter((item) => item.id !== queuedSendId)
       const nextQueues = new Map(queuedSessionSendsRef.current)
       if (remaining.length > 0) nextQueues.set(sessionId, remaining)
       else nextQueues.delete(sessionId)
       if (removed.queueKey) pendingSessionSendKeysRef.current.delete(removed.queueKey)
       updateQueuedSessionSends(nextQueues)
-      if (removed.blocksFollowing) drainQueuedSessionRef.current(sessionId)
+      if (resumesFollowers) drainQueuedSessionRef.current(sessionId)
     },
     [updateQueuedSessionSends]
   )
@@ -8896,7 +8908,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       ) {
         writeSessionDraftBackup(sessionId, editedDraft.updatedAt, editedDraft, scope)
       }
-      removeQueuedSessionSend(sessionId, queuedSend.id)
+      removeQueuedSessionSend(sessionId, queuedSend.id, true)
       window.setTimeout(() => composerInputRef.current?.focus(), 0)
     },
     [notifyWarning, removeQueuedSessionSend, setInputValue, setPendingAttachments, setPendingHiddenContext]
@@ -8954,8 +8966,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [config.use_remote_llm, storageScope, t])
   // Saving an edit changes the item where it stands: same identity, same place in the queue, its
   // attachments and hidden text kept. The stored queue and the draft backup follow through the
-  // queue's own persistence. A paused, held or restored item resumes in place. A refusal keeps the
-  // editor open with one line saying why.
+  // queue's own persistence. A paused, held or restored item resumes in place only when nothing
+  // before it is still held or paused; otherwise only its text changes and it keeps its flags, so
+  // it never goes out ahead of them. A refusal keeps the editor open with one line saying why.
   const saveQueueEdit = useCallback(() => {
     const edit = queueEditRef.current
     if (!edit) return
@@ -8972,9 +8985,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setQueueEdit(current => (current && current.id === edit.id && current.sessionId === edit.sessionId ? { ...current, error: refusal } : current))
       return
     }
+    const resumes = queuedEditResumes(queue, edit.id)
     const nextQueues = new Map(queuedSessionSendsRef.current)
     nextQueues.set(edit.sessionId, queue.map(entry => {
       if (entry.id !== edit.id) return entry
+      if (!resumes) return { ...entry, overrides: { ...entry.overrides!, content } }
       const { heldByStop: _held, ...rest } = entry
       return { ...rest, overrides: { ...entry.overrides!, content }, paused: false, blocksFollowing: false }
     }))

@@ -6,7 +6,10 @@ import {
   leaseQueuedSend,
   nextDrainableSend,
   pauseQueuedSend,
+  queuedEditResumes,
   queuedSendBlockingNewer,
+  queuedSendDrainHead,
+  queuedSendWaitsBehindPause,
   releaseStopHolds,
   settleQueueOnStop,
   type QueuedSendState
@@ -141,13 +144,18 @@ describe('queue strip views', () => {
     expect(
       queuedSendBlockingNewer([composer(1, { paused: true, heldByStop: 3 }), composer(2)])
     ).toBeUndefined()
+    // A paused item behind a held one is not named: saving an edit of it would not resume it.
     expect(
       queuedSendBlockingNewer([
         composer(1, { paused: true, heldByStop: 3 }),
         composer(2, { paused: true }),
         composer(3)
-      ])?.id
-    ).toBe(2)
+      ])
+    ).toBeUndefined()
+    // A held item between the head and the next waiting one is passed over.
+    expect(
+      queuedSendBlockingNewer([composer(1, { paused: true }), composer(2, { heldByStop: 3 }), composer(3)])?.id
+    ).toBe(1)
     // A restored head whose hold was released by the person's next send blocks the newer one.
     const restored = composer(1, { paused: true, heldByStop: 4 })
     const [released, newer] = releaseStopHolds([restored, composer(2)])
@@ -156,17 +164,59 @@ describe('queue strip views', () => {
     expect(
       queuedSendBlockingNewer([composer(1, { paused: true }), composer(2, { paused: true })])
     ).toBeUndefined()
+    // Removing the head would leave the next paused item in front: the head is not named, since
+    // neither action would let the third one go.
     expect(
       queuedSendBlockingNewer([
         composer(1, { paused: true }),
         composer(2, { paused: true }),
         composer(3)
-      ])?.id
-    ).toBe(1)
+      ])
+    ).toBeUndefined()
+    expect(
+      queuedSendBlockingNewer([composer(1, { paused: true }), composer(2, { inFlight: true })])
+    ).toBeUndefined()
     // Being prepared or simply waiting is not blocking.
     expect(queuedSendBlockingNewer([composer(1, { inFlight: true }), composer(2)])).toBeUndefined()
     expect(queuedSendBlockingNewer([composer(1), composer(2)])).toBeUndefined()
     expect(queuedSendBlockingNewer(undefined)).toBeUndefined()
+  })
+
+  it('finds the first item a drain looks at', () => {
+    expect(queuedSendDrainHead([composer(1, { heldByStop: 2 }), composer(2, { paused: true })])?.id).toBe(2)
+    expect(queuedSendDrainHead([composer(1, { heldByStop: 2 })])).toBeUndefined()
+    expect(queuedSendDrainHead(undefined)).toBeUndefined()
+  })
+
+  it('says when a direct send would overtake an item waiting behind a paused one', () => {
+    expect(queuedSendWaitsBehindPause([composer(1, { paused: true }), composer(2)])).toBe(true)
+    expect(
+      queuedSendWaitsBehindPause([composer(1, { paused: true }), composer(2, { paused: true }), composer(3)])
+    ).toBe(true)
+    // Held items neither wait to be sent nor hold anything back.
+    expect(queuedSendWaitsBehindPause([composer(1, { paused: true }), composer(2, { heldByStop: 1 })])).toBe(false)
+    expect(queuedSendWaitsBehindPause([composer(1, { paused: true, heldByStop: 1 }), composer(2)])).toBe(false)
+    // Being prepared is not waiting; nothing paused means nothing to overtake.
+    expect(queuedSendWaitsBehindPause([composer(1, { paused: true }), composer(2, { inFlight: true })])).toBe(false)
+    expect(queuedSendWaitsBehindPause([composer(1), composer(2)])).toBe(false)
+    expect(queuedSendWaitsBehindPause(undefined)).toBe(false)
+  })
+
+  it('resumes an edited item only when nothing before it is held or paused', () => {
+    // After a reload every item is paused and held: only the first one may resume.
+    const restored = [composer(1, { paused: true, heldByStop: 1 }), composer(2, { paused: true, heldByStop: 2 })]
+    expect(queuedEditResumes(restored, 1)).toBe(true)
+    expect(queuedEditResumes(restored, 2)).toBe(false)
+    // After Stop: [A paused, B held, C held]; with A removed, C still waits behind the held B.
+    const stopped = [composer(1, { paused: true }), composer(2, { heldByStop: 3 }), composer(3, { heldByStop: 3 })]
+    expect(queuedEditResumes(stopped, 1)).toBe(true)
+    expect(queuedEditResumes(stopped, 2)).toBe(false)
+    expect(queuedEditResumes(stopped.slice(1), 3)).toBe(false)
+    expect(queuedEditResumes(stopped.slice(1), 2)).toBe(true)
+    // An item waiting behind an ordinary queued or a prepared one resumes: those are sent first.
+    expect(queuedEditResumes([composer(1, { inFlight: true }), composer(2, { paused: true })], 2)).toBe(true)
+    expect(queuedEditResumes([composer(1), composer(2, { heldByStop: 1 })], 2)).toBe(true)
+    expect(queuedEditResumes(stopped, 9)).toBe(false)
   })
 
   it('shows the last three while collapsed, plus the blocking head when it is older', () => {

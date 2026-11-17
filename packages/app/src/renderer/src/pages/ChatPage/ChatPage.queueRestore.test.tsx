@@ -715,3 +715,52 @@ describe('ChatPage queued sends kept with the draft', () => {
     view.unmount()
   })
 })
+
+describe('ChatPage restored queue edited in the Agent column (S5c)', () => {
+  const statuses = () => screen.queryAllByTestId('chat-queue-status').map((item) => item.textContent)
+  const requestedTexts = () =>
+    fixture.request.mock.calls.map((call) =>
+      (call[0] as { messages: ChatMessage[] }).messages.filter((message) => message.role === 'user').at(-1)?.content
+    )
+  const saveRowEdit = (row: HTMLElement, text: string) => {
+    fireEvent.click(within(row).getByRole('button', { name: 'chat.queue_edit' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: text } })
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+  }
+
+  it('saving an edit of the second restored item sends nothing; each item goes only on its own save, in order', async () => {
+    const view = await renderPage([session('restored-order')], 'restored-order', { compact: true })
+    await queueTwoBehindRunningReply()
+    await waitFor(() => expect(storedSession('restored-order')?.draft?.queuedSends).toHaveLength(2))
+    view.unmount()
+    fixture.request.mockClear()
+    await mountPage('restored-order', { compact: true })
+    await waitFor(() => expect(queueItems()).toHaveLength(2))
+    expect(statuses()).toEqual(['chat.queue_status_held', 'chat.queue_status_held'])
+    const storedIds = storedSession('restored-order')!.draft!.queuedSends!.map((item) => item.id)
+    // 'queued one' is still held before it: the save changes only the text.
+    saveRowEdit(queueItems()[1], 'queued two edited')
+    await wait(300)
+    expect(fixture.request).not.toHaveBeenCalled()
+    expect(statuses()).toEqual(['chat.queue_status_held', 'chat.queue_status_held'])
+    expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual(['queued one', 'queued two edited'])
+    expect(userTexts(currentSession().messages)).toEqual(['running reply'])
+    // The stored queue keeps both items under their own ids, with the edited text.
+    await waitFor(() =>
+      expect(storedSession('restored-order')?.draft?.queuedSends?.map((item) => [item.id, item.content])).toEqual([
+        [storedIds[0], 'queued one'],
+        [storedIds[1], 'queued two edited']
+      ])
+    )
+    // The first one goes on its own save; the second, restored and held, waits for its own.
+    saveRowEdit(queueItems()[0], 'queued one')
+    await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(1))
+    await wait(300)
+    expect(fixture.request).toHaveBeenCalledTimes(1)
+    expect(statuses()).toEqual(['chat.queue_status_held'])
+    saveRowEdit(queueItems()[0], 'queued two edited')
+    await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(2))
+    expect(requestedTexts()).toEqual(['queued one', 'queued two edited'])
+    await waitFor(() => expect(queueItems()).toHaveLength(0))
+  })
+})

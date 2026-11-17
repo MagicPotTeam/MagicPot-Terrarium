@@ -117,19 +117,57 @@ export const releaseStopHolds = <T extends QueuedSendState>(queue: readonly T[])
       })
     : queue
 
+/** The first item a drain looks at (the first one not held back), or undefined. */
+export const queuedSendDrainHead = <T extends QueuedSendState>(
+  queue: readonly T[] | undefined
+): T | undefined => queue?.find((item) => !item.heldByStop)
+
 /**
- * The item the newer ones wait behind, or undefined: the first item a drain would look at (the
- * first not held back) when it is paused and an item a drain could send (neither held nor paused)
- * follows it. Such a head is sent only after an explicit edit or removal.
+ * The item the newer ones wait behind, or undefined: the first item a drain looks at, paused,
+ * with nothing held before it, followed directly by an item a drain could send (neither held,
+ * paused nor being prepared). Removing it lets that item go (the removal drains), and saving an
+ * edit of it sends it first (nothing before it waits for the person), so both actions resume
+ * the ones after it.
  */
 export const queuedSendBlockingNewer = <T extends QueuedSendState>(
   queue: readonly T[] | undefined
 ): T | undefined => {
-  const waiting = (queue ?? []).filter((item) => !item.heldByStop)
-  const head = waiting[0]
-  return head && head.paused && !head.inFlight && waiting.slice(1).some((item) => !item.paused)
-    ? head
-    : undefined
+  const items = queue ?? []
+  const head = items[0]
+  if (!head || head.heldByStop || !head.paused || head.inFlight) return undefined
+  const next = items.slice(1).find((item) => !item.heldByStop)
+  return next && !next.paused && !next.inFlight ? head : undefined
+}
+
+/**
+ * True when an item a drain could send (neither held, paused nor being prepared) waits behind a
+ * paused item that is not held. A direct send of the composer on the idle conversation would
+ * overtake it, so the composer asks the person to deal with the paused item first.
+ */
+export const queuedSendWaitsBehindPause = (
+  queue: readonly QueuedSendState[] | undefined
+): boolean => {
+  let pausedAhead = false
+  for (const item of queue ?? []) {
+    if (item.heldByStop) continue
+    if (item.paused) pausedAhead = true
+    else if (pausedAhead && !item.inFlight) return true
+  }
+  return false
+}
+
+/**
+ * Saving an edit of a queued item resumes it (its Stop hold and pause are lifted) only when
+ * nothing before it still waits for the person's action (held by a Stop or a reload, or paused).
+ * Otherwise only its text changes: lifting its flags would send it ahead of those items.
+ */
+export const queuedEditResumes = (
+  queue: readonly QueuedSendState[] | undefined,
+  id: number
+): boolean => {
+  const items = queue ?? []
+  const index = items.findIndex((item) => item.id === id)
+  return index >= 0 && !items.slice(0, index).some((item) => item.heldByStop || item.paused)
 }
 
 /**

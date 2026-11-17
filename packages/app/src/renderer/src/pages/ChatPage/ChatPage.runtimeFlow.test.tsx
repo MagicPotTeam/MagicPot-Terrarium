@@ -9728,6 +9728,132 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
   })
 
+  describe('queue order around Stop, removal and in-row edits (S5c)', () => {
+    const abortable = (request: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      request.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+    const send = (text: string) => {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: text } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    }
+    const statuses = () => screen.queryAllByTestId('chat-queue-status').map(item => item.textContent)
+    const requestedTexts = () => hoisted.requestChatCompletionMock.mock.calls.map(call =>
+      (call[0].messages as ChatMessage[]).findLast(message => message.role === 'user')?.content)
+    const settle = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 80)) })
+    const saveRowEdit = (row: HTMLElement, text: string) => {
+      fireEvent.click(within(row).getByRole('button', { name: 'chat.queue_edit' }))
+      fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: text } })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+    }
+
+    it('removing a Stop-paused head sends the released message next, and a composer send cannot overtake it', async () => {
+      let finishNewer!: (value: { content: string }) => void
+      hoisted.requestChatCompletionMock
+        .mockImplementationOnce(abortable)
+        .mockImplementationOnce(() => new Promise(resolve => { finishNewer = resolve }))
+        .mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-remove-head')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('first queued')
+      send('second queued')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() => expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held']))
+      // The person's newer send is accepted and releases the hold: 'second queued' now waits behind the paused head.
+      send('newer request')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      await act(async () => finishNewer({ content: 'newer done' }))
+      await settle()
+      expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_queued'])
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      // A direct send on the idle conversation would overtake 'second queued': it is refused and the text stays.
+      hoisted.notifyWarningMock.mockClear()
+      send('latest')
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('请先处理暂停的排队消息，再发送当前输入')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('latest')
+      await settle()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      // Removing the paused head (as its note says) lets the released message go at once.
+      fireEvent.click(within(screen.getAllByTestId('chat-queue-item')[0]).getByRole('button', { name: 'chat.queue_remove' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
+      send('latest')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(4))
+      expect(requestedTexts()).toEqual(['running', 'newer request', 'second queued', 'latest'])
+    })
+
+    it('removing a paused head whose follower is still held sends nothing', async () => {
+      hoisted.requestChatCompletionMock.mockImplementationOnce(abortable).mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-remove-held')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('A')
+      send('B')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() => expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held']))
+      // Saving an edit of B, held behind the paused A, changes only its text: it stays held.
+      saveRowEdit(screen.getAllByTestId('chat-queue-item')[1], 'B edited')
+      await settle()
+      expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held'])
+      expect(screen.getAllByTestId('chat-queue-text').map(item => item.textContent)).toEqual(['A', 'B edited'])
+      expect(screen.queryByTestId('chat-queue-resume-notice')).not.toBeInTheDocument()
+      fireEvent.click(within(screen.getAllByTestId('chat-queue-item')[0]).getByRole('button', { name: 'chat.queue_remove' }))
+      await settle()
+      expect(statuses()).toEqual(['chat.queue_status_held'])
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      // The person's next send goes first and releases the held message, which follows it.
+      send('N')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      expect(requestedTexts()).toEqual(['running', 'N', 'B edited'])
+    })
+
+    it('Stop with three queued, remove the head and edit the third: nothing is sent, then the order is the strip order', async () => {
+      hoisted.requestChatCompletionMock.mockImplementationOnce(abortable).mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-three')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('A')
+      send('B')
+      send('C')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(3))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() => expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held', 'chat.queue_status_held']))
+      fireEvent.click(within(screen.getAllByTestId('chat-queue-item')[0]).getByRole('button', { name: 'chat.queue_remove' }))
+      await settle()
+      expect(statuses()).toEqual(['chat.queue_status_held', 'chat.queue_status_held'])
+      saveRowEdit(screen.getAllByTestId('chat-queue-item')[1], 'C edited')
+      await settle()
+      // C keeps its hold behind the held B: nothing goes out by the save.
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(statuses()).toEqual(['chat.queue_status_held', 'chat.queue_status_held'])
+      expect(screen.getAllByTestId('chat-queue-text').map(item => item.textContent)).toEqual(['B', 'C edited'])
+      send('N')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(4))
+      expect(requestedTexts()).toEqual(['running', 'N', 'B', 'C edited'])
+    })
+
+    it('saving an edit of the paused head sends it before the ones it held back', async () => {
+      hoisted.requestChatCompletionMock.mockImplementationOnce(abortable).mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-edit-head')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('A')
+      send('B')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() => expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held']))
+      saveRowEdit(screen.getAllByTestId('chat-queue-item')[0], 'A edited')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      expect(requestedTexts()).toEqual(['running', 'A edited', 'B'])
+    })
+  })
+
   it('edits and cancels queued messages with the compact queue controls', async () => {
     let resolveFirstRequest: ((value: { content: string }) => void) | undefined
     hoisted.requestChatCompletionMock.mockImplementationOnce(
