@@ -1677,7 +1677,9 @@
     "queue_count_one": "{{count}} queued message",
     "queue_count_other": "{{count}} queued messages",
     "queue_edit_unavailable": "This conversation cannot send this message now",
-    "queue_edit_plain_only": "A queued message cannot be a command or an @member request"
+    "queue_edit_plain_only": "A queued message cannot be a command or an @member request",
+    "queue_finish_edit_first": "Save or discard the queued message you are editing first, then send.",
+    "queue_edit_drop_unavailable": "An attachment is no longer available and will not be sent. Save again to keep the message without it."
   },
   "agent_workspace": {
     "title": "Agent Threads",

@@ -9837,6 +9837,36 @@ describe('ChatPage runtime workflow integration', () => {
       expect(requestedTexts()).toEqual(['running', 'N', 'B', 'C edited'])
     })
 
+    it('a composer send on the idle conversation does not overtake the item open in the row editor', async () => {
+      let finishFirst!: (value: { content: string }) => void
+      hoisted.requestChatCompletionMock
+        .mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve }))
+        .mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-edit-hold')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('X')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_edit' }))
+      await act(async () => finishFirst({ content: 'first done' }))
+      await settle()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      hoisted.notifyWarningMock.mockClear()
+      send('N')
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.queue_finish_edit_first')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('N')
+      await settle()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: 'X edited' } })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
+      send('N')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      expect(requestedTexts()).toEqual(['running', 'X edited', 'N'])
+    })
+
     it('saving an edit of the paused head sends it before the ones it held back', async () => {
       hoisted.requestChatCompletionMock.mockImplementationOnce(abortable).mockResolvedValue({ content: 'done' })
       renderChatPage('queue-order-edit-head')

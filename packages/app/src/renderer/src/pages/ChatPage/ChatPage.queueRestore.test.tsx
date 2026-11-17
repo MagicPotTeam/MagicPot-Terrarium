@@ -763,4 +763,82 @@ describe('ChatPage restored queue edited in the Agent column (S5c)', () => {
     expect(requestedTexts()).toEqual(['queued one', 'queued two edited'])
     await waitFor(() => expect(queueItems()).toHaveLength(0))
   })
+
+  it('drops an attachment that did not survive the reload only when the person saves again', async () => {
+    await renderPage(
+      [
+        session('drop-unavailable', {
+          draft: {
+            inputValue: '',
+            pendingAttachments: [],
+            pendingHiddenContext: '',
+            updatedAt: 0,
+            queuedSendsUpdatedAt: 5,
+            queuedSends: [
+              {
+                id: 'stored-image-item',
+                content: 'look at this',
+                queuedAt: 1,
+                attachments: [{ type: 'image', url: 'blob:file:///gone', fileName: 'gone.png', mimeType: 'image/png' }]
+              }
+            ]
+          }
+        })
+      ],
+      'drop-unavailable',
+      { compact: true }
+    )
+    await waitFor(() => expect(queueItems()).toHaveLength(1))
+    fireEvent.click(within(queueItems()[0]).getByRole('button', { name: 'chat.queue_edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent('chat.queue_edit_drop_unavailable')
+    await wait(200)
+    expect(fixture.request).not.toHaveBeenCalled()
+    // Changing the text asks again.
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: 'look at this, no image' } })
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent('chat.queue_edit_drop_unavailable')
+    await wait(200)
+    expect(fixture.request).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+    await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(1))
+    const sent = (fixture.request.mock.calls[0][0] as { messages: ChatMessage[] }).messages.filter((message) => message.role === 'user').at(-1)
+    expect(sent?.content).toBe('look at this, no image')
+    expect(sent?.attachments ?? []).toEqual([])
+    await waitFor(() => expect(queueItems()).toHaveLength(0))
+  })
+
+  it('refuses to save a message of unavailable attachments only', async () => {
+    await renderPage(
+      [
+        session('only-unavailable', {
+          draft: {
+            inputValue: '',
+            pendingAttachments: [],
+            pendingHiddenContext: '',
+            updatedAt: 0,
+            queuedSendsUpdatedAt: 5,
+            queuedSends: [
+              {
+                id: 'stored-image-only',
+                content: '',
+                queuedAt: 1,
+                attachments: [{ type: 'image', url: 'blob:file:///gone', fileName: 'gone.png', mimeType: 'image/png' }]
+              }
+            ]
+          }
+        })
+      ],
+      'only-unavailable',
+      { compact: true }
+    )
+    await waitFor(() => expect(queueItems()).toHaveLength(1))
+    fireEvent.click(within(queueItems()[0]).getByRole('button', { name: 'chat.queue_edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent('Image unavailable')
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+    await wait(200)
+    expect(fixture.request).not.toHaveBeenCalled()
+    expect(queueItems()).toHaveLength(1)
+  })
 })

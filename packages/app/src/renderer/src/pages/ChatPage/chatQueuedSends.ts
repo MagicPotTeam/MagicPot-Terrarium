@@ -42,6 +42,14 @@ export const isUserQueuedSend = (item: QueuedSendState): boolean =>
       !item.overrides?.resolveAttachments)
   )
 
+/**
+ * The person may edit this queued item in place: a user item (never team-internal work, which
+ * carries its sender's authority and delivery state) that is not being prepared and does not
+ * resolve its attachments lazily.
+ */
+export const isEditableQueuedSend = (item: QueuedSendState): boolean =>
+  isUserQueuedSend(item) && !item.inFlight && !item.overrides?.resolveAttachments
+
 /** Paused: not in flight, no lease, sent only after an explicit user action. */
 export const pauseQueuedSend = <T extends QueuedSendState>(item: T): T => {
   const { leaseId: _lease, heldByStop: _held, ...rest } = item

@@ -141,6 +141,16 @@ describe('ChatQueueStrip', () => {
     expect(handlers.onToggleExpanded).toHaveBeenCalledOnce()
   })
 
+  it('keeps the row being edited in view while collapsed', () => {
+    const items = [1, 2, 3, 4, 5].map((id) => item(id))
+    renderStrip({ items, visibleIds: new Set([3, 4, 5]), editing: { id: 1, text: 'draft' } })
+    const rows = screen.getAllByTestId('chat-queue-item')
+    expect(rows).toHaveLength(4)
+    expect(rows[0]).toHaveAttribute('data-editing', 'true')
+    expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue('draft')
+    expect(screen.getByRole('button', { name: 'chat.queue_show_more:1' })).toBeInTheDocument()
+  })
+
   it('collapses again once expanded', () => {
     const items = [1, 2, 3, 4].map((id) => item(id))
     renderStrip({ items, visibleIds: new Set([2, 3, 4]), expanded: true })

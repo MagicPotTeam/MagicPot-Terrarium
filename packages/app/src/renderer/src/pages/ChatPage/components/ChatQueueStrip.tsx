@@ -84,7 +84,10 @@ export const ChatQueueStrip: React.FC<{
     editor.focus()
     editor.setSelectionRange(editor.value.length, editor.value.length)
   }, [editingId])
-  const shown = expanded ? items : items.filter((item) => visibleIds.has(item.id))
+  // The row being edited stays in view when the strip is collapsed: its editor holds the item back.
+  const shown = expanded
+    ? items
+    : items.filter((item) => visibleIds.has(item.id) || item.id === editingId)
   const hidden = items.length - shown.length
   // Something is left out while collapsed: the strip offers to show it (or to collapse again).
   const collapsible = items.some((item) => !visibleIds.has(item.id))

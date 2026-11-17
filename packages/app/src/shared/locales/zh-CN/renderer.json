@@ -1504,7 +1504,9 @@
     "queue_count_one": "{{count}} 条排队消息",
     "queue_count_other": "{{count}} 条排队消息",
     "queue_edit_unavailable": "这个会话现在不能发送这条消息",
-    "queue_edit_plain_only": "排队消息只能是普通消息，不能是命令或 @成员"
+    "queue_edit_plain_only": "排队消息只能是普通消息，不能是命令或 @成员",
+    "queue_finish_edit_first": "请先保存或放弃正在编辑的排队消息，再发送当前输入",
+    "queue_edit_drop_unavailable": "有附件已不可用，不会发送。再次保存将不带这些附件。"
   },
   "agent_workspace": {
     "title": "Agent 线程",

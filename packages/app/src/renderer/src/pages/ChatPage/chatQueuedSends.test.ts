@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   collapsedQueuedSendIds,
+  isEditableQueuedSend,
   isQueuedSendLeaseCurrent,
   isUserQueuedSend,
   leaseQueuedSend,
@@ -48,6 +49,20 @@ describe('queued send rules', () => {
     expect(isUserQueuedSend(task(5))).toBe(false)
     expect(isUserQueuedSend(autoSend(6))).toBe(false)
     expect(isUserQueuedSend({ id: 7 })).toBe(false)
+  })
+
+  it('lets the person edit only user items that are not being prepared', () => {
+    expect(isEditableQueuedSend(composer(1))).toBe(true)
+    expect(isEditableQueuedSend(edit(2))).toBe(true)
+    expect(isEditableQueuedSend(composer(3, { paused: true, heldByStop: 1 }))).toBe(true)
+    // Team-internal work keeps its sender's authority: a member channel message, a task dispatch.
+    expect(isEditableQueuedSend(channel(4))).toBe(false)
+    expect(isEditableQueuedSend(task(5))).toBe(false)
+    expect(isEditableQueuedSend(autoSend(6))).toBe(false)
+    expect(isEditableQueuedSend(composer(7, { inFlight: true }))).toBe(false)
+    // A composer item that resolves its attachments lazily is not edited in place either.
+    expect(isEditableQueuedSend(composer(8, { overrides: { resolveAttachments: async () => [] } }))).toBe(false)
+    expect(isEditableQueuedSend({ id: 9 })).toBe(false)
   })
 
   it('manual Stop pauses the first user item, holds the others and drops team work', () => {
