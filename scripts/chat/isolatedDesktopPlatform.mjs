@@ -10,10 +10,13 @@
 //   <root>/bin/canvas-thumbnail-sidecar; no worker path is accepted from the caller;
 // - the runner re-executes itself under `xvfb-run` (no real display), in its own
 //   process group, with an owner token in the environment;
-// - after the run, only processes that carry this run's owner token or this run's
-//   private root marker are terminated; nothing else is signalled;
-// - while the run is alive, the TCP/UDP endpoints of those processes are sampled from
-//   /proc so the report can show that only loopback addresses were contacted.
+// - the run's processes are its detached process group, every descendant, every process
+//   carrying its owner token, and Electron's own group (Playwright detaches Electron and
+//   Chromium's children overwrite their environ), each pinned by its start time;
+// - while the run is alive, the TCP/UDP endpoints of those processes (including Chromium's
+//   network service) are sampled from /proc so the report shows which addresses were used;
+// - after the run, only those processes are terminated, each re-checked by start time;
+// - if the observing wrapper is killed, a watchdog in the relaunched runner stops the run.
 // The bootstrap gates (isolatedImageDesktopBootstrap.cjs) are unchanged on both platforms.
 import assert from 'node:assert/strict'
 import { spawn as spawnChild } from 'node:child_process'
@@ -30,7 +33,9 @@ const defaultRepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)
 export const LINUX_XVFB_ENV = 'MAGICPOT_ISOLATED_LINUX_XVFB'
 /** Unique per relaunch; every process started for the run inherits it. */
 export const LINUX_OWNER_ENV = 'MAGICPOT_ISOLATED_LINUX_OWNER'
-/** Set by isolatedImageEnvironment for Electron and all of its children. */
+/** `<pid>:<starttime>` of the wrapper that observes the run; see armLinuxWrapperWatchdog. */
+export const LINUX_WRAPPER_ENV = 'MAGICPOT_ISOLATED_LINUX_WRAPPER'
+/** Set by isolatedImageEnvironment for Electron. Shared by every run on a root: never used for ownership. */
 export const RUN_ROOT_MARKER_ENV = 'MAGICPOT_TEST_ARTIFACT_ROOT'
 export const LINUX_XVFB_SCREEN = '-screen 0 1920x1200x24'
 export const LINUX_WORKER_FILE = 'canvas-thumbnail-sidecar'
@@ -65,7 +70,13 @@ export function isolatedElectronArgs(args, platform = process.platform) {
 /**
  * Linux additions to the isolated Electron environment: a private HOME/XDG/TMPDIR inside
  * the run root, the Chinese UI the fixtures select by label, the xvfb display, and the
- * standing test flags. Nothing from the host is copied except DISPLAY and XAUTHORITY.
+ * standing test flags. Nothing from the host is copied except DISPLAY, XAUTHORITY and the
+ * run's owner token.
+ *
+ * MAGICPOT_PRIVATE_TEST_SKIP_LEGACY_USER_DATA_MIGRATION and MAGICPOT_PRIVATE_LIVE_SYNC are
+ * set because the standing test rules ask for them, but nothing in packages/app/src reads
+ * either variable today: they have no effect yet, so do not rely on them. Isolation comes
+ * from the private HOME/XDG/TMPDIR, --user-data-dir, MAGICPOT_STORAGE_ROOT and the bootstrap.
  */
 export function linuxIsolatedEnvironment(runRoot, hostEnv = process.env) {
   const home = path.join(runRoot, 'home')
@@ -81,6 +92,9 @@ export function linuxIsolatedEnvironment(runRoot, hostEnv = process.env) {
   }
   if (hostEnv.DISPLAY) environment.DISPLAY = hostEnv.DISPLAY
   if (hostEnv.XAUTHORITY) environment.XAUTHORITY = hostEnv.XAUTHORITY
+  // Inside the xvfb relaunch Electron carries this run's owner token, so the observer and the
+  // cleanup find it even though Playwright starts it in a process group of its own.
+  if (hostEnv[LINUX_OWNER_ENV]) environment[LINUX_OWNER_ENV] = hostEnv[LINUX_OWNER_ENV]
   return environment
 }
 
@@ -140,11 +154,14 @@ export function needsLinuxXvfbRelaunch(platform = process.platform, env = proces
   return isLinuxIsolatedPlatform(platform) && env[LINUX_XVFB_ENV] !== '1'
 }
 
-export function linuxXvfbCommand({ script, args, execPath = process.execPath, env = process.env, owner }) {
+export function linuxXvfbCommand({ script, args, execPath = process.execPath, env = process.env, owner, wrapper }) {
+  const childEnv = { ...env, [LINUX_XVFB_ENV]: '1', [LINUX_OWNER_ENV]: owner }
+  delete childEnv[LINUX_WRAPPER_ENV]
+  if (wrapper) childEnv[LINUX_WRAPPER_ENV] = wrapper
   return {
     command: 'xvfb-run',
     args: ['-a', '-s', LINUX_XVFB_SCREEN, execPath, script, ...args],
-    env: { ...env, [LINUX_XVFB_ENV]: '1', [LINUX_OWNER_ENV]: owner }
+    env: childEnv
   }
 }
 
@@ -154,37 +171,101 @@ async function readText(file) {
   try { return await fs.readFile(file, 'utf8') } catch { return null }
 }
 
-function parseStat(text) {
+/** comm, ppid, pgid and starttime (field 22, clock ticks since boot) from /proc/<pid>/stat. */
+export function parseStat(text) {
   if (!text) return null
   const close = text.lastIndexOf(')')
   const open = text.indexOf('(')
   if (open < 0 || close < open) return null
-  const fields = text.slice(close + 2).split(' ')
-  return { comm: text.slice(open + 1, close), ppid: Number(fields[1]), pgid: Number(fields[2]) }
+  const fields = text.slice(close + 2).trim().split(/\s+/)
+  const starttime = /^\d+$/.test(fields[19] ?? '') ? Number(fields[19]) : null
+  return { comm: text.slice(open + 1, close), ppid: Number(fields[1]), pgid: Number(fields[2]), starttime }
 }
 
+const notEarlier = (item, reference) => item.starttime !== null && reference.starttime !== null && item.starttime >= reference.starttime
+
 /**
- * Processes owned by this run: their environment carries the owner token of this relaunch
- * or the private run-root marker that only this run's Electron tree receives.
+ * Decides which processes belong to this run. Chromium children of Electron (zygote, GPU,
+ * renderers, the network-service utility) overwrite their environ with setproctitle and
+ * Playwright starts Electron in a process group of its own, so the environment alone cannot
+ * find them. A process is owned when:
+ * - it is in the run's process group (the detached xvfb-run), or in a process group whose
+ *   leader was owned (Electron's group) while that leader number is not held by another
+ *   process; or
+ * - its parent is owned (ancestry, so every descendant of the run is found); or
+ * - its environment carries this run's owner token (Electron and the inner runner); or
+ * - it was owned at an earlier scan and still has the same start time (a child reparented
+ *   to init after its parent died stays owned; a reused pid does not).
+ * Every pid is pinned by its start time, and a member is never older than its group leader
+ * or parent. Two runs never share a token or a process group, even on the same root.
  */
-export async function listOwnedLinuxProcesses({ owner, runRoot, procRoot = '/proc', selfPid = process.pid }) {
-  const needles = []
-  if (owner) needles.push(`${LINUX_OWNER_ENV}=${owner}`)
-  if (runRoot) needles.push(`${RUN_ROOT_MARKER_ENV}=${runRoot}`)
-  assert(needles.length > 0, 'An owner token or run root is required')
-  let entries = []
-  try { entries = await fs.readdir(procRoot) } catch { return [] }
-  const owned = []
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry) || Number(entry) === selfPid) continue
-    const environ = await readText(path.join(procRoot, entry, 'environ'))
-    if (!environ) continue
-    const variables = environ.split('\0')
-    if (!needles.some(needle => variables.includes(needle))) continue
-    const stat = parseStat(await readText(path.join(procRoot, entry, 'stat')))
-    owned.push({ pid: Number(entry), comm: stat?.comm ?? null, ppid: stat?.ppid ?? null, pgid: stat?.pgid ?? null })
+export function createLinuxOwnershipTracker({ owner, group, procRoot = '/proc', selfPid = process.pid }) {
+  assert(owner || group, 'An owner token or the run process group is required')
+  const token = owner ? `${LINUX_OWNER_ENV}=${owner}` : null
+  const pinned = new Map() // pid -> starttime
+  const groups = new Map() // pgid -> starttime of its owned leader (null until seen)
+  if (group) groups.set(group, null)
+  async function readTable() {
+    let entries = []
+    try { entries = await fs.readdir(procRoot) } catch { return new Map() }
+    const table = new Map()
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry) || Number(entry) === selfPid) continue
+      const stat = parseStat(await readText(path.join(procRoot, entry, 'stat')))
+      if (stat) table.set(Number(entry), { pid: Number(entry), ...stat })
+    }
+    return table
   }
-  return owned
+  const inOwnedGroup = (item, table) => {
+    if (!groups.has(item.pgid)) return false
+    const leaderStart = groups.get(item.pgid)
+    const holder = table.get(item.pgid)
+    if (leaderStart === null) return !holder || holder.pgid === item.pgid
+    // The group number is still ours while its leader is alive with the same start time, or
+    // while no process holds that number (the kernel keeps it reserved while members exist).
+    if (holder && holder.starttime !== leaderStart) return false
+    return item.starttime !== null && item.starttime >= leaderStart
+  }
+  async function scan() {
+    const table = await readTable()
+    // The run group leader's start time is learnt on the first scan that sees it.
+    for (const [pgid, leaderStart] of groups) {
+      const leader = table.get(pgid)
+      if (leaderStart === null && leader && leader.pgid === pgid && leader.starttime !== null) groups.set(pgid, leader.starttime)
+    }
+    const owned = new Map()
+    const own = (item, via) => {
+      owned.set(item.pid, { ...item, via })
+      if (item.pid === item.pgid && item.starttime !== null && !groups.has(item.pgid)) groups.set(item.pgid, item.starttime)
+    }
+    for (const item of table.values()) {
+      if (item.starttime !== null && pinned.get(item.pid) === item.starttime) own(item, 'pinned')
+      else if (inOwnedGroup(item, table)) own(item, 'group')
+      else if (token && (await readText(path.join(procRoot, String(item.pid), 'environ')))?.split('\0').includes(token)) own(item, 'token')
+    }
+    for (let grew = true; grew;) {
+      grew = false
+      for (const item of table.values()) {
+        if (owned.has(item.pid)) continue
+        const parent = owned.get(item.ppid)
+        if (parent && notEarlier(item, parent)) { own(item, 'parent'); grew = true } else if (inOwnedGroup(item, table)) { own(item, 'group'); grew = true }
+      }
+    }
+    for (const [pid, starttime] of pinned) if (table.get(pid)?.starttime !== starttime) pinned.delete(pid)
+    for (const item of owned.values()) if (item.starttime !== null) pinned.set(item.pid, item.starttime)
+    return [...owned.values()]
+  }
+  /** True while the pid still names the very process that was listed (same start time). */
+  async function isSameProcess(item) {
+    const stat = parseStat(await readText(path.join(procRoot, String(item.pid), 'stat')))
+    return Boolean(stat && item.starttime !== null && stat.starttime === item.starttime)
+  }
+  return { scan, isSameProcess, owner, group }
+}
+
+/** One-shot listing of the processes owned by this run (see createLinuxOwnershipTracker). */
+export async function listOwnedLinuxProcesses({ owner, group, procRoot = '/proc', selfPid = process.pid }) {
+  return createLinuxOwnershipTracker({ owner, group, procRoot, selfPid }).scan()
 }
 
 function decodeIpv4(hex) {
@@ -249,20 +330,25 @@ export async function sampleLinuxSockets(pids, { procRoot = '/proc' } = {}) {
 }
 
 /** Keeps a bounded summary of owned processes and their endpoints while the run is alive. */
-export function createLinuxRunObserver({ owner, runRoot, procRoot = '/proc', sampleMs = 500, selfPid = process.pid }) {
+export function createLinuxRunObserver({ tracker, owner, group, procRoot = '/proc', sampleMs = 500, selfPid = process.pid }) {
+  const ownership = tracker ?? createLinuxOwnershipTracker({ owner, group, procRoot, selfPid })
   const processes = new Map()
   const endpoints = new Map()
   let samples = 0, timer, pending, stopped = false
   const collect = async () => {
-    const owned = await listOwnedLinuxProcesses({ owner, runRoot, procRoot, selfPid })
-    for (const item of owned) if (!processes.has(item.pid) && processes.size < 512) processes.set(item.pid, item)
+    const owned = await ownership.scan()
+    for (const item of owned) {
+      const key = `${item.pid}@${item.starttime}`
+      if (!processes.has(key) && processes.size < 512) processes.set(key, item)
+    }
+    const byPid = new Map(owned.map(item => [item.pid, item]))
     for (const socket of await sampleLinuxSockets(owned.map(item => item.pid), { procRoot })) {
       const listening = socket.protocol === 'tcp' ? socket.state === '0A' : socket.remote.port === 0
       const peer = listening ? socket.local : socket.remote
       if (!listening && isUnspecified(peer.address) && peer.port === 0) continue
       const key = `${socket.protocol} ${listening ? 'listen' : 'peer'} ${peer.address}:${peer.port}`
       if (!endpoints.has(key) && endpoints.size < 512) {
-        endpoints.set(key, { protocol: socket.protocol, kind: listening ? 'listen' : 'peer', address: peer.address, port: peer.port, loopback: isLoopbackAddress(peer.address), comm: processes.get(socket.pid)?.comm ?? null })
+        endpoints.set(key, { protocol: socket.protocol, kind: listening ? 'listen' : 'peer', address: peer.address, port: peer.port, loopback: isLoopbackAddress(peer.address), comm: byPid.get(socket.pid)?.comm ?? null })
       }
     }
     samples++
@@ -272,6 +358,7 @@ export function createLinuxRunObserver({ owner, runRoot, procRoot = '/proc', sam
     pending = collect().catch(() => undefined).finally(() => { pending = undefined })
   }
   return {
+    tracker: ownership,
     start() { tick(); timer = setInterval(tick, sampleMs) },
     async stop() {
       stopped = true
@@ -286,7 +373,7 @@ export function createLinuxRunObserver({ owner, runRoot, procRoot = '/proc', sam
         // A peer is traffic; a bound/listening socket is only exposure and is reported apart.
         nonLoopback: list.filter(item => item.kind === 'peer' && !item.loopback),
         nonLoopbackListeners: list.filter(item => item.kind === 'listen' && !item.loopback),
-        coverage: 'Sampled from /proc every sampleMs: a connection opened and closed between two samples is not seen. The bootstrap guard counts blocked requests independently.'
+        coverage: 'Owned processes (run process group, descendants, owner token, pinned by start time) are sampled from /proc every sampleMs: a connection opened and closed between two samples is not seen. The bootstrap guard counts blocked requests independently.'
       }
     }
   }
@@ -294,11 +381,18 @@ export function createLinuxRunObserver({ owner, runRoot, procRoot = '/proc', sam
 
 /**
  * Terminates the processes of this run that are still alive: SIGTERM, a grace period, then
- * SIGKILL. Only processes whose environment carries this run's owner token or run-root marker
- * are signalled, so no foreign process can be hit even if a pid or process group is reused.
+ * SIGKILL. Only processes the ownership tracker attributes to this run are signalled, and each
+ * pid is re-checked against its recorded start time right before the signal, so a pid that
+ * was reused by another process is skipped. Node has no pidfd, so a reuse inside the few
+ * microseconds between that check and kill() cannot be excluded completely.
  */
-export async function cleanupOwnedLinuxProcesses({ owner, runRoot, procRoot = '/proc', kill = (pid, signal) => process.kill(pid, signal), settleMs = 5000, graceMs = 10_000, pollMs = 200, selfPid = process.pid }) {
-  const list = () => listOwnedLinuxProcesses({ owner, runRoot, procRoot, selfPid })
+export async function cleanupOwnedLinuxProcesses({ tracker, owner, group, procRoot = '/proc', kill = (pid, signal) => process.kill(pid, signal), settleMs = 5000, graceMs = 10_000, pollMs = 200, selfPid = process.pid }) {
+  const ownership = tracker ?? createLinuxOwnershipTracker({ owner, group, procRoot, selfPid })
+  const list = () => ownership.scan()
+  const signal = async (item, name, into) => {
+    if (!(await ownership.isSameProcess(item))) return
+    try { kill(item.pid, name); into.push({ pid: item.pid, comm: item.comm, signal: name }) } catch { /* exited meanwhile */ }
+  }
   // Processes that are already exiting (Xvfb after xvfb-run's trap) get settleMs first.
   const settleEnd = Date.now() + settleMs
   let remaining = await list()
@@ -311,42 +405,80 @@ export async function cleanupOwnedLinuxProcesses({ owner, runRoot, procRoot = '/
   const terminated = []
   while (remaining.length && Date.now() < deadline) {
     for (const item of remaining) {
-      if (!terminated.some(entry => entry.pid === item.pid)) {
-        try { kill(item.pid, 'SIGTERM'); terminated.push({ pid: item.pid, comm: item.comm, signal: 'SIGTERM' }) } catch { /* exited meanwhile */ }
-      }
+      if (!terminated.some(entry => entry.pid === item.pid)) await signal(item, 'SIGTERM', terminated)
     }
     await new Promise(resolve => setTimeout(resolve, pollMs))
     remaining = await list()
   }
   const killed = []
-  for (const item of remaining) {
-    try { kill(item.pid, 'SIGKILL'); killed.push({ pid: item.pid, comm: item.comm, signal: 'SIGKILL' }) } catch { /* exited meanwhile */ }
-  }
+  for (const item of remaining) await signal(item, 'SIGKILL', killed)
   if (killed.length) await new Promise(resolve => setTimeout(resolve, pollMs))
   const after = await list()
   return { initiallyAlive, terminated, killed, remainingAfter: after, clean: initiallyAlive.length === 0 && after.length === 0 }
 }
 
 /**
+ * Inside the xvfb relaunch: when the wrapper that observes and cleans up the run disappears
+ * (for example after SIGKILL), the run must not keep going unobserved. The wrapper passes its
+ * pid and start time; once that process is gone, the run's own process group (led by
+ * xvfb-run, which carries the same owner token) gets SIGTERM, which stops Xvfb and cargo and
+ * lets Playwright close Electron, and this process exits after a grace period. Not armed on
+ * Windows, outside the relaunch, or without a wrapper identity.
+ */
+export function armLinuxWrapperWatchdog({ env = process.env, platform = process.platform, procRoot = '/proc', selfPid = process.pid, intervalMs = 1000, graceMs = 20_000, kill = (pid, signal) => process.kill(pid, signal), exit = code => process.exit(code), log = message => console.error(message) } = {}) {
+  if (!isLinuxIsolatedPlatform(platform) || env[LINUX_XVFB_ENV] !== '1') return null
+  const wrapper = /^(\d+):(\d+)$/.exec(env[LINUX_WRAPPER_ENV] ?? '')
+  if (!wrapper) return null
+  let fired = false, timer
+  const check = async () => {
+    if (fired) return false
+    const stat = parseStat(await readText(path.join(procRoot, wrapper[1], 'stat')))
+    if (stat && stat.starttime === Number(wrapper[2])) return false
+    fired = true
+    clearInterval(timer)
+    const self = parseStat(await readText(path.join(procRoot, String(selfPid), 'stat')))
+    const leaderEnv = self && self.pgid > 1 ? await readText(path.join(procRoot, String(self.pgid), 'environ')) : null
+    const ownGroup = Boolean(env[LINUX_OWNER_ENV] && leaderEnv?.split('\0').includes(`${LINUX_OWNER_ENV}=${env[LINUX_OWNER_ENV]}`))
+    log(`isolated-linux-watchdog: the observing wrapper (pid ${wrapper[1]}) is gone; stopping ${ownGroup ? 'the run process group ' + self.pgid : 'this runner'}`)
+    try { kill(ownGroup ? -self.pgid : selfPid, 'SIGTERM') } catch { /* already gone */ }
+    const deadline = setTimeout(() => exit(1), graceMs)
+    deadline.unref?.()
+    return true
+  }
+  timer = setInterval(() => { void check() }, intervalMs)
+  timer.unref?.()
+  return { check, stop: () => clearInterval(timer) }
+}
+
+const countBy = (items, key) => items.reduce((counts, item) => ({ ...counts, [key(item)]: (counts[key(item)] ?? 0) + 1 }), {})
+
+/**
  * Runner CLI entry on Linux: refuses a used root, then re-executes the runner under
  * xvfb-run in its own process group, observes the run's processes and endpoints, and
  * cleans up only its own processes afterwards. Resolves to the process exit code.
  */
-export async function relaunchIsolatedRunnerUnderXvfb(script, argv, { privateRoot, spawn = spawnChild, procRoot = '/proc', kill, env = process.env, execPath = process.execPath, platform = process.platform, sampleMs = 500, settleMs = 5000, graceMs = 10_000, log = message => console.log(message) } = {}) {
+export async function relaunchIsolatedRunnerUnderXvfb(script, argv, { privateRoot, allowedFlags = [], spawn = spawnChild, procRoot = '/proc', kill, env = process.env, execPath = process.execPath, platform = process.platform, sampleMs = 500, settleMs = 5000, graceMs = 10_000, selfPid = process.pid, log = message => console.log(message) } = {}) {
   assert(isLinuxIsolatedPlatform(platform), 'The xvfb relaunch is Linux only')
   assert(Array.isArray(argv) && argv.length >= 1 && argv[0] && !argv[0].startsWith('--'), 'Pass one new private run root')
-  // Flags (--name) are forwarded; any other argument would be a worker path, which Linux never takes.
+  // Only the flags this runner knows are forwarded; any other argument would be a worker path,
+  // which Linux never takes.
   const flags = argv.slice(1)
   assertNoLinuxWorkerSource(flags.find(value => !value.startsWith('--')))
+  const unknown = flags.filter(value => !allowedFlags.includes(value))
+  assert.deepEqual(unknown, [], `Unknown option(s) for this runner: ${unknown.join(' ')}${allowedFlags.length ? ' (accepted: ' + allowedFlags.join(' ') + ')' : ' (it takes none)'}`)
   const runRoot = path.resolve(argv[0])
   await assertFreshIsolatedRunRoot(runRoot, privateRoot)
   const owner = randomUUID()
-  const { command, args, env: childEnv } = linuxXvfbCommand({ script, args: [runRoot, ...flags], execPath, env, owner })
-  const observer = createLinuxRunObserver({ owner, runRoot, procRoot, sampleMs })
-  observer.start()
+  const self = parseStat(await readText(path.join(procRoot, String(selfPid), 'stat')))
+  const wrapper = self?.starttime != null ? `${selfPid}:${self.starttime}` : undefined
+  const { command, args, env: childEnv } = linuxXvfbCommand({ script, args: [runRoot, ...flags], execPath, env, owner, wrapper })
   const startedAt = new Date().toISOString()
-  // Own process group (detached): the run's tree can be told apart from the caller's.
+  // Own process group (detached): the run's tree can be told apart from the caller's, and the
+  // group (with descendants and the owner token) defines what the observer and cleanup own.
   const child = spawn(command, args, { env: childEnv, stdio: 'inherit', detached: true, shell: false })
+  const tracker = createLinuxOwnershipTracker({ owner, group: Number.isInteger(child.pid) && child.pid > 1 ? child.pid : undefined, procRoot, selfPid })
+  const observer = createLinuxRunObserver({ tracker, procRoot, sampleMs })
+  observer.start()
   const forward = signal => { try { kill ? kill(-child.pid, signal) : process.kill(-child.pid, signal) } catch { /* group already gone */ } }
   const onInt = () => forward('SIGINT'), onTerm = () => forward('SIGTERM')
   process.on('SIGINT', onInt); process.on('SIGTERM', onTerm)
@@ -358,12 +490,12 @@ export async function relaunchIsolatedRunnerUnderXvfb(script, argv, { privateRoo
     })
   } finally { process.off('SIGINT', onInt); process.off('SIGTERM', onTerm) }
   const network = await observer.stop()
-  const cleanup = await cleanupOwnedLinuxProcesses({ owner, runRoot, procRoot, settleMs, graceMs, ...(kill ? { kill } : {}) })
+  const cleanup = await cleanupOwnedLinuxProcesses({ tracker, procRoot, settleMs, graceMs, ...(kill ? { kill } : {}) })
   let electron = null
   try { electron = JSON.parse(await fs.readFile(path.join(defaultRepoRoot, 'node_modules/electron/package.json'), 'utf8')).version } catch { /* reported as unknown */ }
   const observation = {
     platform: 'linux', startedAt, finishedAt: new Date().toISOString(), runRoot, script: path.basename(script),
-    xvfb: { command, screen: LINUX_XVFB_SCREEN }, electron, ownerToken: owner,
+    xvfb: { command, screen: LINUX_XVFB_SCREEN }, electron, ownerToken: owner, processGroup: tracker.group ?? null, wrapper: wrapper ?? null,
     exit, network, cleanup
   }
   const failed = exit.code !== 0 || network.nonLoopback.length > 0 || !cleanup.clean
@@ -378,6 +510,10 @@ export async function relaunchIsolatedRunnerUnderXvfb(script, argv, { privateRoo
       await fs.writeFile(written, JSON.stringify(observation, null, 2), { flag: 'wx' })
     }
   } catch { written = null }
-  log('isolated-linux-host ' + JSON.stringify({ status: observation.status, reason: observation.reason ?? null, exit, electron, nonLoopback: network.nonLoopback, nonLoopbackListeners: network.nonLoopbackListeners, endpoints: network.endpoints.length, processes: network.processes.length, leftovers: cleanup.initiallyAlive.length, killed: cleanup.killed.length, report: written }))
+  log('isolated-linux-host ' + JSON.stringify({ status: observation.status, reason: observation.reason ?? null, exit, electron, nonLoopback: network.nonLoopback, nonLoopbackListeners: network.nonLoopbackListeners, endpoints: network.endpoints.length, processes: network.processes.length, processesBy: countBy(network.processes, item => item.via), leftovers: cleanup.initiallyAlive.length, killed: cleanup.killed.length, report: written }))
   return failed ? 1 : 0
 }
+
+// Inside the xvfb relaunch only (Linux, MAGICPOT_ISOLATED_LINUX_XVFB=1 and a wrapper identity);
+// a no-op everywhere else, including Windows and the tests.
+armLinuxWrapperWatchdog()

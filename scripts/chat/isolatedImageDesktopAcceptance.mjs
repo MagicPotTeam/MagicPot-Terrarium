@@ -407,7 +407,7 @@ export async function runIsolatedImageDesktop(runRoot, workerSource, { crashTwic
 const isMainModule = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url
 // Linux: re-run this file under xvfb-run with the worker built from source (no worker argument).
 if (isMainModule && needsLinuxXvfbRelaunch()) {
-  process.exitCode = await relaunchIsolatedRunnerUnderXvfb(fileURLToPath(import.meta.url), process.argv.slice(2), { privateRoot: privateScratch })
+  process.exitCode = await relaunchIsolatedRunnerUnderXvfb(fileURLToPath(import.meta.url), process.argv.slice(2), { privateRoot: privateScratch, allowedFlags: ['--no-crash-recovery'] })
 } else if (isMainModule) {
   if (!process.argv[2] || (!isLinuxIsolatedPlatform() && !process.argv[3])) throw new Error('Pass isolated runRoot and private worker source paths.')
   const linuxArgs = isLinuxIsolatedPlatform() ? process.argv.slice(3).filter(value => value !== '--no-crash-recovery') : []

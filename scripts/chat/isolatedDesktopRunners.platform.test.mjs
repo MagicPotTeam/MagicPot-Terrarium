@@ -67,6 +67,7 @@ test('isolated environment: win32 is the original set, linux adds only the priva
   const expected = ['HOME', 'LANG', 'MAGICPOT_PRIVATE_LIVE_SYNC', 'MAGICPOT_PRIVATE_TEST_SKIP_LEGACY_USER_DATA_MIGRATION', 'TMPDIR', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME']
   if (process.env.DISPLAY) expected.push('DISPLAY')
   if (process.env.XAUTHORITY) expected.push('XAUTHORITY')
+  if (process.env[LINUX_OWNER_ENV]) expected.push(LINUX_OWNER_ENV)
   assert.deepEqual(added, expected.sort())
   for (const [key, value] of Object.entries(windows)) {
     if (key !== 'MAGICPOT_CANVAS_THUMBNAIL_SIDECAR_PATH') assert.equal(linux[key], value, key)
@@ -91,7 +92,11 @@ test('linux CLI refuses a root outside the private area and a worker argument be
   const withWorker = cli('isolatedTeamDesktopAcceptance.mjs', [root, path.join(privateRoot, 'worker.exe')])
   assert.notEqual(withWorker.status, 0)
   assert.match(withWorker.stderr, /do not pass a worker path/)
-  assert.doesNotMatch(outside.stdout + withWorker.stdout, /isolated-linux-host/)
+  // A flag the runner does not know (here the image runner's) is refused instead of being taken as a worker.
+  const withFlag = cli('isolatedTeamDesktopAcceptance.mjs', [root, '--no-crash-recovery'])
+  assert.notEqual(withFlag.status, 0)
+  assert.match(withFlag.stderr, /Unknown option\(s\) for this runner: --no-crash-recovery/)
+  assert.doesNotMatch(outside.stdout + withWorker.stdout + withFlag.stdout, /isolated-linux-host/)
   assert.equal(fs.existsSync(root), false)
 })
 
