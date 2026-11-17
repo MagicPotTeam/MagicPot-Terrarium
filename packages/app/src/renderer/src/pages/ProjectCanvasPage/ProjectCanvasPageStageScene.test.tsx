@@ -4701,6 +4701,31 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       cropSourceEvidenceMock.read.mockClear()
     })
 
+    // What the real setters do: the scene is rendered again with the new items.
+    function show(
+      view: ReturnType<typeof render>,
+      props: Record<string, unknown>,
+      items: CanvasItem[]
+    ) {
+      view.rerender(
+        <ProjectCanvasPageStageScene
+          {...props}
+          visibleItems={items}
+          itemIdSet={new Set(items.map((item) => item.id))}
+        />
+      )
+    }
+
+    function applyConfirm(setItemsWithHistory: ReturnType<typeof vi.fn>, items: CanvasItem[], call = 0) {
+      return (setItemsWithHistory.mock.calls[call][0] as (prev: CanvasItem[]) => CanvasItem[])(items)
+    }
+
+    function applyRecord(setItemsWithoutHistory: ReturnType<typeof vi.fn>, items: CanvasItem[], call = 0) {
+      return (setItemsWithoutHistory.mock.calls[call][0] as (prev: CanvasItem[]) => CanvasItem[])(
+        items
+      )
+    }
+
     it('attaches a confirm record when the evidence equals the crop space and writes the absent source size', async () => {
       // In-memory image 200x120 and no explicit source size: the overlay measured in 200x120.
       const target = createImageItem('record-target')
@@ -4870,6 +4895,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
         return {
           registry,
           kept,
+          revoke,
           drawImage,
           toBlob,
           finishEncode: (blob: Blob | null) => encode?.(blob),
@@ -4885,12 +4911,10 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
         const evidence = deferEvidence()
         const proven = setupRegistry()
         try {
-          const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(
-            target,
-            [],
-            { provenCropRegistry: proven.registry }
-          )
+          const { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory } =
+            renderCropTarget(target, [], { provenCropRegistry: proven.registry })
           act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          show(view, props, applyConfirm(setItemsWithHistory, [target]))
           const read = syntheticEvidence(200, 120)
           await act(async () => evidence.resolve(read))
           await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
@@ -4952,16 +4976,133 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
         const evidence = deferEvidence()
         const proven = setupRegistry()
         try {
-          const { view, confirm } = renderCropTarget(target, [], {
+          const { view, props, confirm, setItemsWithHistory } = renderCropTarget(target, [], {
             provenCropRegistry: proven.registry
           })
           act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          show(view, props, applyConfirm(setItemsWithHistory, [target]))
           await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
           await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
           view.unmount()
           await act(async () => proven.finishEncode(new Blob(['late'], { type: 'image/png' })))
           expect(proven.registry.entryCount).toBe(0)
           expect(proven.kept).toHaveLength(0)
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('registers the crop of an item without a stored source size once the record writes it (F2)', async () => {
+        // The record update writes sourceWidth/Height = record size; the fence
+        // after the encode must accept that, or the proven crop is never draggable.
+        const target = createImageItem('registry-no-source-size')
+        expect(target.sourceWidth).toBeUndefined()
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory } =
+            renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          const confirmed = applyConfirm(setItemsWithHistory, [target])
+          show(view, props, confirmed)
+          await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          const attested = applyRecord(setItemsWithoutHistory, confirmed)
+          expect(attested[0]).toEqual(
+            expect.objectContaining({ sourceWidth: 200, sourceHeight: 120 })
+          )
+          // React commits the record before the encode resolves.
+          show(view, props, attested)
+          await act(async () => proven.finishEncode(new Blob(['crop'], { type: 'image/png' })))
+
+          expect({
+            sourceWidth: (attested[0] as CanvasImageItem).sourceWidth,
+            entryCount: proven.registry.entryCount
+          }).toEqual({ sourceWidth: 200, entryCount: 1 })
+          expect(proven.registry.lookup(attested[0] as CanvasImageItem)).not.toBeNull()
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('does not let a late read of an undone crop replace the entry of the crop on the canvas (F2)', async () => {
+        const proven = setupRegistry()
+        const recordA = {
+          version: 1 as const,
+          origin: 'confirm' as const,
+          width: 200,
+          height: 120,
+          sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+          sha256: SYNTHETIC_SOURCE_SHA256
+        }
+        const cropA = { x: 0, y: 0, width: 100, height: 100 }
+        const itemA: CanvasImageItem = {
+          ...createImageItem('registry-undo'),
+          sourceWidth: 200,
+          sourceHeight: 120,
+          crop: cropA,
+          cropSource: recordA
+        }
+        try {
+          const entryA = proven.registry.register(
+            itemA,
+            new Blob(['crop-a'], { type: 'image/png' }),
+            { width: 100, height: 100 }
+          )
+          expect(entryA).not.toBeNull()
+          const evidence = deferEvidence()
+          const { view, props, confirm, setItemsWithHistory } = renderCropTarget(itemA, [], {
+            provenCropRegistry: proven.registry
+          })
+          // Crop B is confirmed, then undone before its read lands.
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          show(view, props, applyConfirm(setItemsWithHistory, [itemA]))
+          show(view, props, [itemA])
+          await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+          await act(async () => {
+            await Promise.resolve()
+          })
+
+          expect(proven.drawImage).not.toHaveBeenCalled()
+          expect(proven.toBlob).not.toHaveBeenCalled()
+          expect(proven.registry.lookup(itemA)).toEqual(entryA)
+          expect(proven.revoke).not.toHaveBeenCalled()
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('keeps the newer crop when two confirm reads of one item resolve in reverse order (F2)', async () => {
+        const target = { ...createImageItem('registry-reorder'), sourceWidth: 200, sourceHeight: 120 }
+        const proven = setupRegistry()
+        try {
+          const first = deferEvidence()
+          const { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory } =
+            renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          const second = deferEvidence()
+          const cropB = { x: 40, y: 20, width: 60, height: 50 }
+          act(() => confirm({ width: 60, height: 50, crop: cropB }))
+          const shownB = applyConfirm(setItemsWithHistory, [target], 1)
+          show(view, props, shownB)
+
+          await act(async () => second.resolve(syntheticEvidence(200, 120)))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          const attestedB = applyRecord(setItemsWithoutHistory, shownB)
+          show(view, props, attestedB)
+          await act(async () => proven.finishEncode(new Blob(['crop-b'], { type: 'image/png' })))
+          // The older read for the first crop lands last: it is no longer current.
+          await act(async () => first.resolve(syntheticEvidence(200, 120)))
+          await act(async () => {
+            await Promise.resolve()
+          })
+
+          expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1)
+          expect(proven.toBlob).toHaveBeenCalledTimes(1)
+          expect(proven.registry.entryCount).toBe(1)
+          expect(proven.registry.lookup(attestedB[0] as CanvasImageItem)).toEqual(
+            expect.objectContaining({ width: 60, height: 50 })
+          )
         } finally {
           proven.restore()
         }

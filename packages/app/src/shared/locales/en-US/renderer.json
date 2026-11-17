@@ -2079,6 +2079,7 @@
     "confirm_clear_desc": "Are you sure you want to clear the canvas? This action cannot be undone.",
     "clear": "Clear",
     "agent_send_cropped_image_failed": "Cannot send cropped canvas images safely yet. Remove the crop to send the full original, or send another uncropped image.",
+    "drag_cropped_image_unavailable": "This cropped image cannot be dragged out yet. Send it to the Agent or confirm the crop again, then drag it.",
     "agent_send_overview_failed": "Could not create the canvas overview. Select a smaller area or reduce the distance between items, then try again.",
     "send_to_agent_failed": "Some images could not be read. Re-import them and try again.",
     "agent_edit_input_unavailable": "Cannot add this whole input while editing a message. Finish or cancel editing, then try again.",

@@ -651,6 +651,15 @@ describe('useCanvasSelectionUiActions drag payload', () => {
     expect(notifyError).toHaveBeenCalledOnce()
   })
 
+  it('asks for a send or a new confirm, never for removing the crop, when a crop has no pixels yet', () => {
+    const unregistered = createImageItem({ crop: { x: 10, y: 20, width: 30, height: 40 }, cropSource: PROVEN_CROP_SOURCE })
+    const { registry } = createProvenCropRegistry()
+    const notifyError = vi.fn()
+    const { result } = renderSelectionUiActions([unregistered], vi.fn(), { notifyError, provenCropRegistry: registry })
+    expect(() => result.current.buildCanvasDragPayload([unregistered], { objectUrl: 'blob:selection-snapshot' })).toThrow('CANVAS_CROP_EXPORT_UNAVAILABLE')
+    expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.drag_cropped_image_unavailable')
+  })
+
   it('refuses the whole selection when one of two cropped images has no proven crop', () => {
     const proven = createImageItem({ crop: { x: 10, y: 20, width: 30, height: 40 }, cropSource: PROVEN_CROP_SOURCE })
     const unproven = createImageItem({ id: 'image-2', crop: { x: 10, y: 20, width: 30, height: 40 }, cropSource: PROVEN_CROP_SOURCE })

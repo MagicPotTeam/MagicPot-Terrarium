@@ -67,6 +67,10 @@ function createStubRegistry(): CanvasProvenCropRegistry {
             height: item.crop.height
           }
         : null,
+    has: (item) => Boolean(item.crop),
+    canAddWithoutEviction: () => true,
+    beginPending: () => () => undefined,
+    isPending: () => false,
     release: () => undefined,
     subscribe: () => () => undefined,
     entryCount: 0,

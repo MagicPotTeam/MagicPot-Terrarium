@@ -565,10 +565,11 @@ Return shape:
       // If a crop remains, synchronous materialization did not produce visible
       // pixels. The original URL (including option fallbacks) must not enter a
       // drag payload; abort the whole selection instead of silently dropping it.
+      // The refusal never suggests removing the crop: that would expose the
+      // whole original. A send or a new confirm proves the crop and keeps its
+      // pixels for the next drag.
       if (attachmentSourceItems.some((item) => item.type === 'image' && item.crop)) {
-        notifyError(t('canvas.agent_send_cropped_image_failed', {
-          defaultValue: 'Cannot send cropped canvas images safely yet. Remove the crop to send the full original, or send another uncropped image.'
-        }))
+        notifyError(t('canvas.drag_cropped_image_unavailable'))
         throw new Error('CANVAS_CROP_EXPORT_UNAVAILABLE')
       }
       const dragManifestItems = attachmentSourceItems

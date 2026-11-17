@@ -68,7 +68,10 @@ import {
   readCanvasImageSourceEvidence
 } from './canvasCropProvenance'
 import { drawVerifiedCanvasImageCropPng } from './canvasAgentAttachmentUtils'
-import type { CanvasProvenCropRegistry } from './canvasProvenCropRegistry'
+import {
+  isCanvasProvenCropDrawable,
+  type CanvasProvenCropRegistry
+} from './canvasProvenCropRegistry'
 import { useStableEventHandler } from './useStableEventHandler'
 import type {
   CanvasAnnotationItem,
@@ -139,6 +142,19 @@ const PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE: React.CSSProperties = {
   overflow: 'visible',
   pointerEvents: 'none',
   transformOrigin: '0 0'
+}
+
+function isSameCanvasCrop(
+  left: CanvasImageItem['crop'] | undefined,
+  right: NonNullable<CanvasImageItem['crop']>
+): boolean {
+  return Boolean(
+    left &&
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  )
 }
 
 function areCanvasItemListsShallowEqual(left: readonly CanvasItem[], right: readonly CanvasItem[]) {
@@ -2388,72 +2404,94 @@ export default function ProjectCanvasPageStageScene(props: any) {
       const tokens = cropSourceReadTokenByIdRef.current
       const token = (tokens.get(item.id) ?? 0) + 1
       tokens.set(item.id, token)
-      const isCurrent = () => {
-        if (!cropSourceMountedRef.current || tokens.get(expected.id) !== token) return false
-        const latest = latestCanvasItemsForCropSourceRef.current.find(
-          (candidate) => candidate.id === expected.id
-        )
-        return Boolean(
-          latest &&
-          latest.type === 'image' &&
-          latest.src === expected.src &&
-          latest.sourceWidth === expected.sourceWidth &&
-          latest.sourceHeight === expected.sourceHeight
-        )
-      }
-      const evidence = await readCanvasImageSourceEvidence(expected.src, isCurrent, {
-        maxBytes: CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES
-      })
-      if (!evidence || !isCurrent()) return
-      if (evidence.width !== cropSpace.width || evidence.height !== cropSpace.height) return
-      const cropSource = createCropSourceRecord(evidence, 'confirm')
-      if (!cropSource) return
-      setItemsWithoutHistory((prev: CanvasItem[]) => {
-        let changed = false
-        const next = prev.map((candidate) => {
-          if (candidate.id !== expected.id || candidate.type !== 'image') return candidate
-          const currentCrop = candidate.crop
-          if (
-            candidate.src !== expected.src ||
-            candidate.sourceWidth !== expected.sourceWidth ||
-            candidate.sourceHeight !== expected.sourceHeight ||
-            !currentCrop ||
-            currentCrop.x !== expected.crop.x ||
-            currentCrop.y !== expected.crop.y ||
-            currentCrop.width !== expected.crop.width ||
-            currentCrop.height !== expected.crop.height
-          ) {
-            return candidate
-          }
-          // Every display path must read the crop in the record's space.
-          const attested: CanvasImageItem = {
-            ...candidate,
-            sourceWidth: candidate.sourceWidth ?? cropSource.width,
-            sourceHeight: candidate.sourceHeight ?? cropSource.height,
-            cropSource
-          }
-          if (!hasVerifiableCrop(attested)) return candidate
-          changed = true
-          return attested
-        })
-        return changed ? next : prev
-      })
-      // Keep the crop's pixels, drawn from the decode of the verified bytes, so
-      // a drag start (synchronous, cannot hash) can carry only what is visible.
       const registry = provenCropRegistry as CanvasProvenCropRegistry | undefined
-      if (!registry) return
-      const provenItem: CanvasImageItem = {
-        ...item,
-        src: expected.src,
-        sourceWidth: expected.sourceWidth ?? cropSource.width,
-        sourceHeight: expected.sourceHeight ?? cropSource.height,
-        crop: expected.crop,
-        cropSource
+      // The registry fill leaves this item to the read below.
+      const endPending = registry?.beginPending(item.id)
+      try {
+        // The source size the record update writes when none was stored.
+        let attestedSourceSize: { width: number; height: number } | null = null
+        const findLatest = () =>
+          latestCanvasItemsForCropSourceRef.current.find(
+            (candidate) => candidate.id === expected.id
+          )
+        const isCurrent = () => {
+          if (!cropSourceMountedRef.current || tokens.get(expected.id) !== token) return false
+          const latest = findLatest()
+          if (!latest || latest.type !== 'image' || latest.src !== expected.src) return false
+          if (
+            latest.sourceWidth === expected.sourceWidth &&
+            latest.sourceHeight === expected.sourceHeight
+          ) {
+            return true
+          }
+          return Boolean(
+            attestedSourceSize &&
+            expected.sourceWidth === undefined &&
+            expected.sourceHeight === undefined &&
+            latest.sourceWidth === attestedSourceSize.width &&
+            latest.sourceHeight === attestedSourceSize.height
+          )
+        }
+        // The confirmed crop is the one on the canvas: only its pixels may be
+        // registered, and only then is the draw worth doing.
+        const isShownCrop = () => {
+          if (!isCurrent()) return false
+          const latest = findLatest()
+          return latest?.type === 'image' && isSameCanvasCrop(latest.crop, expected.crop)
+        }
+        const evidence = await readCanvasImageSourceEvidence(expected.src, isCurrent, {
+          maxBytes: CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES
+        })
+        if (!evidence || !isCurrent()) return
+        if (evidence.width !== cropSpace.width || evidence.height !== cropSpace.height) return
+        const cropSource = createCropSourceRecord(evidence, 'confirm')
+        if (!cropSource) return
+        attestedSourceSize = { width: cropSource.width, height: cropSource.height }
+        setItemsWithoutHistory((prev: CanvasItem[]) => {
+          let changed = false
+          const next = prev.map((candidate) => {
+            if (candidate.id !== expected.id || candidate.type !== 'image') return candidate
+            if (
+              candidate.src !== expected.src ||
+              candidate.sourceWidth !== expected.sourceWidth ||
+              candidate.sourceHeight !== expected.sourceHeight ||
+              !isSameCanvasCrop(candidate.crop, expected.crop)
+            ) {
+              return candidate
+            }
+            // Every display path must read the crop in the record's space.
+            const attested: CanvasImageItem = {
+              ...candidate,
+              sourceWidth: candidate.sourceWidth ?? cropSource.width,
+              sourceHeight: candidate.sourceHeight ?? cropSource.height,
+              cropSource
+            }
+            if (!hasVerifiableCrop(attested)) return candidate
+            changed = true
+            return attested
+          })
+          return changed ? next : prev
+        })
+        // Keep the crop's pixels, drawn from the decode of the verified bytes, so
+        // a drag start (synchronous, cannot hash) can carry only what is visible.
+        if (!registry) return
+        const provenItem: CanvasImageItem = {
+          ...item,
+          src: expected.src,
+          sourceWidth: expected.sourceWidth ?? cropSource.width,
+          sourceHeight: expected.sourceHeight ?? cropSource.height,
+          crop: expected.crop,
+          cropSource
+        }
+        if (!hasVerifiableCrop(provenItem) || !isCanvasProvenCropDrawable(provenItem)) return
+        // A newer confirm, an undo of this crop or an unmount throws the draw away.
+        if (!isShownCrop()) return
+        const png = await drawVerifiedCanvasImageCropPng(provenItem, evidence)
+        if (!png || !isShownCrop()) return
+        registry.register(provenItem, png.blob, png)
+      } finally {
+        endPending?.()
       }
-      if (!hasVerifiableCrop(provenItem)) return
-      const png = await drawVerifiedCanvasImageCropPng(provenItem, evidence)
-      if (!png || !isCurrent()) return
-      registry.register(provenItem, png.blob, png)
     },
     [provenCropRegistry, setItemsWithoutHistory]
   )

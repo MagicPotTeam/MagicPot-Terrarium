@@ -18,6 +18,18 @@ import type { CanvasImageItem, CanvasItem } from './types'
 export const CANVAS_PROVEN_CROP_REGISTRY_MAX_ENTRIES = 24
 export const CANVAS_PROVEN_CROP_REGISTRY_MAX_BYTES = 64 * 1024 * 1024
 export const CANVAS_PROVEN_CROP_ENTRY_MAX_BYTES = 32 * 1024 * 1024
+/**
+ * Crops above this many output pixels are not drawn for the registry: their
+ * PNG would rarely fit CANVAS_PROVEN_CROP_ENTRY_MAX_BYTES, and the decode,
+ * readback and encode would be thrown away.
+ */
+export const CANVAS_PROVEN_CROP_DRAW_MAX_PIXELS = 4096 * 4096
+
+/** Whether the registry would draw this proven crop at all (pixel cap). */
+export function isCanvasProvenCropDrawable(item: CanvasImageItem): boolean {
+  const size = getCanvasProvenCropOutputSize(item)
+  return Boolean(size && size.width * size.height <= CANVAS_PROVEN_CROP_DRAW_MAX_PIXELS)
+}
 
 export type CanvasProvenCrop = CanvasProvenCropPixels & { mimeType: 'image/png' }
 
@@ -46,6 +58,17 @@ export type CanvasProvenCropRegistry = {
   ) => CanvasProvenCrop | null
   /** The entry made for exactly this item id, source, record and crop, or null. */
   lookup: (item: CanvasImageItem) => CanvasProvenCrop | null
+  /** Whether lookup would find an entry; does not change the recency order. */
+  has: (item: CanvasImageItem) => boolean
+  /** Whether a PNG of this many bytes fits without evicting another entry. */
+  canAddWithoutEviction: (bytes: number) => boolean
+  /**
+   * Marks a proof of this item's crop as running (a confirm read or a fill),
+   * so a second reader does not read and draw the same source. Returns the
+   * function that clears the mark.
+   */
+  beginPending: (itemId: string) => () => void
+  isPending: (itemId: string) => boolean
   /** Revokes every object URL and forgets every entry; the registry stays usable. */
   release: () => void
   /**
@@ -111,6 +134,7 @@ export function createCanvasProvenCropRegistry(
   // Map order is the recency order: the first entry is the least recently used.
   const entries = new Map<string, RegistryEntry>()
   const listeners = new Set<(itemId: string) => void>()
+  const pendingCounts = new Map<string, number>()
   let totalBytes = 0
 
   const revoke = (entry: RegistryEntry) => {
@@ -204,6 +228,33 @@ export function createCanvasProvenCropRegistry(
       entries.delete(item.id)
       entries.set(item.id, entry)
       return toPublic(entry)
+    },
+    has(item) {
+      const key = getCanvasProvenCropKey(item)
+      return Boolean(key && entries.get(item.id)?.key === key)
+    },
+    canAddWithoutEviction(bytes) {
+      return (
+        Number.isFinite(bytes) &&
+        bytes > 0 &&
+        bytes <= maxEntryBytes &&
+        entries.size + 1 <= maxEntries &&
+        totalBytes + bytes <= maxBytes
+      )
+    },
+    beginPending(itemId) {
+      pendingCounts.set(itemId, (pendingCounts.get(itemId) ?? 0) + 1)
+      let done = false
+      return () => {
+        if (done) return
+        done = true
+        const count = (pendingCounts.get(itemId) ?? 1) - 1
+        if (count > 0) pendingCounts.set(itemId, count)
+        else pendingCounts.delete(itemId)
+      }
+    },
+    isPending(itemId) {
+      return pendingCounts.has(itemId)
     },
     release() {
       const all = Array.from(entries.values())

@@ -164,6 +164,7 @@ import { useCanvasKeyboardShortcuts } from './useCanvasKeyboardShortcuts'
 import { useCanvasBridgeActions } from './useCanvasBridgeActions'
 import { useCanvasViewportPersistence } from './useCanvasViewportPersistence'
 import { useCanvasLegacyCropUpgrade } from './useCanvasLegacyCropUpgrade'
+import { useCanvasProvenCropRegistryFill } from './useCanvasProvenCropRegistryFill'
 import { useCanvasLayerRuntime } from './useCanvasLayerRuntime'
 import { useCanvasInlineTextEffects } from './useCanvasInlineTextEffects'
 import { useCanvasMediaRuntime } from './useCanvasMediaRuntime'
@@ -846,6 +847,8 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     items,
     setItemsWithoutHistory: setItems
   })
+  // Proven crops stay draggable after a board open or a registry eviction.
+  useCanvasProvenCropRegistryFill({ items, selectedIds, registry: provenCropRegistry })
 
   const {
     clearConfirmOpen,
