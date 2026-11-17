@@ -150,7 +150,18 @@ describe('main-side report parser: shape first, nothing copied before it', () =>
     class Breadcrumb { constructor() { Object.assign(this, valid) } }
     expect(parseChatSendStageReport(new Breadcrumb())).toBeNull()
     expect(parseChatSendStageReport(Object.assign(Object.create({ inherited: true }), valid))).toBeNull()
-    expect(parseChatSendStageReport({ ...valid, [Symbol('x')]: 1 })).toBeNull()
+  })
+
+  // Moved: the symbol-key refusal was pinned on the main parser. A symbol key cannot cross IPC, so
+  // it is refused where the page's own object can arrive: in the preload's strict walk.
+  it('refuses a symbol key in the preload parser; main, which IPC never hands one, leaves it unread', () => {
+    const withSymbol = { ...valid, [Symbol('x')]: 'secret' }
+    expect(parseChatSendStageBreadcrumb(withSymbol)).toBeNull()
+    expect(parseChatSendStageBreadcrumb(Object.assign(Object.create(null), withSymbol))).toBeNull()
+    expect(parseChatSendStageBreadcrumb({ ...valid, [Symbol.iterator]: () => undefined })).toBeNull()
+    const report = parseChatSendStageReport(withSymbol)
+    expect(report).toEqual(valid)
+    expect(Object.getOwnPropertySymbols(report as object)).toEqual([])
   })
 
   // Updated: this pinned a key walk that stopped at the first unknown key. V8's for-in lists every
@@ -158,6 +169,7 @@ describe('main-side report parser: shape first, nothing copied before it', () =>
   it('never walks the keys: it looks at the known keys only, once each, and leaves any other unread', () => {
     const read: string[] = []
     const looked: string[] = []
+    let listed = 0
     const record: Record<string, unknown> = { ...valid, content: 'secret' }
     for (let index = 0; index < 1000; index += 1) record[`k${index}`] = index
     const probe = new Proxy(record, {
@@ -169,9 +181,15 @@ describe('main-side report parser: shape first, nothing copied before it', () =>
         if (typeof key === 'string') looked.push(key)
         return Reflect.getOwnPropertyDescriptor(target, key)
       },
+      // Listing the keys, string or symbol (Object.keys, for-in, Object.getOwnPropertySymbols).
+      ownKeys: (target) => {
+        listed += 1
+        return Reflect.ownKeys(target)
+      },
       getPrototypeOf: () => Object.prototype
     })
     expect(parseChatSendStageReport(probe)).toEqual(valid)
+    expect(listed).toBe(0)
     const known = [...Object.keys(valid), 'failedAfter', 'errorName', 'usedJSHeapSize', 'jsHeapSizeLimit']
     expect(looked.filter((key) => !known.includes(key))).toEqual([])
     expect(read.filter((key) => !known.includes(key))).toEqual([])

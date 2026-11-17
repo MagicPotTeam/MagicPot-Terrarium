@@ -165,16 +165,13 @@ const BREADCRUMB_KEYS = new Set<string>([
 /**
  * True only for a plain object: its prototype is Object.prototype or null, so a typed array, an
  * array, a map, a date, an error or a class instance is rejected by its prototype alone, before
- * any key is looked at. Symbol keys are never part of a breadcrumb: Object.getOwnPropertySymbols
- * scans the property table without building a list of the string keys (30 ms for an object with a
- * million keys, against 716 ms for deserializing that object, measured on Node 24). Over IPC a
- * symbol key cannot arrive at all (structured clone drops it); this keeps direct callers strict.
+ * any key is looked at. No key is listed here, neither string nor symbol: the cost does not grow
+ * with the size of the object.
  */
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
-  if (prototype !== Object.prototype && prototype !== null) return false
-  return Object.getOwnPropertySymbols(value).length === 0
+  return prototype === Object.prototype || prototype === null
 }
 
 /**
@@ -183,9 +180,16 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * about as much as copying the object, whatever key it stops at. Only the preload uses it, where
  * contextBridge has already copied the page's whole object; main never walks a report's keys (see
  * parseChatSendStageReport). Only key NAMES are looked at here.
+ *
+ * Symbol keys are refused here and only here: the preload is the one place where the page's own
+ * object can arrive (directly, when the context is not isolated). Main gets a report through IPC
+ * only, where a symbol key cannot arrive (structured clone drops it), and for-in below does not
+ * visit symbols, so they need their own look (Object.getOwnPropertySymbols scans the property
+ * table: about 30 ms for a million keys, which main no longer pays).
  */
 function isPlainRecordWithKeys(value: unknown, allowed: ReadonlySet<string>): value is Record<string, unknown> {
   if (!isPlainRecord(value)) return false
+  if (Object.getOwnPropertySymbols(value).length !== 0) return false
   let count = 0
   // With Object.prototype or null as prototype, for-in visits own enumerable string keys only.
   for (const key in value) {
@@ -280,8 +284,10 @@ export function withJsHeapNumbers(
  * deserialization of the message, a second block of the main thread for a report with millions of
  * keys. A key main does not know is therefore not refused but left behind unread; the preload
  * already refuses one from the page (parseChatSendStageBreadcrumb), and nothing unknown is stored.
- * Beyond the deserialization, the work here does not grow with the size of the report except for
- * the symbol check's scan.
+ * Beyond the deserialization, the work here does not grow with the size of the report. Symbol keys
+ * are not looked for: the only caller is the IPC handler (main/chatSendStageBreadcrumbs.ts), and a
+ * symbol key cannot cross IPC; one on an object passed in directly would be left behind unread
+ * like any other unknown key.
  */
 export function parseChatSendStageReport(value: unknown): ChatSendStageReport | null {
   if (!isPlainRecord(value)) return null

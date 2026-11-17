@@ -307,6 +307,8 @@ describe('preload capability boundary', () => {
 
     appDiagnostics.reportChatSendStage(breadcrumb)
     appDiagnostics.reportChatSendStage({ ...breadcrumb, content: 'secret' })
+    // A symbol key is refused here, in the preload (main does not look for one: IPC cannot carry it).
+    appDiagnostics.reportChatSendStage({ ...breadcrumb, [Symbol('content')]: 'secret' })
     appDiagnostics.reportChatSendStage('request-built')
 
     expect(sendMock).toHaveBeenCalledExactlyOnceWith('app:chat-send-stage', breadcrumb)
