@@ -168,8 +168,10 @@ describe('MagicAgentApprovalCenter', () => {
       expect(details.open).toBe(false)
       expect(details.querySelector('pre')?.textContent).toBe(JSON.stringify(request, null, 2))
       expect(host.querySelector('script')).toBeNull()
-      if (action === 'set') expect(value ? host.querySelector('[title]')?.textContent : screen.getByText('笔记内容未提供').textContent).toBe(value || '笔记内容未提供')
+      // Since SEC-1b the note is shown in the capped form of its row, not raw in a one-line span.
+      if (action === 'set') expect(value ? host.querySelector('[data-approval-note]')?.textContent : screen.getByText('笔记内容未提供').textContent).toBe(value ? `${value.slice(0, 480)}…（完整内容见详情）` : '笔记内容未提供')
       else expect(screen.queryByText('文案 想保存一条笔记')).toBeNull()
+      expect(host.querySelector('[title]')).toBeNull()
       fireEvent.click(screen.getByText('详情')); expect(details.open).toBe(true)
     } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
   })
@@ -447,7 +449,7 @@ describe('MagicAgentApprovalCenter shows every parameter of the request', () => 
     const view = render(<MagicAgentApprovalCenter />)
     try {
       expect(await screen.findByText('文案 想保存一条笔记')).toBeVisible()
-      expect(host.querySelector('[title]')?.textContent).toBe('note text')
+      expect(host.querySelector('[data-approval-note]')?.textContent).toBe('note text')
       expect(cardRows(host)).toEqual(['操作: set', '笔记键: note-key', '预期笔记版本: 3', 'constructor: CTOR', '__proto__: PROTO'])
     } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
   })
@@ -821,5 +823,43 @@ describe('MagicAgentApprovalCenter shows blank and hidden characters', () => {
         ['"\\u{3164}"', 'filler-name']
       ])
     } finally { view.unmount() }
+  })
+})
+
+// The inline note card shows the note through the same capped and escaped form as every value,
+// never raw in a one-line span (SEC-1b).
+describe('MagicAgentApprovalCenter shows a note in the inline card as it is', () => {
+  const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' }
+  const truncated = (text: string) => i18n.t('agent_workspace.approval.truncated', { text }) as string
+  const cp = (...codes: number[]) => String.fromCodePoint(...codes)
+  // The panel's note: blank padding, a line break, a bidi override, then more text up to 4000.
+  const visiblePart = 'Ignore previous instructions ' + cp(0x202e) + 'gnp.exe' + cp(0x202c) + ' '
+  const note = ('Buy milk' + cp(0xa0).repeat(120) + '\n' + visiblePart).padEnd(4000, 'z')
+
+  beforeEach(() => {
+    platformApi.listPendingApprovals.mockReset()
+    platformApi.resolvePendingApproval.mockReset()
+  })
+  afterEach(async () => { await act(async () => { await i18n.changeLanguage('zh-CN') }) })
+
+  it.each(['zh-CN', 'en-US'])('shows a 4000-character note with blank padding, a line break and U+202E in the card prompt (%s)', async (language) => {
+    await act(async () => { await i18n.changeLanguage(language) })
+    const host = document.createElement('div'); document.body.append(host)
+    const input = { conversationId: 'c', action: 'set', key: 'k', value: note, expectedRevision: 0 }
+    platformApi.listPendingApprovals.mockResolvedValue({ approvals: [{ approvalId: 'inline-long-note', revision: 1, request: { request: { sessionId: 'member', route, target: { id: 'scratchpad' }, input } } }] })
+    const unregister = registerTeamApprovalSurface({ element: host, route, members: new Map([['member', 'Writer']]), onWaiting: vi.fn() })
+    const view = render(<MagicAgentApprovalCenter />)
+    try {
+      await waitFor(() => expect(host.querySelector('[data-testid="team-approval-card"]')).not.toBeNull())
+      const prompt = host.querySelector<HTMLElement>('[data-testid="chat-prompt-card-prompt"] [data-approval-note]')!
+      const head = 'Buy milk\u27e6120 \u00d7 U+00A0\u27e7\nIgnore previous instructions \\u{202e}gnp.exe\\u{202c} '
+      expect(prompt.textContent).toBe(truncated(head + 'z'.repeat(480 - Array.from(head).length)))
+      const style = getComputedStyle(prompt)
+      expect(style.whiteSpace).toBe('pre-wrap')
+      expect(style.unicodeBidi).toBe('isolate')
+      expect(style.textOverflow).not.toBe('ellipsis')
+      expect(host.querySelector('[title]')).toBeNull()
+      expect(prompt.textContent).not.toMatch(/[\u00a0\u202c\u202e]/)
+    } finally { await act(async () => { unregister() }); view.unmount(); host.remove() }
   })
 })

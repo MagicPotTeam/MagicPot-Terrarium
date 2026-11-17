@@ -409,8 +409,10 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
     const note = ownValue(shown.input, 'value')
     const isNote = shown.toolName === 'scratchpad' && ownValue(shown.input, 'action') === 'set'
     // A note card shows the note itself as its prompt; every other field is listed below it.
-    // A note that is not text is not the prompt, so its value stays in the list.
-    const detailParameters = isNote && typeof note === 'string' ? shown.parameters.filter(parameter => parameter.key !== 'value') : shown.parameters
+    // A note that is not text is not the prompt, so its value stays in the list. The prompt is
+    // the note's own row, so it is shown in the same capped and escaped form as every value.
+    const noteRow = isNote && typeof note === 'string' ? shown.parameters.find(parameter => parameter.key === 'value') : undefined
+    const detailParameters = noteRow ? shown.parameters.filter(parameter => parameter !== noteRow) : shown.parameters
     const member = surface!.members.get(matchTeamApproval(pending.request,surface!)!)
     // Presentation only: a prompt card at the end of the member's team transcript. Which
     // approval is shown here and what the buttons resolve are decided above.
@@ -420,7 +422,7 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
         icon={<WarningAmberIcon aria-hidden="true" />}
         accent="warning"
         title={isNote ? t('agent_workspace.approval.member_wants_note', { member }) : t('agent_workspace.approval.member_requests_action', { member })}
-        prompt={isNote ? <Box component="span" title={typeof note === 'string' ? note : undefined} sx={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{typeof note === 'string' ? note : t('agent_workspace.approval.note_missing')}</Box> : shown.action}
+        prompt={isNote ? noteRow ? <Box component="span" data-approval-note="" sx={{display:'block',whiteSpace:'pre-wrap',overflowWrap:'anywhere',unicodeBidi:'isolate'}}>{noteRow.text}</Box> : t('agent_workspace.approval.note_missing') : shown.action}
         detail={!detailParameters.length ? undefined : <>{detailParameters.map(parameter => <Box key={parameter.key} component="span" data-approval-parameter={parameter.key} sx={{display:'block',pl:'1em',textIndent:'-1em'}}><Box component="span" data-approval-parameter-label="" sx={{fontWeight:600}}>{parameter.label}</Box>: <Box component="span" data-approval-parameter-value="" sx={{unicodeBidi:'isolate'}}>{parameter.text}</Box></Box>)}</>}
         options={[
           { key: 'approve', label: t('agent_workspace.approval.approve'), primary: true, disabled: busy, onSelect: () => void resolve(true, pending) },
