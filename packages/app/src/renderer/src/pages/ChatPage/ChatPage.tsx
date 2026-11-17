@@ -220,6 +220,7 @@ import {
   CHAT_PATHLESS_ATTACHMENT_MAX_BYTES,
   ChatImageTooLargeError,
   ChatPathlessAttachmentTooLargeError,
+  describeChatAttachmentImportFailure,
   importChatAttachment,
   importChatAttachmentUrl,
   importIncomingChatImageAttachment,
@@ -5146,9 +5147,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
               setPendingAttachments((prev) => [...prev, attachment])
             } catch (error) {
               console.error('[ChatPage] Failed to process pasted image:', error)
-              if (error instanceof ChatPathlessAttachmentTooLargeError) {
-                notifyErrorRef.current(error.message)
-              }
+              notifyErrorRef.current(
+                describeChatAttachmentImportFailure(error, 'pasted-image.png', 'image')
+              )
             }
           }
           break
@@ -5585,12 +5586,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             } catch (error) {
               if (!isDropTargetCurrent()) return
               console.error('[ChatPage] Failed to process dropped edit image:', error)
-              notifyError(
-                t('chat.image_process_failed', {
-                  name: file.name,
-                  defaultValue: 'Failed to process image {{name}}.'
-                })
-              )
+              notifyError(describeChatAttachmentImportFailure(error, file.name, 'image'))
             }
           }
         }
@@ -10145,14 +10141,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
     }
 
-    return isImage
-      ? buildImageChatAttachmentFromFile(file)
-      : importChatAttachment({
-          service: api().svcManagedMedia,
-          file,
-          type: isVideo ? 'video' : 'model3d',
-          mimeType: normalizeFileMimeType(file.name, file.type)
-        })
+    try {
+      return await (isImage
+        ? buildImageChatAttachmentFromFile(file)
+        : importChatAttachment({
+            service: api().svcManagedMedia,
+            file,
+            type: isVideo ? 'video' : 'model3d',
+            mimeType: normalizeFileMimeType(file.name, file.type)
+          }))
+    } catch (error) {
+      // The composer's notice, not a native alert; main's error text is only logged.
+      console.error('[ChatPage] Upload file error:', error)
+      notifyError(describeChatAttachmentImportFailure(error, file.name, isImage ? 'image' : 'file'))
+      return undefined
+    }
   }
 
   const handleDropEditingImages = useCallback(async (files: File[]): Promise<ChatAttachment[]> => {
@@ -10195,7 +10198,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }, 500)
     } catch (error) {
       console.error('[ChatPage] Upload file error:', error)
-      alert(`上传文件失败: ${error instanceof Error ? error.message : String(error)}`)
+      notifyError(t('chat.attachment_add_failed'))
     }
   }
 

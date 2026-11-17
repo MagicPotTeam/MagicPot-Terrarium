@@ -80,6 +80,25 @@ export class ChatPathlessAttachmentTooLargeError extends Error {
   }
 }
 
+/**
+ * The short message the composer shows when an attachment cannot be added: the size refusal
+ * for path-less data above the cap, otherwise "could not process <name>". Main's error text
+ * is never shown (it is logged), so no path or internal detail reaches the message.
+ */
+export const describeChatAttachmentImportFailure = (
+  error: unknown,
+  fileName: string,
+  kind: 'image' | 'file'
+): string => {
+  if (error instanceof ChatPathlessAttachmentTooLargeError) return error.message
+  const name = fileName || 'attachment'
+  return (
+    i18next.t(kind === 'image' ? 'chat.image_process_failed' : 'chat.file_process_failed', {
+      name
+    }) || name
+  )
+}
+
 /** The blob's bytes as one ArrayBuffer (FileReader only where Blob#arrayBuffer is missing). */
 const readBlobArrayBuffer = (blob: Blob): Promise<ArrayBuffer> => {
   if (typeof blob.arrayBuffer === 'function') return blob.arrayBuffer()

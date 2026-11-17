@@ -15,7 +15,10 @@ import { createTeamMemberInDB, saveSessionToDB, type ChatSession, type ChatSessi
 import type { ChatLoadingStatus } from './chatLoadingStatus'
 import ChatPage from './ChatPage'
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
-import { ChatPathlessAttachmentTooLargeError } from './chatManagedMediaAttachments'
+import {
+  ChatPathlessAttachmentTooLargeError,
+  describeChatAttachmentImportFailure
+} from './chatManagedMediaAttachments'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
@@ -10239,17 +10242,97 @@ describe('ChatPage runtime workflow integration', () => {
 
     await user.click(screen.getByTestId('chat-composer-upload-mock'))
 
-    await waitFor(() => expect(alert).toHaveBeenCalledOnce())
-    const shown = String(alert.mock.calls[0]?.[0])
-    expect(shown).toContain(
-      new ChatPathlessAttachmentTooLargeError('generated.mp4', 70 * 1024 * 1024).message
+    // The composer's notice with the localized line alone: no native alert, no prefix.
+    await waitFor(() =>
+      expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+        new ChatPathlessAttachmentTooLargeError('generated.mp4', 70 * 1024 * 1024).message
+      )
     )
-    expect(shown).toContain('generated.mp4')
+    expect(alert).not.toHaveBeenCalled()
     expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(hoisted.importManagedBytesMock).not.toHaveBeenCalled()
     expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
     expect(hoisted.importManagedFileMock).not.toHaveBeenCalled()
+  })
+
+  it('reports a refused chooser import through the composer notice without main\'s error text', async () => {
+    const user = userEvent.setup()
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 64
+        naturalHeight = 32
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    const refusal = new Error('Managed media source did not respond in time /home/artist/secret')
+    hoisted.importManagedFileMock.mockRejectedValueOnce(refusal)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    hoisted.selectFileMock.mockResolvedValueOnce(
+      createLocalFile('slow.png', 'image/png', '/mnt/stalled/slow.png')
+    )
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    const expected = describeChatAttachmentImportFailure(refusal, 'slow.png', 'image')
+    await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(expected))
+    for (const [message] of hoisted.notifyErrorMock.mock.calls) {
+      expect(String(message)).not.toContain('/home/artist')
+      expect(String(message)).not.toContain('/mnt/stalled')
+      expect(String(message)).not.toContain('上传文件失败')
+    }
+    expect(alert).not.toHaveBeenCalled()
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+  })
+
+  it('shows a short message when a pasted image fails for another reason than the cap', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 64
+        naturalHeight = 32
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    const refusal = new Error('Managed media bytes do not match image/png')
+    hoisted.importManagedBytesMock.mockRejectedValueOnce(refusal)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const pasted = new File(['not really a png'], 'clipboard.png', { type: 'image/png' })
+
+    await act(async () => {
+      const pasteEvent = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent
+      Object.defineProperty(pasteEvent, 'clipboardData', {
+        value: { items: [{ type: 'image/png', getAsFile: () => pasted }] }
+      })
+      document.dispatchEvent(pasteEvent)
+    })
+
+    await waitFor(() =>
+      expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+        describeChatAttachmentImportFailure(refusal, 'pasted-image.png', 'image')
+      )
+    )
+    expect(hoisted.notifyErrorMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('do not match')
+    )
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
   })
 
   it('shows the localized cap message for a pasted image above the in-memory cap and attaches nothing', async () => {

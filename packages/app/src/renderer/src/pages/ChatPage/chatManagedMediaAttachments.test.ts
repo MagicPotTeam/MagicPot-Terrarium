@@ -6,6 +6,7 @@ import {
   CHAT_ATTACHMENT_STORAGE,
   CHAT_PATHLESS_ATTACHMENT_MAX_BYTES,
   ChatPathlessAttachmentTooLargeError,
+  describeChatAttachmentImportFailure,
   importChatAttachment,
   importChatAttachmentUrl
 } from './chatManagedMediaAttachments'
@@ -489,5 +490,34 @@ describe('chatManagedMediaAttachments', () => {
         mimeType: 'image/png'
       })
     ).rejects.toBe(failure)
+  })
+
+  it('words the path-less cap as a size limit that applies, with no advice that cannot work', () => {
+    for (const locale of [enUS, zhCN]) {
+      const text = locale.chat.pathless_attachment_too_large
+      expect(text.length).toBeLessThan(120)
+      // Saving a large image to a folder does not help: the composer's image limit is lower.
+      expect(text).not.toMatch(/save|folder|保存|文件夹/i)
+    }
+  })
+
+  it('describes a failed attachment in both locales without main\'s error text', async () => {
+    const { default: i18n } = await import('@renderer/i18n')
+    const mainError = new Error('Managed media source did not respond in time C:\\Users\\me\\x.png')
+    for (const [language, locale] of [
+      ['zh-CN', zhCN],
+      ['en-US', enUS]
+    ] as const) {
+      await i18n.changeLanguage(language)
+      expect(describeChatAttachmentImportFailure(mainError, 'x.png', 'image')).toBe(
+        locale.chat.image_process_failed.replace('{{name}}', 'x.png')
+      )
+      expect(describeChatAttachmentImportFailure(mainError, 'mesh.glb', 'file')).toBe(
+        locale.chat.file_process_failed.replace('{{name}}', 'mesh.glb')
+      )
+      expect(locale.chat.attachment_add_failed).toBeTruthy()
+      const cap = new ChatPathlessAttachmentTooLargeError('big.png', 70 * 1024 * 1024)
+      expect(describeChatAttachmentImportFailure(cap, 'big.png', 'image')).toBe(cap.message)
+    }
   })
 })
