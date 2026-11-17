@@ -1562,6 +1562,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (isPermanentSaveConflict(e)) {
             // Another writer owns the newer record. Say so once per conflicted session; an explicit
             // Retry reports again.
+            // `current` is the live object now, which may be newer than the refused payload (it can
+            // be replaced while the put is pending). Recording it stops the automatic save from
+            // trying it although it was never sent; that is harmless while the frozen baseline is
+            // unchanged (it would be refused the same way), and a newer object or Retry still tries.
             const reported = saveConflictSessionsRef.current.has(conflictKey)
             if (current) saveConflictSessionsRef.current.set(conflictKey, current)
             if (reported && label !== 'retry-unsaved') {
@@ -4917,10 +4921,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (isPermanentSaveConflict(error)) {
           // Another writer owns the newer record (or the session was deleted). Keep the dirty copy
           // and the one error line; retrying the same object on a timer would loop forever.
+          // Record the LIVE object, not the registered one: persistLatest resolved and sent the live
+          // object, so recording the older registered one would let the effect try the refused
+          // payload once more. If the live object was replaced after the refusal it was never tried;
+          // skipping it is harmless while the baseline is unchanged (it would be refused too), and
+          // any newer object or the explicit Retry still tries.
           for (const failed of failedSessions) {
             const live = sessionsRef.current.find(session => session.id === failed.id)
             if (live) setDirtySessionSnapshot(storageScope, live)
-            saveConflictSessionsRef.current.set(getSessionStorageKey(storageScope, failed.id), failed)
+            saveConflictSessionsRef.current.set(getSessionStorageKey(storageScope, failed.id), live ?? failed)
           }
           return
         }

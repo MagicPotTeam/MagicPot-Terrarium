@@ -317,4 +317,32 @@ describe('ChatPage treats a superseded save as benign and stops retrying a perma
       expect(h.saves.filter(call => call.outcome === 'conflict')).toEqual([])
     } finally { view.unmount() }
   })
+
+  it('records the refused live object, not the registered one, so the refused payload is not tried again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      const external: ChatSession = { ...structuredClone(session), messages: [...session.messages, { role: 'assistant', content: 'other writer' }] }
+      // The registered object holds 'first edit'. While its read is pending the live object becomes
+      // 'second edit', so persistLatest's own retry sends the live object, which a second writer refuses.
+      h.whileReadPending = (candidate) => {
+        const last = candidate.messages.at(-1)?.content
+        if (last === 'first edit') appendEvent('second edit')
+        if (last === 'second edit') { h.whileReadPending = null; h.sessions = [structuredClone(external)] }
+      }
+      await append('first edit')
+      await waitFor(() => expect(banner()).not.toBeNull(), { timeout: 3000 })
+      await advanceSeconds(120)
+      expect(shown()).toBe('original|first edit|second edit')
+      expect(h.saves.map(call => [contents(call.session)?.at(-1), call.outcome])).toEqual([['first edit', 'superseded'], ['second edit', 'conflict']])
+      expect(screen.getAllByText(/Failed to save chat session/)).toHaveLength(1)
+      expect(h.sessions).toEqual([external])
+      // The explicit Retry still tries the refused object once more.
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(h.saves).toHaveLength(3))
+      expect(h.saves.at(-1)?.outcome).toBe('conflict')
+      expect(h.sessions).toEqual([external])
+    } finally { view.unmount() }
+  })
 })
