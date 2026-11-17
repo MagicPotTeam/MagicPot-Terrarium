@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { sessionPreparing, stopTeamMembers, teamMembersToStop } from './teamMemberStop'
+import { sendReleasesStopHolds, sessionPreparing, stopTeamMembers, teamMembersToStop } from './teamMemberStop'
 
 const none = new Set<string>()
 const state = (patch: Partial<Parameters<typeof teamMembersToStop>[1]> = {}) => ({
@@ -23,5 +23,23 @@ describe('team member stop', () => {
     expect(sessionPreparing('d', none, queues)).toBe(true)
     // A queued item that is not in its preflight is not work in progress.
     expect(sessionPreparing('e', none, queues)).toBe(false)
+  })
+})
+
+describe('which accepted send releases a stop hold', () => {
+  const task = { content: '团队任务：x', onTaskCompleted: () => undefined, onTaskSettled: () => undefined }
+  it('releases on the user\'s own sends: composer, @member, edit-resend and a task the user dispatched', () => {
+    expect(sendReleasesStopHolds(undefined)).toBe(true)
+    expect(sendReleasesStopHolds({ composerSubmission: true })).toBe(true)
+    expect(sendReleasesStopHolds({ onComposerSubmissionAccepted: () => undefined })).toBe(true)
+    expect(sendReleasesStopHolds({ ...task, userTaskDispatch: true })).toBe(true)
+  })
+  it('never releases on a task dispatched by the lead or by automation, a team-message delivery or a drained queue item', () => {
+    expect(sendReleasesStopHolds(task)).toBe(false)
+    expect(sendReleasesStopHolds({ ...task, userTaskDispatch: false })).toBe(false)
+    expect(sendReleasesStopHolds({ content: '[团队成员消息]', queueKey: 'team-message:1', teamMessageHop: 1 } as never)).toBe(false)
+    // A drained item releases in its own lease (onQueuedComposerAccepted), not here.
+    expect(sendReleasesStopHolds({ composerSubmission: true, isQueuedComposerCurrent: () => true })).toBe(false)
+    expect(sendReleasesStopHolds({ ...task, userTaskDispatch: true, isQueuedComposerCurrent: () => true })).toBe(false)
   })
 })

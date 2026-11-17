@@ -443,6 +443,8 @@ async function mountChannelPage(input: {
   storage?: FakeChatIndexedDb
   /** Extra ChatPage props (for example `active: false` for a hidden pane). */
   props?: ChannelPageProps
+  /** Extra fields of the seeded lead (for example its shared tasks). */
+  lead?: Partial<ChatSession>
 }): Promise<ChannelPage> {
   if (mountedPage)
     throw new Error('mountChannelPage: finish() the earlier page of this test first.')
@@ -471,7 +473,7 @@ async function mountChannelPage(input: {
     .map(storageKey)
     .sort()
   if (!input.storage) {
-    for (const session of [lead(), ...input.members]) await storage.saveSessionToDB(session, SCOPE)
+    for (const session of [{ ...lead(), ...input.lead }, ...input.members]) await storage.saveSessionToDB(session, SCOPE)
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'lead')
     // The seed went into THIS fake, one record per session, and nothing else is in it.
     expect(idb.stats.calls.put).toBe(expectedKeys.length)
@@ -1549,6 +1551,60 @@ describe('real ChatPage stop on in-memory fakes', () => {
     expect(toWriter()).toHaveLength(3)
     expect(main.claimRequests).toHaveLength(1)
     expect(screen.queryByRole('button', { name: 'chat.delegated.member_label — chat.delegated.held' })).toBeNull()
+    await page.finish()
+  }, 30000)
+  it('releases a stopped member when the user dispatches a task to it: its held team message follows the task once', async () => {
+    const page = await mountChannelPage({
+      members: [member('designer', '设计师'), member('writer', '文案')],
+      lead: { teamTasks: [{ id: 'task-writer', title: '写文案', ownerId: 'writer', status: 'pending', dependsOn: [] }] },
+      model: ({ request, lastUserText, teamTools, toolResults }) => {
+        if (request.conversationId === 'writer') {
+          if (lastUserText.includes('hold writer busy')) return new Promise<ModelStep>(() => undefined)
+          if (lastUserText.includes('团队任务：写文案')) return { text: '文案任务完成 fixture' }
+          return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+        }
+        if (!toolResults.length && teamTools.includes('send_message')) {
+          return { tool: 'send_message', callId: 'fixture-task-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+        }
+        return { text: '发送成员完成 fixture' }
+      }
+    })
+    const { main } = page
+    const toWriter = () =>
+      main.chatRequests
+        .filter((request) => request.conversationId === 'writer')
+        .map((request) => textOf(request.messages.at(-1)?.content))
+
+    page.send('@writer hold writer busy')
+    await waitFor(() => expect(toWriter()).toHaveLength(1))
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+    fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
+    await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
+    await waitFor(async () =>
+      expect((await page.stored('designer'))?.messages.map((message) => message.content)).toContain('发送成员完成 fixture')
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'chat.stop_generating' }))
+    await waitFor(() => expect(main.cancelledRuns).toEqual(['writer']))
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    // Held: the stop is not undone by the team message.
+    expect(toWriter()).toHaveLength(1)
+
+    // The user dispatches the writer's task: it runs first, then the held message follows, once.
+    const dialog = await page.openTeamManagement()
+    fireEvent.click(within(dialog).getByRole('button', { name: '执行 写文案' }))
+    await waitFor(() => expect(toWriter()).toHaveLength(3), { timeout: 6000 })
+    expect(toWriter()[1]).toContain('团队任务：写文案')
+    expect(toWriter()[2]).toContain('来自成员的测试消息')
+    await waitFor(async () => {
+      const stored = await page.stored('lead')
+      expect(stored?.teamTasks?.[0]).toEqual({ id: 'task-writer', title: '写文案', ownerId: 'writer', status: 'done', dependsOn: [] })
+    })
+    await waitFor(async () =>
+      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture')
+    )
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    expect(toWriter()).toHaveLength(3)
+    expect(main.claimRequests).toHaveLength(1)
     await page.finish()
   }, 30000)
 })

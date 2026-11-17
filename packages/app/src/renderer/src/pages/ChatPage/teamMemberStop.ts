@@ -31,3 +31,21 @@ export const stopTeamMembers = (
   for (const id of stopped) terminate(id, { dropQueued: true, pauseUserSends: true })
   return stopped
 }
+
+type AcceptedSend = Readonly<{
+  composerSubmission?: boolean
+  onComposerSubmissionAccepted?: unknown
+  isQueuedComposerCurrent?: unknown
+  userTaskDispatch?: boolean
+}>
+
+/**
+ * Whether the acceptance of this send's user turn is the user's own explicit send to the session,
+ * which releases what the user's stop held (team messages and paused queue items): a composer or
+ * '@member' send, an edit-resend, or a task the user dispatched from team management. A drained
+ * queue item releases in its own lease; a team-message delivery, and a task dispatched by the lead
+ * or by automation (no userTaskDispatch), never release.
+ */
+export const sendReleasesStopHolds = (overrides: AcceptedSend | undefined): boolean =>
+  !overrides?.isQueuedComposerCurrent &&
+  (!overrides || Boolean(overrides.composerSubmission) || Boolean(overrides.onComposerSubmissionAccepted) || overrides.userTaskDispatch === true)

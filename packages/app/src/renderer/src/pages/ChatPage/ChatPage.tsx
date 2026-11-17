@@ -1,5 +1,5 @@
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
-import { sessionPreparing, stopTeamMembers, teamMembersToStop } from './teamMemberStop'
+import { sendReleasesStopHolds, sessionPreparing, stopTeamMembers, teamMembersToStop } from './teamMemberStop'
 import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import { useHelperInvocationObserver, type HelperInvocationHandle } from './useHelperInvocationObserver'
 import { revertTeamTaskRun, setTeamTaskStatus, validateTeamTasks, type TeamTaskOutcome } from './agentTeamTasks'
@@ -461,6 +461,8 @@ type SendMessageOverrides = {
   onTaskCompleted?: () => void
   /** The run ended without a confirmed result (failed, cancelled, or its reply save unconfirmed). */
   onTaskSettled?: (outcome: TeamTaskOutcome) => void
+  /** A task the user dispatched: like the user's own send, its accepted turn releases stop holds. */
+  userTaskDispatch?: boolean
   /** Renderer initiated a member request, not proof the provider received it. */
   onTeamRequestStarted?: () => void
   /** True only while the originating composer draft still belongs to this submission. */
@@ -7367,9 +7369,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setSessions(userMsgUpdater)
       overrides?.onComposerSubmissionAccepted?.()
       overrides?.onQueuedComposerAccepted?.()
-      // The user's own composer send to this session was accepted (a drained queue item does
-      // this in its lease): what a manual Stop held back may follow it, in order.
-      if (!overrides?.isQueuedComposerCurrent && (!overrides || overrides.composerSubmission || overrides.onComposerSubmissionAccepted)) {
+      // The user's own send to this session was accepted (a composer send or a task the user
+      // dispatched; a drained queue item does this in its lease): what a Stop held back may follow
+      // it, in order, once this run ends.
+      if (sendReleasesStopHolds(overrides)) {
         releaseStopHolds(targetSessionId)
       }
       if (clearsLiveComposer) {
@@ -9040,7 +9043,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       const terminationEpochAtSend = sessionTerminationEpochRef.current.get(member.id) ?? 0
       try {
-        await sendMessage({ content: `团队任务：${task.title}`, targetSessionId: member.id, onTaskCompleted: complete, onTaskSettled: settle })
+        // Only the user's click in team management dispatches a task: it is the user's next explicit
+        // send to the owner and releases what the user's stop held for it (see sendReleasesStopHolds).
+        await sendMessage({ content: `团队任务：${task.title}`, targetSessionId: member.id, onTaskCompleted: complete, onTaskSettled: settle, userTaskDispatch: true })
       } finally {
         // The send returned without reporting the run: it never started, or it was abandoned in its
         // preflight or when its scope changed. The user's own stop in that window cancelled it;
