@@ -8951,7 +8951,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const ownerBusy = isSessionBusy
     if (!lead || !task || task.status !== 'pending' || !member || !validTeam(lead, member) || ownerBusy(member.id) ||
       persistedSessionsRef.current.get(leadId) !== lead || chatSaveBaselineRef.current.isPending(scope, leadId)) {
-      notifyWarning('任务不可执行：请检查负责人、依赖和已保存状态')
+      notifyWarning(t('chat.team_task_unavailable', { defaultValue: 'Task cannot run: check its owner, dependencies and saved state.' }))
       return
     }
     const scopeEpoch = sessionLoadEpochRef.current
@@ -8978,7 +8978,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (isMountedRef.current && storageScopeRef.current === scope && (!stillCurrent || !released)) void refreshSessionsFromStorage()
         notifyWarning(stillCurrent
           ? t('chat.team_task_owner_busy', { defaultValue: 'The owner is busy with another request. The task was not started; try again later.' })
-          : '任务已领取但团队状态发生变化，请检查任务状态')
+          : t('chat.team_task_claim_changed', { defaultValue: 'Task claimed, but the team changed. Check the task status.' }))
         return
       }
       chatSaveBaselineRef.current.fenceAndAdvance(scope, leadId, claimed)
@@ -8997,7 +8997,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           (current.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)) return
         let updated: ChatSession | undefined
         const notifyTaskStateUnsaved = (): void => {
-          if (outcome === 'done') notifyWarning('任务执行结果已返回，但任务状态保存失败')
+          if (outcome === 'done') notifyWarning(t('chat.team_task_result_unsaved', { defaultValue: 'The task returned its result, but its status could not be saved.' }))
           else notifyWarning(t('chat.team_task_revert_unsaved', { defaultValue: 'The task could not be returned to pending. Reset it in team management.' }))
         }
         chatSaveBaselineRef.current.freeze(scope, leadId, persistedSessionsRef.current.get(leadId) ?? null)
@@ -9057,7 +9057,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (!taskRunReported) settle(stoppedByUser ? 'cancelled' : 'interrupted')
       }
     } catch {
-      notifyWarning('无法领取任务，请刷新团队状态并重试')
+      notifyWarning(t('chat.team_task_claim_failed', { defaultValue: 'Could not claim the task. Refresh the team and try again.' }))
     } finally {
       teamTaskClaimsRef.current.delete(claimKey)
     }

@@ -6583,7 +6583,7 @@ describe('ChatPage runtime workflow integration', () => {
       hoisted.selectiveSaveGate.value = null
       await act(async () => { release?.() })
       await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0]).toEqual({id:'task',title:'保存中任务',ownerId:member.id,status:'done',dependsOn:[]}))
-      expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith('任务执行结果已返回，但任务状态保存失败')
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith('The task returned its result, but its status could not be saved.')
       expect(screen.queryByRole('button',{name:'Reset: 保存中任务'})).not.toBeInTheDocument()
     } finally {
       hoisted.selectiveSaveGate.value = null
@@ -6668,7 +6668,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
       chooseAddMenuEntry('chat-composer-menu-team')
       fireEvent.click(screen.getByRole('button',{name:'执行 忙碌任务'}))
-      await waitFor(() => expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('任务不可执行：请检查负责人、依赖和已保存状态'))
+      await waitFor(() => expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Task cannot run: check its owner, dependencies and saved state.'))
       expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0]).toEqual(lead.teamTasks![0])
       await act(async () => { finishers[0]({content:'first done'}) })
       await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===member.id)?.messages.some(message=>message.content==='first done')).toBe(true))
