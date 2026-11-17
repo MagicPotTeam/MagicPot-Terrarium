@@ -1434,3 +1434,134 @@ describe('rendererDiagnostics dead window after a declined recovery dialog', () 
     })
   })
 })
+
+describe('rendererDiagnostics hung renderer that dies after its reload request expired', () => {
+  type Answer = { resolve: (response: number) => void; signal?: AbortSignal; message?: string }
+  let answers: Answer[] = []
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    answers = []
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockImplementation(
+        ((
+          _window: unknown,
+          options: { signal?: AbortSignal; message?: string; cancelId?: number }
+        ) =>
+          new Promise((resolve) => {
+            const answer: Answer = {
+              resolve: (response) => resolve({ response, checkboxChecked: false }),
+              signal: options.signal,
+              message: options.message
+            }
+            answers.push(answer)
+            options.signal?.addEventListener('abort', () => answer.resolve(options.cancelId ?? 1))
+          })) as never
+      )
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    resetAppQuittingForTests()
+    resetExpectedRendererExitsForTests()
+  })
+
+  const flush = async () => {
+    for (let index = 0; index < 8; index += 1) await Promise.resolve()
+  }
+  /** Hang -> Reload, the forced end is never reported: the 'hang-not-ended' dialog is open. */
+  const hungWindowAskedAgain = async () => {
+    const window = createWindow()
+    const clock = { now: 1_000 }
+    attachRendererDiagnostics(window as never, {
+      monotonicNow: () => clock.now,
+      wallClockNow: () => 42
+    })
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    answers[0].resolve(1) // 重新加载
+    await flush()
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(5_000)
+    await flush()
+    expect(answers).toHaveLength(2)
+    expect(answers[1].message).toBe('未能结束没有响应的窗口进程。')
+    return { window, clock }
+  }
+
+  it('closes the open "could not be ended" dialog and answers the exit (no dead end)', async () => {
+    const { window, clock } = await hungWindowAskedAgain()
+    // The user is away; eleven minutes later the hung renderer dies by itself.
+    clock.now += 11 * 60_000
+    window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
+    expect(answers[1].signal?.aborted).toBe(true)
+    // An ordinary crash within the budget: reloaded at once, once.
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    await flush()
+    expect(answers).toHaveLength(2)
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    window.webContents.isCrashed.mockReturnValue(false)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'crashed',
+      exitCode: 5,
+      diedAt: 42
+    })
+  })
+
+  it('asks with the crash dialog for an exit that is not reloaded automatically, and Reload brings the window back', async () => {
+    const { window, clock } = await hungWindowAskedAgain()
+    clock.now += 11 * 60_000
+    window.webContents.isCrashed.mockReturnValue(true)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
+    expect(answers[1].signal?.aborted).toBe(true)
+    expect(answers).toHaveLength(3)
+    expect(answers[2].message).toBe('窗口的显示进程已意外停止。')
+    answers[2].resolve(0)
+    await flush()
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+  })
+
+  it('reloads a renderer that is dead by the time Reload is chosen in the "could not be ended" dialog', async () => {
+    const { window } = await hungWindowAskedAgain()
+    // The renderer is dead, but no exit was seen (yet): ending it again would never report one.
+    window.webContents.isCrashed.mockReturnValue(true)
+    answers[1].resolve(0)
+    await flush()
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(1)
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    window.webContents.isCrashed.mockReturnValue(false)
+    listenerOf(window, 'did-finish-load')()
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith('app:renderer-recovered', {
+      reason: 'unresponsive',
+      exitCode: 0,
+      diedAt: 42
+    })
+  })
+
+  it('the hang question does not promise that drafts are kept, and asks to check the last message', () => {
+    const window = createWindow()
+    attachRendererDiagnostics(window as never)
+    listenerOf(window, 'unresponsive')()
+    vi.advanceTimersByTime(15_000)
+    const call = vi.mocked(dialog.showMessageBox).mock.calls[0] as unknown[] | undefined
+    const detail = (call?.[1] as { detail?: string } | undefined)?.detail ?? ''
+    expect(detail).not.toContain('草稿')
+    expect(detail).toContain('不会自动重新发送')
+    expect(detail).toContain('请确认你最后发送的消息仍在对话中')
+  })
+
+  it('still ends a renderer that is only hung again when Reload is chosen there', async () => {
+    const { window } = await hungWindowAskedAgain()
+    answers[1].resolve(0)
+    await flush()
+    expect(window.webContents.forcefullyCrashRenderer).toHaveBeenCalledTimes(2)
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+  })
+})

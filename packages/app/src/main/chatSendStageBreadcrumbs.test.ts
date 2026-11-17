@@ -142,6 +142,20 @@ describe('chat send-stage breadcrumbs in main', () => {
     expect(getOpenChatSends(1)).toEqual([])
   })
 
+  it('a late report never moves the last report backwards', () => {
+    recordChatSendStage(1, crumb('request-start', 3, 1))
+    recordChatSendStage(1, crumb('request-built', 3, 1))
+    recordChatSendStage(1, crumb('images-checked', 3, 1))
+    expect(getLastChatSendStage(1)).toMatchObject({ sendSeq: 1, stage: 'request-built' })
+    recordChatSendStage(1, crumb('reply-finished', 3, 1))
+    recordChatSendStage(1, crumb('request-built', 3, 1))
+    recordChatSendStage(1, crumb('reply-finished', 3, 1))
+    expect(getLastChatSendStage(1)).toMatchObject({ sendSeq: 1, stage: 'reply-finished' })
+    // A newer send still moves it on.
+    recordChatSendStage(1, crumb('request-start', 0, 2))
+    expect(getLastChatSendStage(1)).toMatchObject({ sendSeq: 2, stage: 'request-start' })
+  })
+
   it('starts over when the page restarted its numbers without a process death', () => {
     recordChatSendStage(1, crumb('request-start', 40, 1))
     recordChatSendStage(1, crumb('request-built', 40, 1))
@@ -151,7 +165,9 @@ describe('chat send-stage breadcrumbs in main', () => {
     expect(getOpenChatSends(1)).toEqual([expect.objectContaining({ sendSeq: 1, imageCount: 2, stage: 'request-start' })])
   })
 
-  it('forgets a page\'s sends when its main frame navigates or reloads, not on an in-page navigation', () => {
+  // Updated: it used to forget already when a main-frame navigation started, also one that the
+  // window then blocks (an untrusted link, a stray file drop) while the page keeps sending.
+  it('forgets a page\'s sends when a new document commits (navigation or reload), not when a navigation only starts', () => {
     const listeners = new Map<string, (...args: unknown[]) => void>()
     const webContents = {
       id: 1,
@@ -161,27 +177,16 @@ describe('chat send-stage breadcrumbs in main', () => {
     forgetChatSendStageOnPageChange(webContents as never)
     forgetChatSendStageOnPageChange(webContents as never)
     // Attached once per page, whatever the number of reports.
-    expect(webContents.on).toHaveBeenCalledTimes(2)
+    expect(webContents.on).toHaveBeenCalledTimes(1)
     expect(webContents.once).toHaveBeenCalledTimes(1)
+    // A navigation that only starts (and may be blocked) leaves the running sends alone.
+    expect(listeners.has('did-start-navigation')).toBe(false)
     const fill = () => recordChatSendStage(1, crumb('request-built', 8, 4))
 
     fill()
-    listeners.get('did-start-navigation')!({ isMainFrame: true, isSameDocument: true })
-    listeners.get('did-start-navigation')!({ isMainFrame: false, isSameDocument: false })
     expect(getOpenChatSends(1)).toHaveLength(1)
-    listeners.get('did-start-navigation')!({ isMainFrame: true, isSameDocument: false })
-    expect(getOpenChatSends(1)).toEqual([])
-    expect(getLastChatSendStage(1)).toBeNull()
-
-    // The older positional form (url, isInPlace, isMainFrame).
-    fill()
-    listeners.get('did-start-navigation')!({}, 'file:///index.html', true, true)
-    expect(getOpenChatSends(1)).toHaveLength(1)
-    listeners.get('did-start-navigation')!({}, 'file:///index.html', false, true)
-    expect(getOpenChatSends(1)).toEqual([])
-
-    fill()
     listeners.get('did-navigate')!()
+    expect(getOpenChatSends(1)).toEqual([])
     expect(getLastChatSendStage(1)).toBeNull()
     fill()
     listeners.get('destroyed')!()
@@ -194,7 +199,7 @@ describe('chat send-stage breadcrumbs in main', () => {
     const listener = h.listeners.get('app:chat-send-stage')!
     listener(from(main), crumb('request-start'))
     listener(from(main), crumb('request-built'))
-    expect(main.on.mock.calls.map(([event]) => event)).toEqual(['did-start-navigation', 'did-navigate'])
+    expect(main.on.mock.calls.map(([event]) => event)).toEqual(['did-navigate'])
     expect(main.once.mock.calls.map(([event]) => event)).toEqual(['destroyed'])
   })
 })

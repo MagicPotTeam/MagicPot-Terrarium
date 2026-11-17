@@ -18,6 +18,7 @@ import { isTrustedRendererNavigation } from './utils/rendererNavigation'
 import { authorizeScopedLocalMediaPath } from './localMediaAccess'
 import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
 import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
+import { AGENT_PROCESS_JOB_LIMITS } from '@shared/api/agentThreadProcessJob'
 import {
   registerMagicAgentTrustedRouteBinding,
   unregisterMagicAgentTrustedRouteBinding
@@ -46,10 +47,14 @@ export const MAIN_WINDOW_BACKGROUND_COLOR = '#1a1a1a'
  * Listener limit of the main window's WebContents. Its 'render-process-gone' / 'destroyed' /
  * 'did-start-navigation' listeners are bounded by design, not leaked: measured in the real app,
  * 10 'render-process-gone' listeners right after the start, unchanged after 2 more threads and 5
- * reloads. Each running send adds a few and removes them when it ends, so Node's default of 10 warns
- * on an ordinary send; a listener that really leaks per reload or per request still warns here.
+ * reloads; a running send adds a few (its IPC stream and its Agent thread interaction lease) and
+ * removes them when it ends. Each retained Agent background process keeps its interaction lease
+ * (three listeners, one of each) until the entry is removed, up to retainedGlobal entries for up to
+ * 15 min after the process ended (api/agentThreadProcesses.ts). The limit is that bound plus room
+ * for the fixed listeners and the running sends, so only a real leak (per reload or per request)
+ * warns.
  */
-export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS = 50
+export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS = AGENT_PROCESS_JOB_LIMITS.retainedGlobal + 64
 
 function sanitizeDragFileName(fileName: string): string {
   const trimmed = (fileName || '').trim()
@@ -175,7 +180,7 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     }
   })
 
-  // Electron's forwarder, renderer diagnostics, both read admissions, one per open IPC stream and one per Agent thread interaction lease (scope bindings + running requests).
+  // Electron's forwarder, renderer diagnostics, both read admissions, one per open IPC stream, one per Agent thread interaction lease (scope bindings + running requests) and one per retained Agent background process.
   mainWindow.webContents.setMaxListeners(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
 
   const trustedRendererUrl = resolveMainWindowRendererUrl()

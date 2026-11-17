@@ -44,8 +44,14 @@ export function recordChatSendStage(webContentsId: number, payload: unknown, rec
   // from a page that replaced the old one without a process death.
   if (sends && stored.stage === 'request-start' && stored.sendSeq <= sends.maxStartedSeq) sends = undefined
   if (!sends) sends = { last: stored, open: new Map(), closed: [], maxStartedSeq: 0 }
-  sends.last = stored
   const seq = stored.sendSeq
+  // A late report (of a send that has ended, or of a stage the send has already passed) changes
+  // nothing: the last report must never move backwards.
+  const previousOpen = sends.open.get(seq)
+  const stale =
+    sends.closed.includes(seq) ||
+    (previousOpen !== undefined && stageRank(stored.stage) < stageRank(previousOpen.stage))
+  if (!stale) sends.last = stored
   if (TERMINAL_CHAT_SEND_STAGES.includes(stored.stage)) {
     sends.open.delete(seq)
     if (!sends.closed.includes(seq)) {
@@ -53,9 +59,8 @@ export function recordChatSendStage(webContentsId: number, payload: unknown, rec
       if (sends.closed.length > MAX_CLOSED_CHAT_SENDS) sends.closed.shift()
     }
   } else if (!sends.closed.includes(seq)) {
-    const previous = sends.open.get(seq)
     // A report that arrives out of order never moves a send back to an earlier stage.
-    if (!previous || stageRank(stored.stage) >= stageRank(previous.stage)) sends.open.set(seq, stored)
+    if (!stale) sends.open.set(seq, stored)
     while (sends.open.size > MAX_OPEN_CHAT_SENDS) {
       const oldest = sends.open.keys().next().value
       if (oldest === undefined) break
@@ -93,7 +98,7 @@ export function forgetChatSendStage(webContentsId: number): void {
   sendsByWebContents.delete(webContentsId)
 }
 
-// Each reporting page's WebContents gets these three listeners once, for its whole life.
+// Each reporting page's WebContents gets these two listeners once, for its whole life.
 const watchedWebContents = new WeakSet<WebContents>()
 /**
  * A real navigation or reload of the main frame replaces the page without a process death (the
@@ -104,14 +109,10 @@ export function forgetChatSendStageOnPageChange(webContents: WebContents): void 
   if (watchedWebContents.has(webContents)) return
   watchedWebContents.add(webContents)
   const webContentsId = webContents.id
-  webContents.on('did-start-navigation', (details: unknown, ...legacy: unknown[]) => {
-    const event = (details ?? {}) as { isMainFrame?: unknown; isSameDocument?: unknown }
-    const isMainFrame = typeof event.isMainFrame === 'boolean' ? event.isMainFrame : legacy[2]
-    const isSameDocument = typeof event.isSameDocument === 'boolean' ? event.isSameDocument : legacy[1]
-    if (isMainFrame === true && isSameDocument !== true) forgetChatSendStage(webContentsId)
-  })
-  // Once more when the new document commits (main frame only): a report the old document sent
-  // while the navigation was starting must not stay behind as an unfinished send.
+  // Only when the new document commits ('did-navigate': main frame, never in-page). Not when a
+  // navigation merely starts: the window blocks some of them (an untrusted link, a stray file drop,
+  // see mainWindow.ts 'will-navigate') and the page keeps running its sends; and the sends of the
+  // old page that run while a navigation starts really are running until the new page replaces it.
   webContents.on('did-navigate', () => forgetChatSendStage(webContentsId))
   webContents.once('destroyed', () => forgetChatSendStage(webContentsId))
 }

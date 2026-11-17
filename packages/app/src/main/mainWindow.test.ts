@@ -3,6 +3,7 @@ import { BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
 import { createMainWindow, MAIN_WINDOW_BACKGROUND_COLOR, MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS } from './mainWindow'
+import { AGENT_PROCESS_JOB_LIMITS } from '@shared/api/agentThreadProcessJob'
 import { getAuthoritativeMainWindow, winController } from './winControls'
 import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
 import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
@@ -131,12 +132,15 @@ describe('createMainWindow teardown', () => {
     expect(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).toBeGreaterThan(10)
     expect(window.webContents.getMaxListeners()).toBe(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
     expect(limitsAtInstall).toEqual([MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS])
-    // Eleven 'render-process-gone' listeners (what the running app has during a send) do not warn.
+    // What the running app can hold by design does not warn: 13 'render-process-gone' listeners
+    // measured during a send, one per retained Agent background process (their interaction leases
+    // live until the entry is removed) and two more for each of eight further running sends.
+    const byDesign = 13 + AGENT_PROCESS_JOB_LIMITS.retainedGlobal + 2 * 8
     const warnings: Error[] = []
     const onWarning = (warning: Error) => warnings.push(warning)
     process.on('warning', onWarning)
     try {
-      for (let index = 0; index < 11; index += 1) window.webContents.on('render-process-gone', () => undefined)
+      for (let index = 0; index < byDesign; index += 1) window.webContents.on('render-process-gone', () => undefined)
       // Node emits the warning on a later tick.
       await new Promise((resolve) => setImmediate(resolve))
     } finally {

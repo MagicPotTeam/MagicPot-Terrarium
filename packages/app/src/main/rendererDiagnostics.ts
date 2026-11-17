@@ -59,7 +59,11 @@ export const RECOVERY_PROMPT_POLL_MS = 1_000
 
 /** What the page brought up by a recovery reload is told about the death. */
 type RecoveryNotice = Pick<RendererRecoveredEvent, 'reason' | 'exitCode'>
-type RecoveryPrompt = { controller: AbortController; poll: ReturnType<typeof setInterval> | null }
+type RecoveryPrompt = {
+  kind: RendererRecoveryPromptKind
+  controller: AbortController
+  poll: ReturnType<typeof setInterval> | null
+}
 
 /** True when the exit may be answered with an automatic reload. */
 export function shouldRecoverRendererProcess(details: RenderProcessGoneDetails): boolean {
@@ -302,7 +306,7 @@ export function attachRendererDiagnostics(
     notice: RecoveryNotice = details
   ) => {
     if (recoveryPrompt || isShuttingDown()) return
-    const prompt: RecoveryPrompt = { controller: new AbortController(), poll: null }
+    const prompt: RecoveryPrompt = { kind, controller: new AbortController(), poll: null }
     recoveryPrompt = prompt
     const settle = () => {
       if (recoveryPrompt !== prompt) return
@@ -325,11 +329,13 @@ export function attachRendererDiagnostics(
         settle()
         // The answer can arrive long after the question: check again that nothing is closing.
         if (isShuttingDown()) return
-        if (reload && kind === 'hang-not-ended') {
+        if (reload && kind === 'hang-not-ended' && !isRendererDead()) {
           // The renderer is still hung, and a hung renderer cannot process a reload: end it again
           // and wait for its exit as before.
           reloadHungRenderer()
         } else if (reload) {
+          // (A 'hang-not-ended' renderer that is dead by now, its exit answered or not, gets the
+          // reload the user asked for: ending a dead renderer again would never report an exit.)
           // Never reload a page that came back meanwhile (the 1 s look above may not have run yet).
           if (!isRendererDead()) return
           startRecoveryReload(details, notice)
@@ -482,7 +488,7 @@ export function attachRendererDiagnostics(
           type: 'warning',
           title: '窗口没有响应',
           message: '窗口已超过 15 秒没有响应。',
-          detail: '可以继续等待，或重新加载窗口。正在生成的回复会中断，不会自动重新发送；草稿会保留。',
+          detail: '可以继续等待，或重新加载窗口。正在生成的回复会中断，不会自动重新发送；重新加载后请确认你最后发送的消息仍在对话中。',
           buttons: ['等待', '重新加载'],
           defaultId: 0,
           cancelId: 0,
@@ -531,6 +537,12 @@ export function attachRendererDiagnostics(
       startRecoveryReload(details, { reason: 'unresponsive', exitCode: 0 })
       return
     }
+    // The hung renderer died after the user's hang reload request had expired, while the question
+    // whether to end it once more is still open: that question no longer applies, and keeping it
+    // open would swallow this exit (an open dialog blocks every other answer). Close it, and let
+    // the exit get its own answer below.
+    if (recoveryPrompt?.kind === 'hang-not-ended') withdrawRecoveryPrompt()
+    dropHangReloadRequest()
     handleRendererProcessGone(window, details, {
       recoverRenderer: recoverWithinBudget,
       promptRenderer: promptForManualRecovery,
