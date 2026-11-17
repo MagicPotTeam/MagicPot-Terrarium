@@ -140,6 +140,7 @@ describe('bounded encrypted conversation goal checkpoints (no runtime admission)
       expect(Object.keys(t.store.read(scope).goals[0])).not.toContain('ticket')
     } finally { db.close() }
   })
+  // Slow by design: about 140 encrypted, schema-validated SQLite writes reach the goal and retirement bounds (~0.7 s alone, ~2 s under 4x load).
   it('refuses goal/owner/retirement capacity without discarding replay domains', () => {
     const t = setup()
     for (let i = 0; i < 8; i++) t.store.mutateUser(scope, create(randomUUID(), i, `create-${i}`), 100 + i)
@@ -153,5 +154,5 @@ describe('bounded encrypted conversation goal checkpoints (no runtime admission)
     const reader = (t.store as unknown as { db: NodeSQLiteAdapter }).db, get = reader.get.bind(reader)
     vi.spyOn(reader, 'get').mockImplementation((sql, ...args) => sql.startsWith('SELECT count(*) AS n,coalesce(sum(length(cipher))') ? { n: LIMITS.owners, bytes: 100000 } : get(sql, ...args))
     expect(() => t.store.mutateUser({ ...scope, conversationId: 'new-owner' }, create(), 202)).toThrow('owner capacity')
-  })
+  }, 30_000)
 })

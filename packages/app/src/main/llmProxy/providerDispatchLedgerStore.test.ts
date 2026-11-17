@@ -236,6 +236,7 @@ describe('isolated encrypted ledger DATA only, no execution capabilities or prod
     expect(() => t.store.apply(scope, begin(), 100)).toThrow('committed data may remain')
     expect(t.store.read(scope)).toMatchObject({ mutationBlocked: true, orphaned: true, document: { revision: 1 } })
   })
+  // Slow by design: 264 encrypted, schema-validated SQLite writes fill the receipt bound (~2 s alone, 6-9 s under 4x load).
   it('keeps full bounded lifecycle receipts durable through all reservations, settlements and finishes', () => {
     const t = setup(); let revision = 0, clock = 100
     for (let run = 0; run < DISPATCH_LEDGER_LIMITS.runs; run++) {
@@ -253,7 +254,7 @@ describe('isolated encrypted ledger DATA only, no execution capabilities or prod
     expect(value).toMatchObject({ orphaned: false, grantsPermission: false, document: { revision } })
     expect(value.document.receipts).toHaveLength(DISPATCH_LEDGER_LIMITS.receipts)
     expect(value.document.runs.every(run => run.status === 'finished' && run.chargedProviderDispatches === DISPATCH_LEDGER_LIMITS.attempts)).toBe(true)
-  })
+  }, 30_000)
   it('rejects hardlink database paths before opening unsafe aliases', () => {
     const t = setup(), req = begin(); t.store.apply(scope, req, 100)
     const linked = path.join(path.dirname(t.file), 'hardlink.sqlite'); linkSync(t.file, linked)

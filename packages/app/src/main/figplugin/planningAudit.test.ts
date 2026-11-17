@@ -108,6 +108,7 @@ describe('real-filesystem bounded planning audit storage', () => {
     if (process.platform !== 'win32') expect((await fs.stat(file)).mode & 0o077).toBe(0)
   })
 
+  // Slow by design: 259 fsynced whole-file rewrites exceed the 256-record bound (~1.7 s alone, ~4.5 s under 4x load).
   it('retains at most 256 recent records and enforces TTL, future and corrupt entry cleanup on disk', async () => {
     const root = await ownedRoot()
     let now = 1000
@@ -132,7 +133,7 @@ describe('real-filesystem bounded planning audit storage', () => {
     )
     expect(await store.list()).toEqual([event(300, now)])
     expect(await fs.readFile(file, 'utf8')).toBe(`${JSON.stringify(event(300, now))}\n`)
-  })
+  }, 30_000)
 
   it('rejects payload fields before persistence and exposes sticky loss only for the planning file', async () => {
     const root = await ownedRoot()

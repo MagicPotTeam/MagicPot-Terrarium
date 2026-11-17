@@ -239,6 +239,7 @@ describe('ISOLATED owner-host v2 capability, no production consent/factory/runne
     vi.restoreAllMocks(); request.finish(); await request.drain()
     expect(t.document().runs).toHaveLength(1)
   })
+  // Slow by design: 33 scopes are upgraded, admitted and drained through real encrypted SQLite ledgers (~0.7 s alone, ~3.2 s under 4x load).
   it('keeps the owner’s 32-slot ceiling across scopes and frees a finished invocation only after its real drain', async () => {
     const t = await setup(false), scopes = Array.from({ length: 33 }, (_, i) => ({ ...scope, conversationId: `slot-${i}` }))
     for (const scope of scopes) t.host.trustedUpgrade(scope, { action: 'upgrade-v2', operationId: randomUUID(), expectedRevision: 0 })
@@ -251,7 +252,7 @@ describe('ISOLATED owner-host v2 capability, no production consent/factory/runne
     const next = t.host.createInvocationAdmission(extra); next.finish(); await next.drain()
     for (const request of requests.slice(1)) { request.finish(); await request.drain() }
     expect(t.host.readCurrentData(scopes[0]).document.runs[0].status).toBe('finished')
-  })
+  }, 30_000)
   it('a failed disposal cannot short-circuit another hanging callback or close its native ledger', async () => {
     const exec = vi.spyOn(NodeSQLiteAdapter.prototype, 'exec'), get = vi.spyOn(NodeSQLiteAdapter.prototype, 'get'), t = await setup(), secondScope = { ...scope, conversationId: 'hanging' }
     t.host.trustedUpgrade(secondScope, { action: 'upgrade-v2', operationId: randomUUID(), expectedRevision: 0 })

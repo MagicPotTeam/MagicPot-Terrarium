@@ -59,6 +59,7 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
     ).toBe(false)
   })
 
+  // Slow by design: 264 fsynced whole-file rewrites exceed the 256-record bound (~1.4 s alone, ~3.7 s under 4x load).
   it('retains only the newest bounded records and never stores document values', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
     roots.push(root)
@@ -76,7 +77,7 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
     expect(disk.trimEnd().split('\n')).toHaveLength(FIGPLUGIN_AUDIT_MAX_RECORDS)
     const info = await fs.stat(path.join(root, 'execution-audit.jsonl'))
     if (process.platform !== 'win32') expect(info.mode & 0o077).toBe(0)
-  })
+  }, 30_000)
 
   it('stores only paired terminal visual checkpoint summaries', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'figplugin-audit-test-'))
