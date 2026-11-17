@@ -1483,7 +1483,18 @@
       "switch": "切换",
       "empty": "没有匹配的模型。"
     },
-    "no_model_status": "未配置模型。请到 {{settings}} › {{tab}}。"
+    "no_model_status": "未配置模型。请到 {{settings}} › {{tab}}。",
+    "queue_count": "{{count}} 条排队消息",
+    "queue_status_queued": "排队中",
+    "queue_status_preparing": "准备中",
+    "queue_status_paused": "已暂停",
+    "queue_status_held": "已保留",
+    "queue_resume_notice": "编辑或移除此项后，后续排队消息可能继续发送。",
+    "queue_edit_button": "编辑",
+    "queue_remove_button": "取消",
+    "queue_edit_field": "编辑排队消息",
+    "queue_save": "保存",
+    "queue_discard": "放弃编辑"
   },
   "agent_workspace": {
     "title": "Agent 线程",

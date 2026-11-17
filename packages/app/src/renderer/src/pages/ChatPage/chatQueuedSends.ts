@@ -116,3 +116,31 @@ export const releaseStopHolds = <T extends QueuedSendState>(queue: readonly T[])
         return rest as T
       })
     : queue
+
+/**
+ * The item the newer ones wait behind, or undefined: the first item a drain would look at (the
+ * first not held back) when it is paused and another such item follows it. Such a head is sent
+ * only after an explicit edit or removal.
+ */
+export const queuedSendBlockingNewer = <T extends QueuedSendState>(
+  queue: readonly T[] | undefined
+): T | undefined => {
+  const waiting = (queue ?? []).filter((item) => !item.heldByStop)
+  const head = waiting[0]
+  return head && head.paused && !head.inFlight && waiting.length > 1 ? head : undefined
+}
+
+/**
+ * The rows a collapsed queue view shows: the last three, and the item the newer ones wait
+ * behind when it is not among them.
+ */
+export const collapsedQueuedSendIds = <T extends QueuedSendState>(
+  queue: readonly T[] | undefined,
+  size = 3
+): Set<number> => {
+  const items = queue ?? []
+  const ids = new Set(items.slice(-size).map((item) => item.id))
+  const blocking = queuedSendBlockingNewer(items)
+  if (blocking) ids.add(blocking.id)
+  return ids
+}

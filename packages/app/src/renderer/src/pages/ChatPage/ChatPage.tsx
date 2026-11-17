@@ -335,15 +335,18 @@ import AgentThreadSidesPanel from './components/AgentThreadSidesPanel'
 import AgentTeamThreadRows, { type AgentTeamThreadRowsTeam } from './components/AgentTeamThreadRows'
 import AgentTeamDelegatedRows from './components/AgentTeamDelegatedRows'
 import {
+  collapsedQueuedSendIds,
   isQueuedSendLeaseCurrent,
   isUserQueuedSend,
   leaseQueuedSend,
   nextDrainableSend,
   pauseQueuedSend,
+  queuedSendBlockingNewer,
   releaseStopHolds as releaseQueuedStopHolds,
   settleQueueOnStop,
   withoutLease
 } from './chatQueuedSends'
+import ChatQueueStrip, { type ChatQueueStripItem } from './components/ChatQueueStrip'
 import {
   isUnavailableQueuedAttachment,
   restoreQueuedSends,
@@ -3736,6 +3739,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ? (queuedSessionSends.get(currentSessionId) ?? [])
     : []
   const [isQueueExpanded, setIsQueueExpanded] = useState(false)
+  // The Agent column's queue strip edits an item in place: the item (its drain waits while the
+  // edit is open) and the text being edited. Saving hands the text to the composer's send path.
+  const [queueEdit, setQueueEdit] = useState<{ sessionId: string; id: number; text: string } | null>(null)
+  const queueEditRef = useRef(queueEdit)
+  queueEditRef.current = queueEdit
+  const queueEditHoldRef = useRef<{ sessionId: string; id: number } | null>(null)
+  const queueResubmitRef = useRef<{ sessionId: string; content: string; attachments: ChatAttachment[] } | null>(null)
+  const [queueResubmitToken, setQueueResubmitToken] = useState(0)
   useEffect(() => {
     if (currentSessionQueuedSends.length <= 3) setIsQueueExpanded(false)
   }, [currentSessionId, currentSessionQueuedSends.length])
@@ -8772,6 +8783,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     // Items held by a manual Stop keep their place but are never sent by a drain; a paused
     // item (Stop, failed preparation, left scope) blocks everything behind it.
     const next = nextDrainableSend(queue)
+    // The Agent column's queue strip is editing this item in place: it waits until the edit ends.
+    const editHold = queueEditHoldRef.current
+    if (next && editHold?.sessionId === sessionId && editHold.id === next.id) return
     if (!next) {
       if (queuedSessionSendsRef.current.has(sessionId) && !queue?.length) {
         const nextQueues = new Map(queuedSessionSendsRef.current)
@@ -8853,18 +8867,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const editQueuedSessionSend = useCallback(
-    (sessionId: string, queuedSend: QueuedSessionSend) => {
+    // Moves the item back into the composer (text, attachments, the composer's own hidden text)
+    // and out of the queue. `content` replaces its text (an edit made in the column's queue strip).
+    // Returns what the composer now holds, or null when the item could not be moved.
+    (sessionId: string, queuedSend: QueuedSessionSend, content?: string): { content: string; attachments: ChatAttachment[] } | null => {
       const liveItem = queuedSessionSendsRef.current.get(sessionId)?.find(item => item.id === queuedSend.id)
-      if (!liveItem || liveItem.inFlight) return
+      if (!liveItem || liveItem.inFlight) return null
       const overrides = liveItem.overrides
-      if (!overrides || overrides.resolveAttachments) return
+      if (!overrides || overrides.resolveAttachments) return null
       if (inputValueRef.current.trim() || pendingAttachmentsRef.current.length || pendingHiddenContextRef.current) {
         notifyWarning('请先处理当前输入，再编辑排队消息')
-        return
+        return null
       }
+      const editedContent = content ?? overrides.content
       const editedAttachments = overrides.attachments?.map(cloneChatAttachment) ?? []
       const editedHiddenContext = liveItem.originalComposerHiddenContext ?? overrides.hiddenContext ?? ''
-      setInputValue(overrides.content)
+      setInputValue(editedContent)
       setPendingAttachments(editedAttachments)
       setPendingHiddenContext(editedHiddenContext)
       // Store the edited text in the composer's draft backup before the item leaves the stored queue,
@@ -8872,7 +8890,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // the edited values: the composer refs of attachments and hidden context update only on render.
       // A blob URL lives only in this renderer and must not replace durable backup data.
       const editedDraft = normalizeChatSessionDraft<ChatSessionDraft>({
-        inputValue: overrides.content,
+        inputValue: editedContent,
         pendingAttachments: editedAttachments,
         pendingHiddenContext: editedHiddenContext,
         updatedAt: Date.now()
@@ -8886,9 +8904,49 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       removeQueuedSessionSend(sessionId, queuedSend.id)
       window.setTimeout(() => composerInputRef.current?.focus(), 0)
+      return { content: editedContent, attachments: editedAttachments }
     },
     [notifyWarning, removeQueuedSessionSend, setInputValue, setPendingAttachments, setPendingHiddenContext]
   )
+
+  const endQueueEdit = useCallback((resume: boolean) => {
+    const hold = queueEditHoldRef.current
+    queueEditHoldRef.current = null
+    setQueueEdit(null)
+    // The item may be sent again now that nobody edits it.
+    if (resume && hold) drainQueuedSessionRef.current(hold.sessionId)
+  }, [])
+  const startQueueEdit = useCallback((id: number) => {
+    const sessionId = currentSessionIdRef.current
+    const item = sessionId ? queuedSessionSendsRef.current.get(sessionId)?.find(entry => entry.id === id) : undefined
+    if (!sessionId || !item?.overrides || item.overrides.resolveAttachments || item.inFlight) return
+    const previous = queueEditHoldRef.current
+    queueEditHoldRef.current = { sessionId, id }
+    setQueueEdit({ sessionId, id, text: item.overrides.content })
+    if (previous && (previous.sessionId !== sessionId || previous.id !== id)) drainQueuedSessionRef.current(previous.sessionId)
+  }, [])
+  // Saving an edit is the composer's send: the item moves into the composer with the edited text
+  // (as Edit does in the full-page chat) and, once the composer holds it, the composer's send path
+  // runs every send-time check again. A refusal leaves the text in the composer, as before.
+  const saveQueueEdit = useCallback(() => {
+    const edit = queueEditRef.current
+    if (!edit) return
+    const item = queuedSessionSendsRef.current.get(edit.sessionId)?.find(entry => entry.id === edit.id)
+    if (!item || edit.sessionId !== currentSessionIdRef.current) { endQueueEdit(true); return }
+    const staged = editQueuedSessionSend(edit.sessionId, item, edit.text)
+    // Not moved (the composer holds another draft: the person was told): the edit stays open.
+    if (!staged) return
+    queueEditHoldRef.current = null
+    setQueueEdit(null)
+    queueResubmitRef.current = { sessionId: edit.sessionId, ...staged }
+    setQueueResubmitToken(value => value + 1)
+  }, [editQueuedSessionSend, endQueueEdit])
+  // An edit belongs to its item in the open conversation: it ends when either is gone.
+  useEffect(() => {
+    const edit = queueEditRef.current
+    if (!edit) return
+    if (edit.sessionId !== currentSessionId || !currentSessionQueuedSends.some(item => item.id === edit.id)) endQueueEdit(true)
+  }, [currentSessionId, currentSessionQueuedSends, endQueueEdit])
 
   // 保持 sendMessageRef 与最新 sendMessage 同步，供 send-to-agent autoSend 使用
   sendMessageRef.current = sendMessage
@@ -9783,6 +9841,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
     void sendMessage()
   }, [currentSession?.teamLeadId, teamEnabled, teamLead, teamMembers, sendMessage, isAutoContextCompressionAvailable, inspectionScope, appendTailCard, showTailPanel, handleCompressCurrentContext, goalCommandAvailable, compact, isReady, sessionsLoaded, sessionLoadError, selectedProfileId, selectedSkillId, selectedSkillRuntime, config, scratchpadAvailable, active, currentSessionId, route, config?.use_remote_llm, storageScope, notifyWarning, notifyError, t, setInputValue, clearScheduledDraftPersistence, markTransientDraftCleared, getSessionStorageKey, setSessions, persistCurrentSessionSnapshot, mergeHiddenContext])
+  // A saved queue edit: the composer now holds the item; send it as the composer's own send.
+  const handleSendCurrentMessageRef = useRef(handleSendCurrentMessage)
+  handleSendCurrentMessageRef.current = handleSendCurrentMessage
+  useEffect(() => {
+    const pending = queueResubmitRef.current
+    queueResubmitRef.current = null
+    if (!pending || currentSessionIdRef.current !== pending.sessionId) return
+    if (inputValueRef.current !== pending.content || pendingAttachmentsRef.current !== pending.attachments) return
+    handleSendCurrentMessageRef.current()
+  }, [queueResubmitToken])
 
   // The edit form belongs to the thread, selection and scope it was rendered for. The
   // callbacks below are rebuilt on every selection; one captured earlier does nothing.
@@ -11048,7 +11116,34 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 host={compact ? agentPromptHost : undefined}
               />
 
-              {currentSessionId && currentSessionQueuedSends.length > 0 ? (
+              {/* The Agent column's queued messages: upstream's strip directly above the composer. */}
+              {compact && currentSessionId && currentSessionQueuedSends.length > 0 ? (() => {
+                const blocking = queuedSendBlockingNewer(currentSessionQueuedSends)
+                const items = currentSessionQueuedSends.map((queuedSend): ChatQueueStripItem => ({
+                  id: queuedSend.id,
+                  text: queuedSend.overrides?.content ?? '',
+                  attachmentCount: (queuedSend.overrides?.queuedAttachmentTypes ?? queuedSend.overrides?.attachments ?? []).length,
+                  status: queuedSend.inFlight ? 'preparing' : queuedSend.heldByStop ? 'held' : queuedSend.paused ? 'paused' : 'queued',
+                  canEdit: Boolean(queuedSend.overrides && !queuedSend.overrides.resolveAttachments && !queuedSend.inFlight),
+                  canRemove: !queuedSend.inFlight,
+                  blocksNewer: blocking?.id === queuedSend.id
+                }))
+                return (
+                  <ChatQueueStrip
+                    items={items}
+                    visibleIds={collapsedQueuedSendIds(currentSessionQueuedSends)}
+                    expanded={isQueueExpanded}
+                    onToggleExpanded={() => setIsQueueExpanded((expanded) => !expanded)}
+                    editing={queueEdit && queueEdit.sessionId === currentSessionId ? { id: queueEdit.id, text: queueEdit.text } : null}
+                    onEdit={startQueueEdit}
+                    onEditChange={(text) => setQueueEdit((edit) => (edit ? { ...edit, text } : edit))}
+                    onSave={saveQueueEdit}
+                    onDiscard={() => { endQueueEdit(true); composerInputRef.current?.focus() }}
+                    onRemove={(id) => removeQueuedSessionSend(currentSessionId, id)}
+                  />
+                )
+              })() : null}
+              {!compact && currentSessionId && currentSessionQueuedSends.length > 0 ? (
                 <Box
                   data-testid="chat-queue-panel"
                   role="region"

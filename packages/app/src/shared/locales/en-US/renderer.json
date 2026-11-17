@@ -1656,7 +1656,18 @@
       "switch": "Switch",
       "empty": "No matching models."
     },
-    "no_model_status": "No model is configured. Open {{settings}} › {{tab}}."
+    "no_model_status": "No model is configured. Open {{settings}} › {{tab}}.",
+    "queue_count": "{{count}} queued message(s)",
+    "queue_status_queued": "Queued",
+    "queue_status_preparing": "Preparing",
+    "queue_status_paused": "Paused",
+    "queue_status_held": "Held",
+    "queue_resume_notice": "Edit or remove this message to let the ones after it continue.",
+    "queue_edit_button": "Edit",
+    "queue_remove_button": "Cancel",
+    "queue_edit_field": "Edit the queued message",
+    "queue_save": "Save",
+    "queue_discard": "Discard edit"
   },
   "agent_workspace": {
     "title": "Agent Threads",

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  collapsedQueuedSendIds,
   isQueuedSendLeaseCurrent,
   isUserQueuedSend,
   leaseQueuedSend,
   nextDrainableSend,
   pauseQueuedSend,
+  queuedSendBlockingNewer,
   releaseStopHolds,
   settleQueueOnStop,
   type QueuedSendState
@@ -127,5 +129,34 @@ describe('queued send rules', () => {
       [2, false, undefined],
       [3, false, undefined]
     ])
+  })
+})
+
+describe('queue strip views', () => {
+  it('names the paused head that newer items wait behind, and only then', () => {
+    expect(queuedSendBlockingNewer([composer(1, { paused: true }), composer(2)])?.id).toBe(1)
+    // Alone, it blocks nothing.
+    expect(queuedSendBlockingNewer([composer(1, { paused: true })])).toBeUndefined()
+    // Held items (a reload, a Stop) are passed over: the first item a drain looks at counts.
+    expect(queuedSendBlockingNewer([composer(1, { paused: true, heldByStop: 3 }), composer(2)])).toBeUndefined()
+    expect(
+      queuedSendBlockingNewer([composer(1, { paused: true, heldByStop: 3 }), composer(2, { paused: true }), composer(3)])?.id
+    ).toBe(2)
+    // A restored head whose hold was released by the person's next send blocks the newer one.
+    const restored = composer(1, { paused: true, heldByStop: 4 })
+    const [released, newer] = releaseStopHolds([restored, composer(2)])
+    expect(queuedSendBlockingNewer([released, newer])?.id).toBe(1)
+    // Being prepared or simply waiting is not blocking.
+    expect(queuedSendBlockingNewer([composer(1, { inFlight: true }), composer(2)])).toBeUndefined()
+    expect(queuedSendBlockingNewer([composer(1), composer(2)])).toBeUndefined()
+    expect(queuedSendBlockingNewer(undefined)).toBeUndefined()
+  })
+
+  it('shows the last three while collapsed, plus the blocking head when it is older', () => {
+    const plain = [1, 2, 3, 4, 5].map((id) => composer(id))
+    expect([...collapsedQueuedSendIds(plain)]).toEqual([3, 4, 5])
+    const blocked = [composer(1, { paused: true }), ...[2, 3, 4, 5].map((id) => composer(id))]
+    expect([...collapsedQueuedSendIds(blocked)].sort()).toEqual([1, 3, 4, 5])
+    expect([...collapsedQueuedSendIds([composer(1), composer(2)])]).toEqual([1, 2])
   })
 })
