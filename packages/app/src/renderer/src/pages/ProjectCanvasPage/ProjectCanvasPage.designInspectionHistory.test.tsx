@@ -561,22 +561,29 @@ vi.mock('./components/ProjectCanvasImageCropOverlay', async () => {
         ref,
         () => ({
           confirm: () => {
-            const nextWidth = Math.max(40, item.width - 32)
-            const nextHeight = Math.max(40, item.height - 24)
+            // Same frame rule as the real overlay (pinned on the real component in
+            // components/ProjectCanvasImageCropOverlay.test.tsx, 'confirmed frame'):
+            // the frame is the crop size in source pixels, and the scale and the
+            // position compensate so the kept pixels stay where they were drawn.
+            const sourceWidth = item.sourceWidth || item.width
+            const sourceHeight = item.sourceHeight || item.height
+            const crop = {
+              x: 10,
+              y: 6,
+              width: Math.max(1, sourceWidth - 20),
+              height: Math.max(1, sourceHeight - 16)
+            }
+            const nextScaleX = item.scaleX * (item.width / sourceWidth)
+            const nextScaleY = item.scaleY * (item.height / sourceHeight)
             mockCropOverlayConfirm()
             onConfirm({
-              x: item.x + 12,
-              y: item.y + 8,
-              width: nextWidth,
-              height: nextHeight,
-              scaleX: item.scaleX * 1.15,
-              scaleY: item.scaleY * 1.1,
-              crop: {
-                x: 10,
-                y: 6,
-                width: Math.max(1, (item.sourceWidth || item.width) - 20),
-                height: Math.max(1, (item.sourceHeight || item.height) - 16)
-              }
+              x: item.x + crop.x * nextScaleX,
+              y: item.y + crop.y * nextScaleY,
+              width: crop.width,
+              height: crop.height,
+              scaleX: nextScaleX,
+              scaleY: nextScaleY,
+              crop
             })
           }
         }),
@@ -1778,18 +1785,20 @@ describe('ProjectCanvasPage generation-first entry', () => {
     // Crop confirm keeps the user's original picture plus the crop region (never
     // flattened into a new data URL). The crop is in the 320x240 source's pixel
     // space (the decoded MockImage size, recorded as sourceWidth/Height). The
-    // frame (x, y, width, height, scale) is exactly what the overlay reported:
-    // the mocked overlay above reports width - 32, height - 24 and scale x1.15 /
-    // x1.1; the real overlay reports the crop size with a compensating scale.
+    // frame is what the overlay reported, stored unchanged: width / height equal
+    // to the crop size, with the scale and the position compensating (the 160 x
+    // 160 picture showed the whole 320 x 240 source, so 0.5 and 160 / 240). That
+    // rule itself is pinned on the real overlay in
+    // components/ProjectCanvasImageCropOverlay.test.tsx ('confirmed frame').
     expect(savedTargetImage).toEqual(
       expect.objectContaining({
         id: 'image-1',
-        x: 92,
-        y: 48,
-        width: 128,
-        height: 136,
-        scaleX: 1.15,
-        scaleY: 1.1,
+        x: 85,
+        y: expect.closeTo(44, 6),
+        width: 300,
+        height: 224,
+        scaleX: 0.5,
+        scaleY: expect.closeTo(160 / 240, 6),
         src: 'file:///C:/magicpot/crop-target.png',
         fileName: 'crop-target.png',
         sourceWidth: 320,
