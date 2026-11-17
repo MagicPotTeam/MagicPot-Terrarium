@@ -6,6 +6,7 @@ import ProjectCanvasPageStageScene, {
   PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS
 } from './ProjectCanvasPageStageScene'
 import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
+import { resolveCanvasImageDisplayCrop } from './canvasImageDisplayUtils'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -4805,19 +4806,67 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       }
     })
 
-    it('attaches no record when the evidence differs from the crop space', async () => {
-      // A 200x120 thumbnail in memory over a 400x240 source: the crop numbers are in thumbnail space.
-      const target = createImageItem('thumbnail-target')
+    it('attaches no record when the evidence cannot be related to the crop space', async () => {
+      // A 200x120 image in memory over a 400x400 source: another aspect, so the
+      // in-memory image is not a thumbnail of these bytes.
+      const target = createImageItem('unrelated-target')
       const evidence = deferEvidence()
       const { confirm, setItemsWithoutHistory } = renderCropTarget(target)
 
       act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
-      await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 400)))
       await act(async () => {
         await Promise.resolve()
       })
 
       expect(cropSourceEvidenceMock.read).toHaveBeenCalledTimes(1)
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    it('measures the source of a thumbnail-hydrated image and records the crop in source space (F2 part 4)', async () => {
+      // A 200x120 thumbnail in memory, no stored source size, a 400x240 source:
+      // the crop numbers are in thumbnail space and are scaled by 2.
+      const target = createImageItem('thumbnail-target')
+      expect(target.sourceWidth).toBeUndefined()
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+      await waitFor(() => expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1))
+
+      expect(cropSourceEvidenceMock.read).toHaveBeenCalledTimes(1)
+      const confirmed = applyConfirm(setItemsWithHistory, [target])
+      const [attested] = applyRecord(setItemsWithoutHistory, confirmed) as CanvasImageItem[]
+      expect(attested).toEqual(
+        expect.objectContaining({
+          src: target.src,
+          sourceWidth: 400,
+          sourceHeight: 240,
+          crop: { x: 40, y: 20, width: 160, height: 120 },
+          cropSource: expect.objectContaining({ origin: 'confirm', width: 400, height: 240 })
+        })
+      )
+      // The display reads the crop against the stored size: the same region of the thumbnail.
+      expect(resolveCanvasImageDisplayCrop(attested, attested.image)).toEqual(confirmedCrop)
+      expect(resolveCanvasImageDisplayCrop(confirmed[0] as CanvasImageItem, target.image)).toEqual(
+        confirmedCrop
+      )
+    })
+
+    it('never scales a crop measured in an explicit source size', async () => {
+      const explicit = {
+        ...createImageItem('explicit-mismatch'),
+        sourceWidth: 200,
+        sourceHeight: 120
+      }
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithoutHistory } = renderCropTarget(explicit)
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+      await act(async () => {
+        await Promise.resolve()
+      })
       expect(setItemsWithoutHistory).not.toHaveBeenCalled()
     })
 
@@ -4996,7 +5045,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
         try {
           const { confirm } = renderCropTarget(target, [], { provenCropRegistry: proven.registry })
           act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
-          await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+          await act(async () => evidence.resolve(syntheticEvidence(400, 400)))
           await act(async () => {
             await Promise.resolve()
           })

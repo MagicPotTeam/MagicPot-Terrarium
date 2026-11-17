@@ -4,7 +4,7 @@
 // never prove anything on their own; only a record whose byte size, SHA-256
 // and decoded pixel size match the source does.
 import { loadImageFromSrc } from './canvasAssetIntakeHelpers'
-import { getCanvasImageAssetSize } from './canvasImageAssetUtils'
+import { getCanvasImageAssetSize, isCanvasImagePlaceholderAsset } from './canvasImageAssetUtils'
 import { resolveAuthorizedCanvasLocalMediaSourceUrl } from './canvasLocalFileSource'
 import { resolveCanvasLocalFilePathFromSource } from './canvasLocalImageSource'
 import { sha256Hex } from './canvasSha256'
@@ -161,6 +161,60 @@ export function getCanvasCropOverlaySpace(
   const width = item.sourceWidth || imageSize.width
   const height = item.sourceHeight || imageSize.height
   return isPositiveSafeInteger(width) && isPositiveSafeInteger(height) ? { width, height } : null
+}
+
+/**
+ * A confirmed crop in the pixel space of the attested source. The overlay
+ * measured it in getCanvasCropOverlaySpace(item). When that space equals the
+ * source, the crop is returned as it is. When there is no stored source size
+ * and the in-memory image is a smaller copy of the source with the same aspect
+ * (a thumbnail the board was hydrated from), the crop is scaled into the
+ * source space and rounded to whole source pixels: once the source size is
+ * stored with it, every display path reads it against that size and shows the
+ * same region of the thumbnail. Null when the two spaces cannot be related, so
+ * the crop gets no record.
+ */
+export function resolveCanvasCropInSourceSpace(
+  item: CanvasImageItem,
+  crop: CanvasCrop,
+  cropSpace: { width: number; height: number },
+  source: { width: number; height: number }
+): { crop: CanvasCrop; scaled: boolean } | null {
+  if (source.width === cropSpace.width && source.height === cropSpace.height) {
+    return { crop: { x: crop.x, y: crop.y, width: crop.width, height: crop.height }, scaled: false }
+  }
+  // An explicit source size is what the overlay measured in: it must match.
+  if (item.sourceWidth !== undefined || item.sourceHeight !== undefined) return null
+  if (!item.image || isCanvasImagePlaceholderAsset(item.image)) return null
+  const imageSize = getCanvasImageAssetSize(item.image)
+  if (imageSize.width !== cropSpace.width || imageSize.height !== cropSpace.height) return null
+  if (
+    !isPositiveSafeInteger(source.width) ||
+    !isPositiveSafeInteger(source.height) ||
+    source.width < cropSpace.width ||
+    source.height < cropSpace.height
+  ) {
+    return null
+  }
+  // A thumbnail keeps the aspect up to the rounding of its own pixel size.
+  if (
+    Math.abs(source.width * cropSpace.height - cropSpace.width * source.height) >
+    Math.max(source.width, source.height)
+  ) {
+    return null
+  }
+  const values = [crop.x, crop.y, crop.width, crop.height]
+  if (!values.every((value) => typeof value === 'number' && Number.isFinite(value))) return null
+  const scaleX = source.width / cropSpace.width
+  const scaleY = source.height / cropSpace.height
+  const toSource = (value: number, scale: number, max: number) =>
+    Math.min(max, Math.max(0, Math.round(value * scale)))
+  const left = toSource(crop.x, scaleX, source.width)
+  const top = toSource(crop.y, scaleY, source.height)
+  const right = toSource(crop.x + crop.width, scaleX, source.width)
+  const bottom = toSource(crop.y + crop.height, scaleY, source.height)
+  if (right <= left || bottom <= top) return null
+  return { crop: { x: left, y: top, width: right - left, height: bottom - top }, scaled: true }
 }
 
 export function createCropSourceRecord(

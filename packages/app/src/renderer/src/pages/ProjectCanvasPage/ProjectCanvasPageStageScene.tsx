@@ -65,7 +65,8 @@ import {
   getCanvasCropOverlaySpace,
   hasVerifiableCrop,
   isConfirmedIdentityCrop,
-  readCanvasImageSourceEvidence
+  readCanvasImageSourceEvidence,
+  resolveCanvasCropInSourceSpace
 } from './canvasCropProvenance'
 import { drawVerifiedCanvasImageCropPng } from './canvasAgentAttachmentUtils'
 import {
@@ -2409,8 +2410,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
       // The registry fill leaves this item to the read below.
       const endPending = registry?.beginPending(item.id)
       try {
-        // The source size the record update writes when none was stored.
+        // The source size the record update writes when none was stored, and
+        // the crop in that space (scaled when the overlay measured a thumbnail).
         let attestedSourceSize: { width: number; height: number } | null = null
+        let attestedCrop: NonNullable<CanvasImageItem['crop']> | null = null
         const findLatest = () =>
           latestCanvasItemsForCropSourceRef.current.find(
             (candidate) => candidate.id === expected.id
@@ -2438,16 +2441,26 @@ export default function ProjectCanvasPageStageScene(props: any) {
         const isShownCrop = () => {
           if (!isCurrent()) return false
           const latest = findLatest()
-          return latest?.type === 'image' && isSameCanvasCrop(latest.crop, expected.crop)
+          if (latest?.type !== 'image') return false
+          return (
+            isSameCanvasCrop(latest.crop, expected.crop) ||
+            Boolean(attestedCrop && isSameCanvasCrop(latest.crop, attestedCrop))
+          )
         }
         const evidence = await readCanvasImageSourceEvidence(expected.src, isCurrent, {
           maxBytes: CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES
         })
         if (!evidence || !isCurrent()) return
-        if (evidence.width !== cropSpace.width || evidence.height !== cropSpace.height) return
+        // The same read measures the source: a crop drawn on a thumbnail (no
+        // stored source size) is scaled into the source space; any other
+        // mismatch between the overlay space and the bytes gets no record.
+        const inSource = resolveCanvasCropInSourceSpace(item, expected.crop, cropSpace, evidence)
+        if (!inSource) return
+        const sourceCrop = inSource.crop
         const cropSource = createCropSourceRecord(evidence, 'confirm')
         if (!cropSource) return
         attestedSourceSize = { width: cropSource.width, height: cropSource.height }
+        attestedCrop = sourceCrop
         // The record is a fact about these bytes and this crop, not an edit: it
         // goes to the present items and to every undo/redo snapshot that shows
         // the same crop on the same source, so neither an undo to a snapshot
@@ -2468,6 +2481,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
             ...candidate,
             sourceWidth: candidate.sourceWidth ?? cropSource.width,
             sourceHeight: candidate.sourceHeight ?? cropSource.height,
+            crop: { ...sourceCrop },
             cropSource
           }
           return hasVerifiableCrop(attested) ? attested : candidate
@@ -2493,7 +2507,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
           src: expected.src,
           sourceWidth: expected.sourceWidth ?? cropSource.width,
           sourceHeight: expected.sourceHeight ?? cropSource.height,
-          crop: expected.crop,
+          crop: sourceCrop,
           cropSource
         }
         if (!hasVerifiableCrop(provenItem) || !isCanvasProvenCropDrawable(provenItem)) return

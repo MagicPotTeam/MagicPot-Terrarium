@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { markCanvasImagePlaceholderAsset } from './canvasImageAssetUtils'
 import type { CanvasImageCropSource, CanvasImageItem } from './types'
 
 const mocks = vi.hoisted(() => ({
@@ -26,7 +27,8 @@ import {
   isConfirmedIdentityCrop,
   isCropSourceRecordValid,
   matchesCropSource,
-  readCanvasImageSourceEvidence
+  readCanvasImageSourceEvidence,
+  resolveCanvasCropInSourceSpace
 } from './canvasCropProvenance'
 
 // Synthetic bytes only: "synthetic" and a short fake PNG header; nothing is a real picture.
@@ -401,5 +403,70 @@ describe('crop source records', () => {
       getCanvasCropOverlaySpace(imageItem({ image, sourceWidth: 200, sourceHeight: 120 }))
     ).toEqual({ width: 200, height: 120 })
     expect(getCanvasCropOverlaySpace(imageItem())).toBeNull()
+  })
+})
+
+describe('resolveCanvasCropInSourceSpace (F2 part 4)', () => {
+  function sizedImage(width: number, height: number) {
+    const image = document.createElement('img')
+    Object.defineProperty(image, 'naturalWidth', { value: width })
+    Object.defineProperty(image, 'naturalHeight', { value: height })
+    return image
+  }
+  const crop = { x: 20, y: 10, width: 80, height: 60 }
+
+  it('keeps a crop measured in the source space as it is', () => {
+    const item = imageItem({ image: sizedImage(200, 120) })
+    expect(resolveCanvasCropInSourceSpace(item, crop, { width: 200, height: 120 }, { width: 200, height: 120 })).toEqual({
+      crop,
+      scaled: false
+    })
+  })
+
+  it('scales a crop drawn on a thumbnail with no stored source size into whole source pixels', () => {
+    const item = imageItem({ image: sizedImage(200, 120) })
+    expect(
+      resolveCanvasCropInSourceSpace(item, crop, { width: 200, height: 120 }, { width: 6000, height: 3600 })
+    ).toEqual({ crop: { x: 600, y: 300, width: 2400, height: 1800 }, scaled: true })
+    // A thumbnail rounded to whole pixels (6000x4001 shown as 200x133) still relates.
+    const rounded = imageItem({ image: sizedImage(200, 133) })
+    const scaled = resolveCanvasCropInSourceSpace(
+      rounded,
+      { x: 0, y: 0, width: 200, height: 133 },
+      { width: 200, height: 133 },
+      { width: 6000, height: 4001 }
+    )
+    expect(scaled).toEqual({ crop: { x: 0, y: 0, width: 6000, height: 4001 }, scaled: true })
+  })
+
+  it.each([
+    ['an explicit source size', { sourceWidth: 200, sourceHeight: 120 }, { width: 400, height: 240 }],
+    ['another aspect', {}, { width: 400, height: 400 }],
+    ['a source smaller than the image', {}, { width: 100, height: 60 }],
+    ['a fractional source size', {}, { width: 400.5, height: 240 }]
+  ] as const)('refuses %s', (_label, overrides, source) => {
+    const item = imageItem({ image: sizedImage(200, 120), ...overrides })
+    expect(resolveCanvasCropInSourceSpace(item, crop, { width: 200, height: 120 }, source)).toBeNull()
+  })
+
+  it('refuses a placeholder image and a crop space that is not the in-memory image', () => {
+    const placeholder = markCanvasImagePlaceholderAsset(sizedImage(200, 120))
+    expect(
+      resolveCanvasCropInSourceSpace(imageItem({ image: placeholder }), crop, { width: 200, height: 120 }, { width: 400, height: 240 })
+    ).toBeNull()
+    expect(
+      resolveCanvasCropInSourceSpace(imageItem({ image: sizedImage(200, 120) }), crop, { width: 200, height: 120 }, { width: 400, height: 240 })
+    ).not.toBeNull()
+    expect(
+      resolveCanvasCropInSourceSpace(imageItem({ image: undefined }), crop, { width: 200, height: 120 }, { width: 400, height: 240 })
+    ).toBeNull()
+    expect(
+      resolveCanvasCropInSourceSpace(
+        imageItem({ image: sizedImage(100, 60) }),
+        crop,
+        { width: 200, height: 120 },
+        { width: 400, height: 240 }
+      )
+    ).toBeNull()
   })
 })
