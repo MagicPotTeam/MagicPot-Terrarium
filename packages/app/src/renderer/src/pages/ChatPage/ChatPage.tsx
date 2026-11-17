@@ -8866,6 +8866,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
       teamTaskClaimsRef.current.delete(claimKey)
     }
   }
+  // A running task whose owner has no live run or send in this pane is left over from an earlier
+  // run (or an earlier app session): the team menu offers a reset for it, never a re-run.
+  const isTeamTaskOwnerBusy = (id: string): boolean =>
+    loadingSessionIds.has(id) || externalLoadingSessionIds.has(id) || sessionPreparing(id, sendingSessionIds, queuedSessionSends)
   useEffect(() => {
     if (!teamEnabled || !sessionsLoaded || sessionLoadError || !route?.threadId || !messageLeadId || teamLead?.teamEnded || teamLead?.archived) return
     const scope = storageScope, thread = route.threadId, leadId = messageLeadId, generation = messageGeneration
@@ -10510,7 +10514,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }}>{t('chat.confirm_branch_image_placeholders', { defaultValue: 'Confirm branch image placeholders' })}</Button>}
             <Button onClick={() => setImageRepairView(null)}>{t('chat.close_image_repair', { defaultValue: 'Close image repair' })}</Button>
           </Box>}
-          {teamEnabled && teamLead && <AgentTeamMenu openRequest={teamManagementOpenRequest} overlayHost={overlayHost} onReturnFocus={focusComposerInput} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} onBroadcast={async ({ id, text }) => {
+          {teamEnabled && teamLead && <AgentTeamMenu openRequest={teamManagementOpenRequest} overlayHost={overlayHost} onReturnFocus={focusComposerInput} onDispatch={taskId => void dispatchSelectedTeamTask(taskId)} isOwnerBusy={isTeamTaskOwnerBusy} onBroadcast={async ({ id, text }) => {
             const current = teamMessageDispatcherRef.current
             if (!current || current.key !== messageKey || !route?.threadId || !messageLeadId || !teamEnabled) throw new Error('Team channel unavailable.')
             // Avoid consuming the broadcast draft for a known-unavailable model setting.

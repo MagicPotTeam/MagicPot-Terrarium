@@ -6488,6 +6488,59 @@ describe('ChatPage runtime workflow integration', () => {
     } finally { page.unmount() }
   })
 
+  it('offers a reset for a stored running task with no live run after a remount, and runs it only on the next explicit dispatch', async () => {
+    const doneTask = {id:'earlier',title:'已完成任务',ownerId:'orphan-task-member',status:'done' as const,dependsOn:[]}
+    const lead: ChatSession = {id:'orphan-task-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[doneTask,{id:'task',title:'中断任务',ownerId:'orphan-task-member',status:'running',dependsOn:['earlier']}]}
+    const member: ChatSession = {id:'orphan-task-member',title:'writer',messages:[],teamLeadId:lead.id,teamMemberName:'writer'}
+    hoisted.storedSessions.value = [lead,member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID,'runtime-flow'),lead.id)
+    const first = renderChatPage({team:true})
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    first.unmount()
+    hoisted.requestChatCompletionMock.mockResolvedValueOnce({content:'重新执行完成'})
+    const page = renderChatPage({team:true})
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      expect(screen.getByText(/中断任务 · writer · 进行中 · Last run interrupted/)).toBeVisible()
+      expect(screen.getByRole('button',{name:'执行 中断任务'})).toBeDisabled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button',{name:'Reset: 中断任务'}))
+      await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[1]).toEqual({id:'task',title:'中断任务',ownerId:member.id,status:'pending',dependsOn:['earlier'],lastOutcome:'interrupted'}))
+      expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0]).toEqual(doneTask)
+      expect(screen.queryByRole('button',{name:'Reset: 中断任务'})).not.toBeInTheDocument()
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)) })
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      await waitFor(() => expect(screen.getByRole('button',{name:'执行 中断任务'})).toBeEnabled())
+      fireEvent.click(screen.getByRole('button',{name:'执行 中断任务'}))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[1]).toEqual({id:'task',title:'中断任务',ownerId:member.id,status:'done',dependsOn:['earlier']}))
+      expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0]).toEqual(doneTask)
+    } finally { page.unmount() }
+  })
+
+  it('offers no reset while the owner of a running task is still running it', async () => {
+    const lead: ChatSession = {id:'live-task-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[{id:'task',title:'运行中任务',ownerId:'live-task-member',status:'pending',dependsOn:[]}]}
+    const member: ChatSession = {id:'live-task-member',title:'writer',messages:[],teamLeadId:lead.id,teamMemberName:'writer'}
+    hoisted.storedSessions.value = [lead,member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID,'runtime-flow'),lead.id)
+    let finish!: (value: {content:string}) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const page = renderChatPage({team:true})
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      fireEvent.click(screen.getByRole('button',{name:'执行 运行中任务'}))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(screen.getByText(/运行中任务 · writer · 进行中/)).toBeVisible())
+      expect(screen.queryByRole('button',{name:'Reset: 运行中任务'})).not.toBeInTheDocument()
+      expect(screen.queryByText(/Last run interrupted/)).not.toBeInTheDocument()
+      await act(async () => { finish({content:'完成'}) })
+      await waitFor(() => expect(hoisted.storedSessions.value.find(session=>session.id===lead.id)?.teamTasks?.[0].status).toBe('done'))
+      expect(screen.queryByRole('button',{name:'Reset: 运行中任务'})).not.toBeInTheDocument()
+    } finally { finish?.({content:'cleanup'}); page.unmount() }
+  })
+
   it('keeps a task pending when its owner is busy at dispatch, before or while the claim commits', async () => {
     const lead: ChatSession = {id:'busy-task-lead',title:'Lead',messages:[],profileId:'base-model',teamTasks:[{id:'task',title:'忙碌任务',ownerId:'busy-task-member',status:'pending',dependsOn:[]}]}
     const member: ChatSession = {id:'busy-task-member',title:'Alice',messages:[],teamLeadId:lead.id,teamMemberName:'Alice'}

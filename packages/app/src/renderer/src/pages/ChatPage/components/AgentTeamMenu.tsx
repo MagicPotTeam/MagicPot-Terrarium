@@ -6,7 +6,7 @@ import AgentColumnOverlay from '@renderer/components/AgentColumnOverlay'
 import { getAgentColumnTokens } from '@renderer/components/agentColumnTokens'
 import type { ChatSession } from '../chatStorage'
 import { resolveTeamRequestSettings } from '../agentTeam'
-import { canSetTeamTaskStatus, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, validateTeamTasks } from '../agentTeamTasks'
+import { canSetTeamTaskStatus, setTeamTaskDependencies, setTeamTaskStatus, teamTaskBlockers, validateTeamTasks, type TeamTaskOutcome } from '../agentTeamTasks'
 
 const taskStatusLabel = { pending: '待处理', running: '进行中', done: '已完成' } as const
 const broadcastUnknownNotice = '广播结果未确认，请先核对相关会话，避免重复发送。'
@@ -14,7 +14,7 @@ const normalizeAccessibleName = (value: string) => value.replace(/\s+/g, ' ').tr
 const normalizePerceivedName = (value: string) => normalizeAccessibleName(value.replace(/[\u200b\u2060]/gu, ''))
 
 export default function AgentTeamMenu({
-  lead, members, models, onSave, onEnd, onDispatch, subscriptions, onSubscriptionChange, onBroadcast, openRequest, onReturnFocus, overlayHost
+  lead, members, models, onSave, onEnd, onDispatch, isOwnerBusy, subscriptions, onSubscriptionChange, onBroadcast, openRequest, onReturnFocus, overlayHost
 }: {
   /** Opens the dialog each time it changes (the composer "+" menu entry "团队…"). */
   openRequest?: number
@@ -26,6 +26,12 @@ export default function AgentTeamMenu({
   onBroadcast?(input: Readonly<{ id: string; text: string }>): { queued: number } | Promise<{ queued: number }>
   onEnd(): void
   onDispatch?(taskId: string): void
+  /**
+   * Whether a task owner (a member id, or the lead's id for lead tasks) has a live run or a send in
+   * preparation. A running task whose owner is not busy is left over from an ended run: it can be
+   * reset to pending. Without this callback no reset is offered.
+   */
+  isOwnerBusy?(ownerId: string): boolean
   subscriptions?: readonly string[]
   onSubscriptionChange?(memberId: string, subscribed: boolean): void
   lead: ChatSession
@@ -117,6 +123,11 @@ export default function AgentTeamMenu({
     onEnd()
   }
   const draftLocked = pendingDraft || pendingOther || draftUnconfirmed || broadcastPending
+  const runOutcomeLabel = (outcome: TeamTaskOutcome): string => outcome === 'failed'
+    ? t('chat.team_task_run_failed', { defaultValue: 'Last run failed' })
+    : outcome === 'cancelled'
+      ? t('chat.team_task_run_cancelled', { defaultValue: 'Last run cancelled' })
+      : t('chat.team_task_run_interrupted', { defaultValue: 'Last run interrupted' })
   const tasks = lead.teamTasks ?? []
   let validTasks = true
   try { validateTeamTasks(tasks) } catch { validTasks = false }
@@ -209,10 +220,18 @@ export default function AgentTeamMenu({
           try { resolveTeamRequestSettings(ownerMatches[0], lead); validOwner = true } catch { /* Stale member. */ }
         }
         const canDispatch = !draftLocked && !!onDispatch && !lead.teamEnded && validOwner && item.status === 'pending' && canSetTeamTaskStatus(tasks, item.id, 'running')
+        // Running without a live run of its owner: the run ended without reporting (an earlier app
+        // session, a lost save). Reset only returns it to pending; it never starts a run.
+        const orphanedRun = item.status === 'running' && !!isOwnerBusy && !isOwnerBusy(item.ownerId || lead.id)
+        const outcomeNote = orphanedRun ? runOutcomeLabel('interrupted') : item.status === 'pending' && item.lastOutcome ? runOutcomeLabel(item.lastOutcome) : ''
+        const resetLabel = t('chat.team_task_reset', { defaultValue: 'Reset' })
         return <Box key={item.id}>
-          <Typography variant="caption">{item.title} · {unconfirmedEntry?.kind === 'task' && unconfirmedEntry.id === item.id ? '未确认 · ' : ''}{item.ownerId ? (members.find(member => member.id === item.ownerId)?.teamMemberName ?? '原成员') : '组长'} · {taskStatusLabel[item.status]} · 依赖 {item.dependsOn.map(id => tasks.find(taskItem => taskItem.id === id)?.title ?? id).join(', ') || '无'}{blockers.length > 0 ? ` · 等待 ${blockers.map(blocker => blocker.title).join(', ')}` : ''}</Typography>
+          <Typography variant="caption">{item.title} · {unconfirmedEntry?.kind === 'task' && unconfirmedEntry.id === item.id ? '未确认 · ' : ''}{item.ownerId ? (members.find(member => member.id === item.ownerId)?.teamMemberName ?? '原成员') : '组长'} · {taskStatusLabel[item.status]}{outcomeNote ? ` · ${outcomeNote}` : ''} · 依赖 {item.dependsOn.map(id => tasks.find(taskItem => taskItem.id === id)?.title ?? id).join(', ') || '无'}{blockers.length > 0 ? ` · 等待 ${blockers.map(blocker => blocker.title).join(', ')}` : ''}</Typography>
           <Button size="small" aria-label={useDispatchPositionPrefix ? `当前列表第 ${taskIndex + 1} 项（位置随列表变化），执行：${item.title}` : dispatchNames[taskIndex]} disabled={!canDispatch} onClick={() => { if (canDispatch) onDispatch?.(item.id) }}>执行</Button>
           <Button size="small" aria-label={`当前列表第 ${taskIndex + 1} 项（位置随列表变化），${item.status === 'done' ? '重开' : '完成'}：${item.title}`} aria-describedby={reopenBlockedBySuccessor ? reopenDescriptionId : undefined} disabled={draftLocked || !canSetTeamTaskStatus(tasks, item.id, nextStatus)} onClick={() => saveOther({ ...lead, teamTasks: setTeamTaskStatus(tasks, item.id, nextStatus) })}>{item.status === 'done' ? '重开' : '完成'}</Button>
+          {orphanedRun && <Button size="small" aria-label={useDispatchPositionPrefix || (titleCounts.get(normalizeAccessibleName(item.title)) ?? 0) > 1 ? `${resetLabel} (${taskIndex + 1}): ${item.title}` : `${resetLabel}: ${item.title}`} disabled={draftLocked} onClick={() => {
+            if (!isOwnerBusy?.(item.ownerId || lead.id)) saveOther({ ...lead, teamTasks: setTeamTaskStatus(tasks, item.id, 'pending', 'interrupted') })
+          }}>{resetLabel}</Button>}
           {reopenBlockedBySuccessor && <Typography id={reopenDescriptionId} variant="caption" component="span">有进行中或已完成的后续任务，无法重开。</Typography>}
           <details><summary aria-label={useDispatchPositionPrefix || (titleCounts.get(normalizeAccessibleName(item.title)) ?? 0) > 1 ? `当前列表第 ${taskIndex + 1} 项（位置随列表变化），编辑依赖 · ${item.title}` : undefined}>编辑依赖 · {item.title}</summary>{tasks.filter(candidate => candidate.id !== item.id).map((candidate, candidateIndex) => {
             const selectedDependency = item.dependsOn.includes(candidate.id)
