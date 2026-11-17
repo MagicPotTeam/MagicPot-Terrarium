@@ -18,4 +18,9 @@ export type TerminalRunAuditEvidence = Readonly<{
   stderrChars: number
   truncated: boolean
   durationMs: number
+  /**
+   * win32 only, present when the run was stopped (timeout, output limit or cancel) through the
+   * Job Object helper: terminating the helper closes the job and kills every process in it.
+   */
+  processTreeStop?: 'job-object'
 }>
