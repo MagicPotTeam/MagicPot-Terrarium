@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { createHash } from 'node:crypto'
 
 import { CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES } from './canvasCropProvenance'
+import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import { useCanvasBridgeActions } from './useCanvasBridgeActions'
 import type { CanvasGroup, CanvasImageCropSource, CanvasImageItem, CanvasItem } from './types'
 
@@ -672,7 +673,10 @@ describe('useCanvasBridgeActions', () => {
       height: 30, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 5, locked: false, fill: '#fff',
       fontSize: 14, fontFamily: 'Arial' }
 
-    function setup(items: CanvasItem[]) {
+    function setup(
+      items: CanvasItem[],
+      extra: Partial<Parameters<typeof useCanvasBridgeActions>[0]> = {}
+    ) {
       const notifyError = vi.fn(), notifySuccess = vi.fn()
       const renderSnapshot = vi.fn(async (_items: CanvasItem[]) => 'data:image/png;base64,b3ZlcnZpZXc=')
       const events = vi.spyOn(window, 'dispatchEvent')
@@ -680,7 +684,7 @@ describe('useCanvasBridgeActions', () => {
       const hook = renderHook(() => useCanvasBridgeActions({
         canvasId: 'canvas-1', projectName: 'Demo', items, groups: [], notifyError, notifySuccess,
         extractPromptTextFromCanvasItems: () => 'note', renderCanvasItemsImageDataUrl: renderSnapshot,
-        renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg/>')
+        renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg/>'), ...extra
       }))
       const sendEvents = () => events.mock.calls
         .map(([event]) => event as CustomEvent)
@@ -768,6 +772,69 @@ describe('useCanvasBridgeActions', () => {
       expect(delivered).not.toContain(second)
       expect(delivered).not.toContain('"crop"')
       expect([croppedA, croppedB]).toEqual(before)
+    })
+
+    it('keeps the crop pixels of a verified send for later drags and nothing of a refused one', async () => {
+      const original = 'local-media:///C:/MagicPot/proven.jpg'
+      installCropImageFixture(original)
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+        drawImage: vi.fn()
+      } as never)
+      vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(
+        'data:image/png;base64,cHJvdmVuLWNyb3A='
+      )
+      const kept: Blob[] = []
+      const registry = createCanvasProvenCropRegistry(
+        {},
+        {
+          create: (blob) => {
+            kept.push(blob)
+            return `blob:proven-crop-${kept.length}`
+          },
+          revoke: vi.fn()
+        }
+      )
+      const cropped = createImageItem('proven', 'proven.jpg', {
+        sourceWidth: 100,
+        sourceHeight: 80,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: LOCAL_SOURCE_RECORD
+      })
+      const sent = setup([cropped], { provenCropRegistry: registry })
+      await act(async () => {
+        await sent.result.current.handleSendCanvasItemsToAgent([cropped])
+        vi.runAllTimers()
+      })
+      expect(sent.notifyError).not.toHaveBeenCalled()
+      expect(registry.lookup(cropped)).toEqual({
+        url: 'blob:proven-crop-1',
+        fileName: 'proven.png',
+        mimeType: 'image/png',
+        sizeBytes: 11,
+        width: 30,
+        height: 40
+      })
+      expect(kept).toHaveLength(1)
+      expect(kept[0]).toMatchObject({ type: 'image/png', size: 'proven-crop'.length })
+      sent.unmount()
+
+      const unproven = createImageItem('unproven', 'proven.jpg', {
+        sourceWidth: 100,
+        sourceHeight: 80,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: { ...LOCAL_SOURCE_RECORD, sizeBytes: LOCAL_SOURCE_RECORD.sizeBytes + 1 }
+      })
+      const refused = setup([unproven], { provenCropRegistry: registry })
+      await act(async () => {
+        await refused.result.current.handleSendCanvasItemsToAgent([unproven])
+        vi.runAllTimers()
+      })
+      expect(refused.notifyError).toHaveBeenCalledExactlyOnceWith(
+        'canvas.agent_send_cropped_image_failed'
+      )
+      expect(registry.lookup(unproven)).toBeNull()
+      expect(registry.entryCount).toBe(1)
+      expect(kept).toHaveLength(1)
     })
 
     it('allocates no canvas and decodes nothing when the canvas unmounts while the source is read', async () => {

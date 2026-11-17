@@ -67,6 +67,8 @@ import {
   isConfirmedIdentityCrop,
   readCanvasImageSourceEvidence
 } from './canvasCropProvenance'
+import { drawVerifiedCanvasImageCropPng } from './canvasAgentAttachmentUtils'
+import type { CanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -884,6 +886,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     setInlineTextEdit,
     setItemsWithHistory,
     setItemsWithoutHistory,
+    provenCropRegistry,
     setLabelDialogItemId,
     setLabelDialogOpen,
     setLabelDialogText,
@@ -2352,8 +2355,24 @@ export default function ProjectCanvasPageStageScene(props: any) {
         })
         return changed ? next : prev
       })
+      // Keep the crop's pixels, drawn from the decode of the verified bytes, so
+      // a drag start (synchronous, cannot hash) can carry only what is visible.
+      const registry = provenCropRegistry as CanvasProvenCropRegistry | undefined
+      if (!registry) return
+      const provenItem: CanvasImageItem = {
+        ...item,
+        src: expected.src,
+        sourceWidth: expected.sourceWidth ?? cropSource.width,
+        sourceHeight: expected.sourceHeight ?? cropSource.height,
+        crop: expected.crop,
+        cropSource
+      }
+      if (!hasVerifiableCrop(provenItem)) return
+      const png = await drawVerifiedCanvasImageCropPng(provenItem, evidence)
+      if (!png || !isCurrent()) return
+      registry.register(provenItem, png.blob, png)
     },
-    [setItemsWithoutHistory]
+    [provenCropRegistry, setItemsWithoutHistory]
   )
   const handleCropConfirm = React.useCallback(
     (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {

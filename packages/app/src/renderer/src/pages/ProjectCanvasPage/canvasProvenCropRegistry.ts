@@ -7,12 +7,13 @@
 // cropped pixels are held, as small PNG Blobs behind canvas-owned object URLs;
 // the registry is bounded and released with the board.
 import {
+  canvasPngDataUrlToBlob,
   getCanvasImageCropPngFileName,
   type CanvasProvenCropPixels
 } from './canvasAgentAttachmentUtils'
 import { hasVerifiableCrop } from './canvasCropProvenance'
 import { normalizeCanvasImageDisplayCrop } from './canvasImageDisplayUtils'
-import type { CanvasImageItem } from './types'
+import type { CanvasImageItem, CanvasItem } from './types'
 
 export const CANVAS_PROVEN_CROP_REGISTRY_MAX_ENTRIES = 24
 export const CANVAS_PROVEN_CROP_REGISTRY_MAX_BYTES = 64 * 1024 * 1024
@@ -203,4 +204,48 @@ export function createCanvasProvenCropRegistry(
       return totalBytes
     }
   }
+}
+
+/**
+ * After an Agent send proved its crops (prepareCanvasAgentCropDelivery
+ * 'ready'), keeps the drawn PNG of each proven crop so a later drag of the same
+ * crop can use it. originals and attachmentItems are the selection before and
+ * after preparation, in the same order. Best effort: a refused or failed entry
+ * changes nothing about the send. Returns the number of entries made.
+ */
+export function registerCanvasAgentSendProvenCrops(
+  registry: CanvasProvenCropRegistry | null | undefined,
+  originals: CanvasItem[],
+  attachmentItems: CanvasItem[]
+): number {
+  if (!registry || originals.length !== attachmentItems.length) return 0
+  let registered = 0
+  originals.forEach((original, index) => {
+    const prepared = attachmentItems[index]
+    if (
+      original.type !== 'image' ||
+      !original.crop ||
+      prepared?.type !== 'image' ||
+      prepared.id !== original.id ||
+      prepared.crop ||
+      prepared.src === original.src ||
+      !getCanvasProvenCropKey(original)
+    ) {
+      return
+    }
+    // Skip the decode of a PNG the registry would refuse for its size.
+    if ((prepared.sizeBytes ?? 0) > CANVAS_PROVEN_CROP_ENTRY_MAX_BYTES) return
+    try {
+      const png = canvasPngDataUrlToBlob(prepared.src)
+      if (!png) return
+      const entry = registry.register(original, png, {
+        width: prepared.sourceWidth ?? 0,
+        height: prepared.sourceHeight ?? 0
+      })
+      if (entry) registered += 1
+    } catch {
+      // The send does not depend on the drag registry.
+    }
+  })
+  return registered
 }

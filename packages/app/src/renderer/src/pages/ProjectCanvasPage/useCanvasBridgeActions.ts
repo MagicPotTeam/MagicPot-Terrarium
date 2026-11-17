@@ -16,6 +16,10 @@ import {
   type CanvasAgentCropPreparation
 } from './canvasAgentAttachmentUtils'
 import { resolveActiveAgentScope } from './canvasPageLocalStateUtils'
+import {
+  registerCanvasAgentSendProvenCrops,
+  type CanvasProvenCropRegistry
+} from './canvasProvenCropRegistry'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
 import type { AgentTargetApp, SendCanvasItemsToAgentOptions } from './projectCanvasPageShared'
 import type { CanvasGroup, CanvasItem, CanvasModel3DItem, CanvasVideoItem } from './types'
@@ -37,6 +41,8 @@ type UseCanvasBridgeActionsOptions = {
   notifySuccess: NotifyFn
   notifyError: NotifyFn
   extractPromptTextFromCanvasItems: (targetItems: CanvasItem[]) => string
+  /** Receives the pixels of every crop this send proves, for later drags. */
+  provenCropRegistry?: CanvasProvenCropRegistry
   renderCanvasItemsImageDataUrl: (
     targetItems: CanvasItem[],
     includeBackground?: boolean,
@@ -70,6 +76,7 @@ export function useCanvasBridgeActions({
   notifySuccess,
   notifyError,
   extractPromptTextFromCanvasItems,
+  provenCropRegistry,
   renderCanvasItemsImageDataUrl,
   renderCanvasItemsSvgMarkup
 }: UseCanvasBridgeActionsOptions) {
@@ -169,6 +176,15 @@ export function useCanvasBridgeActions({
           return false
         }
         const { attachmentItems, overviewItems } = cropPreparation
+        // Every crop here was drawn from bytes that matched its record: keep
+        // its pixels so the same crop can be dragged out later.
+        if (attachmentItems !== expandedTargetItems) {
+          registerCanvasAgentSendProvenCrops(
+            provenCropRegistry,
+            expandedTargetItems,
+            attachmentItems
+          )
+        }
 
         const baseAttachments = buildCanvasAgentAttachments(attachmentItems)
         const attachmentManifest = buildCanvasAgentAttachmentManifest(attachmentItems)
@@ -364,6 +380,7 @@ export function useCanvasBridgeActions({
       groups,
       items,
       notifyError,
+      provenCropRegistry,
       renderCanvasItemsImageDataUrl,
       t
     ]

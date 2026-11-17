@@ -3,9 +3,10 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createCanvasProvenCropRegistry,
   getCanvasProvenCropKey,
-  getCanvasProvenCropOutputSize
+  getCanvasProvenCropOutputSize,
+  registerCanvasAgentSendProvenCrops
 } from './canvasProvenCropRegistry'
-import type { CanvasImageCropSource, CanvasImageItem } from './types'
+import type { CanvasImageCropSource, CanvasImageItem, CanvasItem } from './types'
 
 // Synthetic record and PNG bytes; nothing is read or decoded.
 const RECORD: CanvasImageCropSource = {
@@ -175,5 +176,84 @@ describe('canvas proven crop registry', () => {
         croppedItem({ crop: { x: 0.4, y: 0, width: 99.6, height: 50.4 } })
       )
     ).toEqual({ width: 100, height: 50 })
+  })
+})
+
+describe('crops proven by an Agent send', () => {
+  // base64 of the synthetic bytes 'crop-png'.
+  const DRAWN = 'data:image/png;base64,Y3JvcC1wbmc='
+  const sent = (
+    item: CanvasImageItem,
+    overrides: Partial<CanvasImageItem> = {}
+  ): CanvasImageItem => {
+    const { crop: _crop, cropSource: _cropSource, ...rest } = item
+    return {
+      ...rest,
+      src: DRAWN,
+      fileName: 'source.png',
+      sizeBytes: 8,
+      sourceWidth: 60,
+      sourceHeight: 30,
+      width: 60,
+      height: 30,
+      ...overrides
+    }
+  }
+
+  it('keeps the drawn PNG of each proven crop of the selection, in order', () => {
+    const { registry, create } = createRegistry()
+    const a = croppedItem({ id: 'a' })
+    const plain = croppedItem({ id: 'plain', crop: undefined, cropSource: undefined })
+    const text = { id: 'note', type: 'text' } as unknown as CanvasItem
+    expect(
+      registerCanvasAgentSendProvenCrops(registry, [a, plain, text], [sent(a), plain, text])
+    ).toBe(1)
+    expect(create).toHaveBeenCalledOnce()
+    const blob = create.mock.calls[0][0]
+    expect(blob.type).toBe('image/png')
+    expect(blob.size).toBe('crop-png'.length)
+    expect(registry.lookup(a)).toEqual(
+      expect.objectContaining({ width: 60, height: 30, sizeBytes: 8 })
+    )
+    expect(registry.lookup(plain)).toBeNull()
+  })
+
+  it.each([
+    [
+      'a prepared item that still has its crop',
+      (item: CanvasImageItem) => ({ ...sent(item), crop: item.crop })
+    ],
+    [
+      'a prepared item that is still the original',
+      (item: CanvasImageItem) => sent(item, { src: item.src })
+    ],
+    ['a prepared item of another id', (item: CanvasImageItem) => sent(item, { id: 'other' })],
+    [
+      'a prepared item that is not a PNG data URL',
+      (item: CanvasImageItem) => sent(item, { src: 'data:image/jpeg;base64,Y3JvcC1wbmc=' })
+    ],
+    [
+      'a prepared item of another pixel size',
+      (item: CanvasImageItem) => sent(item, { sourceWidth: 59 })
+    ],
+    [
+      'a prepared item over the entry limit',
+      (item: CanvasImageItem) => sent(item, { sizeBytes: 33 * 1024 * 1024 })
+    ]
+  ] as const)('keeps nothing for %s', (_label, prepare) => {
+    const { registry, create } = createRegistry()
+    const item = croppedItem()
+    expect(registerCanvasAgentSendProvenCrops(registry, [item], [prepare(item)])).toBe(0)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('keeps nothing for a crop without a usable record or for misaligned lists', () => {
+    const { registry, create } = createRegistry()
+    const unrecorded = croppedItem({ cropSource: undefined })
+    expect(registerCanvasAgentSendProvenCrops(registry, [unrecorded], [sent(unrecorded)])).toBe(0)
+    const item = croppedItem()
+    expect(registerCanvasAgentSendProvenCrops(registry, [item], [])).toBe(0)
+    expect(registerCanvasAgentSendProvenCrops(undefined, [item], [sent(item)])).toBe(0)
+    expect(create).not.toHaveBeenCalled()
   })
 })

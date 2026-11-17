@@ -169,6 +169,7 @@ import { useCanvasInlineTextEffects } from './useCanvasInlineTextEffects'
 import { useCanvasMediaRuntime } from './useCanvasMediaRuntime'
 import { useCanvasStageResize } from './useCanvasStageResize'
 import { buildProjectCanvasPageShellProps } from './buildProjectCanvasPageShellProps'
+import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import { useProjectCanvasPageRuntimeState } from './useProjectCanvasPageRuntimeState'
 import { useProjectCanvasPageShellState } from './useProjectCanvasPageShellState'
 import { useCanvasViewportPlacement } from './useCanvasViewportPlacement'
@@ -236,6 +237,9 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   )
   const { imageBatchImportProgress, isImageBatchImportActive, handleImageBatchImportProgress } =
     useCanvasImageBatchImportProgress()
+  // Pixels of proven crops for drags; owned by this board and released with it.
+  const [provenCropRegistry] = useState(createCanvasProvenCropRegistry)
+  useEffect(() => () => provenCropRegistry.release(), [provenCropRegistry])
 
   const projectName = useSelector((state: any) => {
     const tab = state.layout.openTabs.find((t: any) => t.id === canvasId)
@@ -719,6 +723,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     notifySuccess,
     notifyError,
     extractPromptTextFromCanvasItems,
+    provenCropRegistry,
     renderCanvasItemsImageDataUrl,
     renderCanvasItemsSvgMarkup
   })
@@ -1268,6 +1273,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     nextZIndex,
     notifyError,
     notifySuccess,
+    provenCropRegistry,
     selectedIds,
     setAnnotationFillOpacity,
     setContextMenuTarget,
@@ -1598,6 +1604,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     setItems,
     setItemsWithHistory,
     setItemsWithoutHistory: setItems,
+    provenCropRegistry,
     setLabelDialogItemId,
     setSelectedHistoryRevision,
     setLabelDialogOpen,

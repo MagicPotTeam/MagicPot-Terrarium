@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
 import ProjectCanvasPageStageScene from './ProjectCanvasPageStageScene'
+import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -4340,7 +4341,11 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     })
     const confirmedCrop = { x: 20, y: 10, width: 80, height: 60 }
 
-    function renderCropTarget(target: CanvasImageItem, siblings: CanvasImageItem[] = []) {
+    function renderCropTarget(
+      target: CanvasImageItem,
+      siblings: CanvasImageItem[] = [],
+      extra: Record<string, unknown> = {}
+    ) {
       const setItemsWithHistory = vi.fn()
       const setItemsWithoutHistory = vi.fn()
       const props = {
@@ -4348,7 +4353,8 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
         tool: 'crop-select',
         croppingImageId: target.id,
         setItemsWithHistory,
-        setItemsWithoutHistory
+        setItemsWithoutHistory,
+        ...extra
       }
       const view = render(<ProjectCanvasPageStageScene {...props} />)
       const confirm = cropOverlayProps.get(target.id)?.onConfirm as (
@@ -4513,6 +4519,131 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       await Promise.resolve()
 
       expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    describe('drag registry of proven crops', () => {
+      function setupRegistry() {
+        const kept: Blob[] = []
+        const revoke = vi.fn()
+        const registry = createCanvasProvenCropRegistry(
+          {},
+          {
+            create: (blob) => {
+              kept.push(blob)
+              return `blob:proven-crop-${kept.length}`
+            },
+            revoke
+          }
+        )
+        const drawImage = vi.fn()
+        const getContext = vi
+          .spyOn(HTMLCanvasElement.prototype, 'getContext')
+          .mockReturnValue({ drawImage } as never)
+        let encode: ((blob: Blob | null) => void) | null = null
+        const toBlob = vi
+          .spyOn(HTMLCanvasElement.prototype, 'toBlob')
+          .mockImplementation((callback: BlobCallback) => {
+            encode = callback
+          })
+        return {
+          registry,
+          kept,
+          drawImage,
+          toBlob,
+          finishEncode: (blob: Blob | null) => encode?.(blob),
+          restore: () => {
+            getContext.mockRestore()
+            toBlob.mockRestore()
+          }
+        }
+      }
+
+      it('keeps the crop drawn from the verified decode once the confirm record lands', async () => {
+        const target = createImageItem('registry-target')
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(
+            target,
+            [],
+            { provenCropRegistry: proven.registry }
+          )
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          const read = syntheticEvidence(200, 120)
+          await act(async () => evidence.resolve(read))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          expect(proven.drawImage).toHaveBeenCalledExactlyOnceWith(
+            read.image,
+            20,
+            10,
+            80,
+            60,
+            0,
+            0,
+            80,
+            60
+          )
+          expect(proven.toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/png')
+          const png = new Blob(['proven-crop'], { type: 'image/png' })
+          await act(async () => proven.finishEncode(png))
+
+          const confirmed = (
+            setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+          )([target])
+          const attach = setItemsWithoutHistory.mock.calls[0][0] as (
+            prev: CanvasItem[]
+          ) => CanvasItem[]
+          const [attested] = attach(confirmed) as CanvasImageItem[]
+          await waitFor(() => expect(proven.registry.lookup(attested)).not.toBeNull())
+          expect(proven.registry.lookup(attested)).toEqual(
+            expect.objectContaining({ url: 'blob:proven-crop-1', width: 80, height: 60 })
+          )
+          expect(proven.kept).toEqual([png])
+          // The pixels are kept only for the record they were drawn under.
+          expect(proven.registry.lookup(confirmed[0] as CanvasImageItem)).toBeNull()
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('keeps nothing and draws nothing when the evidence differs from the crop space', async () => {
+        const target = createImageItem('registry-mismatch')
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { confirm } = renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+          await act(async () => {
+            await Promise.resolve()
+          })
+          expect(proven.drawImage).not.toHaveBeenCalled()
+          expect(proven.toBlob).not.toHaveBeenCalled()
+          expect(proven.registry.entryCount).toBe(0)
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('keeps nothing when the scene unmounts while the crop is encoded', async () => {
+        const target = createImageItem('registry-unmount')
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { view, confirm } = renderCropTarget(target, [], {
+            provenCropRegistry: proven.registry
+          })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          view.unmount()
+          await act(async () => proven.finishEncode(new Blob(['late'], { type: 'image/png' })))
+          expect(proven.registry.entryCount).toBe(0)
+          expect(proven.kept).toHaveLength(0)
+        } finally {
+          proven.restore()
+        }
+      })
     })
 
     it('drops the old record of a re-cropped item until the source is attested again', () => {
