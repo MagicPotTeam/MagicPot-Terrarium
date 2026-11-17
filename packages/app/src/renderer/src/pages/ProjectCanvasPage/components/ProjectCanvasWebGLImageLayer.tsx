@@ -295,7 +295,13 @@ export const PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET = 128
 // buffer and adds no chunk; the layer's context holds 0 bytes of chunks after it. The ~104 MB
 // once seen right after an import belonged to the thumbnail workers' accelerated canvases,
 // not to this layer; the workers now draw on CPU canvases and no longer hold it.
+// The item's own preview image (the page's 512 px bitmap of an import) goes through the same
+// budget: it is uploaded here, eagerly, and never by Pixi on its first draw.
 export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_BYTES = 16 * 1024 * 1024
+// The eager uploads of one display frame also stay within this much main-thread time. The
+// time of the next upload is estimated from the measured time per byte of the earlier ones;
+// the first upload of a frame always goes, so every texture gets its turn.
+export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_MS = 4
 // If the GPU never reports the previous frame's uploads as finished (no fence support, a lost
 // fence), the next frame's uploads wait at most this long.
 export const PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_MAX_WAIT_MS = 1000
@@ -537,6 +543,10 @@ type ProjectCanvasLargeTextureUploadPacer = {
   startedAt: number
   // Bytes of eager uploads since the last display frame.
   bytesThisFrame: number
+  // Main-thread milliseconds of those uploads.
+  uploadMsThisFrame: number
+  // Measured upload time per byte (moving average); 0 until the first upload.
+  uploadMsPerByte: number
   // Uploads ran since the fence was made; the next fence is made at the end of the pass.
   fencePending: boolean
   // An upload was held back and waits for the next reconcile pass.
@@ -574,7 +584,11 @@ function isProjectCanvasLargeTextureUploadReady(
   textureByteSize = 0
 ) {
   if (pacer.bytesThisFrame > 0) {
-    return pacer.bytesThisFrame + textureByteSize <= PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_BYTES
+    return (
+      pacer.bytesThisFrame + textureByteSize <= PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_BYTES &&
+      pacer.uploadMsThisFrame + pacer.uploadMsPerByte * Math.max(1, textureByteSize) <=
+        PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_MS
+    )
   }
   if (pacer.sync === null) {
     return true
@@ -597,10 +611,22 @@ function isProjectCanvasLargeTextureUploadReady(
 
 function noteProjectCanvasLargeTextureUpload(
   pacer: ProjectCanvasLargeTextureUploadPacer,
-  textureByteSize: number
+  textureByteSize: number,
+  elapsedMs: number
 ) {
-  pacer.bytesThisFrame += Math.max(1, textureByteSize)
+  const bytes = Math.max(1, textureByteSize)
+  const safeElapsedMs = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0
+  pacer.bytesThisFrame += bytes
+  pacer.uploadMsThisFrame += safeElapsedMs
+  const msPerByte = safeElapsedMs / bytes
+  pacer.uploadMsPerByte =
+    pacer.uploadMsPerByte > 0 ? pacer.uploadMsPerByte * 0.75 + msPerByte * 0.25 : msPerByte
   pacer.fencePending = true
+}
+
+function resetProjectCanvasTextureUploadFrame(pacer: ProjectCanvasLargeTextureUploadPacer) {
+  pacer.bytesThisFrame = 0
+  pacer.uploadMsThisFrame = 0
 }
 
 // One fence after the last upload of a pass covers all of them (fences pass in order).
@@ -1522,6 +1548,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     sync: null,
     startedAt: 0,
     bytesThisFrame: 0,
+    uploadMsThisFrame: 0,
+    uploadMsPerByte: 0,
     fencePending: false,
     waiting: false
   })
@@ -1702,7 +1730,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     largeTextureUploadFrameRef.current = window.requestAnimationFrame(() => {
       largeTextureUploadFrameRef.current = null
       const pacer = largeTextureUploadPacerRef.current
-      pacer.bytesThisFrame = 0
+      resetProjectCanvasTextureUploadFrame(pacer)
       // A gesture ends with a reconcile pass of its own, which retries the held-back upload.
       if (!pacer.waiting || isViewportInteractingRef.current) {
         return
@@ -3440,7 +3468,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         getProjectCanvasWebGLFenceContext(appRef.current),
         largeTextureUploadPacerRef.current
       )
-      largeTextureUploadPacerRef.current.bytesThisFrame = 0
+      resetProjectCanvasTextureUploadFrame(largeTextureUploadPacerRef.current)
       largeTextureUploadPacerRef.current.fencePending = false
       largeTextureUploadPacerRef.current.waiting = false
       if (imageVersionFrameRef.current !== null) {
@@ -5249,6 +5277,21 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     let residentCandidateTextureBytes = 0
     let worldOrderDirty = false
     const nextRenderItems = new Map<string, ProjectCanvasRenderableImage>()
+    // Uploads a new texture now and counts its bytes and main-thread time against this
+    // display frame's upload budget (checked before the texture was created).
+    const uploadTextureNowWithinFrameBudget = (texture: Texture, textureByteSize: number) => {
+      const uploadStartedAt = window.performance.now()
+      if (!uploadProjectCanvasTextureNow(appRef.current, texture)) {
+        return false
+      }
+      noteProjectCanvasLargeTextureUpload(
+        largeTextureUploadPacerRef.current,
+        textureByteSize,
+        window.performance.now() - uploadStartedAt
+      )
+      armLargeTextureUploadFrame()
+      return true
+    }
 
     const reconcileSpatialTilePresentation = (input: SpatialTileReconcileInput) => {
       if (
@@ -5798,7 +5841,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (
         canUploadEagerly &&
         sharedTexturePoolRef.current.getRefCount(sharedTextureKey) === 0 &&
-        decodedRecordsByImageRef.current.has(image) &&
         !isProjectCanvasDecodedImageReleased(image) &&
         !isProjectCanvasLargeTextureUploadReady(
           largeTextureUploadGl,
@@ -5809,7 +5851,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       ) {
         // This frame's upload budget is spent, or the previous frame's uploads are still in
         // flight: keep the decode (it is wanted by this pass, so the decoded budget keeps it)
-        // and what is on screen, and upload in a later frame.
+        // or the item's own preview, and what is on screen, and upload in a later frame.
         largeTextureUploadPacerRef.current.waiting = true
         armLargeTextureUploadFrame()
         if (existingRecord) {
@@ -5924,14 +5966,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               textureDecodedAssetRef.current.set(baseTexture!, decodedAsset)
             }
           }
-          if (alreadyUploaded || uploadProjectCanvasTextureNow(appRef.current, baseTexture)) {
-            if (!alreadyUploaded) {
-              noteProjectCanvasLargeTextureUpload(
-                largeTextureUploadPacerRef.current,
-                textureByteSize
-              )
-              armLargeTextureUploadFrame()
-            }
+          if (alreadyUploaded || uploadTextureNowWithinFrameBudget(baseTexture, textureByteSize)) {
             eagerlyUploadedTexturesRef.current.add(baseTexture)
             if (isCanvasImageBitmapLike(image)) {
               releaseDecodedImagePixelsAfterUpload(image)
@@ -5946,6 +5981,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             // No eager upload on this renderer: Pixi uploads on a later draw, so the
             // texture keeps its actual input alive until it is destroyed.
             holdDecodedAssetForTexture()
+          }
+        } else if (createdSharedTexture && canUploadEagerly) {
+          // The item's own preview (the page's bitmap or element, not a decode of this
+          // layer): upload it now, inside this frame's upload budget, instead of letting Pixi
+          // upload it on its first draw outside every budget. The page owns the image and
+          // keeps it; nothing is released here.
+          if (uploadTextureNowWithinFrameBudget(baseTexture, textureByteSize)) {
+            eagerlyUploadedTexturesRef.current.add(baseTexture)
           }
         }
         ;(baseTexture.source as { scaleMode?: 'nearest' | 'linear' }).scaleMode =

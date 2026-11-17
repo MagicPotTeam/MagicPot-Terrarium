@@ -138,7 +138,12 @@ let bitmapClosedWithLiveTexture: ImageBitmap[] = []
 let closedBitmaps = new WeakSet<object>()
 // false simulates a renderer without an eager upload: Pixi then uploads on a later draw.
 let mockRendererSupportsEagerUpload = true
+// Eager uploads of the layer's own decodes (bitmaps, decoded image elements)...
 let eagerTextureUploads: unknown[] = []
+// ...and of the items' own preview images (item.image of an item from createItem, or any
+// real <img> element), which the layer uploads eagerly too but never releases.
+let eagerPreviewUploads: unknown[] = []
+let providedItemImages = new WeakSet<object>()
 // 1 simulates a WebGL 1 context, which cannot run the edge-antialias program.
 let mockWebGLVersion = 2
 // true gives the mock context WebGL 2 fences; each one passes when the test sets `signaled`.
@@ -439,7 +444,14 @@ function installPixiMock() {
                   }
                   if (!source.gpuValid) {
                     assertBitmapUploadable(source.resource)
-                    eagerTextureUploads.push(source.resource)
+                    if (
+                      source.resource instanceof HTMLImageElement ||
+                      providedItemImages.has(source.resource as object)
+                    ) {
+                      eagerPreviewUploads.push(source.resource)
+                    } else {
+                      eagerTextureUploads.push(source.resource)
+                    }
                     source.gpuValid = true
                   }
                 })
@@ -608,7 +620,7 @@ function getTextureImage(sprite: MockSpriteInstance | null) {
 }
 
 function createItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
-  return {
+  const item: CanvasImageItem = {
     id: 'image-1',
     type: 'image',
     src: 'file:///image-1.png',
@@ -625,6 +637,10 @@ function createItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
     image: createImage(100, 60),
     ...overrides
   }
+  if (item.image && typeof item.image === 'object') {
+    providedItemImages.add(item.image)
+  }
+  return item
 }
 
 function createNamedItem(id: string, overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
@@ -718,6 +734,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     closedBitmaps = new WeakSet<object>()
     mockRendererSupportsEagerUpload = true
     eagerTextureUploads = []
+    eagerPreviewUploads = []
+    providedItemImages = new WeakSet<object>()
     mockWebGLVersion = 2
     mockWebGLFences = false
     createdWebGLFences = []
@@ -952,6 +970,99 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
     })
 
+    // Items that arrive with a preview image of their own (an import's 512 px bitmaps), each
+    // upload taking `uploadMs` of main-thread time on a clock that moves only during uploads.
+    const renderOwnPreviews = async (count: number, uploadMs: number) => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      let clockMs = 1000
+      vi.spyOn(window.performance, 'now').mockImplementation(() => clockMs)
+      let displayFrame = 0
+      const requestFrame = window.requestAnimationFrame.bind(window)
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+        requestFrame((time) => {
+          displayFrame += 1
+          callback(time)
+        })
+      )
+      const items = Array.from({ length: count }, (_, index) =>
+        createNamedItem(`preview-${index + 1}`, {
+          x: 24 + (index % 6) * 180,
+          y: 24 + Math.floor(index / 6) * 140,
+          zIndex: index,
+          image: createImage(512, 512)
+        })
+      )
+      const uploadFrames: number[] = []
+      let lazyUploads = 0
+      const utils = render(<Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdApplications).toHaveLength(1))
+      const app = createdApplications[0]
+      const upload = app.renderer.texture!.initSource
+      const uploadImplementation = upload.getMockImplementation() as (
+        source: MockTextureSource
+      ) => void
+      upload.mockImplementation((source: MockTextureSource) => {
+        uploadFrames.push(displayFrame)
+        clockMs += uploadMs
+        uploadImplementation(source)
+      })
+      const renderImplementation = app.render.getMockImplementation() as () => void
+      app.render.mockImplementation(() => {
+        lazyUploads += createdSprites.filter(
+          (sprite) =>
+            !sprite.destroyed &&
+            sprite.parent &&
+            !(sprite.texture.source as MockTextureSource).gpuValid
+        ).length
+        renderImplementation()
+      })
+      const uploadsPerFrame = () => {
+        const perFrame = new Map<number, number>()
+        uploadFrames.forEach((frame) => perFrame.set(frame, (perFrame.get(frame) ?? 0) + 1))
+        return [...perFrame.values()]
+      }
+      return { ...utils, app, items, uploadsPerFrame, getLazyUploads: () => lazyUploads }
+    }
+
+    it("uploads the items' own preview images eagerly, within the frame byte budget", async () => {
+      // Twenty 1 MiB previews: 16 MiB go up in one display frame, the rest in the next one,
+      // before any draw; Pixi never uploads one lazily inside a render.
+      const { items, uploadsPerFrame, getLazyUploads } = await renderOwnPreviews(20, 0)
+
+      await waitFor(() => expect(eagerPreviewUploads).toHaveLength(20))
+      expect(new Set(eagerPreviewUploads)).toEqual(new Set(items.map((item) => item.image)))
+      expect(uploadsPerFrame()).toEqual([16, 4])
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+      expect(getLazyUploads()).toBe(0)
+      // The page owns its preview images: nothing is released or replaced.
+      items.forEach((item) =>
+        expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(item.image)
+      )
+    })
+
+    it('keeps the uploads of one display frame within the frame time budget', async () => {
+      // Each preview takes 3 ms to upload: a second one would pass the 4 ms frame budget, so
+      // the previews go up one per display frame, and every one of them does.
+      const { items, uploadsPerFrame, getLazyUploads } = await renderOwnPreviews(5, 3)
+
+      await waitFor(() => expect(eagerPreviewUploads).toHaveLength(5))
+      expect(uploadsPerFrame()).toEqual([1, 1, 1, 1, 1])
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+      expect(getLazyUploads()).toBe(0)
+    })
+
+    it('keeps the sprites on screen while the rest of the previews wait for their frame', async () => {
+      const { items, uploadsPerFrame } = await renderOwnPreviews(5, 3)
+
+      await waitFor(() => expect(eagerPreviewUploads.length).toBeGreaterThanOrEqual(2))
+      const first = items.find((item) => getLiveSpriteByLabel(item.id))!
+      const firstSprite = getLiveSpriteByLabel(first.id)
+      await waitFor(() => expect(eagerPreviewUploads).toHaveLength(5))
+      expect(getLiveSpriteByLabel(first.id)).toBe(firstSprite)
+      expect(firstSprite?.destroyed).toBe(false)
+      expect(uploadsPerFrame().every((count) => count === 1)).toBe(true)
+    })
+
     it('moves, re-layers and rotates an image whose large upload is held back', async () => {
       mockWebGLFences = true
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -972,11 +1083,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender, unmount } = render(
         <Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={selectedIds} />
       )
+      // The two previews go up first, behind one fence of their own.
+      await waitFor(() => expect(eagerPreviewUploads).toHaveLength(2))
+      await waitFor(() => expect(createdWebGLFences).toHaveLength(1))
+      createdWebGLFences[0].signaled = true
       await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 150))
       })
-      // One source upload went through; the other one waits for the first fence and the
+      // One source upload went through; the other one waits for the next fence and the
       // image is still drawn from its preview.
       expect(eagerTextureUploads).toHaveLength(1)
       const held = items.find(
@@ -1014,7 +1129,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(rotated.position.x).toBe(held.x + 333)
       expect(rotated.rotation).toBeCloseTo(Math.PI / 12)
 
-      createdWebGLFences[0].signaled = true
+      createdWebGLFences[1].signaled = true
       await waitFor(() => expect(eagerTextureUploads).toHaveLength(2))
       await waitFor(() =>
         expect(getTextureImage(getLiveSpriteByLabel(held.id))).not.toBeInstanceOf(HTMLImageElement)
