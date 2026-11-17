@@ -1953,6 +1953,170 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     )
   })
 
+  it('keeps the callbacks a proxy kept from an earlier render acting on the latest selection, tool and handlers', async () => {
+    const imageItem = createImageItem('image-stale-callbacks')
+    const textItem = createTextItem('text-stale-callbacks')
+    textItem.x = 600
+    const annotationItem = createAnnotationItem('annotation-stale-callbacks', { x: 900 })
+    setMockWebGLRuntime({ loadedIds: [imageItem.id] })
+    const baseProps = createBaseProps([imageItem, textItem, annotationItem])
+    const noSelection = new Set<string>()
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={noSelection} />
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(3)
+    })
+
+    // What a memoised proxy holds when its comparator skips every later render.
+    type ProxyCallbacks = {
+      onSelect: (additive?: boolean) => void
+      onContextMenu: (event: MouseEvent) => void
+      onDragEnd: (id: string, x: number, y: number, evt?: PointerEvent) => void
+      onTransformEnd: (id: string, attrs: Partial<CanvasItem>) => void
+      onPreviewChange?: (itemId: string, preview: unknown) => void
+      onDoubleClick?: () => void
+    }
+    const keptImageProxy = { ...canvasPlaceholderProps.get(imageItem.id) } as ProxyCallbacks
+    const keptTextProxy = { ...canvasPlaceholderProps.get(textItem.id) } as ProxyCallbacks
+    const keptAnnotationProxy = {
+      ...canvasPlaceholderProps.get(annotationItem.id)
+    } as ProxyCallbacks
+
+    // The selection changes: the page hands down handlers that close over the new selection.
+    const nextSelection = new Set([textItem.id])
+    const nextHandleImageContextMenu = vi.fn()
+    const nextHandleDragEnd = vi.fn()
+    const nextHandleTransformEnd = vi.fn()
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        selectedIds={nextSelection}
+        handleImageContextMenu={nextHandleImageContextMenu}
+        handleDragEnd={nextHandleDragEnd}
+        handleTransformEnd={nextHandleTransformEnd}
+      />
+    )
+
+    const contextMenuEvent = new MouseEvent('contextmenu', { clientX: 4, clientY: 8 })
+    keptImageProxy.onContextMenu(contextMenuEvent)
+    expect(nextHandleImageContextMenu).toHaveBeenLastCalledWith(contextMenuEvent, imageItem)
+    expect(baseProps.handleImageContextMenu).not.toHaveBeenCalled()
+
+    keptImageProxy.onDragEnd(imageItem.id, 30, 40)
+    expect(nextHandleDragEnd).toHaveBeenLastCalledWith(imageItem.id, 30, 40, undefined)
+    keptTextProxy.onDragEnd(textItem.id, 50, 60)
+    expect(nextHandleDragEnd).toHaveBeenLastCalledWith(textItem.id, 50, 60, undefined)
+    keptAnnotationProxy.onDragEnd(annotationItem.id, 910, 84)
+    expect(nextHandleDragEnd).toHaveBeenCalledTimes(3)
+    expect(baseProps.handleDragEnd).not.toHaveBeenCalled()
+
+    keptTextProxy.onTransformEnd(textItem.id, { rotation: 15 })
+    expect(nextHandleTransformEnd).toHaveBeenLastCalledWith(textItem.id, { rotation: 15 })
+    expect(baseProps.handleTransformEnd).not.toHaveBeenCalled()
+
+    // The tool changes to the hand tool: a click on a kept proxy must not select it, and an image
+    // drag preview must not reach the WebGL layer.
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        tool="hand"
+        selectedIds={nextSelection}
+        handleImageContextMenu={nextHandleImageContextMenu}
+        handleDragEnd={nextHandleDragEnd}
+        handleTransformEnd={nextHandleTransformEnd}
+      />
+    )
+    keptImageProxy.onSelect(false)
+    keptTextProxy.onSelect(true)
+    keptAnnotationProxy.onSelect(false)
+    expect(baseProps.setSelectedIds).not.toHaveBeenCalled()
+
+    expect(keptImageProxy.onPreviewChange).toBeTypeOf('function')
+    syncItemPreviewSpy.mockClear()
+    keptImageProxy.onPreviewChange?.(imageItem.id, {
+      x: 1,
+      y: 2,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      width: 100,
+      height: 80
+    })
+    expect(syncItemPreviewSpy).not.toHaveBeenCalled()
+    // Clearing a preview is always allowed (the proxy clears on unmount).
+    keptImageProxy.onPreviewChange?.(imageItem.id, null)
+    expect(syncItemPreviewSpy).toHaveBeenLastCalledWith(imageItem.id, null)
+
+    // Back to the select tool: the same kept callbacks select again.
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        tool="select"
+        selectedIds={nextSelection}
+        handleImageContextMenu={nextHandleImageContextMenu}
+        handleDragEnd={nextHandleDragEnd}
+        handleTransformEnd={nextHandleTransformEnd}
+      />
+    )
+    keptImageProxy.onSelect(false)
+    const selectionUpdate = (baseProps.setSelectedIds as ReturnType<typeof vi.fn>).mock.calls.at(
+      -1
+    )?.[0] as (previous: Set<string>) => Set<string>
+    expect([...selectionUpdate(nextSelection)]).toEqual([imageItem.id])
+
+    // The text editor opened from a kept double-click uses the latest setter.
+    const nextSetInlineTextEdit = vi.fn()
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        tool="select"
+        selectedIds={nextSelection}
+        setInlineTextEdit={nextSetInlineTextEdit}
+      />
+    )
+    act(() => {
+      keptTextProxy.onDoubleClick?.()
+    })
+    expect(nextSetInlineTextEdit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: textItem.id, isNew: false })
+    )
+    expect(baseProps.setInlineTextEdit).not.toHaveBeenCalled()
+  })
+
+  it('gives the multi-selection overlay stable callbacks that commit through the latest history setter', async () => {
+    const firstItem = createImageItem('image-multi-stale-first')
+    const secondItem = createImageItem('image-multi-stale-second')
+    secondItem.x = 420
+    setMockWebGLRuntime({ loadedIds: [firstItem.id, secondItem.id] })
+    const baseProps = createBaseProps([firstItem, secondItem])
+    const selection = new Set([firstItem.id, secondItem.id])
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={selection} />
+    )
+    await screen.findByTestId('mock-multi-selection-transform-overlay')
+    const keptOnTransformEnd = latestMultiSelectionTransformOverlayProps?.onTransformEnd as (
+      updates: Array<{ id: string; attrs: Partial<CanvasItem> }>
+    ) => void
+
+    const nextSetItemsWithHistory = vi.fn()
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        selectedIds={selection}
+        setItemsWithHistory={nextSetItemsWithHistory}
+      />
+    )
+    // Same identity, so the overlay's comparator does not re-render it for a new setter...
+    expect(latestMultiSelectionTransformOverlayProps?.onTransformEnd).toBe(keptOnTransformEnd)
+    // ...and the kept callback still commits through the latest one.
+    keptOnTransformEnd([{ id: firstItem.id, attrs: { x: 7 } }])
+    expect(nextSetItemsWithHistory).toHaveBeenCalledTimes(1)
+    expect(baseProps.setItemsWithHistory).not.toHaveBeenCalled()
+  })
+
   it('forwards viewport driver callbacks into the WebGL layer imperative viewport sync', async () => {
     const item = createImageItem('image-viewport-sync')
     let viewportCallback: ((pos: { x: number; y: number }, scale: number) => void) | null = null

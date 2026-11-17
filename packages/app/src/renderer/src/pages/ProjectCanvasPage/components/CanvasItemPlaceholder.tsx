@@ -169,6 +169,12 @@ const CanvasItemPlaceholder: React.FC<CanvasItemPlaceholderProps> = ({
     [item.id, onHoverChange]
   )
 
+  const handleTransformEnd = React.useCallback(
+    (id: string, attrs: Partial<ProjectCanvasRectItemTransform>) =>
+      onTransformEnd(id, attrs as Partial<PlaceholderItem>),
+    [onTransformEnd]
+  )
+
   return (
     <ProjectCanvasRectItemInteractionOverlay
       canvasContainerRef={canvasContainerRef}
@@ -188,7 +194,7 @@ const CanvasItemPlaceholder: React.FC<CanvasItemPlaceholderProps> = ({
       onDragStart={onDragStart}
       onSelect={onSelect}
       onDragEnd={onDragEnd}
-      onTransformEnd={(id, attrs) => onTransformEnd(id, attrs as Partial<PlaceholderItem>)}
+      onTransformEnd={handleTransformEnd}
       onDoubleClick={onDoubleClick}
       onContextMenu={onContextMenu}
       onHoverChange={handleHoverStateChange}
@@ -196,6 +202,12 @@ const CanvasItemPlaceholder: React.FC<CanvasItemPlaceholderProps> = ({
   )
 }
 
+/**
+ * The comparator ignores the callback props on purpose: a proxy keeps the callbacks of its last
+ * render through any number of skipped renders. Callers must therefore pass stable handlers that
+ * call the latest committed callback (ProjectCanvasPageStageScene uses useStableEventHandler);
+ * an inline callback is only safe when everything it closes over is compared below (the item).
+ */
 export default React.memo(CanvasItemPlaceholder, (prev, next) => {
   const canUseStageRefs =
     prev.stagePosRef != null &&

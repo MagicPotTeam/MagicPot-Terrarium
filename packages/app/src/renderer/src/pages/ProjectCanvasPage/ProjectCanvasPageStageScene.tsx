@@ -69,6 +69,7 @@ import {
 } from './canvasCropProvenance'
 import { drawVerifiedCanvasImageCropPng } from './canvasAgentAttachmentUtils'
 import type { CanvasProvenCropRegistry } from './canvasProvenCropRegistry'
+import { useStableEventHandler } from './useStableEventHandler'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -1828,6 +1829,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
     },
     [setItemsWithHistory]
   )
+  // The multi-selection overlay keeps its callbacks through skipped renders too (see the hit
+  // proxies below): give it stable handlers that call the latest committed ones.
+  const handleStableMultiSelectionTransformEnd = useStableEventHandler(
+    handleMultiSelectionTransformEnd
+  )
+  const handleStableLiveMultiSelectionBoundsChange = useStableEventHandler(
+    onLiveMultiSelectionBoundsChange
+  )
   const multiSelectionLivePreviewSyncItemIds = React.useMemo(() => {
     const itemIds = new Set<string>()
 
@@ -3088,6 +3097,80 @@ export default function ProjectCanvasPageStageScene(props: any) {
     renderableMediaItemMap,
     visibleItems
   ])
+  // Hit proxies skip renders through their memo comparator (a gesture end, a selection or tool
+  // change that does not touch their own props), so a callback passed to them can outlive the
+  // render that created it. Every proxy callback goes through a stable handler that calls the
+  // latest committed one: a proxy can never act on an old selection, tool or item list.
+  const handleProxySelectItem = useStableEventHandler(selectItem)
+  const handleProxyContextMenu = useStableEventHandler(
+    (event: MouseEvent | PointerEvent, item: CanvasItem) => handleImageContextMenu?.(event, item)
+  )
+  const handleProxyDragStart = useStableEventHandler(handlePlaceholderDragStart)
+  const handleProxyDragEnd = useStableEventHandler(handlePlaceholderDragEnd)
+  const handleProxyTransformEnd = useStableEventHandler(
+    (itemId: string, attrs: Partial<CanvasItem>) => handleTransformEnd?.(itemId, attrs)
+  )
+  const handleProxyImagePreviewChange = useStableEventHandler(
+    (itemId: string, preview: ProjectCanvasImagePreview | null) => {
+      // Only the select tool drags images. A proxy rendered under the select tool can keep this
+      // handler after a tool change, so check the latest tool here; a clear (null) always goes
+      // through.
+      if (preview && tool !== 'select') {
+        return
+      }
+      syncWebGLImagePreview(itemId, preview)
+    }
+  )
+  const handleProxyOpenTextEditor = useStableEventHandler(openCanvasTextInlineEditor)
+  const handleProxyOpenFileDialog = useStableEventHandler((itemId: string) =>
+    handleOpenFileDialog?.(itemId)
+  )
+  const handleProxyOpenModel3DViewer = useStableEventHandler((itemId: string) =>
+    handleOpenModel3DViewer?.(itemId)
+  )
+  const handleProxyAnnotationPreviewChange = useStableEventHandler(
+    handleAnnotationPlaceholderPreviewChange
+  )
+  const handleProxyAnnotationDragEnd = useStableEventHandler(handleAnnotationPlaceholderDragEnd)
+  const handleProxyAnnotationHoverChange = useStableEventHandler(
+    (annoItem: CanvasAnnotationItem, isHovering: boolean) => {
+      setActiveOcrHover(
+        isHovering && annoItem.ocrBundleId && annoItem.ocrBoxId
+          ? {
+              bundleId: annoItem.ocrBundleId,
+              bboxIds: [annoItem.ocrBoxId],
+              cellIds: annoItem.ocrCellIds || []
+            }
+          : null
+      )
+    }
+  )
+  const handleProxyAnnotationDoubleClick = useStableEventHandler(
+    (annoItem: CanvasAnnotationItem) => {
+      setSelectedIds(new Set())
+      if (annoItem.shape === 'text-anno') {
+        const absW = Math.max(10, (annoItem.width || 150) * Math.abs(annoItem.scaleX))
+        const absH = Math.max(10, (annoItem.height || 40) * Math.abs(annoItem.scaleY))
+        const sy = annoItem.scaleY
+        setInlineTextEdit({
+          id: annoItem.id,
+          x: annoItem.x,
+          y: annoItem.y,
+          w: absW,
+          h: absH,
+          text: annoItem.text || '',
+          isNew: false,
+          fontSize: (annoItem.fontSize || 36) * Math.abs(sy),
+          attachedToId: (annoItem as AttachedCaptionAnnotation).attachedToId,
+          attachmentPlacement: (annoItem as AttachedCaptionAnnotation).attachmentPlacement
+        })
+      } else {
+        setLabelDialogItemId(annoItem.id)
+        setLabelDialogText(annoItem.label)
+        setLabelDialogOpen(true)
+      }
+    }
+  )
   const proxyLayerElements = React.useMemo(() => {
     return proxyLayerCandidateItems.map((item: CanvasItem) => {
       const isSelected = selectedIds.has(item.id) && tool === 'select'
@@ -3125,14 +3208,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
               stageScale={stageScale}
               stagePosRef={proxyStagePosRef}
               stageScaleRef={proxyStageScaleRef}
-              onPreviewChange={tool === 'select' ? syncWebGLImagePreview : undefined}
-              onDragStart={handlePlaceholderDragStart}
+              onPreviewChange={tool === 'select' ? handleProxyImagePreviewChange : undefined}
+              onDragStart={handleProxyDragStart}
               onSelect={(additiveSelection) => {
-                selectItem(item.id, false, Boolean(additiveSelection))
+                handleProxySelectItem(item.id, false, Boolean(additiveSelection))
               }}
-              onDragEnd={handlePlaceholderDragEnd}
-              onTransformEnd={handleTransformEnd as any}
-              onContextMenu={(event) => handleImageContextMenu(event as any, item)}
+              onDragEnd={handleProxyDragEnd}
+              onTransformEnd={handleProxyTransformEnd as any}
+              onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
             />
           )
         }
@@ -3153,14 +3236,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
             stageScale={stageScale}
             stagePosRef={proxyStagePosRef}
             stageScaleRef={proxyStageScaleRef}
-            onDragStart={handlePlaceholderDragStart}
+            onDragStart={handleProxyDragStart}
             onSelect={(additiveSelection?: boolean) => {
-              selectItem(item.id, false, Boolean(additiveSelection))
+              handleProxySelectItem(item.id, false, Boolean(additiveSelection))
             }}
-            onDragEnd={handlePlaceholderDragEnd}
-            onTransformEnd={handleTransformEnd}
-            onContextMenu={(event) => handleImageContextMenu(event as any, item)}
-            onDoubleClick={() => openCanvasTextInlineEditor(textItem)}
+            onDragEnd={handleProxyDragEnd}
+            onTransformEnd={handleProxyTransformEnd}
+            onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
+            onDoubleClick={() => handleProxyOpenTextEditor(textItem)}
           />
         )
       }
@@ -3178,14 +3261,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
             renderMode="dom-file-proxy"
             stagePos={stagePos}
             stageScale={stageScale}
-            onDragStart={handlePlaceholderDragStart}
+            onDragStart={handleProxyDragStart}
             onSelect={(additiveSelection) => {
-              selectItem(item.id, false, Boolean(additiveSelection))
+              handleProxySelectItem(item.id, false, Boolean(additiveSelection))
             }}
-            onDragEnd={handlePlaceholderDragEnd}
-            onTransformEnd={handleTransformEnd as any}
-            onDoubleClick={() => handleOpenFileDialog(fileItem.id)}
-            onContextMenu={(event) => handleImageContextMenu(event as any, item)}
+            onDragEnd={handleProxyDragEnd}
+            onTransformEnd={handleProxyTransformEnd as any}
+            onDoubleClick={() => handleProxyOpenFileDialog(fileItem.id)}
+            onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
           />
         )
       }
@@ -3213,57 +3296,24 @@ export default function ProjectCanvasPageStageScene(props: any) {
             stageScale={stageScale}
             stagePosRef={proxyStagePosRef}
             stageScaleRef={proxyStageScaleRef}
-            onDragStart={handlePlaceholderDragStart}
+            onDragStart={handleProxyDragStart}
             onRectPreviewChange={(_itemId, preview) => {
-              handleAnnotationPlaceholderPreviewChange(annoItem, proxyRect, preview)
+              handleProxyAnnotationPreviewChange(annoItem, proxyRect, preview)
             }}
             onSelect={(additiveSelection) => {
-              selectItem(item.id, true, Boolean(additiveSelection))
+              handleProxySelectItem(item.id, true, Boolean(additiveSelection))
             }}
             onDragEnd={(itemId, x, y, evt) => {
-              handleAnnotationPlaceholderDragEnd(annoItem, proxyRect, itemId, x, y, evt)
+              handleProxyAnnotationDragEnd(annoItem, proxyRect, itemId, x, y, evt)
             }}
-            onTransformEnd={handleTransformEnd}
-            onContextMenu={(event) => handleImageContextMenu(event as any, item)}
+            onTransformEnd={handleProxyTransformEnd}
+            onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
             onHoverChange={
               annoItem.ocrBundleId && annoItem.ocrBoxId
-                ? (isHovering) => {
-                    setActiveOcrHover(
-                      isHovering
-                        ? {
-                            bundleId: annoItem.ocrBundleId!,
-                            bboxIds: [annoItem.ocrBoxId!],
-                            cellIds: annoItem.ocrCellIds || []
-                          }
-                        : null
-                    )
-                  }
+                ? (isHovering) => handleProxyAnnotationHoverChange(annoItem, isHovering)
                 : undefined
             }
-            onDoubleClick={() => {
-              setSelectedIds(new Set())
-              if (annoItem.shape === 'text-anno') {
-                const absW = Math.max(10, (annoItem.width || 150) * Math.abs(annoItem.scaleX))
-                const absH = Math.max(10, (annoItem.height || 40) * Math.abs(annoItem.scaleY))
-                const sy = annoItem.scaleY
-                setInlineTextEdit({
-                  id: annoItem.id,
-                  x: annoItem.x,
-                  y: annoItem.y,
-                  w: absW,
-                  h: absH,
-                  text: annoItem.text || '',
-                  isNew: false,
-                  fontSize: (annoItem.fontSize || 36) * Math.abs(sy),
-                  attachedToId: (annoItem as AttachedCaptionAnnotation).attachedToId,
-                  attachmentPlacement: (annoItem as AttachedCaptionAnnotation).attachmentPlacement
-                })
-              } else {
-                setLabelDialogItemId(item.id)
-                setLabelDialogText(annoItem.label)
-                setLabelDialogOpen(true)
-              }
-            }}
+            onDoubleClick={() => handleProxyAnnotationDoubleClick(annoItem)}
           />
         )
       }
@@ -3288,18 +3338,18 @@ export default function ProjectCanvasPageStageScene(props: any) {
             stageScale={stageScale}
             stagePosRef={proxyStagePosRef}
             stageScaleRef={proxyStageScaleRef}
-            onDragStart={handlePlaceholderDragStart}
+            onDragStart={handleProxyDragStart}
             onSelect={(additiveSelection) => {
-              selectItem(item.id, false, Boolean(additiveSelection))
+              handleProxySelectItem(item.id, false, Boolean(additiveSelection))
             }}
-            onDragEnd={handlePlaceholderDragEnd}
+            onDragEnd={handleProxyDragEnd}
             onDoubleClick={
               renderableMediaItem.kind === 'model3d'
-                ? () => handleOpenModel3DViewer(item.id)
+                ? () => handleProxyOpenModel3DViewer(item.id)
                 : undefined
             }
-            onTransformEnd={handleTransformEnd}
-            onContextMenu={(event) => handleImageContextMenu(event as any, item)}
+            onTransformEnd={handleProxyTransformEnd}
+            onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
           />
         )
       }
@@ -3310,34 +3360,30 @@ export default function ProjectCanvasPageStageScene(props: any) {
     animatedGifImageIdSet,
     canvasContainerRef,
     getImageRuntimeRoute,
-    handleAnnotationPlaceholderDragEnd,
-    handleAnnotationPlaceholderPreviewChange,
-    handleImageContextMenu,
-    handleOpenFileDialog,
-    handleOpenModel3DViewer,
-    handlePlaceholderDragEnd,
-    handlePlaceholderDragStart,
-    handleTransformEnd,
+    handleProxyAnnotationDoubleClick,
+    handleProxyAnnotationDragEnd,
+    handleProxyAnnotationHoverChange,
+    handleProxyAnnotationPreviewChange,
+    handleProxyContextMenu,
+    handleProxyDragEnd,
+    handleProxyDragStart,
+    handleProxyImagePreviewChange,
+    handleProxyOpenFileDialog,
+    handleProxyOpenModel3DViewer,
+    handleProxyOpenTextEditor,
+    handleProxySelectItem,
+    handleProxyTransformEnd,
     imageFallbackReasonById,
     canvas2DVisualOwnerImageIdSet,
     itemIdSet,
-    openCanvasTextInlineEditor,
     renderableMediaItemMap,
     selectedIds,
     placeholderProxyImageIdSet,
     proxyLayerCandidateItems,
-    syncWebGLImagePreview,
     selectedSingleAnnotationItem?.id,
     selectedSingleFileItem?.id,
     selectedSinglePlaceholderItem?.id,
     selectedSingleTextItem?.id,
-    selectItem,
-    setActiveOcrHover,
-    setInlineTextEdit,
-    setLabelDialogItemId,
-    setLabelDialogOpen,
-    setLabelDialogText,
-    setSelectedIds,
     stagePos,
     proxyStagePosRef,
     stageScale,
@@ -4022,13 +4068,17 @@ export default function ProjectCanvasPageStageScene(props: any) {
                 canvasContainerRef={canvasContainerRef}
                 items={stableMultiSelectionTransformItems}
                 livePreviewSyncItemIds={multiSelectionLivePreviewSyncItemIds}
-                onPreviewBoundsChange={onLiveMultiSelectionBoundsChange}
+                onPreviewBoundsChange={
+                  onLiveMultiSelectionBoundsChange
+                    ? handleStableLiveMultiSelectionBoundsChange
+                    : undefined
+                }
                 registerViewportCallback={registerViewportCallback}
                 stagePos={stagePos}
                 stagePosRef={proxyStagePosRef}
                 stageScale={stageScale}
                 stageScaleRef={proxyStageScaleRef}
-                onTransformEnd={handleMultiSelectionTransformEnd}
+                onTransformEnd={handleStableMultiSelectionTransformEnd}
               />
             )}
           <div
