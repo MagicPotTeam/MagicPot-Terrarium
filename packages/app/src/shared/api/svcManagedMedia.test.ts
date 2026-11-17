@@ -132,6 +132,35 @@ describe('svcManagedMedia contract', () => {
     }
   })
 
+  it('accepts Windows drive-letter and long paths and refuses UNC and namespace paths at the IPC boundary', () => {
+    const longPath = `C:\\${'nested-folder\\'.repeat(24)}image.png`
+    for (const sourcePath of ['C:\\Users\\artist\\a.png', 'd:\\Art Work\\a b.png', longPath]) {
+      expect(
+        validateImportManagedMediaFileReq({
+          sourcePath,
+          mimeType: 'image/png',
+          originalFileName: 'a.png'
+        }).sourcePath
+      ).toBe(sourcePath)
+    }
+    for (const sourcePath of [
+      '\\\\server\\share\\a.png',
+      '//server/share/a.png',
+      '\\\\?\\C:\\Users\\a.png',
+      '\\\\.\\PhysicalDrive0',
+      'C:\\Users\\..\\a.png',
+      'C:a.png'
+    ]) {
+      expect(() =>
+        validateImportManagedMediaFileReq({
+          sourcePath,
+          mimeType: 'image/png',
+          originalFileName: 'a.png'
+        })
+      ).toThrow(ServiceValidationError)
+    }
+  })
+
   it('validates import data URL MIME, base64, decoded size, and file name', () => {
     expect(
       validateImportManagedMediaDataUrlReq({

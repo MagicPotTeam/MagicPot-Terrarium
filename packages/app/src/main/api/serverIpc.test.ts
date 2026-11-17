@@ -84,7 +84,7 @@ vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: vi.fn
   platformConstructor(deps); return new (createServiceClass())()
 }) }))
 vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({ createInstalledCatalogReadDelegate: catalogDelegateFactory }))
-vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: createServiceClass() }))
+vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: createServiceClass(), MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES: 1024 }))
 vi.mock('./svcReportBundlesImpl', () => ({ ReportBundlesSvcImpl: createServiceClass() }))
 describe('serverIpc createServer', () => {
   beforeEach(() => {

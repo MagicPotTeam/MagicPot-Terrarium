@@ -215,7 +215,8 @@ const isCanonicalAbsoluteFileSource = (value: unknown): value is string => {
   if (typeof value !== 'string' || !value || value !== value.trim() || value.includes('\0')) {
     return false
   }
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(value)) {
+  // A Windows drive letter ('C:\\', 'C:/') is a path, not a one-letter URI scheme.
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(value) && !/^[A-Za-z]:[\\/]/u.test(value)) {
     try {
       const url = new URL(value)
       if (

@@ -40,6 +40,7 @@ import {
   ManagedMediaResolutionError,
   importManagedMedia,
   importManagedMediaFile,
+  isManagedMediaMimeTypeSupported,
   readManagedMediaBytes,
   isPathInsideRoot,
   type ImportedManagedMedia,
@@ -56,6 +57,15 @@ export type ManagedMediaSvcImplDependencies = {
   readMediaBytes?: typeof readManagedMediaBytes
   resolveReference?: typeof resolveManagedMediaReference
   migrateLegacy?: typeof migrateLegacyBase64MediaOnDemand
+  /**
+   * Source-path policy for importFile requests that come from a renderer. Returns the
+   * canonical path when the path is under an application root or was granted (a file the
+   * user picked), otherwise null. When set, importFile refuses every path it does not
+   * return unchanged. Main-owned callers that confine paths themselves leave it unset.
+   */
+  authorizeImportSourcePath?: (sourcePath: string) => string | null
+  /** Byte cap for importFile, checked on the stat and again on the bytes actually copied. */
+  maxImportFileBytes?: number
   updateReferenceSnapshot?: (snapshot: {
     complete: boolean
     ids: readonly string[]
@@ -118,6 +128,58 @@ type ManagedMediaImportRoots = {
   importRoot: string
   /** Base `.chat_media` root used to authorize and later resolve references. */
   authorizedRoot: string
+}
+
+/** Byte cap for importFile requests from the renderer (the composer allows up to 500 MB). */
+export const MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES = 1024 * 1024 * 1024
+
+const invalidImportSource = (): ServiceError =>
+  new ServiceError('Managed media source must be a canonical absolute local file path', {
+    code: 'MANAGED_MEDIA_IMPORT_INVALID'
+  })
+
+export type ImportSourcePathOptions = {
+  pathApi?: Pick<typeof path, 'isAbsolute' | 'normalize'>
+  toPath?: (url: URL) => string
+  /** Default true; main-owned callers that confine paths themselves may allow UNC paths. */
+  refuseNetworkAndDevicePaths?: boolean
+}
+
+/**
+ * Turn an importFile sourcePath (absolute path or file: URI) into a local path, without
+ * touching the filesystem. Refused: other URI schemes, relative or non-normalized paths and,
+ * by default, UNC and Win32 device or long-path namespace paths (\\server\share, \\?\,
+ * \\.\), which would make main contact a remote host or a device before any other check,
+ * and Windows alternate data streams. Errors never contain the path.
+ */
+export function toImportSourceLocalPath(
+  value: string,
+  {
+    pathApi = path,
+    toPath = (url) => fileURLToPath(url),
+    refuseNetworkAndDevicePaths = true
+  }: ImportSourcePathOptions = {}
+): string {
+  const raw = String(value || '')
+  if (!raw || raw.includes('\0')) throw invalidImportSource()
+  const isUri = /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(raw) && !/^[A-Za-z]:[\\/]/u.test(raw)
+  if (isUri && !raw.startsWith('file:')) throw invalidImportSource()
+  let sourcePath: string
+  try {
+    sourcePath = isUri ? toPath(new URL(raw)) : raw
+  } catch {
+    throw invalidImportSource()
+  }
+  if (
+    (refuseNetworkAndDevicePaths &&
+      (/^[\\/]{2}/u.test(sourcePath) ||
+        (/^[A-Za-z]:[\\/]/u.test(sourcePath) && sourcePath.slice(2).includes(':')))) ||
+    !pathApi.isAbsolute(sourcePath) ||
+    pathApi.normalize(sourcePath) !== sourcePath
+  ) {
+    throw invalidImportSource()
+  }
+  return sourcePath
 }
 
 function sameFilesystemPath(left: string, right: string): boolean {
@@ -211,29 +273,43 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
 
   async importFile(req: ImportManagedMediaFileReq): Promise<ImportManagedMediaResp> {
     try {
+      // Every check that needs no filesystem access comes first.
+      const authorize = this.dependencies.authorizeImportSourcePath
+      const sourcePath = toImportSourceLocalPath(req.sourcePath, {
+        refuseNetworkAndDevicePaths: Boolean(authorize)
+      })
+      if (!isManagedMediaMimeTypeSupported(req.mimeType)) {
+        throw new ServiceError('Unsupported managed media type', {
+          code: 'MANAGED_MEDIA_UNSUPPORTED'
+        })
+      }
+      if (authorize) {
+        // The authorized form must be the requested path itself: no symlink, alias or
+        // case variant of an allowed path is followed to somewhere else.
+        const authorized = authorize(sourcePath)
+        if (!authorized || !sameFilesystemPath(authorized, sourcePath)) {
+          throw new ServiceError('Managed media source is not an allowed file', {
+            code: 'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+          })
+        }
+      }
       const { importRoot, authorizedRoot } = await resolveImportRoots(
         req.storage,
         this.dependencies
       )
-      const isUri = /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(req.sourcePath)
-      if (isUri && !req.sourcePath.startsWith('file:')) {
-        throw new ServiceError('Managed media source must be a file URI or absolute path', {
-          code: 'MANAGED_MEDIA_IMPORT_INVALID'
-        })
-      }
-      const sourcePath = isUri ? fileURLToPath(new URL(req.sourcePath)) : req.sourcePath
-      if (!path.isAbsolute(sourcePath) || path.normalize(sourcePath) !== sourcePath) {
-        throw new ServiceError('Managed media source path must be canonical and absolute', {
-          code: 'MANAGED_MEDIA_IMPORT_INVALID'
-        })
-      }
+      // The store re-checks on the open handle: regular non-symlink file (no directory,
+      // FIFO or device), canonical, outside the store, same file and size before and
+      // after the copy, the cap on the bytes actually copied, image bytes on the copy.
       const imported = await (this.dependencies.importFile ?? importManagedMediaFile)(
         {
           chatMediaRoot: importRoot,
           sourcePath,
           mimeType: req.mimeType,
           originalFileName: req.originalFileName,
-          provenance: { source: 'chat-attachment-file' }
+          provenance: { source: 'chat-attachment-file' },
+          ...(this.dependencies.maxImportFileBytes !== undefined
+            ? { maxBytes: this.dependencies.maxImportFileBytes }
+            : {})
         },
         { authorizedRoot }
       )

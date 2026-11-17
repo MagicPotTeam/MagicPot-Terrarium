@@ -4,6 +4,10 @@ import type { ManagedMediaStorage } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference } from '@shared/mediaReference'
 import { resolveLocalMediaPathFromUrl } from './chatPageShared'
 
+/**
+ * A File's own `path` property no longer exists in Electron 42 and, when present, is a plain
+ * property any renderer code can set; it is never used as an import source.
+ */
 export type ManagedAttachmentFile = File & { path?: string }
 type Dimensions = { sourceWidth?: number; sourceHeight?: number }
 
@@ -13,9 +17,18 @@ export const CHAT_ATTACHMENT_STORAGE = {
   scope: 'chat-attachments'
 } as const satisfies ManagedMediaStorage
 
+/** The preload's file bridge (window.electronFile), as far as attachment import uses it. */
+export type ChatAttachmentFileBridge = {
+  getPathForFile?: (file: File) => string
+  authorizeLocalMediaFile?: (file: File) => Promise<string>
+  resolveAuthorizedLocalMediaPath?: (filePath: string) => Promise<string>
+}
+
 type ImportChatAttachmentInput = {
   service?: Pick<ManagedMediaSvc, 'importFile' | 'importDataUrl'>
   file: ManagedAttachmentFile
+  /** Defaults to window.electronFile. */
+  fileBridge?: ChatAttachmentFileBridge
   type: ChatAttachment['type']
   mimeType?: string
   relativePath?: string
@@ -50,9 +63,54 @@ const readUrlAsDataUrl = async (url: string): Promise<string> => {
   return readFileAsDataUrl(new File([blob], 'attachment', { type: blob.type }))
 }
 
+/** UNC (\\server\share) and Win32 device / namespace paths (\\?\, \\.\): main refuses them. */
+const isNetworkOrDevicePath = (value: string): boolean => /^[\\/]{2}/u.test(value)
+
+const defaultFileBridge = (): ChatAttachmentFileBridge | undefined =>
+  typeof window === 'undefined' ? undefined : window.electronFile
+
+/**
+ * The canonical path main may import a picked file from, or '' when the file has no path
+ * (clipboard, generated blob) or main does not authorise it. The path comes only from the
+ * preload's webUtils.getPathForFile, which returns a path only for a File the user picked or
+ * dropped; authorizeLocalMediaFile records that pick as a grant in main, and main checks
+ * the grant again when it imports.
+ */
+const resolvePickedFileImportPath = async (
+  file: File,
+  bridge: ChatAttachmentFileBridge | undefined
+): Promise<string> => {
+  if (
+    !bridge?.getPathForFile ||
+    !bridge.authorizeLocalMediaFile ||
+    !bridge.resolveAuthorizedLocalMediaPath
+  ) {
+    return ''
+  }
+  try {
+    const rawPath: unknown = bridge.getPathForFile(file)
+    if (typeof rawPath !== 'string') {
+      // A guarded bridge answers with a (rejected) promise instead of a path.
+      void Promise.resolve(rawPath).catch(() => undefined)
+      return ''
+    }
+    const pickedPath = rawPath.trim()
+    if (!pickedPath || isNetworkOrDevicePath(pickedPath)) return ''
+    const grantedPath = String((await bridge.authorizeLocalMediaFile(file)) || '').trim()
+    if (!grantedPath) return ''
+    const canonicalPath = String(
+      (await bridge.resolveAuthorizedLocalMediaPath(grantedPath)) || ''
+    ).trim()
+    return canonicalPath && !isNetworkOrDevicePath(canonicalPath) ? canonicalPath : ''
+  } catch {
+    return ''
+  }
+}
+
 export const importChatAttachment = async ({
   service,
   file,
+  fileBridge = defaultFileBridge(),
   type,
   mimeType,
   relativePath,
@@ -61,7 +119,8 @@ export const importChatAttachment = async ({
 }: ImportChatAttachmentInput): Promise<ChatAttachment> => {
   if (!service) throw new Error('Managed media service is unavailable')
   const originalFileName = file.name || 'attachment'
-  const sourcePath = typeof file.path === 'string' ? file.path.trim() : ''
+  // A file on disk is copied by main from its path: its bytes never enter the renderer.
+  const sourcePath = await resolvePickedFileImportPath(file, fileBridge)
   const imported = sourcePath
     ? await service.importFile({
         sourcePath,

@@ -153,6 +153,14 @@ function normalizeMime(value: string): SupportedMimeType {
     )
   return mime as SupportedMimeType
 }
+/** True for the MIME types the store can hold; lets callers refuse others before copying bytes. */
+export function isManagedMediaMimeTypeSupported(value: string): boolean {
+  const mime = String(value || '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase()
+  return mime in extensions
+}
 function dimensionsAreSafe(width: number, height: number): boolean {
   return width > 0 && height > 0
 }
