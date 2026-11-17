@@ -1008,6 +1008,7 @@
     "incoming_image_downscaled": "{{fileName}} is larger than {{maxMB}} MB, so a {{width}} × {{height}} copy was attached instead.",
     "incoming_image_too_large": "{{fileName}} is too large. Max {{maxMB}} MB, current size {{size}}.",
     "pathless_attachment_too_large": "{{fileName}} ({{size}}) could not be read from a local file and is above the {{maxMB}} MB limit for pasted, generated or network data. Save it to a local folder and attach it from there.",
+    "image_batch_too_large": "Images not added: the images of one message may total at most {{maxMB}} MB (these: {{size}}, left for this message: {{remaining}}). Send them in several messages.",
     "report_check_timed_out": "Checking the report took too long. Your message was kept; try again.",
     "request_images_too_large": "The images in this conversation exceed what one request can carry. Remove older images or start a new conversation.",
     "drop_folder_process_failed": "Failed to process the dropped folder.",

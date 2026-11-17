@@ -267,9 +267,13 @@ import {
   resolveChatReasoningPreferenceKey
 } from './chatPageExtensions'
 import {
+  CHAT_MESSAGE_IMAGE_BATCH_MAX_BYTES,
   getChatAttachmentMaxSizeMB,
   getChatAttachmentTypeForFile,
-  summarizeChatAttachmentsForLog
+  getKnownChatImageBytes,
+  resolveChatImageBatchBudget,
+  summarizeChatAttachmentsForLog,
+  type ChatImageBatchBudget
 } from '@renderer/features/chat/chatAttachmentUtils'
 import {
   areChatComposerDraftsEqual,
@@ -927,6 +931,18 @@ const describeIncomingImageFailure = (t: TFunction, error: unknown): string =>
     : error instanceof ChatPathlessAttachmentTooLargeError
       ? error.message
       : t('canvas.send_to_agent_failed')
+
+/** Notice for images refused because the message's image budget cannot carry them. */
+const describeImageBatchTooLarge = (t: TFunction, budget: ChatImageBatchBudget): string =>
+  t('chat.image_batch_too_large', {
+    maxMB: Math.round(CHAT_MESSAGE_IMAGE_BATCH_MAX_BYTES / (1024 * 1024)),
+    size: formatFileSize(budget.incomingBytes),
+    remaining: formatFileSize(budget.remainingBytes)
+  })
+
+/** Image bytes of a dropped or picked file as the composer will attach it (0 for others). */
+const getChatImageFileBytes = (file: File): number =>
+  getChatAttachmentTypeForFile(file) === 'image' ? file.size : 0
 
 const attachmentDescriptorsMatch = (left: ChatAttachment, right: ChatAttachment): boolean =>
   left.type === right.type && left.url === right.url && left.fileName === right.fileName
@@ -2875,6 +2891,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // event. Other events and existing composer state are not a transaction.
       stageInArrivalOrder((resolvedAttachments) => {
         if (!isDestinationCurrent()) return
+        // Refuse the whole event when its images do not fit the message's image budget.
+        const stagedImageBudget = resolveChatImageBatchBudget(
+          pendingAttachmentsRef.current,
+          resolvedAttachments.map(getKnownChatImageBytes)
+        )
+        if (!stagedImageBudget.fits) {
+          notifyError(describeImageBatchTooLarge(t, stagedImageBudget))
+          return
+        }
         if (resolvedAttachments.length > 0) {
           setPendingAttachments((prev) => {
             if (!isDestinationCurrent()) return prev
@@ -5040,6 +5065,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 throw new ChatPathlessAttachmentTooLargeError('pasted-image.png', blob.size)
               }
               const file = new File([blob], 'pasted-image.png', { type: blob.type })
+              const pastedImageBudget = resolveChatImageBatchBudget(
+                pendingAttachmentsRef.current,
+                [file.size]
+              )
+              if (!pastedImageBudget.fits) {
+                notifyError(describeImageBatchTooLarge(t, pastedImageBudget))
+                continue
+              }
               const attachment = await buildImageChatAttachmentFromFile(file)
               setPendingAttachments((prev) => [...prev, attachment])
             } catch (error) {
@@ -5056,7 +5089,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
     document.addEventListener('paste', handlePaste)
     return () => document.removeEventListener('paste', handlePaste)
-  }, [active, currentSessionId, sessions, setPendingAttachments])
+  }, [active, currentSessionId, notifyError, sessions, setPendingAttachments, t])
 
   // ==================== 拖拽处理 ====================
   const handleDragOver = useCallback(
@@ -5245,6 +5278,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
             return
           }
 
+          const draggedImageBudget = resolveChatImageBatchBudget(
+            pendingAttachmentsRef.current,
+            materializedAttachments.map(getKnownChatImageBytes)
+          )
+          if (!draggedImageBudget.fits) {
+            notifyError(describeImageBatchTooLarge(t, draggedImageBudget))
+            return
+          }
           if (materializedAttachments.length > 0) {
             // Every dragged image is its own occurrence, in drag order, also when it repeats
             // a source already in the draft (owner decision 5); the count is checked above.
@@ -5326,6 +5367,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 defaultValue: `${oversizedDirectoryFile.name} is too large. Max ${maxSizeMB}MB.`
               })
             )
+            return
+          }
+          // The whole directory batch must also fit the message's image budget.
+          const directoryImageBudget = resolveChatImageBatchBudget(
+            pendingAttachmentsRef.current,
+            droppedDirectoryFiles.map(({ file }) => getChatImageFileBytes(file))
+          )
+          if (!editingAttachmentReceiver && !directoryImageBudget.fits) {
+            notifyError(describeImageBatchTooLarge(t, directoryImageBudget))
             return
           }
 
@@ -5450,6 +5500,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         }
         // Do not leak non-image drops into the bottom composer while editing.
+        return
+      }
+
+      // Like the per-file limit above, refuse the whole native batch when its images do
+      // not fit the message's image budget, before importing any of them.
+      const nativeImageBudget = resolveChatImageBatchBudget(
+        pendingAttachmentsRef.current,
+        Array.from(files).map(getChatImageFileBytes)
+      )
+      if (!nativeImageBudget.fits) {
+        notifyError(describeImageBatchTooLarge(t, nativeImageBudget))
         return
       }
 
@@ -9991,6 +10052,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
         size: formatFileSize(file.size)
       }))
       return undefined
+    }
+    if (isImage) {
+      const pickedImageBudget = resolveChatImageBatchBudget(pendingAttachmentsRef.current, [
+        file.size
+      ])
+      if (!pickedImageBudget.fits) {
+        notifyError(describeImageBatchTooLarge(t, pickedImageBudget))
+        return undefined
+      }
     }
 
     return isImage

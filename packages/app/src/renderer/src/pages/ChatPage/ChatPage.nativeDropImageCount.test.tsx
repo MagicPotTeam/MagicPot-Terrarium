@@ -740,6 +740,49 @@ describe('native drop image count boundary', () => {
     await waitFor(() => expect(f.blob).toHaveBeenCalled())
     expect(f.notify).not.toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
   })
+  // 4.9 MiB each: under the 5 MB per-image limit; 8 of them exceed the 32 MiB batch MAIN
+  // accepts for one request. They used to be attached, then refused after the send.
+  const largeImages = (count: number, offset = 0) =>
+    images(count + offset).slice(offset).map((file) => {
+      Object.defineProperty(file, 'size', { value: Math.round(4.9 * 1024 * 1024) })
+      return file
+    })
+  it('refuses a native drop of eight 4.9 MB images that one request cannot carry', async () => {
+    await setup()
+    const before = screen.getByTestId('attachments').textContent
+    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(8)) })
+    await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
+    expect(f.blob).not.toHaveBeenCalled()
+    expect(f.fileReaderCreated).not.toHaveBeenCalled()
+    expect(f.importDataUrl).not.toHaveBeenCalled()
+    expect(f.importFile).not.toHaveBeenCalled()
+    expect(screen.getByTestId('attachments').textContent).toBe(before)
+    expect(screen.getByTestId('input')).toHaveValue('keep')
+  })
+  it('attaches six 4.9 MB images, then refuses two more for the same message', async () => {
+    await setup()
+    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(6)) })
+    await waitFor(() =>
+      expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(7)
+    )
+    expect(f.notify).not.toHaveBeenCalled()
+    const attached = JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
+    expect(attached.slice(1).map((attachment) => attachment.sizeBytes)).toEqual(
+      Array(6).fill(Math.round(4.9 * 1024 * 1024))
+    )
+    const importsAfterSix = f.importDataUrl.mock.calls.length
+    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(largeImages(2, 6)) })
+    await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
+    expect(f.importDataUrl).toHaveBeenCalledTimes(importsAfterSix)
+    expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(7)
+    // A non-image still fits next to a full image budget.
+    fireEvent.drop(screen.getByTestId('input'), {
+      dataTransfer: transfer([new File(['x'], 'note.txt', { type: 'text/plain' })])
+    })
+    await waitFor(() =>
+      expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(8)
+    )
+  })
   it('does not count a URL-only drop as native files', async () => {
     await setup()
     fireEvent.drop(screen.getByTestId('input'), {
