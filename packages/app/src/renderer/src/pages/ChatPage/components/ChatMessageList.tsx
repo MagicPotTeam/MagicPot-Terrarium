@@ -3085,13 +3085,15 @@ const AssistantLoadingStatus: React.FC<{
   columnTokens?: AgentColumnTokens
 }> = ({ label, progress, detail, theme, columnTokens }) =>
   columnTokens ? (
-    // The working line of the Agent column: a pulsing dot and a label, no box.
+    // The working line of the Agent column: a pulsing dot and one line of text, no box. A retry
+    // or progress detail follows the label on the same line ("… · 第 2 次重试，5 秒后"), muted,
+    // and the line ends in an ellipsis when it does not fit (the whole text is its tooltip).
     <Box
       data-testid="assistant-loading-status"
       sx={{ padding: '8px 4px', minWidth: 0, color: columnTokens.attention }}
     >
       <Box
-        sx={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: 14, lineHeight: 1.2 }}
+        sx={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, fontSize: 14, lineHeight: 1.2 }}
       >
         <Box
           aria-hidden="true"
@@ -3107,29 +3109,33 @@ const AssistantLoadingStatus: React.FC<{
         />
         <Box
           component="span"
+          data-testid="assistant-loading-line"
+          title={[progress ? `${label} ${progress}` : label, detail].filter(Boolean).join(' · ')}
           sx={{
+            flex: 1,
             minWidth: 0,
-            overflowWrap: 'anywhere',
-            color: alpha(columnTokens.attention, 0.8),
-            ...columnPulseSx
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
           }}
         >
-          {progress ? `${label} ${progress}` : label}
+          <Box
+            component="span"
+            sx={{ color: alpha(columnTokens.attention, 0.8), ...columnPulseSx }}
+          >
+            {progress ? `${label} ${progress}` : label}
+          </Box>
+          {detail ? (
+            <Box
+              component="span"
+              data-testid="assistant-loading-detail"
+              sx={{ fontSize: columnTokens.fontSize.small, color: columnTokens.muted }}
+            >
+              {` · ${detail}`}
+            </Box>
+          ) : null}
         </Box>
       </Box>
-      {detail ? (
-        <Typography
-          sx={{
-            mt: '2px',
-            pl: '18px',
-            fontSize: columnTokens.fontSize.small,
-            lineHeight: '16px',
-            color: columnTokens.muted
-          }}
-        >
-          {detail}
-        </Typography>
-      ) : null}
     </Box>
   ) : (
     <Box

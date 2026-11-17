@@ -281,7 +281,7 @@ describe('ChatMessageList in the Agent column', () => {
     expect(getComputedStyle(items[2]).listStyleType).not.toBe('none')
   })
 
-  it('shows the working line as a dot and a label without a box, with the detail below', () => {
+  it('shows the working line as a dot and one line without a box: the detail follows the label', () => {
     const session: ChatSession = {
       ...conversation,
       messages: [
@@ -304,7 +304,14 @@ describe('ChatMessageList in the Agent column', () => {
     expect(within(status).getByText('Running a tool 1/3')).toHaveStyle({
       color: alpha('#ddaa00', 0.8)
     })
-    expect(within(status).getByText('Step detail')).toHaveStyle({ fontSize: '12px' })
+    // One line: the detail follows the label in the same element, muted, and the line ends in an ellipsis.
+    const line = within(status).getByTestId('assistant-loading-line')
+    const detail = within(line).getByTestId('assistant-loading-detail')
+    expect(detail).toHaveTextContent('· Step detail')
+    expect(detail).toHaveStyle({ fontSize: '12px' })
+    expect(line).toHaveStyle({ whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' })
+    expect(line).toHaveAttribute('title', 'Running a tool 1/3 · Step detail')
+    expect(line.textContent).toBe('Running a tool 1/3 · Step detail')
     expect(status.querySelector('[role="progressbar"]')).toBeNull()
     // It belongs to the last row of the list.
     const rows = [...document.querySelectorAll('[data-chat-message-index]')]
