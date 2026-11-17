@@ -17,6 +17,8 @@ client = MagicAgentClient(HttpAgentTransport(
 result = client.run(AgentRunRequest("example", {"prompt": "hello"}))
 ```
 
+Loopback connections (`127.0.0.0/8`, `::1`, `localhost`) never use a proxy, so the token is never sent to one; any other host follows your proxy settings, and the token is never sent on a redirect.
+
 Attach streams are incremental and closable. The async client bridges the blocking
 stdlib HTTP stream through worker threads, so it does not block the event loop:
 
