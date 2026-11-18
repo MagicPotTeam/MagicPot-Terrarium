@@ -167,17 +167,32 @@ export const buildWindowsJobObjectArguments = (constraints: PolicyConstraints): 
   ]
 }
 
+/**
+ * The installed helper next to the executable, and in a development checkout the one built into
+ * the repository. A packaged app (Electron without `defaultApp`) never looks in its start
+ * directory: that folder can be anything (a shortcut's start-in, a workspace), and a helper there
+ * would be checked only against a manifest lying next to it, then executed.
+ */
+export const isPackagedElectronApp = (
+  versions: NodeJS.ProcessVersions = process.versions,
+  defaultApp: boolean | undefined = (process as { defaultApp?: boolean }).defaultApp
+): boolean => Boolean(versions.electron) && defaultApp !== true
+
 const defaultCandidates = (): string[] => [
   path.join(path.dirname(process.execPath), 'bin', 'magicpot-command-job', HELPER_NAME),
-  path.join(
-    process.cwd(),
-    'packages',
-    'runtime-assets',
-    'resources',
-    'bin',
-    'magicpot-command-job',
-    HELPER_NAME
-  )
+  ...(isPackagedElectronApp()
+    ? []
+    : [
+        path.join(
+          process.cwd(),
+          'packages',
+          'runtime-assets',
+          'resources',
+          'bin',
+          'magicpot-command-job',
+          HELPER_NAME
+        )
+      ])
 ]
 
 const integerOrDash = (value: unknown, name: string, maximum = Number.MAX_SAFE_INTEGER): string => {

@@ -56,7 +56,12 @@ export type WindowsProcessSpawn = (
   options: SpawnOptions
 ) => ChildProcess
 
-export type WindowsProcessTreeStopOutcome = 'converged' | 'snapshot-unavailable' | 'deadline'
+export type WindowsProcessTreeStopOutcome =
+  | 'converged'
+  | 'snapshot-unavailable'
+  | 'deadline'
+  /** A live process linked to the tree holds a protected pid (or a system pid): never killed. */
+  | 'protected-member'
 
 export type WindowsProcessTreeStopReport = Readonly<{
   /**
@@ -94,6 +99,13 @@ export type WindowsProcessTreeStopOptions = Readonly<{
    * child, whatever its parent pid says. The sweep still kills the children the root left behind.
    */
   rootExitedAtMs?: number
+  /**
+   * Read on every round: Date.now() of the root's 'exit' event once it has been seen, else
+   * undefined. Node keeps the process handle open until that event, so the root's pid cannot be
+   * reused before it: the event dates the root's death exactly, also when the initial taskkill
+   * exited non-zero.
+   */
+  rootExitObservedAtMs?: () => number | undefined
   spawnProcess?: WindowsProcessSpawn
   /** Defaults to the PowerShell / CIM snapshot started through `spawnProcess`. */
   snapshot?: WindowsProcessSnapshotProvider
@@ -108,7 +120,11 @@ export type WindowsProcessTreeStopOptions = Readonly<{
    * fallback hook).
    */
   onInitialKillFailed?: () => void
-  /** Never killed, whatever a snapshot says (defaults to this process and its parent). */
+  /**
+   * Never killed, whatever a snapshot says (defaults to this process and its parent), as long as
+   * the process holding the pid is older than the root: a holder created after the root was
+   * spawned cannot be this process or its parent (the parent pid may be dead and reused).
+   */
   protectedPids?: readonly number[]
 }>
 
@@ -117,6 +133,8 @@ const INITIAL_KILL_TIMEOUT_MS = 3_000
 const MIN_SNAPSHOT_TIMEOUT_MS = 1_500
 const MAX_SNAPSHOT_TIMEOUT_MS = 4_000
 const MAX_PIDS_PER_TASKKILL = 32
+/** taskkill's exit code when a pid is not found: its holder was gone at that moment. */
+const TASKKILL_NOT_FOUND = 128
 /** Second bound of the sweep, for a clock that does not advance: rounds of snapshot and kill. */
 const MAX_SWEEP_ROUNDS = 64
 /** Bound of the last kill of known live members when the deadline has already passed. */
@@ -350,9 +368,15 @@ const memberLowerBound = (member: Member): number => member.createdAtUs ?? membe
 export function collectLiveTreeMembers(
   table: readonly WindowsProcessEntry[],
   members: WindowsTreeMembers,
-  protectedPids: ReadonlySet<number>,
-  window?: WindowsSnapshotWindow
+  protectedPids: ReadonlySet<number> | ((entry: WindowsProcessEntry) => boolean),
+  window?: WindowsSnapshotWindow,
+  /** Receives the live members that are never killed (protected or system pids). */
+  withheld?: WindowsProcessEntry[]
 ): WindowsProcessEntry[] {
+  const isProtected =
+    typeof protectedPids === 'function'
+      ? protectedPids
+      : (entry: WindowsProcessEntry) => protectedPids.has(entry.pid)
   const byPid = new Map(table.map((entry) => [entry.pid, entry]))
   const identifies = (member: Member, entry: WindowsProcessEntry): boolean => {
     if (entry.createdAtUs === null) return false
@@ -412,7 +436,12 @@ export function collectLiveTreeMembers(
       grew = true
     }
   }
-  return [...live.values()].filter((entry) => !protectedPids.has(entry.pid) && entry.pid > 4)
+  const killable: WindowsProcessEntry[] = []
+  for (const entry of live.values()) {
+    if (!isProtected(entry) && entry.pid > 4) killable.push(entry)
+    else withheld?.push(entry)
+  }
+  return killable
 }
 
 /**
@@ -431,7 +460,7 @@ export async function stopWindowsProcessTree(
   const now = options.now ?? Date.now
   const startedAt = now()
   const deadline = startedAt + (options.deadlineMs ?? WINDOWS_TREE_SWEEP_DEADLINE_MS)
-  const protectedPids = new Set(options.protectedPids ?? [process.pid, process.ppid])
+  const protectedPidSet = new Set(options.protectedPids ?? [process.pid, process.ppid])
   const snapshotTimeout = () =>
     Math.min(MAX_SNAPSHOT_TIMEOUT_MS, Math.max(MIN_SNAPSHOT_TIMEOUT_MS, deadline - now()))
   const takeSnapshot = async () => {
@@ -479,10 +508,33 @@ export async function stopWindowsProcessTree(
     ...(initial.exitCode === 0 ? { killedAtUs: initialKillDoneUs } : {})
   }
   const members: WindowsTreeMembers = new Map([[rootPid, [rootMember]]])
+  // Protection by identity: this process and its parent were created before the root.
+  const protectedPids = (entry: WindowsProcessEntry): boolean =>
+    protectedPidSet.has(entry.pid) &&
+    (entry.createdAtUs === null || entry.createdAtUs < rootMember.notBeforeUs)
+  const applyRootExit = () => {
+    const exitedAtMs = options.rootExitObservedAtMs?.()
+    if (exitedAtMs === undefined) return
+    const exitedAtUs = exitedAtMs * 1000
+    if (rootMember.deadByUs === undefined || exitedAtUs < rootMember.deadByUs)
+      rootMember.deadByUs = exitedAtUs
+  }
   let snapshots = 0
   let swept = 0
   const report = (confirmed: boolean, outcome: WindowsProcessTreeStopOutcome) =>
     Object.freeze({ confirmed, outcome, initialKill: Object.freeze(initial), snapshots, swept })
+  // A kill that succeeded, or that found no such pid, proves the member was dead by now: the
+  // upper bound for the creation of its children. Any other answer leaves the bound open.
+  const dateDeath = (entry: WindowsProcessEntry, result: KillResult) => {
+    const member = members
+      .get(entry.pid)
+      ?.find((candidate) => candidate.createdAtUs === entry.createdAtUs)
+    if (!member) return
+    const atUs = now() * 1000
+    if (result.exitCode === 0) member.killedAtUs = atUs
+    else if (result.exitCode === TASKKILL_NOT_FOUND && member.deadByUs === undefined)
+      member.deadByUs = atUs
+  }
   const kill = async (live: readonly WindowsProcessEntry[], timeoutMs: () => number) => {
     for (let index = 0; index < live.length; index += MAX_PIDS_PER_TASKKILL) {
       const batch = live.slice(index, index + MAX_PIDS_PER_TASKKILL)
@@ -495,13 +547,26 @@ export async function stopWindowsProcessTree(
         [...args, '/F'],
         timeoutMs()
       )
-      if (result.exitCode !== 0) continue
-      const killedAtUs = now() * 1000
+      if (result.exitCode === 0) {
+        for (const entry of batch) dateDeath(entry, result)
+        continue
+      }
+      // Non-zero: at least one pid of the batch failed (often one that exited by itself after
+      // the snapshot). Without a per-pid answer no member's death would be dated until the next
+      // snapshot arrives, which would stretch the window in which a reused pid's child is taken
+      // for a member's child. Kill one pid per taskkill so each answer dates its own pid.
+      if (batch.length === 1) {
+        dateDeath(batch[0], result)
+        continue
+      }
       for (const entry of batch) {
-        const member = members
-          .get(entry.pid)
-          ?.find((candidate) => candidate.createdAtUs === entry.createdAtUs)
-        if (member) member.killedAtUs = killedAtUs
+        const single = await runTaskkill(
+          spawnProcess,
+          options.systemRoot,
+          ['/PID', windowsPidArgument(entry.pid), '/F'],
+          timeoutMs()
+        )
+        dateDeath(entry, single)
       }
     }
     swept += live.length
@@ -518,13 +583,17 @@ export async function stopWindowsProcessTree(
       recordOnly = undefined
       if (recorded) {
         snapshots += 1
+        applyRootExit()
         collectLiveTreeMembers(recorded.table, members, protectedPids, recorded.window)
       }
     }
     if (!shot) return report(false, now() >= deadline ? 'deadline' : 'snapshot-unavailable')
     snapshots += 1
-    const live = collectLiveTreeMembers(shot.table, members, protectedPids, shot.window)
-    if (!live.length) return report(true, 'converged')
+    applyRootExit()
+    const withheld: WindowsProcessEntry[] = []
+    const live = collectLiveTreeMembers(shot.table, members, protectedPids, shot.window, withheld)
+    // A live linked process that may not be killed: never report the stop as confirmed.
+    if (!live.length) return withheld.length ? report(false, 'protected-member') : report(true, 'converged')
     if (now() >= deadline || round >= MAX_SWEEP_ROUNDS) {
       // Out of time with members known to be alive: kill them once more, then report honestly.
       await kill(live, () => FINAL_KILL_TIMEOUT_MS)

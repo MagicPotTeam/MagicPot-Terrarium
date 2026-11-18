@@ -452,19 +452,114 @@ describe('stopWindowsProcessTree', () => {
     for (const pid of [100, 150, 160]) expect(os.alive(pid), `pid ${pid}`).toBe(false)
   })
 
-  it('never kills a protected pid, even when a snapshot claims it descends from the tree', async () => {
+  it('protects pids by identity: a tree member holding a protected (reused) pid is killed, an older holder never', async () => {
     const os = new FakeWindows()
     os.add(100, 1, T0 + 10)
+    // 3000 is a protected pid held by a process older than the root (this process or its parent).
+    os.add(3000, 1, T0 - 60_000)
     os.onKill = (_enumerated, call) => {
       if (call === 0) {
+        // 4242 is protected too, but its holder was created after the root: it cannot be this
+        // process or its parent (whose pid may be dead and reused); it is a tree member.
         os.add(4242, 100, T0 + 500)
         os.add(4243, 100, T0 + 500)
       }
     }
     const clock = fakeClock()
-    await stopWindowsProcessTree(100, { ...stopOptions(os, clock.now), protectedPids: [4242] })
-    expect(os.alive(4242)).toBe(true)
+    const report = await stopWindowsProcessTree(100, {
+      ...stopOptions(os, clock.now),
+      protectedPids: [3000, 4242]
+    })
+    expect(os.alive(3000)).toBe(true)
+    expect(os.alive(4242)).toBe(false)
     expect(os.alive(4243)).toBe(false)
+    expect(report).toMatchObject({ confirmed: true, outcome: 'converged' })
+  })
+
+  it('never reports a stop confirmed while a linked process that may not be killed is alive', async () => {
+    const os = new FakeWindows()
+    os.add(100, 1, T0 + 10)
+    os.onKill = (_enumerated, call) => {
+      // A system pid can never be killed; a snapshot claiming it descends from the tree must not
+      // be read as 'nothing left to kill'.
+      if (call === 0) os.add(4, 100, T0 + 500)
+    }
+    const clock = fakeClock()
+    const report = await stopWindowsProcessTree(100, stopOptions(os, clock.now))
+    expect(os.alive(4)).toBe(true)
+    expect(report).toMatchObject({ confirmed: false, outcome: 'protected-member' })
+    expect(
+      os.calls.filter((call) => call.file === TASKKILL).some((call) => call.args.includes('4'))
+    ).toBe(false)
+  })
+
+  it("dates the root's death by its exit event when the first taskkill exits non-zero (no stranger is killed)", async () => {
+    const os = new FakeWindows()
+    os.add(100, 1, T0 + 10)
+    const clock = fakeClock()
+    let rootExitedAtMs: number | undefined
+    os.taskkillExitCode = 255
+    os.onKill = (_enumerated, call) => {
+      if (call === 0) rootExitedAtMs = clock.now()
+    }
+    let snaps = 0
+    const snapshot = async () => {
+      snaps += 1
+      if (snaps === 2) {
+        // 0.7 s after the root's exit a short-lived launcher reused its pid and left a child.
+        clock.advance(700)
+        os.add(900, 100, clock.now())
+      }
+      return os.entries()
+    }
+    const report = await stopWindowsProcessTree(100, {
+      ...stopOptions(os, clock.now),
+      snapshot,
+      rootExitObservedAtMs: () => rootExitedAtMs
+    })
+    expect(os.alive(900)).toBe(true)
+    expect(os.calls.filter((call) => call.file === TASKKILL).map((call) => call.args)).toEqual([
+      ['/PID', '100', '/T', '/F']
+    ])
+    expect(report).toMatchObject({ confirmed: true, outcome: 'converged' })
+  })
+
+  it('dates each death by its own taskkill when a batch kill exits non-zero (no stranger is killed)', async () => {
+    const os = new FakeWindows()
+    os.add(100, 1, T0 + 10)
+    const clock = fakeClock()
+    os.onKill = (_enumerated, call) => {
+      // 102 and 103 are born while the first taskkill runs and survive it.
+      if (call === 0) {
+        os.add(102, 100, clock.now())
+        os.add(103, 100, clock.now())
+      }
+    }
+    let snaps = 0
+    const snapshot = async () => {
+      snaps += 1
+      const rows = os.entries()
+      // 103 exits by itself right after the deciding snapshot saw it: the batch kill of 102 and
+      // 103 then exits 128 (not found).
+      if (snaps === 2) os.table.get(103)!.alive = false
+      if (snaps === 3) {
+        // 0.7 s after the batch a launcher reused the pid of the dead 102 and left a child.
+        clock.advance(700)
+        os.add(901, 102, clock.now())
+        return os.entries()
+      }
+      return rows
+    }
+    const report = await stopWindowsProcessTree(100, { ...stopOptions(os, clock.now), snapshot })
+    expect(os.alive(901)).toBe(true)
+    const kills = os.calls.filter((call) => call.file === TASKKILL).map((call) => call.args)
+    expect(kills[1]).toEqual(['/PID', '102', '/PID', '103', '/F'])
+    expect(kills.slice(2)).toEqual([
+      ['/PID', '102', '/F'],
+      ['/PID', '103', '/F']
+    ])
+    expect(kills.some((args) => args.includes('901'))).toBe(false)
+    expect(report).toMatchObject({ confirmed: true, outcome: 'converged' })
   })
 })
 

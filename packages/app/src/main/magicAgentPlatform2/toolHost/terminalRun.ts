@@ -12,6 +12,7 @@ import type { MagicAgentPolicyAuthorizationService } from '../policy'
 import {
   defaultWindowsCommandLookup,
   isJobHelperLaunchable,
+  isWindowsBatchFileName,
   resolveWindowsSpawnCommand,
   type WindowsCommandLookup
 } from './windowsCommandResolution'
@@ -68,7 +69,12 @@ export type TerminalRunProcessControl = Readonly<{
   /** win32 without the helper: process-table snapshots for the tree sweep (default: PowerShell). */
   windowsSnapshot?: WindowsProcessSnapshotProvider
   windowsSweepDeadlineMs?: number
+  /** win32: how long a stopped run waits for the command's pipes to close (default 3 s). */
+  windowsCloseWaitMs?: number
 }>
+
+/** win32: bound of the wait for the command's 'close' once its stop has done what it can. */
+export const WINDOWS_CLOSE_WAIT_AFTER_STOP_MS = 3_000
 
 const defaultProcessControl = (): TerminalRunProcessControl => ({
   platform: process.platform,
@@ -308,7 +314,12 @@ async function executeProcess(
     const resolved = helper
       ? resolveWindowsSpawnCommand(command, cwd, env, control.windowsCommandLookup)
       : undefined
-    if (helper && resolved !== undefined && isJobHelperLaunchable(resolved, cwd))
+    if (
+      helper &&
+      resolved !== undefined &&
+      !isWindowsBatchFileName(command) &&
+      isJobHelperLaunchable(resolved, cwd)
+    )
       launch = { file: helper, args: ['-', '-', '-', '--', resolved, ...args], jobObject: true }
   }
   return new Promise((resolve) => {
@@ -351,6 +362,7 @@ async function executeProcess(
           // The helper already exited, which means it emptied its job.
         }
         termination = Promise.resolve()
+        boundCloseWait()
       } else if (windows) {
         // No Job Object (no verified helper, or a command the helper cannot launch): today's
         // immediate `taskkill /PID <pid> /T /F`, then a best-effort sweep for processes it missed.
@@ -360,6 +372,7 @@ async function executeProcess(
         termination = stopWindowsProcessTree(pid, {
           rootCreatedNotBeforeMs: spawnedNotBeforeMs,
           ...(exitedAtMs === undefined ? {} : { rootExitedAtMs: exitedAtMs }),
+          rootExitObservedAtMs: () => exitedAtMs,
           spawnProcess: control.spawn,
           now: control.now,
           ...(control.windowsSnapshot ? { snapshot: control.windowsSnapshot } : {}),
@@ -376,6 +389,7 @@ async function executeProcess(
             child.kill('SIGKILL')
           }
         )
+        boundCloseWait()
       } else {
         try {
           process.kill(-pid, 'SIGKILL')
@@ -385,9 +399,38 @@ async function executeProcess(
         termination = Promise.resolve()
       }
     }
+    // Windows: once the stop has done what it can, a process it could not reach (an orphan, a
+    // process that left the job) may still hold the command's output pipes, and 'close' would
+    // then wait for that process to end by itself. Bound the wait: the run ends with what was
+    // read, and the stop is reported unconfirmed, because a pipe holder proves that something of
+    // the tree still runs.
+    let closeWaitTimer: ReturnType<typeof setTimeout> | undefined
+    function boundCloseWait(): void {
+      void termination?.then(() => {
+        if (settled) return
+        closeWaitTimer = setTimeout(() => {
+          if (settled) return
+          settled = true
+          cleanup()
+          processTreeStop = 'tree-unconfirmed'
+          child.stdout?.destroy()
+          child.stderr?.destroy()
+          resolve({
+            status,
+            exitCode: child.exitCode,
+            signal: child.signalCode,
+            stdout,
+            stderr,
+            truncated,
+            processTreeStop
+          })
+        }, control.windowsCloseWaitMs ?? WINDOWS_CLOSE_WAIT_AFTER_STOP_MS)
+      })
+    }
     const onAbort = () => stop('cancelled')
     const cleanup = () => {
       clearTimeout(timer)
+      clearTimeout(closeWaitTimer)
       signal?.removeEventListener('abort', onAbort)
     }
     const timer = setTimeout(() => stop('timed-out'), timeoutMs)

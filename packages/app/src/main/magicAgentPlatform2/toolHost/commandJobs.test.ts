@@ -910,16 +910,19 @@ describe('CommandJobsToolHost win32 stop strategy', () => {
     expect(stopped).toMatchObject({ state: 'stopped', outcome: 'unknown', stopOutcome: 'termination-unconfirmed', termination: { controllerExitCode: null, childClosed: true } })
   })
 
-  it('keeps an unconfined stop unknown and quarantined when no process snapshot can be taken', async () => {
+  it('judges an unconfined stop as before the sweep when no process snapshot can be taken (no quarantine)', async () => {
+    // PowerShell blocked by policy, a broken WMI or a cold start beyond the bound: the sweep has
+    // no evidence either way. Quarantining the job host until a restart on every such PC would be
+    // worse than the old rule (taskkill exit 0 and the child's close), which therefore applies.
     const fake = createFakeSpawner()
     const { root, authorization } = setup(fake.spawnProcess)
     const host = win32Host(root, authorization, fake.spawnProcess, { windowsProcessSnapshot: async () => undefined })
     const input = approved(root, authorization, ['--hang'])
     const job = await host.background(input)
     const stopped = await host.stop({ ...input, jobId: job.jobId })
-    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'unknown', stopOutcome: 'termination-unconfirmed', termination: { controllerExitCode: 0, controllerFailed: true, childClosed: true } })
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'known', stopOutcome: 'stop-requested', termination: { controllerExitCode: 0, controllerFailed: false, childClosed: true } })
     expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([['/PID', String(fake.calls[0].child.pid), '/T', '/F']])
-    expect(() => host.assertNoUncertainStop()).toThrow('unconfirmed')
+    expect(() => host.assertNoUncertainStop()).not.toThrow()
   })
 
   it('stops a confined job by ending the Job Object helper itself, without a sweep', async () => {

@@ -303,7 +303,11 @@ describe('terminal.run on win32 with the Job Object helper', () => {
     for (const [command, files] of [
       ['missing', []],
       ['script.cmd', ['C:\\Windows\\System32\\script.cmd']],
-      ['D:relative', ['D:relative.exe']]
+      ['D:relative', ['D:relative.exe']],
+      // Node refuses a .cmd / .bat name as given (EINVAL) before searching anything: it must not
+      // be resolved to another file such as npm.cmd.exe planted earlier on the search path.
+      ['npm.cmd', ['C:\\Windows\\System32\\npm.cmd.exe']],
+      ['Build.Bat. ', ['C:\\Windows\\System32\\Build.Bat.exe']]
     ] as const) {
       const fake = fakeSpawner(({ child }) => child.close(0))
       await host(root, authorization, {
@@ -422,6 +426,39 @@ describe('terminal.run on win32 without the helper: taskkill plus sweep', () => 
     expect(result.status).toBe('timed-out')
     expect(fake.calls[0].child.kills).toEqual([])
     expect(audit[0]).toMatchObject({ status: 'timed-out', processTreeStop: 'tree-swept' })
+  })
+
+  it('ends a stopped run whose pipes a process out of reach keeps open, and reports the stop unconfirmed', async () => {
+    const { root, authorization } = setup()
+    // taskkill succeeds, but the command's pipes stay open: a process the stop could not reach
+    // (an orphan) holds them, so the command never emits 'close'.
+    const fake = fakeSpawner(({ file, child }) => {
+      if (file.endsWith('taskkill.exe')) child.close(0)
+    })
+    const controller = new AbortController()
+    const audit: TerminalRunAuditEvidence[] = []
+    const running = host(
+      root,
+      authorization,
+      {
+        spawn: fake.spawn,
+        resolveWindowsJobHelper: noHelper,
+        windowsCommandLookup: windowsFiles(['C:\\Windows\\System32\\tool.exe']),
+        windowsSnapshot: async () => [],
+        windowsCloseWaitMs: 20
+      },
+      audit
+    ).run(approvedInput(root, authorization, 'tool', [], { signal: controller.signal }))
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(1))
+    fake.calls[0].child.stdout.write('partial output')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    controller.abort()
+    const result = await running
+    expect(result.status).toBe('cancelled')
+    expect(result.stdout).toBe('partial output')
+    expect(fake.calls[0].child.closed).toBe(false)
+    expect(fake.calls[0].child.stdout.destroyed).toBe(true)
+    expect(audit[0]).toMatchObject({ status: 'cancelled', processTreeStop: 'tree-unconfirmed' })
   })
 
   it('reports an unconfirmed tree stop when no snapshot can be taken', async () => {

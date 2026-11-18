@@ -10,6 +10,7 @@ import {
   createWindowsJobObjectConfinementAdapter,
   probeWindowsCommandJobHelperCapability,
   resolveCapableWindowsCommandJobHelper,
+  isPackagedElectronApp,
   resolveWindowsCommandJobHelper,
   WINDOWS_COMMAND_JOB_CAPABILITY
 } from './windowsJobObjectConfinement'
@@ -350,5 +351,15 @@ describe('Windows Job Object helper argument round trip', () => {
     expect(received).toEqual(helperArgv)
     const childLine = received.slice(4).map(helperQuote).join(' ')
     expect(parse(childLine)).toEqual([command, ...args])
+  })
+})
+
+describe('isPackagedElectronApp (no helper from the start directory in a packaged app)', () => {
+  it('is true only for Electron started without defaultApp', () => {
+    const electron = { ...process.versions, electron: '42.0.0' } as NodeJS.ProcessVersions
+    const node = { ...process.versions, electron: undefined } as unknown as NodeJS.ProcessVersions
+    expect(isPackagedElectronApp(electron, undefined)).toBe(true)
+    expect(isPackagedElectronApp(electron, true)).toBe(false)
+    expect(isPackagedElectronApp(node, undefined)).toBe(false)
   })
 })

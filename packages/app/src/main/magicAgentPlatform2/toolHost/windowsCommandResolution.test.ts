@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   isJobHelperLaunchable,
+  isWindowsBatchFileName,
   resolveWindowsSpawnCommand,
   windowsSpawnSearchPath,
   type WindowsCommandLookup
@@ -202,5 +203,16 @@ describe('resolveWindowsSpawnCommand (libuv search_path on win32)', () => {
     expect(isJobHelperLaunchable('C:\\bin\\tool.exe', dir(248))).toBe(false)
     expect(isJobHelperLaunchable(`${dir(238)}\\tool.exe`)).toBe(true)
     expect(isJobHelperLaunchable(`${dir(239)}\\tool.exe`)).toBe(false)
+  })
+})
+
+describe('isWindowsBatchFileName (Node refuses these names without a shell)', () => {
+  it('matches .cmd and .bat as given, in any case, with trailing dots and spaces', () => {
+    for (const name of ['npm.cmd', 'build.BAT', 'C:\\tools\\x.Cmd', 'npm.cmd.', 'npm.cmd ', 'b.bat. .'])
+      expect(isWindowsBatchFileName(name), name).toBe(true)
+  })
+  it('does not match other names', () => {
+    for (const name of ['npm', 'npm.exe', 'npm.cmd.exe', 'cmd', 'x.batch', 'tool.com', 'a.cmdx'])
+      expect(isWindowsBatchFileName(name), name).toBe(false)
   })
 })

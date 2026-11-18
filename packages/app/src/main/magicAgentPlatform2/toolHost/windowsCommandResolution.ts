@@ -195,6 +195,18 @@ export function windowsPathIsNonDirectory(candidate: string): boolean {
 export const JOB_HELPER_MAX_PATH_CHARS = 247
 
 /**
+ * Node's own rule (src/util-inl.h IsWindowsBatchFile, applied in process_wrap.cc to the file name
+ * AS GIVEN, before anything is searched): a name whose extension is .cmd or .bat, trailing dots
+ * and spaces ignored, is refused with EINVAL when spawned without a shell. Such a name must keep
+ * the direct spawn, so that it is refused as today instead of being resolved to another file
+ * (`npm.cmd` -> `npm.cmd.exe` in the working directory).
+ */
+export function isWindowsBatchFileName(command: string): boolean {
+  const match = /\.([a-zA-Z0-9]+)\s*[.\s]*$/.exec(command)
+  return match !== null && ['cmd', 'bat'].includes(match[1].toLowerCase())
+}
+
+/**
  * True when `resolved` can be given to the Job Object helper: an absolute drive or UNC path to a
  * `.exe` or `.com` file, with the path and the working directory inside the classic length
  * limits. Anything else (batch files, which Node refuses without a shell, other extensions,

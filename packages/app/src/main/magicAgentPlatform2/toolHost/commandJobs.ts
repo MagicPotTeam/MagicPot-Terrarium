@@ -498,13 +498,20 @@ export class CommandJobsToolHost {
         const report = await stopWindowsProcessTree(pid, {
           rootCreatedNotBeforeMs: live.spawnedNotBeforeMs,
           ...(live.exitedAtMs === undefined ? {} : { rootExitedAtMs: live.exitedAtMs }),
+          rootExitObservedAtMs: () => live.exitedAtMs,
           spawnProcess: this.spawnProcess as unknown as WindowsProcessSpawn,
           ...(this.windowsProcessSnapshot ? { snapshot: this.windowsProcessSnapshot } : {})
         })
         controllerExitCode = report.initialKill.exitCode
         controllerTimedOut = report.initialKill.timedOut || report.outcome === 'deadline'
-        controllerFailed = report.initialKill.failed || report.outcome === 'snapshot-unavailable'
-        killerConfirmed = report.confirmed && report.initialKill.exitCode === 0
+        controllerFailed = report.initialKill.failed
+        // No process snapshot could be taken (PowerShell blocked by policy, a broken WMI, a cold
+        // start beyond the bound): the sweep has no evidence either way, so the stop is judged as
+        // before the sweep existed (taskkill exit 0 and the child's close). Treating it as
+        // unconfirmed would quarantine the job host until a restart on every such PC.
+        killerConfirmed =
+          report.initialKill.exitCode === 0 &&
+          (report.confirmed || report.outcome === 'snapshot-unavailable')
       } else {
         try { this.killProcessGroup(-pid, 'SIGTERM') } catch { /* process group may already have exited */ }
         await new Promise((resolve) => setTimeout(resolve, 250))
