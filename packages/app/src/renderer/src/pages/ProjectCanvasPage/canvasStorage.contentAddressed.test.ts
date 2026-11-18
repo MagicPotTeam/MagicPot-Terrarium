@@ -2218,11 +2218,13 @@ describe('reopening a board the mirror holds', () => {
     // The Agent hand-off reads the bytes: a format the managed store does not hold (BMP)
     // is inlined, a PNG is imported into managed media. Neither keeps a path.
     const importFile = vi.fn()
-    const importDataUrl = vi.fn(async (req: { dataUrl: string }) => ({
+    const importDataUrl = vi.fn()
+    // Path-less bytes (a blob: URL) are imported as bytes, never as a base64 string.
+    const importBytes = vi.fn(async (req: { bytes: Uint8Array }) => ({
       reference: { version: 1, kind: 'managed', relativePath: 'chat/p.png', mimeType: 'image/png', sizeBytes: 3 },
-      localMediaUrl: `local-media:///home/u/Media/imported-${req.dataUrl.length}.png`
+      localMediaUrl: `local-media:///home/u/Media/imported-${req.bytes.length}.png`
     }))
-    const service = { importFile, importDataUrl } as unknown as IncomingChatImageImportOptions['service']
+    const service = { importFile, importDataUrl, importBytes } as unknown as IncomingChatImageImportOptions['service']
     const fetchImpl = (async (url: string) => ({
       ok: true,
       blob: async () => restoredBlobs.get(url)!
@@ -2237,9 +2239,9 @@ describe('reopening a board the mirror holds', () => {
     )
     expect(handedScan.url.startsWith('data:')).toBe(true)
     expect(importFile).not.toHaveBeenCalled()
-    expect(importDataUrl).toHaveBeenCalledTimes(1)
-    const importedDataUrl = importDataUrl.mock.calls[0][0].dataUrl
-    expect([...Buffer.from(importedDataUrl.slice(importedDataUrl.indexOf(',') + 1), 'base64')]).toEqual(photoBytes)
+    expect(importDataUrl).not.toHaveBeenCalled()
+    expect(importBytes).toHaveBeenCalledTimes(1)
+    expect([...importBytes.mock.calls[0][0].bytes]).toEqual(photoBytes)
     expect(handedPhoto.url.startsWith('local-media:///home/u/Media/')).toBe(true)
 
     // Both images are deleted (outside undo) and the board is saved until it prunes.
