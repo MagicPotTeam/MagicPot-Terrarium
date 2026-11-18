@@ -3,8 +3,8 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentHtmlApp } from '@shared/api/agentThreadHtml'
 import AgentThreadHtmlPanel from './AgentThreadHtmlPanel'
-const mocks = vi.hoisted(() => ({ list: vi.fn(), open: vi.fn(), close: vi.fn(), storage: vi.fn(), initialize: vi.fn(), bind: vi.fn(), save: vi.fn(), saved: vi.fn() }))
-vi.mock('../../../utils/windowUtils', () => ({ api: () => ({ svcLLMProxy: { saveAgentHtmlApp: mocks.save, listSavedAgentHtmlApps: mocks.saved, setAgentHtmlScope: mocks.bind, listAgentHtmlApps: mocks.list, openAgentHtmlApp: mocks.open, closeAgentHtmlApp: mocks.close, agentHtmlStorageStatus: mocks.storage, initializeAgentHtmlStorage: mocks.initialize } }) }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), open: vi.fn(), close: vi.fn(), storage: vi.fn(), initialize: vi.fn(), bind: vi.fn(), save: vi.fn(), saved: vi.fn(), restore: vi.fn(), remove: vi.fn() }))
+vi.mock('../../../utils/windowUtils', () => ({ api: () => ({ svcLLMProxy: { restoreAgentHtmlApp: mocks.restore, deleteSavedAgentHtmlApp: mocks.remove, saveAgentHtmlApp: mocks.save, listSavedAgentHtmlApps: mocks.saved, setAgentHtmlScope: mocks.bind, listAgentHtmlApps: mocks.list, openAgentHtmlApp: mocks.open, closeAgentHtmlApp: mocks.close, agentHtmlStorageStatus: mocks.storage, initializeAgentHtmlStorage: mocks.initialize } }) }))
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'p', threadId: 't' } as const
 const app = (status: AgentHtmlApp['status'] = 'ready'): AgentHtmlApp => ({ id: 'owned', title: '<img src=x onerror=alert(1)>', status, revision: 1, sha256: 'hash', createdAt: Date.now(), expiresAt: Date.now() + 60000, surface: 'canvas' })
@@ -141,7 +141,10 @@ describe('HTML user-control metadata panel', () => {
     render(<AgentThreadHtmlPanel route={route} conversationId="chat" active host={host} />)
     await act(async () => { await Promise.resolve() })
     expect(host).toBeEmptyDOMElement()
-    expect(mocks.saved).not.toHaveBeenCalled()
+    // The snapshots are listed once to learn whether there is anything to draw; polling adds no read.
+    expect(mocks.saved).toHaveBeenCalledOnce()
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    expect(host).toBeEmptyDOMElement(); expect(mocks.saved).toHaveBeenCalledOnce()
     mocks.list.mockResolvedValue({ apps: [app(), { ...app(), id: 'last', title: 'Last app' }] })
     await act(async () => vi.advanceTimersByTimeAsync(1000))
     const cards = within(host).getAllByTestId('agent-html-app')
@@ -149,30 +152,100 @@ describe('HTML user-control metadata panel', () => {
     const line = within(cards[1]).getByText('chat.agent_html.run_slots_short')
     expect(line.parentElement).toHaveAttribute('title', 'chat.agent_html.run_slots')
     expect(screen.queryByRole('button', { name: /saved_refresh/ })).toBeNull()
-    // Polling does not list the snapshots again.
-    expect(mocks.saved).toHaveBeenCalledOnce()
+    // The lines moved into the app card (one more read); polling does not list the snapshots again.
+    expect(mocks.saved).toHaveBeenCalledTimes(2)
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    expect(mocks.saved).toHaveBeenCalledTimes(2)
     host.remove()
   })
-  it('lists saved snapshots in the body of the last app card, and draws no card for them alone', async () => {
+  it('lists saved snapshots in the body of the last app card, and as launcher cards of their own while the thread has no app', async () => {
     const host = document.createElement('div'); document.body.appendChild(host)
     mocks.storage.mockResolvedValue({ enabled: true, initialized: true, available: true, unconfirmedRuns: 0, canInitialize: false, saveEnabled: true })
-    mocks.saved.mockResolvedValue({ apps: [{ id: 's1', title: 'Saved chart', storageRevision: 1, documentRevision: 3, htmlBytes: 10, surface: 'canvas', sha256: 'h', createdAt: 1, updatedAt: 1 }] })
+    mocks.saved.mockResolvedValue({ apps: [{ id: 's1', title: 'Saved chart', storageRevision: 1, documentRevision: 3, htmlBytes: 10, surface: 'canvas', sha256: 'h', createdAt: 1, updatedAt: 1 }, { id: 's2', title: 'Saved table', storageRevision: 4, documentRevision: 1, htmlBytes: 10, surface: 'canvas', sha256: 'h', createdAt: 1, updatedAt: 1 }] })
     mocks.list.mockResolvedValue({ apps: [] })
     render(<AgentThreadHtmlPanel route={route} conversationId="chat" active host={host} />)
     await act(async () => { await Promise.resolve() })
-    // No permanent card of saved snapshots in the transcript tail.
-    expect(host).toBeEmptyDOMElement()
+    // No app (it left after 15 minutes, or the program restarted): each snapshot is still there as a
+    // launcher card, the host's own child (title, 恢复, 删除…), so it can be restored and deleted.
+    const own = within(host).getAllByTestId('agent-html-saved-item')
+    expect(own.map(card => card.parentElement)).toEqual([host, host])
+    expect(own.map(card => within(card).getByTestId('agent-app-launcher-title').textContent)).toEqual(['Saved chart', 'Saved table'])
+    expect(within(own[0]).getAllByRole('button').map(button => button.textContent)).toEqual(['chat.agent_html.restore', 'chat.agent_html.delete_saved'])
+    expect(own[0]).not.toHaveTextContent('v3')
+    expect(within(host).queryByTestId('agent-html-app')).toBeNull()
     mocks.list.mockResolvedValue({ apps: [app(), { ...app(), id: 'last', title: 'Last app' }] })
     await act(async () => vi.advanceTimersByTimeAsync(1000))
     await act(async () => { await Promise.resolve() })
+    // With app cards the same snapshots are lines in the last one's body; their own cards are gone.
     const cards = within(host).getAllByTestId('agent-html-app')
     expect(cards).toHaveLength(2)
+    expect([...host.children]).toEqual(cards)
     expect(within(cards[0]).queryByTestId('agent-html-saved-item')).toBeNull()
-    const line = within(cards[1]).getByTestId('agent-html-saved-item')
-    expect(line).toHaveTextContent('Saved chart')
-    expect(line).not.toHaveTextContent('v3')
-    expect(within(line).getAllByRole('button').map(button => button.textContent)).toEqual(['chat.agent_html.restore'])
+    const lines = within(cards[1]).getAllByTestId('agent-html-saved-item')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toHaveTextContent('Saved chart')
+    expect(lines[0]).not.toHaveTextContent('v3')
+    expect(within(lines[0]).getAllByRole('button').map(button => button.textContent)).toEqual(['chat.agent_html.restore', 'chat.agent_html.delete_saved'])
     expect(within(host).queryAllByTestId('agent-app-launcher-title').map(title => title.textContent)).toEqual(['<img src=x onerror=alert(1)>', 'Last app'])
+    host.remove()
+  })
+  it('restores a snapshot with no live app in the thread, restores it again after that card left, and deletes it', async () => {
+    const host = document.createElement('div'); document.body.appendChild(host)
+    mocks.storage.mockResolvedValue({ enabled: true, initialized: true, available: true, unconfirmedRuns: 0, canInitialize: false, saveEnabled: true })
+    const saved = { id: 's-alone', title: 'Saved chart', storageRevision: 2, documentRevision: 3, htmlBytes: 10, surface: 'canvas', sha256: 'h', createdAt: 1, updatedAt: 1 }
+    mocks.saved.mockResolvedValue({ apps: [saved] }); mocks.list.mockResolvedValue({ apps: [] }); mocks.remove.mockResolvedValue(undefined)
+    // Main as it answers a restore: a replayed operation gets the card it made then, and is refused
+    // once that card left the thread.
+    const made = new Map<string, AgentHtmlApp>()
+    let listed: AgentHtmlApp[] = []
+    mocks.list.mockImplementation(async () => ({ apps: listed }))
+    mocks.restore.mockImplementation(async ({ operationId }: { operationId: string }) => {
+      const prior = made.get(operationId)
+      if (prior) { if (!listed.includes(prior)) throw new Error('HTML app is unavailable in this document/thread/conversation.'); return { app: prior } }
+      const card = { ...app(), id: `restored-${made.size + 1}`, title: 'Saved chart', savedId: saved.id, savedRevision: 2 }
+      made.set(operationId, card); listed = [...listed, card]; return { app: card }
+    })
+    render(<AgentThreadHtmlPanel route={route} conversationId="chat" active host={host} />)
+    await act(async () => { await Promise.resolve() })
+    await act(async () => fireEvent.click(within(host).getByRole('button', { name: 'chat.agent_html.restore' })))
+    expect(mocks.restore).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'chat', documentToken: 'document-token', savedId: saved.id, expectedStorageRevision: 2, operationId: expect.any(String) })
+    // The restored card appears and takes the snapshot into its body as a line.
+    await act(async () => vi.advanceTimersByTimeAsync(1000)); await act(async () => { await Promise.resolve() })
+    const restored = within(host).getByTestId('agent-html-app')
+    expect(within(restored).getByTestId('agent-html-saved-item')).toHaveTextContent('Saved chart')
+    // That card expires: the snapshot is a card of its own again, and 恢复 restores it once more
+    // (a new operation: main would refuse the first one now).
+    listed = []
+    await act(async () => vi.advanceTimersByTimeAsync(1000)); await act(async () => { await Promise.resolve() })
+    expect(within(host).queryByTestId('agent-html-app')).toBeNull()
+    await act(async () => fireEvent.click(within(host).getByRole('button', { name: 'chat.agent_html.restore' })))
+    expect(mocks.restore).toHaveBeenCalledTimes(2)
+    expect(mocks.restore.mock.calls[1][0].operationId).not.toBe(mocks.restore.mock.calls[0][0].operationId)
+    expect(within(host).queryByRole('alert')).toBeNull()
+    await act(async () => vi.advanceTimersByTimeAsync(1000)); await act(async () => { await Promise.resolve() })
+    expect(within(within(host).getByTestId('agent-html-app')).getByTestId('agent-app-launcher-title')).toHaveTextContent('Saved chart')
+    // That card leaves too; deleting from the snapshot's own card asks once more, then removes it.
+    listed = []
+    await act(async () => vi.advanceTimersByTimeAsync(1000)); await act(async () => { await Promise.resolve() })
+    fireEvent.click(within(host).getByRole('button', { name: 'chat.agent_html.delete_saved' }))
+    expect(mocks.remove).not.toHaveBeenCalled()
+    mocks.saved.mockResolvedValue({ apps: [] })
+    await act(async () => fireEvent.click(within(host).getByRole('button', { name: 'chat.agent_html.confirm_delete' })))
+    expect(mocks.remove).toHaveBeenCalledExactlyOnceWith({ route, conversationId: 'chat', documentToken: 'document-token', savedId: saved.id, expectedStorageRevision: 2 })
+    await act(async () => { await Promise.resolve() })
+    expect(host).toBeEmptyDOMElement()
+    host.remove()
+  })
+  it('does not read or draw snapshots while saving is off', async () => {
+    const host = document.createElement('div'); document.body.appendChild(host)
+    mocks.saved.mockResolvedValue({ apps: [{ id: 's1', title: 'Saved chart', storageRevision: 1, documentRevision: 3, htmlBytes: 10, surface: 'canvas', sha256: 'h', createdAt: 1, updatedAt: 1 }] })
+    mocks.list.mockResolvedValue({ apps: [] })
+    render(<AgentThreadHtmlPanel route={route} conversationId="chat" active host={host} />)
+    await act(async () => { await Promise.resolve() }); await act(async () => vi.advanceTimersByTimeAsync(2000))
+    expect(host).toBeEmptyDOMElement(); expect(mocks.saved).not.toHaveBeenCalled()
+    mocks.list.mockResolvedValue({ apps: [app()] })
+    await act(async () => vi.advanceTimersByTimeAsync(1000))
+    expect(within(host).getByTestId('agent-html-app')).toBeTruthy(); expect(within(host).queryByTestId('agent-html-saved-item')).toBeNull(); expect(mocks.saved).not.toHaveBeenCalled()
     host.remove()
   })
 })

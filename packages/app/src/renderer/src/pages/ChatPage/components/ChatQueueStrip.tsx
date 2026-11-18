@@ -92,7 +92,8 @@ export const ChatQueueStrip: React.FC<{
     : items.filter((item) => visibleIds.has(item.id) || item.id === editingId)
   const hidden = items.length - shown.length
   // Something is left out while collapsed: the strip offers to show it (or to collapse again).
-  const collapsible = items.some((item) => !visibleIds.has(item.id))
+  // When the only row outside the collapsed ones is the one being edited, nothing is left out.
+  const collapsible = expanded ? items.some((item) => !visibleIds.has(item.id)) : hidden > 0
   const statusLabel: Record<ChatQueueStripStatus, string> = {
     queued: t('chat.queue_status_queued'),
     preparing: t('chat.queue_status_preparing'),

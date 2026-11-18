@@ -1152,9 +1152,6 @@
       "save_snapshot": "保存快照",
       "saved_notice": "HTML和数据只作为本地加密历史保存。恢复生成待打开卡片，不启动进程；模型修改不会自动保存。仅运行前或确认关闭后可保存，不保存DOM或JS堆。",
       "snapshot_failed": "快照操作失败、被停用或版本已变。请刷新并核对后重试，不会自动重试或重启进程。",
-      "restore_another": "再建一张…",
-      "restore_another_notice": "上一次恢复已收到确认。是否从同一快照创建另一张待打开卡片？这不会运行任何卡片。",
-      "confirm_restore_another": "创建另一张待打开卡片",
       "restore": "恢复",
       "delete_saved": "删除…",
       "delete_notice": "删除此加密快照？这不会清除聊天／供应商副本，也不会清除未确认运行状态。",
@@ -1184,7 +1181,6 @@
       "run_slots_short": "未确认的运行：{{count}}",
       "initialize_failed_short": "初始化失败，已有状态未重置",
       "snapshot_failed_short": "快照操作失败",
-      "restore_another_notice_short": "从此快照再建一张待打开卡片？",
       "delete_notice_short": "删除此加密快照？"
     },
     "agent_side": {
@@ -1507,6 +1503,7 @@
     "queue_count_other": "{{count}} 条排队消息",
     "queue_edit_unavailable": "这个会话现在不能发送这条消息",
     "queue_edit_plain_only": "排队消息只能是普通消息，不能是命令或 @成员",
+    "queue_paused_first": "请先处理暂停的排队消息，再发送当前输入",
     "queue_finish_edit_first": "请先保存或放弃正在编辑的排队消息，再发送当前输入",
     "queue_edit_drop_unavailable": "有附件已不可用，不会发送。再次保存将不带这些附件。"
   },

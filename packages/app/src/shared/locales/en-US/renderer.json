@@ -1325,9 +1325,6 @@
       "save_snapshot": "Save snapshot",
       "saved_notice": "Saved HTML/data is local encrypted history. Restore creates a new ready card, not a running process. Model updates never auto-save. Saving is allowed only before running or after confirmed shutdown; DOM/JS heap is not a snapshot.",
       "snapshot_failed": "Snapshot operation failed, was disabled or its revision changed. Refresh and review before retrying. No automatic retry or process restart.",
-      "restore_another": "Another copy…",
-      "restore_another_notice": "The previous restore was acknowledged. Create a separate ready card from this same snapshot? This will not run either card.",
-      "confirm_restore_another": "Create another ready card",
       "restore": "Restore",
       "delete_saved": "Delete…",
       "delete_notice": "Delete this encrypted snapshot? This does not erase chat/provider copies or clear unconfirmed runs.",
@@ -1357,7 +1354,6 @@
       "run_slots_short": "Unconfirmed runs: {{count}}",
       "initialize_failed_short": "Initialization failed; nothing was reset",
       "snapshot_failed_short": "Snapshot operation failed",
-      "restore_another_notice_short": "Create another ready card from this snapshot?",
       "delete_notice_short": "Delete this encrypted snapshot?"
     },
     "agent_side": {
@@ -1680,6 +1676,7 @@
     "queue_count_other": "{{count}} queued messages",
     "queue_edit_unavailable": "This conversation cannot send this message now",
     "queue_edit_plain_only": "A queued message cannot be a command or an @member request",
+    "queue_paused_first": "Edit or cancel the paused queued message first, then send.",
     "queue_finish_edit_first": "Save or discard the queued message you are editing first, then send.",
     "queue_edit_drop_unavailable": "An attachment is no longer available and will not be sent. Save again to keep the message without it."
   },

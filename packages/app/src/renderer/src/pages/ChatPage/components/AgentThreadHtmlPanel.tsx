@@ -96,9 +96,11 @@ function HtmlApps({ scope, host }: { scope: string; host?: HTMLElement | null })
     void poll(); return () => { closed = true; clearTimeout(timer) }
   }, [scope, boundScope, revision])
   const savedEnabled = storage?.initialized === true && storage.available && storage.saveEnabled
-  // Upstream has app cards only: with no app there is nothing to draw (the snapshots are listed in
-  // an app card's body).
-  if (!apps.length) return null
+  // With no app card (an app leaves after 15 minutes and does not survive a restart) the thread's
+  // saved snapshots are still drawn, each as a launcher card of its own, so they can always be
+  // restored and deleted; with neither there is nothing to draw.
+  if (!apps.length && !savedEnabled) return null
+  const saved = (cards: boolean) => boundScope ? <AgentThreadHtmlSaved scope={boundScope} enabled={savedEnabled} cards={cards} revision={revision} onChanged={() => setRevision(value => value + 1)} /> : null
   // The thread's app storage: short lines in the body of the last app card, never a card of its own.
   const storageBody = storage?.enabled ? <>
     {!storage.initialized && storage.canInitialize && <>
@@ -114,9 +116,10 @@ function HtmlApps({ scope, host }: { scope: string; host?: HTMLElement | null })
     {apps.map((item, index) => <HtmlAppRow key={item.id} item={item} scope={boundScope ?? scope} canOpen={storage?.enabled === true && storage.initialized && storage.available} canSave={savedEnabled} onChanged={() => setRevision(value => value + 1)}>
       {index === apps.length - 1 ? <>
         {storageBody}
-        {boundScope ? <AgentThreadHtmlSaved scope={boundScope} enabled={savedEnabled} revision={revision} onChanged={() => setRevision(value => value + 1)} /> : null}
+        {saved(false)}
       </> : null}
     </HtmlAppRow>)}
+    {apps.length ? null : saved(true)}
   </>
   // In the transcript tail (`host`) the cards are the host's own children, so an empty host stays
   // empty; drawn in place they share one column.

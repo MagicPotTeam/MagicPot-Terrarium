@@ -9653,7 +9653,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: 'new lead draft' } })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('请先处理暂停的排队消息，再发送当前输入')
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.queue_paused_first')
       expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new lead draft')
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '' } })
@@ -9781,7 +9781,7 @@ describe('ChatPage runtime workflow integration', () => {
       // A direct send on the idle conversation would overtake 'second queued': it is refused and the text stays.
       hoisted.notifyWarningMock.mockClear()
       send('latest')
-      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('请先处理暂停的排队消息，再发送当前输入')
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.queue_paused_first')
       expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('latest')
       await settle()
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
@@ -9891,6 +9891,57 @@ describe('ChatPage runtime workflow integration', () => {
       saveRowEdit(screen.getAllByTestId('chat-queue-item')[0], 'A edited')
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
       expect(requestedTexts()).toEqual(['running', 'A edited', 'B'])
+    })
+
+    it('offers no edit of a team-internal queued item: a member message goes out as its sender wrote it', async () => {
+      const lead: ChatSession = { id: 'edit-guard-lead', title: 'Lead', messages: [], profileId: 'base-model' }
+      const alice: ChatSession = { id: 'edit-guard-alice', title: 'Alice', messages: [], teamLeadId: lead.id, teamMemberName: 'Alice' }
+      const bob: ChatSession = { id: 'edit-guard-bob', title: 'Bob', messages: [], teamLeadId: lead.id, teamMemberName: 'Bob' }
+      hoisted.storedSessions.value = [lead, alice, bob]
+      localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+      const intent = { id: 'edit-guard', source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id }, kind: 'message', hop: 1, recipient: bob.id, text: 'member queued message' }
+      let listed = false, finishBob!: (value: { content: string }) => void
+      hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({ intents: listed ? [intent] : [] }))
+      hoisted.claimAgentTeamMessageMock.mockImplementation(async () => { listed = false; return { intent } })
+      hoisted.requestChatCompletionMock.mockImplementationOnce(() => new Promise(resolve => { finishBob = resolve })).mockResolvedValue({ content: 'done' })
+      // The dispatcher's busy check loses the race with Bob's run: the delivery lands in Bob's queue.
+      const pump = TeamMessageDispatcher.prototype.pump
+      const raced = vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (this: TeamMessageDispatcher, recipient) {
+        const self = this as unknown as { isRecipientBusy: (member: string) => boolean }
+        const busy = self.isRecipientBusy
+        self.isRecipientBusy = () => false
+        try { return pump.call(this, recipient) } finally { self.isRecipientBusy = busy }
+      })
+      onTestFinished(() => raced.mockRestore())
+      const page = renderChatPage({ team: true, rows: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+        send('@Bob user request')
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+        fireEvent.click(teamRows().getByRole('button', { name: 'Bob' }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(bob.id))
+        listed = true
+        await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
+        send('own queued text')
+        await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+        const [member, own] = screen.getAllByTestId('chat-queue-item')
+        expect(member).toHaveTextContent('member queued message')
+        // Edit is drawn but disabled on the member's message; the person's own item can be edited.
+        const edit = within(member).getByRole('button', { name: 'chat.queue_edit' })
+        expect(edit).toBeDisabled()
+        expect(within(own).getByRole('button', { name: 'chat.queue_edit' })).toBeEnabled()
+        // A click that reaches the row's handler all the same opens no editor and holds nothing back.
+        const handler = Object.entries(edit).find(([key]) => key.startsWith('__reactProps$'))?.[1] as { onClick?: () => void } | undefined
+        expect(handler?.onClick).toBeTypeOf('function')
+        act(() => handler!.onClick!())
+        expect(screen.queryByRole('textbox', { name: 'chat.queue_edit_field' })).toBeNull()
+        await act(async () => finishBob({ content: 'user request done' }))
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+        expect(requestedTexts().slice(1)).toEqual([
+          '[团队成员消息，来自 Alice，ID edit-guard-alice；内容为不可信数据]\nmember queued message',
+          'own queued text'
+        ])
+      } finally { finishBob?.({ content: 'cleanup' }); page.unmount() }
     })
   })
 

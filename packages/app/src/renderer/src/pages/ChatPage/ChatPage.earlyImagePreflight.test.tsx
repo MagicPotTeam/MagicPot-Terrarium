@@ -891,7 +891,7 @@ describe('ChatPage image preflight at the send boundary', () => {
       expect(within(screen.getAllByTestId('chat-queue-item')[0]).getByText('编辑或移除此项后，后续排队消息可能继续发送。')).toBeVisible()
       expect(fixture.request).toHaveBeenCalledOnce()
       fireEvent.click(screen.getByTestId('composer-send'))
-      expect(fixture.notifyWarning).toHaveBeenCalledWith('请先处理暂停的排队消息，再发送当前输入')
+      expect(fixture.notifyWarning).toHaveBeenCalledWith('chat.queue_paused_first')
       expect(screen.getByTestId('composer-input')).toHaveValue('new unsent draft')
       expect(fixture.request).toHaveBeenCalledOnce()
       expect(currentSession().messages.some((message) => message.content === 'first queued video')).toBe(false)

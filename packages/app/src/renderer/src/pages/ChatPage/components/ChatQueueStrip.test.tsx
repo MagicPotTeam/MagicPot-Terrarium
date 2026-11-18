@@ -158,6 +158,14 @@ describe('ChatQueueStrip', () => {
     expect(screen.getByRole('button', { name: 'chat.queue_show_more:1' })).toBeInTheDocument()
   })
 
+  it('offers nothing to show while the row being edited is the only one outside the collapsed rows', () => {
+    const items = [1, 2, 3, 4].map((id) => item(id))
+    renderStrip({ items, visibleIds: new Set([2, 3, 4]), editing: { id: 1, text: 'draft' } })
+    expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(4)
+    expect(screen.queryByRole('button', { name: /chat\.queue_show_more/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'chat.queue_collapse' })).toBeNull()
+  })
+
   it('collapses again once expanded', () => {
     const items = [1, 2, 3, 4].map((id) => item(id))
     renderStrip({ items, visibleIds: new Set([2, 3, 4]), expanded: true })

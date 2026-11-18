@@ -8694,7 +8694,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // On an idle conversation a direct send must not overtake a queued item that waits behind a
       // paused one: the person deals with the paused item first (edit or remove it).
       if (!isBusy && fromComposer && ((pausedHead?.paused && pausedHead.blocksFollowing) || queuedSendWaitsBehindPause(targetQueue))) {
-        notifyWarning('请先处理暂停的排队消息，再发送当前输入')
+        notifyWarning(t('chat.queue_paused_first'))
         return
       }
       // The item a drain would send next is open in the queue strip's editor: it waits for the
