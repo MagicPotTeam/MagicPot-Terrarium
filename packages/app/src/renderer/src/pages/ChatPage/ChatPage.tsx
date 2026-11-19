@@ -5602,11 +5602,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
           const nextAttachments: ChatAttachment[] = []
           for (const entry of droppedDirectoryFiles) {
-            const attachment = await buildChatAttachmentFromDroppedFile(entry.file, {
-              relativePath: entry.relativePath
-            })
-            if (!isDropTargetCurrent()) return
-            nextAttachments.push(attachment)
+            try {
+              const attachment = await buildChatAttachmentFromDroppedFile(entry.file, {
+                relativePath: entry.relativePath
+              })
+              if (!isDropTargetCurrent()) return
+              nextAttachments.push(attachment)
+            } catch (error) {
+              if (!isDropTargetCurrent()) return
+              // One file that cannot be added is named; the rest of the folder is attached.
+              console.error('[ChatPage] Failed to process a file of a dropped folder:', error)
+              notifyError(
+                describeChatAttachmentImportFailure(
+                  error,
+                  entry.file.name,
+                  getChatAttachmentTypeForFile(entry.file) === 'image' ? 'image' : 'file'
+                )
+              )
+            }
           }
 
           if (nextAttachments.length > 0) {

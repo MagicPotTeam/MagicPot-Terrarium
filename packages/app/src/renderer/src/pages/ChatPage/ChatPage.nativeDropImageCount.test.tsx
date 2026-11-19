@@ -8,6 +8,7 @@ import type { ChatAttachment } from '@shared/llm'
 import ChatPage from './ChatPage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 import {
+  ChatAttachmentSourceRefusedError,
   ChatAttachmentSourceTimeoutError,
   describeChatAttachmentImportFailure
 } from './chatManagedMediaAttachments'
@@ -691,6 +692,64 @@ describe('native drop image count boundary', () => {
     await waitFor(() => expect(f.importBytes).toHaveBeenCalled())
     expect(drop.fileCallback).toHaveBeenCalledTimes(51)
     expect(f.notify).not.toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
+  })
+  it('attaches the rest of a dropped folder and names the one file main refused', async () => {
+    const originalElectronFile = window.electronFile
+    try {
+      await setup()
+      const granted = vi.fn(async (file: File) =>
+        file.name === '2.png'
+          ? ({ refused: 'denied' } as const)
+          : { path: `/root/nested/${file.name}` }
+      )
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: {
+          getPathForFile: (file: File) => `/root/nested/${file.name}`,
+          authorizeLocalMediaFileForImport: granted
+        }
+      })
+      f.importFile.mockImplementation(
+        async ({ originalFileName }: { originalFileName: string }) => ({
+          localMediaUrl: `local-media://imported/${originalFileName}`,
+          reference: {
+            version: 1,
+            kind: 'managed',
+            relativePath: originalFileName,
+            status: 'ready'
+          }
+        })
+      )
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const drop = directoryTransfer(4)
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
+      const refusal = describeChatAttachmentImportFailure(
+        new ChatAttachmentSourceRefusedError('2.png'),
+        '2.png',
+        'image'
+      )
+      await waitFor(() => expect(f.notify).toHaveBeenCalledWith(refusal))
+      await waitFor(() =>
+        expect(
+          (JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[])
+            .map((attachment) => attachment.fileName)
+            .filter((name) => /^[0-9]\.png$/.test(name || ''))
+        ).toEqual(expect.arrayContaining(['1.png', '3.png']))
+      )
+      const names = (
+        JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
+      ).map((attachment) => attachment.fileName)
+      expect(names).not.toContain('2.png')
+      expect(f.notify).toHaveBeenCalledOnce()
+      expect(f.notify).not.toHaveBeenCalledWith('Failed to process the dropped folder.')
+      // Nothing is read in place of the refused file.
+      expect(f.importBytes).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: originalElectronFile
+      })
+    }
   })
   it('rejects an oversized directory before decoding or importing into the edit receiver', async () => {
     await setup()
