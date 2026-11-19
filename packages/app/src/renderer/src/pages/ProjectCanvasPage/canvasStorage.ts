@@ -3812,8 +3812,9 @@ async function saveCanvasItemsExclusive(
 /**
  * The items of a stored board as they are persisted, for scans that read item
  * metadata only (managed-media references). No binary is read and no object
- * URL is created. A board with no IndexedDB record (or an empty one) is loaded
- * as loadCanvasItems loads it, so a scan never sees fewer items than a load.
+ * URL is created. A board with no IndexedDB record (or an empty one) is read
+ * from the files loadCanvasItems falls back to, so a scan never sees fewer items
+ * than a load. A read error rejects: the scan must not take the board for empty.
  */
 export function loadCanvasItemsMetadata(storeKey: string = KEY): Promise<{ items: unknown[] }> {
   return runExclusiveCanvasStoreOperation(storeKey, async () => {
@@ -3830,8 +3831,6 @@ export function loadCanvasItemsMetadata(storeKey: string = KEY): Promise<{ items
         tx.onabort = () => rejectCanvasStorageError(reject, 'canvas metadata read transaction', tx.error)
         tx.onerror = () => rejectCanvasStorageError(reject, 'canvas metadata read transaction', tx.error)
       })
-    } catch {
-      persisted = undefined
     } finally {
       db?.close()
     }
@@ -3844,8 +3843,45 @@ export function loadCanvasItemsMetadata(storeKey: string = KEY): Promise<{ items
         )
       }
     }
-    return { items: (await loadCanvasItemsExclusive(storeKey)).items }
+    return { items: await readCanvasFallbackItemsMetadata(storeKey) }
   })
+}
+
+/**
+ * The items of the autosave and project files loadCanvasFallback restores a board
+ * from, as stored in them: nothing is decoded or restored. Every one of these files
+ * is read (a load stops at the first it can restore); a missing file is skipped, any
+ * other read or parse error rejects.
+ */
+async function readCanvasFallbackItemsMetadata(storeKey: string): Promise<unknown[]> {
+  if (!window.api?.svcFs || !window.path) return []
+  const paths: string[] = []
+  const autoSaveRoot = await resolveAutoSaveRootPath()
+  if (autoSaveRoot) {
+    const projectDir = window.path.join(autoSaveRoot, resolveProjectStorageDirName(storeKey))
+    paths.push(window.path.join(projectDir, AUTOSAVE_CANVAS_FILENAME))
+  }
+  const location = await getProjectCanvasLocation(storeKey)
+  if (location) {
+    paths.push(location.canvasFullPath)
+    if (location.legacyCanvasFullPath) paths.push(location.legacyCanvasFullPath)
+  }
+  const items: unknown[] = []
+  for (const fullPath of paths) {
+    let content: string
+    try {
+      ;({ content } = await window.api.svcFs.readTextFile({ fullPath }))
+    } catch (error) {
+      if (isMissingMirrorFileError(error)) continue
+      throw error
+    }
+    const parsed = JSON.parse(content) as Partial<CanvasFileData> | null
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items)) {
+      throw new Error('[Canvas Storage] Malformed canvas file.')
+    }
+    items.push(...parsed.items)
+  }
+  return items
 }
 
 /**

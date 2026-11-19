@@ -52,10 +52,11 @@ function createScannerSources(): ManagedMediaReferenceScannerSources {
     visitCanvasItems: async (visit) => {
       // Only the items' media references are scanned: read the records, not the images
       // (a full load would wrap every image of every board in a new object URL each scan).
-      const documents = await Promise.all(
-        readProjectIds().map((projectId) => loadCanvasItemsMetadata(projectId))
-      )
-      for (const document of documents) visit(document.items)
+      // One board at a time, so only one board's items are held; a board that cannot be read
+      // fails the scan.
+      for (const projectId of readProjectIds()) {
+        visit((await loadCanvasItemsMetadata(projectId)).items)
+      }
     },
     // Draft backups of every scope are read from localStorage by the scanner itself.
     localStorage

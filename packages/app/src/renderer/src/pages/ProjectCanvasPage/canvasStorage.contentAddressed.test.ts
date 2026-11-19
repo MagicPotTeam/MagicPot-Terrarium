@@ -2330,6 +2330,74 @@ describe('metadata-only reads', () => {
     expect(items.map((item) => (item as { id: string }).id)).toEqual(['managed', 'plain'])
     expect((items[0] as { media?: unknown }).media).toEqual({ kind: 'managed', id: 'media-7' })
   })
+
+  const managedMedia = { kind: 'managed', id: 'media-8' }
+  const writeBoardFile = (
+    mirror: ReturnType<typeof createFakeMirror>,
+    storeKey: string,
+    content: string
+  ): void => {
+    const projectDir = `${mirror.autoSaveRoot}/${buildProjectStorageDirName(storeKey, storeKey)}`
+    mirror.text.set(`${projectDir}/project.mpcanvas`, content)
+  }
+
+  it('reads a board IndexedDB does not hold from its mirror file, as stored, without its bytes', async () => {
+    const mirror = createFakeMirror()
+    writeBoardFile(
+      mirror,
+      'meta-lost',
+      JSON.stringify({
+        magic: 'MAGICPOT_CANVAS',
+        version: 8,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        items: [{ ...(imageItem('embedded', '') as object), media: managedMedia }],
+        groups: [],
+        groupBranches: [],
+        blobs: { embedded: { base64: 'AQID', mimeType: 'image/png' } }
+      })
+    )
+    const createObjectUrl = vi.mocked(URL.createObjectURL)
+    createObjectUrl.mockClear()
+
+    const { items } = await loadCanvasItemsMetadata('meta-lost')
+
+    expect(createObjectUrl).not.toHaveBeenCalled()
+    expect(fake.log.gets.map((get) => `${get.store}:${get.key}`)).toEqual([
+      'canvas-items:meta-lost'
+    ])
+    expect(mirror.calls.readFileFromPath).toEqual([])
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ id: 'embedded', media: managedMedia })
+  })
+
+  it('reads an empty board with no file anywhere as empty', async () => {
+    createFakeMirror()
+    fake.committed
+      .get('canvas-items')!
+      .set('meta-empty', { items: [], groups: [], groupBranches: [] })
+    await expect(loadCanvasItemsMetadata('meta-empty')).resolves.toEqual({ items: [] })
+  })
+
+  it('rejects when the board cannot be read instead of taking it for an empty board', async () => {
+    createFakeMirror()
+    vi.stubGlobal('indexedDB', {
+      open: () => {
+        const request: { error?: DOMException; onerror?: () => void } = {}
+        setTimeout(() => {
+          request.error = new DOMException('Denied', 'UnknownError')
+          request.onerror?.()
+        }, 0)
+        return request
+      }
+    })
+    await expect(loadCanvasItemsMetadata('meta-unreadable')).rejects.toThrow()
+  })
+
+  it('rejects when the file of a board IndexedDB does not hold cannot be parsed', async () => {
+    const mirror = createFakeMirror()
+    writeBoardFile(mirror, 'meta-corrupt', '{"magic": "MAGICPOT_CANVAS", "items": [')
+    await expect(loadCanvasItemsMetadata('meta-corrupt')).rejects.toThrow()
+  })
 })
 
 describe('mirror staging failures', () => {
