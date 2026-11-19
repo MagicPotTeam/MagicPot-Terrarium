@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('node:fs', async () => vi.importActual<typeof import('node:fs')>('node:fs'))
 
 import {
+  LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS,
   createLocalMediaTempRootVerifier,
   ensurePrivateLocalMediaTempRoot
 } from './localMediaTempRoot'
@@ -144,12 +145,12 @@ describe('the private local-media temp root', () => {
 describe('the verified temp root, remembered once accepted', () => {
   /** A verifier on the real filesystem whose lstat calls and log lines are counted. */
   const verifier = (overrides: Parameters<typeof createLocalMediaTempRootVerifier>[0] = {}) => {
-    const lstatSync = vi.fn((target: string) => fs.lstatSync(target))
+    const lstatSync = vi.fn((target: string) => (overrides.lstatSync ?? fs.lstatSync)(target))
     const warn = vi.fn()
     return {
       lstatSync,
       warn,
-      ...createLocalMediaTempRootVerifier({ lstatSync, warn, ...overrides })
+      ...createLocalMediaTempRootVerifier({ ...overrides, lstatSync, warn })
     }
   }
 
@@ -239,4 +240,55 @@ describe('the verified temp root, remembered once accepted', () => {
     // And verifying again refuses the folder.
     expect(subject.reverify(root)).toBeNull()
   })
+
+  posixOnly(
+    'checks once a minute on reads that the folder is still the same one, refusing a changed one',
+    () => {
+      const temp = sharedTemp()
+      const root = path.join(temp, 'magicpot-local-media')
+      let clock = 0
+      // Reports another inode once the folder counts as recreated (a file system may reuse the
+      // freed inode number at once, which a real removal and mkdir here could not show).
+      let recreated = false
+      const subject = verifier({
+        now: () => clock,
+        lstatSync: (target: string) => {
+          const stat = fs.lstatSync(target)
+          return recreated
+            ? Object.assign(Object.create(stat) as fs.Stats, { ino: stat.ino + 1 })
+            : stat
+        }
+      })
+      const canonical = subject.get(root)!
+      expect(canonical).toBe(fs.realpathSync(root))
+      const statsAfterAccept = subject.lstatSync.mock.calls.length
+      clock = LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS - 1
+      expect(subject.get(root)).toBe(canonical)
+      expect(subject.lstatSync).toHaveBeenCalledTimes(statsAfterAccept)
+      // A minute later: one lstat, still the same folder.
+      clock = LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS
+      expect(subject.get(root)).toBe(canonical)
+      expect(subject.lstatSync).toHaveBeenCalledTimes(statsAfterAccept + 1)
+      // Removed by a temp cleaner and created again: another folder at the same name.
+      recreated = true
+      clock += LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS
+      expect(subject.get(root)).toBeNull()
+      expect(subject.warn.mock.calls.at(-1)?.[0]).toContain('changed')
+      // The next use verifies afresh: main's own private folder is accepted again.
+      expect(subject.get(root)).toBe(canonical)
+      // Its mode opened by someone: refused at the next check.
+      fs.chmodSync(root, 0o777)
+      clock += LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS
+      expect(subject.get(root)).toBeNull()
+      // Replaced by a symlink: refused, and refused again when verified afresh.
+      expect(subject.get(root)).toBe(canonical)
+      const victim = path.join(temp, 'victim-home')
+      fs.mkdirSync(victim, { mode: 0o700 })
+      fs.rmSync(root, { recursive: true })
+      fs.symlinkSync(victim, root)
+      clock += LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS
+      expect(subject.get(root)).toBeNull()
+      expect(subject.get(root)).toBeNull()
+    }
+  )
 })

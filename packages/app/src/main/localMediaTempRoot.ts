@@ -2,7 +2,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 export type PrivateTempRootDependencies = {
-  lstatSync?: (target: string) => Pick<fs.Stats, 'isDirectory' | 'isSymbolicLink' | 'uid' | 'mode'>
+  lstatSync?: (
+    target: string
+  ) => Pick<fs.Stats, 'isDirectory' | 'isSymbolicLink' | 'uid' | 'mode'> &
+    Partial<Pick<fs.Stats, 'dev' | 'ino'>>
   mkdirSync?: (target: string, options: { recursive: true; mode: number }) => unknown
   chmodSync?: (target: string, mode: number) => void
   /** null on Windows, where the temp directory is per user and has no POSIX owner. */
@@ -77,48 +80,98 @@ export function ensurePrivateLocalMediaTempRoot(
 export type LocalMediaTempRootVerifierDependencies = PrivateTempRootDependencies & {
   realpathSync?: (target: string) => string
   warn?: (message: string) => void
+  /** Monotonic milliseconds, for the periodic identity check. */
+  now?: () => number
 }
 
+/** A remembered folder is checked again (one lstat) when its last check is this old. */
+export const LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS = 60_000
+
 /**
- * Verifies the temp root once and remembers its canonical path, so the local-media requests
- * that consult it do not stat it each time. The remembered canonical path is what callers
- * use (a pinned root, never resolved again): a symlink put in place of the directory later
- * leads every path under it outside that path, so it widens nothing. Writes verify again
+ * Verifies the temp root once and remembers its canonical path and identity, so the
+ * local-media requests that consult it do not stat it each time. The remembered canonical
+ * path is what callers use (a pinned root, never resolved again): a symlink put in place of
+ * the directory later leads every path under it outside that path, so it widens nothing. At
+ * most once a minute a read checks that the folder is still the same one (device, inode,
+ * owner, private mode, no symlink); if it changed (removed by a temp cleaner and created again
+ * by someone else) it is refused and verified afresh at the next use. Writes verify again
  * first (reverify), and so does any use that failed. A refusal is logged once, with its
  * reason and without the path.
  */
 export function createLocalMediaTempRootVerifier({
   realpathSync = (target) => fs.realpathSync.native(target),
   warn = (message) => console.warn(message),
+  now = () => performance.now(),
   ...dependencies
 }: LocalMediaTempRootVerifierDependencies = {}): {
   get(root: string): string | null
   reverify(root: string): string | null
   forget(): void
 } {
-  const accepted = new Map<string, string>()
+  const lstatSync = dependencies.lstatSync ?? ((target: string) => fs.lstatSync(target))
+  const getuid =
+    dependencies.getuid === undefined
+      ? typeof process.getuid === 'function'
+        ? () => process.getuid!()
+        : null
+      : dependencies.getuid
+  type Accepted = { canonical: string; dev?: number; ino?: number; checkedAt: number }
+  const accepted = new Map<string, Accepted>()
   let refusalLogged = false
+  const refuse = (root: string, reason: string): null => {
+    accepted.delete(root)
+    if (!refusalLogged) {
+      refusalLogged = true
+      warn(`[LocalMedia] The temporary media folder is not used: it is not private (${reason})`)
+    }
+    return null
+  }
   const verify = (root: string): string | null => {
     let verdict = checkPrivateLocalMediaTempRoot(root, dependencies)
     if (verdict === 'ok') {
       try {
         const canonical = path.resolve(realpathSync(root))
-        accepted.set(root, canonical)
+        const identity = lstatSync(root)
+        accepted.set(root, {
+          canonical,
+          dev: identity.dev,
+          ino: identity.ino,
+          checkedAt: now()
+        })
         refusalLogged = false
         return canonical
       } catch {
         verdict = 'unavailable'
       }
     }
-    accepted.delete(root)
-    if (!refusalLogged) {
-      refusalLogged = true
-      warn(`[LocalMedia] The temporary media folder is not used: it is not private (${verdict})`)
+    return refuse(root, verdict)
+  }
+  const recheck = (root: string, entry: Accepted): string | null => {
+    let stat: ReturnType<typeof lstatSync> | null = null
+    try {
+      stat = lstatSync(root)
+    } catch {
+      stat = null
     }
-    return null
+    const same =
+      stat !== null &&
+      !stat.isSymbolicLink() &&
+      stat.isDirectory() &&
+      stat.dev === entry.dev &&
+      stat.ino === entry.ino &&
+      (!getuid || (stat.uid === getuid() && (stat.mode & 0o077) === 0))
+    if (!same) return refuse(root, 'changed')
+    entry.checkedAt = now()
+    return entry.canonical
   }
   return {
-    get: (root) => accepted.get(root) ?? verify(root),
+    get: (root) => {
+      const entry = accepted.get(root)
+      if (!entry) return verify(root)
+      return now() - entry.checkedAt < LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS
+        ? entry.canonical
+        : recheck(root, entry)
+    },
     reverify: verify,
     forget: () => accepted.clear()
   }
