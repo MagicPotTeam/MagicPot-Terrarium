@@ -4,6 +4,7 @@ import type {
   TriggerPolicyRequestFactoryInput,
   PolicyEffect
 } from '../../../shared/magicAgentPlatform2/policy'
+import { digestPolicyRequest } from '../../../shared/magicAgentPlatform2/policy'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { MagicAgentPolicyAuthorizationService, PermitConsumedError } from '../policy'
 import {
@@ -328,5 +329,141 @@ describe('TriggerPolicyExecutionBoundary outcome recovery', () => {
     expect(outcomes.list()).toHaveLength(1)
     expect(outcomes.list()[0].state.status).toBe('permit-consumed')
     expect(execute).not.toHaveBeenCalled()
+  })
+})
+
+describe('TriggerPolicyExecutionBoundary permit hook', () => {
+  const tracked = (service: MagicAgentPolicyAuthorizationService, order: string[]) => {
+    const authorize = vi.spyOn(service, 'authorize').mockImplementation((value) => {
+      order.push('authorize')
+      return MagicAgentPolicyAuthorizationService.prototype.authorize.call(service, value)
+    })
+    const consume = vi.spyOn(service, 'consumeExecutionPermit').mockImplementation((value) => {
+      order.push('consume')
+      return MagicAgentPolicyAuthorizationService.prototype.consumeExecutionPermit.call(
+        service,
+        value
+      )
+    })
+    return { authorize, consume }
+  }
+
+  it('runs once after authorization and immediately before permit consumption', async () => {
+    const { service } = setup('allow')
+    const order: string[] = []
+    tracked(service, order)
+    const hook = vi.fn(async () => {
+      order.push('hook')
+    })
+    const boundary = new TriggerPolicyExecutionBoundary(
+      service,
+      () => undefined,
+      async () => {
+        order.push('dispatch')
+      },
+      () => 1000,
+      async () => {
+        order.push('permit-consumed')
+      },
+      hook
+    )
+    const result = await boundary.execute(input())
+    expect(result.status).toBe('executed')
+    expect(order).toEqual(['authorize', 'hook', 'consume', 'permit-consumed', 'dispatch'])
+    expect(hook).toHaveBeenCalledOnce()
+    const requestDigest = digestPolicyRequest(result.request)
+    expect(hook).toHaveBeenCalledWith({
+      request: result.request,
+      authorizationId: `trigger-authorization:${requestDigest}`,
+      requestDigest
+    })
+  })
+
+  it('runs after the grant authorization on the approval path', async () => {
+    const { service } = setup('require-approval')
+    const order: string[] = []
+    tracked(service, order)
+    const boundary = new TriggerPolicyExecutionBoundary(
+      service,
+      async (request) => {
+        order.push('grant')
+        const created = service.createApprovalGrant({
+          grantId: 'grant-hook',
+          request,
+          approvedBy: approver,
+          issuedAt: 1000,
+          expiresAt: 2000,
+          maxUses: 1,
+          idempotencyKey: 'grant-hook'
+        })
+        return { grantId: created.grant.grantId, expectedGrantUseCount: created.grant.useCount }
+      },
+      async () => {
+        order.push('dispatch')
+      },
+      () => 1000,
+      undefined,
+      async () => {
+        order.push('hook')
+      }
+    )
+    await expect(boundary.execute(input())).resolves.toMatchObject({ status: 'executed' })
+    expect(order).toEqual(['authorize', 'grant', 'authorize', 'hook', 'consume', 'dispatch'])
+  })
+
+  it('consumes nothing and rethrows unwrapped when the hook throws', async () => {
+    const { service } = setup('allow')
+    const { consume } = tracked(service, [])
+    const failure = new Error('marker write failed')
+    const permitConsumed = vi.fn()
+    const execute = vi.fn()
+    const boundary = new TriggerPolicyExecutionBoundary(
+      service,
+      () => undefined,
+      execute,
+      () => 1000,
+      permitConsumed,
+      async () => {
+        throw failure
+      }
+    )
+    await expect(boundary.execute(input())).rejects.toBe(failure)
+    expect(consume).not.toHaveBeenCalled()
+    expect(permitConsumed).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it.each(['deny', 'require-approval'] as const)('is not called for %s', async (effect) => {
+    const { service } = setup(effect)
+    const hook = vi.fn()
+    const boundary = new TriggerPolicyExecutionBoundary(
+      service,
+      () => undefined,
+      vi.fn(),
+      () => 1000,
+      undefined,
+      hook
+    )
+    const result = await boundary.execute(input())
+    expect(result.status).toBe(effect === 'deny' ? 'denied' : 'awaiting-approval')
+    expect(hook).not.toHaveBeenCalled()
+  })
+
+  it('is not called when the authorization is already consumed', async () => {
+    const { service } = setup('allow')
+    const hook = vi.fn()
+    const execute = vi.fn()
+    const boundary = new TriggerPolicyExecutionBoundary(
+      service,
+      () => undefined,
+      execute,
+      () => 1000,
+      undefined,
+      hook
+    )
+    await expect(boundary.execute(input())).resolves.toMatchObject({ status: 'executed' })
+    await expect(boundary.execute(input())).resolves.toMatchObject({ status: 'already-consumed' })
+    expect(hook).toHaveBeenCalledOnce()
+    expect(execute).toHaveBeenCalledOnce()
   })
 })

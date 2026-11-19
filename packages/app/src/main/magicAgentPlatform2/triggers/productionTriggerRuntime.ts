@@ -88,6 +88,12 @@ export class ProductionTriggerRuntime<TResult = unknown> {
       grantProvider: options.grantProvider,
       resolveTrustedRoute: options.routeResolver,
       outcomes: this.outcomes,
+      onOccurrencePermit: ({ occurrenceId, owner, authorizationId, requestDigest }) => {
+        this.occurrences.markPermit(occurrenceId, owner, this.now(), {
+          authorizationId,
+          requestDigest
+        })
+      },
       dispatch: {
         runAgent: (input) => options.service.runAgent(input),
         runGraph: (input) => options.service.runGraph(input)
