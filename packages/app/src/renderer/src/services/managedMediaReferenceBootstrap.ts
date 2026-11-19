@@ -63,8 +63,10 @@ function createScannerSources(): ManagedMediaReferenceScannerSources {
   }
 }
 
-async function publishManagedMediaReferenceSnapshot(): Promise<void> {
+async function publishManagedMediaReferenceSnapshot(isCurrent: () => boolean): Promise<void> {
   const result = await scanManagedMediaReferenceIds(createScannerSources())
+  // A deferral that began while this scan ran withdrew the snapshot: do not put one back.
+  if (!isCurrent()) return
   await api().svcManagedMedia.updateReferenceSnapshot({
     version: 1,
     complete: result.ok,
@@ -73,23 +75,46 @@ async function publishManagedMediaReferenceSnapshot(): Promise<void> {
   })
 }
 
+/** Main drops its snapshot on an incomplete one: no cleanup runs until the next complete scan. */
+async function withdrawManagedMediaReferenceSnapshot(): Promise<void> {
+  await api().svcManagedMedia.updateReferenceSnapshot({
+    version: 1,
+    complete: false,
+    ids: [],
+    referenceCounts: {}
+  })
+}
+
 export function startManagedMediaReferenceScanner(): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined
   let stopped = false
   // When the scan due first found a chat request running; undefined while none is waiting.
   let deferredSince: number | undefined
+  // Moves when a deferral withdraws the snapshot; a scan that started before is not published.
+  let epoch = 0
   const scan = () => {
     timer = undefined
     if (stopped) return
-    // A scan never starts while a chat request runs: it waits for the requests to end, and is
-    // retried by the reconcile timer. The wait is bounded, because main keeps using the last
-    // complete snapshot for its daily cleanup until a newer one arrives.
+    // A scan never starts while a chat request runs: it waits for the requests to end. Main
+    // would keep planning its daily cleanup from the last complete snapshot, however old, so
+    // the wait starts by withdrawing it, and it is bounded: past the cap the scan runs anyway.
     if (hasRunningScopedChatRequests()) {
-      deferredSince ??= Date.now()
-      if (Date.now() - deferredSince < SNAPSHOT_MAX_DEFER_MS) return
+      const now = Date.now()
+      if (deferredSince === undefined) {
+        deferredSince = now
+        epoch += 1
+        void withdrawManagedMediaReferenceSnapshot().catch(() => undefined)
+      }
+      const waited = now - deferredSince
+      // A clock set back (a negative wait) counts as a wait past the cap.
+      if (waited >= 0 && waited < SNAPSHOT_MAX_DEFER_MS) {
+        timer = setTimeout(scan, SNAPSHOT_MAX_DEFER_MS - waited)
+        return
+      }
     }
     deferredSince = undefined
-    void publishManagedMediaReferenceSnapshot().catch(() => undefined)
+    const scanEpoch = epoch
+    void publishManagedMediaReferenceSnapshot(() => scanEpoch === epoch).catch(() => undefined)
   }
   const schedule = () => {
     if (stopped) return
