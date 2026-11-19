@@ -1534,6 +1534,13 @@ describe('useCanvasAssetIntake', () => {
 
     expect(itemUpdates).toHaveLength(1)
     expect(itemUpdates[0]).toHaveLength(sources.length)
+    // That one update is the frames, before any pixels were handed over ...
+    expect(
+      itemUpdates[0].every(
+        (item) => item.type === 'image' && isCanvasImagePendingPixelsAsset(item.image)
+      )
+    ).toBe(true)
+    // ... and nothing was handed over after the unmount.
     expect(itemUpdates[0].every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
   })
 

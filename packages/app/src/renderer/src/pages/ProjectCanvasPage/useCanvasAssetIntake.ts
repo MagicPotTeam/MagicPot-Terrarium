@@ -579,37 +579,6 @@ export async function mapCanvasImageBatchWithConcurrency<T, R>(
   return results.flatMap((entry) => (entry != null ? [entry] : []))
 }
 
-export async function mapCanvasImageBatchWithProgress<T, R>(
-  inputs: T[],
-  concurrency: number,
-  worker: (input: T, index: number) => Promise<R | null>,
-  onResult: (result: R) => Promise<void> | void,
-  options: { collectResults?: boolean } = {}
-): Promise<R[]> {
-  const workerCount = Math.max(1, Math.min(inputs.length, Math.floor(concurrency) || 1))
-  const shouldCollectResults = options.collectResults !== false
-  const results: R[] = []
-  let nextIndex = 0
-
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (nextIndex < inputs.length) {
-        const index = nextIndex
-        nextIndex += 1
-        const result = await worker(inputs[index], index)
-        if (result != null) {
-          if (shouldCollectResults) {
-            results.push(result)
-          }
-          await onResult(result)
-        }
-      }
-    })
-  )
-
-  return results
-}
-
 async function withCanvasImageIntakeTimeout<T>(
   task: Promise<T>,
   timeoutMs: number,
