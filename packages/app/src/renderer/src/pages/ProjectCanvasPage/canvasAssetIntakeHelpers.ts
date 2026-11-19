@@ -4,7 +4,11 @@ import { markCanvasImagePlaceholderAsset } from './canvasImageAssetUtils'
 import type { CanvasImageAsset, CanvasImageItem, CanvasProvenanceSource } from './types'
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from './canvasThumbnailCache'
-import { ensureCanvasThumbnailSet, readWarmCanvasThumbnailSet } from './canvasThumbnailWorkerClient'
+import {
+  ensureCanvasThumbnailSet,
+  getCanvasThumbnailWorkerPoolMetrics,
+  readWarmCanvasThumbnailSet
+} from './canvasThumbnailWorkerClient'
 import type {
   CanvasImageSourceIdentity,
   CanvasImageThumbnailSet,
@@ -855,6 +859,35 @@ export function bindCanvasThumbnailSetToSource(
   return changed ? { ...thumbnailSet, levels: bound } : thumbnailSet
 }
 
+/**
+ * Thumbnail generations that hydration (opening a board) runs at the same time. A board saved in
+ * the middle of an import has frames with no cached thumbnails; opening it asked for all of them
+ * at once: the source of each was read into memory, the pool queue filled, and every request it
+ * turned away was generated on the main thread with no byte cap. They now wait here, in order.
+ * An import does not use this: it has its own byte-capped slots.
+ */
+export function getCanvasThumbnailHydrationGenerationConcurrency(): number {
+  return Math.max(4, getCanvasThumbnailWorkerPoolMetrics().maxWorkers + 2)
+}
+
+const hydrationGenerationSlots = { active: 0, waiters: [] as Array<() => void> }
+
+async function withCanvasThumbnailHydrationGenerationSlot<T>(run: () => Promise<T>): Promise<T> {
+  const slots = hydrationGenerationSlots
+  if (slots.active >= getCanvasThumbnailHydrationGenerationConcurrency()) {
+    await new Promise<void>((resolve) => slots.waiters.push(resolve))
+  } else {
+    slots.active += 1
+  }
+  try {
+    return await run()
+  } finally {
+    const next = slots.waiters.shift()
+    if (next) next()
+    else slots.active -= 1
+  }
+}
+
 export async function resolveCanvasImageThumbnailDisplayAsset({
   src,
   sourceIdentity,
@@ -868,6 +901,7 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
   signal,
   onQueued,
   onDispatch,
+  boundGeneration = false,
   loadImageFromSrcFn = loadImageFromSrc
 }: {
   src: string
@@ -890,6 +924,8 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
   /** Called when the thumbnail job of this image waits for a worker, and when one starts it. */
   onQueued?: () => void
   onDispatch?: () => void
+  /** Generate a missing set in turn with the other hydrations (opening a board). */
+  boundGeneration?: boolean
   loadImageFromSrcFn?: (src: string) => Promise<LoadedCanvasImage>
 }): Promise<{ image: CanvasImageAsset; thumbnailSet: CanvasImageThumbnailSet } | null> {
   if (!sourceIdentity) {
@@ -911,38 +947,46 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
     level: null
   }
   if (!resolvedThumbnailSet) {
-    try {
+    const generate = async () => {
       const sourceBlob = await resolveCanvasImageThumbnailSourceBlob({ src, sourceFile })
-      if (sourceBlob) {
-        const ensured = await ensureCanvasThumbnailSet({
-          source: sourceBlob,
-          identity: sourceIdentity,
-          // The cache was read just above.
-          skipWarmRead: true,
-          ...(signal ? { signal } : {}),
-          ...(onQueued ? { onQueued } : {}),
-          ...(onDispatch ? { onDispatch } : {}),
-          ...(typeof sourceWidth === 'number' && typeof sourceHeight === 'number'
-            ? { sourceWidth, sourceHeight }
-            : {}),
-          ...(onFirstImage
-            ? {
-                firstLevelMaxSide: maxPreviewSide,
-                onFirstLevel: (level) => {
-                  if (early.level) {
-                    return
-                  }
-                  const image = loadCanvasImageFromBlob(level.blob, loadImageFromSrcFn)
-                  early.level = { maxSide: level.maxSide, image }
-                  void image.then((loaded) => {
-                    if (loaded) {
-                      onFirstImage(loaded)
-                    }
-                  })
+      if (!sourceBlob) {
+        return null
+      }
+      return await ensureCanvasThumbnailSet({
+        source: sourceBlob,
+        identity: sourceIdentity,
+        // The cache was read just above.
+        skipWarmRead: true,
+        ...(signal ? { signal } : {}),
+        ...(onQueued ? { onQueued } : {}),
+        ...(onDispatch ? { onDispatch } : {}),
+        ...(typeof sourceWidth === 'number' && typeof sourceHeight === 'number'
+          ? { sourceWidth, sourceHeight }
+          : {}),
+        ...(onFirstImage
+          ? {
+              firstLevelMaxSide: maxPreviewSide,
+              onFirstLevel: (level) => {
+                if (early.level) {
+                  return
                 }
+                const image = loadCanvasImageFromBlob(level.blob, loadImageFromSrcFn)
+                early.level = { maxSide: level.maxSide, image }
+                void image.then((loaded) => {
+                  if (loaded) {
+                    onFirstImage(loaded)
+                  }
+                })
               }
-            : {})
-        })
+            }
+          : {})
+      })
+    }
+    try {
+      const ensured = boundGeneration
+        ? await withCanvasThumbnailHydrationGenerationSlot(generate)
+        : await generate()
+      if (ensured) {
         resolvedThumbnailSet = ensured.thumbnailSet
         generatedLevels = ensured.generatedLevels
       }
@@ -1091,6 +1135,7 @@ export async function hydrateCanvasImageItemForCanvas(
     sourceHeight: item.sourceHeight,
     sizeBytes: item.sizeBytes,
     maxPreviewSide,
+    boundGeneration: true,
     loadImageFromSrcFn
   })
   if (thumbnailPreview) {

@@ -625,64 +625,39 @@ describe('canvasThumbnailWorkerClient', () => {
     )
   })
 
-  it('queues thumbnail worker requests and falls back to renderer generation under backpressure', async () => {
+  it('waits in a full worker queue instead of generating on the main thread', async () => {
     installMockThumbnailWorker()
     configureSingleMockWorkerPool(1)
-    const { drawImage, close } = installRendererThumbnailMocks({ width: 512, height: 256 })
+    const { drawImage } = installRendererThumbnailMocks({ width: 512, height: 256 })
+    const requests = [1, 2, 3].map((index) =>
+      generateCanvasThumbnailLevels({
+        source: new Blob([`source-${index}`], { type: 'image/png' }),
+        identity: createIdentity({ canonicalPath: `C:/Images/ref-${index}.png` }),
+        levels: [128]
+      })
+    )
 
-    const first = generateCanvasThumbnailLevels({
-      source: new Blob(['source-1'], { type: 'image/png' }),
-      identity: createIdentity({ canonicalPath: 'C:/Images/ref-1.png' }),
-      levels: [128]
-    })
-    const second = generateCanvasThumbnailLevels({
-      source: new Blob(['source-2'], { type: 'image/png' }),
-      identity: createIdentity({ canonicalPath: 'C:/Images/ref-2.png' }),
-      levels: [128]
-    })
-    const backpressured = generateCanvasThumbnailLevels({
-      source: new Blob(['source-3'], { type: 'image/png' }),
-      identity: createIdentity({ canonicalPath: 'C:/Images/ref-3.png' }),
-      levels: [128]
-    })
-
+    // One running, two waiting: the queue of one is full, but nobody is turned away.
     expect(MockThumbnailWorker.instances).toHaveLength(1)
-    expect(MockThumbnailWorker.instances[0].messages).toHaveLength(1)
     expect(getCanvasThumbnailWorkerPoolMetrics()).toEqual(
       expect.objectContaining({
         activeRequestCount: 1,
-        queuedRequestCount: 1,
-        rejectedRequestCount: 1
+        queuedRequestCount: 2,
+        rejectedRequestCount: 0
       })
     )
 
-    const firstMessage = MockThumbnailWorker.instances[0].messages[0]
-    MockThumbnailWorker.instances[0].emit({
-      type: 'success',
-      requestId: firstMessage.requestId,
-      levels: [createWorkerLevel(128)]
-    })
-    await first
-
-    expect(MockThumbnailWorker.instances[0].messages).toHaveLength(2)
-    const secondMessage = MockThumbnailWorker.instances[0].messages[1]
-    MockThumbnailWorker.instances[0].emit({
-      type: 'success',
-      requestId: secondMessage.requestId,
-      levels: [createWorkerLevel(128)]
-    })
-    await second
-
-    const backpressuredLevels = await backpressured
-    expect(backpressuredLevels).toHaveLength(1)
-    expect(backpressuredLevels[0]).toEqual(
-      expect.objectContaining({
-        maxSide: 128,
-        mimeType: 'image/webp'
+    const [worker] = MockThumbnailWorker.instances
+    for (let index = 0; index < 3; index += 1) {
+      await vi.waitFor(() => expect(worker.messages).toHaveLength(index + 1))
+      worker.emit({
+        type: 'success',
+        requestId: worker.messages[index].requestId,
+        levels: [createWorkerLevel(128)]
       })
-    )
-    expect(drawImage).toHaveBeenCalled()
-    expect(close).toHaveBeenCalled()
+      await expect(requests[index]).resolves.toHaveLength(1)
+    }
+    expect(drawImage).not.toHaveBeenCalled()
   })
 
   it('uses native thumbnail fallback when renderer generation fails', async () => {

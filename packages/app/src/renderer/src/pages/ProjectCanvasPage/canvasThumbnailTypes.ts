@@ -221,6 +221,11 @@ export type CanvasThumbnailGenerationRequest = {
    * and no renderer-side generation starts for it.
    */
   signal?: AbortSignal
+  /**
+   * Wait in the pool's queue even when it is full, instead of getting null back (the caller
+   * would then generate on the main thread with no byte cap). The caller bounds its own requests.
+   */
+  queueWhenFull?: boolean
   /** Called when the job has to wait in the pool's queue (all workers or bytes are taken). */
   onQueued?: () => void
   /** Called once when a worker starts the job (at once when the request joins a running job). */

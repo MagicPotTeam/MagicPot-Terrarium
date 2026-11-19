@@ -12,6 +12,7 @@ import {
   buildCanvasImagePlaceholderAsset,
   createCanvasImagePendingPixelsAsset,
   getCanvasImagePreviewMaxSideForBatch,
+  getCanvasThumbnailHydrationGenerationConcurrency,
   hydrateCanvasImageItemForCanvas,
   isCanvasImagePendingPixelsAsset,
   loadImageFromSrc,
@@ -1178,6 +1179,72 @@ describe('canvasAssetIntakeHelpers', () => {
       )
       expect(isCanvasThumbnailSetFresh(result?.thumbnailSet, identity)).toBe(true)
     })
+  })
+
+  it('opens a board of uncached images a few thumbnail generations at a time', async () => {
+    resetCanvasThumbnailWorkerPoolForTest()
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcCanvasThumbnail: { readThumbnailManifest: vi.fn(async () => ({ manifest: null })) }
+      }
+    })
+    // Each generation starts by reading its source: hold every read.
+    const pendingReads: Array<() => void> = []
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          pendingReads.push(() => resolve({ ok: false, status: 404 } as Response))
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const loadImageFromSrc = vi.fn(async () => ({
+      img: createImage(64, 48),
+      width: 64,
+      height: 48
+    }))
+    const items: CanvasImageItem[] = Array.from({ length: 20 }, (_, index) => ({
+      id: `reopened-${index}`,
+      type: 'image',
+      src: `local-media:///C:/board/reopened-${index}.png`,
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 240,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      sourceIdentity: buildCanvasImageSourceIdentity({
+        canonicalPath: `C:/board/reopened-${index}.png`,
+        sizeBytes: 1000 + index,
+        lastModifiedMs: 1700000000000
+      })!
+    }))
+
+    try {
+      const hydrations = items.map((item) =>
+        hydrateCanvasImageItemForCanvas({ item, loadImageFromSrc })
+      )
+      const limit = getCanvasThumbnailHydrationGenerationConcurrency()
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(limit))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      // The others wait in turn instead of all reading their source (and later generating) at once.
+      expect(fetchMock).toHaveBeenCalledTimes(limit)
+
+      for (let round = 0; round < 40 && fetchMock.mock.calls.length < items.length; round += 1) {
+        pendingReads.splice(0).forEach((finish) => finish())
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      pendingReads.splice(0).forEach((finish) => finish())
+      const hydrated = await Promise.all(hydrations)
+      expect(fetchMock).toHaveBeenCalledTimes(items.length)
+      expect(hydrated.every((item) => item?.image)).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('makes one flat pending tile per import and marks it as a placeholder', () => {

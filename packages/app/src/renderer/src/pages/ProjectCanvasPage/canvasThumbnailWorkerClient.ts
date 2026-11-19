@@ -274,7 +274,9 @@ const canvasThumbnailWorkerPool = new CanvasThumbnailWorkerPool(
 async function generateLevelsWithWorker(
   request: CanvasThumbnailGenerationRequest
 ): Promise<CanvasGeneratedThumbnailLevel[] | null> {
-  const workerLevels = await canvasThumbnailWorkerPool.generate(request)
+  // A full queue is waited out: only a pool that cannot run a worker at all, or a failed job,
+  // leads to generation on the main thread.
+  const workerLevels = await canvasThumbnailWorkerPool.generate({ ...request, queueWhenFull: true })
   return workerLevels ? workerLevels.map(finalizeGeneratedThumbnailLevel) : null
 }
 

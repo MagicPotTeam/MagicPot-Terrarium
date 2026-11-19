@@ -310,7 +310,7 @@ export class CanvasThumbnailWorkerPool {
       job.resolve(null)
       return job.promise
     }
-    if (this.queue.length >= this.options.maxQueueSize) {
+    if (this.queue.length >= this.options.maxQueueSize && !request.queueWhenFull) {
       this.inFlightByKey.delete(key)
       this.rejectedRequestCount += 1
       job.resolve(null)
