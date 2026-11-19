@@ -228,6 +228,50 @@ export async function readPngImageFileMetadata(
   }
 }
 
+/**
+ * EXIF orientation of a JPEG APP1 segment (1-8), or null. The decoder turns the picture for
+ * orientations 5-8, so a frame sized from the header has to swap width and height for them.
+ */
+function readJpegExifOrientation(bytes: Uint8Array, start: number, end: number): number | null {
+  // "Exif\0\0", then a TIFF header: byte order, 42, offset of the first directory.
+  if (end - start < 14 || !matchesAscii(bytes, start, 'Exif') || bytes[start + 4] !== 0) {
+    return null
+  }
+
+  const tiff = start + 6
+  const littleEndian = bytes[tiff] === 0x49 && bytes[tiff + 1] === 0x49
+  const bigEndian = bytes[tiff] === 0x4d && bytes[tiff + 1] === 0x4d
+  if (!littleEndian && !bigEndian) {
+    return null
+  }
+  const readUint16 = (at: number) =>
+    littleEndian ? bytes[at] | (bytes[at + 1] << 8) : (bytes[at] << 8) | bytes[at + 1]
+  const readUint32 = (at: number) =>
+    littleEndian
+      ? (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)) >>> 0
+      : ((bytes[at] << 24) | (bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3]) >>> 0
+  if (readUint16(tiff + 2) !== 42) {
+    return null
+  }
+
+  const directory = tiff + readUint32(tiff + 4)
+  if (directory + 2 > end) {
+    return null
+  }
+  const entryCount = readUint16(directory)
+  for (let index = 0; index < entryCount; index += 1) {
+    const entry = directory + 2 + index * 12
+    if (entry + 12 > end) {
+      return null
+    }
+    if (readUint16(entry) === 0x0112) {
+      const orientation = readUint16(entry + 8)
+      return orientation >= 1 && orientation <= 8 ? orientation : null
+    }
+  }
+  return null
+}
+
 export async function readJpegImageFileMetadata(
   file: Blob
 ): Promise<CanvasImageFileMetadata | null> {
@@ -238,6 +282,7 @@ export async function readJpegImageFileMetadata(
     }
 
     let offset = 2
+    let exifOrientation: number | null = null
     while (offset + 9 < bytes.length) {
       while (offset < bytes.length && bytes[offset] !== 0xff) {
         offset += 1
@@ -271,9 +316,17 @@ export async function readJpegImageFileMetadata(
         (marker >= 0xc5 && marker <= 0xc7) ||
         (marker >= 0xc9 && marker <= 0xcb) ||
         (marker >= 0xcd && marker <= 0xcf)
+      if (marker === 0xe1 && exifOrientation == null) {
+        exifOrientation = readJpegExifOrientation(bytes, offset + 2, offset + segmentLength)
+      }
+
       if (isStartOfFrame && segmentLength >= 7) {
-        const height = (bytes[offset + 3] << 8) | bytes[offset + 4]
-        const width = (bytes[offset + 5] << 8) | bytes[offset + 6]
+        const storedHeight = (bytes[offset + 3] << 8) | bytes[offset + 4]
+        const storedWidth = (bytes[offset + 5] << 8) | bytes[offset + 6]
+        // Orientations 5-8 are shown turned by a quarter: the displayed size is the swapped one.
+        const turned = exifOrientation != null && exifOrientation >= 5
+        const width = turned ? storedHeight : storedWidth
+        const height = turned ? storedWidth : storedHeight
         if (width > 0 && height > 0) {
           return {
             width,
@@ -623,6 +676,55 @@ export async function buildCanvasImagePlaceholderAsset({
   }
 
   return markCanvasImagePlaceholderAsset(canvas)
+}
+
+/**
+ * The pending tile is as wide as an import preview (512 px), so the renderer treats a frame that
+ * waits for its pixels like one that already has its preview: it starts no source decode of its
+ * own unless the frame is shown at more than twice that size. It is only a few rows high: it is
+ * one flat colour, stretched to the frame, and every frame gets its own texture of it in the
+ * renderer (4 KiB each instead of 1 MiB for a square tile).
+ */
+export const CANVAS_IMAGE_PENDING_PIXELS_ASSET_WIDTH = 512
+export const CANVAS_IMAGE_PENDING_PIXELS_ASSET_HEIGHT = 2
+
+let canvasImagePendingPixelsAsset: CanvasImageAsset | null | undefined
+
+/**
+ * One flat, half-transparent tile shared by every image whose pixels are still on their way.
+ * It is drawn stretched to the item's own rectangle. It carries the placeholder marker: the
+ * item counts as "placeholder" for the renderer's health metrics until its real pixels replace
+ * it.
+ */
+export function getCanvasImagePendingPixelsAsset(): CanvasImageAsset | null {
+  if (canvasImagePendingPixelsAsset !== undefined) {
+    return canvasImagePendingPixelsAsset
+  }
+  if (typeof document === 'undefined') {
+    return null
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = CANVAS_IMAGE_PENDING_PIXELS_ASSET_WIDTH
+  canvas.height = CANVAS_IMAGE_PENDING_PIXELS_ASSET_HEIGHT
+  try {
+    const context = canvas.getContext('2d')
+    if (context) {
+      context.fillStyle = 'rgba(128, 134, 144, 0.32)'
+      context.fillRect(0, 0, canvas.width, canvas.height)
+    }
+  } catch {
+    // A blank tile still frames the item.
+  }
+
+  canvasImagePendingPixelsAsset = markCanvasImagePlaceholderAsset(canvas)
+  return canvasImagePendingPixelsAsset
+}
+
+export function isCanvasImagePendingPixelsAsset(
+  image: CanvasImageAsset | null | undefined
+): boolean {
+  return Boolean(image) && image === canvasImagePendingPixelsAsset
 }
 
 function describeCanvasImageSource(src: string): string {

@@ -17,7 +17,10 @@ import {
   canvasThumbnailManifestFromSet,
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
-import type { CanvasImageSourceInput } from './canvasAssetIntakeHelpers'
+import {
+  isCanvasImagePendingPixelsAsset,
+  type CanvasImageSourceInput
+} from './canvasAssetIntakeHelpers'
 import { buildProjectCanvasRenderableItems } from './projectCanvasRenderBoundary'
 import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import type { CanvasGroup, CanvasImageItem, CanvasItem } from './types'
@@ -1431,7 +1434,7 @@ describe('useCanvasAssetIntake', () => {
     expect((maxBottom - minY) / (maxRight - minX)).toBeLessThan(1.2)
   })
 
-  it('streams an anchored large image paste and centers the final arranged group at the anchor', async () => {
+  it('commits an anchored large image paste once at its final position and streams the pixels afterwards', async () => {
     const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
       src: `https://example.invalid/anchored-large-paste-${index}.png`,
       fileName: `anchored-large-paste-${index}.png`,
@@ -1442,7 +1445,6 @@ describe('useCanvasAssetIntake', () => {
     const onComplete = vi.fn()
     const onProgress = vi.fn()
     const itemUpdates: CanvasItem[][] = []
-    const renderableCounts: number[] = []
     const hiddenImageCounts: number[] = []
     const historyCommits: CanvasItem[][] = []
     const pasteOptions = { clientX: 640, clientY: 360 }
@@ -1455,7 +1457,6 @@ describe('useCanvasAssetIntake', () => {
         onProgress={onProgress}
         onItemsUpdate={(items) => {
           itemUpdates.push(items)
-          renderableCounts.push(buildProjectCanvasRenderableItems(items).length)
           hiddenImageCounts.push(
             items.filter((item) => item.type === 'image' && isCanvasItemTransientlyHidden(item.id))
               .length
@@ -1476,22 +1477,33 @@ describe('useCanvasAssetIntake', () => {
     const progressEvents = onProgress.mock.calls.map(
       ([progress]) => progress as CanvasImageBatchImportProgress
     )
+    const rectOf = (item: CanvasItem) => [item.id, item.x, item.y, item.width, item.height]
 
     expect(result).toHaveLength(sources.length)
     expect(imageItems).toHaveLength(sources.length)
     expect(progressEvents.some((event) => event.phase === 'committing')).toBe(true)
+    // Every frame is there from the first update, in the import's only history entry, ...
     expect(itemUpdates.length).toBeGreaterThan(1)
-    expect(hiddenImageCounts.slice(0, -1).every((count) => count > 0)).toBe(true)
-    expect(renderableCounts.slice(0, -1).every((count) => count === 0)).toBe(true)
-    expect(imageItems.every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
-    expect(buildProjectCanvasRenderableItems(items)).toHaveLength(sources.length)
+    expect(itemUpdates[0]).toHaveLength(sources.length)
     expect(historyCommits).toHaveLength(1)
-    expect(historyCommits[0].every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
+    expect(historyCommits[0]).toHaveLength(sources.length)
+    expect(buildProjectCanvasRenderableItems(itemUpdates[0])).toHaveLength(sources.length)
+    expect(
+      itemUpdates[0].every(
+        (item) => item.type === 'image' && isCanvasImagePendingPixelsAsset(item.image)
+      )
+    ).toBe(true)
+    // ... nothing is hidden while the pixels arrive, and no frame moves afterwards.
+    expect(hiddenImageCounts.every((count) => count === 0)).toBe(true)
+    for (const update of itemUpdates) {
+      expect(update.map(rectOf)).toEqual(itemUpdates[0].map(rectOf))
+    }
+    expect(imageItems.every((item) => !isCanvasImagePendingPixelsAsset(item.image))).toBe(true)
     expect((minX + maxX) / 2).toBe(pasteOptions.clientX)
     expect((minY + maxY) / 2).toBe(pasteOptions.clientY)
   })
 
-  it('reveals transiently hidden anchored items when the intake owner unmounts', async () => {
+  it('stops handing over pixels when the intake owner unmounts during the stream', async () => {
     const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
       src: `https://example.invalid/unmounted-anchor-${index}.png`,
       fileName: `unmounted-anchor-${index}.png`,
@@ -1499,7 +1511,7 @@ describe('useCanvasAssetIntake', () => {
       sourceWidthHint: 120,
       sourceHeightHint: 90
     }))
-    const hiddenItemIds: string[] = []
+    const itemUpdates: CanvasItem[][] = []
     let unmountHarness: () => void = () => undefined
 
     const rendered = render(
@@ -1508,11 +1520,8 @@ describe('useCanvasAssetIntake', () => {
         pasteOptions={{ clientX: 640, clientY: 360 }}
         onComplete={vi.fn()}
         onItemsUpdate={(items) => {
-          const hiddenItems = items.filter(
-            (item) => item.type === 'image' && isCanvasItemTransientlyHidden(item.id)
-          )
-          if (hiddenItems.length > 0 && hiddenItemIds.length === 0) {
-            hiddenItemIds.push(...hiddenItems.map((item) => item.id))
+          itemUpdates.push(items)
+          if (itemUpdates.length === 1) {
             queueMicrotask(() => unmountHarness())
           }
         }}
@@ -1520,8 +1529,12 @@ describe('useCanvasAssetIntake', () => {
     )
     unmountHarness = rendered.unmount
 
-    await waitFor(() => expect(hiddenItemIds.length).toBeGreaterThan(0), { timeout: 5000 })
-    expect(hiddenItemIds.every((itemId) => !isCanvasItemTransientlyHidden(itemId))).toBe(true)
+    await waitFor(() => expect(itemUpdates.length).toBeGreaterThan(0), { timeout: 5000 })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    expect(itemUpdates).toHaveLength(1)
+    expect(itemUpdates[0]).toHaveLength(sources.length)
+    expect(itemUpdates[0].every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
   })
 
   it('reports progress while streaming large image batches into the canvas', async () => {

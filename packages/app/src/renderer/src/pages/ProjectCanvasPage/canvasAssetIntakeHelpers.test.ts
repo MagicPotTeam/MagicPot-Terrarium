@@ -9,18 +9,25 @@ import {
   CANVAS_IMAGE_PROXY_SMALL_BATCH_MAX_SIDE,
   buildCanvasImageDisplayAsset,
   buildCanvasImagePlaceholderAsset,
+  getCanvasImagePendingPixelsAsset,
   getCanvasImagePreviewMaxSideForBatch,
   hydrateCanvasImageItemForCanvas,
+  isCanvasImagePendingPixelsAsset,
   loadImageFromSrc,
   readCanvasImageBlobMetadata
 } from './canvasAssetIntakeHelpers'
-import { isCanvasImageDeferredPlaceholderPreview } from './canvasImageAssetUtils'
+import {
+  getCanvasImageAssetSize,
+  isCanvasImageDeferredPlaceholderPreview,
+  isCanvasImagePlaceholderAsset
+} from './canvasImageAssetUtils'
+import { resolveCanvasImageLodDecision } from './canvasImageLodPolicy'
 import {
   buildCanvasImageSourceIdentity,
   canvasThumbnailManifestFromSet,
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
-import type { CanvasImageItem } from './types'
+import type { CanvasImageAsset, CanvasImageItem } from './types'
 
 function createImage(width: number, height: number): HTMLImageElement {
   const image = document.createElement('img')
@@ -294,6 +301,84 @@ describe('canvasAssetIntakeHelpers', () => {
       decodedByteSize: 3136 * 1568 * 4,
       hasAlpha: false
     })
+    expect(createImageBitmapMock).not.toHaveBeenCalled()
+  })
+
+  it('swaps the header size of a JPEG that its EXIF orientation turns by a quarter', async () => {
+    const createImageBitmapMock = vi.fn(async () => {
+      throw new Error('bitmap decode should not be used for JPEG metadata')
+    })
+    Object.defineProperty(globalThis, 'createImageBitmap', {
+      configurable: true,
+      writable: true,
+      value: createImageBitmapMock
+    })
+    /** SOI, an APP1 EXIF segment with only the orientation tag, then SOF0 with the stored size. */
+    const createJpegWithExif = (
+      storedWidth: number,
+      storedHeight: number,
+      orientation: number,
+      littleEndian: boolean
+    ) => {
+      const u16 = (value: number) =>
+        littleEndian ? [value & 0xff, value >> 8] : [value >> 8, value & 0xff]
+      const u32 = (value: number) =>
+        littleEndian ? [value & 0xff, 0, 0, 0] : [0, 0, 0, value & 0xff]
+      const tiff = [
+        ...(littleEndian ? [0x49, 0x49] : [0x4d, 0x4d]),
+        ...u16(42),
+        ...u32(8),
+        ...u16(1),
+        ...u16(0x0112),
+        ...u16(3),
+        ...u32(1),
+        ...u16(orientation),
+        0,
+        0,
+        ...u32(0)
+      ]
+      const exif = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff]
+      const app1Length = exif.length + 2
+      return new Blob([
+        new Uint8Array([
+          0xff,
+          0xd8,
+          0xff,
+          0xe1,
+          app1Length >> 8,
+          app1Length & 0xff,
+          ...exif,
+          0xff,
+          0xc0,
+          0x00,
+          0x11,
+          0x08,
+          (storedHeight >> 8) & 0xff,
+          storedHeight & 0xff,
+          (storedWidth >> 8) & 0xff,
+          storedWidth & 0xff,
+          0x03,
+          ...Array.from({ length: 9 }, () => 0)
+        ])
+      ])
+    }
+    const sizeOf = async (orientation: number, littleEndian = false) => {
+      const metadata = await readCanvasImageBlobMetadata(
+        createJpegWithExif(1600, 1000, orientation, littleEndian)
+      )
+      return [metadata?.width, metadata?.height]
+    }
+
+    // 1-4 keep the stored size (mirrored or turned by a half), 5-8 are shown as 1000 x 1600.
+    for (const orientation of [1, 2, 3, 4]) {
+      expect(await sizeOf(orientation)).toEqual([1600, 1000])
+    }
+    for (const orientation of [5, 6, 7, 8]) {
+      expect(await sizeOf(orientation)).toEqual([1000, 1600])
+      expect(await sizeOf(orientation, true)).toEqual([1000, 1600])
+    }
+    // A value outside 1-8 is ignored.
+    expect(await sizeOf(9)).toEqual([1600, 1000])
     expect(createImageBitmapMock).not.toHaveBeenCalled()
   })
 
@@ -719,5 +804,47 @@ describe('canvasAssetIntakeHelpers', () => {
       image: thumbnailImage,
       thumbnailSet
     })
+  })
+
+  it('shares one flat pending tile between all placeholders and marks it as a placeholder', () => {
+    HTMLCanvasElement.prototype.getContext = (() =>
+      null) as typeof HTMLCanvasElement.prototype.getContext
+    const first = getCanvasImagePendingPixelsAsset()
+    const second = getCanvasImagePendingPixelsAsset()
+
+    expect(first).not.toBeNull()
+    expect(second).toBe(first)
+    expect(isCanvasImagePendingPixelsAsset(first)).toBe(true)
+    expect(isCanvasImagePlaceholderAsset(first)).toBe(true)
+    expect(isCanvasImagePendingPixelsAsset(document.createElement('canvas'))).toBe(false)
+    expect(isCanvasImagePendingPixelsAsset(undefined)).toBe(false)
+  })
+
+  it('keeps the pending tile cheap as a texture and quiet for the renderer', () => {
+    HTMLCanvasElement.prototype.getContext = (() =>
+      null) as typeof HTMLCanvasElement.prototype.getContext
+    const tile = getCanvasImagePendingPixelsAsset()
+    const { width, height } = getCanvasImageAssetSize(tile)
+
+    // The renderer makes one texture of it per frame that waits: a few KiB each, not 1 MiB.
+    expect(width * height * 4).toBeLessThanOrEqual(8 * 1024)
+
+    // A waiting frame at overview size asks for no source decode of its own ...
+    const frame = {
+      id: 'pending',
+      src: 'local-media:///C:/board/pending.png',
+      width: 400,
+      height: 300,
+      scaleX: 1,
+      scaleY: 1,
+      sourceWidth: 4096,
+      sourceHeight: 3072
+    }
+    const overview = resolveCanvasImageLodDecision({ item: frame, image: tile, stageScale: 1 })
+    expect(overview.usesPlaceholderPreview).toBe(true)
+    expect(overview.shouldUseSourceTexture).toBe(false)
+    // ... only one that fills the screen does, like a frame that already has its 512 px preview.
+    const closeUp = resolveCanvasImageLodDecision({ item: frame, image: tile, stageScale: 3 })
+    expect(closeUp.shouldUseSourceTexture).toBe(true)
   })
 })
