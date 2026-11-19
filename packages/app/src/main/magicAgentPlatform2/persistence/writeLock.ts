@@ -123,6 +123,32 @@ export function assertNoActiveInstanceLeases(databasePath: string): void {
   scanAndCleanInstanceLeases(directory)
 }
 
+/**
+ * Read-only view of the instance leases next to a database: the PID of every lease whose process
+ * is alive, or cannot be shown dead (-1 for an unreadable PID). It creates, cleans and deletes
+ * nothing; a missing directory means no lease. A reused PID can report a dead holder as alive,
+ * which errs towards "another holder exists" (fail closed), like assertNoActiveInstanceLeases.
+ */
+export function activeInstanceLeasePids(databasePath: string): number[] {
+  const database = resolve(databasePath)
+  let names: string[]
+  try {
+    names = readdirSync(join(realpathSync(dirname(database)), `${basename(database)}.magicagent.instances`))
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return []
+    throw error
+  }
+  const pids: number[] = []
+  for (const name of names) {
+    const match = LEASE_NAME.exec(name)
+    if (!match) continue
+    const pid = Number(match[1])
+    if (!Number.isSafeInteger(pid) || pid <= 0) pids.push(-1)
+    else if (isPidAlive(pid)) pids.push(pid)
+  }
+  return pids
+}
+
 function scanAndCleanInstanceLeases(directory: string): void {
   const entries = readdirSync(directory, { withFileTypes: true })
   const anchors = new Set(

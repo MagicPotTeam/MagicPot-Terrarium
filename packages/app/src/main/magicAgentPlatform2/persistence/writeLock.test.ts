@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('node:fs', async (importActual) => importActual())
 vi.mock('node:fs/promises', async (importActual) => importActual())
 
-import { acquireEventStoreWriteLock } from './writeLock'
+import { acquireEventStoreWriteLock, acquireInstanceLease, activeInstanceLeasePids } from './writeLock'
 
 const children = new Set<ChildProcess>()
 const directories: string[] = []
@@ -184,5 +184,48 @@ describe('acquireEventStoreWriteLock', () => {
     expect(existsSync(lockPaths.lock)).toBe(false)
     expect(existsSync(lockPaths.owner)).toBe(false)
     expect(existsSync(lockPaths.anchor)).toBe(true)
+  })
+})
+
+async function liveChild(): Promise<ChildProcess> {
+  const child = spawn(process.execPath, ['-e', "process.stdout.write('READY\\n'); setInterval(() => {}, 1000)"], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    stdio: ['ignore', 'pipe', 'ignore']
+  })
+  children.add(child)
+  await new Promise<void>((resolveReady, reject) => {
+    const timer = setTimeout(() => reject(new Error('child timeout')), 10_000)
+    child.stdout?.on('data', (chunk) => { if (String(chunk).includes('READY')) { clearTimeout(timer); resolveReady() } })
+  })
+  return child
+}
+
+describe('activeInstanceLeasePids (read-only)', () => {
+  it('reports no holder and creates nothing when the lease directory does not exist', async () => {
+    const path = await database()
+    expect(activeInstanceLeasePids(path)).toEqual([])
+    expect(readdirSync(dirname(path))).toEqual([])
+  })
+
+  it('reports a live holder, never a dead one, and deletes no lease file', async () => {
+    const path = await database()
+    const own = acquireInstanceLease(path)
+    expect(activeInstanceLeasePids(path)).toEqual([process.pid])
+    const directory = dirname(own.path)
+    const child = await liveChild()
+    const live = join(directory, `${child.pid}-${randomUUID()}.lease`)
+    const dead = join(directory, `${deadOwner().pid}-${randomUUID()}.lease`)
+    writeFileSync(live, '{}')
+    writeFileSync(dead, '{}')
+    writeFileSync(join(directory, 'unrelated-entry'), '')
+    expect(activeInstanceLeasePids(path).sort()).toEqual([process.pid, child.pid].sort())
+    await terminate(child)
+    children.delete(child)
+    expect(activeInstanceLeasePids(path)).toEqual([process.pid])
+    own.release()
+    expect(activeInstanceLeasePids(path)).toEqual([])
+    // Read-only: the dead and the stopped holder's leases stay where they were.
+    expect(existsSync(live)).toBe(true)
+    expect(existsSync(dead)).toBe(true)
   })
 })
