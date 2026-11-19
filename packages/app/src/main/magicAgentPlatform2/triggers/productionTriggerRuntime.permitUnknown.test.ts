@@ -77,31 +77,34 @@ const authorizationFor = (
     trustedApprovers: [approver]
   })
 
+type Clock = { now: number }
 // Modelled on createGrantProvider, but each grant is issued at the current clock value so a
-// retry after the clock moved can be granted again.
+// retry after the clock moved can be granted again. `approvalMs` models a person who takes that
+// long to approve.
 const grantAtClock =
-  (authorization: MagicAgentPolicyAuthorizationService, now: () => number) =>
+  (authorization: MagicAgentPolicyAuthorizationService, clock: Clock, approvalMs = 0) =>
   async (request: PolicyRequest) => {
     const grantId = `grant-${request.requestId}`
-    const issuedAt = now()
+    const issuedAt = clock.now
     const grant = authorization.createApprovalGrant({
       grantId,
       request,
       approvedBy: approver,
       issuedAt,
-      expiresAt: issuedAt + 1_000,
+      expiresAt: issuedAt + approvalMs + 1_000,
       maxUses: 1,
       idempotencyKey: grantId
     })
+    clock.now += approvalMs
     return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
   }
 
-type Clock = { now: number }
 const harness = (
   options: {
     eventStore?: MagicAgentEventStore
     effect?: 'allow' | 'deny'
     grant?: boolean
+    approvalMs?: number
     storeId?: string
     clock?: Clock
   } = {}
@@ -111,17 +114,21 @@ const harness = (
   const authorization = authorizationFor(eventStore, options.effect, options.storeId)
   const runAgent = vi.fn(async (input: TriggerAgentDispatchInput): Promise<unknown> => input)
   const runGraph = vi.fn(async (input: TriggerGraphDispatchInput): Promise<unknown> => input)
+  const grantProvider = vi.fn(
+    options.grant === false
+      ? async () => undefined
+      : grantAtClock(authorization, clock, options.approvalMs)
+  )
   const runtime = new ProductionTriggerRuntime({
     eventStore,
     authorization,
     service: { runAgent, runGraph },
-    grantProvider:
-      options.grant === false ? () => undefined : grantAtClock(authorization, () => clock.now),
+    grantProvider,
     routeResolver: () => ({ trusted: true }),
     now: () => clock.now,
     pollInterval: 60_000
   })
-  return { eventStore, authorization, runtime, runAgent, runGraph, clock }
+  return { eventStore, authorization, runtime, runAgent, runGraph, clock, grantProvider }
 }
 type Harness = ReturnType<typeof harness>
 
@@ -331,6 +338,30 @@ describe('trigger occurrence after its permit step', () => {
 })
 
 describe('trigger occurrence settlement of long runs and restarts', () => {
+  it('fails closed when the approval takes longer than the lease', async () => {
+    // Known limit: the grant is awaited inside the claim and the lease is not renewed, so the
+    // marker is refused, nothing is consumed and every attempt uses up one grant.
+    const h = harness({ approvalMs: LEASE_MS + 1 })
+    enqueue(h)
+    const consume = passThroughConsume(h.authorization)
+    const polls: string[] = []
+    for (let poll = 0; poll < 5; poll += 1) {
+      await h.runtime.occurrenceScheduler.runOnce().then(
+        (claimed) => polls.push(String(claimed)),
+        (error: unknown) =>
+          polls.push(error instanceof TriggerOccurrenceFencingError ? 'fenced' : String(error))
+      )
+      h.clock.now += 1_000
+    }
+    expect(h.runAgent).not.toHaveBeenCalled()
+    expect(consume).not.toHaveBeenCalled()
+    expect(h.grantProvider).toHaveBeenCalledTimes(3)
+    expect(polls).toEqual(['fenced', 'fenced', 'fenced', 'false', 'false'])
+    expect(occurrence(h)).toMatchObject({ status: 'dead-letter', attempt: 3 })
+    expect(occurrence(h)?.permit).toBeUndefined()
+    expect(h.runtime.outcomes.list()).toHaveLength(0)
+  })
+
   it('completes a dispatch that outlasts its lease exactly once', async () => {
     const h = harness()
     enqueue(h)

@@ -88,6 +88,10 @@ export class ProductionTriggerRuntime<TResult = unknown> {
       grantProvider: options.grantProvider,
       resolveTrustedRoute: options.routeResolver,
       outcomes: this.outcomes,
+      // markPermit needs a live claim, and the grant is awaited inside that claim without lease
+      // renewal. A grant provider that waits longer than the lease (30 s) makes every attempt fail
+      // closed: no permit consumed, one grant used per attempt, dead-letter at the third. Hosts
+      // that wait for a person need lease renewal or a claim taken after the approval.
       onOccurrencePermit: ({ occurrenceId, owner, authorizationId, requestDigest }) => {
         this.occurrences.markPermit(occurrenceId, owner, this.now(), {
           authorizationId,
