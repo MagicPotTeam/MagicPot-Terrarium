@@ -3,6 +3,7 @@ import enUS from '@shared/locales/en-US/renderer.json'
 import zhCN from '@shared/locales/zh-CN/renderer.json'
 import type { ImportManagedMediaBytesReq, ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import {
+  MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS,
   MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE,
   validateImportManagedMediaBytesReq,
   validateImportManagedMediaDataUrlReq,
@@ -361,6 +362,39 @@ describe('chatManagedMediaAttachments', () => {
       expect(toManagedOriginalFileName('CON.png', 'attachment')).toBe('_CON.png')
       expect(toManagedOriginalFileName(' . ', 'attachment')).toBe('attachment')
     })
+  })
+
+  it('stops waiting for a grant main never answers, and reads nothing', async () => {
+    vi.useFakeTimers()
+    try {
+      const file = new File([new Uint8Array([1, 2, 3])], 'hung.png', { type: 'image/png' })
+      const arrayBuffer = vi.fn()
+      Object.defineProperty(file, 'arrayBuffer', { value: arrayBuffer })
+      const service = { importFile: vi.fn(), importBytes: vi.fn() }
+      let outcome: unknown = 'pending'
+      void importChatAttachment({
+        service,
+        file,
+        fileBridge: {
+          getPathForFile: () => '/mnt/nas/hung.png',
+          authorizeLocalMediaFileForImport: () => new Promise(() => undefined)
+        },
+        type: 'image',
+        mimeType: 'image/png'
+      }).then(
+        () => (outcome = 'attached'),
+        (error: unknown) => (outcome = error)
+      )
+      await vi.advanceTimersByTimeAsync(MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS - 1)
+      expect(outcome).toBe('pending')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(outcome).toBeInstanceOf(ChatAttachmentSourceTimeoutError)
+      expect(arrayBuffer).not.toHaveBeenCalled()
+      expect(service.importBytes).not.toHaveBeenCalled()
+      expect(service.importFile).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refuses a picked file main does not grant or that does not answer in time, and reads nothing', async () => {

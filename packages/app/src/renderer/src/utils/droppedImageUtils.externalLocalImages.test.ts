@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS } from '@shared/api/svcManagedMedia'
 
 const mocks = vi.hoisted(() => ({
   read: vi.fn(),
@@ -183,6 +184,27 @@ describe('external local image drop intake', () => {
       images: [],
       failedUrls: [first]
     })
+  })
+
+  it('stops waiting for a drop grant main never answers', async () => {
+    vi.useFakeTimers()
+    try {
+      mocks.importGrant.mockImplementation((url: string) =>
+        url === first
+          ? new Promise(() => undefined)
+          : Promise.resolve({ path: 'C:\\cache\\second.png', sizeBytes: 2000 })
+      )
+      let outcome: unknown = 'pending'
+      void getDroppedLocalImages({ fileUrls: [first, second], text: '' }).then(
+        (value) => (outcome = value)
+      )
+      await vi.advanceTimersByTimeAsync(MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS - 1)
+      expect(outcome).toBe('pending')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(outcome).toMatchObject({ failedUrls: [first], images: [{ url: second }] })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('does no work for an already stale destination', async () => {

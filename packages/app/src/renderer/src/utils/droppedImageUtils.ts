@@ -16,6 +16,7 @@ import { loadImageFromSrc } from '@renderer/pages/ProjectCanvasPage/canvasAssetI
 import { resolveCanvasLocalFilePathFromSource } from '@renderer/pages/ProjectCanvasPage/canvasLocalImageSource'
 import { stripHtmlToText } from './htmlText'
 import { parseExternalImageDrop } from '@shared/externalImageDrop'
+import { MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS } from '@shared/api/svcManagedMedia'
 import { getChatAttachmentMaxSizeMB } from '@renderer/features/chat/chatAttachmentUtils'
 
 export const QAPP_IMAGE_DRAG_MIME = 'application/x-qapp-image'
@@ -1000,14 +1001,20 @@ export const getDroppedLocalImages = async (
     content.fileUrls.map(async (url) => {
       const fileName = inferFileNameFromUrl(url, 'dropped-image.png')
       const mimeType = inferMimeTypeFromFileName(fileName)
+      let timer: ReturnType<typeof setTimeout> | undefined
       try {
-        const grant = await window.electronFile?.authorizeDroppedLocalImageForImport?.(
-          url,
-          mimeType
-        )
+        // Bounded like a pick's grant: a source that never answers counts as not granted.
+        const grant = await Promise.race([
+          window.electronFile?.authorizeDroppedLocalImageForImport?.(url, mimeType),
+          new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS)
+          })
+        ])
         return grant?.path ? { url, fileName, mimeType, grant } : null
       } catch {
         return null
+      } finally {
+        clearTimeout(timer)
       }
     })
   )

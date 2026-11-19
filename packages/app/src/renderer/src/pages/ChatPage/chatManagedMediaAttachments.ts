@@ -4,6 +4,7 @@ import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import type { ManagedMediaStorage } from '@shared/api/svcManagedMedia'
 import {
   MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES,
+  MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS,
   MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE
 } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference } from '@shared/mediaReference'
@@ -228,10 +229,22 @@ const resolvePickedFileImportSource = async (
   let answer: Awaited<
     ReturnType<NonNullable<ChatAttachmentFileBridge['authorizeLocalMediaFileForImport']>>
   >
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    answer = await bridge.authorizeLocalMediaFileForImport(file, mimeType)
+    // main always answers in time; this bound only keeps the composer from waiting forever.
+    answer = await Promise.race([
+      bridge.authorizeLocalMediaFileForImport(file, mimeType),
+      new Promise<{ refused: 'timeout' }>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ refused: 'timeout' }),
+          MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS
+        )
+      })
+    ])
   } catch {
     return { kind: 'refused', timedOut: false }
+  } finally {
+    clearTimeout(timer)
   }
   const canonicalPath = typeof answer?.path === 'string' ? answer.path.trim() : ''
   if (canonicalPath && !isNetworkOrDevicePath(canonicalPath)) {

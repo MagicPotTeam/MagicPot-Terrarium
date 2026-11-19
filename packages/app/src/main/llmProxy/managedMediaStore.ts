@@ -140,14 +140,25 @@ export type ImportSourceGuard = {
    */
   copyBaseTimeoutMs: number
   copyMinBytesPerSecond: number
+  /**
+   * Ceiling of that cap whatever size the source reports (default
+   * IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS): a source that trickles a byte now and then holds its
+   * slots no longer than this.
+   */
+  copyMaxTimeoutMs?: number
 }
 export const IMPORT_SOURCE_MAX_CALLS_PER_ROOT = 2
 export const IMPORT_SOURCE_MAX_CALLS = 3
+/** 20 minutes: more than the base gave a 1 GiB source (about 18 min); no real import needs more. */
+export const IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS = 20 * 60_000
+/** A call waits for a slot at most this many times its own deadline, then it is refused. */
+export const IMPORT_SOURCE_WAIT_TIMEOUT_FACTOR = 4
 export const DEFAULT_IMPORT_SOURCE_GUARD: ImportSourceGuard = {
   operationTimeoutMs: 15_000,
   copyBaseTimeoutMs: 60_000,
   // Generous: four copies that share a 256 KiB/s link still finish.
-  copyMinBytesPerSecond: 64 * 1024
+  copyMinBytesPerSecond: 64 * 1024,
+  copyMaxTimeoutMs: IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS
 }
 
 /** Monotonic: a clock step or a suspend/resume never ends a copy as a timeout. */
@@ -192,8 +203,12 @@ export function importSourceRootKey(filePath: string): string {
 }
 
 export type ImportSourceGate = {
-  /** Calls start() once a slot of `key` is free, or refuse() when the root does not respond. */
-  acquire(key: string, start: () => void, refuse: () => void): void
+  /**
+   * Calls start() once a slot of `key` is free, or refuse() when the root does not respond.
+   * Returns cancel(), which takes a call that is still waiting out of the queue (true) and
+   * does nothing once it has started or been refused (false).
+   */
+  acquire(key: string, start: () => void, refuse: () => void): () => boolean
   /** The call holding a slot of `key` passed its deadline; it keeps the slot until it returns. */
   markOverdue(key: string): void
   release(key: string, overdue: boolean): void
@@ -251,8 +266,15 @@ export function createImportSourceGate({
   }
   return {
     acquire(key, start, refuse) {
-      waiting.push({ key, start, refuse })
+      const waiter = { key, start, refuse }
+      waiting.push(waiter)
       pump()
+      return () => {
+        const index = waiting.indexOf(waiter)
+        if (index < 0) return false
+        waiting.splice(index, 1)
+        return true
+      }
     },
     markOverdue(key) {
       overdue += 1
@@ -281,52 +303,67 @@ const defaultImportSourceGate = createImportSourceGate()
 
 /**
  * Runs one filesystem call on an import source under the gate, rejecting with
- * MANAGED_MEDIA_IMPORT_TIMEOUT once timeoutMs has passed since the call got its slot (the
- * root is then taken as not responding), once the monotonic time notAfter() has come (a
- * copy's cap), or at once when the source's root does not respond. The slot stays taken
- * until the call really settles; a result that arrives after the deadline goes to
- * onLateResult (to close a late file handle).
+ * MANAGED_MEDIA_IMPORT_TIMEOUT once timeoutMs has passed since the call got its slot, once
+ * the monotonic time notAfter() has come (a copy's cap), when it waited waitTimeoutMs for a
+ * slot, or at once when the source's root does not respond. The slot stays taken until the
+ * call really settles; a call still pending timeoutMs after it started is counted as overdue
+ * (its root does not respond), whatever cut it before. A result that arrives after the
+ * deadline goes to onLateResult (to close a late file handle).
  */
 export function runImportSourceOperation<T>(
   operation: () => Promise<T>,
   {
     key = '',
     timeoutMs,
+    waitTimeoutMs = Math.max(0, timeoutMs) * IMPORT_SOURCE_WAIT_TIMEOUT_FACTOR,
     notAfter,
     gate = defaultImportSourceGate,
     onLateResult
   }: {
     key?: string
     timeoutMs: number
+    /** How long the call may wait for a slot (not counted in timeoutMs). */
+    waitTimeoutMs?: number
     notAfter?: () => number
     gate?: ImportSourceGate
     onLateResult?: (value: T) => void
   }
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    let settled = false
+    let started = false
+    let waitTimer: ReturnType<typeof setTimeout> | undefined
     const start = (): void => {
+      started = true
+      clearTimeout(waitTimer)
       const capLeft = notAfter ? notAfter() - monotonicNow() : Number.POSITIVE_INFINITY
       const stallLimit = Math.max(0, timeoutMs)
       if (capLeft <= 0) {
         gate.release(key, false)
+        settled = true
         reject(importSourceTimeoutError())
         return
       }
-      let settled = false
+      let returned = false
       let overdue = false
-      const timer = setTimeout(
-        () => {
-          if (settled) return
-          settled = true
-          // Only a call that ran out its own deadline marks its root as not responding.
-          if (stallLimit <= capLeft) {
-            overdue = true
-            gate.markOverdue(key)
-          }
-          reject(importSourceTimeoutError())
-        },
-        Math.min(stallLimit, capLeft)
-      )
+      // Still pending a whole call deadline after it started: its root does not respond,
+      // even when the copy's cap cut the call first (it would otherwise hold its slot unseen).
+      const stallTimer = setTimeout(() => {
+        if (returned) return
+        overdue = true
+        gate.markOverdue(key)
+        if (settled) return
+        settled = true
+        reject(importSourceTimeoutError())
+      }, stallLimit)
+      const capTimer =
+        capLeft < stallLimit
+          ? setTimeout(() => {
+              if (returned || settled) return
+              settled = true
+              reject(importSourceTimeoutError())
+            }, capLeft)
+          : undefined
       let pending: Promise<T>
       try {
         pending = Promise.resolve(operation())
@@ -336,18 +373,22 @@ export function runImportSourceOperation<T>(
       pending
         .then(
           (value) => {
+            returned = true
+            clearTimeout(stallTimer)
+            clearTimeout(capTimer)
             if (!settled) {
               settled = true
-              clearTimeout(timer)
               resolve(value)
             } else {
               onLateResult?.(value)
             }
           },
           (error: unknown) => {
+            returned = true
+            clearTimeout(stallTimer)
+            clearTimeout(capTimer)
             if (!settled) {
               settled = true
-              clearTimeout(timer)
               reject(error)
             }
           }
@@ -355,7 +396,22 @@ export function runImportSourceOperation<T>(
         .catch(() => undefined)
         .finally(() => gate.release(key, overdue))
     }
-    gate.acquire(key, start, () => reject(importSourceTimeoutError()))
+    const cancel = gate.acquire(key, start, () => {
+      clearTimeout(waitTimer)
+      settled = true
+      reject(importSourceTimeoutError())
+    })
+    // A call never waits for a slot without bound.
+    if (!started && !settled) {
+      waitTimer = setTimeout(
+        () => {
+          if (!cancel()) return
+          settled = true
+          reject(importSourceTimeoutError())
+        },
+        Math.max(0, waitTimeoutMs)
+      )
+    }
   })
 }
 
@@ -1320,8 +1376,11 @@ export async function importManagedMediaFile(
       if (guard)
         copyDeadline =
           monotonicNow() +
-          guard.copyBaseTimeoutMs +
-          Math.ceil((sourceLstat.size / guard.copyMinBytesPerSecond) * 1000)
+          Math.min(
+            guard.copyMaxTimeoutMs ?? IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS,
+            guard.copyBaseTimeoutMs +
+              Math.ceil((sourceLstat.size / guard.copyMinBytesPerSecond) * 1000)
+          )
       return fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK)
     },
     (lateHandle) => void lateHandle.close().catch(() => undefined)

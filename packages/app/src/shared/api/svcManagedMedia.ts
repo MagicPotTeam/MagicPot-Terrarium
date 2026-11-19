@@ -95,6 +95,12 @@ export type ImportManagedMediaBytesReq = {
  */
 export const MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE = 'Managed media source did not respond in time'
 
+/**
+ * How long the renderer waits for main's import grant of one file. main answers within a
+ * slot wait (4 x 15 s) plus one call (15 s); past this the file counts as not answering.
+ */
+export const MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS = 90_000
+
 export const MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES = 64 * 1024 * 1024
 
 export type ImportManagedMediaResp = {

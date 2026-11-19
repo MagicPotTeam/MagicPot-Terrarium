@@ -16,8 +16,10 @@ vi.mock('electron', () => ({
 
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
+  IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS,
   IMPORT_SOURCE_MAX_CALLS,
   IMPORT_SOURCE_MAX_CALLS_PER_ROOT,
+  IMPORT_SOURCE_WAIT_TIMEOUT_FACTOR,
   createImportSourceGate,
   importManagedMediaFile,
   importSourceRootKey,
@@ -47,6 +49,16 @@ const guard = (overrides: Partial<ImportSourceGuard> = {}): ImportSourceGuard =>
   copyMinBytesPerSecond: 1024 * 1024,
   ...overrides
 })
+
+/** The outcome of a promise within `ms`: 'resolved', the rejection code, or 'pending'. */
+const within = (promise: Promise<unknown>, ms: number) =>
+  Promise.race([
+    promise.then(
+      () => 'resolved',
+      (error: unknown) => String((error as { code?: string })?.code ?? error)
+    ),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), ms))
+  ])
 
 type Handle = Awaited<ReturnType<typeof fs.open>>
 
@@ -408,6 +420,68 @@ describe('import source deadlines (a stalled or slow source never blocks main)',
     await vi.waitFor(() => expect(gate.active).toBe(0))
   })
 
+  it('counts a call cut by its copy cap as overdue once it stays stuck: nothing waits forever', async () => {
+    const gate = createImportSourceGate({ onSaturated: () => undefined })
+    const releases: Array<() => void> = []
+    const stuckForGood = () =>
+      new Promise<string>((resolve) => releases.push(() => resolve('late')))
+    const capCut = (key: string) => {
+      const capAt = performance.now() + 20
+      return runImportSourceOperation(stuckForGood, {
+        key,
+        timeoutMs: 80,
+        notAfter: () => capAt,
+        gate
+      }).catch((error: unknown) => error)
+    }
+    // Two copies on one root are cut by their cap, then their source dies.
+    for (const call of [capCut('/mnt/a'), capCut('/mnt/a')])
+      await expect(call).resolves.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+    await vi.waitFor(() => expect(gate.overdue).toBe(2))
+    // Another call on that root settles promptly (it never waits on the stuck slots).
+    const sameRoot = vi.fn(async () => 'ok')
+    expect(
+      await within(
+        runImportSourceOperation(sameRoot, { key: '/mnt/a', timeoutMs: 80, gate }),
+        1_000
+      )
+    ).toBe('MANAGED_MEDIA_IMPORT_TIMEOUT')
+    // A third on another root: every slot is now held by stuck calls; a call on a healthy
+    // root is refused at once instead of waiting for a slot that never frees.
+    await expect(capCut('/mnt/b')).resolves.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+    await vi.waitFor(() => expect(gate.overdue).toBe(3))
+    const healthy = vi.fn(async () => 'ok')
+    expect(
+      await within(runImportSourceOperation(healthy, { key: '/home', timeoutMs: 80, gate }), 1_000)
+    ).toBe('MANAGED_MEDIA_IMPORT_TIMEOUT')
+    expect(healthy).not.toHaveBeenCalled()
+    releases.forEach((release) => release())
+    await vi.waitFor(() => expect(gate.active).toBe(0))
+    await expect(
+      runImportSourceOperation(healthy, { key: '/home', timeoutMs: 80, gate })
+    ).resolves.toBe('ok')
+  })
+
+  it('refuses a call that waited too long for a slot, without starting it', async () => {
+    const gate = createImportSourceGate()
+    const later = () => new Promise<string>((resolve) => setTimeout(() => resolve('done'), 600))
+    const holders = [
+      runImportSourceOperation(later, { key: '/a', timeoutMs: 2_000, gate }),
+      runImportSourceOperation(later, { key: '/a', timeoutMs: 2_000, gate })
+    ]
+    const queued = vi.fn(async () => 'ran')
+    const startedAt = performance.now()
+    await expect(
+      runImportSourceOperation(queued, { key: '/a', timeoutMs: 50, waitTimeoutMs: 150, gate })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+    expect(performance.now() - startedAt).toBeLessThan(500)
+    expect(queued).not.toHaveBeenCalled()
+    await expect(Promise.all(holders)).resolves.toEqual(['done', 'done'])
+    expect(gate.active).toBe(0)
+    // By default a call waits four times its own deadline.
+    expect(IMPORT_SOURCE_WAIT_TIMEOUT_FACTOR).toBe(4)
+  })
+
   it('keys the gate by drive, share or mount, from the path text alone', () => {
     expect(importSourceRootKey('C:\\Users\\me\\a.png')).toBe('c:')
     expect(importSourceRootKey('d:/photos/a.png')).toBe('d:')
@@ -690,6 +764,79 @@ describe('a slow but working source is never cut, a stalled one is', () => {
       })
     ).resolves.toMatchObject({ reference: { sizeBytes: 64 * 1024 } })
   })
+
+  it('stops a copy that keeps trickling at the absolute ceiling, whatever size the source reports', async () => {
+    expect(DEFAULT_IMPORT_SOURCE_GUARD.copyMaxTimeoutMs).toBe(IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS)
+    expect(IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS).toBe(20 * 60_000)
+    // 1 GiB at 64 KiB/s would be allowed 4.5 hours; the ceiling stops it.
+    expect(60_000 + ((1024 * MiB) / (64 * 1024)) * 1000).toBeGreaterThan(
+      IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS
+    )
+    const file = virtualPng('trickle-forever.png', 4 * MiB, 4, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    const startedAt = performance.now()
+    await expect(
+      importVirtual(file, withVirtualFiles([file]), {
+        operationTimeoutMs: 1_000,
+        copyBaseTimeoutMs: 60_000,
+        copyMinBytesPerSecond: 1,
+        copyMaxTimeoutMs: 300
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+    expect(performance.now() - startedAt).toBeLessThan(5_000)
+    await stagingIsEmpty()
+  })
+
+  it('never leaves an import hanging behind sources that trickle, then die near their cap', async () => {
+    // Two such copies on one mount and one on another (the security review's scenario).
+    const names = [
+      ['evilA', 'one.png'],
+      ['evilA', 'two.png'],
+      ['evilB', 'three.png']
+    ].map(([mount, name]) => path.resolve(path.sep, 'mnt', mount, name))
+    const hostile = names.map((name, index) =>
+      virtualPng(path.basename(name), 2 * MiB, 10 + index, async (_bytes, readIndex) => {
+        if (readIndex === 0) await new Promise((resolve) => setTimeout(resolve, 250))
+        else await never()
+      })
+    )
+    hostile.forEach((file, index) => {
+      file.filePath = names[index]
+    })
+    const guard = {
+      operationTimeoutMs: 300,
+      copyBaseTimeoutMs: 400,
+      copyMinBytesPerSecond: 1024 * MiB
+    }
+    const outcomes = await Promise.all(
+      hostile.map((file) => within(importVirtual(file, withVirtualFiles(hostile), guard), 3_000))
+    )
+    expect(outcomes).toEqual([
+      'MANAGED_MEDIA_IMPORT_TIMEOUT',
+      'MANAGED_MEDIA_IMPORT_TIMEOUT',
+      'MANAGED_MEDIA_IMPORT_TIMEOUT'
+    ])
+    // A healthy local file now is imported or refused promptly, never left pending.
+    const healthy = path.join(root, 'healthy.png')
+    await fs.writeFile(healthy, PNG)
+    const outcome = await within(
+      importManagedMediaFile(
+        {
+          chatMediaRoot: media,
+          sourcePath: healthy,
+          mimeType: 'image/png',
+          originalFileName: 'healthy.png',
+          provenance: { source: 'test' },
+          sourceGuard: guard
+        },
+        { authorizedRoot: media }
+      ),
+      3_000
+    )
+    expect(outcome).not.toBe('pending')
+    await stagingIsEmpty()
+  }, 20_000)
 
   it('measures the copy on a monotonic clock: a wall-clock jump does not end it', async () => {
     const realNow = Date.now.bind(Date)
