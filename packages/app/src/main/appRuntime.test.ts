@@ -147,7 +147,7 @@ describe('appRuntime local-media protocol helpers', () => {
     expect(response.status).toBe(403)
     expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenCalledWith('/outside/image.webp', [
       path.win32.normalize('C:/userData'),
-      path.win32.normalize('C:/temp/magicpot-local-media'),
+      { pinnedCanonicalPath: expect.stringContaining('magicpot-local-media') },
       path.win32.normalize('C:/project'),
       path.win32.normalize('C:/autosave'),
       path.win32.normalize(cacheRoot),

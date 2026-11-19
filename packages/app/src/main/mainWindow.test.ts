@@ -2,6 +2,9 @@ import { EventEmitter } from 'node:events'
 import { BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
+import fs from 'node:fs'
+import { authorizeScopedLocalMediaPath } from './localMediaAccess'
+import { resolveTestArtifactPath } from './testUiPolicy'
 import {
   createMainWindow,
   MAIN_WINDOW_BACKGROUND_COLOR,
@@ -17,15 +20,17 @@ import {
   unregisterMagicAgentTrustedRouteBinding
 } from './magicAgentRuntime/trustedRouteBinding'
 
-const { bindings, catalogInstall, catalogDisposers, storageInstall, storageDisposers, registered } = vi.hoisted(() => ({
-  bindings: new Map<number, unknown>(), catalogInstall: vi.fn(), catalogDisposers: new Map<object, ReturnType<typeof vi.fn>>(), storageInstall: vi.fn(), storageDisposers: new Map<object, ReturnType<typeof vi.fn>>(), registered: { window: null as unknown }
+const { bindings, catalogInstall, catalogDisposers, storageInstall, storageDisposers, registered, ipcHandlers, tempRoot } = vi.hoisted(() => ({
+  bindings: new Map<number, unknown>(), catalogInstall: vi.fn(), catalogDisposers: new Map<object, ReturnType<typeof vi.fn>>(), storageInstall: vi.fn(), storageDisposers: new Map<object, ReturnType<typeof vi.fn>>(), registered: { window: null as unknown },
+  ipcHandlers: new Map<string, (...args: unknown[]) => unknown>(),
+  tempRoot: { reverify: vi.fn((_root: string): string | null => null), forget: vi.fn() }
 }))
 
 vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/mock-user-data'), isPackaged: false },
   BrowserWindow: vi.fn(),
-  ipcMain: { handle: vi.fn() },
-  nativeImage: {},
+  ipcMain: { handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => ipcHandlers.set(channel, handler)) },
+  nativeImage: { createFromPath: vi.fn(() => ({ isEmpty: () => false })), createFromDataURL: vi.fn() },
   screen: {},
   shell: {}
 }))
@@ -54,6 +59,11 @@ vi.mock('./windowState', () => ({
 vi.mock('./utils/externalUrl', () => ({ normalizeAllowedExternalUrl: vi.fn() }))
 vi.mock('./utils/rendererNavigation', () => ({ isTrustedRendererNavigation: vi.fn() }))
 vi.mock('./localMediaAccess', () => ({ authorizeScopedLocalMediaPath: vi.fn() }))
+vi.mock('./localMediaAllowedRoots', () => ({ getLocalMediaTempRootPath: () => '/shared-tmp/magicpot-local-media' }))
+vi.mock('./localMediaTempRoot', () => ({
+  reverifyLocalMediaTempRoot: (root: string) => tempRoot.reverify(root),
+  forgetLocalMediaTempRootVerification: () => tempRoot.forget()
+}))
 vi.mock('./magicAgentRuntime/trustedRouteBinding', () => ({
   registerMagicAgentTrustedRouteBinding: vi.fn(
     (senderId: number, _route: unknown, options: unknown) => bindings.set(senderId, options)
@@ -300,5 +310,43 @@ describe('createMainWindow teardown', () => {
     catalogInstall.mockImplementationOnce((window: object) => { catalogDisposers.set(window, cleanup); return cleanup })
     expect(() => createMainWindow(window => { (window as unknown as FakeWindow).destroyed = true; throw original })).toThrow(original)
     expect(cleanup).toHaveBeenCalledOnce()
+  })
+})
+
+describe('canvas drag-out handler', () => {
+  const payload = { files: [{ fileName: 'out.png', data: new Uint8Array([1, 2, 3]) }] }
+  const dragOut = (startDrag = vi.fn()) => {
+    createMainWindow()
+    const handler = ipcHandlers.get('canvas:start-system-drag')!
+    return { startDrag, result: handler({ sender: { startDrag } }, payload) as Promise<{ filePath: string }> }
+  }
+
+  beforeEach(() => {
+    vi.mocked(BrowserWindow).mockImplementation(function () {
+      return new FakeWindow() as unknown as BrowserWindow
+    })
+    vi.mocked(resolveTestArtifactPath).mockImplementation(({ tempPath, segments }) => join(tempPath, ...segments))
+    tempRoot.reverify.mockReset()
+    tempRoot.forget.mockReset()
+  })
+
+  it('writes nothing and gives a short code when the temp folder is refused', async () => {
+    tempRoot.reverify.mockReturnValue(null)
+    const { startDrag, result } = dragOut()
+    await expect(result).rejects.toThrow('LOCAL_MEDIA_TEMP_ROOT_REFUSED')
+    expect(tempRoot.reverify).toHaveBeenCalledWith('/shared-tmp/magicpot-local-media')
+    expect(tempRoot.forget).toHaveBeenCalled()
+    expect(startDrag).not.toHaveBeenCalled()
+    expect(authorizeScopedLocalMediaPath).not.toHaveBeenCalled()
+  })
+
+  it('writes into the folder verified right before the write', async () => {
+    tempRoot.reverify.mockReturnValue('/verified-tmp/magicpot-local-media')
+    const { startDrag, result } = dragOut()
+    const { filePath } = await result
+    expect(filePath.startsWith('/verified-tmp/magicpot-local-media/drag/')).toBe(true)
+    expect(fs.readFileSync(filePath)).toEqual(Buffer.from([1, 2, 3]))
+    expect(startDrag).toHaveBeenCalledOnce()
+    expect(tempRoot.forget).not.toHaveBeenCalled()
   })
 })

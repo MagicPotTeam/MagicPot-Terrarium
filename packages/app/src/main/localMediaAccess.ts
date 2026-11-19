@@ -232,10 +232,17 @@ function isWindowsNetworkPathScoped(filePath: string): boolean {
   )
 }
 
+/**
+ * A root used by the canonical path recorded when it was verified (the private temp root):
+ * it is never resolved again, so a symlink put in its place later cannot widen it.
+ */
+export type PinnedLocalMediaRoot = { readonly pinnedCanonicalPath: string }
+export type LocalMediaRoot = string | PinnedLocalMediaRoot
+
 /** Returns a canonical path only when it is under an application root or explicitly scoped. */
 export function resolveAuthorizedLocalMediaPath(
   filePath: string,
-  allowedRoots: readonly string[]
+  allowedRoots: readonly LocalMediaRoot[]
 ): string | null {
   const trimmed = String(filePath || '').trim()
   // Only Windows has network (UNC) paths. On POSIX `//dir/file` is the local file `/dir/file`,
@@ -265,7 +272,8 @@ export function resolveAuthorizedLocalMediaPath(
   if (isNetworkPath) return null
 
   return allowedRoots.some((root) => {
-    const canonicalRoot = canonicalizeExistingPath(root)
+    const canonicalRoot =
+      typeof root === 'string' ? canonicalizeExistingPath(root) : root.pinnedCanonicalPath
     return canonicalRoot ? isSameOrInside(canonicalRoot, canonical) : false
   })
     ? canonical
@@ -377,7 +385,7 @@ export type LocalMediaImportSourceAuthorization = {
  */
 export async function authorizeLocalMediaImportSourcePathAsync(
   filePath: string,
-  allowedRoots: readonly string[],
+  allowedRoots: readonly LocalMediaRoot[],
   {
     now = localMediaImportGrantClock,
     realpath = (value: string) => fs.promises.realpath(value)
@@ -406,7 +414,10 @@ export async function authorizeLocalMediaImportSourcePathAsync(
   }
   if (!isNetworkPath) {
     for (const root of allowedRoots) {
-      const canonicalRoot = await canonicalizeExistingPathAsync(root, realpath)
+      const canonicalRoot =
+        typeof root === 'string'
+          ? await canonicalizeExistingPathAsync(root, realpath)
+          : root.pinnedCanonicalPath
       if (canonicalRoot && isSameOrInside(canonicalRoot, canonical)) return persisted
     }
   }

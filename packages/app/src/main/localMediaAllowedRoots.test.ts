@@ -2,13 +2,14 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const { appGetPathMock, ensurePrivateTempRootMock } = vi.hoisted(() => ({
+const { appGetPathMock, verifiedTempRootMock } = vi.hoisted(() => ({
   appGetPathMock: vi.fn((name: string) => path.join(os.tmpdir(), `magicpot-${name}`)),
-  ensurePrivateTempRootMock: vi.fn((_root: string) => true)
+  // The canonical path the verifier recorded, or null when the folder is refused.
+  verifiedTempRootMock: vi.fn((root: string): string | null => `${root}-canonical`)
 }))
 
 vi.mock('./localMediaTempRoot', () => ({
-  ensurePrivateLocalMediaTempRoot: ensurePrivateTempRootMock
+  getVerifiedLocalMediaTempRoot: verifiedTempRootMock
 }))
 
 vi.mock('electron', () => ({
@@ -26,8 +27,8 @@ import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 
 describe('local media allowed roots', () => {
   afterEach(() => {
-    ensurePrivateTempRootMock.mockReset()
-    ensurePrivateTempRootMock.mockReturnValue(true)
+    verifiedTempRootMock.mockReset()
+    verifiedTempRootMock.mockImplementation((root: string) => `${root}-canonical`)
     delete process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK
     delete process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT
     delete process.env.MAGICPOT_TEST_ARTIFACT_ROOT
@@ -44,7 +45,9 @@ describe('local media allowed roots', () => {
 
     expect(roots).toEqual([
       path.resolve(path.join(os.tmpdir(), 'magicpot-userData')),
-      path.resolve(path.join(os.tmpdir(), 'magicpot-temp', 'magicpot-local-media')),
+      {
+        pinnedCanonicalPath: `${path.resolve(path.join(os.tmpdir(), 'magicpot-temp', 'magicpot-local-media'))}-canonical`
+      },
       path.resolve(path.join(os.tmpdir(), 'magicpot-projects')),
       path.resolve(path.join(os.tmpdir(), 'magicpot-autosave'))
     ])
@@ -77,15 +80,16 @@ describe('local media allowed roots', () => {
     expect(getLocalMediaAllowedRoots()).toHaveLength(4)
   })
 
-  it('trusts the temp root only when it is verified as main\'s own private directory', () => {
+  it('trusts the temp root only when it is verified, by the canonical path recorded then', () => {
     const tempRoot = path.resolve(path.join(os.tmpdir(), 'magicpot-temp', 'magicpot-local-media'))
-    expect(getLocalMediaAllowedRoots()).toContain(tempRoot)
-    expect(ensurePrivateTempRootMock).toHaveBeenLastCalledWith(tempRoot)
+    expect(getLocalMediaAllowedRoots()).toContainEqual({
+      pinnedCanonicalPath: `${tempRoot}-canonical`
+    })
+    expect(verifiedTempRootMock).toHaveBeenLastCalledWith(tempRoot)
 
     // Planted as a symlink or owned by someone else: not an allowed root.
-    ensurePrivateTempRootMock.mockReturnValue(false)
+    verifiedTempRootMock.mockReturnValue(null)
     const roots = getLocalMediaAllowedRoots()
-    expect(roots).not.toContain(tempRoot)
     expect(roots).toEqual([
       path.resolve(path.join(os.tmpdir(), 'magicpot-userData')),
       path.resolve(path.join(os.tmpdir(), 'magicpot-projects')),

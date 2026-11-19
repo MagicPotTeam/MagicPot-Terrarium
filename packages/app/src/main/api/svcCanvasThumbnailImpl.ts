@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as path from 'path'
 import { pathToFileURL } from 'node:url'
 import { resolveAuthorizedLocalMediaPath } from '../localMediaAccess'
+import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
 import type {
   CanvasThumbnailManifest,
   CanvasThumbnailCacheRootReq,
@@ -727,9 +728,10 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
     req: CanvasThumbnailNativeRegionReq
   ): Promise<CanvasThumbnailNativeRegionResp> => {
     const requestedPath = path.resolve(req.fullPath)
+    // The temp media folder only once verified as main's own private directory.
     const authorizedPath = resolveAuthorizedLocalMediaPath(requestedPath, [
       app.getPath('userData'),
-      path.join(app.getPath('temp'), 'magicpot-local-media')
+      ...getVerifiedLocalMediaTempRoots()
     ])
     if (!authorizedPath) {
       throw new Error('Local image path is not authorized for native region decoding.')

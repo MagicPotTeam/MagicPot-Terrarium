@@ -1,6 +1,5 @@
 import { app, BrowserWindow, ipcMain, nativeImage, screen, shell } from 'electron'
-import * as fs from 'fs'
-import { basename, extname, join } from 'path'
+import { join } from 'path'
 import { pathToFileURL } from 'url'
 // 256 px copy of the 4096 px master logo (scripts/assets/generate-logo-sizes.py):
 // the master costs a 64 MB decode per window and per canvas drag without its own icon.
@@ -18,6 +17,12 @@ import { attachWindowStatePersistence, readWindowState, type WindowState } from 
 import { normalizeAllowedExternalUrl } from './utils/externalUrl'
 import { isTrustedRendererNavigation } from './utils/rendererNavigation'
 import { authorizeScopedLocalMediaPath } from './localMediaAccess'
+import { getLocalMediaTempRootPath } from './localMediaAllowedRoots'
+import {
+  forgetLocalMediaTempRootVerification,
+  reverifyLocalMediaTempRoot
+} from './localMediaTempRoot'
+import { CANVAS_DRAG_TEMP_ROOT_REFUSED, writeCanvasSystemDragFiles } from './canvasSystemDragFiles'
 import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
 import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
 import {
@@ -64,24 +69,6 @@ export const MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS = 16
  */
 export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS = MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS
 
-function sanitizeDragFileName(fileName: string): string {
-  const trimmed = (fileName || '').trim()
-  const baseName = [...basename(trimmed || 'canvas-selection.png')]
-    .map((char) => {
-      const code = char.charCodeAt(0)
-      return code <= 0x1f || '<>:"/\\|?*'.includes(char) ? '_' : char
-    })
-    .join('')
-
-  if (!baseName) {
-    return 'canvas-selection.png'
-  }
-  if (extname(baseName)) {
-    return baseName
-  }
-  return `${baseName}.png`
-}
-
 function registerCanvasStartSystemDrag(): void {
   if (canvasStartSystemDragRegistered) {
     return
@@ -90,22 +77,36 @@ function registerCanvasStartSystemDrag(): void {
   ipcMain.handle(
     'canvas:start-system-drag',
     async (event, payload: CanvasStartSystemDragPayload): Promise<{ filePath: string }> => {
-      const tempDir = resolveTestArtifactPath({
-        desktopPath: app.getPath('desktop'),
-        tempPath: join(app.getPath('temp'), 'magicpot-local-media'),
-        policy: testUiPolicy,
-        segments: ['drag']
-      })
-      fs.mkdirSync(tempDir, { recursive: true })
-
-      const filePaths = payload.files.map((file) => {
-        const fileName = sanitizeDragFileName(file.fileName)
-        const uniquePrefix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-        const fullPath = join(tempDir, `${uniquePrefix}-${fileName}`)
-        fs.writeFileSync(fullPath, Buffer.from(file.data))
-        authorizeScopedLocalMediaPath(fullPath)
-        return fullPath
-      })
+      // Outside automated test runs (whose artifacts have their own folder) the files go to
+      // main's private temp media folder, verified again right before this write: a folder
+      // another user planted or opened is refused and nothing is written.
+      const tempRoot = testUiPolicy.automatedRun
+        ? join(app.getPath('temp'), 'magicpot-local-media')
+        : reverifyLocalMediaTempRoot(getLocalMediaTempRootPath())
+      let filePaths: string[]
+      try {
+        filePaths = writeCanvasSystemDragFiles(
+          payload.files,
+          tempRoot &&
+            resolveTestArtifactPath({
+              desktopPath: app.getPath('desktop'),
+              tempPath: tempRoot,
+              policy: testUiPolicy,
+              segments: ['drag']
+            })
+        )
+      } catch (error) {
+        // Verified again at the next use; the error carries no path.
+        forgetLocalMediaTempRootVerification()
+        const code = (error as NodeJS.ErrnoException)?.code
+        console.warn('[MainWindow] Canvas drag-out files not written:', code || 'refused')
+        throw new Error(
+          (error as Error)?.message === CANVAS_DRAG_TEMP_ROOT_REFUSED
+            ? CANVAS_DRAG_TEMP_ROOT_REFUSED
+            : 'CANVAS_DRAG_WRITE_FAILED'
+        )
+      }
+      filePaths.forEach((fullPath) => authorizeScopedLocalMediaPath(fullPath))
 
       const dragIcon =
         payload.iconDataUrl && payload.iconDataUrl.startsWith('data:')

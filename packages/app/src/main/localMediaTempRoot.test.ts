@@ -6,7 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // Real filesystem: symlinks, owners and modes are what these tests are about.
 vi.mock('node:fs', async () => vi.importActual<typeof import('node:fs')>('node:fs'))
 
-import { ensurePrivateLocalMediaTempRoot } from './localMediaTempRoot'
+import {
+  createLocalMediaTempRootVerifier,
+  ensurePrivateLocalMediaTempRoot
+} from './localMediaTempRoot'
+import {
+  authorizeLocalMediaImportSourcePathAsync,
+  resolveAuthorizedLocalMediaPath
+} from './localMediaAccess'
 
 const cleanupPaths: string[] = []
 afterEach(() => {
@@ -112,5 +119,105 @@ describe('the private local-media temp root', () => {
       fs.symlinkSync(root, link)
       expect(ensurePrivateLocalMediaTempRoot(link, { getuid: null })).toBe(false)
     }
+  })
+})
+
+describe('the verified temp root, remembered once accepted', () => {
+  /** A verifier on the real filesystem whose lstat calls and log lines are counted. */
+  const verifier = (overrides: Parameters<typeof createLocalMediaTempRootVerifier>[0] = {}) => {
+    const lstatSync = vi.fn((target: string) => fs.lstatSync(target))
+    const warn = vi.fn()
+    return {
+      lstatSync,
+      warn,
+      ...createLocalMediaTempRootVerifier({ lstatSync, warn, ...overrides })
+    }
+  }
+
+  posixOnly('refuses a planted symlink, logs the reason once and never the path', () => {
+    const temp = sharedTemp()
+    const victim = path.join(temp, 'victim-home')
+    fs.mkdirSync(victim, { mode: 0o700 })
+    const root = path.join(temp, 'magicpot-local-media')
+    fs.symlinkSync(victim, root)
+    const subject = verifier()
+    expect(subject.get(root)).toBeNull()
+    expect(subject.get(root)).toBeNull()
+    expect(subject.warn).toHaveBeenCalledOnce()
+    expect(subject.warn.mock.calls[0][0]).toContain('symlink')
+    expect(subject.warn.mock.calls[0][0]).not.toContain(temp)
+    // A refusal is not remembered: the folder is checked again at the next use.
+    expect(subject.lstatSync).toHaveBeenCalledTimes(2)
+  })
+
+  posixOnly('refuses a directory another user owns (as the stat reports it)', () => {
+    const root = path.join(sharedTemp(), 'magicpot-local-media')
+    fs.mkdirSync(root, { mode: 0o700 })
+    const chmodSync = vi.fn()
+    const subject = verifier({
+      lstatSync: (target: string) => {
+        const stat = fs.lstatSync(target)
+        return {
+          isDirectory: () => stat.isDirectory(),
+          isSymbolicLink: () => stat.isSymbolicLink(),
+          mode: stat.mode,
+          uid: process.getuid!() + 1
+        }
+      },
+      chmodSync
+    })
+    expect(subject.get(root)).toBeNull()
+    expect(subject.warn.mock.calls[0][0]).toContain('other-owner')
+    expect(chmodSync).not.toHaveBeenCalled()
+  })
+
+  posixOnly('tightens a 0777 directory of its own and then uses it', () => {
+    const root = path.join(sharedTemp(), 'magicpot-local-media')
+    fs.mkdirSync(root)
+    fs.chmodSync(root, 0o777)
+    const subject = verifier()
+    expect(subject.get(root)).toBe(fs.realpathSync(root))
+    expect(fs.lstatSync(root).mode & 0o777).toBe(0o700)
+    expect(subject.warn).not.toHaveBeenCalled()
+  })
+
+  posixOnly('does not stat the folder again once accepted, until a write or a failed use', () => {
+    const root = path.join(sharedTemp(), 'magicpot-local-media')
+    const subject = verifier()
+    const canonical = subject.get(root)
+    expect(canonical).toBe(fs.realpathSync(root))
+    const statsAfterFirst = subject.lstatSync.mock.calls.length
+    for (let request = 0; request < 100; request += 1) expect(subject.get(root)).toBe(canonical)
+    expect(subject.lstatSync).toHaveBeenCalledTimes(statsAfterFirst)
+    // A write verifies again; so does the next use after a failed one.
+    expect(subject.reverify(root)).toBe(canonical)
+    expect(subject.lstatSync.mock.calls.length).toBeGreaterThan(statsAfterFirst)
+    const statsAfterReverify = subject.lstatSync.mock.calls.length
+    subject.forget()
+    expect(subject.get(root)).toBe(canonical)
+    expect(subject.lstatSync.mock.calls.length).toBeGreaterThan(statsAfterReverify)
+  })
+
+  posixOnly('never widens to a symlink put in place of the accepted folder later', async () => {
+    const temp = sharedTemp()
+    const victim = path.join(temp, 'victim-home')
+    fs.mkdirSync(victim, { mode: 0o700 })
+    fs.writeFileSync(path.join(victim, 'secret.png'), 'secret')
+    const root = path.join(temp, 'magicpot-local-media')
+    const subject = verifier()
+    const canonical = subject.get(root)!
+    expect(canonical).toBeTruthy()
+    // The folder disappears (a temp cleaner) and a symlink is planted at its name.
+    fs.rmdirSync(root)
+    fs.symlinkSync(victim, root)
+    const planted = path.join(root, 'secret.png')
+    // Re-resolving the root by its name would follow the link: the danger.
+    expect(resolveAuthorizedLocalMediaPath(planted, [root])).toBe(path.join(victim, 'secret.png'))
+    // The pinned canonical path is never resolved again: nothing under the link is allowed.
+    const pinned = [{ pinnedCanonicalPath: subject.get(root)! }]
+    expect(resolveAuthorizedLocalMediaPath(planted, pinned)).toBeNull()
+    await expect(authorizeLocalMediaImportSourcePathAsync(planted, pinned)).resolves.toBeNull()
+    // And verifying again refuses the folder.
+    expect(subject.reverify(root)).toBeNull()
   })
 })

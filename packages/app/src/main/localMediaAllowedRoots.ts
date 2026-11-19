@@ -1,7 +1,8 @@
 import path from 'node:path'
 import { app } from 'electron'
 import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
-import { ensurePrivateLocalMediaTempRoot } from './localMediaTempRoot'
+import type { LocalMediaRoot, PinnedLocalMediaRoot } from './localMediaAccess'
+import { getVerifiedLocalMediaTempRoot } from './localMediaTempRoot'
 
 function isAbsoluteLocalMediaRoot(value: string): boolean {
   return path.isAbsolute(value) || path.win32.isAbsolute(value)
@@ -16,15 +17,26 @@ function normalizeLocalMediaRoot(value: string): string {
   return path.resolve(value)
 }
 
+/** Where main's private temp media folder belongs (under the OS temp directory). */
+export function getLocalMediaTempRootPath(): string {
+  return normalizeLocalMediaRoot(path.join(app.getPath('temp'), 'magicpot-local-media'))
+}
+
+/**
+ * The private temp media folder as a pinned root once it is verified as main's own private
+ * directory (verified once, see getVerifiedLocalMediaTempRoot), otherwise nothing: the OS
+ * temp directory may be shared with other users (/tmp).
+ */
+export function getVerifiedLocalMediaTempRoots(): PinnedLocalMediaRoot[] {
+  const canonical = getVerifiedLocalMediaTempRoot(getLocalMediaTempRootPath())
+  return canonical ? [{ pinnedCanonicalPath: canonical }] : []
+}
+
 /** Returns the application-owned roots plus the narrowly scoped benchmark cache root. */
-export function getLocalMediaAllowedRoots(): string[] {
+export function getLocalMediaAllowedRoots(): LocalMediaRoot[] {
   const storageState = getCurrentUserDataDirectoryState()
-  const tempRoot = normalizeLocalMediaRoot(path.join(app.getPath('temp'), 'magicpot-local-media'))
   const roots: string[] = [
     app.getPath('userData'),
-    // The OS temp directory may be shared with other users (/tmp): trusted only as main's own
-    // private directory.
-    ...(ensurePrivateLocalMediaTempRoot(tempRoot) ? [tempRoot] : []),
     storageState.projectRoot,
     storageState.autoSaveRoot
   ]
@@ -47,5 +59,6 @@ export function getLocalMediaAllowedRoots(): string[] {
     roots.push(benchmarkArtifactRoot)
   }
 
-  return roots.map(normalizeLocalMediaRoot)
+  const [userData, ...rest] = roots.map(normalizeLocalMediaRoot)
+  return [userData, ...getVerifiedLocalMediaTempRoots(), ...rest]
 }

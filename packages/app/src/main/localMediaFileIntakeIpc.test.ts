@@ -17,7 +17,9 @@ vi.mock('./config/userDataDirectory', () => ({
     autoSaveRoot: 'C:/autosave'
   })
 }))
-vi.mock('./localMediaTempRoot', () => ({ ensurePrivateLocalMediaTempRoot: () => true }))
+vi.mock('./localMediaTempRoot', () => ({
+  getVerifiedLocalMediaTempRoot: (root: string) => `${root}-verified`
+}))
 vi.mock('./localMediaAccess', () => ({
   authorizeScopedLocalMediaPath: authorizeMock,
   localMediaImportGrantClock: () => 0,
@@ -78,7 +80,9 @@ describe('local media file intake IPC', () => {
     )
     expect(resolveMock).toHaveBeenCalledWith('C:/picked/image.png', [
       expect.stringMatching(/C:[\\/]userData/),
-      expect.stringMatching(/C:[\\/]temp[\\/]magicpot-local-media/),
+      {
+        pinnedCanonicalPath: expect.stringMatching(/C:[\\/]temp[\\/]magicpot-local-media-verified$/)
+      },
       expect.stringMatching(/C:[\\/]project/),
       expect.stringMatching(/C:[\\/]autosave/)
     ])
@@ -102,7 +106,9 @@ describe('local media file intake IPC', () => {
 
     expect(resolveMock).toHaveBeenCalledWith('C:/shared-thumbnail-cache/image.webp', [
       expect.stringMatching(/C:[\\/]userData/),
-      expect.stringMatching(/C:[\\/]temp[\\/]magicpot-local-media/),
+      {
+        pinnedCanonicalPath: expect.stringMatching(/C:[\\/]temp[\\/]magicpot-local-media-verified$/)
+      },
       expect.stringMatching(/C:[\\/]project/),
       expect.stringMatching(/C:[\\/]autosave/),
       expect.stringMatching(/C:[\\/]shared-thumbnail-cache/),
