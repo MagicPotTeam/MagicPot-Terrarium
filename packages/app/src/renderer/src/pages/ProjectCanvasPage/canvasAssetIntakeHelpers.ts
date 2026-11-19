@@ -692,18 +692,16 @@ export async function buildCanvasImagePlaceholderAsset({
 export const CANVAS_IMAGE_PENDING_PIXELS_ASSET_WIDTH = 512
 export const CANVAS_IMAGE_PENDING_PIXELS_ASSET_HEIGHT = 2
 
-let canvasImagePendingPixelsAsset: CanvasImageAsset | null | undefined
+const canvasImagePendingPixelsAssets = new WeakSet<object>()
 
 /**
- * One flat, half-transparent tile shared by every image whose pixels are still on their way.
- * It is drawn stretched to the item's own rectangle. It carries the placeholder marker: the
- * item counts as "placeholder" for the renderer's health metrics until its real pixels replace
- * it.
+ * A flat, half-transparent tile for the frames of one import whose pixels are still on their
+ * way: each import makes its own, so that it can tell its waiting frames from any other item
+ * that came to carry the tile (a copy of a waiting frame, an undo that restored another frame).
+ * It is drawn stretched to the item's own rectangle. It carries the placeholder marker: the item
+ * counts as "placeholder" for the renderer's health metrics until its real pixels replace it.
  */
-export function getCanvasImagePendingPixelsAsset(): CanvasImageAsset | null {
-  if (canvasImagePendingPixelsAsset !== undefined) {
-    return canvasImagePendingPixelsAsset
-  }
+export function createCanvasImagePendingPixelsAsset(): CanvasImageAsset | null {
   if (typeof document === 'undefined') {
     return null
   }
@@ -721,14 +719,15 @@ export function getCanvasImagePendingPixelsAsset(): CanvasImageAsset | null {
     // A blank tile still frames the item.
   }
 
-  canvasImagePendingPixelsAsset = markCanvasImagePlaceholderAsset(canvas)
-  return canvasImagePendingPixelsAsset
+  const tile = markCanvasImagePlaceholderAsset(canvas)
+  canvasImagePendingPixelsAssets.add(tile)
+  return tile
 }
 
 export function isCanvasImagePendingPixelsAsset(
   image: CanvasImageAsset | null | undefined
 ): boolean {
-  return Boolean(image) && image === canvasImagePendingPixelsAsset
+  return Boolean(image) && canvasImagePendingPixelsAssets.has(image as object)
 }
 
 function describeCanvasImageSource(src: string): string {

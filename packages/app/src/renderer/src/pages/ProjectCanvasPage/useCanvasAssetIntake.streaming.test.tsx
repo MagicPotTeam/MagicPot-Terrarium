@@ -521,6 +521,97 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
     expect(store.history).toHaveLength(1)
   })
 
+  it('leaves no pending tile on a copy of a frame made before its pixels arrived', async () => {
+    const gate = deferred<void>()
+    thumbnailResolver.mockImplementation(async ({ src }) => {
+      await gate.promise
+      return createThumbnailResult(src)
+    })
+    const store = createCanvasStore()
+    const { result } = renderIntake(store)
+
+    let done = false
+    await act(async () => {
+      void result.current.addImagesToCanvas(createSources(30)).then(() => {
+        done = true
+      })
+    })
+    await waitFor(() => expect(store.items).toHaveLength(30))
+    // What duplicate_items does with a waiting frame: a copy with a new id, image included.
+    store.setItemsWithHistory((items) => [...items, { ...items[0], id: 'copy-of-0', x: 9999 }])
+    const copyBefore = store.images().find((item) => item.id === 'copy-of-0')
+    expect(isCanvasImagePendingPixelsAsset(copyBefore?.image)).toBe(true)
+
+    await act(async () => gate.resolve())
+    await waitFor(() => expect(done).toBe(true), { timeout: 5000 })
+
+    const copy = store.images().find((item) => item.id === 'copy-of-0')
+    expect(store.images().some((item) => isCanvasImagePendingPixelsAsset(item.image))).toBe(false)
+    // No image at all: the canvas loads its source and levels like any other item's.
+    expect(copy?.image).toBeUndefined()
+    expect(copy?.src).toBe(store.images()[0].src)
+  })
+
+  it('leaves no pending tile on a waiting frame that was deleted and brought back by undo', async () => {
+    const gates = new Map<string, Array<() => void>>()
+    thumbnailResolver.mockImplementation(async ({ src }) => {
+      await new Promise<void>((resolve) => gates.set(src, [...(gates.get(src) ?? []), resolve]))
+      return createThumbnailResult(src)
+    })
+    const release = async (keep?: string) => {
+      await act(async () => {
+        for (const [src, waiting] of [...gates]) {
+          if (src === keep) continue
+          gates.delete(src)
+          waiting.forEach((resolve) => resolve())
+        }
+      })
+    }
+    const store = createCanvasStore()
+    const { result } = renderIntake(store)
+    const base = createSources(30)
+    const twin = base[29] as Exclude<CanvasImageSourceInput, string>
+    // The same file twice in one import.
+    let done = false
+    await act(async () => {
+      void result.current.addImagesToCanvas([...base, { ...twin }]).then(() => {
+        done = true
+      })
+    })
+    await waitFor(() => expect(store.items).toHaveLength(31))
+    const [firstCopy, secondCopy] = store.images().filter((item) => item.src === twin.src)
+
+    // The user deletes the first copy while it waits; the stream skips it.
+    store.setItemsWithHistory((items) => items.filter((item) => item.id !== firstCopy.id))
+    for (let round = 0; round < 60; round += 1) {
+      await release(twin.src)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      const othersWaiting = store
+        .images()
+        .filter((item) => item.id !== secondCopy.id)
+        .some((item) => isCanvasImagePendingPixelsAsset(item.image))
+      if (!othersWaiting && [...gates.keys()].every((src) => src === twin.src)) break
+    }
+    // Undo while the second copy still waits: the restored copy takes the second copy's tile by
+    // source, but nothing will patch it any more.
+    store.undo()
+    const restored = store.images().find((item) => item.id === firstCopy.id)
+    expect(isCanvasImagePendingPixelsAsset(restored?.image)).toBe(true)
+
+    for (let round = 0; round < 40 && !done; round += 1) {
+      await release()
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    await waitFor(() => expect(done).toBe(true), { timeout: 5000 })
+
+    const after = store.images().find((item) => item.id === firstCopy.id)
+    const second = store.images().find((item) => item.id === secondCopy.id)
+    expect(isCanvasImagePendingPixelsAsset(second?.image)).toBe(false)
+    expect(second?.image).toBeDefined()
+    expect(isCanvasImagePendingPixelsAsset(after?.image)).toBe(false)
+    expect(after?.image).toBeUndefined()
+  })
+
   it('shares the pixel concurrency between two imports started back to back', async () => {
     let active = 0
     let maxActive = 0

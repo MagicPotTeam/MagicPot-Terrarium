@@ -10,7 +10,7 @@ import {
   bindCanvasThumbnailSetToSource,
   buildCanvasImageDisplayAsset,
   buildCanvasImagePlaceholderAsset,
-  getCanvasImagePendingPixelsAsset,
+  createCanvasImagePendingPixelsAsset,
   getCanvasImagePreviewMaxSideForBatch,
   hydrateCanvasImageItemForCanvas,
   isCanvasImagePendingPixelsAsset,
@@ -1180,15 +1180,17 @@ describe('canvasAssetIntakeHelpers', () => {
     })
   })
 
-  it('shares one flat pending tile between all placeholders and marks it as a placeholder', () => {
+  it('makes one flat pending tile per import and marks it as a placeholder', () => {
     HTMLCanvasElement.prototype.getContext = (() =>
       null) as typeof HTMLCanvasElement.prototype.getContext
-    const first = getCanvasImagePendingPixelsAsset()
-    const second = getCanvasImagePendingPixelsAsset()
+    const first = createCanvasImagePendingPixelsAsset()
+    const second = createCanvasImagePendingPixelsAsset()
 
     expect(first).not.toBeNull()
-    expect(second).toBe(first)
+    // Each import tells its own waiting frames apart by the tile object.
+    expect(second).not.toBe(first)
     expect(isCanvasImagePendingPixelsAsset(first)).toBe(true)
+    expect(isCanvasImagePendingPixelsAsset(second)).toBe(true)
     expect(isCanvasImagePlaceholderAsset(first)).toBe(true)
     expect(isCanvasImagePendingPixelsAsset(document.createElement('canvas'))).toBe(false)
     expect(isCanvasImagePendingPixelsAsset(undefined)).toBe(false)
@@ -1197,7 +1199,7 @@ describe('canvasAssetIntakeHelpers', () => {
   it('keeps the pending tile cheap as a texture and quiet for the renderer', () => {
     HTMLCanvasElement.prototype.getContext = (() =>
       null) as typeof HTMLCanvasElement.prototype.getContext
-    const tile = getCanvasImagePendingPixelsAsset()
+    const tile = createCanvasImagePendingPixelsAsset()
     const { width, height } = getCanvasImageAssetSize(tile)
 
     // The renderer makes one texture of it per frame that waits: a few KiB each, not 1 MiB.

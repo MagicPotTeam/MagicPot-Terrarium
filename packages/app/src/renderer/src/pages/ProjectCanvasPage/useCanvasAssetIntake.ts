@@ -62,7 +62,7 @@ import {
   buildCanvasImagePreviewFromBlob,
   buildCanvasImageDisplayAsset,
   estimateCanvasImageDecodedByteSize,
-  getCanvasImagePendingPixelsAsset,
+  createCanvasImagePendingPixelsAsset,
   getCanvasImagePreviewMaxSideForBatch,
   hydrateCanvasImageItemForCanvas,
   isCanvasImagePendingPixelsAsset,
@@ -2143,7 +2143,9 @@ export function useCanvasAssetIntake({
             planned.map((entry) => ({ width: entry.width, height: entry.height })),
             { gap: batchGap, allowUpscale: false }
           )
-          const pendingPixelsAsset = getCanvasImagePendingPixelsAsset() ?? undefined
+          // This import's own tile: an item that carries it but is not one of the frames waiting
+          // below never gets pixels from this import (see applyPixelPatches).
+          const pendingPixelsAsset = createCanvasImagePendingPixelsAsset() ?? undefined
           let placeholderItems = planned.map((entry, index) => {
             const layoutEntry = batchLayout[index]
             const fallbackCenterPosition = getCenterPosition(entry.width, entry.height)
@@ -2202,6 +2204,12 @@ export function useCanvasAssetIntake({
             ...entry,
             item: placeholderItems[index]
           }))
+          /** Frames committed with the pending tile whose pixels this import still owes. */
+          const waitingItemIds = new Set(
+            placeholderItems
+              .filter((item) => pendingPixelsAsset && item.image === pendingPixelsAsset)
+              .map((item) => item.id)
+          )
           planned.length = 0
 
           // 3. Every frame goes onto the canvas at once, in the import's single history entry.
@@ -2228,7 +2236,21 @@ export function useCanvasAssetIntake({
               const seen = new Set<string>()
               let changed = false
               const next = prev.map((item) => {
-                if (item.type !== 'image' || !importItemIds.has(item.id)) return item
+                if (item.type !== 'image') return item
+                // An item with this import's tile that no longer waits for pixels from it: a copy
+                // of a waiting frame, a frame that an undo restored from another one's source, or
+                // a frame deleted while it waited. Without an image it loads its own source and
+                // levels like any other item.
+                const keepsStrayTile =
+                  Boolean(pendingPixelsAsset) &&
+                  item.image === pendingPixelsAsset &&
+                  !waitingItemIds.has(item.id)
+                if (!importItemIds.has(item.id)) {
+                  if (!keepsStrayTile) return item
+                  changed = true
+                  const { image: _strayTile, ...rest } = item
+                  return rest
+                }
                 seen.add(item.id)
                 const queued = batch.get(item.id)
                 if (queued) {
@@ -2257,7 +2279,12 @@ export function useCanvasAssetIntake({
                 const handedOver = handedOverItemIds.has(item.id)
                   ? resolvedPatchById.get(item.id)
                   : undefined
-                if (!handedOver || handedOver.src !== item.src) return item
+                if (!handedOver || handedOver.src !== item.src) {
+                  if (!keepsStrayTile) return item
+                  changed = true
+                  const { image: _strayTile, ...rest } = item
+                  return rest
+                }
                 const lostPixels =
                   Boolean(handedOver.image) &&
                   (!item.image || isCanvasImagePendingPixelsAsset(item.image))
@@ -2305,7 +2332,10 @@ export function useCanvasAssetIntake({
                 }
                 batch.forEach((patch, itemId) => {
                   queuedPatchById.delete(itemId)
-                  if (!patch.preview) handedOverItemIds.add(itemId)
+                  if (!patch.preview) {
+                    handedOverItemIds.add(itemId)
+                    waitingItemIds.delete(itemId)
+                  }
                 })
                 applyPixelPatches(batch)
                 emitImportProgress('committing')
@@ -2362,7 +2392,9 @@ export function useCanvasAssetIntake({
               }
               const [entry] = pixelQueue.splice(bestIndex, 1)
               if (liveItemIds && !liveItemIds.has(entry.item.id)) {
-                // Deleted while waiting: no thumbnail work for an image that is gone.
+                // Deleted while waiting: no thumbnail work for an image that is gone (an undo that
+                // brings it back gives it no pending tile, see applyPixelPatches).
+                waitingItemIds.delete(entry.item.id)
                 processedCount += 1
                 continue
               }
@@ -2414,10 +2446,10 @@ export function useCanvasAssetIntake({
           )
           await drainPixelPatches()
           assertActive()
-          if (!abandoned && resolvedPatchById.size > 0) {
-            // Last pass: an undo/redo during the import may have returned frames without pixels.
-            applyPixelPatches(new Map())
-          }
+          // Last pass: nothing waits any more. Frames that an undo/redo returned without pixels get
+          // them back, and no item keeps this import's pending tile.
+          waitingItemIds.clear()
+          applyPixelPatches(new Map())
           processedCount = totalSourceCount
           emitImportProgress('complete', true)
           return entries.map((entry) => {
