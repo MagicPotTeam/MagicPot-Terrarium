@@ -6,7 +6,7 @@ import { getAgentSessionKey, normalizeAgentRoute } from '@shared/agent'
 import type { AgentThreadInteractionScope } from '@shared/api/agentThreadInteraction'
 import type { AgentTeamMessageIntent, AgentTeamMessageClaim } from '@shared/api/agentTeamMessage'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
-import type { LLMTeamIdentity, LLMTeamMember } from '@shared/api/svcLLMProxy'
+import type { LLMChatReq, LLMTeamIdentity, LLMTeamMember } from '@shared/api/svcLLMProxy'
 import { getBuildEnv } from '../config/buildEnv'
 import { MagicAgentEventStore } from '../magicAgentPlatform2/persistence/eventStore'
 import { activeInstanceLeasePids } from '../magicAgentPlatform2/persistence/writeLock'
@@ -66,6 +66,7 @@ function productionOpener(): TeamMessageStoreOpener {
   return { open: create => resolve().open(create), close: () => opener?.close() }
 }
 const unavailable = (error: unknown): boolean => error instanceof Error && error.message === TEAM_QUEUE_UNAVAILABLE
+export const TEAM_MESSAGE_UNAVAILABLE = 'Team message is no longer available.'
 
 /**
  * MAIN-owned member message queue over the durable TeamMessageStore. A record is fresh while the
@@ -187,6 +188,39 @@ export class AgentTeamMessageQueue {
     const view = this.view(claimed, token)
     if (this.fresh.get(req.id) === senderId) { this.fresh.delete(req.id); owner.fresh.delete(req.id) }
     return view
+  }
+
+  /**
+   * Admission of a member-message delivery request (after the End check, before any provider, tool
+   * or goal set-up). A request without teamMessageDelivery passes unchanged and never touches the
+   * store. With it, the claim must be this process's, held by this webContents with this token, for
+   * this team, route, hop and a valid recipient; MAIN then records the start of the request, and
+   * only then does the request go on, without the field. A repeat of a recipient already started
+   * by the same lease holder is admitted without a second record. Anything else is refused.
+   */
+  admitDelivery<T extends LLMChatReq>(req: T, invocation?: ServiceInvocationContext): T {
+    if (!Object.hasOwn(req, 'teamMessageDelivery')) return req
+    const { teamMessageDelivery: delivery, ...admitted } = req
+    try {
+      const member = req.teamMember, senderId = invocation?.senderId
+      if (!invocation || !Number.isSafeInteger(senderId) || !['svcLLMProxy.chat', 'svcLLMProxy.chatStream'].includes(invocation.methodName)) throw Error()
+      if (!delivery || typeof delivery !== 'object' || Object.keys(delivery).length !== 2 || !valid(delivery.id) || !valid(delivery.lease)) throw Error()
+      if (!member || ![member.scope, member.thread, member.lead, member.member].every(valid)) throw Error()
+      const lease = this.leases.get(delivery.id)
+      if (!lease || lease.token !== delivery.lease || lease.senderId !== senderId) throw Error()
+      const store = this.opener.open(false)
+      const entry = store && (store.peek(delivery.id) ?? store.get(delivery.id))
+      if (!store || !entry) throw Error()
+      const { intent, state } = entry
+      if (req.teamMessageHop !== intent.hop || member.scope !== state.team.scope || member.thread !== state.team.thread || member.lead !== state.team.lead) throw Error()
+      if (!req.route || getAgentSessionKey(normalizeAgentRoute(req.route)) !== intent.routeKey) throw Error()
+      // Durable before the request goes on. The store refuses a claim that is not this boot's and a
+      // recipient other than the message's own (or, for a channel, the source member itself).
+      store.start(delivery.id, member.member)
+    } catch {
+      throw new Error(TEAM_MESSAGE_UNAVAILABLE)
+    }
+    return admitted as T
   }
 
   /** After End was recorded: every queued message of the team is 'ended'. A profile without the file gets none. */

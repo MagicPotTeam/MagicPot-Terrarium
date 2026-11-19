@@ -2494,6 +2494,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     // The turn's End checks, built from the request as it entered; requests without teamMember get none.
     const teamChecks = createMemberTeamChecks(req)
     req = ensureCorrelationId(req)
+    // A member-message delivery: MAIN records its start (or refuses it) before any other set-up.
+    req = this.teamMessageQueue.admitDelivery(req, options?.methodName ? options as ServiceInvocationContext : undefined)
     const abortContext = this.createConversationAbortContext(
       req.conversationId,
       options?.signal,
@@ -3543,6 +3545,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     // The turn's End checks, built from the request as it entered; requests without teamMember get none.
     const teamChecks = createMemberTeamChecks(req)
     req = ensureCorrelationId(req)
+    // A member-message delivery: MAIN records its start (or refuses it) before any other set-up.
+    req = this.teamMessageQueue.admitDelivery(req, invocation)
     // Normalize once at the trusted main boundary. Structured streaming is
     // gated until its complete response satisfies this detached contract.
     let structuredOutput = req.structuredOutput

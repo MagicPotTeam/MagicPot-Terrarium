@@ -174,6 +174,9 @@ export type LLMChatReq = {
   teamMember?: LLMTeamMember
   /** Controlled renderer reports a member-message hop (1 or 2); not an authorization boundary. */
   teamMessageHop?: 1 | 2
+  /** The claim of the member message this request delivers (local MAIN only). MAIN records the start of
+   * the request before it goes on and removes the field: never sent to a provider or a remote host. */
+  teamMessageDelivery?: { id: string; lease: string }
   /** Request-scoped cancellation ownership; never forwarded as provider authority. */
   cancellationId?: string
   /** Main-issued identifier used to correlate Desktop, Bridge and Provider stages. */
@@ -463,7 +466,7 @@ export type LLMProxySvc = {
     resp: ServerStreaming<LLMExternalAgentStreamResp>
   ): Promise<void>
 
-  /** Trusted local desktop only. Claim means removed from the temporary queue, not delivered. */
+  /** Trusted local desktop only. A claim is a lease on a durable record (given out once), not a delivery. */
   listAgentTeamMessages(req: AgentTeamMessageQueueScope): Promise<{ intents: AgentTeamMessageIntent[] }>
   claimAgentTeamMessage(req: AgentTeamMessageClaim): Promise<{ intent?: AgentTeamMessageIntent }>
   /** Conversation feedback, never operation approval. */
