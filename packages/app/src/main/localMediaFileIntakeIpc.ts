@@ -41,6 +41,14 @@ export type LocalMediaImportGrantDependencies = {
 
 /** A one-use import grant: the canonical path main will import, and its size when granted. */
 export type LocalMediaImportGrant = { path: string; sizeBytes: number }
+/**
+ * Why no grant was recorded, where the renderer acts on it: the file did not answer in time
+ * (the composer says so and reads nothing itself), or its canonical form is a network path
+ * main never imports by path (a mapped network drive: the composer may read it as bytes).
+ */
+export type LocalMediaImportGrantRefusal = { refused: 'timeout' | 'network' }
+
+const isNetworkOrDevicePath = (value: string): boolean => /^[\\/]{2}/u.test(value)
 
 const isImportablePath = (value: string): boolean => {
   try {
@@ -67,25 +75,30 @@ export async function grantLocalMediaImportFile(
     now = localMediaImportGrantClock,
     timeoutMs = DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs
   }: LocalMediaImportGrantDependencies = {}
-): Promise<LocalMediaImportGrant | null> {
+): Promise<LocalMediaImportGrant | LocalMediaImportGrantRefusal | null> {
   if (typeof filePath !== 'string' || typeof mimeType !== 'string') return null
   if (!isManagedMediaMimeTypeSupported(mimeType) || !isImportablePath(filePath)) return null
   try {
     // Off the event loop and under the import-source deadline and gate.
     const granted = await runImportSourceOperation(
-      async (): Promise<LocalMediaImportGrant | null> => {
-        const resolved = path.resolve(await realpath(filePath))
+      async (): Promise<LocalMediaImportGrant | LocalMediaImportGrantRefusal | null> => {
+        const canonical = await realpath(filePath)
+        // Checked on the realpath result itself, in any path syntax: a mapped drive's UNC form.
+        if (isNetworkOrDevicePath(canonical)) return { refused: 'network' }
+        const resolved = path.resolve(canonical)
         if (!isImportablePath(resolved)) return null
         const stats = await stat(resolved)
         return stats.isFile() ? { path: resolved, sizeBytes: stats.size } : null
       },
       { key: importSourceRootKey(filePath), timeoutMs }
     )
-    if (!granted) return null
+    if (!granted || !('path' in granted)) return granted
     recordLocalMediaImportGrant(granted.path, now())
     return granted
-  } catch {
-    return null
+  } catch (error) {
+    return (error as { code?: unknown })?.code === 'MANAGED_MEDIA_IMPORT_TIMEOUT'
+      ? { refused: 'timeout' }
+      : null
   }
 }
 
@@ -95,7 +108,8 @@ export async function grantLocalMediaImportPath(
   mimeType: unknown,
   dependencies: LocalMediaImportGrantDependencies = {}
 ): Promise<string> {
-  return (await grantLocalMediaImportFile(filePath, mimeType, dependencies))?.path ?? ''
+  const granted = await grantLocalMediaImportFile(filePath, mimeType, dependencies)
+  return granted && 'path' in granted ? granted.path : ''
 }
 
 export function registerLocalMediaFileIntakeIpc(getMainWindow: () => BrowserWindow | null): void {
@@ -109,7 +123,11 @@ export function registerLocalMediaFileIntakeIpc(getMainWindow: () => BrowserWind
   // URL of the current trusted drop (its private drop lease).
   ipcMain.handle(
     'local-media:authorize-import-path',
-    async (event, filePath: unknown, mimeType: unknown): Promise<LocalMediaImportGrant | null> => {
+    async (
+      event,
+      filePath: unknown,
+      mimeType: unknown
+    ): Promise<LocalMediaImportGrant | LocalMediaImportGrantRefusal | null> => {
       if (!isTrustedRenderer(event, getMainWindow)) return null
       return grantLocalMediaImportFile(filePath, mimeType)
     }

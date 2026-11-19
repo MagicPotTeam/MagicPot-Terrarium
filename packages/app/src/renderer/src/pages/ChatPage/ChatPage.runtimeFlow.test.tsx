@@ -1191,11 +1191,11 @@ const stubLocalFileBridge = () => {
       if (filePath) grantedLocalFilePaths.add(filePath)
       return filePath
     },
-    // The composer's one-use import grant (main returns the canonical path).
+    // The composer's one-use import grant (main returns the canonical path, or why not).
     authorizeLocalMediaFileForImport: async (file: File) => {
       const filePath = localFilePaths.get(file) ?? ''
       if (filePath) grantedLocalFilePaths.add(filePath)
-      return filePath
+      return filePath ? { path: filePath } : { refused: 'denied' as const }
     },
     resolveAuthorizedLocalMediaPath: async (filePath: string) =>
       grantedLocalFilePaths.has(filePath) ? filePath : ''

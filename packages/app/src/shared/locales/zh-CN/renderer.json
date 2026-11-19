@@ -1385,7 +1385,8 @@
       }
     },
     "send_message": "发送消息",
-    "image_too_large": "图片 {{name}} 过大（最大 50MB）",
+    "file_too_large": "{{fileName}} 过大。最大 {{maxMB}} MB，当前大小 {{size}}。",
+    "attachment_source_timeout": "{{name}}：文件未及时响应。",
     "image_process_failed": "处理图片失败：{{name}}",
     "file_process_failed": "处理文件失败：{{name}}",
     "attachment_add_failed": "添加附件失败。",

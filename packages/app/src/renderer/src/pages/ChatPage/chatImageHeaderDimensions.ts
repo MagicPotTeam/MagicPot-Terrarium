@@ -135,14 +135,38 @@ const readSlice = (blob: Blob): Promise<ArrayBuffer> => {
   })
 }
 
-/** Reads at most CHAT_IMAGE_HEADER_READ_BYTES of the file; null when the caller must decode. */
+/**
+ * How long the header read may take. A picked file on a stalled network mount never answers;
+ * the caller then skips its own decode (which would read the same file) and leaves the file
+ * to main, whose import has its own deadline and refusal.
+ */
+export const CHAT_IMAGE_HEADER_READ_TIMEOUT_MS = 3_000
+export const CHAT_IMAGE_HEADER_READ_TIMED_OUT = 'timed-out' as const
+
+/**
+ * Reads at most CHAT_IMAGE_HEADER_READ_BYTES of the file: its dimensions, null when the
+ * caller must decode, or CHAT_IMAGE_HEADER_READ_TIMED_OUT when the read did not finish in
+ * time (the caller must not read the file again).
+ */
 export const readChatImageHeaderDimensions = async (
-  file: Blob
-): Promise<ChatImageHeaderDimensions | null> => {
+  file: Blob,
+  { timeoutMs = CHAT_IMAGE_HEADER_READ_TIMEOUT_MS }: { timeoutMs?: number } = {}
+): Promise<ChatImageHeaderDimensions | null | typeof CHAT_IMAGE_HEADER_READ_TIMED_OUT> => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<typeof CHAT_IMAGE_HEADER_READ_TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(CHAT_IMAGE_HEADER_READ_TIMED_OUT), timeoutMs)
+  })
+  const read = (async () => {
+    try {
+      const bytes = new Uint8Array(await readSlice(file.slice(0, CHAT_IMAGE_HEADER_READ_BYTES)))
+      return parseChatImageHeaderDimensions(bytes)
+    } catch {
+      return null
+    }
+  })()
   try {
-    const bytes = new Uint8Array(await readSlice(file.slice(0, CHAT_IMAGE_HEADER_READ_BYTES)))
-    return parseChatImageHeaderDimensions(bytes)
-  } catch {
-    return null
+    return await Promise.race([read, timedOut])
+  } finally {
+    clearTimeout(timer)
   }
 }

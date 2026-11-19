@@ -1563,7 +1563,8 @@
       }
     },
     "send_message": "Send Message",
-    "image_too_large": "Image {{name}} is too large (max 50MB)",
+    "file_too_large": "{{fileName}} is too large. Max {{maxMB}} MB, current size {{size}}.",
+    "attachment_source_timeout": "{{name}}: the file did not respond in time.",
     "image_process_failed": "Failed to process image {{name}}",
     "file_process_failed": "Failed to process file {{name}}",
     "attachment_add_failed": "Could not add the attachment.",

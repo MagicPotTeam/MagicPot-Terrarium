@@ -31,7 +31,10 @@ const path: BuiltInPath = pkgPath as unknown as BuiltInPath
 const droppedLocalImages = createExternalImageDropAuthorization({
   target: typeof window === 'undefined' ? undefined : window,
   authorizePath: authorizeLocalMediaFilePath,
-  authorizeImportPath: requestLocalMediaImportGrant
+  authorizeImportPath: async (filePath, mimeType) => {
+    const answer = await requestLocalMediaImportGrant(filePath, mimeType)
+    return answer && 'path' in answer ? answer : null
+  }
 })
 const electronFile = {
   getPathForFile(file: unknown): string {
@@ -55,13 +58,18 @@ const electronFile = {
    * ('' otherwise). The path comes only from webUtils.getPathForFile of a real File, never
    * from a string the page passes.
    */
-  async authorizeLocalMediaFileForImport(file: unknown, mimeType: unknown): Promise<string> {
+  async authorizeLocalMediaFileForImport(
+    file: unknown,
+    mimeType: unknown
+  ): Promise<LocalMediaFileImportAnswer> {
     try {
       const filePath = (webUtils.getPathForFile as (target: unknown) => string)(file) || ''
-      if (!filePath || typeof mimeType !== 'string') return ''
-      return (await requestLocalMediaImportGrant(filePath, mimeType))?.path ?? ''
+      if (!filePath || typeof mimeType !== 'string') return { refused: 'denied' }
+      const answer = await requestLocalMediaImportGrant(filePath, mimeType)
+      if (!answer) return { refused: 'denied' }
+      return 'path' in answer ? { path: answer.path } : answer
     } catch {
-      return ''
+      return { refused: 'denied' }
     }
   },
   authorizeDroppedLocalImage(canonicalUrl: string): Promise<string> {
@@ -219,11 +227,18 @@ async function authorizeLocalMediaFilePath(filePath: string): Promise<boolean> {
   }
 }
 
-/** Main's one-use import grant for a path the preload itself obtained, or null. */
+/**
+ * The picked file's one-use import grant: main's canonical path, or why there is none (no
+ * answer in time, a network path main imports only as bytes, or any other refusal).
+ */
+type LocalMediaFileImportAnswer = { path: string } | { refused: 'timeout' | 'network' | 'denied' }
+type LocalMediaImportGrantRefusal = { refused: 'timeout' | 'network' }
+
+/** Main's one-use import grant for a path the preload itself obtained, or why not, or null. */
 async function requestLocalMediaImportGrant(
   filePath: string,
   mimeType: string
-): Promise<DroppedLocalImageImportGrant | null> {
+): Promise<DroppedLocalImageImportGrant | LocalMediaImportGrantRefusal | null> {
   if (!filePath) return null
   try {
     const granted: unknown = await ipcRenderer.invoke(
@@ -231,6 +246,8 @@ async function requestLocalMediaImportGrant(
       filePath,
       mimeType
     )
+    const refusal = (granted as Partial<LocalMediaImportGrantRefusal> | null)?.refused
+    if (refusal === 'timeout' || refusal === 'network') return { refused: refusal }
     const candidate = granted as Partial<DroppedLocalImageImportGrant> | null
     return candidate &&
       typeof candidate.path === 'string' &&

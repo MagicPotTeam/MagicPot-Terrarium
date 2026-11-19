@@ -10,11 +10,18 @@ import type {
 
 /** A one-use import grant from main: the canonical path and its size when granted. */
 export type LocalMediaImportGrant = { path: string; sizeBytes: number }
+/**
+ * main's answer for a picked file: the canonical path, or why there is none: no answer in
+ * time, a network path main imports only as bytes (mapped drive), or any other refusal.
+ */
+export type LocalMediaFileImportAnswer =
+  | { path: string }
+  | { refused: 'timeout' | 'network' | 'denied' }
 
 export type ElectronFileBridge = {
   getPathForFile(file: File): string
   authorizeLocalMediaFile(file: File): Promise<string>
-  authorizeLocalMediaFileForImport(file: File, mimeType: string): Promise<string>
+  authorizeLocalMediaFileForImport(file: File, mimeType: string): Promise<LocalMediaFileImportAnswer>
   authorizeDroppedLocalImage(canonicalUrl: string): Promise<string>
   authorizeDroppedLocalImageForImport(
     canonicalUrl: string,

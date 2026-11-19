@@ -103,7 +103,10 @@ describe('short-lived local media import grants', () => {
         removeEventListener: () => undefined
       } as unknown as Window,
       authorizePath: async (filePath) => authorizeScopedLocalMediaPath(filePath),
-      authorizeImportPath: (filePath, mimeType) => grantLocalMediaImportFile(filePath, mimeType)
+      authorizeImportPath: async (filePath, mimeType) => {
+        const answer = await grantLocalMediaImportFile(filePath, mimeType)
+        return answer && 'path' in answer ? answer : null
+      }
     })
 
     const drops = path.join(root, 'drops')
@@ -205,6 +208,35 @@ describe('short-lived local media import grants', () => {
         realpath: async () => '//server/share/mapped.png'
       })
     ).toBe('')
+    expect(countLocalMediaImportGrantsForTest()).toBe(0)
+  })
+
+  it('tells a stalled file and a network canonical path apart from other refusals', async () => {
+    const root = makeTempDir('magicpot-import-grants-')
+    const picked = path.join(root, 'picked.png')
+    fs.writeFileSync(picked, 'png')
+    // The realpath does not answer within the deadline: the composer shows its timeout notice.
+    // (A mount of its own, so the stalled call blocks no other test's root.)
+    let answer!: (value: string) => void
+    await expect(
+      grantLocalMediaImportFile(path.resolve(path.sep, 'mnt', 'stalled', 'a.png'), 'image/png', {
+        realpath: () => new Promise<string>((resolve) => (answer = resolve)),
+        timeoutMs: 30
+      })
+    ).resolves.toEqual({ refused: 'timeout' })
+    answer(picked)
+    // A mapped network drive resolves to its UNC form, in either syntax: bytes only.
+    for (const unc of ['\\\\server\\share\\mapped.png', '//server/share/mapped.png']) {
+      const stat = vi.fn(async () => ({ isFile: () => true, size: 3 }))
+      await expect(
+        grantLocalMediaImportFile(picked, 'image/png', { realpath: async () => unc, stat })
+      ).resolves.toEqual({ refused: 'network' })
+      expect(stat).not.toHaveBeenCalled()
+    }
+    // Anything else is a plain refusal.
+    await expect(
+      grantLocalMediaImportFile(path.join(root, 'missing.png'), 'image/png')
+    ).resolves.toBeNull()
     expect(countLocalMediaImportGrantsForTest()).toBe(0)
   })
 

@@ -88,6 +88,13 @@ export type ImportManagedMediaBytesReq = {
 }
 
 /** Largest path-less import (importBytes); the renderer refuses larger data before reading it. */
+/**
+ * Main's message when an import source does not answer within its deadline. Managed media
+ * errors reach the renderer as their message only, so the composer recognizes the timeout
+ * by this text and shows its own short notice instead.
+ */
+export const MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE = 'Managed media source did not respond in time'
+
 export const MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES = 64 * 1024 * 1024
 
 export type ImportManagedMediaResp = {

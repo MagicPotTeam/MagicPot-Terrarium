@@ -3,6 +3,7 @@ import enUS from '@shared/locales/en-US/renderer.json'
 import zhCN from '@shared/locales/zh-CN/renderer.json'
 import type { ImportManagedMediaBytesReq, ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import {
+  MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE,
   validateImportManagedMediaBytesReq,
   validateImportManagedMediaDataUrlReq,
   validateImportManagedMediaFileReq
@@ -10,6 +11,8 @@ import {
 import {
   CHAT_ATTACHMENT_STORAGE,
   CHAT_PATHLESS_ATTACHMENT_MAX_BYTES,
+  ChatAttachmentSourceRefusedError,
+  ChatAttachmentSourceTimeoutError,
   ChatPathlessAttachmentTooLargeError,
   describeChatAttachmentImportFailure,
   importChatAttachment,
@@ -76,7 +79,7 @@ describe('chatManagedMediaAttachments', () => {
       file,
       fileBridge: {
         getPathForFile: () => '/selected/file.png',
-        authorizeLocalMediaFileForImport: async () => '/selected/file.png'
+        authorizeLocalMediaFileForImport: async () => ({ path: '/selected/file.png' })
       },
       type: 'image',
       mimeType: 'image/png',
@@ -116,9 +119,9 @@ describe('chatManagedMediaAttachments', () => {
     const arrayBuffer = vi.fn()
     Object.defineProperty(file, 'arrayBuffer', { value: arrayBuffer })
     const getPathForFile = vi.fn(() => 'C:\\Users\\artist\\Pictures\\shot.jpg')
-    const authorizeLocalMediaFileForImport = vi.fn(
-      async () => 'C:\\Users\\Artist\\Pictures\\shot.jpg'
-    )
+    const authorizeLocalMediaFileForImport = vi.fn(async () => ({
+      path: 'C:\\Users\\Artist\\Pictures\\shot.jpg'
+    }))
     const authorizeLocalMediaFile = vi.fn()
     const resolveAuthorizedLocalMediaPath = vi.fn()
     vi.stubGlobal('electronFile', {
@@ -158,7 +161,7 @@ describe('chatManagedMediaAttachments', () => {
   })
 
   it('asks for no grant and reads nothing for a picked file of a type the store refuses', async () => {
-    const authorizeLocalMediaFileForImport = vi.fn(async () => '/videos/clip.mp4')
+    const authorizeLocalMediaFileForImport = vi.fn(async () => ({ path: '/videos/clip.mp4' }))
     const authorizeLocalMediaFile = vi.fn(async () => '/videos/clip.mp4')
     // Main refuses the type before it looks at the path or the grants.
     const service = {
@@ -222,23 +225,15 @@ describe('chatManagedMediaAttachments', () => {
         file: new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' }),
         bridge: {
           getPathForFile: () => p,
-          authorizeLocalMediaFileForImport: vi.fn(async () => p)
+          authorizeLocalMediaFileForImport: vi.fn(async () => ({ path: p }))
         }
       })),
-      // Main refuses the grant (other window, mapped network drive, not a regular file).
-      {
-        file: new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' }),
-        bridge: {
-          getPathForFile: () => '/picked/a.png',
-          authorizeLocalMediaFileForImport: async () => ''
-        }
-      },
-      // Main's canonical form is a UNC path (mapped drive): never sent by path.
+      // Main's canonical form is a UNC path (mapped drive): never sent by path, read as bytes.
       {
         file: new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' }),
         bridge: {
           getPathForFile: () => 'Z:\\a.png',
-          authorizeLocalMediaFileForImport: async () => '\\\\nas\\share\\a.png'
+          authorizeLocalMediaFileForImport: async () => ({ refused: 'network' })
         }
       },
       // A bridge without the import grant: the persisted grant is not used instead.
@@ -279,7 +274,7 @@ describe('chatManagedMediaAttachments', () => {
       const file = new File([new Uint8Array([1, 2, 3])], name, { type: 'image/png' })
       vi.stubGlobal('electronFile', {
         getPathForFile: () => `/Users/artist/Pictures/${name}`,
-        authorizeLocalMediaFileForImport: async () => `/Users/artist/Pictures/${name}`
+        authorizeLocalMediaFileForImport: async () => ({ path: `/Users/artist/Pictures/${name}` })
       })
       const service = {
         importFile: vi.fn(async (request: unknown) => {
@@ -366,6 +361,70 @@ describe('chatManagedMediaAttachments', () => {
       expect(toManagedOriginalFileName('CON.png', 'attachment')).toBe('_CON.png')
       expect(toManagedOriginalFileName(' . ', 'attachment')).toBe('attachment')
     })
+  })
+
+  it('refuses a picked file main does not grant or that does not answer in time, and reads nothing', async () => {
+    const answers: Array<{ answer: () => Promise<unknown>; timedOut: boolean }> = [
+      { answer: async () => ({ refused: 'denied' }), timedOut: false },
+      { answer: async () => ({ refused: 'timeout' }), timedOut: true },
+      // A UNC answer is not a grant main gives: refused too.
+      { answer: async () => ({ path: '\\\\nas\\share\\a.png' }), timedOut: false },
+      { answer: async () => Promise.reject(new Error('bridge failed')), timedOut: false }
+    ]
+    for (const { answer, timedOut } of answers) {
+      const file = new File([new Uint8Array([1, 2, 3])], 'stalled.png', { type: 'image/png' })
+      const arrayBuffer = vi.fn()
+      Object.defineProperty(file, 'arrayBuffer', { value: arrayBuffer })
+      const fileReaderConstructed = vi.fn()
+      globalThis.FileReader = class {
+        constructor() {
+          fileReaderConstructed()
+        }
+      } as unknown as typeof FileReader
+      const service = { importFile: vi.fn(), importBytes: vi.fn() }
+      const error = await importChatAttachment({
+        service,
+        file,
+        fileBridge: {
+          getPathForFile: () => '/mnt/nas/stalled.png',
+          authorizeLocalMediaFileForImport: answer as never
+        },
+        type: 'image',
+        mimeType: 'image/png'
+      }).catch((reason: unknown) => reason)
+      expect(error).toBeInstanceOf(
+        timedOut ? ChatAttachmentSourceTimeoutError : ChatAttachmentSourceRefusedError
+      )
+      // No fallback: the renderer does not read the file itself.
+      expect(arrayBuffer).not.toHaveBeenCalled()
+      expect(fileReaderConstructed).not.toHaveBeenCalled()
+      expect(service.importBytes).not.toHaveBeenCalled()
+      expect(service.importFile).not.toHaveBeenCalled()
+      const { default: i18n } = await import('@renderer/i18n')
+      await i18n.changeLanguage('en-US')
+      expect(describeChatAttachmentImportFailure(error, 'stalled.png', 'image')).toBe(
+        (timedOut ? enUS.chat.attachment_source_timeout : enUS.chat.image_process_failed).replace(
+          '{{name}}',
+          'stalled.png'
+        )
+      )
+    }
+  })
+
+  it("says that the file did not answer in time when main's import of it timed out", async () => {
+    const { default: i18n } = await import('@renderer/i18n')
+    // main's text as the renderer receives it; no path reaches the notice.
+    const fromMain = new Error(`ServiceError: ${MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE}`)
+    for (const [language, locale] of [
+      ['zh-CN', zhCN],
+      ['en-US', enUS]
+    ] as const) {
+      await i18n.changeLanguage(language)
+      expect(describeChatAttachmentImportFailure(fromMain, 'nas.png', 'image')).toBe(
+        locale.chat.attachment_source_timeout.replace('{{name}}', 'nas.png')
+      )
+      expect(locale.chat.file_too_large).toMatch(/{{fileName}}.*{{maxMB}}.*{{size}}/s)
+    }
   })
 
   it('imports pathless clipboard Files as bytes and persists only local-media', async () => {
@@ -485,7 +544,7 @@ describe('chatManagedMediaAttachments', () => {
       file,
       fileBridge: {
         getPathForFile: () => '/picked/huge.png',
-        authorizeLocalMediaFileForImport: async () => '/picked/huge.png'
+        authorizeLocalMediaFileForImport: async () => ({ path: '/picked/huge.png' })
       },
       type: 'image',
       mimeType: 'image/png'
@@ -606,7 +665,7 @@ describe('chatManagedMediaAttachments', () => {
 
   it('describes a failed attachment in both locales without main\'s error text', async () => {
     const { default: i18n } = await import('@renderer/i18n')
-    const mainError = new Error('Managed media source did not respond in time C:\\Users\\me\\x.png')
+    const mainError = new Error('Unable to import managed media file C:\\Users\\me\\x.png')
     for (const [language, locale] of [
       ['zh-CN', zhCN],
       ['en-US', enUS]

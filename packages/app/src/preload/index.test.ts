@@ -96,8 +96,10 @@ describe('preload capability boundary', () => {
     getPathForFileMock.mockReturnValue('/picked/picked.png')
     invokeMock.mockResolvedValue({ path: '/canonical/picked.png', sizeBytes: 3 })
 
-    await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toBe(
-      '/canonical/picked.png'
+    await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toEqual(
+      {
+        path: '/canonical/picked.png'
+      }
     )
     expect(getPathForFileMock).toHaveBeenCalledWith(file)
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith(
@@ -114,22 +116,41 @@ describe('preload capability boundary', () => {
     })
     await expect(
       electronFile.authorizeLocalMediaFileForImport('/home/user/.ssh/id_rsa', 'image/png')
-    ).resolves.toBe('')
+    ).resolves.toEqual({ refused: 'denied' })
     await expect(
       electronFile.authorizeLocalMediaFileForImport(
         { name: 'forged.png', path: '/etc/shadow' },
         'image/png'
       )
-    ).resolves.toBe('')
+    ).resolves.toEqual({ refused: 'denied' })
     expect(invokeMock).not.toHaveBeenCalled()
     // A malformed answer from main is never passed on as a path.
     getPathForFileMock.mockReturnValue('/picked/picked.png')
-    for (const answer of ['/etc/shadow', { path: '/etc/shadow' }, { path: 7, sizeBytes: 1 }]) {
+    for (const answer of [
+      '/etc/shadow',
+      { path: '/etc/shadow' },
+      { path: 7, sizeBytes: 1 },
+      { refused: 'anything' },
+      null
+    ]) {
       invokeMock.mockResolvedValue(answer)
-      await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toBe(
-        ''
-      )
+      await expect(
+        electronFile.authorizeLocalMediaFileForImport(file, 'image/png')
+      ).resolves.toEqual({
+        refused: 'denied'
+      })
     }
+    // main's reasons pass through: no answer in time, or a network path (bytes only).
+    for (const refused of ['timeout', 'network'] as const) {
+      invokeMock.mockResolvedValue({ refused })
+      await expect(
+        electronFile.authorizeLocalMediaFileForImport(file, 'image/png')
+      ).resolves.toEqual({ refused })
+    }
+    invokeMock.mockRejectedValue(new Error('ipc failed'))
+    await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toEqual(
+      { refused: 'denied' }
+    )
     expect(sendSyncMock).not.toHaveBeenCalled()
   })
 
@@ -215,7 +236,10 @@ describe('preload capability boundary', () => {
       'image/png'
     )
     // Never the persisted grant channel.
-    expect(invokeMock).not.toHaveBeenCalledWith('local-media:authorize-picker-path', expect.anything())
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'local-media:authorize-picker-path',
+      expect.anything()
+    )
   })
 
   it('invalidates an unconsumed trusted drop on navigation', async () => {

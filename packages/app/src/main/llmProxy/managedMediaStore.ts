@@ -3,6 +3,7 @@ import { constants as fsConstants } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE } from '../../shared/api/svcManagedMedia'
 import {
   MEDIA_REFERENCE_VERSION,
   isNormalizedMediaRelativePath,
@@ -155,7 +156,7 @@ const monotonicNow = (): number => performance.now()
 function importSourceTimeoutError(): ManagedMediaImportError {
   return new ManagedMediaImportError(
     'MANAGED_MEDIA_IMPORT_TIMEOUT',
-    'Managed media source did not respond in time'
+    MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE
   )
 }
 

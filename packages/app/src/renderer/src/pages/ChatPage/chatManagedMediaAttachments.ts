@@ -2,7 +2,10 @@ import i18next from 'i18next'
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import type { ManagedMediaStorage } from '@shared/api/svcManagedMedia'
-import { MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES } from '@shared/api/svcManagedMedia'
+import {
+  MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES,
+  MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE
+} from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference } from '@shared/mediaReference'
 import { formatFileSize } from '@renderer/utils/fileUtils'
 import { resolveLocalMediaPathFromUrl } from './chatPageShared'
@@ -23,8 +26,11 @@ export const CHAT_ATTACHMENT_STORAGE = {
 /** The preload's file bridge (window.electronFile), as far as attachment import uses it. */
 export type ChatAttachmentFileBridge = {
   getPathForFile?: (file: File) => string
-  /** One-use, in-memory import grant in main; returns the canonical path or ''. */
-  authorizeLocalMediaFileForImport?: (file: File, mimeType: string) => Promise<string>
+  /** One-use, in-memory import grant in main: the canonical path, or why there is none. */
+  authorizeLocalMediaFileForImport?: (
+    file: File,
+    mimeType: string
+  ) => Promise<{ path?: string; refused?: 'timeout' | 'network' | 'denied' }>
   resolveAuthorizedLocalMediaPath?: (filePath: string) => Promise<string>
 }
 
@@ -80,10 +86,36 @@ export class ChatPathlessAttachmentTooLargeError extends Error {
   }
 }
 
+/** A picked file whose location did not answer within main's deadline. */
+export class ChatAttachmentSourceTimeoutError extends Error {
+  constructor(readonly fileName: string) {
+    super(
+      i18next.t('chat.attachment_source_timeout', { name: fileName || 'attachment' }) ||
+        `${fileName || 'attachment'}: no answer in time`
+    )
+    this.name = 'ChatAttachmentSourceTimeoutError'
+  }
+}
+
+/** main refused the import grant of a picked file: nothing is read in its place. */
+export class ChatAttachmentSourceRefusedError extends Error {
+  constructor(readonly fileName: string) {
+    super('The picked file was not granted for import')
+    this.name = 'ChatAttachmentSourceRefusedError'
+  }
+}
+
+const isSourceTimeout = (error: unknown): boolean =>
+  error instanceof ChatAttachmentSourceTimeoutError ||
+  String((error as { message?: unknown } | null)?.message ?? '').includes(
+    MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE
+  )
+
 /**
  * The short message the composer shows when an attachment cannot be added: the size refusal
- * for path-less data above the cap, otherwise "could not process <name>". Main's error text
- * is never shown (it is logged), so no path or internal detail reaches the message.
+ * for path-less data above the cap, "<name> did not respond in time" when its location
+ * stalled, otherwise "could not process <name>". Main's error text is never shown (it is
+ * logged), so no path or internal detail reaches the message.
  */
 export const describeChatAttachmentImportFailure = (
   error: unknown,
@@ -91,6 +123,7 @@ export const describeChatAttachmentImportFailure = (
   kind: 'image' | 'file'
 ): string => {
   if (error instanceof ChatPathlessAttachmentTooLargeError) return error.message
+  if (isSourceTimeout(error)) return new ChatAttachmentSourceTimeoutError(fileName).message
   const name = fileName || 'attachment'
   return (
     i18next.t(kind === 'image' ? 'chat.image_process_failed' : 'chat.file_process_failed', {
@@ -172,29 +205,40 @@ const readPickedFilePath = (file: File, bridge: ChatAttachmentFileBridge | undef
 }
 
 /**
- * The canonical path main may import a picked file from, or '' when the file has no path
- * (clipboard, generated blob) or main does not grant it. The path comes only from the
- * preload's webUtils.getPathForFile, which returns a path only for a File the user picked or
- * dropped. authorizeLocalMediaFileForImport records a one-use, in-memory import grant in main
- * (never a persisted grant, so chat attachments cannot push canvas grants out), and main's
- * importFile uses it up.
+ * Where a picked file is imported from. The path comes only from the preload's
+ * webUtils.getPathForFile, which returns a path only for a File the user picked or dropped;
+ * authorizeLocalMediaFileForImport records a one-use, in-memory import grant in main (never a
+ * persisted grant, so chat attachments cannot push canvas grants out) and main's importFile
+ * spends it. Without a path (clipboard, generated blob), on a UNC path, or when the file's
+ * canonical form is a network path main does not import by path (a mapped drive), the bytes
+ * are read here (up to the cap). When main refuses the grant or the file does not answer in
+ * time, nothing is read here: the attachment is refused.
  */
-const resolvePickedFileImportPath = async (
+type PickedFileImportSource =
+  { kind: 'path'; sourcePath: string } | { kind: 'bytes' } | { kind: 'refused'; timedOut: boolean }
+
+const resolvePickedFileImportSource = async (
   file: File,
   pickedPath: string,
   mimeType: string,
   bridge: ChatAttachmentFileBridge | undefined
-): Promise<string> => {
-  if (!pickedPath || isNetworkOrDevicePath(pickedPath)) return ''
-  if (!bridge?.authorizeLocalMediaFileForImport) return ''
+): Promise<PickedFileImportSource> => {
+  if (!pickedPath || isNetworkOrDevicePath(pickedPath)) return { kind: 'bytes' }
+  if (!bridge?.authorizeLocalMediaFileForImport) return { kind: 'bytes' }
+  let answer: Awaited<
+    ReturnType<NonNullable<ChatAttachmentFileBridge['authorizeLocalMediaFileForImport']>>
+  >
   try {
-    const canonicalPath = String(
-      (await bridge.authorizeLocalMediaFileForImport(file, mimeType)) || ''
-    ).trim()
-    return canonicalPath && !isNetworkOrDevicePath(canonicalPath) ? canonicalPath : ''
+    answer = await bridge.authorizeLocalMediaFileForImport(file, mimeType)
   } catch {
-    return ''
+    return { kind: 'refused', timedOut: false }
   }
+  const canonicalPath = typeof answer?.path === 'string' ? answer.path.trim() : ''
+  if (canonicalPath && !isNetworkOrDevicePath(canonicalPath)) {
+    return { kind: 'path', sourcePath: canonicalPath }
+  }
+  if (answer?.refused === 'network') return { kind: 'bytes' }
+  return { kind: 'refused', timedOut: answer?.refused === 'timeout' }
 }
 
 export const importChatAttachment = async ({
@@ -218,9 +262,15 @@ export const importChatAttachment = async ({
   const grantable =
     !pickedPath || isNetworkOrDevicePath(pickedPath) || isStoreMimeType(importMimeType)
   // A file on disk is copied by main from its path: its bytes never enter the renderer.
-  const sourcePath = grantable
-    ? await resolvePickedFileImportPath(file, pickedPath, importMimeType, fileBridge)
-    : pickedPath
+  const source: PickedFileImportSource = grantable
+    ? await resolvePickedFileImportSource(file, pickedPath, importMimeType, fileBridge)
+    : { kind: 'path', sourcePath: pickedPath }
+  if (source.kind === 'refused') {
+    throw source.timedOut
+      ? new ChatAttachmentSourceTimeoutError(displayName)
+      : new ChatAttachmentSourceRefusedError(displayName)
+  }
+  const sourcePath = source.kind === 'path' ? source.sourcePath : ''
   const imported = sourcePath
     ? await service.importFile({
         sourcePath,

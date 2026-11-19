@@ -7,8 +7,13 @@ import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type { ChatAttachment } from '@shared/llm'
 import ChatPage from './ChatPage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
+import {
+  ChatAttachmentSourceTimeoutError,
+  describeChatAttachmentImportFailure
+} from './chatManagedMediaAttachments'
 
 const f = vi.hoisted(() => ({
+  translate: vi.fn(),
   materialize: vi.fn(),
   editing: vi.fn(),
   editImport: null as ((files: File[]) => Promise<ChatAttachment[]>) | null,
@@ -28,7 +33,10 @@ const f = vi.hoisted(() => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: 'en', resolvedLanguage: 'en' },
-    t: (key: string, o?: { defaultValue?: string }) => o?.defaultValue || key
+    t: (key: string, o?: { defaultValue?: string }) => {
+      f.translate(key, o)
+      return o?.defaultValue || key
+    }
   })
 }))
 vi.mock('@renderer/hooks/useConfig', () => ({
@@ -479,7 +487,8 @@ describe('edit-form native image import preparation', () => {
     const importer = f.editImport!
     const result = importer(files)
     try {
-      await expect(result).rejects.toThrow('1.png is too large')
+      // The composer's localized size line (this fixture's t returns the key), not English text.
+      await expect(result).rejects.toThrow('chat.incoming_image_too_large')
       expect(f.blob).not.toHaveBeenCalled()
       expect(f.imageCreated).not.toHaveBeenCalled()
       expect(f.importBytes).not.toHaveBeenCalled()
@@ -534,7 +543,13 @@ describe('edit-form native image import preparation', () => {
       reference: { version: 1, kind: 'managed', relativePath: 'first', status: 'ready' }
     })
     f.importBytes.mockRejectedValueOnce(new Error('second import failed'))
-    await expect(f.editImport!(images(3))).rejects.toThrow('second import failed')
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    // The edit form shows the composer's short notice for the file, never main's text.
+    const error = (await f.editImport!(images(3)).catch((reason: unknown) => reason)) as Error
+    expect(error.message).toBe(
+      describeChatAttachmentImportFailure(new Error('any'), '1.png', 'image')
+    )
+    expect(error.message).not.toContain('second import failed')
     expect(f.importBytes).toHaveBeenCalledTimes(2)
     expect(f.blob).toHaveBeenCalledTimes(2)
     expect(f.imageCreated).toHaveBeenCalledTimes(2)
@@ -943,5 +958,64 @@ describe('native drop image count boundary', () => {
     expect(actual.map((attachment) => attachment.type)).toEqual(['file', 'image', 'image'])
     expect(f.notify).not.toHaveBeenCalled()
     expect(screen.getByTestId('input')).toHaveValue('keep')
+  })
+})
+
+describe('a picked file on a stalled mount', () => {
+  const originalElectronFile = window.electronFile
+  afterEach(() => {
+    Object.defineProperty(window, 'electronFile', { configurable: true, value: originalElectronFile })
+  })
+
+  it('shows the timeout notice and reads nothing itself when neither the header nor main answers', async () => {
+    await setup()
+    const file = new File(['x'], 'nas.png', { type: 'image/png' })
+    // The header read never returns (a hard-mounted share that stopped answering).
+    const headerRead = vi.fn(() => new Promise<ArrayBuffer>(() => undefined))
+    Object.defineProperty(file, 'slice', { value: () => ({ arrayBuffer: headerRead }) })
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(file, 'arrayBuffer', { value: arrayBuffer })
+    const authorizeLocalMediaFileForImport = vi.fn(async () => ({ refused: 'timeout' as const }))
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { getPathForFile: () => '/mnt/nas/nas.png', authorizeLocalMediaFileForImport }
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer([file]) })
+    await waitFor(
+      () =>
+        expect(f.notify).toHaveBeenCalledWith(
+          new ChatAttachmentSourceTimeoutError('nas.png').message
+        ),
+      { timeout: 8000 }
+    )
+    expect(headerRead).toHaveBeenCalledOnce()
+    expect(authorizeLocalMediaFileForImport).toHaveBeenCalledOnce()
+    // No decode of the same file, no fallback read of up to 64 MB.
+    expect(f.blob).not.toHaveBeenCalled()
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(f.importBytes).not.toHaveBeenCalled()
+    expect(f.importFile).not.toHaveBeenCalled()
+  }, 15_000)
+})
+
+describe('size refusals on the ordinary drop path', () => {
+  it.each([
+    ['big.png', 'image/png', 6 * 1024 * 1024, 'chat.incoming_image_too_large', 5],
+    ['clip.mp4', 'video/mp4', 600 * 1024 * 1024, 'chat.file_too_large', 500],
+    ['notes.pdf', 'application/pdf', 11 * 1024 * 1024, 'chat.file_too_large', 10]
+  ])('refuses %s with its real limit, localized', async (name, type, size, key, maxMB) => {
+    await setup()
+    const file = new File(['x'], name, { type })
+    Object.defineProperty(file, 'size', { value: size })
+    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer([file]) })
+    await waitFor(() => expect(f.notify).toHaveBeenCalledWith(key))
+    expect(f.translate).toHaveBeenCalledWith(
+      key,
+      expect.objectContaining({ fileName: name, maxMB, size: expect.any(String) })
+    )
+    // Neither the untrue 50 MB line nor an English-only default.
+    expect(f.translate).not.toHaveBeenCalledWith('chat.image_too_large', expect.anything())
+    expect(f.importBytes).not.toHaveBeenCalled()
   })
 })

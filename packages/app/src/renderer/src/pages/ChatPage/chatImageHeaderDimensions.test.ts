@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   CHAT_IMAGE_HEADER_READ_BYTES,
+  CHAT_IMAGE_HEADER_READ_TIMED_OUT,
+  CHAT_IMAGE_HEADER_READ_TIMEOUT_MS,
   parseChatImageHeaderDimensions,
   readChatImageHeaderDimensions
 } from './chatImageHeaderDimensions'
@@ -153,5 +155,25 @@ describe('chat image header dimensions', () => {
     await expect(
       readChatImageHeaderDimensions(new File(['mock-file'], 'x.png', { type: 'image/png' }))
     ).resolves.toBeNull()
+  })
+
+  it('gives up on a header read that does not finish in time (a stalled mount)', async () => {
+    vi.useFakeTimers()
+    try {
+      const stalled = {
+        slice: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(() => undefined) })
+      }
+      let outcome: unknown = 'pending'
+      void readChatImageHeaderDimensions(stalled as unknown as Blob).then((value) => {
+        outcome = value
+      })
+      await vi.advanceTimersByTimeAsync(CHAT_IMAGE_HEADER_READ_TIMEOUT_MS - 1)
+      expect(outcome).toBe('pending')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(outcome).toBe(CHAT_IMAGE_HEADER_READ_TIMED_OUT)
+      expect(CHAT_IMAGE_HEADER_READ_TIMEOUT_MS).toBeLessThanOrEqual(3_000)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

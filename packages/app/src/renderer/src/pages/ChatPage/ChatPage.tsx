@@ -217,7 +217,10 @@ import {
 } from '@renderer/utils/droppedImageUtils'
 import { collectDroppedDirectoryFilesBounded, DroppedDirectoryLimitError } from '../ProjectCanvasPage/dropDirectory'
 import { normalizeMediaReference } from '@shared/mediaReference'
-import { readChatImageHeaderDimensions } from './chatImageHeaderDimensions'
+import {
+  CHAT_IMAGE_HEADER_READ_TIMED_OUT,
+  readChatImageHeaderDimensions
+} from './chatImageHeaderDimensions'
 import {
   boundIncomingChatImageSize,
   CHAT_PATHLESS_ATTACHMENT_MAX_BYTES,
@@ -946,6 +949,19 @@ const describeIncomingImageDownscaled = (
     height: downscaled?.height
   })
 
+/** The size refusal for a file above the composer's limit for its type, with the real limit. */
+const describeAttachmentTooLarge = (t: TFunction, file: File): string => {
+  const type = getChatAttachmentTypeForFile(file)
+  const maxMB = getChatAttachmentMaxSizeMB(type)
+  return type === 'image'
+    ? t('chat.incoming_image_too_large', {
+        fileName: file.name,
+        maxMB,
+        size: formatFileSize(file.size)
+      })
+    : t('chat.file_too_large', { fileName: file.name, maxMB, size: formatFileSize(file.size) })
+}
+
 /** Message for a failed incoming image: the size message when it is above a limit. */
 const describeIncomingImageFailure = (t: TFunction, error: unknown): string =>
   error instanceof ChatImageTooLargeError
@@ -1076,16 +1092,21 @@ const buildImageChatAttachmentFromFile = async (
   }
 ): Promise<ChatAttachment> => {
   // The size from the file's first bytes; a full decode only when the header cannot tell.
+  // A header read that does not finish in time (a stalled mount) is not followed by a decode
+  // of the same file: main imports it under its own deadline and refuses it with a notice.
+  const header = await readChatImageHeaderDimensions(file)
   const dimensions =
-    (await readChatImageHeaderDimensions(file)) ??
-    (await (async () => {
-      const previewUrl = fileToBlobUrl(file)
-      try {
-        return await readImageDimensionsFromUrl(previewUrl)
-      } finally {
-        revokeBlobUrl(previewUrl)
-      }
-    })())
+    header === CHAT_IMAGE_HEADER_READ_TIMED_OUT
+      ? {}
+      : (header ??
+        (await (async () => {
+          const previewUrl = fileToBlobUrl(file)
+          try {
+            return await readImageDimensionsFromUrl(previewUrl)
+          } finally {
+            revokeBlobUrl(previewUrl)
+          }
+        })()))
   return importChatAttachment({
     service: api().svcManagedMedia,
     file,
@@ -5557,15 +5578,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             !checkFileSize(file, getChatAttachmentMaxSizeMB(getChatAttachmentTypeForFile(file)))
           )?.file
           if (oversizedDirectoryFile) {
-            const maxSizeMB = getChatAttachmentMaxSizeMB(
-              getChatAttachmentTypeForFile(oversizedDirectoryFile)
-            )
-            notifyError(
-              t('chat.image_too_large', {
-                name: oversizedDirectoryFile.name,
-                defaultValue: `${oversizedDirectoryFile.name} is too large. Max ${maxSizeMB}MB.`
-              })
-            )
+            notifyError(describeAttachmentTooLarge(t, oversizedDirectoryFile))
             return
           }
           // The whole directory batch must also fit the message's image budget.
@@ -5629,13 +5642,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return !checkFileSize(file, getChatAttachmentMaxSizeMB(attachmentType))
       })
       if (oversizedNativeFile) {
-        const attachmentType = getChatAttachmentTypeForFile(oversizedNativeFile)
-        const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
-        const messageKey = attachmentType === 'image' ? 'chat.image_too_large' : 'chat.file_too_large'
-        notifyError(t(messageKey, {
-          name: oversizedNativeFile.name,
-          defaultValue: `${oversizedNativeFile.name} is too large. Max ${maxSizeMB}MB.`
-        }))
+        notifyError(describeAttachmentTooLarge(t, oversizedNativeFile))
         return
       }
       const files = rawDroppedFiles
@@ -5744,14 +5751,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
 
           if (!checkFileSize(file, maxSizeMB)) {
-            const messageKey =
-              attachmentType === 'image' ? 'chat.image_too_large' : 'chat.file_too_large'
-            notifyError(
-              t(messageKey, {
-                name: file.name,
-                defaultValue: `${file.name} is too large. Max ${maxSizeMB}MB.`
-              })
-            )
+            notifyError(describeAttachmentTooLarge(t, file))
             continue
           }
 
@@ -5761,19 +5761,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } catch (error) {
           if (!isDropTargetCurrent()) return
           console.error('[ChatPage] Failed to process dropped file:', error)
-          if (error instanceof ChatPathlessAttachmentTooLargeError) {
-            notifyError(error.message)
-            continue
-          }
-          const messageKey =
-            getChatAttachmentTypeForFile(file) === 'image'
-              ? 'chat.image_process_failed'
-              : 'chat.file_process_failed'
+          // The composer's short notices: the size cap, a source that did not answer in
+          // time, otherwise "could not process"; main's text is only logged.
           notifyError(
-            t(messageKey, {
-              name: file.name,
-              defaultValue: `Failed to process ${file.name}.`
-            })
+            describeChatAttachmentImportFailure(
+              error,
+              file.name,
+              getChatAttachmentTypeForFile(file) === 'image' ? 'image' : 'file'
+            )
           )
         }
       }
@@ -10483,17 +10478,29 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const maxSizeMB = getChatAttachmentMaxSizeMB('image')
     for (const file of imageFiles) {
       if (!checkFileSize(file, maxSizeMB)) {
-        throw new Error(`${file.name} is too large. Max ${maxSizeMB}MB.`)
+        throw new Error(
+          t('chat.incoming_image_too_large', {
+            fileName: file.name,
+            maxMB: maxSizeMB,
+            size: formatFileSize(file.size)
+          })
+        )
       }
     }
     const attachments: ChatAttachment[] = []
     // One native editing drop can contain many images. Complete each decode and
     // managed import before starting the next; keep the result atomic to the form.
     for (const file of imageFiles) {
-      attachments.push(await buildImageChatAttachmentFromFile(file))
+      try {
+        attachments.push(await buildImageChatAttachmentFromFile(file))
+      } catch (error) {
+        // The edit form shows the composer's short notice; main's text is only logged.
+        console.error('[ChatPage] Failed to import edit-drop image:', error)
+        throw new Error(describeChatAttachmentImportFailure(error, file.name, 'image'))
+      }
     }
     return attachments
-  }, [])
+  }, [t])
 
   const handleUploadFile = async () => {
     try {
