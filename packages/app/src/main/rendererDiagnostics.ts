@@ -60,6 +60,10 @@ export const HANG_RELOAD_REQUEST_TTL_MS = 10 * 60_000
  * unexpected death. Short on purpose: a death after it is answered as any other death.
  */
 export const HANG_LATE_END_GRACE_MS = 5_000
+
+/** Reasons our own forced end can be reported with (Electron: 'crashed' / 'killed'; a clean exit). */
+export const isForcedEndReason = (reason: string): boolean =>
+  reason === 'crashed' || reason === 'killed' || reason === 'clean-exit'
 /** How often an open recovery dialog checks whether the dead renderer came back by itself. */
 export const RECOVERY_PROMPT_POLL_MS = 1_000
 
@@ -579,7 +583,9 @@ export function attachRendererDiagnostics(
     goneWithoutCrash = false
     // An exit in the few seconds after the forced end was given up (the renderer had answered
     // again) is that forced end landing late. (The death recorder has taken the announcement.)
-    const lateForcedEnd = lateForcedEndTimer !== null
+    // Our forced end arrives as 'crashed' or 'killed' (or a clean exit), never as 'oom': an
+    // out-of-memory death in the grace is a real crash of the reloaded page and uses the budget.
+    const lateForcedEnd = lateForcedEndTimer !== null && isForcedEndReason(details.reason)
     dropLateForcedEnd()
     if (hangTerminationTimer || isHangReloadRequested() || lateForcedEnd) {
       // The forced end of a hung renderer the user chose to reload, also when it is reported after

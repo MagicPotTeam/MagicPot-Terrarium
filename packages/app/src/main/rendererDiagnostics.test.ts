@@ -1773,6 +1773,27 @@ describe('rendererDiagnostics hung renderer that answers again while its forced 
     })
   })
 
+  // Review of P1e: our own forced end is reported as 'crashed' or 'killed', never as 'oom'. An
+  // out-of-memory death inside the grace is a real crash of the reloaded page: it uses the budget.
+  it('counts an out-of-memory death inside the grace as a crash that uses the budget', async () => {
+    const { window, clock } = await answersWhileEnding()
+    vi.advanceTimersByTime(1_000)
+    clock.now += 1_000
+    listenerOf(window, 'render-process-gone')({}, { reason: 'oom', exitCode: 0 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(1)
+    await flush()
+    listenerOf(window, 'did-start-loading')()
+    listenerOf(window, 'did-finish-load')()
+    // Two more crashes are reloaded; the next within 60 s asks: the oom took a place in the budget.
+    for (let crash = 0; crash < 2; crash += 1) {
+      listenerOf(window, 'render-process-gone')({}, { reason: 'oom', exitCode: 0 })
+    }
+    expect(window.webContents.reload).toHaveBeenCalledTimes(3)
+    listenerOf(window, 'render-process-gone')({}, { reason: 'oom', exitCode: 0 })
+    expect(window.webContents.reload).toHaveBeenCalledTimes(3)
+    expect(answers.at(-1)?.message).toBe('窗口多次意外退出，自动恢复已暂停。')
+  })
+
   // Reviewer probe C: the renderer answered during the 5 s wait, the request was dropped, and then
   // our own forced end landed. It used to be answered as an unexpected 'killed': the dialog
   // '窗口的显示进程已意外停止。' although the user had asked for the reload, and an untagged death record.

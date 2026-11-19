@@ -233,6 +233,18 @@ describe('processDiagnostics', () => {
     expect(readLines()[0].lastSendStage).toBeNull()
   })
 
+  it('never marks an out-of-memory death as the forced end of a hang reload', () => {
+    const diagnostics = createProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setTimeout: () => ({}) })
+    expectRendererExit(7, 'reload-after-hang', 5_000)
+    diagnostics.recordRendererGone(7, { reason: 'oom', exitCode: 0 })
+    // The announcement was taken by that exit: it names nothing later either.
+    diagnostics.recordRendererGone(7, { reason: 'crashed', exitCode: 5 })
+    expect(readLines().map(({ reason, expected }) => ({ reason, expected }))).toEqual([
+      { reason: 'oom', expected: undefined },
+      { reason: 'crashed', expected: undefined }
+    ])
+  })
+
   it('marks the forced end of a hung renderer as the user\'s reload, once', () => {
     const diagnostics = createProcessDiagnostics({ logsDir: () => LOGS, getAppMetrics: () => [], setTimeout: () => ({}) })
 

@@ -327,7 +327,9 @@ export function createProcessDiagnostics(options: ProcessDiagnosticsOptions = {}
   return {
     recordRendererGone(webContentsId, details) {
       // Taken even when nothing is written, so that it cannot name a later exit.
-      const expected = takeExpectedRendererExit(webContentsId)
+      const taken = takeExpectedRendererExit(webContentsId)
+      // An out-of-memory death is never the forced end of a hang reload, whatever was announced.
+      const expected = taken === 'reload-after-hang' && details.reason === 'oom' ? undefined : taken
       if (details.reason === 'clean-exit' || isShuttingDown()) return
       const lastKnownPid = lastKnownPidOf(webContentsId)
       lastRendererGoneAt.set(webContentsId, deps.now())
