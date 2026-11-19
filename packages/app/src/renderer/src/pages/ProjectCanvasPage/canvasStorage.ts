@@ -3858,21 +3858,33 @@ export class CanvasMetadataFileError extends Error {
 /**
  * The items of the autosave and project files loadCanvasFallback restores a board
  * from, as stored in them: nothing is decoded or restored. Every one of these files
- * is read (a load stops at the first it can restore); a missing file is skipped, any
- * other read or parse error rejects with a CanvasMetadataFileError.
+ * is read (a load stops at the first it can restore). The folders are resolved as the
+ * loader resolves them, except that an IPC error fails the read instead of leaving a
+ * folder out. A file main reports as not found is skipped; main reports any failure
+ * to reach a file that way (an unreachable folder included), so such a board still
+ * reads as empty. Any other read or parse error rejects with a CanvasMetadataFileError.
  */
 async function readCanvasFallbackItemsMetadata(storeKey: string): Promise<unknown[]> {
-  if (!window.api?.svcFs || !window.path) return []
-  const paths: string[] = []
-  const autoSaveRoot = await resolveAutoSaveRootPath()
-  if (autoSaveRoot) {
-    const projectDir = window.path.join(autoSaveRoot, resolveProjectStorageDirName(storeKey))
-    paths.push(window.path.join(projectDir, AUTOSAVE_CANVAS_FILENAME))
+  const svcState = window.api?.svcState
+  if (!window.api?.svcFs || !svcState || !window.path || typeof window.path.join !== 'function') {
+    return []
   }
-  const location = await getProjectCanvasLocation(storeKey)
-  if (location) {
-    paths.push(location.canvasFullPath)
-    if (location.legacyCanvasFullPath) paths.push(location.legacyCanvasFullPath)
+  const path = window.path
+  const { state } = await svcState.getUserDataDirectoryState({})
+  let projectRoot: string | null | undefined = state?.projectRoot
+  if (typeof svcState.getConfig === 'function') {
+    const configuredDir = (await svcState.getConfig({})).config.download_dir?.trim()
+    if (configuredDir) projectRoot = configuredDir
+  }
+  const dirName = resolveProjectStorageDirName(storeKey)
+  const paths: string[] = []
+  if (state?.autoSaveRoot) {
+    paths.push(path.join(state.autoSaveRoot, dirName, AUTOSAVE_CANVAS_FILENAME))
+  }
+  if (projectRoot) {
+    paths.push(path.join(projectRoot, dirName, PROJECT_CANVAS_FILENAME))
+    const legacyDirName = resolveLegacyProjectStorageDirName(storeKey)
+    if (legacyDirName) paths.push(path.join(projectRoot, legacyDirName, PROJECT_CANVAS_FILENAME))
   }
   const items: unknown[] = []
   for (const fullPath of paths) {

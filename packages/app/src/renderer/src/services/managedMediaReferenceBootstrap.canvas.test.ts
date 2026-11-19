@@ -20,6 +20,7 @@ vi.mock('../utils/windowUtils', () => ({
 }))
 
 const AUTOSAVE_ROOT = '/home/u/AutoSave'
+const PROJECT_ROOT = '/home/u/Projects'
 const id = (n: number): string => n.toString(16).padStart(2, '0').repeat(32)
 const media = (sha256: string) => ({
   version: 1 as const,
@@ -128,6 +129,10 @@ function createCanvasDb(records: Map<string, unknown>) {
 describe('managed media reference scan over the canvas boards', () => {
   const files = new Map<string, string>()
   let createObjectUrl: ReturnType<typeof vi.fn>
+  let svcState: {
+    getConfig: ReturnType<typeof vi.fn>
+    getUserDataDirectoryState: ReturnType<typeof vi.fn>
+  }
   let warn: ReturnType<typeof vi.spyOn>
   const warnings = (): string[] => warn.mock.calls.map(([text]) => String(text))
   let originalCreateObjectUrl: typeof URL.createObjectURL | undefined
@@ -147,6 +152,12 @@ describe('managed media reference scan over the canvas boards', () => {
       writable: true,
       value: createObjectUrl
     })
+    svcState = {
+      getConfig: vi.fn(async () => ({ config: {} as { download_dir?: string } })),
+      getUserDataDirectoryState: vi.fn(async () => ({
+        state: { autoSaveRoot: AUTOSAVE_ROOT, projectRoot: PROJECT_ROOT }
+      }))
+    }
     vi.stubGlobal('api', {
       svcFs: {
         readTextFile: async ({ fullPath }: { fullPath: string }) => {
@@ -158,12 +169,7 @@ describe('managed media reference scan over the canvas boards', () => {
           throw new Error('the scan must not read file bytes')
         }
       },
-      svcState: {
-        getConfig: async () => ({ config: {} }),
-        getUserDataDirectoryState: async () => ({
-          state: { autoSaveRoot: AUTOSAVE_ROOT, projectRoot: '/home/u/Projects' }
-        })
-      }
+      svcState
     })
     Object.defineProperty(window, 'path', {
       configurable: true,
@@ -290,5 +296,50 @@ describe('managed media reference scan over the canvas boards', () => {
       expect.stringContaining('a stored file of canvas board "board-b" could not be read or parsed')
     ])
     expect(warnings()[0]).not.toContain(AUTOSAVE_ROOT)
+  })
+
+  it('fails the scan when the folders of a board without stored items cannot be resolved', async () => {
+    const canvas = seedBoards()
+    vi.stubGlobal('indexedDB', canvas.api)
+    svcState.getUserDataDirectoryState.mockRejectedValue(new Error('IPC failed'))
+
+    const snapshot = await scanOnce()
+
+    expect(snapshot).toMatchObject({ complete: false, ids: [] })
+    expect(warnings()).toEqual([
+      expect.stringContaining('canvas board "board-b" could not be read')
+    ])
+  })
+
+  it('fails the scan when the configured project folder cannot be resolved', async () => {
+    const canvas = seedBoards()
+    vi.stubGlobal('indexedDB', canvas.api)
+    svcState.getConfig.mockRejectedValue(new Error('IPC failed'))
+
+    const snapshot = await scanOnce()
+
+    expect(snapshot).toMatchObject({ complete: false, ids: [] })
+  })
+
+  it('reads the autosave, the project and the legacy file of a board without stored items', async () => {
+    const canvas = seedBoards()
+    vi.stubGlobal('indexedDB', canvas.api)
+    const configured = '/mnt/configured'
+    svcState.getConfig.mockResolvedValue({ config: { download_dir: ` ${configured} ` } })
+    const dirName = buildProjectStorageDirName('board-b', 'board-b')
+    const file = (items: unknown[]) =>
+      JSON.stringify({ magic: 'MAGICPOT_CANVAS', version: 8, items, groups: [] })
+    files.set(`${configured}/${dirName}/project.mpcanvas`, file([image('p', id(4))]))
+    files.set(
+      `${configured}/${dirName.replace(/^\.+/, '')}/project.mpcanvas`,
+      file([image('l', id(5))])
+    )
+    // The default project folder is not read when one is configured.
+    files.set(`${PROJECT_ROOT}/${dirName}/project.mpcanvas`, file([image('d', id(6))]))
+
+    const snapshot = await scanOnce()
+
+    expect(snapshot.complete).toBe(true)
+    expect(snapshot.ids).toEqual([id(1), id(2), id(3), id(4), id(5)])
   })
 })
